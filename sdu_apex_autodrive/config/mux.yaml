@@ -1,0 +1,27 @@
+ackermann_mux:
+  ros__parameters:
+    topics:
+      safety:
+        topic: /cmd/safety
+        timeout: 0.25
+        priority: 255
+      manual:
+        topic: /cmd/manual
+        timeout: 0.50
+        priority: 220
+      mpc:
+        topic: /cmd/mpc
+        timeout: 0.20
+        priority: 120
+      stanley:
+        topic: /cmd/stanley
+        timeout: 0.20
+        priority: 110
+      pure_pursuit:
+        topic: /cmd/pure_pursuit
+        timeout: 0.20
+        priority: 100
+      ftg:
+        topic: /cmd/ftg
+        timeout: 0.20
+        priority: 90

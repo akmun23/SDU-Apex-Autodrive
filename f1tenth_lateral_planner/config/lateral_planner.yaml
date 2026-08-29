@@ -1,0 +1,34 @@
+lateral_planner_node:
+  ros__parameters:
+    map_frame: map
+    base_frame: roboracer_1
+    laser_frame: lidar
+    odom_topic: /autodrive/roboracer_1/odom
+    obstacle_topic: /scan_obstacles
+    local_raceline_topic: /local_raceline
+    opponent_marker_topic: /opponent_marker
+    trajectory_file: ""
+    trajectory_package: f1tenth_planning
+    trajectory_relative_path: trajectories/my_track_raceline.csv
+    avoidance_enabled: true
+    publish_rate: 50.0
+    startup_speed_initial_scale: 0.5
+    startup_speed_ramp_duration_sec: 15.0
+    car_width: 0.270
+    opponent_length: 0.500
+    clearance_tolerance: 0.10
+    planning_tolerance_scale: 2.0
+    min_window: 8.0
+    window_time: 2.0
+    window_lead_ratio: 0.5
+    max_lateral_shift: 0.8
+    max_avoidance_kappa: 2.5
+    pass_complete_margin: 2.0
+    curvature_speed_factor: 0.10
+    curvature_speed_floor_ratio: 0.43
+    curvature_speed_preview_points: 8
+    max_lateral_accel: 7.27
+    min_regulated_speed: 0.30
+    obstacle_speed_cap: 5.0
+    lookahead_points: 300
+    path_start_offset_points: 0

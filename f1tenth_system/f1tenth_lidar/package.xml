@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>f1tenth_lidar</name>
+  <version>1.0.0</version>
+  <description>LaserScan processing and map-aware dynamic-obstacle extraction for AutoDRIVE.</description>
+  <maintainer email="pabjo23@student.sdu.dk">Pascal</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+
+  <depend>std_msgs</depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

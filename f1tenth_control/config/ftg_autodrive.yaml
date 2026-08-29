@@ -1,0 +1,43 @@
+ftg_node:
+  ros__parameters:
+    scan_topic: /autodrive/roboracer_1/lidar
+    odom_topic: /autodrive/roboracer_1/odom
+    enable_topic: /control/ftg/enable
+    command_topic: /cmd/ftg
+    command_frame: roboracer_1
+
+    # AutoDRIVE 2026 geometry and steering actuator limits. The speed values
+    # below remain conservative initial operating caps.
+    wheelbase: 0.324
+    car_length: 0.500
+    car_width: 0.270
+    rear_overhang: 0.080
+    lidar_offset_x: 0.2733
+    max_speed: 1.8
+    min_speed: 0.6
+    speed_full_range: 4.0
+    steer_slowdown_gain: 1.0
+    max_steering: 0.5236
+    steering_gain: 1.1
+    max_steering_rate: 3.2
+    target_ema_alpha: 0.55
+    heading_weight: 0.7
+    score_power: 2.0
+    clearance_cone_scale: 1.0
+    min_score_range: 0.35
+    # Raw LiDAR clearance. Wall margin is applied later only for path scoring.
+    emergency_brake_distance: 0.18
+    footprint_clearance: 0.08
+    disparity_threshold: 0.5
+    wall_margin: 0.05
+    side_safety_margin: 0.10
+    max_disparity_extension_angle: 0.7854
+    gap_threshold: 0.5
+    min_gap_width: 0.15
+    lidar:
+      range_min: 0.1
+      range_max: 10.0
+      angle_min: -1.5708
+      angle_max: 1.5708
+      apply_median_filter: true
+      median_window_size: 3

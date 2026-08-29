@@ -1,0 +1,51 @@
+# Vehicle Parameters for F1Tenth Racing Line Optimization
+# Source-backed AutoDRIVE RoboRacer 2026 dimensions and limits.
+# Unpublished dynamic coefficients remain explicitly marked as estimates.
+
+vehicle:
+  # Physical dimensions
+  wheelbase: 0.324          # [m] Distance between front and rear axles
+  width: 0.270                # [m] AutoDRIVE 2026 full vehicle width
+  
+  # Tire/friction properties
+  friction_coeff: 0.72     # [-] Published longitudinal tire extremum force ratio
+  
+  # Acceleration limits
+  max_acceleration: 7.31    # [m/s²] Maximum longitudinal acceleration
+  max_deceleration: 7.31    # [m/s²] Maximum braking deceleration
+  
+  # Speed limits
+  max_speed: 22.88           # [m/s] Documented simulator top speed
+
+optimization:
+  # Track boundary safety margin (half car width + buffer)
+  safety_margin: 0.20       # [m] Distance to keep from track edges
+  
+  # Direction of travel along the raceline
+  # 'ccw' = counter-clockwise (default), 'cw' = clockwise
+  direction: cw
+
+# Additional vehicle properties (for reference, not currently used in optimization)
+# These are kept for documentation and future advanced features
+advanced:
+  # Detailed dimensions
+  lf: 0.16868              # [m] CG to front axle
+  lr: 0.15532              # [m] CG to rear axle
+  length: 0.500            # [m] Total car length
+  
+  # Mass properties
+  mass: 3.906              # [kg] Total vehicle mass
+  inertia: 0.035           # [kg·m²] Unverified yaw-inertia estimate
+  cg_height: 0.01434       # [m] Center of gravity height
+  
+  # Tire cornering stiffness (for dynamic models)
+  C_Sf: 1.58                # [1/rad] Front cornering stiffness (C_af/(m*g))
+  C_Sr: 1.33                # [1/rad] Rear cornering stiffness (C_ar/(m*g))
+  # Note: C_Sf > C_Sr; car understeers (K_us = 0.0093)
+  
+  # Rolling resistance (for trajectory optimizer mintime mode)
+  c_roll: 0.163               # [-] Rolling resistance coefficient (measured coast-down 2025-03-11)
+  
+  # Steering constraints  
+  max_steering_angle: 0.5236  # [rad] Documented symmetric centre-steering limit
+  max_steering_rate: 3.2      # [rad/s] Documented centre-steering rate

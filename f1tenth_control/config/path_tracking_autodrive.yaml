@@ -1,0 +1,37 @@
+pure_pursuit_node:
+  ros__parameters:
+    odom_topic: /autodrive/roboracer_1/odom
+    pose_topic: /amcl_pose
+    enable_topic: /control/pure_pursuit/enable
+    local_raceline_topic: /local_raceline
+    command_topic: /cmd/pure_pursuit
+    path_frame: map
+    command_frame: roboracer_1
+    trajectory_file: ""
+    wheelbase: 0.324
+    max_speed: 1.0
+    max_steering: 0.5236
+    pose_timeout_s: 0.3
+    odom_timeout_s: 0.3
+    max_steering_rate: 3.2
+    max_accel_cmd: 1.0
+    max_decel_cmd: 2.0
+
+stanley_node:
+  ros__parameters:
+    odom_topic: /autodrive/roboracer_1/odom
+    pose_topic: /amcl_pose
+    enable_topic: /control/stanley/enable
+    local_raceline_topic: /local_raceline
+    command_topic: /cmd/stanley
+    path_frame: map
+    command_frame: roboracer_1
+    trajectory_file: ""
+    wheelbase: 0.324
+    max_speed: 1.0
+    min_speed: 0.4
+    max_steering: 0.5236
+    max_steering_rate: 3.2
+    control_rate: 20.0
+    pose_timeout_s: 0.3
+    odom_timeout_s: 0.3
