@@ -18,7 +18,7 @@
  *   Subscribe: /autodrive/roboracer_1/steering (std_msgs/Float32)
  *   Subscribe: /amcl_pose              (geometry_msgs/PoseWithCovarianceStamped)
  *   Subscribe: /local_raceline         (nav_msgs/Path)         — lateral planner reference [QoS(10)]
- *   Publish:   /cmd/mpc                (ackermann_msgs/AckermannDriveStamped)
+ *   Publish:   /cmd/controller         (ackermann_msgs/AckermannDriveStamped)
  *
  * @dependencies mpc.h, mpc_types.h, util_math.h, vehicle_model.h,
  *               rclc, rcl, nav_msgs, ackermann_msgs, std_msgs, geometry_msgs,
@@ -72,7 +72,7 @@
 
 /** Configurable topic names */
 static const char *g_odom_topic = "/autodrive/roboracer_1/odom";
-static const char *g_drive_topic = "/cmd/mpc";
+static const char *g_drive_topic = "/cmd/controller";
 static const char *g_servo_topic = "/autodrive/roboracer_1/steering";
 static const char *g_ekf_pose_topic = "/amcl_pose";
 static const char *g_local_raceline_topic = "/local_raceline";
@@ -97,6 +97,10 @@ static int g_ekf_pose_received = 0;
 /** Safety watchdog timeout [seconds] */
 static double g_watchdog_timeout_sec = 0.2;
 static double g_raceline_timeout_sec = 0.5;
+static double g_pose_covariance_xy_max = 0.25;
+static double g_pose_covariance_yaw_max = 0.12;
+static int g_pose_required_good_updates = 5;
+static int g_pose_good_updates = 0;
 static double g_drive_republish_period_ms = 20.0;
 static int g_drive_command_ready = 0;
 /* Last published drive command (fallback uses these instead of forcing stop). */
@@ -1170,6 +1174,26 @@ static void run_mpc_for_pose(
     const double pose_cov_y = pose->covariance[7];
     const double pose_cov_yaw = pose->covariance[35];
 
+    const double pose_cov_xy = fmax(pose_cov_x, pose_cov_y);
+    if (!isfinite(pose_cov_xy) || !isfinite(pose_cov_yaw) ||
+        pose_cov_xy < 0.0 || pose_cov_yaw < 0.0 ||
+        pose_cov_xy > g_pose_covariance_xy_max ||
+        pose_cov_yaw > g_pose_covariance_yaw_max)
+    {
+        g_pose_good_updates = 0;
+        set_neutral_drive_command("localization_covariance");
+        return;
+    }
+    if (g_pose_good_updates < g_pose_required_good_updates)
+    {
+        g_pose_good_updates++;
+        if (g_pose_good_updates < g_pose_required_good_updates)
+        {
+            set_neutral_drive_command("localization_converging");
+            return;
+        }
+    }
+
     /* Local variables for MPC computation and logging */
     int closest = 0;
     double ey = 0.0, epsi = 0.0;
@@ -1422,7 +1446,11 @@ static void run_mpc_for_pose(
         }
     }
 
-    if (mpc_status == MPC_STATUS_SUCCESS &&
+    /* MAXIMUM_ITERATIONS_REACHED is a usable bounded iterate, not a solver
+     * failure. The core API explicitly returns its best available control in
+     * that state, and the simulation node accepts it as well. */
+    if ((mpc_status == MPC_STATUS_SUCCESS ||
+         mpc_status == MPC_STATUS_MAXIMUM_ITERATIONS_REACHED) &&
         isfinite(mpc_result.optimal_control.steer_ang) &&
         isfinite(mpc_result.optimal_control.long_acc))
     {
@@ -1773,6 +1801,24 @@ int main(int argc, char *argv[])
         {
             double timeout = atof(env_val);
             if (timeout > 0.0 && timeout <= 5.0) g_raceline_timeout_sec = timeout;
+        }
+        if ((env_val = getenv("MPC_POSE_COVARIANCE_XY_MAX")) != NULL)
+        {
+            double threshold = atof(env_val);
+            if (threshold >= 0.0 && threshold <= 100.0)
+                g_pose_covariance_xy_max = threshold;
+        }
+        if ((env_val = getenv("MPC_POSE_COVARIANCE_YAW_MAX")) != NULL)
+        {
+            double threshold = atof(env_val);
+            if (threshold >= 0.0 && threshold <= 100.0)
+                g_pose_covariance_yaw_max = threshold;
+        }
+        if ((env_val = getenv("MPC_POSE_REQUIRED_GOOD_UPDATES")) != NULL)
+        {
+            int count = atoi(env_val);
+            if (count >= 1 && count <= 1000)
+                g_pose_required_good_updates = count;
         }
         if ((env_val = getenv("MPC_RACELINE_SPEED_MARGIN")) != NULL)
         {

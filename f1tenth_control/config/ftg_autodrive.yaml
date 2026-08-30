@@ -2,8 +2,7 @@ ftg_node:
   ros__parameters:
     scan_topic: /autodrive/roboracer_1/lidar
     odom_topic: /autodrive/roboracer_1/odom
-    enable_topic: /control/ftg/enable
-    command_topic: /cmd/ftg
+    command_topic: /cmd/controller
     command_frame: roboracer_1
 
     # AutoDRIVE 2026 geometry and steering actuator limits. The speed values

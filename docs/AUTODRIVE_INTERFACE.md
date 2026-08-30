@@ -55,41 +55,30 @@ not expose a target-speed command; it exposes normalized motor throttle.
 Consequently, no exact `speed * gain = throttle` conversion exists in the
 bridge or simulator interface.
 
-The adapter preserves the correct Ackermann contract and uses odometry
+The actuator interface preserves the correct Ackermann contract and uses odometry
 feedback to control normalized forward throttle. Its proportional/integral
 values are controller tuning, not actuator calibration. The default controller
 uses target-speed feedforward plus signed PI feedback, then a throttle slew
 rate. It does not cut throttle to zero merely because speed is slightly above
-target. `maximum_forward_throttle: 0.07` remains an operating cap;
+target. `throttle_max_forward: 0.10` remains an operating cap;
 AutoDRIVE's native hard limit remains `1.0`.
 
-At a zero target, the adapter publishes zero throttle. The simulator documents
+At a zero target, the interface publishes zero throttle. The simulator documents
 idle braking at zero throttle. Reverse is not used by the initial racing stack.
 
 ## Safety behavior
 
-The adapter remains disarmed at startup and publishes neutral for:
+There is no arming state or arming topic. The interface publishes neutral for:
 
-- disarm
+- startup, until both inputs arrive
 - missing or stale controller command
 - missing or stale odometry
 - invalid numeric input
+- zero target speed
 - shutdown
-
-Arm:
-
-```bash
-ros2 topic pub --once /autodrive/adapter/enable \
-  std_msgs/msg/Bool '{data: true}'
-```
-
-Disarm:
-
-```bash
-ros2 topic pub --once /autodrive/adapter/enable \
-  std_msgs/msg/Bool '{data: false}'
-```
 
 Controller speed behavior may still need tuning on track. Tune the speed
 controller and operational caps, not the native actuator range or steering
-conversion.
+conversion. The checked-in feedforward table is provisional low-speed track
+data; replace it using raw tests in a wall-less Unity scene before high-speed
+tuning.

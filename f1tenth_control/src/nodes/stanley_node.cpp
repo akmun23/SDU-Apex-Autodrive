@@ -45,11 +45,6 @@ StanleyNode::StanleyNode(const rclcpp::NodeOptions& options)
         std::bind(&StanleyNode::localRacelineCallback, this, std::placeholders::_1)
     );
     
-    enable_sub_ = create_subscription<std_msgs::msg::Bool>(
-        enable_topic_, 10,
-        std::bind(&StanleyNode::enableCallback, this, std::placeholders::_1)
-    );
-    
     drive_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
         command_topic_, 10
     );
@@ -85,7 +80,6 @@ void StanleyNode::declareParameters() {
     declare_parameter("trajectory_file", "");
     declare_parameter("odom_topic", odom_topic_);
     declare_parameter("pose_topic", pose_topic_);
-    declare_parameter("enable_topic", enable_topic_);
     declare_parameter("local_raceline_topic", local_raceline_topic_);
     declare_parameter("command_topic", command_topic_);
     declare_parameter("path_frame", path_frame_);
@@ -120,13 +114,15 @@ void StanleyNode::declareParameters() {
     declare_parameter("control_rate", 200.0);
     declare_parameter("pose_timeout_s", 0.3);
     declare_parameter("odom_timeout_s", 0.3);
+    declare_parameter("localization_covariance_xy_max", 0.25);
+    declare_parameter("localization_covariance_yaw_max", 0.12);
+    declare_parameter("localization_required_updates", 5);
 }
 
 void StanleyNode::loadParameters() {
     trajectory_file_ = get_parameter("trajectory_file").as_string();
     odom_topic_ = get_parameter("odom_topic").as_string();
     pose_topic_ = get_parameter("pose_topic").as_string();
-    enable_topic_ = get_parameter("enable_topic").as_string();
     local_raceline_topic_ = get_parameter("local_raceline_topic").as_string();
     command_topic_ = get_parameter("command_topic").as_string();
     path_frame_ = get_parameter("path_frame").as_string();
@@ -152,6 +148,12 @@ void StanleyNode::loadParameters() {
     control_rate_ = get_parameter("control_rate").as_double();
     pose_timeout_s_ = get_parameter("pose_timeout_s").as_double();
     odom_timeout_s_ = get_parameter("odom_timeout_s").as_double();
+    localization_covariance_xy_max_ = std::max(
+        0.0, get_parameter("localization_covariance_xy_max").as_double());
+    localization_covariance_yaw_max_ = std::max(
+        0.0, get_parameter("localization_covariance_yaw_max").as_double());
+    localization_required_updates_ = std::max(
+        1, static_cast<int>(get_parameter("localization_required_updates").as_int()));
     config_.control_rate = control_rate_;  // Pass control rate to algorithm for rate limiting
 }
 
@@ -167,7 +169,6 @@ rcl_interfaces::msg::SetParametersResult StanleyNode::parametersCallback(
     for (const auto& param : parameters) {
         if (param.get_name() == "odom_topic" ||
             param.get_name() == "pose_topic" ||
-            param.get_name() == "enable_topic" ||
             param.get_name() == "local_raceline_topic" ||
             param.get_name() == "command_topic") {
             result.successful = false;
@@ -251,7 +252,26 @@ rcl_interfaces::msg::SetParametersResult StanleyNode::parametersCallback(
 }
 
 void StanleyNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    const double covariance_xy = std::max(
+        msg->pose.covariance[0], msg->pose.covariance[7]);
+    const double covariance_yaw = msg->pose.covariance[35];
+    const bool covariance_good =
+        std::isfinite(covariance_xy) && std::isfinite(covariance_yaw) &&
+        covariance_xy >= 0.0 && covariance_yaw >= 0.0 &&
+        covariance_xy <= localization_covariance_xy_max_ &&
+        covariance_yaw <= localization_covariance_yaw_max_;
+
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!covariance_good) {
+        localization_good_updates_ = 0;
+        pose_received_ = false;
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "Waiting for AMCL covariance: xy=%.3f yaw=%.3f",
+            covariance_xy, covariance_yaw);
+        return;
+    }
+    localization_good_updates_++;
     current_state_.velocity = msg->twist.twist.linear.x;
     current_state_.angular_velocity = msg->twist.twist.angular.z;
     odom_received_ = true;
@@ -278,8 +298,10 @@ void StanleyNode::poseCallback(
         msg->pose.pose.orientation.z,
         msg->pose.pose.orientation.w);
     current_state_.pose.theta = tf2::getYaw(q);
-    pose_received_ = true;
-    last_pose_time_ = now();
+    if (localization_good_updates_ >= localization_required_updates_) {
+        pose_received_ = true;
+        last_pose_time_ = now();
+    }
 }
 
 void StanleyNode::localRacelineCallback(const nav_msgs::msg::Path::SharedPtr msg)
@@ -350,11 +372,6 @@ void StanleyNode::localRacelineCallback(const nav_msgs::msg::Path::SharedPtr msg
     controller_->setTrajectory(trajectory);
 }
 
-void StanleyNode::enableCallback(const std_msgs::msg::Bool::SharedPtr msg) {
-    enabled_ = msg->data;
-    RCLCPP_INFO(get_logger(), "Stanley controller %s", enabled_ ? "ENABLED" : "DISABLED");
-}
-
 void StanleyNode::controlLoop() {
     // Copy state under lock
     VehicleState state;
@@ -421,13 +438,8 @@ void StanleyNode::controlLoop() {
     drive_msg.header.stamp = now();
     drive_msg.header.frame_id = command_frame_;
     
-    if (enabled_) {
-        drive_msg.drive.steering_angle = output.steering_angle;
-        drive_msg.drive.speed = output.target_speed;
-    } else {
-        drive_msg.drive.steering_angle = 0.0;
-        drive_msg.drive.speed = 0.0;
-    }
+    drive_msg.drive.steering_angle = output.steering_angle;
+    drive_msg.drive.speed = output.target_speed;
     
     drive_pub_->publish(drive_msg);
     

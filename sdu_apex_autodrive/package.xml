@@ -2,8 +2,8 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>sdu_apex_autodrive</name>
-  <version>0.1.0</version>
-  <description>Safe native AutoDRIVE integration boundary for SDU Apex controllers.</description>
+  <version>0.2.0</version>
+  <description>Single-launch AutoDRIVE controller and calibration integration.</description>
   <maintainer email="akmun23@student.sdu.dk">Aksel Munksgaard-Ottosen</maintainer>
   <license>MIT</license>
 
@@ -14,8 +14,18 @@
   <depend>std_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
-  <exec_depend>ackermann_mux</exec_depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
   <exec_depend>f1tenth_control</exec_depend>
+  <exec_depend>f1tenth_localization</exec_depend>
+  <exec_depend>f1tenth_lateral_planner</exec_depend>
+  <exec_depend>f1tenth_lidar</exec_depend>
+  <exec_depend>f1tenth_stack</exec_depend>
+  <exec_depend>mpc_riccati</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>

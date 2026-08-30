@@ -40,5 +40,9 @@ RUN source /opt/ros/humble/setup.bash \
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+RUN echo 'source /opt/ros/humble/setup.bash' >> /root/.bashrc && \
+    echo 'source /home/autodrive_devkit/install/setup.bash' >> /root/.bashrc && \
+    echo 'source /workspace/install/setup.bash' >> /root/.bashrc
+
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]

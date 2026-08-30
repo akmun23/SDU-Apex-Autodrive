@@ -8,7 +8,7 @@
  *          Applies command-side rate limiting on steering and acceleration.
  *          Supports online trajectory updates from a local planner topic.
  *          Soft-start ramp is applied after trajectory load.
- * @dependencies pure_pursuit.hpp, rclcpp, nav_msgs, ackermann_msgs, geometry_msgs, std_msgs
+ * @dependencies pure_pursuit.hpp, rclcpp, nav_msgs, ackermann_msgs, geometry_msgs
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -16,7 +16,6 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <std_msgs/msg/bool.hpp>
 
 #include "algorithms/pure_pursuit.hpp"
 #include <memory>
@@ -38,7 +37,6 @@ namespace f1tenth_control {
  * Topics:
  *   Subscriptions:
  *     - /ekf_pose (geometry_msgs/PoseWithCovarianceStamped): Vehicle pose
- *     - /pp_enable (std_msgs/Bool): Enable/disable controller
  *   
  *   Publications:
  *     - /drive (ackermann_msgs/AckermannDriveStamped): Control commands
@@ -67,13 +65,11 @@ private:
     // State
     VehicleState current_state_;    // Current vehicle state (pose, velocity, etc.)
     std::mutex state_mutex_;        // Protects access to current_state_ for thread safety
-    bool enabled_{true};            // Whether the controller is currently enabled
     bool trajectory_loaded_{false}; // Whether a trajectory has been successfully loaded into the controller
     
     // ROS2 Communication
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;                         // Subscription for odometry messages
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;   // Subscription for pose estimate messages
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;                           // Subscription for enable/disable commands                  
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr local_raceline_sub_;                   // Subscription for local raceline updates
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;    // Publisher for drive commands
@@ -92,17 +88,20 @@ private:
     std::string trajectory_file_;           // Path to trajectory CSV file
     std::string odom_topic_{"/autodrive/roboracer_1/odom"};
     std::string pose_topic_{"/amcl_pose"};
-    std::string enable_topic_{"/control/pure_pursuit/enable"};
     std::string local_raceline_topic_{"/local_raceline"};
-    std::string command_topic_{"/cmd/pure_pursuit"};
+    std::string command_topic_{"/cmd/controller"};
     std::string path_frame_{"map"};
     std::string command_frame_{"roboracer_1"};
     bool pose_received_{false};             // Whether a valid pose estimate has been received
     bool odom_received_{false};             // Whether a valid odometry message has been received
+    int localization_good_updates_{0};      // Consecutive covariance-qualified poses
     rclcpp::Time last_pose_time_;           // Timestamp of the last received pose message
     rclcpp::Time last_odom_time_;           // Timestamp of the last received odometry message
     double pose_timeout_s_{0.1};            // Timeout for considering pose data stale [s]
     double odom_timeout_s_{0.2};            // Timeout for considering odometry data stale [s]
+    double localization_covariance_xy_max_{0.25};   // Maximum AMCL x/y variance [m^2]
+    double localization_covariance_yaw_max_{0.12};  // Maximum AMCL yaw variance [rad^2]
+    int localization_required_updates_{5};          // Consecutive qualified poses before drive
     double max_speed_{2.0};                 // [m/s] Maximum commanded speed
     double max_steering_rate_{2.8};         // [rad/s] Maximum rate of change for steering angle
     double max_accel_cmd_{3.0};             // [m/s^2] Maximum acceleration command for speed ramping
@@ -146,13 +145,6 @@ private:
      * @return None.
      */
     void poseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
-
-    /**
-     * @brief Callback for enable/disable commands.
-     * @param msg Shared pointer to the received Bool message indicating whether to enable or disable the controller.
-     * @return None.
-     */
-    void enableCallback(const std_msgs::msg::Bool::SharedPtr msg);
 
     /**
      * @brief Callback for local raceline updates.

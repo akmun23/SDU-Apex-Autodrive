@@ -1,0 +1,33 @@
+autodrive_actuator_interface:
+  ros__parameters:
+    input_topic: /cmd/controller
+    odom_topic: /autodrive/roboracer_1/odom
+    steering_topic: /autodrive/roboracer_1/steering_command
+    throttle_topic: /autodrive/roboracer_1/throttle_command
+
+    command_timeout_sec: 0.25
+    odom_timeout_sec: 0.25
+    publish_rate_hz: 50.0
+
+    max_steering_angle_rad: 0.5236
+    steering_command_min: -1.0
+    steering_command_max: 1.0
+    throttle_command_min: -1.0
+    throttle_command_max: 1.0
+    max_target_speed_mps: 4.0
+    speed_measurement: magnitude
+
+    kp: 0.015
+    ki: 0.003
+    ka: 0.0
+    integral_limit: 1.0
+    throttle_min_forward: 0.0
+    throttle_max_forward: 0.10
+    throttle_rise_rate_per_sec: 0.20
+    throttle_fall_rate_per_sec: 0.50
+    stop_speed_threshold_mps: 0.02
+
+    # Provisional points inferred from successful low-speed track laps.
+    # Replace using raw wall-less throttle characterization before high speed.
+    feedforward_speed_mps: [0.0, 0.6, 1.0, 1.5, 1.8, 2.5]
+    feedforward_throttle: [0.0, 0.025, 0.035, 0.055, 0.065, 0.085]

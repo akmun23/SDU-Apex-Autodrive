@@ -33,11 +33,6 @@ FTGNode::FTGNode(const rclcpp::NodeOptions& options)
         std::bind(&FTGNode::odomCallback, this, std::placeholders::_1)
     );
     
-    enable_sub_ = create_subscription<std_msgs::msg::Bool>(
-        enable_topic_, reliable_qos,
-        std::bind(&FTGNode::enableCallback, this, std::placeholders::_1)
-    );
-    
     // Publishers
     drive_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
         command_topic_, reliable_qos
@@ -53,7 +48,6 @@ void FTGNode::declareParameters() {
     // ROS interface
     declare_parameter("scan_topic", scan_topic_);
     declare_parameter("odom_topic", odom_topic_);
-    declare_parameter("enable_topic", enable_topic_);
     declare_parameter("command_topic", command_topic_);
     declare_parameter("command_frame", command_frame_);
 
@@ -106,7 +100,6 @@ void FTGNode::declareParameters() {
 void FTGNode::loadParameters() {
     scan_topic_ = get_parameter("scan_topic").as_string();
     odom_topic_ = get_parameter("odom_topic").as_string();
-    enable_topic_ = get_parameter("enable_topic").as_string();
     command_topic_ = get_parameter("command_topic").as_string();
     command_frame_ = get_parameter("command_frame").as_string();
 
@@ -166,7 +159,6 @@ rcl_interfaces::msg::SetParametersResult FTGNode::parametersCallback(
     for (const auto& param : parameters) {
         if (param.get_name() == "scan_topic" ||
             param.get_name() == "odom_topic" ||
-            param.get_name() == "enable_topic" ||
             param.get_name() == "command_topic") {
             result.successful = false;
             result.reason = "topic parameters require node restart";
@@ -185,10 +177,6 @@ rcl_interfaces::msg::SetParametersResult FTGNode::parametersCallback(
 }
 
 void FTGNode::scanCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
-    if (!enabled_) {
-        return;
-    }
-    
     // Run FTG algorithm
     FTGOutput output = ftg_->compute(
         msg->ranges,
@@ -245,16 +233,6 @@ void FTGNode::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
     // Extract velocities
     current_state_.velocity = msg->twist.twist.linear.x;
     current_state_.angular_velocity = msg->twist.twist.angular.z;
-}
-
-void FTGNode::enableCallback(const std_msgs::msg::Bool::ConstSharedPtr msg) {
-    enabled_ = msg->data;
-    RCLCPP_INFO(get_logger(), "FTG %s", enabled_ ? "enabled" : "disabled");
-    
-    if (!enabled_) {
-        // Publish zero command when disabled
-        publishDriveCommand(DriveCommand(0.0, 0.0));
-    }
 }
 
 void FTGNode::publishDriveCommand(const DriveCommand& cmd) {

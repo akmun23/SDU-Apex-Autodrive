@@ -1,0 +1,14 @@
+auto_global_localizer:
+  ros__parameters:
+    global_localization_service: /reinitialize_global_localization
+    nomotion_update_service: /request_nomotion_update
+    pose_topic: /amcl_pose
+    ready_topic: /localization/ready
+    global_frame: map
+    base_frame: roboracer_1
+    max_position_variance_m2: 0.25
+    max_yaw_variance_rad2: 0.12
+    required_consecutive_updates: 5
+    # Keep pose-triggered controllers above the 4 Hz actuator watchdog floor.
+    nomotion_request_period_sec: 0.1
+    retry_timeout_sec: 15.0

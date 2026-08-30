@@ -6,7 +6,6 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <tf2/utils.h>
 
 #include "algorithms/stanley.hpp"
@@ -60,12 +59,6 @@ private:
     void localRacelineCallback(const nav_msgs::msg::Path::SharedPtr msg);
 
     /**
-     * @brief Enable or disable autonomous control output.
-     * @param msg Incoming enable flag.
-     */
-    void enableCallback(const std_msgs::msg::Bool::SharedPtr msg);
-
-    /**
      * @brief Execute one timer-driven control step and publish a drive command.
      */
     void controlLoop();
@@ -93,7 +86,6 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr local_raceline_sub_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     
@@ -105,7 +97,7 @@ private:
     std::mutex state_mutex_;
     bool pose_received_{false};
     bool odom_received_{false};
-    bool enabled_{true};
+    int localization_good_updates_{0};
     rclcpp::Time last_pose_time_;
     rclcpp::Time last_odom_time_;
     
@@ -122,14 +114,16 @@ private:
     std::string trajectory_file_;
     std::string odom_topic_{"/autodrive/roboracer_1/odom"};
     std::string pose_topic_{"/amcl_pose"};
-    std::string enable_topic_{"/control/stanley/enable"};
     std::string local_raceline_topic_{"/local_raceline"};
-    std::string command_topic_{"/cmd/stanley"};
+    std::string command_topic_{"/cmd/controller"};
     std::string path_frame_{"map"};
     std::string command_frame_{"roboracer_1"};
     double control_rate_{200.0};
     double pose_timeout_s_{0.3};
     double odom_timeout_s_{0.3};
+    double localization_covariance_xy_max_{0.25};
+    double localization_covariance_yaw_max_{0.12};
+    int localization_required_updates_{5};
 };
 
 }  // namespace f1tenth_control

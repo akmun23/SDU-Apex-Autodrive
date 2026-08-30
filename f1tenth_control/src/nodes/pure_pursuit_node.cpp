@@ -31,11 +31,6 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
         std::bind(&PurePursuitNode::poseCallback, this, std::placeholders::_1)
     );
     
-    enable_sub_ = create_subscription<std_msgs::msg::Bool>(
-        enable_topic_, 10,
-        std::bind(&PurePursuitNode::enableCallback, this, std::placeholders::_1)
-    );
-    
     // Local raceline from lateral planner (overrides loaded trajectory when received)
     local_raceline_sub_ = create_subscription<nav_msgs::msg::Path>(
         local_raceline_topic_, 10,
@@ -78,7 +73,6 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("trajectory_file", "");
     declare_parameter("odom_topic", odom_topic_);
     declare_parameter("pose_topic", pose_topic_);
-    declare_parameter("enable_topic", enable_topic_);
     declare_parameter("local_raceline_topic", local_raceline_topic_);
     declare_parameter("command_topic", command_topic_);
     declare_parameter("path_frame", path_frame_);
@@ -116,6 +110,9 @@ void PurePursuitNode::declareParameters() {
     // Misc
     declare_parameter("pose_timeout_s", 0.1);
     declare_parameter("odom_timeout_s", 0.2);
+    declare_parameter("localization_covariance_xy_max", 0.25);
+    declare_parameter("localization_covariance_yaw_max", 0.12);
+    declare_parameter("localization_required_updates", 5);
     declare_parameter("max_steering_rate", 2.8);
     declare_parameter("max_accel_cmd", 3.0);
     declare_parameter("max_decel_cmd", 5.0);
@@ -125,7 +122,6 @@ void PurePursuitNode::loadParameters() {
     trajectory_file_ = get_parameter("trajectory_file").as_string();
     odom_topic_ = get_parameter("odom_topic").as_string();
     pose_topic_ = get_parameter("pose_topic").as_string();
-    enable_topic_ = get_parameter("enable_topic").as_string();
     local_raceline_topic_ = get_parameter("local_raceline_topic").as_string();
     command_topic_ = get_parameter("command_topic").as_string();
     path_frame_ = get_parameter("path_frame").as_string();
@@ -162,6 +158,12 @@ void PurePursuitNode::loadParameters() {
     pose_topic_ = get_parameter("pose_topic").as_string();
     pose_timeout_s_ = std::max(0.01, get_parameter("pose_timeout_s").as_double());
     odom_timeout_s_ = std::max(0.01, get_parameter("odom_timeout_s").as_double());
+    localization_covariance_xy_max_ = std::max(
+        0.0, get_parameter("localization_covariance_xy_max").as_double());
+    localization_covariance_yaw_max_ = std::max(
+        0.0, get_parameter("localization_covariance_yaw_max").as_double());
+    localization_required_updates_ = std::max(
+        1, static_cast<int>(get_parameter("localization_required_updates").as_int()));
     max_steering_rate_ = std::max(0.1, get_parameter("max_steering_rate").as_double());
     max_accel_cmd_ = std::max(0.1, get_parameter("max_accel_cmd").as_double());
     max_decel_cmd_ = std::max(0.1, get_parameter("max_decel_cmd").as_double());
@@ -184,7 +186,6 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
     for (const auto& param : parameters) {
         if (param.get_name() == "odom_topic" ||
             param.get_name() == "pose_topic" ||
-            param.get_name() == "enable_topic" ||
             param.get_name() == "local_raceline_topic" ||
             param.get_name() == "command_topic") {
             result.reason = "topic parameters require node restart";
@@ -420,8 +421,23 @@ void PurePursuitNode::poseCallback(const geometry_msgs::msg::PoseWithCovarianceS
         return;
     }
 
+    const double covariance_xy = std::max(
+        msg->pose.covariance[0], msg->pose.covariance[7]);
+    const double covariance_yaw = msg->pose.covariance[35];
+    const bool covariance_good =
+        std::isfinite(covariance_xy) && std::isfinite(covariance_yaw) &&
+        covariance_xy >= 0.0 && covariance_yaw >= 0.0 &&
+        covariance_xy <= localization_covariance_xy_max_ &&
+        covariance_yaw <= localization_covariance_yaw_max_;
+
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!covariance_good) {
+            localization_good_updates_ = 0;
+            pose_received_ = false;
+        } else {
+            localization_good_updates_++;
+        }
         current_state_.pose.x = msg->pose.pose.position.x;
         current_state_.pose.y = msg->pose.pose.position.y;
         const double qx = msg->pose.pose.orientation.x;
@@ -431,41 +447,21 @@ void PurePursuitNode::poseCallback(const geometry_msgs::msg::PoseWithCovarianceS
         current_state_.pose.theta = std::atan2(
             2.0 * (qw * qz + qx * qy),
             1.0 - 2.0 * (qy * qy + qz * qz));
-        pose_received_ = true;
-        last_pose_time_ = now();
+        if (localization_good_updates_ >= localization_required_updates_) {
+            pose_received_ = true;
+            last_pose_time_ = now();
+        }
+    }
+
+    if (!covariance_good) {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "Waiting for AMCL covariance: xy=%.3f yaw=%.3f",
+            covariance_xy, covariance_yaw);
     }
 
     // Run control on every pose update (typically /ekf_pose).
     controlLoop();
-}
-
-void PurePursuitNode::enableCallback(const std_msgs::msg::Bool::SharedPtr msg) {
-    bool enabled = false;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        enabled_ = msg->data;
-        enabled = enabled_;
-        if (enabled_) {
-            soft_start_initialized_ = false;
-            cmd_history_initialized_ = false;
-        }
-    }
-
-    if (enabled) {
-        RCLCPP_INFO(get_logger(), "Pure Pursuit ENABLED");
-    } else {
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            cmd_history_initialized_ = false;
-            soft_start_initialized_ = false;
-            soft_start_distance_traveled_ = 0.0;
-            last_cmd_speed_ = 0.0;
-            last_cmd_steering_ = 0.0;
-        }
-        RCLCPP_INFO(get_logger(), "Pure Pursuit DISABLED");
-        // Stop the car
-        publishDriveCommand(0.0, 0.0);
-    }
 }
 
 void PurePursuitNode::localRacelineCallback(const nav_msgs::msg::Path::SharedPtr msg) {
@@ -560,7 +556,6 @@ void PurePursuitNode::localRacelineCallback(const nav_msgs::msg::Path::SharedPtr
 }
 
 void PurePursuitNode::controlLoop() {
-    bool enabled = false;
     bool trajectory_loaded = false;
     bool pose_received = false;
     bool odom_received = false;
@@ -572,7 +567,6 @@ void PurePursuitNode::controlLoop() {
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        enabled = enabled_;
         trajectory_loaded = trajectory_loaded_;
         pose_received = pose_received_;
         odom_received = odom_received_;
@@ -583,7 +577,7 @@ void PurePursuitNode::controlLoop() {
         max_speed = max_speed_;
     }
 
-    if (!enabled || !trajectory_loaded) {
+    if (!trajectory_loaded) {
         publishDriveCommand(0.0, 0.0);
         return;
     }

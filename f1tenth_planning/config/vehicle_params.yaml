@@ -19,7 +19,7 @@ vehicle:
 
 optimization:
   # Track boundary safety margin (half car width + buffer)
-  safety_margin: 0.20       # [m] Distance to keep from track edges
+  safety_margin: 0.15       # [m] Distance to keep from track edges
   
   # Direction of travel along the raceline
   # 'ccw' = counter-clockwise (default), 'cw' = clockwise

@@ -8,7 +8,7 @@
  *          and long-horizon performance metrics.
  *          Uses composable node architecture with zero-copy intra-process comms.
  * @dependencies follow_the_gap.hpp, rclcpp, sensor_msgs, nav_msgs,
- *               ackermann_msgs, std_msgs, memory, mutex, deque, chrono
+ *               ackermann_msgs, memory, mutex, deque, chrono
  */
 #include "algorithms/follow_the_gap.hpp"
 
@@ -17,7 +17,6 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <tf2/utils.h>
 
 #include <memory>
@@ -54,7 +53,6 @@ private:
     // State    
     VehicleState current_state_;            // Latest vehicle state from odometry
     std::mutex state_mutex_;                // Protects access to current_state_
-    bool enabled_{true};                    // Whether autonomous control is enabled
     
     // Steering smoothing
     double last_steering_{0.0}; // Last steering angle for rate limiting and smoothing
@@ -100,14 +98,12 @@ private:
     // ROS2 Communication
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_; // Subscription for LiDAR scans
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;     // Subscription for odometry
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;       // Subscription for enable/disable commands
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;    // Publisher for drive commands
 
     std::string scan_topic_{"/autodrive/roboracer_1/lidar"};
     std::string odom_topic_{"/autodrive/roboracer_1/odom"};
-    std::string enable_topic_{"/control/ftg/enable"};
-    std::string command_topic_{"/cmd/ftg"};
+    std::string command_topic_{"/cmd/controller"};
     std::string command_frame_{"roboracer_1"};
     
     // Parameters
@@ -155,14 +151,6 @@ private:
      * @return None
      */
     void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
-
-    /**
-     * @brief Callback for enable/disable commands.
-     * This function enables or disables autonomous control based on incoming Bool messages. When disabled, it should stop the vehicle safely.
-     * @param msg Incoming Bool message where true = enable control, false = disable control.
-     * @return None
-     */
-    void enableCallback(const std_msgs::msg::Bool::ConstSharedPtr msg);
 
     // Publishing
 

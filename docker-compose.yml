@@ -3,16 +3,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+
     image: sdu-apex-autodrive:humble
     container_name: sdu_apex_autodrive
+
     network_mode: host
     ipc: host
+    privileged: true
+    gpus: all
+
     environment:
-      DISPLAY: ${DISPLAY:-:0}
+      DISPLAY: ${DISPLAY}
       QT_X11_NO_MITSHM: "1"
+
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - .:/workspace/src:rw
+
     stdin_open: true
     tty: true
     command: bash

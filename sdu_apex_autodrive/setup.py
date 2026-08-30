@@ -8,7 +8,7 @@ package_name = 'sdu_apex_autodrive'
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.0',
     packages=[package_name],
     data_files=[
         (
@@ -27,13 +27,18 @@ setup(
     maintainer='Aksel Munksgaard-Ottosen',
     maintainer_email='akmun23@student.sdu.dk',
     description=(
-        'Safe native AutoDRIVE integration boundary for SDU Apex controllers.'
+        'Single-launch AutoDRIVE controller and calibration integration.'
     ),
     license='MIT',
     entry_points={
         'console_scripts': [
-            'command_adapter = sdu_apex_autodrive.command_adapter:main',
-            'guarded_run = sdu_apex_autodrive.guarded_run:main',
+            'actuator_interface = sdu_apex_autodrive.actuator_interface:main',
+            'auto_global_localizer = sdu_apex_autodrive.auto_global_localizer:main',
+            'throttle_characterization = sdu_apex_autodrive.throttle_characterization:main',
+            'speed_tracking_test = sdu_apex_autodrive.speed_tracking_test:main',
+            'steering_characterization = sdu_apex_autodrive.steering_characterization:main',
+            'data_recorder = sdu_apex_autodrive.data_recorder:main',
+            'create_open_map = sdu_apex_autodrive.create_open_map:main',
         ],
     },
 )
