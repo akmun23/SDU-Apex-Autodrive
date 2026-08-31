@@ -1,0 +1,38 @@
+# Diagnostics-only open-ground calibration. The recorder uses simulator
+# ground truth (/autodrive/roboracer_1/{ips,odom,collision_count}) solely for
+# offline evaluation. No competition runtime node subscribes to these topics.
+calibration:
+  ros__parameters:
+    mode: full_suite
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_full_suite
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+
+    # Direct throttle step response over the entire normalized forward command
+    # range. 1.0 is the protocol maximum, not a project tuning ceiling.
+    throttle_sequence: [0.00, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20, 0.23, 0.26, 0.30, 0.35, 0.40, 0.50, 0.60, 0.70, 0.80, 1.00]
+
+    # Closed-loop speed response at low, medium, high and stop targets.
+    speed_sequence_mps: [0.00, 1.00, 2.00, 4.00, 6.00, 8.00, 10.00, 12.00, 14.00, 16.00, 18.00, 20.00, 0.00]
+    steering_sequence: [0.0]
+    # Every throttle and speed step is long enough to expose both transient
+    # acceleration and the steady response of the simulated vehicle.
+    hold_sec: 30.0
+    # A simulator reset can retain velocity briefly after teleporting the
+    # vehicle. Isolate every throttle/speed step from that residual motion.
+    zero_settle_sec: 5.0
+
+    # Above the documented simulator top speed so it cannot silently cap the
+    # full-throttle experiment. This is an abort safety diagnostic only.
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.25
+    reset_confirmation_timeout_sec: 120.0
+    reset_zero_odom_stable_sec: 30.0
+    # Restart a long phase before the finite open-ground plane is reached.
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 450.0

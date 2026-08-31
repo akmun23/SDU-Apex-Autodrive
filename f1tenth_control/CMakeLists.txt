@@ -146,15 +146,6 @@ install(
   DESTINATION share/${PROJECT_NAME}/config
 )
 
-# Keep legacy gym/hardware launch files as source history, but do not expose
-# them in the installed AutoDRIVE runtime.
-install(
-  FILES
-    launch/ftg_autodrive.launch.py
-    launch/pure_pursuit_autodrive.launch.py
-    launch/stanley_autodrive.launch.py
-  DESTINATION share/${PROJECT_NAME}/launch
-)
 
 # ===================
 # Testing
@@ -191,20 +182,24 @@ if(BUILD_TESTING)
   # Follow The Gap algorithm tests
   add_control_gtest(test_follow_the_gap test/test_follow_the_gap.cpp ftg_algorithm f1tenth_common)
 
-  # Pure Pursuit closed-loop simulation sweep (standalone executable)
-  add_executable(test_sim_drive_pure_pursuit test/test_sim_drive_pure_pursuit.cpp)
-  target_link_libraries(test_sim_drive_pure_pursuit pure_pursuit_algorithm)
-  ament_target_dependencies(test_sim_drive_pure_pursuit ${DEPENDENCIES})
+  # Keep the closed-loop controller tests optional: the old repository dump
+  # did not contain the legacy Stanley/Pure-Pursuit test sources.  A missing
+  # test must not make a production build fail.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sim_drive_pure_pursuit.cpp")
+    add_executable(test_sim_drive_pure_pursuit test/test_sim_drive_pure_pursuit.cpp)
+    target_link_libraries(test_sim_drive_pure_pursuit pure_pursuit_algorithm)
+    ament_target_dependencies(test_sim_drive_pure_pursuit ${DEPENDENCIES})
+    add_test(NAME pure_pursuit_closed_loop COMMAND test_sim_drive_pure_pursuit)
+    install(TARGETS test_sim_drive_pure_pursuit RUNTIME DESTINATION lib/${PROJECT_NAME})
+  endif()
 
-  # Stanley closed-loop simulation sweep (standalone executable)
-  add_executable(test_sim_drive_stanley test/test_sim_drive_stanley.cpp)
-  target_link_libraries(test_sim_drive_stanley stanley_algorithm)
-  ament_target_dependencies(test_sim_drive_stanley ${DEPENDENCIES})
-  # Install test executables so they are available to ros2 run
-  install(
-    TARGETS test_sim_drive_pure_pursuit test_sim_drive_stanley
-    RUNTIME DESTINATION lib/${PROJECT_NAME}
-  )
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sim_drive_stanley.cpp")
+    add_executable(test_sim_drive_stanley test/test_sim_drive_stanley.cpp)
+    target_link_libraries(test_sim_drive_stanley stanley_algorithm)
+    ament_target_dependencies(test_sim_drive_stanley ${DEPENDENCIES})
+    add_test(NAME stanley_closed_loop COMMAND test_sim_drive_stanley)
+    install(TARGETS test_sim_drive_stanley RUNTIME DESTINATION lib/${PROJECT_NAME})
+  endif()
 endif()
 
 # Export

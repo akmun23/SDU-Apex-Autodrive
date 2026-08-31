@@ -3,23 +3,45 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-
     image: sdu-apex-autodrive:humble
     container_name: sdu_apex_autodrive
-
     network_mode: host
     ipc: host
     privileged: true
     gpus: all
-
     environment:
       DISPLAY: ${DISPLAY}
       QT_X11_NO_MITSHM: "1"
-
+      # Keep the workspace idle.  Mapping and controller launches each own the
+      # only AutoDRIVE bridge, so automatically starting FTG would occupy 4567.
+      SDU_APEX_AUTOSTART: ${SDU_APEX_AUTOSTART:-0}
+      SDU_APEX_CONTROLLER: ${SDU_APEX_CONTROLLER:-ftg}
+      SDU_APEX_WITH_RVIZ: ${SDU_APEX_WITH_RVIZ:-false}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - .:/workspace/src:rw
-
     stdin_open: true
     tty: true
+
+  simulator:
+    build:
+      context: .
+      dockerfile: docker/simulator.Dockerfile
+    image: sdu-apex-autodrive-simulator:2026-iros-practice
+    # Keep the container alive; start the official simulator explicitly with
+    # the graphical or xvfb headless command from the host terminal.
     command: bash
+    container_name: autodrive_roboracer_sim
+    network_mode: host
+    ipc: host
+    privileged: true
+    gpus: all
+    environment:
+      DISPLAY: ${DISPLAY}
+      QT_X11_NO_MITSHM: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    stdin_open: true
+    tty: true

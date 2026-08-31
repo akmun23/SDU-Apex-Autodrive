@@ -1,39 +1,16 @@
-throttle_characterization:
+calibration:
   ros__parameters:
-    mode: throttle_sweep
-    output_dir: /workspace/src/autodrive_artifacts/calibration/raw
-    throttle_sequence: [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
-    hold_sec: 3.0
-    zero_settle_sec: 2.0
-    sample_rate_hz: 50.0
-    maximum_test_speed_mps: 3.0
-    maximum_throttle: 0.10
-    maximum_total_duration_sec: 120.0
-    telemetry_timeout_sec: 0.5
-
-speed_tracking_test:
-  ros__parameters:
-    mode: speed_steps
-    output_dir: /workspace/src/autodrive_artifacts/calibration/raw
-    speed_sequence_mps: [0.0, 0.5, 1.0, 1.5, 2.0, 1.0, 0.0]
-    hold_sec: 4.0
-    sample_rate_hz: 50.0
-    maximum_test_speed_mps: 3.0
-    maximum_total_duration_sec: 90.0
-    telemetry_timeout_sec: 0.5
-    command_topic: /cmd/controller
-
-steering_characterization:
-  ros__parameters:
-    output_dir: /workspace/src/autodrive_artifacts/calibration/raw
-    steering_sequence: [0.0, -0.25, 0.0, 0.25, 0.0, -0.5, 0.0, 0.5, 0.0]
-    hold_sec: 1.0
-    maximum_steering_command: 0.5
-
-autodrive_data_recorder:
-  ros__parameters:
-    output_dir: /workspace/src/autodrive_artifacts/calibration/raw
-    file_prefix: sensor_record
+    mode: sensor_record
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw
     sample_rate_hz: 50.0
     duration_sec: 0.0
-    command_topic: /cmd/controller
+    throttle_sequence: [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+    speed_sequence_mps: [0.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 0.0]
+    steering_sequence: [0.0, -0.25, 0.0, 0.25, 0.0, -0.5, 0.0, 0.5, 0.0]
+    hold_sec: 3.0
+    zero_settle_sec: 2.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0

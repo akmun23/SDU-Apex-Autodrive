@@ -11,6 +11,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -69,10 +70,12 @@ public:
     trajectory_relative_path_ = declare_parameter<std::string>(
       "trajectory_relative_path", "trajectories/my_track_raceline.csv");
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
-    base_frame_ = declare_parameter<std::string>("base_frame", "roboracer_1");
+    base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
     laser_frame_ = declare_parameter<std::string>("laser_frame", "lidar");
     odom_topic_ = declare_parameter<std::string>(
-      "odom_topic", "/autodrive/roboracer_1/odom");
+      "odom_topic", "/odom");
+    pose_topic_ = declare_parameter<std::string>(
+      "pose_topic", "/ekf_pose");
     obstacle_topic_ = declare_parameter<std::string>(
       "obstacle_topic", "/scan_obstacles");
     local_raceline_topic_ = declare_parameter<std::string>(
@@ -166,6 +169,13 @@ private:
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, rclcpp::SensorDataQoS(),
       std::bind(&LateralPlannerNode::odomCallback, this, std::placeholders::_1));
+
+    // The controller pose is already available as a map-frame EKF message.
+    // Using it directly avoids a timestamped TF lookup race when the simulator
+    // pauses, resets, or delivers a queued scan after a restart.
+    pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      pose_topic_, rclcpp::QoS(10).reliable(),
+      std::bind(&LateralPlannerNode::poseCallback, this, std::placeholders::_1));
   }
 
   // ── Publishers ────────────────────────────────────────────────────
@@ -204,6 +214,26 @@ private:
     double vy = msg->twist.twist.linear.y;
     std::lock_guard<std::mutex> lock(planner_mutex_);
     planner_->updateSpeed(std::sqrt(vx * vx + vy * vy));
+  }
+
+  void poseCallback(
+    const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+  {
+    if (!msg || (!msg->header.frame_id.empty() && msg->header.frame_id != map_frame_)) {
+      return;
+    }
+
+    const auto & q = msg->pose.pose.orientation;
+    const double x = msg->pose.pose.position.x;
+    const double y = msg->pose.pose.position.y;
+    const double yaw = yawFromQuaternion(q);
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw)) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(planner_mutex_);
+    planner_->updateRobotPose(x, y, yaw);
+    pose_received_ = true;
   }
 
   void obstacleCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan)
@@ -249,9 +279,12 @@ private:
       }
     }
 
-    // Update planning reference pose from TF
-    if (!updateRobotPoseFromTF()) {
-      return;
+    // Pose is updated asynchronously from the allowed map-frame EKF topic.
+    {
+      std::lock_guard<std::mutex> lock(planner_mutex_);
+      if (!pose_received_) {
+        return;
+      }
     }
 
     std::vector<Waypoint> path_waypoints;
@@ -271,33 +304,6 @@ private:
     publishPathViz(path_waypoints);
     publishWallDistanceMarkers(path_waypoints, opponent_snapshot);
     publishOpponentMarker(opponent_snapshot);
-  }
-
-  // ── TF pose update ────────────────────────────────────────────────
-
-  bool updateRobotPoseFromTF()
-  {
-    geometry_msgs::msg::TransformStamped tf;
-    try {
-      tf = tf_buffer_->lookupTransform(
-        map_frame_, base_frame_,
-        tf2::TimePointZero,
-        tf2::durationFromSec(0.02));
-    } catch (const tf2::TransformException & ex) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "Robot pose TF %s -> %s unavailable: %s",
-        map_frame_.c_str(), base_frame_.c_str(), ex.what());
-      return false;
-    }
-
-    double x   = tf.transform.translation.x;
-    double y   = tf.transform.translation.y;
-    double yaw = yawFromQuaternion(tf.transform.rotation);
-
-    std::lock_guard<std::mutex> lock(planner_mutex_);
-    planner_->updateRobotPose(x, y, yaw);
-    return true;
   }
 
   // ── Startup speed ramp helper ─────────────────────────────────────
@@ -605,6 +611,7 @@ private:
 
   // Topic names
   std::string odom_topic_;
+  std::string pose_topic_;
   std::string obstacle_topic_;
   std::string local_raceline_topic_;
   std::string opponent_marker_topic_;
@@ -616,6 +623,8 @@ private:
   // Subscribers
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr obstacle_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr     odom_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
+  bool pose_received_{false};
 
   // Publishers
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr                raceline_pub_;

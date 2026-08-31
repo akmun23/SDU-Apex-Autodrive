@@ -13,7 +13,7 @@ namespace gpu_amcl_cpp {
  * @brief Shared math utilities for localization.
  *
  * All functions are stateless and work on standard types (doubles, Eigen).
- * Used by AMCL, Odom and EKF nodes.
+ * Used by the CUDA AMCL implementation.
  */
 namespace math_utils {
 

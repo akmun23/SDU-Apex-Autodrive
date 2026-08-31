@@ -1,206 +1,160 @@
-# ============================================================
-# GPU AMCL C++ — Unified parameter file
-# ============================================================
-# Contains parameters for all three nodes:
-#   - gpu_amcl_cpp   (AMCL particle filter)
-#   - odom_fused     (odom relay with covariance)
-#   - ekf_localization (EKF sensor fusion + TF broadcast)
-#
-# All values are configurable — nothing is hardcoded.
-# ============================================================
-
-## OLD VALUES (for reference):
-# min_particles: 300
-# max_particles: 1000
-# kld_epsilon: 0.05
-# kld_z: 2.33
-
-# sigma_hit: 0.05
-# z_hit: 0.975
-# z_rand: 0.025
-
-
-# ────────────────────────────────────────────────────────────────
-#  AMCL Node
-# ────────────────────────────────────────────────────────────────
 gpu_amcl_cpp:
   ros__parameters:
-    # ---- Particles ----
+    base_frame_id: base_link
+    odom_frame_id: odom
+    global_frame_id: map
+    scan_topic: /autodrive/roboracer_1/lidar
+    odom_topic: /odom
+
     num_particles: 2500
     min_particles: 1000
     max_particles: 2500
-
-    # ---- KLD adaptive sampling ----
-    # Dynamically adjusts particle count based on distribution spread.
-    # When converged (tight cluster), uses fewer particles → saves GPU time.
-    # When uncertain (spread out), uses more particles → better coverage.
     use_kld_sampling: true
-    kld_epsilon: 0.10         # KL-divergence error bound (smaller → more particles)
-    kld_z: 1.96                # Quantile: 2.33 = 99%, 1.96 = 95%
-    kld_bin_x: 0.05             # metres per occupied KLD bin in x
-    kld_bin_y: 0.05             # metres per occupied KLD bin in y
-    kld_bin_theta: 0.05236   # ≈ 3 degrees per occupied KLD heading bin
-    kld_min_bin_weight: 0.00001  # only count KLD bins with this normalized weight mass
+    kld_epsilon: 0.10
+    kld_z: 1.96
+    kld_bin_x: 0.05
+    kld_bin_y: 0.05
+    kld_bin_theta: 0.0523598776
+    kld_min_bin_weight: 0.0
 
-    # ---- Frame IDs ----
-    base_frame_id: "ego_racecar/base_link"
-    odom_frame_id: "ego_racecar/odom"
-    global_frame_id: "map"
-
-    # ---- Topics ----
-    scan_topic: "/scan"
-    odom_topic: "/ego_racecar/odom"
-
-    # ---- Update thresholds (metres / radians) ----
-    # How much the robot must move before we run a PF update.
-    # Higher = fewer updates = less noise accumulation but less responsive.
-    update_min_d: 0.04
+    # Do not re-localize on stationary scan noise. AMCL republishes its last
+    # accepted pose while the vehicle has not moved, preventing drift between
+    # motion updates while preserving the official simulator cadence.
+    update_min_d: 0.02
     update_min_a: 0.035
+    # The official practice bridge publishes complete scans at about 10 Hz.
+    # Accept transport/scheduling delay without treating an old scan as live.
+    max_scan_age: 0.25
+    # LiDAR callbacks can arrive behind the 10 Hz odometry timestamp. Keep a
+    # full second so scan-time interpolation does not fall back to an old
+    # sample and create a false AMCL lag during acceleration.
+    odom_history_duration_s: 1.00
 
-    # ---- Scan freshness ----
-    # Max age (seconds) of a scan before it's rejected as stale.
-    # Tight gate to avoid stale corrections under backlog.
-    max_scan_age: 0.04
+    # The official bridge provides cumulative wheel angles plus IMU yaw. Keep
+    # the motion model conservative so ten-hertz scan corrections do not let
+    # artificial yaw noise dominate the local particle cloud.
+    alpha1: 0.02
+    alpha2: 0.05
+    alpha3: 0.03
+    alpha4: 0.05
+    slip_angular_threshold: 1.0
+    slip_noise_multiplier: 2.0
 
-    # ---- Odometry timestamp alignment ----
-    # Time window kept for interpolating odometry at LiDAR scan timestamps.
-    odom_history_duration_s: 0.2
-
-    # ---- Motion model (odometry noise, Prob. Robotics §5.4) ----
-    # These control how much random noise is added to each particle.
-    # For simulation (accurate odom), use LOW values.
-    # For real hardware (noisy odom/slip), increase 5-10x.
-    alpha1: 0.1    # rotation  → rotation  noise
-    alpha2: 0.4    # translation → rotation  noise
-    alpha3: 0.15    # translation → translation noise
-    alpha4: 0.2   # rotation  → translation noise
-
-    # ---- Slip-aware noise scaling ----
-    # During aggressive turns, increase noise to account for tire slip
-    slip_angular_threshold: 1.0  # rad/s — angular velocity above which slip is assumed
-    slip_noise_multiplier: 2.5   # multiply alpha values by this during slip
-
-    # ---- Sensor model (likelihood field, Prob. Robotics §6.4) ----
     max_beams: 270
     z_hit: 0.90
     z_rand: 0.10
-    sigma_hit: 0.05         # meters; selected by AMCL parameter sweep
+    sigma_hit: 0.05
     laser_max_range: 10.0
-    laser_offset_x: 0.265   # LiDAR X offset from base_link
-    laser_offset_y: 0.0     # LiDAR Y offset from base_link
-    normalize_likelihood_by_beams: true  # use geometric mean, avoids first-scan global collapse
-    likelihood_scale: 2.0                # selected by AMCL parameter sweep
+    laser_offset_x: 0.2733
+    laser_offset_y: 0.0
+    normalize_likelihood_by_beams: true
+    likelihood_scale: 2.0
+    resample_threshold: 0.50
 
-    # ---- Resampling ----
-    resample_threshold: 0.5  # selected by AMCL parameter sweep
-    enable_recovery_injection: true   # standard random-particle recovery; no custom resampling
-    recovery_injection_ratio: 0.1    # runtime recovery particles injected after each resample
-    enable_local_roughening: true      # bad scan match -> jitter local particles after resample
-    local_roughening_ratio: 0.25       # replace 20% around current local mean
-    local_roughening_xy_std_m: 0.20    # 12 cm XY noise
-    local_roughening_yaw_std_rad: 0.0872664626  # 5 deg yaw noise
+    use_cluster_estimate: true
+    cluster_xy_bin_m: 0.15
+    cluster_radius_m: 0.35
+    cluster_iterations: 3
+    cluster_min_covariance: 0.0001
+    cluster_publish_min_weight: 0.60
+
+    enable_recovery_injection: false
+    recovery_injection_ratio: 0.05
+    enable_local_roughening: true
+    local_roughening_ratio: 0.20
+    local_roughening_xy_std_m: 0.12
+    local_roughening_yaw_std_rad: 0.0872664626
     local_roughening_bad_log_weight_per_beam: -1.0
-    local_roughening_max_cloud_std_m: 0.75      # only roughen when cloud is already local
-    use_cluster_estimate: true          # publish best local mode, not global multi-modal mean
-    cluster_xy_bin_m: 0.25              # density bin for finding strongest cluster seed
-    cluster_radius_m: 0.20              # particles inside radius define output pose/covariance
-    cluster_iterations: 3               # local mean-shift passes around best cluster
-    cluster_min_covariance: 0.0001      # floor for EKF numerical stability
-    cluster_publish_min_weight: 0.60    # match sim benchmark default
-    enable_raycast_verification: true   # on/off switch for second-stage raycast verification
-    raycast_verification_global_only: false # run during global init and later recovery
-    raycast_verification_max_clusters: 4
+    local_roughening_max_cloud_std_m: 0.75
+
+    enable_raycast_verification: false
+    raycast_verification_global_only: true
+    raycast_verification_max_clusters: 5
     raycast_verification_particles_per_cluster: 20
-    raycast_verification_top_particles: 20  # best non-duplicate particles added after cluster reps
-    raycast_verification_max_beams: 90
+    raycast_verification_top_particles: 20
+    raycast_verification_max_beams: 270
     raycast_verification_cluster_radius_m: 0.35
-    raycast_verification_yaw_tolerance_rad: 0.5235987756  # +/- 30 deg cluster yaw gate
-    raycast_verification_beta: 0.30       # cluster log-weight penalty scale
-    raycast_verification_min_factor: 0.20 # worst verified cluster keeps at least 20% relative weight
-    raycast_verification_step_m: 0.05     # ray marching step; map-resolution scale
-    enable_startup_scan_refinement: true  # one-shot GPU scan-match refine before first global-init resample
+    raycast_verification_yaw_tolerance_rad: 0.5235987756
+    raycast_verification_beta: 0.30
+    raycast_verification_min_factor: 0.20
+    raycast_verification_step_m: 0.05
+
+    enable_startup_scan_refinement: false
     startup_scan_refinement_max_beams: 90
-    startup_scan_refinement_iterations: 20
-    startup_scan_refinement_max_match_distance_m: 0.80
-    startup_scan_refinement_max_translation_m: 0.70
+    startup_scan_refinement_iterations: 8
+    startup_scan_refinement_max_match_distance_m: 0.60
+    startup_scan_refinement_max_translation_m: 0.50
     startup_scan_refinement_max_yaw_rad: 0.52
     startup_scan_refinement_max_step_translation_m: 0.08
     startup_scan_refinement_max_step_yaw_rad: 0.06
 
-    # Reject one-frame global pose jumps from false injected modes.
     pose_jump_gate_enabled: true
     pose_jump_max_distance_m: 1.0
     pose_jump_max_yaw_rad: 1.2
-    pose_jump_confirm_scans: 3
+    pose_jump_confirm_scans: 5
     pose_jump_confirm_distance_m: 0.75
-    pose_jump_confirm_yaw_rad: 0.6
+    pose_jump_confirm_yaw_rad: 0.60
 
-    # ---- Initial pose ----
-    # false: seed particles around initial_pose_*
-    # true: seed particles globally along raceline corridor with forward heading cone
+    # Keep AMCL odometry-dominant at the native 10 Hz scan cadence while
+    # allowing real map corrections to arrive within a few scans. A larger
+    # single-scan jump is still rejected as a corridor alias and replaced by
+    # the causal odometry prediction.
+    local_scan_correction_max_distance_m: 0.35
+    local_scan_correction_max_yaw_rad: 0.45
+    # Associate local scan clusters with the causal odometry-predicted pose;
+    # repeated corridor aliases outside this radius are not controller input.
+    local_cluster_association_max_distance_m: 0.80
+    local_scan_correction_gain: 0.08
+    # Recenter the local particle cloud on the fused pose after each accepted
+    # scan. Without this, the cloud retains the previous scan mode and a small
+    # matching bias is integrated again at every 10 Hz update.
+    local_tracking_reinitialize_cloud: true
+    local_tracking_cloud_covariance_xy: 0.04
+    local_tracking_cloud_covariance_yaw: 0.04
+
+    # Start globally so AMCL can recover from an incorrect start guess. A
+    # candidate must also be near the saved raceline before the controller sees
+    # it; this rejects low-covariance wall/track-corridor aliases at startup.
     global_initialization: true
+    # The circuit has visually identical straight sections.  Race startup uses
+    # the known first raceline waypoint as an acceptance anchor while global
+    # particles still recover from a wrong initial pose guess.
+    initial_pose_from_raceline: true
     initial_heading_from_raceline: true
-    global_heading_cone_rad: 1.0471975512  # +/- 60 deg around nearest raceline heading
-    global_track_margin_m: 0.05            # keep global samples this far from walls
-    global_max_lateral_offset_m: 1.5       # do not trust huge d_left/d_right CSV widths during global sampling
-    global_heading_trajectory_file: ""     # absolute path override; empty resolves package/rel path below
-    global_heading_trajectory_package: "f1tenth_planning"
-    global_heading_trajectory_rel_path: "trajectories/my_track_raceline.csv"
+    global_heading_cone_rad: 0.45
+    global_track_margin_m: 0.15
+    global_max_lateral_offset_m: 1.50
+    global_heading_trajectory_file: ""
+    global_heading_trajectory_package: f1tenth_planning
+    global_heading_trajectory_rel_path: trajectories/autodrive_track_5laps_raceline.csv
+    # Do not accept a global candidate until it meets the same safety envelope
+    # required by the controller.  AMCL keeps refining while the vehicle is
+    # stationary, so a wrong start guess cannot deadlock localization.
+    global_pose_covariance_xy_max: 0.25
+    global_pose_covariance_yaw_max: 0.12
+    # The simulator reset pose is ~0.51 m from the first raceline sample while
+    # still inside the measured track corridor. Keep a bounded startup margin
+    # so AMCL can publish its first map pose instead of deadlocking the EKF and
+    # lateral planner at the reset origin.
+    global_pose_max_track_distance_m: 0.65
+    global_pose_max_track_heading_error_rad: 0.45
+    # Do not require the first raceline waypoint at startup.  The simulator can
+    # retain the vehicle pose between runs, and AMCL must be able to recover at
+    # any valid track location.  The map/raceline distance and heading gates
+    # above still prevent an off-track or corridor-alias estimate from enabling
+    # control.
+    global_start_anchor_enabled: false
+    global_start_anchor_radius_m: 0.90
 
-    # Used only when global_initialization=false, and as covariance for RViz 2D Pose Estimate.
     initial_pose_x: 0.0
     initial_pose_y: 0.0
     initial_pose_a: 0.0
-    initial_cov_xx: 0.2
-    initial_cov_yy: 0.2
-    initial_cov_aa: 0.2
+    initial_cov_xx: 0.50
+    initial_cov_yy: 0.50
+    initial_cov_aa: 0.20
 
-    # ---- Publishing ----
-    cloud_publish_rate: 0.0       # Hz; <= 0 disables particle cloud publishing and downloads
-    debug_pre_resample_particles: false  # publish weighted pre-resample PointCloud2 debug topic
-    force_max_particles_initial_sec: 0.0 # keep max_particles active for first movement seconds; 0 disables
-
-
-
-# ────────────────────────────────────────────────────────────────
-#  Odom Relay Node  (VESC odom already includes IMU-fused heading)
-# ────────────────────────────────────────────────────────────────
-odom_fused:
-  ros__parameters:
-    # ---- Topics ----
-    odom_topic: "/ego_racecar/odom"           # INPUT: Raw wheel odometry
-    output_topic: "/odom_pose"                # OUTPUT: PoseWithCovarianceStamped
-
-    # ---- Frames ----
-    frame_id: "ego_racecar/odom"               # Header frame_id for published pose (must match odom_frame)
-
-    # ---- Base covariances (metres² / rad²) ----
-    pass_through_covariance: true            # Forward covariance from /ego_racecar/odom
-    base_cov_xy: 0.05                        # Variance for x and y
-    base_cov_theta: 0.05                     # Variance for yaw (theta)        
-
-
-# ────────────────────────────────────────────────────────────────
-#  EKF Node
-# ────────────────────────────────────────────────────────────────
-ekf_localization:
-  ros__parameters:
-    # ---- Topics ----
-    amcl_topic: "/amcl_pose"
-    odom_topic: "/odom_pose"
-    output_topic: "/ekf_pose"
-
-    # ---- Frames ----
-    global_frame: "map"
-    odom_frame: "ego_racecar/odom"
-    base_frame: "ego_racecar/base_link"
-
-    # ---- EKF tuning ----
-    transform_tolerance: 0.02    # seconds into the future for TF
-    process_noise_scale: 0.2     # multiplier on dt-scaled odom covariance for Q
-    amcl_max_latency_sec: 0.15  # Drop AMCL updates older than 100 ms
-    odom_history_duration_s: 0.2  # Time window kept for timestamped TF lookup
-    amcl_jump_reset_enabled: true
-    amcl_jump_reset_distance_m: 1.0
-    amcl_jump_reset_yaw_rad: 1.2
-    amcl_jump_reset_covariance_scale: 1.0
+    cloud_publish_rate: 1.0
+    debug_pre_resample_particles: false
+    force_max_particles_initial_sec: 2.0
+    odom_reset_distance_m: 2.0
+    odom_reset_yaw_rad: 1.5

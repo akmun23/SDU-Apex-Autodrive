@@ -29,15 +29,21 @@ StanleyNode::StanleyNode(const rclcpp::NodeOptions& options)
         }
     }
     
-    // Setup publishers/subscribers
+    // Match the reliable QoS used by the team state publishers.
+    const auto state_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-        odom_topic_, rclcpp::SensorDataQoS(),
+        odom_topic_, state_qos,
         std::bind(&StanleyNode::odomCallback, this, std::placeholders::_1)
     );
 
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-        pose_topic_, rclcpp::SensorDataQoS(),
+        pose_topic_, state_qos,
         std::bind(&StanleyNode::poseCallback, this, std::placeholders::_1)
+    );
+
+    lidar_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+        lidar_topic_, state_qos,
+        std::bind(&StanleyNode::lidarCallback, this, std::placeholders::_1)
     );
 
     local_raceline_sub_ = create_subscription<nav_msgs::msg::Path>(
@@ -47,13 +53,6 @@ StanleyNode::StanleyNode(const rclcpp::NodeOptions& options)
     
     drive_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
         command_topic_, 10
-    );
-    
-    // Setup control timer
-    auto period = std::chrono::duration<double>(1.0 / control_rate_);
-    control_timer_ = create_wall_timer(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-        std::bind(&StanleyNode::controlLoop, this)
     );
     
     // Setup parameter callback
@@ -72,6 +71,8 @@ StanleyNode::StanleyNode(const rclcpp::NodeOptions& options)
                 config_.use_feedforward ? "ON" : "OFF", config_.feedforward_gain);
     RCLCPP_INFO(get_logger(), "  Pose: %s (%s frame)", pose_topic_.c_str(), path_frame_.c_str());
     RCLCPP_INFO(get_logger(), "  Odom: %s", odom_topic_.c_str());
+    RCLCPP_INFO(get_logger(), "  Sensor trigger: %s (one command per scan; nominal %.1f Hz)",
+                lidar_topic_.c_str(), control_rate_);
     RCLCPP_INFO(get_logger(), "  Command: %s", command_topic_.c_str());
 }
 
@@ -80,6 +81,7 @@ void StanleyNode::declareParameters() {
     declare_parameter("trajectory_file", "");
     declare_parameter("odom_topic", odom_topic_);
     declare_parameter("pose_topic", pose_topic_);
+    declare_parameter("lidar_topic", lidar_topic_);
     declare_parameter("local_raceline_topic", local_raceline_topic_);
     declare_parameter("command_topic", command_topic_);
     declare_parameter("path_frame", path_frame_);
@@ -101,17 +103,17 @@ void StanleyNode::declareParameters() {
     declare_parameter("speed_gain", 1.2986);
     
     // Steering
-    declare_parameter("max_steering", 0.4189);
-    declare_parameter("max_steering_rate", 2.8175);
+    declare_parameter("max_steering", 0.5236);
+    declare_parameter("max_steering_rate", 3.2);
     
     // Vehicle
-    declare_parameter("wheelbase", 0.3302);
+    declare_parameter("wheelbase", 0.324);
     
     // Stability
     declare_parameter("curvature_speed_factor", 1.1939);
     
     // Misc
-    declare_parameter("control_rate", 200.0);
+    declare_parameter("control_rate", 10.0);
     declare_parameter("pose_timeout_s", 0.3);
     declare_parameter("odom_timeout_s", 0.3);
     declare_parameter("localization_covariance_xy_max", 0.25);
@@ -123,6 +125,7 @@ void StanleyNode::loadParameters() {
     trajectory_file_ = get_parameter("trajectory_file").as_string();
     odom_topic_ = get_parameter("odom_topic").as_string();
     pose_topic_ = get_parameter("pose_topic").as_string();
+    lidar_topic_ = get_parameter("lidar_topic").as_string();
     local_raceline_topic_ = get_parameter("local_raceline_topic").as_string();
     command_topic_ = get_parameter("command_topic").as_string();
     path_frame_ = get_parameter("path_frame").as_string();
@@ -169,6 +172,7 @@ rcl_interfaces::msg::SetParametersResult StanleyNode::parametersCallback(
     for (const auto& param : parameters) {
         if (param.get_name() == "odom_topic" ||
             param.get_name() == "pose_topic" ||
+            param.get_name() == "lidar_topic" ||
             param.get_name() == "local_raceline_topic" ||
             param.get_name() == "command_topic") {
             result.successful = false;
@@ -226,16 +230,6 @@ rcl_interfaces::msg::SetParametersResult StanleyNode::parametersCallback(
     if (control_rate_changed) {
         control_rate_ = updated_control_rate;
         config_.control_rate = control_rate_;
-
-        if (control_timer_) {
-            control_timer_->cancel();
-        }
-
-        auto period = std::chrono::duration<double>(1.0 / control_rate_);
-        control_timer_ = create_wall_timer(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-            std::bind(&StanleyNode::controlLoop, this)
-        );
     }
     
     if (controller_) {
@@ -252,30 +246,19 @@ rcl_interfaces::msg::SetParametersResult StanleyNode::parametersCallback(
 }
 
 void StanleyNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-    const double covariance_xy = std::max(
-        msg->pose.covariance[0], msg->pose.covariance[7]);
-    const double covariance_yaw = msg->pose.covariance[35];
-    const bool covariance_good =
-        std::isfinite(covariance_xy) && std::isfinite(covariance_yaw) &&
-        covariance_xy >= 0.0 && covariance_yaw >= 0.0 &&
-        covariance_xy <= localization_covariance_xy_max_ &&
-        covariance_yaw <= localization_covariance_yaw_max_;
-
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (!covariance_good) {
-        localization_good_updates_ = 0;
-        pose_received_ = false;
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 1000,
-            "Waiting for AMCL covariance: xy=%.3f yaw=%.3f",
-            covariance_xy, covariance_yaw);
-        return;
-    }
-    localization_good_updates_++;
     current_state_.velocity = msg->twist.twist.linear.x;
     current_state_.angular_velocity = msg->twist.twist.angular.z;
     odom_received_ = true;
     last_odom_time_ = now();
+}
+
+void StanleyNode::lidarCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr /*msg*/) {
+    std::unique_lock<std::mutex> control_lock(control_mutex_, std::try_to_lock);
+    if (!control_lock.owns_lock()) {
+        return;
+    }
+    controlLoop();
 }
 
 void StanleyNode::poseCallback(
@@ -289,7 +272,22 @@ void StanleyNode::poseCallback(
         return;
     }
 
+    const double covariance_xy = std::max(
+        msg->pose.covariance[0], msg->pose.covariance[7]);
+    const double covariance_yaw = msg->pose.covariance[35];
+    const bool covariance_good =
+        std::isfinite(covariance_xy) && std::isfinite(covariance_yaw) &&
+        covariance_xy >= 0.0 && covariance_yaw >= 0.0 &&
+        covariance_xy <= localization_covariance_xy_max_ &&
+        covariance_yaw <= localization_covariance_yaw_max_;
+
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!covariance_good) {
+        localization_good_updates_ = 0;
+        pose_received_ = false;
+        return;
+    }
+    ++localization_good_updates_;
     current_state_.pose.x = msg->pose.pose.position.x;
     current_state_.pose.y = msg->pose.pose.position.y;
     tf2::Quaternion q(

@@ -226,6 +226,7 @@ struct TrajectoryPoint {
     double y{0.0};                                                  // [m] Y position
     double heading{0.0};                                            // [rad] Heading angle
     double velocity{0.0};                                           // [m/s] Target velocity
+    double acceleration{0.0};                                       // [m/s^2] Profile acceleration
     double curvature{0.0};                                          // [1/m] Path curvature
     double arc_length{0.0};                                         // [m] Distance along path
     double left_bound{std::numeric_limits<double>::infinity()};     // [m] Left corridor half-width

@@ -1,0 +1,22 @@
+# Diagnostics-only closed-loop speed verification over the full documented
+# simulator command envelope. The racing Pure Pursuit cap is independent.
+calibration:
+  ros__parameters:
+    mode: speed_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_speed_full_range
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    throttle_sequence: [0.0]
+    speed_sequence_mps: [0.00, 1.00, 2.00, 4.00, 6.00, 8.00, 10.00, 12.00, 14.00, 16.00, 18.00, 20.00, 0.00]
+    steering_sequence: [0.0]
+    hold_sec: 6.0
+    # The simulator reset teleports pose but can retain velocity briefly.
+    # Allow it to settle before each independent speed target.
+    zero_settle_sec: 3.0
+    maximum_test_speed_mps: 100.0
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.25

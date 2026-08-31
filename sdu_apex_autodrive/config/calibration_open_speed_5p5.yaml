@@ -1,0 +1,20 @@
+# Diagnostic-only single-target speed-controller run on the explore/open-ground
+# simulator scene.
+calibration:
+  ros__parameters:
+    mode: speed_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_speed_controller
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    throttle_sequence: [0.0]
+    speed_sequence_mps: [5.5, 0.0]
+    steering_sequence: [0.0]
+    hold_sec: 5.0
+    zero_settle_sec: 1.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.25

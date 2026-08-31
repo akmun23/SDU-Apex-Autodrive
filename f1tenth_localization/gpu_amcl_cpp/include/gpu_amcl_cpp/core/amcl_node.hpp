@@ -24,8 +24,8 @@ namespace gpu_amcl_cpp {
  * @brief AMCL ROS 2 node — GPU-accelerated particle-filter localisation.
  *
  * Subscribes to laser scans and odometry, publishes pose estimates
- * and a particle cloud.  Does NOT broadcast TF — that is handled
- * by the EKF node.
+ * and a particle cloud.  The sensor-odometry node owns the map->odom
+ * transform; AMCL remains an estimate source only.
  */
 class AmclNode : public rclcpp::Node {
 public:
@@ -36,8 +36,6 @@ private:
     void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg);
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg);
     void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
-    void initialpose_callback(
-        const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
     void publish_particle_cloud(const rclcpp::Time& stamp);
     void publish_pre_resample_weighted_cloud(const rclcpp::Time& stamp);
 
@@ -62,13 +60,14 @@ private:
                                double& x,
                                double& y,
                                double& theta) const;
+    double raceline_distance_to_pose(double x, double y) const;
+    double raceline_heading_error_to_pose(double x, double y, double theta) const;
 
     // ── ROS I/O ────────────────────────────────────────────────────
     // Subscribers
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initpose_sub_;
 
     // Publishers    
     rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;  // /amcl_pose
@@ -95,6 +94,8 @@ private:
     rclcpp::Time last_cloud_publish_time_;
     bool debug_pre_resample_particles_ = false;
     bool initial_heading_from_raceline_ = true;
+    bool initial_pose_from_raceline_ = true;
+    double initial_pose_heading_offset_rad_ = 0.0;
 
     // Slip-aware noise scaling
     double slip_angular_threshold_ = 1.0;  // rad/s
@@ -104,13 +105,43 @@ private:
     // Prediction baseline (reset on reinit)
     bool prediction_baseline_ready_ = false;
     bool global_pose_published_ = false;
+    bool global_localization_locked_ = false;
+    bool local_odom_reference_ready_ = false;
+    bool initial_scan_update_pending_ = true;
     bool localization_start_time_set_ = false;
     bool startup_scan_refinement_attempted_ = false;
     double pred_last_x_ = 0;
     double pred_last_y_ = 0;
     double pred_last_theta_ = 0;
+    double local_odom_reference_x_ = 0.0;
+    double local_odom_reference_y_ = 0.0;
+    double local_odom_reference_theta_ = 0.0;
+    PoseEstimate local_pose_reference_;
     double force_max_particles_initial_sec_ = 0.0;
     rclcpp::Time localization_start_time_;
+    double global_pose_covariance_xy_max_ = 0.25;
+    double global_pose_covariance_yaw_max_ = 0.12;
+    double global_pose_max_track_distance_m_ = 0.45;
+    double global_pose_max_track_heading_error_rad_ = 0.45;
+    bool global_start_anchor_enabled_ = true;
+    double global_start_anchor_radius_m_ = 0.90;
+    std::vector<ParticleFilter::TrackHeadingPoint> global_heading_points_;
+
+    // A likelihood-field match can select a visually similar section of the
+    // circuit. Once globally locked, reject scan corrections that are
+    // implausibly large relative to the accepted pose plus this scan's odom
+    // delta, then restart the local cloud around the odometry prediction.
+    double local_scan_correction_max_distance_m_ = 0.35;
+    double local_scan_correction_max_yaw_rad_ = 0.45;
+    double local_cluster_association_max_distance_m_ = 0.80;
+    // A scan match is an absolute map-pose measurement.  Keep odometry as
+    // the short-term prediction and apply only a bounded fraction of the
+    // scan correction so a small systematic likelihood-field bias cannot
+    // accumulate into a large along-track error at the native 10 Hz rate.
+    double local_scan_correction_gain_ = 0.08;
+    bool local_tracking_reinitialize_cloud_ = true;
+    double local_tracking_cloud_covariance_xy_ = 0.01;
+    double local_tracking_cloud_covariance_yaw_ = 0.01;
 
     struct OdomSample {
         rclcpp::Time stamp;
@@ -121,9 +152,11 @@ private:
 
     std::deque<OdomSample> odom_history_;
     double odom_history_duration_s_ = 0.2;
+    double odom_reset_distance_m_ = 2.0;
+    double odom_reset_yaw_rad_ = 1.5;
 
     // Pose-jump guard: prevents one-frame false global relocalization from
-    // teleporting the EKF/controller.
+    // teleporting the controller.
     bool pose_jump_gate_enabled_ = true;
     double pose_jump_max_distance_m_ = 1.0;
     double pose_jump_max_yaw_rad_ = 1.2;

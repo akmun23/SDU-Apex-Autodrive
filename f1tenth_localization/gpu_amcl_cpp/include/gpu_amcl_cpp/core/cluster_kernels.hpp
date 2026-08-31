@@ -46,6 +46,23 @@ void launch_gpu_find_cluster_seed(
     float radius2,
     cudaStream_t stream);
 
+// Select the strongest cluster whose seed is close to the causal odometry
+// prediction. This keeps repeated-corridor aliases out of local tracking.
+void launch_gpu_find_cluster_seed_near(
+    const float* d_particles,
+    const float* d_weights,
+    void* d_scores,
+    ClusterScoreResult* d_best,
+    ClusterScoreResult* d_second,
+    void* d_temp,
+    size_t temp_bytes,
+    int n,
+    float radius2,
+    float reference_x,
+    float reference_y,
+    float association_radius2,
+    cudaStream_t stream);
+
 void launch_gpu_compute_cluster_mean(
     const float* d_particles,
     const float* d_weights,

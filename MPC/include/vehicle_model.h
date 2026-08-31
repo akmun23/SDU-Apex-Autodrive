@@ -3,8 +3,8 @@
  * @brief Dynamic nonlinear bicycle model for F1/10th vehicle.
  *
  * Provides vehicle dynamics prediction for Model Predictive Control.
- * Uses the dynamic bicycle model with linear tire forces and wheel
- * dynamics, appropriate for high-speed autonomous vehicles like F1/10th.
+ * Uses the dynamic bicycle model with asymptotically saturated tire forces
+ * and wheel dynamics, matching the AutoDRIVE simulator response.
  *
  * State vector (6 states): [x, y, psi, v_x, v_y, omega]
  *   x, y       = position in world frame [meters]
@@ -28,10 +28,9 @@
  * Longitudinal force: F_x = m * a_cmd (direct acceleration input)
  *
  * Tire model:
- *   Prediction uses a linear model:
- *     F_yf = mu * C_Sf * alpha_f * F_zf
- *     F_yr = mu * C_Sr * alpha_r * F_zr
- *   Linearization uses a Pacejka-like model for tire force saturation.
+ *   F_y = F_z * spline(tan(alpha))
+ *   with documented lateral knots (0.01, 1.00) and (0.10, 0.50).
+ *   The local derivative is used for the MPC linearization.
  *
  * Discretization:
  *   - Pose states (x, y, psi): analytical SE(2) integration of constant body twist
@@ -110,7 +109,7 @@ ControlInput_t vehicle_model_saturate_control(const ControlInput_t *raw_control)
  * Uses analytical pose integration for (x, y, psi) with constant body twist
  * over the step, and Forward Euler for body dynamic states (v_x, v_y, omega).
  *
- * Includes tire force computation using linear tire model.
+ * Includes asymptotic tire force computation.
  * The control input is automatically saturated to physical limits.
  *
  * @param current_state   Current vehicle state (6 states)
@@ -154,10 +153,10 @@ void vehicle_model_predict_trajectory(
  *===========================================================================*/
 
 /**
- * @brief Compute local effective lateral stiffness for a Pacejka-like tire law.
- * @details Evaluates the nonlinear tire law at the operating slip angle and
- *          returns the local slope dF_y/dalpha, clamped to a minimum
- *          stiffness floor for numerical robustness near saturation.
+ * @brief Compute local effective lateral stiffness for the simulator tire law.
+ * @details Evaluates the documented two-piece cubic asymptotic tire law at the
+ *          operating slip angle and returns dF_y/dalpha, with a small
+ *          numerical floor near saturation so the MPC remains controllable.
  * @param use_front_axle Set to 1 for front-axle constants, 0 for rear-axle constants.
  * @param normal_load Tire normal load [newtons].
  * @param slip_angle Operating slip angle [radians].

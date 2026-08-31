@@ -209,7 +209,7 @@ public:
               const SensorModel::Config& sm_cfg,
               const MapProcessor& map);
 
-    /// Re-initialise around a given pose (e.g. from /initialpose).
+    /// Re-initialise around a supplied pose for internal recovery/testing.
     void reinitialize(double x, double y, double theta,
                       double cov_xx, double cov_yy, double cov_aa);
 
@@ -246,6 +246,13 @@ public:
     PoseEstimate get_cluster_estimate(double* cluster_weight_out = nullptr,
                                       double* second_cluster_weight_out = nullptr);
 
+    /// Get the strongest cluster associated with a causal pose prediction.
+    PoseEstimate get_cluster_estimate_near(
+        const PoseEstimate& reference,
+        double association_radius_m,
+        double* cluster_weight_out = nullptr,
+        double* second_cluster_weight_out = nullptr);
+
     /// Download particles to host for visualisation.
     void get_particles(std::vector<float>& particles);
 
@@ -270,6 +277,14 @@ public:
     void set_force_max_particles(bool enabled);
 
 private:
+    PoseEstimate get_cluster_estimate_impl(
+        bool constrain_to_reference,
+        double reference_x,
+        double reference_y,
+        double association_radius_m,
+        double* cluster_weight_out,
+        double* second_cluster_weight_out);
+
     void check_resample();
     void do_resample(int target_n);
     int  compute_kld_target();

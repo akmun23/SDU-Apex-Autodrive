@@ -1,181 +1,63 @@
-# F1Tenth Control Package
+# F1Tenth control
 
-A modular, high-performance C++ package for F1Tenth autonomous racing algorithms.
+ROS 2 Humble controller components for the AutoDRIVE RoboRacer stack.
 
-## Overview
+The package contains three controller plugins:
 
-This package provides reusable components and algorithms for F1Tenth autonomous racing. It's designed with modularity in mind, allowing components like LiDAR processing and math utilities to be shared across different algorithms.
+- `f1tenth_control::FTGNode` — LiDAR-only Follow The Gap.
+- `f1tenth_control::PurePursuitNode` — raceline tracking with AMCL pose and
+  encoder/IMU odometry.
+- `f1tenth_control::StanleyNode` — raceline tracking with AMCL pose and
+  encoder/IMU odometry.
 
-## Package Structure
+All controllers publish physical-unit commands to `/cmd/controller` as
+`ackermann_msgs/msg/AckermannDriveStamped`. The single
+`sdu_apex_autodrive/actuator_interface` node owns conversion to AutoDRIVE's
+normalized steering and throttle topics.
 
-```
-f1tenth_control/
-├── include/f1tenth_control/
-│   ├── common/              # Reusable components
-│   │   ├── types.hpp        # Common data types (Point2D, Pose2D, TrajectoryPoint, Gap, etc.)
-│   │   ├── math_utils.hpp   # Math utilities (angle normalization, transforms, filters)
-│   │   └── lidar_processor.hpp  # LiDAR preprocessing (filtering, validation)
-│   ├── algorithms/          # Racing algorithms
-│   │   ├── follow_the_gap.hpp   # Follow The Gap (reactive)
-│   │   ├── pure_pursuit.hpp     # Pure Pursuit (path following)
-│   │   └── stanley.hpp          # Stanley controller (path following)
-│   └── nodes/               # ROS2 node wrappers
-│       ├── ftg_node.hpp
-│       ├── pure_pursuit_node.hpp
-│       └── stanley_node.hpp
-├── src/                     # Implementation files
-├── config/                  # Configuration files
-│   └── ftg_params.yaml      # FTG parameters
-├── launch/                  # Launch files
-│   ├── ftg_hardware_launch.py
-│   ├── pure_pursuit_launch.py
-│   └── stanley_launch.py
-└── test/                    # Unit tests
-```
+## Runtime interfaces
 
-## Algorithms
+FTG subscribes to:
 
-### Follow The Gap (FTG)
+- `/autodrive/roboracer_1/lidar` (`sensor_msgs/msg/LaserScan`)
 
-A reactive obstacle avoidance algorithm that:
-1. Processes LiDAR scan data with noise filtering
-2. Finds the closest obstacle and creates a safety bubble
-3. Applies disparity extension to avoid narrow gaps
-4. Finds the largest/deepest gap in the scan
-5. Steers toward the best gap while adjusting speed
+Pure Pursuit and Stanley additionally subscribe to:
 
-**Features:**
-- Configurable speed based on gap distance
-- Emergency braking for close obstacles
-- Preference for straight-ahead gaps (configurable)
-- Mapping mode for track boundary extraction
+- `/odom` (`nav_msgs/msg/Odometry`) from encoder/IMU dead reckoning
+- `/amcl_pose` (`geometry_msgs/msg/PoseWithCovarianceStamped`)
+- `/local_raceline` when a lateral planner is enabled
 
-## Usage
+The path frame is `map`; the command frame is `base_link`. Controller commands
+are deliberately kept separate from native actuator outputs so that steering
+conversion, speed control, timeout handling, and neutral-on-failure behavior
+exist at one boundary.
 
-### Building
+## Build and run
+
+Build with the workspace instructions in the root [README](../README.md). The
+supported launch entry point is:
 
 ```bash
-cd ~/f1tenth_ws
-colcon build --packages-select f1tenth_control
-source install/setup.bash
+ros2 launch sdu_apex_autodrive controller.launch.py controller:=ftg
+ros2 launch sdu_apex_autodrive controller.launch.py controller:=pure_pursuit
+ros2 launch sdu_apex_autodrive controller.launch.py controller:=stanley
 ```
 
-### Running FTG
+Use the MPC controller through the same launch file with
+`controller:=mpc`; it starts the lateral planner and this package is not
+required for that controller path.
 
-```bash
-# Hardware mode with launch defaults
-ros2 launch f1tenth_control ftg_hardware_launch.py
+The checked-in defaults follow the AutoDRIVE RoboRacer geometry: wheelbase
+`0.324 m`, steering limit `±0.5236 rad`, and centre-steering rate `3.2 rad/s`.
+The controller accepts the documented simulator envelope; the raceline
+velocity column, curvature, clearance, acceleration, and actuator limits
+regulate the actual corner speed.
 
-# With custom speed
-ros2 launch f1tenth_control ftg_hardware_launch.py max_speed:=3.0
+## Configuration
 
-# With mapping mode enabled
-ros2 launch f1tenth_control ftg_hardware_launch.py mapping_mode:=true
-```
+- `config/ftg_autodrive.yaml`
+- `config/path_tracking_autodrive.yaml`
 
-### Topics
-
-**Subscribed:**
-- `/scan` (sensor_msgs/LaserScan) - LiDAR scan data
-- `/ego_racecar/odom` (nav_msgs/Odometry) - Vehicle odometry (remapped into node topic `odom`)
-- `ftg/enable` (std_msgs/Bool) - Enable/disable the algorithm
-
-**Published:**
-- `/drive` (ackermann_msgs/AckermannDriveStamped) - Drive commands
-
-### Parameters
-
-All parameters are configurable via `config/ftg_params.yaml` or launch arguments.
-Values below are defaults from `ftg_params.yaml`. In `ftg_hardware_launch.py`, `max_speed` is overridden to `3.0` by default unless a launch argument overrides it.
-
-Key parameters:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_speed` | 2.0 | Maximum speed (m/s) |
-| `min_speed` | 1.0 | Minimum speed (m/s) |
-| `max_steering` | 0.4189 | Max steering angle (rad) |
-| `emergency_brake_distance` | 0.15 | Emergency stop distance (m) |
-| `gap_threshold` | 0.5 | Minimum range for gap detection (m) |
-| `mapping_mode` | false | Enable boundary point extraction |
-
-### Dynamic Reconfiguration
-
-Parameters can be changed at runtime:
-
-```bash
-ros2 param set /ftg_node max_speed 2.0
-ros2 param set /ftg_node gap_threshold 0.8
-```
-
-## Reusable Components
-
-### LidarProcessor
-
-The `LidarProcessor` class provides reusable LiDAR preprocessing:
-
-```cpp
-#include "f1tenth_control/common/lidar_processor.hpp"
-
-f1tenth_control::LidarProcessor processor(config);
-
-// Process scan (range filtering, median filter, angle computation)
-auto processed = processor.processScan(ranges, angle_min, angle_max, angle_increment);
-
-// Find closest point
-size_t closest = processor.findClosestPoint(processed);
-
-// Convert to Cartesian
-Point2D point = processor.scanPointToCartesian(processed, index);
-
-// Extract boundary points for mapping
-auto boundaries = processor.extractBoundaryPoints(processed, robot_pose, timestamp);
-```
-
-Algorithm-specific processing (gap finding, disparity extension, safety bubbles) is in `FollowTheGap`.
-
-### Math Utilities
-
-Common math functions for robotics:
-
-```cpp
-#include "f1tenth_control/common/math_utils.hpp"
-
-// Angle normalization
-double normalized = f1tenth_control::math::normalizeAngle(angle);
-
-// Coordinate transforms
-Point2D global = f1tenth_control::math::localToGlobal(local_point, robot_pose);
-
-// Filtering
-auto filtered = f1tenth_control::math::medianFilter(data, window_size);
-
-// Basic math
-double d = f1tenth_control::math::distance(point_a, point_b);
-double v = f1tenth_control::math::clamp(value, min_val, max_val);
-double i = f1tenth_control::math::lerp(a, b, t);
-```
-
-## Adding New Algorithms
-
-1. Create header in `include/f1tenth_control/algorithms/`
-2. Create implementation in `src/algorithms/`
-3. Create ROS2 node wrapper in `src/nodes/`
-4. Add to CMakeLists.txt
-5. Create config file and launch file
-
-The `LidarProcessor` and math utilities can be reused. For example:
-- `LidarProcessor::scanPointToCartesian()` for obstacle coordinate transforms
-- `math::localToGlobal()` for waypoint transforms
-- `math::normalizeAngle()` for angle wrapping
-
-## Hardware
-
-Designed for F1Tenth cars with:
-- **Computer:** NVIDIA Jetson Orin (8GB RAM)
-- **LiDAR:** Hokuyo UST-10LX (270° FOV, 40Hz)
-- **Motor Controller:** VESC with Ackermann steering
-
-## License
-
-MIT License
+The launch file loads the appropriate YAML and selects exactly one controller.
+Do not start the deleted legacy hardware launches or an additional command
+mux/bridge.

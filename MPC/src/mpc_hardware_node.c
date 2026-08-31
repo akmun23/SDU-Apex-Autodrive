@@ -5,24 +5,23 @@
  * Uses the platform-independent MPC core from the former hardware node, with
  * AutoDRIVE-native topics, frames, message types, and fail-neutral watchdogs.
  *
- * Architecture (EKF-driven):
- *   - Odometry callback: stores latest velocity state (fast, non-blocking)
- *   - Steering callback: optionally stores verified radians feedback
- *   - EKF pose callback: caches latest pose and signals MPC thread
- *   - MPC control thread: runs once per newest EKF pose, updates latest command
- *   - Drive publisher thread: republishes latest MPC command at fixed rate
+ * Architecture (native 10 Hz driven):
+ *   - Odometry callback: stores latest velocity state and triggers one solve
+ *   - EKF pose callback: caches latest map-frame pose
+ *   - Local raceline callback: caches the current map-frame reference
+ *   - MPC control thread: runs once per newest /odom sample, using latest pose
+ *   - Drive publication: one command is published for each native /odom event
  *   - Safety: missing, stale, invalid, or failed inputs publish neutral
  *
  * Topics:
- *   Subscribe: /autodrive/roboracer_1/odom (nav_msgs/Odometry)
- *   Subscribe: /autodrive/roboracer_1/steering (std_msgs/Float32)
- *   Subscribe: /amcl_pose              (geometry_msgs/PoseWithCovarianceStamped)
+ *   Subscribe: /odom                         (nav_msgs/Odometry)
+ *   Subscribe: /ekf_pose               (geometry_msgs/PoseWithCovarianceStamped)
  *   Subscribe: /local_raceline         (nav_msgs/Path)         — lateral planner reference [QoS(10)]
  *   Publish:   /cmd/controller         (ackermann_msgs/AckermannDriveStamped)
  *
  * @dependencies mpc.h, mpc_types.h, util_math.h, vehicle_model.h,
  *               rclc, rcl, nav_msgs, ackermann_msgs, std_msgs, geometry_msgs,
- *               <sched.h>, <sys/stat.h>
+ *               <sys/stat.h>
  */
 
 #ifndef _GNU_SOURCE
@@ -35,7 +34,6 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
-#include <sched.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -55,7 +53,6 @@
 #include "nav_msgs/msg/odometry.h"
 #include "nav_msgs/msg/path.h"
 #include "ackermann_msgs/msg/ackermann_drive_stamped.h"
-#include "std_msgs/msg/float32.h"
 #include "std_msgs/msg/float64.h"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.h"
 
@@ -71,15 +68,13 @@
 
 
 /** Configurable topic names */
-static const char *g_odom_topic = "/autodrive/roboracer_1/odom";
+static const char *g_odom_topic = "/odom";
 static const char *g_drive_topic = "/cmd/controller";
-static const char *g_servo_topic = "/autodrive/roboracer_1/steering";
-static const char *g_ekf_pose_topic = "/amcl_pose";
+static const char *g_ekf_pose_topic = "/ekf_pose";
 static const char *g_local_raceline_topic = "/local_raceline";
 static const char *g_pose_frame = "map";
 static const char *g_path_frame = "map";
-static const char *g_command_frame = "roboracer_1";
-static int g_steering_feedback_is_radians = 0;
+static const char *g_command_frame = "base_link";
 static int g_local_raceline_received = 0;
 static int g_local_raceline_wait_logged = 0;
 static int g_local_raceline_wall_warned = 0;
@@ -101,36 +96,10 @@ static double g_pose_covariance_xy_max = 0.25;
 static double g_pose_covariance_yaw_max = 0.12;
 static int g_pose_required_good_updates = 5;
 static int g_pose_good_updates = 0;
-static double g_drive_republish_period_ms = 20.0;
-static int g_drive_command_ready = 0;
 /* Last published drive command (fallback uses these instead of forcing stop). */
 static float g_last_cmd_steer = 0.0f;
 static float g_last_cmd_speed = 0.0f;
 static float g_last_cmd_accel = 0.0f;
-
-/* Standstill brake-override fallback:
- * If the car is essentially stopped but MPC commands full braking, override
- * acceleration to gently pull forward (keeps MPC steering). */
-static int g_standstill_brake_override_active = 0;
-
-static double apply_standstill_brake_override(double vx, double accel_cmd, int allow_log)
-{
-    /* Physical-car brake override is invalid until AutoDRIVE throttle/brake
-     * behavior is measured. Keep function call sites model-transparent. */
-    (void)vx;
-    (void)allow_log;
-    g_standstill_brake_override_active = 0;
-    return accel_cmd;
-}
-
-/*===========================================================================
- * Steering Command Tracking
- *===========================================================================
- * AutoDRIVE steering-feedback units must be measured. Until explicitly marked
- * as radians, the controller ignores that value and uses its last target.
- */
-static double global_commanded_steering_angle = 0.0;
-static int g_have_steering_command_echo = 0;
 
 /*===========================================================================
  * Global State Variables (pre-allocated, no dynamic allocation in hot path)
@@ -151,7 +120,6 @@ static rcl_publisher_t g_timing_iteration_count_publisher;
 static rcl_publisher_t g_timing_control_gap_ms_publisher;
 static rcl_publisher_t g_timing_ekf_to_control_ms_publisher;
 static rcl_publisher_t g_timing_output_gap_ms_publisher;
-static rcl_publisher_t g_timing_drive_age_ms_publisher;
 static rcl_publisher_t g_timing_pose_seq_publisher;
 static rcl_publisher_t g_timing_skipped_poses_publisher;
 static rcl_publisher_t g_timing_solver_enter_seq_publisher;
@@ -159,7 +127,6 @@ static int g_timing_publishers_ready = 0;
 static pthread_mutex_t g_timing_publish_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static nav_msgs__msg__Odometry global_odometry_message_buffer;
-static std_msgs__msg__Float32 global_servo_message_buffer;
 static ackermann_msgs__msg__AckermannDriveStamped global_drive_message_buffer;
 static geometry_msgs__msg__PoseWithCovarianceStamped global_ekf_pose_buffer;
 static nav_msgs__msg__Path global_local_raceline_buffer;
@@ -197,7 +164,6 @@ static unsigned long g_solver_log_counter = 0;
 static int g_solver_log_stride = 1;
 static int g_solver_csv_logging_enabled = 0;
 static int g_log_local_raceline_snapshots = 0;
-static double g_last_servo_raw = 0.0;
 static long long g_last_odom_ros_time_ns = 0;
 static unsigned long g_local_raceline_update_seq = 0;
 static long long g_local_raceline_ros_time_ns = 0;
@@ -223,17 +189,19 @@ typedef struct
 } PoseSnapshot_t;
 
 static PoseSnapshot_t g_latest_pose_snapshot;
-static unsigned long g_latest_pose_seq = 0;
 static int g_latest_pose_valid = 0;
+static unsigned long g_latest_odom_seq = 0;
+static int32_t g_latest_odom_stamp_sec = 0;
+static uint32_t g_latest_odom_stamp_nanosec = 0;
+static struct timespec g_latest_odom_received_mono_time = {0, 0};
+static int g_latest_odom_trigger_valid = 0;
 static pthread_mutex_t g_pose_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_pose_cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t g_drive_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_trajectory_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_control_thread;
-static pthread_t g_drive_thread;
 static int g_control_thread_started = 0;
-static int g_drive_thread_started = 0;
 
 typedef struct
 {
@@ -287,8 +255,8 @@ static void ensure_parent_directories(const char *filepath)
     }
 }
 
-/** Number of executor handles: 4 subscriptions (odom, servo, ekf_pose, local_raceline). */
-#define EXECUTOR_NUM_HANDLES 4
+/** Number of executor handles: odometry, pose, and local-raceline subscriptions. */
+#define EXECUTOR_NUM_HANDLES 3
 
 static double timespec_diff_sec(const struct timespec *a, const struct timespec *b);
 
@@ -344,7 +312,7 @@ static void fatal_signal_handler(int sig)
 }
 
 /**
- * @brief Publish /drive and log if ROS refuses the publish call.
+ * @brief Publish /cmd/controller and log if ROS refuses the publish call.
  */
 static void publish_drive_command_or_warn(const char *context)
 {
@@ -358,7 +326,7 @@ static void publish_drive_command_or_warn(const char *context)
         if (publish_error_count <= 5UL || (publish_error_count % 20UL) == 0UL)
         {
             fprintf(stderr,
-                    "[ROS2] ERROR: /drive publish failed in %s: rc=%d, error=%s\n",
+                    "[ROS2] ERROR: /cmd/controller publish failed in %s: rc=%d, error=%s\n",
                     context,
                     (int)pub_rc,
                     rcl_get_error_string().str);
@@ -384,7 +352,6 @@ static void set_neutral_drive_command(const char *context)
     g_last_cmd_steer = 0.0f;
     g_last_cmd_speed = 0.0f;
     g_last_cmd_accel = 0.0f;
-    g_drive_command_ready = 1;
     g_last_mpc_output_time = now_mono;
     g_last_mpc_output_valid = 1;
     publish_drive_command_or_warn(context);
@@ -455,111 +422,6 @@ static int init_float64_publisher(
     return 1;
 }
 
-static void *drive_publisher_thread_main(void *arg)
-{
-    (void)arg;
-
-    const long period_ns = (long)(g_drive_republish_period_ms * 1000000.0);
-    struct timespec sleep_time;
-    sleep_time.tv_sec = period_ns / 1000000000L;
-    sleep_time.tv_nsec = period_ns % 1000000000L;
-
-    while (!global_shutdown_requested)
-    {
-        nanosleep(&sleep_time, NULL);
-
-        double drive_age_ms = 0.0;
-        int publish_drive_age = 0;
-
-        pthread_mutex_lock(&g_drive_mutex);
-        if (g_drive_command_ready)
-        {
-            struct timespec now_rt;
-            clock_gettime(CLOCK_REALTIME, &now_rt);
-            global_drive_message_buffer.header.stamp.sec = (int32_t)now_rt.tv_sec;
-            global_drive_message_buffer.header.stamp.nanosec = (uint32_t)now_rt.tv_nsec;
-
-            if (g_last_mpc_output_valid)
-            {
-                struct timespec now_mono;
-                clock_gettime(CLOCK_MONOTONIC, &now_mono);
-                drive_age_ms = timespec_diff_sec(&g_last_mpc_output_time, &now_mono) * 1000.0;
-                publish_drive_age = 1;
-                if (drive_age_ms > g_watchdog_timeout_sec * 1000.0)
-                {
-                    global_drive_message_buffer.drive.steering_angle = 0.0f;
-                    global_drive_message_buffer.drive.speed = 0.0f;
-                    global_drive_message_buffer.drive.acceleration = 0.0f;
-                    g_last_cmd_steer = 0.0f;
-                    g_last_cmd_speed = 0.0f;
-                    g_last_cmd_accel = 0.0f;
-                }
-            }
-            publish_drive_command_or_warn("drive_publisher_thread");
-        }
-        pthread_mutex_unlock(&g_drive_mutex);
-
-        if (publish_drive_age)
-        {
-            publish_float64_metric(&g_timing_drive_age_ms_publisher,
-                                   drive_age_ms,
-                                   "drive_age_ms");
-        }
-    }
-
-    return NULL;
-}
-
-/*===========================================================================
- * Optional Real-Time Setup
- *===========================================================================*/
-
-/**
- * @brief Configure real-time scheduler policy and CPU affinity when available.
- * @return None.
- */
-static void setup_realtime_scheduling(void)
-{
-    /* Try SCHED_FIFO for real-time priority */
-    struct sched_param param;
-    param.sched_priority = 49;  /* Below kernel threads (50+), above normal */
-
-    if (sched_setscheduler(0, SCHED_FIFO, &param) == 0)
-    {
-        printf("[RT] SCHED_FIFO enabled (priority=%d)\n", param.sched_priority);
-    }
-    else
-    {
-        printf("[RT] SCHED_FIFO not available (errno=%d: %s) — running as normal priority\n",
-               errno, strerror(errno));
-        printf("[RT] Run as root or set CAP_SYS_NICE for real-time scheduling\n");
-    }
-
-    /* Pin to a specific CPU core to reduce cache thrashing */
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(5, &cpuset);
-
-    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == 0)
-    {
-        printf("[RT] Pinned to CPU core 5\n");
-    }
-    else
-    {
-        /* Try core 3 as fallback (works on 4-core systems) */
-        CPU_ZERO(&cpuset);
-        CPU_SET(3, &cpuset);
-        if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == 0)
-        {
-            printf("[RT] Pinned to CPU core 3 (fallback)\n");
-        }
-        else
-        {
-            printf("[RT] CPU affinity not set (errno=%d) — using default\n", errno);
-        }
-    }
-}
-
 /*===========================================================================
  * Local Raceline Reference
  *===========================================================================*/
@@ -594,7 +456,8 @@ static int frame_matches(
  * so the horizon is never "blind" when the car momentarily stops.
  * @return None.
  */
-static void build_reference_from_local_raceline(void)
+static void build_reference_from_local_raceline(
+    int closest_index, double projected_path_s)
 {
     if (global_trajectory_count <= 0)
     {
@@ -605,10 +468,26 @@ static void build_reference_from_local_raceline(void)
     const MpcConfiguration_t cfg = mpc_get_configuration();
     const double dt = (cfg.time_step > 0.0f) ? (double)cfg.time_step : (double)TIME_STEP_SECONDS;
 
-    /* Use v_ref at the current position so lookahead remains defined when
-     * actual velocity momentarily reaches zero. */
+    if (closest_index < 0) closest_index = 0;
+    if (closest_index >= global_trajectory_count - 1)
+        closest_index = global_trajectory_count - 2;
+
+    /* Use v_ref at the projected vehicle position so lookahead remains
+     * defined when actual velocity momentarily reaches zero. */
+    const TrajectoryWaypoint_t *start_a = &global_trajectory[closest_index];
+    const TrajectoryWaypoint_t *start_b = &global_trajectory[closest_index + 1];
+    double start_ds = start_b->s_meters - start_a->s_meters;
+    double start_t = 0.0;
+    if (start_ds > 1e-9)
+    {
+        start_t = (projected_path_s - start_a->s_meters) / start_ds;
+        if (start_t < 0.0) start_t = 0.0;
+        if (start_t > 1.0) start_t = 1.0;
+    }
     double v_ref_base =
-        (double)global_trajectory[0].velocity_meters_per_second;
+        start_a->velocity_meters_per_second +
+        start_t * (start_b->velocity_meters_per_second -
+                   start_a->velocity_meters_per_second);
     if (v_ref_base <= 0.0) v_ref_base = MIN_TRAJECTORY_SPEED_MPS;
 
     /* For each horizon step, compute the arc-length position and fill reference trajectory.
@@ -617,9 +496,15 @@ static void build_reference_from_local_raceline(void)
     int segment_index = 0;
     for (int step = 0; step < PREDICTION_HORIZON; step++)
     {
-        const double target_s = v_ref_base * dt * (double)step;
+        double target_s = projected_path_s + v_ref_base * dt * (double)step;
+        if (target_s < 0.0) target_s = 0.0;
+        const double final_s =
+            global_trajectory[global_trajectory_count - 1].s_meters;
+        if (target_s > final_s) target_s = final_s;
         /* target_s is monotonic, so retain the previous segment instead of
-         * rescanning the local path from index zero for every horizon sample. */
+         * rescanning the local path from the projected segment for every
+         * horizon sample. */
+        if (segment_index < closest_index) segment_index = closest_index;
         while (segment_index + 1 < global_trajectory_count &&
                global_trajectory[segment_index + 1].s_meters <= target_s)
         {
@@ -822,13 +707,64 @@ static void project_to_path_segment(
     }
 }
 
-/* 9-state augmented model verification note:
+/**
+ * @brief Find the closest forward path segment to the map-frame vehicle pose.
+ * @details /local_raceline is a map-frame path and may be either a moving
+ *          planner window or a temporarily unchanged window.  The controller
+ *          must therefore not assume that element zero is the vehicle's
+ *          projection.  Segment projection avoids waypoint-spacing bias.
+ */
+static int find_closest_path_segment(double car_x, double car_y)
+{
+    if (global_trajectory_count < 2)
+        return 0;
+
+    int best_index = 0;
+    double best_distance_squared = HUGE_VAL;
+
+    for (int i = 0; i + 1 < global_trajectory_count; ++i)
+    {
+        const double ax = global_trajectory[i].x_meters;
+        const double ay = global_trajectory[i].y_meters;
+        const double bx = global_trajectory[i + 1].x_meters;
+        const double by = global_trajectory[i + 1].y_meters;
+        const double abx = bx - ax;
+        const double aby = by - ay;
+        const double ab_length_squared = abx * abx + aby * aby;
+
+        double t = 0.0;
+        if (ab_length_squared > 1e-12)
+        {
+            const double apx = car_x - ax;
+            const double apy = car_y - ay;
+            t = (apx * abx + apy * aby) / ab_length_squared;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+        }
+
+        const double px = ax + t * abx;
+        const double py = ay + t * aby;
+        const double dx = car_x - px;
+        const double dy = car_y - py;
+        const double distance_squared = dx * dx + dy * dy;
+        if (distance_squared < best_distance_squared)
+        {
+            best_distance_squared = distance_squared;
+            best_index = i;
+        }
+    }
+
+    return best_index;
+}
+
+/* 10-state augmented model verification note:
  * The FrenetState_t provides x0[0..4] = {e_y, e_psi, vx, vy, omega}.
  * The remaining augmented states are managed by the solver internally:
  *   x0[5] = delta_command   — supplied before each solve
- *   x0[6] = delta_effective — advanced by the 5 ms estimator
- *   x0[7] = delta_rate_prev — previous steering-rate memory
- *   x0[8] = accel_prev      — previous acceleration memory
+ *   x0[6] = delta_effective — advanced once per native control interval
+ *   x0[7] = accel_effective — simulated longitudinal response state
+ *   x0[8] = delta_rate_prev — previous steering-rate memory
+ *   x0[9] = accel_prev      — previous acceleration command memory
  */
 
 /*===========================================================================
@@ -1062,7 +998,7 @@ void odometry_subscription_callback(const void *message_in)
     }
 
     pthread_mutex_lock(&g_state_mutex);
-    /* Store only the velocity state from odometry. EKF pose drives position,
+    /* Store only the velocity state from odometry. AMCL pose drives position,
      * heading, and the control callback. */
     global_vehicle_state.long_vel = vx;
     global_vehicle_state.lat_vel = vy;
@@ -1080,49 +1016,26 @@ void odometry_subscription_callback(const void *message_in)
 
     global_odometry_received_flag = 1;
     pthread_mutex_unlock(&g_state_mutex);
-}
 
-/*===========================================================================
- * ROS2 Callback: Servo Command-Echo Subscription
- *===========================================================================*/
-
-/**
- * @brief Accept AutoDRIVE steering feedback only after its units are verified.
- * @param message_in Pointer to std_msgs/Float32 message.
- * @return None.
- */
-
-void servo_command_callback(const void *message_in)
-{
-    if (message_in == NULL) return;
-
-    const std_msgs__msg__Float32 *msg =
-        (const std_msgs__msg__Float32 *)message_in;
-    double servo_val = (double)msg->data;
-    if (!isfinite(servo_val)) return;
-
-    pthread_mutex_lock(&g_state_mutex);
-    g_last_servo_raw = servo_val;
-    if (g_steering_feedback_is_radians)
-    {
-        global_commanded_steering_angle = servo_val;
-        g_have_steering_command_echo = 1;
-    }
-    const double commanded_steer = global_commanded_steering_angle;
-    pthread_mutex_unlock(&g_state_mutex);
-
-    if (g_verbose)
-    {
-        printf("[MPC] Steering feedback: raw=%.3f accepted_rad=%d delta=%.4f\n",
-               servo_val, g_steering_feedback_is_radians, commanded_steer);
-    }
+    /* The official encoder/IMU-derived /odom stream is the native control
+     * clock. EKF can publish more than once per odometry sample because it
+     * also reacts to AMCL corrections; it must not drive MPC above the
+     * available sensor cadence. */
+    pthread_mutex_lock(&g_pose_mutex);
+    g_latest_odom_stamp_sec = odom->header.stamp.sec;
+    g_latest_odom_stamp_nanosec = odom->header.stamp.nanosec;
+    clock_gettime(CLOCK_MONOTONIC, &g_latest_odom_received_mono_time);
+    g_latest_odom_trigger_valid = 1;
+    g_latest_odom_seq++;
+    pthread_cond_signal(&g_pose_cond);
+    pthread_mutex_unlock(&g_pose_mutex);
 }
 
 /*===========================================================================
  * MPC Control Step
  *===========================================================================
- * Runs once for one copied EKF pose. EKF callback never calls this directly;
- * the control thread does, after being signaled that a new pose arrived.
+ * Runs once for one native /odom trigger using the newest copied EKF pose.
+ * The ROS callbacks never call this directly; the control thread does.
  *===========================================================================*/
 static void run_mpc_for_pose(
     const PoseSnapshot_t *pose,
@@ -1217,9 +1130,8 @@ static void run_mpc_for_pose(
     double latest_omega_snapshot = 0.0;
     struct timespec last_odom_time_snapshot = {0, 0};
     long long last_odom_ros_time_snapshot = 0;
-    double commanded_steer_snapshot = 0.0;
-    double last_servo_raw_snapshot = 0.0;
-    int have_steering_command_echo_snapshot = 0;
+    double previous_cmd_steer_snapshot = 0.0;
+    double previous_cmd_accel_snapshot = 0.0;
 
     pthread_mutex_lock(&g_state_mutex);
     odom_received_snapshot = global_odometry_received_flag;
@@ -1228,10 +1140,12 @@ static void run_mpc_for_pose(
     latest_omega_snapshot = g_latest_omega;
     last_odom_time_snapshot = g_last_odom_time;
     last_odom_ros_time_snapshot = g_last_odom_ros_time_ns;
-    commanded_steer_snapshot = global_commanded_steering_angle;
-    last_servo_raw_snapshot = g_last_servo_raw;
-    have_steering_command_echo_snapshot = g_have_steering_command_echo;
     pthread_mutex_unlock(&g_state_mutex);
+
+    pthread_mutex_lock(&g_drive_mutex);
+    previous_cmd_steer_snapshot = g_last_cmd_steer;
+    previous_cmd_accel_snapshot = g_last_cmd_accel;
+    pthread_mutex_unlock(&g_drive_mutex);
 
     /* Don't run MPC until odometry (velocity) has been received */
     if (!odom_received_snapshot)
@@ -1289,14 +1203,12 @@ static void run_mpc_for_pose(
     }
     if (global_trajectory_count > 1)
     {
-        /* The lateral planner republishes /local_raceline every cycle anchored
-         * at the car, so segment 0 IS the current reference origin. A global
-         * nearest-segment search adds per-cycle cost and can snap to an
-         * offset/curved-back segment; project from index 0 instead. */
-        closest = 0;
-        build_reference_from_local_raceline();
-
+        /* /local_raceline is a map-frame path.  Its first waypoint is not a
+         * contractually defined vehicle origin, so always project the pose to
+         * the nearest segment before building the forward reference. */
+        closest = find_closest_path_segment(pos_x, pos_y);
         project_to_path_segment(pos_x, pos_y, heading, closest, &projection, &global_frenet_state);
+        build_reference_from_local_raceline(closest, projection.path_s_m);
         global_frenet_state.flong_vel = latest_vx_snapshot;
         global_frenet_state.flat_vel = latest_vy_snapshot;
         global_frenet_state.fyaw_rate = latest_omega_snapshot;
@@ -1346,12 +1258,12 @@ static void run_mpc_for_pose(
     MpcSolverStatus_t mpc_status;
     struct timespec t0, t1;
 
-    /* Supply the command that acted during the preceding 5 ms interval. The
+    /* Supply the command that acted during the preceding 100 ms interval. The
      * MPC advances its effective-steering estimator once inside this solve. */
     {
         ControlInput_t previous_command;
-        previous_command.steer_ang = (float)commanded_steer_snapshot;
-        previous_command.long_acc = global_control_command.long_acc;
+        previous_command.steer_ang = (float)previous_cmd_steer_snapshot;
+        previous_command.long_acc = (float)previous_cmd_accel_snapshot;
         mpc_set_previous_command(&previous_command);
     }
 
@@ -1454,37 +1366,13 @@ static void run_mpc_for_pose(
         isfinite(mpc_result.optimal_control.steer_ang) &&
         isfinite(mpc_result.optimal_control.long_acc))
     {
-        double steer =
-            mpc_result.optimal_control.steer_ang;
+        double steer = mpc_result.optimal_control.steer_ang;
 
         /* Pass MPC output directly — no clamping, no bias, no softening. */
         global_control_command.steer_ang =
             mpc_result.optimal_control.steer_ang;
         global_control_command.long_acc =
             mpc_result.optimal_control.long_acc;
-
-        /* Fallback: if at standstill and MPC commands max braking, override
-         * acceleration to +0.5 m/s^2 while keeping MPC steering. */
-        {
-            const double vx = latest_vx_snapshot;
-            const double a_cmd = (double)global_control_command.long_acc;
-            global_control_command.long_acc =
-                (float)apply_standstill_brake_override(vx, a_cmd, 1);
-        }
-
-        /* Keep the command echo if available. Otherwise use the target this
-         * node is about to publish; effective steering is estimated in MPC. */
-        pthread_mutex_lock(&g_state_mutex);
-        commanded_steer_snapshot = global_commanded_steering_angle;
-        have_steering_command_echo_snapshot =
-            g_have_steering_command_echo;
-        if (!have_steering_command_echo_snapshot)
-        {
-            commanded_steer_snapshot = steer;
-            global_commanded_steering_angle = steer;
-        }
-        last_servo_raw_snapshot = g_last_servo_raw;
-        pthread_mutex_unlock(&g_state_mutex);
 
         if (g_verbose && g_solver_log_file == NULL)
         {
@@ -1520,10 +1408,6 @@ static void run_mpc_for_pose(
             const MpcConfiguration_t cfg = mpc_get_configuration();
             const double pred_dt = (cfg.time_step > 0.0f) ? (double)cfg.time_step : (double)TIME_STEP_SECONDS;
 
-            /* Apply the same standstill brake-override in all publish paths
-             * (including solver hold-last-command fallback). */
-            a_cmd = apply_standstill_brake_override(latest_vx_snapshot, a_cmd, 0);
-
             /* Integrate over the prediction time step used by MPC. */
             double v_cmd = latest_vx_snapshot + a_cmd * pred_dt;
             if (v_cmd < (double)VP_MIN_VELOCITY_MPS) v_cmd = (double)VP_MIN_VELOCITY_MPS;
@@ -1547,8 +1431,6 @@ static void run_mpc_for_pose(
         g_last_cmd_steer = global_drive_message_buffer.drive.steering_angle;
         g_last_cmd_speed = global_drive_message_buffer.drive.speed;
         g_last_cmd_accel = global_drive_message_buffer.drive.acceleration;
-        g_drive_command_ready = 1;
-
         {
             struct timespec now_mono;
             clock_gettime(CLOCK_MONOTONIC, &now_mono);
@@ -1605,7 +1487,7 @@ static void run_mpc_for_pose(
                     "%.6f,%.6f,%.6f,%.6f,"
                     "%.6f,%.6f,%.6f,%.6f,%.6f,"
                     "%.6f,%.6f,%.6f,%.6f,"
-                    "%.6f,%.3f,%d,%lld\n",
+                    "%.6f,%.6f,%lld\n",
                     pose_ros_time_ns, unix_time_ns, pose_seq, skipped_poses,
                     ekf_to_control_ms, control_gap_ms, output_gap_ms,
                     solve_us, (int)mpc_status, mpc_result.iterations_used,
@@ -1617,8 +1499,7 @@ static void run_mpc_for_pose(
                     vref0, kappa0, ref_yaw_rate0, left_wall0, right_wall0,
                     local_wp0_x, local_wp0_y, local_wp0_heading, local_wp0_s,
                     cmd_steer, cmd_accel, publish_speed_cmd, publish_accel_cmd,
-                    commanded_steer_snapshot, last_servo_raw_snapshot,
-                    have_steering_command_echo_snapshot,
+                    previous_cmd_steer_snapshot, previous_cmd_accel_snapshot,
                     last_odom_ros_time_snapshot);
 
             if ((g_solver_log_counter % 200UL) == 0UL)
@@ -1630,9 +1511,10 @@ static void run_mpc_for_pose(
 }
 
 /*===========================================================================
- * ROS2 Callback: EKF Pose Subscription
+ * ROS2 Callback: AMCL Pose Subscription
  *===========================================================================
- * Fast path only: copy latest pose, bump sequence, signal control thread.
+ * Fast path only: copy latest pose. The odometry callback owns the control
+ * trigger so this callback cannot increase MPC's cadence above native input.
  *===========================================================================*/
 void ekf_pose_callback(const void *message_in)
 {
@@ -1682,7 +1564,6 @@ void ekf_pose_callback(const void *message_in)
     pthread_mutex_lock(&g_pose_mutex);
     g_latest_pose_snapshot = snapshot;
     g_latest_pose_valid = 1;
-    g_latest_pose_seq++;
     pthread_cond_signal(&g_pose_cond);
     pthread_mutex_unlock(&g_pose_mutex);
 
@@ -1704,7 +1585,8 @@ static void *mpc_control_thread_main(void *arg)
 
         pthread_mutex_lock(&g_pose_mutex);
         while (!global_shutdown_requested &&
-               (!g_latest_pose_valid || g_latest_pose_seq == processed_seq))
+               (!g_latest_pose_valid || !g_latest_odom_trigger_valid ||
+                g_latest_odom_seq == processed_seq))
         {
             pthread_cond_wait(&g_pose_cond, &g_pose_mutex);
         }
@@ -1714,7 +1596,13 @@ static void *mpc_control_thread_main(void *arg)
             break;
         }
         pose = g_latest_pose_snapshot;
-        seq = g_latest_pose_seq;
+        /* Use the odometry event as the control timestamp. The pose remains
+         * the newest EKF map-frame estimate, while the trigger is guaranteed
+         * to be no faster than the official sensor stream. */
+        pose.stamp_sec = g_latest_odom_stamp_sec;
+        pose.stamp_nanosec = g_latest_odom_stamp_nanosec;
+        pose.received_mono_time = g_latest_odom_received_mono_time;
+        seq = g_latest_odom_seq;
         pthread_mutex_unlock(&g_pose_mutex);
 
         unsigned long skipped_poses =
@@ -1731,7 +1619,7 @@ static void *mpc_control_thread_main(void *arg)
  *===========================================================================*/
 
 /**
- * @brief Initialize MPC/ROS2 resources and run the hardware control node.
+ * @brief Initialize MPC/ROS2 resources and run the AutoDRIVE control node.
  * @param argc Argument count.
  * @param argv Argument vector.
  * @return Process exit code.
@@ -1741,8 +1629,8 @@ int main(int argc, char *argv[])
     printf("============================================================\n");
     printf("  MPC Riccati-ADMM ROS2 Node for AutoDRIVE\n");
     printf("  Target: RoboRacer simulation (localization-driven)\n");
-    printf("  9-state augmented Frenet model\n");
-    printf("  [e_y, e_psi, vx, vy, omega, delta_cmd, delta_eff, drate_prev, accel_prev]\n");
+    printf("  10-state augmented Frenet model\n");
+    printf("  [e_y, e_psi, vx, vy, omega, delta_cmd, delta_eff, accel_eff, drate_prev, accel_prev]\n");
     printf("  Controls: [delta_rate, a_x]\n");
     printf("  Solver: Riccati backward/forward pass inside ADMM loop\n");
     printf("============================================================\n");
@@ -1758,9 +1646,6 @@ int main(int argc, char *argv[])
 
     rcl_ret_t rc;
 
-    /* Set up real-time scheduling before anything else */
-    setup_realtime_scheduling();
-
     /* Initialize MPC controller — uses Riccati-ADMM internally */
     mpc_initialize();
 
@@ -1774,12 +1659,6 @@ int main(int argc, char *argv[])
             g_odom_topic = env_val;
         if ((env_val = getenv("MPC_DRIVE_TOPIC")) != NULL)
             g_drive_topic = env_val;
-        if ((env_val = getenv("MPC_SERVO_TOPIC")) != NULL)
-            g_servo_topic = env_val;
-        if ((env_val = getenv("MPC_STEERING_FEEDBACK_TOPIC")) != NULL)
-            g_servo_topic = env_val;
-        if ((env_val = getenv("MPC_STEERING_FEEDBACK_RADIANS")) != NULL)
-            g_steering_feedback_is_radians = atoi(env_val) != 0;
         if ((env_val = getenv("MPC_VERBOSE")) != NULL)
             g_verbose = atoi(env_val);
         if ((env_val = getenv("MPC_WATCHDOG_TIMEOUT")) != NULL)
@@ -1825,11 +1704,6 @@ int main(int argc, char *argv[])
             double margin = atof(env_val);
             if (margin >= 0.0 && margin <= 5.0) g_raceline_speed_margin_mps = margin;
         }
-        if ((env_val = getenv("MPC_DRIVE_REPUBLISH_PERIOD_MS")) != NULL)
-        {
-            double period_ms = atof(env_val);
-            if (period_ms >= 1.0 && period_ms <= 100.0) g_drive_republish_period_ms = period_ms;
-        }
         if ((env_val = getenv("MPC_SOLVER_CSV_LOG")) != NULL)
             g_solver_csv_logging_enabled = atoi(env_val) != 0;
         if ((env_val = getenv("MPC_LOG_LOCAL_RACELINE_SNAPSHOTS")) != NULL)
@@ -1869,7 +1743,7 @@ int main(int argc, char *argv[])
                     "v_ref0,kappa0,ref_yaw_rate0,left_wall0,right_wall0,"
                     "local_wp0_x,local_wp0_y,local_wp0_heading,local_wp0_s,"
                     "cmd_steer,cmd_accel,publish_speed_cmd,publish_accel_cmd,"
-                    "commanded_steer,servo_raw,have_steering_command_echo,odom_ros_time_ns\n");
+                    "previous_cmd_steer,previous_cmd_accel,odom_ros_time_ns\n");
             fflush(g_solver_log_file);
             printf("[MPC] Solver telemetry log: %s (stride=%d)\n", log_path, g_solver_log_stride);
 
@@ -1936,8 +1810,6 @@ int main(int argc, char *argv[])
                         fprintf(g_solver_meta_file, "vehicle_steer_max_rad=%.9g\n", (double)VP_MAX_STEERING_RAD);
                         fprintf(g_solver_meta_file, "vehicle_min_speed_mps=%.9g\n", (double)VP_MIN_VELOCITY_MPS);
                         fprintf(g_solver_meta_file, "vehicle_max_speed_mps=%.9g\n", (double)VP_MAX_VELOCITY_MPS);
-                        fprintf(g_solver_meta_file, "steering_feedback_radians=%d\n",
-                                g_steering_feedback_is_radians);
                         fprintf(g_solver_meta_file, "steering_rate_limit=%.9g\n", (double)STEERING_RATE_LIMIT);
                         fprintf(g_solver_meta_file, "raceline_speed_margin_mps=%.9g\n", g_raceline_speed_margin_mps);
                         fprintf(g_solver_meta_file, "use_solver_log_stride=%d\n", g_solver_log_stride);
@@ -1974,17 +1846,14 @@ int main(int argc, char *argv[])
                PREDICTION_HORIZON, (double)cfg.time_step * 1000.0);
     }
 
-    printf("[MPC] Control mode: localization-driven solver, fixed-rate command republish\n");
+    printf("[MPC] Control mode: localization-driven solver, one command per native /odom update\n");
     printf("[MPC] Topics: odom=%s, drive=%s\n", g_odom_topic, g_drive_topic);
-    printf("[MPC] Steering feedback: %s (radians=%d)\n",
-            g_servo_topic, g_steering_feedback_is_radians);
     printf("[MPC] Watchdog timeout: %.0f ms\n", g_watchdog_timeout_sec * 1000.0);
     printf("[MPC] Pose: %s [%s]\n", g_ekf_pose_topic, g_pose_frame);
     printf("[MPC] Local raceline: %s [%s], timeout=%.0f ms\n",
            g_local_raceline_topic, g_path_frame, g_raceline_timeout_sec * 1000.0);
     printf("[MPC] Command frame: %s\n", g_command_frame);
     printf("[MPC] Raceline speed margin: %.2f m/s\n", g_raceline_speed_margin_mps);
-    printf("[MPC] Drive republish period: %.1f ms\n", g_drive_republish_period_ms);
     printf("[MPC] Verbose=%d\n", g_verbose);
 
     {
@@ -2102,22 +1971,7 @@ int main(int argc, char *argv[])
     }
     printf("[ROS2] Subscribed to %s (BestEffort, KeepLast(10))\n", g_odom_topic);
 
-    /* ===== Subscription 2: AutoDRIVE steering feedback ===== */
-    rcl_subscription_t servo_sub = rcl_get_zero_initialized_subscription();
-    rcl_subscription_options_t servo_sub_opts = rcl_subscription_get_default_options();
-    servo_sub_opts.qos = qos_sensor;
-
-    rc = rcl_subscription_init(&servo_sub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-        g_servo_topic, &servo_sub_opts);
-    if (rc != RCL_RET_OK)
-    {
-        fprintf(stderr, "[ROS2] ERROR: servo subscription: %s\n", rcl_get_error_string().str);
-        return 1;
-    }
-    printf("[ROS2] Subscribed to %s (BestEffort, KeepLast(10))\n", g_servo_topic);
-
-    /* ===== Subscription 3: EKF pose (geometry_msgs/PoseWithCovarianceStamped) ===== */
+    /* ===== Subscription 2: EKF pose (geometry_msgs/PoseWithCovarianceStamped) ===== */
     rmw_qos_profile_t qos_ekf_pose = rmw_qos_profile_default;
     qos_ekf_pose.reliability = RMW_QOS_POLICY_RELIABILITY_RELIABLE;
     qos_ekf_pose.history     = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
@@ -2137,7 +1991,7 @@ int main(int argc, char *argv[])
     }
     printf("[ROS2] Subscribed to %s (Reliable, KeepLast(10))\n", g_ekf_pose_topic);
 
-    /* ===== Subscription 4: Local raceline path (nav_msgs/Path) ===== */
+    /* ===== Subscription 3: Local raceline path (nav_msgs/Path) ===== */
     rcl_subscription_t local_raceline_sub = rcl_get_zero_initialized_subscription();
     rcl_subscription_options_t local_raceline_sub_opts = rcl_subscription_get_default_options();
     local_raceline_sub_opts.qos = qos_reliable_10;
@@ -2152,7 +2006,7 @@ int main(int argc, char *argv[])
     }
     printf("[ROS2] Subscribed to %s (Reliable, KeepLast(10))\n", g_local_raceline_topic);
 
-    /* ===== Publisher: /drive (ackermann_msgs/AckermannDriveStamped) ===== */
+    /* ===== Publisher: /cmd/controller (ackermann_msgs/AckermannDriveStamped) ===== */
     rcl_publisher_options_t pub_opts = rcl_publisher_get_default_options();
     pub_opts.qos = qos_reliable_10;
 
@@ -2186,8 +2040,6 @@ int main(int argc, char *argv[])
                                 "/mpc/timing/ekf_to_control_ms", &timing_pub_opts) ||
         !init_float64_publisher(&g_timing_output_gap_ms_publisher, &node,
                                 "/mpc/timing/output_gap_ms", &timing_pub_opts) ||
-        !init_float64_publisher(&g_timing_drive_age_ms_publisher, &node,
-                                "/mpc/timing/drive_age_ms", &timing_pub_opts) ||
         !init_float64_publisher(&g_timing_pose_seq_publisher, &node,
                                 "/mpc/timing/pose_seq", &timing_pub_opts) ||
         !init_float64_publisher(&g_timing_skipped_poses_publisher, &node,
@@ -2208,7 +2060,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    std_msgs__msg__Float32__init(&global_servo_message_buffer);
     geometry_msgs__msg__PoseWithCovarianceStamped__init(&global_ekf_pose_buffer);
     nav_msgs__msg__Path__init(&global_local_raceline_buffer);
 
@@ -2220,7 +2071,7 @@ int main(int argc, char *argv[])
     }
     set_rosidl_string(&global_drive_message_buffer.header.frame_id, g_command_frame);
 
-    /* Executor: subscriptions only. Control and /drive publish run in pthreads. */
+    /* Executor: subscriptions only. Control and /cmd/controller publish run in pthreads. */
     rcl_allocator_t alloc = rcl_get_default_allocator();
     rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
 
@@ -2237,15 +2088,6 @@ int main(int argc, char *argv[])
     if (rc != RCL_RET_OK)
     {
         fprintf(stderr, "[ROS2] ERROR: add odom sub: %s\n", rcl_get_error_string().str);
-        return 1;
-    }
-
-    /* Add servo command-echo subscription. */
-    rc = rclc_executor_add_subscription(&executor, &servo_sub,
-        &global_servo_message_buffer, &servo_command_callback, ON_NEW_DATA);
-    if (rc != RCL_RET_OK)
-    {
-        fprintf(stderr, "[ROS2] ERROR: add servo sub: %s\n", rcl_get_error_string().str);
         return 1;
     }
 
@@ -2267,16 +2109,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (pthread_create(&g_drive_thread, NULL, drive_publisher_thread_main, NULL) == 0)
-    {
-        g_drive_thread_started = 1;
-    }
-    else
-    {
-        fprintf(stderr, "[MPC] ERROR: failed to start drive publisher thread\n");
-        return 1;
-    }
-
     if (pthread_create(&g_control_thread, NULL, mpc_control_thread_main, NULL) == 0)
     {
         g_control_thread_started = 1;
@@ -2287,8 +2119,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    printf("[ROS2] Executor ready (4 subs, MPC thread signaled by %s)\n", g_ekf_pose_topic);
-    printf("\n[MPC] Spinning... (waiting for EKF pose on %s, odometry on %s, and local raceline on %s)\n\n",
+    printf("[ROS2] Executor ready (4 subs, MPC thread triggered by %s)\n", g_odom_topic);
+    printf("\n[MPC] Spinning... (waiting for EKF pose on %s, odometry trigger on %s, and local raceline on %s)\n\n",
            g_ekf_pose_topic, g_odom_topic, g_local_raceline_topic);
 
     rclc_executor_spin(&executor);
@@ -2300,10 +2132,6 @@ int main(int argc, char *argv[])
     if (g_control_thread_started)
     {
         pthread_join(g_control_thread, NULL);
-    }
-    if (g_drive_thread_started)
-    {
-        pthread_join(g_drive_thread, NULL);
     }
     g_timing_publishers_ready = 0;
     if (g_solver_log_file != NULL)
@@ -2326,12 +2154,10 @@ int main(int argc, char *argv[])
     }
     rclc_executor_fini(&executor);
     nav_msgs__msg__Odometry__fini(&global_odometry_message_buffer);
-    std_msgs__msg__Float32__fini(&global_servo_message_buffer);
     ackermann_msgs__msg__AckermannDriveStamped__fini(&global_drive_message_buffer);
     nav_msgs__msg__Path__fini(&global_local_raceline_buffer);
     rcl_ret_t cleanup_rc;
     cleanup_rc = rcl_subscription_fini(&odom_sub, &node); (void)cleanup_rc;
-    cleanup_rc = rcl_subscription_fini(&servo_sub, &node); (void)cleanup_rc;
     cleanup_rc = rcl_subscription_fini(&ekf_pose_sub, &node); (void)cleanup_rc;
     cleanup_rc = rcl_subscription_fini(&local_raceline_sub, &node); (void)cleanup_rc;
     geometry_msgs__msg__PoseWithCovarianceStamped__fini(&global_ekf_pose_buffer);
@@ -2340,7 +2166,6 @@ int main(int argc, char *argv[])
     cleanup_rc = rcl_publisher_fini(&g_timing_control_gap_ms_publisher, &node); (void)cleanup_rc;
     cleanup_rc = rcl_publisher_fini(&g_timing_ekf_to_control_ms_publisher, &node); (void)cleanup_rc;
     cleanup_rc = rcl_publisher_fini(&g_timing_output_gap_ms_publisher, &node); (void)cleanup_rc;
-    cleanup_rc = rcl_publisher_fini(&g_timing_drive_age_ms_publisher, &node); (void)cleanup_rc;
     cleanup_rc = rcl_publisher_fini(&g_timing_pose_seq_publisher, &node); (void)cleanup_rc;
     cleanup_rc = rcl_publisher_fini(&g_timing_skipped_poses_publisher, &node); (void)cleanup_rc;
     cleanup_rc = rcl_publisher_fini(&g_timing_solver_enter_seq_publisher, &node); (void)cleanup_rc;

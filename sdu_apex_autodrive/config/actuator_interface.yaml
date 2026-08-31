@@ -1,33 +1,89 @@
 autodrive_actuator_interface:
   ros__parameters:
     input_topic: /cmd/controller
-    odom_topic: /autodrive/roboracer_1/odom
+    odom_topic: /odom
     steering_topic: /autodrive/roboracer_1/steering_command
     throttle_topic: /autodrive/roboracer_1/throttle_command
+    # Mapping completion is not part of the racing actuator contract.  Keep
+    # the optional hook disabled so a latched message from a previous mapping
+    # session can never hold a fresh race run at neutral.
+    external_stop_topic: ""
 
-    command_timeout_sec: 0.25
-    odom_timeout_sec: 0.25
-    publish_rate_hz: 50.0
+    command_timeout_sec: 0.30
+    odom_timeout_sec: 0.30
+    publish_rate_hz: 10.0
+
+    # Simulator-only terminal failure handling. This is deliberately isolated
+    # from competition controller inputs and must be disabled for a rules-only
+    # deployment that does not permit collision telemetry.
+    collision_topic: /autodrive/roboracer_1/collision_count
+    reset_command_topic: /autodrive/reset_command
+    collision_reset_enabled: true
+    collision_reset_pulse_sec: 0.5
+    collision_baseline_stable_sec: 1.0
 
     max_steering_angle_rad: 0.5236
-    steering_command_min: -1.0
-    steering_command_max: 1.0
-    throttle_command_min: -1.0
-    throttle_command_max: 1.0
-    max_target_speed_mps: 4.0
-    speed_measurement: magnitude
+    # The actuator accepts the full characterized simulator body-speed range.
+    # Pure Pursuit keeps its independent track/raceline cap in its own config.
+    # Official model envelope. This is an input validation bound, not a
+    # project-specific racing target or throttle ceiling.
+    max_target_speed_mps: 22.88
 
-    kp: 0.015
-    ki: 0.003
-    ka: 0.0
+    # Ground-truth open-ground response fit. Keep correction modest because
+    # the direct throttle response already supplies most of the demand.
+    kp: 0.003
+    ki: 0.0001
+    # Pure Pursuit publishes a bounded desired acceleration. A small gain
+    # makes throttle removal respond immediately to a braking-envelope drop.
+    ka: 0.001
     integral_limit: 1.0
-    throttle_min_forward: 0.0
-    throttle_max_forward: 0.10
-    throttle_rise_rate_per_sec: 0.20
-    throttle_fall_rate_per_sec: 0.50
+    # The bridge accepts normalized throttle in [-1, 1]. Do not impose a
+    # project-specific ceiling; the speed controller chooses the output from
+    # measured feed-forward plus speed error and this is only the protocol
+    # bound for forward throttle.
+    throttle_max_forward: 1.0
+    # At the native 10 Hz event cadence a command reaches the full normalized
+    # range in one update. This keeps the measured actuator response available
+    # to the acceleration controller instead of imposing a hidden throttle cap.
+    throttle_rise_rate_per_sec: 10.0
+    throttle_fall_rate_per_sec: 10.0
     stop_speed_threshold_mps: 0.02
+    # Use calibrated feedback for small overshoots; passive coast is reserved
+    # for a materially large error so low-speed control does not oscillate.
+    overspeed_coast_threshold_mps: 1.0
 
-    # Provisional points inferred from successful low-speed track laps.
-    # Replace using raw wall-less throttle characterization before high speed.
-    feedforward_speed_mps: [0.0, 0.6, 1.0, 1.5, 1.8, 2.5]
-    feedforward_throttle: [0.0, 0.025, 0.035, 0.055, 0.065, 0.085]
+    # Allowed-input acceleration/speed observer and inverse throttle model.
+    # The observer uses /odom and IMU only. Ground truth is used solely by the
+    # offline calibration recorder and never enters the race controller.
+    acceleration_filter_alpha: 0.35
+    slip_threshold_mps: 0.75
+    slip_ratio: 0.20
+    odom_correction_gain: 0.25
+    speed_error_to_accel_gain: 1.25
+    speed_error_integral_to_accel_gain: 0.05
+    max_acceleration_mps2: 6.0
+    max_deceleration_mps2: 8.0
+    # Secondary IMU correction; keep isolated 10 Hz acceleration spikes from
+    # overriding the calibrated speed/acceleration feed-forward.
+    acceleration_feedback_gain: 0.05
+    acceleration_integral_gain: 0.003
+    acceleration_integral_limit: 2.0
+    acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
+                             16.0, 18.0, 20.0, 23.0]
+    # Incremental throttle per m/s^2 identified over the complete clean
+    # open-ground response. This is an inverse gain, not a throttle limit.
+    # Inverse of the settled full-range fit measured at 10 Hz. These values
+    # are throttle per requested m/s^2, not a throttle limit.
+    acceleration_throttle_per_mps2: [0.158521, 0.160881, 0.163312, 0.165818,
+                                     0.168402, 0.171068, 0.173819, 0.176661,
+                                     0.179597, 0.182632, 0.185771, 0.190688]
+
+    # Settled open-ground response over the complete normalized command
+    # range. 1.0 throttle reaches the simulator envelope at 22.8836 m/s.
+    feedforward_speed_mps: [0.0, 0.5016, 1.2497, 1.9930, 2.4859, 2.9768,
+                            3.7096, 4.4382, 4.9216, 5.6440, 6.3621, 7.3135,
+                            8.4935, 9.6633, 11.9725, 14.2418, 16.4701,
+                            18.6555, 22.8836]
+    feedforward_throttle: [0.0, 0.020, 0.050, 0.080, 0.100, 0.120, 0.150,
+                           0.180, 0.200, 0.230, 0.260, 0.300, 0.350, 0.400,
+                           0.500, 0.600, 0.700, 0.800, 1.000]

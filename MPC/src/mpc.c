@@ -65,6 +65,65 @@ static float get_wall_ref_clearance_m(void)
     return get_env_float("MPC_WALL_REF_CLEAR_M", 0.10f);
 }
 
+static float get_tracking_error_speed_gain(void)
+{
+    return get_env_float("MPC_TRACKING_ERROR_SPEED_GAIN", 0.75f);
+}
+
+static float get_tracking_error_speed_min_scale(void)
+{
+    return get_env_float("MPC_TRACKING_ERROR_SPEED_MIN_SCALE", 0.45f);
+}
+
+static float get_tracking_error_lateral_scale_m(void)
+{
+    return get_env_float("MPC_TRACKING_ERROR_LATERAL_SCALE_M", 0.30f);
+}
+
+static float get_tracking_error_heading_scale_rad(void)
+{
+    return get_env_float("MPC_TRACKING_ERROR_HEADING_SCALE_RAD", 0.40f);
+}
+
+static void apply_tracking_error_speed_envelope(
+    const FrenetState_t *state,
+    TrajectoryReferencePoint_t reference[PREDICTION_HORIZON])
+{
+    if (state == NULL || reference == NULL)
+        return;
+
+    float gain = get_tracking_error_speed_gain();
+    float min_scale = get_tracking_error_speed_min_scale();
+    float lateral_scale = get_tracking_error_lateral_scale_m();
+    float heading_scale = get_tracking_error_heading_scale_rad();
+    if (!(gain > 0.0f) || !isfinite(gain) ||
+        !isfinite(min_scale) || !isfinite(lateral_scale) ||
+        !isfinite(heading_scale))
+        return;
+
+    min_scale = util_clamp(min_scale, 0.05f, 1.0f);
+    lateral_scale = fmaxf(lateral_scale, 0.01f);
+    heading_scale = fmaxf(heading_scale, 0.01f);
+
+    const float normalized_error = sqrtf(
+        (state->flat_error / lateral_scale) * (state->flat_error / lateral_scale) +
+        (state->fhead_error / heading_scale) * (state->fhead_error / heading_scale));
+    const float scale = util_clamp(
+        1.0f / (1.0f + gain * fmaxf(0.0f, normalized_error)),
+        min_scale, 1.0f);
+
+    /* This is a tracking-state envelope, not a physical-car watchdog.  It
+     * makes the optimizer spend the next native interval recovering heading
+     * and lateral error instead of accelerating through a corner exit. */
+    if (scale < 0.9999f) {
+        for (int k = 0; k < PREDICTION_HORIZON; ++k) {
+            reference[k].reference_velocity = fmaxf(
+                MIN_TRAJECTORY_SPEED_MPS,
+                reference[k].reference_velocity * scale);
+        }
+    }
+}
+
 static void compute_wall_ey_bounds(
     float left_wall_bound,
     float right_wall_bound,
@@ -138,11 +197,43 @@ static ControlInput_t prev_control;
 static float commanded_steering_angle = 0.0f;
 static float effective_steering_angle = 0.0f;
 static int steering_command_initialized = 0;
+static float commanded_longitudinal_accel = 0.0f;
+static float effective_longitudinal_accel = 0.0f;
+static int acceleration_command_initialized = 0;
 static SteeringDynamicsCoefficients_t control_steering_dynamics;
 static SteeringDynamicsCoefficients_t prediction_steering_dynamics;
 static RiccatiAdmmState_t admm_state;
 static float warm_start_prev_curvature = 0;
 static int warm_start_prev_model_signature = MPC_MODEL_SIGNATURE;
+
+typedef struct
+{
+    float retention;
+    float command_gain;
+    float average_effective_gain;
+    float average_command_gain;
+} LongitudinalAccelerationDynamicsCoefficients_t;
+
+static LongitudinalAccelerationDynamicsCoefficients_t
+longitudinal_acceleration_dynamics_coefficients(float dt_seconds)
+{
+    float tau = get_env_float(
+        "MPC_ACCEL_EFFECTIVE_TAU_S",
+        LONGITUDINAL_ACCEL_EFFECTIVE_TIME_CONSTANT_SECONDS);
+    if (!(tau > 0.0f) || !isfinite(tau))
+        tau = LONGITUDINAL_ACCEL_EFFECTIVE_TIME_CONSTANT_SECONDS;
+    if (!(dt_seconds > 0.0f) || !isfinite(dt_seconds))
+        dt_seconds = TIME_STEP_SECONDS;
+
+    LongitudinalAccelerationDynamicsCoefficients_t coefficients;
+    coefficients.retention = expf(-dt_seconds / tau);
+    coefficients.command_gain = 1.0f - coefficients.retention;
+    coefficients.average_effective_gain =
+        tau * coefficients.command_gain / dt_seconds;
+    coefficients.average_command_gain =
+        1.0f - coefficients.average_effective_gain;
+    return coefficients;
+}
 
 static void refresh_steering_dynamics(void)
 {
@@ -157,6 +248,9 @@ static void reset_steering_state(void)
     commanded_steering_angle = 0.0f;
     effective_steering_angle = 0.0f;
     steering_command_initialized = 0;
+    commanded_longitudinal_accel = 0.0f;
+    effective_longitudinal_accel = 0.0f;
+    acceleration_command_initialized = 0;
 }
 
 static FrenetState_t mpc_predict_frenet_next_state(
@@ -402,10 +496,20 @@ void mpc_set_previous_command(const ControlInput_t *command)
             commanded_steering_angle = new_command;
         }
 
-        if (isfinite(command->long_acc)) {
-            prev_control.long_acc = util_clamp(
-                command->long_acc, VP_MIN_ACCEL_MPS2, VP_MAX_ACCEL_MPS2);
+        float new_accel = command->long_acc;
+        if (!isfinite(new_accel))
+            new_accel = prev_control.long_acc;
+        new_accel = util_clamp(
+            new_accel, VP_MIN_ACCEL_MPS2, VP_MAX_ACCEL_MPS2);
+
+        if (!acceleration_command_initialized) {
+            commanded_longitudinal_accel = new_accel;
+            effective_longitudinal_accel = new_accel;
+            acceleration_command_initialized = 1;
+        } else {
+            commanded_longitudinal_accel = new_accel;
         }
+        prev_control.long_acc = new_accel;
     }
 }
 
@@ -437,10 +541,19 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         return MPC_STATUS_ERROR;
     }
 
+    /* Reference speeds are reduced only while the allowed pose state is
+     * materially off the local raceline.  Keep the caller's reference array
+     * immutable: the ROS node reuses it for telemetry and another callback
+     * may own the backing storage after this call returns. */
+    TrajectoryReferencePoint_t adjusted_reference[PREDICTION_HORIZON];
+    memcpy(adjusted_reference, reference_trajectory, sizeof(adjusted_reference));
+    apply_tracking_error_speed_envelope(current_frenet_state, adjusted_reference);
+    reference_trajectory = adjusted_reference;
+
     // Auto-initialize on first use if not already initialized.
     if (!initialized) mpc_initialize();
 
-    /* The command supplied before this call acted during the preceding 5 ms
+    /* The command supplied before this call acted during the preceding native
      * control interval. Advance the effective-steering estimate exactly once
      * per MPC solve, independent of callback or simulation update frequency. */
     if (steering_command_initialized) {
@@ -449,6 +562,17 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             commanded_steering_angle,
             0.0f,
             &control_steering_dynamics);
+    }
+
+    const LongitudinalAccelerationDynamicsCoefficients_t
+        prediction_acceleration_dynamics =
+            longitudinal_acceleration_dynamics_coefficients(config.time_step);
+    if (acceleration_command_initialized) {
+        effective_longitudinal_accel =
+            prediction_acceleration_dynamics.retention *
+                effective_longitudinal_accel +
+            prediction_acceleration_dynamics.command_gain *
+                commanded_longitudinal_accel;
     }
 
     const FrenetState_t *frenet = current_frenet_state;
@@ -487,6 +611,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
     /* Build per-step data array */
     RiccatiStepData_t step_data[PREDICTION_HORIZON];
+    float horizon_effective_longitudinal_accel =
+        effective_longitudinal_accel;
     /* Zero only sparse blocks that are not explicitly written later. */
 
     for (int k = 0; k < N; k++) {
@@ -496,6 +622,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         for (int i = 0; i < NX_AUG; i++) {
             sd->A[IDX_DELTA_COMMAND][i] = 0;
             sd->A[IDX_DELTA_EFFECTIVE][i] = 0;
+            sd->A[IDX_ACCEL_EFFECTIVE][i] = 0;
             sd->A[IDX_DRATE_PREV][i] = 0;
             sd->A[IDX_ACCEL_PREV][i] = 0;
 
@@ -509,6 +636,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         }
         sd->B[IDX_DELTA_COMMAND][1] = 0;  /* Steering command integrator is not affected by accel. */
         sd->B[IDX_DELTA_EFFECTIVE][1] = 0; /* Effective-steering pole is not affected by accel. */
+        sd->B[IDX_ACCEL_EFFECTIVE][0] = 0; /* Effective-acceleration pole is not affected by steering rate. */
         sd->B[IDX_DRATE_PREV][1] = 0;    /* δ̇_prev not affected by accel */
         sd->B[IDX_ACCEL_PREV][0] = 0;    /* a_prev not affected by δ̇ */
 
@@ -517,13 +645,20 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         float kappa_k = reference_trajectory[k].path_curvature;
         float v_state_for_limits = lin_state.flong_vel;
 
+        const float acceleration_command = prev_control.long_acc;
+        const float acceleration_average =
+            prediction_acceleration_dynamics.average_effective_gain *
+                horizon_effective_longitudinal_accel +
+            prediction_acceleration_dynamics.average_command_gain *
+                acceleration_command;
+
         ControlInput_t lin_control;
         lin_control.steer_ang = atanf(VP_WHEELBASE_M * kappa_k);
         if (lin_control.steer_ang > delta_clamp)
             lin_control.steer_ang = delta_clamp;
         if (lin_control.steer_ang < -delta_clamp)
             lin_control.steer_ang = -delta_clamp;
-        lin_control.long_acc = prev_control.long_acc;
+        lin_control.long_acc = acceleration_average;
 
         float A_step[5][5];
         float B_step[5][2];
@@ -549,7 +684,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             &lin_state, &lin_control, config.time_step, kappa_k,
             reference_trajectory[k].reference_velocity);
 
-        /* === Augmented A matrix (9x9) === */
+        /* === Augmented A matrix (10x10) === */
 
         /* Top-left 5×5: per-step Frenet A (e_y, e_psi, vx, vy, omega) */
         for (int i = 0; i < 5; i++)
@@ -570,6 +705,9 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             sd->B[i][0] =
                 prediction_steering_dynamics.average_rate_gain_seconds *
                 steering_jacobian;
+            sd->A[i][IDX_ACCEL_EFFECTIVE] =
+                prediction_acceleration_dynamics.average_effective_gain *
+                B_step[i][1];
         }
 
         for (int i = 0; i < NX_AUG; i++)
@@ -606,14 +744,20 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             prediction_steering_dynamics.command_gain;
         sd->A[IDX_DELTA_EFFECTIVE][IDX_DELTA_EFFECTIVE] =
             prediction_steering_dynamics.retention;
+        sd->A[IDX_ACCEL_EFFECTIVE][IDX_ACCEL_EFFECTIVE] =
+            prediction_acceleration_dynamics.retention;
+        sd->B[IDX_ACCEL_EFFECTIVE][1] =
+            prediction_acceleration_dynamics.command_gain;
 
         /* Previous-control tail rows and columns were zeroed above. */
 
-        /* === Augmented B matrix (9x2) === */
+        /* === Augmented B matrix (10x2) === */
 
         /* Rows 0-4, col 1: acceleration effect on dynamics */
         for (int i = 0; i < 5; i++)
-            sd->B[i][1] = B_step[i][1];
+            sd->B[i][1] =
+                prediction_acceleration_dynamics.average_command_gain *
+                B_step[i][1];
 
         /* Command angle integrates the optimized steering rate. */
         sd->B[IDX_DELTA_COMMAND][0] = config.time_step;
@@ -628,7 +772,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* Previous acceleration state. */
         sd->B[IDX_ACCEL_PREV][1] = 1.0f;
 
-        /* === Q_diag (9 elements): state tracking weights === */
+        /* === Q_diag (10 elements): state tracking weights === */
         sd->Q_diag[0] = RICCATI_COST_FACTOR * config.weight_lateral_error;
         sd->Q_diag[1] = RICCATI_COST_FACTOR * config.weight_heading_error;
         sd->Q_diag[2] = RICCATI_COST_FACTOR * config.weight_velocity;
@@ -637,6 +781,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         sd->Q_diag[IDX_DELTA_COMMAND] = 0.0f;
         sd->Q_diag[IDX_DELTA_EFFECTIVE] =
             RICCATI_COST_FACTOR * config.weight_effective_steering;
+        sd->Q_diag[IDX_ACCEL_EFFECTIVE] = 0.0f;
         sd->Q_diag[IDX_DRATE_PREV] = RICCATI_COST_FACTOR * config.weight_steering_rate;
         sd->Q_diag[IDX_ACCEL_PREV] = RICCATI_COST_FACTOR * config.weight_acceleration_rate;
 
@@ -683,7 +828,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             }
         }
 
-        /* === q (9 elements): linear state cost (tracking references) === */
+        /* === q (10 elements): linear state cost (tracking references) === */
         {
             float ey_ref_k = reference_trajectory[k].reference_lateral_error;
             ey_ref_k = compute_wall_biased_ey_ref(ey_ref_k, wall_x_lb_con, wall_x_ub_con,
@@ -707,9 +852,10 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             float delta_ff_k = atanf(VP_WHEELBASE_M * kappa_k);
             if (delta_ff_k > VP_MAX_STEERING_RAD) delta_ff_k = VP_MAX_STEERING_RAD;
             if (delta_ff_k < -VP_MAX_STEERING_RAD) delta_ff_k = -VP_MAX_STEERING_RAD;
-            sd->q[IDX_DELTA_EFFECTIVE] =
+        sd->q[IDX_DELTA_EFFECTIVE] =
                 -(sd->Q_diag[IDX_DELTA_EFFECTIVE] * delta_ff_k);
         }
+        sd->q[IDX_ACCEL_EFFECTIVE] = 0.0f;
         sd->q[IDX_DRATE_PREV] = 0;  /* No tracking ref for δ̇_prev */
         sd->q[IDX_ACCEL_PREV] = 0;  /* No tracking ref for a_prev */
 
@@ -728,7 +874,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         sd->r[0] = 0;
         sd->r[1] = 0;
 
-        /* === Cross-cost N (9x2) === */
+        /* === Cross-cost N (10x2) === */
         /* Couple previous and current steering rates for the jerk cost. */
         sd->N[IDX_DRATE_PREV][0] = -(RICCATI_COST_FACTOR * config.weight_steering_rate);
         /* Couple previous and current acceleration for the rate cost. */
@@ -739,7 +885,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             sd->N[IDX_ACCEL_PREV][1] = -(RICCATI_COST_FACTOR * (config.weight_acceleration_rate * config.cross_call_rate_scale));
         }
 
-        /* === State bounds (9 elements) === */
+        /* === State bounds (10 elements) === */
 
         /* e_y wall bounds active from the first stage. */
         sd->x_lb[0] = wall_x_lb_con;
@@ -759,6 +905,11 @@ MpcSolverStatus_t mpc_compute_optimal_control(
          * projection channel. */
         sd->x_lb[IDX_DELTA_EFFECTIVE] = -BIG_BOUND;
         sd->x_ub[IDX_DELTA_EFFECTIVE] = BIG_BOUND;
+
+        /* Effective acceleration is an internal response state; the command
+         * bounds remain on u[1]. */
+        sd->x_lb[IDX_ACCEL_EFFECTIVE] = -BIG_BOUND;
+        sd->x_ub[IDX_ACCEL_EFFECTIVE] = BIG_BOUND;
 
         /* Previous controls are unconstrained states. */
         sd->x_lb[IDX_DRATE_PREV] = -BIG_BOUND;
@@ -799,6 +950,11 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         }
 
         lin_state = lin_state_next;
+        horizon_effective_longitudinal_accel =
+            prediction_acceleration_dynamics.retention *
+                horizon_effective_longitudinal_accel +
+            prediction_acceleration_dynamics.command_gain *
+                acceleration_command;
         if (lin_state.flong_vel < MIN_LINEARIZATION_VELOCITY)
             lin_state.flong_vel = MIN_LINEARIZATION_VELOCITY;
     }
@@ -897,6 +1053,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         terminal_x_ub[IDX_DELTA_COMMAND] = VP_MAX_STEERING_RAD;
         terminal_x_lb[IDX_DELTA_EFFECTIVE] = -BIG_BOUND;
         terminal_x_ub[IDX_DELTA_EFFECTIVE] = BIG_BOUND;
+        terminal_x_lb[IDX_ACCEL_EFFECTIVE] = -BIG_BOUND;
+        terminal_x_ub[IDX_ACCEL_EFFECTIVE] = BIG_BOUND;
         terminal_x_lb[IDX_DRATE_PREV] = -BIG_BOUND;
         terminal_x_ub[IDX_DRATE_PREV] = BIG_BOUND;
         terminal_x_lb[IDX_ACCEL_PREV] = -BIG_BOUND;
@@ -904,7 +1062,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     }
 
     /* ---------------------------------------------------------------
-     * Step 3: Build augmented initial state (9 elements)
+     * Step 3: Build augmented initial state (10 elements)
      * --------------------------------------------------------------- */
     float x0[RICCATI_MAX_NX];
     memset(x0, 0, sizeof(x0));
@@ -915,6 +1073,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     x0[4] = frenet->fyaw_rate;
     x0[IDX_DELTA_COMMAND] = commanded_steering_angle;
     x0[IDX_DELTA_EFFECTIVE] = effective_steering_angle;
+    x0[IDX_ACCEL_EFFECTIVE] = effective_longitudinal_accel;
     x0[IDX_DRATE_PREV] = prev_control.steer_ang;  /* Previous delta-rate command */
     x0[IDX_ACCEL_PREV] = prev_control.long_acc;
 
@@ -1011,8 +1170,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     float delta_rate = admm_state.z_u[0][0];
     float accel = admm_state.z_u[0][1];
 
-    /* Preserve the existing 30 ms rate-to-target semantics for this isolated
-     * model change; the CPU controller still replans every 5 ms. */
+    /* Convert the first steering-rate action into the steering target issued
+     * for the next native 100 ms interval. */
     float delta_cmd =
         commanded_steering_angle + config.time_step * delta_rate;
 

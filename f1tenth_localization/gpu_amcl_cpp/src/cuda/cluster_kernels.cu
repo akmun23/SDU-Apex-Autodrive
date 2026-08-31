@@ -102,6 +102,22 @@ __global__ void kernel_filter_second_cluster_scores(
     out_scores[i] = score;
 }
 
+__global__ void kernel_filter_cluster_scores_by_reference(
+    ClusterScoreResult* __restrict__ scores,
+    int n,
+    float reference_x,
+    float reference_y,
+    float association_radius2) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    const float dx = scores[i].x - reference_x;
+    const float dy = scores[i].y - reference_y;
+    if (dx * dx + dy * dy > association_radius2) {
+        scores[i].score = 0.0f;
+    }
+}
+
 __global__ void kernel_compute_cluster_mean_contrib(
     const float* __restrict__ particles,
     const float* __restrict__ weights,
@@ -220,6 +236,51 @@ void launch_gpu_find_cluster_seed(
     const auto launch = make_adaptive_launch_config(n);
     kernel_score_cluster_candidates<<<launch.grid, launch.block, 0, stream>>>(
         d_particles, d_weights, d_scores, n, radius2);
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cub::DeviceReduce::Reduce(
+        d_temp, temp_bytes,
+        d_scores, d_best, n,
+        ClusterScoreOp(),
+        ClusterScoreResult{-1.0f, -1, 0.0f, 0.0f},
+        stream));
+
+    kernel_filter_second_cluster_scores<<<launch.grid, launch.block, 0, stream>>>(
+        d_scores, d_scores, d_best, n, radius2);
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cub::DeviceReduce::Reduce(
+        d_temp, temp_bytes,
+        d_scores, d_second, n,
+        ClusterScoreOp(),
+        ClusterScoreResult{0.0f, -1, 0.0f, 0.0f},
+        stream));
+}
+
+void launch_gpu_find_cluster_seed_near(
+    const float* d_particles,
+    const float* d_weights,
+    void* d_scores_v,
+    ClusterScoreResult* d_best,
+    ClusterScoreResult* d_second,
+    void* d_temp,
+    size_t temp_bytes,
+    int n,
+    float radius2,
+    float reference_x,
+    float reference_y,
+    float association_radius2,
+    cudaStream_t stream) {
+    if (n <= 0) return;
+
+    auto* d_scores = static_cast<ClusterScoreResult*>(d_scores_v);
+    const auto launch = make_adaptive_launch_config(n);
+    kernel_score_cluster_candidates<<<launch.grid, launch.block, 0, stream>>>(
+        d_particles, d_weights, d_scores, n, radius2);
+    CUDA_CHECK(cudaGetLastError());
+
+    kernel_filter_cluster_scores_by_reference<<<launch.grid, launch.block, 0, stream>>>(
+        d_scores, n, reference_x, reference_y, association_radius2);
     CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cub::DeviceReduce::Reduce(

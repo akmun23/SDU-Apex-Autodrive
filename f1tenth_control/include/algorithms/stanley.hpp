@@ -41,11 +41,11 @@ struct StanleyConfig {
     double speed_gain{1.2986};      // Multiplier for trajectory target speed
     
     // Steering limits
-    double max_steering{0.4189};    // [rad] Maximum steering angle (~24°)
-    double max_steering_rate{2.8175};  // [rad/s] Maximum steering rate
+    double max_steering{0.5236};    // [rad] Maximum centre-steering angle
+    double max_steering_rate{3.2};  // [rad/s] Maximum centre-steering rate
     
     // Vehicle parameters
-    double wheelbase{0.3302};       // [m] Distance between axles
+    double wheelbase{0.324};        // [m] Distance between axles
     
     // Path tracking
     double position_tolerance{0.5}; // [m] Max deviation before re-finding closest point

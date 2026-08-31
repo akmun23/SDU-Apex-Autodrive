@@ -1,115 +1,92 @@
-"""Launch one deterministic AutoDRIVE calibration or recording test."""
+"""Calibration launcher. No arming and no guarded-run wrapper."""
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 
-def _bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in ('1', 'true', 'yes', 'on'):
-        return True
-    if normalized in ('0', 'false', 'no', 'off'):
-        return False
-    raise RuntimeError('boolean argument expected, got %r' % value)
+RAW = {
+    "throttle_sweep", "throttle_steps", "zero_throttle_decel", "steering_steps",
+    "steering_response", "throttle_speed_grid",
+}
+SPEED = {"speed_steps", "speed_ramp"}
+ALL = RAW | SPEED | {"sensor_record", "full_suite"}
 
 
-def _launch_setup(context):
-    test = LaunchConfiguration('test').perform(context).strip().lower()
-    allowed = (
-        'throttle_sweep', 'throttle_steps', 'zero_throttle_decel',
-        'speed_steps', 'speed_ramp', 'steering_steps', 'sensor_record')
-    if test not in allowed:
-        raise RuntimeError('test must be one of: %s' % ', '.join(allowed))
-    with_rviz = _bool(LaunchConfiguration('with_rviz').perform(context))
-    bridge_launch = (
-        'bringup_graphics.launch.py' if with_rviz
-        else 'bringup_headless.launch.py')
-    bridge_path = os.path.join(
-        get_package_share_directory('autodrive_roboracer'),
-        'launch',
-        bridge_launch,
-    )
-    actions = [IncludeLaunchDescription(PythonLaunchDescriptionSource(bridge_path))]
-    common = [LaunchConfiguration('calibration_params')]
-    output_dir = LaunchConfiguration('output_dir')
-    max_speed = ParameterValue(LaunchConfiguration('max_test_speed'), value_type=float)
-    max_throttle = ParameterValue(LaunchConfiguration('max_throttle'), value_type=float)
+def _setup(context):
+    mode = LaunchConfiguration("test").perform(context)
+    if mode not in ALL:
+        raise RuntimeError(f"unknown test mode: {mode}")
 
-    if test in ('throttle_sweep', 'throttle_steps', 'zero_throttle_decel'):
+    actions = [
+        Node(
+            package="autodrive_roboracer",
+            executable="autodrive_bridge",
+            name="autodrive_bridge",
+            output="screen",
+        ),
+        Node(
+            package="f1tenth_localization",
+            executable="sensor_odometry_node",
+            name="sensor_odometry",
+            output="screen",
+            parameters=[LaunchConfiguration("sensor_odom_params")],
+            remappings=[
+                ("/tf", "/sdu/tf"),
+                ("/tf_static", "/sdu/tf_static"),
+            ],
+        ),
+    ]
+
+    if mode in SPEED or mode == "full_suite":
         actions.append(Node(
-            package='sdu_apex_autodrive',
-            executable='throttle_characterization',
-            name='throttle_characterization',
-            output='screen',
-            parameters=common + [{
-                'mode': test,
-                'output_dir': output_dir,
-                'maximum_test_speed_mps': max_speed,
-                'maximum_throttle': max_throttle,
-            }],
+            package="sdu_apex_autodrive",
+            executable="actuator_interface",
+            name="autodrive_actuator_interface",
+            output="screen",
+            parameters=[LaunchConfiguration("actuator_params")],
         ))
-    elif test in ('speed_steps', 'speed_ramp'):
-        actions.append(Node(
-            package='sdu_apex_autodrive',
-            executable='actuator_interface',
-            name='autodrive_actuator_interface',
-            output='screen',
-            parameters=[LaunchConfiguration('actuator_params')],
-        ))
-        actions.append(Node(
-            package='sdu_apex_autodrive',
-            executable='speed_tracking_test',
-            name='speed_tracking_test',
-            output='screen',
-            parameters=common + [{
-                'mode': test,
-                'output_dir': output_dir,
-                'maximum_test_speed_mps': max_speed,
-            }],
-        ))
-    elif test == 'steering_steps':
-        actions.append(Node(
-            package='sdu_apex_autodrive',
-            executable='steering_characterization',
-            name='steering_characterization',
-            output='screen',
-            parameters=common + [{'output_dir': output_dir}],
-        ))
-    else:
-        actions.append(Node(
-            package='sdu_apex_autodrive',
-            executable='data_recorder',
-            name='autodrive_data_recorder',
-            output='screen',
-            parameters=common + [{'output_dir': output_dir}],
-        ))
-    actions.append(LogInfo(msg='AutoDRIVE test=%s; native publisher ownership enforced' % test))
+
+    actions.append(Node(
+        package="sdu_apex_autodrive",
+        executable="calibration",
+        name="calibration",
+        output="screen",
+        parameters=[
+            LaunchConfiguration("calibration_params"),
+            {
+                "mode": mode,
+                "output_dir": LaunchConfiguration("output_dir"),
+            },
+        ],
+    ))
     return actions
 
 
 def generate_launch_description():
-    share = get_package_share_directory('sdu_apex_autodrive')
+    share = get_package_share_directory("sdu_apex_autodrive")
+    localization = get_package_share_directory("f1tenth_localization")
     return LaunchDescription([
-        DeclareLaunchArgument('test', default_value='sensor_record'),
-        DeclareLaunchArgument('with_rviz', default_value='true'),
+        DeclareLaunchArgument("test", default_value="sensor_record"),
         DeclareLaunchArgument(
-            'output_dir',
-            default_value='/workspace/src/autodrive_artifacts/calibration/raw'),
-        DeclareLaunchArgument('max_test_speed', default_value='3.0'),
-        DeclareLaunchArgument('max_throttle', default_value='0.10'),
+            "output_dir",
+            default_value="/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw",
+        ),
         DeclareLaunchArgument(
-            'calibration_params',
-            default_value=os.path.join(share, 'config', 'calibration.yaml')),
+            "calibration_params",
+            default_value=os.path.join(share, "config", "calibration.yaml"),
+        ),
         DeclareLaunchArgument(
-            'actuator_params',
-            default_value=os.path.join(
-                share, 'config', 'actuator_interface.yaml')),
-        OpaqueFunction(function=_launch_setup),
+            "actuator_params",
+            default_value=os.path.join(share, "config", "actuator_interface.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "sensor_odom_params",
+            default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),
+        ),
+        OpaqueFunction(function=_setup),
     ])

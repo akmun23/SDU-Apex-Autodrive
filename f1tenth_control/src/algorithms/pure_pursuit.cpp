@@ -50,6 +50,9 @@ bool PurePursuit::loadTrajectory(const std::string& csv_path) {
             pt.heading = values[3];
             pt.curvature = values[4];
             pt.velocity = values[5];
+            if (values.size() >= 7 && std::isfinite(values[6])) {
+                pt.acceleration = values[6];
+            }
             // Optional bounds if provided
             if (values.size() >= 9) {
                 pt.left_bound = values[7];
@@ -123,9 +126,15 @@ size_t PurePursuit::findClosestPoint(const Point2D& position) {
     // If no trajectory is loaded, return 0 as a safe default index
     if (trajectory_.empty()) return 0;
     
-    // Search parameters
+    // Search only a short distance around the previous progress point.  The
+    // old symmetric +/-100-point window spans about 5 m on this trajectory;
+    // on the closed hairpin that can contain both the current leg and the
+    // return leg.  A vehicle travelling at the native 10 Hz cadence cannot
+    // legitimately move more than about 0.4 m between updates, so allow
+    // generous forward recovery while keeping backward reassociation tight.
     const size_t n = trajectory_.size();
-    const size_t search_radius = std::min(n / 2, size_t(100));
+    const size_t backtrack_points = std::min(n / 2, size_t(16));
+    const size_t forward_points = std::min(n / 2, size_t(72));
     
     // Initialize search with last known closest index for efficiency
     double min_dist = std::numeric_limits<double>::max();
@@ -142,11 +151,13 @@ size_t PurePursuit::findClosestPoint(const Point2D& position) {
     };
     
    
-    // First try a local search around the last closest index for efficiency
+    // First try a progress-consistent local search.  The cyclic wrap is
+    // intentional: it permits normal reassociation across the start seam.
     const int center = static_cast<int>(last_closest_idx_);
-    const int radius = static_cast<int>(search_radius);
+    const int backtrack = static_cast<int>(backtrack_points);
+    const int forward = static_cast<int>(forward_points);
     const int n_i = static_cast<int>(n);
-    for (int off = -radius; off <= radius; ++off) {
+    for (int off = -backtrack; off <= forward; ++off) {
         int idx_i = (center + off) % n_i;
         if (idx_i < 0) {
             idx_i += n_i;
@@ -162,7 +173,8 @@ size_t PurePursuit::findClosestPoint(const Point2D& position) {
     }
 
     // If the car is too far from path, do a full search (still heading-filtered)
-    const bool seam_region = (last_closest_idx_ < search_radius || last_closest_idx_ + search_radius >= n);
+    const bool seam_region = (last_closest_idx_ < backtrack_points ||
+                              last_closest_idx_ + forward_points >= n);
     if (min_dist > config_.position_tolerance * 2 || seam_region) {
         for (size_t i = 0; i < n; ++i) {
             if (!heading_ok(i)) continue;
@@ -205,8 +217,15 @@ TrajectoryPoint PurePursuit::interpolate(size_t idx1, size_t idx2, double t) con
     heading_diff = std::atan2(std::sin(heading_diff), std::cos(heading_diff));
     result.heading = p1.heading + t * heading_diff;
     result.velocity = p1.velocity + t * (p2.velocity - p1.velocity);
+    result.acceleration = p1.acceleration + t * (p2.acceleration - p1.acceleration);
     result.curvature = p1.curvature + t * (p2.curvature - p1.curvature);
     result.arc_length = p1.arc_length + t * (p2.arc_length - p1.arc_length);
+    if (std::isfinite(p1.left_bound) && std::isfinite(p2.left_bound)) {
+        result.left_bound = p1.left_bound + t * (p2.left_bound - p1.left_bound);
+    }
+    if (std::isfinite(p1.right_bound) && std::isfinite(p2.right_bound)) {
+        result.right_bound = p1.right_bound + t * (p2.right_bound - p1.right_bound);
+    }
     
     return result;
 }
@@ -314,6 +333,24 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
         target_pt = trajectory_[target_idx];
     }
 
+    // The optimized raceline uses the available corridor, but the simulated
+    // vehicle has a finite footprint and a 10 Hz command gap. When one bound
+    // is tighter than the other, shift only the lookahead target a bounded
+    // amount toward the corridor centre. This uses checked-in planning data,
+    // not simulator state, and protects delayed turn-in at the outside wall.
+    if (std::isfinite(target_pt.left_bound) &&
+        std::isfinite(target_pt.right_bound)) {
+        const double requested_bias = 0.5 *
+            (target_pt.left_bound - target_pt.right_bound) *
+            std::clamp(config_.wall_bias_gain, 0.0, 1.0);
+        const double max_bias = std::max(0.0, config_.wall_bias_max_m);
+        const double bias = std::clamp(requested_bias, -max_bias, max_bias);
+        const double normal_x = -std::sin(target_pt.heading);
+        const double normal_y = std::cos(target_pt.heading);
+        target_pt.x += bias * normal_x;
+        target_pt.y += bias * normal_y;
+    }
+
     // Transform target to vehicle frame.
     const double cos_h = std::cos(-heading);
     const double sin_h = std::sin(-heading);
@@ -331,9 +368,16 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
     double target_y_vehicle = target_vehicle.y;
 
     // If the target is behind the vehicle, search forward for the first point ahead.
+    // This normally handles a slightly stale pose at the cyclic seam. If the
+    // car is already displaced far enough that every path point is behind the
+    // current heading, retain a recovery target instead of returning an invalid
+    // command. The latter used to leave the car permanently stopped after a
+    // single localization/actuation transient.
     if (target_x_vehicle <= 0.0) {
         bool found_forward_target = false;
-        for (size_t idx = closest_idx + 1; idx < n; ++idx) {
+        // The raceline is cyclic; continue across the final-to-first seam.
+        for (size_t step = 1; step < n; ++step) {
+            const size_t idx = (closest_idx + step) % n;
             const Point2D candidate = targetToVehicleFrame(trajectory_[idx]);
             if (candidate.x > 0.05) {
                 target_idx = idx;
@@ -346,7 +390,16 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
         }
 
         if (!found_forward_target) {
-            return output;
+            target_idx = closest_idx;
+            target_pt = closest_pt;
+            target_x_vehicle = 0.05;
+            target_y_vehicle = target_vehicle.y;
+            if (std::abs(target_y_vehicle) < 0.02) {
+                const double heading_error = std::atan2(
+                    std::sin(closest_pt.heading - heading),
+                    std::cos(closest_pt.heading - heading));
+                target_y_vehicle = std::sin(heading_error) * lookahead_dist;
+            }
         }
     }
 
@@ -360,12 +413,77 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
 
     // Pure Pursuit steering law:
     // curvature = 2 * y / L^2, where y is lateral offset in vehicle frame.
-    const double curvature = 2.0 * target_vehicle.y / (actual_lookahead * actual_lookahead);
+    const double pursuit_curvature =
+        2.0 * target_vehicle.y / (actual_lookahead * actual_lookahead);
+
+    // At the native 10 Hz cadence, the geometric target is already a full
+    // scan interval ahead by the time the next command is issued.  Add the
+    // measured path curvature at that target as the standard curvature
+    // feed-forward term.  A convex blend suppresses the path curvature exactly
+    // where it is needed most: at the apex, the pursuit error can be near zero
+    // while the desired steering is still substantial.
+    const double ff_gain = std::clamp(config_.curvature_feedforward_gain, 0.0, 1.0);
+    const double target_curvature = std::isfinite(target_pt.curvature) ?
+        target_pt.curvature : closest_pt.curvature;
+    const double curvature = pursuit_curvature + ff_gain * target_curvature;
     double steering_angle = std::atan(config_.wheelbase * curvature);
+    // Native AutoDRIVE control is scan-triggered at about 10 Hz.  Use the
+    // allowed odometry yaw rate to damp steering reversals caused by vehicle
+    // and actuator lag between scans.
+    steering_angle -= config_.yaw_rate_damping * state.angular_velocity;
     steering_angle = std::clamp(steering_angle, -config_.max_steering, config_.max_steering);
 
-    // Base speed from trajectory, then apply preview-based regulation.
-    double target_speed = target_pt.velocity;
+    // Base speed from trajectory, then apply preview-based regulation. Do not
+    // accelerate into a slower section merely because the lookahead point has
+    // already reached its exit speed. At the native 10 Hz cadence the vehicle
+    // can cover a substantial distance before the next scan, and AutoDRIVE
+    // provides idle braking but no competition-safe active brake channel.
+    // Holding the speed of the closest point preserves the fast exit speed
+    // while preventing the early re-acceleration that caused the lower
+    // hairpin wall contact in the recorded run.
+    double target_speed = std::min(target_pt.velocity, closest_pt.velocity);
+
+    // Apply a forward braking envelope to the path speed. The waypoint
+    // velocity is the desired speed at that waypoint, but the simulator only
+    // provides idle braking when throttle is removed. At the native 10 Hz
+    // event cadence, waiting until the lookahead reaches the slow point leaves
+    // too little distance for the real vehicle to shed speed.
+    const double braking_decel = std::max(0.0, config_.speed_profile_braking_decel);
+    const double speed_preview = std::max(0.0, config_.speed_preview_distance);
+    if (braking_decel > 1.0e-3 && speed_preview > 1.0e-3) {
+        double distance_ahead = 0.0;
+        double speed_envelope = target_speed;
+        for (size_t i = closest_idx; i < closest_idx + n && distance_ahead <= speed_preview; ++i) {
+            const size_t curr_idx = i % n;
+            const size_t next_idx = (i + 1) % n;
+            const double candidate_speed = std::max(0.0, trajectory_[curr_idx].velocity);
+            const double reachable_speed = std::sqrt(
+                candidate_speed * candidate_speed +
+                2.0 * braking_decel * distance_ahead);
+            speed_envelope = std::min(speed_envelope, reachable_speed);
+
+            const double segment_dist = math::distance(
+                trajectory_[curr_idx].x, trajectory_[curr_idx].y,
+                trajectory_[next_idx].x, trajectory_[next_idx].y);
+            if (segment_dist <= 1.0e-9) {
+                continue;
+            }
+            if (distance_ahead + segment_dist > speed_preview) {
+                const double remaining = speed_preview - distance_ahead;
+                const double t = std::clamp(remaining / segment_dist, 0.0, 1.0);
+                const double next_speed = trajectory_[next_idx].velocity;
+                const double interpolated_speed = std::max(
+                    0.0, candidate_speed + t * (next_speed - candidate_speed));
+                const double reachable_at_cutoff = std::sqrt(
+                    interpolated_speed * interpolated_speed +
+                    2.0 * braking_decel * speed_preview);
+                speed_envelope = std::min(speed_envelope, reachable_at_cutoff);
+                break;
+            }
+            distance_ahead += segment_dist;
+        }
+        target_speed = std::min(target_speed, speed_envelope);
+    }
 
     // Preview curvature over an extended distance (preview_factor * lookahead)
     // to allow braking well before entering tight corners.
@@ -440,6 +558,10 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
         target_speed = std::min(target_speed, v_lat_limit);
     }
 
+    if (!std::isfinite(target_speed) || !std::isfinite(steering_angle) ||
+        !std::isfinite(output.cross_track_error)) {
+        return output;
+    }
     target_speed = std::max(config_.min_regulated_speed, target_speed);
 
     // Fill output.

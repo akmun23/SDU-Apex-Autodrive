@@ -1,0 +1,19 @@
+# Diagnostics-only open-ground steering identification. Direct steering is
+# normalized exactly as the official actuator topic expects.
+calibration:
+  ros__parameters:
+    mode: steering_response
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_steering_response
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    steering_sequence: [-1.0, -0.75, -0.50, -0.25, 0.0, 0.25, 0.50, 0.75, 1.0]
+    steering_test_throttle: 0.23
+    hold_sec: 1.5
+    zero_settle_sec: 3.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 1.0
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.25

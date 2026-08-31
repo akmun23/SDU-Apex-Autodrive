@@ -1,15 +1,24 @@
 # F1Tenth Planning
 
-Trajectory optimization for the F1Tenth car. Takes a SLAM map and produces an optimized raceline CSV that the MPC controller follows.
+Trajectory optimization for the AutoDRIVE RoboRacer. It takes the five-lap
+SLAM map and produces a raceline CSV consumed directly by Pure Pursuit (and
+also usable by MPC).
 
 ## Quick Start
 
 ```bash
-# Default: minimum-curvature optimization on my_track_map
-python3 f1tenth_planning/scripts/optimize_trajectory.py
+# 1. Drive five FTG laps; the robot stops and SLAM Toolbox writes both files.
+ros2 launch sdu_apex_autodrive mapping.launch.py
 
-# Time-optimal (mintime) using IPOPT/CasADi — slower but better velocity profile
-python3 f1tenth_planning/scripts/optimize_trajectory.py --opt-type mintime
+# 2. Convert that map to the exact CSV that Pure Pursuit loads by default.
+python3 f1tenth_planning/scripts/optimize_trajectory.py \
+  --map f1tenth_planning/maps/autodrive_track_5laps.yaml \
+  --track-name autodrive_track_5laps \
+  --output f1tenth_planning/trajectories \
+  --opt-type mincurv --max-speed 22.88 --min-speed 2.0 --direction auto
+
+# 3. Follow the saved raceline with encoder/IMU odometry and custom AMCL.
+ros2 launch sdu_apex_autodrive controller.launch.py controller:=pure_pursuit
 ```
 
 The output lands in `f1tenth_planning/trajectories/<track>_raceline.csv`.
@@ -36,9 +45,9 @@ The output lands in `f1tenth_planning/trajectories/<track>_raceline.csv`.
 
 ```bash
 python3 f1tenth_planning/scripts/optimize_trajectory.py \
-    --map f1tenth_sim/maps/my_track_map.yaml \  # Map file (auto-detected if omitted)
+    --map f1tenth_planning/maps/autodrive_track_5laps.yaml \  # ROS map YAML
     --opt-type mincurv \                         # Optimization mode
-    --max-speed 8.0 \                            # Velocity clamp [m/s]
+    --max-speed 22.88 \                          # AutoDRIVE command envelope [m/s]
     --min-speed 2.0 \                            # Velocity floor [m/s]
     --smooth-factor 2.0 \                        # Spline smoothing (s_reg). Lower = safer, higher = smoother
     --centerline-points 300 \                    # Centerline resolution
@@ -109,7 +118,7 @@ f1tenth_planning/
 │   ├── main_globaltraj.py
 │   └── params/racecar.ini
 ├── trajectories/                 # Output directory for raceline CSVs
-├── launch/                       # ROS2 launch files
+├── maps/                         # SLAM Toolbox map output (.yaml + .pgm)
 └── CMakeLists.txt
 ```
 

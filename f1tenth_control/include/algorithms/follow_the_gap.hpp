@@ -44,9 +44,9 @@ struct FTGConfig {
     double steer_slowdown_gain{0.5}; // How much steering reduces speed (0-1)
 
     // -- Steering control -----------------------------------------------------
-    double max_steering{0.4189};     // [rad] Maximum steering angle (~24 deg, calibrated)
+    double max_steering{0.5236};     // [rad] Maximum steering angle (~24 deg, calibrated)
     double steering_gain{1.0};       // Proportional gain on target angle
-    double max_steering_rate{2.8492};// [rad/s] Maximum steering change rate
+    double max_steering_rate{3.2};// [rad/s] Maximum steering change rate
     double target_ema_alpha{0.35};   // EMA smoothing for target angle (lower = smoother)
 
     // -- Weighted free-space scoring ------------------------------------------

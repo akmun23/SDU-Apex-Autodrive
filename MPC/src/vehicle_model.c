@@ -61,28 +61,88 @@ void vehicle_model_compute_effective_lateral_stiffness(
     float *effective_stiffness,
     float *lateral_force)
 {
-    float cornering_stiffness =
-        use_front_axle ? VP_FRONT_CORNERING_STIFFNESS : VP_REAR_CORNERING_STIFFNESS;
-    float linear_stiffness = VP_FRICTION_COEFF * cornering_stiffness * normal_load;
-    float peak_force = VP_FRICTION_COEFF * normal_load;
-    float B_term = cornering_stiffness * VP_INV_C_SHAPE;
-    float B_alpha = B_term * slip_angle;
-    float inner_angle = VP_C_SHAPE * atanf(B_alpha);
-    float cos_inner = cosf(inner_angle);
-    float inv_denom = util_recip(1.0f + B_alpha * B_alpha);
+    const float load = fmaxf(0.0f, normal_load);
+    const float initial_physical_slope = use_front_axle ?
+        VP_C_ALPHA_F : VP_C_ALPHA_R;
+    const float initial_normalized_slope = util_div(
+        initial_physical_slope, fmaxf(load, 1.0e-6f));
+    const float signed_slip = tanf(slip_angle);
+    const float slip = fabsf(signed_slip);
+    float normalized_force;
+    float force_slope_per_slip;
 
     /*
-     * Local linearization slope for a Pacejka-like tire law, with a floor to
-     * prevent near-saturated operating points from collapsing Jacobian gains.
+     * AutoDRIVE documents a two-piece cubic spline in normalized lateral
+     * slip S_y = tan(alpha):
+     *
+     *   (0, 0) -> (0.01, 1.00) -> (0.10, 0.50)
+     *
+     * The exact coefficients are not published.  Hermite segments provide
+     * the documented knots, a zero slope at the extremum/asymptote, and the
+     * measured small-slip slope at S_y=0.  Prediction and linearization use
+     * this same evaluator, so the optimizer does not solve a different tire
+     * model than the rollout.
      */
-    float effective_slope = peak_force * VP_C_SHAPE * B_term * cos_inner * inv_denom;
-    float minimum_slope = linear_stiffness * MIN_STIFF_SCALE;
-    *effective_stiffness =
-        (effective_slope > minimum_slope) ? effective_slope : minimum_slope;
+    if (slip < VP_LATERAL_EXTREMUM_SLIP)
+    {
+        const float t = util_div(slip, VP_LATERAL_EXTREMUM_SLIP);
+        const float h = VP_LATERAL_EXTREMUM_SLIP;
+        const float y0 = 0.0f;
+        const float y1 = VP_LATERAL_EXTREMUM_VALUE;
+        const float m0 = initial_normalized_slope;
+        const float m1 = 0.0f;
+        const float t2 = t * t;
+        const float t3 = t2 * t;
+        const float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+        const float h10 = t3 - 2.0f * t2 + t;
+        const float h01 = -2.0f * t3 + 3.0f * t2;
+        const float h11 = t3 - t2;
+        normalized_force = h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * m1;
+        force_slope_per_slip = util_div(
+            (6.0f * t2 - 6.0f * t) * y0 +
+            (3.0f * t2 - 4.0f * t + 1.0f) * h * m0 +
+            (-6.0f * t2 + 6.0f * t) * y1 +
+            (3.0f * t2 - 2.0f * t) * h * m1,
+            h);
+    }
+    else if (slip < VP_LATERAL_ASYMPTOTE_SLIP)
+    {
+        const float h = VP_LATERAL_ASYMPTOTE_SLIP -
+            VP_LATERAL_EXTREMUM_SLIP;
+        const float t = util_div(
+            slip - VP_LATERAL_EXTREMUM_SLIP, h);
+        const float t2 = t * t;
+        const float t3 = t2 * t;
+        const float y0 = VP_LATERAL_EXTREMUM_VALUE;
+        const float y1 = VP_LATERAL_ASYMPTOTE_VALUE;
+        const float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+        const float h01 = -2.0f * t3 + 3.0f * t2;
+        const float h10 = t3 - 2.0f * t2 + t;
+        const float h11 = t3 - t2;
+        normalized_force = h00 * y0 + h01 * y1;
+        force_slope_per_slip = util_div(
+            (-6.0f * t2 + 6.0f * t) * y0 +
+            (6.0f * t2 - 6.0f * t) * y1,
+            h);
+        (void)h10;
+        (void)h11;
+    }
+    else
+    {
+        normalized_force = VP_LATERAL_ASYMPTOTE_VALUE;
+        force_slope_per_slip = 0.0f;
+    }
+
+    /* S_y = tan(alpha), so dS_y/dalpha = sec^2(alpha). */
+    const float slip_angle_slope = 1.0f + signed_slip * signed_slip;
+    const float effective_slope = load * force_slope_per_slip *
+        slip_angle_slope;
+    const float minimum_slope = load * initial_normalized_slope * MIN_STIFF_SCALE;
+    *effective_stiffness = fmaxf(effective_slope, minimum_slope);
 
     if (lateral_force != NULL)
     {
-        *lateral_force = peak_force * sinf(inner_angle);
+        *lateral_force = load * copysignf(normalized_force, signed_slip);
     }
 }
 
@@ -169,21 +229,14 @@ VehicleState_t vehicle_model_predict_next_state(
     float F_zr;
     vehicle_model_compute_normal_loads(Fx, &F_zf, &F_zr);
 
-    /*
-     * Compute lateral tire forces (linear tire model with normal force)
-     *
-     * The cornering stiffness is scaled by friction coefficient and
-     * normal force to capture load transfer and surface grip effects:
-     *
-     *   F_yf = mu * C_Sf * alpha_f * F_zf
-     *   F_yr = mu * C_Sr * alpha_r * F_zr
-     *
-     * mu        — tire-road friction coefficient (dimensionless)
-     * C_Sf/C_Sr — pure tire cornering stiffness [1/rad]
-     * F_zf/F_zr — normal forces [N]
-     */
-    float F_yf = VP_FRICTION_COEFF * VP_FRONT_CORNERING_STIFFNESS * slip_terms.alpha_front * F_zf;
-    float F_yr = VP_FRICTION_COEFF * VP_REAR_CORNERING_STIFFNESS * slip_terms.alpha_rear * F_zr;
+    /* Use the same asymptotic tire law as the linearization. */
+    float unused_stiffness;
+    float F_yf;
+    float F_yr;
+    vehicle_model_compute_effective_lateral_stiffness(
+        1u, F_zf, slip_terms.alpha_front, &unused_stiffness, &F_yf);
+    vehicle_model_compute_effective_lateral_stiffness(
+        0u, F_zr, slip_terms.alpha_rear, &unused_stiffness, &F_yr);
 
     /* Full model: cos(δ)/sin(δ) force resolution for real-world accuracy */
     /* dv_x/dt = (F_x - F_yf * sin(delta) + m * v_y * omega) / m */
@@ -366,7 +419,7 @@ void vehicle_model_compute_frenet_linearization(
     vehicle_model_compute_normal_loads(Fx, &F_zf, &F_zr);
 
     /*
-     * Pacejka-like local linearization at the operating point:
+     * Asymptotic simulator-tire local linearization at the operating point:
      * Keep nonlinear saturation behavior, then convert to effective
      * cornering stiffness dF_y/dalpha for Jacobian entries.
      */

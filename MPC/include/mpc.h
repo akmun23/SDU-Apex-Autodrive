@@ -102,12 +102,12 @@ void mpc_set_configuration(const MpcConfiguration_t *configuration);
 void mpc_reset(void);
 
 /**
- * @brief Supply the steering target and acceleration from the previous 5 ms interval.
+ * @brief Supply the steering target and acceleration from the previous 100 ms interval.
  * @details Call once immediately before mpc_compute_optimal_control(). Steering
- *          is the issued target (or its command echo), not a physical servo
- *          position measurement. The MPC advances its effective-steering pole
+ *          is the previously issued Ackermann target. The MPC advances its
+ *          effective-steering pole and longitudinal acceleration-response pole
  *          exactly once in the subsequent solve. The first sample initializes
- *          commanded and effective steering equally to avoid a false startup
+ *          commanded and effective values equally to avoid a false startup
  *          transient.
  * @param command Pointer to the previous command; no-op if NULL.
  * @return None.

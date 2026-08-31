@@ -1,0 +1,32 @@
+# Diagnostic-only calibration profile for the official explore/open-ground
+# simulator scene.  It is never loaded by a competition controller.
+calibration:
+  ros__parameters:
+    mode: throttle_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_throttle
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    # Increasing positive pulses are separated by a simulator reset and
+    # zero-throttle settling phase. The controller has no project-specific
+    # throttle ceiling: 1.0 is the full normalized protocol range.
+    throttle_sequence: [0.00, 0.05, 0.10, 0.15, 0.18, 0.20, 0.23, 0.26, 0.30, 0.40, 0.50, 0.70, 1.00]
+    speed_sequence_mps: [0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 0.0]
+    steering_sequence: [0.0]
+    # Allow the vehicle to reach its asymptotic response at every command.
+    hold_sec: 30.0
+    zero_settle_sec: 5.0
+    # This is a diagnostic abort threshold, not a throttle clamp. It is above
+    # the documented simulator top speed so the full protocol range can be
+    # sampled; each step has its own simulator reset.
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.25
+    reset_confirmation_timeout_sec: 120.0
+    reset_zero_odom_stable_sec: 30.0
+    # Restart a long phase before the finite open-ground plane is reached.
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 450.0

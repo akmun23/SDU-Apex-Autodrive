@@ -1,39 +1,89 @@
 pure_pursuit_node:
   ros__parameters:
-    odom_topic: /autodrive/roboracer_1/odom
-    pose_topic: /amcl_pose
-    local_raceline_topic: /local_raceline
+    odom_topic: /odom
+    pose_topic: /ekf_pose
+    lidar_topic: /autodrive/roboracer_1/lidar
     command_topic: /cmd/controller
+    steering_feedback_topic: /autodrive/roboracer_1/steering
     path_frame: map
-    command_frame: roboracer_1
+    command_frame: base_link
     trajectory_file: ""
     wheelbase: 0.324
-    max_speed: 1.0
+    # Full AutoDRIVE simulator envelope. The raceline's own velocity column,
+    # curvature and clearance regulation still determine the actual target at
+    # each point; this removes the old project-wide 5.5 m/s ceiling.
+    max_speed: 22.88
+    min_lookahead: 0.65
+    max_lookahead: 1.15
+    lookahead_gain: 0.14
+    # At the native 10 Hz update cadence a high-speed update can traverse a
+    # large fraction of the narrow section before the next command. Start
+    # shedding speed as soon as the estimated pose moves off the line.
+    cte_speed_factor: 1.50
+    cte_speed_floor_ratio: 0.55
+    max_lateral_accel: 6.50
+    # Start requesting the lower speed before the 10 Hz actuator path reaches
+    # the slow point; the effective value models simulator idle braking.
+    speed_preview_distance: 4.0
+    speed_profile_braking_decel: 1.50
+    corridor_half_width_ref: 0.35
+    corridor_speed_floor_ratio: 0.25
+    min_regulated_speed: 0.12
+    # Bounded curvature feed-forward reduces 10 Hz turn-in lag without using
+    # simulator pose or any non-competition state.
+    # Standard additive curvature feed-forward.  The previous convex blend
+    # suppressed steering at the tight apex when CTE was already small.
+    curvature_feedforward_gain: 0.25
+    # Shift the lookahead target toward the wider side of the measured
+    # raceline corridor by at most 10 cm in tight sections.
+    wall_bias_gain: 0.25
+    wall_bias_max_m: 0.10
+    # The observed bend has negative yaw rate while turning negative. A
+    # signed damping term would reduce the required turn-in there, so keep
+    # this disabled until steering feedback is available on the official
+    # command path.
+    yaw_rate_damping: 0.0
     max_steering: 0.5236
     pose_timeout_s: 0.3
     odom_timeout_s: 0.3
+    # Compensate the normal scan-to-state delivery gap using only /odom.
+    state_extrapolation_max_s: 0.12
+    # Kept as a nominal diagnostic value; Pure Pursuit is triggered by LiDAR.
+    control_rate_hz: 10.0
     localization_covariance_xy_max: 0.25
     localization_covariance_yaw_max: 0.12
     localization_required_updates: 5
+    # A 10 Hz command has 100 ms to reach the next requested angle.  This
+    # allows the simulated steering actuator to enter the bend promptly while
+    # the absolute steering limit remains unchanged.
+    # AutoDRIVE documented centre-steering rate limit.
     max_steering_rate: 3.2
-    max_accel_cmd: 1.0
-    max_decel_cmd: 2.0
+    # Keep the proven 10 Hz acceleration envelope.  Increasing this command
+    # ramp made the first tight corner enter about 0.4 m/s faster and caused a
+    # collision even though the path geometry remained aligned.
+    max_accel_cmd: 3.0
+    max_decel_cmd: 8.0
+    steering_feedback_timeout_s: 0.25
+    # Apply only a bounded same-direction lead; sign changes are handled by
+    # the normal steering-rate limiter to avoid stale-feedback reversals.
+    steering_feedback_lead_gain: 0.25
 
 stanley_node:
   ros__parameters:
-    odom_topic: /autodrive/roboracer_1/odom
-    pose_topic: /amcl_pose
-    local_raceline_topic: /local_raceline
+    odom_topic: /odom
+    pose_topic: /ekf_pose
+    lidar_topic: /autodrive/roboracer_1/lidar
     command_topic: /cmd/controller
     path_frame: map
-    command_frame: roboracer_1
+    command_frame: base_link
     trajectory_file: ""
     wheelbase: 0.324
     max_speed: 1.0
     min_speed: 0.4
     max_steering: 0.5236
     max_steering_rate: 3.2
-    control_rate: 20.0
+    # Stanley is also triggered by the official LiDAR event.
+    control_rate: 10.0
     pose_timeout_s: 0.3
     odom_timeout_s: 0.3
     localization_covariance_xy_max: 0.25

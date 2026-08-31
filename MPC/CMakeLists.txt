@@ -30,26 +30,29 @@ target_link_libraries(mpc_core PUBLIC m)
 # ===========================================================================
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(test_riccati_solver test/test_riccati_solver.c)
-    target_link_libraries(test_riccati_solver PRIVATE mpc_core m)
-    if(NOT MSVC)
-        target_compile_options(test_riccati_solver PRIVATE -fno-fast-math)
-    endif()
-    add_test(NAME riccati_solver_regressions COMMAND test_riccati_solver)
+    # The old standalone regression sources were part of the removed hardware
+    # tree.  Add a test only when its source is present; this keeps the core
+    # build honest while the native AutoDRIVE benchmark is developed here.
+    foreach(test_name IN ITEMS riccati_solver frenet_linearization steering_dynamics vehicle_model)
+        set(test_source "${CMAKE_CURRENT_SOURCE_DIR}/test/test_${test_name}.c")
+        if(EXISTS "${test_source}")
+            add_executable("test_${test_name}" "${test_source}")
+            target_link_libraries("test_${test_name}" PRIVATE mpc_core m)
+            if(NOT MSVC)
+                target_compile_options("test_${test_name}" PRIVATE -fno-fast-math)
+            endif()
+            add_test(NAME "${test_name}" COMMAND "test_${test_name}")
+        endif()
+    endforeach()
 
-    add_executable(test_frenet_linearization test/test_frenet_linearization.c)
-    target_link_libraries(test_frenet_linearization PRIVATE mpc_core m)
-    if(NOT MSVC)
-        target_compile_options(test_frenet_linearization PRIVATE -fno-fast-math)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/closed_loop_benchmark.c")
+        add_executable(test_closed_loop_benchmark test/closed_loop_benchmark.c)
+        target_link_libraries(test_closed_loop_benchmark PRIVATE mpc_core m)
+        if(NOT MSVC)
+            target_compile_options(test_closed_loop_benchmark PRIVATE -fno-fast-math)
+        endif()
+        add_test(NAME closed_loop_benchmark COMMAND test_closed_loop_benchmark)
     endif()
-    add_test(NAME frenet_linearization COMMAND test_frenet_linearization)
-
-    add_executable(test_steering_dynamics test/test_steering_dynamics.c)
-    target_link_libraries(test_steering_dynamics PRIVATE mpc_core m)
-    if(NOT MSVC)
-        target_compile_options(test_steering_dynamics PRIVATE -fno-fast-math)
-    endif()
-    add_test(NAME steering_dynamics COMMAND test_steering_dynamics)
 endif()
 
 # ===========================================================================
@@ -69,8 +72,8 @@ if(ament_cmake_FOUND)
     find_package(ackermann_msgs REQUIRED)
     find_package(std_msgs REQUIRED)
 
-    # AutoDRIVE ROS wrapper. Legacy gym and VESC executables are intentionally
-    # not built; all actuator conversion stays in sdu_apex_autodrive.
+    # AutoDRIVE ROS wrapper.  Actuator conversion stays in
+    # sdu_apex_autodrive, so this node exposes only the team command boundary.
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/mpc_hardware_node.c)
         add_executable(mpc_autodrive_node src/mpc_hardware_node.c)
         target_link_libraries(mpc_autodrive_node mpc_core m Threads::Threads)
@@ -99,6 +102,11 @@ if(ament_cmake_FOUND)
 
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/config)
         install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/find_passing_weights.py)
+        install(PROGRAMS find_passing_weights.py
+                DESTINATION share/${PROJECT_NAME}/test)
     endif()
 
     ament_package()

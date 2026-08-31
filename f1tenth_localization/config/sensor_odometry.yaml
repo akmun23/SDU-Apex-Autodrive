@@ -1,0 +1,101 @@
+sensor_odometry:
+  ros__parameters:
+    left_encoder_topic: /autodrive/roboracer_1/left_encoder
+    right_encoder_topic: /autodrive/roboracer_1/right_encoder
+    imu_topic: /autodrive/roboracer_1/imu
+    throttle_topic: /autodrive/roboracer_1/throttle
+    odom_topic: /odom
+
+    odom_frame: odom
+    base_frame: base_link
+    lidar_frame: lidar
+    imu_frame: imu
+
+    # AutoDRIVE publishes rear-wheel joint positions as cumulative radians.
+    # Fixed documented RoboRacer geometry; do not fit this from simulator
+    # ground truth. Runtime odometry consumes only official encoder angles.
+    wheel_radius_m: 0.0590
+    encoder_angle_scale: 1.0
+    # Reject negative reset/rollover jumps and implausible positive bursts.
+    # The larger positive allowance is needed when the official bridge
+    # delivers a delayed sample while a wheel is spinning at full throttle;
+    # it does not change the documented wheel radius or encoder conversion.
+    max_encoder_step_m: 4.0
+    max_encoder_pair_skew_s: 0.05
+    lidar_x_m: 0.2733
+    lidar_y_m: 0.0
+    lidar_z_m: 0.096
+    imu_x_m: 0.08
+    imu_y_m: 0.0
+    imu_z_m: 0.055
+    # Use the official simulated orientation when its step is plausible. If
+    # one sample jumps, the node keeps the gyro-integrated yaw for that step.
+    imu_orientation_correction_gain: 1.0
+    max_imu_orientation_step_rad: 0.30
+    max_imu_dt_s: 0.5
+
+    # The IMU provides yaw and a bounded longitudinal observer. The wheel
+    # radius is still the documented 0.0590 m and is never fitted here.
+    imu_acceleration_filter_alpha: 0.35
+    wheel_slip_threshold_mps: 0.75
+    wheel_slip_ratio: 0.20
+    # The documented Sx ratio is numerically unstable near standstill.  Keep
+    # launch quantisation on the encoder branch until body speed is observable.
+    slip_observation_min_speed_mps: 0.75
+    # Do not let startup IMU bias replace accurate wheel speed at low speed;
+    # only high-speed wheel/IMU disagreement is treated as driven-wheel spin.
+    # The clean ground-truth sweep shows encoder speed remains the better
+    # body-speed measurement through roughly 15 m/s. Enable the IMU branch
+    # only once the wheel signal enters the high-slip region.
+    # Apply the measured wheel-speed -> body-speed map across the complete
+    # forward range. The documented 0.0590 m radius is still used first; this
+    # parameter only controls where the offline slip correction begins.
+    wheel_slip_activation_speed_mps: 0.0
+    encoder_reset_threshold_rad: 0.50
+    max_observer_accel_mps2: 8.0
+    observer_speed_tolerance_mps: 1.0
+    wheel_observer_correction_gain: 0.25
+    stationary_speed_threshold_mps: 0.15
+    # AutoDRIVE technical-guide longitudinal WheelCollider knots:
+    # extremum (slip, force)=(0.15, 0.72), asymptote=(0.25, 0.464).
+    forward_extremum_slip: 0.15
+    forward_extremum_value: 0.72
+    forward_asymptote_slip: 0.25
+    forward_asymptote_value: 0.464
+    # Ground-truth coast-down fit used only as a process prior when the
+    # official driven-wheel encoder is beyond the documented slip asymptote.
+    coast_model_enabled: true
+    coast_throttle_threshold: 0.02
+    coast_model_imu_weight: 0.60
+    coast_deceleration_intercept_mps2: 5.3
+    coast_deceleration_speed_gain_s_inv: 0.26
+    coast_deceleration_max_mps2: 12.0
+    throttle_feedback_timeout_s: 0.5
+    imu_stop_speed_threshold_mps: 2.0
+    imu_stationary_acceleration_threshold_mps2: 0.30
+    zero_encoder_stop_confirm_sec: 0.80
+    slip_pose_xy_variance: 0.10
+    # Offline ground-truth calibration of driven-wheel slip across the full
+    # settled 0-1 throttle response. These values are a correction map after
+    # the documented 0.0590 m wheel conversion, not a wheel-radius replacement
+    # or a controller throttle limit.
+    wheel_speed_map_wheel_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
+                                16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0]
+    wheel_speed_map_body_mps: [0.0, 1.979669, 3.928270, 5.845092, 7.738538,
+                               9.599276, 11.438255, 13.183116, 14.958249,
+                               16.881441, 18.882715, 20.485775, 22.088834,
+                               22.883600, 22.883600, 22.883600]
+
+    # Metadata estimates, not published AutoDRIVE constants.
+    pose_xy_variance: 0.01
+    pose_yaw_variance: 0.01
+    # Encoder differencing is quantized at the native bridge cadence. Smooth
+    # only the published velocity used by the speed controller; reject one
+    # cadence outlier with a short median window, then smooth it. Pose remains
+    # integrated from the unfiltered wheel increments.
+    velocity_filter_alpha: 1.0
+    velocity_median_window: 1
+    velocity_filter_decel_alpha: 1.0
+    max_velocity_accel_mps2: 40.0
+    twist_linear_variance: 0.04
+    twist_yaw_variance: 0.04

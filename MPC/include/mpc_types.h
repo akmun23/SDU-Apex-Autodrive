@@ -21,35 +21,37 @@
 /* Global dimensions */
 #define NX_GLOBAL 6                                      /* Global/body model state size used by nonlinear prediction and linearization. */
 #define NX_FRENET 5                                      /* Frenet state size used by linearized MPC dynamics. */
-#define NX_AUG 9                                         /* Augmented state size including commanded/effective steering and prior controls. */
+#define NX_AUG 10                                        /* Augmented state: Frenet dynamics, steering/acceleration response, and prior controls. */
 #define IDX_EY 0                                         /* Position of lateral error (ey) in the augmented vector. */
 #define IDX_DELTA_COMMAND 5                              /* Position of commanded front-wheel steering angle. */
 #define IDX_DELTA_EFFECTIVE 6                            /* Position of steering angle acting on the vehicle model. */
-#define IDX_DRATE_PREV 7                                 /* Position of previous steering-rate state in the augmented vector. */
-#define IDX_ACCEL_PREV 8                                 /* Position of previous acceleration state in the augmented vector. */
+#define IDX_ACCEL_EFFECTIVE 7                            /* Position of effective longitudinal acceleration acting on the vehicle model. */
+#define IDX_DRATE_PREV 8                                 /* Position of previous steering-rate state in the augmented vector. */
+#define IDX_ACCEL_PREV 9                                 /* Position of previous acceleration command in the augmented vector. */
 #define IDX_SPARSE_B_FIRST_ROW 2                         /* First augmented-state row with non-zero dense B coupling in Riccati sparse products. */
-#define NX_DENSE 7                                       /* Dense A-block width before sparse previous-control tail states. */
+#define NX_DENSE 8                                       /* Dense A-block width before sparse previous-control tail states. */
 #define NU 2                                             /* Control vector width for steering-rate and longitudinal acceleration. */
-#define RICCATI_MAX_NX  9                                /* Maximum Riccati state dimension (augmented Frenet model). */
+#define RICCATI_MAX_NX  10                               /* Maximum Riccati state dimension (augmented Frenet model). */
 #define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and acceleration). */
 
 /* Math and timing */
 #define TWO_PI (2.0 * M_PI)                              /* Full-angle constant used for heading wrap operations. */
-#define CONTROL_RATE_HZ 200.0f                           /* Controller update frequency used by cross-call scaling logic. */
+#define CONTROL_RATE_HZ 10.0f                            /* Native AutoDRIVE control cadence [Hz]. */
 #define CONTROL_DT_SECONDS (1.0f / CONTROL_RATE_HZ)      /* Controller sample period derived from control-rate definition. */
-#define PREDICTION_DT_SECONDS 0.03f                     /* Nominal prediction-step duration used for model rollout defaults. */
+#define PREDICTION_DT_SECONDS CONTROL_DT_SECONDS         /* One horizon stage equals one native interval. */
 #define CROSS_CALL_RATE_SCALE (CONTROL_DT_SECONDS / PREDICTION_DT_SECONDS) /* Normalizes first-step rate penalties across sample times. */
 #define STEERING_EFFECTIVE_TIME_CONSTANT_SECONDS 0.025f  /* Recorded-data-selected zero-dead-time effective-steering pole. */
+#define LONGITUDINAL_ACCEL_EFFECTIVE_TIME_CONSTANT_SECONDS 0.15f /* Tunable simulated actuator-response pole [s], exposed through MPC_ACCEL_EFFECTIVE_TAU_S. */
 
 /* Default MPC objective weights */
-#define WEIGHT_LAT_ERROR 1500.0f                         /* Penalizes lateral tracking deviation from the reference path. */
-#define WEIGHT_HEADING 50.0f                            /* Penalizes heading misalignment relative to path tangent. */
-#define WEIGHT_VELOCITY 200.0f                           /* Penalizes deviation from target longitudinal speed profile. */
+#define WEIGHT_LAT_ERROR 2250.0f                         /* Offline 10 Hz benchmark-selected lateral weight. */
+#define WEIGHT_HEADING 75.0f                             /* Offline 10 Hz benchmark-selected heading weight. */
+#define WEIGHT_VELOCITY 170.0f                           /* Offline 10 Hz benchmark-selected speed weight. */
 #define WEIGHT_LAT_VEL 5.0f                             /* Penalizes lateral velocity to suppress side-slip growth. */
 #define WEIGHT_YAW_RATE 1.5f                            /* Penalizes yaw-rate mismatch against reference curvature dynamics. */
 #define WEIGHT_STEER_EFFORT 2.0f                        /* Penalizes steering-rate effort to limit aggressive steering actuation. */
 #define WEIGHT_ACCEL_EFFORT 0.5f                       /* Penalizes longitudinal acceleration effort to smooth throttle/brake usage. */
-#define WEIGHT_STEER_RATE 5.0f                         /* Penalizes steering-rate change to reduce steering jerk. */
+#define WEIGHT_STEER_RATE 4.0f                          /* Offline 10 Hz benchmark-selected steering-rate weight. */
 #define WEIGHT_ACCEL_RATE 5.0f                         /* Penalizes acceleration change to reduce longitudinal jerk. */
 #define WEIGHT_EFFECTIVE_STEERING 1.0f                /* Penalizes effective-steering bias away from curvature feedforward. */
 
@@ -59,8 +61,8 @@
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
-#define PREDICTION_HORIZON 20                            /* Default maximum number of prediction stages used by the controller. */
-#define TIME_STEP_SECONDS 0.03f                         /* Default model integration period per horizon stage. */
+#define PREDICTION_HORIZON 20                            /* 20 native stages = 2.0 s look-ahead at 10 Hz. */
+#define TIME_STEP_SECONDS CONTROL_DT_SECONDS             /* Default model integration period per horizon stage. */
 
 /* Solver and model safeguards */
 #define RICCATI_COST_FACTOR 2.0f                         /* Global scaling factor applied to stage and terminal costs. */
@@ -74,20 +76,15 @@
 /* CPU warm-start / cold-start policy. */
 #define MPC_WS_CURVATURE_THRESH 0.25f                    /* Curvature jump that forces a cold start. */
 #define MPC_WS_BOUND_THRESH 0.05f                        /* Slack on ey box before a stale warm start is treated as bound-incompatible. */
-#define MPC_MODEL_SIGNATURE 3                            /* Bumped when the CPU augmented model changes. */
+#define MPC_MODEL_SIGNATURE 5                            /* Bumped when the CPU augmented model changes. */
 
 /* Default MPC configuration values */
 #define TRAJECTORY_MAXIMUM_WAYPOINTS 4000                /* Maximum trajectory samples accepted by MPC reference buffers. */
 #define TRAJECTORY_MAXIMUM_VELOCITY 20.0f                /* Cap on reference velocity accepted from trajectory input. */
 #define MIN_TRAJECTORY_SPEED_MPS 0.5f                    /* Lower bound used when trajectory speed is missing or too small. */
 
-/* Hardware/sim calibration defaults */
+/* AutoDRIVE reference defaults */
 #define TRAJECTORY_SPEED_GAIN 1.0f                       /* Global multiplier applied to reference speed profile. */
-#define STEERING_TO_SERVO_GAIN -0.7284f                  /* Linear gain mapping steering angle to servo command domain. */
-#define STEERING_TO_SERVO_OFFSET 0.55f                   /* Bias term for steering-angle to servo-command conversion. */
-#define STEERING_CORRECTION_C2 0.589566f                 /* Quadratic term in empirical steering-command correction model. */
-#define STEERING_CORRECTION_C1 0.918061f                 /* Linear term in empirical steering-command correction model. */
-#define STEERING_CORRECTION_C0 0.001490f                 /* Constant term in empirical steering-command correction model. */
 
 /* Vehicle parameter defaults and derived constants */
 #define VP_MAX_STEERING_RAD 0.5236f                      /* AutoDRIVE 2026 centre-steering saturation [rad]. */
@@ -99,21 +96,23 @@
 #define VP_MASS_KG 3.906f                                /* AutoDRIVE 2026 total vehicle mass [kg]. */
 #define VP_YAW_INERTIA_KGM2 0.035f                       /* Unverified model estimate; simulator guide does not publish yaw inertia. */
 #define VP_CG_HEIGHT_M 0.01434f                          /* AutoDRIVE 2026 center-of-mass height [m]. */
-#define VP_FRICTION_COEFF 0.72f                         /* Effective tire-road friction coefficient for force limits. */
+#define VP_FRICTION_COEFF 0.72f                         /* Documented longitudinal extremum force coefficient. */
 #define GRAVITY_MPS2 9.82f                               /* Gravitational acceleration constant used in vehicle load equations. */
 #define VP_MASS_TIMES_GRAVITY_N (VP_MASS_KG * GRAVITY_MPS2) /* Vehicle weight magnitude used by normal-load equations. */
 #define VP_INV_MASS_1_PER_KG (1.0f / VP_MASS_KG)         /* Reciprocal vehicle mass used in acceleration-state Jacobians. */
 #define VP_INV_YAW_INERTIA_1_PER_KGM2 (1.0f / VP_YAW_INERTIA_KGM2) /* Reciprocal yaw inertia used in yaw-rate Jacobians. */
 #define VP_MAX_ACCEL_MPS2 (VP_FRICTION_COEFF * GRAVITY_MPS2) /* Friction-limited forward acceleration; matches the bag run (no 1.4x over-drive). */
 #define VP_MIN_ACCEL_MPS2 (-VP_MAX_ACCEL_MPS2)           /* Braking bound mirrored from the friction-limited acceleration envelope. */
-#define VP_C_ALPHA_F 51.40f                              /* Front tire lateral-force scale used by the nonlinear tire model. */
-#define VP_C_ALPHA_R 43.10f                              /* Rear tire lateral-force scale used by the nonlinear tire model. */
+#define VP_C_ALPHA_F 51.40f                              /* Measured front small-slip lateral slope [N/rad]. */
+#define VP_C_ALPHA_R 43.10f                              /* Measured rear small-slip lateral slope [N/rad]. */
+#define VP_LATERAL_EXTREMUM_SLIP 0.01f                  /* AutoDRIVE lateral extremum slip S_y. */
+#define VP_LATERAL_EXTREMUM_VALUE 1.00f                 /* AutoDRIVE lateral extremum force / F_z. */
+#define VP_LATERAL_ASYMPTOTE_SLIP 0.10f                 /* AutoDRIVE lateral asymptote slip S_y. */
+#define VP_LATERAL_ASYMPTOTE_VALUE 0.50f                /* AutoDRIVE lateral asymptote force / F_z. */
 #define VP_NORM_LOAD_F (VP_MASS_TIMES_GRAVITY_N * VP_CG_TO_REAR_AXLE_M / VP_WHEELBASE_M) /* Front normal load from static axle-load distribution. */
 #define VP_NORM_LOAD_R (VP_MASS_TIMES_GRAVITY_N * VP_CG_TO_FRONT_AXLE_M / VP_WHEELBASE_M) /* Rear normal load from static axle-load distribution. */
 #define VP_D_FRONT (VP_FRICTION_COEFF * VP_NORM_LOAD_F) /* Front lateral force scale from friction and normal-load estimate. */
 #define VP_D_REAR (VP_FRICTION_COEFF * VP_NORM_LOAD_R)  /* Rear lateral force scale from friction and normal-load estimate. */
-#define VP_C_SHAPE 1.9f                                  /* Tire-model shape factor governing force saturation transition. */
-#define VP_INV_C_SHAPE (1.0f / VP_C_SHAPE)               /* Reciprocal tire shape factor for local-slope calculations. */
 #define MIN_STIFF_SCALE 0.1f                             /* Lower bound on stiffness scaling to avoid low-speed singularities. */
 #define VP_FRONT_CORNERING_STIFFNESS (VP_C_ALPHA_F / VP_D_FRONT) /* Front normalized cornering stiffness used in slip-force mapping. */
 #define VP_REAR_CORNERING_STIFFNESS (VP_C_ALPHA_R / VP_D_REAR)   /* Rear normalized cornering stiffness used in slip-force mapping. */

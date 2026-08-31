@@ -15,6 +15,12 @@ namespace gpu_amcl_cpp {
 
 namespace {
 
+// `max_beams` limits sensor-model work, not the number of ranges delivered by
+// a LiDAR scan.  The official RoboRacer interface provides 1081 ranges, which
+// are subsequently subsampled by the sensor-model kernel.  Keep enough staging
+// space for a complete scan while retaining the configured compute budget.
+constexpr int kMinFullScanCapacity = 2048;
+
 double timed_memcpy_async(
     void* dst,
     const void* src,
@@ -104,9 +110,9 @@ void ParticleFilter::init(const Config& pf_cfg,
     d_log_w_.allocate(cfg_.max_particles);
     d_scratch_w_.allocate(cfg_.max_particles);
 
-    // Pre-allocate range buffer based on max_beams config
+    // Pre-allocate full-scan staging independently from sensor-model sampling.
     sensor_max_beams_ = sm_cfg.max_beams;
-    max_ranges_ = sm_cfg.max_beams + 1;
+    max_ranges_ = std::max(sm_cfg.max_beams + 1, kMinFullScanCapacity);
     d_ranges_.allocate(max_ranges_);
 
     // CUB temp storage for GPU reductions
@@ -497,18 +503,35 @@ bool ParticleFilter::update_weights(const float* ranges, int num_ranges,
                                     float angle_min, float angle_inc) {
     const auto update_start = std::chrono::high_resolution_clock::now();
 
-    // Guard: ensure scan fits in pre-allocated buffer (set by max_beams param)
+    // Guard: ensure scan fits in the full-scan staging buffer.  The sensor
+    // model itself subsamples to `sensor_max_beams_` after this upload.
     if (num_ranges > max_ranges_) {
         std::fprintf(stderr,
-                     "[gpu_amcl_cpp][ParticleFilter] ERROR: num_ranges (%d) exceeds max_ranges_ (%d). "
-                     "Increase max_beams in config.\n",
+                     "[gpu_amcl_cpp][ParticleFilter] ERROR: num_ranges (%d) exceeds scan buffer capacity (%d). "
+                     "Increase kMinFullScanCapacity.\n",
                      num_ranges, max_ranges_);
         return false;
     }
 
-    // Copy to pinned staging, then async DMA to device.
-    memcpy(h_ranges_pinned_, ranges, num_ranges * sizeof(float));
-    const size_t scan_bytes = static_cast<size_t>(num_ranges) * sizeof(float);
+    if (sensor_max_beams_ <= 0) {
+        std::fprintf(stderr,
+                     "[gpu_amcl_cpp][ParticleFilter] ERROR: max_beams must be positive.\n");
+        return false;
+    }
+
+    // Keep the transport scan intact at the ROS boundary, but decimate before
+    // GPU upload.  This makes `max_beams` a real compute and shared-memory
+    // bound rather than merely a loop stride inside a kernel that still stages
+    // every one of the official 1081 LiDAR ranges.
+    const int beam_step = std::max(1, num_ranges / sensor_max_beams_);
+    int sampled_num_ranges = 0;
+    for (int beam = 0; beam < num_ranges; beam += beam_step) {
+        h_ranges_pinned_[sampled_num_ranges++] = ranges[beam];
+    }
+    const float sampled_angle_inc = angle_inc * static_cast<float>(beam_step);
+
+    // Copy the bounded scan staging buffer, then asynchronously upload it.
+    const size_t scan_bytes = static_cast<size_t>(sampled_num_ranges) * sizeof(float);
     last_transfer_diag_.scan_upload_ms = timed_memcpy_async(
         d_ranges_.ptr(), h_ranges_pinned_, scan_bytes,
         cudaMemcpyHostToDevice, stream_.get());
@@ -522,8 +545,8 @@ bool ParticleFilter::update_weights(const float* ranges, int num_ranges,
 
     // §5: Reuse persistent log-weight buffer (no per-frame alloc).
     sensor_.compute_weights(d_active_particles_, n_,
-                            d_ranges_.ptr(), num_ranges,
-                            angle_min, angle_inc,
+                            d_ranges_.ptr(), sampled_num_ranges,
+                            angle_min, sampled_angle_inc,
                             d_log_w_.ptr(), stream_.get());
     last_stage_diag_.sensor_model_ms = timed_stream_stage(stream_.get(), []() {});
 
@@ -541,7 +564,7 @@ bool ParticleFilter::update_weights(const float* ranges, int num_ranges,
     std::swap(d_weights_, d_scratch_w_); // Pointer swap, no copy, no sync needed. d_weights_ now has normalised weights for resampling.
 
     const auto confidence_start = std::chrono::high_resolution_clock::now();
-    update_scan_confidence(num_ranges);
+    update_scan_confidence(sampled_num_ranges);
     const auto confidence_stop = std::chrono::high_resolution_clock::now();
     last_stage_diag_.scan_confidence_ms =
         std::chrono::duration<double, std::milli>(
@@ -1306,6 +1329,27 @@ PoseEstimate ParticleFilter::get_estimate() {
 
 PoseEstimate ParticleFilter::get_cluster_estimate(double* cluster_weight_out,
                                                   double* second_cluster_weight_out) {
+    return get_cluster_estimate_impl(
+        false, 0.0, 0.0, 0.0, cluster_weight_out, second_cluster_weight_out);
+}
+
+PoseEstimate ParticleFilter::get_cluster_estimate_near(
+    const PoseEstimate& reference,
+    double association_radius_m,
+    double* cluster_weight_out,
+    double* second_cluster_weight_out) {
+    return get_cluster_estimate_impl(
+        true, reference.x, reference.y, association_radius_m,
+        cluster_weight_out, second_cluster_weight_out);
+}
+
+PoseEstimate ParticleFilter::get_cluster_estimate_impl(
+    bool constrain_to_reference,
+    double reference_x,
+    double reference_y,
+    double association_radius_m,
+    double* cluster_weight_out,
+    double* second_cluster_weight_out) {
     if (cluster_weight_out != nullptr) {
         *cluster_weight_out = 1.0;
     }
@@ -1321,12 +1365,26 @@ PoseEstimate ParticleFilter::get_cluster_estimate(double* cluster_weight_out,
 
     const float radius = static_cast<float>(cfg_.cluster_radius_m);
     const float radius2 = radius * radius;
-    launch_gpu_find_cluster_seed(
-        d_active_particles_, d_weights_.ptr(),
-        d_cluster_scores_,
-        d_cluster_best_, d_cluster_second_,
-        d_cluster_temp_, cluster_temp_bytes_,
-        n_, radius2, stream_.get());
+    if (constrain_to_reference && std::isfinite(reference_x) &&
+        std::isfinite(reference_y) && association_radius_m > 0.0) {
+        launch_gpu_find_cluster_seed_near(
+            d_active_particles_, d_weights_.ptr(),
+            d_cluster_scores_,
+            d_cluster_best_, d_cluster_second_,
+            d_cluster_temp_, cluster_temp_bytes_,
+            n_, radius2,
+            static_cast<float>(reference_x),
+            static_cast<float>(reference_y),
+            static_cast<float>(association_radius_m * association_radius_m),
+            stream_.get());
+    } else {
+        launch_gpu_find_cluster_seed(
+            d_active_particles_, d_weights_.ptr(),
+            d_cluster_scores_,
+            d_cluster_best_, d_cluster_second_,
+            d_cluster_temp_, cluster_temp_bytes_,
+            n_, radius2, stream_.get());
+    }
     CUDA_CHECK(cudaMemcpyAsync(h_cluster_best_, d_cluster_best_,
                                sizeof(ClusterScoreResult),
                                cudaMemcpyDeviceToHost, stream_.get()));

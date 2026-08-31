@@ -1,0 +1,21 @@
+# Diagnostics-only completion of the high-throttle envelope. The abort
+# threshold is deliberately above wheel-spin readings so the 0.80 and 1.00
+# commands are actually recorded.
+calibration:
+  ros__parameters:
+    mode: throttle_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_high_range_end
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    throttle_sequence: [0.80, 1.00]
+    speed_sequence_mps: [0.0]
+    steering_sequence: [0.0]
+    hold_sec: 5.0
+    zero_settle_sec: 1.0
+    maximum_test_speed_mps: 100.0
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.25

@@ -1,0 +1,19 @@
+five_lap_map_saver:
+  ros__parameters:
+    odom_topic: /odom
+    save_map_service: /slam_toolbox/save_map
+    completion_topic: /sdu/mapping_complete
+
+    # The map name is written without an extension.  SLAM Toolbox creates the
+    # matching .yaml and .pgm files in this directory.
+    output_directory: /workspace/src/f1tenth_planning/maps
+    map_name: autodrive_track_5laps
+    target_laps: 5
+
+    # A lap is a return to the encoder/IMU odometry start point only after the
+    # car has left it and travelled a meaningful distance.  This avoids using
+    # the SLAM map pose while loop closure is still correcting it.
+    start_radius_m: 1.00
+    departure_radius_m: 1.50
+    minimum_lap_distance_m: 8.00
+    maximum_odom_step_m: 1.00

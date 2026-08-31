@@ -1355,12 +1355,12 @@ def main():
     parser.add_argument(
         '--opt-type',
         choices=['shortest_path', 'mincurv', 'mincurv_iqp', 'mintime'],
-        default='mintime',
+        default='mincurv',
         help='Optimization type (default: mincurv)',
     )
     parser.add_argument(
-        '--max-speed', type=float, default=12.0,
-        help='Clamp velocity to this value [m/s] (default: 12.0)',
+        '--max-speed', type=float, default=22.88,
+        help='Clamp velocity to this value [m/s] (default: 22.88)',
     )
     parser.add_argument(
         '--min-speed', type=float, default=2.0,
@@ -1673,6 +1673,20 @@ def main():
             rf'\g<1>{optimizer_width:.3f}',
             original_ini_content,
         )
+
+        # The upstream racecar.ini carries a 22.88 m/s vehicle limit.  The
+        # velocity-profile solver validates that this limit is covered by its
+        # GGV table before the later CSV clamp is applied, so the requested
+        # AutoDRIVE speed must be applied here too.
+        patched_ini, v_max_replacements = re.subn(
+            r'("v_max":\s*)[\d.]+',
+            rf'\g<1>{args.max_speed:.3f}',
+            patched_ini,
+            count=1,
+        )
+        if v_max_replacements != 1:
+            raise RuntimeError("could not set veh_params.v_max in racecar.ini")
+        print(f"  Patched racecar.ini: v_max -> {args.max_speed:.3f} m/s")
 
         # Patch s_reg (spline smoothing factor)
         s_reg_val = float(args.smooth_factor)

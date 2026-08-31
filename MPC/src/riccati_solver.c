@@ -203,16 +203,15 @@ void riccati_solver_pass(
         /* Step 2: S = R_aug + M*B (nu x nu) */
         float S[2][2];
         S[0][0] = r_aug_diag[0]; S[0][1] = 0.0f; S[1][0] = 0.0f; S[1][1] = r_aug_diag[1];
-        /* Same pattern as above across
-         * [IDX_SPARSE_B_FIRST_ROW, IDX_DRATE_PREV),
-         * with identity-channel terms injected below for rows 6 and 7. */
+        /* Same pattern as above across the dense prefix, with the two
+         * previous-control identity channels injected below. */
         for (int s = IDX_SPARSE_B_FIRST_ROW; s < IDX_DRATE_PREV; s++) {
             S[0][0] += M[0][s] * sd->B[s][0];
             S[0][1] += M[0][s] * sd->B[s][1];
             S[1][0] += M[1][s] * sd->B[s][0];
             S[1][1] += M[1][s] * sd->B[s][1];
         }
-        // Add identity-channel contributions from rows 6 and 7 (if any)
+        // Add identity-channel contributions from the previous-control tail.
         S[0][0] += M[0][IDX_DRATE_PREV];
         S[0][1] += M[0][IDX_ACCEL_PREV];
         S[1][0] += M[1][IDX_DRATE_PREV];
@@ -301,7 +300,8 @@ void riccati_solver_pass(
         }
 
         /* Fused: P = Q_diag + A^T*PA + G^T*K */
-        /* Dense block: rows 0..5, cols 0..5 */
+        /* Dense block includes effective acceleration; the final two rows and
+         * columns are the previous-control tail. */
         for (int i = 0; i < NX_DENSE; i++) {
             for (int j = 0; j < NX_DENSE; j++) {
                 float sum = (i == j) ? q_aug_diag[i] : 0.0f;

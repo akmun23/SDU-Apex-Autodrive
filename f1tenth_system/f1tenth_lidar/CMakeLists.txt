@@ -37,25 +37,10 @@ ament_target_dependencies(scan_splitter_node
   tf2_ros
 )
 
-# ── Full-resolution recording relay (/scan_full -> reduced racing /scan) ──
-add_executable(scan_downsampler_node
-  src/scan_downsampler_node.cpp
-)
-ament_target_dependencies(scan_downsampler_node
-  rclcpp
-  sensor_msgs
-)
-
-install(TARGETS scan_splitter_node scan_downsampler_node
+install(TARGETS scan_splitter_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# ── Python diagnostic script ──────────────────────────────────────────
-# Install launch files
-install(DIRECTORY
-  launch
-  DESTINATION share/${PROJECT_NAME}
-)
 
 # Install config files
 install(DIRECTORY

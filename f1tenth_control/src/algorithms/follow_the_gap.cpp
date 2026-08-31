@@ -490,9 +490,8 @@ double FollowTheGap::calculateSpeed(
 }
 
 double FollowTheGap::rateLimitSteering(double target, double last, double dt) {
-    // Calculate maximum allowed change based on configured max steering rate
-    // Might be redundant when driving on a real car since the physical 
-    // steering mechanism already has rate limits,
+    // Limit the discrete command step at the native 10 Hz interface.  This
+    // keeps scan-to-scan steering changes bounded for the simulated actuator.
     double max_change = config_.max_steering_rate * dt;
     double delta = target - last;
     if (std::abs(delta) > max_change) {

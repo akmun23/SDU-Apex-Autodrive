@@ -4,18 +4,19 @@
 /**
  * @file pure_pursuit_node.hpp
  * @brief ROS2 node wrapper for the Pure Pursuit path-following controller.
- * @details Fuses odometry (velocity) with an external pose estimate (EKF).
+ * @details Fuses encoder/IMU odometry (velocity) with the CUDA AMCL pose.
  *          Applies command-side rate limiting on steering and acceleration.
- *          Supports online trajectory updates from a local planner topic.
- *          Soft-start ramp is applied after trajectory load.
+ *          Follows the explicitly selected planning trajectory for the race.
+ *          Commands are shaped only by configured actuator-rate limits.
  * @dependencies pure_pursuit.hpp, rclcpp, nav_msgs, ackermann_msgs, geometry_msgs
  */
 
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <std_msgs/msg/float32.hpp>
 
 #include "algorithms/pure_pursuit.hpp"
 #include <memory>
@@ -30,16 +31,18 @@ namespace f1tenth_control {
  * 
  * This node:
  * - Loads a pre-computed racing line trajectory from CSV
- * - Subscribes to /ekf_pose for vehicle state
- * - Publishes drive commands to /drive
+ * - Subscribes to /ekf_pose and /odom for vehicle state
+ * - Publishes physical-unit commands to /cmd/controller
  * - Supports dynamic parameter reconfiguration
  * 
  * Topics:
  *   Subscriptions:
  *     - /ekf_pose (geometry_msgs/PoseWithCovarianceStamped): Vehicle pose
+ *     - /odom (nav_msgs/Odometry): Encoder/IMU velocity and odometry
+ *     - /autodrive/roboracer_1/lidar (sensor_msgs/LaserScan): Control event
  *   
  *   Publications:
- *     - /drive (ackermann_msgs/AckermannDriveStamped): Control commands
+ *     - /cmd/controller (ackermann_msgs/AckermannDriveStamped): Control commands
  * 
  * @param trajectory_file Path to CSV trajectory file
  * @param min_lookahead Minimum lookahead distance [m]
@@ -70,15 +73,12 @@ private:
     // ROS2 Communication
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;                         // Subscription for odometry messages
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;   // Subscription for pose estimate messages
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr local_raceline_sub_;                   // Subscription for local raceline updates
+    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_sub_;                    // Official 10 Hz sensor trigger
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_feedback_sub_;
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;    // Publisher for drive commands
+    std::mutex control_mutex_;             // Prevent overlapping sensor-triggered updates
     
-    // Soft start
-    rclcpp::Time soft_start_time_;          // Timestamp when soft start was initiated
-    bool soft_start_initialized_{false};    // Whether the soft start timer has been initialized
-    double soft_start_distance_traveled_{0.0};  // Distance tracked during soft-start phase [m]
-    Point2D last_position_{};               // Last pose sample used for soft-start distance integration
     double last_cmd_steering_{0.0};         // Last commanded steering angle for rate limiting
     double last_cmd_speed_{0.0};            // Last commanded speed for rate limiting
     bool cmd_history_initialized_{false};   // Whether the command history has been initialized for rate limiting
@@ -86,26 +86,36 @@ private:
     
     // Parameters
     std::string trajectory_file_;           // Path to trajectory CSV file
-    std::string odom_topic_{"/autodrive/roboracer_1/odom"};
-    std::string pose_topic_{"/amcl_pose"};
-    std::string local_raceline_topic_{"/local_raceline"};
+    std::string odom_topic_{"/odom"};
+    std::string pose_topic_{"/ekf_pose"};
+    std::string lidar_topic_{"/autodrive/roboracer_1/lidar"};
     std::string command_topic_{"/cmd/controller"};
     std::string path_frame_{"map"};
-    std::string command_frame_{"roboracer_1"};
+    std::string command_frame_{"base_link"};
     bool pose_received_{false};             // Whether a valid pose estimate has been received
     bool odom_received_{false};             // Whether a valid odometry message has been received
     int localization_good_updates_{0};      // Consecutive covariance-qualified poses
     rclcpp::Time last_pose_time_;           // Timestamp of the last received pose message
     rclcpp::Time last_odom_time_;           // Timestamp of the last received odometry message
+    rclcpp::Time last_pose_stamp_;          // Sensor timestamp of the last accepted pose
+    rclcpp::Time last_odom_stamp_;           // Sensor timestamp of the last odometry message
+    rclcpp::Time last_steering_feedback_time_;
+    bool steering_feedback_received_{false};
+    double steering_feedback_angle_{0.0};
     double pose_timeout_s_{0.1};            // Timeout for considering pose data stale [s]
     double odom_timeout_s_{0.2};            // Timeout for considering odometry data stale [s]
+    double state_extrapolation_max_s_{0.12}; // Allowed-sensor pose-to-command latency [s]
+    double control_rate_hz_{10.0};           // Nominal cadence; actual updates are LiDAR-triggered
     double localization_covariance_xy_max_{0.25};   // Maximum AMCL x/y variance [m^2]
     double localization_covariance_yaw_max_{0.12};  // Maximum AMCL yaw variance [rad^2]
     int localization_required_updates_{5};          // Consecutive qualified poses before drive
-    double max_speed_{2.0};                 // [m/s] Maximum commanded speed
-    double max_steering_rate_{2.8};         // [rad/s] Maximum rate of change for steering angle
+    double max_speed_{22.88};               // [m/s] Documented simulator envelope
+    double max_steering_rate_{3.2};         // [rad/s] AutoDRIVE documented limit
     double max_accel_cmd_{3.0};             // [m/s^2] Maximum acceleration command for speed ramping
-    double max_decel_cmd_{5.0};             // [m/s^2] Maximum deceleration command for speed ramping
+    double max_decel_cmd_{8.0};             // [m/s^2] Maximum deceleration command for speed ramping
+    std::string steering_feedback_topic_{"/autodrive/roboracer_1/steering"};
+    double steering_feedback_timeout_s_{0.25};
+    double steering_feedback_lead_gain_{0.25};
     
     // Parameter handling
     /**
@@ -146,32 +156,29 @@ private:
      */
     void poseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
 
-    /**
-     * @brief Callback for local raceline updates.
-     * @param msg Shared pointer to the received Path message representing the updated local raceline trajectory.
-     * @return None.
-     */
-    void localRacelineCallback(const nav_msgs::msg::Path::SharedPtr msg);
+    /** Run one control update for each incoming official LiDAR scan. */
+    void lidarCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg);
+
+    /** Store the official raw-radian steering actuator feedback. */
+    void steeringFeedbackCallback(const std_msgs::msg::Float32::ConstSharedPtr msg);
 
     /**
-     * @brief Main control loop callback.
-     * This function is called periodically 
-     * by a timer and executes one cycle of the 
-     * Pure Pursuit control logic, including state checks, 
-     * controller evaluation, command generation, and publishing.
+     * @brief Main control loop callback for one LiDAR event.
+     * Executes one cycle of Pure Pursuit control using the newest allowed
+     * localization and odometry state extrapolated to the scan timestamp.
      * @return None.
      */
-    void controlLoop();
+    void controlLoop(const rclcpp::Time & event_stamp);
     
     // Publishing
     /**
      * @brief Publish drive command based on computed steering and speed.
-     * This function constructs an AckermannDriveStamped message from the given steering angle and speed, applies any necessary rate limiting or soft start logic, and publishes it to the /drive topic.
+     * This function constructs and publishes an AckermannDriveStamped command.
      * @param steering Desired steering angle in radians.
      * @param speed Desired speed in meters per second.
      * @return None.
      */
-    void publishDriveCommand(double steering, double speed);
+    void publishDriveCommand(double steering, double speed, double acceleration = 0.0);
 
     // Helpers
 
