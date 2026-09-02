@@ -1,0 +1,52 @@
+schema_version: 2
+description: >-
+  Calibration workspace intentionally reset for one new encoder/IMU/odom
+  identification dataset. Ground truth is diagnostics-only and must never be
+  an input to competition runtime estimation or control.
+repository:
+  revision: pending_after_identification_grid
+  status_date: 2026-09-02
+  analyzer: sdu_apex_autodrive/sdu_apex_autodrive/scripts/analyze_calibration.py
+  fit_policy:
+    - Split by scheduled reset epoch before fitting.
+    - Use source timestamps and measured callback rates, not recorder row rate.
+    - Keep full-brake/coast intervals; encoder standstill with moving ground
+      truth is a slip observation, not a reset or invalid sample.
+    - Fit on one subset of epochs and verify on held-out epochs.
+csv_cleanup:
+  calibration_csvs_remaining_in_workspace: 0
+  archived_csv_count: 263
+  archive: /home/akselmo/.local/share/Trash/files/SDU-Apex-Autodrive-calibration-20260902
+  planner_source_csvs_preserved: true
+planned_single_run:
+  mode: identification_grid
+  output_dir: raw/latest_identification_grid
+  scene: official_open_ground_simulator_scene
+  amcl_started: false
+  simulator_ground_truth_recorded: true
+  scheduled_reset_between_grid_bands: true
+  reset_on_frozen_encoder_during_braking: false
+  grid_nominal_speed_mps: [0.0, 3.0, 6.0, 9.0, 12.0, 16.0]
+  throttle_values: [0.0, 0.03, 0.06, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80, 1.0]
+  recorded_groups:
+    - throttle command and feedback
+    - ground-truth velocity and derived acceleration
+    - IMU acceleration, yaw rate, orientation and source timestamp
+    - raw encoder angles and timestamp-derived angular speeds
+    - wheel speed, ground-truth slip speed and slip ratio
+    - sensor odometry pose, speed and diagnostics
+    - local EKF pose and covariance
+    - callback event counts and rolling measured rates
+  output_csv_is_not_runtime_input: true
+runtime_architecture:
+  local_motion_chain: official_encoders_and_imu -> sensor_odometry -> local_ekf_in_odom_frame
+  global_position_chain: lidar_and_track_map -> independent_amcl_in_map_frame -> map_to_odom_correction
+  amcl_direct_ekf_subscription: false
+  ground_truth_runtime_input: false
+map_and_raceline:
+  map_yaml: ../../../f1tenth_planning/maps/autodrive_compete_2026.yaml
+  raceline_csv: ../../../f1tenth_planning/trajectories/icra_2025_raceline.csv
+  note: >-
+    These official competition-track assets are preserved. The open-ground
+    identification run does not start AMCL because that scene has no matching
+    map; AMCL will be evaluated later on the same track map and raceline.

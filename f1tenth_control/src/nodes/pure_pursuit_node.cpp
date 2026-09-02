@@ -811,10 +811,12 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
             output.cross_track_error, output.closest_idx, output.target_idx,
             cmd_steer, cmd_speed);
         
-        const double requested_accel = std::clamp(
-            (cmd_speed - std::max(0.0, state.velocity)) / std::max(dt_cmd, 0.05),
-            -max_decel_cmd_, max_accel_cmd_);
-        publishDriveCommand(cmd_steer, cmd_speed, requested_accel);
+        // The actuator boundary already closes the longitudinal loop from the
+        // requested speed and converts its speed error into throttle.  Do not
+        // also encode (target-speed)/dt in AckermannDrive.acceleration: that
+        // double-counts the launch demand and can overshoot a low target by a
+        // large margin at the native simulator cadence.
+        publishDriveCommand(cmd_steer, cmd_speed, 0.0);
     } else {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, 
                             "Invalid Pure Pursuit output");

@@ -22,8 +22,13 @@ slam_toolbox:
     min_laser_range: 0.06
     max_laser_range: 10.0
     minimum_time_interval: 0.05
-    transform_timeout: 0.2
-    tf_buffer_duration: 10.0
+    # The simulator bridge delivers LiDAR and encoder events at roughly
+    # 4.3 Hz. Their source stamps agree, but DDS delivery can leave the
+    # transform briefly outside slam_toolbox's default 0.2 s lookup window.
+    # Keep the source timestamps intact and allow the measured delivery
+    # jitter instead of dropping otherwise valid scans.
+    transform_timeout: 1.0
+    tf_buffer_duration: 60.0
     enable_interactive_mode: false
 
     use_scan_matching: true

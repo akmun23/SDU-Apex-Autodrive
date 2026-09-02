@@ -1,7 +1,9 @@
 pure_pursuit_node:
   ros__parameters:
     odom_topic: /odom
-    pose_topic: /ekf_pose
+    # AMCL is the independent map-frame position source. /ekf_pose is local
+    # odom-frame motion and is not consumed as a map-frame correction.
+    pose_topic: /amcl_pose
     lidar_topic: /autodrive/roboracer_1/lidar
     command_topic: /cmd/controller
     steering_feedback_topic: /autodrive/roboracer_1/steering
@@ -71,7 +73,7 @@ pure_pursuit_node:
 stanley_node:
   ros__parameters:
     odom_topic: /odom
-    pose_topic: /ekf_pose
+    pose_topic: /amcl_pose
     lidar_topic: /autodrive/roboracer_1/lidar
     command_topic: /cmd/controller
     path_frame: map

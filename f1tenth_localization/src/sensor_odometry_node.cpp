@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -14,7 +15,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -60,6 +63,11 @@ public:
     // temporary sensor dropout while propulsion is still applied.
     declare_parameter("throttle_topic", "/autodrive/roboracer_1/throttle");
     declare_parameter("odom_topic", "/odom");
+    declare_parameter("diagnostics_topic", "/odom/diagnostics");
+    // Simulator epoch resets are diagnostics-only. Production odometry must
+    // remain continuous and leaves this disabled.
+    declare_parameter("reset_enabled", false);
+    declare_parameter("reset_topic", "/autodrive/reset_command");
 
     declare_parameter("odom_frame", "odom");
     declare_parameter("base_frame", "base_link");
@@ -135,6 +143,9 @@ public:
     declare_parameter("imu_stationary_acceleration_threshold_mps2", 0.30);
     declare_parameter("zero_encoder_stop_confirm_sec", 0.80);
     declare_parameter("slip_pose_xy_variance", 0.10);
+    declare_parameter("encoder_reset_covariance_duration_s", 1.0);
+    declare_parameter("encoder_reset_pose_xy_variance", 0.25);
+    declare_parameter("encoder_reset_twist_linear_variance", 0.50);
     declare_parameter(
       "wheel_speed_map_wheel_mps",
       std::vector<double>{0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
@@ -237,6 +248,12 @@ public:
       0.0, get_parameter("zero_encoder_stop_confirm_sec").as_double());
     slip_pose_xy_var_ = std::max(
       pose_xy_var_, get_parameter("slip_pose_xy_variance").as_double());
+    encoder_reset_covariance_duration_s_ = std::max(
+      0.0, get_parameter("encoder_reset_covariance_duration_s").as_double());
+    encoder_reset_pose_xy_var_ = std::max(
+      pose_xy_var_, get_parameter("encoder_reset_pose_xy_variance").as_double());
+    encoder_reset_twist_linear_var_ = std::max(
+      twist_linear_var_, get_parameter("encoder_reset_twist_linear_variance").as_double());
     wheel_speed_map_wheel_mps_ = get_parameter(
       "wheel_speed_map_wheel_mps").as_double_array();
     wheel_speed_map_body_mps_ = get_parameter(
@@ -267,6 +284,8 @@ public:
 
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
       get_parameter("odom_topic").as_string(), rclcpp::QoS(10));
+    diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+      get_parameter("diagnostics_topic").as_string(), rclcpp::QoS(10));
 
     auto sensor_qos = rclcpp::SensorDataQoS().keep_last(5);
     left_sub_ = create_subscription<sensor_msgs::msg::JointState>(
@@ -287,6 +306,15 @@ public:
       [this](std_msgs::msg::Float32::ConstSharedPtr msg) {
         throttle_callback(*msg);
       });
+    if (get_parameter("reset_enabled").as_bool()) {
+      reset_sub_ = create_subscription<std_msgs::msg::Bool>(
+        get_parameter("reset_topic").as_string(), rclcpp::QoS(10),
+        [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+          if (msg->data) {
+            reset_diagnostic_epoch();
+          }
+        });
+    }
     publish_static_transforms();
     RCLCPP_INFO(
       get_logger(),
@@ -294,6 +322,54 @@ public:
   }
 
 private:
+
+  void reset_diagnostic_epoch()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The calibration harness verifies that the vehicle has stopped before
+    // sending this event. Rebaseline every local state variable so /odom
+    // starts at the simulator spawn for the next independent grid point.
+    have_left_ = false;
+    have_right_ = false;
+    left_updated_ = false;
+    right_updated_ = false;
+    encoder_initialized_ = false;
+    imu_initialized_ = false;
+    left_angle_ = 0.0;
+    right_angle_ = 0.0;
+    prev_left_ = 0.0;
+    prev_right_ = 0.0;
+    left_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    right_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    prev_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    imu_yaw_zero_ = 0.0;
+    imu_raw_yaw_ = 0.0;
+    last_imu_relative_yaw_ = 0.0;
+    imu_integrated_yaw_ = 0.0;
+    imu_yaw_rate_ = 0.0;
+    odom_yaw_ = 0.0;
+    prev_yaw_ = 0.0;
+    last_imu_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    have_imu_stamp_ = false;
+    speed_mps_ = 0.0;
+    recent_raw_speeds_.clear();
+    raw_wheel_speed_mps_ = 0.0;
+    corrected_wheel_speed_mps_ = 0.0;
+    longitudinal_slip_ = 0.0;
+    wheel_slip_detected_ = false;
+    wheel_observation_confidence_ = 1.0;
+    zero_encoder_duration_s_ = 0.0;
+    coast_model_speed_mps_ = 0.0;
+    coast_model_active_ = false;
+    last_motion_sign_ = 1.0;
+    x_ = 0.0;
+    y_ = 0.0;
+    reset_longitudinal_observer();
+    have_throttle_feedback_ = false;
+    throttle_feedback_ = 0.0;
+    encoder_reset_active_ = false;
+    RCLCPP_INFO(get_logger(), "Diagnostic odometry epoch reset to spawn origin");
+  }
 
   void throttle_callback(const std_msgs::msg::Float32 & msg)
   {
@@ -361,9 +437,11 @@ private:
         imu_integrated_yaw_ = wrap_angle(imu_integrated_yaw_ + gyro_delta);
 
         // AutoDRIVE occasionally emits an orientation sample with a large
-        // discontinuity although its gyro stream remains smooth. Never let
-        // that one sample teleport odometry. When the absolute orientation is
-        // plausible, use it only as a slow drift correction to the gyro.
+        // discontinuity although its gyro stream remains smooth. This also
+        // occurs when the simulator teleports the vehicle during a diagnostic
+        // reset. Never let that sample, or the next correction, teleport
+        // odometry. Rebase the raw orientation while preserving the integrated
+        // yaw and let the gyro continue from the continuous state.
         if (std::abs(raw_delta) <= max_imu_orientation_step_rad_) {
           const double correction = wrap_angle(raw_relative_yaw - imu_integrated_yaw_);
           imu_integrated_yaw_ = wrap_angle(
@@ -373,10 +451,14 @@ private:
             get_logger(), *get_clock(), 2000,
             "Ignoring discontinuous IMU yaw sample (step=%.3f rad); using gyro integration",
             raw_delta);
+          imu_yaw_zero_ = wrap_angle(raw_yaw - imu_integrated_yaw_);
+          last_imu_relative_yaw_ = imu_integrated_yaw_;
         }
       }
       odom_yaw_ = imu_integrated_yaw_;
-      last_imu_relative_yaw_ = raw_relative_yaw;
+      if (std::abs(raw_delta) <= max_imu_orientation_step_rad_) {
+        last_imu_relative_yaw_ = raw_relative_yaw;
+      }
       last_imu_stamp_ = stamp;
       have_imu_stamp_ = true;
     }
@@ -476,6 +558,10 @@ private:
       speed_mps_ = 0.0;
       reset_longitudinal_observer();
       recent_raw_speeds_.clear();
+      raw_wheel_speed_mps_ = 0.0;
+      corrected_wheel_speed_mps_ = 0.0;
+      longitudinal_slip_ = 0.0;
+      wheel_observation_confidence_ = 1.0;
       encoder_initialized_ = true;
       publish_odom(stamp, 0.0);
       return;
@@ -505,24 +591,20 @@ private:
         std::abs(dr) > max_encoder_step_m_) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
-        "Encoder discontinuity/reset (left=%.3f m right=%.3f m); resetting odometry origin",
+        "Encoder discontinuity/reset (left=%.3f m right=%.3f m); rebaselining only",
         dl, dr);
       prev_left_ = left_angle_;
       prev_right_ = right_angle_;
       prev_stamp_ = stamp;
-      x_ = 0.0;
-      y_ = 0.0;
-      if (imu_initialized_ && std::isfinite(imu_raw_yaw_)) {
-        imu_yaw_zero_ = imu_raw_yaw_;
-        last_imu_relative_yaw_ = 0.0;
-        imu_integrated_yaw_ = 0.0;
-        odom_yaw_ = 0.0;
-      }
-      speed_mps_ = 0.0;
-      reset_longitudinal_observer();
       recent_raw_speeds_.clear();
       prev_yaw_ = odom_yaw_;
-      publish_odom(stamp, 0.0);
+      raw_wheel_speed_mps_ = std::numeric_limits<double>::quiet_NaN();
+      corrected_wheel_speed_mps_ = std::numeric_limits<double>::quiet_NaN();
+      longitudinal_slip_ = std::numeric_limits<double>::quiet_NaN();
+      ++encoder_reset_count_;
+      encoder_reset_active_ = true;
+      last_encoder_reset_stamp_ = stamp;
+      publish_odom(stamp, speed_mps_);
       return;
     }
 
@@ -540,6 +622,9 @@ private:
     const double longitudinal_slip =
       (wheel_speed - imu_body_speed) / slip_denominator;
     const double absolute_longitudinal_slip = std::abs(longitudinal_slip);
+    raw_wheel_speed_mps_ = wheel_speed;
+    corrected_wheel_speed_mps_ = std::copysign(mapped_speed, wheel_speed);
+    longitudinal_slip_ = longitudinal_slip;
     const bool slip_observable = imu_speed_ready_ &&
       imu_body_speed > slip_observation_min_speed_mps_;
     const bool high_slip = slip_observable &&
@@ -568,18 +653,21 @@ private:
       // speed and acceleration have stayed near zero for the confirmation
       // interval.  This also covers a single repeated sample without making
       // the pose drift forever after the car stops.
-      const bool imu_stop_confirmed =
-        zero_encoder_duration_s_ >= zero_encoder_stop_confirm_sec_ &&
-        imu_speed_mps_ <= imu_stop_speed_threshold_mps_ &&
+      const bool throttle_feedback_fresh = have_throttle_feedback_ &&
+        std::abs((now() - last_throttle_feedback_time_).seconds()) <=
+        throttle_feedback_timeout_s_;
+      const bool propulsion_released = throttle_feedback_fresh &&
+        throttle_feedback_ <= coast_throttle_threshold_;
+      const bool imu_acceleration_quiet =
         std::abs(imu_acceleration_filtered_mps2_) <=
         imu_stationary_acceleration_threshold_mps2_;
+      const bool imu_stop_confirmed =
+        zero_encoder_duration_s_ >= zero_encoder_stop_confirm_sec_ &&
+        imu_acceleration_quiet &&
+        (imu_speed_mps_ <= imu_stop_speed_threshold_mps_ || propulsion_released);
       if (!imu_stop_confirmed && imu_speed_mps_ > stationary_speed_threshold_mps_) {
-        const bool throttle_feedback_fresh = have_throttle_feedback_ &&
-          std::abs((now() - last_throttle_feedback_time_).seconds()) <=
-          throttle_feedback_timeout_s_;
         const bool passive_coast = coast_model_enabled_ &&
-          throttle_feedback_fresh &&
-          throttle_feedback_ <= coast_throttle_threshold_ &&
+          propulsion_released &&
           asymptotic_slip;
         if (passive_coast) {
           if (!coast_model_active_) {
@@ -787,12 +875,34 @@ private:
     const double confidence = std::clamp(wheel_observation_confidence_, 0.0, 1.0);
     const double pose_variance = pose_xy_var_ +
       (slip_pose_xy_var_ - pose_xy_var_) * (1.0 - confidence);
-    msg.pose.covariance[0] = pose_variance;
-    msg.pose.covariance[7] = pose_variance;
+    const double reset_age_s = encoder_reset_active_ ?
+      (stamp - last_encoder_reset_stamp_).seconds() :
+      std::numeric_limits<double>::infinity();
+    const bool reset_covariance_active = encoder_reset_active_ &&
+      reset_age_s >= 0.0 && reset_age_s <= encoder_reset_covariance_duration_s_;
+    const double published_pose_variance = reset_covariance_active ?
+      std::max(pose_variance, encoder_reset_pose_xy_var_) : pose_variance;
+    const double published_twist_variance = reset_covariance_active ?
+      std::max(twist_linear_var_, encoder_reset_twist_linear_var_) :
+      twist_linear_var_;
+    msg.pose.covariance[0] = published_pose_variance;
+    msg.pose.covariance[7] = published_pose_variance;
     msg.pose.covariance[35] = pose_yaw_var_;
-    msg.twist.covariance[0] = twist_linear_var_;
+    msg.twist.covariance[0] = published_twist_variance;
     msg.twist.covariance[35] = twist_yaw_var_;
     odom_pub_->publish(msg);
+
+    std_msgs::msg::Float64MultiArray diagnostics;
+    diagnostics.layout.dim.resize(1);
+    diagnostics.layout.dim[0].label =
+      "raw_wheel_speed_mps,corrected_wheel_speed_mps,longitudinal_slip_ratio,"
+      "wheel_observation_confidence,imu_acceleration_bias_mps2,encoder_reset_count";
+    diagnostics.layout.dim[0].size = 6;
+    diagnostics.layout.dim[0].stride = 6;
+    diagnostics.data = {
+      raw_wheel_speed_mps_, corrected_wheel_speed_mps_, longitudinal_slip_,
+      confidence, 0.0, static_cast<double>(encoder_reset_count_)};
+    diagnostics_pub_->publish(diagnostics);
 
     geometry_msgs::msg::TransformStamped tf;
     tf.header = msg.header;
@@ -807,10 +917,12 @@ private:
   std::mutex mutex_;
 
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr diagnostics_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr throttle_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
@@ -829,6 +941,9 @@ private:
   double max_velocity_accel_mps2_{40.0};
   double twist_linear_var_{0.04};
   double twist_yaw_var_{0.04};
+  double encoder_reset_covariance_duration_s_{1.0};
+  double encoder_reset_pose_xy_var_{0.25};
+  double encoder_reset_twist_linear_var_{0.50};
 
   bool have_left_{false};
   bool have_right_{false};
@@ -893,6 +1008,12 @@ private:
   bool imu_speed_ready_{false};
   bool wheel_slip_detected_{false};
   double wheel_observation_confidence_{1.0};
+  double raw_wheel_speed_mps_{0.0};
+  double corrected_wheel_speed_mps_{0.0};
+  double longitudinal_slip_{0.0};
+  uint32_t encoder_reset_count_{0};
+  bool encoder_reset_active_{false};
+  rclcpp::Time last_encoder_reset_stamp_{0, 0, RCL_ROS_TIME};
   double zero_encoder_duration_s_{0.0};
   double throttle_feedback_{0.0};
   rclcpp::Time last_throttle_feedback_time_{0, 0, RCL_ROS_TIME};

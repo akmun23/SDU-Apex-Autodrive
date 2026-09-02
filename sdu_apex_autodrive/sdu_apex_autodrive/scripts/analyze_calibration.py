@@ -15,6 +15,10 @@ import statistics
 
 
 DOCUMENTED_WHEEL_RADIUS_M = 0.0590
+DOCUMENTED_MAX_SPEED_MPS = 22.88
+DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR = 1.5
+DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M = 0.15
+DEFAULT_GROUND_TRUTH_MAX_GAP_S = 0.5
 
 
 def finite(value: str) -> float | None:
@@ -31,6 +35,111 @@ def row_stamp(row: dict[str, str]) -> float | None:
     if stamp is not None:
         return stamp
     return finite(row.get("time_s"))
+
+
+def source_event(row: dict[str, str], event_field: str) -> int | None:
+    """Return an integral source event counter when a recorder provides one."""
+    value = finite(row.get(event_field))
+    if value is None or value < 0.0 or value != float(int(value)):
+        return None
+    return int(value)
+
+
+def deduplicate_source_events(
+    rows: list[dict[str, str]],
+    event_field: str = "gt_odom_event_count",
+) -> tuple[list[dict[str, str]], int]:
+    """Keep one recorder row for each source event.
+
+    Calibration records are commonly written at 50 Hz while the simulator
+    state is refreshed at about 10 Hz.  The event counter is therefore the
+    authoritative identity of a source sample.  The last recorder row for an
+    event is retained because it contains the freshest values from the other
+    callbacks.  Rows without a counter are retained for compatibility with
+    older files; their counts are reported as recorder rows, not source rows.
+
+    The recorder's event counter is monotonic for the lifetime of one CSV, so
+    phase transitions must not create a second copy of an event that straddles
+    a timer tick. Separate files remain the boundary between experiments.
+    """
+    result: list[dict[str, str]] = []
+    positions: dict[int, int] = {}
+    duplicates = 0
+    for row in rows:
+        event = source_event(row, event_field)
+        if event is None:
+            result.append(row)
+            continue
+        key = event
+        position = positions.get(key)
+        if position is None:
+            positions[key] = len(result)
+            result.append(row)
+        else:
+            result[position] = row
+            duplicates += 1
+    return result, duplicates
+
+
+def timestamped_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return rows in timestamp order while preserving legacy no-stamp files."""
+    indexed = [
+        (index, row_stamp(row), row)
+        for index, row in enumerate(rows)
+    ]
+    stamped = [item for item in indexed if item[1] is not None]
+    if not stamped:
+        return rows
+    ordered = [row for _, _, row in sorted(
+        stamped, key=lambda item: (float(item[1]), item[0]))]
+    # A mixed-format file cannot be fully synchronized. Keep its legacy rows
+    # after the timestamped portion rather than silently dropping data.
+    return ordered + [row for _, stamp, row in indexed if stamp is None]
+
+
+def ground_truth_step_limit_m(
+    dt_s: float,
+    max_speed_mps: float = DOCUMENTED_MAX_SPEED_MPS,
+    jitter_factor: float = DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR,
+    position_margin_m: float = DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M,
+    max_gap_s: float = DEFAULT_GROUND_TRUTH_MAX_GAP_S,
+) -> float | None:
+    """Return the timestamp-aware maximum plausible truth displacement."""
+    if (not math.isfinite(dt_s) or dt_s <= 0.0 or dt_s > max_gap_s or
+            not math.isfinite(max_speed_mps) or max_speed_mps <= 0.0 or
+            not math.isfinite(jitter_factor) or jitter_factor < 1.0 or
+            not math.isfinite(position_margin_m) or position_margin_m < 0.0):
+        return None
+    return max_speed_mps * dt_s * jitter_factor + position_margin_m
+
+
+def valid_ground_truth_step(
+    step_m: float,
+    before: dict[str, str],
+    after: dict[str, str],
+    max_speed_mps: float = DOCUMENTED_MAX_SPEED_MPS,
+    jitter_factor: float = DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR,
+    position_margin_m: float = DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M,
+    max_gap_s: float = DEFAULT_GROUND_TRUTH_MAX_GAP_S,
+    legacy_max_step_m: float = 0.60,
+) -> bool:
+    """Validate one truth displacement using source timing when available."""
+    if not math.isfinite(step_m) or step_m < 0.0:
+        return False
+    before_stamp = row_stamp(before)
+    after_stamp = row_stamp(after)
+    if before_stamp is not None and after_stamp is not None:
+        limit = ground_truth_step_limit_m(
+            after_stamp - before_stamp,
+            max_speed_mps,
+            jitter_factor,
+            position_margin_m,
+            max_gap_s,
+        )
+        return limit is not None and step_m <= limit
+    # Old monitor exports have no source timestamp. Preserve a conservative
+    # compatibility path, but make the fallback explicit in the report.
+    return step_m < legacy_max_step_m
 
 
 def valid_ground_truth_row(row: dict[str, str]) -> bool:
@@ -99,6 +208,10 @@ def encoder_distance_metrics(
     rows: list[dict[str, str]],
     ground_truth_path: Path,
     max_encoder_step_rad: float = 40.0,
+    max_ground_truth_speed_mps: float = DOCUMENTED_MAX_SPEED_MPS,
+    ground_truth_step_jitter_factor: float = DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR,
+    ground_truth_position_margin_m: float = DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M,
+    max_ground_truth_gap_s: float = DEFAULT_GROUND_TRUTH_MAX_GAP_S,
 ) -> tuple[float, float, float, int, int] | None:
     """Estimate encoder scale from a diagnostics-only ground-truth run.
 
@@ -113,6 +226,10 @@ def encoder_distance_metrics(
     if max_encoder_step_rad <= 0.0:
         return None
     gt_rows = read_rows(ground_truth_path)
+    gt_rows, _ = deduplicate_source_events(gt_rows)
+    gt_rows = timestamped_rows(gt_rows)
+    rows, _ = deduplicate_source_events(rows)
+    rows = timestamped_rows(rows)
     telemetry_stamps = [row_stamp(row) for row in rows]
     telemetry_stamps = [value for value in telemetry_stamps if value is not None]
     gt_stamps = [row_stamp(row) for row in gt_rows]
@@ -139,10 +256,13 @@ def encoder_distance_metrics(
         ay = finite(after.get("gt_y_m"))
         if None not in (bx, by, ax, ay):
             step = math.hypot(ax - bx, ay - by)
-            # Ground-truth rows are normally about 10 Hz. A legal 3.5 m/s
-            # vehicle can move roughly 0.35 m per row; allow modest delivery
-            # jitter but reject the simulator's ~0.88 m collision/reset jump.
-            if 0.0 < step < 0.60:
+            # Use source timing so valid high-speed motion is not rejected by
+            # the old low-speed-only 0.60 m threshold.  A missing timestamp
+            # takes the explicit legacy fallback inside this helper.
+            if (0.0 < step and valid_ground_truth_step(
+                    step, before, after, max_ground_truth_speed_mps,
+                    ground_truth_step_jitter_factor,
+                    ground_truth_position_margin_m, max_ground_truth_gap_s)):
                 gt_distance += step
 
     encoder_distance = 0.0
@@ -747,9 +867,10 @@ def throttle_table(
         if not valid_ground_truth_row(row):
             continue
         phase = row.get("phase", "")
-        if not phase.startswith("throttle_"):
+        if not (phase.startswith("throttle_") or
+                phase.startswith("grid_throttle_")):
             continue
-        throttle = finite(phase.removeprefix("throttle_"))
+        throttle = phase_command(phase)
         speed = finite(row.get(speed_field))
         if (throttle is not None and speed is not None and speed >= 0.0 and
                 (max_throttle is None or throttle <= max_throttle)):
@@ -773,6 +894,141 @@ def throttle_table(
     return deduplicated
 
 
+def _truth_speed(row: dict[str, str]) -> float | None:
+    speed = finite(row.get("gt_speed_mps"))
+    if speed is not None and speed >= 0.0:
+        return speed
+    vx = finite(row.get("gt_vx_mps"))
+    vy = finite(row.get("gt_vy_mps"))
+    if vx is not None and vy is not None:
+        return math.hypot(vx, vy)
+    return None
+
+
+def classify_motion_regime(
+    row: dict[str, str], previous: dict[str, str] | None = None,
+) -> str:
+    """Classify one unique truth event for regime-based error reporting."""
+    phase = row.get("phase", "")
+    if (phase == "reset" or phase == "boundary_reset" or
+            phase.startswith("grid_reset_")):
+        return "simulator_reset"
+    if not valid_ground_truth_row(row):
+        return "invalid_ground_truth"
+
+    speed = _truth_speed(row)
+    if speed is None:
+        return "unknown"
+
+    left = finite(row.get("left_encoder_rad"))
+    right = finite(row.get("right_encoder_rad"))
+    has_encoder_fields = "left_encoder_rad" in row or "right_encoder_rad" in row
+    previous_left = finite(previous.get("left_encoder_rad")) if previous else None
+    previous_right = finite(previous.get("right_encoder_rad")) if previous else None
+    if has_encoder_fields and speed > 0.2:
+        if left is None or right is None or previous_left is None or previous_right is None:
+            return "encoder_dropout"
+        if left - previous_left < -0.5 or right - previous_right < -0.5:
+            return "encoder_reset_or_discontinuity"
+
+    dt = None
+    previous_speed = _truth_speed(previous) if previous else None
+    if previous is not None:
+        before_stamp = row_stamp(previous)
+        after_stamp = row_stamp(row)
+        if before_stamp is not None and after_stamp is not None:
+            candidate = after_stamp - before_stamp
+            if 1.0e-4 <= candidate <= 1.0:
+                dt = candidate
+    acceleration = 0.0
+    if dt is not None and previous_speed is not None:
+        acceleration = (speed - previous_speed) / dt
+
+    yaw_rate = finite(row.get("gt_yaw_rate_radps"))
+    yaw_rate = abs(yaw_rate) if yaw_rate is not None else 0.0
+    lateral_accel = yaw_rate * speed
+    curvature = yaw_rate / max(speed, 0.5)
+
+    # Driven-wheel slip is a regime label, not a runtime correction.  Use the
+    # fixed documented radius and the body-longitudinal truth velocity only
+    # for development segmentation.
+    if (has_encoder_fields and previous is not None and dt is not None and
+            left is not None and right is not None and
+            previous_left is not None and previous_right is not None):
+        wheel_speed = DOCUMENTED_WHEEL_RADIUS_M * (
+            (left - previous_left) + (right - previous_right)) / (2.0 * dt)
+        vx = finite(row.get("gt_vx_mps"))
+        if vx is not None and abs(vx) > 0.5 and math.isfinite(wheel_speed):
+            slip_ratio = (abs(wheel_speed) - abs(vx)) / abs(vx)
+            if slip_ratio > 0.15:
+                return "high_longitudinal_slip"
+
+    if speed < 0.10:
+        return "stationary"
+    if lateral_accel >= 2.0:
+        return "high_lateral_acceleration"
+    if curvature >= 0.15:
+        return "high_curvature_turn"
+    if curvature >= 0.03:
+        return "low_curvature_turn"
+    if acceleration >= 0.50:
+        return "straight_accelerating"
+    if acceleration <= -0.50:
+        return "straight_coasting"
+    return "straight_steady"
+
+
+def motion_regime_metrics(
+    rows: list[dict[str, str]],
+) -> list[dict[str, float | int | str]]:
+    """Summarize truth-vs-odom speed errors separately by motion regime."""
+    groups: dict[str, dict[str, list[float]]] = {}
+    previous = None
+    previous_regime = None
+    for row in timestamped_rows(rows):
+        regime = classify_motion_regime(row, previous)
+        group = groups.setdefault(regime, {
+            "events": [], "duration": [], "truth_speed": [], "speed_error": [],
+        })
+        stamp = row_stamp(row)
+        truth_speed = _truth_speed(row)
+        odom_speed = finite(row.get("speed_mps"))
+        group["events"].append(1.0)
+        if (previous_regime == regime and previous is not None and
+                stamp is not None and row_stamp(previous) is not None):
+            dt = stamp - row_stamp(previous)
+            if 0.0 < dt <= 1.0:
+                group["duration"].append(dt)
+        if stamp is not None:
+            # Keep source timestamps only for compatibility with callers that
+            # inspect the intermediate shape; duration uses contiguous spans.
+            group.setdefault("stamps", []).append(stamp)
+        if truth_speed is not None:
+            group["truth_speed"].append(truth_speed)
+        if truth_speed is not None and odom_speed is not None:
+            group["speed_error"].append(abs(truth_speed - odom_speed))
+        previous = row
+        previous_regime = regime
+
+    result: list[dict[str, float | int | str]] = []
+    for regime, group in sorted(groups.items()):
+        errors = group["speed_error"]
+        result.append({
+            "regime": regime,
+            "events": len(group["events"]),
+            "duration_s": sum(group["duration"]),
+            "truth_speed_median_mps": (
+                statistics.median(group["truth_speed"])
+                if group["truth_speed"] else math.nan),
+            "odom_speed_mae_mps": (
+                statistics.mean(errors) if errors else math.nan),
+            "odom_speed_p95_abs_error_mps": (
+                percentile(errors, 0.95) if errors else math.nan),
+            "error_samples": len(errors),
+        })
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
@@ -788,6 +1044,22 @@ def main() -> None:
     parser.add_argument(
         "--max-encoder-step-rad", type=float, default=40.0,
         help="largest non-negative per-sample wheel-angle step included in the fit")
+    parser.add_argument(
+        "--max-ground-truth-speed-mps", type=float,
+        default=DOCUMENTED_MAX_SPEED_MPS,
+        help="maximum physical speed used by timestamp-aware truth validation")
+    parser.add_argument(
+        "--ground-truth-step-jitter-factor", type=float,
+        default=DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR,
+        help="multiplicative allowance for timestamp jitter in truth steps")
+    parser.add_argument(
+        "--ground-truth-position-margin-m", type=float,
+        default=DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M,
+        help="additive position allowance for timestamped truth steps")
+    parser.add_argument(
+        "--max-ground-truth-gap-s", type=float,
+        default=DEFAULT_GROUND_TRUTH_MAX_GAP_S,
+        help="largest timestamp gap eligible for truth-distance accumulation")
     parser.add_argument(
         "--feedforward-max-throttle", type=float, default=1.0,
         help=("highest direct-throttle step used for production feed-forward; "
@@ -807,6 +1079,9 @@ def main() -> None:
     parser.add_argument(
         "--steering-output", type=Path,
         help="write truth-derived direct steering response metrics")
+    parser.add_argument(
+        "--regime-output", type=Path,
+        help="write unique-event truth-vs-odom metrics grouped by motion regime")
     args = parser.parse_args()
 
     rows = read_rows(args.input)
@@ -817,7 +1092,11 @@ def main() -> None:
     # Do not discard the later steps as if those diagnostic resets were a
     # failed single run. Legacy recordings without reset phases retain the
     # original reset-prefix handling.
-    has_isolated_resets = any(row.get("phase") == "reset" for row in rows)
+    has_isolated_resets = any(
+        row.get("phase") == "reset" or
+        row.get("phase") == "boundary_reset" or
+        row.get("phase", "").startswith("grid_reset_")
+        for row in rows)
     if has_isolated_resets:
         reset_time = reset_kind = None
     else:
@@ -827,12 +1106,15 @@ def main() -> None:
     if rejected_ground_truth_rows:
         print(f"ground_truth_boundary_rows_removed={rejected_ground_truth_rows}")
     rows = valid_rows
+    analysis_rows, duplicate_gt_rows = deduplicate_source_events(rows)
     rates = [finite(row.get("lidar_rate_hz")) for row in rows]
     rates = [value for value in rates if value is not None and value > 0.0]
     speed_field = preferred_speed_field(rows)
-    speed = [finite(row.get(speed_field)) for row in rows]
+    speed = [finite(row.get(speed_field)) for row in analysis_rows]
     speed = [value for value in speed if value is not None]
     print(f"rows={len(rows)}")
+    print(f"unique_gt_odom_rows={len(analysis_rows)}")
+    print(f"duplicate_gt_odom_rows_removed={duplicate_gt_rows}")
     print(f"speed_reference={speed_field}")
     if reset_time is not None:
         print(f"encoder_reset_handled_s={reset_time:.3f} kind={reset_kind}")
@@ -850,12 +1132,12 @@ def main() -> None:
     if speed:
         print(f"{speed_field}_min={min(speed):.3f} {speed_field}_max={max(speed):.3f}")
 
-    collision_values = [finite(row.get("gt_collision_count")) for row in rows]
+    collision_values = [finite(row.get("gt_collision_count")) for row in analysis_rows]
     collision_values = [value for value in collision_values if value is not None]
     if collision_values:
         print(f"ground_truth_collision_count_max={max(collision_values):.0f}")
 
-    phase_metrics = phase_response_metrics(rows, speed_field)
+    phase_metrics = phase_response_metrics(analysis_rows, speed_field)
     if phase_metrics:
         print(
             "phase,command,initial_speed_mps,peak_speed_mps,"
@@ -868,7 +1150,7 @@ def main() -> None:
                 f"{tail:.6f},{accel},{samples}"
             )
 
-    steering_metrics = steering_response_metrics(rows)
+    steering_metrics = steering_response_metrics(analysis_rows)
     if steering_metrics:
         print("steering,gt_speed_mps,gt_yaw_rate_radps,gt_curvature_rad_per_m,samples")
         for command, speed, yaw_rate, curvature, samples in steering_metrics:
@@ -883,7 +1165,7 @@ def main() -> None:
                 writer.writerows(steering_metrics)
             print(f"steering_response={args.steering_output}")
 
-    trace = response_trace(rows, speed_field)
+    trace = response_trace(analysis_rows, speed_field)
     if args.response_output:
         args.response_output.parent.mkdir(parents=True, exist_ok=True)
         with args.response_output.open("w", newline="", encoding="utf-8") as stream:
@@ -903,7 +1185,7 @@ def main() -> None:
             writer.writerows(acceleration_map(trace))
         print(f"acceleration_map={args.acceleration_map_output}")
 
-    longitudinal_fit = longitudinal_acceleration_fit(rows)
+    longitudinal_fit = longitudinal_acceleration_fit(analysis_rows)
     if longitudinal_fit is not None:
         coefficients, operating_table, rmse, fit_samples = longitudinal_fit
         print(
@@ -931,7 +1213,7 @@ def main() -> None:
                         f"{hold_throttle:.6f}", f"{throttle_per_accel:.6f}", fit_samples))
             print(f"longitudinal_fit={args.longitudinal_fit_output}")
 
-    wheel_speed_map = wheel_speed_body_speed_map(rows)
+    wheel_speed_map = wheel_speed_body_speed_map(analysis_rows)
     if wheel_speed_map is not None:
         map_points, map_rmse, map_samples = wheel_speed_map
         print(
@@ -950,7 +1232,7 @@ def main() -> None:
 
     truth_odom_position_error = []
     truth_odom_speed_error = []
-    for row in rows:
+    for row in analysis_rows:
         gx = finite(row.get("gt_x_m"))
         gy = finite(row.get("gt_y_m"))
         ox = finite(row.get("x_odom_m"))
@@ -985,7 +1267,7 @@ def main() -> None:
     tracking_error = []
     absolute_tracking_error = []
     overspeed_error = []
-    for row in rows:
+    for row in analysis_rows:
         target = finite(row.get("controller_speed_mps"))
         measured = finite(row.get("speed_mps"))
         if target is not None and measured is not None and target > 0.1:
@@ -1011,7 +1293,7 @@ def main() -> None:
             f"gt_0.10={overspeed_samples / len(overspeed_error):.3f}"
         )
 
-    truth_tracking_error, truth_phase_errors = truth_speed_tracking_metrics(rows)
+    truth_tracking_error, truth_phase_errors = truth_speed_tracking_metrics(analysis_rows)
     if truth_tracking_error:
         absolute = [abs(value) for value in truth_tracking_error]
         print(
@@ -1027,7 +1309,7 @@ def main() -> None:
             f"abs_p95={percentile([abs(value) for value in truth_phase_errors], 0.95):.3f}"
         )
 
-    amcl_ekf = pose_difference(rows, "amcl", "ekf")
+    amcl_ekf = pose_difference(analysis_rows, "amcl", "ekf")
     if amcl_ekf:
         print(
             "amcl_ekf_xy_difference_m="
@@ -1037,7 +1319,7 @@ def main() -> None:
 
     if args.trajectory:
         trajectory = read_trajectory(args.trajectory)
-        path_error, seam_crossings = raceline_metrics(rows, trajectory)
+        path_error, seam_crossings = raceline_metrics(analysis_rows, trajectory)
         if path_error:
             print(
                 "ekf_raceline_error_m="
@@ -1048,7 +1330,11 @@ def main() -> None:
 
     if args.ground_truth:
         metrics = encoder_distance_metrics(
-            rows, args.ground_truth, args.max_encoder_step_rad)
+            analysis_rows, args.ground_truth, args.max_encoder_step_rad,
+            args.max_ground_truth_speed_mps,
+            args.ground_truth_step_jitter_factor,
+            args.ground_truth_position_margin_m,
+            args.max_ground_truth_gap_s)
         if metrics is None:
             print("encoder_scale=unavailable")
         else:
@@ -1062,8 +1348,8 @@ def main() -> None:
                 f"steps={samples} rejected_steps={rejected_steps}"
             )
 
-    full_table = throttle_table(rows, speed_field)
-    table = throttle_table(rows, speed_field, args.feedforward_max_throttle)
+    full_table = throttle_table(analysis_rows, speed_field)
+    table = throttle_table(analysis_rows, speed_field, args.feedforward_max_throttle)
     if full_table and table != full_table:
         print(
             "feedforward_fit_range="
@@ -1083,6 +1369,34 @@ def main() -> None:
             writer.writerows((f"{speed_mps:.6f}", f"{throttle:.6f}")
                              for speed_mps, throttle, _, _ in table)
         print(f"feedforward_table={args.feedforward_output}")
+
+    regimes = motion_regime_metrics(analysis_rows)
+    if regimes:
+        print(
+            "motion_regime,events,duration_s,truth_speed_median_mps,"
+            "odom_speed_mae_mps,odom_speed_p95_abs_error_mps,error_samples"
+        )
+        fields = (
+            "regime", "events", "duration_s", "truth_speed_median_mps",
+            "odom_speed_mae_mps", "odom_speed_p95_abs_error_mps",
+            "error_samples")
+
+        def formatted(value: float | int | str) -> str:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, float):
+                return f"{value:.6f}"
+            return str(value)
+
+        for result in regimes:
+            print(",".join(formatted(result[field]) for field in fields))
+        if args.regime_output:
+            args.regime_output.parent.mkdir(parents=True, exist_ok=True)
+            with args.regime_output.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(regimes)
+            print(f"motion_regime_metrics={args.regime_output}")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,10 @@ sensor_odometry:
     imu_topic: /autodrive/roboracer_1/imu
     throttle_topic: /autodrive/roboracer_1/throttle
     odom_topic: /odom
+    diagnostics_topic: /odom/diagnostics
+    # Float64MultiArray data order:
+    # raw wheel m/s, corrected wheel m/s, slip ratio, confidence,
+    # IMU acceleration bias m/s^2 (placeholder), encoder reset count.
 
     odom_frame: odom
     base_frame: base_link
@@ -54,7 +58,10 @@ sensor_odometry:
     encoder_reset_threshold_rad: 0.50
     max_observer_accel_mps2: 8.0
     observer_speed_tolerance_mps: 1.0
-    wheel_observer_correction_gain: 0.25
+    # Live track data showed the IMU-integrated speed lagging the calibrated
+    # wheel signal during the low-speed launch. Increase the bounded wheel
+    # correction without changing the documented wheel radius or slip gates.
+    wheel_observer_correction_gain: 0.75
     stationary_speed_threshold_mps: 0.15
     # AutoDRIVE technical-guide longitudinal WheelCollider knots:
     # extremum (slip, force)=(0.15, 0.72), asymptote=(0.25, 0.464).
@@ -72,9 +79,16 @@ sensor_odometry:
     coast_deceleration_max_mps2: 12.0
     throttle_feedback_timeout_s: 0.5
     imu_stop_speed_threshold_mps: 2.0
+    # With fresh zero-throttle feedback, a quiet IMU confirms a stopped car
+    # even if the observer speed retained a stale value after encoder freeze.
     imu_stationary_acceleration_threshold_mps2: 0.30
     zero_encoder_stop_confirm_sec: 0.80
     slip_pose_xy_variance: 0.10
+    # An encoder discontinuity only re-baselines the angle counters. Keep the
+    # continuous odom pose/yaw/velocity and advertise temporary uncertainty.
+    encoder_reset_covariance_duration_s: 1.0
+    encoder_reset_pose_xy_variance: 0.25
+    encoder_reset_twist_linear_variance: 0.50
     # Offline ground-truth calibration of driven-wheel slip across the full
     # settled 0-1 throttle response. These values are a correction map after
     # the documented 0.0590 m wheel conversion, not a wheel-radius replacement

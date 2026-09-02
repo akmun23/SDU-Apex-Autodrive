@@ -10,9 +10,9 @@ from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
 
 
-DEFAULT_MAP = "/workspace/src/f1tenth_planning/maps/autodrive_track_5laps.yaml"
+DEFAULT_MAP = "/workspace/src/f1tenth_planning/maps/autodrive_compete_2026.yaml"
 DEFAULT_TRAJECTORY = (
-    "/workspace/src/f1tenth_planning/trajectories/autodrive_track_5laps_raceline_full_range.csv"
+    "/workspace/src/f1tenth_planning/trajectories/icra_2025_raceline.csv"
 )
 
 
@@ -112,13 +112,17 @@ def _setup(context):
                         "global_initialization": LaunchConfiguration(
                             "amcl_global_initialization"
                         ),
+                        "global_pose_max_track_distance_m": LaunchConfiguration(
+                            "amcl_max_track_distance"
+                        ),
                         "initial_pose_heading_offset_rad": LaunchConfiguration(
                             "amcl_initial_heading_offset"
                         ),
                     },
                 ],
             ),
-            # Predict from official encoder/IMU odometry and correct with AMCL.
+            # Local encoder/IMU filter. AMCL remains an independent map-frame
+            # position source and is never passed into this EKF.
             Node(
                 package="f1tenth_localization",
                 executable="ekf_localization_node",
@@ -248,7 +252,10 @@ def _setup(context):
             emulate_tty=True,
             additional_env={
                 "MPC_ODOM_TOPIC": "/odom",
-                "MPC_EKF_TOPIC": "/ekf_pose",
+                # The existing MPC environment variable names its pose input;
+                # use the independent map-frame AMCL pose now that /ekf_pose
+                # is explicitly local odom-frame output.
+                "MPC_EKF_TOPIC": "/amcl_pose",
                 "MPC_LOCAL_RACELINE_TOPIC": "/local_raceline",
                 "MPC_DRIVE_TOPIC": "/cmd/controller",
                 "MPC_POSE_FRAME": "map",
@@ -345,6 +352,14 @@ def generate_launch_description():
             description=(
                 "Use track-constrained global AMCL initialization so the pose "
                 "can recover from an incorrect startup guess."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "amcl_max_track_distance",
+            default_value="0.65",
+            description=(
+                "Maximum global AMCL candidate distance from the raceline [m]. "
+                "Use a temporary override only for measured acceptance tests."
             ),
         ),
         DeclareLaunchArgument(

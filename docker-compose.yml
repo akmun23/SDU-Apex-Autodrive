@@ -24,13 +24,13 @@ services:
     tty: true
 
   simulator:
-    build:
-      context: .
-      dockerfile: docker/simulator.Dockerfile
-    image: sdu-apex-autodrive-simulator:2026-iros-practice
+    # The IROS explore asset is the open-world RoboRacer simulator.  The
+    # practice/competition assets contain a visible track and are not valid
+    # for the reset-isolated sensor-identification run.
+    image: autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore
     # Keep the container alive; start the official simulator explicitly with
     # the graphical or xvfb headless command from the host terminal.
-    command: bash
+    command: ["-c", "sleep infinity"]
     container_name: autodrive_roboracer_sim
     network_mode: host
     ipc: host

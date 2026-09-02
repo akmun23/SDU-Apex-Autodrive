@@ -1,0 +1,62 @@
+# One finite open-ground identification suite. Each operating-speed band is
+# reset to the simulator start before its throttle grid, so the car cannot
+# reach the edge of the world. This is still one recorder run and one CSV.
+#
+# AMCL is intentionally absent: the open ground scene has no matching map.
+# Simulator ground truth is diagnostics-only and is recorded for fitting.
+calibration:
+  ros__parameters:
+    mode: identification_grid
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/latest_identification_grid
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+
+    # Labels identify the requested operating-speed bands. The fitter must
+    # use gt_speed_mps at each row, not these nominal labels.
+    grid_speed_sequence_mps: [0.0, 3.0, 6.0, 9.0, 12.0, 16.0]
+    grid_base_throttle_sequence: [0.0, 0.08, 0.15, 0.25, 0.35, 0.50]
+    # Include neutral, light drive, normal drive, high drive and full drive.
+    grid_throttle_sequence: [0.0, 0.03, 0.06, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80, 1.0]
+    # These are minimum command holds. The recorder waits for local measured
+    # speed to settle before it starts the following brake/coast phase.
+    grid_base_hold_sec: 2.5
+    grid_step_hold_sec: 1.5
+    throttle_settle_timeout_sec: 30.0
+    throttle_settle_min_sec: 1.5
+    throttle_settle_stable_sec: 0.75
+    throttle_settle_speed_rate_mps2: 0.15
+    # Full zero-throttle brake/coast command. The phase ends only after fresh
+    # encoder + IMU + local-odom stop evidence; this is only a safety timeout.
+    grid_brake_timeout_sec: 30.0
+    brake_stop_encoder_speed_radps: 0.5
+    brake_stop_imu_accel_mps2: 0.25
+    brake_stop_imu_yaw_rate_radps: 0.05
+    brake_stop_odom_speed_mps: 0.20
+    # Ground truth is allowed here only as the diagnostic movement oracle.
+    brake_stop_gt_speed_mps: 0.20
+    brake_stop_stable_sec: 0.75
+
+    steering_sequence: [0.0]
+    hold_sec: 1.5
+    zero_settle_sec: 3.0
+    encoder_wheel_radius_m: 0.0590
+
+    # Diagnostic abort guard only; it is above the official simulator speed
+    # envelope so it does not censor the full-throttle response.
+    maximum_test_speed_mps: 30.0
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+
+    # Scheduled isolation resets between grid points. A reset can only be
+    # reached after the preceding brake/coast phase confirms a full stop.
+    reset_between_steps: true
+    reset_pulse_sec: 0.50
+    reset_signal_hold_sec: 0.20
+    reset_confirmation_timeout_sec: 30.0
+    reset_odom_speed_threshold_mps: 0.20
+    reset_zero_odom_stable_sec: 2.0
+
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 350.0

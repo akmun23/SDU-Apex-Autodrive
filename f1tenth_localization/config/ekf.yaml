@@ -1,30 +1,22 @@
 ekf_localization:
   ros__parameters:
-    # Team topics only. /odom is generated from official rear encoders + IMU.
-    amcl_topic: /amcl_pose
+    # Local filter only. /odom is generated from the official rear encoders
+    # and IMU by sensor_odometry_node. AMCL is an independent map-frame
+    # localization source and is deliberately not an EKF input.
     odom_topic: /odom
     output_topic: /ekf_pose
 
-    global_frame: map
     odom_frame: odom
-    base_frame: base_link
-    transform_tolerance_s: 0.0
 
-    # Predict from every odometry sample. Propagate delayed AMCL measurements
-    # to the latest odom time before applying the map-frame correction.
+    # Propagate every sensor-odometry sample in the local odom frame. This is
+    # the conservative baseline to identify against ground truth before the
+    # fitted encoder/IMU vehicle model is installed.
     process_noise_scale: 1.0
-    odom_history_duration_s: 0.75
-    amcl_max_latency_s: 0.35
+    # Large enough for native bridge gaps at high speed. A frozen wheel
+    # encoder while braking is not a discontinuity and never triggers reset.
+    max_odom_delta_m: 20.0
 
-    # Keep odometry as the short-term pose source. AMCL corrects the map-frame
-    # offset at a useful rate, but the covariance floor prevents one scan from
-    # overwriting the encoder/IMU motion estimate at full weight.
-    amcl_position_variance_floor: 0.15
-    amcl_yaw_variance_floor: 0.06
-    # Inflate only genuinely large innovations; ordinary track corrections
-    # must still reach the fused pose in a few scan cycles.
-    amcl_innovation_gate_distance_m: 0.30
-    amcl_innovation_gate_yaw_rad: 0.12
-    amcl_jump_reset_enabled: true
-    amcl_jump_reset_distance_m: 1.0
-    amcl_jump_reset_yaw_rad: 1.2
+    # Enabled only by the finite open-ground identification suite. Production
+    # runtime leaves this disabled; AMCL remains an independent map correction.
+    reset_enabled: false
+    reset_topic: /autodrive/reset_command

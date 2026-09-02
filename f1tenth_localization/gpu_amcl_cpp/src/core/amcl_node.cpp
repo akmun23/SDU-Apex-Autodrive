@@ -35,6 +35,7 @@ AmclNode::AmclNode(const rclcpp::NodeOptions& options)
         "amcl_kld_diagnostics", rclcpp::QoS(10));
     gpu_timing_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
         "amcl_gpu_timing", rclcpp::QoS(10));
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
     // ── Callback groups ──
     // MutuallyExclusive: callbacks in SAME group don't run concurrently
@@ -1414,7 +1415,11 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             raceline_distance > global_pose_max_track_distance_m_) {
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "Global AMCL candidate rejected: distance to raceline %.3f m > %.3f m.",
+                "Global AMCL candidate rejected at (%.3f, %.3f, %.3f): "
+                "distance to raceline %.3f m > %.3f m.",
+                est.x,
+                est.y,
+                est.theta,
                 raceline_distance,
                 global_pose_max_track_distance_m_);
         } else if (global_pose_confident && !global_pose_on_track) {
@@ -1522,6 +1527,30 @@ void AmclNode::publish_pose(const PoseEstimate& est, const rclcpp::Time& stamp) 
     cov[35] = est.covariance(2, 2);  // yaw-yaw
 
     pose_pub_->publish(pose_msg);
+
+    // Keep AMCL independent from the local EKF. The local odometry remains
+    // odom->base_link; AMCL supplies only the global map->odom correction.
+    // The odom history is already timestamped for scan alignment, so use the
+    // same interpolation rule here instead of pairing unrelated callbacks.
+    double odom_x = prev_x_;
+    double odom_y = prev_y_;
+    double odom_theta = prev_theta_;
+    if (odom_received_) {
+        (void)interpolate_odom_pose(stamp, odom_x, odom_y, odom_theta);
+    }
+    const Eigen::Vector3d map_pose(est.x, est.y, est.theta);
+    const Eigen::Vector3d odom_pose(odom_x, odom_y, odom_theta);
+    const Eigen::Vector3d map_odom = math_utils::se2_compose(
+        map_pose, math_utils::se2_inverse(odom_pose));
+    geometry_msgs::msg::TransformStamped map_odom_tf;
+    map_odom_tf.header.stamp = stamp;
+    map_odom_tf.header.frame_id = global_frame_;
+    map_odom_tf.child_frame_id = odom_frame_;
+    map_odom_tf.transform.translation.x = map_odom[0];
+    map_odom_tf.transform.translation.y = map_odom[1];
+    map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom[2]);
+    tf_broadcaster_->sendTransform(map_odom_tf);
+
     last_published_pose_ = est;
     have_last_published_pose_ = true;
 }

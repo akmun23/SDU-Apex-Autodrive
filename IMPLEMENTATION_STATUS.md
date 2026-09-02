@@ -1,6 +1,6 @@
 # SDU Apex AutoDRIVE implementation handoff
 
-Status date: 2026-08-31
+Status date: 2026-09-01
 Repository: `/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive`
 Branch: `main`
 Recorded revision: `a074412 Refactor code structure for improved readability and maintainability`
@@ -88,7 +88,9 @@ Implemented in `sdu_apex_autodrive/launch/controller.launch.py`:
 - Starts the official `autodrive_bridge` once.
 - Starts team odometry, custom AMCL, EKF, optional lateral planner, one
   controller, and one actuator interface.
-- Uses the saved five-lap map and full-range raceline by default.
+- Uses the verified current-competition map and full-range raceline by
+  default: `f1tenth_planning/maps/autodrive_compete_2026.yaml` with the
+  existing `icra_2025_raceline.csv` geometry.
 - Defaults to no RViz, no ground-truth monitor, no telemetry recorder, and no
   collision-reset safety in a rules-compliant run.
 - Keeps simulator-only collision reset available only as an explicit diagnostic
@@ -140,6 +142,13 @@ Implemented in `f1tenth_localization/src/sensor_odometry_node.cpp` and
   to trust AMCL more when encoder speed is no longer a reliable body-speed proxy.
 - Treats encoder dropout while moving as low-confidence instead of presenting it
   as a good measurement.
+- Publishes an offline-only `/odom/diagnostics` vector containing raw and
+  corrected wheel speed, slip ratio, wheel confidence, the current bias
+  placeholder, and an encoder-reset counter. The calibration recorder stores
+  this vector without feeding it back into estimation or control.
+- Encoder discontinuities re-baseline the angle counters while preserving the
+  continuous odom position, yaw, and speed. A short covariance inflation marks
+  the transition instead of resetting the odom origin.
 
 ### Custom AMCL and EKF
 
@@ -233,6 +242,22 @@ errors because simulator resets and team odom-origin continuity are not
 perfectly phase-aligned. Speed-tail results are useful; reset-heavy absolute
 position results must not be treated as final localization accuracy.
 
+### Calibration analysis hygiene
+
+The offline analyzer now uses `gt_odom_event_count` to collapse faster recorder
+rows to unique simulator odometry events before truth-based fitting and error
+metrics. It retains a raw-row count and reports how many duplicate rows were
+removed. Truth-distance checks use source timestamps, the documented 22.88 m/s
+speed envelope, a configurable jitter factor/margin, and an explicit legacy
+fallback for old no-timestamp exports. Motion-regime summaries cover stationary,
+straight, turning, slip, reset, and encoder-quality cases with speed errors
+reported per regime.
+
+Calibration provenance is recorded in
+`sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml`. The header-only
+`derived/full_envelope_acceleration_map.csv` artifact was removed; no runtime
+calibration table was changed by this hygiene pass.
+
 ### MPC and vehicle model
 
 The MPC wrapper in `MPC/src/mpc_hardware_node.c` is AutoDRIVE-native:
@@ -264,6 +289,16 @@ The default planning output is:
 The planning README documents map extraction, raceline optimization, direction
 handling, speed limits, wall distances, and MPC-compatible output. The saved
 trajectory uses map coordinates and is the default Pure Pursuit/MPC reference.
+
+The current official ICRA competition simulator was verified against the
+historical `icra_2025` map/raceline geometry before promotion to the runtime
+default. Its map is retained under the explicit
+`autodrive_compete_2026.{pgm,yaml}` name; the PGM hash is unchanged from the
+historical source. Two new five-lap mapping attempts were also made on the
+current simulator after increasing slam_toolbox's transform timeout to 1.0 s
+and TF buffer to 60 s. The live map published, but each run collided before
+completing a lap, so the partial maps are retained as diagnostics and are not
+used for control.
 
 ### Collision diagnostic
 
@@ -302,6 +337,8 @@ container, not on host ROS Jazzy:
 
 ```text
 Full colcon build, all 7 packages, Release, BUILD_TESTING=OFF: PASS
+Focused Humble rebuild after calibration/odometry changes (`f1tenth_localization`,
+`sdu_apex_autodrive`): PASS
 f1tenth_localization CUDA/CPU targets: built successfully
 MPC standalone vehicle_model test: PASS
 MPC standalone closed_loop_benchmark: PASS
@@ -309,11 +346,19 @@ f1tenth_control + mpc_riccati colcon tests: 24 tests, 0 failures
 f1tenth_control Pure Pursuit closed-loop test: PASS
 f1tenth_control cppcheck/xmllint checks: PASS
 sdu_apex_autodrive speed-controller pytest: 13 passed
+calibration analyzer regression pytest: 17 passed (including speed-controller tests)
+timestamp-aware analyzer run on the 20260831 speed-feedback dataset: PASS
 git diff --check: PASS
 full-range throttle diagnostic: completed, no collision
 full-range speed feedback diagnostic: completed, no collision
 steering response diagnostic: completed, no collision
 high-speed coast/asymptote diagnostic: completed, no collision
+live simulator full-suite recorder after explicit UI connection: completed,
+  4,276 rows; all six odometry diagnostic fields populated
+live odometry rebaseline check: 10 encoder-reset transitions preserved x/y and
+  speed exactly at the sampled boundary; maximum sampled yaw change was
+  0.000134 rad; the raw run recorded nine simulator collision/reset events and
+  is diagnostic evidence, not a replacement for the clean calibration tables
 ```
 
 The Python speed-controller tests are currently run directly with pytest; the
@@ -349,8 +394,9 @@ stack:
 7. **Steering actuator identification.** Confirm official steering feedback
    unit/sign and quantify command-to-angle delay at native cadence. The sweep is
    evidence, not yet a formal MPC steering model.
-8. **Reset synchronization.** Gate or improve diagnostic reset handling so
-   `/odom`, AMCL, EKF, and ground truth share a known epoch.
+8. **Reset synchronization.** Encoder/IMU rebaselining and odom continuity are
+   now implemented and live-checked, but `/odom`, AMCL, EKF, and ground truth
+   still need a shared explicit epoch for a complete reset acceptance test.
 9. **Complete topic audit.** With one controller active, use `ros2 topic info -v`
    to confirm no production node subscribes to IPS, truth pose, collision, lap,
    camera, or simulator debug topics. Keep truth monitors outside competition
@@ -364,10 +410,106 @@ substantially complete, but items 1–6 are integration evidence that was not
 completed before shutdown. Pure Pursuit, AMCL/EKF, and MPC must not be declared
 fully working solely from successful builds or offline tests.
 
+### Resumed live-simulator evidence (2026-09-01)
+
+The pinned simulator image was rebuilt because the prior container had an empty
+`/home/autodrive_simulator`. The official binary then rendered successfully and
+required its menu `Disconnected` control to be activated before the bridge
+reported `Connected`. A connected full-suite run produced:
+
+- `raw/runtime_diagnostics_20260901_connected/full_suite_20260901_064608.csv`:
+  4,285 rows, with the pre-fix odometry observer; it is retained to document
+  the terminal reset at 37.354 s.
+- `raw/runtime_diagnostics_20260901_imu_rebaseline/full_suite_20260901_065233.csv`:
+  4,276 rows after the IMU rebaseline change; ten reset transitions kept
+  odom x/y/speed continuous and the largest sampled yaw delta was 0.000134 rad.
+
+Both runs were made with simulator truth in the recorder only. They did not
+change the active runtime calibration tables, and their repeated collision or
+reset segments must not be treated as clean high-speed calibration evidence.
+
+A connected unified Pure Pursuit localization smoke test was also resumed on
+the same simulator image. The simulator rendered its open-ground scene, while
+the launch used the saved five-lap map and raceline. AMCL repeatedly refined a
+low-covariance candidate but rejected it at `0.703 m > 0.650 m`, so no
+`/amcl_pose` or `/ekf_pose` was published and Pure Pursuit correctly remained
+inhibited. This is unresolved racing acceptance evidence, not a justification
+for widening the track gate or using simulator truth in production.
+
+Follow-up live evidence used the current official competition track and the
+historical map/raceline candidate. The map server loaded at 1054 x 580 cells at
+0.025 m/cell, AMCL converged and accepted `(10.328, -9.594, 2.921)` with the
+confidence floor reduced to 0.20, and Pure Pursuit selected raceline index 306
+with 0.386 m cross-track error. The diagnostics-only ground-truth monitor
+reported 0.000 m and 0.000 rad AMCL, EKF, and odometry error while stationary.
+The candidate was tested with a zero speed cap, so this proves startup
+localization/map alignment only; it is not a racing lap. The corrected Pure
+Pursuit command path now leaves longitudinal acceleration at the actuator
+boundary, which already closes the measured speed loop.
+
+### Live closed-track tuning probes (2026-09-01)
+
+After rebuilding in the Humble workspace, each probe restarted both containers,
+started the unified launch before the simulator, activated the simulator menu
+connection, and waited for `autodrive_bridge: Connected!`. Ground truth was used
+only by the diagnostics-only monitor; it never entered AMCL, EKF, or the
+controller.
+
+The supported baseline was the promoted ICRA map/raceline, compact AMCL
+(cluster floor 0.20, association radius 0.80 m, local correction gain 0.08,
+cloud recentering enabled), sensor odom wheel-observer correction gain 0.75,
+and Pure Pursuit minimum lookahead 0.65 m / curvature feed-forward 0.25.
+
+- At controller cap 0.5 m/s, one collision occurred after about 57.8 s; before
+  collision AMCL/EKF/odom maximum errors were 0.773/0.723/0.669 m.
+- At 0.2 m/s, one collision occurred after about 73.6 s; maximum errors were
+  0.939/0.951/1.099 m. This reached farther into the track but did not
+  complete a lap.
+- At 0.12 m/s, one collision occurred after about 77.1 s; maximum errors were
+  1.816/1.804/1.930 m. Lowering the cap alone is therefore not an acceptance
+  fix.
+- A runtime wall-bias probe and stronger short-lookahead/feed-forward probe
+  were rejected; both produced worse localization divergence before collision.
+- A retained-cloud AMCL probe was rejected: it selected a corridor alias and
+  reached 3.338 m AMCL error. Compact-cloud AMCL remains the selected baseline.
+
+The CSV/log evidence is retained in
+`sdu_apex_autodrive/artifacts/calibration/raw/runtime_diagnostics_20260901_track_tuning/`.
+These are diagnostic/reset-containing probes, not clean-lap or competition
+acceptance evidence. No speed increase or AMCL gate widening is promoted.
+
+The additional 0.25 local scan-correction probe was rejected: it reached
+14.522 m maximum AMCL error after selecting a wrong scan mode, so the selected
+runtime gain remains 0.08. A fresh 0.20 m/s probe with the odometry stop guard
+also collided at recorder time about 70.5 s and reached pre-reset maxima of
+5.408/5.421/5.546 m for AMCL/EKF/odom. After the simulator reset, the guard
+stopped publishing stale observer motion and the odometry speed settled at
+0.0 m/s. This validates the stop behavior only; it is not clean accuracy
+evidence.
+
+### Map/raceline geometry cross-check (2026-09-01)
+
+The default runtime uses
+`f1tenth_planning/maps/autodrive_compete_2026.yaml` and
+`f1tenth_planning/trajectories/icra_2025_raceline.csv`. The map is the
+historical `icra_2025` PGM under an explicit competition-track name: SHA256
+`66550e26d81641544b7a0b18bc960db87f6a123a8a9fb47d28acee99e8153352`, 1054 x
+580 cells, 0.025 m resolution, origin `(-4.749971, -12.201061, 0)`. The
+raceline has 4,469 points and SHA256
+`ea441e7c8be90789d26d7e377c8d1f8f3ac6eb8b5a130ca6c4d0994882fd5720`.
+
+All 4,469 raceline points are in bounds and on free map pixels. Moving
+ground-truth samples from the connected track probes also landed on free map
+cells. The simulator distribution does not expose its internal Unity track as
+PGM/CSV, so this establishes matching live geometry and runtime pairing, not
+byte identity with an internal mesh.
+
 ## Safe restart procedure
 
 Use the repository directory explicitly; running `docker compose` from `~`
-gives “no configuration file provided”. The containers are stopped at handoff.
+gives “no configuration file provided”. Start the unified ROS launch first so
+the bridge is listening, then start the simulator application and activate its
+UI connection control until the bridge reports `Connected!`.
 
 ```bash
 cd /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive
@@ -393,7 +535,7 @@ docker exec -it autodrive_roboracer_sim bash -lc '
 '
 ```
 
-After the simulator reports `Connected!`, launch one stack only:
+Launch one stack only, before starting the simulator executable:
 
 ```bash
 docker exec -it sdu_apex_autodrive bash -lc '

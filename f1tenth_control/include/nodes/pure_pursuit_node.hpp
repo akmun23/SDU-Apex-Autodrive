@@ -31,13 +31,13 @@ namespace f1tenth_control {
  * 
  * This node:
  * - Loads a pre-computed racing line trajectory from CSV
- * - Subscribes to /ekf_pose and /odom for vehicle state
+ * - Subscribes to independent map-frame /amcl_pose and local /odom state
  * - Publishes physical-unit commands to /cmd/controller
  * - Supports dynamic parameter reconfiguration
  * 
  * Topics:
  *   Subscriptions:
- *     - /ekf_pose (geometry_msgs/PoseWithCovarianceStamped): Vehicle pose
+ *     - /amcl_pose (geometry_msgs/PoseWithCovarianceStamped): Map pose
  *     - /odom (nav_msgs/Odometry): Encoder/IMU velocity and odometry
  *     - /autodrive/roboracer_1/lidar (sensor_msgs/LaserScan): Control event
  *   
@@ -87,7 +87,7 @@ private:
     // Parameters
     std::string trajectory_file_;           // Path to trajectory CSV file
     std::string odom_topic_{"/odom"};
-    std::string pose_topic_{"/ekf_pose"};
+    std::string pose_topic_{"/amcl_pose"};
     std::string lidar_topic_{"/autodrive/roboracer_1/lidar"};
     std::string command_topic_{"/cmd/controller"};
     std::string path_frame_{"map"};

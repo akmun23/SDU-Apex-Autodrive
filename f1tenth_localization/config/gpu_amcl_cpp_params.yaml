@@ -56,7 +56,11 @@ gpu_amcl_cpp:
     cluster_radius_m: 0.35
     cluster_iterations: 3
     cluster_min_covariance: 0.0001
-    cluster_publish_min_weight: 0.60
+    # The current competition map and native simulator scan cadence converge
+    # at roughly 0.20.  Keep this as a confidence floor, not a truth input;
+    # the map/raceline distance, heading, covariance, and jump gates remain
+    # active before a pose is published to the controller.
+    cluster_publish_min_weight: 0.20
 
     enable_recovery_injection: false
     recovery_injection_ratio: 0.05
@@ -103,7 +107,10 @@ gpu_amcl_cpp:
     local_scan_correction_max_yaw_rad: 0.45
     # Associate local scan clusters with the causal odometry-predicted pose;
     # repeated corridor aliases outside this radius are not controller input.
+    # Associate local scan clusters with the causal odometry-predicted pose;
+    # repeated corridor aliases outside this radius are not controller input.
     local_cluster_association_max_distance_m: 0.80
+    # Keep the scan correction a bounded refinement of the odometry prediction.
     local_scan_correction_gain: 0.08
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
@@ -126,7 +133,7 @@ gpu_amcl_cpp:
     global_max_lateral_offset_m: 1.50
     global_heading_trajectory_file: ""
     global_heading_trajectory_package: f1tenth_planning
-    global_heading_trajectory_rel_path: trajectories/autodrive_track_5laps_raceline.csv
+    global_heading_trajectory_rel_path: trajectories/icra_2025_raceline.csv
     # Do not accept a global candidate until it meets the same safety envelope
     # required by the controller.  AMCL keeps refining while the vehicle is
     # stationary, so a wrong start guess cannot deadlock localization.

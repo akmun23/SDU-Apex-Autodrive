@@ -1,0 +1,15 @@
+five_lap_map_saver:
+  ros__parameters:
+    odom_topic: /odom
+    save_map_service: /slam_toolbox/save_map
+    completion_topic: /sdu/mapping_complete
+
+    # Keep the competition-scene map separate from the practice/open-ground
+    # map that remains the historical calibration artifact.
+    output_directory: /workspace/src/f1tenth_planning/maps
+    map_name: autodrive_compete_5laps
+    target_laps: 5
+    start_radius_m: 1.00
+    departure_radius_m: 1.50
+    minimum_lap_distance_m: 8.00
+    maximum_odom_step_m: 1.00

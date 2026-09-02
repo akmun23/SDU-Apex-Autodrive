@@ -24,8 +24,9 @@ namespace gpu_amcl_cpp {
  * @brief AMCL ROS 2 node — GPU-accelerated particle-filter localisation.
  *
  * Subscribes to laser scans and odometry, publishes pose estimates
- * and a particle cloud.  The sensor-odometry node owns the map->odom
- * transform; AMCL remains an estimate source only.
+ * and a particle cloud. AMCL publishes the independent map->odom correction
+ * computed from its map pose and the timestamp-aligned local odometry pose.
+ * The local EKF never subscribes to this AMCL output.
  */
 class AmclNode : public rclcpp::Node {
 public:
@@ -77,6 +78,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr particle_count_pub_;                  // /amcl_particle_count
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr kld_diag_pub_;            // /amcl_kld_diagnostics
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr gpu_timing_pub_;          // /amcl_gpu_timing
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     
     // ── Core ───────────────────────────────────────────────────────
     ParticleFilter pf_;     // The particle filter
