@@ -1,6 +1,7 @@
 autodrive_actuator_interface:
   ros__parameters:
-    input_topic: /cmd/controller
+    input_topic: /cmd/speed
+    command_mode: speed
     odom_topic: /odom
     steering_topic: /autodrive/roboracer_1/steering_command
     throttle_topic: /autodrive/roboracer_1/throttle_command
@@ -51,21 +52,52 @@ autodrive_actuator_interface:
     # Use calibrated feedback for small overshoots; passive coast is reserved
     # for a materially large error so low-speed control does not oscillate.
     overspeed_coast_threshold_mps: 1.0
+    # Accelerate with feedback outside the speed deadband. The IMU remains an
+    # input to predictive handoff and feedback; the mapped throttle is held
+    # through small speed crossings.
+    speed_hold_error_deadband_mps: 0.15
+    # Keep the calibrated target-speed throttle through bounded odom
+    # under-reporting after the handoff. Re-enter recovery only when the
+    # measured deficit is large enough to represent a real loss of speed.
+    speed_hold_recovery_error_mps: 2.5
+    speed_hold_acceleration_deadband_mps2: 0.35
+    # Fast boost while far below target, followed by a predictive handoff to
+    # the throttle mapped to the requested target speed. The horizon covers
+    # the native 10 Hz command interval and the measured actuator transient.
+    speed_boost_error_mps: 1.5
+    speed_hold_prediction_horizon_sec: 0.35
+    speed_hold_entry_margin_mps: 0.15
+    # Require a persistent relative overspeed before coasting; native
+    # simulator odometry is approximately 10 Hz and can spike for one sample.
+    speed_overspeed_confirmation_sec: 0.30
 
     # Allowed-input acceleration/speed observer and inverse throttle model.
     # The observer uses /odom and IMU only. Ground truth is used solely by the
     # offline calibration recorder and never enters the race controller.
-    acceleration_filter_alpha: 0.35
+    acceleration_filter_alpha: 0.20
     slip_threshold_mps: 0.75
     slip_ratio: 0.20
     odom_correction_gain: 0.25
+    # Control-side conditioning only. /odom remains the published calibrated
+    # sensor-fusion stream; this alpha prevents one odom sample from toggling
+    # the speed loop between hold and coast.
+    speed_measurement_filter_alpha: 0.35
     speed_error_to_accel_gain: 1.25
     speed_error_integral_to_accel_gain: 0.05
-    max_acceleration_mps2: 6.0
+    # Positive acceleration capability is a decreasing function of speed,
+    # fitted from the full-throttle open-ground grid. The scalar is the
+    # standstill cap; the table is the runtime reachable envelope.
+    max_acceleration_mps2: 5.5
+    max_acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
+                                 16.0, 18.0, 20.0, 22.0, 23.0]
+    max_acceleration_envelope_mps2: [5.5, 4.4, 4.4, 3.568, 3.175, 2.562,
+                                     2.043, 1.565, 0.956, 0.529, 0.529,
+                                     0.529, 0.086]
     max_deceleration_mps2: 8.0
-    # Secondary IMU correction; keep isolated 10 Hz acceleration spikes from
-    # overriding the calibrated speed/acceleration feed-forward.
-    acceleration_feedback_gain: 0.05
+    # Filtered IMU acceleration closes the acceleration loop. The gain and
+    # separate slew limits damp the native ~10 Hz transient samples without
+    # slowing the independent speed-loop output.
+    acceleration_feedback_gain: 0.5
     acceleration_integral_gain: 0.003
     acceleration_integral_limit: 2.0
     acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
@@ -77,13 +109,15 @@ autodrive_actuator_interface:
     acceleration_throttle_per_mps2: [0.158521, 0.160881, 0.163312, 0.165818,
                                      0.168402, 0.171068, 0.173819, 0.176661,
                                      0.179597, 0.182632, 0.185771, 0.190688]
+    acceleration_throttle_rise_rate_per_sec: 2.0
+    acceleration_throttle_fall_rate_per_sec: 4.0
 
-    # Settled open-ground response over the complete normalized command
-    # range. 1.0 throttle reaches the simulator envelope at 22.8836 m/s.
-    feedforward_speed_mps: [0.0, 0.5016, 1.2497, 1.9930, 2.4859, 2.9768,
-                            3.7096, 4.4382, 4.9216, 5.6440, 6.3621, 7.3135,
-                            8.4935, 9.6633, 11.9725, 14.2418, 16.4701,
-                            18.6555, 22.8836]
-    feedforward_throttle: [0.0, 0.020, 0.050, 0.080, 0.100, 0.120, 0.150,
-                           0.180, 0.200, 0.230, 0.260, 0.300, 0.350, 0.400,
-                           0.500, 0.600, 0.700, 0.800, 1.000]
+    # Monotonic response points from the completed 2026-09-03 grid. The
+    # analyzer rejects moving-coast tails before producing this table; linear
+    # interpolation supplies commands between the measured throttle points.
+    # 1.0 throttle reaches the simulator envelope at 22.8821 m/s.
+    feedforward_speed_mps: [0.0, 0.7537, 1.5005, 2.4883, 3.7113, 4.9225,
+                            7.3138, 9.6633, 11.9725, 15.3611, 18.6550,
+                            22.8821]
+    feedforward_throttle: [0.0, 0.030, 0.060, 0.100, 0.150, 0.200,
+                           0.300, 0.400, 0.500, 0.650, 0.800, 1.000]

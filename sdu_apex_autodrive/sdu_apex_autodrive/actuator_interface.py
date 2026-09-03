@@ -15,6 +15,7 @@ from std_msgs.msg import Bool, Float32, Int32
 from .speed_controller import (
     LongitudinalStateEstimator,
     SpeedControllerConfig,
+    TargetAccelerationController,
     TargetSpeedController,
     clamp,
 )
@@ -25,6 +26,11 @@ class ActuatorInterface(Node):
         "kp", "ki", "ka", "integral_limit", "throttle_max_forward",
         "throttle_rise_rate_per_sec", "throttle_fall_rate_per_sec",
         "stop_speed_threshold_mps", "overspeed_coast_threshold_mps",
+        "speed_hold_error_deadband_mps",
+        "speed_hold_recovery_error_mps",
+        "speed_hold_acceleration_deadband_mps2",
+        "speed_boost_error_mps", "speed_hold_prediction_horizon_sec",
+        "speed_hold_entry_margin_mps", "speed_overspeed_confirmation_sec",
     }
 
     def __init__(self) -> None:
@@ -33,6 +39,9 @@ class ActuatorInterface(Node):
 
         self.max_steering = float(self.get_parameter("max_steering_angle_rad").value)
         self.max_target_speed = float(self.get_parameter("max_target_speed_mps").value)
+        self.command_mode = str(self.get_parameter("command_mode").value).strip().lower()
+        if self.command_mode not in {"speed", "acceleration"}:
+            raise ValueError("command_mode must be 'speed' or 'acceleration'")
         self.command_timeout = float(self.get_parameter("command_timeout_sec").value)
         self.odom_timeout = float(self.get_parameter("odom_timeout_sec").value)
         rate = float(self.get_parameter("publish_rate_hz").value)
@@ -41,9 +50,13 @@ class ActuatorInterface(Node):
 
         self.nominal_dt = 1.0 / rate
         self.speed_controller = TargetSpeedController(self._speed_config())
+        self.acceleration_controller = TargetAccelerationController(
+            self._speed_config())
 
         self.command = None
         self.command_time = None
+        self.raw_throttle_override = None
+        self.raw_throttle_override_time = None
         self.speed = None
         self.odom_time = None
         self.acceleration = 0.0
@@ -56,6 +69,8 @@ class ActuatorInterface(Node):
             slip_ratio=float(self.get_parameter("slip_ratio").value),
             odom_correction_gain=float(
                 self.get_parameter("odom_correction_gain").value),
+            speed_measurement_filter_alpha=float(
+                self.get_parameter("speed_measurement_filter_alpha").value),
         )
         self.control_time = None
         self.last_neutral_reason = None
@@ -80,6 +95,14 @@ class ActuatorInterface(Node):
         self.command_sub = self.create_subscription(
             AckermannDriveStamped, self.get_parameter("input_topic").value,
             self._on_command, 10)
+        self.raw_throttle_override_sub = None
+        if bool(self.get_parameter("allow_raw_throttle_override").value):
+            self.raw_throttle_override_sub = self.create_subscription(
+                Float32,
+                self.get_parameter("raw_throttle_override_topic").value,
+                self._on_raw_throttle_override,
+                10,
+            )
         self.odom_sub = self.create_subscription(
             Odometry, self.get_parameter("odom_topic").value,
             self._on_odom, 10)
@@ -111,11 +134,20 @@ class ActuatorInterface(Node):
         self.get_logger().info("Actuator interface ready; no arming state")
 
     def _declare_parameters(self) -> None:
-        self.declare_parameter("input_topic", "/cmd/controller")
+        self.declare_parameter("input_topic", "/cmd/speed")
+        self.declare_parameter("command_mode", "speed")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("imu_topic", "/autodrive/roboracer_1/imu")
         self.declare_parameter("steering_topic", "/autodrive/roboracer_1/steering_command")
         self.declare_parameter("throttle_topic", "/autodrive/roboracer_1/throttle_command")
+        # Diagnostics-only escape hatch for calibration phases that must
+        # apply raw zero throttle. Production controllers never enable this:
+        # acceleration=0 is a valid hold-acceleration request, not neutral.
+        self.declare_parameter("allow_raw_throttle_override", False)
+        self.declare_parameter(
+            "raw_throttle_override_topic",
+            "/autodrive/roboracer_1/raw_throttle_override",
+        )
         # Mapping completion is not part of the race actuator contract. The
         # mapping launch enables its optional hook explicitly when needed.
         self.declare_parameter("external_stop_topic", "")
@@ -152,21 +184,51 @@ class ActuatorInterface(Node):
         # low speed because passive simulator deceleration is steep.  Reserve
         # forced coasting for a materially large overspeed.
         self.declare_parameter("overspeed_coast_threshold_mps", 1.0)
+        # Once target speed and acceleration are settled, hold the calibrated
+        # feed-forward throttle until either deadband is left.
+        self.declare_parameter("speed_hold_error_deadband_mps", 0.25)
+        self.declare_parameter("speed_hold_recovery_error_mps", 0.25)
+        self.declare_parameter("speed_hold_acceleration_deadband_mps2", 0.35)
+        # Far below target, use the full normalized forward command. Handoff
+        # is predictive so the vehicle reaches the target without a large
+        # overshoot, then the target-speed feed-forward value is held.
+        self.declare_parameter("speed_boost_error_mps", 1.5)
+        self.declare_parameter("speed_hold_prediction_horizon_sec", 0.25)
+        self.declare_parameter("speed_hold_entry_margin_mps", 0.15)
+        self.declare_parameter("speed_overspeed_confirmation_sec", 0.30)
         # Allowed-input longitudinal observer.  It rejects encoder wheel-spin
         # when the IMU-integrated body speed disagrees materially.
-        self.declare_parameter("acceleration_filter_alpha", 0.35)
+        self.declare_parameter("acceleration_filter_alpha", 0.20)
         self.declare_parameter("slip_threshold_mps", 0.75)
         self.declare_parameter("slip_ratio", 0.20)
         self.declare_parameter("odom_correction_gain", 0.25)
+        # Condition only the speed signal consumed by the actuator loop. The
+        # estimator's published /odom topic remains the calibrated sensor
+        # fusion output and is not low-pass filtered here.
+        self.declare_parameter("speed_measurement_filter_alpha", 0.35)
         self.declare_parameter("speed_error_to_accel_gain", 1.25)
         self.declare_parameter("speed_error_integral_to_accel_gain", 0.05)
-        self.declare_parameter("max_acceleration_mps2", 6.0)
+        # Full-throttle open-ground acceleration is speed dependent. The
+        # scalar is the low-speed cap; the envelope below is the measured
+        # monotonic capability curve used at runtime.
+        self.declare_parameter("max_acceleration_mps2", 5.5)
+        self.declare_parameter(
+            "max_acceleration_speed_mps",
+            [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0,
+             18.0, 20.0, 22.0, 23.0])
+        self.declare_parameter(
+            "max_acceleration_envelope_mps2",
+            [5.5, 4.4, 4.4, 3.568, 3.175, 2.562, 2.043, 1.565,
+             0.956, 0.529, 0.529, 0.529, 0.086])
         self.declare_parameter("max_deceleration_mps2", 8.0)
         # IMU acceleration is useful as a secondary signal, but isolated
         # simulator samples can spike at the native 10 Hz cadence. Let the
         # calibrated speed/acceleration feed-forward and odom feedback remain
         # dominant instead of cutting throttle on one such spike.
-        self.declare_parameter("acceleration_feedback_gain", 0.05)
+        # Close the acceleration loop against the filtered IMU signal. The
+        # open-ground verification showed that a very small value allowed the
+        # speed feed-forward term to overshoot the requested acceleration.
+        self.declare_parameter("acceleration_feedback_gain", 0.5)
         self.declare_parameter("acceleration_integral_gain", 0.003)
         self.declare_parameter("acceleration_integral_limit", 2.0)
         self.declare_parameter(
@@ -177,17 +239,16 @@ class ActuatorInterface(Node):
             "acceleration_throttle_per_mps2",
             [0.158521, 0.160881, 0.163312, 0.165818, 0.168402, 0.171068,
              0.173819, 0.176661, 0.179597, 0.182632, 0.185771, 0.190688])
+        self.declare_parameter("acceleration_throttle_rise_rate_per_sec", 2.0)
+        self.declare_parameter("acceleration_throttle_fall_rate_per_sec", 4.0)
         self.declare_parameter(
             "feedforward_speed_mps",
-            [0.0, 0.5016, 1.2497, 1.9930, 2.4859, 2.9768,
-             3.7096, 4.4382, 4.9216, 5.6440, 6.3621, 7.3135,
-             8.4935, 9.6633, 11.9725, 14.2418, 16.4701, 18.6555,
-             22.8836])
+            [0.0, 0.7537, 1.5005, 2.4883, 3.7113, 4.9225,
+             7.3138, 9.6633, 11.9725, 15.3611, 18.6550, 22.8821])
         self.declare_parameter(
             "feedforward_throttle",
-            [0.0, 0.020, 0.050, 0.080, 0.100, 0.120, 0.150,
-             0.180, 0.200, 0.230, 0.260, 0.300, 0.350, 0.400,
-             0.500, 0.600, 0.700, 0.800, 1.000])
+            [0.0, 0.030, 0.060, 0.100, 0.150, 0.200,
+             0.300, 0.400, 0.500, 0.650, 0.800, 1.000])
 
     def _speed_config(self) -> SpeedControllerConfig:
         return SpeedControllerConfig(
@@ -201,6 +262,20 @@ class ActuatorInterface(Node):
             stop_speed_threshold_mps=float(self.get_parameter("stop_speed_threshold_mps").value),
             overspeed_coast_threshold_mps=float(
                 self.get_parameter("overspeed_coast_threshold_mps").value),
+            speed_hold_error_deadband_mps=float(
+                self.get_parameter("speed_hold_error_deadband_mps").value),
+            speed_hold_recovery_error_mps=float(
+                self.get_parameter("speed_hold_recovery_error_mps").value),
+            speed_hold_acceleration_deadband_mps2=float(
+                self.get_parameter("speed_hold_acceleration_deadband_mps2").value),
+            speed_boost_error_mps=float(
+                self.get_parameter("speed_boost_error_mps").value),
+            speed_hold_prediction_horizon_sec=float(
+                self.get_parameter("speed_hold_prediction_horizon_sec").value),
+            speed_hold_entry_margin_mps=float(
+                self.get_parameter("speed_hold_entry_margin_mps").value),
+            speed_overspeed_confirmation_sec=float(
+                self.get_parameter("speed_overspeed_confirmation_sec").value),
             feedforward_speed_mps=tuple(float(v) for v in self.get_parameter("feedforward_speed_mps").value),
             feedforward_throttle=tuple(float(v) for v in self.get_parameter("feedforward_throttle").value),
             speed_error_to_accel_gain=float(
@@ -209,6 +284,10 @@ class ActuatorInterface(Node):
                 self.get_parameter("speed_error_integral_to_accel_gain").value),
             max_acceleration_mps2=float(
                 self.get_parameter("max_acceleration_mps2").value),
+            max_acceleration_speed_mps=tuple(float(v) for v in self.get_parameter(
+                "max_acceleration_speed_mps").value),
+            max_acceleration_envelope_mps2=tuple(float(v) for v in self.get_parameter(
+                "max_acceleration_envelope_mps2").value),
             max_deceleration_mps2=float(
                 self.get_parameter("max_deceleration_mps2").value),
             acceleration_feedback_gain=float(
@@ -217,6 +296,10 @@ class ActuatorInterface(Node):
                 self.get_parameter("acceleration_integral_gain").value),
             acceleration_integral_limit=float(
                 self.get_parameter("acceleration_integral_limit").value),
+            acceleration_throttle_rise_rate_per_sec=float(
+                self.get_parameter("acceleration_throttle_rise_rate_per_sec").value),
+            acceleration_throttle_fall_rate_per_sec=float(
+                self.get_parameter("acceleration_throttle_fall_rate_per_sec").value),
             acceleration_speed_mps=tuple(float(v) for v in self.get_parameter(
                 "acceleration_speed_mps").value),
             acceleration_throttle_per_mps2=tuple(float(v) for v in self.get_parameter(
@@ -234,6 +317,7 @@ class ActuatorInterface(Node):
             candidate = replace(self.speed_controller.config, **changes)
             candidate.validate()
             self.speed_controller.reconfigure(candidate)
+            self.acceleration_controller.reconfigure(candidate)
         except (TypeError, ValueError) as exc:
             return SetParametersResult(successful=False, reason=str(exc))
         self.control_time = None
@@ -254,6 +338,15 @@ class ActuatorInterface(Node):
         )
         self.command_time = self.get_clock().now()
 
+    def _on_raw_throttle_override(self, msg: Float32) -> None:
+        value = float(msg.data)
+        if not math.isfinite(value):
+            self.raw_throttle_override = None
+            self.raw_throttle_override_time = None
+            return
+        self.raw_throttle_override = clamp(value, 0.0, self.speed_controller.config.throttle_max_forward)
+        self.raw_throttle_override_time = self.get_clock().now()
+
     def _on_odom(self, msg: Odometry) -> None:
         speed = float(msg.twist.twist.linear.x)
         if not math.isfinite(speed):
@@ -273,7 +366,12 @@ class ActuatorInterface(Node):
         now = self.get_clock().now()
         self.speed_estimator.update_acceleration(
             acceleration, now.nanoseconds / 1e9)
-        self.speed = self.speed_estimator.speed_mps
+        # Once calibrated /odom is live, it is the absolute speed measurement
+        # used by the controller. The estimator still filters IMU acceleration
+        # for the acceleration-loop feedback, but its open-loop integral must
+        # not overwrite the newer odometry speed between two odom callbacks.
+        if not self.speed_estimator.has_odom:
+            self.speed = self.speed_estimator.speed_mps
         self.acceleration = self.speed_estimator.acceleration_mps2
         self.imu_time = now
 
@@ -327,6 +425,7 @@ class ActuatorInterface(Node):
         self.command = None
         self.command_time = None
         self.speed_controller.reset()
+        self.acceleration_controller.reset()
         self.speed_estimator.reset()
         self.speed = 0.0
         self.acceleration = 0.0
@@ -367,6 +466,19 @@ class ActuatorInterface(Node):
         self._service_reset_pulse(now)
         if self.external_stop_latched:
             return self._neutral("external stop")
+        if (self.raw_throttle_override is not None and
+                self.raw_throttle_override_time is not None and
+                (now - self.raw_throttle_override_time).nanoseconds / 1e9
+                <= self.command_timeout):
+            # Calibration owns the raw actuator only while this explicit,
+            # diagnostics-only override is fresh. Reset controller state so
+            # its previous closed-loop target cannot resume during braking.
+            self.speed_controller.reset()
+            self.acceleration_controller.reset()
+            self.control_time = None
+            self._publish(0.0, self.raw_throttle_override)
+            self.last_neutral_reason = None
+            return
         if self.command is None or self.command_time is None:
             return self._neutral("no command")
         if self.speed is None or self.odom_time is None:
@@ -383,8 +495,14 @@ class ActuatorInterface(Node):
 
         steering_angle, target_speed, target_accel = self.command
         steering = clamp(steering_angle / self.max_steering, -1.0, 1.0)
-        throttle = self.speed_controller.update(
-            target_speed, self.speed, target_accel, dt, self.acceleration)
+        if self.command_mode == "acceleration":
+            throttle = self.acceleration_controller.update(
+                target_accel, self.speed, self.acceleration, dt)
+        else:
+            # The speed interface owns the speed target. Any acceleration
+            # field in a speed command is diagnostic metadata and is ignored.
+            throttle = self.speed_controller.update(
+                target_speed, self.speed, 0.0, dt, self.acceleration)
         self._publish(steering, throttle)
         self.last_neutral_reason = None
 
@@ -394,6 +512,7 @@ class ActuatorInterface(Node):
 
     def _neutral(self, reason: str) -> None:
         self.speed_controller.reset()
+        self.acceleration_controller.reset()
         self.control_time = None
         self._publish(0.0, 0.0)
         if reason != self.last_neutral_reason:

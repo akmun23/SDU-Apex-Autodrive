@@ -10,6 +10,8 @@ calibration:
     speed_sequence_mps: [5.5, 0.0]
     steering_sequence: [0.0]
     hold_sec: 5.0
+    speed_settle_error_mps: 0.25
+    speed_settle_timeout_sec: 15.0
     zero_settle_sec: 1.0
     maximum_test_speed_mps: 22.88
     maximum_throttle: 1.0
@@ -17,4 +19,9 @@ calibration:
     telemetry_timeout_sec: 0.75
     startup_timeout_sec: 30.0
     reset_between_steps: true
-    reset_pulse_sec: 0.25
+    # Hold the diagnostics reset across at least one native bridge callback
+    # before releasing it; this is not a production controller parameter.
+    reset_pulse_sec: 1.0
+    reset_signal_hold_sec: 0.8
+    reset_confirmation_timeout_sec: 60.0
+    reset_zero_odom_stable_sec: 2.0

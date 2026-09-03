@@ -71,7 +71,6 @@
 #define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
 #define MIN_LINEARIZATION_VELOCITY 0.5f                  /* Lower velocity clamp aligned with slip-angle floor for low-speed recovery. */
 #define STABILITY_LIMIT 0.95f                            /* Clamp on selected discrete self-coupling to preserve numerical stability. */
-#define V_SWITCH 7.319f                                  /* Transition speed for constant-power acceleration limiting. */
 #define MIN_SLIP_VELOCITY 0.5f                           /* Lower velocity clamp used in slip-angle calculations. */
 /* CPU warm-start / cold-start policy. */
 #define MPC_WS_CURVATURE_THRESH 0.25f                    /* Curvature jump that forces a cold start. */
@@ -101,8 +100,9 @@
 #define VP_MASS_TIMES_GRAVITY_N (VP_MASS_KG * GRAVITY_MPS2) /* Vehicle weight magnitude used by normal-load equations. */
 #define VP_INV_MASS_1_PER_KG (1.0f / VP_MASS_KG)         /* Reciprocal vehicle mass used in acceleration-state Jacobians. */
 #define VP_INV_YAW_INERTIA_1_PER_KGM2 (1.0f / VP_YAW_INERTIA_KGM2) /* Reciprocal yaw inertia used in yaw-rate Jacobians. */
-#define VP_MAX_ACCEL_MPS2 (VP_FRICTION_COEFF * GRAVITY_MPS2) /* Friction-limited forward acceleration; matches the bag run (no 1.4x over-drive). */
-#define VP_MIN_ACCEL_MPS2 (-VP_MAX_ACCEL_MPS2)           /* Braking bound mirrored from the friction-limited acceleration envelope. */
+#define VP_MAX_ACCEL_MPS2 5.5f                           /* Measured open-ground full-throttle acceleration cap at standstill. */
+#define VP_MAX_BRAKING_MPS2 (VP_FRICTION_COEFF * GRAVITY_MPS2) /* Conservative friction-limited braking bound. */
+#define VP_MIN_ACCEL_MPS2 (-VP_MAX_BRAKING_MPS2)         /* Negative acceleration bound; active brake availability remains a separate actuator issue. */
 #define VP_C_ALPHA_F 51.40f                              /* Measured front small-slip lateral slope [N/rad]. */
 #define VP_C_ALPHA_R 43.10f                              /* Measured rear small-slip lateral slope [N/rad]. */
 #define VP_LATERAL_EXTREMUM_SLIP 0.01f                  /* AutoDRIVE lateral extremum slip S_y. */

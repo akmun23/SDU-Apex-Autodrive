@@ -114,6 +114,10 @@ class GroundTruthAmclMonitor(Node):
         self.map_to_world_translation: Optional[Tuple[float, float]] = None
         # (odom x, odom y, odom yaw, map x, map y, map yaw) at alignment.
         self.odom_map_reference: Optional[Tuple[float, float, float, float, float, float]] = None
+        # /ekf_pose is the local sensor-only EKF pose in odom, not map. Keep
+        # an independent reference so its diagnostic error is evaluated in
+        # the same map frame as AMCL and ground truth.
+        self.ekf_map_reference: Optional[Tuple[float, float, float, float, float, float]] = None
 
         self.sum_sq_xy = 0.0
         self.sum_sq_yaw = 0.0
@@ -152,6 +156,7 @@ class GroundTruthAmclMonitor(Node):
         self.map_to_world_yaw = None
         self.map_to_world_translation = None
         self.odom_map_reference = None
+        self.ekf_map_reference = None
         self.amcl_samples.clear()
         self.odom_samples.clear()
         self.ekf_samples.clear()
@@ -249,6 +254,16 @@ class GroundTruthAmclMonitor(Node):
         dx, dy = _rotate(ox - ox0, oy - oy0, myaw0)
         return mx0 + dx, my0 + dy, _wrap(myaw0 + _wrap(oyaw - oyaw0))
 
+    def _map_pose_from_ekf(
+        self, ekf_pose: Tuple[float, float, float]
+    ) -> Optional[Tuple[float, float, float]]:
+        if self.ekf_map_reference is None:
+            return None
+        ex0, ey0, eyaw0, mx0, my0, myaw0 = self.ekf_map_reference
+        ex, ey, eyaw = ekf_pose
+        dx, dy = _rotate(ex - ex0, ey - ey0, myaw0)
+        return mx0 + dx, my0 + dy, _wrap(myaw0 + _wrap(eyaw - eyaw0))
+
     def _compare_at(self, stamp: float) -> None:
         gt_pose = _interpolate(self.gt_samples, stamp, self.pair_timeout)
         amcl_pose = _interpolate(self.amcl_samples, stamp, self.pair_timeout)
@@ -270,6 +285,12 @@ class GroundTruthAmclMonitor(Node):
                     odom_pose[0], odom_pose[1], odom_pose[2],
                     amcl_x, amcl_y, amcl_yaw,
                 )
+            ekf_pose = _interpolate(self.ekf_samples, stamp, self.pair_timeout)
+            if ekf_pose is not None:
+                self.ekf_map_reference = (
+                    ekf_pose[0], ekf_pose[1], ekf_pose[2],
+                    amcl_x, amcl_y, amcl_yaw,
+                )
             self.get_logger().info(
                 "Ground-truth alignment initialized: map->world yaw=%.3f, translation=(%.3f, %.3f)"
                 % (self.map_to_world_yaw, self.map_to_world_translation[0],
@@ -285,11 +306,19 @@ class GroundTruthAmclMonitor(Node):
         error_yaw = abs(_wrap(amcl_yaw - expected_yaw))
 
         ekf_pose = _interpolate(self.ekf_samples, stamp, self.pair_timeout)
+        if self.ekf_map_reference is None and ekf_pose is not None:
+            # EKF may publish later than the first AMCL alignment sample.
+            # Establish its local-to-map origin at the first valid pair.
+            self.ekf_map_reference = (
+                ekf_pose[0], ekf_pose[1], ekf_pose[2],
+                amcl_x, amcl_y, amcl_yaw,
+            )
+        ekf_map_pose = self._map_pose_from_ekf(ekf_pose) if ekf_pose else None
         ekf_error_xy = math.nan
         ekf_error_yaw = math.nan
         ekf_report = "ekf=unavailable"
-        if ekf_pose is not None:
-            ex, ey, eyaw = ekf_pose
+        if ekf_map_pose is not None:
+            ex, ey, eyaw = ekf_map_pose
             ekf_error_xy = math.hypot(ex - expected_x, ey - expected_y)
             ekf_error_yaw = abs(_wrap(eyaw - expected_yaw))
             ekf_report = "ekf=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad" % (
@@ -333,8 +362,8 @@ class GroundTruthAmclMonitor(Node):
         if self.csv_writer is not None:
             elapsed = stamp - (self.startup_time.nanoseconds * 1.0e-9)
             ex = ey = etheta = math.nan
-            if ekf_pose is not None:
-                ex, ey, etheta = ekf_pose
+            if ekf_map_pose is not None:
+                ex, ey, etheta = ekf_map_pose
             ox = oy = otheta = math.nan
             if odom_map_pose is not None:
                 ox, oy, otheta = odom_map_pose

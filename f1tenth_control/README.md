@@ -10,7 +10,8 @@ The package contains three controller plugins:
 - `f1tenth_control::StanleyNode` — raceline tracking with AMCL pose and
   encoder/IMU odometry.
 
-All controllers publish physical-unit commands to `/cmd/controller` as
+Pure Pursuit, Stanley, and FTG publish physical-unit speed commands to
+`/cmd/speed` as
 `ackermann_msgs/msg/AckermannDriveStamped`. The single
 `sdu_apex_autodrive/actuator_interface` node owns conversion to AutoDRIVE's
 normalized steering and throttle topics.

@@ -1,0 +1,72 @@
+rows=25079
+unique_gt_odom_rows=5444
+duplicate_gt_odom_rows_removed=19635
+speed_reference=gt_speed_mps
+ground_truth_position_reference=timestamped_gt_odom
+lidar_rate_hz_median=10.896
+imu_rate_hz_median=10.897 imu_rate_hz_p95=11.499
+left_encoder_rate_hz_median=10.896 left_encoder_rate_hz_p95=11.499
+right_encoder_rate_hz_median=10.897 right_encoder_rate_hz_p95=11.499
+odom_rate_hz_median=10.898 odom_rate_hz_p95=11.498
+gt_odom_rate_hz_median=10.897 gt_odom_rate_hz_p95=11.499
+gt_ips_rate_hz_median=10.896 gt_ips_rate_hz_p95=11.499
+collision_rate_hz_median=10.896 collision_rate_hz_p95=11.499
+speed_command_rate_hz_median=49.985 speed_command_rate_hz_p95=50.321
+acceleration_command_rate_hz_median=49.989 acceleration_command_rate_hz_p95=50.497
+steering_command_rate_hz_median=59.862 steering_command_rate_hz_p95=60.374
+throttle_feedback_rate_hz_median=10.895 throttle_feedback_rate_hz_p95=11.500
+steering_feedback_rate_hz_median=10.898 steering_feedback_rate_hz_p95=11.499
+gt_speed_mps_min=0.000 gt_speed_mps_max=20.152
+ground_truth_collision_count_max=0
+phase,command,initial_speed_mps,peak_speed_mps,tail_speed_mps,peak_accel_mps2,samples
+speed_0.00,0.000000,0.000000,0.000000,0.000000,0.000000,371
+speed_10.00,10.000000,6.308050,12.603800,10.795650,6.209226,203
+speed_12.00,12.000000,6.573950,13.621800,12.116100,6.129777,201
+speed_14.00,14.000000,6.974200,14.616600,13.169300,5.887097,195
+speed_16.00,16.000000,7.036700,16.809700,15.777500,5.285611,195
+speed_20.00,20.000000,6.858900,20.151900,19.098800,5.287055,195
+speed_4.00,4.000000,3.317900,6.081600,4.436550,6.720247,199
+speed_6.00,6.000000,5.013800,7.840500,6.665800,6.175996,201
+speed_8.00,8.000000,6.711100,9.442600,7.964350,6.522135,200
+response_trace=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/latest_speed_filter_verification_20260903/response.csv
+acceleration_map=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/latest_speed_filter_verification_20260903/acceleration_map.csv
+slip_model_rows=17 samples=160
+motion_regime,force_curve_region,wheel_speed_bin_mps,median_wheel_speed_mps,median_body_vx_mps,median_slip_speed_mps,median_slip_ratio,slip_ratio_mad,slip_ratio_p10,slip_ratio_p90,samples
+braking,asymptotic,0.000000,0.000000,5.750950,-5.750950,-1.000000,0.000000,-1.000000,-1.000000,136
+braking,asymptotic,2.000000,3.193643,5.763800,-2.570157,-0.414362,0.127932,-0.542294,-0.286431,2
+braking,asymptotic,4.000000,4.708746,9.146350,-4.437604,-0.469707,0.072533,-0.542241,-0.397174,2
+braking,asymptotic,8.000000,9.762414,5.794150,3.968264,0.746106,0.308871,0.437234,1.054977,2
+braking,asymptotic,10.000000,11.622827,16.786600,-5.163773,-0.307613,0.000000,-0.307613,-0.307613,1
+braking,asymptotic,12.000000,13.570163,9.228500,4.341663,0.470462,0.000000,0.470462,0.470462,1
+braking,asymptotic,14.000000,14.413225,10.341600,4.071625,0.405274,0.144513,0.260761,0.549787,2
+braking,asymptotic,18.000000,19.415450,13.052700,6.362750,0.487563,0.014403,0.473161,0.501966,2
+braking,asymptotic,20.000000,20.857625,9.836200,11.021425,1.120496,0.000000,1.120496,1.120496,1
+braking,asymptotic,22.000000,22.496180,14.021200,8.474980,0.604440,0.000000,0.604440,0.604440,1
+braking,asymptotic,24.000000,25.001179,14.168700,11.137779,0.803394,0.017965,0.310745,0.821360,3
+braking,post_extremum,14.000000,14.316543,18.904900,-4.588357,-0.242707,0.000000,-0.242707,-0.242707,1
+braking,post_extremum,20.000000,20.359786,16.939650,3.420136,0.201989,0.010800,0.191190,0.212789,2
+braking,pre_extremum,4.000000,5.374198,5.044100,0.330098,0.065442,0.000000,0.065442,0.065442,1
+braking,pre_extremum,10.000000,11.990908,11.085900,0.905008,0.081636,0.000000,0.081636,0.081636,1
+braking,pre_extremum,14.000000,15.117437,13.474300,1.643137,0.121946,0.000000,0.121946,0.121946,1
+braking,pre_extremum,20.000000,21.210653,18.786900,2.423753,0.129013,0.000000,0.129013,0.129013,1
+slip_model=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/latest_speed_filter_verification_20260903/slip_model.csv
+ground_truth_vs_odom_position_error_m=median=0.158 p95=6.910 max=301.021
+ground_truth_vs_odom_position_error_active_m=median=0.158 p95=6.718 max=265.476
+ground_truth_vs_odom_speed_error_mps=median=0.000 abs_p95=1.071
+ground_truth_vs_odom_speed_error_active_mps=median=0.000 abs_p95=1.071
+lidar_events_median=2756.000 lidar_events_p95=5191.000
+speed_tracking_error_mps=median=0.724 p95=9.340
+speed_tracking_abs_error_mps=median=0.730 p95=9.340 max=20.000
+speed_overspeed_fraction=gt_0.10=0.081
+truth_speed_tracking_error_mps=median=0.393 abs_p95=9.424 max_abs=20.000 phases=8
+truth_speed_tracking_tail_error_mps=median=-0.040 abs_p95=0.901
+feedforward_table=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/latest_speed_filter_verification_20260903/feedforward.csv
+motion_regime,events,duration_s,truth_speed_median_mps,odom_speed_mae_mps,odom_speed_p95_abs_error_mps,error_samples
+high_longitudinal_slip,1075,72.488635,10.237100,0.479920,1.390822,1075
+simulator_reset,26,1.378619,nan,nan,nan,0
+stationary,3682,343.011578,0.000000,0.000841,0.000100,3682
+straight_accelerating,188,2.026174,10.869100,0.624963,1.647708,188
+straight_coasting,432,26.845065,6.821000,0.739542,1.929522,432
+straight_steady,33,0.102581,16.933900,0.443224,1.281423,33
+unknown,8,0,nan,nan,nan,0
+motion_regime_metrics=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/latest_speed_filter_verification_20260903/regime.csv

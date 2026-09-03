@@ -15,7 +15,8 @@ RAW = {
     "steering_response", "throttle_speed_grid", "identification_grid",
 }
 SPEED = {"speed_steps", "speed_ramp"}
-ALL = RAW | SPEED | {"sensor_record", "full_suite"}
+ACCELERATION = {"acceleration_steps"}
+ALL = RAW | SPEED | ACCELERATION | {"sensor_record", "full_suite"}
 
 
 def _setup(context):
@@ -40,7 +41,9 @@ def _setup(context):
             # controller launch leaves sensor odometry continuous.
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
-                {"reset_enabled": mode == "identification_grid",
+                {"reset_enabled": mode in {
+                    "identification_grid", "speed_steps", "speed_ramp",
+                    "acceleration_steps", "full_suite"},
                  "reset_topic": "/autodrive/reset_command"},
             ],
             remappings=[
@@ -65,13 +68,22 @@ def _setup(context):
             ],
         ))
 
-    if mode in SPEED or mode == "full_suite":
+    if mode in SPEED or mode in ACCELERATION or mode == "full_suite":
         actions.append(Node(
             package="sdu_apex_autodrive",
             executable="actuator_interface",
             name="autodrive_actuator_interface",
             output="screen",
-            parameters=[LaunchConfiguration("actuator_params")],
+            parameters=[LaunchConfiguration("actuator_params"), {
+                "input_topic": "/cmd/acceleration"
+                if mode in ACCELERATION else "/cmd/speed",
+                "command_mode": "acceleration"
+                if mode in ACCELERATION else "speed",
+                # The recorder's raw reset/brake phases must be able to force
+                # zero throttle without being reinterpreted as a valid
+                # acceleration=0 hold request. This is diagnostics-only.
+                "allow_raw_throttle_override": True,
+            }],
         ))
 
     actions.append(Node(

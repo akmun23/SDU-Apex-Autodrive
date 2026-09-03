@@ -14,13 +14,13 @@ integration launch:
 - `/ekf_pose` — map-frame EKF pose fused from `/odom` and AMCL
 - `/local_raceline` — map-frame path from the lateral planner
 
-It publishes Ackermann commands to `/cmd/controller`. The integration's
+It publishes Ackermann acceleration commands to `/cmd/acceleration`. The integration's
 actuator interface converts those commands to normalized AutoDRIVE steering
 and throttle. This MPC node does not access simulator IPS, simulator odometry,
 ground-truth TF, collision/lap telemetry, or physical-vehicle interfaces.
 
 The model uses a fixed 20-stage horizon and a 100 ms prediction step (2.0 s
-look-ahead). One solve and one `/cmd/controller` publication are triggered by
+look-ahead). One solve and one `/cmd/acceleration` publication are triggered by
 each native `/odom` update, so the controller runs at the available AutoDRIVE
 cadence rather than fabricating a higher-rate sensor or command stream. The
 actuator interface owns the command watchdog at that same boundary. The MPC

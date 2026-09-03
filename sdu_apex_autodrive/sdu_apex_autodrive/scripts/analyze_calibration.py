@@ -19,6 +19,8 @@ DOCUMENTED_MAX_SPEED_MPS = 22.88
 DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR = 1.5
 DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M = 0.15
 DEFAULT_GROUND_TRUTH_MAX_GAP_S = 0.5
+DOCUMENTED_LONGITUDINAL_EXTREMUM_SLIP = 0.15
+DOCUMENTED_LONGITUDINAL_ASYMPTOTE_SLIP = 0.25
 
 
 def finite(value: str) -> float | None:
@@ -35,6 +37,17 @@ def row_stamp(row: dict[str, str]) -> float | None:
     if stamp is not None:
         return stamp
     return finite(row.get("time_s"))
+
+
+def truth_stamp(row: dict[str, str]) -> float | None:
+    """Return the simulator odometry source time when available.
+
+    Recorder rows are written by a 50 Hz timer, while the simulator topics
+    arrive at their own native cadence. Truth derivatives and phase fits must
+    use the timestamp carried by the ground-truth message, not the timer row
+    time, otherwise callback scheduling becomes part of the vehicle model.
+    """
+    return finite(row.get("gt_odom_stamp_s")) or row_stamp(row)
 
 
 def source_event(row: dict[str, str], event_field: str) -> int | None:
@@ -144,8 +157,25 @@ def valid_ground_truth_step(
 
 def valid_ground_truth_row(row: dict[str, str]) -> bool:
     """Reject samples after the open-ground vehicle leaves the world plane."""
-    z = finite(row.get("gt_z_m"))
+    z = finite(row.get("gt_odom_z_m"))
+    if z is None:
+        z = finite(row.get("gt_z_m"))
     return z is None or 0.0 <= z <= 0.20
+
+
+def ground_truth_position(row: dict[str, str]) -> tuple[float | None, float | None]:
+    """Return the timestamped simulator-odom position from a calibration row.
+
+    New recordings expose the source explicitly as ``gt_odom_*``. The
+    generic fields remain a compatibility path for older files, where IPS
+    could have overwritten them in the recorder.
+    """
+    x = finite(row.get("gt_odom_x_m"))
+    y = finite(row.get("gt_odom_y_m"))
+    if x is None or y is None:
+        x = finite(row.get("gt_x_m"))
+        y = finite(row.get("gt_y_m"))
+    return x, y
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -244,16 +274,14 @@ def encoder_distance_metrics(
     def in_window(row: dict[str, str]) -> bool:
         if shared_window is None:
             return True
-        stamp = row_stamp(row)
+        stamp = truth_stamp(row)
         return stamp is not None and shared_window[0] <= stamp <= shared_window[1]
 
     gt_rows = [row for row in gt_rows if in_window(row)]
     gt_distance = 0.0
     for before, after in zip(gt_rows, gt_rows[1:]):
-        bx = finite(before.get("gt_x_m"))
-        by = finite(before.get("gt_y_m"))
-        ax = finite(after.get("gt_x_m"))
-        ay = finite(after.get("gt_y_m"))
+        bx, by = ground_truth_position(before)
+        ax, ay = ground_truth_position(after)
         if None not in (bx, by, ax, ay):
             step = math.hypot(ax - bx, ay - by)
             # Use source timing so valid high-speed motion is not rejected by
@@ -265,7 +293,6 @@ def encoder_distance_metrics(
                     ground_truth_position_margin_m, max_ground_truth_gap_s)):
                 gt_distance += step
 
-    encoder_distance = 0.0
     encoder_angle = 0.0
     valid_steps = 0
     rejected_steps = 0
@@ -351,12 +378,23 @@ def phase_is_response(phase: str) -> bool:
         phase.startswith("throttle_") or
         phase.startswith("grid_throttle_") or
         phase.startswith("speed_") or
+        phase.startswith("acceleration_") or
         phase in {"full_throttle_accelerate", "zero_throttle_decel"}
     )
 
 
+def phase_is_diagnostic_reset(phase: str) -> bool:
+    """Return whether a phase is a simulator-reset transient."""
+    return (
+        phase in {"reset", "boundary_reset"} or
+        phase.startswith("grid_reset_")
+    )
+
+
 def phase_command(phase: str) -> float | None:
-    match = re.search(r"(?:throttle|grid_throttle|speed)_(-?\d+(?:\.\d+)?)", phase)
+    match = re.search(
+        r"(?:throttle|grid_throttle|speed|acceleration)_(-?\d+(?:\.\d+)?)",
+        phase)
     if match:
         return finite(match.group(1))
     if phase == "full_throttle_accelerate":
@@ -384,7 +422,7 @@ def phase_response_metrics(
         interesting = phase_is_response(phase)
         if not interesting:
             continue
-        stamp = row_stamp(row)
+        stamp = truth_stamp(row)
         speed = finite(row.get(speed_field))
         if stamp is not None and speed is not None and speed >= 0.0:
             groups.setdefault(phase, []).append((stamp, speed))
@@ -431,7 +469,7 @@ def response_trace(
             continue
         phase = row.get("phase", "")
         interesting = phase_is_response(phase)
-        stamp = row_stamp(row)
+        stamp = truth_stamp(row)
         speed = finite(row.get(speed_field))
         if not interesting or stamp is None or speed is None or speed < 0.0:
             continue
@@ -486,7 +524,7 @@ def steering_response_metrics(
         if not phase.startswith("steering_"):
             continue
         match = re.search(r"steering_(-?\d+(?:\.\d+)?)", phase)
-        stamp = row_stamp(row)
+        stamp = truth_stamp(row)
         speed = finite(row.get("gt_speed_mps"))
         yaw_rate = finite(row.get("gt_yaw_rate_radps"))
         command = finite(match.group(1)) if match else None
@@ -537,6 +575,115 @@ def acceleration_map(
     return result
 
 
+def _weighted_isotonic_decreasing(
+    values: list[float], weights: list[int]
+) -> list[float]:
+    """Weighted non-increasing fit, preserving one output per input knot."""
+    blocks: list[dict[str, float | int]] = []
+    for value, weight in zip(values, weights):
+        blocks.append({
+            "sum": value * weight,
+            "weight": weight,
+            "mean": value,
+            "count": 1,
+        })
+        while len(blocks) >= 2 and blocks[-2]["mean"] < blocks[-1]["mean"]:
+            left = blocks.pop(-2)
+            right = blocks.pop(-1)
+            weight_sum = int(left["weight"] + right["weight"])
+            blocks.append({
+                "sum": float(left["sum"]) + float(right["sum"]),
+                "weight": weight_sum,
+                "mean": (float(left["sum"]) + float(right["sum"])) /
+                weight_sum,
+                "count": int(left["count"] + right["count"]),
+            })
+    result: list[float] = []
+    for block in blocks:
+        result.extend([float(block["mean"])] * int(block["count"]))
+    return result
+
+
+def acceleration_envelope(
+    trace: list[dict[str, float | str]],
+    max_throttle: float = 1.0,
+    speed_knots: tuple[float, ...] = (
+        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
+        16.0, 18.0, 20.0, 22.0, 23.0,
+    ),
+) -> list[tuple[float, float, float, int]]:
+    """Fit the positive-drive acceleration ceiling as a function of speed.
+
+    Only direct full-throttle grid phases are used.  Samples are grouped by
+    speed, positive acceleration is retained, and a weighted monotonic fit
+    removes isolated derivative spikes while preserving the measured envelope
+    shape.  This is intentionally a conservative capability model: it is
+    used to bound a requested acceleration, not to claim that every sample
+    reaches the fitted median.
+
+    The returned columns are speed knot, observed median, monotonic fit, and
+    sample count.  Ground truth is used here only by the offline fitter.
+    """
+    if (not math.isfinite(max_throttle) or max_throttle <= 0.0 or
+            len(speed_knots) < 2 or any(
+                not math.isfinite(value) or value < 0.0
+                for value in speed_knots) or any(
+                left >= right for left, right in zip(speed_knots, speed_knots[1:]))):
+        raise ValueError("invalid acceleration-envelope inputs")
+
+    groups: list[list[float]] = [[] for _ in speed_knots]
+    for sample in trace:
+        phase = str(sample.get("phase", ""))
+        if not (phase.startswith("throttle_") or
+                phase.startswith("grid_throttle_")):
+            continue
+        throttle = finite(sample.get("throttle"))
+        speed = finite(sample.get("speed_mps"))
+        acceleration = finite(sample.get("acceleration_mps2"))
+        if (throttle is None or speed is None or acceleration is None or
+                abs(throttle - max_throttle) > 1.0e-6 or speed < 0.0 or
+                acceleration <= 0.0):
+            continue
+        index = len(speed_knots) - 1
+        for candidate in range(len(speed_knots) - 1):
+            boundary = 0.5 * (speed_knots[candidate] +
+                              speed_knots[candidate + 1])
+            if speed < boundary:
+                index = candidate
+                break
+        groups[index].append(acceleration)
+
+    if not any(groups):
+        return []
+
+    observed: list[float] = []
+    sample_counts: list[int] = []
+    for index, values in enumerate(groups):
+        if values:
+            observed.append(statistics.median(values))
+            sample_counts.append(len(values))
+            continue
+        # A missing terminal/low-speed knot is filled from the closest
+        # observed knot; the caller still sees a zero sample count.
+        nearest = min(
+            (other for other, candidate in enumerate(groups) if candidate),
+            key=lambda other: abs(speed_knots[other] - speed_knots[index]),
+            default=None,
+        )
+        if nearest is None:
+            raise ValueError("no full-throttle acceleration samples")
+        observed.append(statistics.median(groups[nearest]))
+        sample_counts.append(0)
+
+    fitted = _weighted_isotonic_decreasing(
+        observed, [max(1, count) for count in sample_counts])
+    return [
+        (speed, raw, fit, count)
+        for speed, raw, fit, count in zip(
+            speed_knots, observed, fitted, sample_counts)
+    ]
+
+
 def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
     """Solve a small dense system without adding a numerical dependency."""
     size = len(vector)
@@ -578,7 +725,7 @@ def longitudinal_fit_samples(
         if not (phase.startswith("throttle_") or
                 phase.startswith("grid_throttle_")):
             continue
-        stamp = row_stamp(row)
+        stamp = truth_stamp(row)
         speed = finite(row.get("gt_speed_mps"))
         throttle = phase_command(phase)
         event = finite(row.get("gt_odom_event_count"))
@@ -693,7 +840,7 @@ def wheel_speed_body_speed_samples(
         if not (phase.startswith("throttle_") or
                 phase.startswith("grid_throttle_")):
             continue
-        stamp = finite(row_stamp(row))
+        stamp = finite(truth_stamp(row))
         event = finite(row.get("gt_odom_event_count"))
         truth_speed = finite(row.get("gt_speed_mps"))
         left = finite(row.get("left_encoder_rad"))
@@ -805,6 +952,212 @@ def wheel_speed_body_speed_map(
     return output, rmse, len(samples)
 
 
+def _slip_phase(phase: str) -> bool:
+    """Return whether a phase contains useful longitudinal-slip evidence."""
+    return (
+        phase.startswith("grid_throttle_") or
+        phase.startswith("grid_base_") or
+        phase.startswith("grid_brake_")
+    )
+
+
+def _slip_motion_regime(row: dict[str, str]) -> str:
+    """Classify slip using the truth derivative only during offline fitting."""
+    if row.get("phase", "").startswith("grid_brake_"):
+        return "braking"
+    acceleration = finite(row.get("gt_longitudinal_accel_mps2"))
+    if acceleration is not None:
+        if acceleration <= -0.50:
+            return "braking"
+        if acceleration >= 0.50:
+            return "traction"
+    return "steady"
+
+
+def _slip_force_region(slip_ratio: float) -> str:
+    """Map measured slip to the official longitudinal force-curve region."""
+    absolute_slip = abs(slip_ratio)
+    if absolute_slip < DOCUMENTED_LONGITUDINAL_EXTREMUM_SLIP:
+        return "pre_extremum"
+    if absolute_slip < DOCUMENTED_LONGITUDINAL_ASYMPTOTE_SLIP:
+        return "post_extremum"
+    return "asymptotic"
+
+
+def slip_model_samples(
+    rows: list[dict[str, str]], min_body_speed_mps: float = 0.75,
+) -> list[dict[str, float | str]]:
+    """Build unique, timestamped slip samples for offline model fitting.
+
+    AutoDRIVE defines longitudinal slip against the longitudinal body velocity
+    ``v_x``.  The encoder speed is calculated from the two source-timestamped
+    encoder callbacks by the recorder.  Ground truth is used here only to fit
+    and score the model; this function is never called by runtime odometry.
+    Samples near standstill are excluded because the official ratio is
+    ill-conditioned there.  Braking samples are retained, including a frozen
+    encoder, because ``S_x`` near -1 is valid evidence of wheel/ground motion
+    disagreement rather than a reset.
+    """
+    if min_body_speed_mps <= 0.0 or not math.isfinite(min_body_speed_mps):
+        raise ValueError("min_body_speed_mps must be finite and positive")
+    unique_rows, _ = deduplicate_source_events(rows)
+    samples: list[dict[str, float | str]] = []
+    for row in timestamped_rows(unique_rows):
+        if not valid_ground_truth_row(row) or not _slip_phase(row.get("phase", "")):
+            continue
+        vx = finite(row.get("gt_vx_mps"))
+        wheel_speed = finite(row.get("encoder_wheel_speed_mps"))
+        if wheel_speed is None:
+            left_speed = finite(row.get("left_encoder_speed_radps"))
+            right_speed = finite(row.get("right_encoder_speed_radps"))
+            if left_speed is not None and right_speed is not None:
+                wheel_speed = DOCUMENTED_WHEEL_RADIUS_M * 0.5 * (
+                    left_speed + right_speed)
+        if vx is None or wheel_speed is None or abs(vx) < min_body_speed_mps:
+            continue
+        if (not math.isfinite(wheel_speed) or abs(wheel_speed) > 60.0 or
+                abs(vx) > DOCUMENTED_MAX_SPEED_MPS * 1.25):
+            continue
+        # Keep the signed definition from the technical guide.  For the
+        # forward open-ground sweep vx is positive; retaining the sign also
+        # makes braking (frozen wheel, moving body) explicit.
+        slip_speed = wheel_speed - vx
+        slip_ratio = slip_speed / vx
+        if not math.isfinite(slip_ratio) or abs(slip_ratio) > 50.0:
+            continue
+        wheel_bin = math.floor(abs(wheel_speed) / 2.0) * 2.0
+        samples.append({
+            "phase": row.get("phase", ""),
+            "motion_regime": _slip_motion_regime(row),
+            "force_curve_region": _slip_force_region(slip_ratio),
+            "wheel_speed_bin_mps": wheel_bin,
+            "wheel_speed_mps": wheel_speed,
+            "body_vx_mps": vx,
+            "slip_speed_mps": slip_speed,
+            "slip_ratio": slip_ratio,
+            "longitudinal_accel_mps2": (
+                finite(row.get("gt_longitudinal_accel_mps2")) or math.nan),
+        })
+    return samples
+
+
+def slip_model_metrics(
+    rows: list[dict[str, str]], min_body_speed_mps: float = 0.75,
+) -> list[dict[str, float | int | str]]:
+    """Aggregate a regime- and speed-conditioned longitudinal slip model.
+
+    The median is the proposed correction centre; MAD and quantiles expose
+    uncertainty so a future runtime observer can increase wheel covariance
+    instead of blindly applying a correction in a broad/high-slip bin.
+    """
+    samples = slip_model_samples(rows, min_body_speed_mps)
+    groups: dict[tuple[str, str, float], list[dict[str, float | str]]] = {}
+    for sample in samples:
+        key = (
+            str(sample["motion_regime"]),
+            str(sample["force_curve_region"]),
+            float(sample["wheel_speed_bin_mps"]),
+        )
+        groups.setdefault(key, []).append(sample)
+
+    result: list[dict[str, float | int | str]] = []
+    for (motion_regime, force_region, wheel_bin), values in sorted(groups.items()):
+        wheel_values = [float(value["wheel_speed_mps"]) for value in values]
+        body_values = [float(value["body_vx_mps"]) for value in values]
+        slip_speed_values = [float(value["slip_speed_mps"]) for value in values]
+        slip_values = [float(value["slip_ratio"]) for value in values]
+        median_slip = statistics.median(slip_values)
+        mad = statistics.median(abs(value - median_slip) for value in slip_values)
+        ordered = sorted(slip_values)
+        result.append({
+            "motion_regime": motion_regime,
+            "force_curve_region": force_region,
+            "wheel_speed_bin_mps": wheel_bin,
+            "median_wheel_speed_mps": statistics.median(wheel_values),
+            "median_body_vx_mps": statistics.median(body_values),
+            "median_slip_speed_mps": statistics.median(slip_speed_values),
+            "median_slip_ratio": median_slip,
+            "slip_ratio_mad": mad,
+            "slip_ratio_p10": percentile(ordered, 0.10),
+            "slip_ratio_p90": percentile(ordered, 0.90),
+            "samples": len(values),
+        })
+    return result
+
+
+def frozen_encoder_brake_model(
+    rows: list[dict[str, str]], min_body_speed_mps: float = 0.75,
+    max_frozen_wheel_speed_mps: float = 0.15, speed_bin_width_mps: float = 2.0,
+) -> tuple[dict[str, float | int], list[dict[str, float | int]]] | None:
+    """Fit a bounded deceleration prior for a moving frozen driven encoder.
+
+    This is an offline identification helper.  Ground-truth longitudinal
+    acceleration selects the braking samples and is never an input to runtime
+    odometry.  Robust per-speed-bin medians are fitted instead of individual
+    samples because simulator callback timing and collision transients can
+    produce large derivative outliers.  The resulting prior is appropriate
+    only for the ambiguous ``encoder ~= 0`` state after the IMU has become
+    quiet; it is not a generic slip-ratio correction.
+    """
+    if (min_body_speed_mps <= 0.0 or not math.isfinite(min_body_speed_mps) or
+            max_frozen_wheel_speed_mps < 0.0 or
+            not math.isfinite(max_frozen_wheel_speed_mps) or
+            speed_bin_width_mps <= 0.0 or not math.isfinite(speed_bin_width_mps)):
+        raise ValueError("invalid frozen-encoder brake-model bounds")
+
+    samples = []
+    for sample in slip_model_samples(rows, min_body_speed_mps):
+        wheel_speed = float(sample["wheel_speed_mps"])
+        body_speed = float(sample["body_vx_mps"])
+        acceleration = float(sample["longitudinal_accel_mps2"])
+        if (abs(wheel_speed) > max_frozen_wheel_speed_mps or
+                not math.isfinite(acceleration) or acceleration >= -0.50):
+            continue
+        samples.append((body_speed, -acceleration))
+    if not samples:
+        return None
+
+    grouped: dict[int, list[tuple[float, float]]] = {}
+    for body_speed, deceleration in samples:
+        index = math.floor(body_speed / speed_bin_width_mps)
+        grouped.setdefault(index, []).append((body_speed, deceleration))
+    bins: list[dict[str, float | int]] = []
+    for index, values in sorted(grouped.items()):
+        bins.append({
+            "speed_bin_mps": index * speed_bin_width_mps,
+            "median_body_speed_mps": statistics.median(value[0] for value in values),
+            "median_deceleration_mps2": statistics.median(value[1] for value in values),
+            "samples": len(values),
+        })
+    if not bins:
+        return None
+
+    x_values = [float(value["median_body_speed_mps"]) for value in bins]
+    y_values = [float(value["median_deceleration_mps2"]) for value in bins]
+    x_mean = statistics.mean(x_values)
+    y_mean = statistics.mean(y_values)
+    denominator = sum((value - x_mean) ** 2 for value in x_values)
+    gain = (sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values)) /
+            denominator if denominator > 1.0e-9 else 0.0)
+    # A deceleration prior must not become propulsion or change sign at the
+    # top of the identified envelope. Clamp only the fitted coefficients;
+    # residuals remain reported so a poor fit cannot look exact.
+    gain = max(0.0, gain)
+    intercept = max(0.0, y_mean - gain * x_mean)
+    predictions = [intercept + gain * value for value in x_values]
+    residuals = [actual - predicted for actual, predicted in zip(y_values, predictions)]
+    decelerations = [value[1] for value in samples]
+    model = {
+        "intercept_mps2": intercept,
+        "speed_gain_per_s": gain,
+        "max_deceleration_p95_mps2": percentile(sorted(decelerations), 0.95) or 0.0,
+        "fit_rmse_mps2": math.sqrt(sum(value * value for value in residuals) / len(residuals)),
+        "samples": len(samples),
+        "bins": len(bins),
+    }
+    return model, bins
+
+
 def truth_speed_tracking_metrics(
     rows: list[dict[str, str]],
 ) -> tuple[list[float], list[float]]:
@@ -862,7 +1215,17 @@ def throttle_table(
     rows: list[dict[str, str]], speed_field: str,
     max_throttle: float | None = None,
 ) -> list[tuple[float, float, float, int]]:
-    grouped: dict[float, list[float]] = {}
+    """Derive a monotonic throttle-to-speed table from valid step tails.
+
+    The identification grid deliberately starts several throttle probes from
+    an already-moving operating point. Pooling all rows by throttle therefore
+    makes a coast at 15 m/s look like the steady speed for a small throttle.
+    Keep phase-local tails instead, reject phases whose tail is materially
+    below their initial speed, and select the fastest non-decelerating phase
+    for each command. This preserves the useful full-range envelope while
+    preventing cross-point contamination from entering the actuator table.
+    """
+    phase_groups: dict[str, list[tuple[float, float]]] = {}
     for row in rows:
         if not valid_ground_truth_row(row):
             continue
@@ -871,18 +1234,47 @@ def throttle_table(
                 phase.startswith("grid_throttle_")):
             continue
         throttle = phase_command(phase)
+        stamp = truth_stamp(row)
         speed = finite(row.get(speed_field))
-        if (throttle is not None and speed is not None and speed >= 0.0 and
+        if (throttle is not None and stamp is not None and speed is not None and
+                speed >= 0.0 and
                 (max_throttle is None or throttle <= max_throttle)):
-            grouped.setdefault(throttle, []).append(speed)
+            phase_groups.setdefault(phase, []).append((stamp, speed))
+
+    candidates: dict[float, list[tuple[float, float, int]]] = {}
+    for phase, samples in phase_groups.items():
+        samples.sort()
+        values = [value for _, value in samples]
+        if len(values) < 4:
+            continue
+        throttle = phase_command(phase)
+        if throttle is None:
+            continue
+        initial = statistics.median(values[:max(1, len(values) // 5)])
+        tail = stable_tail(values)
+        tail_speed = statistics.median(tail) if tail else values[-1]
+        # A target below the current operating point is a braking/coast
+        # response, not evidence for the target's steady-speed feed-forward.
+        if tail_speed < initial - 0.25:
+            continue
+        # The zero-throttle grid has intentional coast phases at every high
+        # nominal band. Only the from-rest zero-throttle phase is a valid
+        # neutral feed-forward point.
+        if (throttle <= 1.0e-9 and phase.startswith("grid_throttle_") and
+                not phase.endswith("_at_0.00")):
+            continue
+        spread = statistics.pstdev(tail) if len(tail) > 1 else 0.0
+        candidates.setdefault(throttle, []).append(
+            (max(values), spread, len(tail)))
 
     result = []
-    for throttle in sorted(grouped):
-        samples = stable_tail(grouped[throttle])
-        if not samples:
-            continue
-        result.append((statistics.median(samples), throttle, statistics.pstdev(samples), len(samples)))
-    # Speed is the interpolation domain and must be strictly increasing.
+    for throttle, values in sorted(candidates.items()):
+        peak, spread, count = max(values, key=lambda item: item[0])
+        result.append((peak, throttle, spread, count))
+
+    # Speed is the interpolation domain and must be strictly increasing. A
+    # coarse simulator response can produce equal peaks for adjacent commands;
+    # retain the higher command at that speed so the inverse remains monotonic.
     result.sort()
     deduplicated: list[tuple[float, float, float, int]] = []
     for sample in result:
@@ -910,8 +1302,7 @@ def classify_motion_regime(
 ) -> str:
     """Classify one unique truth event for regime-based error reporting."""
     phase = row.get("phase", "")
-    if (phase == "reset" or phase == "boundary_reset" or
-            phase.startswith("grid_reset_")):
+    if phase_is_diagnostic_reset(phase):
         return "simulator_reset"
     if not valid_ground_truth_row(row):
         return "invalid_ground_truth"
@@ -934,8 +1325,8 @@ def classify_motion_regime(
     dt = None
     previous_speed = _truth_speed(previous) if previous else None
     if previous is not None:
-        before_stamp = row_stamp(previous)
-        after_stamp = row_stamp(row)
+        before_stamp = truth_stamp(previous)
+        after_stamp = truth_stamp(row)
         if before_stamp is not None and after_stamp is not None:
             candidate = after_stamp - before_stamp
             if 1.0e-4 <= candidate <= 1.0:
@@ -990,13 +1381,13 @@ def motion_regime_metrics(
         group = groups.setdefault(regime, {
             "events": [], "duration": [], "truth_speed": [], "speed_error": [],
         })
-        stamp = row_stamp(row)
+        stamp = truth_stamp(row)
         truth_speed = _truth_speed(row)
         odom_speed = finite(row.get("speed_mps"))
         group["events"].append(1.0)
         if (previous_regime == regime and previous is not None and
-                stamp is not None and row_stamp(previous) is not None):
-            dt = stamp - row_stamp(previous)
+                stamp is not None and truth_stamp(previous) is not None):
+            dt = stamp - truth_stamp(previous)
             if 0.0 < dt <= 1.0:
                 group["duration"].append(dt)
         if stamp is not None:
@@ -1027,6 +1418,268 @@ def motion_regime_metrics(
             "error_samples": len(errors),
         })
     return result
+
+
+def acceleration_command_metrics(
+    rows: list[dict[str, str]],
+) -> tuple[int, float, float] | None:
+    """Score requested acceleration against timestamped truth derivatives."""
+    errors: list[float] = []
+    for row in rows:
+        if not row.get("phase", "").startswith("acceleration_"):
+            continue
+        requested = finite(row.get("acceleration_command_accel_mps2"))
+        measured = finite(row.get("gt_longitudinal_accel_mps2"))
+        if requested is None or measured is None or abs(measured) > 50.0:
+            continue
+        errors.append(measured - requested)
+    if not errors:
+        return None
+    absolute = [abs(value) for value in errors]
+    return len(errors), statistics.mean(errors), percentile(absolute, 0.95)
+
+
+RELATIVE_ERROR_FIELDS = (
+    "metric", "bin", "samples", "relative_samples",
+    "absolute_error_median", "absolute_error_p95", "absolute_error_max",
+    "relative_error_median_pct", "relative_error_p95_pct",
+    "relative_error_max_pct", "reference_median", "reference_max",
+)
+
+RELATIVE_SPEED_BINS = (
+    (0.0, 1.0), (1.0, 3.0), (3.0, 5.0), (5.0, 10.0),
+    (10.0, 15.0), (15.0, 20.0), (20.0, 23.0),
+)
+
+POSITION_DISTANCE_THRESHOLDS_M = (1.0, 5.0, 10.0, 50.0, 100.0)
+
+
+def _relative_metric_row(
+    metric: str,
+    bin_name: str,
+    absolute_errors: list[float],
+    references: list[float],
+) -> dict[str, float | int | str]:
+    """Summarize absolute error and error relative to a physical reference.
+
+    ``references`` is the target speed for controller metrics, actual truth
+    speed for odom velocity metrics, or cumulative truth distance for pose
+    metrics.  A zero reference deliberately has no percentage error: a
+    percentage at standstill or at the origin has no useful meaning.
+    """
+    absolute = [value for value in absolute_errors if math.isfinite(value)]
+    paired = [
+        (abs(error), reference)
+        for error, reference in zip(absolute_errors, references)
+        if math.isfinite(error) and math.isfinite(reference) and reference > 1.0e-6
+    ]
+    relative = [100.0 * error / reference for error, reference in paired]
+    reference_values = [value for value in references if math.isfinite(value)]
+
+    def value_or_nan(values: list[float], fraction: float | None = None) -> float:
+        if not values:
+            return math.nan
+        if fraction is None:
+            return statistics.median(values)
+        result = percentile(values, fraction)
+        return result if result is not None else math.nan
+
+    return {
+        "metric": metric,
+        "bin": bin_name,
+        "samples": len(absolute),
+        "relative_samples": len(relative),
+        "absolute_error_median": value_or_nan(absolute),
+        "absolute_error_p95": value_or_nan(absolute, 0.95),
+        "absolute_error_max": max(absolute, default=math.nan),
+        "relative_error_median_pct": value_or_nan(relative),
+        "relative_error_p95_pct": value_or_nan(relative, 0.95),
+        "relative_error_max_pct": max(relative, default=math.nan),
+        "reference_median": value_or_nan(reference_values),
+        "reference_max": max(reference_values, default=math.nan),
+    }
+
+
+def _position_error_samples(
+    rows: list[dict[str, str]],
+) -> list[dict[str, float | int]]:
+    """Return active pose errors with cumulative truth distance per reset.
+
+    The calibration suite intentionally teleports the simulator between
+    isolated points.  Reset phases split distance epochs, so a pose error is
+    never divided by distance travelled in a different experiment.
+    """
+    ordered = sorted(
+        enumerate(rows),
+        key=lambda item: (
+            truth_stamp(item[1]) if truth_stamp(item[1]) is not None else math.inf,
+            item[0],
+        ),
+    )
+    result: list[dict[str, float | int]] = []
+    epoch = 0
+    in_reset = False
+    distance_m = 0.0
+    previous_position: tuple[float, float] | None = None
+    previous_stamp: float | None = None
+
+    for order, row in ordered:
+        phase = row.get("phase", "")
+        if phase_is_diagnostic_reset(phase):
+            if not in_reset:
+                epoch += 1
+            in_reset = True
+            distance_m = 0.0
+            previous_position = None
+            previous_stamp = None
+            continue
+
+        in_reset = False
+        position = ground_truth_position(row)
+        stamp = truth_stamp(row)
+        if position[0] is not None and position[1] is not None:
+            current_position = (position[0], position[1])
+            if previous_position is not None and previous_stamp is not None and stamp is not None:
+                dt = stamp - previous_stamp
+                step = math.hypot(
+                    current_position[0] - previous_position[0],
+                    current_position[1] - previous_position[1],
+                )
+                limit = ground_truth_step_limit_m(dt)
+                if limit is not None and step <= limit:
+                    distance_m += step
+            previous_position = current_position
+            previous_stamp = stamp
+
+            odom_x = finite(row.get("x_odom_m"))
+            odom_y = finite(row.get("y_odom_m"))
+            if odom_x is not None and odom_y is not None:
+                result.append({
+                    "epoch": epoch,
+                    "order": order,
+                    "distance_m": distance_m,
+                    "error_m": math.hypot(
+                        current_position[0] - odom_x,
+                        current_position[1] - odom_y,
+                    ),
+                })
+    return result
+
+
+def _stable_controller_pairs(
+    rows: list[dict[str, str]],
+    phase_prefix: str,
+    target_field: str,
+    measured_field: str,
+) -> list[tuple[str, float, list[tuple[float, float]]]]:
+    """Return target/measured samples from the stable tail of each phase."""
+    groups: dict[str, list[tuple[float, float, float]]] = {}
+    for row in rows:
+        phase = row.get("phase", "")
+        if not phase.startswith(phase_prefix):
+            continue
+        stamp = truth_stamp(row)
+        target = finite(row.get(target_field))
+        measured = finite(row.get(measured_field))
+        if None in (stamp, target, measured):
+            continue
+        groups.setdefault(phase, []).append((stamp, target, measured))
+
+    result = []
+    for phase, samples in groups.items():
+        samples.sort(key=lambda item: item[0])
+        tail = samples[max(0, int(len(samples) * 0.6)):]
+        if not tail:
+            continue
+        target = statistics.median(item[1] for item in tail)
+        result.append((phase, target, [(item[1], item[2]) for item in tail]))
+    return sorted(result, key=lambda item: (item[1], item[0]))
+
+
+def relative_error_metrics(
+    rows: list[dict[str, str]],
+) -> list[dict[str, float | int | str]]:
+    """Report scale-aware odom, pose, speed-target, and accel-target errors.
+
+    Odom velocity percentages use actual simulator speed as the denominator.
+    Pose percentages use cumulative simulator distance since the most recent
+    reset. Controller rows use their requested target and only the stable tail
+    of each isolated command phase. Absolute errors remain beside every
+    percentage because percentages near zero are intrinsically ill-conditioned.
+    """
+    metrics: list[dict[str, float | int | str]] = []
+
+    speed_groups: dict[str, tuple[list[float], list[float]]] = {
+        f"{lower:g}-{upper:g}_mps": ([], [])
+        for lower, upper in RELATIVE_SPEED_BINS
+    }
+    for row in rows:
+        if phase_is_diagnostic_reset(row.get("phase", "")):
+            continue
+        truth = _truth_speed(row)
+        odom = finite(row.get("speed_mps"))
+        if truth is None or odom is None or truth < 0.0:
+            continue
+        for lower, upper in RELATIVE_SPEED_BINS:
+            if lower <= truth < upper or (
+                    upper == 23.0 and lower <= truth <= upper):
+                errors, references = speed_groups[f"{lower:g}-{upper:g}_mps"]
+                errors.append(abs(truth - odom))
+                # Below 1 m/s, the percentage is dominated by native source
+                # quantisation and is not a useful acceptance measure. Keep
+                # the absolute error, but leave the percentage undefined.
+                references.append(truth if truth >= 1.0 else math.nan)
+                break
+    for lower, upper in RELATIVE_SPEED_BINS:
+        label = f"{lower:g}-{upper:g}_mps"
+        errors, references = speed_groups[label]
+        if errors:
+            metrics.append(_relative_metric_row(
+                "odom_speed_vs_truth", label, errors, references))
+
+    position_samples = _position_error_samples(rows)
+    for threshold in POSITION_DISTANCE_THRESHOLDS_M:
+        selected = [
+            sample for sample in position_samples
+            if float(sample["distance_m"]) >= threshold
+        ]
+        if selected:
+            metrics.append(_relative_metric_row(
+                "odom_position_vs_truth",
+                f"distance_ge_{threshold:g}m",
+                [float(sample["error_m"]) for sample in selected],
+                [float(sample["distance_m"]) for sample in selected],
+            ))
+
+    epochs: dict[int, list[dict[str, float | int]]] = {}
+    for sample in position_samples:
+        epochs.setdefault(int(sample["epoch"]), []).append(sample)
+    for epoch, samples in sorted(epochs.items()):
+        endpoint = samples[-1]
+        metrics.append(_relative_metric_row(
+            "odom_position_endpoint", f"epoch_{epoch}",
+            [float(endpoint["error_m"])],
+            [float(endpoint["distance_m"])],
+        ))
+
+    for phase, target, pairs in _stable_controller_pairs(
+            rows, "speed_", "target_speed_mps", "gt_speed_mps"):
+        if target <= 0.1:
+            continue
+        metrics.append(_relative_metric_row(
+            "speed_target_vs_truth", phase,
+            [abs(target - measured) for _, measured in pairs],
+            [target for _ in pairs],
+        ))
+
+    for phase, target, pairs in _stable_controller_pairs(
+            rows, "acceleration_", "target_accel_mps2", "gt_longitudinal_accel_mps2"):
+        metrics.append(_relative_metric_row(
+            "acceleration_target_vs_truth", phase,
+            [abs(target - measured) for _, measured in pairs],
+            [abs(target) for _ in pairs],
+        ))
+    return metrics
 
 
 def main() -> None:
@@ -1071,17 +1724,30 @@ def main() -> None:
         "--acceleration-map-output", type=Path,
         help="write the truth-derived throttle x speed acceleration map")
     parser.add_argument(
+        "--acceleration-envelope-output", type=Path,
+        help="write the monotonic full-throttle acceleration ceiling by speed")
+    parser.add_argument(
         "--longitudinal-fit-output", type=Path,
         help="write the robust truth-derived throttle/acceleration fit")
     parser.add_argument(
         "--wheel-speed-map-output", type=Path,
         help="write the truth-derived encoder wheel-speed to body-speed slip map")
     parser.add_argument(
+        "--slip-model-output", type=Path,
+        help="write the truth-derived regime/speed-conditioned slip model")
+    parser.add_argument(
+        "--frozen-encoder-model-output", type=Path,
+        help="write the offline frozen-encoder braking/deceleration model")
+    parser.add_argument(
         "--steering-output", type=Path,
         help="write truth-derived direct steering response metrics")
     parser.add_argument(
         "--regime-output", type=Path,
         help="write unique-event truth-vs-odom metrics grouped by motion regime")
+    parser.add_argument(
+        "--relative-error-output", type=Path,
+        help=("write scale-aware odom, pose, speed-target, and "
+              "acceleration-target error metrics"))
     args = parser.parse_args()
 
     rows = read_rows(args.input)
@@ -1116,6 +1782,19 @@ def main() -> None:
     print(f"unique_gt_odom_rows={len(analysis_rows)}")
     print(f"duplicate_gt_odom_rows_removed={duplicate_gt_rows}")
     print(f"speed_reference={speed_field}")
+    explicit_truth_positions = sum(
+        finite(row.get("gt_odom_x_m")) is not None and
+        finite(row.get("gt_odom_y_m")) is not None
+        for row in rows)
+    if explicit_truth_positions:
+        print("ground_truth_position_reference=timestamped_gt_odom")
+    else:
+        print("ground_truth_position_reference=legacy_gt_x_m")
+        if any((finite(row.get("gt_ips_event_count")) or 0.0) > 0.0 for row in rows):
+            print(
+                "warning=legacy_gt_x_m_may_mix_timestamped_gt_odom_and_untimestamped_ips; "
+                "rerun with the current calibration recorder before accepting position metrics"
+            )
     if reset_time is not None:
         print(f"encoder_reset_handled_s={reset_time:.3f} kind={reset_kind}")
     if rates:
@@ -1124,7 +1803,7 @@ def main() -> None:
         "imu_rate_hz", "left_encoder_rate_hz", "right_encoder_rate_hz",
         "odom_rate_hz", "amcl_rate_hz", "ekf_rate_hz",
         "gt_odom_rate_hz", "gt_ips_rate_hz", "collision_rate_hz",
-        "controller_command_rate_hz", "throttle_command_rate_hz",
+        "speed_command_rate_hz", "acceleration_command_rate_hz",
         "steering_command_rate_hz", "throttle_feedback_rate_hz",
         "steering_feedback_rate_hz",
     ):
@@ -1185,6 +1864,26 @@ def main() -> None:
             writer.writerows(acceleration_map(trace))
         print(f"acceleration_map={args.acceleration_map_output}")
 
+    envelope = acceleration_envelope(
+        trace, max_throttle=args.feedforward_max_throttle)
+    if envelope:
+        print("speed_mps,observed_full_throttle_acceleration_mps2,"
+              "monotonic_acceleration_limit_mps2,samples")
+        for speed_mps, observed, limit, samples in envelope:
+            print(f"{speed_mps:.6f},{observed:.6f},{limit:.6f},{samples}")
+    if envelope and args.acceleration_envelope_output:
+        args.acceleration_envelope_output.parent.mkdir(parents=True, exist_ok=True)
+        with args.acceleration_envelope_output.open(
+                "w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow((
+                "speed_mps", "observed_full_throttle_acceleration_mps2",
+                "monotonic_acceleration_limit_mps2", "samples"))
+            writer.writerows(
+                (f"{speed_mps:.6f}", f"{observed:.6f}", f"{limit:.6f}", samples)
+                for speed_mps, observed, limit, samples in envelope)
+        print(f"acceleration_envelope={args.acceleration_envelope_output}")
+
     longitudinal_fit = longitudinal_acceleration_fit(analysis_rows)
     if longitudinal_fit is not None:
         coefficients, operating_table, rmse, fit_samples = longitudinal_fit
@@ -1230,19 +1929,90 @@ def main() -> None:
                 writer.writerows(map_points)
             print(f"wheel_speed_body_speed_map_output={args.wheel_speed_map_output}")
 
+    slip_model = slip_model_metrics(analysis_rows)
+    if slip_model:
+        slip_fields = (
+            "motion_regime", "force_curve_region", "wheel_speed_bin_mps",
+            "median_wheel_speed_mps", "median_body_vx_mps",
+            "median_slip_speed_mps", "median_slip_ratio", "slip_ratio_mad",
+            "slip_ratio_p10", "slip_ratio_p90", "samples")
+        print(
+            "slip_model_rows="
+            f"{len(slip_model)} samples={sum(int(row['samples']) for row in slip_model)}")
+        print(",".join(slip_fields))
+
+        def formatted_slip(value: float | int | str) -> str:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, float):
+                return f"{value:.6f}"
+            return str(value)
+
+        for result in slip_model:
+            print(",".join(formatted_slip(result[field]) for field in slip_fields))
+        if args.slip_model_output:
+            args.slip_model_output.parent.mkdir(parents=True, exist_ok=True)
+            with args.slip_model_output.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=slip_fields)
+                writer.writeheader()
+                writer.writerows(slip_model)
+            print(f"slip_model={args.slip_model_output}")
+
+    frozen_model = frozen_encoder_brake_model(analysis_rows)
+    if frozen_model is not None:
+        model, model_bins = frozen_model
+        print(
+            "frozen_encoder_brake_model="
+            f"intercept_mps2={model['intercept_mps2']:.3f} "
+            f"speed_gain_per_s={model['speed_gain_per_s']:.3f} "
+            f"fit_rmse_mps2={model['fit_rmse_mps2']:.3f} "
+            f"samples={model['samples']} bins={model['bins']}")
+        print("speed_bin_mps,median_body_speed_mps,median_deceleration_mps2,samples")
+        for result in model_bins:
+            print(
+                f"{float(result['speed_bin_mps']):.6f},"
+                f"{float(result['median_body_speed_mps']):.6f},"
+                f"{float(result['median_deceleration_mps2']):.6f},"
+                f"{int(result['samples'])}")
+        if args.frozen_encoder_model_output:
+            args.frozen_encoder_model_output.parent.mkdir(parents=True, exist_ok=True)
+            with args.frozen_encoder_model_output.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(("record_type", "parameter", "value", "speed_bin_mps",
+                                 "median_body_speed_mps", "median_deceleration_mps2", "samples"))
+                for parameter in (
+                    "intercept_mps2", "speed_gain_per_s", "max_deceleration_p95_mps2",
+                    "fit_rmse_mps2", "samples", "bins"):
+                    writer.writerow(("fit", parameter, f"{model[parameter]:.9f}", "", "", "", ""))
+                for result in model_bins:
+                    writer.writerow((
+                        "speed_bin", "", "",
+                        f"{float(result['speed_bin_mps']):.9f}",
+                        f"{float(result['median_body_speed_mps']):.9f}",
+                        f"{float(result['median_deceleration_mps2']):.9f}",
+                        int(result["samples"])))
+            print(f"frozen_encoder_brake_model_output={args.frozen_encoder_model_output}")
+
     truth_odom_position_error = []
+    active_truth_odom_position_error = []
     truth_odom_speed_error = []
+    active_truth_odom_speed_error = []
     for row in analysis_rows:
-        gx = finite(row.get("gt_x_m"))
-        gy = finite(row.get("gt_y_m"))
+        gx, gy = ground_truth_position(row)
         ox = finite(row.get("x_odom_m"))
         oy = finite(row.get("y_odom_m"))
         gv = finite(row.get("gt_speed_mps"))
         ov = finite(row.get("speed_mps"))
         if None not in (gx, gy, ox, oy):
-            truth_odom_position_error.append(math.hypot(gx - ox, gy - oy))
+            error = math.hypot(gx - ox, gy - oy)
+            truth_odom_position_error.append(error)
+            if not phase_is_diagnostic_reset(row.get("phase", "")):
+                active_truth_odom_position_error.append(error)
         if None not in (gv, ov):
-            truth_odom_speed_error.append(gv - ov)
+            error = gv - ov
+            truth_odom_speed_error.append(error)
+            if not phase_is_diagnostic_reset(row.get("phase", "")):
+                active_truth_odom_speed_error.append(error)
     if truth_odom_position_error:
         print(
             "ground_truth_vs_odom_position_error_m="
@@ -1250,11 +2020,25 @@ def main() -> None:
             f"p95={percentile(truth_odom_position_error, 0.95):.3f} "
             f"max={max(truth_odom_position_error):.3f}"
         )
+    if active_truth_odom_position_error:
+        print(
+            "ground_truth_vs_odom_position_error_active_m="
+            f"median={statistics.median(active_truth_odom_position_error):.3f} "
+            f"p95={percentile(active_truth_odom_position_error, 0.95):.3f} "
+            f"max={max(active_truth_odom_position_error):.3f}"
+        )
     if truth_odom_speed_error:
         absolute = [abs(value) for value in truth_odom_speed_error]
         print(
             "ground_truth_vs_odom_speed_error_mps="
             f"median={statistics.median(truth_odom_speed_error):.3f} "
+            f"abs_p95={percentile(absolute, 0.95):.3f}"
+        )
+    if active_truth_odom_speed_error:
+        absolute = [abs(value) for value in active_truth_odom_speed_error]
+        print(
+            "ground_truth_vs_odom_speed_error_active_mps="
+            f"median={statistics.median(active_truth_odom_speed_error):.3f} "
             f"abs_p95={percentile(absolute, 0.95):.3f}"
         )
 
@@ -1308,6 +2092,35 @@ def main() -> None:
             f"median={statistics.median(truth_phase_errors):.3f} "
             f"abs_p95={percentile([abs(value) for value in truth_phase_errors], 0.95):.3f}"
         )
+
+    acceleration_metrics = acceleration_command_metrics(analysis_rows)
+    if acceleration_metrics is not None:
+        samples, bias, absolute_p95 = acceleration_metrics
+        print(
+            "acceleration_command_tracking_error_mps2="
+            f"bias={bias:.3f} abs_p95={absolute_p95:.3f} samples={samples}"
+        )
+
+    relative_metrics = relative_error_metrics(analysis_rows)
+    if relative_metrics:
+        print(",".join(RELATIVE_ERROR_FIELDS))
+
+        def format_relative(value: float | int | str) -> str:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, float):
+                return f"{value:.6f}"
+            return str(value)
+
+        for result in relative_metrics:
+            print(",".join(format_relative(result[field]) for field in RELATIVE_ERROR_FIELDS))
+        if args.relative_error_output:
+            args.relative_error_output.parent.mkdir(parents=True, exist_ok=True)
+            with args.relative_error_output.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=RELATIVE_ERROR_FIELDS)
+                writer.writeheader()
+                writer.writerows(relative_metrics)
+            print(f"relative_error_metrics={args.relative_error_output}")
 
     amcl_ekf = pose_difference(analysis_rows, "amcl", "ekf")
     if amcl_ekf:

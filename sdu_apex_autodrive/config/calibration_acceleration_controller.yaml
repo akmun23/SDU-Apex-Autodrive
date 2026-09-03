@@ -1,0 +1,33 @@
+# Diagnostics-only acceleration-controller verification on the official
+# explore/open-ground simulator. The actuator consumes /cmd/acceleration and
+# the recorder uses ground truth only for offline scoring and stop validation.
+calibration:
+  ros__parameters:
+    mode: acceleration_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_acceleration_controller
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    acceleration_sequence_mps2: [0.0, 1.0, 2.0, 4.0, 6.0, 2.0, -2.0]
+    maximum_acceleration_mps2: 8.0
+    hold_sec: 5.0
+    zero_settle_sec: 3.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: true
+    reset_pulse_sec: 0.50
+    reset_signal_hold_sec: 0.20
+    reset_confirmation_timeout_sec: 60.0
+    reset_odom_speed_threshold_mps: 0.20
+    reset_zero_odom_stable_sec: 2.0
+    grid_brake_timeout_sec: 30.0
+    brake_stop_encoder_speed_radps: 0.5
+    brake_stop_imu_accel_mps2: 0.25
+    brake_stop_imu_yaw_rate_radps: 0.05
+    brake_stop_odom_speed_mps: 0.20
+    brake_stop_gt_speed_mps: 0.20
+    brake_stop_stable_sec: 0.75
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 350.0

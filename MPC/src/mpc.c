@@ -922,31 +922,18 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         sd->u_lb[0] = -STEERING_RATE_LIMIT;
         sd->u_ub[0] = STEERING_RATE_LIMIT;
 
-        /* u[1] acceleration bound follows a constant-power region model. */
+        /* u[1] acceleration bound follows the measured full-throttle
+         * capability envelope, not a speed-independent friction bound. */
         {
-            float v_ref_k = reference_trajectory[k].reference_velocity;
             float v_model_k = v_state_for_limits;
-            float v_for_limit;
-            float a_max = VP_MAX_ACCEL_MPS2;
+            float a_max;
             float a_min = VP_MIN_ACCEL_MPS2;
 
-            if (v_model_k < MIN_LINEARIZATION_VELOCITY)
-                v_model_k = MIN_LINEARIZATION_VELOCITY;
-
-            /* Blend model speed with reference speed so under-speed states are not
-             * over-limited by an aggressive reference profile. */
-            v_for_limit = 0.7f * v_model_k + 0.3f * v_ref_k;
-            if (v_for_limit < MIN_LINEARIZATION_VELOCITY)
-                v_for_limit = MIN_LINEARIZATION_VELOCITY;
-
-            if (v_for_limit > V_SWITCH) {
-                float scale = V_SWITCH / v_for_limit;
-                sd->u_ub[1] = a_max * scale;
-                sd->u_lb[1] = a_min;
-            } else {
-                sd->u_ub[1] = a_max;
-                sd->u_lb[1] = a_min;
-            }
+            if (v_model_k < 0.0f)
+                v_model_k = 0.0f;
+            a_max = vehicle_model_max_forward_acceleration(v_model_k);
+            sd->u_ub[1] = a_max;
+            sd->u_lb[1] = a_min;
         }
 
         lin_state = lin_state_next;

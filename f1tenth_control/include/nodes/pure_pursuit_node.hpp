@@ -32,7 +32,7 @@ namespace f1tenth_control {
  * This node:
  * - Loads a pre-computed racing line trajectory from CSV
  * - Subscribes to independent map-frame /amcl_pose and local /odom state
- * - Publishes physical-unit commands to /cmd/controller
+ * - Publishes physical-unit speed commands to /cmd/speed
  * - Supports dynamic parameter reconfiguration
  * 
  * Topics:
@@ -42,7 +42,7 @@ namespace f1tenth_control {
  *     - /autodrive/roboracer_1/lidar (sensor_msgs/LaserScan): Control event
  *   
  *   Publications:
- *     - /cmd/controller (ackermann_msgs/AckermannDriveStamped): Control commands
+ *     - /cmd/speed (ackermann_msgs/AckermannDriveStamped): Speed commands
  * 
  * @param trajectory_file Path to CSV trajectory file
  * @param min_lookahead Minimum lookahead distance [m]
@@ -89,7 +89,7 @@ private:
     std::string odom_topic_{"/odom"};
     std::string pose_topic_{"/amcl_pose"};
     std::string lidar_topic_{"/autodrive/roboracer_1/lidar"};
-    std::string command_topic_{"/cmd/controller"};
+    std::string command_topic_{"/cmd/speed"};
     std::string path_frame_{"map"};
     std::string command_frame_{"base_link"};
     bool pose_received_{false};             // Whether a valid pose estimate has been received

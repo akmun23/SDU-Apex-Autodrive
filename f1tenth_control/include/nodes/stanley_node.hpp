@@ -120,7 +120,7 @@ private:
     std::string pose_topic_{"/amcl_pose"};
     std::string lidar_topic_{"/autodrive/roboracer_1/lidar"};
     std::string local_raceline_topic_{"/local_raceline"};
-    std::string command_topic_{"/cmd/controller"};
+    std::string command_topic_{"/cmd/speed"};
     std::string path_frame_{"map"};
     std::string command_frame_{"base_link"};
     double control_rate_{10.0};

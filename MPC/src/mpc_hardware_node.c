@@ -17,7 +17,7 @@
  *   Subscribe: /odom                         (nav_msgs/Odometry)
  *   Subscribe: /ekf_pose               (geometry_msgs/PoseWithCovarianceStamped)
  *   Subscribe: /local_raceline         (nav_msgs/Path)         — lateral planner reference [QoS(10)]
- *   Publish:   /cmd/controller         (ackermann_msgs/AckermannDriveStamped)
+ *   Publish:   /cmd/acceleration       (ackermann_msgs/AckermannDriveStamped)
  *
  * @dependencies mpc.h, mpc_types.h, util_math.h, vehicle_model.h,
  *               rclc, rcl, nav_msgs, ackermann_msgs, std_msgs, geometry_msgs,
@@ -69,7 +69,7 @@
 
 /** Configurable topic names */
 static const char *g_odom_topic = "/odom";
-static const char *g_drive_topic = "/cmd/controller";
+static const char *g_drive_topic = "/cmd/acceleration";
 static const char *g_ekf_pose_topic = "/ekf_pose";
 static const char *g_local_raceline_topic = "/local_raceline";
 static const char *g_pose_frame = "map";
@@ -312,7 +312,7 @@ static void fatal_signal_handler(int sig)
 }
 
 /**
- * @brief Publish /cmd/controller and log if ROS refuses the publish call.
+ * @brief Publish /cmd/acceleration and log if ROS refuses the publish call.
  */
 static void publish_drive_command_or_warn(const char *context)
 {
@@ -326,7 +326,7 @@ static void publish_drive_command_or_warn(const char *context)
         if (publish_error_count <= 5UL || (publish_error_count % 20UL) == 0UL)
         {
             fprintf(stderr,
-                    "[ROS2] ERROR: /cmd/controller publish failed in %s: rc=%d, error=%s\n",
+                    "[ROS2] ERROR: /cmd/acceleration publish failed in %s: rc=%d, error=%s\n",
                     context,
                     (int)pub_rc,
                     rcl_get_error_string().str);
@@ -2006,7 +2006,7 @@ int main(int argc, char *argv[])
     }
     printf("[ROS2] Subscribed to %s (Reliable, KeepLast(10))\n", g_local_raceline_topic);
 
-    /* ===== Publisher: /cmd/controller (ackermann_msgs/AckermannDriveStamped) ===== */
+    /* ===== Publisher: /cmd/acceleration (ackermann_msgs/AckermannDriveStamped) ===== */
     rcl_publisher_options_t pub_opts = rcl_publisher_get_default_options();
     pub_opts.qos = qos_reliable_10;
 
@@ -2071,7 +2071,7 @@ int main(int argc, char *argv[])
     }
     set_rosidl_string(&global_drive_message_buffer.header.frame_id, g_command_frame);
 
-    /* Executor: subscriptions only. Control and /cmd/controller publish run in pthreads. */
+    /* Executor: subscriptions only. Control and /cmd/acceleration publish run in pthreads. */
     rcl_allocator_t alloc = rcl_get_default_allocator();
     rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
 

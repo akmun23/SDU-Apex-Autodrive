@@ -99,6 +99,19 @@ void vehicle_model_compute_normal_loads(
  */
 ControlInput_t vehicle_model_saturate_control(const ControlInput_t *raw_control);
 
+/**
+ * @brief Return the measured positive acceleration capability at a speed.
+ *
+ * The open-ground full-throttle data shows a decreasing reachable
+ * acceleration envelope. This helper is shared by the MPC bounds and the
+ * nonlinear prediction model so the solver cannot plan an unavailable
+ * acceleration at high speed.
+ *
+ * @param speed_mps Current forward speed [m/s].
+ * @return Maximum reachable positive acceleration [m/s^2].
+ */
+float vehicle_model_max_forward_acceleration(float speed_mps);
+
 /*===========================================================================
  * State Prediction (Single Step)
  *===========================================================================*/

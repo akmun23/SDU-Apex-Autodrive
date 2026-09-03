@@ -1,7 +1,7 @@
 ftg_node:
   ros__parameters:
     scan_topic: /autodrive/roboracer_1/lidar
-    command_topic: /cmd/controller
+    command_topic: /cmd/speed
     command_frame: base_link
 
     wheelbase: 0.324

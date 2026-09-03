@@ -1,0 +1,25 @@
+# Diagnostics-only continuous speed-transition validation on the official
+# open-world simulator. Ground truth is recorded only to score /odom; the
+# speed controller receives /odom and never reads these truth topics.
+calibration:
+  ros__parameters:
+    mode: speed_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/open_scene_speed_transition_validation
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    throttle_sequence: [0.0]
+    # Includes upward and downward transitions without stopping between them.
+    speed_sequence_mps: [2.0, 5.0, 8.0, 5.0, 2.0, 0.0]
+    steering_sequence: [0.0]
+    hold_sec: 4.0
+    speed_settle_error_mps: 0.25
+    speed_settle_timeout_sec: 15.0
+    zero_settle_sec: 2.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 30.0
+    reset_between_steps: false
+    speed_steps_brake_between_targets: false
+    grid_brake_timeout_sec: 30.0

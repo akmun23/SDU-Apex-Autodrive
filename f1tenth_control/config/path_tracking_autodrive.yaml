@@ -5,7 +5,7 @@ pure_pursuit_node:
     # odom-frame motion and is not consumed as a map-frame correction.
     pose_topic: /amcl_pose
     lidar_topic: /autodrive/roboracer_1/lidar
-    command_topic: /cmd/controller
+    command_topic: /cmd/speed
     steering_feedback_topic: /autodrive/roboracer_1/steering
     path_frame: map
     command_frame: base_link
@@ -75,7 +75,7 @@ stanley_node:
     odom_topic: /odom
     pose_topic: /amcl_pose
     lidar_topic: /autodrive/roboracer_1/lidar
-    command_topic: /cmd/controller
+    command_topic: /cmd/speed
     path_frame: map
     command_frame: base_link
     trajectory_file: ""

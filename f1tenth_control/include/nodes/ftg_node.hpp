@@ -30,7 +30,7 @@ private:
   rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
 
   std::string scan_topic_{"/autodrive/roboracer_1/lidar"};
-  std::string command_topic_{"/cmd/controller"};
+  std::string command_topic_{"/cmd/speed"};
   std::string command_frame_{"base_link"};
 };
 

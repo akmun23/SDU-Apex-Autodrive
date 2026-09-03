@@ -51,6 +51,9 @@ def _setup(context):
     if controller == "mpc" and not with_lateral:
         raise RuntimeError("mpc requires with_lateral_planner:=true")
 
+    actuator_input_topic = "/cmd/acceleration" if controller == "mpc" else "/cmd/speed"
+    actuator_command_mode = "acceleration" if controller == "mpc" else "speed"
+
     actions = [
         # Keep the official bridge unmodified for evaluator/debugging.
         Node(
@@ -195,6 +198,7 @@ def _setup(context):
                 {
                     "mode": "sensor_record",
                     "output_dir": LaunchConfiguration("telemetry_output_dir"),
+                    "duration_sec": LaunchConfiguration("telemetry_duration_sec"),
                 },
             ],
         ))
@@ -257,7 +261,7 @@ def _setup(context):
                 # is explicitly local odom-frame output.
                 "MPC_EKF_TOPIC": "/amcl_pose",
                 "MPC_LOCAL_RACELINE_TOPIC": "/local_raceline",
-                "MPC_DRIVE_TOPIC": "/cmd/controller",
+                "MPC_DRIVE_TOPIC": "/cmd/acceleration",
                 "MPC_POSE_FRAME": "map",
                 "MPC_PATH_FRAME": "map",
                 "MPC_COMMAND_FRAME": "base_link",
@@ -273,7 +277,11 @@ def _setup(context):
             LaunchConfiguration("actuator_params"),
             # Keep the simulator-only collision reset outside the default
             # competition interface. Enable it explicitly for test runs.
-            {"collision_reset_enabled": with_collision_safety},
+            {
+                "input_topic": actuator_input_topic,
+                "command_mode": actuator_command_mode,
+                "collision_reset_enabled": with_collision_safety,
+            },
         ],
     ))
 
@@ -322,6 +330,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "telemetry_output_dir",
             default_value="/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw",
+        ),
+        DeclareLaunchArgument(
+            "telemetry_duration_sec",
+            default_value="0.0",
+            description=(
+                "Finite diagnostics recorder duration; zero keeps recording until "
+                "the launch is stopped"
+            ),
         ),
         DeclareLaunchArgument(
             "ground_truth_output_csv",

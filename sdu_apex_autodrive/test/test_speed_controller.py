@@ -1,6 +1,9 @@
+from dataclasses import replace
+
 from sdu_apex_autodrive.speed_controller import (
     LongitudinalStateEstimator,
     SpeedControllerConfig,
+    TargetAccelerationController,
     TargetSpeedController,
 )
 
@@ -41,7 +44,8 @@ def test_output_never_exceeds_limit():
 
 
 def test_material_overspeed_coasts_and_clears_integral():
-    controller = TargetSpeedController(config())
+    controller = TargetSpeedController(replace(
+        config(), speed_hold_error_deadband_mps=0.0))
     # Keep the first demand below this deliberately small test actuator's
     # throttle ceiling so the integral has a chance to accumulate.
     controller.update(0.2, 0.0, 0.0, 0.5)
@@ -64,6 +68,148 @@ def test_10hz_rise_and_fall_are_slew_limited():
     falling = [controller.update(0.5, 5.5, 0.0, 0.1) for _ in range(3)]
     assert all(a - b <= 0.20 + 1e-12 for a, b in zip(falling, falling[1:]))
     assert all(0.0 <= value <= 0.10 for value in falling)
+
+
+def test_speed_controller_holds_calibrated_feedforward_when_settled():
+    controller = TargetSpeedController(config())
+    controller.update(2.0, 0.0, 0.0, 0.1)
+
+    expected = controller.feedforward(2.0)
+    held = [controller.update(2.0, 1.9, 0.0, 0.1) for _ in range(4)]
+
+    assert held == [expected] * 4
+
+
+def test_speed_controller_leaves_hold_deadband_for_fast_correction():
+    controller = TargetSpeedController(config())
+    controller.update(2.0, 1.9, 0.0, 0.1)
+    expected = controller.feedforward(2.0)
+
+    output = controller.update(2.0, 0.0, 0.0, 0.1)
+
+    assert output > expected
+
+
+def test_speed_controller_boosts_at_full_throttle_far_below_target():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+    ))
+
+    output = controller.update(5.0, 0.0, 0.0, 0.1)
+
+    assert output == 1.0
+
+
+def test_speed_controller_handoffs_to_target_hold_throttle_before_crossing():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+    ))
+    controller.update(5.0, 0.0, 0.0, 0.1)
+
+    # The previous full-throttle command predicts that the target will be
+    # crossed shortly, so the controller selects the mapped 5 m/s hold value.
+    output = controller.update(5.0, 3.8, 0.0, 0.1)
+
+    assert output == controller.feedforward(5.0)
+    assert controller._hold_approach
+
+    # Do not re-enter boost while the vehicle is still approaching the target.
+    assert controller.update(5.0, 4.8, 0.0, 0.1) == controller.feedforward(5.0)
+
+
+def test_speed_controller_keeps_hold_throttle_through_small_crossing():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+    ))
+    controller.update(2.0, 1.9, 0.0, 0.1)
+    expected = controller.feedforward(2.0)
+
+    assert controller.update(2.0, 2.05, 0.0, 0.1) == expected
+
+
+def test_speed_controller_exits_hold_for_material_underspeed():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+    ))
+    controller.update(2.0, 1.9, 0.0, 0.1)
+    output = controller.update(2.0, 1.5, 0.0, 0.1)
+
+    assert not controller._hold_approach
+    assert output > controller.feedforward(2.0)
+    assert controller.update(2.0, 1.5, 0.0, 0.1) > controller.feedforward(2.0)
+
+
+def test_speed_controller_can_tolerate_bounded_hold_under_report():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+        speed_hold_recovery_error_mps=1.0,
+    ))
+    controller.update(5.0, 0.0, 0.0, 0.1)
+    expected = controller.feedforward(5.0)
+    assert controller.update(5.0, 3.8, 0.0, 0.1) == expected
+    assert controller.update(5.0, 4.0, 0.0, 0.1) == expected
+
+
+def test_speed_controller_target_change_exits_hold_approach():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+    ))
+    controller.update(5.0, 0.0, 0.0, 0.1)
+    controller.update(5.0, 3.8, 0.0, 0.1)
+
+    assert controller.update(10.0, 3.8, 0.0, 0.1) == 1.0
+
+
+def test_speed_controller_uses_relative_overspeed_guard():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+        overspeed_coast_threshold_mps=1.0,
+    ))
+
+    # A 0.6 m/s overspeed is below the old fixed 1 m/s threshold but above
+    # the new 10% target-relative guard for a 5 m/s target.
+    assert controller.update(5.0, 5.6, 0.0, 0.1) == 0.0
+
+
+def test_speed_loop_uses_speed_slew_limits_not_acceleration_limits():
+    controller = TargetSpeedController(replace(
+        config(),
+        acceleration_throttle_rise_rate_per_sec=0.1,
+        acceleration_throttle_fall_rate_per_sec=0.1,
+    ))
+    output = controller.update(5.5, 0.0, 0.0, 0.1)
+    assert output == 0.10
+
+
+def test_acceleration_loop_uses_its_independent_slew_limits():
+    controller = TargetAccelerationController(replace(
+        config(),
+        acceleration_throttle_rise_rate_per_sec=0.1,
+        acceleration_throttle_fall_rate_per_sec=0.1,
+    ))
+    output = controller.update(5.0, 0.0, 0.0, 0.1)
+    assert abs(output - 0.01) < 1.0e-12
 
 
 def test_feedforward_and_output_remain_bounded_above_measured_table():
@@ -150,3 +296,52 @@ def test_imu_observer_anchors_when_encoder_and_imu_agree():
     observer.update_odometry(2.4, 0.1)
     assert not observer.slip_detected
     assert observer.speed_mps == 2.4
+
+
+def test_imu_update_does_not_overwrite_absolute_odom_speed():
+    observer = LongitudinalStateEstimator(acceleration_filter_alpha=1.0)
+    observer.update_odometry(5.0, 0.0)
+    observer.update_acceleration(8.0, 0.0)
+    observer.update_acceleration(8.0, 0.1)
+    assert observer.speed_mps == 5.0
+    assert observer.acceleration_mps2 == 8.0
+
+
+def test_acceleration_command_uses_speed_only_for_feedforward():
+    controller = TargetAccelerationController(config())
+    output = controller.update(
+        target_accel_mps2=0.0,
+        measured_speed_mps=1.5,
+        measured_accel_mps2=0.0,
+        dt_seconds=0.1,
+    )
+    # The zero-acceleration command still holds the measured speed with the
+    # feed-forward throttle; it is not interpreted as a stop request.
+    assert 0.0 < output <= 0.10
+
+
+def test_acceleration_command_coasts_for_negative_acceleration():
+    controller = TargetAccelerationController(config())
+    controller.update(1.0, 1.0, 0.0, 0.1)
+    assert controller.update(-1.0, 1.0, 0.0, 0.1) == 0.0
+    assert controller.last_output == 0.0
+
+
+def test_acceleration_command_is_slew_limited_and_bounded():
+    controller = TargetAccelerationController(config())
+    outputs = [controller.update(5.0, 0.0, 0.0, 0.1) for _ in range(20)]
+    assert outputs == sorted(outputs)
+    assert all(0.0 <= value <= 0.10 for value in outputs)
+    assert all(b - a <= 0.10 + 1.0e-12 for a, b in zip(outputs, outputs[1:]))
+
+
+def test_acceleration_controller_exposes_speed_dependent_capability():
+    controller = TargetAccelerationController(config())
+
+    at_zero = controller.acceleration_controller.maximum_acceleration(0.0)
+    at_ten = controller.acceleration_controller.maximum_acceleration(10.0)
+    at_top = controller.acceleration_controller.maximum_acceleration(23.0)
+
+    assert abs(at_zero - 0.63) < 0.01
+    assert at_ten < at_zero
+    assert at_top < at_ten

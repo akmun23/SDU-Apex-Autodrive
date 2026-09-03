@@ -3,12 +3,15 @@ sensor_odometry:
     left_encoder_topic: /autodrive/roboracer_1/left_encoder
     right_encoder_topic: /autodrive/roboracer_1/right_encoder
     imu_topic: /autodrive/roboracer_1/imu
-    throttle_topic: /autodrive/roboracer_1/throttle
     odom_topic: /odom
     diagnostics_topic: /odom/diagnostics
     # Float64MultiArray data order:
     # raw wheel m/s, corrected wheel m/s, slip ratio, confidence,
-    # IMU acceleration bias m/s^2 (placeholder), encoder reset count.
+    # IMU acceleration bias m/s^2 (placeholder), encoder reset count,
+    # IMU-integrated speed m/s, frozen-encoder model active, model decel m/s^2,
+    # fitted fusion speed m/s, fitted forest spread m/s, fitted model active,
+    # motion regime (0 accel, 1 steady, 2 decel, 3 frozen), followed by the
+    # exact causal nine-sample raw and mapped encoder window speeds.
 
     odom_frame: odom
     base_frame: base_link
@@ -40,17 +43,24 @@ sensor_odometry:
 
     # The IMU provides yaw and a bounded longitudinal observer. The wheel
     # radius is still the documented 0.0590 m and is never fitted here.
-    imu_acceleration_filter_alpha: 0.35
+    # Offline replay of the completed 2026-09-03 speed envelope selected a
+    # more responsive observer. It has passed one open-world live speed
+    # verification; integrated-position acceptance remains open.
+    imu_acceleration_filter_alpha: 0.70
+    # Reject isolated native-telemetry acceleration spikes for observer
+    # integration and regime selection; raw acceleration remains a model
+    # feature for offline compatibility.
+    imu_acceleration_median_window: 3
     wheel_slip_threshold_mps: 0.75
     wheel_slip_ratio: 0.20
     # The documented Sx ratio is numerically unstable near standstill.  Keep
     # launch quantisation on the encoder branch until body speed is observable.
     slip_observation_min_speed_mps: 0.75
-    # Do not let startup IMU bias replace accurate wheel speed at low speed;
-    # only high-speed wheel/IMU disagreement is treated as driven-wheel spin.
-    # The clean ground-truth sweep shows encoder speed remains the better
-    # body-speed measurement through roughly 15 m/s. Enable the IMU branch
-    # only once the wheel signal enters the high-slip region.
+    # The fitted sensor-only model selects separate acceleration, steady,
+    # deceleration, and frozen-encoder models.
+    # This documented slip confidence remains an input to the model and keeps
+    # the explicit IMU/frozen-encoder fallback conservative when the wheel
+    # signal is physically uninformative.
     # Apply the measured wheel-speed -> body-speed map across the complete
     # forward range. The documented 0.0590 m radius is still used first; this
     # parameter only controls where the offline slip correction begins.
@@ -58,10 +68,29 @@ sensor_odometry:
     encoder_reset_threshold_rad: 0.50
     max_observer_accel_mps2: 8.0
     observer_speed_tolerance_mps: 1.0
-    # Live track data showed the IMU-integrated speed lagging the calibrated
-    # wheel signal during the low-speed launch. Increase the bounded wheel
-    # correction without changing the documented wheel radius or slip gates.
-    wheel_observer_correction_gain: 0.75
+    # Replay of the new speed envelope shows that a small absolute wheel/map
+    # correction is useful before the learned sensor-only model is applied,
+    # while a larger gain adds wheel-spin noise to its fallback estimate.
+    wheel_observer_correction_gain: 0.10
+    # Do not fully replace the integrated observer with one instantaneous
+    # encoder packet. The bounded fused correction and the steady-history
+    # re-anchor handle trusted absolute updates without creating speed jumps.
+    imu_speed_correction_gain: 0.0
+    # Causal model fitted from the open-world identification grid. Ground
+    # truth is never read by the runtime node; it was only the offline target.
+    # The fitted branch is now guarded by the promptly filtered regime,
+    # bounded baseline innovation, and the controller's hold-recovery gate.
+    # Keep it enabled so the accepted steady-state correction is available
+    # while wheel-spin transitions remain rejected.
+    sensor_fusion_model_enabled: true
+    # The steady wheel/IMU baseline is preferred to the learned steady branch;
+    # acceleration, deceleration, and frozen regimes remain model-selectable.
+    sensor_fusion_steady_model_enabled: false
+    # Causal regime selector for the four offline-fitted models. Ground truth
+    # is never read by the runtime node.
+    regime_acceleration_threshold_mps2: 0.50
+    regime_model_max_spread_mps: 0.75
+    regime_model_max_baseline_delta_mps: 0.75
     stationary_speed_threshold_mps: 0.15
     # AutoDRIVE technical-guide longitudinal WheelCollider knots:
     # extremum (slip, force)=(0.15, 0.72), asymptote=(0.25, 0.464).
@@ -69,44 +98,47 @@ sensor_odometry:
     forward_extremum_value: 0.72
     forward_asymptote_slip: 0.25
     forward_asymptote_value: 0.464
-    # Ground-truth coast-down fit used only as a process prior when the
-    # official driven-wheel encoder is beyond the documented slip asymptote.
-    coast_model_enabled: true
-    coast_throttle_threshold: 0.02
-    coast_model_imu_weight: 0.60
-    coast_deceleration_intercept_mps2: 5.3
-    coast_deceleration_speed_gain_s_inv: 0.26
-    coast_deceleration_max_mps2: 12.0
-    throttle_feedback_timeout_s: 0.5
+    # IMU-only propagation is used while a driven-wheel encoder freezes during
+    # braking or slip. It is stopped only after the encoder and IMU have both
+    # been quiet for the confirmation interval.
     imu_stop_speed_threshold_mps: 2.0
-    # With fresh zero-throttle feedback, a quiet IMU confirms a stopped car
-    # even if the observer speed retained a stale value after encoder freeze.
+    # A quiet IMU confirms a stopped car only after the observer has also
+    # decayed below this bound following encoder freeze.
     imu_stationary_acceleration_threshold_mps2: 0.30
     zero_encoder_stop_confirm_sec: 0.80
+    # Fitted offline from moving, frozen-encoder braking samples in the
+    # open-world identification grid. This is a bounded sensor-only prior:
+    # it predicts remaining slip distance after the IMU becomes quiet, and
+    # does not reset pose or use ground truth/throttle at runtime.
+    frozen_encoder_model_enabled: true
+    frozen_encoder_model_delay_sec: 0.15
+    frozen_encoder_decel_intercept_mps2: 5.5
+    frozen_encoder_decel_speed_gain_per_s: 0.27
+    frozen_encoder_decel_max_mps2: 12.0
     slip_pose_xy_variance: 0.10
     # An encoder discontinuity only re-baselines the angle counters. Keep the
     # continuous odom pose/yaw/velocity and advertise temporary uncertainty.
     encoder_reset_covariance_duration_s: 1.0
     encoder_reset_pose_xy_variance: 0.25
     encoder_reset_twist_linear_variance: 0.50
-    # Offline ground-truth calibration of driven-wheel slip across the full
-    # settled 0-1 throttle response. These values are a correction map after
+    # Offline ground-truth calibration of driven-wheel slip from the completed
+    # 2026-09-03 open-ground identification grid. These values are a correction map after
     # the documented 0.0590 m wheel conversion, not a wheel-radius replacement
-    # or a controller throttle limit.
+    # or a controller throttle limit. The source fit is retained at
+    # artifacts/calibration/derived/latest_identification_grid_20260903/wheel_speed_map.csv.
     wheel_speed_map_wheel_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
                                 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0]
-    wheel_speed_map_body_mps: [0.0, 1.979669, 3.928270, 5.845092, 7.738538,
-                               9.599276, 11.438255, 13.183116, 14.958249,
-                               16.881441, 18.882715, 20.485775, 22.088834,
-                               22.883600, 22.883600, 22.883600]
+    wheel_speed_map_body_mps: [0.0, 1.988601, 3.967925, 5.888532, 8.549802,
+                               9.662430, 11.536114, 13.473328, 15.270020,
+                               16.855770, 18.570086, 19.279928, 19.987528,
+                               20.287600, 20.287600, 20.287600]
 
     # Metadata estimates, not published AutoDRIVE constants.
     pose_xy_variance: 0.01
     pose_yaw_variance: 0.01
-    # Encoder differencing is quantized at the native bridge cadence. Smooth
-    # only the published velocity used by the speed controller; reject one
-    # cadence outlier with a short median window, then smooth it. Pose remains
-    # integrated from the unfiltered wheel increments.
+    # The actuator keeps a separate control-side speed conditioner. Keep the
+    # published odom velocity responsive here: filtering this topic as well
+    # would add a second delay and make the speed controller overshoot.
     velocity_filter_alpha: 1.0
     velocity_median_window: 1
     velocity_filter_decel_alpha: 1.0

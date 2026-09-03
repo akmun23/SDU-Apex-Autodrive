@@ -6,6 +6,38 @@
 
 #include "vehicle_model.h"
 
+static const float kAccelerationEnvelopeSpeedMps[] = {
+    0.0f, 2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f,
+    14.0f, 16.0f, 18.0f, 20.0f, 22.0f, 23.0f};
+static const float kAccelerationEnvelopeMps2[] = {
+    5.5f, 4.4f, 4.4f, 3.568f, 3.175f, 2.562f, 2.043f,
+    1.565f, 0.956f, 0.529f, 0.529f, 0.529f, 0.086f};
+static const size_t kAccelerationEnvelopeCount =
+    sizeof(kAccelerationEnvelopeSpeedMps) /
+    sizeof(kAccelerationEnvelopeSpeedMps[0]);
+
+float vehicle_model_max_forward_acceleration(float speed_mps)
+{
+    float speed = isfinite(speed_mps) ? speed_mps : 0.0f;
+    if (speed <= kAccelerationEnvelopeSpeedMps[0])
+        return kAccelerationEnvelopeMps2[0];
+    if (speed >= kAccelerationEnvelopeSpeedMps[kAccelerationEnvelopeCount - 1U])
+        return kAccelerationEnvelopeMps2[kAccelerationEnvelopeCount - 1U];
+
+    for (size_t index = 1U; index < kAccelerationEnvelopeCount; ++index) {
+        if (speed <= kAccelerationEnvelopeSpeedMps[index]) {
+            const float lower_speed = kAccelerationEnvelopeSpeedMps[index - 1U];
+            const float upper_speed = kAccelerationEnvelopeSpeedMps[index];
+            const float ratio = (speed - lower_speed) /
+                (upper_speed - lower_speed);
+            return kAccelerationEnvelopeMps2[index - 1U] + ratio *
+                (kAccelerationEnvelopeMps2[index] -
+                 kAccelerationEnvelopeMps2[index - 1U]);
+        }
+    }
+    return kAccelerationEnvelopeMps2[kAccelerationEnvelopeCount - 1U];
+}
+
 /*===========================================================================
  * Shared Helper Math
  *===========================================================================*/
@@ -183,6 +215,13 @@ VehicleState_t vehicle_model_predict_next_state(
 
     // Saturate control inputs to ensure predictions respect physical limits.
     ControlInput_t saturated_control = vehicle_model_saturate_control(control_input);
+    /* The direct acceleration command is only physically available up to the
+     * measured full-throttle envelope at the current speed. Keep the
+     * nonlinear prediction consistent with the per-stage MPC bounds. */
+    saturated_control.long_acc = util_clamp(
+        saturated_control.long_acc,
+        VP_MIN_ACCEL_MPS2,
+        vehicle_model_max_forward_acceleration(current_state->long_vel));
 
     // Extract current state variables for readability
     float psi = current_state->heading;

@@ -1,52 +1,279 @@
-schema_version: 2
+schema_version: 3
 description: >-
-  Calibration workspace intentionally reset for one new encoder/IMU/odom
-  identification dataset. Ground truth is diagnostics-only and must never be
-  an input to competition runtime estimation or control.
+  Active finite open-world IMU/encoder calibration evidence and separate speed
+  and acceleration controller verification. Ground truth is diagnostics-only.
 repository:
-  revision: pending_after_identification_grid
-  status_date: 2026-09-02
+  base_revision: 535adf0
+  status_date: 2026-09-03
   analyzer: sdu_apex_autodrive/sdu_apex_autodrive/scripts/analyze_calibration.py
+  simulator_image: autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore
+  scene: official_open_ground_no_track
   fit_policy:
-    - Split by scheduled reset epoch before fitting.
-    - Use source timestamps and measured callback rates, not recorder row rate.
-    - Keep full-brake/coast intervals; encoder standstill with moving ground
-      truth is a slip observation, not a reset or invalid sample.
-    - Fit on one subset of epochs and verify on held-out epochs.
-csv_cleanup:
-  calibration_csvs_remaining_in_workspace: 0
-  archived_csv_count: 263
-  archive: /home/akselmo/.local/share/Trash/files/SDU-Apex-Autodrive-calibration-20260902
-  planner_source_csvs_preserved: true
-planned_single_run:
+    - Use source timestamps and measured callback rates.
+    - Deduplicate repeated rows by timestamped GT odom event.
+    - Keep encoder freeze during slip/braking as valid motion data.
+    - Reset only after throttle settling and IMU/encoder/odom stop evidence.
+    - Keep ground truth outside runtime odom, EKF, AMCL, and controllers.
+
+active_raw_csvs:
+  - raw/latest_identification_grid/identification_grid_20260903_081853.csv
+  - raw/latest_acceleration_controller_20260903/acceleration_steps_20260903_092339.csv
+  - raw/latest_speed_controller_20260903/speed_steps_20260903_095257.csv
+  - raw/latest_speed_filter_verification_20260903/speed_steps_20260903_103344.csv
+  - raw/latest_identification_verification_final/identification_grid_20260903_114229.csv
+  - raw/latest_sensor_fusion_validation_20260903/identification_grid_20260903_133516.csv
+  - raw/latest_regime_sensor_fusion_validation_20260903/identification_grid_20260903_143901.csv
+  - raw/latest_regime_sensor_fusion_validation_final_20260903/identification_grid_20260903_144650.csv
+  - raw/latest_regime_sensor_fusion_validation_promoted_20260903/identification_grid_20260903_145602.csv
+  - raw/latest_acceleration_controller_envelope_20260903/acceleration_steps_20260903_153146.csv
+active_raw_csv_count: 10
+active_derived_csv_count: 72
+planner_source_csvs_preserved: true
+archived_csv_count_current_archives: 85
+archives:
+  - /home/akselmo/.local/share/Trash/files/SDU-Apex-Autodrive-calibration-20260902
+  - /home/akselmo/.local/share/Trash/files/SDU-Apex-Autodrive-calibration-20260903
+
+identification_grid:
   mode: identification_grid
-  output_dir: raw/latest_identification_grid
-  scene: official_open_ground_simulator_scene
+  raw_csv: raw/latest_identification_grid/identification_grid_20260903_081853.csv
+  derived_dir: derived/latest_identification_grid_20260903
+  grid_speed_sequence_mps: [0.0, 3.0, 6.0, 9.0, 12.0, 16.0, 20.0]
+  throttle_values: [0.0, 0.03, 0.06, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80, 1.0]
+  steering_speed_sequence_mps: [3.0, 9.0, 16.0, 20.0]
+  steering_values: [0.0, -0.25, 0.25, -0.50, 0.50]
   amcl_started: false
   simulator_ground_truth_recorded: true
-  scheduled_reset_between_grid_bands: true
+  reset_between_points: true
   reset_on_frozen_encoder_during_braking: false
-  grid_nominal_speed_mps: [0.0, 3.0, 6.0, 9.0, 12.0, 16.0]
-  throttle_values: [0.0, 0.03, 0.06, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80, 1.0]
-  recorded_groups:
-    - throttle command and feedback
-    - ground-truth velocity and derived acceleration
-    - IMU acceleration, yaw rate, orientation and source timestamp
-    - raw encoder angles and timestamp-derived angular speeds
-    - wheel speed, ground-truth slip speed and slip ratio
-    - sensor odometry pose, speed and diagnostics
-    - local EKF pose and covariance
-    - callback event counts and rolling measured rates
-  output_csv_is_not_runtime_input: true
+  raw_rows: 74718
+  unique_gt_odom_rows: 16099
+  duplicate_gt_odom_rows_removed: 58619
+  throttle_probe_count: 84
+  steering_probe_count: 20
+  max_ground_truth_speed_mps: 22.882
+  collisions: 0
+  all_brake_phases_stop_confirmed: true
+  measured_rates_hz:
+    sensor_median: 10.891
+    sensor_p95: 11.465
+    command_median: 49.979
+  wheel_speed_body_speed_rmse_mps: 0.173
+  longitudinal_global_fit_rmse_mps2: 2.270
+  slip_model:
+    source_definition: official_Sx=(r_omega-v_x)/v_x
+    minimum_abs_body_vx_mps: 0.75
+    source_samples: 8453
+    fitted_bins: 146
+    traction_median_slip_ratio: 0.680
+    steady_median_slip_ratio: 0.029
+    braking_median_slip_ratio: -1.000
+    traction_slip_ratio_mad: 0.556
+    runtime_decision: retain_adaptive_wheel_confidence; no_direct_traction_median_correction
+    frozen_encoder_brake_model:
+      source_samples: 1114
+      source_speed_bins: 11
+      intercept_mps2: 5.406
+      speed_gain_per_s: 0.279
+      fit_rmse_mps2: 0.066
+      runtime_use: bounded_sensor_only_remaining_slip_prediction
+      artifact: derived/latest_identification_grid_20260903/frozen_encoder_brake_model.csv
+
+post_fit_verification:
+  mode: identification_grid
+  raw_csv: raw/latest_identification_verification_final/identification_grid_20260903_114229.csv
+  derived_dir: derived/latest_identification_verification_final
+  isolated_throttle_values: [0.06, 0.20, 0.40, 0.65, 0.80, 1.0]
+  raw_rows: 4711
+  unique_gt_odom_rows: 1072
+  duplicate_gt_odom_rows_removed: 3639
+  max_ground_truth_speed_mps: 22.882
+  collisions: 0
+  all_brake_phases_stop_confirmed: true
+  measured_source_timestamp_median_hz: 10.02
+  measured_source_timestamp_p95_hz: 20.31
+  measured_command_timestamp_median_hz: 49.96
+  odom_active_speed_abs_p95_mps: 0.283
+  odom_active_position_error_p95_m: 3.84
+  odom_active_position_error_max_m: 4.92
+  frozen_encoder_model_active_recorder_rows: 5
+  status: passed_speed_reset_brake_and_collision_checks_position_threshold_pending
+
+odom_candidate:
+  source: offline_replay_then_open_world_live_verification
+  imu_acceleration_filter_alpha: 0.70
+  wheel_observer_correction_gain: 0.10
+  imu_speed_correction_gain: 0.0
+  velocity_filter_alpha: 1.0
+  velocity_filter_decel_alpha: 1.0
+  prior_replay_mae_mps: 0.162
+  prior_replay_abs_p95_mps: 1.026
+  candidate_replay_mae_mps: 0.153
+  candidate_replay_abs_p95_mps: 0.931
+  live_verification: passed_independent_open_world_regime_model_speed_check_position_tails_remain
+  velocity_filter_live_verification: passed_open_world_speed_signal_check
+  frozen_encoder_model_enabled: true
+  frozen_encoder_model_delay_sec: 0.15
+  frozen_encoder_decel_intercept_mps2: 5.5
+  frozen_encoder_decel_speed_gain_per_s: 0.27
+  frozen_encoder_decel_max_mps2: 12.0
+  live_verification_raw_csv: raw/latest_speed_filter_verification_20260903/speed_steps_20260903_103344.csv
+  live_active_speed_abs_p95_mps: 1.071
+  live_active_position_error_p95_m: 6.718
+  live_tail_tracking_abs_p95_mps: 0.901
+  prior_baseline_raw_csv: raw/latest_speed_controller_20260903/speed_steps_20260903_095257.csv
+  prior_baseline_active_speed_abs_p95_mps: 0.812
+  post_fit_verification_raw_csv: raw/latest_identification_verification_final/identification_grid_20260903_114229.csv
+  post_fit_active_speed_abs_p95_mps: 0.283
+  post_fit_active_position_error_p95_m: 3.84
+  sensor_fusion_model:
+    enabled: true
+    fit_script: sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py
+    generated_header: ../../../f1tenth_localization/include/f1tenth_localization/sensor_fusion_model.hpp
+    model_artifact_dir: derived/latest_identification_grid_20260903_model
+    grouped_cv_episodes: 105
+    grouped_cv_samples: 15465
+    speed_relative_median_pct:
+      1-3_mps: 1.065
+      3-5_mps: 0.668
+      5-10_mps: 0.807
+      1-10_mps: 0.815
+    speed_relative_p95_pct:
+      1-3_mps: 16.577
+      3-5_mps: 11.193
+      5-10_mps: 7.410
+      1-10_mps: 10.639
+    pose_replay_relative_median_pct:
+      active: 1.539
+      distance_ge_10m: 1.177
+      distance_ge_50m: 0.868
+      distance_ge_100m: 0.830
+    live_verification: passed_independent_open_world_regime_model_check
+    promoted_validation_raw_csv: raw/latest_regime_sensor_fusion_validation_promoted_20260903/identification_grid_20260903_145602.csv
+    promoted_validation_speed_relative_median_pct:
+      1-3_mps: 0.967
+      3-5_mps: 0.386
+      5-10_mps: 0.360
+      10-15_mps: 0.177
+      15-20_mps: 0.264
+      20-23_mps: 0.198
+    promoted_validation_speed_relative_p95_pct:
+      1-3_mps: 17.244
+      3-5_mps: 4.312
+      5-10_mps: 2.316
+      10-15_mps: 1.326
+      15-20_mps: 1.472
+      20-23_mps: 1.410
+  integrated_position_acceptance: long_distance_passed_short_distance_tails_remain
+  slew_limit_separation_fix: applied_after_recorded_verification
+  live_reverification: pending
+
+acceleration_controller:
+  baseline_raw_csv: raw/latest_acceleration_controller_20260903/acceleration_steps_20260903_092339.csv
+  raw_csv: raw/latest_acceleration_controller_envelope_20260903/acceleration_steps_20260903_153146.csv
+  derived_dir: derived/latest_acceleration_controller_envelope_20260903
+  command_topic: /cmd/acceleration
+  sequence_mps2: [0.0, 1.0, 2.0, 4.0, 6.0, 2.0, -2.0]
+  raw_rows: 4553
+  unique_gt_odom_rows: 1052
+  measured_sensor_rate_hz: 11.494
+  measured_acceleration_command_rate_hz: 49.969
+  maximum_ground_truth_speed_mps: 14.570
+  phase_average_acceleration_mps2:
+    acceleration_1.00: 2.212
+    acceleration_2.00: 2.881
+    acceleration_4.00: 2.892
+    acceleration_6.00: 2.909
+  collisions: 0
+  status: speed_dependent_positive_acceleration_envelope_live_verified_low_demand_tuning_pending
+  slew_limit_separation_fix: applied_after_recorded_verification
+  positive_acceleration_envelope_mps2:
+    speed_knots_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 23.0]
+    limit_knots_mps2: [5.5, 4.4, 4.4, 3.568, 3.175, 2.562, 2.043, 1.565, 0.956, 0.529, 0.529, 0.529, 0.086]
+    source: full_throttle_direct_drive_identification_grid
+    runtime_behavior: intersect_with_remaining_throttle_headroom
+  live_reverification: completed_open_world_no_collisions
+
+speed_controller:
+  raw_csv: raw/latest_speed_controller_20260903/speed_steps_20260903_095257.csv
+  derived_dir: derived/latest_speed_controller_20260903
+  command_topic: /cmd/speed
+  target_sequence_mps: [0.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 0.0]
+  raw_rows: 25022
+  unique_gt_odom_rows: 5460
+  measured_sensor_rate_hz: 10.910
+  measured_speed_command_rate_hz: 49.990
+  measured_steering_command_rate_hz: 59.881
+  max_ground_truth_speed_mps: 20.286
+  collisions: 0
+  odom_active_speed_abs_p95_mps: 0.812
+  tail_abs_p95_range_mps: [0.85, 2.92]
+  slowest_95_percent_rise_time_s: 12.66
+  status: predictive_boost_to_target_feedforward_handoff_implemented_live_reverification_pending
+  boost_error_mps: 1.5
+  hold_entry_margin_mps: 0.15
+  prediction_horizon_sec: 0.25
+  hold_throttle_source: calibrated_target_speed_feedforward
+  overspeed_guard: target_relative_10_percent_bounded_by_configured_threshold
+  filter_verification_raw_csv: raw/latest_speed_filter_verification_20260903/speed_steps_20260903_103344.csv
+  filter_verification_derived_dir: derived/latest_speed_filter_verification_20260903
+  filter_verification_raw_rows: 25079
+  filter_verification_unique_gt_odom_rows: 5444
+  filter_verification_sensor_rate_hz: 10.897
+  filter_verification_speed_command_rate_hz: 49.985
+  filter_verification_max_ground_truth_speed_mps: 20.152
+  filter_verification_collisions: 0
+  filter_verification_active_speed_abs_p95_mps: 1.071
+  filter_verification_active_position_error_p95_m: 6.718
+  filter_verification_tail_tracking_abs_p95_mps: 0.901
+  slew_limit_separation_fix: applied_after_recorded_verification
+  boost_to_hold_handoff: applied_after_recorded_verification
+  live_reverification: pending
+
 runtime_architecture:
-  local_motion_chain: official_encoders_and_imu -> sensor_odometry -> local_ekf_in_odom_frame
-  global_position_chain: lidar_and_track_map -> independent_amcl_in_map_frame -> map_to_odom_correction
-  amcl_direct_ekf_subscription: false
+  local_motion_chain: official_encoders_and_imu -> sensor_odometry -> ekf_prediction
+  global_position_chain: map_and_lidar -> independent_amcl -> map_to_odom_correction
+  amcl_direct_sensor_odom_input: false
   ground_truth_runtime_input: false
-map_and_raceline:
-  map_yaml: ../../../f1tenth_planning/maps/autodrive_compete_2026.yaml
-  raceline_csv: ../../../f1tenth_planning/trajectories/icra_2025_raceline.csv
-  note: >-
-    These official competition-track assets are preserved. The open-ground
-    identification run does not start AMCL because that scene has no matching
-    map; AMCL will be evaluated later on the same track map and raceline.
+  speed_controller_input: /cmd/speed
+  acceleration_controller_input: /cmd/acceleration
+  competition_map: ../../../f1tenth_planning/maps/autodrive_compete_2026.yaml
+  competition_raceline: ../../../f1tenth_planning/trajectories/icra_2025_raceline.csv
+
+retained_derived_outputs:
+  - derived/latest_identification_grid_20260903/analysis.txt
+  - derived/latest_identification_grid_20260903/response.csv
+  - derived/latest_identification_grid_20260903/acceleration_map.csv
+  - derived/latest_identification_grid_20260903/longitudinal_fit.csv
+  - derived/latest_identification_grid_20260903/wheel_speed_map.csv
+  - derived/latest_identification_grid_20260903/slip_model.csv
+  - derived/latest_identification_grid_20260903/frozen_encoder_brake_model.csv
+  - derived/latest_identification_grid_20260903/steering.csv
+  - derived/latest_identification_grid_20260903/regime.csv
+  - derived/latest_identification_grid_20260903/feedforward.csv
+  - derived/latest_identification_grid_20260903_model/sensor_fusion_model_metrics.csv
+  - derived/latest_identification_grid_20260903_model/sensor_fusion_model_position_metrics.csv
+  - derived/latest_identification_grid_20260903_model/corrected_relative_error_metrics.csv
+  - derived/latest_acceleration_controller_20260903_final/response.csv
+  - derived/latest_acceleration_controller_20260903_final/acceleration_map.csv
+  - derived/latest_acceleration_controller_20260903_final/feedforward.csv
+  - derived/latest_acceleration_controller_20260903_final/regime.csv
+  - derived/latest_acceleration_controller_envelope_20260903/response.csv
+  - derived/latest_acceleration_controller_envelope_20260903/acceleration_map.csv
+  - derived/latest_acceleration_controller_envelope_20260903/relative_error.csv
+  - derived/latest_acceleration_controller_envelope_20260903/regime.csv
+  - derived/latest_speed_controller_20260903/response.csv
+  - derived/latest_speed_controller_20260903/acceleration_map.csv
+  - derived/latest_speed_controller_20260903/feedforward.csv
+  - derived/latest_speed_controller_20260903/regime.csv
+  - derived/latest_speed_filter_verification_20260903/response.csv
+  - derived/latest_speed_filter_verification_20260903/acceleration_map.csv
+  - derived/latest_speed_filter_verification_20260903/feedforward.csv
+  - derived/latest_speed_filter_verification_20260903/slip_model.csv
+  - derived/latest_speed_filter_verification_20260903/regime.csv
+  - derived/latest_identification_verification_final/acceleration_map.csv
+  - derived/latest_identification_verification_final/frozen_encoder_brake_model.csv
+  - derived/latest_identification_verification_final/longitudinal_fit.csv
+  - derived/latest_identification_verification_final/regime_metrics.csv
+  - derived/latest_identification_verification_final/response.csv
+  - derived/latest_identification_verification_final/slip_model.csv

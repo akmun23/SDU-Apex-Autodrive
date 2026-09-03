@@ -56,6 +56,7 @@ target_link_libraries(gpu_amcl_cpp_node gpu_amcl_cpp_lib)
 ament_target_dependencies(gpu_amcl_cpp_node rclcpp)
 
 add_executable(sensor_odometry_node src/sensor_odometry_node.cpp)
+target_include_directories(sensor_odometry_node PRIVATE include)
 ament_target_dependencies(sensor_odometry_node
   rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros)
 
