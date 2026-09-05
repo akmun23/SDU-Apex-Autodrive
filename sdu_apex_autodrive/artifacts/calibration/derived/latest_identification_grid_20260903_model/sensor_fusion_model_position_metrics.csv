@@ -1,5 +1,0 @@
-model,bin,samples,absolute_error_median_m,absolute_error_p95_m,relative_error_median_pct,relative_error_p95_pct
-random_forest_grouped_cv_replayed_pose,all_active,9429,0.3729652074789258,2.7845447394248675,1.5386700436451481,8.62030527731171
-random_forest_grouped_cv_replayed_pose,distance_ge_10m,7077,0.4896373249268705,3.8050455808749803,1.1767245651379339,3.671909288128814
-random_forest_grouped_cv_replayed_pose,distance_ge_50m,3204,0.896016381754049,6.109306765709544,0.8684400754229997,3.0097919776502966
-random_forest_grouped_cv_replayed_pose,distance_ge_100m,1375,1.4591729771956499,7.373814293011258,0.8299844048831484,3.3920718205692295
