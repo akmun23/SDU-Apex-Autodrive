@@ -13,6 +13,7 @@ import csv
 import importlib.util
 import math
 from pathlib import Path
+import re
 import statistics
 
 import numpy as np
@@ -58,7 +59,9 @@ WHEEL_FROZEN_SPEED_MPS = 0.15
 MOVING_SPEED_MPS = 0.75
 REGIME_ACCELERATION_MPS2 = 0.50
 STATIONARY_SPEED_MPS = 0.30
-IMU_FILTER_ALPHA = 0.70
+DEFAULT_SENSOR_ODOMETRY_CONFIG = (
+    Path(__file__).resolve().parents[3] /
+    "f1tenth_localization" / "config" / "sensor_odometry.yaml")
 HISTORY_WINDOW = 9
 WHEEL_RADIUS_M = 0.0590
 WHEEL_MAP_WHEEL_MPS = np.asarray(
@@ -84,6 +87,33 @@ MODEL_KWARGS = {
     "random_state": 4,
     "n_jobs": -1,
 }
+
+
+def load_imu_filter_alpha(config_path):
+    """Read the runtime longitudinal IMU filter alpha from its YAML file.
+
+    The fitter deliberately reads the same source-of-truth parameter as the
+    node instead of carrying a second training-only constant.  Keep this
+    parser dependency-free because this script already runs outside the ROS
+    environment during offline calibration.
+    """
+    config_path = Path(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    matches = re.findall(
+        r"^\s*imu_acceleration_filter_alpha:\s*"
+        r"([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))\s*(?:#.*)?$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected exactly one imu_acceleration_filter_alpha in "
+            f"{config_path}, found {len(matches)}")
+    alpha = float(matches[0])
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError(
+            f"imu_acceleration_filter_alpha must be in (0, 1], got {alpha}")
+    return alpha
 
 
 def load_analysis_module():
@@ -225,8 +255,10 @@ def merge_coherent_sensor_snapshot(raw_rows, diagnostic_rows, analysis):
     return merged
 
 
-def build_examples(path, analysis, run_id):
+def build_examples(path, analysis, run_id, imu_filter_alpha):
     raw_rows = analysis.read_rows(path)
+    odom_events, odom_stamps = _source_event_series(
+        raw_rows, "odom", analysis)
     # A timer/GT callback snapshot can lag the odom source event by one
     # bridge packet. When exact source events are available, fit the causal
     # sensor features against truth interpolated at that odom timestamp. This
@@ -323,8 +355,8 @@ def build_examples(path, analysis, run_id):
             filtered_acceleration = acceleration
         else:
             filtered_acceleration = (
-                IMU_FILTER_ALPHA * acceleration +
-                (1.0 - IMU_FILTER_ALPHA) * filtered_acceleration)
+                imu_filter_alpha * acceleration +
+                (1.0 - imu_filter_alpha) * filtered_acceleration)
         previous_imu_stamp = imu_stamp
 
         # Keep the fitter's short causal history consistent with the runtime
@@ -395,6 +427,42 @@ def build_examples(path, analysis, run_id):
             analysis, row, imu, raw, acceleration)
         if runtime_regime == "frozen" and filtered_acceleration >= -0.50:
             runtime_regime = "frozen_accelerating"
+        # Match the diagnostic callback to the actual odom source callback by
+        # message timestamp. The node publishes diagnostics immediately
+        # before /odom, but the diagnostic vector stores its internal speed
+        # member while the odom message carries the function argument. The
+        # source event is the authoritative deployed output when available.
+        diagnostics_stamp = finite(
+            analysis, row, "odom_diagnostics_stamp_s")
+        deployed_prediction = None
+        deployed_source = "odom_source_event"
+        if diagnostics_stamp is not None and odom_stamps:
+            odom_index = bisect_right(odom_stamps, diagnostics_stamp) - 1
+            if (odom_index >= 0 and
+                    abs(odom_stamps[odom_index] - diagnostics_stamp) <= 1.0e-6):
+                deployed_prediction = finite(
+                    analysis, odom_events[odom_index], "speed_mps")
+        if deployed_prediction is None:
+            deployed_prediction = finite(
+                analysis, row, "odom_diagnostics_speed_mps")
+            deployed_source = "odom_diagnostics"
+        if deployed_prediction is None:
+            deployed_prediction = finite(analysis, row, "speed_mps")
+            deployed_source = "odom"
+        model_active = finite(
+            analysis, row, "odom_sensor_fusion_model_active")
+        frozen_model_active = finite(
+            analysis, row, "odom_frozen_encoder_model_active")
+        if model_active is not None and model_active > 0.5:
+            deployed_branch = "learned_model"
+        elif frozen_model_active is not None and frozen_model_active > 0.5:
+            deployed_branch = "frozen_encoder_model"
+        elif runtime_regime == "decelerating":
+            deployed_branch = "braking_observer"
+        elif runtime_regime == "frozen":
+            deployed_branch = "frozen_observer"
+        else:
+            deployed_branch = "observer_or_wheel"
         examples.append({
             "features": features,
             "target": max(0.0, truth),
@@ -402,6 +470,9 @@ def build_examples(path, analysis, run_id):
             "sensor_regime": runtime_regime,
             "truth_regime": ground_truth_regime(
                 truth, raw, gt_acceleration),
+            "deployed_prediction": deployed_prediction,
+            "deployed_source": deployed_source,
+            "deployed_branch": deployed_branch,
             "row": row,
         })
 
@@ -471,11 +542,12 @@ def predict_examples(models, examples):
     return predictions, spreads, used
 
 
-def metrics(rows, model_name):
+def metrics(rows, model_name, group_key="sensor_regime", groups=None):
+    groups = tuple(REGIMES if groups is None else groups)
     result = []
-    for regime in (*REGIMES, "all"):
+    for regime in (*groups, "all"):
         selected = [row for row in rows if regime == "all" or
-                    row["sensor_regime"] == regime]
+                    row.get(group_key) == regime]
         for lower, upper in ((1.0, 3.0), (3.0, 5.0), (5.0, 10.0),
                              (10.0, 15.0), (15.0, 20.0), (20.0, 23.0)):
             selected_bin = [row for row in selected
@@ -696,6 +768,47 @@ def score_examples(models, examples):
     return result
 
 
+def score_deployed_examples(examples):
+    """Score the speed actually published by the recorded runtime node.
+
+    The exact ``/odom`` source event matched to the diagnostic timestamp is
+    preferred. ``odom_diagnostics_speed_mps`` is the first fallback for older
+    recordings, followed by the recorder callback's ``speed_mps`` snapshot.
+    This is an acceptance metric for the deployed observer, not a replay of
+    the offline forest.
+    """
+    result = []
+    for example in examples:
+        prediction = example["deployed_prediction"]
+        if prediction is None or example["truth_regime"] == "stationary":
+            continue
+        result.append({
+            "target": example["target"],
+            "prediction": max(0.0, float(prediction)),
+            "sensor_regime": example["sensor_regime"],
+            "runtime_branch": example["deployed_branch"],
+            "prediction_source": example["deployed_source"],
+        })
+    return result
+
+
+def report_rows(models, examples, forest_model_name,
+                deployed_model_name="deployed_odom_validation"):
+    """Return separate offline-forest and deployed-runtime metric rows."""
+    forest_rows = score_examples(models, examples)
+    deployed_rows = score_deployed_examples(examples)
+    rows = metrics(forest_rows, forest_model_name)
+    rows.extend(metrics(deployed_rows, deployed_model_name))
+    branches = sorted({row["runtime_branch"] for row in deployed_rows})
+    rows.extend(metrics(
+        deployed_rows,
+        "deployed_odom_branch",
+        group_key="runtime_branch",
+        groups=branches,
+    ))
+    return rows, forest_rows, deployed_rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -704,13 +817,30 @@ def main():
     parser.add_argument(
         "--validation", type=Path, nargs="+",
         help="independent recordings scored after fitting on inputs")
+    parser.add_argument(
+        "--sensor-odometry-config", type=Path,
+        default=DEFAULT_SENSOR_ODOMETRY_CONFIG,
+        help="runtime sensor_odometry.yaml used for the IMU filter alpha")
+    parser.add_argument(
+        "--imu-filter-alpha", type=float,
+        help="explicit alpha override for controlled experiments")
     parser.add_argument("--header", type=Path, required=True)
     parser.add_argument("--metrics", type=Path, required=True)
     args = parser.parse_args()
+    if args.imu_filter_alpha is None:
+        imu_filter_alpha = load_imu_filter_alpha(args.sensor_odometry_config)
+        alpha_source = str(args.sensor_odometry_config)
+    else:
+        imu_filter_alpha = args.imu_filter_alpha
+        if not 0.0 < imu_filter_alpha <= 1.0:
+            raise ValueError(
+                f"--imu-filter-alpha must be in (0, 1], got "
+                f"{imu_filter_alpha}")
+        alpha_source = "--imu-filter-alpha"
     analysis = load_analysis_module()
     runs = []
     for index, path in enumerate(args.inputs):
-        examples = build_examples(path, analysis, index)
+        examples = build_examples(path, analysis, index, imu_filter_alpha)
         if examples:
             runs.append((path, examples))
     if len(runs) < 2:
@@ -721,50 +851,72 @@ def main():
     if args.validation:
         validation = []
         for index, path in enumerate(args.validation):
-            examples = build_examples(path, analysis, index)
+            examples = build_examples(
+                path, analysis, index, imu_filter_alpha)
             if examples:
                 validation.extend(examples)
         if not validation:
             raise RuntimeError("no usable validation recordings")
         training = [example for _, examples in runs for example in examples]
         models, counts = train_models(training)
-        scored = score_examples(models, validation)
+        metric_rows, scored, deployed_scored = report_rows(
+            models, validation, "offline_forest_validation")
         export_header(models, args.header)
-        write_metrics(args.metrics,
-                       metrics(scored, "independent_validation"))
+        write_metrics(args.metrics, metric_rows)
+        print(f"imu_filter_alpha={imu_filter_alpha:.6g} "
+              f"source={alpha_source}")
         print(f"training_recordings={len(runs)} "
               f"training_examples={len(training)}")
         print(f"validation_recordings={len(args.validation)} "
               f"validation_examples={len(validation)}")
         print("regime_training_counts=" + ",".join(
             f"{regime}:{counts[regime]}" for regime in REGIMES))
-        for row in metrics(scored, "independent_validation"):
+        print(f"offline_forest_examples={len(scored)} "
+              f"deployed_odom_examples={len(deployed_scored)}")
+        for row in metric_rows:
             if row["regime"] == "all":
                 print(f"{row['bin']}: median={row['relative_error_median_pct']:.3f}% "
-                      f"p95={row['relative_error_p95_pct']:.3f}%")
+                      f"p95={row['relative_error_p95_pct']:.3f}% "
+                      f"[{row['model']}]")
         print(f"header={args.header}")
         print(f"metrics={args.metrics}")
         return 0
 
     validation_rows = []
+    deployed_validation_rows = []
     for holdout_path, holdout in runs:
         train = [example for path, examples in runs if path != holdout_path
                  for example in examples]
         models, _ = train_models(train)
         validation_rows.extend(score_examples(models, holdout))
+        deployed_validation_rows.extend(score_deployed_examples(holdout))
 
     final_examples = [example for _, examples in runs for example in examples]
     models, counts = train_models(final_examples)
     export_header(models, args.header)
-    write_metrics(args.metrics,
-                   metrics(validation_rows, "leave_one_recording_out"))
+    metric_rows = metrics(
+        validation_rows, "offline_forest_leave_one_recording_out")
+    metric_rows.extend(metrics(
+        deployed_validation_rows, "deployed_odom_leave_one_recording_out"))
+    branches = sorted({row["runtime_branch"]
+                       for row in deployed_validation_rows})
+    metric_rows.extend(metrics(
+        deployed_validation_rows,
+        "deployed_odom_branch_leave_one_recording_out",
+        group_key="runtime_branch",
+        groups=branches,
+    ))
+    write_metrics(args.metrics, metric_rows)
+    print(f"imu_filter_alpha={imu_filter_alpha:.6g} "
+          f"source={alpha_source}")
     print(f"recordings={len(runs)} examples={len(final_examples)}")
     print("regime_training_counts=" + ",".join(
         f"{regime}:{counts[regime]}" for regime in REGIMES))
-    for row in metrics(validation_rows, "leave_one_recording_out"):
+    for row in metric_rows:
         if row["regime"] == "all":
             print(f"{row['bin']}: median={row['relative_error_median_pct']:.3f}% "
-                  f"p95={row['relative_error_p95_pct']:.3f}%")
+                  f"p95={row['relative_error_p95_pct']:.3f}% "
+                  f"[{row['model']}]")
     print(f"header={args.header}")
     print(f"metrics={args.metrics}")
     return 0

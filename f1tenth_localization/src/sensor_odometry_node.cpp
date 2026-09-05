@@ -105,7 +105,7 @@ public:
     // mechanical conversion, followed by the measured simulator slip map.
     // The map is active from standstill because the clean open-ground sweep
     // shows measurable slip before the old high-speed-only threshold.
-    declare_parameter("imu_acceleration_filter_alpha", 0.70);
+    declare_parameter("imu_acceleration_filter_alpha", 0.90);
     // The simulator occasionally emits isolated longitudinal IMU spikes at
     // the native telemetry rate. Keep the raw value for the fitted model
     // feature, but use a short causal median for integration and regime
@@ -2021,7 +2021,7 @@ private:
   double max_imu_orientation_step_rad_{0.30};
   double max_imu_dt_s_{0.5};
   double imu_pair_extrapolation_max_s_{0.10};
-  double imu_acceleration_filter_alpha_{0.70};
+  double imu_acceleration_filter_alpha_{0.90};
   size_t imu_acceleration_median_window_{3};
   double wheel_slip_threshold_mps_{0.75};
   double wheel_slip_ratio_{0.20};

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 description: >-
   Canonical open-world IMU/encoder odometry calibration evidence. Ground truth
   is used offline for fitting and scoring only; it is never a runtime input.
@@ -43,23 +43,39 @@ canonical_fit:
     raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv
     --validation
     raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv
+    --sensor-odometry-config f1tenth_localization/config/sensor_odometry.yaml
     --header derived/odom_fusion_train_full_holdout_observer_median_20260904/sensor_fusion_model.hpp
     --metrics derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv
 
+fit_runtime_parameters:
+  imu_acceleration_filter_alpha: 0.90
+  imu_acceleration_filter_alpha_source: f1tenth_localization/config/sensor_odometry.yaml
+  deployed_speed_source: odom_source_event_speed_mps
+  deployed_speed_fallbacks:
+    - odom_diagnostics_speed_mps
+    - speed_mps
+  deployed_braking_branch: braking_observer
+
 holdout_relative_error_p95_pct:
-  all:
-    1-3_mps: 2.669
-    3-5_mps: 1.801
-    5-10_mps: 1.190
-    10-15_mps: 0.757
-    15-20_mps: 0.476
-    20-23_mps: 0.299
-  1-3_mps_by_regime:
-    accelerating: 3.869
-    steady: 0.016
-    decelerating: 11.655
-    frozen: 2.352
-    frozen_accelerating: 4.430
+  offline_forest_validation_all:
+    1-3_mps: 2.696
+    3-5_mps: 1.800
+    5-10_mps: 1.142
+    10-15_mps: 0.775
+    15-20_mps: 0.438
+    20-23_mps: 0.441
+  deployed_odom_validation_all:
+    1-3_mps: 18.161
+    3-5_mps: 8.628
+    5-10_mps: 6.535
+    10-15_mps: 4.141
+    15-20_mps: 4.630
+    20-23_mps: 6.342
+  deployed_odom_validation_decelerating:
+    1-3_mps: 17.755
+    3-5_mps: 9.178
+    5-10_mps: 7.106
+    10-15_mps: 4.666
 
 deployed_map_provenance:
   wheel_speed_map: derived/identification_grid_stop_gate_40hz_20260904/wheel_speed_map.csv

@@ -6,19 +6,24 @@ Scene used for calibration: official open ground, no track
 
 ## Current result
 
-The fixed train/validation odometry fit is strong in accelerating, steady,
-and most frozen-wheel regimes, but it is not yet accepted as a universal
-under-5% estimator. The remaining failure is concentrated in low-speed
-deceleration:
+The fixed train/validation corpus now reports the offline forest and the
+recorded deployed `/odom` separately. The offline forest is not the runtime
+braking estimator: the C++ node rejects the generic learned branch during
+active deceleration and uses the IMU observer plus bounded brake prior. The
+runtime acceptance result is therefore the recorded `/odom` result below.
 
-| regime, 1--3 m/s | relative median | relative p95 |
+With the active runtime IMU filter alpha of 0.90, the deployed odometry is
+not yet accepted as a universal under-5% estimator:
+
+| metric, 1--3 m/s | relative median | relative p95 |
 |---|---:|---:|
-| accelerating | 0.365% | 3.869% |
-| steady | 0.000% | 0.016% |
-| decelerating | 1.663% | 11.655% |
-| frozen | 0.460% | 2.352% |
-| frozen while accelerating | 0.419% | 4.430% |
-| all regimes | 0.024% | 2.669% |
+| offline forest, all regimes | 0.024% | 2.696% |
+| recorded deployed `/odom`, all regimes | 1.871% | 18.161% |
+| recorded deployed `/odom`, decelerating | 4.813% | 17.755% |
+
+The old 11.655% deceleration value was an offline forest score produced with
+the wrong alpha and was not a deployed `/odom` score. It is no longer used as
+the runtime acceptance metric.
 
 The production sensor-odometry header has therefore not been replaced by the
 large generated candidate. Runtime remains sensor-only: encoders and IMU go
@@ -38,14 +43,18 @@ them, fit on the validation file, or use any other CSV as a substitute. The
 fitter command and retained artifact paths are recorded in
 `sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml`.
 
-The current candidate report is:
+The retained report is:
 
 `sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv`
 
 The generated candidate header is deliberately not retained: it was an
 uninstalled 110 MB artifact. It can be regenerated from the two canonical
-CSVs using the command in the manifest, and the production header remains
-unchanged.
+CSVs using the command in the manifest. The report contains three named
+families: `offline_forest_validation`, `deployed_odom_validation`, and
+`deployed_odom_branch`. The latter two use the speed recorded in the runtime
+`/odom` source event matched to the diagnostic timestamp, with
+`odom_diagnostics_speed_mps` and then the recorder's `speed_mps` field as
+legacy fallbacks. The production header remains unchanged.
 
 ## What has been implemented
 
@@ -64,6 +73,10 @@ unchanged.
   telemetry is not fabricated or interpolated at runtime.
 - AMCL remains an independent global-position correction path and is not fed
   directly into the local odometry observer.
+- The fitter reads `imu_acceleration_filter_alpha` from the active
+  `sensor_odometry.yaml`; the C++ fallback default is also 0.90.
+- Runtime validation is scored from recorded `/odom`, not from the forest
+  prediction. Braking is reported as the `braking_observer` branch.
 
 ## Why the remaining tail is difficult
 
@@ -111,7 +124,8 @@ remain. Active runtime source, launch files, tests, map, raceline, and the
 ## Still open
 
 1. Find a causal braking estimator that passes the isolated low-speed p95
-   requirement without using ground truth or another live run.
+   requirement without using ground truth or another live run. The fixed
+   validation now shows the actual deployed gap clearly.
 2. Only after that candidate passes the fixed validation, promote it to the
    production header and rerun the Humble build/tests.
 3. Then validate the full track map/raceline, AMCL, EKF, Pure Pursuit, and

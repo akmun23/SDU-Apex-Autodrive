@@ -131,13 +131,13 @@ same envelope in its per-horizon acceleration bounds.
 
 The current odom candidate is in
 f1tenth_localization/config/sensor_odometry.yaml. It uses IMU and encoders only;
-IMU acceleration alpha=0.70, wheel correction gain=0.10, published-velocity
+IMU acceleration alpha=0.90, wheel correction gain=0.10, published-velocity
 filter alpha=1.0 for both acceleration and deceleration, and the causal
 sensor-fusion model are enabled. The model is reproducibly fitted by
 `sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py`
 from the open-world identification corpus and compiled into the localization
 node. It contains separate accelerating, steady, decelerating, and frozen
-models and 22 causal features. The frozen-encoder fallback is the bounded
+models and 24 causal features. The frozen-encoder fallback is the bounded
 prior `decel = min(12.0, 5.5 + 0.27 * speed)` after a quiet-IMU hold; it is a
 motion prediction, not a stop/reset condition.
 
