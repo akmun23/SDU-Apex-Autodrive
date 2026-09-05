@@ -141,8 +141,6 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
       const Eigen::Vector3d delta =
         math_utils::se2_relative(previous_odom_, odom_pose);
       const double dt = (stamp - previous_odom_stamp_).seconds();
-      previous_odom_ = odom_pose;
-      previous_odom_stamp_ = stamp;
 
       // Only reject an impossible pose discontinuity. Encoder standstill
       // during full braking is intentionally not a discontinuity condition;
@@ -154,8 +152,25 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
           get_logger(), *get_clock(), 2000,
           "Ignoring impossible sensor-odometry jump: %.3f m, %.3f rad",
           std::hypot(delta[0], delta[1]), std::abs(delta[2]));
+        previous_odom_ = odom_pose;
+        previous_odom_stamp_ = stamp;
+        // In the reset-enabled diagnostic suite a simulator teleport can be
+        // delivered before the reset Bool callback. Treat that impossible
+        // pose jump as the epoch boundary so the EKF cannot publish one
+        // stale pre-reset pose. Production keeps reset_enabled=false and
+        // therefore retains the normal impossible-jump rejection behavior.
+        if (reset_enabled_) {
+          state_.setZero();
+          covariance_ = odom_process_covariance(*msg);
+          reset_pending_ = false;
+          initialized_ = true;
+          publish = true;
+        }
         return;
       }
+
+      previous_odom_ = odom_pose;
+      previous_odom_stamp_ = stamp;
 
       predict(delta, odom_process_covariance(*msg), dt);
       publish = true;

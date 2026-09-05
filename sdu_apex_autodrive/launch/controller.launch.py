@@ -55,10 +55,11 @@ def _setup(context):
     actuator_command_mode = "acceleration" if controller == "mpc" else "speed"
 
     actions = [
-        # Keep the official bridge unmodified for evaluator/debugging.
+        # Pace commands independently of the official telemetry decoder so
+        # the simulator is not throttled by camera/LIDAR ROS publication.
         Node(
-            package="autodrive_roboracer",
-            executable="autodrive_bridge",
+            package="sdu_apex_autodrive",
+            executable="autodrive_bridge_40hz",
             name="autodrive_bridge",
             output="screen",
             emulate_tty=True,

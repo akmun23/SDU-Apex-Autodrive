@@ -1,0 +1,10 @@
+record_type,parameter,value,speed_bin_mps,median_body_speed_mps,median_deceleration_mps2,samples
+fit,intercept_mps2,11.204014939,,,,
+fit,speed_gain_per_s,0.000000000,,,,
+fit,max_deceleration_p95_mps2,184.872571363,,,,
+fit,fit_rmse_mps2,1.186842937,,,,
+fit,samples,49.000000000,,,,
+fit,bins,3.000000000,,,,
+speed_bin,,,0.000000000,1.204300000,12.882464212,31
+speed_bin,,,2.000000000,2.673550000,10.364276163,16
+speed_bin,,,4.000000000,4.232650000,10.365304441,2

@@ -11,15 +11,35 @@ from geometry_msgs.msg import Point, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 from sensor_msgs.msg import Imu, JointState, LaserScan
 from std_msgs.msg import Bool, Float32, Float64, Float64MultiArray, Int32
+
+
+# The simulator bridge is best-effort and can deliver several native samples
+# in one executor burst. The default sensor-data depth is only five, which
+# lets the Python diagnostics recorder drop source events while it flushes
+# CSV rows. Keep the source timestamps and retain enough backlog to measure
+# the bridge's actual cadence without changing runtime topics.
+SOURCE_SENSOR_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=100,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+)
 
 
 FIELDS = (
     # stamp_s is the absolute ROS/system timestamp used to align this
     # recorder with timestamped diagnostic files. time_s remains the
     # human-friendly elapsed time within this recorder process.
-    "stamp_s", "time_s", "phase", "target_speed_mps", "target_accel_mps2",
+    "stamp_s", "time_s", "phase", "source_event_name", "source_event_count",
+    "source_event_stamp_s", "target_speed_mps", "target_accel_mps2",
     "controller_speed_mps", "controller_accel_mps2", "controller_steering_rad",
     "throttle_command", "throttle_feedback", "steering_command",
     "steering_feedback", "speed_mps", "speed_rate_mps2", "gt_speed_rate_mps2",
@@ -44,6 +64,9 @@ FIELDS = (
     "odom_sensor_fusion_model_active", "odom_sensor_motion_regime",
     "odom_sensor_fusion_window_raw_speed_mps",
     "odom_sensor_fusion_window_mapped_speed_mps",
+    "odom_diagnostics_stamp_s", "odom_imu_observer_acceleration_mps2",
+    "odom_imu_pair_speed_mps", "odom_imu_pair_lead_s",
+    "odom_diagnostics_speed_mps",
     # Brake/coast completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
@@ -66,6 +89,7 @@ FIELDS = (
     "left_encoder_rate_hz", "left_encoder_event_count",
     "right_encoder_rate_hz", "right_encoder_event_count",
     "odom_rate_hz", "odom_event_count",
+    "odom_diagnostics_rate_hz", "odom_diagnostics_event_count",
     "gt_odom_rate_hz", "gt_odom_event_count",
     "gt_ips_rate_hz", "gt_ips_event_count",
     "collision_rate_hz", "collision_event_count",
@@ -133,7 +157,7 @@ class Calibration(Node):
         self.last_encoder_sample = {"left": None, "right": None}
         self.rate_event_names = (
             "lidar", "imu", "left_encoder", "right_encoder", "odom",
-            "gt_odom", "gt_ips", "collision", "amcl", "ekf",
+            "odom_diagnostics", "gt_odom", "gt_ips", "collision", "amcl", "ekf",
             "speed_command", "acceleration_command",
             "throttle_command", "steering_command",
             "throttle_feedback", "steering_feedback",
@@ -142,6 +166,9 @@ class Calibration(Node):
         self.event_window_counts = {name: 0 for name in self.rate_event_names}
         self.event_rates = {name: math.nan for name in self.rate_event_names}
         self.rate_window_start = self.start
+        self.capture_source_events = bool(
+            self.get_parameter("capture_source_events").value)
+        self.source_event_rows = []
         self.finished = False
         self.reset_pending = False
         self.reset_odom_confirmed = False
@@ -202,7 +229,7 @@ class Calibration(Node):
                 Bool, "/autodrive/reset_command", 10)
 
         self.create_subscription(
-            Odometry, "/odom", self._on_odom, rclpy.qos.qos_profile_sensor_data)
+            Odometry, "/odom", self._on_odom, SOURCE_SENSOR_QOS)
         self.create_subscription(
             Float64MultiArray, "/odom/diagnostics", self._on_odom_diagnostics, 10)
         # Restricted simulator ground truth is intentionally subscribed to by
@@ -210,10 +237,10 @@ class Calibration(Node):
         # fit acceleration, delay, encoder scale, and collision metrics.
         self.create_subscription(
             Odometry, "/autodrive/roboracer_1/odom", self._on_gt_odom,
-            rclpy.qos.qos_profile_sensor_data)
+            SOURCE_SENSOR_QOS)
         self.create_subscription(
             Point, "/autodrive/roboracer_1/ips", self._on_gt_ips,
-            rclpy.qos.qos_profile_sensor_data)
+            SOURCE_SENSOR_QOS)
         self.create_subscription(
             Int32, "/autodrive/roboracer_1/collision_count",
             self._on_collision_count, 10)
@@ -223,18 +250,16 @@ class Calibration(Node):
             PoseWithCovarianceStamped, "/ekf_pose", self._on_ekf, 10)
         self.create_subscription(
             Imu, "/autodrive/roboracer_1/imu",
-            self._on_imu, rclpy.qos.qos_profile_sensor_data)
+            self._on_imu, SOURCE_SENSOR_QOS)
         self.create_subscription(
             JointState, "/autodrive/roboracer_1/left_encoder",
-            lambda m: self._on_encoder(m, "left_encoder_rad"),
-            rclpy.qos.qos_profile_sensor_data)
+            lambda m: self._on_encoder(m, "left_encoder_rad"), SOURCE_SENSOR_QOS)
         self.create_subscription(
             JointState, "/autodrive/roboracer_1/right_encoder",
-            lambda m: self._on_encoder(m, "right_encoder_rad"),
-            rclpy.qos.qos_profile_sensor_data)
+            lambda m: self._on_encoder(m, "right_encoder_rad"), SOURCE_SENSOR_QOS)
         self.create_subscription(
             LaserScan, "/autodrive/roboracer_1/lidar", self._on_lidar,
-            rclpy.qos.qos_profile_sensor_data)
+            SOURCE_SENSOR_QOS)
         self.create_subscription(
             AckermannDriveStamped, "/cmd/speed",
             lambda m: self._on_controller_command(m, "speed"), 10)
@@ -272,6 +297,11 @@ class Calibration(Node):
         self.declare_parameter(
             "output_dir", "/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw")
         self.declare_parameter("sample_rate_hz", 50.0)
+        # Timer snapshots are useful for command/phase diagnostics, but a
+        # burst of native callbacks can make them skip source samples.  When
+        # enabled, important sensor callbacks also enqueue exact snapshots;
+        # the analyzer selects the GT-aligned rows for model fitting.
+        self.declare_parameter("capture_source_events", False)
         self.declare_parameter("duration_sec", 0.0)
         self.declare_parameter(
             "throttle_sequence", [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07])
@@ -333,9 +363,11 @@ class Calibration(Node):
         # tracking validation and remains diagnostics-only.
         self.declare_parameter("speed_steps_brake_between_targets", True)
         self.declare_parameter("reset_pulse_sec", 0.25)
-        # The official bridge samples its latched reset level at its native
-        # simulator callback cadence. Hold true long enough for at least one
-        # bridge event, then publish false so it cannot reset continuously.
+        # The paced bridge samples its latched reset level at 40 Hz. The
+        # simulator currently requires reset=true to remain asserted across
+        # paced commands until the teleport is acknowledged; the harness only
+        # enters this phase after the brake/stop gate has completed and clears
+        # it immediately after confirmation.
         self.declare_parameter("reset_signal_hold_sec", 0.20)
         # A diagnostics reset must reach both the simulator bridge and the
         # local epoch subscribers.  Counting only the local odometry
@@ -635,6 +667,32 @@ class Calibration(Node):
     def _set(self, name, value):
         self.state[name] = value
 
+    def _capture_source_event(self, name: str, stamp_s: float) -> None:
+        """Queue an exact callback snapshot when source logging is enabled."""
+        if not self.capture_source_events:
+            return
+        if name not in {
+                "imu", "left_encoder", "right_encoder", "odom",
+                "odom_diagnostics", "gt_odom"}:
+            return
+        now = self.get_clock().now()
+        row = dict(self.state)
+        row["stamp_s"] = now.nanoseconds * 1.0e-9
+        row["time_s"] = (now - self.start).nanoseconds * 1.0e-9
+        row["phase"] = self.active_phase or str(self.state.get("phase", "waiting"))
+        row["source_event_name"] = name
+        row["source_event_count"] = self.event_counts[name]
+        row["source_event_stamp_s"] = stamp_s
+        self.source_event_rows.append(row)
+
+    def _flush_source_event_rows(self) -> None:
+        if not self.source_event_rows:
+            return
+        for row in self.source_event_rows:
+            self.writer.writerow(row)
+        self.source_event_rows.clear()
+        self.stream.flush()
+
     def _message_stamp_s(self, msg) -> float:
         """Return the source timestamp used for derivative/rate estimates."""
         stamp = getattr(getattr(msg, "header", None), "stamp", None)
@@ -722,11 +780,13 @@ class Calibration(Node):
                 # zero interval must start over so that stale queued samples
                 # cannot contaminate the next phase.
                 self.reset_zero_odom_since = None
+        self._capture_source_event("odom", stamp_s)
 
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
         """Record the fixed-order sensor-odometry diagnostic vector."""
-        if len(msg.data) < 7:
+        if len(msg.data) < 20:
             return
+        self._record_event("odom_diagnostics")
         fields = (
             "odom_raw_wheel_speed_mps",
             "odom_corrected_wheel_speed_mps",
@@ -743,10 +803,18 @@ class Calibration(Node):
             "odom_sensor_motion_regime",
             "odom_sensor_fusion_window_raw_speed_mps",
             "odom_sensor_fusion_window_mapped_speed_mps",
+            "odom_diagnostics_stamp_s",
+            "odom_imu_observer_acceleration_mps2",
+            "odom_imu_pair_speed_mps",
+            "odom_imu_pair_lead_s",
+            "odom_diagnostics_speed_mps",
         )
         for field, value in zip(fields, msg.data[:len(fields)]):
             if math.isfinite(float(value)):
                 self.state[field] = float(value)
+        diagnostics_stamp = self.state.get("odom_diagnostics_stamp_s")
+        if diagnostics_stamp is not None and math.isfinite(diagnostics_stamp):
+            self._capture_source_event("odom_diagnostics", diagnostics_stamp)
 
     def _on_gt_odom(self, msg: Odometry) -> None:
         """Record simulator truth for offline calibration and validation only."""
@@ -812,6 +880,7 @@ class Calibration(Node):
                     self.reset_gt_confirmed = True
             else:
                 self.reset_zero_gt_since = None
+        self._capture_source_event("gt_odom", stamp_s)
 
     def _on_gt_ips(self, msg: Point) -> None:
         """Record the simulator IPS position as a second truth stream."""
@@ -836,7 +905,9 @@ class Calibration(Node):
         self.state["imu_yaw_rate_radps"] = float(msg.angular_velocity.z)
         self.state["yaw_rate_radps"] = float(msg.angular_velocity.z)
         self.state["imu_yaw_rad"] = _yaw_from_quaternion(msg.orientation)
-        self.state["imu_stamp_s"] = self._message_stamp_s(msg)
+        stamp_s = self._message_stamp_s(msg)
+        self.state["imu_stamp_s"] = stamp_s
+        self._capture_source_event("imu", stamp_s)
 
     def _on_encoder(self, msg: JointState, field: str) -> None:
         side = "left" if field.startswith("left") else "right"
@@ -860,6 +931,7 @@ class Calibration(Node):
                         self.state[speed_field] = math.nan
                 self.last_encoder_sample[side] = (stamp_s, value)
                 self._update_encoder_slip()
+                self._capture_source_event(f"{side}_encoder", stamp_s)
 
     def _on_pose(self, msg: PoseWithCovarianceStamped, prefix: str) -> None:
         pose = msg.pose.pose
@@ -1096,7 +1168,13 @@ class Calibration(Node):
         if kind == "reset" or phase == "settle":
             return False
         settle = float(self.get_parameter("zero_settle_sec").value)
+        brake_timeout = max(1.0, float(self.get_parameter(
+            "grid_brake_timeout_sec").value))
         self.phases[self.phase_index:self.phase_index] = [
+            # Never teleport a moving car merely because the finite open
+            # plane was reached. Boundary recovery obeys the same stop gate
+            # as every normal grid point.
+            ("boundary_brake", "raw_throttle", 0.0, brake_timeout),
             ("boundary_reset", "reset", 1.0, self.reset_pulse_sec),
             ("settle", "raw_throttle", 0.0, settle),
         ]
@@ -1257,6 +1335,10 @@ class Calibration(Node):
         elapsed = (now - self.start).nanoseconds / 1e9
         self.state["stamp_s"] = now.nanoseconds * 1.0e-9
         self.state["time_s"] = elapsed
+        # Source callbacks can arrive in bursts between timer invocations.
+        # Flush their queued snapshots before the timer row so no native
+        # sensor event is lost merely because the recorder cadence is lower.
+        self._flush_source_event_rows()
 
         if self.mode != "sensor_record":
             telemetry_time = (self.last_gt_odom
@@ -1299,7 +1381,7 @@ class Calibration(Node):
 
         if phase != self.active_phase:
             self.active_phase = phase
-            if phase.startswith("grid_brake"):
+            if phase.startswith(("grid_brake", "boundary_brake")):
                 self.brake_stop_since = None
                 self.brake_event_baseline = {
                     "left_encoder": self.event_counts["left_encoder"],
@@ -1339,7 +1421,8 @@ class Calibration(Node):
         # before reaching its edge so the requested hold duration remains
         # meaningful and no out-of-world tail is used in the fit.
         if (kind != "reset" and not phase.startswith("grid_settle") and
-                not phase.startswith("grid_brake") and phase != "settle" and
+                not phase.startswith(("grid_brake", "boundary_brake")) and
+                phase != "settle" and
                 self._ground_truth_boundary_reached()):
             self._insert_boundary_reset(now)
             return
@@ -1421,7 +1504,7 @@ class Calibration(Node):
                 self._finish("throttle settle timeout")
             return
 
-        if phase.startswith("grid_brake"):
+        if phase.startswith(("grid_brake", "boundary_brake")):
             self.state["phase"] = phase
             self._command("raw_throttle", 0.0, 0.0)
             confirmed = self._update_brake_stop(now)
@@ -1470,6 +1553,7 @@ class Calibration(Node):
     def destroy_node(self):
         if not self.finished and rclpy.ok(context=self.context):
             self._neutral()
+        self._flush_source_event_rows()
         if not self.stream.closed:
             self.stream.flush()
             self.stream.close()

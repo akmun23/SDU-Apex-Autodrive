@@ -1,0 +1,17 @@
+record_type,name,speed_mps,value,value_2,samples
+coefficient,c0,,0.919924675,,946
+coefficient,c1,,4.929235404,,946
+coefficient,c2,,-0.125119158,,946
+coefficient,c3,,-0.146459815,,946
+operating_point,,0.000000,0.000000,0.202871,946
+operating_point,,2.000000,0.000000,0.215689,946
+operating_point,,4.000000,0.000000,0.230235,946
+operating_point,,6.000000,0.000000,0.246885,946
+operating_point,,8.000000,0.021564,0.266130,946
+operating_point,,10.000000,0.095614,0.288631,946
+operating_point,,12.000000,0.183341,0.315287,946
+operating_point,,14.000000,0.288920,0.347367,946
+operating_point,,16.000000,0.418419,0.386716,946
+operating_point,,18.000000,0.581005,0.436118,946
+operating_point,,20.000000,0.791214,0.499990,946
+operating_point,,23.000000,1.000000,0.640755,946

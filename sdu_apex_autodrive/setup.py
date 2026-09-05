@@ -31,6 +31,7 @@ setup(
             "create_open_map = sdu_apex_autodrive.create_open_map:main",
             "lap_map_saver = sdu_apex_autodrive.lap_map_saver:main",
             "ground_truth_amcl_monitor = sdu_apex_autodrive.ground_truth_amcl_monitor:main",
+            "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
             "analyze_calibration = sdu_apex_autodrive.scripts.analyze_calibration:main",
         ],
     },

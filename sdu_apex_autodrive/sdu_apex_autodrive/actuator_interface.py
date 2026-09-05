@@ -30,7 +30,8 @@ class ActuatorInterface(Node):
         "speed_hold_recovery_error_mps",
         "speed_hold_acceleration_deadband_mps2",
         "speed_boost_error_mps", "speed_hold_prediction_horizon_sec",
-        "speed_hold_entry_margin_mps", "speed_overspeed_confirmation_sec",
+        "speed_hold_entry_margin_mps", "speed_downshift_stable_sec",
+        "speed_downshift_band_mps", "speed_overspeed_confirmation_sec",
     }
 
     def __init__(self) -> None:
@@ -73,6 +74,7 @@ class ActuatorInterface(Node):
                 self.get_parameter("speed_measurement_filter_alpha").value),
         )
         self.control_time = None
+        self.last_controller_odom_time = None
         self.last_neutral_reason = None
         self.external_stop_latched = False
         self.collision_count = None
@@ -153,9 +155,9 @@ class ActuatorInterface(Node):
         self.declare_parameter("external_stop_topic", "")
         self.declare_parameter("command_timeout_sec", 0.25)
         self.declare_parameter("odom_timeout_sec", 0.25)
-        # The official telemetry/control event is approximately 10 Hz. The
-        # actuator repeats the last accepted command at that same cadence and
-        # retains its timeout watchdog for missing commands.
+        # The bridge now repeats the latest accepted command at 40 Hz. The
+        # actuator's own command update policy remains configurable at 10 Hz
+        # and retains its timeout watchdog for missing commands.
         self.declare_parameter("publish_rate_hz", 10.0)
         self.declare_parameter("max_steering_angle_rad", 0.5236)
         self.declare_parameter("max_target_speed_mps", 22.88)
@@ -195,6 +197,8 @@ class ActuatorInterface(Node):
         self.declare_parameter("speed_boost_error_mps", 1.5)
         self.declare_parameter("speed_hold_prediction_horizon_sec", 0.25)
         self.declare_parameter("speed_hold_entry_margin_mps", 0.15)
+        self.declare_parameter("speed_downshift_stable_sec", 0.20)
+        self.declare_parameter("speed_downshift_band_mps", 0.10)
         self.declare_parameter("speed_overspeed_confirmation_sec", 0.30)
         # Allowed-input longitudinal observer.  It rejects encoder wheel-spin
         # when the IMU-integrated body speed disagrees materially.
@@ -243,8 +247,8 @@ class ActuatorInterface(Node):
         self.declare_parameter("acceleration_throttle_fall_rate_per_sec", 4.0)
         self.declare_parameter(
             "feedforward_speed_mps",
-            [0.0, 0.7537, 1.5005, 2.4883, 3.7113, 4.9225,
-             7.3138, 9.6633, 11.9725, 15.3611, 18.6550, 22.8821])
+            [0.0, 0.7537, 1.5008, 2.4883, 3.7113, 4.9226,
+             7.3138, 9.6633, 11.9725, 15.3610, 18.6554, 22.8834])
         self.declare_parameter(
             "feedforward_throttle",
             [0.0, 0.030, 0.060, 0.100, 0.150, 0.200,
@@ -274,6 +278,10 @@ class ActuatorInterface(Node):
                 self.get_parameter("speed_hold_prediction_horizon_sec").value),
             speed_hold_entry_margin_mps=float(
                 self.get_parameter("speed_hold_entry_margin_mps").value),
+            speed_downshift_stable_sec=float(
+                self.get_parameter("speed_downshift_stable_sec").value),
+            speed_downshift_band_mps=float(
+                self.get_parameter("speed_downshift_band_mps").value),
             speed_overspeed_confirmation_sec=float(
                 self.get_parameter("speed_overspeed_confirmation_sec").value),
             feedforward_speed_mps=tuple(float(v) for v in self.get_parameter("feedforward_speed_mps").value),
@@ -321,6 +329,7 @@ class ActuatorInterface(Node):
         except (TypeError, ValueError) as exc:
             return SetParametersResult(successful=False, reason=str(exc))
         self.control_time = None
+        self.last_controller_odom_time = None
         return SetParametersResult(successful=True)
 
     def _on_command(self, msg: AckermannDriveStamped) -> None:
@@ -501,8 +510,13 @@ class ActuatorInterface(Node):
         else:
             # The speed interface owns the speed target. Any acceleration
             # field in a speed command is diagnostic metadata and is ignored.
+            fresh_odom = (
+                self.last_controller_odom_time is None or
+                self.odom_time != self.last_controller_odom_time)
             throttle = self.speed_controller.update(
-                target_speed, self.speed, 0.0, dt, self.acceleration)
+                target_speed, self.speed, 0.0, dt, self.acceleration,
+                measurement_fresh=fresh_odom)
+            self.last_controller_odom_time = self.odom_time
         self._publish(steering, throttle)
         self.last_neutral_reason = None
 

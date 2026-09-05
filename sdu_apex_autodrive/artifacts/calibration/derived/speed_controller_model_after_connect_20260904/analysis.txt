@@ -1,0 +1,70 @@
+rows=9947
+unique_gt_odom_rows=1592
+duplicate_gt_odom_rows_removed=0
+speed_reference=gt_speed_mps
+ground_truth_position_reference=timestamped_gt_odom
+lidar_rate_hz_median=39.951
+imu_rate_hz_median=39.951 imu_rate_hz_p95=41.495
+left_encoder_rate_hz_median=39.896 left_encoder_rate_hz_p95=41.495
+right_encoder_rate_hz_median=39.951 right_encoder_rate_hz_p95=41.495
+odom_rate_hz_median=39.896 odom_rate_hz_p95=41.492
+gt_odom_rate_hz_median=39.896 gt_odom_rate_hz_p95=41.495
+gt_ips_rate_hz_median=39.951 gt_ips_rate_hz_p95=41.495
+collision_rate_hz_median=39.951 collision_rate_hz_p95=41.495
+speed_command_rate_hz_median=49.980 speed_command_rate_hz_p95=50.444
+acceleration_command_rate_hz_median=48.937 acceleration_command_rate_hz_p95=48.937
+steering_command_rate_hz_median=9.988 steering_command_rate_hz_p95=58.924
+throttle_feedback_rate_hz_median=39.896 throttle_feedback_rate_hz_p95=41.495
+steering_feedback_rate_hz_median=39.896 steering_feedback_rate_hz_p95=41.495
+imu_source_rate_hz=39.966 imu_source_events=1591 recorder_row_rate_hz=249.841
+left_encoder_source_rate_hz=39.966 left_encoder_source_events=1591 recorder_row_rate_hz=249.841
+right_encoder_source_rate_hz=39.966 right_encoder_source_events=1591 recorder_row_rate_hz=249.841
+odom_source_rate_hz=39.966 odom_source_events=1591 recorder_row_rate_hz=249.841
+gt_odom_source_rate_hz=39.966 gt_odom_source_events=1591 recorder_row_rate_hz=249.841
+gt_speed_mps_min=0.000 gt_speed_mps_max=16.000
+ground_truth_collision_count_max=0
+phase,command,initial_speed_mps,peak_speed_mps,tail_speed_mps,peak_accel_mps2,samples
+speed_12.00,12.000000,9.473400,11.995500,11.995500,4.365912,239
+speed_16.00,16.000000,12.380600,16.000100,15.896400,2.441556,136
+speed_2.00,2.000000,1.781300,1.995700,1.993000,8.637592,206
+speed_5.00,5.000000,3.972500,4.994700,4.994000,6.191404,242
+speed_8.00,8.000000,7.999000,7.999200,7.999100,5.049799,652
+response_trace=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/speed_controller_model_after_connect_20260904/response.csv
+acceleration_map=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/speed_controller_model_after_connect_20260904/acceleration_map.csv
+ground_truth_vs_odom_position_error_m=median=66.485 p95=67.082 max=67.802
+ground_truth_vs_odom_position_error_active_m=median=66.485 p95=67.082 max=67.802
+ground_truth_vs_odom_speed_error_mps=median=0.000 abs_p95=0.421
+ground_truth_vs_odom_speed_error_active_mps=median=0.000 abs_p95=0.421
+lidar_events_median=795.000 lidar_events_p95=1512.000
+speed_tracking_error_mps=median=0.014 p95=2.787
+speed_tracking_abs_error_mps=median=0.049 p95=2.787 max=4.239
+speed_overspeed_fraction=gt_0.10=0.055
+truth_speed_tracking_error_mps=median=0.005 abs_p95=2.624 max_abs=4.005 phases=5
+truth_speed_tracking_tail_error_mps=median=0.006 abs_p95=0.104
+metric,bin,samples,relative_samples,absolute_error_median,absolute_error_p95,absolute_error_max,relative_error_median_pct,relative_error_p95_pct,relative_error_max_pct,reference_median,reference_max
+odom_speed_vs_truth,0-1_mps,123,0,0.000000,0.896500,0.989554,nan,nan,nan,nan,nan
+odom_speed_vs_truth,1-3_mps,215,215,0.008929,0.256029,1.992999,0.448028,11.655682,100.000000,1.993000,2.897400
+odom_speed_vs_truth,3-5_mps,233,233,0.026532,0.290669,0.315686,0.531269,5.874883,6.721297,4.994000,4.994700
+odom_speed_vs_truth,5-10_mps,678,678,0.045294,0.427802,0.719598,0.563372,5.469452,8.056001,7.999100,9.903300
+odom_speed_vs_truth,10-15_mps,283,283,0.090492,0.361184,0.584176,0.720825,2.883315,4.718476,11.995500,14.946500
+odom_speed_vs_truth,15-20_mps,60,60,0.139078,0.533972,0.799281,0.885352,3.337867,4.997066,15.855400,16.000100
+odom_position_vs_truth,distance_ge_1m,1449,1449,66.533882,67.089692,67.801586,75.424741,1462.650664,6369.983592,88.587601,243.407303
+odom_position_vs_truth,distance_ge_5m,1367,1367,66.552890,67.095471,67.801586,69.881319,785.725708,1316.445688,95.279901,243.407303
+odom_position_vs_truth,distance_ge_10m,1268,1268,66.571209,67.111518,67.801586,64.518768,405.554575,658.428885,103.451401,243.407303
+odom_position_vs_truth,distance_ge_50m,948,948,66.651571,67.184581,67.801586,50.908225,113.098761,132.513026,131.196201,243.407303
+odom_position_vs_truth,distance_ge_100m,655,655,66.688181,67.229713,67.801586,42.248786,62.891298,66.484717,157.298902,243.407303
+odom_position_endpoint,epoch_0,1,1,66.510172,66.510172,66.510172,27.324641,27.324641,27.324641,243.407303,243.407303
+speed_target_vs_truth,speed_2.00,83,83,0.007000,0.007000,0.007000,0.350000,0.350000,0.350000,2.000000,2.000000
+speed_target_vs_truth,speed_5.00,97,97,0.006000,0.006000,0.006000,0.120000,0.120000,0.120000,5.000000,5.000000
+speed_target_vs_truth,speed_8.00,261,261,0.000900,0.000900,0.000900,0.011250,0.011250,0.011250,8.000000,8.000000
+speed_target_vs_truth,speed_12.00,96,96,0.004500,0.004500,0.004500,0.037500,0.037500,0.037500,12.000000,12.000000
+speed_target_vs_truth,speed_16.00,55,55,0.103600,0.812400,0.812400,0.647500,5.077500,5.077500,16.000000,16.000000
+relative_error_metrics=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/speed_controller_model_after_connect_20260904/relative_error.csv
+motion_regime,events,duration_s,truth_speed_median_mps,odom_speed_mae_mps,odom_speed_p95_abs_error_mps,error_samples
+encoder_dropout,1,0,1.993000,1.992999,1.992999,1
+high_longitudinal_slip,569,5.606031,7.999100,0.104736,0.427544,569
+stationary,113,2.806050,0.000000,0.061311,0.834927,113
+straight_accelerating,75,0.639236,11.345200,0.202070,0.507348,75
+straight_coasting,5,0.080679,0.896500,0.954940,1.490000,5
+straight_steady,829,10.358999,7.999100,0.082457,0.312289,829
+motion_regime_metrics=/workspace/src/sdu_apex_autodrive/artifacts/calibration/derived/speed_controller_model_after_connect_20260904/regime.csv

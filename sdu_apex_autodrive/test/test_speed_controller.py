@@ -178,6 +178,60 @@ def test_speed_controller_target_change_exits_hold_approach():
     assert controller.update(10.0, 3.8, 0.0, 0.1) == 1.0
 
 
+def test_speed_controller_downshift_waits_for_fresh_stable_odom():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+        speed_downshift_stable_sec=0.2,
+        speed_downshift_band_mps=0.1,
+    ))
+    controller.update(5.0, 4.9, 0.0, 0.1)
+
+    # A lower target must immediately coast while the old speed is still
+    # above the new band.
+    assert controller.update(2.0, 5.0, 0.0, 0.1) == 0.0
+    assert controller._downshift_guard
+
+    # A repeated snapshot is not fresh evidence and cannot restore throttle.
+    assert controller.update(
+        2.0, 2.05, 0.0, 0.1, measurement_fresh=False) == 0.0
+    assert controller._downshift_guard
+
+    # One fresh in-band sample is still insufficient; the second completes
+    # the dwell and only then restores the calibrated hold throttle.
+    assert controller.update(2.0, 2.05, 0.0, 0.1) == 0.0
+    assert controller._downshift_guard
+    assert controller.update(2.0, 2.05, 0.0, 0.1) == controller.feedforward(2.0)
+    assert not controller._downshift_guard
+
+
+def test_speed_controller_catches_predicted_downshift_coast():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+        speed_hold_prediction_horizon_sec=0.25,
+        speed_downshift_stable_sec=0.2,
+        speed_downshift_band_mps=0.1,
+    ))
+    controller.update(10.0, 9.9, 0.0, 0.1)
+
+    # The car is still above the 2 m/s target, but the allowed IMU signal
+    # predicts that passive coast would cross the target before the next
+    # control update. Start the new target hold throttle immediately.
+    output = controller.update(4.0, 5.0, 0.0, 0.1, measured_accel_mps2=-6.0)
+    assert controller._downshift_catch
+    assert output == controller.feedforward(4.0)
+
+    # Once fresh odometry reaches the target band, the catch phase ends while
+    # the calibrated hold throttle remains active.
+    assert controller.update(4.0, 4.05, 0.0, 0.1) == controller.feedforward(4.0)
+    assert not controller._downshift_catch
+
+
 def test_speed_controller_uses_relative_overspeed_guard():
     controller = TargetSpeedController(replace(
         config(),

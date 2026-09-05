@@ -9,6 +9,9 @@ calibration:
     mode: identification_grid
     output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/latest_identification_grid
     sample_rate_hz: 50.0
+    # Keep exact native callback snapshots in addition to the recorder timer
+    # rows so bursty delivery cannot hide encoder/IMU/odom/ground-truth data.
+    capture_source_events: true
     duration_sec: 0.0
 
     # Labels identify the requested operating-speed bands. The fitter must

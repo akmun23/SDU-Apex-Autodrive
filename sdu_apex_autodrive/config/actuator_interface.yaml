@@ -67,6 +67,10 @@ autodrive_actuator_interface:
     speed_boost_error_mps: 1.5
     speed_hold_prediction_horizon_sec: 0.35
     speed_hold_entry_margin_mps: 0.15
+    # After a target decrease, require fresh odometry in the new band before
+    # restoring the target-speed feed-forward throttle.
+    speed_downshift_stable_sec: 0.20
+    speed_downshift_band_mps: 0.10
     # Require a persistent relative overspeed before coasting; native
     # simulator odometry is approximately 10 Hz and can spike for one sample.
     speed_overspeed_confirmation_sec: 0.30
@@ -74,7 +78,7 @@ autodrive_actuator_interface:
     # Allowed-input acceleration/speed observer and inverse throttle model.
     # The observer uses /odom and IMU only. Ground truth is used solely by the
     # offline calibration recorder and never enters the race controller.
-    acceleration_filter_alpha: 0.20
+    acceleration_filter_alpha: 0.10
     slip_threshold_mps: 0.75
     slip_ratio: 0.20
     odom_correction_gain: 0.25
@@ -97,8 +101,12 @@ autodrive_actuator_interface:
     # Filtered IMU acceleration closes the acceleration loop. The gain and
     # separate slew limits damp the native ~10 Hz transient samples without
     # slowing the independent speed-loop output.
-    acceleration_feedback_gain: 0.5
-    acceleration_integral_gain: 0.003
+    # The direct inverse model supplies the nominal acceleration. A strong
+    # IMU correction causes low-speed throttle relay (0 -> 0.2 -> 0.4) because
+    # the simulator's traction threshold is discontinuous. Keep feedback
+    # corrective and let the calibrated model remain dominant.
+    acceleration_feedback_gain: 0.10
+    acceleration_integral_gain: 0.001
     acceleration_integral_limit: 2.0
     acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
                              16.0, 18.0, 20.0, 23.0]
@@ -112,12 +120,12 @@ autodrive_actuator_interface:
     acceleration_throttle_rise_rate_per_sec: 2.0
     acceleration_throttle_fall_rate_per_sec: 4.0
 
-    # Monotonic response points from the completed 2026-09-03 grid. The
+    # Monotonic response points from the completed 2026-09-04 40 Hz grid. The
     # analyzer rejects moving-coast tails before producing this table; linear
     # interpolation supplies commands between the measured throttle points.
-    # 1.0 throttle reaches the simulator envelope at 22.8821 m/s.
-    feedforward_speed_mps: [0.0, 0.7537, 1.5005, 2.4883, 3.7113, 4.9225,
-                            7.3138, 9.6633, 11.9725, 15.3611, 18.6550,
-                            22.8821]
+    # 1.0 throttle reaches the simulator envelope at 22.8836 m/s.
+    feedforward_speed_mps: [0.0, 0.7537, 1.5008, 2.4883, 3.7113, 4.9226,
+                            7.3138, 9.6633, 11.9725, 15.3610, 18.6555,
+                            22.8836]
     feedforward_throttle: [0.0, 0.030, 0.060, 0.100, 0.150, 0.200,
                            0.300, 0.400, 0.500, 0.650, 0.800, 1.000]

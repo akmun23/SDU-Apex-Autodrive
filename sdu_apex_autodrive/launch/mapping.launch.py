@@ -43,8 +43,8 @@ def generate_launch_description():
             default_value=os.path.join(integration, "config", "actuator_interface.yaml"),
         ),
         Node(
-            package="autodrive_roboracer",
-            executable="autodrive_bridge",
+            package="sdu_apex_autodrive",
+            executable="autodrive_bridge_40hz",
             name="autodrive_bridge",
             output="screen",
         ),

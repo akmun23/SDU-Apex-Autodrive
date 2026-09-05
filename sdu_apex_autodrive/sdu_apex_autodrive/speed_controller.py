@@ -42,6 +42,10 @@ class SpeedControllerConfig:
     speed_boost_error_mps: float = 1.5
     speed_hold_prediction_horizon_sec: float = 0.50
     speed_hold_entry_margin_mps: float = 0.15
+    # After a target decrease, passive coasting must observe fresh odometry
+    # inside the new target band for this long before feed-forward resumes.
+    speed_downshift_stable_sec: float = 0.20
+    speed_downshift_band_mps: float = 0.10
     # A single native telemetry sample above the target is not enough to
     # command coast: the simulator publishes longitudinal telemetry at about
     # 10 Hz and wheel/IMU fusion can produce one-sample spikes. Zero keeps the
@@ -95,6 +99,8 @@ class SpeedControllerConfig:
             self.speed_boost_error_mps,
             self.speed_hold_prediction_horizon_sec,
             self.speed_hold_entry_margin_mps,
+            self.speed_downshift_stable_sec,
+            self.speed_downshift_band_mps,
             self.speed_overspeed_confirmation_sec,
         )
         if not all(math.isfinite(v) for v in scalars):
@@ -114,6 +120,8 @@ class SpeedControllerConfig:
                 self.speed_boost_error_mps <= 0.0 or
                 self.speed_hold_prediction_horizon_sec <= 0.0 or
                 self.speed_hold_entry_margin_mps < 0.0 or
+                self.speed_downshift_stable_sec <= 0.0 or
+                self.speed_downshift_band_mps < 0.0 or
                 self.speed_overspeed_confirmation_sec < 0.0):
             raise ValueError("invalid speed-controller handoff configuration")
         if (
@@ -450,6 +458,10 @@ class TargetSpeedController:
         self._hold_reentry_requires_speed = False
         self._last_target_speed = None
         self._overspeed_elapsed = 0.0
+        self._downshift_guard = False
+        self._downshift_catch = False
+        self._downshift_stable_elapsed = 0.0
+        self._downshift_below_band_elapsed = 0.0
 
     def reset(self) -> None:
         self.integral = 0.0
@@ -459,6 +471,10 @@ class TargetSpeedController:
         self._hold_reentry_requires_speed = False
         self._last_target_speed = None
         self._overspeed_elapsed = 0.0
+        self._downshift_guard = False
+        self._downshift_catch = False
+        self._downshift_stable_elapsed = 0.0
+        self._downshift_below_band_elapsed = 0.0
 
     def reconfigure(self, config: SpeedControllerConfig) -> None:
         config.validate()
@@ -556,6 +572,7 @@ class TargetSpeedController:
         requested_accel_mps2: float,
         dt_seconds: float,
         measured_accel_mps2: float = 0.0,
+        measurement_fresh: bool = True,
     ) -> float:
         if not all(math.isfinite(v) for v in (
             target_speed_mps, measured_speed_mps, requested_accel_mps2,
@@ -569,15 +586,96 @@ class TargetSpeedController:
             self.reset()
             return 0.0
 
-        if (self._last_target_speed is None or
-                abs(target - self._last_target_speed) > max(
-                    0.05, self.config.speed_hold_entry_margin_mps)):
+        target_changed = (
+            self._last_target_speed is None or
+            abs(target - self._last_target_speed) > max(
+                0.05, self.config.speed_hold_entry_margin_mps))
+        if target_changed:
+            downshift = (
+                self._last_target_speed is not None and
+                target < self._last_target_speed - max(
+                    0.05, self.config.speed_hold_entry_margin_mps))
             self._hold_approach = False
             self._hold_reentry_requires_speed = False
             self.integral = 0.0
             self.acceleration_controller.reset()
             self._overspeed_elapsed = 0.0
+            self._downshift_guard = downshift
+            self._downshift_catch = False
+            self._downshift_stable_elapsed = 0.0
+            self._downshift_below_band_elapsed = 0.0
         self._last_target_speed = target
+
+        # A target decrease is a different problem from an ordinary
+        # underspeed correction.  The previous target's feed-forward may be
+        # much too large for the new target, and one stale/low odometry sample
+        # must not immediately restart it.  Require fresh measurements to be
+        # in the target band for a short dwell; while the vehicle is still
+        # above the band, command passive coast.
+        if self._downshift_guard:
+            band = self.config.speed_downshift_band_mps
+            if not measurement_fresh:
+                self._downshift_stable_elapsed = 0.0
+                self._downshift_below_band_elapsed = 0.0
+                self.integral = 0.0
+                self.acceleration_controller.reset()
+                return self._slew_to(0.0, dt_seconds)
+            if measured > target + band:
+                # Passive simulator coast-down is much faster than the
+                # actuator/telemetry loop. Waiting until the speed is already
+                # inside the target band can therefore skip past the target
+                # by several metres per second. Start the new target's
+                # calibrated hold throttle when the allowed IMU acceleration
+                # predicts that the next coast interval would cross the band.
+                predicted_speed = measured + min(
+                    0.0, measured_accel_mps2) * self.config.speed_hold_prediction_horizon_sec
+                if (measured_accel_mps2 < 0.0 and
+                        predicted_speed <= target + band):
+                    self._downshift_guard = False
+                    self._downshift_catch = True
+                    self._hold_approach = True
+                    self._downshift_stable_elapsed = 0.0
+                    self._downshift_below_band_elapsed = 0.0
+                    self.integral = 0.0
+                    self.acceleration_controller.reset()
+                    return self._slew_to(self.feedforward(target), dt_seconds)
+                self._downshift_stable_elapsed = 0.0
+                self._downshift_below_band_elapsed = 0.0
+                self.integral = 0.0
+                self.acceleration_controller.reset()
+                return self._slew_to(0.0, dt_seconds)
+            if measured < max(0.0, target - band):
+                self._downshift_stable_elapsed = 0.0
+                self._downshift_below_band_elapsed += dt_seconds
+                if (self._downshift_below_band_elapsed <
+                        self.config.speed_downshift_stable_sec):
+                    self.integral = 0.0
+                    self.acceleration_controller.reset()
+                    return self._slew_to(0.0, dt_seconds)
+                self._downshift_guard = False
+            else:
+                self._downshift_below_band_elapsed = 0.0
+                self._downshift_stable_elapsed += dt_seconds
+                if (self._downshift_stable_elapsed <
+                        self.config.speed_downshift_stable_sec):
+                    self.integral = 0.0
+                    self.acceleration_controller.reset()
+                    return self._slew_to(0.0, dt_seconds)
+                self._downshift_guard = False
+                self._hold_approach = True
+
+        if self._downshift_catch:
+            # Keep the new target's hold throttle during the brief catch phase,
+            # including while the vehicle is still above the nominal target.
+            # The ordinary overspeed coast guard must not undo this correction;
+            # it is the catch that prevents passive deceleration from carrying
+            # the car below the requested speed.
+            self.integral = 0.0
+            self.acceleration_controller.reset()
+            if measured <= target + self.config.speed_downshift_band_mps:
+                self._downshift_catch = False
+            else:
+                return self._slew_to(self.feedforward(target), dt_seconds)
 
         error = target - measured
         overspeed = measured - target > self._overspeed_limit(target)

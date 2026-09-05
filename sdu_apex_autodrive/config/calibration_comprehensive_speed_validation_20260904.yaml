@@ -1,0 +1,27 @@
+# Fresh open-world speed-controller validation. Ground truth is recorded for
+# offline scoring only; the controller receives the tuned /odom topic.
+calibration:
+  ros__parameters:
+    mode: speed_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/comprehensive_speed_controller_validation_20260904
+    sample_rate_hz: 50.0
+    capture_source_events: true
+    duration_sec: 0.0
+    # Many upward and downward targets in one continuous trajectory. The
+    # total distance remains inside the finite open-world plane.
+    speed_sequence_mps: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0,
+                         12.0, 14.0, 16.0, 14.0, 12.0, 10.0, 8.0,
+                         6.0, 5.0, 4.0, 2.0, 1.0, 0.0]
+    hold_sec: 2.0
+    zero_settle_sec: 3.0
+    speed_settle_error_mps: 0.25
+    speed_settle_timeout_sec: 10.0
+    speed_steps_brake_between_targets: false
+    reset_between_steps: false
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 90.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 330.0

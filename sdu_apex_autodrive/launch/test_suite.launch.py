@@ -4,8 +4,14 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    OpaqueFunction,
+    RegisterEventHandler,
+    Shutdown,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -26,8 +32,8 @@ def _setup(context):
 
     actions = [
         Node(
-            package="autodrive_roboracer",
-            executable="autodrive_bridge",
+            package="sdu_apex_autodrive",
+            executable="autodrive_bridge_40hz",
             name="autodrive_bridge",
             output="screen",
             condition=IfCondition(LaunchConfiguration("start_bridge")),
@@ -86,7 +92,7 @@ def _setup(context):
             }],
         ))
 
-    actions.append(Node(
+    calibration_node = Node(
         package="sdu_apex_autodrive",
         executable="calibration",
         name="calibration",
@@ -98,7 +104,15 @@ def _setup(context):
                 "output_dir": LaunchConfiguration("output_dir"),
             },
         ],
-    ))
+    )
+    actions.append(calibration_node)
+    # Calibration is a finite diagnostics job.  Shut down the launch and all
+    # sensor/controller children as soon as it exits, otherwise a completed
+    # run can leave a second /odom publisher alive and corrupt the next test.
+    actions.append(RegisterEventHandler(OnProcessExit(
+        target_action=calibration_node,
+        on_exit=[Shutdown(reason="calibration completed")],
+    )))
     return actions
 
 

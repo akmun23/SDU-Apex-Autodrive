@@ -1,0 +1,21 @@
+# Continuous speed-controller validation against the tuned /odom topic.
+# Targets intentionally move both up and down without a reset between them.
+calibration:
+  ros__parameters:
+    sample_rate_hz: 50.0
+    capture_source_events: true
+    duration_sec: 0.0
+    speed_sequence_mps: [2.0, 5.0, 8.0, 12.0, 16.0, 10.0, 4.0, 0.0]
+    hold_sec: 5.0
+    zero_settle_sec: 3.0
+    speed_settle_error_mps: 0.25
+    speed_settle_timeout_sec: 20.0
+    speed_steps_brake_between_targets: false
+    reset_between_steps: false
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 90.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 350.0

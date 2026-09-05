@@ -23,6 +23,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "f1tenth_localization/sensor_fusion_model.hpp"
+#include "f1tenth_localization/longitudinal_observer.hpp"
 
 namespace {
 
@@ -78,10 +79,13 @@ public:
     // Fixed documented RoboRacer geometry; this is not runtime-calibrated.
     declare_parameter("wheel_radius_m", 0.0590);
     declare_parameter("encoder_angle_scale", 1.0);
-    // At the native ~10 Hz telemetry cadence, valid full-speed wheel motion
-    // can exceed 2.7 m per sample. Reset jumps are tens to hundreds of metres,
-    // so 4 m rejects resets without rejecting valid racing motion.
+    // Keep the broad distance guard for long native telemetry gaps. The
+    // source-time guard below is the important one for the measured ~40 Hz
+    // stream: a bridge burst can carry a full wheel increment with a 1-2 ms
+    // timestamp interval, which is an impossible wheel speed and must not
+    // enter odom.
     declare_parameter("max_encoder_step_m", 4.0);
+    declare_parameter("max_encoder_step_speed_mps", 35.0);
     declare_parameter("max_encoder_pair_skew_s", 0.05);
     declare_parameter("lidar_x_m", 0.2733);
     declare_parameter("lidar_y_m", 0.0);
@@ -95,6 +99,7 @@ public:
     declare_parameter("imu_orientation_correction_gain", 1.0);
     declare_parameter("max_imu_orientation_step_rad", 0.30);
     declare_parameter("max_imu_dt_s", 0.5);
+    declare_parameter("imu_pair_extrapolation_max_s", 0.10);
 
     // Longitudinal observer: the documented encoder geometry remains the
     // mechanical conversion, followed by the measured simulator slip map.
@@ -120,6 +125,18 @@ public:
     declare_parameter("max_observer_accel_mps2", 8.0);
     declare_parameter("observer_speed_tolerance_mps", 1.0);
     declare_parameter("wheel_observer_correction_gain", 0.10);
+    declare_parameter("observer_acceleration_noise_mps2", 1.50);
+    declare_parameter("observer_bias_random_walk_mps3", 0.08);
+    declare_parameter("observer_initial_speed_variance_m2ps2", 1.00);
+    declare_parameter("observer_initial_bias_variance_m4ps4", 0.25);
+    declare_parameter("observer_innovation_gate_mps", 1.50);
+    declare_parameter("observer_encoder_measurement_variance_m2ps2", 0.09);
+    declare_parameter(
+      "observer_accelerating_encoder_measurement_variance_m2ps2", 0.49);
+    declare_parameter(
+      "observer_steady_encoder_measurement_variance_m2ps2", 0.04);
+    declare_parameter(
+      "observer_decelerating_encoder_measurement_variance_m2ps2", 0.25);
     declare_parameter("sensor_fusion_model_enabled", true);
     // In the steady regime the bounded wheel/IMU baseline is already an
     // absolute observation. The learned steady branch is retained for
@@ -127,6 +144,42 @@ public:
     // low-speed wheel update into a stale launch-speed bias.
     declare_parameter("sensor_fusion_steady_model_enabled", false);
     declare_parameter("regime_acceleration_threshold_mps2", 0.50);
+    declare_parameter("regime_enter_acceleration_mps2", 0.65);
+    declare_parameter("regime_exit_acceleration_mps2", 0.25);
+    declare_parameter("regime_min_dwell_s", 0.075);
+    declare_parameter("sensor_fusion_window_low_speed_duration_s", 1.00);
+    declare_parameter("sensor_fusion_window_mid_speed_duration_s", 0.60);
+    declare_parameter("sensor_fusion_window_high_speed_duration_s", 0.30);
+    declare_parameter("sensor_fusion_window_low_speed_threshold_mps", 5.0);
+    declare_parameter("sensor_fusion_window_high_speed_threshold_mps", 15.0);
+    declare_parameter("sensor_fusion_window_stability_mps", 0.35);
+    // A throttle downshift can make the driven wheel speed change before the
+    // body has decelerated. Hold the IMU estimate through that causal
+    // transient instead of accepting the new wheel speed as body speed.
+    declare_parameter("sensor_fusion_wheel_downshift_min_drop_mps", 0.35);
+    declare_parameter("sensor_fusion_wheel_downshift_hold_s", 0.50);
+    // Do not reuse a cumulative encoder window across a braking interval.
+    // The driven wheel can freeze while the body keeps moving, which would
+    // otherwise dilute the first steady low-speed samples after braking.
+    declare_parameter("sensor_fusion_window_recovery_s", 0.35);
+    declare_parameter("sensor_fusion_recovery_stability_mps", 0.50);
+    declare_parameter("sensor_fusion_recovery_encoder_blend", 0.75);
+    declare_parameter("sensor_fusion_recovery_encoder_max_correction_mps", 0.35);
+    declare_parameter("sensor_fusion_model_blend", 0.50);
+    declare_parameter("sensor_fusion_transient_model_blend", 0.50);
+    declare_parameter("sensor_fusion_transient_model_max_correction_mps", 0.35);
+    declare_parameter("sensor_fusion_transient_low_speed_threshold_mps", 0.75);
+    declare_parameter("sensor_fusion_transient_mid_speed_threshold_mps", 1.50);
+    declare_parameter("sensor_fusion_transient_low_speed_max_correction_mps", 0.10);
+    declare_parameter("sensor_fusion_transient_mid_speed_max_correction_mps", 0.20);
+    // At low speed the timestamped encoder window is better conditioned than
+    // an IMU integral with an unknown bias.  Only promote it when it is
+    // stable and close to the IMU prediction; this cannot turn a large wheel
+    // spin burst into body speed.
+    declare_parameter("low_speed_encoder_priority_mps", 5.0);
+    declare_parameter("low_speed_encoder_max_imu_gap_mps", 0.75);
+    declare_parameter("low_speed_encoder_stability_mps", 0.35);
+    declare_parameter("low_speed_encoder_stability_samples", 8);
     declare_parameter("regime_model_max_spread_mps", 0.75);
     declare_parameter("regime_model_max_baseline_delta_mps", 0.75);
     // A quiet, consistent wheel/map measurement below the IMU observer is
@@ -151,7 +204,10 @@ public:
     // the allowed IMU integration until a low-speed/low-acceleration stop is
     // confirmed.  This avoids cutting off the coast distance while preventing
     // residual IMU bias from producing indefinite motion at rest.
-    declare_parameter("imu_stop_speed_threshold_mps", 2.0);
+    // A stop confirmation must not classify a low-speed launch as stopped.
+    // Keep this close to the stationary threshold; the old 2 m/s bound could
+    // zero a moving observer while the first encoder window was still empty.
+    declare_parameter("imu_stop_speed_threshold_mps", 0.20);
     declare_parameter("imu_stationary_acceleration_threshold_mps2", 0.30);
     declare_parameter("zero_encoder_stop_confirm_sec", 0.80);
     // Offline identification found a bounded braking deceleration trend when
@@ -164,6 +220,11 @@ public:
     declare_parameter("frozen_encoder_decel_intercept_mps2", 5.5);
     declare_parameter("frozen_encoder_decel_speed_gain_per_s", 0.27);
     declare_parameter("frozen_encoder_decel_max_mps2", 12.0);
+    // During an active brake the IMU remains the primary measurement, but the
+    // open-world fit shows a small, repeatable under-estimation of the true
+    // deceleration. Apply only a positive, bounded correction toward the
+    // frozen-encoder prior; never replace a stronger measured IMU brake.
+    declare_parameter("frozen_encoder_braking_model_blend", 0.75);
     declare_parameter("slip_pose_xy_variance", 0.10);
     declare_parameter("encoder_reset_covariance_duration_s", 1.0);
     declare_parameter("encoder_reset_pose_xy_variance", 0.25);
@@ -192,6 +253,8 @@ public:
     wheel_radius_ = get_parameter("wheel_radius_m").as_double();
     encoder_scale_ = get_parameter("encoder_angle_scale").as_double();
     max_encoder_step_m_ = get_parameter("max_encoder_step_m").as_double();
+    max_encoder_step_speed_mps_ = std::max(
+      1.0, get_parameter("max_encoder_step_speed_mps").as_double());
     max_encoder_pair_skew_s_ = std::max(
       0.0, get_parameter("max_encoder_pair_skew_s").as_double());
     pose_xy_var_ = get_parameter("pose_xy_variance").as_double();
@@ -212,6 +275,8 @@ public:
     max_imu_orientation_step_rad_ = std::max(
       0.05, get_parameter("max_imu_orientation_step_rad").as_double());
     max_imu_dt_s_ = std::max(0.05, get_parameter("max_imu_dt_s").as_double());
+    imu_pair_extrapolation_max_s_ = std::max(
+      0.0, get_parameter("imu_pair_extrapolation_max_s").as_double());
     imu_acceleration_filter_alpha_ = std::clamp(
       get_parameter("imu_acceleration_filter_alpha").as_double(), 0.01, 1.0);
     const auto imu_median_window = get_parameter(
@@ -237,12 +302,97 @@ public:
       0.0, get_parameter("observer_speed_tolerance_mps").as_double());
     wheel_observer_correction_gain_ = std::clamp(
       get_parameter("wheel_observer_correction_gain").as_double(), 0.0, 1.0);
+    observer_acceleration_noise_mps2_ = std::max(
+      0.01, get_parameter("observer_acceleration_noise_mps2").as_double());
+    observer_bias_random_walk_mps3_ = std::max(
+      0.0001, get_parameter("observer_bias_random_walk_mps3").as_double());
+    observer_initial_speed_variance_m2ps2_ = std::max(
+      1.0e-6, get_parameter("observer_initial_speed_variance_m2ps2").as_double());
+    observer_initial_bias_variance_m4ps4_ = std::max(
+      1.0e-6, get_parameter("observer_initial_bias_variance_m4ps4").as_double());
+    observer_innovation_gate_mps_ = std::max(
+      0.0, get_parameter("observer_innovation_gate_mps").as_double());
+    observer_encoder_measurement_variance_m2ps2_ = std::max(
+      1.0e-6, get_parameter(
+        "observer_encoder_measurement_variance_m2ps2").as_double());
+    observer_accelerating_measurement_variance_m2ps2_ = std::max(
+      1.0e-6, get_parameter(
+        "observer_accelerating_encoder_measurement_variance_m2ps2").as_double());
+    observer_steady_measurement_variance_m2ps2_ = std::max(
+      1.0e-6, get_parameter(
+        "observer_steady_encoder_measurement_variance_m2ps2").as_double());
+    observer_decelerating_measurement_variance_m2ps2_ = std::max(
+      1.0e-6, get_parameter(
+        "observer_decelerating_encoder_measurement_variance_m2ps2").as_double());
     sensor_fusion_model_enabled_ = get_parameter(
       "sensor_fusion_model_enabled").as_bool();
     sensor_fusion_steady_model_enabled_ = get_parameter(
       "sensor_fusion_steady_model_enabled").as_bool();
     regime_acceleration_threshold_mps2_ = std::max(
       0.05, get_parameter("regime_acceleration_threshold_mps2").as_double());
+    regime_enter_acceleration_mps2_ = std::max(
+      regime_acceleration_threshold_mps2_, get_parameter(
+        "regime_enter_acceleration_mps2").as_double());
+    regime_exit_acceleration_mps2_ = std::clamp(
+      get_parameter("regime_exit_acceleration_mps2").as_double(),
+      0.01, regime_enter_acceleration_mps2_);
+    regime_min_dwell_s_ = std::max(
+      0.0, get_parameter("regime_min_dwell_s").as_double());
+    sensor_fusion_window_low_speed_duration_s_ = std::max(
+      0.10, get_parameter("sensor_fusion_window_low_speed_duration_s").as_double());
+    sensor_fusion_window_mid_speed_duration_s_ = std::max(
+      0.10, get_parameter("sensor_fusion_window_mid_speed_duration_s").as_double());
+    sensor_fusion_window_high_speed_duration_s_ = std::max(
+      0.10, get_parameter("sensor_fusion_window_high_speed_duration_s").as_double());
+    sensor_fusion_window_low_speed_threshold_mps_ = std::max(
+      0.10, get_parameter("sensor_fusion_window_low_speed_threshold_mps").as_double());
+    sensor_fusion_window_high_speed_threshold_mps_ = std::max(
+      sensor_fusion_window_low_speed_threshold_mps_, get_parameter(
+        "sensor_fusion_window_high_speed_threshold_mps").as_double());
+    sensor_fusion_window_stability_mps_ = std::max(
+      0.0, get_parameter("sensor_fusion_window_stability_mps").as_double());
+    sensor_fusion_wheel_downshift_min_drop_mps_ = std::max(
+      0.05, get_parameter(
+        "sensor_fusion_wheel_downshift_min_drop_mps").as_double());
+    sensor_fusion_wheel_downshift_hold_s_ = std::max(
+      0.0, get_parameter("sensor_fusion_wheel_downshift_hold_s").as_double());
+    sensor_fusion_window_recovery_s_ = std::max(
+      0.0, get_parameter("sensor_fusion_window_recovery_s").as_double());
+    sensor_fusion_recovery_stability_mps_ = std::max(
+      0.0, get_parameter("sensor_fusion_recovery_stability_mps").as_double());
+    sensor_fusion_recovery_encoder_blend_ = std::clamp(
+      get_parameter("sensor_fusion_recovery_encoder_blend").as_double(), 0.0, 1.0);
+    sensor_fusion_recovery_encoder_max_correction_mps_ = std::max(
+      0.0, get_parameter(
+        "sensor_fusion_recovery_encoder_max_correction_mps").as_double());
+    sensor_fusion_model_blend_ = std::clamp(
+      get_parameter("sensor_fusion_model_blend").as_double(), 0.0, 1.0);
+    sensor_fusion_transient_model_blend_ = std::clamp(
+      get_parameter("sensor_fusion_transient_model_blend").as_double(), 0.0, 1.0);
+    sensor_fusion_transient_model_max_correction_mps_ = std::max(
+      0.0, get_parameter("sensor_fusion_transient_model_max_correction_mps").as_double());
+    sensor_fusion_transient_low_speed_threshold_mps_ = std::max(
+      stationary_speed_threshold_mps_, get_parameter(
+        "sensor_fusion_transient_low_speed_threshold_mps").as_double());
+    sensor_fusion_transient_mid_speed_threshold_mps_ = std::max(
+      sensor_fusion_transient_low_speed_threshold_mps_, get_parameter(
+        "sensor_fusion_transient_mid_speed_threshold_mps").as_double());
+    sensor_fusion_transient_low_speed_max_correction_mps_ = std::max(
+      0.0, get_parameter(
+        "sensor_fusion_transient_low_speed_max_correction_mps").as_double());
+    sensor_fusion_transient_mid_speed_max_correction_mps_ = std::max(
+      sensor_fusion_transient_low_speed_max_correction_mps_, get_parameter(
+        "sensor_fusion_transient_mid_speed_max_correction_mps").as_double());
+    low_speed_encoder_priority_mps_ = std::max(
+      stationary_speed_threshold_mps_, get_parameter(
+        "low_speed_encoder_priority_mps").as_double());
+    low_speed_encoder_max_imu_gap_mps_ = std::max(
+      0.0, get_parameter("low_speed_encoder_max_imu_gap_mps").as_double());
+    low_speed_encoder_stability_mps_ = std::max(
+      0.0, get_parameter("low_speed_encoder_stability_mps").as_double());
+    low_speed_encoder_stability_samples_ = std::max<std::size_t>(
+      3, static_cast<std::size_t>(get_parameter(
+        "low_speed_encoder_stability_samples").as_int()));
     regime_model_max_spread_mps_ = std::max(
       0.0, get_parameter("regime_model_max_spread_mps").as_double());
     regime_model_max_baseline_delta_mps_ = std::max(
@@ -283,6 +433,8 @@ public:
       0.0, get_parameter("frozen_encoder_decel_speed_gain_per_s").as_double());
     frozen_encoder_decel_max_mps2_ = std::max(
       0.1, get_parameter("frozen_encoder_decel_max_mps2").as_double());
+    frozen_encoder_braking_model_blend_ = std::clamp(
+      get_parameter("frozen_encoder_braking_model_blend").as_double(), 0.0, 1.0);
     if (frozen_encoder_decel_intercept_mps2_ > frozen_encoder_decel_max_mps2_) {
       throw std::runtime_error("frozen encoder deceleration intercept exceeds maximum");
     }
@@ -317,8 +469,13 @@ public:
     odom_frame_ = get_parameter("odom_frame").as_string();
     base_frame_ = get_parameter("base_frame").as_string();
 
+    longitudinal_observer_.configure(
+      observer_acceleration_noise_mps2_, observer_bias_random_walk_mps3_,
+      observer_initial_speed_variance_m2ps2_, observer_initial_bias_variance_m4ps4_,
+      30.0);
+
     if (wheel_radius_ <= 0.0 || encoder_scale_ <= 0.0 ||
-        max_encoder_step_m_ <= 0.0) {
+        max_encoder_step_m_ <= 0.0 || max_encoder_step_speed_mps_ <= 0.0) {
       throw std::runtime_error("invalid sensor odometry parameters");
     }
 
@@ -406,6 +563,10 @@ private:
     sensor_fusion_imu_history_.clear();
     sensor_fusion_gap_history_.clear();
     sensor_fusion_encoder_history_.clear();
+    sensor_fusion_recovery_window_history_.clear();
+    sensor_fusion_braking_window_active_ = false;
+    sensor_fusion_window_recovery_elapsed_s_ = 0.0;
+    sensor_fusion_wheel_reacquisition_required_ = false;
     steady_mapped_speed_history_.clear();
     zero_encoder_duration_s_ = 0.0;
     last_motion_sign_ = 1.0;
@@ -506,30 +667,7 @@ private:
 
     update_longitudinal_observer(longitudinal_acceleration, stamp);
 
-    // The official bridge publishes both encoder messages before the IMU in
-    // one telemetry cycle.  Integrating from an encoder callback therefore
-    // uses the previous cycle's yaw.  Complete the pair after the matching
-    // IMU callback so the planar increment is time-aligned.
-    if (have_left_ && have_right_ && left_updated_ && right_updated_ && imu_initialized_) {
-      const double pair_skew = std::abs((left_stamp_ - right_stamp_).seconds());
-      if (pair_skew > max_encoder_pair_skew_s_) {
-        // Keep the newer sample and wait for the other wheel from the same
-        // bridge cycle. Never combine a delayed wheel message with a newer
-        // one, which would create false yaw/velocity spikes.
-        if (left_stamp_ < right_stamp_) {
-          left_updated_ = false;
-        } else {
-          right_updated_ = false;
-        }
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "Waiting for synchronized encoder pair (skew=%.3f s)", pair_skew);
-      } else {
-        integrate_pair();
-        left_updated_ = false;
-        right_updated_ = false;
-      }
-    }
+    try_integrate_pair();
   }
 
   void update_longitudinal_observer(
@@ -539,6 +677,7 @@ private:
       return;
     }
     const double acceleration = std::clamp(acceleration_mps2, -25.0, 25.0);
+    const double observer_acceleration_input = acceleration;
     const double robust_acceleration = sensor_history_median(
       imu_acceleration_history_, acceleration);
     imu_acceleration_history_.push_back(acceleration);
@@ -546,10 +685,12 @@ private:
       imu_acceleration_history_.pop_front();
     }
     if (!have_imu_speed_stamp_) {
-      imu_acceleration_filtered_mps2_ = acceleration;
+      imu_acceleration_filtered_mps2_ = observer_acceleration_input;
       imu_acceleration_robust_mps2_ = robust_acceleration;
-      imu_observer_acceleration_mps2_ = acceleration;
-      imu_speed_mps_ = 0.0;
+      imu_observer_acceleration_mps2_ = 0.5 * (
+        acceleration + robust_acceleration);
+      longitudinal_observer_.reset();
+      imu_speed_mps_ = longitudinal_observer_.speed();
       last_imu_speed_stamp_ = stamp;
       have_imu_speed_stamp_ = true;
       imu_speed_ready_ = true;
@@ -558,19 +699,30 @@ private:
 
     const double dt = (stamp - last_imu_speed_stamp_).seconds();
     if (dt > 1.0e-4 && dt <= max_imu_dt_s_) {
+      const double previous_observer_acceleration =
+        imu_observer_acceleration_mps2_;
       imu_acceleration_filtered_mps2_ =
-        imu_acceleration_filter_alpha_ * acceleration +
+        imu_acceleration_filter_alpha_ * observer_acceleration_input +
         (1.0 - imu_acceleration_filter_alpha_) * imu_acceleration_filtered_mps2_;
       imu_acceleration_robust_mps2_ = robust_acceleration;
-      // The causal median remains the outlier/stop guard, but it delays a
-      // real braking sign change by two native telemetry samples. Integrate
-      // the EMA of the raw longitudinal signal so a sustained brake is
-      // reflected promptly in the motion state.
-      imu_observer_acceleration_mps2_ =
-        imu_acceleration_filter_alpha_ * acceleration +
-        (1.0 - imu_acceleration_filter_alpha_) * imu_observer_acceleration_mps2_;
-      imu_speed_mps_ = std::clamp(
-        imu_speed_mps_ + imu_observer_acceleration_mps2_ * dt, 0.0, 30.0);
+      // Use the causal median to reject an isolated bridge spike, but do not
+      // halve a genuine brake/launch onset while the EMA is already beyond
+      // the regime threshold.  The old fixed 50/50 blend delayed the first
+      // braking samples by one to two native packets; with a frozen driven
+      // encoder that delay became a visible speed error.  Once the filtered
+      // signal is inside the regime envelope it remains median-protected.
+      const bool filtered_regime_signal =
+        std::abs(imu_acceleration_filtered_mps2_) >=
+        regime_enter_acceleration_mps2_;
+      imu_observer_acceleration_mps2_ = filtered_regime_signal ?
+        imu_acceleration_filtered_mps2_ : 0.5 * (
+        imu_acceleration_filtered_mps2_ + imu_acceleration_robust_mps2_);
+      // Acceleration is a sample at the end of this interval. A trapezoidal
+      // step prevents a newly observed brake/release impulse from being
+      // applied across the entire preceding interval.
+      longitudinal_observer_.predict(0.5 * (
+        previous_observer_acceleration + imu_observer_acceleration_mps2_), dt);
+      imu_speed_mps_ = longitudinal_observer_.speed();
     }
     last_imu_speed_stamp_ = stamp;
     have_imu_speed_stamp_ = true;
@@ -600,6 +752,58 @@ private:
       right_updated_ = true;
     }
 
+    // Encoder callbacks can arrive after the IMU callback for the same
+    // simulator cycle. Try here as well as from imu_callback so a complete
+    // pair is not delayed until the next IMU event. The helper's source-time
+    // guard still holds a future encoder pair until its matching IMU exists.
+    try_integrate_pair();
+
+  }
+
+  void try_integrate_pair()
+  {
+    if (!have_left_ || !have_right_ || !left_updated_ || !right_updated_ ||
+      !imu_initialized_ || !have_imu_speed_stamp_)
+    {
+      return;
+    }
+
+    const rclcpp::Time pair_stamp = left_stamp_ > right_stamp_ ? left_stamp_ : right_stamp_;
+    // The bridge topics do not share a DDS delivery order. An encoder
+    // message carrying the next simulator timestamp can reach this node
+    // before the IMU callback for that same timestamp. Integrating it here
+    // would combine a future encoder displacement with the previous IMU
+    // state, then publish an odom sample stamped in the future. Keep the
+    // pair pending until the observer has processed an IMU at or beyond
+    // the pair timestamp. This is a source-time guard, not a wall-clock
+    // rate assumption.
+    if (pair_stamp > last_imu_speed_stamp_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Waiting for matching IMU timestamp (encoder=%.6f imu=%.6f)",
+        pair_stamp.seconds(), last_imu_speed_stamp_.seconds());
+      return;
+    }
+
+    const double pair_skew = std::abs((left_stamp_ - right_stamp_).seconds());
+    if (pair_skew > max_encoder_pair_skew_s_) {
+      // Keep the newer sample and wait for the other wheel from the same
+      // bridge cycle. Never combine a delayed wheel message with a newer
+      // one, which would create false yaw/velocity spikes.
+      if (left_stamp_ < right_stamp_) {
+        left_updated_ = false;
+      } else {
+        right_updated_ = false;
+      }
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Waiting for synchronized encoder pair (skew=%.3f s)", pair_skew);
+      return;
+    }
+
+    integrate_pair();
+    left_updated_ = false;
+    right_updated_ = false;
   }
 
   void integrate_pair()
@@ -622,6 +826,7 @@ private:
       sensor_fusion_imu_history_.clear();
       sensor_fusion_gap_history_.clear();
       sensor_fusion_encoder_history_.clear();
+      sensor_fusion_recovery_window_history_.clear();
       steady_mapped_speed_history_.clear();
       raw_wheel_speed_mps_ = 0.0;
       corrected_wheel_speed_mps_ = 0.0;
@@ -647,6 +852,7 @@ private:
       sensor_fusion_imu_history_.clear();
       sensor_fusion_gap_history_.clear();
       sensor_fusion_encoder_history_.clear();
+      sensor_fusion_recovery_window_history_.clear();
       steady_mapped_speed_history_.clear();
       sensor_fusion_window_raw_speed_mps_ = 0.0;
       sensor_fusion_window_mapped_speed_mps_ = 0.0;
@@ -664,12 +870,17 @@ private:
     const bool paired_encoder_reset =
       dl < -encoder_reset_threshold_rad_ * wheel_radius_ &&
       dr < -encoder_reset_threshold_rad_ * wheel_radius_;
+    const double source_time_step_limit_m = max_encoder_step_speed_mps_ * dt;
+    const bool impossible_source_time_step =
+      std::abs(dl) > source_time_step_limit_m ||
+      std::abs(dr) > source_time_step_limit_m;
     if (paired_encoder_reset || std::abs(dl) > max_encoder_step_m_ ||
-        std::abs(dr) > max_encoder_step_m_) {
+        std::abs(dr) > max_encoder_step_m_ || impossible_source_time_step) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
-        "Encoder discontinuity/reset (left=%.3f m right=%.3f m); rebaselining only",
-        dl, dr);
+        "Encoder discontinuity/reset (left=%.3f m right=%.3f m dt=%.4f); "
+        "rebaselining only",
+        dl, dr, dt);
       prev_left_ = left_angle_;
       prev_right_ = right_angle_;
       prev_stamp_ = stamp;
@@ -698,21 +909,139 @@ private:
     const double wheel_speed_abs = std::abs(wheel_speed);
     const double encoder_position_m = 0.5 * wheel_radius_ *
       (left_angle_ + right_angle_);
+    const bool active_deceleration =
+      imu_acceleration_filtered_mps2_ < -regime_enter_acceleration_mps2_;
+    // The timestamped encoder window is a cumulative displacement estimate.
+    // A braking interval is a deliberate boundary for that estimate: the
+    // driven encoder may freeze while the body continues to move, so keeping
+    // those samples would report a falsely low speed after throttle resumes.
+    if (active_deceleration != sensor_fusion_braking_window_active_) {
+      sensor_fusion_encoder_history_.clear();
+      // A brake is a model-regime boundary as well as an encoder-window
+      // boundary. Do not let acceleration/steady-state samples from before
+      // the brake influence the first post-brake prediction.
+      sensor_fusion_raw_history_.clear();
+      sensor_fusion_mapped_history_.clear();
+      sensor_fusion_imu_history_.clear();
+      sensor_fusion_gap_history_.clear();
+      sensor_fusion_window_raw_speed_mps_ = 0.0;
+      sensor_fusion_window_mapped_speed_mps_ = 0.0;
+      sensor_fusion_window_recovery_elapsed_s_ = 0.0;
+      sensor_fusion_recovery_window_history_.clear();
+      sensor_fusion_braking_window_active_ = active_deceleration;
+      if (active_deceleration) {
+        // The next nonzero encoder windows are not trusted merely because
+        // the fixed recovery timer has elapsed. They must pass the separate
+        // multi-sample reacquisition gate below.
+        sensor_fusion_wheel_reacquisition_required_ = true;
+      }
+    } else if (active_deceleration) {
+      sensor_fusion_window_recovery_elapsed_s_ = 0.0;
+    } else {
+      sensor_fusion_window_recovery_elapsed_s_ = std::min(
+        sensor_fusion_window_recovery_s_,
+        sensor_fusion_window_recovery_elapsed_s_ + std::max(0.0, dt));
+    }
+    const bool sensor_fusion_window_recovering =
+      !active_deceleration && sensor_fusion_wheel_reacquisition_required_;
     const double window_raw_speed = sensor_fusion_window_raw_speed(
       stamp.seconds(), encoder_position_m, wheel_speed_abs);
     sensor_fusion_window_raw_speed_mps_ = window_raw_speed;
-    sensor_fusion_window_mapped_speed_mps_ =
+    const double window_mapped_speed =
       body_speed_from_wheel_speed(window_raw_speed);
+    sensor_fusion_window_mapped_speed_mps_ = window_mapped_speed;
+    const double sensor_fusion_window_age_s =
+      sensor_fusion_encoder_history_.empty() ? 0.0 : std::max(
+      0.0, stamp.seconds() - sensor_fusion_encoder_history_.front().first);
+    // A brake boundary invalidates the old cumulative window, but the first
+    // post-brake windows can still contain quantized/burst samples. Keep a
+    // small, separate reacquisition history and accept it only after five
+    // consecutive values agree and remain plausible relative to the IMU.
+    if (!active_deceleration && sensor_fusion_wheel_reacquisition_required_ &&
+      window_mapped_speed > stationary_speed_threshold_mps_ &&
+      std::abs(window_mapped_speed - imu_speed_mps_) <=
+      observer_speed_tolerance_mps_ + max_observer_accel_mps2_ *
+      std::max(dt, 0.02))
+    {
+      sensor_fusion_recovery_window_history_.push_back(window_mapped_speed);
+      while (sensor_fusion_recovery_window_history_.size() > 5) {
+        sensor_fusion_recovery_window_history_.pop_front();
+      }
+    }
+    const bool recovery_window_stable =
+      sensor_fusion_recovery_window_history_.size() >= 5 &&
+      *std::max_element(
+      sensor_fusion_recovery_window_history_.begin(),
+      sensor_fusion_recovery_window_history_.end()) -
+      *std::min_element(
+      sensor_fusion_recovery_window_history_.begin(),
+      sensor_fusion_recovery_window_history_.end()) <=
+      sensor_fusion_recovery_stability_mps_;
+    const double recovery_window_speed = recovery_window_stable ?
+      sensor_history_median_existing(sensor_fusion_recovery_window_history_) :
+      std::numeric_limits<double>::quiet_NaN();
+    const bool post_brake_wheel_reacquired = recovery_window_stable &&
+      std::isfinite(recovery_window_speed) &&
+      sensor_fusion_window_recovery_elapsed_s_ >= sensor_fusion_window_recovery_s_ &&
+      std::abs(recovery_window_speed - imu_speed_mps_) <=
+      observer_speed_tolerance_mps_ + max_observer_accel_mps2_ *
+      std::max(dt, 0.02);
+    if (post_brake_wheel_reacquired) {
+      sensor_fusion_wheel_reacquisition_required_ = false;
+    }
+    const bool recovery_window_partially_stable =
+      sensor_fusion_wheel_reacquisition_required_ &&
+      sensor_fusion_recovery_window_history_.size() >= 3 &&
+      *std::max_element(
+      sensor_fusion_recovery_window_history_.begin(),
+      sensor_fusion_recovery_window_history_.end()) -
+      *std::min_element(
+      sensor_fusion_recovery_window_history_.begin(),
+      sensor_fusion_recovery_window_history_.end()) <=
+      sensor_fusion_recovery_stability_mps_ &&
+      std::isfinite(recovery_window_speed) &&
+      recovery_window_speed > stationary_speed_threshold_mps_ &&
+      std::abs(recovery_window_speed - imu_speed_mps_) <=
+      low_speed_encoder_max_imu_gap_mps_;
     if (wheel_distance > 0.0) {
       last_motion_sign_ = 1.0;
     } else if (wheel_distance < 0.0) {
       last_motion_sign_ = -1.0;
     }
     const double mapped_speed = body_speed_from_wheel_speed(wheel_speed_abs);
-    const double imu_body_speed = std::clamp(imu_speed_mps_, 0.0, 30.0);
+    // The bridge can deliver repeated encoder positions followed by a burst
+    // containing the accumulated increment.  The instantaneous derivative is
+    // therefore a useful diagnostic, but it is not a stable velocity
+    // measurement.  Use the timestamped travel window for fusion decisions
+    // and pose integration so the repeated zero/burst pattern is averaged in
+    // time rather than interpreted as alternating stop and wheel spin.
+    const double fusion_wheel_speed = window_raw_speed;
+    const double fusion_mapped_speed = window_mapped_speed;
+    // Encoder callbacks can be ahead of the latest IMU callback by one
+    // bridge burst. Keep the observer at its IMU timestamp, but extrapolate
+    // only the speed used for this pair output to the pair timestamp. This
+    // avoids publishing a one-burst-old braking speed without advancing the
+    // observer clock and integrating the same interval again later.
+    double imu_pair_speed_mps = imu_speed_mps_;
+    double imu_pair_lead_s = 0.0;
+    if (imu_speed_ready_ && have_imu_speed_stamp_) {
+      imu_pair_lead_s = (stamp - last_imu_speed_stamp_).seconds();
+      if (imu_pair_lead_s > 1.0e-4 &&
+        imu_pair_lead_s <= imu_pair_extrapolation_max_s_)
+      {
+        const double observer_acceleration =
+          imu_observer_acceleration_mps2_ - longitudinal_observer_.bias();
+        imu_pair_speed_mps = std::clamp(
+          imu_pair_speed_mps + observer_acceleration * imu_pair_lead_s,
+          0.0, 30.0);
+      }
+    }
+    imu_pair_speed_mps_ = imu_pair_speed_mps;
+    imu_pair_lead_s_ = std::max(0.0, imu_pair_lead_s);
+    const double imu_body_speed = std::clamp(imu_pair_speed_mps, 0.0, 30.0);
     const double slip_denominator = std::max(imu_body_speed, 0.25);
     const double imu_longitudinal_slip =
-      (wheel_speed - imu_body_speed) / slip_denominator;
+      (fusion_wheel_speed - imu_body_speed) / slip_denominator;
     const double absolute_longitudinal_slip = std::abs(imu_longitudinal_slip);
     raw_wheel_speed_mps_ = wheel_speed;
     corrected_wheel_speed_mps_ = std::copysign(mapped_speed, wheel_speed);
@@ -731,41 +1060,136 @@ private:
     // the learned model is disabled.
     const double wheel_observation_confidence = slip_observable ?
       longitudinal_wheel_observation_confidence(absolute_longitudinal_slip) : 1.0;
+    const double previous_fusion_mapped_speed = sensor_history_median_existing(
+      sensor_fusion_mapped_history_);
+    const bool low_speed_encoder_window_stable = sensor_history_stable(
+      sensor_fusion_mapped_history_, fusion_mapped_speed,
+      low_speed_encoder_stability_mps_, low_speed_encoder_stability_samples_);
+    const bool low_speed_encoder_window_mature =
+      sensor_fusion_window_age_s >= sensor_fusion_window_low_speed_duration_s_;
+    const bool low_speed_encoder_priority = imu_speed_ready_ &&
+      fusion_mapped_speed > stationary_speed_threshold_mps_ &&
+      fusion_mapped_speed <= low_speed_encoder_priority_mps_ &&
+      std::isfinite(previous_fusion_mapped_speed) &&
+      low_speed_encoder_window_stable &&
+      low_speed_encoder_window_mature &&
+      std::abs(fusion_mapped_speed - imu_body_speed) <=
+      low_speed_encoder_max_imu_gap_mps_ &&
+      !sensor_fusion_window_recovering &&
+      !sensor_fusion_wheel_reacquisition_required_;
+    const bool wheel_encoder_priority = low_speed_encoder_priority ||
+      post_brake_wheel_reacquired;
+    // The force-curve slip gate is useful once wheel speed is well observed,
+    // but near standstill it confuses accumulated IMU bias with wheel slip.
+    // A stable low-speed encoder window is therefore allowed to correct the
+    // observer even when the ratio computed against the biased IMU integral
+    // crosses the asymptotic threshold.
+    const bool map_observation_rejected = asymptotic_slip &&
+      !wheel_encoder_priority;
+    const double effective_wheel_observation_confidence =
+      wheel_encoder_priority ? 1.0 : wheel_observation_confidence;
     const double slip_threshold = std::max(
       wheel_slip_threshold_mps_,
-      wheel_slip_ratio_ * std::max(wheel_speed_abs, imu_speed_mps_));
-    const bool slip_map_active = wheel_speed_abs >= wheel_slip_activation_speed_mps_;
-    double fused_speed = mapped_speed;
+      wheel_slip_ratio_ * std::max(fusion_wheel_speed, imu_body_speed));
+    const bool slip_map_active = fusion_wheel_speed >= wheel_slip_activation_speed_mps_;
+    const bool frozen_motion_candidate = imu_speed_ready_ &&
+      fusion_wheel_speed <= stationary_speed_threshold_mps_ &&
+      imu_body_speed > stationary_speed_threshold_mps_;
+    if (imu_speed_ready_) {
+      update_motion_regime(frozen_motion_candidate, dt);
+    }
+    // A throttle downshift can make the driven wheel speed change before the
+    // body has decelerated. Hold that wheel observation out of the observer
+    // for a short causal interval instead of treating the new wheel speed as
+    // the current body speed.
+    const double previous_fusion_imu_speed = sensor_history_median_existing(
+      sensor_fusion_imu_history_);
+    const double wheel_window_drop = std::isfinite(previous_fusion_mapped_speed) ?
+      previous_fusion_mapped_speed - fusion_mapped_speed : 0.0;
+    const double imu_body_speed_drop = std::isfinite(previous_fusion_imu_speed) ?
+      previous_fusion_imu_speed - imu_body_speed : 0.0;
+    const bool wheel_downshift_candidate = imu_speed_ready_ &&
+      std::isfinite(previous_fusion_mapped_speed) &&
+      std::isfinite(previous_fusion_imu_speed) &&
+      wheel_window_drop >= sensor_fusion_wheel_downshift_min_drop_mps_ &&
+      wheel_window_drop > imu_body_speed_drop +
+      sensor_fusion_wheel_downshift_min_drop_mps_ * 0.25 &&
+      fusion_mapped_speed > stationary_speed_threshold_mps_ &&
+      fusion_mapped_speed < imu_body_speed - 0.15 &&
+      imu_acceleration_filtered_mps2_ <= regime_exit_acceleration_mps2_;
+    if (wheel_downshift_candidate) {
+      sensor_fusion_wheel_downshift_hold_remaining_s_ = std::max(
+        sensor_fusion_wheel_downshift_hold_remaining_s_,
+        sensor_fusion_wheel_downshift_hold_s_);
+      // The current sample becomes the first post-shift sample; do not let
+      // pre-shift values make it look like a stable new wheel measurement.
+      sensor_fusion_raw_history_.clear();
+      sensor_fusion_mapped_history_.clear();
+      sensor_fusion_imu_history_.clear();
+      sensor_fusion_gap_history_.clear();
+      steady_mapped_speed_history_.clear();
+    }
+    const bool wheel_downshift_transient =
+      sensor_fusion_wheel_downshift_hold_remaining_s_ > 0.0;
+    const bool deceleration_encoder_untrusted = active_deceleration ||
+      motion_regime_ == SensorMotionRegime::DECELERATING ||
+      sensor_fusion_wheel_reacquisition_required_ ||
+      wheel_downshift_transient;
+    double fused_speed = fusion_mapped_speed;
     bool encoder_dropout_hold = false;
     sensor_fusion_model_active_ = false;
     sensor_fusion_model_speed_mps_ = 0.0;
     sensor_fusion_model_spread_mps_ = 0.0;
-    if (std::abs(wheel_speed) <= stationary_speed_threshold_mps_) {
-      zero_encoder_duration_s_ += std::max(0.0, dt);
+    if (fusion_wheel_speed <= stationary_speed_threshold_mps_) {
+      // A zero/short encoder window is not a stationary observation when the
+      // IMU is actively accelerating or braking.  In particular, after a
+      // diagnostic reset the vehicle can begin moving before the first
+      // timestamped encoder window becomes nonzero.  Do not carry the prior
+      // quiet interval into that launch and never let it satisfy the stop
+      // gate.  The counter resumes only after acceleration has become quiet.
+      const bool imu_acceleration_quiet =
+        std::abs(imu_acceleration_robust_mps2_) <=
+        imu_stationary_acceleration_threshold_mps2_;
+      if (!imu_acceleration_quiet) {
+        zero_encoder_duration_s_ = 0.0;
+      } else {
+        zero_encoder_duration_s_ += std::max(0.0, dt);
+      }
       // The simulator may freeze the driven-wheel encoder during a brake or
       // passive coast. Continue with the independent IMU prediction while it
       // is moving; only declare a stop after speed and acceleration have
       // stayed near zero for the confirmation interval. No command or
       // actuator feedback is required by this estimator.
-      const bool imu_acceleration_quiet =
-        std::abs(imu_acceleration_robust_mps2_) <=
-        imu_stationary_acceleration_threshold_mps2_;
       const bool imu_stop_confirmed =
         zero_encoder_duration_s_ >= zero_encoder_stop_confirm_sec_ &&
         imu_acceleration_quiet &&
         imu_speed_mps_ <= imu_stop_speed_threshold_mps_;
-      if (!imu_stop_confirmed && imu_speed_mps_ > stationary_speed_threshold_mps_) {
-        if (frozen_encoder_model_enabled_ && imu_acceleration_quiet &&
-            zero_encoder_duration_s_ >= frozen_encoder_model_delay_sec_) {
+      if (!imu_stop_confirmed && imu_body_speed > stationary_speed_threshold_mps_) {
+        // A frozen driven wheel has two observable braking intervals. During
+        // active braking the IMU remains primary, but the calibrated prior may
+        // correct only a positive deceleration residual. After the IMU goes
+        // quiet, the same prior models the remaining slip before stop
+        // confirmation. In neither case is the speed reset to zero early.
+        const bool frozen_brake_prior_allowed =
+          frozen_encoder_model_enabled_ &&
+          ((!imu_acceleration_quiet && active_deceleration) ||
+          (imu_acceleration_quiet &&
+          zero_encoder_duration_s_ >= frozen_encoder_model_delay_sec_));
+        if (frozen_brake_prior_allowed) {
           // The fit is deliberately a deceleration prior, not a velocity
           // reset. It keeps the car moving for the modelled remaining slip
           // distance and then lets the normal stop confirmation gate close.
           frozen_encoder_model_decel_mps2_ = std::clamp(
             frozen_encoder_decel_intercept_mps2_ +
-            frozen_encoder_decel_speed_gain_per_s_ * imu_speed_mps_,
+            frozen_encoder_decel_speed_gain_per_s_ * imu_body_speed,
             0.0, frozen_encoder_decel_max_mps2_);
-          imu_speed_mps_ = std::max(
-            0.0, imu_speed_mps_ - frozen_encoder_model_decel_mps2_ * dt);
+          const double measured_deceleration = std::max(
+            0.0, -imu_observer_acceleration_mps2_);
+          const double positive_correction = std::max(
+            0.0, frozen_encoder_model_decel_mps2_ - measured_deceleration);
+          longitudinal_observer_.add_speed_delta(
+            -frozen_encoder_braking_model_blend_ * positive_correction * dt);
+          imu_speed_mps_ = longitudinal_observer_.speed();
           frozen_encoder_model_active_ = true;
         }
         fused_speed = frozen_encoder_model_active_ ?
@@ -773,7 +1197,8 @@ private:
         encoder_dropout_hold = true;
       } else {
         fused_speed = 0.0;
-        imu_speed_mps_ = 0.0;
+        longitudinal_observer_.set_speed(0.0);
+        imu_speed_mps_ = longitudinal_observer_.speed();
       }
       // A frozen wheel at non-zero body speed has Sx approximately -1.0,
       // which is beyond the documented asymptote. Mark it as uncertain so
@@ -788,27 +1213,40 @@ private:
       // relative to the IMU prediction. Within the calibrated operating
       // envelope the map and IMU should agree; under a spinning-wheel burst
       // the map can be much higher than body speed and must be rejected.
-      const double imu_body_speed = std::clamp(imu_speed_mps_, 0.0, 30.0);
-      const double wheel_imu_gap = wheel_speed_abs - imu_body_speed;
+      const double wheel_imu_gap = fusion_wheel_speed - imu_body_speed;
       wheel_slip_detected_ = slip_map_active &&
         (high_slip || wheel_imu_gap > slip_threshold);
       const double max_map_prediction_gap = observer_speed_tolerance_mps_ +
         max_observer_accel_mps2_ * dt;
-      if (!asymptotic_slip &&
-        std::abs(mapped_speed - imu_body_speed) <= max_map_prediction_gap) {
-        // Keep the instantaneous correction bounded. Replacing the IMU
-        // integration with every accepted wheel sample lets a short wheel-spin
-        // burst become the next prediction and can hold the speed controller
-        // in false overspeed.
-        fused_speed = imu_body_speed + wheel_observer_correction_gain_ * (
-          wheel_observation_confidence * (mapped_speed - imu_body_speed));
-        // Slowly bring the IMU-speed state toward a trusted wheel/map
-        // observation. This prevents long-run acceleration-bias drift while
-        // preserving the high-slip innovation rejection above.
-        imu_speed_mps_ = std::clamp(
-          imu_body_speed + imu_speed_correction_gain_ *
-          wheel_observation_confidence * (mapped_speed - imu_body_speed),
-          0.0, 30.0);
+      // During real braking the driven wheel does not measure body speed:
+      // its angular momentum and tire slip keep the cumulative wheel window
+      // above the car's speed, then the encoder can freeze altogether.  The
+      // IMU prediction is the only timely longitudinal measurement in this
+      // regime.  Reject the wheel update as soon as the filtered IMU sees a
+      // meaningful negative acceleration, without waiting for the hysteresis
+      // dwell to relabel the regime.  This prevents a stale wheel window from
+      // feeding speed back into the observer and delaying the deceleration.
+      const bool mapped_window_stable =
+        sensor_fusion_mapped_history_.size() >= 3 &&
+        std::abs(fusion_mapped_speed - previous_fusion_mapped_speed) <=
+        sensor_fusion_window_stability_mps_ &&
+        !sensor_fusion_wheel_reacquisition_required_;
+      if (!map_observation_rejected && !deceleration_encoder_untrusted &&
+        (wheel_encoder_priority || mapped_window_stable) &&
+        std::abs(fusion_mapped_speed - imu_body_speed) <= max_map_prediction_gap) {
+        // The scalar observer determines the correction from its covariance;
+        // regime/slip confidence enters as measurement variance. This avoids
+        // using one fixed blend at launch, steady speed, and braking.
+        const double measurement_gate = std::max(
+          0.05, std::min(observer_innovation_gate_mps_, max_map_prediction_gap));
+        const double measurement_variance = post_brake_wheel_reacquired ?
+          observer_steady_measurement_variance_m2ps2_ :
+          observer_measurement_variance(wheel_observation_confidence);
+        longitudinal_observer_.update(
+          post_brake_wheel_reacquired ? recovery_window_speed : fusion_mapped_speed,
+          measurement_variance, measurement_gate);
+        imu_speed_mps_ = longitudinal_observer_.speed();
+        fused_speed = imu_speed_mps_;
       } else {
         fused_speed = imu_body_speed;
         // Do not repeatedly compare the same delayed encoder burst with the
@@ -819,10 +1257,62 @@ private:
         prev_stamp_ = stamp;
         recent_raw_speeds_.clear();
       }
-      wheel_observation_confidence_ = wheel_observation_confidence;
+      wheel_observation_confidence_ = deceleration_encoder_untrusted ? 0.0 :
+        effective_wheel_observation_confidence;
+      wheel_slip_detected_ = wheel_slip_detected_ ||
+        deceleration_encoder_untrusted;
+
+      // The driven encoder can stop immediately when braking while the body
+      // continues to move. In that interval the IMU is the only timely
+      // measurement, but the calibration data shows that its longitudinal
+      // acceleration is slightly less negative than the actual body
+      // deceleration. Apply the speed-dependent prior as a bounded correction
+      // only when the encoder is already uninformative. This keeps the IMU in
+      // the loop and avoids interpreting a zero wheel increment as a stop.
+      const bool braking_encoder_uninformative = active_deceleration &&
+        (encoder_dropout_hold || wheel_speed_abs <= stationary_speed_threshold_mps_ ||
+        fusion_wheel_speed <= stationary_speed_threshold_mps_);
+      if (frozen_encoder_model_enabled_ && braking_encoder_uninformative &&
+        imu_body_speed > stationary_speed_threshold_mps_)
+      {
+        const double prior_deceleration = std::clamp(
+          frozen_encoder_decel_intercept_mps2_ +
+            frozen_encoder_decel_speed_gain_per_s_ * imu_body_speed,
+          0.0, frozen_encoder_decel_max_mps2_);
+        const double measured_deceleration = std::max(
+          0.0, -imu_observer_acceleration_mps2_);
+        const double positive_correction = std::max(
+          0.0, prior_deceleration - measured_deceleration);
+        const double correction = frozen_encoder_braking_model_blend_ *
+          positive_correction;
+        if (correction > 0.0) {
+          longitudinal_observer_.add_speed_delta(-correction * dt);
+          imu_speed_mps_ = longitudinal_observer_.speed();
+          fused_speed = imu_speed_mps_;
+          frozen_encoder_model_active_ = true;
+          frozen_encoder_model_decel_mps2_ = prior_deceleration;
+        }
+      }
     } else {
       wheel_slip_detected_ = false;
       wheel_observation_confidence_ = 1.0;
+    }
+
+    // Before the full post-brake wheel gate passes, a short sequence of
+    // tightly clustered windows is already useful as a bounded correction.
+    // Apply only an upward correction toward the window median: the IMU can
+    // be left below the true speed after integrating the brake, while a
+    // premature downward wheel correction would recreate the encoder-freeze
+    // failure. This does not update the observer state and cannot clear the
+    // full reacquisition lock.
+    if (recovery_window_partially_stable &&
+      recovery_window_speed > fused_speed)
+    {
+      const double correction = std::min(
+        sensor_fusion_recovery_encoder_max_correction_mps_,
+        sensor_fusion_recovery_encoder_blend_ *
+        (recovery_window_speed - fused_speed));
+      fused_speed += correction;
     }
 
     // This model is fitted offline against simulator truth but is causal at
@@ -831,26 +1321,43 @@ private:
     // acceleration, and short sensor histories. The frozen model is trained
     // only on moving zero-encoder samples; stationary samples never select a
     // speed model.
-    const double model_imu_speed = std::clamp(imu_speed_mps_, 0.0, 30.0);
+    const double model_imu_speed = std::clamp(imu_body_speed, 0.0, 30.0);
     const bool frozen_motion = encoder_dropout_hold &&
       model_imu_speed > stationary_speed_threshold_mps_;
     const bool model_motion =
-      wheel_speed_abs > stationary_speed_threshold_mps_ || frozen_motion;
-    if (imu_speed_ready_ && model_motion) {
-      motion_regime_ = frozen_motion ?
-        SensorMotionRegime::FROZEN : classify_motion_regime();
+      fusion_wheel_speed > stationary_speed_threshold_mps_ || frozen_motion;
+    if (imu_speed_ready_ && model_motion && frozen_motion) {
+      motion_regime_ = SensorMotionRegime::FROZEN;
     }
     const bool learned_steady_model_allowed =
       sensor_fusion_steady_model_enabled_ ||
       motion_regime_ != SensorMotionRegime::STEADY;
+    // A frozen driven-wheel encoder is ambiguous: during a launch it is a
+    // delayed observation, while during braking it carries no body-speed
+    // information.  The offline fit keeps these cases separate.  Select the
+    // launch branch only from the causal filtered IMU acceleration; the
+    // externally reported motion regime remains FROZEN for compatibility.
+    SensorMotionRegime model_regime = motion_regime_;
+    if (motion_regime_ == SensorMotionRegime::FROZEN &&
+      imu_acceleration_filtered_mps2_ >= -regime_acceleration_threshold_mps2_)
+    {
+      model_regime = SensorMotionRegime::FROZEN_ACCELERATING;
+    }
     if (sensor_fusion_model_enabled_ && imu_speed_ready_ &&
-      model_motion &&
-      learned_steady_model_allowed)
+      model_motion && learned_steady_model_allowed &&
+      // Braking gets a separate conservative blend below. Do not let the
+      // generic branch replace the observer during a brake or wheel
+      // reacquisition transient. The first post-brake window is explicitly
+      // treated as untrusted until the separate five-sample gate passes.
+      !active_deceleration && !sensor_fusion_window_recovering &&
+      !wheel_downshift_transient &&
+      motion_regime_ != SensorMotionRegime::DECELERATING)
     {
       const auto features = sensor_fusion_features(
         wheel_speed, mapped_speed, model_imu_speed, dt, pair_skew,
-        wheel_observation_confidence, window_raw_speed);
-      const auto prediction = sensor_fusion_model_.predict(motion_regime_, features);
+        effective_wheel_observation_confidence, window_raw_speed,
+        longitudinal_observer_.bias(), imu_observer_acceleration_mps2_);
+      const auto prediction = sensor_fusion_model_.predict(model_regime, features);
       sensor_fusion_model_speed_mps_ = prediction.speed_mps;
       sensor_fusion_model_spread_mps_ = prediction.spread_mps;
       const bool prediction_finite = prediction.valid &&
@@ -860,9 +1367,52 @@ private:
         regime_model_max_spread_mps_ &&
         std::abs(prediction.speed_mps - fused_speed) <=
         regime_model_max_baseline_delta_mps_;
+      // A frozen driven-wheel encoder is especially ambiguous during a
+      // launch after a target downshift.  In that state the scalar observer
+      // is already the causal IMU prediction; a learned branch trained on
+      // stop-to-throttle launches must not pull it down merely because its
+      // wheel features look like a delayed zero.  Keep upward corrections,
+      // but make this branch one-sided so a stale frozen wheel cannot create
+      // an artificial loss of body speed.
+      const bool frozen_launch_downward_correction =
+        model_regime == SensorMotionRegime::FROZEN_ACCELERATING &&
+        prediction.speed_mps < fused_speed;
       if (prediction_finite && prediction_bounded) {
-        sensor_fusion_model_active_ = true;
-        fused_speed = prediction.speed_mps;
+        const bool transient_model = frozen_motion;
+        if (transient_model) {
+          // During a frozen/post-brake interval the model is useful only for
+          // recovering an IMU estimate that is known to lag the body. Never
+          // pull the estimate down and cap the upward correction so a forest
+          // extrapolation cannot recreate the previous overshoot failure.
+          const double upward_correction = std::max(
+            0.0, prediction.speed_mps - fused_speed);
+          double transient_max_correction =
+            sensor_fusion_transient_model_max_correction_mps_;
+          if (model_imu_speed < sensor_fusion_transient_low_speed_threshold_mps_) {
+            transient_max_correction = std::min(
+              transient_max_correction,
+              sensor_fusion_transient_low_speed_max_correction_mps_);
+          } else if (model_imu_speed < sensor_fusion_transient_mid_speed_threshold_mps_) {
+            transient_max_correction = std::min(
+              transient_max_correction,
+              sensor_fusion_transient_mid_speed_max_correction_mps_);
+          }
+          const double bounded_correction = std::min(
+            transient_max_correction,
+            sensor_fusion_transient_model_blend_ * upward_correction);
+          if (bounded_correction > 0.0) {
+            sensor_fusion_model_active_ = true;
+            fused_speed += bounded_correction;
+          }
+        } else if (!frozen_launch_downward_correction) {
+          sensor_fusion_model_active_ = true;
+          // The learned prediction corrects a causal IMU/encoder baseline;
+          // it is not an independent measurement. A partial correction is
+          // more stable at regime boundaries and prevents a tree leaf trained
+          // on a sparse low-speed burst from replacing the observer outright.
+          fused_speed += sensor_fusion_model_blend_ * (
+            prediction.speed_mps - fused_speed);
+        }
       }
     }
 
@@ -883,15 +1433,18 @@ private:
     const double steady_mapped_speed = sensor_history_median_existing(
       steady_mapped_speed_history_);
     const bool steady_wheel_consistent = std::isfinite(steady_mapped_speed) &&
-      std::abs(mapped_speed - steady_mapped_speed) <=
+      std::abs(fusion_mapped_speed - steady_mapped_speed) <=
       observer_speed_tolerance_mps_ + max_observer_accel_mps2_ * dt;
     const bool steady_encoder_reanchor = steady_encoder_reanchor_enabled_ &&
       motion_regime_ == SensorMotionRegime::STEADY &&
       !encoder_dropout_hold &&
+      !sensor_fusion_window_recovering &&
+      !wheel_downshift_transient &&
       steady_mapped_speed_history_.size() >= 2 &&
+      low_speed_encoder_window_mature &&
       std::abs(imu_acceleration_robust_mps2_) <=
       regime_acceleration_threshold_mps2_ &&
-      mapped_speed > stationary_speed_threshold_mps_ &&
+      fusion_mapped_speed > stationary_speed_threshold_mps_ &&
       steady_mapped_speed > stationary_speed_threshold_mps_ &&
       // At low and moderate speed the calibrated wheel/map observation is
       // the useful absolute velocity reference.  The old one-sided gate
@@ -901,10 +1454,14 @@ private:
       // keeps wheel-spin bursts from becoming a new steady reference.
       std::abs(steady_mapped_speed - model_imu_speed) <=
       observer_speed_tolerance_mps_ &&
-      wheel_observation_confidence >= 0.75 &&
+      effective_wheel_observation_confidence >= 0.75 &&
+      sensor_history_stable(
+        steady_mapped_speed_history_, fusion_mapped_speed,
+        low_speed_encoder_stability_mps_, 5) &&
       steady_wheel_consistent;
     if (steady_encoder_reanchor) {
-      imu_speed_mps_ = std::clamp(steady_mapped_speed, 0.0, 30.0);
+      longitudinal_observer_.set_speed(steady_mapped_speed);
+      imu_speed_mps_ = longitudinal_observer_.speed();
       fused_speed = imu_speed_mps_;
       wheel_slip_detected_ = false;
       wheel_observation_confidence_ = 1.0;
@@ -912,22 +1469,25 @@ private:
 
     if (motion_regime_ != SensorMotionRegime::STEADY) {
       steady_mapped_speed_history_.clear();
-    } else if (mapped_speed > stationary_speed_threshold_mps_ &&
-      wheel_observation_confidence >= 0.75) {
+    } else if (fusion_mapped_speed > stationary_speed_threshold_mps_ &&
+      effective_wheel_observation_confidence >= 0.75 &&
+      !sensor_fusion_window_recovering) {
       // Keep low-confidence wheel-spin samples out of the steady reference
       // history.  Otherwise a single driven-wheel burst can poison the
       // median for the next several native telemetry cycles.
-      steady_mapped_speed_history_.push_back(mapped_speed);
+      steady_mapped_speed_history_.push_back(fusion_mapped_speed);
       while (steady_mapped_speed_history_.size() > 5) {
         steady_mapped_speed_history_.pop_front();
       }
     }
 
     fused_speed = std::clamp(fused_speed, 0.0, 30.0);
+    sensor_fusion_wheel_downshift_hold_remaining_s_ = std::max(
+      0.0, sensor_fusion_wheel_downshift_hold_remaining_s_ - dt);
     // Report slip against the final allowed body-speed estimate. The IMU
     // innovation still controls wheel trust; this diagnostic is less
     // sensitive to IMU integration lag than the raw IMU ratio alone.
-    longitudinal_slip_ = (wheel_speed - fused_speed) /
+    longitudinal_slip_ = (fusion_wheel_speed - fused_speed) /
       std::max(std::abs(fused_speed), 0.25);
     // Integrate the observer's body speed for both pose and twist. Raw wheel
     // distance is not a body-distance increment while driven-wheel slip is
@@ -935,14 +1495,14 @@ private:
     // Do not integrate a repeated zero encoder position as motion.  Only the
     // explicitly bounded dropout hold may use the IMU speed when the wheel
     // delta is zero.
-    const double ds = (wheel_speed_abs > stationary_speed_threshold_mps_ ||
+    const double ds = (fusion_wheel_speed > stationary_speed_threshold_mps_ ||
       encoder_dropout_hold) ?
       std::copysign(fused_speed * dt, wheel_distance == 0.0 ?
       (last_motion_sign_ >= 0.0 ? 1.0 : -1.0) : wheel_distance) : 0.0;
 
     remember_sensor_fusion_sample(
-      std::abs(wheel_speed), mapped_speed, imu_body_speed,
-      std::abs(mapped_speed - imu_body_speed));
+      fusion_wheel_speed, fusion_mapped_speed, imu_body_speed,
+      std::abs(fusion_mapped_speed - imu_body_speed));
     remember_sensor_fusion_encoder_sample(stamp.seconds(), encoder_position_m);
 
     const double dyaw = wrap_angle(odom_yaw_ - prev_yaw_);
@@ -954,43 +1514,14 @@ private:
     prev_right_ = right_angle_;
     prev_stamp_ = stamp;
     prev_yaw_ = odom_yaw_;
-    double raw_speed = fused_speed;
-    // Encoder messages can arrive in a short burst after bridge scheduling.
-    // Limit only the velocity sample used by downstream speed control; the
-    // integrated pose above still uses the complete valid mapped increment.
-    if (std::isfinite(speed_mps_)) {
-      const double max_speed_step = max_velocity_accel_mps2_ * dt;
-      raw_speed = std::clamp(
-        raw_speed, speed_mps_ - max_speed_step, speed_mps_ + max_speed_step);
-    }
-    recent_raw_speeds_.push_back(raw_speed);
-    if (wheel_speed_abs <= stationary_speed_threshold_mps_) {
-      // Keep a moving IMU observer through a repeated encoder position. Only
-      // publish zero when the observer itself has reached standstill.
-      const double previous_speed = speed_mps_;
-      std::vector<double> sorted_speeds(
-        recent_raw_speeds_.begin(), recent_raw_speeds_.end());
-      std::sort(sorted_speeds.begin(), sorted_speeds.end());
-      const double robust_speed = sorted_speeds.empty() ?
-        fused_speed : sorted_speeds[sorted_speeds.size() / 2];
-      const double filter_alpha = robust_speed < previous_speed ?
-        velocity_filter_decel_alpha_ : velocity_filter_alpha_;
-      speed_mps_ = filter_alpha * robust_speed +
-        (1.0 - filter_alpha) * previous_speed;
-      recent_raw_speeds_.clear();
-    } else {
-      while (recent_raw_speeds_.size() > velocity_median_window_) {
-        recent_raw_speeds_.pop_front();
-      }
-      std::vector<double> sorted_speeds(
-        recent_raw_speeds_.begin(), recent_raw_speeds_.end());
-      std::sort(sorted_speeds.begin(), sorted_speeds.end());
-      const double robust_speed = sorted_speeds[sorted_speeds.size() / 2];
-      const double filter_alpha = robust_speed < speed_mps_ ?
-        velocity_filter_decel_alpha_ : velocity_filter_alpha_;
-      speed_mps_ = filter_alpha * robust_speed +
-        (1.0 - filter_alpha) * speed_mps_;
-    }
+    // The fusion path has already rejected instantaneous encoder bursts with
+    // its timestamped window, slip gate, observer covariance, and learned
+    // regime model. Applying a second median here creates an avoidable output
+    // delay at a brake boundary and makes the speed controller react to an
+    // old /odom value. Publish the accepted fused estimate directly; the
+    // estimator's causal filters remain upstream of this point.
+    speed_mps_ = fused_speed;
+    recent_raw_speeds_.clear();
     publish_odom(stamp, speed_mps_);
 
     RCLCPP_INFO_THROTTLE(
@@ -1004,7 +1535,9 @@ private:
 
   void reset_longitudinal_observer()
   {
+    longitudinal_observer_.reset();
     imu_speed_mps_ = 0.0;
+    sensor_fusion_wheel_downshift_hold_remaining_s_ = 0.0;
     imu_acceleration_filtered_mps2_ = 0.0;
     imu_acceleration_robust_mps2_ = 0.0;
     imu_observer_acceleration_mps2_ = 0.0;
@@ -1016,6 +1549,62 @@ private:
     wheel_observation_confidence_ = 1.0;
     frozen_encoder_model_active_ = false;
     frozen_encoder_model_decel_mps2_ = 0.0;
+    imu_pair_speed_mps_ = 0.0;
+    imu_pair_lead_s_ = 0.0;
+    motion_regime_ = SensorMotionRegime::STEADY;
+    regime_candidate_ = SensorMotionRegime::STEADY;
+    regime_candidate_dwell_s_ = 0.0;
+  }
+
+  double observer_measurement_variance(double confidence) const
+  {
+    double variance = observer_encoder_measurement_variance_m2ps2_;
+    switch (motion_regime_) {
+      case SensorMotionRegime::ACCELERATING:
+        variance = observer_accelerating_measurement_variance_m2ps2_;
+        break;
+      case SensorMotionRegime::STEADY:
+        variance = observer_steady_measurement_variance_m2ps2_;
+        break;
+      case SensorMotionRegime::DECELERATING:
+        variance = observer_decelerating_measurement_variance_m2ps2_;
+        break;
+      case SensorMotionRegime::FROZEN:
+        variance = observer_encoder_measurement_variance_m2ps2_ * 100.0;
+        break;
+      case SensorMotionRegime::FROZEN_ACCELERATING:
+        variance = observer_encoder_measurement_variance_m2ps2_ * 100.0;
+        break;
+    }
+    const double usable_confidence = std::clamp(confidence, 0.05, 1.0);
+    return variance / (usable_confidence * usable_confidence);
+  }
+
+  void update_motion_regime(bool frozen, double dt)
+  {
+    if (frozen) {
+      motion_regime_ = SensorMotionRegime::FROZEN;
+      regime_candidate_ = SensorMotionRegime::FROZEN;
+      regime_candidate_dwell_s_ = 0.0;
+      return;
+    }
+
+    const SensorMotionRegime candidate = classify_motion_regime();
+    if (candidate == motion_regime_) {
+      regime_candidate_ = candidate;
+      regime_candidate_dwell_s_ = 0.0;
+      return;
+    }
+    if (candidate != regime_candidate_) {
+      regime_candidate_ = candidate;
+      regime_candidate_dwell_s_ = std::max(0.0, dt);
+    } else {
+      regime_candidate_dwell_s_ += std::max(0.0, dt);
+    }
+    if (regime_candidate_dwell_s_ >= regime_min_dwell_s_) {
+      motion_regime_ = candidate;
+      regime_candidate_dwell_s_ = 0.0;
+    }
   }
 
   double body_speed_from_wheel_speed(double wheel_speed) const
@@ -1092,10 +1681,30 @@ private:
     return values[values.size() / 2];
   }
 
+  static bool sensor_history_stable(
+    const std::deque<double> & history, double current, double max_range,
+    std::size_t minimum_samples)
+  {
+    if (!std::isfinite(current) || history.size() < minimum_samples) {
+      return false;
+    }
+    double minimum = current;
+    double maximum = current;
+    for (const double value : history) {
+      if (!std::isfinite(value)) {
+        return false;
+      }
+      minimum = std::min(minimum, value);
+      maximum = std::max(maximum, value);
+    }
+    return maximum - minimum <= std::max(0.0, max_range);
+  }
+
   std::array<double, f1tenth_localization::SensorFusionModel::kFeatureCount>
   sensor_fusion_features(
     double wheel_speed, double mapped_speed, double imu_speed, double dt,
-    double pair_skew, double confidence, double window_raw_speed) const
+    double pair_skew, double confidence, double window_raw_speed,
+    double imu_acceleration_bias, double imu_observer_acceleration) const
   {
     const double raw = std::abs(wheel_speed);
     const double mapped = std::abs(mapped_speed);
@@ -1108,40 +1717,63 @@ private:
       mapped : sensor_fusion_mapped_history_.back();
     const double previous_imu = sensor_fusion_imu_history_.empty() ?
       imu : sensor_fusion_imu_history_.back();
-    return {
-      imu,
-      mapped,
-      raw,
-      signed_gap,
-      gap,
-      std::max(0.0, confidence),
-      imu_raw_acceleration_mps2_,
-      imu_acceleration_filtered_mps2_,
-      std::abs(imu_lateral_acceleration_mps2_),
-      std::abs(imu_yaw_rate_),
-      std::max(0.0, dt),
-      std::max(0.0, pair_skew),
-      raw <= stationary_speed_threshold_mps_ ? 1.0 : 0.0,
-      sensor_history_median(sensor_fusion_raw_history_, raw),
-      sensor_history_median(sensor_fusion_mapped_history_, mapped),
-      sensor_history_median(sensor_fusion_imu_history_, imu),
-      sensor_history_median(sensor_fusion_gap_history_, signed_gap),
-      raw - previous_raw,
-      mapped - previous_mapped,
-      imu - previous_imu,
-      window_raw_speed,
-      body_speed_from_wheel_speed(window_raw_speed)};
+    std::array<double, f1tenth_localization::SensorFusionModel::kFeatureCount>
+      features{};
+    features[0] = imu;
+    features[1] = mapped;
+    features[2] = raw;
+    features[3] = signed_gap;
+    features[4] = gap;
+    features[5] = std::max(0.0, confidence);
+    features[6] = imu_raw_acceleration_mps2_;
+    features[7] = imu_acceleration_filtered_mps2_;
+    features[8] = std::abs(imu_lateral_acceleration_mps2_);
+    features[9] = std::abs(imu_yaw_rate_);
+    features[10] = std::max(0.0, dt);
+    features[11] = std::max(0.0, pair_skew);
+    features[12] = raw <= stationary_speed_threshold_mps_ ? 1.0 : 0.0;
+    features[13] = sensor_history_median(sensor_fusion_raw_history_, raw);
+    features[14] = sensor_history_median(sensor_fusion_mapped_history_, mapped);
+    features[15] = sensor_history_median(sensor_fusion_imu_history_, imu);
+    features[16] = sensor_history_median(sensor_fusion_gap_history_, signed_gap);
+    features[17] = raw - previous_raw;
+    features[18] = mapped - previous_mapped;
+    features[19] = imu - previous_imu;
+    features[20] = window_raw_speed;
+    features[21] = body_speed_from_wheel_speed(window_raw_speed);
+    // Keep source compatibility with the existing 22-feature production
+    // header. A regenerated 24-feature candidate consumes these fields;
+    // the old header simply leaves them out until that candidate is accepted.
+    if constexpr (f1tenth_localization::SensorFusionModel::kFeatureCount > 22) {
+      features[22] = imu_acceleration_bias;
+    }
+    if constexpr (f1tenth_localization::SensorFusionModel::kFeatureCount > 23) {
+      features[23] = imu_observer_acceleration;
+    }
+    return features;
   }
 
   SensorMotionRegime classify_motion_regime() const
   {
-    // Use the promptly filtered acceleration for regime transitions. The
-    // causal median remains the stop/outlier guard; using it here would delay
-    // a real brake sign change by multiple native telemetry samples.
-    if (imu_acceleration_filtered_mps2_ > regime_acceleration_threshold_mps2_) {
+    // Enter a new regime only after the larger threshold is crossed, but keep
+    // the current accelerating/decelerating regime until acceleration has
+    // returned through the smaller exit threshold. This prevents 40 Hz noise
+    // from alternating the measurement variance at every sample.
+    const double acceleration = imu_acceleration_filtered_mps2_;
+    if (motion_regime_ == SensorMotionRegime::ACCELERATING &&
+      acceleration > regime_exit_acceleration_mps2_)
+    {
       return SensorMotionRegime::ACCELERATING;
     }
-    if (imu_acceleration_filtered_mps2_ < -regime_acceleration_threshold_mps2_) {
+    if (motion_regime_ == SensorMotionRegime::DECELERATING &&
+      acceleration < -regime_exit_acceleration_mps2_)
+    {
+      return SensorMotionRegime::DECELERATING;
+    }
+    if (acceleration > regime_enter_acceleration_mps2_) {
+      return SensorMotionRegime::ACCELERATING;
+    }
+    if (acceleration < -regime_enter_acceleration_mps2_) {
       return SensorMotionRegime::DECELERATING;
     }
     return SensorMotionRegime::STEADY;
@@ -1157,6 +1789,8 @@ private:
       case SensorMotionRegime::DECELERATING:
         return 2.0;
       case SensorMotionRegime::FROZEN:
+        return 3.0;
+      case SensorMotionRegime::FROZEN_ACCELERATING:
         return 3.0;
     }
     return 1.0;
@@ -1185,14 +1819,69 @@ private:
     {
       return current_speed;
     }
-    return std::abs(position_m - sensor_fusion_encoder_history_.front().second) /
-      (stamp_s - sensor_fusion_encoder_history_.front().first);
+    // Encoder events can be delivered in zero/large bursts even though their
+    // source timestamps are regular.  Select the most recent history sample
+    // at or before a speed-dependent averaging horizon.  Low-speed samples
+    // need the longer horizon to overcome angle quantisation; high-speed
+    // samples use less history so acceleration response remains causal.
+    const double previous_window_speed =
+      std::max(0.0, sensor_fusion_window_raw_speed_mps_);
+    const double reference_speed = std::max(
+      std::abs(current_speed), previous_window_speed);
+    double desired_duration = sensor_fusion_window_high_speed_duration_s_;
+    if (reference_speed <= sensor_fusion_window_low_speed_threshold_mps_) {
+      desired_duration = sensor_fusion_window_low_speed_duration_s_;
+    } else if (reference_speed < sensor_fusion_window_high_speed_threshold_mps_) {
+      desired_duration = sensor_fusion_window_mid_speed_duration_s_;
+    }
+
+    const double minimum_duration = std::min(0.10, desired_duration * 0.25);
+    const double maximum_duration = std::min(
+      1.00, std::max(0.30, desired_duration * 1.50));
+    std::vector<std::pair<double, double>> samples(
+      sensor_fusion_encoder_history_.begin(), sensor_fusion_encoder_history_.end());
+    samples.emplace_back(stamp_s, position_m);
+    std::vector<double> slopes;
+    slopes.reserve(samples.size() * samples.size() / 2);
+    for (size_t first_index = 0; first_index + 1 < samples.size(); ++first_index) {
+      for (size_t after_index = first_index + 1;
+        after_index < samples.size(); ++after_index)
+      {
+        const double duration = samples[after_index].first -
+          samples[first_index].first;
+        if (duration < minimum_duration || duration > maximum_duration) {
+          continue;
+        }
+        const double slope = std::abs(
+          samples[after_index].second - samples[first_index].second) / duration;
+        if (std::isfinite(slope) && slope <= 40.0) {
+          slopes.push_back(slope);
+        }
+      }
+    }
+    if (slopes.size() >= 4) {
+      std::sort(slopes.begin(), slopes.end());
+      return slopes[slopes.size() / 2];
+    }
+
+    // During the first few samples after a reset there is not yet enough
+    // history for a robust slope. Fall back to the most recent valid pair.
+    const auto reference = sensor_fusion_encoder_history_.empty() ?
+      std::pair<double, double>{stamp_s, position_m} :
+      sensor_fusion_encoder_history_.back();
+    const double duration = stamp_s - reference.first;
+    if (duration <= 1.0e-4) {
+      return current_speed;
+    }
+    return std::abs(position_m - reference.second) / duration;
   }
 
   void remember_sensor_fusion_encoder_sample(double stamp_s, double position_m)
   {
     sensor_fusion_encoder_history_.emplace_back(stamp_s, position_m);
-    while (sensor_fusion_encoder_history_.size() > 9) {
+    // 45 samples cover the one-second low-speed horizon at the measured
+    // 40 Hz source cadence, with room for timestamp jitter.
+    while (sensor_fusion_encoder_history_.size() > 45) {
       sensor_fusion_encoder_history_.pop_front();
     }
   }
@@ -1227,7 +1916,6 @@ private:
     msg.pose.covariance[35] = pose_yaw_var_;
     msg.twist.covariance[0] = published_twist_variance;
     msg.twist.covariance[35] = twist_yaw_var_;
-    odom_pub_->publish(msg);
 
     std_msgs::msg::Float64MultiArray diagnostics;
     diagnostics.layout.dim.resize(1);
@@ -1237,18 +1925,30 @@ private:
       "imu_speed_mps,frozen_encoder_model_active,frozen_encoder_model_decel_mps2,"
       "sensor_fusion_model_speed_mps,sensor_fusion_model_spread_mps,"
       "sensor_fusion_model_active,sensor_motion_regime,"
-      "sensor_fusion_window_raw_speed_mps,sensor_fusion_window_mapped_speed_mps";
-    diagnostics.layout.dim[0].size = 15;
-    diagnostics.layout.dim[0].stride = 15;
+      "sensor_fusion_window_raw_speed_mps,sensor_fusion_window_mapped_speed_mps,"
+      "odom_stamp_s,imu_observer_acceleration_mps2,imu_pair_speed_mps,"
+      "imu_pair_lead_s,odom_speed_mps";
+    diagnostics.layout.dim[0].size = 20;
+    diagnostics.layout.dim[0].stride = 20;
     diagnostics.data = {
       raw_wheel_speed_mps_, corrected_wheel_speed_mps_, longitudinal_slip_,
-      confidence, 0.0, static_cast<double>(encoder_reset_count_),
+      confidence, longitudinal_observer_.bias(),
+      static_cast<double>(encoder_reset_count_),
       imu_speed_mps_, frozen_encoder_model_active_ ? 1.0 : 0.0,
       frozen_encoder_model_decel_mps2_, sensor_fusion_model_speed_mps_,
       sensor_fusion_model_spread_mps_, sensor_fusion_model_active_ ? 1.0 : 0.0,
       motion_regime_code(), sensor_fusion_window_raw_speed_mps_,
-      sensor_fusion_window_mapped_speed_mps_};
+      sensor_fusion_window_mapped_speed_mps_, stamp.seconds(),
+      imu_observer_acceleration_mps2_, imu_pair_speed_mps_,
+      imu_pair_lead_s_, speed_mps_};
     diagnostics_pub_->publish(diagnostics);
+
+    // Publish diagnostics first. The recorder subscribes to both topics and
+    // can therefore associate the following odom sample with the diagnostic
+    // vector produced for the same encoder pair. The explicit stamp fields
+    // above remain the authoritative check if DDS scheduling interleaves the
+    // callbacks.
+    odom_pub_->publish(msg);
 
     geometry_msgs::msg::TransformStamped tf;
     tf.header = msg.header;
@@ -1277,6 +1977,7 @@ private:
   double wheel_radius_{0.0590};
   double encoder_scale_{1.0};
   double max_encoder_step_m_{4.0};
+  double max_encoder_step_speed_mps_{35.0};
   double max_encoder_pair_skew_s_{0.05};
   double pose_xy_var_{0.01};
   double pose_yaw_var_{0.01};
@@ -1319,6 +2020,7 @@ private:
   double imu_orientation_correction_gain_{0.08};
   double max_imu_orientation_step_rad_{0.30};
   double max_imu_dt_s_{0.5};
+  double imu_pair_extrapolation_max_s_{0.10};
   double imu_acceleration_filter_alpha_{0.70};
   size_t imu_acceleration_median_window_{3};
   double wheel_slip_threshold_mps_{0.75};
@@ -1329,14 +2031,50 @@ private:
   double max_observer_accel_mps2_{12.0};
   double observer_speed_tolerance_mps_{2.0};
   double wheel_observer_correction_gain_{0.10};
+  double observer_acceleration_noise_mps2_{1.50};
+  double observer_bias_random_walk_mps3_{0.08};
+  double observer_initial_speed_variance_m2ps2_{1.00};
+  double observer_initial_bias_variance_m4ps4_{0.25};
+  double observer_innovation_gate_mps_{1.50};
+  double observer_encoder_measurement_variance_m2ps2_{0.09};
+  double observer_accelerating_measurement_variance_m2ps2_{0.49};
+  double observer_steady_measurement_variance_m2ps2_{0.04};
+  double observer_decelerating_measurement_variance_m2ps2_{0.25};
   double imu_speed_correction_gain_{0.0};
   bool sensor_fusion_model_enabled_{true};
   bool sensor_fusion_steady_model_enabled_{false};
   double regime_acceleration_threshold_mps2_{0.50};
+  double regime_enter_acceleration_mps2_{0.65};
+  double regime_exit_acceleration_mps2_{0.25};
+  double regime_min_dwell_s_{0.075};
+  double sensor_fusion_window_low_speed_duration_s_{1.00};
+  double sensor_fusion_window_mid_speed_duration_s_{0.60};
+  double sensor_fusion_window_high_speed_duration_s_{0.30};
+  double sensor_fusion_window_low_speed_threshold_mps_{5.0};
+  double sensor_fusion_window_high_speed_threshold_mps_{15.0};
+  double sensor_fusion_window_stability_mps_{0.35};
+  double sensor_fusion_wheel_downshift_min_drop_mps_{0.35};
+  double sensor_fusion_wheel_downshift_hold_s_{0.50};
+  double sensor_fusion_window_recovery_s_{0.35};
+  double sensor_fusion_recovery_stability_mps_{0.50};
+  double sensor_fusion_recovery_encoder_blend_{0.75};
+  double sensor_fusion_recovery_encoder_max_correction_mps_{0.35};
+  double sensor_fusion_model_blend_{0.50};
+  double sensor_fusion_transient_model_blend_{0.50};
+  double sensor_fusion_transient_model_max_correction_mps_{0.35};
+  double sensor_fusion_transient_low_speed_threshold_mps_{0.75};
+  double sensor_fusion_transient_mid_speed_threshold_mps_{1.50};
+  double sensor_fusion_transient_low_speed_max_correction_mps_{0.10};
+  double sensor_fusion_transient_mid_speed_max_correction_mps_{0.20};
+  double low_speed_encoder_priority_mps_{5.0};
+  double low_speed_encoder_max_imu_gap_mps_{0.75};
+  double low_speed_encoder_stability_mps_{0.35};
+  std::size_t low_speed_encoder_stability_samples_{8};
   double regime_model_max_spread_mps_{0.75};
   double regime_model_max_baseline_delta_mps_{0.75};
   bool steady_encoder_reanchor_enabled_{true};
   f1tenth_localization::SensorFusionModel sensor_fusion_model_;
+  f1tenth_localization::LongitudinalObserver longitudinal_observer_;
   double stationary_speed_threshold_mps_{0.15};
   double forward_extremum_slip_{0.15};
   double forward_extremum_value_{0.72};
@@ -1350,6 +2088,7 @@ private:
   double frozen_encoder_decel_intercept_mps2_{5.5};
   double frozen_encoder_decel_speed_gain_per_s_{0.27};
   double frozen_encoder_decel_max_mps2_{12.0};
+  double frozen_encoder_braking_model_blend_{0.75};
   double slip_pose_xy_var_{0.10};
   std::vector<double> wheel_speed_map_wheel_mps_;
   std::vector<double> wheel_speed_map_body_mps_;
@@ -1380,13 +2119,22 @@ private:
   bool sensor_fusion_model_active_{false};
   double sensor_fusion_model_speed_mps_{0.0};
   double sensor_fusion_model_spread_mps_{0.0};
+  double imu_pair_speed_mps_{0.0};
+  double imu_pair_lead_s_{0.0};
   SensorMotionRegime motion_regime_{SensorMotionRegime::STEADY};
+  SensorMotionRegime regime_candidate_{SensorMotionRegime::STEADY};
+  double regime_candidate_dwell_s_{0.0};
   std::deque<double> sensor_fusion_raw_history_;
   std::deque<double> sensor_fusion_mapped_history_;
   std::deque<double> sensor_fusion_imu_history_;
   std::deque<double> sensor_fusion_gap_history_;
   std::deque<double> steady_mapped_speed_history_;
   std::deque<std::pair<double, double>> sensor_fusion_encoder_history_;
+  std::deque<double> sensor_fusion_recovery_window_history_;
+  bool sensor_fusion_braking_window_active_{false};
+  double sensor_fusion_window_recovery_elapsed_s_{0.0};
+  double sensor_fusion_wheel_downshift_hold_remaining_s_{0.0};
+  bool sensor_fusion_wheel_reacquisition_required_{false};
   double x_{0.0};
   double y_{0.0};
 

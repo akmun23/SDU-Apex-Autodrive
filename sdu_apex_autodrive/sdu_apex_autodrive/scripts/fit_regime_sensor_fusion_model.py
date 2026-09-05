@@ -8,6 +8,7 @@ fit by the frozen branch instead of being mixed with rolling-wheel motion.
 """
 
 import argparse
+from bisect import bisect_right
 import csv
 import importlib.util
 import math
@@ -15,7 +16,7 @@ from pathlib import Path
 import statistics
 
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import ExtraTreesRegressor
 
 
 FEATURE_NAMES = (
@@ -41,9 +42,18 @@ FEATURE_NAMES = (
     "imu_speed_delta_mps",
     "window_raw_wheel_speed_mps",
     "window_mapped_wheel_speed_mps",
+    "imu_acceleration_bias_mps2",
+    "imu_observer_acceleration_mps2",
 )
 
-REGIMES = ("accelerating", "steady", "decelerating", "frozen")
+# Frozen encoder motion has two distinct causal causes in the simulator: the
+# driven wheel can be frozen while the body is still launching, or it can be
+# frozen while the body is braking/coasting.  Keep those branches separate so
+# a braking tail cannot bias the launch estimate.  The first four names retain
+# the diagnostic regime numbering; the fifth is an internal model branch.
+REGIMES = (
+    "accelerating", "steady", "decelerating", "frozen", "frozen_accelerating",
+)
 WHEEL_FROZEN_SPEED_MPS = 0.15
 MOVING_SPEED_MPS = 0.75
 REGIME_ACCELERATION_MPS2 = 0.50
@@ -56,17 +66,22 @@ WHEEL_MAP_WHEEL_MPS = np.asarray(
      16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0),
     dtype=np.float64)
 WHEEL_MAP_BODY_MPS = np.asarray(
-    (0.0, 1.988601, 3.967925, 5.888532, 8.549802, 9.662430,
-     11.536114, 13.473328, 15.270020, 16.855770, 18.570086,
-     19.279928, 19.987528, 20.287600, 20.287600, 20.287600),
+    (0.0, 1.981831, 3.954033, 5.858258, 7.737783, 9.633347,
+     11.447797, 13.230562, 15.094604, 16.841838, 18.522608,
+     20.287895, 21.928664, 22.882700, 22.882700, 22.882700),
     dtype=np.float64)
 
 MODEL_KWARGS = {
-    "n_estimators": 50,
-    "max_depth": 10,
-    "min_samples_leaf": 8,
-    "max_features": 0.8,
-    "random_state": 10,
+    # ExtraTrees keeps the model causal while averaging away the
+    # burst/quantisation artefacts in the native encoder stream.  The median
+    # tree aggregate below is robust to a small number of bad training
+    # packets, so the deeper forest can represent the narrow low-speed
+    # frozen-wheel relationship without letting one leaf dominate output.
+    "n_estimators": 100,
+    "max_depth": 16,
+    "min_samples_leaf": 1,
+    "max_features": 0.9,
+    "random_state": 4,
     "n_jobs": -1,
 }
 
@@ -111,6 +126,23 @@ def ground_truth_regime(speed, raw_wheel, acceleration):
     return "steady"
 
 
+def logged_runtime_regime(analysis, row, imu, raw_wheel, acceleration):
+    """Return the exact runtime regime when the diagnostic field is present.
+
+    The estimator uses hysteresis and dwell time before switching regimes.
+    Reconstructing a regime from the raw acceleration in this offline fitter
+    can therefore train a model for a different branch than the C++ node
+    actually selects.  New recordings expose the runtime branch explicitly;
+    retain the raw-feature fallback for older calibration files.
+    """
+    logged = finite(analysis, row, "odom_sensor_motion_regime")
+    if logged is not None:
+        index = int(round(logged))
+        if 0 <= index < len(REGIMES):
+            return REGIMES[index]
+    return sensor_regime(imu, raw_wheel, acceleration)
+
+
 def median(history, current):
     values = list(history[-HISTORY_WINDOW:])
     values.append(current)
@@ -122,11 +154,97 @@ def body_speed_from_wheel_speed(wheel_speed):
         max(0.0, wheel_speed), WHEEL_MAP_WHEEL_MPS, WHEEL_MAP_BODY_MPS))
 
 
+_SOURCE_SENSOR_FIELDS = {
+    "imu": (
+        "ax_mps2", "ay_mps2", "az_mps2", "imu_accel_norm_mps2",
+        "yaw_rate_radps", "imu_yaw_rate_radps", "imu_yaw_rad",
+        "imu_stamp_s",
+    ),
+    "left_encoder": (
+        "left_encoder_rad", "left_encoder_speed_radps", "left_encoder_dt_s",
+        "left_encoder_stamp_s",
+    ),
+    "right_encoder": (
+        "right_encoder_rad", "right_encoder_speed_radps", "right_encoder_dt_s",
+        "right_encoder_stamp_s",
+    ),
+}
+
+
+def _source_event_series(raw_rows, event_name, analysis):
+    """Return unique source callbacks ordered by their message timestamp."""
+    unique = {}
+    for row in raw_rows:
+        if row.get("source_event_name") != event_name:
+            continue
+        stamp = finite(analysis, row, "source_event_stamp_s")
+        if stamp is None:
+            continue
+        event = row.get("source_event_count", "")
+        unique[event or f"stamp:{stamp:.17g}"] = row
+    rows = sorted(
+        unique.values(),
+        key=lambda row: finite(analysis, row, "source_event_stamp_s"),
+    )
+    return rows, [finite(analysis, row, "source_event_stamp_s") for row in rows]
+
+
+def merge_coherent_sensor_snapshot(raw_rows, diagnostic_rows, analysis):
+    """Overlay the sensor callbacks that produced each diagnostic vector.
+
+    ``odom_diagnostics`` has no ROS header.  The recorder therefore stores
+    its vector in a callback snapshot, and that snapshot can be delivered
+    before the recorder has processed the IMU/encoder callbacks carrying the
+    same source timestamp.  The vector fields themselves are coherent, but
+    raw ``ax`` and encoder metadata in the surrounding snapshot may be one
+    packet old.  Rebuild those fields from the latest exact source callback at
+    or before the vector timestamp.  This is still causal and uses no truth.
+    """
+    series = {
+        name: _source_event_series(raw_rows, name, analysis)
+        for name in _SOURCE_SENSOR_FIELDS
+    }
+    merged = []
+    for row in diagnostic_rows:
+        stamp = finite(analysis, row, "source_event_stamp_s")
+        if stamp is None:
+            merged.append(row)
+            continue
+        aligned = dict(row)
+        for event_name, fields in _SOURCE_SENSOR_FIELDS.items():
+            events, stamps = series[event_name]
+            index = bisect_right(stamps, stamp) - 1
+            if index < 0:
+                continue
+            source = events[index]
+            for field in fields:
+                value = source.get(field)
+                if value not in (None, "", "nan", "NaN"):
+                    aligned[field] = value
+        merged.append(aligned)
+    return merged
+
+
 def build_examples(path, analysis, run_id):
-    rows = analysis.read_rows(path)
-    rows, _ = analysis.deduplicate_source_events(rows)
-    rows = analysis.timestamped_rows(
-        [row for row in rows if analysis.valid_ground_truth_row(row)])
+    raw_rows = analysis.read_rows(path)
+    # A timer/GT callback snapshot can lag the odom source event by one
+    # bridge packet. When exact source events are available, fit the causal
+    # sensor features against truth interpolated at that odom timestamp. This
+    # keeps the offline target aligned with the runtime pair being modelled.
+    # Model features are emitted in the diagnostics vector before /odom is
+    # published. The recorder's later /odom callback may run after another
+    # IMU/encoder callback and therefore mix an odom speed with an older
+    # diagnostic snapshot. Prefer the exact diagnostics event for fitting;
+    # retain the odom-event path for legacy recordings without diagnostics.
+    rows = analysis.align_odom_source_events(raw_rows, "odom_diagnostics")
+    if rows is None:
+        rows = analysis.align_odom_source_events(raw_rows)
+    else:
+        rows = merge_coherent_sensor_snapshot(raw_rows, rows, analysis)
+    if rows is None:
+        rows, _ = analysis.deduplicate_source_events(raw_rows)
+        rows = [row for row in rows if analysis.valid_ground_truth_row(row)]
+    rows = analysis.timestamped_rows(rows)
 
     examples = []
     raw_history = []
@@ -136,10 +254,18 @@ def build_examples(path, analysis, run_id):
     encoder_history = []
     filtered_acceleration = 0.0
     previous_imu_stamp = None
+    previous_active_deceleration = False
 
     for row in rows:
         phase = row.get("phase", "")
-        if analysis.phase_is_diagnostic_reset(phase):
+        # The grid harness labels the settled post-reset interval as
+        # ``grid_settle_*`` rather than ``grid_reset_*``.  It is nevertheless
+        # a hard causal boundary: SensorOdometryNode clears all of its
+        # histories when the reset command is accepted.  Do the same here so
+        # a previous grid point cannot leak a wheel/IMU window into the next
+        # model example.
+        if (analysis.phase_is_diagnostic_reset(phase) or
+                phase.startswith("grid_settle_")):
             raw_history.clear()
             mapped_history.clear()
             imu_history.clear()
@@ -147,26 +273,48 @@ def build_examples(path, analysis, run_id):
             encoder_history.clear()
             filtered_acceleration = 0.0
             previous_imu_stamp = None
+            previous_active_deceleration = False
             continue
 
         truth = finite(analysis, row, "gt_speed_mps")
-        imu = finite(analysis, row, "odom_imu_speed_mps")
-        mapped = finite(analysis, row, "odom_corrected_wheel_speed_mps")
+        # The runtime model is evaluated at the encoder-pair timestamp.  The
+        # plain observer speed is still at the latest IMU timestamp when an
+        # encoder callback arrives; SensorOdometryNode extrapolates that
+        # state to the pair timestamp and passes the extrapolated value to
+        # sensor_fusion_features().  Prefer the explicitly logged pair value
+        # so offline training has the same causal input as the generated C++
+        # model. Keep the old field as a compatibility fallback for legacy
+        # recordings without pair-time diagnostics.
+        imu = finite(analysis, row, "odom_imu_pair_speed_mps")
+        if imu is None:
+            imu = finite(analysis, row, "odom_imu_speed_mps")
         raw = finite(analysis, row, "odom_raw_wheel_speed_mps")
         confidence = finite(analysis, row, "odom_wheel_observation_confidence")
         acceleration = finite(analysis, row, "ax_mps2", 0.0)
         lateral = finite(analysis, row, "ay_mps2", 0.0)
         yaw_rate = finite(analysis, row, "imu_yaw_rate_radps", 0.0)
         gt_acceleration = finite(analysis, row, "gt_longitudinal_accel_mps2", 0.0)
+        imu_acceleration_bias = finite(
+            analysis, row, "odom_imu_acceleration_bias_mps2", 0.0)
+        imu_observer_acceleration = finite(
+            analysis, row, "odom_imu_observer_acceleration_mps2", acceleration)
         left_angle = finite(analysis, row, "left_encoder_rad")
         right_angle = finite(analysis, row, "right_encoder_rad")
+        left_stamp = finite(analysis, row, "left_encoder_stamp_s")
+        right_stamp = finite(analysis, row, "right_encoder_stamp_s")
         if any(value is None for value in (
-                truth, imu, mapped, raw, confidence, left_angle, right_angle)):
+                truth, imu, raw, confidence, left_angle, right_angle,
+                left_stamp, right_stamp)):
             continue
 
         imu = max(0.0, imu)
-        mapped = abs(mapped)
         raw = abs(raw)
+        # Recompute the mapped wheel observation from the raw encoder speed.
+        # Recordings made before the corrected 40 Hz map was installed contain
+        # a different diagnostic mapped value; using that logged value would
+        # make a cross-recording fit learn the map revision instead of the
+        # sensor-fusion relationship.
+        mapped = body_speed_from_wheel_speed(raw)
         confidence = max(0.0, confidence)
         imu_stamp = finite(analysis, row, "imu_stamp_s")
         if imu_stamp is None:
@@ -179,11 +327,22 @@ def build_examples(path, analysis, run_id):
                 (1.0 - IMU_FILTER_ALPHA) * filtered_acceleration)
         previous_imu_stamp = imu_stamp
 
+        # Keep the fitter's short causal history consistent with the runtime
+        # node. A braking boundary changes the observability regime: the
+        # driven encoder can freeze, so pre-brake acceleration/steady samples
+        # must not be mixed into the post-brake recovery feature vector.
+        active_deceleration = (
+            filtered_acceleration < -REGIME_ACCELERATION_MPS2)
+        if active_deceleration != previous_active_deceleration:
+            raw_history.clear()
+            mapped_history.clear()
+            imu_history.clear()
+            gap_history.clear()
+        previous_active_deceleration = active_deceleration
+
         signed_gap = mapped - imu
         gap = abs(signed_gap)
         encoder_dt = max(0.0, finite(analysis, row, "left_encoder_dt_s", 0.0))
-        left_stamp = finite(analysis, row, "left_encoder_stamp_s")
-        right_stamp = finite(analysis, row, "right_encoder_stamp_s")
         pair_skew = 0.0 if left_stamp is None or right_stamp is None else abs(
             left_stamp - right_stamp)
         encoder_stamp = max(
@@ -229,21 +388,32 @@ def build_examples(path, analysis, run_id):
             imu - previous_imu,
             window_raw,
             window_mapped,
+            imu_acceleration_bias,
+            imu_observer_acceleration,
         ], dtype=np.float64)
+        runtime_regime = logged_runtime_regime(
+            analysis, row, imu, raw, acceleration)
+        if runtime_regime == "frozen" and filtered_acceleration >= -0.50:
+            runtime_regime = "frozen_accelerating"
         examples.append({
             "features": features,
             "target": max(0.0, truth),
             "run_id": run_id,
-            "sensor_regime": sensor_regime(imu, raw, acceleration),
+            "sensor_regime": runtime_regime,
             "truth_regime": ground_truth_regime(
                 truth, raw, gt_acceleration),
             "row": row,
         })
 
-        raw_history.append(raw)
-        mapped_history.append(mapped)
+        # Match SensorOdometryNode exactly: the instantaneous wheel/map values
+        # are exposed as current features, while the short history is updated
+        # with the timestamp-window values after prediction.  Using the
+        # instantaneous burst/zero derivative here trained a different model
+        # from the one the runtime actually evaluates.
+        raw_history.append(window_raw)
+        mapped_history.append(window_mapped)
         imu_history.append(imu)
-        gap_history.append(signed_gap)
+        gap_history.append(abs(window_mapped - imu))
         encoder_history.append((encoder_stamp, encoder_position))
         del raw_history[:-HISTORY_WINDOW]
         del mapped_history[:-HISTORY_WINDOW]
@@ -256,9 +426,9 @@ def build_examples(path, analysis, run_id):
 
 def sample_weights(targets):
     return np.where(
-        (targets >= 1.0) & (targets < 3.0), 5.0,
+        (targets >= 1.0) & (targets < 3.0), 10.0,
         np.where(
-            (targets >= 3.0) & (targets < 5.0), 5.0,
+            (targets >= 3.0) & (targets < 5.0), 8.0,
             np.where((targets >= 5.0) & (targets < 10.0), 4.0, 1.0)))
 
 
@@ -267,15 +437,14 @@ def train_models(examples):
     counts = {}
     for regime in REGIMES:
         selected = [example for example in examples
-                    if example["truth_regime"] == regime and
-                    (regime == "frozen" or
-                     example["features"][12] < 0.5)]
+                    if example["sensor_regime"] == regime and
+                    example["target"] >= MOVING_SPEED_MPS]
         if len(selected) < 50:
             raise RuntimeError(
-                f"not enough examples for {regime}: {len(selected)}")
+                f"not enough runtime-regime examples for {regime}: {len(selected)}")
         features = np.asarray([example["features"] for example in selected])
         targets = np.asarray([example["target"] for example in selected])
-        model = RandomForestRegressor(**MODEL_KWARGS)
+        model = ExtraTreesRegressor(**MODEL_KWARGS)
         model.fit(features, targets, sample_weight=sample_weights(targets))
         models[regime] = model
         counts[regime] = len(selected)
@@ -288,13 +457,15 @@ def predict_examples(models, examples):
     used = np.zeros(len(examples), dtype=bool)
     for regime, model in models.items():
         indices = [index for index, example in enumerate(examples)
-                   if example["sensor_regime"] == regime and
-                   (regime == "frozen" or example["features"][12] < 0.5)]
+                   if example["sensor_regime"] == regime]
         if not indices:
             continue
         features = np.asarray([examples[index]["features"] for index in indices])
         trees = np.asarray([tree.predict(features) for tree in model.estimators_])
-        predictions[indices] = np.clip(trees.mean(axis=0), 0.0, 30.0)
+        # A median aggregate is less sensitive than a mean to quantised
+        # encoder bursts that survive the causal source-time guard.  The
+        # generated C++ evaluator uses the same aggregate.
+        predictions[indices] = np.clip(np.median(trees, axis=0), 0.0, 30.0)
         spreads[indices] = trees.std(axis=0)
         used[indices] = True
     return predictions, spreads, used
@@ -376,6 +547,7 @@ def export_header(models, destination):
         "steady": "Steady",
         "decelerating": "Decelerating",
         "frozen": "Frozen",
+        "frozen_accelerating": "FrozenAccelerating",
     }
     blocks = []
     for regime in REGIMES:
@@ -407,6 +579,7 @@ enum class SensorMotionRegime : uint8_t
   STEADY = 1,
   DECELERATING = 2,
   FROZEN = 3,
+  FROZEN_ACCELERATING = 4,
 }};
 
 struct SensorFusionPrediction
@@ -440,6 +613,11 @@ public:
       case SensorMotionRegime::FROZEN:
         return evaluate(input, kFrozenRoots, kFrozenFeatures,
           kFrozenThresholds, kFrozenLeft, kFrozenRight, kFrozenValues);
+      case SensorMotionRegime::FROZEN_ACCELERATING:
+        return evaluate(input, kFrozenAcceleratingRoots,
+          kFrozenAcceleratingFeatures, kFrozenAcceleratingThresholds,
+          kFrozenAcceleratingLeft, kFrozenAcceleratingRight,
+          kFrozenAcceleratingValues);
     }}
     return {{0.0, 0.0, false}};
   }}
@@ -455,8 +633,10 @@ private:
     const std::array<int32_t, NodeCount> & right,
     const std::array<float, NodeCount> & values) noexcept
   {{
+    std::array<double, TreeCount> predictions{{}};
     double sum = 0.0;
     double sum_squared = 0.0;
+    std::size_t prediction_index = 0;
     for (const int32_t root : roots) {{
       int32_t node = root;
       while (features[static_cast<std::size_t>(node)] != 255U) {{
@@ -466,13 +646,19 @@ private:
           left[index] : right[index];
       }}
       const double value = values[static_cast<std::size_t>(node)];
+      predictions[prediction_index++] = value;
       sum += value;
       sum_squared += value * value;
     }}
+    std::sort(predictions.begin(), predictions.end());
     const double count = static_cast<double>(roots.size());
-    const double mean = std::clamp(sum / count, 0.0, 30.0);
-    const double variance = std::max(0.0, sum_squared / count - mean * mean);
-    return {{mean, std::sqrt(variance), true}};
+    const double mean = sum / count;
+    const double median = TreeCount % 2U == 0U ?
+      0.5 * (predictions[TreeCount / 2U - 1U] +
+      predictions[TreeCount / 2U]) : predictions[TreeCount / 2U];
+    const double variance = std::max(
+      0.0, sum_squared / count - mean * mean);
+    return {{std::clamp(median, 0.0, 30.0), std::sqrt(variance), true}};
   }}
 
 {''.join(blocks)}}};  // class SensorFusionModel
@@ -494,9 +680,30 @@ def write_metrics(path, rows):
         writer.writerows(rows)
 
 
+def score_examples(models, examples):
+    predictions, spreads, used = predict_examples(models, examples)
+    result = []
+    for example, prediction, spread, model_used in zip(
+            examples, predictions, spreads, used):
+        if not model_used or example["truth_regime"] == "stationary":
+            continue
+        result.append({
+            "target": example["target"],
+            "prediction": float(prediction),
+            "spread": float(spread),
+            "sensor_regime": example["sensor_regime"],
+        })
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("inputs", type=Path, nargs="+")
+    parser.add_argument(
+        "inputs", type=Path, nargs="+",
+        help="recordings used for training; never include the holdout here")
+    parser.add_argument(
+        "--validation", type=Path, nargs="+",
+        help="independent recordings scored after fitting on inputs")
     parser.add_argument("--header", type=Path, required=True)
     parser.add_argument("--metrics", type=Path, required=True)
     args = parser.parse_args()
@@ -507,24 +714,44 @@ def main():
         if examples:
             runs.append((path, examples))
     if len(runs) < 2:
-        raise RuntimeError("at least two usable recordings are required")
+        if not args.validation:
+            raise RuntimeError(
+                "at least two usable recordings are required without --validation")
+
+    if args.validation:
+        validation = []
+        for index, path in enumerate(args.validation):
+            examples = build_examples(path, analysis, index)
+            if examples:
+                validation.extend(examples)
+        if not validation:
+            raise RuntimeError("no usable validation recordings")
+        training = [example for _, examples in runs for example in examples]
+        models, counts = train_models(training)
+        scored = score_examples(models, validation)
+        export_header(models, args.header)
+        write_metrics(args.metrics,
+                       metrics(scored, "independent_validation"))
+        print(f"training_recordings={len(runs)} "
+              f"training_examples={len(training)}")
+        print(f"validation_recordings={len(args.validation)} "
+              f"validation_examples={len(validation)}")
+        print("regime_training_counts=" + ",".join(
+            f"{regime}:{counts[regime]}" for regime in REGIMES))
+        for row in metrics(scored, "independent_validation"):
+            if row["regime"] == "all":
+                print(f"{row['bin']}: median={row['relative_error_median_pct']:.3f}% "
+                      f"p95={row['relative_error_p95_pct']:.3f}%")
+        print(f"header={args.header}")
+        print(f"metrics={args.metrics}")
+        return 0
 
     validation_rows = []
     for holdout_path, holdout in runs:
         train = [example for path, examples in runs if path != holdout_path
                  for example in examples]
         models, _ = train_models(train)
-        predictions, spreads, used = predict_examples(models, holdout)
-        for example, prediction, spread, model_used in zip(
-                holdout, predictions, spreads, used):
-            if not model_used or example["truth_regime"] == "stationary":
-                continue
-            validation_rows.append({
-                "target": example["target"],
-                "prediction": float(prediction),
-                "spread": float(spread),
-                "sensor_regime": example["sensor_regime"],
-            })
+        validation_rows.extend(score_examples(models, holdout))
 
     final_examples = [example for _, examples in runs for example in examples]
     models, counts = train_models(final_examples)

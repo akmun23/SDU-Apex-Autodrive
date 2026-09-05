@@ -7,6 +7,7 @@ state or publishes a command.
 """
 
 import argparse
+from bisect import bisect_left, bisect_right
 import csv
 import math
 from pathlib import Path
@@ -64,17 +65,26 @@ def deduplicate_source_events(
 ) -> tuple[list[dict[str, str]], int]:
     """Keep one recorder row for each source event.
 
-    Calibration records are commonly written at 50 Hz while the simulator
-    state is refreshed at about 10 Hz.  The event counter is therefore the
-    authoritative identity of a source sample.  The last recorder row for an
-    event is retained because it contains the freshest values from the other
-    callbacks.  Rows without a counter are retained for compatibility with
-    older files; their counts are reported as recorder rows, not source rows.
+    Calibration records are commonly written by a timer while native sensor
+    callbacks arrive in bursts.  The event counter is therefore the
+    authoritative identity of a source sample.  If callback snapshots are
+    present, prefer the exact GT-aligned snapshots; otherwise retain the last
+    timer row for each event because it contains the freshest values from the
+    other callbacks. Rows without a counter are retained for compatibility
+    with older files; their counts are reported as recorder rows, not source
+    rows.
 
     The recorder's event counter is monotonic for the lifetime of one CSV, so
     phase transitions must not create a second copy of an event that straddles
     a timer tick. Separate files remain the boundary between experiments.
     """
+    exact_gt_rows = [
+        row for row in rows
+        if row.get("source_event_name") == "gt_odom"
+    ]
+    if exact_gt_rows:
+        rows = exact_gt_rows
+
     result: list[dict[str, str]] = []
     positions: dict[int, int] = {}
     duplicates = 0
@@ -108,6 +118,113 @@ def timestamped_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     # A mixed-format file cannot be fully synchronized. Keep its legacy rows
     # after the timestamped portion rather than silently dropping data.
     return ordered + [row for _, stamp, row in indexed if stamp is None]
+
+
+_INTERPOLATED_TRUTH_FIELDS = (
+    "gt_x_m", "gt_y_m", "gt_z_m", "gt_vx_mps", "gt_vy_mps",
+    "gt_vz_mps", "gt_speed_mps", "gt_odom_x_m", "gt_odom_y_m",
+    "gt_odom_z_m",
+)
+
+
+def align_odom_source_events(
+    rows: list[dict[str, str]], source_event_name: str = "odom",
+) -> list[dict[str, str]] | None:
+    """Pair a timestamped estimator event with truth at the same time.
+
+    The recorder is a multi-topic ROS executor.  A callback snapshot for an
+    message can therefore contain the previous ground-truth callback, even
+    though both messages carry valid source timestamps.  For files with exact
+    source-event logging, use the selected estimator-event timestamp as the
+    abscissa and linearly interpolate the surrounding ground-truth odometry
+    samples. The interpolation is offline-only and never enters runtime
+    odometry. ``odom_diagnostics`` is the preferred event for model fitting:
+    its snapshot contains the sensor-fusion feature vector produced for that
+    estimator update, whereas a later ``odom`` callback can observe a mixture
+    of that vector and the following sensor callback.
+
+    Return ``None`` for legacy/timer-only files so their established scoring
+    path remains unchanged.
+    """
+    odom_events = [
+        row for row in rows
+        if row.get("source_event_name") == source_event_name and
+        finite(row.get("source_event_stamp_s")) is not None
+    ]
+    truth_events = [
+        row for row in rows
+        if row.get("source_event_name") == "gt_odom" and
+        finite(row.get("source_event_stamp_s")) is not None and
+        valid_ground_truth_row(row)
+    ]
+    if len(odom_events) < 3 or len(truth_events) < 3:
+        return None
+
+    def unique_events(events: list[dict[str, str]]) -> list[dict[str, str]]:
+        unique: dict[str, dict[str, str]] = {}
+        for row in events:
+            event = row.get("source_event_count", "")
+            stamp = row.get("source_event_stamp_s", "")
+            unique[event if event else f"stamp:{stamp}"] = row
+        return sorted(
+            unique.values(),
+            key=lambda row: float(row["source_event_stamp_s"]),
+        )
+
+    truth = unique_events(truth_events)
+    odom = unique_events(odom_events)
+    truth_samples: list[tuple[float, dict[str, str]]] = []
+    for row in truth:
+        stamp = finite(row.get("source_event_stamp_s"))
+        if stamp is None:
+            continue
+        # Duplicate source timestamps are possible during bridge bursts. Keep
+        # the newest callback snapshot for interpolation.
+        if truth_samples and stamp == truth_samples[-1][0]:
+            truth_samples[-1] = (stamp, row)
+        else:
+            truth_samples.append((stamp, row))
+    if len(truth_samples) < 3:
+        return None
+    truth_times = [sample[0] for sample in truth_samples]
+    truth_values = {
+        field: [finite(row.get(field)) for _, row in truth_samples]
+        for field in _INTERPOLATED_TRUTH_FIELDS
+    }
+
+    def interpolate(field: str, stamp: float) -> float | None:
+        values = truth_values[field]
+        if stamp < truth_times[0] or stamp > truth_times[-1]:
+            return None
+        index = bisect_left(truth_times, stamp)
+        if index < len(values) and truth_times[index] == stamp:
+            return values[index]
+        if index <= 0 or index >= len(values):
+            return None
+        before_stamp = truth_times[index - 1]
+        after_stamp = truth_times[index]
+        before_value = values[index - 1]
+        after_value = values[index]
+        if before_value is None or after_value is None or after_stamp <= before_stamp:
+            return None
+        ratio = (stamp - before_stamp) / (after_stamp - before_stamp)
+        return before_value + ratio * (after_value - before_value)
+
+    aligned: list[dict[str, str]] = []
+    for row in odom:
+        stamp = finite(row.get("source_event_stamp_s"))
+        if stamp is None or stamp < truth_times[0] or stamp > truth_times[-1]:
+            continue
+        aligned_row = dict(row)
+        for field in _INTERPOLATED_TRUTH_FIELDS:
+            value = interpolate(field, stamp)
+            if value is not None:
+                aligned_row[field] = f"{value:.17g}"
+        # Make the truth timestamp explicit so all derivative/category code
+        # uses the same source time as the odom measurement.
+        aligned_row["gt_odom_stamp_s"] = f"{stamp:.17g}"
+        aligned.append(aligned_row)
+    return aligned if len(aligned) >= 3 else None
 
 
 def ground_truth_step_limit_m(
@@ -832,11 +949,16 @@ def wheel_speed_body_speed_samples(
     One sample per simulator odometry event is retained, and only the stable
     tail of each direct-throttle phase is used.
     """
-    groups: dict[str, dict[int, tuple[float, float, float, float]]] = {}
+    groups: dict[tuple[str, int], dict[int, tuple[float, float, float, float]]] = {}
+    phase_occurrence = 0
+    previous_phase = None
     for row in rows:
         if not valid_ground_truth_row(row):
             continue
         phase = row.get("phase", "")
+        if phase != previous_phase:
+            phase_occurrence += 1
+            previous_phase = phase
         if not (phase.startswith("throttle_") or
                 phase.startswith("grid_throttle_")):
             continue
@@ -845,31 +967,55 @@ def wheel_speed_body_speed_samples(
         truth_speed = finite(row.get("gt_speed_mps"))
         left = finite(row.get("left_encoder_rad"))
         right = finite(row.get("right_encoder_rad"))
-        if None in (stamp, event, truth_speed, left, right):
+        left_encoder_stamp = finite(row.get("left_encoder_stamp_s"))
+        right_encoder_stamp = finite(row.get("right_encoder_stamp_s"))
+        if None in (stamp, event, truth_speed, left, right,
+                    left_encoder_stamp, right_encoder_stamp):
             continue
-        groups.setdefault(phase, {})[int(event)] = (
-            stamp, truth_speed, left, right)
+        encoder_stamp = max(left_encoder_stamp, right_encoder_stamp)
+        # A boundary recovery can restart the same named throttle phase.
+        # Keep each occurrence independent so its acceleration history and
+        # stable tail cannot contaminate the next fit episode.
+        groups.setdefault((phase, phase_occurrence), {})[int(event)] = (
+            stamp, truth_speed, left, right, encoder_stamp)
 
     result: list[tuple[float, float]] = []
     for event_rows in groups.values():
-        samples = sorted(event_rows.values())
-        interval_samples: list[tuple[float, float]] = []
-        for before, after in zip(samples, samples[1:]):
-            dt = after[0] - before[0]
-            if not 0.05 <= dt <= 0.50:
-                continue
-            wheel_speed = DOCUMENTED_WHEEL_RADIUS_M * (
-                (after[2] - before[2]) + (after[3] - before[3])) / (2.0 * dt)
-            if (not math.isfinite(wheel_speed) or not math.isfinite(after[1]) or
-                    wheel_speed < 0.0 or wheel_speed > 40.0 or
-                    after[1] < 0.0 or after[1] > 25.0):
-                continue
-            interval_samples.append((wheel_speed, after[1]))
-        if len(interval_samples) < 8:
+        samples = sorted(event_rows.values(), key=lambda value: value[0])
+        if len(samples) < 8:
             continue
-        tail = interval_samples[max(0, int(len(interval_samples) * 0.60)):]
-        wheel_speed = statistics.median(value[0] for value in tail)
+        # At high throttle the car can take most of a phase to approach
+        # terminal speed; including that acceleration in the encoder slope
+        # biases the map downward. Low-speed phases already have a short,
+        # well-settled tail, where retaining more samples reduces encoder
+        # quantisation noise. Use an adaptive tail rather than one fraction
+        # for every operating regime.
+        phase_body_speed = statistics.median(value[1] for value in samples)
+        tail_fraction = 0.60 if phase_body_speed < 10.0 else 0.80
+        tail = samples[max(0, int(len(samples) * tail_fraction)):]
+        # A 40 Hz bridge stream can deliver several small timestamp gaps and
+        # then one larger encoder-angle increment.  A packet derivative is
+        # therefore quantized even when the physical speed is constant. Use
+        # all sufficiently separated pairs in the stable tail and take the
+        # median cumulative slope. This is still based only on the official
+        # encoder timestamps and angles, but does not turn callback batching
+        # into a false low-speed slip correction.
+        slopes: list[float] = []
+        for first_index, before in enumerate(tail[:-1]):
+            for after in tail[first_index + 1:]:
+                dt = after[4] - before[4]
+                if not 0.10 <= dt <= 1.0:
+                    continue
+                wheel_speed = DOCUMENTED_WHEEL_RADIUS_M * (
+                    (after[2] - before[2]) + (after[3] - before[3])) / (2.0 * dt)
+                if math.isfinite(wheel_speed) and 0.0 <= wheel_speed <= 40.0:
+                    slopes.append(wheel_speed)
+        if len(slopes) < 4:
+            continue
+        wheel_speed = statistics.median(slopes)
         body_speed = statistics.median(value[1] for value in tail)
+        if not math.isfinite(body_speed) or not 0.0 <= body_speed <= 25.0:
+            continue
         # A stable phase cannot have body speed materially above its wheel
         # speed. Such points are reset/phase-transition contamination.
         if wheel_speed < 0.5 and body_speed > 0.5:
@@ -1006,7 +1152,19 @@ def slip_model_samples(
         if not valid_ground_truth_row(row) or not _slip_phase(row.get("phase", "")):
             continue
         vx = finite(row.get("gt_vx_mps"))
-        wheel_speed = finite(row.get("encoder_wheel_speed_mps"))
+        # The instantaneous encoder derivative is deliberately not the
+        # primary slip observation.  The simulator/bridge can repeat a
+        # JointState position and then deliver the accumulated angle in a
+        # burst; that produces zero/very-large derivatives although the
+        # wheel is rolling normally.  SensorOdometryNode exposes the
+        # timestamp-window derivative specifically to average that delivery
+        # pattern.  Prefer it whenever the recording contains it, while
+        # retaining the instantaneous field as a compatibility fallback for
+        # older calibration files and unit fixtures.
+        wheel_speed = finite(
+            row.get("odom_sensor_fusion_window_raw_speed_mps"))
+        if wheel_speed is None:
+            wheel_speed = finite(row.get("encoder_wheel_speed_mps"))
         if wheel_speed is None:
             left_speed = finite(row.get("left_encoder_speed_radps"))
             right_speed = finite(row.get("right_encoder_speed_radps"))
@@ -1197,6 +1355,37 @@ def report_field(rows: list[dict[str, str]], field: str, label: str | None = Non
     name = label or field
     p95 = percentile(values, 0.95)
     print(f"{name}_median={statistics.median(values):.3f} {name}_p95={p95:.3f}")
+
+
+def report_event_counter_rate(
+    rows: list[dict[str, str]], event_name: str,
+) -> None:
+    """Report the callback rate independently of recorder timer sampling.
+
+    The calibration node writes snapshots from a timer, but source callbacks
+    can arrive in bursts.  In that case a timer snapshot may skip an event
+    even though the event counter saw it.  The counter delta is therefore the
+    authoritative native callback count for a recording; the row rate is
+    reported alongside it to expose any logging loss.
+    """
+    event_field = f"{event_name}_event_count"
+    elapsed_values = [finite(row.get("time_s")) for row in rows]
+    elapsed_values = [value for value in elapsed_values if value is not None]
+    counts = [finite(row.get(event_field)) for row in rows]
+    counts = [value for value in counts if value is not None]
+    if len(elapsed_values) < 2 or len(counts) < 2:
+        return
+    elapsed = elapsed_values[-1] - elapsed_values[0]
+    count_delta = counts[-1] - counts[0]
+    if elapsed <= 0.0 or count_delta < 0.0:
+        return
+    row_rate = (len(rows) - 1) / elapsed
+    source_rate = count_delta / elapsed
+    print(
+        f"{event_name}_source_rate_hz={source_rate:.3f} "
+        f"{event_name}_source_events={count_delta:.0f} "
+        f"recorder_row_rate_hz={row_rate:.3f}"
+    )
 
 
 def pose_difference(rows: list[dict[str, str]], left: str, right: str) -> list[float]:
@@ -1451,6 +1640,10 @@ RELATIVE_SPEED_BINS = (
     (10.0, 15.0), (15.0, 20.0), (20.0, 23.0),
 )
 
+SPEED_TRACKING_CATEGORIES = ("acceleration", "steady-state", "deceleration")
+SPEED_TRACKING_SLOPE_WINDOW_S = 0.15
+SPEED_TRACKING_SLOPE_THRESHOLD_MPS2 = 0.50
+
 POSITION_DISTANCE_THRESHOLDS_M = (1.0, 5.0, 10.0, 50.0, 100.0)
 
 
@@ -1566,6 +1759,102 @@ def _position_error_samples(
     return result
 
 
+def _speed_tracking_category_rows(
+    rows: list[dict[str, str]],
+) -> list[tuple[dict[str, str], str]]:
+    """Classify speed samples using a short timestamped truth-speed slope.
+
+    The instantaneous simulator acceleration field contains quantized spikes
+    at the native source cadence.  It is unsuitable for deciding whether a
+    speed error occurred during acceleration, steady state, or deceleration.
+    Use a centered least-squares slope over one quarter of a second instead.
+    Reset phases and long timestamp gaps split the fitting blocks so a
+    teleport cannot become a vehicle transient.
+    """
+    ordered = timestamped_rows(rows)
+    result: list[tuple[dict[str, str], str]] = []
+    block: list[dict[str, str]] = []
+
+    def classify_block(samples: list[dict[str, str]]) -> None:
+        if not samples:
+            return
+        stamped_samples = [
+            (truth_stamp(row), _truth_speed(row), row)
+            for row in samples
+            if truth_stamp(row) is not None and _truth_speed(row) is not None
+        ]
+        stamped_samples.sort(key=lambda item: item[0])
+        sample_times = [item[0] for item in stamped_samples]
+        # Center timestamps before accumulating squares. Source timestamps
+        # are large epoch values, and uncentered sums lose the small
+        # 40-Hz-window differences to floating-point cancellation.
+        time_origin = sample_times[0] if sample_times else 0.0
+        prefix_t = [0.0]
+        prefix_s = [0.0]
+        prefix_tt = [0.0]
+        prefix_ts = [0.0]
+        for sample_time, sample_speed, _ in stamped_samples:
+            sample_offset = sample_time - time_origin
+            prefix_t.append(prefix_t[-1] + sample_offset)
+            prefix_s.append(prefix_s[-1] + sample_speed)
+            prefix_tt.append(prefix_tt[-1] + sample_offset * sample_offset)
+            prefix_ts.append(prefix_ts[-1] + sample_offset * sample_speed)
+
+        for row in samples:
+            speed = _truth_speed(row)
+            if speed is None:
+                continue
+            if speed < 0.10:
+                result.append((row, "stationary"))
+                continue
+            stamp = truth_stamp(row)
+            slope = None
+            if stamp is not None:
+                first = bisect_left(
+                    sample_times, stamp - SPEED_TRACKING_SLOPE_WINDOW_S)
+                after = bisect_right(
+                    sample_times, stamp + SPEED_TRACKING_SLOPE_WINDOW_S)
+                count = after - first
+                if count >= 3:
+                    sum_t = prefix_t[after] - prefix_t[first]
+                    sum_s = prefix_s[after] - prefix_s[first]
+                    sum_tt = prefix_tt[after] - prefix_tt[first]
+                    sum_ts = prefix_ts[after] - prefix_ts[first]
+                    denominator = sum_tt - sum_t * sum_t / count
+                    numerator = sum_ts - sum_t * sum_s / count
+                    slope = numerator / denominator if denominator > 0.0 else 0.0
+            if slope is None:
+                # Preserve compatibility with older files that did not carry
+                # source timestamps. This fallback is intentionally used only
+                # when a timestamped slope cannot be formed.
+                slope = finite(row.get("gt_longitudinal_accel_mps2")) or 0.0
+            if slope >= SPEED_TRACKING_SLOPE_THRESHOLD_MPS2:
+                category = "acceleration"
+            elif slope <= -SPEED_TRACKING_SLOPE_THRESHOLD_MPS2:
+                category = "deceleration"
+            else:
+                category = "steady-state"
+            result.append((row, category))
+
+    previous_stamp = None
+    for row in ordered:
+        stamp = truth_stamp(row)
+        if phase_is_diagnostic_reset(row.get("phase", "")) or not valid_ground_truth_row(row):
+            classify_block(block)
+            block = []
+            previous_stamp = None
+            continue
+        if (previous_stamp is not None and stamp is not None and
+                (stamp <= previous_stamp or
+                 stamp - previous_stamp > DEFAULT_GROUND_TRUTH_MAX_GAP_S)):
+            classify_block(block)
+            block = []
+        block.append(row)
+        previous_stamp = stamp
+    classify_block(block)
+    return result
+
+
 def _stable_controller_pairs(
     rows: list[dict[str, str]],
     phase_prefix: str,
@@ -1608,6 +1897,7 @@ def relative_error_metrics(
     percentage because percentages near zero are intrinsically ill-conditioned.
     """
     metrics: list[dict[str, float | int | str]] = []
+    rows = align_odom_source_events(rows) or rows
 
     speed_groups: dict[str, tuple[list[float], list[float]]] = {
         f"{lower:g}-{upper:g}_mps": ([], [])
@@ -1636,6 +1926,54 @@ def relative_error_metrics(
         if errors:
             metrics.append(_relative_metric_row(
                 "odom_speed_vs_truth", label, errors, references))
+
+    # Keep the requested motion-state split beside the speed-bin report. A
+    # speed sample is not interchangeable across acceleration, steady state,
+    # and braking, especially while a driven encoder is frozen. Emit both the
+    # aggregate category and its speed-bin breakdown so low-speed braking
+    # errors cannot be hidden by the full-population median.
+    category_groups: dict[str, dict[str, tuple[list[float], list[float]]]] = {
+        category: {
+            f"{lower:g}-{upper:g}_mps": ([], [])
+            for lower, upper in RELATIVE_SPEED_BINS
+        }
+        for category in SPEED_TRACKING_CATEGORIES
+    }
+    category_all: dict[str, tuple[list[float], list[float]]] = {
+        category: ([], []) for category in SPEED_TRACKING_CATEGORIES
+    }
+    for row, category in _speed_tracking_category_rows(rows):
+        if category not in category_groups:
+            continue
+        truth = _truth_speed(row)
+        odom = finite(row.get("speed_mps"))
+        if truth is None or odom is None or truth < 0.0:
+            continue
+        error = abs(truth - odom)
+        all_errors, all_references = category_all[category]
+        all_errors.append(error)
+        all_references.append(truth if truth >= 1.0 else math.nan)
+        for lower, upper in RELATIVE_SPEED_BINS:
+            if lower <= truth < upper or (
+                    upper == 23.0 and lower <= truth <= upper):
+                errors, references = category_groups[category][
+                    f"{lower:g}-{upper:g}_mps"]
+                errors.append(error)
+                references.append(truth if truth >= 1.0 else math.nan)
+                break
+    for category in SPEED_TRACKING_CATEGORIES:
+        errors, references = category_all[category]
+        if errors:
+            metrics.append(_relative_metric_row(
+                f"odom_speed_vs_truth_{category}", "all_speeds",
+                errors, references))
+        for lower, upper in RELATIVE_SPEED_BINS:
+            label = f"{lower:g}-{upper:g}_mps"
+            errors, references = category_groups[category][label]
+            if errors:
+                metrics.append(_relative_metric_row(
+                    f"odom_speed_vs_truth_{category}", label,
+                    errors, references))
 
     position_samples = _position_error_samples(rows)
     for threshold in POSITION_DISTANCE_THRESHOLDS_M:
@@ -1773,6 +2111,10 @@ def main() -> None:
         print(f"ground_truth_boundary_rows_removed={rejected_ground_truth_rows}")
     rows = valid_rows
     analysis_rows, duplicate_gt_rows = deduplicate_source_events(rows)
+    aligned_analysis_rows = align_odom_source_events(rows)
+    if aligned_analysis_rows is not None:
+        analysis_rows = aligned_analysis_rows
+        print("ground_truth_speed_alignment=odom_source_timestamp_interpolation")
     rates = [finite(row.get("lidar_rate_hz")) for row in rows]
     rates = [value for value in rates if value is not None and value > 0.0]
     speed_field = preferred_speed_field(rows)
@@ -1808,6 +2150,10 @@ def main() -> None:
         "steering_feedback_rate_hz",
     ):
         report_field(rows, field)
+    for event_name in (
+        "imu", "left_encoder", "right_encoder", "odom", "gt_odom",
+    ):
+        report_event_counter_rate(rows, event_name)
     if speed:
         print(f"{speed_field}_min={min(speed):.3f} {speed_field}_max={max(speed):.3f}")
 

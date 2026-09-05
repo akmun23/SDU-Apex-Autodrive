@@ -1,0 +1,24 @@
+# Short continuous speed transition validation from a verified spawn. The
+# sequence includes both acceleration and braking/downshift regimes while
+# remaining well inside the open-world boundary.
+calibration:
+  ros__parameters:
+    mode: speed_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/comprehensive_speed_down_up_short_validation_20260904
+    sample_rate_hz: 50.0
+    capture_source_events: true
+    duration_sec: 0.0
+    speed_sequence_mps: [4.0, 8.0, 12.0, 16.0, 12.0, 8.0, 4.0, 2.0, 0.0]
+    hold_sec: 1.0
+    zero_settle_sec: 3.0
+    speed_settle_error_mps: 0.25
+    speed_settle_timeout_sec: 8.0
+    speed_steps_brake_between_targets: false
+    reset_between_steps: false
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 90.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 300.0
