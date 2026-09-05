@@ -1,0 +1,49 @@
+diff --git a/Assets/Scripts/LIDAR.cs b/Assets/Scripts/LIDAR.cs
+index 2d6eb22..parallel40hz 100644
+--- a/Assets/Scripts/LIDAR.cs
++++ b/Assets/Scripts/LIDAR.cs
+@@ -93,24 +93,40 @@ public class LIDAR : MonoBehaviour
+ 		// Precompute directions and store in an array
+ 		Vector3[] laserRayDirections = new Vector3[MeasurementsPerScan];
+ 		for (int i = 0; i < MeasurementsPerScan; i++)
+ 		{
+ 			float angle = initialAngle + (i * angleIncrement) * (MinimumAngularRange <= 0 ? -1 : 1);
+ 			laserRayDirections[i] = new Vector3(Mathf.Sin(angle), 0, Mathf.Cos(angle)) * MaximumLinearRange;
+ 		}
+
++		// Schedule the independent sensor rays on Unity's physics workers.  The
++		// original loop executes all 1080 Physics.Raycast calls on the main
++		// thread, which can consume the complete 25 ms telemetry budget on the
++		// compete scene.  This keeps the same origin, range, layer mask, and
++		// single-hit behavior while allowing the queries to run in parallel.
++		NativeArray<RaycastCommand> raycastCommands =
++			new NativeArray<RaycastCommand>(MeasurementsPerScan, Allocator.TempJob);
++		NativeArray<RaycastHit> hits =
++			new NativeArray<RaycastHit>(MeasurementsPerScan, Allocator.TempJob);
++		for (int i = 0; i < MeasurementsPerScan; i++)
++		{
++			raycastCommands[i] = new RaycastCommand(
++				Head.transform.position, laserRayDirections[i],
++				MaximumLinearRange, layer_mask, 1);
++		}
++		JobHandle raycastJob = RaycastCommand.ScheduleBatch(
++			raycastCommands, hits, 32, default(JobHandle));
++		raycastJob.Complete();
+ 
+-		// Perform raycasts
+-		RaycastHit[] hits = new RaycastHit[MeasurementsPerScan];
+ 		for (int i = 0; i < MeasurementsPerScan; i++)
+ 		{
+-			if (Physics.Raycast(Head.transform.position, laserRayDirections[i], out hits[i], MaximumLinearRange, layer_mask))
++			if (hits[i].collider != null)
+ 			{
+ 				float hitDistance = hits[i].distance;
+ 				RangeArray[i] = (hitDistance > MinimumLinearRange) ? hitDistance.ToString() : "inf"; // Store range result
+@@
+ 			Graphics.DrawMesh(LaserScanMesh, Vector3.zero, Quaternion.identity, LaserScanMaterial, visualizationLayerID);
+ 		}
+
++		raycastCommands.Dispose();
++		hits.Dispose();
+ 
+ 		// LOG LASER SCAN

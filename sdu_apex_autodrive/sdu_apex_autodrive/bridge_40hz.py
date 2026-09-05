@@ -77,6 +77,9 @@ _packet_timing_publisher: Any = None
 _reset_subscription: Any = None
 _packet_sequence = 0
 _packet_contract_installed = False
+_handler_timing_enabled = False
+_handler_timing_count = 0
+_handler_timing_total_ns = 0
 
 # Unity can emit one startup packet before its LiDAR range buffer has been
 # populated.  The official decoder treats that optional field as mandatory and
@@ -327,6 +330,8 @@ def _install_packet_contract(publish_camera: bool) -> None:
         raise RuntimeError("official AutoDRIVE bridge has no Bridge handler")
 
     def packet_handler(sid: Any, data: Any) -> Any:
+        global _handler_timing_count, _handler_timing_total_ns
+        handler_start_ns = time.monotonic_ns()
         _capture_simulation_metadata(data)
         if not publish_camera and isinstance(data, dict):
             # The official bridge accesses this key unconditionally. Injecting
@@ -346,7 +351,19 @@ def _install_packet_contract(publish_camera: bool) -> None:
             )
             _retry_incomplete_packet()
             return None
-        return original_handler(sid, data)
+        result = original_handler(sid, data)
+        if _handler_timing_enabled:
+            duration_ns = time.monotonic_ns() - handler_start_ns
+            _handler_timing_count += 1
+            _handler_timing_total_ns += duration_ns
+            if _handler_timing_count % 40 == 0:
+                average_ms = _handler_timing_total_ns / _handler_timing_count / 1e6
+                print(
+                    "[autodrive_bridge_40hz] handler timing: "
+                    f"last={duration_ns / 1e6:.2f} ms average={average_ms:.2f} ms",
+                    flush=True,
+                )
+        return result
 
     handlers["Bridge"] = packet_handler
     _packet_contract_installed = True
@@ -368,7 +385,10 @@ def _disable_camera_path() -> None:
 
 
 def main() -> None:
+    global _handler_timing_enabled
     rate_hz = _rate_hz()
+    _handler_timing_enabled = _env_enabled(
+        "AUTODRIVE_BRIDGE_LOG_HANDLER_TIMING", False)
     _install_packet_timestamp_patch()
     publish_camera = _env_enabled("AUTODRIVE_BRIDGE_PUBLISH_CAMERA", False)
     publish_lidar_intensity = _env_enabled(

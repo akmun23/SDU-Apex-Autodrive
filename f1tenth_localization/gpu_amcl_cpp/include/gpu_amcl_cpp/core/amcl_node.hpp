@@ -139,7 +139,7 @@ private:
     // A scan match is an absolute map-pose measurement.  Keep odometry as
     // the short-term prediction and apply only a bounded fraction of the
     // scan correction so a small systematic likelihood-field bias cannot
-    // accumulate into a large along-track error at the native 10 Hz rate.
+    // accumulate into a large along-track error at the native scan rate.
     double local_scan_correction_gain_ = 0.08;
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;

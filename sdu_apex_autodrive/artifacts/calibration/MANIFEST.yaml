@@ -1,110 +1,77 @@
-schema_version: 5
+schema_version: 6
 description: >-
-  Canonical open-world IMU/encoder odometry calibration evidence. Ground truth
-  is used offline for fitting and scoring only; it is never a runtime input.
+  Deterministic source-timestamp odometry observer evidence. Ground truth is
+  used for offline scoring only and is never a runtime odometry input.
 repository:
-  base_revision: 535adf0
+  base_revision: 4efda364280879f64026b33c60bbec012967c0be
   status_date: 2026-09-05
   scene: official_open_ground_no_track
   simulator_image: autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore
-  analyzer: sdu_apex_autodrive/sdu_apex_autodrive/scripts/analyze_calibration.py
-  regime_fitter: sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py
-fit_policy:
-  - Fit only from training_csv.
-  - Score only on validation_csv; never mix the files.
-  - Use source timestamps and measured callback cadence.
-  - Keep encoder freeze and braking slip as valid motion data.
-  - Keep simulator truth outside runtime odom, EKF, AMCL, and controllers.
-
-canonical_odometry_csvs:
-  training_csv:
-    path: raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv
-    purpose: model fitting only
-    source_events: 63158
-    recorder_rows: 457619
-    measured_sensor_rate_hz: 39.99
-    collisions: 0
-  validation_csv:
-    path: raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv
-    purpose: untouched independent validation only
-    source_events: 62829
-    recorder_rows: 455089
-    measured_sensor_rate_hz: 39.99
-    collisions: 0
-
-canonical_fit:
-  output_dir: derived/odom_fusion_train_full_holdout_observer_median_20260904
-  metrics: derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv
-  installed_runtime_header: ../../../f1tenth_localization/include/f1tenth_localization/sensor_fusion_model.hpp
-  installed_runtime_header_status: unchanged_candidate_not_promoted
-  command: >-
-    PYTHONPATH=sdu_apex_autodrive python3 -u
-    sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py
-    raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv
-    --validation
-    raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv
-    --sensor-odometry-config f1tenth_localization/config/sensor_odometry.yaml
-    --header derived/odom_fusion_train_full_holdout_observer_median_20260904/sensor_fusion_model.hpp
-    --metrics derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv
-
-fit_runtime_parameters:
-  imu_acceleration_filter_alpha: 0.90
-  imu_acceleration_filter_alpha_source: f1tenth_localization/config/sensor_odometry.yaml
-  deployed_speed_source: odom_source_event_speed_mps
-  deployed_speed_fallbacks:
-    - odom_diagnostics_speed_mps
-    - speed_mps
-  deployed_braking_branch: braking_observer
-
-runtime_v2_estimator:
-  source_handoff: /home/akselmo/Downloads/odom_estimator_handoff_v2.zip
-  global_model: ../../sdu_apex_autodrive/scripts/odom_estimator_v2/models/global_lgbm_speed_residual.txt
-  braking_model: ../../sdu_apex_autodrive/scripts/odom_estimator_v2/models/braking_specialist.txt
-  generated_header: ../../../f1tenth_localization/include/f1tenth_localization/odom_estimator_v2_model.hpp
-  feature_history_header: ../../../f1tenth_localization/include/f1tenth_localization/odom_estimator_v2_features.hpp
-  generator: sdu_apex_autodrive/sdu_apex_autodrive/scripts/generate_odom_estimator_v2_header.py
-  global_feature_count: 195
-  braking_feature_count: 50
-  braking_blend: clamp((-imu_observer_acceleration_mps2 - 0.35) / 0.50, 0, 1)
-  validation_summary: sdu_apex_autodrive/scripts/odom_estimator_v2/results/summary_v2.json
+  simulator_camera_mode: camera-off level0 serialized-scene override
+  bridge: sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py
+  bridge_revision: 4efda364280879f64026b33c60bbec012967c0be
+  source_rate_hz: 40
+  camera_runtime_path: disabled
+  unity_metadata_available_in_prebuilt_player: false
+runtime:
+  implementation:
+    - f1tenth_localization/include/f1tenth_localization/odometry_observer.hpp
+    - f1tenth_localization/src/odometry_observer.cpp
+    - f1tenth_localization/include/f1tenth_localization/sensor_packet_assembler.hpp
+    - f1tenth_localization/src/sensor_packet_assembler.cpp
+    - f1tenth_localization/src/sensor_odometry_node.cpp
+  packet_policy: exact source timestamp; encoder pair and IMU must be complete
+  wheel_map: sdu_apex_autodrive/config/wheel_speed_map.csv
+  wheel_map_sha256: b9e1d5b19e061925f6292245e6262fe046604a929c60f55830ca1c2849973f48
+  sensor_odometry_config_sha256: 5e1c9138a4506137c1c13fb3502baa679a728b30aa9e6a9d70dcf9988961fcb7
+  timing_profile: sdu_apex_autodrive/config/timing_clean_40hz.yaml
+  timing_profile_sha256: 71b3400e16d247a1041bbaabe90fa82ef71f4ec7d7743949c997a26fcf1b942f
+  physical_wheel_radius_m: 0.059
+  diagnostics_version: 2
   runtime_ground_truth_input: false
-
-holdout_relative_error_p95_pct:
-  offline_forest_validation_all:
-    1-3_mps: 2.696
-    3-5_mps: 1.800
-    5-10_mps: 1.142
-    10-15_mps: 0.775
-    15-20_mps: 0.438
-    20-23_mps: 0.441
-  deployed_odom_validation_all:
-    1-3_mps: 18.161
-    3-5_mps: 8.628
-    5-10_mps: 6.535
-    10-15_mps: 4.141
-    15-20_mps: 4.630
-    20-23_mps: 6.342
-  deployed_odom_validation_decelerating:
-    1-3_mps: 17.755
-    3-5_mps: 9.178
-    5-10_mps: 7.106
-    10-15_mps: 4.666
-
-deployed_map_provenance:
-  wheel_speed_map: derived/identification_grid_stop_gate_40hz_20260904/wheel_speed_map.csv
-  physical_wheel_radius_m: 0.0590
-  ground_truth_runtime_input: false
-
-retained_files:
-  - raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv
-  - raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv
-  - derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv
-  - derived/identification_grid_stop_gate_40hz_20260904/wheel_speed_map.csv
-
-deleted_as_superseded:
-  - prior identification, speed-controller, acceleration-controller, and
-    transient-validation CSV recordings
-  - prior derived reports and generated model candidates
-  - superseded calibration profiles and the Docker-owned rejected-controller archive
-  - obsolete fit_sensor_fusion_model.py implementation
-  - rejected fit_longitudinal_observer.py implementation and its setup entry
+  runtime_learned_model_input: false
+  runtime_camera_input: false
+canonical_replays:
+  fit:
+    path: raw/identification_grid_fit_40hz_20260905_final/identification_grid_20260905_144304.csv
+    sha256: b3261c202b7a3196e93692f1be8d68f4cb12f5ad052492d6518e370f7e6d21de
+    complete_packets: 58661
+    moving_samples: 31482
+    p95_relative_error_pct: 0.7208446321
+    fraction_le_2pct: 0.9911695572
+  test:
+    path: raw/identification_grid_test_40hz_20260905/identification_grid_20260905_151313.csv
+    sha256: c46af5b33644fdfcf66d6c6c8a1c93688776f4939e4609a71b5ef9fc3fedf8b3
+    complete_packets: 58726
+    moving_samples: 31484
+    p95_relative_error_pct: 0.7217812745
+    fraction_le_2pct: 0.9909477830
+  blind_validation:
+    path: raw/identification_grid_validation_40hz_20260905/identification_grid_20260905_155143.csv
+    sha256: 0970e6112d456daf66e0ab94d864b384034484a2026b2e353fdc14a48d8e5aac
+    complete_packets: 58747
+    moving_samples: 31476
+    p95_relative_error_pct: 0.7421933522
+    fraction_le_2pct: 0.9903418478
+  python_cpp_parity: all speed/body/pose fields and flags matched to floating-point precision
+fresh_live_acceptance:
+  path: raw/deterministic_observer_motion_40hz_20260905/zero_throttle_decel_20260905_172107.csv
+  sha256: 83974b69163585554b22d85c21c69e46d8606f15e1dd8ec46d874e5d935c5ac2
+  complete_packets: 1081
+  incomplete_packets: 0
+  duplicate_event_rows: 0
+  moving_samples: 390
+  fraction_le_2pct: 1.0
+  timing_gate_report: /tmp/deterministic_observer_motion_gate.json
+  timing_monitor_report: /tmp/deterministic_observer_motion_monitor.json
+  timing_gate: pass
+  timing_monitor: pass
+  simulation_metadata_gate: disabled_for_prebuilt_player
+tests:
+  ctest: f1tenth_localization/odometry_observer_test passed
+  python_cpp_replay: passed
+  packet_reconstruction: exact timestamp join with no forward fill
+offline_model_development:
+  policy: keep new model fitting/scoring separate from deterministic runtime
+  legacy_learned_estimator_scripts_removed: true
+  legacy_cpp_runtime_headers_removed: true

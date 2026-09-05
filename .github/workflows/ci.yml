@@ -1,0 +1,44 @@
+name: CPU validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  odometry-cpu:
+    name: ROS 2 Humble CPU odometry
+    runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build without CUDA AMCL
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake libeigen3-dev
+          colcon build --merge-install \
+            --packages-select f1tenth_localization \
+            --cmake-args -DBUILD_GPU_AMCL=OFF
+      - name: Run C++ tests
+        shell: bash
+        run: |
+          ctest --test-dir build/f1tenth_localization --output-on-failure
+
+  python:
+    name: Python analysis and controller tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install numpy pandas pytest
+      - name: Run Python tests
+        run: |
+          PYTHONPATH=sdu_apex_autodrive pytest -q sdu_apex_autodrive/test
+      - name: Check whitespace and syntax
+        run: |
+          git diff --check
+          python3 -m compileall -q sdu_apex_autodrive/sdu_apex_autodrive

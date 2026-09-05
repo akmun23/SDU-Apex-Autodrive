@@ -1,15 +1,15 @@
 """Measured-feedforward speed and longitudinal acceleration controllers.
 
 The AutoDRIVE actuator interface has a normalized throttle input, not a direct
-acceleration input.  The speed feed-forward table supplies the throttle needed
-to hold a body speed, while the acceleration controller adds the calibrated
-speed-dependent throttle required to produce a requested longitudinal
-acceleration.  The online controller only consumes allowed odometry and IMU
-data; simulator truth is used offline to identify the tables.
+acceleration input. The speed feed-forward table supplies the throttle needed
+to hold a body speed. Speed commands use that table directly; acceleration
+commands are integrated into a speed trajectory and then use the same speed
+loop. The online controller only consumes allowed odometry and IMU data;
+simulator truth is used offline to identify and validate the tables.
 """
 
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 
@@ -69,8 +69,12 @@ class SpeedControllerConfig:
         0.956, 0.529, 0.529, 0.529, 0.086,
     )
     max_deceleration_mps2: float = 8.0
-    acceleration_feedback_gain: float = 0.25
-    acceleration_integral_gain: float = 0.003
+    # Native acceleration is a diagnostic signal only by default. The
+    # simulator's derivative can alternate sign between otherwise increasing
+    # speed samples, so closing this loop directly creates throttle relay.
+    # Keep the knobs available for a future validated acceleration sensor.
+    acceleration_feedback_gain: float = 0.0
+    acceleration_integral_gain: float = 0.0
     acceleration_integral_limit: float = 2.0
     # Optional acceleration-loop slew limits. ``None`` preserves the shared
     # speed-loop limits for callers that construct this dataclass directly.
@@ -82,9 +86,13 @@ class SpeedControllerConfig:
     # Throttle added per requested m/s^2.  It rises with speed because the
     # open-ground measurements show a progressively smaller acceleration
     # response and more wheel slip at high speed.
+    # Live acceleration-step response showed the previous offline inverse
+    # table was roughly three times too aggressive. These conservative
+    # dynamic increments are applied above the measured steady-speed table;
+    # the capability envelope still bounds the result at high speed.
     acceleration_throttle_per_mps2: tuple[float, ...] = (
-        0.158521, 0.160881, 0.163312, 0.165818, 0.168402, 0.171068,
-        0.173819, 0.176661, 0.179597, 0.182632, 0.185771, 0.190688,
+        0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
+        0.066, 0.068, 0.070, 0.072, 0.074, 0.078,
     )
 
     def validate(self) -> None:
@@ -183,10 +191,11 @@ class AccelerationController:
     """Convert desired body acceleration into a throttle correction.
 
     ``base_throttle`` is the measured steady-speed feed-forward value.  The
-    correction is an inverse acceleration model with IMU acceleration
-    feedback.  It deliberately returns a correction instead of clamping the
-    final throttle, so the caller retains the complete normalized [0, 1]
-    actuator range.
+    correction is an inverse acceleration model with optional acceleration
+    feedback.  The production profile leaves that feedback disabled because
+    the simulator's native derivative contains sign-reversing bursts. It
+    deliberately returns a correction instead of clamping the final throttle,
+    so the caller retains the complete normalized [0, 1] actuator range.
     """
 
     def __init__(self, config: SpeedControllerConfig) -> None:
@@ -347,9 +356,10 @@ class LongitudinalStateEstimator:
     The C++ odometry node already converts the documented wheel angle into a
     body-speed estimate and applies the measured high-speed slip map.  That
     odometry stream is therefore the absolute speed reference for control.
-    The IMU is retained as a filtered acceleration signal and as a diagnostic
-    disagreement indicator; its open-loop integral is not allowed to mask a
-    valid odometry update with accumulated bias.
+    Once odometry is live, acceleration feedback is the filtered derivative of
+    that calibrated speed. The IMU is retained only for bounded startup
+    operation; native IMU acceleration can contain transient sign reversals
+    while the calibrated speed is still increasing.
     """
 
     def __init__(
@@ -380,6 +390,7 @@ class LongitudinalStateEstimator:
         self.filtered_acceleration_mps2 = 0.0
         self.last_acceleration_time = None
         self.last_odom_time = None
+        self._odom_acceleration_samples = []
         self.has_acceleration = False
         self.has_odom = False
         self.slip_detected = False
@@ -392,10 +403,11 @@ class LongitudinalStateEstimator:
             dt = now_seconds - self.last_acceleration_time
             if 1.0e-4 < dt <= 0.5:
                 previous = self.filtered_acceleration_mps2
-                self.filtered_acceleration_mps2 = (
-                    self.acceleration_filter_alpha * acceleration
-                    + (1.0 - self.acceleration_filter_alpha) * previous
-                )
+                if not self.has_odom:
+                    self.filtered_acceleration_mps2 = (
+                        self.acceleration_filter_alpha * acceleration
+                        + (1.0 - self.acceleration_filter_alpha) * previous
+                    )
                 # Before the first odometry sample, integration gives the
                 # actuator a bounded startup estimate. Once /odom is live,
                 # keep this observer from overwriting its calibrated absolute
@@ -403,7 +415,7 @@ class LongitudinalStateEstimator:
                 if not self.has_odom:
                     self.speed_mps = max(
                         0.0, self.speed_mps + self.filtered_acceleration_mps2 * dt)
-        else:
+        elif not self.has_odom:
             self.filtered_acceleration_mps2 = acceleration
         self.last_acceleration_time = now_seconds
         self.has_acceleration = True
@@ -415,11 +427,15 @@ class LongitudinalStateEstimator:
         if not self.has_odom:
             self.speed_mps = odom_speed
             self.has_odom = True
-        elif not self.has_acceleration:
-            self.speed_mps = odom_speed
+            # Discard any startup IMU value when the calibrated speed stream
+            # becomes available; acceleration feedback will use its derivative.
+            self.filtered_acceleration_mps2 = 0.0
+            self._odom_acceleration_samples.clear()
         elif odom_speed <= 0.20 and self.speed_mps > 0.50:
             # A reset or a genuine stop must not leave the IMU observer moving.
             self.speed_mps = odom_speed
+            self.filtered_acceleration_mps2 = 0.0
+            self._odom_acceleration_samples.clear()
             self.slip_detected = False
         else:
             discrepancy = abs(odom_speed - self.speed_mps)
@@ -438,7 +454,28 @@ class LongitudinalStateEstimator:
             # between boost, hold, and coast. The published /odom topic is
             # untouched, and alpha=1 preserves the raw calibrated value.
             alpha = self.speed_measurement_filter_alpha
+            previous_speed = self.speed_mps
+            previous_time = self.last_odom_time
             self.speed_mps = alpha * odom_speed + (1.0 - alpha) * self.speed_mps
+            if previous_time is not None:
+                dt = now_seconds - previous_time
+                if 1.0e-4 < dt <= 0.5:
+                    odom_acceleration = clamp(
+                        (self.speed_mps - previous_speed) / dt,
+                        -25.0,
+                        25.0,
+                    )
+                    self._odom_acceleration_samples.append(odom_acceleration)
+                    if len(self._odom_acceleration_samples) > 5:
+                        self._odom_acceleration_samples.pop(0)
+                    ordered_accelerations = sorted(self._odom_acceleration_samples)
+                    odom_acceleration = ordered_accelerations[
+                        len(ordered_accelerations) // 2]
+                    self.filtered_acceleration_mps2 = (
+                        self.acceleration_filter_alpha * odom_acceleration
+                        + (1.0 - self.acceleration_filter_alpha)
+                        * self.filtered_acceleration_mps2
+                    )
         self.last_odom_time = now_seconds
         return self.speed_mps
 
@@ -787,28 +824,52 @@ class TargetSpeedController:
 class TargetAccelerationController:
     """Convert a physical acceleration target into normalized throttle.
 
-    MPC publishes acceleration on its own command topic.  This controller
-    deliberately ignores the speed field in that message: speed is used only
-    to select the measured steady-speed feed-forward operating point, while
-    the requested acceleration and IMU acceleration close the transient loop.
-    Negative acceleration requests coast because the AutoDRIVE competition
-    interface exposes no active brake channel.
+    MPC publishes acceleration on its own command topic.  The command is
+    integrated into a short-horizon speed trajectory and passed through the
+    validated speed controller. This is intentional: the simulator's native
+    acceleration derivative can reverse sign between otherwise increasing
+    speed samples, so direct acceleration feedback relays throttle instead of
+    tracking the requested trajectory. Negative acceleration requests coast
+    because the AutoDRIVE competition interface exposes no active brake
+    channel.
     """
 
     def __init__(self, config: SpeedControllerConfig) -> None:
         config.validate()
         self.config = config
         self.acceleration_controller = AccelerationController(config)
+        self.speed_controller = self._make_speed_controller(config)
+        self.target_speed_mps = None
         self.last_output = 0.0
 
+    @staticmethod
+    def _make_speed_controller(config: SpeedControllerConfig) -> TargetSpeedController:
+        # Keep acceleration-mode output slew limits independent from the
+        # normal speed-command profile while reusing the same speed feedback
+        # and handoff logic.
+        return TargetSpeedController(replace(
+            config,
+            throttle_rise_rate_per_sec=(
+                config.acceleration_throttle_rise_rate_per_sec
+                if config.acceleration_throttle_rise_rate_per_sec is not None
+                else config.throttle_rise_rate_per_sec),
+            throttle_fall_rate_per_sec=(
+                config.acceleration_throttle_fall_rate_per_sec
+                if config.acceleration_throttle_fall_rate_per_sec is not None
+                else config.throttle_fall_rate_per_sec),
+        ))
+
     def reset(self) -> None:
+        self.speed_controller.reset()
         self.last_output = 0.0
         self.acceleration_controller.reset()
+        self.target_speed_mps = None
 
     def reconfigure(self, config: SpeedControllerConfig) -> None:
         config.validate()
         self.config = config
         self.acceleration_controller = AccelerationController(config)
+        self.speed_controller = self._make_speed_controller(config)
         self.reset()
 
     def feedforward(self, speed_mps: float) -> float:
@@ -839,39 +900,33 @@ class TargetAccelerationController:
 
         measured_speed = max(0.0, measured_speed_mps)
         if target_accel_mps2 < 0.0:
+            # There is no active brake output in the competition actuator
+            # contract. Reset the trajectory and coast immediately; a later
+            # positive command will seed a new trajectory from fresh odom.
             self.reset()
             return 0.0
 
-        correction = self.acceleration_controller.correction(
-            measured_speed,
-            min(
-                target_accel_mps2,
-                self.acceleration_controller.maximum_acceleration(measured_speed),
-            ),
-            measured_accel_mps2,
-            dt_seconds,
+        if self.target_speed_mps is None:
+            self.target_speed_mps = measured_speed
+        target_acceleration = min(
+            target_accel_mps2,
+            self.acceleration_controller.maximum_acceleration(measured_speed),
         )
-        desired = clamp(
-            self.feedforward(measured_speed) + correction,
+        self.target_speed_mps = clamp(
+            self.target_speed_mps + target_acceleration * dt_seconds,
             0.0,
-            self.config.throttle_max_forward,
+            self.config.feedforward_speed_mps[-1],
         )
-        if desired >= self.last_output:
-            rate = (
-                self.config.acceleration_throttle_rise_rate_per_sec
-                if self.config.acceleration_throttle_rise_rate_per_sec is not None
-                else self.config.throttle_rise_rate_per_sec
-            )
-        else:
-            rate = (
-                self.config.acceleration_throttle_fall_rate_per_sec
-                if self.config.acceleration_throttle_fall_rate_per_sec is not None
-                else self.config.throttle_fall_rate_per_sec
-            )
-        max_step = rate * dt_seconds
-        self.last_output = clamp(
-            desired,
-            max(0.0, self.last_output - max_step),
-            min(self.config.throttle_max_forward, self.last_output + max_step),
+        # The trajectory itself carries the acceleration request. Pass zero
+        # transient acceleration here so the noisy native derivative cannot
+        # re-enter the control law through the speed controller's predictive
+        # handoff.
+        self.last_output = self.speed_controller.update(
+            self.target_speed_mps,
+            measured_speed,
+            0.0,
+            dt_seconds,
+            measured_accel_mps2=0.0,
+            measurement_fresh=True,
         )
         return self.last_output

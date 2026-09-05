@@ -66,7 +66,7 @@ def _setup(context):
         executable="timing_validator",
         name="autodrive_timing_validator",
         output="screen",
-        parameters=[{
+        parameters=[LaunchConfiguration("timing_profile"), {
             "duration_sec": LaunchConfiguration("timing_gate_duration_sec"),
             "startup_timeout_sec": LaunchConfiguration("timing_gate_startup_timeout_sec"),
             "report_path": LaunchConfiguration("timing_gate_report_path"),
@@ -125,7 +125,7 @@ def _setup(context):
             executable="timing_validator",
             name="autodrive_timing_monitor",
             output="screen",
-            parameters=[{
+            parameters=[LaunchConfiguration("timing_profile"), {
                 "duration_sec": LaunchConfiguration("timing_monitor_duration_sec"),
                 "startup_timeout_sec": LaunchConfiguration("timing_gate_startup_timeout_sec"),
                 "report_path": LaunchConfiguration("timing_monitor_report_path"),
@@ -199,6 +199,11 @@ def generate_launch_description():
         DeclareLaunchArgument("timing_gate_duration_sec", default_value="15.0"),
         DeclareLaunchArgument("timing_gate_startup_timeout_sec", default_value="30.0"),
         DeclareLaunchArgument("timing_gate_grace_sec", default_value="2.0"),
+        DeclareLaunchArgument(
+            "timing_profile",
+            default_value=os.path.join(share, "config", "timing_clean_40hz.yaml"),
+            description="Shared source/arrival timing policy for 40 Hz acceptance",
+        ),
         DeclareLaunchArgument("require_simulation_metadata", default_value="true"),
         DeclareLaunchArgument("timing_monitor_duration_sec", default_value="3600.0"),
         DeclareLaunchArgument("timing_monitor_grace_sec", default_value="2.0"),

@@ -1379,7 +1379,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             // The particle cloud is a scan-matching aid, not a second dead-
             // reckoning state. Recenter it on the fused pose so a small
             // systematic scan bias cannot be integrated again on the next
-            // native 10 Hz update.
+            // native scan update.
             pf_.reinitialize(
                 est.x, est.y, est.theta,
                 local_tracking_cloud_covariance_xy_,

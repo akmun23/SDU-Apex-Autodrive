@@ -12,7 +12,10 @@ autodrive_actuator_interface:
 
     command_timeout_sec: 0.30
     odom_timeout_sec: 0.30
-    publish_rate_hz: 10.0
+    # The simulator source stream is now accepted at 40 Hz. Run the actuator
+    # loop at the same cadence so speed and acceleration feedback do not wait
+    # an extra 75 ms for the next controller tick.
+    publish_rate_hz: 40.0
 
     # Simulator-only terminal failure handling. This is deliberately isolated
     # from competition controller inputs and must be disabled for a rules-only
@@ -43,27 +46,24 @@ autodrive_actuator_interface:
     # measured feed-forward plus speed error and this is only the protocol
     # bound for forward throttle.
     throttle_max_forward: 1.0
-    # At the native 10 Hz event cadence a command reaches the full normalized
-    # range in one update. This keeps the measured actuator response available
-    # to the acceleration controller instead of imposing a hidden throttle cap.
+    # The speed loop is allowed to use the full normalized range at 40 Hz;
+    # acceleration mode applies its own independent slew limits below.
     throttle_rise_rate_per_sec: 10.0
     throttle_fall_rate_per_sec: 10.0
     stop_speed_threshold_mps: 0.02
     # Use calibrated feedback for small overshoots; passive coast is reserved
     # for a materially large error so low-speed control does not oscillate.
     overspeed_coast_threshold_mps: 1.0
-    # Accelerate with feedback outside the speed deadband. The IMU remains an
-    # input to predictive handoff and feedback; the mapped throttle is held
-    # through small speed crossings.
+    # Accelerate with speed feedback outside the deadband. The mapped throttle
+    # is held through small speed crossings.
     speed_hold_error_deadband_mps: 0.15
     # Keep the calibrated target-speed throttle through bounded odom
     # under-reporting after the handoff. Re-enter recovery only when the
     # measured deficit is large enough to represent a real loss of speed.
-    speed_hold_recovery_error_mps: 2.5
+    speed_hold_recovery_error_mps: 0.75
     speed_hold_acceleration_deadband_mps2: 0.35
     # Fast boost while far below target, followed by a predictive handoff to
-    # the throttle mapped to the requested target speed. The horizon covers
-    # the native 10 Hz command interval and the measured actuator transient.
+    # the throttle mapped to the requested target speed.
     speed_boost_error_mps: 1.5
     speed_hold_prediction_horizon_sec: 0.35
     speed_hold_entry_margin_mps: 0.15
@@ -71,21 +71,24 @@ autodrive_actuator_interface:
     # restoring the target-speed feed-forward throttle.
     speed_downshift_stable_sec: 0.20
     speed_downshift_band_mps: 0.10
-    # Require a persistent relative overspeed before coasting; native
-    # simulator odometry is approximately 10 Hz and can spike for one sample.
+    # Require a persistent relative overspeed before coasting; one native
+    # odometry sample can still spike.
     speed_overspeed_confirmation_sec: 0.30
 
-    # Allowed-input acceleration/speed observer and inverse throttle model.
+    # Allowed-input acceleration/speed observer and acceleration capability
+    # model.
     # The observer uses /odom and IMU only. Ground truth is used solely by the
     # offline calibration recorder and never enters the race controller.
-    acceleration_filter_alpha: 0.10
+    # The 40 Hz source stream supports a shorter acceleration-observer lag
+    # without relying on a single noisy native sample.
+    acceleration_filter_alpha: 0.20
     slip_threshold_mps: 0.75
     slip_ratio: 0.20
     odom_correction_gain: 0.25
     # Control-side conditioning only. /odom remains the published calibrated
     # sensor-fusion stream; this alpha prevents one odom sample from toggling
     # the speed loop between hold and coast.
-    speed_measurement_filter_alpha: 0.35
+    speed_measurement_filter_alpha: 0.75
     speed_error_to_accel_gain: 1.25
     speed_error_integral_to_accel_gain: 0.05
     # Positive acceleration capability is a decreasing function of speed,
@@ -98,25 +101,21 @@ autodrive_actuator_interface:
                                      2.043, 1.565, 0.956, 0.529, 0.529,
                                      0.529, 0.086]
     max_deceleration_mps2: 8.0
-    # Filtered IMU acceleration closes the acceleration loop. The gain and
-    # separate slew limits damp the native ~10 Hz transient samples without
-    # slowing the independent speed-loop output.
-    # The direct inverse model supplies the nominal acceleration. A strong
-    # IMU correction causes low-speed throttle relay (0 -> 0.2 -> 0.4) because
-    # the simulator's traction threshold is discontinuous. Keep feedback
-    # corrective and let the calibrated model remain dominant.
-    acceleration_feedback_gain: 0.10
-    acceleration_integral_gain: 0.001
+    # The simulator's acceleration derivative contains alternating sign
+    # bursts while calibrated speed is increasing. Keep acceleration mode
+    # model-led until a stable acceleration source is validated; nonzero
+    # feedback causes throttle relay on this simulator.
+    acceleration_feedback_gain: 0.0
+    acceleration_integral_gain: 0.0
     acceleration_integral_limit: 2.0
     acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
                              16.0, 18.0, 20.0, 23.0]
-    # Incremental throttle per m/s^2 identified over the complete clean
-    # open-ground response. This is an inverse gain, not a throttle limit.
-    # Inverse of the settled full-range fit measured at 10 Hz. These values
-    # are throttle per requested m/s^2, not a throttle limit.
-    acceleration_throttle_per_mps2: [0.158521, 0.160881, 0.163312, 0.165818,
-                                     0.168402, 0.171068, 0.173819, 0.176661,
-                                     0.179597, 0.182632, 0.185771, 0.190688]
+    # Conservative fallback inverse gains retained for capability calculation;
+    # acceleration commands are now integrated into the validated speed loop.
+    # Retuned from the model-led 40 Hz acceleration run: the previous
+    # offline inverse table was approximately 3x too aggressive dynamically.
+    acceleration_throttle_per_mps2: [0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
+                                     0.066, 0.068, 0.070, 0.072, 0.074, 0.078]
     acceleration_throttle_rise_rate_per_sec: 2.0
     acceleration_throttle_fall_rate_per_sec: 4.0
 

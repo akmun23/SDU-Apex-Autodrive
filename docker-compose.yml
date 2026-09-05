@@ -28,6 +28,11 @@ services:
     # practice/competition assets contain a visible track and are not valid
     # for the reset-isolated sensor-identification run.
     image: ${AUTODRIVE_SIMULATOR_IMAGE:-autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore}
+    # The official images use different entrypoints (one expects the command
+    # directly, another wraps it).  Keep the container lifecycle uniform so a
+    # local compete image can be selected without exiting before the player is
+    # started explicitly.
+    entrypoint: ["/bin/bash"]
     # Keep the container alive; start the official simulator explicitly with
     # the graphical or xvfb headless command from the host terminal.
     command: ["-c", "sleep infinity"]

@@ -1,0 +1,33 @@
+/**:
+  ros__parameters:
+    # One shared policy for the 40 Hz preflight, monitor, and CSV acceptance
+    # path. Launch-specific duration/report/fail-fast behavior is overlaid by
+    # test_suite.launch.py.
+    expected_rate_hz: 40.0
+    rate_tolerance_hz: 1.0
+    min_samples: 400
+    min_packet_coverage_fraction: 0.995
+    max_packet_count_skew: 2
+    source_min_p01_ms: 18.0
+    source_median_min_ms: 22.0
+    source_median_max_ms: 28.0
+    source_max_p95_ms: 32.0
+    source_max_p99_ms: 36.0
+    max_source_burst_fraction: 0.0
+    max_source_gap_fraction: 0.0
+    arrival_min_p01_ms: 8.0
+    arrival_max_p95_ms: 45.0
+    arrival_fail_fast_max_ms: 250.0
+    max_arrival_burst_fraction: 0.005
+    max_arrival_gap_fraction: 0.01
+    reject_arrival_timing: true
+    bridge_arrival_min_p01_ms: 15.0
+    bridge_arrival_max_p95_ms: 40.0
+    max_bridge_arrival_burst_fraction: 0.0
+    max_bridge_arrival_gap_fraction: 0.0
+    max_encoder_rate_radps: 1500.0
+    max_imu_accel_mps2: 200.0
+    max_imu_angular_rate_radps: 100.0
+    max_odom_speed_mps: 60.0
+    require_simulation_metadata: true
+    reject_encoder_outliers: true

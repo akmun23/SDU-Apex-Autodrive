@@ -419,12 +419,13 @@ class TimingValidator(Node):
         self._record(name, _stamp_ns(msg), time.monotonic_ns(), values)
 
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
-        # The fixed-order vector stores odom_stamp_s at index 15. It is the
-        # source boundary for this headerless diagnostic message.
+        # Version 2 stores source_stamp_s at index 1. Legacy vectors stored
+        # odom_stamp_s at index 15; retain that fallback for old recordings.
         values = tuple(float(value) for value in msg.data)
         source_ns = 0
-        if len(values) > 15 and math.isfinite(values[15]):
-            source_ns = int(round(values[15] * 1e9))
+        source_index = 1 if len(values) >= 21 and values[0] == 2.0 else 15
+        if len(values) > source_index and math.isfinite(values[source_index]):
+            source_ns = int(round(values[source_index] * 1e9))
         self._record(
             "odom_diagnostics", source_ns, time.monotonic_ns(), values)
 
@@ -572,6 +573,10 @@ class TimingValidator(Node):
         max_imu_accel = 0.0
         max_imu_angular = 0.0
         max_odom_speed = 0.0
+        diagnostic_version_samples = 0
+        diagnostic_version_mismatch = 0
+        max_packet_drop_count = 0.0
+        max_packet_coherence_fault_count = 0.0
         for sample in samples:
             values = sample["values"]
             if values is not None and not self._finite(values):
@@ -591,6 +596,16 @@ class TimingValidator(Node):
                 max_odom_speed = max(
                     max_odom_speed,
                     math.sqrt(sum(value * value for value in values[3:6])))
+
+            if name == "odom_diagnostics":
+                if (values is not None and len(values) >= 21 and
+                        math.isfinite(values[0]) and values[0] == 2.0):
+                    diagnostic_version_samples += 1
+                    max_packet_drop_count = max(max_packet_drop_count, values[16])
+                    max_packet_coherence_fault_count = max(
+                        max_packet_coherence_fault_count, values[17])
+                else:
+                    diagnostic_version_mismatch += 1
 
         if name in ("left_encoder", "right_encoder"):
             for previous, current in zip(samples, samples[1:]):
@@ -628,6 +643,10 @@ class TimingValidator(Node):
             "max_imu_accel_mps2": max_imu_accel,
             "max_imu_angular_rate_radps": max_imu_angular,
             "max_odom_speed_mps": max_odom_speed,
+            "diagnostic_version_samples": diagnostic_version_samples,
+            "diagnostic_version_mismatch": diagnostic_version_mismatch,
+            "max_packet_drop_count": max_packet_drop_count,
+            "max_packet_coherence_fault_count": max_packet_coherence_fault_count,
         }
 
     def _build_report(self, force_failure: str | None) -> dict[str, Any]:
@@ -739,6 +758,15 @@ class TimingValidator(Node):
                     content["max_odom_speed_mps"]) > float(
                     self.get_parameter("max_odom_speed_mps").value):
                 failures.append(f"{name}: odometry speed exceeds physical limit")
+            if name == "odom_diagnostics":
+                if int(content["diagnostic_version_mismatch"]) != 0:
+                    failures.append(
+                        f"{name}: diagnostics version 2 missing or malformed")
+                if float(content["max_packet_drop_count"]) > 0.0:
+                    failures.append(f"{name}: packet drops reported by observer")
+                if float(content["max_packet_coherence_fault_count"]) > 0.0:
+                    failures.append(
+                        f"{name}: packet coherence faults reported by observer")
 
         # A validator subscriber can occasionally receive one inconsistent
         # JointState sample that is not seen by the C++ odometry subscriber or

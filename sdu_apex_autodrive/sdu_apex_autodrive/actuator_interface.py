@@ -32,6 +32,11 @@ class ActuatorInterface(Node):
         "speed_boost_error_mps", "speed_hold_prediction_horizon_sec",
         "speed_hold_entry_margin_mps", "speed_downshift_stable_sec",
         "speed_downshift_band_mps", "speed_overspeed_confirmation_sec",
+        "speed_error_to_accel_gain", "speed_error_integral_to_accel_gain",
+        "acceleration_feedback_gain", "acceleration_integral_gain",
+        "acceleration_integral_limit",
+        "acceleration_throttle_rise_rate_per_sec",
+        "acceleration_throttle_fall_rate_per_sec",
     }
 
     def __init__(self) -> None:
@@ -155,10 +160,9 @@ class ActuatorInterface(Node):
         self.declare_parameter("external_stop_topic", "")
         self.declare_parameter("command_timeout_sec", 0.25)
         self.declare_parameter("odom_timeout_sec", 0.25)
-        # The bridge now repeats the latest accepted command at 40 Hz. The
-        # actuator's own command update policy remains configurable at 10 Hz
-        # and retains its timeout watchdog for missing commands.
-        self.declare_parameter("publish_rate_hz", 10.0)
+        # Match the accepted native simulator source cadence. The timeout
+        # watchdog still neutralizes the outputs if commands or odometry stop.
+        self.declare_parameter("publish_rate_hz", 40.0)
         self.declare_parameter("max_steering_angle_rad", 0.5236)
         self.declare_parameter("max_target_speed_mps", 22.88)
         self.declare_parameter("collision_topic", "/autodrive/roboracer_1/collision_count")
@@ -225,15 +229,13 @@ class ActuatorInterface(Node):
             [5.5, 4.4, 4.4, 3.568, 3.175, 2.562, 2.043, 1.565,
              0.956, 0.529, 0.529, 0.529, 0.086])
         self.declare_parameter("max_deceleration_mps2", 8.0)
-        # IMU acceleration is useful as a secondary signal, but isolated
-        # simulator samples can spike at the native 10 Hz cadence. Let the
-        # calibrated speed/acceleration feed-forward and odom feedback remain
-        # dominant instead of cutting throttle on one such spike.
-        # Close the acceleration loop against the filtered IMU signal. The
-        # open-ground verification showed that a very small value allowed the
-        # speed feed-forward term to overshoot the requested acceleration.
-        self.declare_parameter("acceleration_feedback_gain", 0.5)
-        self.declare_parameter("acceleration_integral_gain", 0.003)
+        # The simulator's acceleration derivative contains alternating sign
+        # bursts even while calibrated speed is increasing. Do not close the
+        # acceleration loop on that signal: the validated inverse model and
+        # actuator slew limits provide a stable command, while acceleration is
+        # retained for diagnostics and future validated sensor profiles.
+        self.declare_parameter("acceleration_feedback_gain", 0.0)
+        self.declare_parameter("acceleration_integral_gain", 0.0)
         self.declare_parameter("acceleration_integral_limit", 2.0)
         self.declare_parameter(
             "acceleration_speed_mps",
@@ -241,8 +243,8 @@ class ActuatorInterface(Node):
              20.0, 23.0])
         self.declare_parameter(
             "acceleration_throttle_per_mps2",
-            [0.158521, 0.160881, 0.163312, 0.165818, 0.168402, 0.171068,
-             0.173819, 0.176661, 0.179597, 0.182632, 0.185771, 0.190688])
+            [0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
+             0.066, 0.068, 0.070, 0.072, 0.074, 0.078])
         self.declare_parameter("acceleration_throttle_rise_rate_per_sec", 2.0)
         self.declare_parameter("acceleration_throttle_fall_rate_per_sec", 4.0)
         self.declare_parameter(

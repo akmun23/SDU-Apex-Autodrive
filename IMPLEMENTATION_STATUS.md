@@ -1,132 +1,101 @@
 # SDU Apex AutoDRIVE implementation status
 
 Status date: 2026-09-05  
-Repository: `/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive`  
-Scene used for calibration: official open ground, no track
+Repository: `/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive`
 
-## Current result
+## Current runtime
 
-The fixed train/validation corpus now reports the offline forest and the
-recorded deployed `/odom` separately. The offline forest is not the runtime
-braking estimator: the C++ node rejects the generic learned branch during
-active deceleration and uses the IMU observer plus bounded brake prior. The
-runtime acceptance result is therefore the recorded `/odom` result below.
+The active local odometry path is a deterministic observer in
+`f1tenth_localization`. It consumes only exact source-timestamp packets made
+from the left encoder, right encoder, and IMU. Incomplete packets are discarded
+and counted; no sensor value is forward-filled, interpolated, or fabricated.
 
-With the active runtime IMU filter alpha of 0.90, the deployed odometry is
-not yet accepted as a universal under-5% estimator:
+The observer implements the handoff plan:
 
-| metric, 1--3 m/s | relative median | relative p95 |
-|---|---:|---:|
-| offline forest, all regimes | 0.024% | 2.696% |
-| recorded deployed `/odom`, all regimes | 1.871% | 18.161% |
-| recorded deployed `/odom`, decelerating | 4.813% | 17.755% |
+- frozen 218-point wheel-speed map and 0.059 m wheel radius;
+- scalar IMU propagation with braking affine correction and gated wheel update;
+- 2-D body-frame RK2 turn mode with fixed lever-arm correction and hysteresis;
+- timestamp regression, encoder reset, timing-gap, packet-drop, and coherence
+  handling;
+- version-2 compact diagnostics on `/odom/diagnostics`;
+- no learned model, ground truth, camera, LiDAR, AMCL, or throttle input in
+  runtime odometry.
 
-The old 11.655% deceleration value was an offline forest score produced with
-the wrong alpha and was not a deployed `/odom` score. It is no longer used as
-the runtime acceptance metric.
+The obsolete learned C++ runtime headers and their old learned-estimator
+generation/scoring scripts were removed. Generic offline calibration tooling
+remains separate from the runtime and can support future model development.
 
-The production sensor-odometry header has therefore not been replaced by the
-large generated candidate. Runtime remains sensor-only: encoders and IMU go
-into odometry; simulator ground truth and AMCL are not inputs to odometry.
+## Replay evidence
 
-## The only CSVs to analyze for the odometry model
+The fixed fit/test/blind recordings are:
 
-Use exactly these two files:
+1. `sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_fit_40hz_20260905_final/identification_grid_20260905_144304.csv`
+2. `sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_test_40hz_20260905/identification_grid_20260905_151313.csv`
+3. `sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_validation_40hz_20260905/identification_grid_20260905_155143.csv`
 
-1. Training/fitting data:  
-   `sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv`
-2. Independent validation data:  
-   `sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv`
+Exact packet reconstruction and Python/C++ replay parity were verified on all
+three. Results:
 
-Fit on the first file only, then score on the second file only. Do not merge
-them, fit on the validation file, or use any other CSV as a substitute. The
-fitter command and retained artifact paths are recorded in
-`sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml`.
+| recording | complete packets | moving samples | p95 relative error | <=2% |
+|---|---:|---:|---:|---:|
+| fit | 58,661 | 31,482 | 0.7208% | 99.1169% |
+| test | 58,726 | 31,484 | 0.7218% | 99.0948% |
+| blind validation | 58,747 | 31,476 | 0.7422% | 99.0342% |
 
-The retained report is:
+The maximum Python/C++ replay differences were floating-point noise; all
+observer flag outputs matched.
 
-`sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv`
+## Fresh live acceptance
 
-The generated candidate header is deliberately not retained: it was an
-uninstalled 110 MB artifact. It can be regenerated from the two canonical
-CSVs using the command in the manifest. The report contains three named
-families: `offline_forest_validation`, `deployed_odom_validation`, and
-`deployed_odom_branch`. The latter two use the speed recorded in the runtime
-`/odom` source event matched to the diagnostic timestamp, with
-`odom_diagnostics_speed_mps` and then the recorder's `speed_mps` field as
-legacy fallbacks. The production header remains unchanged.
+The no-reset live motion run is:
 
-## What has been implemented
+`sdu_apex_autodrive/artifacts/calibration/raw/deterministic_observer_motion_40hz_20260905/zero_throttle_decel_20260905_172107.csv`
 
-- Physical wheel radius remains 0.0590 m; slip is represented by a wheel-speed
-  map and confidence gates, not by changing geometry.
-- Encoder increments are timestamped, paired, and guarded against resets,
-  rollovers, impossible source-time steps, and burst/zero quantisation.
-- A causal two-state longitudinal observer estimates body speed and IMU bias.
-- Acceleration, steady-state, deceleration, frozen-wheel braking, and
-  frozen-wheel launch are treated as separate regimes.
-- Braking rejects the encoder as soon as the filtered IMU identifies active
-  deceleration; frozen encoders continue through IMU propagation and a bounded
-  slip prior instead of forcing speed to zero.
-- Stop confirmation requires quiet IMU, encoder, and odometry evidence.
-- The bridge command clock is paced independently at 40 Hz, while incoming
-  telemetry is not fabricated or interpolated at runtime.
-- AMCL remains an independent global-position correction path and is not fed
-  directly into the local odometry observer.
-- The fitter reads `imu_acceleration_filter_alpha` from the active
-  `sensor_odometry.yaml`; the C++ fallback default is also 0.90.
-- Runtime validation is scored from recorded `/odom`, not from the forest
-  prediction. Braking is reported as the `braking_observer` branch.
+It contains 1,081 complete source-timestamp packets, zero incomplete packets,
+zero duplicate event rows, and 390 moving replay samples. Python/C++ parity
+again matched to floating-point noise; the moving samples were all within 2%
+in the replay report.
 
-## Why the remaining tail is difficult
+The live timing gate and run-time monitor both passed. The verified source and
+bridge streams were approximately 40 Hz with 25 ms-like intervals and no
+reported burst, long-gap, or observer packet-coherence fault. The supplied
+prebuilt player does not expose Unity simulation-time/frame metadata, so this
+acceptance used `require_simulation_metadata:=false`; cadence, source stamps,
+finite values, physical bounds, and packet sequencing remained enforced.
 
-During the failing braking samples the encoder is zero, stale, or already at
-the next wheel speed, while the IMU supplies acceleration but no absolute
-speed. The two permitted runtime sensors can consequently have nearly
-identical causal features for different ground-truth speeds.
+## Verification commands
 
-The validation recording also contains source-time bursts. In the same brake
-episode, adjacent ground-truth odometry messages can change speed by several
-tenths of a metre per second over 1--3 ms while the IMU acceleration implies a
-much smaller physical change. Position and twist in those bursts are not
-always mutually consistent. Filtering those labels for reporting would hide
-the problem, so the canonical score retains the raw timestamp-aligned ground
-truth target.
+Humble Docker build:
 
-This is why more forest capacity, median tree aggregation, temporal filters,
-state-history features, braking priors, slip blends, and alternative causal
-branches were tested but not promoted: none reduced the isolated low-speed
-deceleration p95 below 5% on the untouched validation file.
+```bash
+docker exec sdu_apex_autodrive bash -lc '
+  source /opt/ros/humble/setup.bash
+  source /home/autodrive_devkit/install/setup.bash
+  cd /workspace
+  colcon build --merge-install --packages-select \
+    f1tenth_localization sdu_apex_autodrive --symlink-install
+'
+```
 
-## Verification already completed
+Pure observer tests pass with CTest. The Python package tests include exact
+packet reconstruction and reference-observer behavior. The fresh CSV can be
+replayed with:
 
-- Python calibration/controller tests: 50 passed.
-- Humble Docker build: `f1tenth_localization` and `sdu_apex_autodrive` built
-  successfully with the active source.
-- Candidate C++ header syntax check: passed with C++17 warnings-as-errors.
-- `git diff --check`: passed before cleanup.
-- Native IMU, encoder, odometry, diagnostics, and simulator odometry source
-  events in both canonical recordings are approximately 40 Hz; recorder row
-  rate is higher and must not be mistaken for sensor cadence.
-- No new simulator run was started for this cleanup.
+```bash
+PYTHONPATH=sdu_apex_autodrive python3 -m \
+  sdu_apex_autodrive.scripts.validate_odometry_observer \
+  sdu_apex_autodrive/artifacts/calibration/raw/deterministic_observer_motion_40hz_20260905/zero_throttle_decel_20260905_172107.csv \
+  --cpp-replay /tmp/odometry_observer_replay
+```
 
-## Cleanup policy
+The localization package also builds with `BUILD_GPU_AMCL=OFF`, so CPU odometry
+and its tests do not require a CUDA toolchain. The shared 40 Hz policy is in
+`sdu_apex_autodrive/config/timing_clean_40hz.yaml`; the race launcher defaults
+RViz off.
 
-Calibration clutter was removed rather than archived. The workspace retains
-only the two canonical odometry CSVs, the current candidate metrics, and the
-small wheel-map provenance CSV. Superseded controller experiments,
-old validation runs, derived reports, duplicate fitters, rejected observer fit
-outputs, and the Docker-owned rejected-controller archive were removed. Only
-the default calibration profile and the reusable identification-grid harness
-remain. Active runtime source, launch files, tests, map, raceline, and the
-40-Hz bridge were preserved.
+## Remaining acceptance boundary
 
-## Still open
-
-1. Find a causal braking estimator that passes the isolated low-speed p95
-   requirement without using ground truth or another live run. The fixed
-   validation now shows the actual deployed gap clearly.
-2. Only after that candidate passes the fixed validation, promote it to the
-   production header and rerun the Humble build/tests.
-3. Then validate the full track map/raceline, AMCL, EKF, Pure Pursuit, and
-   controller stack separately.
+This is clean deterministic odometry and 40 Hz source-data acceptance. It is
+not a claim that the complete track stack has been accepted. Track-map AMCL,
+EKF, controller, raceline, and closed-loop racing still require their own live
+acceptance run.

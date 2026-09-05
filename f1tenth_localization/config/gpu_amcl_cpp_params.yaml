@@ -22,17 +22,18 @@ gpu_amcl_cpp:
     # motion updates while preserving the official simulator cadence.
     update_min_d: 0.02
     update_min_a: 0.035
-    # The official practice bridge publishes complete scans at about 10 Hz.
     # Accept transport/scheduling delay without treating an old scan as live.
+    # This remains valid for both the current 20 Hz compete player and a
+    # validated 40 Hz player; AMCL never fabricates an intermediate scan.
     max_scan_age: 0.25
-    # LiDAR callbacks can arrive behind the 10 Hz odometry timestamp. Keep a
-    # full second so scan-time interpolation does not fall back to an old
-    # sample and create a false AMCL lag during acceleration.
+    # LiDAR callbacks can arrive behind the odometry timestamp. Keep a full
+    # second so scan-time interpolation does not fall back to an old sample
+    # and create a false AMCL lag during acceleration.
     odom_history_duration_s: 1.00
 
     # The official bridge provides cumulative wheel angles plus IMU yaw. Keep
-    # the motion model conservative so ten-hertz scan corrections do not let
-    # artificial yaw noise dominate the local particle cloud.
+    # the motion model conservative so scan corrections do not let artificial
+    # yaw noise dominate the local particle cloud.
     alpha1: 0.02
     alpha2: 0.05
     alpha3: 0.03
@@ -99,7 +100,7 @@ gpu_amcl_cpp:
     pose_jump_confirm_distance_m: 0.75
     pose_jump_confirm_yaw_rad: 0.60
 
-    # Keep AMCL odometry-dominant at the native 10 Hz scan cadence while
+    # Keep AMCL odometry-dominant at the native scan cadence while
     # allowing real map corrections to arrive within a few scans. A larger
     # single-scan jump is still rejected as a corridor alias and replaced by
     # the causal odometry prediction.
@@ -114,7 +115,7 @@ gpu_amcl_cpp:
     local_scan_correction_gain: 0.08
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
-    # matching bias is integrated again at every 10 Hz update.
+    # matching bias is integrated again at every scan update.
     local_tracking_reinitialize_cloud: true
     local_tracking_cloud_covariance_xy: 0.04
     local_tracking_cloud_covariance_yaw: 0.04

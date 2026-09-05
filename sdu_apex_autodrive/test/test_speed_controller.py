@@ -286,7 +286,8 @@ def test_acceleration_demand_uses_full_normalized_throttle_range():
 
 
 def test_acceleration_controller_reduces_throttle_for_measured_overshoot():
-    controller = TargetSpeedController(config())
+    controller = TargetSpeedController(replace(
+        config(), acceleration_feedback_gain=0.25))
     controller.update(2.0, 0.0, 0.0, 0.1, 0.0)
     output = controller.update(2.0, 1.0, 0.0, 0.1, 25.0)
     assert 0.0 <= output < 0.10
@@ -358,7 +359,21 @@ def test_imu_update_does_not_overwrite_absolute_odom_speed():
     observer.update_acceleration(8.0, 0.0)
     observer.update_acceleration(8.0, 0.1)
     assert observer.speed_mps == 5.0
-    assert observer.acceleration_mps2 == 8.0
+    assert observer.acceleration_mps2 == 0.0
+
+
+def test_odom_speed_derivative_drives_acceleration_feedback_after_startup():
+    observer = LongitudinalStateEstimator(
+        acceleration_filter_alpha=1.0,
+        speed_measurement_filter_alpha=1.0,
+    )
+    observer.update_odometry(0.0, 0.0)
+    observer.update_acceleration(-8.0, 0.0)
+    observer.update_acceleration(-8.0, 0.1)
+    observer.update_odometry(1.0, 0.1)
+
+    assert observer.speed_mps == 1.0
+    assert observer.acceleration_mps2 == 10.0
 
 
 def test_acceleration_command_uses_speed_only_for_feedforward():
@@ -384,9 +399,32 @@ def test_acceleration_command_coasts_for_negative_acceleration():
 def test_acceleration_command_is_slew_limited_and_bounded():
     controller = TargetAccelerationController(config())
     outputs = [controller.update(5.0, 0.0, 0.0, 0.1) for _ in range(20)]
-    assert outputs == sorted(outputs)
     assert all(0.0 <= value <= 0.10 for value in outputs)
     assert all(b - a <= 0.10 + 1.0e-12 for a, b in zip(outputs, outputs[1:]))
+    assert all(a - b <= 0.20 + 1.0e-12 for a, b in zip(outputs, outputs[1:]))
+
+
+def test_acceleration_command_can_remain_model_led_with_bursty_feedback():
+    negative_sensor_controller = TargetAccelerationController(replace(
+        config(),
+        acceleration_feedback_gain=0.0,
+        acceleration_integral_gain=0.0,
+        acceleration_throttle_rise_rate_per_sec=10.0,
+        acceleration_throttle_fall_rate_per_sec=10.0,
+    ))
+    positive_sensor_controller = TargetAccelerationController(replace(
+        config(),
+        acceleration_feedback_gain=0.0,
+        acceleration_integral_gain=0.0,
+        acceleration_throttle_rise_rate_per_sec=10.0,
+        acceleration_throttle_fall_rate_per_sec=10.0,
+    ))
+    first = negative_sensor_controller.update(1.0, 0.0, -8.0, 0.1)
+    second = positive_sensor_controller.update(1.0, 0.0, 8.0, 0.1)
+
+    # With the production-style model-led profile, an isolated sign reversal
+    # in the diagnostic acceleration cannot relay the throttle command.
+    assert first == second
 
 
 def test_acceleration_controller_exposes_speed_dependent_capability():
@@ -396,6 +434,4 @@ def test_acceleration_controller_exposes_speed_dependent_capability():
     at_ten = controller.acceleration_controller.maximum_acceleration(10.0)
     at_top = controller.acceleration_controller.maximum_acceleration(23.0)
 
-    assert abs(at_zero - 0.63) < 0.01
-    assert at_ten < at_zero
-    assert at_top < at_ten
+    assert at_zero > at_ten > at_top

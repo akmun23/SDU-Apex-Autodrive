@@ -63,19 +63,16 @@ FIELDS = (
     # the estimator or controller.
     "odom_raw_wheel_speed_mps", "odom_corrected_wheel_speed_mps",
     "odom_longitudinal_slip_ratio", "odom_wheel_observation_confidence",
-    "odom_imu_acceleration_bias_mps2", "odom_encoder_reset_count",
-    "odom_imu_speed_mps", "odom_frozen_encoder_model_active",
-    "odom_frozen_encoder_model_decel_mps2",
-    "odom_sensor_fusion_model_speed_mps", "odom_sensor_fusion_model_spread_mps",
-    "odom_sensor_fusion_model_active", "odom_sensor_motion_regime",
-    "odom_sensor_fusion_window_raw_speed_mps",
-    "odom_sensor_fusion_window_mapped_speed_mps",
-    "odom_diagnostics_stamp_s", "odom_imu_observer_acceleration_mps2",
-    "odom_imu_pair_speed_mps", "odom_imu_pair_lead_s",
-    "odom_diagnostics_speed_mps", "odom_v2_global_speed_mps",
-    "odom_v2_base_speed_mps", "odom_v2_braking_speed_mps",
-    "odom_v2_braking_blend",
-    "odom_v2_global_residual", "odom_v2_braking_residual", "odom_v2_active",
+    "odom_diagnostics_stamp_s", "odom_diagnostics_speed_mps",
+    # Versioned deterministic observer diagnostics.
+    "odom_observer_version", "odom_observer_source_stamp_s", "odom_observer_dt_s",
+    "odom_observer_speed_pred_mps", "odom_observer_body_u_mps",
+    "odom_observer_body_v_mps", "odom_observer_ax_mps2", "odom_observer_ay_mps2",
+    "odom_observer_yaw_rate_radps", "odom_observer_wheel_update_used",
+    "odom_observer_turn_mode", "odom_observer_reset_epoch",
+    "odom_observer_timing_degraded", "odom_observer_packet_drop_count",
+    "odom_observer_packet_coherence_fault_count", "odom_observer_x_m",
+    "odom_observer_y_m", "odom_observer_yaw_rad",
     # Brake/coast completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
@@ -793,45 +790,42 @@ class Calibration(Node):
         self._capture_source_event("odom", stamp_s)
 
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
-        """Record the fixed-order sensor-odometry diagnostic vector."""
-        if len(msg.data) < 20:
+        """Record only the version-2 deterministic observer vector."""
+        if len(msg.data) != 21 or abs(float(msg.data[0]) - 2.0) >= 1.0e-9:
             return
-        self._record_event("odom_diagnostics")
-        fields = (
-            "odom_raw_wheel_speed_mps",
-            "odom_corrected_wheel_speed_mps",
-            "odom_longitudinal_slip_ratio",
-            "odom_wheel_observation_confidence",
-            "odom_imu_acceleration_bias_mps2",
-            "odom_encoder_reset_count",
-            "odom_imu_speed_mps",
-            "odom_frozen_encoder_model_active",
-            "odom_frozen_encoder_model_decel_mps2",
-            "odom_sensor_fusion_model_speed_mps",
-            "odom_sensor_fusion_model_spread_mps",
-            "odom_sensor_fusion_model_active",
-            "odom_sensor_motion_regime",
-            "odom_sensor_fusion_window_raw_speed_mps",
-            "odom_sensor_fusion_window_mapped_speed_mps",
-            "odom_diagnostics_stamp_s",
-            "odom_imu_observer_acceleration_mps2",
-            "odom_imu_pair_speed_mps",
-            "odom_imu_pair_lead_s",
-            "odom_diagnostics_speed_mps",
-            "odom_v2_global_speed_mps",
-            "odom_v2_base_speed_mps",
-            "odom_v2_braking_speed_mps",
-            "odom_v2_braking_blend",
-            "odom_v2_global_residual",
-            "odom_v2_braking_residual",
-            "odom_v2_active",
+        self._on_deterministic_odom_diagnostics(msg)
+
+    def _on_deterministic_odom_diagnostics(self, msg: Float64MultiArray) -> None:
+        """Translate the deterministic observer diagnostics into CSV fields."""
+        values = [float(value) for value in msg.data[:21]]
+        names = (
+            "odom_observer_version", "odom_observer_source_stamp_s",
+            "odom_observer_dt_s", "odom_raw_wheel_speed_mps",
+            "odom_corrected_wheel_speed_mps", "odom_observer_speed_pred_mps",
+            "odom_diagnostics_speed_mps", "odom_observer_body_u_mps",
+            "odom_observer_body_v_mps", "odom_observer_ax_mps2",
+            "odom_observer_ay_mps2", "odom_observer_yaw_rate_radps",
+            "odom_observer_wheel_update_used", "odom_observer_turn_mode",
+            "odom_observer_reset_epoch", "odom_observer_timing_degraded",
+            "odom_observer_packet_drop_count",
+            "odom_observer_packet_coherence_fault_count", "odom_observer_x_m",
+            "odom_observer_y_m", "odom_observer_yaw_rad",
         )
-        for field, value in zip(fields, msg.data[:len(fields)]):
-            if math.isfinite(float(value)):
-                self.state[field] = float(value)
-        diagnostics_stamp = self.state.get("odom_diagnostics_stamp_s")
-        if diagnostics_stamp is not None and math.isfinite(diagnostics_stamp):
-            self._capture_source_event("odom_diagnostics", diagnostics_stamp)
+        self._record_event("odom_diagnostics")
+        for name, value in zip(names, values):
+            if math.isfinite(value):
+                self.state[name] = value
+
+        self.state["odom_diagnostics_stamp_s"] = values[1]
+        self.state["odom_longitudinal_slip_ratio"] = (
+            (values[3] - values[6]) / max(abs(values[6]), 0.5)
+            if math.isfinite(values[3]) and math.isfinite(values[6]) else math.nan)
+        self.state["odom_wheel_observation_confidence"] = (
+            1.0 if values[12] > 0.5 else 0.0)
+        self.state["x_odom_m"] = values[18]
+        self.state["y_odom_m"] = values[19]
+        self.state["yaw_odom_rad"] = values[20]
+        self._capture_source_event("odom_diagnostics", values[1])
 
     def _on_gt_odom(self, msg: Odometry) -> None:
         """Record simulator truth for offline calibration and validation only."""

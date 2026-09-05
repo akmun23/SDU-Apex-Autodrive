@@ -170,14 +170,40 @@ docker exec -it sdu_apex_autodrive bash -lc '
 
 Do not start AMCL in this open scene.
 
-## Offline analysis
+## Deterministic odometry observer
 
-The canonical odometry identification corpus is
-artifacts/calibration/raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv.
-The independent holdout validation corpus is
-artifacts/calibration/raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv.
-Fit only on the first file and score only on the second; do not merge them.
-Write all derived outputs for a new run under one dated directory:
+The active `/odom` implementation is a pure deterministic observer. It
+assembles exact source-timestamp packets from both encoders and the IMU before
+updating; it never forward-fills, interpolates, or fabricates a sensor value.
+The observer uses the frozen wheel-speed map in
+`config/wheel_speed_map.csv`, scalar longitudinal propagation, a gated wheel
+update, and a 2-D body-frame RK2 turn mode with the fixed lever-arm correction.
+Ground truth, throttle, camera, LiDAR, AMCL, and learned models are not runtime
+inputs.
+
+The observer constants are frozen in
+`f1tenth_localization/config/sensor_odometry.yaml`. Diagnostics are version 2
+and publish source stamp, timing state, wheel-gate state, turn state, reset
+epoch, packet-drop count, and packet-coherence-fault count.
+
+The canonical historical fit/test/blind recordings are:
+
+- `artifacts/calibration/raw/identification_grid_fit_40hz_20260905_final/identification_grid_20260905_144304.csv`
+- `artifacts/calibration/raw/identification_grid_test_40hz_20260905/identification_grid_20260905_151313.csv`
+- `artifacts/calibration/raw/identification_grid_validation_40hz_20260905/identification_grid_20260905_155143.csv`
+
+Replay uses exact packet reconstruction and has a Python reference plus a
+standalone C++ replay binary:
+
+~~~bash
+PYTHONPATH=sdu_apex_autodrive python3 -m \
+  sdu_apex_autodrive.scripts.validate_odometry_observer INPUT.csv \
+  --cpp-replay /tmp/odometry_observer_replay
+~~~
+
+For new model development, keep fitting and scoring offline and separate from
+the runtime observer. Write any derived outputs for a new run under one dated
+directory:
 
 ~~~bash
 ros2 run sdu_apex_autodrive analyze_calibration INPUT.csv \
@@ -195,24 +221,18 @@ ros2 run sdu_apex_autodrive analyze_calibration INPUT.csv \
 
 The analyzer deduplicates rows by timestamped simulator odom event and reports
 native rates from message source timestamps. It must not assume a fixed 40 or
-50 Hz sensor rate. The regime fitter is
-`sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py`.
-It trains separate accelerating, steady, decelerating, and frozen-encoder
-models from causal IMU/encoder features, including a timestamp-derived
-9-sample encoder-travel window. Ground truth is used only for offline labels
-and targets. The slip model is an offline diagnostic fit using the official
-(S_x=(r\omega-v_x)/v_x) definition; it informs wheel confidence and model
-selection, not a direct truth correction. Runtime never consumes ground truth,
-throttle, or AMCL.
+50 Hz sensor rate. Ground truth is allowed only for offline labels and targets;
+runtime never consumes ground truth, throttle, AMCL, or camera data.
 
 ## Controller abstractions
 
 Pure Pursuit, Stanley, and FTG publish through the controller boundary. Pure
 Pursuit publishes /cmd/speed; actuator_interface converts speed to normalized
 throttle using feed-forward and speed feedback. MPC publishes
-/cmd/acceleration; the same boundary converts it using the inverse acceleration
-model and filtered IMU feedback. Only one controller and one actuator interface
-may be active in a racing run.
+/cmd/acceleration; the same boundary integrates that request into a speed
+trajectory and uses the validated speed loop. This avoids closing throttle on
+the simulator's bursty acceleration derivative. Only one controller and one
+actuator interface may be active in a racing run.
 
 The speed controller has three operating phases. While the target error is
 normally at least 1.5 m/s it uses the maximum configured forward throttle to
@@ -226,70 +246,25 @@ of the 0.15 m/s hold deadband or 10% of the target, bounded by the configured
 coast threshold. This limits both overshoot and the subsequent undershoot
 correction without requiring an unavailable active brake channel.
 
-The acceleration controller uses the measured speed-dependent reachable
-envelope rather than assuming every acceleration is available everywhere:
-approximately 5.5 m/s² at standstill, 3.18 at 8 m/s, 2.04 at 12 m/s, 0.96 at
-16 m/s, 0.53 at 18–22 m/s, and near zero at the 23 m/s limit. Requests above
-that envelope are bounded before the throttle inverse is applied. MPC uses the
-same envelope in its per-horizon acceleration bounds.
+The acceleration command path bounds the requested positive acceleration by
+the measured speed-dependent reachable envelope rather than assuming every
+acceleration is available everywhere: approximately 5.5 m/s² at standstill,
+3.18 at 8 m/s, 2.04 at 12 m/s, 0.96 at 16 m/s, 0.53 at 18–22 m/s, and near
+zero at the 23 m/s limit. It integrates the bounded request into a speed
+trajectory and reuses the speed-loop feed-forward and feedback. Negative
+acceleration coasts because the competition actuator has no active brake
+channel. MPC uses the same envelope in its per-horizon acceleration bounds.
 
-The current odom candidate is in
-f1tenth_localization/config/sensor_odometry.yaml. It uses IMU and encoders only;
-IMU acceleration alpha=0.90, wheel correction gain=0.10, published-velocity
-filter alpha=1.0 for both acceleration and deceleration, and the promoted v2
-causal residual estimator are enabled. The v2 model is embedded in the C++
-localization node; its runtime inputs remain IMU/encoder diagnostics only.
-The model is reproducibly fitted and applied offline by
-`sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py`
-from the open-world identification corpus and compiled into the localization
-node. The attached v2 handoff is retained under
-`sdu_apex_autodrive/sdu_apex_autodrive/scripts/odom_estimator_v2/`; its
-reproducible holdout command is:
+The observer replay matched the C++ implementation to floating-point precision
+on the fit, test, blind validation, and fresh motion capture. The three
+historical replays had p95 relative speed error of 0.7208%, 0.7218%, and
+0.7422%, respectively. The fresh no-reset motion capture passed at 40 Hz,
+contained 1,081 complete packets with zero incomplete or duplicate packets,
+and had every moving replay sample within 2% in the validation report.
 
-~~~bash
-python3 sdu_apex_autodrive/sdu_apex_autodrive/scripts/odom_estimator_v2/apply_v2.py \
-  sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv \
-  --output /tmp/odom_estimator_v2_validation.csv
-~~~
-
-The v2 runtime computes
-`global = odom + max(odom, 0.5) * fractional_residual` and
-`output = (1-blend) * global + blend * braking_specialist`, with
-`blend=clamp((-observer_acceleration-0.35)/0.50,0,1)`. It has 195 causal
-features and a 50-feature braking specialist. The frozen-encoder fallback is the bounded
-prior `decel = min(12.0, 5.5 + 0.27 * speed)` after a quiet-IMU hold; it is a
-motion prediction, not a stop/reset condition.
-
-The v2 independent holdout result is p95 relative error 3.709553%, MAE
-0.0672747 m/s, and 86.9836% of moving samples within 2%. This remains a
-validation result, not a claim that a universal 2% p95 requirement has been
-met. The v2 branch also publishes its global/braking speeds, blend, residuals,
-and active flag in `/odom/diagnostics` for the next live recording.
-
-The promoted held-out live validation reached a median relative speed error
-below 2% in every measured nonzero speed bin: 0.967% at 1-3 m/s, 0.386% at
-3-5, 0.360% at 5-10, 0.177% at 10-15, 0.264% at 15-20, and 0.198% at
-20-23 m/s. This does not satisfy a strict every-sample 98% requirement: the
-same p95 relative errors were 17.244%, 4.312%, 2.316%, 1.326%, 1.472%, and
-1.410%. Long-distance integrated pose error (distance >=50 m) had 0.535%
-median and 1.931% p95 relative error; short-distance/reset transients remain
-the main position limitation. The complete metrics are in
-`artifacts/calibration/derived/latest_regime_sensor_fusion_validation_promoted_20260903/`.
-After that held-out check, the production header was regenerated from all
-nine usable recordings (32,473 deduplicated examples). The saved
-leave-one-recording-out aggregate is intentionally more pessimistic because
-the historical recordings have different distributions; it is a robustness
-warning, not a replacement for the independent live result.
-The promoted run reached 22.882 m/s with zero collisions. Native sensor,
-odom, EKF, and simulator-truth streams were about 11.49 Hz by their source
-timestamps; commands were about 49.98 Hz. These measured rates include jitter
-and are not assumed constants. The public `/odom` remains a single output;
-model regime and window values are exposed through diagnostics.
-The speed/acceleration slew-limit boundary was subsequently corrected so the
-speed loop and acceleration loop use independent configured limits. The
-existing live controller CSVs predate the boost-to-hold handoff and therefore
-remain baseline evidence only; one fresh finite open-world speed verification
-is required before final tuning is accepted.
+The old learned C++ runtime headers are removed from the active localization
+include path. Offline model-development scripts and artifacts remain separate
+so new models can be developed without changing the deterministic runtime.
 
 ## Track runtime
 
@@ -309,3 +284,14 @@ diagnostic-only.
 Active evidence and the recoverable cleanup archive are documented in
 artifacts/calibration/MANIFEST.yaml and the repository-level
 IMPLEMENTATION_STATUS.md.
+
+For map-frame localization without starting a controller or a second bridge,
+use the dedicated launch while the official bridge is already running:
+
+~~~bash
+ros2 launch sdu_apex_autodrive localization.launch.py start_bridge:=false
+~~~
+
+The launch defaults to the compete map and ICRA raceline above. It does not
+upsample simulator data: AMCL consumes each real LiDAR scan at the native
+player cadence.

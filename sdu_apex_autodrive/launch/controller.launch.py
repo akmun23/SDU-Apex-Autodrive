@@ -317,7 +317,11 @@ def generate_launch_description():
         DeclareLaunchArgument("controller", default_value="ftg"),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
-        DeclareLaunchArgument("with_rviz", default_value="true"),
+        DeclareLaunchArgument(
+            "with_rviz",
+            default_value="false",
+            description="Development visualization; disabled for race launch by default",
+        ),
         DeclareLaunchArgument(
             "with_ground_truth_monitor",
             default_value="false",

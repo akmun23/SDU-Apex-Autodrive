@@ -26,7 +26,18 @@ f1tenth_planning/trajectories/*_prepared_splines_debug.png
 f1tenth_planning/trajectories/*step0_width_debug*.png
 f1tenth_planning/trajectories/optimize_*.log
 
-# Large calibration recordings/models stay local; MANIFEST.yaml records their
-# exact paths and train/validation roles without putting hundreds of MB in Git.
-sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_*/
-sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/sensor_fusion_model.hpp
+# Calibration recordings and generated model artifacts stay local. MANIFEST.yaml
+# records logical dataset IDs, hashes, provenance and accepted metrics without
+# putting large raw/model files in Git.
+sdu_apex_autodrive/artifacts/calibration/raw/**
+!sdu_apex_autodrive/artifacts/calibration/raw/
+!sdu_apex_autodrive/artifacts/calibration/raw/.gitkeep
+sdu_apex_autodrive/artifacts/calibration/derived/**
+!sdu_apex_autodrive/artifacts/calibration/derived/
+!sdu_apex_autodrive/artifacts/calibration/derived/**/
+!sdu_apex_autodrive/artifacts/calibration/derived/**/metrics.csv
+!sdu_apex_autodrive/artifacts/calibration/derived/**/wheel_speed_map.csv
+!sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml
+sdu_apex_autodrive/artifacts/calibration/derived/**/sensor_fusion_model*.hpp
+sdu_apex_autodrive/artifacts/calibration/derived/identification_grid_stop_gate_40hz_20260904/**
+sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/**

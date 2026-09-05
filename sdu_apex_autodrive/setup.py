@@ -7,7 +7,11 @@ package_name = "sdu_apex_autodrive"
 setup(
     name=package_name,
     version="0.3.0",
-    packages=[package_name, package_name + ".scripts"],
+    packages=[
+        package_name,
+        package_name + ".scripts",
+        package_name + ".odometry_analysis",
+    ],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
@@ -35,6 +39,7 @@ setup(
             "timing_validator = sdu_apex_autodrive.timing_validator:main",
             "analyze_calibration = sdu_apex_autodrive.scripts.analyze_calibration:main",
             "audit_calibration_csv = sdu_apex_autodrive.scripts.audit_calibration_csv:main",
+            "validate_odometry_observer = sdu_apex_autodrive.scripts.validate_odometry_observer:main",
         ],
     },
 )
