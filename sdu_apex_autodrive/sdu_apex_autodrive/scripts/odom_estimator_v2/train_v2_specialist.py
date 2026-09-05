@@ -15,7 +15,8 @@ def main():
     global_model=lgb.Booster(model_file=str(root/'models/global_lgbm_speed_residual.txt'))
     importance=pd.Series(global_model.feature_importance(importance_type='gain'),index=global_model.feature_name()).sort_values(ascending=False)
     features=list(importance.head(50).index)
-    truth=d.truth_speed.to_numpy(float); odom=d.odom_diagnostics_speed_mps.to_numpy(float); a=X.acc_obs.to_numpy(float)
+    baseline_column = base.runtime_baseline_column(d)
+    truth=d.truth_speed.to_numpy(float); odom=d[baseline_column].to_numpy(float); a=X.acc_obs.to_numpy(float)
     mask=(truth>=0.5)&np.isfinite(truth)&np.isfinite(odom)&(a < -0.35)
     target=truth-odom
     weights=np.ones(len(d)); weights[(truth>=1)&(truth<3)]*=10; weights[(truth>=3)&(truth<5)]*=5; weights[(truth>=0.5)&(truth<1)]*=2

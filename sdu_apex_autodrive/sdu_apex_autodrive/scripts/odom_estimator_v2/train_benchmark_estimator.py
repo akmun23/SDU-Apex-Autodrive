@@ -77,6 +77,18 @@ def load_aligned(path: Path) -> pd.DataFrame:
     return dg
 
 
+def runtime_baseline_column(df: pd.DataFrame) -> str:
+    """Return the exact baseline consumed by the deployed v2 node.
+
+    New captures record the pre-v2 speed explicitly.  Older captures only
+    contain the post-v2 diagnostics speed and remain supported for the
+    historical replay test.
+    """
+    if 'odom_v2_base_speed_mps' in df.columns:
+        return 'odom_v2_base_speed_mps'
+    return 'odom_diagnostics_speed_mps'
+
+
 def add_episode(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     p = d['phase'].astype(str)
@@ -90,7 +102,7 @@ def add_episode(df: pd.DataFrame) -> pd.DataFrame:
 def make_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     d = add_episode(df)
     sigs = {
-        'base':'odom_diagnostics_speed_mps',
+        'base':runtime_baseline_column(d),
         'imu_pair':'odom_imu_pair_speed_mps',
         'imu':'odom_imu_speed_mps',
         'wheel_raw':'odom_raw_wheel_speed_mps',
@@ -281,7 +293,8 @@ def main() -> None:
         (train.truth_speed >= 0.5) & np.isfinite(train.truth_speed) &
         np.isfinite(train.odom_diagnostics_speed_mps)
     )
-    baseline_train = train.odom_diagnostics_speed_mps.to_numpy(dtype=float)
+    baseline_column = runtime_baseline_column(train)
+    baseline_train = train[baseline_column].to_numpy(dtype=float)
     denominator = np.maximum(baseline_train, 0.5)
     target_fraction = np.clip((train.truth_speed.to_numpy(dtype=float) - baseline_train) / denominator, -2.0, 2.0)
 
@@ -302,7 +315,8 @@ def main() -> None:
     )
     model.fit(X_train.loc[train_mask], target_fraction[train_mask], sample_weight=weights[train_mask])
 
-    baseline = valid.odom_diagnostics_speed_mps.to_numpy(dtype=float)
+    baseline_column = runtime_baseline_column(valid)
+    baseline = valid[baseline_column].to_numpy(dtype=float)
     fractional_correction = model.predict(X_valid)
     prediction = np.clip(baseline + np.maximum(baseline, 0.5) * fractional_correction, 0.0, 30.0)
 
