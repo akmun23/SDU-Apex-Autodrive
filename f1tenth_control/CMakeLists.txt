@@ -163,28 +163,8 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_gtest REQUIRED)
 
-  function(add_control_gtest test_name test_source)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${test_source}")
-      ament_add_gtest(${test_name} ${test_source})
-      target_link_libraries(${test_name} ${ARGN})
-      ament_target_dependencies(${test_name} ${DEPENDENCIES})
-    else()
-      message(STATUS "Skipping ${test_name}: missing ${test_source}")
-    endif()
-  endfunction()
-
-  # Math utilities tests
-  add_control_gtest(test_math_utils test/test_math_utils.cpp f1tenth_common)
-
-  # LiDAR processor tests
-  add_control_gtest(test_lidar_processor test/test_lidar_processor.cpp f1tenth_common)
-
-  # Follow The Gap algorithm tests
-  add_control_gtest(test_follow_the_gap test/test_follow_the_gap.cpp ftg_algorithm f1tenth_common)
-
-  # Keep the closed-loop controller tests optional: the old repository dump
-  # did not contain the legacy Stanley/Pure-Pursuit test sources.  A missing
-  # test must not make a production build fail.
+  # The repository currently contains one closed-loop controller test. Keep
+  # it conditional so a production checkout without test sources still builds.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sim_drive_pure_pursuit.cpp")
     add_executable(test_sim_drive_pure_pursuit test/test_sim_drive_pure_pursuit.cpp)
     target_link_libraries(test_sim_drive_pure_pursuit pure_pursuit_algorithm)
@@ -193,13 +173,6 @@ if(BUILD_TESTING)
     install(TARGETS test_sim_drive_pure_pursuit RUNTIME DESTINATION lib/${PROJECT_NAME})
   endif()
 
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sim_drive_stanley.cpp")
-    add_executable(test_sim_drive_stanley test/test_sim_drive_stanley.cpp)
-    target_link_libraries(test_sim_drive_stanley stanley_algorithm)
-    ament_target_dependencies(test_sim_drive_stanley ${DEPENDENCIES})
-    add_test(NAME stanley_closed_loop COMMAND test_sim_drive_stanley)
-    install(TARGETS test_sim_drive_stanley RUNTIME DESTINATION lib/${PROJECT_NAME})
-  endif()
 endif()
 
 # Export

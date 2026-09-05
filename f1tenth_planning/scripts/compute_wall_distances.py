@@ -8,9 +8,9 @@ to find the distance to the nearest wall. Outputs a 9-column trajectory CSV:
 
 Usage:
   python3 compute_wall_distances.py \
-      --map ../f1tenth_sim/maps/Spielberg_map.yaml \
-      --trajectory trajectories/Spielberg_raceline.csv \
-      --output trajectories/Spielberg_raceline_walls.csv
+      --map f1tenth_planning/maps/autodrive_compete_2026.yaml \
+      --trajectory f1tenth_planning/trajectories/icra_2025_raceline.csv \
+      --output /tmp/icra_2025_raceline_walls.csv
 """
 
 import argparse

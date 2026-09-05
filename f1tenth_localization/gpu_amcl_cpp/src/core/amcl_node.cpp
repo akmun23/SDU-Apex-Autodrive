@@ -191,7 +191,7 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("global_max_lateral_offset_m", 0.55);
     declare_parameter<std::string>("global_heading_trajectory_file", "");
     declare_parameter<std::string>("global_heading_trajectory_package", "f1tenth_planning");
-    declare_parameter<std::string>("global_heading_trajectory_rel_path", "trajectories/my_track_raceline.csv");
+    declare_parameter<std::string>("global_heading_trajectory_rel_path", "trajectories/icra_2025_raceline.csv");
     declare_parameter<double>("global_pose_covariance_xy_max", 0.25);
     declare_parameter<double>("global_pose_covariance_yaw_max", 0.12);
     declare_parameter<double>("global_pose_max_track_distance_m", 0.45);

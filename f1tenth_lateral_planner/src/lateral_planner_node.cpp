@@ -68,7 +68,7 @@ public:
     trajectory_package_ = declare_parameter<std::string>(
       "trajectory_package", "f1tenth_planning");
     trajectory_relative_path_ = declare_parameter<std::string>(
-      "trajectory_relative_path", "trajectories/my_track_raceline.csv");
+      "trajectory_relative_path", "trajectories/icra_2025_raceline.csv");
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
     laser_frame_ = declare_parameter<std::string>("laser_frame", "lidar");

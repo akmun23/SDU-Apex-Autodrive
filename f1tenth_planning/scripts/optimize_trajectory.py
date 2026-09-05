@@ -16,17 +16,17 @@ Output CSV format (7 or 9 columns):
 
 Usage:
     # Full pipeline from a map file
-    python3 optimize_trajectory.py --map f1tenth_planning/maps/Spielberg_map.yaml
-    python3 optimize_trajectory.py --map f1tenth_planning/maps/my_track_map.yaml --max-speed 8.0
+    python3 optimize_trajectory.py --map f1tenth_planning/maps/autodrive_compete_2026.yaml
+    python3 optimize_trajectory.py --map f1tenth_planning/maps/autodrive_compete_2026.yaml --max-speed 8.0
 
     # With wall distances (enables 9-col output)
-    python3 optimize_trajectory.py --map f1tenth_planning/maps/my_track_map.yaml --with-walls
+    python3 optimize_trajectory.py --map f1tenth_planning/maps/autodrive_compete_2026.yaml --with-walls
 
     # Skip extraction if TUM track CSV already exists
-    python3 optimize_trajectory.py --map f1tenth_planning/maps/Spielberg_map.yaml --skip-extract
+    python3 optimize_trajectory.py --map f1tenth_planning/maps/autodrive_compete_2026.yaml --skip-extract
 
     # Skip both extraction and optimization (re-convert only)
-    python3 optimize_trajectory.py --map f1tenth_planning/maps/Spielberg_map.yaml --skip-extract --skip-optimize
+    python3 optimize_trajectory.py --map f1tenth_planning/maps/autodrive_compete_2026.yaml --skip-extract --skip-optimize
 
 Requirements:
     pip install numpy opencv-python scipy pyyaml
@@ -1346,7 +1346,7 @@ def main():
 
     parser.add_argument(
         '--map', '-m', default=None,
-        help='Path to map .yaml file (default: auto-detect my_track_map.yaml in f1tenth_planning/maps/)',
+        help='Path to map .yaml file (default: autodrive_compete_2026.yaml)',
     )
     parser.add_argument(
         '--track-name', '-t', default=None,
@@ -1417,11 +1417,11 @@ def main():
 
     # Auto-detect map if not specified
     if args.map is None:
-        default_map = os.path.join(workspace, 'f1tenth_planning', 'maps', 'my_track_map.yaml')
+        default_map = os.path.join(workspace, 'f1tenth_planning', 'maps', 'autodrive_compete_2026.yaml')
         if os.path.exists(default_map):
             args.map = default_map
         else:
-            print("ERROR: No --map specified and default my_track_map.yaml not found.")
+            print("ERROR: No --map specified and default autodrive_compete_2026.yaml not found.")
             print(f"  Looked at: {default_map}")
             sys.exit(1)
 

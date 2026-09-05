@@ -102,7 +102,6 @@ distance must be at least `0.35 / 2 + 0.05 = 0.225 m`.
 
 Vehicle parameters for the optimizer live in two places:
 
-- **`config/vehicle_params.yaml`** — used by the pipeline for car width, friction, speed limits.
 - **`global_racetrajectory_optimization/params/racecar.ini`** — used by TUM optimizer for mintime mode (tire model, motor curve, mass, inertia). The pipeline auto-patches `width_opt`, `s_reg`, and step sizes into this file during optimization and restores it afterwards.
 
 ## Files
@@ -112,8 +111,6 @@ f1tenth_planning/
 ├── scripts/
 │   ├── optimize_trajectory.py    # Main pipeline — this is what you run
 │   └── compute_wall_distances.py # Wall ray-cast helper (called by pipeline)
-├── config/
-│   └── vehicle_params.yaml       # Vehicle parameters
 ├── global_racetrajectory_optimization/  # TUM optimizer (submodule)
 │   ├── main_globaltraj.py
 │   └── params/racecar.ini

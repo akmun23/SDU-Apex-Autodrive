@@ -35,7 +35,6 @@ canonical_odometry_csvs:
 canonical_fit:
   output_dir: derived/odom_fusion_train_full_holdout_observer_median_20260904
   metrics: derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv
-  generated_header: derived/odom_fusion_train_full_holdout_observer_median_20260904/sensor_fusion_model.hpp
   installed_runtime_header: ../../../f1tenth_localization/include/f1tenth_localization/sensor_fusion_model.hpp
   installed_runtime_header_status: unchanged_candidate_not_promoted
   command: >-
@@ -71,7 +70,6 @@ retained_files:
   - raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv
   - raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv
   - derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv
-  - derived/odom_fusion_train_full_holdout_observer_median_20260904/sensor_fusion_model.hpp
   - derived/identification_grid_stop_gate_40hz_20260904/wheel_speed_map.csv
 
 deleted_as_superseded:

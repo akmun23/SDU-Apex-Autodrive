@@ -42,8 +42,10 @@ The current candidate report is:
 
 `sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/metrics.csv`
 
-The candidate header is retained beside that report for inspection, but is
-not installed in production.
+The generated candidate header is deliberately not retained: it was an
+uninstalled 110 MB artifact. It can be regenerated from the two canonical
+CSVs using the command in the manifest, and the production header remains
+unchanged.
 
 ## What has been implemented
 
@@ -98,8 +100,8 @@ deceleration p95 below 5% on the untouched validation file.
 ## Cleanup policy
 
 Calibration clutter was removed rather than archived. The workspace retains
-only the two canonical odometry CSVs, the current candidate metrics/header,
-and the small wheel-map provenance CSV. Superseded controller experiments,
+only the two canonical odometry CSVs, the current candidate metrics, and the
+small wheel-map provenance CSV. Superseded controller experiments,
 old validation runs, derived reports, duplicate fitters, rejected observer fit
 outputs, and the Docker-owned rejected-controller archive were removed. Only
 the default calibration profile and the reusable identification-grid harness

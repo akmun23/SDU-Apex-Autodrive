@@ -10,7 +10,7 @@ lateral_planner_node:
     opponent_marker_topic: /opponent_marker
     trajectory_file: ""
     trajectory_package: f1tenth_planning
-    trajectory_relative_path: trajectories/my_track_raceline.csv
+    trajectory_relative_path: trajectories/icra_2025_raceline.csv
 
     avoidance_enabled: true
     publish_rate: 50.0

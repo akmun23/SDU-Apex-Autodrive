@@ -17,3 +17,16 @@ __pycache__/
 .vscode/
 .env
 
+# Planning scratch outputs are reproducible and must not become repository data.
+f1tenth_planning/global_racetrajectory_optimization/outputs/
+f1tenth_planning/global_racetrajectory_optimization/inputs/tracks/*_prepared.npz
+f1tenth_planning/trajectories/*_gvd.png
+f1tenth_planning/trajectories/*_viz.png
+f1tenth_planning/trajectories/*_prepared_splines_debug.png
+f1tenth_planning/trajectories/*step0_width_debug*.png
+f1tenth_planning/trajectories/optimize_*.log
+
+# Large calibration recordings/models stay local; MANIFEST.yaml records their
+# exact paths and train/validation roles without putting hundreds of MB in Git.
+sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_*/
+sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/sensor_fusion_model.hpp
