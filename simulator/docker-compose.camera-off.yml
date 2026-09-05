@@ -1,0 +1,4 @@
+services:
+  simulator:
+    volumes:
+      - ${AUTODRIVE_SIM_LEVEL0:?Set AUTODRIVE_SIM_LEVEL0 to the generated level0 override}:/home/autodrive_simulator/Data/level0:ro

@@ -32,6 +32,12 @@ SOURCE_SENSOR_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.VOLATILE,
 )
+DERIVED_ODOMETRY_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=100,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+)
 
 
 FIELDS = (
@@ -232,9 +238,10 @@ class Calibration(Node):
                 Bool, "/autodrive/reset_command", 10)
 
         self.create_subscription(
-            Odometry, "/odom", self._on_odom, SOURCE_SENSOR_QOS)
+            Odometry, "/odom", self._on_odom, DERIVED_ODOMETRY_QOS)
         self.create_subscription(
-            Float64MultiArray, "/odom/diagnostics", self._on_odom_diagnostics, 10)
+            Float64MultiArray, "/odom/diagnostics", self._on_odom_diagnostics,
+            DERIVED_ODOMETRY_QOS)
         # Restricted simulator ground truth is intentionally subscribed to by
         # this diagnostics recorder only. It provides the reference needed to
         # fit acceleration, delay, encoder scale, and collision metrics.
@@ -1370,7 +1377,15 @@ class Calibration(Node):
             observed_speed = (self.state.get("gt_speed_mps", math.nan)
                               if self.mode == "identification_grid"
                               else self.state.get("speed_mps", math.nan))
-            if math.isfinite(observed_speed) and observed_speed > self.max_speed:
+            # identification_grid begins with an explicit simulator reset.
+            # Let that planned reset run even when a stale session left the
+            # vehicle outside the open scene or above the test envelope; the
+            # normal safety guard applies from the first post-reset phase.
+            planned_reset = (
+                self.phase_index < len(self.phases) and
+                self.phases[self.phase_index][1] == "reset")
+            if (math.isfinite(observed_speed) and observed_speed > self.max_speed
+                    and not planned_reset):
                 self._finish("ground-truth speed safety limit")
                 return
 

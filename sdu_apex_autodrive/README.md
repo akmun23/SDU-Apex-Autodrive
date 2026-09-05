@@ -35,6 +35,19 @@ cd /home/autodrive_simulator
   -screen-fullscreen 0 -ip 127.0.0.1 -port 4567
 ~~~
 
+For the numeric timing gate, use the simulator's documented no-rendering mode
+instead; it disables all rendering, including vehicle-camera rendering, at the
+simulator rather than filtering the image after transmission:
+
+~~~bash
+cd /home/autodrive_simulator
+./AutoDRIVE\ Simulator.x86_64 -batchmode -nographics \
+  -ip 127.0.0.1 -port 4567 -logFile /tmp/autodrive-nographics.log
+~~~
+
+When using the locally built simulator image, the equivalent wrapper mode is
+`AUTODRIVE_SIM_RENDER_MODE=nographics autodrive-headless-simulator`.
+
 In a second terminal, start exactly one 40 Hz command-pacing bridge and wait
 for the simulator UI to report Connected!. The official bridge alone can
 publish at a slower image-processing-limited cadence, so it is not the
@@ -51,9 +64,93 @@ docker exec -d sdu_apex_autodrive bash -lc '
 ~~~
 
 The recorder may remain at its configured 50 Hz timer rate, but the native
-simulator sensor/event stream used for acceptance must measure approximately
-40 Hz. Verify `/autodrive/roboracer_1/imu`, both encoders, `/odom`, and
-`/odom/diagnostics` from the saved source-event rate fields before scoring.
+simulator sensor/event stream used for acceptance must be 40 Hz without bursty
+delivery. `test_suite.launch.py` starts only non-actuating sensor odometry for
+preflight, then requires the timing/data gate to pass before it starts any
+actuator or calibration process. The gate checks bridge-side packet arrivals,
+request timing, raw IMU/encoders/LiDAR, simulator odometry, `/odom`, and
+`/odom/diagnostics`. It rejects duplicate timestamps, bursts, long gaps,
+missing packets, non-finite values, and implausible encoder jumps. A monitor
+continues during the finite run and aborts it if timing degrades.
+
+Camera decode and ROS camera publication are disabled by default for the
+numeric odometry/timing path. The API also sends the source-side setting to the
+patched Unity simulator, which omits camera capture and serialization before
+the packet is sent. The legacy prebuilt simulator image cannot apply that
+setting and will continue to include its compiled camera field until replaced
+with the patched player in `simulator/`. `publish_camera:=true` opts back into
+camera handling for a run that needs `/autodrive/roboracer_1/front_camera`.
+
+### Prebuilt-image camera-off workaround
+
+When Unity source/build access is unavailable, the supplied IL2CPP player can
+be run with a reversible scene-file override that removes the serialized
+front-camera assignment. This changes the serialized player scene and must not
+be treated as competition-equivalent without organizer approval.
+
+Generate the override from the exact image tag being used:
+
+~~~bash
+cd /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive
+./simulator/tools/prepare_camera_disabled_level0.sh \
+  autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore \
+  /tmp/autodrive-level0-no-camera
+~~~
+
+Start it with the optional Compose overlay. A real display is required for
+this workaround; the Unity `-nographics` player remains capped at the observed
+20 Hz even after camera removal:
+
+~~~bash
+export AUTODRIVE_SIM_LEVEL0=/tmp/autodrive-level0-no-camera
+docker compose \
+  -f docker-compose.yml \
+  -f simulator/docker-compose.camera-off.yml \
+  up -d workspace simulator
+docker compose exec simulator bash -lc '
+  cd /home/autodrive_simulator
+  exec taskset -c 0-11 "./AutoDRIVE Simulator.x86_64" \
+    -batchmode -ip 127.0.0.1 -port 4567 \
+    -logFile /tmp/autodrive-camera-off.log
+'
+~~~
+
+Because this legacy binary cannot provide Unity simulation-time/frame
+metadata, its timing-only preflight must explicitly use legacy mode:
+
+~~~bash
+docker compose exec workspace bash -lc '
+  source /opt/ros/humble/setup.bash
+  source /home/autodrive_devkit/install/setup.bash
+  source /workspace/install/setup.bash
+  ros2 launch sdu_apex_autodrive test_suite.launch.py \
+    test:=timing_only start_bridge:=false \
+    require_simulation_metadata:=false
+'
+~~~
+
+The default remains `require_simulation_metadata:=true` for a rebuilt Unity
+player with the source patch. Legacy mode still enforces 40 Hz, 25 ms-like
+source intervals, no bursts/gaps, finite sensor values, and cross-stream
+coherence.
+
+The simulator container already has unlimited CPU and memory cgroup limits and
+GPU access. `AUTODRIVE_SIMULATOR_IMAGE` selects a rebuilt player image; the
+compose file also provides 2 GB shared memory for Unity graphics. More Docker
+resources alone do not remove synchronous Unity main-thread capture or packet
+serialization cost.
+
+To perform only the non-driving timing/data preflight, use:
+
+~~~bash
+docker exec -it sdu_apex_autodrive bash -lc '
+  source /opt/ros/humble/setup.bash
+  source /home/autodrive_devkit/install/setup.bash
+  source /workspace/install/setup.bash
+  ros2 launch sdu_apex_autodrive test_suite.launch.py \
+    test:=timing_only
+'
+~~~
 
 Then start the one finite test. `start_bridge:=false` prevents a second bridge
 from racing the verified one:

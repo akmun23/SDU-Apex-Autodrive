@@ -7,8 +7,22 @@ unity_screen_width="${AUTODRIVE_UNITY_SCREEN_WIDTH:-}"
 unity_screen_height="${AUTODRIVE_UNITY_SCREEN_HEIGHT:-}"
 unity_fullscreen="${AUTODRIVE_UNITY_FULLSCREEN:-0}"
 unity_log_file="${AUTODRIVE_UNITY_LOG_FILE:-/dev/null}"
+render_mode="${AUTODRIVE_SIM_RENDER_MODE:-headless}"
 
-if [[ -n "${unity_screen_width}" || -n "${unity_screen_height}" ]]; then
+case "${render_mode}" in
+  headless|nographics) ;;
+  *)
+    echo "AUTODRIVE_SIM_RENDER_MODE must be headless or nographics." >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${render_mode}" == "nographics" && ( -n "${unity_screen_width}" || -n "${unity_screen_height}" ) ]]; then
+  echo "Screen-size options are not valid with AUTODRIVE_SIM_RENDER_MODE=nographics." >&2
+  exit 2
+fi
+
+if [[ "${render_mode}" == "headless" && ( -n "${unity_screen_width}" || -n "${unity_screen_height}" ) ]]; then
   if [[ ! "${unity_screen_width}" =~ ^[1-9][0-9]*$ || ! "${unity_screen_height}" =~ ^[1-9][0-9]*$ ]]; then
     echo "Set AUTODRIVE_UNITY_SCREEN_WIDTH and AUTODRIVE_UNITY_SCREEN_HEIGHT to positive integers." >&2
     exit 2
@@ -18,6 +32,20 @@ if [[ -n "${unity_screen_width}" || -n "${unity_screen_height}" ]]; then
     echo "AUTODRIVE_UNITY_FULLSCREEN must be 0 or 1." >&2
     exit 2
   fi
+fi
+
+if [[ "${render_mode}" == "nographics" ]]; then
+  cd /home/autodrive_simulator
+  if [[ "$#" -eq 0 ]]; then
+    set -- \
+      "./AutoDRIVE Simulator.x86_64" \
+      -batchmode \
+      -nographics \
+      -ip "${AUTODRIVE_SIM_IP:-127.0.0.1}" \
+      -port "${AUTODRIVE_SIM_PORT:-4567}" \
+      -logFile "${unity_log_file}"
+  fi
+  exec "$@"
 fi
 
 Xvfb ":${display_number}" -screen 0 "${screen_geometry}" -ac \

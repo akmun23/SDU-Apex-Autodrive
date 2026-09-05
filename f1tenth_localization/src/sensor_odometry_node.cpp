@@ -493,10 +493,14 @@ public:
       throw std::runtime_error("invalid sensor odometry parameters");
     }
 
+    // Derived odometry is consumed by the recorder, EKF, and timing gate.
+    // Keep a bounded reliable backlog so a short Python executor/CSV flush
+    // stall cannot drop native derived samples from the dataset.
+    const auto derived_qos = rclcpp::QoS(100);
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
-      get_parameter("odom_topic").as_string(), rclcpp::QoS(10));
+      get_parameter("odom_topic").as_string(), derived_qos);
     diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      get_parameter("diagnostics_topic").as_string(), rclcpp::QoS(10));
+      get_parameter("diagnostics_topic").as_string(), derived_qos);
 
     auto sensor_qos = rclcpp::SensorDataQoS().keep_last(5);
     left_sub_ = create_subscription<sensor_msgs::msg::JointState>(
@@ -2007,20 +2011,35 @@ private:
       "v2_braking_residual,v2_active";
     diagnostics.layout.dim[0].size = 27;
     diagnostics.layout.dim[0].stride = 27;
+    // Reset boundaries intentionally invalidate the instantaneous wheel
+    // quantities below.  Keep the diagnostic vector finite for downstream
+    // timing/data validation; encoder_reset_count_ remains the authoritative
+    // reset marker and no invalid value is fed into odometry or the model.
+    const auto finite_or_zero = [](double value) {
+        return std::isfinite(value) ? value : 0.0;
+    };
     diagnostics.data = {
-      raw_wheel_speed_mps_, corrected_wheel_speed_mps_, longitudinal_slip_,
-      confidence, longitudinal_observer_.bias(),
+      finite_or_zero(raw_wheel_speed_mps_),
+      finite_or_zero(corrected_wheel_speed_mps_),
+      finite_or_zero(longitudinal_slip_),
+      finite_or_zero(confidence), finite_or_zero(longitudinal_observer_.bias()),
       static_cast<double>(encoder_reset_count_),
-      imu_speed_mps_, frozen_encoder_model_active_ ? 1.0 : 0.0,
-      frozen_encoder_model_decel_mps2_, sensor_fusion_model_speed_mps_,
-      sensor_fusion_model_spread_mps_, sensor_fusion_model_active_ ? 1.0 : 0.0,
-      motion_regime_code(), sensor_fusion_window_raw_speed_mps_,
-      sensor_fusion_window_mapped_speed_mps_, stamp.seconds(),
-      imu_observer_acceleration_mps2_, imu_pair_speed_mps_,
-      imu_pair_lead_s_, speed_mps_, sensor_fusion_v2_global_speed_mps_,
-      sensor_fusion_v2_base_speed_mps_,
-      sensor_fusion_v2_braking_speed_mps_, sensor_fusion_v2_braking_blend_,
-      sensor_fusion_v2_global_residual_, sensor_fusion_v2_braking_residual_,
+      finite_or_zero(imu_speed_mps_), frozen_encoder_model_active_ ? 1.0 : 0.0,
+      finite_or_zero(frozen_encoder_model_decel_mps2_),
+      finite_or_zero(sensor_fusion_model_speed_mps_),
+      finite_or_zero(sensor_fusion_model_spread_mps_),
+      sensor_fusion_model_active_ ? 1.0 : 0.0,
+      motion_regime_code(), finite_or_zero(sensor_fusion_window_raw_speed_mps_),
+      finite_or_zero(sensor_fusion_window_mapped_speed_mps_),
+      finite_or_zero(stamp.seconds()),
+      finite_or_zero(imu_observer_acceleration_mps2_),
+      finite_or_zero(imu_pair_speed_mps_), finite_or_zero(imu_pair_lead_s_),
+      finite_or_zero(speed_mps_), finite_or_zero(sensor_fusion_v2_global_speed_mps_),
+      finite_or_zero(sensor_fusion_v2_base_speed_mps_),
+      finite_or_zero(sensor_fusion_v2_braking_speed_mps_),
+      finite_or_zero(sensor_fusion_v2_braking_blend_),
+      finite_or_zero(sensor_fusion_v2_global_residual_),
+      finite_or_zero(sensor_fusion_v2_braking_residual_),
       sensor_fusion_v2_active_ ? 1.0 : 0.0};
     diagnostics_pub_->publish(diagnostics);
 

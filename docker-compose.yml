@@ -27,7 +27,7 @@ services:
     # The IROS explore asset is the open-world RoboRacer simulator.  The
     # practice/competition assets contain a visible track and are not valid
     # for the reset-isolated sensor-identification run.
-    image: autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore
+    image: ${AUTODRIVE_SIMULATOR_IMAGE:-autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore}
     # Keep the container alive; start the official simulator explicitly with
     # the graphical or xvfb headless command from the host terminal.
     command: ["-c", "sleep infinity"]
@@ -36,6 +36,9 @@ services:
     ipc: host
     privileged: true
     gpus: all
+    # The default image has no CPU or memory quota. Keep shared memory
+    # explicit for Unity/graphics workloads when a rebuilt player is used.
+    shm_size: "2gb"
     environment:
       DISPLAY: ${DISPLAY}
       QT_X11_NO_MITSHM: "1"

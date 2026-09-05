@@ -1,0 +1,90 @@
+diff --git a/Assets/Scripts/Socket.cs b/Assets/Scripts/Socket.cs
+index 2e3f5b2..clean40hz 100644
+--- a/Assets/Scripts/Socket.cs
++++ b/Assets/Scripts/Socket.cs
+@@ -4,3 +4,4 @@
+ using UnityEngine.UI;
+ using System;
++using System.Globalization;
+ using SocketIO;
+@@ -36,11 +37,14 @@
+     public GPS[] PositioningSystems; // `IPS` references
+     public IMU[] InertialMeasurementUnits; // `IMU` references
+     public LIDAR[] LIDARUnits; // `LIDAR` references
+-    public bool IntensityArray = true; // Choose to publish 2D LIDAR Intensity Array
++    public bool IntensityArray = false; // Choose to publish 2D LIDAR Intensity Array
+     public LIDAR3D[] LIDAR3DUnits; // `LIDAR3D` references
+     public Camera[] FrontCameras; // Vehicle front camera references
+     public Camera[] RearCameras; // Vehicle rear camera references
+     public bool SideCameras = false; // Rename front/rear camera frames as left/right
++    public bool PublishCameraImages = false; // Avoid camera capture on numeric telemetry path
++    public bool PublishRearCameraImages = false; // Avoid rear camera capture on numeric telemetry path
++    public bool PublishSimulationTiming = true; // Include Unity physics/frame diagnostics
+     public LapTimer[] LapTimers; // Lap timer references
+     public bool TireFriction = false; // Choose to publish tire friction values
+     public TireFriction[] TireFrictions; // `TireFriction` references
+@@ -49,6 +53,7 @@
+ 
+     private Vector3 CoSimPosition;
+     private Quaternion CoSimRotation;
++    private ulong telemetrySequence = 0;
+ 
+     // Use this for initialization
+     void Start()
+@@ -98,5 +103,14 @@
+         JSONObject jsonObject = obj.data; // Read incoming data and store it in a `JSONObject`
+         // Debug.Log(obj.data);
+ 
++        // Allow the API to enforce the numeric telemetry profile without
++        // requiring a separate Unity scene for every sensor configuration.
++        JSONObject cameraSetting = jsonObject.GetField("V1 Publish Camera");
++        if(cameraSetting != null) PublishCameraImages = bool.Parse(cameraSetting.str);
++        JSONObject rearCameraSetting = jsonObject.GetField("V1 Publish Rear Camera");
++        if(rearCameraSetting != null) PublishRearCameraImages = bool.Parse(rearCameraSetting.str);
++        JSONObject intensitySetting = jsonObject.GetField("V1 Publish LIDAR Intensity");
++        if(intensitySetting != null) IntensityArray = bool.Parse(intensitySetting.str);
++
+         // Set time of day
+         if(TimeOfDayAPI && (TimeOfDay.Length !=0))
+@@ -298,4 +312,12 @@
+             // Debug.Log("Attempting to write data...");
+             Dictionary<string, string> data = new Dictionary<string, string>(); // Create new `data` dictionary
++            if(PublishSimulationTiming)
++            {
++                // These identify the Unity state represented by this packet;
++                // they are not host arrival timestamps and must not be fabricated.
++                data["Simulation Time"] = Time.fixedTime.ToString("R", CultureInfo.InvariantCulture);
++                data["Simulation Frame"] = Time.frameCount.ToString(CultureInfo.InvariantCulture);
++                data["Telemetry Sequence"] = (++telemetrySequence).ToString(CultureInfo.InvariantCulture);
++            }
+             // Read data from traffic lights
+             if(TrafficLightControllers.Length != 0)
+@@ -343,12 +365,12 @@
+                         }
+                     }
+                     if(LIDAR3DUnits.Length != 0) data["V"+(i+1).ToString()+" LIDAR Pointcloud"] = Convert.ToBase64String(LIDAR3DUnits[i].CurrentPointcloud); // Get LIDAR pointcloud
+-                    if(FrontCameras.Length != 0)
++                    if(PublishCameraImages && FrontCameras.Length != 0)
+                     {
+                         if(SideCameras) data["V"+(i+1).ToString()+" Left Camera Image"] = Convert.ToBase64String(FrameGrabber.CaptureFrame(FrontCameras[i])); // Get left camera image
+                         else data["V"+(i+1).ToString()+" Front Camera Image"] = Convert.ToBase64String(FrameGrabber.CaptureFrame(FrontCameras[i])); // Get front camera image
+                     }
+-                    if(RearCameras.Length != 0)
++                    if(PublishRearCameraImages && RearCameras.Length != 0)
+                     {
+                         if(SideCameras) data["V"+(i+1).ToString()+" Right Camera Image"] = Convert.ToBase64String(FrameGrabber.CaptureFrame(RearCameras[i])); // Get right camera image
+                         else data["V"+(i+1).ToString()+" Rear Camera Image"] = Convert.ToBase64String(FrameGrabber.CaptureFrame(RearCameras[i])); // Get rear camera image
+diff --git a/Assets/Scenes/RoboRacer - Sim Racing - Explore.unity b/Assets/Scenes/RoboRacer - Sim Racing - Explore.unity
+index 3b0c5e2..clean40hz 100644
+--- a/Assets/Scenes/RoboRacer - Sim Racing - Explore.unity
++++ b/Assets/Scenes/RoboRacer - Sim Racing - Explore.unity
+@@ -4072,6 +4072,9 @@
+   - {fileID: 1105803435}
+   RearCameras: []
+   SideCameras: 0
++  PublishCameraImages: 0
++  PublishRearCameraImages: 0
++  PublishSimulationTiming: 1
+   LapTimers:
+   - {fileID: 1284891608}
+   TrafficLightControllers: []
