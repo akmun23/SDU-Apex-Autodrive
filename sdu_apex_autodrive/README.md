@@ -60,7 +60,7 @@ docker exec -it sdu_apex_autodrive bash -lc '
     test:=identification_grid \
     start_bridge:=false \
     calibration_params:=/workspace/install/share/sdu_apex_autodrive/config/calibration_identification_grid.yaml \
-    output_dir:=/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/latest_identification_grid
+    output_dir:=/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/pending_identification_grid
 '
 ~~~
 
@@ -68,10 +68,11 @@ Do not start AMCL in this open scene.
 
 ## Offline analysis
 
-The original identification corpus is
-artifacts/calibration/raw/latest_identification_grid/identification_grid_20260903_081853.csv.
-The strongest independent validation of the promoted model is
-artifacts/calibration/raw/latest_regime_sensor_fusion_validation_promoted_20260903/identification_grid_20260903_145602.csv.
+The canonical odometry identification corpus is
+artifacts/calibration/raw/identification_grid_full_20260904/identification_grid_20260904_113534.csv.
+The independent holdout validation corpus is
+artifacts/calibration/raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv.
+Fit only on the first file and score only on the second; do not merge them.
 Write all derived outputs for a new run under one dated directory:
 
 ~~~bash

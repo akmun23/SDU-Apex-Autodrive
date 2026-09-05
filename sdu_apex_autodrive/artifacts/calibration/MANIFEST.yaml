@@ -78,5 +78,6 @@ deleted_as_superseded:
   - prior identification, speed-controller, acceleration-controller, and
     transient-validation CSV recordings
   - prior derived reports and generated model candidates
+  - superseded calibration profiles and the Docker-owned rejected-controller archive
   - obsolete fit_sensor_fusion_model.py implementation
   - rejected fit_longitudinal_observer.py implementation and its setup entry

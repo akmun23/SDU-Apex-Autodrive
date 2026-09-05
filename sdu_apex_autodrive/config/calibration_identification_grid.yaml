@@ -7,7 +7,7 @@
 calibration:
   ros__parameters:
     mode: identification_grid
-    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/latest_identification_grid
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/calibration/raw/pending_identification_grid
     sample_rate_hz: 50.0
     # Keep exact native callback snapshots in addition to the recorder timer
     # rows so bursty delivery cannot hide encoder/IMU/odom/ground-truth data.

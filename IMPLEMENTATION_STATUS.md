@@ -100,9 +100,11 @@ deceleration p95 below 5% on the untouched validation file.
 Calibration clutter was removed rather than archived. The workspace retains
 only the two canonical odometry CSVs, the current candidate metrics/header,
 and the small wheel-map provenance CSV. Superseded controller experiments,
-old validation runs, derived reports, duplicate fitters, and rejected observer
-fit outputs were removed. Active runtime source, launch files, tests, map,
-raceline, and the 40-Hz bridge were preserved.
+old validation runs, derived reports, duplicate fitters, rejected observer fit
+outputs, and the Docker-owned rejected-controller archive were removed. Only
+the default calibration profile and the reusable identification-grid harness
+remain. Active runtime source, launch files, tests, map, raceline, and the
+40-Hz bridge were preserved.
 
 ## Still open
 
