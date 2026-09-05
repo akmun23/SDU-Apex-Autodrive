@@ -32,6 +32,7 @@ setup(
             "lap_map_saver = sdu_apex_autodrive.lap_map_saver:main",
             "ground_truth_amcl_monitor = sdu_apex_autodrive.ground_truth_amcl_monitor:main",
             "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
+            "timing_validator = sdu_apex_autodrive.timing_validator:main",
             "analyze_calibration = sdu_apex_autodrive.scripts.analyze_calibration:main",
         ],
     },
