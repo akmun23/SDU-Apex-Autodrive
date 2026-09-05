@@ -66,7 +66,10 @@ FIELDS = (
     "odom_sensor_fusion_window_mapped_speed_mps",
     "odom_diagnostics_stamp_s", "odom_imu_observer_acceleration_mps2",
     "odom_imu_pair_speed_mps", "odom_imu_pair_lead_s",
-    "odom_diagnostics_speed_mps",
+    "odom_diagnostics_speed_mps", "odom_v2_global_speed_mps",
+    "odom_v2_base_speed_mps", "odom_v2_braking_speed_mps",
+    "odom_v2_braking_blend",
+    "odom_v2_global_residual", "odom_v2_braking_residual", "odom_v2_active",
     # Brake/coast completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
@@ -808,6 +811,13 @@ class Calibration(Node):
             "odom_imu_pair_speed_mps",
             "odom_imu_pair_lead_s",
             "odom_diagnostics_speed_mps",
+            "odom_v2_global_speed_mps",
+            "odom_v2_base_speed_mps",
+            "odom_v2_braking_speed_mps",
+            "odom_v2_braking_blend",
+            "odom_v2_global_residual",
+            "odom_v2_braking_residual",
+            "odom_v2_active",
         )
         for field, value in zip(fields, msg.data[:len(fields)]):
             if math.isfinite(float(value)):

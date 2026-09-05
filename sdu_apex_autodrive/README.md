@@ -35,18 +35,25 @@ cd /home/autodrive_simulator
   -screen-fullscreen 0 -ip 127.0.0.1 -port 4567
 ~~~
 
-In a second terminal, start exactly one bridge and wait for the simulator UI to
-report Connected!:
+In a second terminal, start exactly one 40 Hz command-pacing bridge and wait
+for the simulator UI to report Connected!. The official bridge alone can
+publish at a slower image-processing-limited cadence, so it is not the
+acceptance path for this stack:
 
 ~~~bash
 docker exec -d sdu_apex_autodrive bash -lc '
   source /opt/ros/humble/setup.bash
   source /home/autodrive_devkit/install/setup.bash
   source /workspace/install/setup.bash
-  exec ros2 run autodrive_roboracer autodrive_bridge \
+  exec ros2 run sdu_apex_autodrive autodrive_bridge_40hz \
     --ros-args -r __node:=autodrive_bridge
 '
 ~~~
+
+The recorder may remain at its configured 50 Hz timer rate, but the native
+simulator sensor/event stream used for acceptance must measure approximately
+40 Hz. Verify `/autodrive/roboracer_1/imu`, both encoders, `/odom`, and
+`/odom/diagnostics` from the saved source-event rate fields before scoring.
 
 Then start the one finite test. `start_bridge:=false` prevents a second bridge
 from racing the verified one:
@@ -132,14 +139,35 @@ same envelope in its per-horizon acceleration bounds.
 The current odom candidate is in
 f1tenth_localization/config/sensor_odometry.yaml. It uses IMU and encoders only;
 IMU acceleration alpha=0.90, wheel correction gain=0.10, published-velocity
-filter alpha=1.0 for both acceleration and deceleration, and the causal
-sensor-fusion model are enabled. The model is reproducibly fitted by
+filter alpha=1.0 for both acceleration and deceleration, and the promoted v2
+causal residual estimator are enabled. The v2 model is embedded in the C++
+localization node; its runtime inputs remain IMU/encoder diagnostics only.
+The model is reproducibly fitted and applied offline by
 `sdu_apex_autodrive/sdu_apex_autodrive/scripts/fit_regime_sensor_fusion_model.py`
 from the open-world identification corpus and compiled into the localization
-node. It contains separate accelerating, steady, decelerating, and frozen
-models and 24 causal features. The frozen-encoder fallback is the bounded
+node. The attached v2 handoff is retained under
+`sdu_apex_autodrive/sdu_apex_autodrive/scripts/odom_estimator_v2/`; its
+reproducible holdout command is:
+
+~~~bash
+python3 sdu_apex_autodrive/sdu_apex_autodrive/scripts/odom_estimator_v2/apply_v2.py \
+  sdu_apex_autodrive/artifacts/calibration/raw/identification_grid_fusion_candidate_20260904/identification_grid_20260904_123232.csv \
+  --output /tmp/odom_estimator_v2_validation.csv
+~~~
+
+The v2 runtime computes
+`global = odom + max(odom, 0.5) * fractional_residual` and
+`output = (1-blend) * global + blend * braking_specialist`, with
+`blend=clamp((-observer_acceleration-0.35)/0.50,0,1)`. It has 195 causal
+features and a 50-feature braking specialist. The frozen-encoder fallback is the bounded
 prior `decel = min(12.0, 5.5 + 0.27 * speed)` after a quiet-IMU hold; it is a
 motion prediction, not a stop/reset condition.
+
+The v2 independent holdout result is p95 relative error 3.709553%, MAE
+0.0672747 m/s, and 86.9836% of moving samples within 2%. This remains a
+validation result, not a claim that a universal 2% p95 requirement has been
+met. The v2 branch also publishes its global/braking speeds, blend, residuals,
+and active flag in `/odom/diagnostics` for the next live recording.
 
 The promoted held-out live validation reached a median relative speed error
 below 2% in every measured nonzero speed bin: 0.967% at 1-3 m/s, 0.386% at

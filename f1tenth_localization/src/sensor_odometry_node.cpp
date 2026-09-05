@@ -22,6 +22,8 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "f1tenth_localization/odom_estimator_v2_features.hpp"
+#include "f1tenth_localization/odom_estimator_v2_model.hpp"
 #include "f1tenth_localization/sensor_fusion_model.hpp"
 #include "f1tenth_localization/longitudinal_observer.hpp"
 
@@ -138,6 +140,12 @@ public:
     declare_parameter(
       "observer_decelerating_encoder_measurement_variance_m2ps2", 0.25);
     declare_parameter("sensor_fusion_model_enabled", true);
+    // v2 is the promoted causal residual estimator from the attached
+    // holdout-validated handoff. The older generated regime forest remains
+    // available only as a source-compatible fallback when this is disabled.
+    declare_parameter("sensor_fusion_v2_enabled", true);
+    declare_parameter("sensor_fusion_v2_braking_blend_offset_mps2", 0.35);
+    declare_parameter("sensor_fusion_v2_braking_blend_range_mps2", 0.50);
     // In the steady regime the bounded wheel/IMU baseline is already an
     // absolute observation. The learned steady branch is retained for
     // diagnostics but is disabled by default because it can turn a valid
@@ -326,6 +334,12 @@ public:
         "observer_decelerating_encoder_measurement_variance_m2ps2").as_double());
     sensor_fusion_model_enabled_ = get_parameter(
       "sensor_fusion_model_enabled").as_bool();
+    sensor_fusion_v2_enabled_ = get_parameter(
+      "sensor_fusion_v2_enabled").as_bool();
+    sensor_fusion_v2_braking_blend_offset_mps2_ = std::max(
+      0.0, get_parameter("sensor_fusion_v2_braking_blend_offset_mps2").as_double());
+    sensor_fusion_v2_braking_blend_range_mps2_ = std::max(
+      1.0e-6, get_parameter("sensor_fusion_v2_braking_blend_range_mps2").as_double());
     sensor_fusion_steady_model_enabled_ = get_parameter(
       "sensor_fusion_steady_model_enabled").as_bool();
     regime_acceleration_threshold_mps2_ = std::max(
@@ -557,6 +571,14 @@ private:
     sensor_fusion_model_active_ = false;
     sensor_fusion_model_speed_mps_ = 0.0;
     sensor_fusion_model_spread_mps_ = 0.0;
+    sensor_fusion_v2_global_speed_mps_ = 0.0;
+    sensor_fusion_v2_base_speed_mps_ = 0.0;
+    sensor_fusion_v2_braking_speed_mps_ = 0.0;
+    sensor_fusion_v2_braking_blend_ = 0.0;
+    sensor_fusion_v2_global_residual_ = 0.0;
+    sensor_fusion_v2_braking_residual_ = 0.0;
+    sensor_fusion_v2_active_ = false;
+    sensor_fusion_v2_features_.reset();
     motion_regime_ = SensorMotionRegime::STEADY;
     sensor_fusion_raw_history_.clear();
     sensor_fusion_mapped_history_.clear();
@@ -827,6 +849,7 @@ private:
       sensor_fusion_gap_history_.clear();
       sensor_fusion_encoder_history_.clear();
       sensor_fusion_recovery_window_history_.clear();
+      sensor_fusion_v2_features_.reset();
       steady_mapped_speed_history_.clear();
       raw_wheel_speed_mps_ = 0.0;
       corrected_wheel_speed_mps_ = 0.0;
@@ -853,6 +876,7 @@ private:
       sensor_fusion_gap_history_.clear();
       sensor_fusion_encoder_history_.clear();
       sensor_fusion_recovery_window_history_.clear();
+      sensor_fusion_v2_features_.reset();
       steady_mapped_speed_history_.clear();
       sensor_fusion_window_raw_speed_mps_ = 0.0;
       sensor_fusion_window_mapped_speed_mps_ = 0.0;
@@ -890,6 +914,7 @@ private:
       sensor_fusion_imu_history_.clear();
       sensor_fusion_gap_history_.clear();
       sensor_fusion_encoder_history_.clear();
+      sensor_fusion_v2_features_.reset();
       steady_mapped_speed_history_.clear();
       sensor_fusion_window_raw_speed_mps_ = 0.0;
       sensor_fusion_window_mapped_speed_mps_ = 0.0;
@@ -1140,6 +1165,13 @@ private:
     sensor_fusion_model_active_ = false;
     sensor_fusion_model_speed_mps_ = 0.0;
     sensor_fusion_model_spread_mps_ = 0.0;
+    sensor_fusion_v2_global_speed_mps_ = 0.0;
+    sensor_fusion_v2_base_speed_mps_ = 0.0;
+    sensor_fusion_v2_braking_speed_mps_ = 0.0;
+    sensor_fusion_v2_braking_blend_ = 0.0;
+    sensor_fusion_v2_global_residual_ = 0.0;
+    sensor_fusion_v2_braking_residual_ = 0.0;
+    sensor_fusion_v2_active_ = false;
     if (fusion_wheel_speed <= stationary_speed_threshold_mps_) {
       // A zero/short encoder window is not a stationary observation when the
       // IMU is actively accelerating or braking.  In particular, after a
@@ -1315,12 +1347,10 @@ private:
       fused_speed += correction;
     }
 
-    // This model is fitted offline against simulator truth but is causal at
-    // runtime: it only sees the independent IMU observer, the current
-    // encoder increment, the documented wheel-speed map, timing, signed IMU
-    // acceleration, and short sensor histories. The frozen model is trained
-    // only on moving zero-encoder samples; stationary samples never select a
-    // speed model.
+    // The v2 model is fitted offline against simulator truth but is causal at
+    // runtime: it only sees the independent IMU observer, encoder-derived
+    // speeds, timing, acceleration, and their causal history. Ground truth,
+    // throttle, IPS, and simulator odometry never enter this path.
     const double model_imu_speed = std::clamp(imu_body_speed, 0.0, 30.0);
     const bool frozen_motion = encoder_dropout_hold &&
       model_imu_speed > stationary_speed_threshold_mps_;
@@ -1343,7 +1373,52 @@ private:
     {
       model_regime = SensorMotionRegime::FROZEN_ACCELERATING;
     }
-    if (sensor_fusion_model_enabled_ && imu_speed_ready_ &&
+    if (sensor_fusion_v2_enabled_ && imu_speed_ready_) {
+      // The v2 baseline is the current pre-v2 causal sensor estimate. Using
+      // speed_mps_ here feeds the previous v2 output back into its own next
+      // prediction, which was not present in the attached training replay
+      // and can accumulate a low-speed/high-slip bias on a fresh run.
+      const double v2_base_speed = std::clamp(fused_speed, 0.0, 30.0);
+      sensor_fusion_v2_base_speed_mps_ = v2_base_speed;
+      const auto v2_features = sensor_fusion_v2_features_.update(
+        v2_base_speed, imu_pair_speed_mps, imu_speed_mps_, wheel_speed_abs,
+        mapped_speed, window_raw_speed, window_mapped_speed,
+        imu_observer_acceleration_mps2_, longitudinal_observer_.bias(),
+        std::clamp(wheel_observation_confidence_, 0.0, 1.0),
+        imu_raw_acceleration_mps2_, imu_lateral_acceleration_mps2_,
+        imu_yaw_rate_, stamp.seconds(), dt);
+
+      if (model_motion) {
+        const auto prediction = sensor_fusion_v2_model_.predict(v2_features);
+        const double global_speed = std::clamp(
+          v2_base_speed + std::max(v2_base_speed, 0.5) *
+          prediction.global_fractional_residual, 0.0, 30.0);
+        const double braking_speed = std::clamp(
+          v2_base_speed + prediction.braking_absolute_residual_mps,
+          0.0, 30.0);
+        const double braking_blend = std::clamp(
+          (-imu_observer_acceleration_mps2_ -
+          sensor_fusion_v2_braking_blend_offset_mps2_) /
+          sensor_fusion_v2_braking_blend_range_mps2_, 0.0, 1.0);
+        const double v2_speed = (1.0 - braking_blend) * global_speed +
+          braking_blend * braking_speed;
+        if (prediction.valid && std::isfinite(v2_speed)) {
+          fused_speed = v2_speed;
+          sensor_fusion_model_active_ = true;
+          sensor_fusion_model_speed_mps_ = v2_speed;
+          sensor_fusion_model_spread_mps_ =
+            std::abs(global_speed - braking_speed);
+          sensor_fusion_v2_global_speed_mps_ = global_speed;
+          sensor_fusion_v2_braking_speed_mps_ = braking_speed;
+          sensor_fusion_v2_braking_blend_ = braking_blend;
+          sensor_fusion_v2_global_residual_ =
+            prediction.global_fractional_residual;
+          sensor_fusion_v2_braking_residual_ =
+            prediction.braking_absolute_residual_mps;
+          sensor_fusion_v2_active_ = true;
+        }
+      }
+    } else if (sensor_fusion_model_enabled_ && imu_speed_ready_ &&
       model_motion && learned_steady_model_allowed &&
       // Braking gets a separate conservative blend below. Do not let the
       // generic branch replace the observer during a brake or wheel
@@ -1927,9 +2002,11 @@ private:
       "sensor_fusion_model_active,sensor_motion_regime,"
       "sensor_fusion_window_raw_speed_mps,sensor_fusion_window_mapped_speed_mps,"
       "odom_stamp_s,imu_observer_acceleration_mps2,imu_pair_speed_mps,"
-      "imu_pair_lead_s,odom_speed_mps";
-    diagnostics.layout.dim[0].size = 20;
-    diagnostics.layout.dim[0].stride = 20;
+      "imu_pair_lead_s,odom_speed_mps,v2_global_speed_mps,"
+      "v2_base_speed_mps,v2_braking_speed_mps,v2_braking_blend,v2_global_residual,"
+      "v2_braking_residual,v2_active";
+    diagnostics.layout.dim[0].size = 27;
+    diagnostics.layout.dim[0].stride = 27;
     diagnostics.data = {
       raw_wheel_speed_mps_, corrected_wheel_speed_mps_, longitudinal_slip_,
       confidence, longitudinal_observer_.bias(),
@@ -1940,7 +2017,11 @@ private:
       motion_regime_code(), sensor_fusion_window_raw_speed_mps_,
       sensor_fusion_window_mapped_speed_mps_, stamp.seconds(),
       imu_observer_acceleration_mps2_, imu_pair_speed_mps_,
-      imu_pair_lead_s_, speed_mps_};
+      imu_pair_lead_s_, speed_mps_, sensor_fusion_v2_global_speed_mps_,
+      sensor_fusion_v2_base_speed_mps_,
+      sensor_fusion_v2_braking_speed_mps_, sensor_fusion_v2_braking_blend_,
+      sensor_fusion_v2_global_residual_, sensor_fusion_v2_braking_residual_,
+      sensor_fusion_v2_active_ ? 1.0 : 0.0};
     diagnostics_pub_->publish(diagnostics);
 
     // Publish diagnostics first. The recorder subscribes to both topics and
@@ -2042,6 +2123,9 @@ private:
   double observer_decelerating_measurement_variance_m2ps2_{0.25};
   double imu_speed_correction_gain_{0.0};
   bool sensor_fusion_model_enabled_{true};
+  bool sensor_fusion_v2_enabled_{true};
+  double sensor_fusion_v2_braking_blend_offset_mps2_{0.35};
+  double sensor_fusion_v2_braking_blend_range_mps2_{0.50};
   bool sensor_fusion_steady_model_enabled_{false};
   double regime_acceleration_threshold_mps2_{0.50};
   double regime_enter_acceleration_mps2_{0.65};
@@ -2119,6 +2203,13 @@ private:
   bool sensor_fusion_model_active_{false};
   double sensor_fusion_model_speed_mps_{0.0};
   double sensor_fusion_model_spread_mps_{0.0};
+  double sensor_fusion_v2_global_speed_mps_{0.0};
+  double sensor_fusion_v2_base_speed_mps_{0.0};
+  double sensor_fusion_v2_braking_speed_mps_{0.0};
+  double sensor_fusion_v2_braking_blend_{0.0};
+  double sensor_fusion_v2_global_residual_{0.0};
+  double sensor_fusion_v2_braking_residual_{0.0};
+  bool sensor_fusion_v2_active_{false};
   double imu_pair_speed_mps_{0.0};
   double imu_pair_lead_s_{0.0};
   SensorMotionRegime motion_regime_{SensorMotionRegime::STEADY};
@@ -2131,6 +2222,8 @@ private:
   std::deque<double> steady_mapped_speed_history_;
   std::deque<std::pair<double, double>> sensor_fusion_encoder_history_;
   std::deque<double> sensor_fusion_recovery_window_history_;
+  f1tenth_localization::OdomEstimatorV2Model sensor_fusion_v2_model_;
+  f1tenth_localization::OdomEstimatorV2Features sensor_fusion_v2_features_;
   bool sensor_fusion_braking_window_active_{false};
   double sensor_fusion_window_recovery_elapsed_s_{0.0};
   double sensor_fusion_wheel_downshift_hold_remaining_s_{0.0};

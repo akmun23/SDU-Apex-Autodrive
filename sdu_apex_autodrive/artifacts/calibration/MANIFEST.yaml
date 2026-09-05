@@ -56,6 +56,19 @@ fit_runtime_parameters:
     - speed_mps
   deployed_braking_branch: braking_observer
 
+runtime_v2_estimator:
+  source_handoff: /home/akselmo/Downloads/odom_estimator_handoff_v2.zip
+  global_model: ../../sdu_apex_autodrive/scripts/odom_estimator_v2/models/global_lgbm_speed_residual.txt
+  braking_model: ../../sdu_apex_autodrive/scripts/odom_estimator_v2/models/braking_specialist.txt
+  generated_header: ../../../f1tenth_localization/include/f1tenth_localization/odom_estimator_v2_model.hpp
+  feature_history_header: ../../../f1tenth_localization/include/f1tenth_localization/odom_estimator_v2_features.hpp
+  generator: sdu_apex_autodrive/sdu_apex_autodrive/scripts/generate_odom_estimator_v2_header.py
+  global_feature_count: 195
+  braking_feature_count: 50
+  braking_blend: clamp((-imu_observer_acceleration_mps2 - 0.35) / 0.50, 0, 1)
+  validation_summary: sdu_apex_autodrive/scripts/odom_estimator_v2/results/summary_v2.json
+  runtime_ground_truth_input: false
+
 holdout_relative_error_p95_pct:
   offline_forest_validation_all:
     1-3_mps: 2.696

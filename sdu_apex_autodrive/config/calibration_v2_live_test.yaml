@@ -1,0 +1,19 @@
+# Short fresh-data acceptance run for the embedded odom-estimator-v2 branch.
+# Ground truth is recorded by the diagnostics node for scoring only; it is not
+# consumed by sensor odometry or the actuator.
+calibration:
+  ros__parameters:
+    mode: zero_throttle_decel
+    capture_source_events: true
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    throttle_sequence: [0.65]
+    hold_sec: 8.0
+    zero_settle_sec: 3.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.75
+    startup_timeout_sec: 90.0
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 450.0

@@ -12,7 +12,9 @@ sensor_odometry:
     # fitted fusion speed m/s, fitted forest spread m/s, fitted model active,
     # motion regime (0 accel, 1 steady, 2 decel, 3 frozen), followed by the
     # exact causal raw and mapped encoder window speeds, odom stamp, observer
-    # acceleration, pair-time IMU speed, and IMU-to-encoder pair lead.
+    # acceleration, pair-time IMU speed, and IMU-to-encoder pair lead. The v2
+    # fields append the global prediction, its pre-v2 causal baseline, the
+    # braking prediction/blend, residuals, and active flag.
 
     odom_frame: odom
     base_frame: base_link
@@ -105,6 +107,12 @@ sensor_odometry:
     # still only IMU, encoder, timing, and short sensor histories; ground truth
     # is used only by the offline fitter and validation report.
     sensor_fusion_model_enabled: true
+    # Promoted v2 causal residual estimator from the independent holdout
+    # recording. Its two tree ensembles are embedded in the C++ node; no
+    # Python/LightGBM process is required at runtime.
+    sensor_fusion_v2_enabled: true
+    sensor_fusion_v2_braking_blend_offset_mps2: 0.35
+    sensor_fusion_v2_braking_blend_range_mps2: 0.50
     # The steady wheel/IMU baseline is preferred to the learned steady branch;
     # acceleration, deceleration, and frozen regimes remain model-selectable.
     sensor_fusion_steady_model_enabled: true
