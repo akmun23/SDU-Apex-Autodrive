@@ -56,6 +56,23 @@ def test_material_overspeed_coasts_and_clears_integral():
     assert controller.integral == 0.0
 
 
+def test_large_overspeed_cuts_throttle_without_slew_delay():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=1.0,
+        hard_overspeed_cutoff_mps=0.5,
+    ))
+    initial = controller.update(8.0, 0.0, 0.0, 0.1)
+    assert 0.0 < initial < 1.0
+
+    # A 7 m/s crossing must not leave a full-throttle command in the normal
+    # falling slew ramp. AutoDRIVE has no active brake channel.
+    assert controller.update(1.0, 8.0, 0.0, 0.025) == 0.0
+    assert controller.last_output == 0.0
+
+
 def test_10hz_rise_and_fall_are_slew_limited():
     controller = TargetSpeedController(config())
 
@@ -90,7 +107,7 @@ def test_speed_controller_leaves_hold_deadband_for_fast_correction():
     assert output > expected
 
 
-def test_speed_controller_boosts_at_full_throttle_far_below_target():
+def test_speed_controller_uses_bounded_model_far_below_target():
     controller = TargetSpeedController(replace(
         config(),
         throttle_max_forward=1.0,
@@ -100,7 +117,7 @@ def test_speed_controller_boosts_at_full_throttle_far_below_target():
 
     output = controller.update(5.0, 0.0, 0.0, 0.1)
 
-    assert output == 1.0
+    assert controller.feedforward(5.0) < output < 1.0
 
 
 def test_speed_controller_handoffs_to_target_hold_throttle_before_crossing():
@@ -112,7 +129,7 @@ def test_speed_controller_handoffs_to_target_hold_throttle_before_crossing():
     ))
     controller.update(5.0, 0.0, 0.0, 0.1)
 
-    # The previous full-throttle command predicts that the target will be
+    # The previous model-led acceleration predicts that the target will be
     # crossed shortly, so the controller selects the mapped 5 m/s hold value.
     output = controller.update(5.0, 3.8, 0.0, 0.1)
 
@@ -175,7 +192,8 @@ def test_speed_controller_target_change_exits_hold_approach():
     controller.update(5.0, 0.0, 0.0, 0.1)
     controller.update(5.0, 3.8, 0.0, 0.1)
 
-    assert controller.update(10.0, 3.8, 0.0, 0.1) == 1.0
+    output = controller.update(10.0, 3.8, 0.0, 0.1)
+    assert controller.feedforward(10.0) < output < 1.0
 
 
 def test_speed_controller_downshift_waits_for_fresh_stable_odom():

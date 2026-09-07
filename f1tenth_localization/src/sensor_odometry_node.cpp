@@ -99,6 +99,10 @@ public:
     declare_parameter("wheel_freeze_speed_mps", 0.15);
     declare_parameter("wheel_innovation_max_mps", 0.30);
     declare_parameter("wheel_update_beta", 0.20);
+    declare_parameter("stationary_hold_s", 0.20);
+    declare_parameter("stationary_ax_abs_max_mps2", 0.25);
+    declare_parameter("stationary_ay_abs_max_mps2", 0.75);
+    declare_parameter("stationary_yaw_rate_abs_max_radps", 0.15);
     declare_parameter("turn_enter_yaw_rate_radps", 0.6);
     declare_parameter("turn_enter_abs_ay_mps2", 6.0);
     declare_parameter("turn_exit_yaw_rate_radps", 0.1);
@@ -188,6 +192,10 @@ private:
     config.wheel_freeze_speed_mps = 0.15;
     config.wheel_innovation_max_mps = 0.30;
     config.wheel_update_beta = 0.20;
+    config.stationary_hold_s = 0.20;
+    config.stationary_ax_abs_max_mps2 = 0.25;
+    config.stationary_ay_abs_max_mps2 = 0.75;
+    config.stationary_yaw_rate_abs_max_radps = 0.15;
     config.turn_enter_yaw_rate_radps = 0.6;
     config.turn_enter_abs_ay_mps2 = 6.0;
     config.turn_exit_yaw_rate_radps = 0.1;
@@ -213,6 +221,13 @@ private:
     config.wheel_innovation_max_mps = get_parameter(
       "wheel_innovation_max_mps").as_double();
     config.wheel_update_beta = get_parameter("wheel_update_beta").as_double();
+    config.stationary_hold_s = get_parameter("stationary_hold_s").as_double();
+    config.stationary_ax_abs_max_mps2 = get_parameter(
+      "stationary_ax_abs_max_mps2").as_double();
+    config.stationary_ay_abs_max_mps2 = get_parameter(
+      "stationary_ay_abs_max_mps2").as_double();
+    config.stationary_yaw_rate_abs_max_radps = get_parameter(
+      "stationary_yaw_rate_abs_max_radps").as_double();
     config.turn_enter_yaw_rate_radps = get_parameter(
       "turn_enter_yaw_rate_radps").as_double();
     config.turn_enter_abs_ay_mps2 = get_parameter(

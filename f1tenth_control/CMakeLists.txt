@@ -146,6 +146,20 @@ install(
   DESTINATION share/${PROJECT_NAME}/config
 )
 
+# Offline track-level test for tuning only the production Pure Pursuit
+# parameters against the current raceline and a fixed simulator envelope.
+add_executable(test_sim_drive_pp
+  tools/pure_pursuit_track_sweep.cpp
+)
+target_link_libraries(test_sim_drive_pp pure_pursuit_algorithm)
+target_include_directories(test_sim_drive_pp
+  PRIVATE ${F1TENTH_PUBLIC_INCLUDE_DIRS}
+)
+install(
+  TARGETS test_sim_drive_pp
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 
 # ===================
 # Testing

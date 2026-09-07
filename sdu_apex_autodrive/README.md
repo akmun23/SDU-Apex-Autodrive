@@ -97,9 +97,10 @@ cd /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive
   /tmp/autodrive-level0-no-camera
 ~~~
 
-Start it with the optional Compose overlay. A real display is required for
-this workaround; the Unity `-nographics` player remains capped at the observed
-20 Hz even after camera removal:
+Start it with the optional Compose overlay. Use Unity's graphical path through
+Xvfb: the prebuilt player remains near 20 Hz in `-nographics` mode even after
+camera removal, while the camera-disabled Explore scene has been measured at
+40 Hz through Xvfb:
 
 ~~~bash
 export AUTODRIVE_SIM_LEVEL0=/tmp/autodrive-level0-no-camera
@@ -109,11 +110,20 @@ docker compose \
   up -d workspace simulator
 docker compose exec simulator bash -lc '
   cd /home/autodrive_simulator
-  exec taskset -c 0-11 "./AutoDRIVE Simulator.x86_64" \
-    -batchmode -ip 127.0.0.1 -port 4567 \
-    -logFile /tmp/autodrive-camera-off.log
+  exec xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24 -ac" \
+    "./AutoDRIVE Simulator.x86_64" \
+    -batchmode -screen-width 1280 -screen-height 720 -screen-fullscreen 0 \
+    -ip 127.0.0.1 -port 4567 \
+    -logFile /tmp/autodrive-camera-off-xvfb.log
 '
 ~~~
+
+This mode is not sufficient to make the ICRA compete scene 40 Hz on the
+available prebuilt player. The same executable and camera-disabled setup
+measured 39.999 Hz in `2026-iros-explore`, but 19.940 Hz in
+`2026-icra-compete`; the remaining difference is the serialized scene and its
+physics/LiDAR workload. Do not reduce the LiDAR contract or duplicate samples
+to mask that limitation.
 
 Because this legacy binary cannot provide Unity simulation-time/frame
 metadata, its timing-only preflight must explicitly use legacy mode:
@@ -273,7 +283,7 @@ controller.launch.py with:
 
 ~~~text
 map:       f1tenth_planning/maps/autodrive_compete_2026.yaml
-raceline:  f1tenth_planning/trajectories/icra_2025_raceline.csv
+raceline:  f1tenth_planning/trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv
 ~~~
 
 AMCL independently corrects map-frame position from the map and official

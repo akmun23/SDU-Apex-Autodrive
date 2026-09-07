@@ -10,12 +10,8 @@ also usable by MPC).
 # 1. Drive five FTG laps; the robot stops and SLAM Toolbox writes both files.
 ros2 launch sdu_apex_autodrive mapping.launch.py
 
-# 2. Convert that map to the exact CSV that Pure Pursuit loads by default.
-python3 f1tenth_planning/scripts/optimize_trajectory.py \
-  --map f1tenth_planning/maps/autodrive_track_5laps.yaml \
-  --track-name autodrive_track_5laps \
-  --output f1tenth_planning/trajectories \
-  --opt-type mincurv --max-speed 22.88 --min-speed 2.0 --direction auto
+# 2. Generate the AutoDRIVE mintime raceline using the in-code settings.
+python3 f1tenth_planning/scripts/optimize_trajectory.py
 
 # 3. Follow the saved raceline with encoder/IMU odometry and custom AMCL.
 ros2 launch sdu_apex_autodrive controller.launch.py controller:=pure_pursuit
@@ -28,50 +24,28 @@ The output lands in `f1tenth_planning/trajectories/<track>_raceline.csv`.
 `optimize_trajectory.py` runs four steps automatically:
 
 1. **Extract centerline** — reads the `.pgm` map, finds track boundaries, computes the GVD centerline, and measures track widths via ray-cast.
-2. **Optimize raceline** — feeds the centerline + widths into the [TUM global trajectory optimizer](global_racetrajectory_optimization/) which finds the racing line that minimizes curvature (or lap time in mintime mode).
+2. **Optimize raceline** — feeds the centerline + widths into the [TUM global trajectory optimizer](global_racetrajectory_optimization/) in `mintime` mode, using the BachelorProject settings and the AutoDRIVE vehicle model.
 3. **Convert to MPC format** — rotates headings by π/2 (TUM→F1Tenth convention), clamps velocities, and writes a comma-separated CSV.
 4. **Add wall distances** — ray-casts perpendicular to each waypoint to get `d_left` and `d_right` for the MPC's lateral error tracking.
 
-## Optimization Modes
+## Optimizer settings
 
-| Mode | Flag | Description |
-|------|------|-------------|
-| Minimum curvature | `--opt-type mincurv` (default) | Minimizes path curvature → maximizes cornering speed. Fast, good results. |
-| Minimum curvature IQP | `--opt-type mincurv_iqp` | Iterative QP variant. Similar quality, sometimes tighter to boundaries. |
-| Shortest path | `--opt-type shortest_path` | Minimizes path length. Aggressive corner cutting. |
-| Minimum time | `--opt-type mintime` | Full vehicle dynamics optimization via IPOPT/CasADi. Accounts for tire limits, motor torque curve, and friction circle. Best velocity profile but requires `pip install casadi`. |
-
-## Common Options
+`optimize_trajectory.py` is the runnable mintime entry point. It intentionally
+uses the same in-code settings as the BachelorProject implementation and does
+not accept command-line overrides. Edit the user-settings block in the script
+only when deliberately changing an experiment.
 
 ```bash
-python3 f1tenth_planning/scripts/optimize_trajectory.py \
-    --map f1tenth_planning/maps/autodrive_track_5laps.yaml \  # ROS map YAML
-    --opt-type mincurv \                         # Optimization mode
-    --max-speed 22.88 \                          # AutoDRIVE command envelope [m/s]
-    --min-speed 2.0 \                            # Velocity floor [m/s]
-    --smooth-factor 2.0 \                        # Spline smoothing (s_reg). Lower = safer, higher = smoother
-    --centerline-points 300 \                    # Centerline resolution
-    --car-width 0.273 \                          # Physical car width [m]
-    --wall-clearance 0.02 \                      # Extra gap from walls [m]
-    --direction cw \                             # Track direction (cw / ccw / auto)
-    --waypoint-spacing 0.15                      # Final waypoint density [m]
+python3 f1tenth_planning/scripts/optimize_trajectory.py
 ```
 
-### Tuning Tips
+The two smoothing values have different scopes and both match the
+BachelorProject setup:
 
-- **`--smooth-factor`** (`s_reg`): Controls how much the raceline smooths the centerline shape. `0.5` = safe/conservative, `2.0` = good balance, `10+` = aggressive (may cut corners too close on small tracks).
-- **`--centerline-points`**: 300 works well for small tracks (~22 m). More points is not always better — it can make the optimizer sluggish and produce worse results on short tracks.
-- **`--wall-clearance`**: `0.02` leaves 2 cm beyond the car edge. Increase if the MPC overshoots corners.
-
-### Skipping Steps
-
-```bash
-# Reuse previously extracted centerline (skip step 0)
-python3 f1tenth_planning/scripts/optimize_trajectory.py --skip-extract
-
-# Reuse previous optimization, only re-convert to MPC format (skip steps 0+1)
-python3 f1tenth_planning/scripts/optimize_trajectory.py --skip-extract --skip-optimize
-```
+- `racecar.ini:reg_smooth_opts.s_reg = 3.0` is TUM's spline regression value.
+- `optimizer_smoothing_s = 6.0` is the prepared centerline smoother before TUM.
+- `optimizer_smoothing_k = 2`, `stepsize_prep = 0.02`, `stepsize_reg = 0.08`,
+  and final waypoint spacing `0.02 m` are also fixed in the settings block.
 
 ## Output Format
 
@@ -102,7 +76,27 @@ distance must be at least `0.35 / 2 + 0.05 = 0.225 m`.
 
 Vehicle parameters for the optimizer live in two places:
 
-- **`global_racetrajectory_optimization/params/racecar.ini`** — used by TUM optimizer for mintime mode (tire model, motor curve, mass, inertia). The pipeline auto-patches `width_opt`, `s_reg`, and step sizes into this file during optimization and restores it afterwards.
+- **`config/autodrive_sim_vehicle.yaml`** — readable simulator vehicle profile.
+- **`global_racetrajectory_optimization/params/racecar.ini`** — values consumed by TUM mintime. The pipeline temporarily patches only experiment-level track settings and restores the file afterwards.
+
+### AutoDRIVE simulator vehicle profile
+
+The simulator interface uses a 3.2 rad/s steering-rate limit and 0.5236 rad
+steering saturation. The corresponding minimum geometric turn radius is
+0.561 m for the 0.324 m kinematic wheelbase. TUM mintime uses its Pacejka
+`B/C/E` tire model; fixed `C_alpha` values in N/rad are not available from the
+simulator interface and are not inserted as active simulator parameters. The
+profile retains the BachelorProject `C_alpha` values only in a
+`physical_reference` block for comparison.
+
+Generate the route with:
+
+```bash
+f1tenth_planning/.venv/bin/python f1tenth_planning/scripts/optimize_trajectory.py
+```
+
+The verifier recomputes heading/curvature from the actual exported XY path and
+fails if the route exceeds the simulator steering curvature limit.
 
 ## Files
 
@@ -110,6 +104,7 @@ Vehicle parameters for the optimizer live in two places:
 f1tenth_planning/
 ├── scripts/
 │   ├── optimize_trajectory.py    # Main pipeline — this is what you run
+│   ├── optimize_trajectory_mintime.py  # Canonical mintime reference copy
 │   └── compute_wall_distances.py # Wall ray-cast helper (called by pipeline)
 ├── global_racetrajectory_optimization/  # TUM optimizer (submodule)
 │   ├── main_globaltraj.py
@@ -124,6 +119,6 @@ f1tenth_planning/
 ```bash
 pip install numpy opencv-contrib-python scipy pyyaml matplotlib
 
-# Only needed for --opt-type mintime:
+# Required by the mintime optimizer:
 pip install casadi
 ```

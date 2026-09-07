@@ -32,6 +32,13 @@ sensor_odometry:
     wheel_freeze_speed_mps: 0.15
     wheel_innovation_max_mps: 0.30
     wheel_update_beta: 0.20
+    # Clear stale motion after sustained zero wheel motion and calm IMU data;
+    # a single missing encoder packet is still rejected by the frozen-wheel
+    # gate above.
+    stationary_hold_s: 0.20
+    stationary_ax_abs_max_mps2: 0.25
+    stationary_ay_abs_max_mps2: 0.75
+    stationary_yaw_rate_abs_max_radps: 0.15
     turn_enter_yaw_rate_radps: 0.6
     turn_enter_abs_ay_mps2: 6.0
     turn_exit_yaw_rate_radps: 0.1

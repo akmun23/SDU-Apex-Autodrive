@@ -116,6 +116,43 @@ void PurePursuit::setTrajectory(const std::vector<TrajectoryPoint>& trajectory) 
     last_closest_idx_ = 0;
 }
 
+size_t PurePursuit::alignTrajectoryStart(const Point2D& position) {
+    if (trajectory_.empty()) {
+        return 0;
+    }
+
+    size_t closest_idx = 0;
+    double closest_distance = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < trajectory_.size(); ++i) {
+        const double distance = math::distance(
+            position.x, position.y, trajectory_[i].x, trajectory_[i].y);
+        if (distance < closest_distance) {
+            closest_distance = distance;
+            closest_idx = i;
+        }
+    }
+
+    if (closest_idx != 0) {
+        std::rotate(
+            trajectory_.begin(), trajectory_.begin() +
+            static_cast<std::ptrdiff_t>(closest_idx), trajectory_.end());
+    }
+
+    // Arc length is metadata after rotation. Rebuild it so diagnostics and
+    // any consumer that reads it remain monotonic across the new seam.
+    double arc_length = 0.0;
+    for (size_t i = 0; i < trajectory_.size(); ++i) {
+        trajectory_[i].arc_length = arc_length;
+        const size_t next = (i + 1) % trajectory_.size();
+        arc_length += math::distance(
+            trajectory_[i].x, trajectory_[i].y,
+            trajectory_[next].x, trajectory_[next].y);
+    }
+
+    last_closest_idx_ = 0;
+    return closest_idx;
+}
+
 double PurePursuit::getTrajectoryLength() const {
     // Trajectory length is arc_length of last point, or 0 if no trajectory loaded
     if (trajectory_.empty()) return 0.0;
@@ -427,6 +464,22 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
         target_pt.curvature : closest_pt.curvature;
     const double curvature = pursuit_curvature + ff_gain * target_curvature;
     double steering_angle = std::atan(config_.wheelbase * curvature);
+    // At the native scan-triggered cadence, the lateral target can still be
+    // close to the vehicle while its heading has already entered a tight
+    // corner.  Pure curvature feed-forward then turns too late: the first
+    // live failure commanded only about -0.21 rad while the target heading
+    // was already roughly one radian behind the vehicle.  Add a bounded
+    // target-heading correction so turn-in begins before CTE grows.
+    double target_heading_error = target_pt.heading - heading;
+    target_heading_error = std::atan2(
+        std::sin(target_heading_error), std::cos(target_heading_error));
+    // Only use this anticipatory term for the tight bends where curvature
+    // feed-forward alone was observed to be insufficient. On a broad-radius
+    // turn the normal geometric law already supplies the correct heading
+    // evolution; applying this term there would double-count curvature.
+    if (std::abs(target_curvature) > 0.5) {
+        steering_angle += config_.heading_error_gain * target_heading_error;
+    }
     // Native AutoDRIVE control is scan-triggered at about 10 Hz.  Use the
     // allowed odometry yaw rate to damp steering reversals caused by vehicle
     // and actuator lag between scans.
@@ -442,6 +495,12 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
     // while preventing the early re-acceleration that caused the lower
     // hairpin wall contact in the recorded run.
     double target_speed = std::min(target_pt.velocity, closest_pt.velocity);
+    // Apply the actual runtime speed cap before corner/CTE regulation. The
+    // node may intentionally run below the trajectory's nominal speed; that
+    // cap must still leave the regulation terms free to slow further.
+    if (std::isfinite(config_.max_command_speed)) {
+        target_speed = std::min(target_speed, std::max(0.0, config_.max_command_speed));
+    }
 
     // Apply a forward braking envelope to the path speed. The waypoint
     // velocity is the desired speed at that waypoint, but the simulator only
@@ -562,7 +621,20 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
         !std::isfinite(output.cross_track_error)) {
         return output;
     }
-    target_speed = std::max(config_.min_regulated_speed, target_speed);
+    // A rolling floor is appropriate for a recoverable CTE, but it must not
+    // turn a lost localization/path association into continued throttle.
+    // Request neutral at severe tracking error; the actuator owns the final
+    // bounded neutral output and can require a fresh valid command afterward.
+    if (config_.offtrack_stop_error_m > 0.0 &&
+        std::abs(output.cross_track_error) >= config_.offtrack_stop_error_m) {
+        target_speed = 0.0;
+    } else {
+        const double regulated_floor =
+            std::min(std::max(0.0, config_.min_regulated_speed),
+                     std::max(0.0, config_.max_command_speed));
+        target_speed = std::max(regulated_floor, target_speed);
+        target_speed = std::min(target_speed, std::max(0.0, config_.max_command_speed));
+    }
 
     // Fill output.
     output.steering_angle = steering_angle;

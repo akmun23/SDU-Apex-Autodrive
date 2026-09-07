@@ -58,6 +58,8 @@ _latest_command: dict[str, str] = {
     "V1 Publish LIDAR Intensity": "False",
 }
 _reset_level = False
+_reset_deadline_monotonic: float | None = None
+_RESET_HOLD_SEC = 0.75
 _stop_sender = Event()
 _response_ready = Event()
 _emit_lock = Semaphore()
@@ -130,10 +132,18 @@ def _packet_timing_pub() -> Any:
 
 
 def _on_reset_command(message: Bool) -> None:
-    """Latch the diagnostics reset level into the next paced simulator command."""
-    global _reset_level
+    """Apply a reset level with a bounded safety timeout.
+
+    The calibration harness normally sends an explicit true/false pulse, but
+    a one-shot ``ros2 topic pub ... true`` must not leave Unity in a permanent
+    reset loop.  Repeated true messages extend the pulse; an explicit false
+    still releases it immediately.
+    """
+    global _reset_level, _reset_deadline_monotonic
     with _command_lock:
         _reset_level = bool(message.data)
+        _reset_deadline_monotonic = (
+            time.monotonic() + _RESET_HOLD_SEC if _reset_level else None)
         _latest_command["V1 Reset"] = "True" if _reset_level else "False"
 
 
@@ -270,7 +280,6 @@ def _rate_hz() -> float:
 
 
 def _remember_command(data: Any) -> None:
-    global _reset_level
     if not isinstance(data, dict) or "V1 Throttle" not in data:
         return
     command = {
@@ -279,7 +288,6 @@ def _remember_command(data: Any) -> None:
         "V1 Reset": str(data.get("V1 Reset", "False")),
     }
     with _command_lock:
-        _reset_level = command["V1 Reset"].strip().lower() == "true"
         _latest_command.update(command)
 
 
@@ -303,6 +311,12 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             continue
 
         with _command_lock:
+            global _reset_level, _reset_deadline_monotonic
+            if (_reset_level and _reset_deadline_monotonic is not None and
+                    now >= _reset_deadline_monotonic):
+                _reset_level = False
+                _reset_deadline_monotonic = None
+                _latest_command["V1 Reset"] = "False"
             command = dict(_latest_command)
             command["V1 Reset"] = "True" if _reset_level else "False"
 

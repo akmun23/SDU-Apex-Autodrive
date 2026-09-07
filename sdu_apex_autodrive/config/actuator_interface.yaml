@@ -11,7 +11,8 @@ autodrive_actuator_interface:
     external_stop_topic: ""
 
     command_timeout_sec: 0.30
-    odom_timeout_sec: 0.30
+    odom_timeout_sec: 0.125
+    max_feedback_speed_mps: 30.0
     # The simulator source stream is now accepted at 40 Hz. Run the actuator
     # loop at the same cadence so speed and acceleration feedback do not wait
     # an extra 75 ms for the next controller tick.
@@ -62,8 +63,8 @@ autodrive_actuator_interface:
     # measured deficit is large enough to represent a real loss of speed.
     speed_hold_recovery_error_mps: 0.75
     speed_hold_acceleration_deadband_mps2: 0.35
-    # Fast boost while far below target, followed by a predictive handoff to
-    # the throttle mapped to the requested target speed.
+    # Fast model-bounded approach while far below target, followed by a
+    # predictive handoff to the throttle mapped to the requested speed.
     speed_boost_error_mps: 1.5
     speed_hold_prediction_horizon_sec: 0.35
     speed_hold_entry_margin_mps: 0.15
@@ -73,7 +74,11 @@ autodrive_actuator_interface:
     speed_downshift_band_mps: 0.10
     # Require a persistent relative overspeed before coasting; one native
     # odometry sample can still spike.
-    speed_overspeed_confirmation_sec: 0.30
+    speed_overspeed_confirmation_sec: 0.05
+    # Immediate neutral when raw allowed odometry is materially above the
+    # requested speed. This prevents the filtered loop or throttle slew from
+    # carrying a 7 m/s overshoot forward; smaller crossings use normal coast.
+    hard_overspeed_cutoff_mps: 0.50
 
     # Allowed-input acceleration/speed observer and acceleration capability
     # model.

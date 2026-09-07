@@ -1,11 +1,7 @@
 # v_mps,ax_max_mps2,ay_max_mps2
-# Full-domain AutoDRIVE trajectory-generation GGV table.
-# The low-speed longitudinal values retain the existing conservative 9 m/s^2
-# optimizer envelope. The high-speed values follow the open-ground
-# throttle/ground-truth fit and taper as the simulator approaches its
-# measured body-speed ceiling; they are not a throttle limit.
-# The GGV interface uses ax_max symmetrically for acceleration and braking.
-# ay_max is the measured lateral limit used by the path planner.
+# F1/10th calibrated GGV diagram used for trajectory generation.
+# ax_max is used symmetrically for acceleration and braking: +/-9.00 m/s^2.
+# ay_max remains the measured lateral limit: 7.06 m/s^2.
 0.0,9.00,7.06
 1.0,9.00,7.06
 2.0,9.00,7.06
@@ -19,14 +15,6 @@
 10.0,9.00,7.06
 11.0,9.00,7.06
 12.0,9.00,7.06
-13.0,7.06,7.06
-14.0,5.71,7.06
-15.0,4.37,7.06
-16.0,3.02,7.06
-17.0,1.67,7.06
-18.0,0.32,7.06
-19.0,0.00,7.06
-20.0,0.00,7.06
-21.0,0.00,7.06
-22.0,0.00,7.06
-22.88,0.00,7.06
+13.0,9.00,7.06
+14.0,9.00,7.06
+15.0,9.00,7.06

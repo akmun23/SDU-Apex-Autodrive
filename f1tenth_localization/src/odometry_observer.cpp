@@ -33,6 +33,7 @@ void OdometryObserver::reset() noexcept
   last_speed_pred_mps_ = 0.0;
   last_wheel_raw_mps_ = 0.0;
   last_wheel_mapped_mps_ = 0.0;
+  stationary_time_s_ = 0.0;
 }
 
 double OdometryObserver::wrap_angle(double angle) noexcept
@@ -150,6 +151,7 @@ OdometryEstimate OdometryObserver::update(
     last_speed_pred_mps_ = 0.0;
     last_wheel_raw_mps_ = 0.0;
     last_wheel_mapped_mps_ = 0.0;
+    stationary_time_s_ = 0.0;
     auto output = estimate(observation);
     output.dt_s = dt_s;
     output.reset_epoch = true;
@@ -165,6 +167,7 @@ OdometryEstimate OdometryObserver::update(
     last_speed_pred_mps_ = speed_mps_;
     last_wheel_raw_mps_ = 0.0;
     last_wheel_mapped_mps_ = 0.0;
+    stationary_time_s_ = 0.0;
     auto output = estimate(observation);
     output.dt_s = dt_s;
     output.timing_degraded = true;
@@ -176,6 +179,37 @@ OdometryEstimate OdometryObserver::update(
   const double wheel_mapped = WheelSpeedMap::map(wheel_raw);
   last_wheel_raw_mps_ = wheel_raw;
   last_wheel_mapped_mps_ = wheel_mapped;
+
+  const bool calm_stationary_sample =
+    wheel_raw < config_.wheel_freeze_speed_mps &&
+    std::abs(observation.ax_mps2) <= config_.stationary_ax_abs_max_mps2 &&
+    std::abs(observation.ay_mps2) <= config_.stationary_ay_abs_max_mps2 &&
+    std::abs(observation.yaw_rate_radps) <=
+    config_.stationary_yaw_rate_abs_max_radps;
+  stationary_time_s_ = calm_stationary_sample ?
+    stationary_time_s_ + dt_s : 0.0;
+
+  // The normal frozen-wheel gate protects against a single missing encoder
+  // packet.  It must not turn a stopped/collided car into a permanently
+  // moving car, though: once the wheel and IMU have been calm for the hold
+  // interval, force a zero-speed epoch and publish it immediately.
+  if (stationary_time_s_ >= config_.stationary_hold_s) {
+    speed_mps_ = 0.0;
+    body_u_mps_ = 0.0;
+    body_v_mps_ = 0.0;
+    turn_mode_ = false;
+    turn_calm_time_s_ = 0.0;
+    last_speed_pred_mps_ = 0.0;
+    update_pose(dt_s, observation.yaw_rad);
+    previous_stamp_s_ = observation.stamp_s;
+    previous_left_angle_rad_ = observation.left_angle_rad;
+    previous_right_angle_rad_ = observation.right_angle_rad;
+    previous_yaw_rad_ = observation.yaw_rad;
+    previous_yaw_rate_radps_ = observation.yaw_rate_radps;
+    auto output = estimate(observation);
+    output.dt_s = dt_s;
+    return output;
+  }
 
   const double yaw_alpha = (observation.yaw_rate_radps - previous_yaw_rate_radps_) / dt_s;
   const double ax_origin = observation.ax_mps2 +

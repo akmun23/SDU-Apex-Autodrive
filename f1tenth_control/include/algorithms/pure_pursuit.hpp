@@ -32,9 +32,9 @@ namespace f1tenth_control {
  */
 struct PurePursuitConfig {
     // -- Lookahead shaping ---------------------------------------------------
-    double min_lookahead{0.65};                 // [m] Minimum lookahead distance.
-    double max_lookahead{1.15};                 // [m] Maximum lookahead distance.
-    double lookahead_gain{0.14};                // [m/s] Velocity-proportional lookahead gain.
+    double min_lookahead{0.45};                 // [m] Minimum lookahead distance.
+    double max_lookahead{0.95};                 // [m] Maximum lookahead distance.
+    double lookahead_gain{0.05};                // [m/s] Velocity-proportional lookahead gain.
     double cte_lookahead_weight{1.0};           // [unitless] Weight on |CTE| contribution.
     double cte_lookahead_gain{0.041540516};     // [m/m] Reduce lookahead with cross-track error.
     double curvature_lookahead_gain{1.9003721}; // [m*m] Turn-radius-based lookahead limit.
@@ -45,11 +45,14 @@ struct PurePursuitConfig {
     double cte_speed_factor{1.50};             // [unitless] Slowdown gain based on |CTE|.
     double cte_speed_floor_ratio{0.55};        // [0..1] Minimum speed ratio from CTE slowdown.
     double max_lateral_accel{6.50};             // [m/s^2] Physics-aware cornering speed cap.
-    double min_regulated_speed{0.12};           // [m/s] Lower bound after speed regulation.
+    double min_regulated_speed{1.50};           // [m/s] Useful rolling floor after speed regulation.
+    double max_command_speed{22.88};            // [m/s] Runtime command cap used during regulation.
+    double offtrack_stop_error_m{0.75};         // [m] Stop when tracking error is no longer recoverable.
     double speed_preview_distance{4.0};         // [m] Distance used by the braking envelope.
     double speed_profile_braking_decel{1.50};   // [m/s^2] Effective idle-brake deceleration.
     double curvature_preview_factor{1.6245233}; // [unitless] Preview multiple for curvature braking.
-    double curvature_feedforward_gain{0.25};   // [0..1] Additive path-curvature feed-forward.
+    double curvature_feedforward_gain{0.50};   // [0..1] Additive path-curvature feed-forward.
+    double heading_error_gain{0.30};           // [unitless] Add target-heading turn-in.
     double yaw_rate_damping{0.0};               // [s] Optional odometry yaw-rate damping.
 
     // -- Footprint-aware corridor regulation --------------------------------
@@ -118,6 +121,18 @@ public:
      * @return None.
      */
     void setTrajectory(const std::vector<TrajectoryPoint>& trajectory);
+
+    /**
+     * @brief Rotate a closed trajectory so its cyclic seam is at position.
+     *
+     * The seam of a closed raceline is an indexing choice, not vehicle
+     * geometry. Aligning it to the first valid map pose prevents a controller
+     * from entering a tight corner solely because the CSV happens to begin
+     * there while the simulator spawns elsewhere on the same loop.
+     *
+     * @return Original waypoint index selected as the new index zero.
+     */
+    size_t alignTrajectoryStart(const Point2D& position);
     
     /**
      * @brief Compute steering and speed commands for the current vehicle state.

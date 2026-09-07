@@ -17,7 +17,7 @@ from launch_ros.actions import LifecycleNode, Node
 
 DEFAULT_MAP = "/workspace/src/f1tenth_planning/maps/autodrive_compete_2026.yaml"
 DEFAULT_TRAJECTORY = (
-    "/workspace/src/f1tenth_planning/trajectories/icra_2025_raceline.csv"
+    "/workspace/src/f1tenth_planning/trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv"
 )
 
 
@@ -38,7 +38,13 @@ def _setup(context):
             executable="sensor_odometry_node",
             name="sensor_odometry",
             output="screen",
-            parameters=[LaunchConfiguration("sensor_odom_params")],
+            parameters=[
+                LaunchConfiguration("sensor_odom_params"),
+                # The simulator reset command changes encoder epoch and
+                # physical pose. Rebaseline the local observer with it so a
+                # previous run cannot leak stale speed into a new run.
+                {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+            ],
             remappings=[
                 ("/tf", "/sdu/tf"),
                 ("/tf_static", "/sdu/tf_static"),
@@ -84,6 +90,13 @@ def _setup(context):
                     ),
                 },
             ],
+            # Keep the complete team localization tree together. Odometry is
+            # already isolated from simulator TF on /sdu/tf; AMCL's map->odom
+            # correction must use the same tree for map->base_link lookup.
+            remappings=[
+                ("/tf", "/sdu/tf"),
+                ("/tf_static", "/sdu/tf_static"),
+            ],
         ),
     ]
 
@@ -95,7 +108,14 @@ def generate_launch_description():
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
         DeclareLaunchArgument("start_bridge", default_value="false"),
-        DeclareLaunchArgument("amcl_global_initialization", default_value="true"),
+        DeclareLaunchArgument(
+            "amcl_global_initialization",
+            default_value="false",
+            description=(
+                "Use the known simulator reset/raceline start pose; enable "
+                "global recovery only for arbitrary track-position tests"
+            ),
+        ),
         DeclareLaunchArgument("amcl_max_track_distance", default_value="0.65"),
         DeclareLaunchArgument("amcl_initial_heading_offset", default_value="-0.09"),
         DeclareLaunchArgument(

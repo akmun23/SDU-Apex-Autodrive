@@ -138,6 +138,41 @@ void test_positive_curvature_turn() {
             "corner speed exceeded the lateral-acceleration profile");
 }
 
+void test_target_heading_starts_tight_turn_early() {
+    PurePursuitConfig without_heading;
+    without_heading.wall_bias_gain = 0.0;
+    without_heading.curvature_feedforward_gain = 0.25;
+    without_heading.heading_error_gain = 0.0;
+
+    PurePursuitConfig with_heading = without_heading;
+    with_heading.heading_error_gain = 0.30;
+
+    // The vehicle is still close to the path centreline, but the lookahead
+    // target has already entered a negative-heading corner. This is the live
+    // failure shape: CTE alone does not request enough turn-in.
+    std::vector<TrajectoryPoint> path;
+    path.push_back(point(0.0, 0.0, 0.0, 0.0, 0.0, 2.0));
+    path.push_back(point(0.5, 0.5, 0.0, -0.10, -0.2, 2.0));
+    path.push_back(point(1.0, 1.0, -0.01, -0.30, -0.8, 2.0));
+    path.push_back(point(1.5, 1.48, -0.08, -0.50, -0.9, 2.0));
+    path.push_back(point(2.0, 1.90, -0.24, -0.70, -0.8, 2.0));
+    path.push_back(point(2.5, 2.25, -0.48, -0.90, -0.6, 2.0));
+
+    VehicleState state;
+    state.pose = Pose2D(0.45, -0.01, -0.05);
+    state.velocity = 1.0;
+    PurePursuit baseline(without_heading);
+    PurePursuit corrected(with_heading);
+    baseline.setTrajectory(path);
+    corrected.setTrajectory(path);
+    const auto baseline_output = baseline.compute(state);
+    const auto corrected_output = corrected.compute(state);
+    assert_finite_command(baseline_output);
+    assert_finite_command(corrected_output);
+    require(corrected_output.steering_angle < baseline_output.steering_angle - 0.05,
+            "target-heading correction did not start the tight turn earlier");
+}
+
 void test_preview_brakes_before_slow_section() {
     PurePursuitConfig config;
     config.wall_bias_gain = 0.0;
@@ -188,6 +223,57 @@ void test_narrow_corridor_bias_is_bounded() {
             "narrow-side corridor bias selected the wrong direction");
     require(output.steering_angle < 0.5236,
             "corridor bias bypassed the steering bound");
+}
+
+void test_regulated_speed_has_a_useful_floor() {
+    PurePursuitConfig config;
+    config.min_regulated_speed = 1.5;
+    config.corridor_speed_floor_ratio = 0.25;
+    config.wall_bias_gain = 0.0;
+
+    std::vector<TrajectoryPoint> path;
+    for (int i = 0; i <= 200; ++i) {
+        const double x = 0.05 * static_cast<double>(i);
+        // The narrow corridor scaling would otherwise reduce 4 m/s below
+        // the useful rolling range. The configured floor must win without
+        // fabricating a high speed command.
+        path.push_back(point(x, x, 0.0, 0.0, 0.0, 4.0, 0.20, 0.20));
+    }
+
+    PurePursuit controller(config);
+    controller.setTrajectory(path);
+    VehicleState state;
+    state.pose = Pose2D(1.0, 0.0, 0.0);
+    state.velocity = 4.0;
+    const auto output = controller.compute(state);
+    assert_finite_command(output);
+    require(output.target_speed >= 1.5,
+            "PP fell below the useful rolling-speed floor");
+}
+
+void test_severe_offtrack_requests_neutral_speed() {
+    PurePursuitConfig config;
+    config.min_regulated_speed = 1.5;
+    config.offtrack_stop_error_m = 0.75;
+    config.wall_bias_gain = 0.0;
+
+    std::vector<TrajectoryPoint> path;
+    for (int i = 0; i <= 200; ++i) {
+        const double x = 0.05 * static_cast<double>(i);
+        path.push_back(point(x, x, 0.0, 0.0, 0.0, 4.0));
+    }
+
+    PurePursuit controller(config);
+    controller.setTrajectory(path);
+    VehicleState state;
+    state.pose = Pose2D(1.0, 1.0, 0.0);
+    state.velocity = 3.0;
+    const auto output = controller.compute(state);
+    assert_finite_command(output);
+    require(std::abs(output.cross_track_error) >= 0.75,
+            "test state was not severely off-track");
+    require(output.target_speed == 0.0,
+            "severe off-track state retained a rolling speed command");
 }
 
 struct OffTrackPlant {
@@ -329,8 +415,11 @@ int main() {
         test_five_point_five_metre_per_second_straight();
         test_ten_hz_straight_closed_loop();
         test_positive_curvature_turn();
+        test_target_heading_starts_tight_turn_early();
         test_preview_brakes_before_slow_section();
         test_narrow_corridor_bias_is_bounded();
+        test_regulated_speed_has_a_useful_floor();
+        test_severe_offtrack_requests_neutral_speed();
         test_offtrack_10_hz_bicycle_reaches_high_speed();
         test_offtrack_10_hz_turn_with_steering_lag();
         test_invalid_and_empty_paths_fail_safe();

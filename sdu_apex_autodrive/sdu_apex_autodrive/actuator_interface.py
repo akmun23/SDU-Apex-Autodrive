@@ -32,6 +32,7 @@ class ActuatorInterface(Node):
         "speed_boost_error_mps", "speed_hold_prediction_horizon_sec",
         "speed_hold_entry_margin_mps", "speed_downshift_stable_sec",
         "speed_downshift_band_mps", "speed_overspeed_confirmation_sec",
+        "hard_overspeed_cutoff_mps",
         "speed_error_to_accel_gain", "speed_error_integral_to_accel_gain",
         "acceleration_feedback_gain", "acceleration_integral_gain",
         "acceleration_integral_limit",
@@ -50,9 +51,16 @@ class ActuatorInterface(Node):
             raise ValueError("command_mode must be 'speed' or 'acceleration'")
         self.command_timeout = float(self.get_parameter("command_timeout_sec").value)
         self.odom_timeout = float(self.get_parameter("odom_timeout_sec").value)
+        self.max_feedback_speed = float(
+            self.get_parameter("max_feedback_speed_mps").value)
         rate = float(self.get_parameter("publish_rate_hz").value)
-        if min(self.max_steering, self.max_target_speed, self.command_timeout, self.odom_timeout, rate) <= 0.0:
+        if min(
+            self.max_steering, self.max_target_speed, self.command_timeout,
+            self.odom_timeout, self.max_feedback_speed, rate,
+        ) <= 0.0:
             raise ValueError("actuator limits, timeouts and rate must be > 0")
+        if self.max_feedback_speed < self.max_target_speed:
+            raise ValueError("max_feedback_speed_mps must cover max_target_speed_mps")
 
         self.nominal_dt = 1.0 / rate
         self.speed_controller = TargetSpeedController(self._speed_config())
@@ -64,6 +72,10 @@ class ActuatorInterface(Node):
         self.raw_throttle_override = None
         self.raw_throttle_override_time = None
         self.speed = None
+        # The conditioned speed drives ordinary feedback. Keep the latest
+        # accepted raw odometry sample for the hard overspeed interlock so a
+        # low-pass filter cannot hide a large target crossing.
+        self.raw_speed = None
         self.odom_time = None
         self.acceleration = 0.0
         self.imu_time = None
@@ -159,7 +171,10 @@ class ActuatorInterface(Node):
         # mapping launch enables its optional hook explicitly when needed.
         self.declare_parameter("external_stop_topic", "")
         self.declare_parameter("command_timeout_sec", 0.25)
-        self.declare_parameter("odom_timeout_sec", 0.25)
+        # Tolerate a few missed 40 Hz source periods, but do not allow a
+        # stale speed estimate to drive for the old 300 ms window.
+        self.declare_parameter("odom_timeout_sec", 0.125)
+        self.declare_parameter("max_feedback_speed_mps", 30.0)
         # Match the accepted native simulator source cadence. The timeout
         # watchdog still neutralizes the outputs if commands or odometry stop.
         self.declare_parameter("publish_rate_hz", 40.0)
@@ -195,7 +210,7 @@ class ActuatorInterface(Node):
         self.declare_parameter("speed_hold_error_deadband_mps", 0.25)
         self.declare_parameter("speed_hold_recovery_error_mps", 0.25)
         self.declare_parameter("speed_hold_acceleration_deadband_mps2", 0.35)
-        # Far below target, use the full normalized forward command. Handoff
+        # Far below target, use the calibrated acceleration envelope. Handoff
         # is predictive so the vehicle reaches the target without a large
         # overshoot, then the target-speed feed-forward value is held.
         self.declare_parameter("speed_boost_error_mps", 1.5)
@@ -204,6 +219,7 @@ class ActuatorInterface(Node):
         self.declare_parameter("speed_downshift_stable_sec", 0.20)
         self.declare_parameter("speed_downshift_band_mps", 0.10)
         self.declare_parameter("speed_overspeed_confirmation_sec", 0.30)
+        self.declare_parameter("hard_overspeed_cutoff_mps", 0.50)
         # Allowed-input longitudinal observer.  It rejects encoder wheel-spin
         # when the IMU-integrated body speed disagrees materially.
         self.declare_parameter("acceleration_filter_alpha", 0.20)
@@ -286,6 +302,8 @@ class ActuatorInterface(Node):
                 self.get_parameter("speed_downshift_band_mps").value),
             speed_overspeed_confirmation_sec=float(
                 self.get_parameter("speed_overspeed_confirmation_sec").value),
+            hard_overspeed_cutoff_mps=float(
+                self.get_parameter("hard_overspeed_cutoff_mps").value),
             feedforward_speed_mps=tuple(float(v) for v in self.get_parameter("feedforward_speed_mps").value),
             feedforward_throttle=tuple(float(v) for v in self.get_parameter("feedforward_throttle").value),
             speed_error_to_accel_gain=float(
@@ -360,12 +378,16 @@ class ActuatorInterface(Node):
 
     def _on_odom(self, msg: Odometry) -> None:
         speed = float(msg.twist.twist.linear.x)
-        if not math.isfinite(speed):
+        if (not math.isfinite(speed) or speed < -0.05 or
+                speed > self.max_feedback_speed):
             self.speed = None
+            self.raw_speed = None
             self.odom_time = None
             return
         now = self.get_clock().now()
         now_sec = now.nanoseconds / 1e9
+        speed = max(0.0, speed)
+        self.raw_speed = speed
         self.speed = self.speed_estimator.update_odometry(speed, now_sec)
         self.acceleration = self.speed_estimator.acceleration_mps2
         self.odom_time = now
@@ -494,6 +516,8 @@ class ActuatorInterface(Node):
             return self._neutral("no command")
         if self.speed is None or self.odom_time is None:
             return self._neutral("no odometry")
+        if self.raw_speed is None:
+            return self._neutral("invalid odometry")
         if (now - self.command_time).nanoseconds / 1e9 > self.command_timeout:
             return self._neutral("command timeout")
         if (now - self.odom_time).nanoseconds / 1e9 > self.odom_timeout:
@@ -512,13 +536,22 @@ class ActuatorInterface(Node):
         else:
             # The speed interface owns the speed target. Any acceleration
             # field in a speed command is diagnostic metadata and is ignored.
-            fresh_odom = (
-                self.last_controller_odom_time is None or
-                self.odom_time != self.last_controller_odom_time)
-            throttle = self.speed_controller.update(
-                target_speed, self.speed, 0.0, dt, self.acceleration,
-                measurement_fresh=fresh_odom)
-            self.last_controller_odom_time = self.odom_time
+            # Use raw accepted odometry for this one safety decision. The
+            # filtered signal remains useful for normal control, but filtering
+            # must never retain forward throttle after a large target crossing.
+            if (self.raw_speed - target_speed >=
+                    self.speed_controller.config.hard_overspeed_cutoff_mps):
+                self.speed_controller.reset()
+                self.control_time = None
+                throttle = 0.0
+            else:
+                fresh_odom = (
+                    self.last_controller_odom_time is None or
+                    self.odom_time != self.last_controller_odom_time)
+                throttle = self.speed_controller.update(
+                    target_speed, self.speed, 0.0, dt, self.acceleration,
+                    measurement_fresh=fresh_odom)
+                self.last_controller_odom_time = self.odom_time
         self._publish(steering, throttle)
         self.last_neutral_reason = None
 

@@ -1,16 +1,13 @@
 diff --git a/Assets/Scripts/LIDAR.cs b/Assets/Scripts/LIDAR.cs
-index 2d6eb22..parallel40hz 100644
+index f5b2c9e..cf39842 100644
 --- a/Assets/Scripts/LIDAR.cs
 +++ b/Assets/Scripts/LIDAR.cs
-@@ -93,24 +93,40 @@ public class LIDAR : MonoBehaviour
- 		// Precompute directions and store in an array
- 		Vector3[] laserRayDirections = new Vector3[MeasurementsPerScan];
- 		for (int i = 0; i < MeasurementsPerScan; i++)
- 		{
- 			float angle = initialAngle + (i * angleIncrement) * (MinimumAngularRange <= 0 ? -1 : 1);
+@@ -104,11 +104,28 @@ public class LIDAR : MonoBehaviour
  			laserRayDirections[i] = new Vector3(Mathf.Sin(angle), 0, Mathf.Cos(angle)) * MaximumLinearRange;
  		}
-
+ 
+-		// Perform raycasts
+-		RaycastHit[] hits = new RaycastHit[MeasurementsPerScan];
 +		// Schedule the independent sensor rays on Unity's physics workers.  The
 +		// original loop executes all 1080 Physics.Raycast calls on the main
 +		// thread, which can consume the complete 25 ms telemetry budget on the
@@ -20,8 +17,9 @@ index 2d6eb22..parallel40hz 100644
 +			new NativeArray<RaycastCommand>(MeasurementsPerScan, Allocator.TempJob);
 +		NativeArray<RaycastHit> hits =
 +			new NativeArray<RaycastHit>(MeasurementsPerScan, Allocator.TempJob);
-+		for (int i = 0; i < MeasurementsPerScan; i++)
-+		{
+ 		for (int i = 0; i < MeasurementsPerScan; i++)
+ 		{
+-			if (Physics.Raycast(Head.transform.position, laserRayDirections[i], out hits[i], MaximumLinearRange, layer_mask))
 +			raycastCommands[i] = new RaycastCommand(
 +				Head.transform.position, laserRayDirections[i],
 +				MaximumLinearRange, layer_mask, 1);
@@ -29,21 +27,27 @@ index 2d6eb22..parallel40hz 100644
 +		JobHandle raycastJob = RaycastCommand.ScheduleBatch(
 +			raycastCommands, hits, 32, default(JobHandle));
 +		raycastJob.Complete();
- 
--		// Perform raycasts
--		RaycastHit[] hits = new RaycastHit[MeasurementsPerScan];
- 		for (int i = 0; i < MeasurementsPerScan; i++)
- 		{
--			if (Physics.Raycast(Head.transform.position, laserRayDirections[i], out hits[i], MaximumLinearRange, layer_mask))
++
++		for (int i = 0; i < MeasurementsPerScan; i++)
++		{
 +			if (hits[i].collider != null)
  			{
  				float hitDistance = hits[i].distance;
  				RangeArray[i] = (hitDistance > MinimumLinearRange) ? hitDistance.ToString() : "inf"; // Store range result
-@@
+@@ -157,6 +174,9 @@ public class LIDAR : MonoBehaviour
  			Graphics.DrawMesh(LaserScanMesh, Vector3.zero, Quaternion.identity, LaserScanMaterial, visualizationLayerID);
  		}
-
+ 
 +		raycastCommands.Dispose();
 +		hits.Dispose();
- 
++
  		// LOG LASER SCAN
+ 		/*
+ 		// Range Array
+@@ -176,4 +196,4 @@ public class LIDAR : MonoBehaviour
+ 		Debug.Log(IntensityArrayString); // Log the `RangeArrayString` to Unity Console
+ 		*/
+ 	}
+-}
+\ No newline at end of file
++}

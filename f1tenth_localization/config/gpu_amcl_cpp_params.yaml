@@ -120,10 +120,12 @@ gpu_amcl_cpp:
     local_tracking_cloud_covariance_xy: 0.04
     local_tracking_cloud_covariance_yaw: 0.04
 
-    # Start globally so AMCL can recover from an incorrect start guess. A
-    # candidate must also be near the saved raceline before the controller sees
-    # it; this rejects low-covariance wall/track-corridor aliases at startup.
-    global_initialization: true
+    # The compete simulator reset is deterministic and the first trajectory
+    # sample is the checked-in map-frame start pose. Starting globally lets a
+    # visually similar corridor win with high confidence, which gives the
+    # controller a valid-looking but physically wrong map association.
+    # Initialize at the known start and keep scan matching local thereafter.
+    global_initialization: false
     # The circuit has visually identical straight sections.  Race startup uses
     # the known first raceline waypoint as an acceptance anchor while global
     # particles still recover from a wrong initial pose guess.
@@ -146,12 +148,11 @@ gpu_amcl_cpp:
     # lateral planner at the reset origin.
     global_pose_max_track_distance_m: 0.65
     global_pose_max_track_heading_error_rad: 0.45
-    # Do not require the first raceline waypoint at startup.  The simulator can
-    # retain the vehicle pose between runs, and AMCL must be able to recover at
-    # any valid track location.  The map/raceline distance and heading gates
-    # above still prevent an off-track or corridor-alias estimate from enabling
-    # control.
-    global_start_anchor_enabled: false
+    # The compete simulator reset returns the car to the known race start. AMCL
+    # must therefore reject visually similar sections elsewhere on the closed
+    # circuit during startup; otherwise the controller can align its seam to a
+    # valid but physically wrong map location.
+    global_start_anchor_enabled: true
     global_start_anchor_radius_m: 0.90
 
     initial_pose_x: 0.0

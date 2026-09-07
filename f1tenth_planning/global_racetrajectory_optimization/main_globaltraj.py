@@ -517,7 +517,7 @@ if opt_type == 'mintime' and mintime_opts["reopt_mintime_solution"]:
             for free_dev in free_dev_candidates
             if free_dev >= base_free_dev - 1e-9
         })
-        kappa_candidates = [pars["veh_params"]["curvlim"] * 0.95]
+        kappa_candidates = [pars["veh_params"]["curvlim"] * 0.95] # set by optimize_trajectory_mintime.py["curvlim"] * 0.95] # set by optimize_trajectory_mintime.py
 
         reopt_errors = []
         alpha_reopt = None

@@ -15,7 +15,6 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_msgs/msg/float32.hpp>
 
 #include "algorithms/pure_pursuit.hpp"
@@ -39,7 +38,7 @@ namespace f1tenth_control {
  *   Subscriptions:
  *     - /amcl_pose (geometry_msgs/PoseWithCovarianceStamped): Map pose
  *     - /odom (nav_msgs/Odometry): Encoder/IMU velocity and odometry
- *     - /autodrive/roboracer_1/lidar (sensor_msgs/LaserScan): Control event
+ *     - /odom (nav_msgs/Odometry): Control event and longitudinal state
  *   
  *   Publications:
  *     - /cmd/speed (ackermann_msgs/AckermannDriveStamped): Speed commands
@@ -69,11 +68,11 @@ private:
     VehicleState current_state_;    // Current vehicle state (pose, velocity, etc.)
     std::mutex state_mutex_;        // Protects access to current_state_ for thread safety
     bool trajectory_loaded_{false}; // Whether a trajectory has been successfully loaded into the controller
+    bool trajectory_aligned_{false}; // Whether the cyclic seam matches the startup pose
     
     // ROS2 Communication
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;                         // Subscription for odometry messages
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;   // Subscription for pose estimate messages
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_sub_;                    // Official 10 Hz sensor trigger
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_feedback_sub_;
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;    // Publisher for drive commands
@@ -88,7 +87,6 @@ private:
     std::string trajectory_file_;           // Path to trajectory CSV file
     std::string odom_topic_{"/odom"};
     std::string pose_topic_{"/amcl_pose"};
-    std::string lidar_topic_{"/autodrive/roboracer_1/lidar"};
     std::string command_topic_{"/cmd/speed"};
     std::string path_frame_{"map"};
     std::string command_frame_{"base_link"};
@@ -105,7 +103,7 @@ private:
     double pose_timeout_s_{0.1};            // Timeout for considering pose data stale [s]
     double odom_timeout_s_{0.2};            // Timeout for considering odometry data stale [s]
     double state_extrapolation_max_s_{0.12}; // Allowed-sensor pose-to-command latency [s]
-    double control_rate_hz_{10.0};           // Nominal cadence; actual updates are LiDAR-triggered
+    double control_rate_hz_{20.0};           // Nominal odometry cadence; actual rate follows /odom
     double localization_covariance_xy_max_{0.25};   // Maximum AMCL x/y variance [m^2]
     double localization_covariance_yaw_max_{0.12};  // Maximum AMCL yaw variance [rad^2]
     int localization_required_updates_{5};          // Consecutive qualified poses before drive
@@ -156,16 +154,13 @@ private:
      */
     void poseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
 
-    /** Run one control update for each incoming official LiDAR scan. */
-    void lidarCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg);
-
     /** Store the official raw-radian steering actuator feedback. */
     void steeringFeedbackCallback(const std_msgs::msg::Float32::ConstSharedPtr msg);
 
     /**
-     * @brief Main control loop callback for one LiDAR event.
+     * @brief Main control loop callback for one odometry event.
      * Executes one cycle of Pure Pursuit control using the newest allowed
-     * localization and odometry state extrapolated to the scan timestamp.
+     * localization and odometry state extrapolated to the odometry timestamp.
      * @return None.
      */
     void controlLoop(const rclcpp::Time & event_stamp);

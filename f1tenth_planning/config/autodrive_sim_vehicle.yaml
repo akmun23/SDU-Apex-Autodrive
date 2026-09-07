@@ -1,0 +1,107 @@
+# Vehicle profile for the AutoDRIVE RoboRacer used by both planning and
+# controller integration.
+#
+# These values are the measured/tested vehicle model from the BachelorProject
+# parameter set. Keep this file and
+# global_racetrajectory_optimization/params/racecar.ini synchronized when a
+# physical parameter changes.
+#
+# Important distinction:
+#   - minimum_turn_radius_m is the smallest geometric radius, not a maximum
+#     radius. It is the reciprocal of max_curvature_m_inv.
+#   - TUM mintime consumes Pacejka B/C/E parameters below, not a fixed
+#     cornering stiffness in N/rad. No unverified simulator C_alpha value is
+#     asserted here.
+
+name: autodrive_sim
+
+vehicle:
+  mass_kg: 3.314
+  weight_n: 32.51034  # mass_kg * 9.81; derived, not an independent estimate
+  wheelbase_m: 0.324
+  model_wheelbase_m: 0.326  # wheelbase_front_m + wheelbase_rear_m for mintime
+  wheelbase_front_m: 0.166
+  wheelbase_rear_m: 0.160
+  track_width_m: 0.230
+  car_length_m: 0.510
+  car_width_m: 0.273
+  lidar_to_rear_axle_m: 0.2646
+  yaw_inertia_kgm2: 0.035
+  cg_height_m: 0.0703
+
+geometry:
+  # Controller/simulator kinematic wheelbase.
+  wheelbase_m: 0.324
+  wheelbase_front_m: 0.166
+  wheelbase_rear_m: 0.160
+  car_length_m: 0.510
+  car_width_m: 0.273
+  rear_overhang_m: 0.080
+  max_steering_rad: 0.5236
+  max_steering_rate_radps: 3.2
+  # tan(delta_max) / wheelbase_m and its reciprocal.
+  max_curvature_m_inv: 1.7819503140
+  minimum_turn_radius_m: 0.5611828748
+
+tire:
+  friction_coeff: 0.745
+  mintime_friction_coeff: 0.745
+  rolling_resistance_coeff: 0.163
+  # Pacejka parameters consumed by TUM's mintime model.
+  pacejka:
+    f_z0_n: 16.26
+    B_front: 2.39
+    C_front: 3.2
+    E_front: 1.0
+    eps_front: -0.1
+    B_rear: 1.67
+    C_rear: 3.2
+    E_rear: 1.0
+    eps_rear: -0.1
+
+# These are retained for comparison with the physical BachelorProject model
+# only. They are not calibrated AutoDRIVE simulator inputs and are not read by
+# the TUM mintime implementation.
+physical_reference:
+  source: BachelorProject/f1tenth_parameters/vehicle_params.yaml
+  cornering_stiffness_front_n_per_rad: 51.40
+  cornering_stiffness_rear_n_per_rad: 43.10
+  status: reference_only_not_simulator_calibrated
+
+steering:
+  max_steering_angle_rad: 0.5236
+  max_steering_rate_radps: 3.2
+  # TUM mintime actuator time constant. This is distinct from the measured
+  # servo travel time below and is kept equal to the BachelorProject setup.
+  mintime_time_constant_s: 0.117
+  servo_time_constant_s: 0.3675
+
+dynamics:
+  max_speed_mps: 12.0
+  max_acceleration_mps2: 7.31
+  max_deceleration_mps2: 7.31
+  max_lateral_accel_mps2: 7.3078
+  # Runtime path tracking uses the conservative simulator idle-braking value;
+  # this is intentionally not the TUM active-brake limit.
+  passive_deceleration_mps2: 1.50
+  max_acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+  max_acceleration_envelope_mps2: [7.31, 7.31, 7.31, 7.31, 7.31, 7.31]
+
+mintime:
+  max_speed_mps: 12.0
+  min_speed_mps: 1.5
+  optimizer_spacing_m: 0.08
+  waypoint_spacing_m: 0.02
+  centerline_spacing_m: 0.05
+  spline_prep_spacing_m: 0.02
+  spline_order: 2
+  spline_smoothing_s: 6.0
+  racecar_ini_s_reg: 3.0
+  direction: cw
+  optimizer_width_m: 0.30
+  wall_clearance_m: 0.15
+
+planner:
+  min_regulated_speed_mps: 0.12
+  default_wall_clearance_m: 0.15
+  default_smooth_factor: 10.0

@@ -18,6 +18,13 @@ struct OdometryObserverConfig
   double wheel_freeze_speed_mps{0.15};
   double wheel_innovation_max_mps{0.30};
   double wheel_update_beta{0.20};
+  // A frozen encoder must not immediately zero a moving estimate because a
+  // single dropped packet is possible.  Sustained zero wheel motion together
+  // with calm IMU data is, however, a reliable stopped/collision signature.
+  double stationary_hold_s{0.20};
+  double stationary_ax_abs_max_mps2{0.25};
+  double stationary_ay_abs_max_mps2{0.75};
+  double stationary_yaw_rate_abs_max_radps{0.15};
   double turn_enter_yaw_rate_radps{0.6};
   double turn_enter_abs_ay_mps2{6.0};
   double turn_exit_yaw_rate_radps{0.1};
@@ -94,6 +101,7 @@ private:
   double last_speed_pred_mps_{0.0};
   double last_wheel_raw_mps_{0.0};
   double last_wheel_mapped_mps_{0.0};
+  double stationary_time_s_{0.0};
 };
 
 }  // namespace f1tenth_localization

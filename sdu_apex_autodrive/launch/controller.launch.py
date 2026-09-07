@@ -12,7 +12,7 @@ from launch_ros.descriptions import ComposableNode
 
 DEFAULT_MAP = "/workspace/src/f1tenth_planning/maps/autodrive_compete_2026.yaml"
 DEFAULT_TRAJECTORY = (
-    "/workspace/src/f1tenth_planning/trajectories/icra_2025_raceline.csv"
+    "/workspace/src/f1tenth_planning/trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv"
 )
 
 
@@ -71,7 +71,12 @@ def _setup(context):
             executable="sensor_odometry_node",
             name="sensor_odometry",
             output="screen",
-            parameters=[LaunchConfiguration("sensor_odom_params")],
+            parameters=[
+                LaunchConfiguration("sensor_odom_params"),
+                # Keep simulator reset epochs from carrying old speed/pose
+                # into the next controller run.
+                {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+            ],
             remappings=[
                 ("/tf", "/sdu/tf"),
                 ("/tf_static", "/sdu/tf_static"),
@@ -123,6 +128,12 @@ def _setup(context):
                             "amcl_initial_heading_offset"
                         ),
                     },
+                ],
+                # AMCL and sensor odometry must publish into the same
+                # team-isolated TF tree so map->base_link is available.
+                remappings=[
+                    ("/tf", "/sdu/tf"),
+                    ("/tf_static", "/sdu/tf_static"),
                 ],
             ),
             # Local encoder/IMU filter. AMCL remains an independent map-frame
@@ -314,7 +325,11 @@ def generate_launch_description():
     planner = get_package_share_directory("f1tenth_lateral_planner")
 
     return LaunchDescription([
-        DeclareLaunchArgument("controller", default_value="ftg"),
+        DeclareLaunchArgument(
+            "controller",
+            default_value="pure_pursuit",
+            description="Controller to run; Pure Pursuit is the validated simulator default",
+        ),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
         DeclareLaunchArgument(
@@ -364,15 +379,18 @@ def generate_launch_description():
         DeclareLaunchArgument("avoidance_enabled", default_value="false"),
         DeclareLaunchArgument(
             "controller_max_speed",
-            default_value="22.88",
-            description="Maximum target speed for Pure Pursuit or Stanley [m/s]",
+            default_value="1.5",
+            description=(
+                "Safe simulator startup cap for Pure Pursuit or Stanley [m/s]. "
+                "Raise explicitly only after the baseline follows the track."
+            ),
         ),
         DeclareLaunchArgument(
             "amcl_global_initialization",
-            default_value="true",
+            default_value="false",
             description=(
-                "Use track-constrained global AMCL initialization so the pose "
-                "can recover from an incorrect startup guess."
+                "Use known simulator reset/raceline startup; enable global "
+                "recovery only for arbitrary track-position tests."
             ),
         ),
         DeclareLaunchArgument(

@@ -330,6 +330,22 @@ bool AmclNode::should_publish_pose_estimate(const PoseEstimate& est) {
         return true;
     }
 
+    // Once global localization has locked, local scan matching is only a
+    // bounded correction around the causal odometry prediction. A large
+    // alternative pose is therefore a corridor alias or a damaged scan, not
+    // a valid recovery path. Never let it re-anchor the controller after a
+    // collision/dropout; an explicit localization restart is safer than
+    // accepting a multi-metre map-frame teleport.
+    if (global_localization_locked_) {
+        have_pending_jump_pose_ = false;
+        pending_jump_pose_count_ = 0;
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "AMCL local pose jump rejected: %.2f m, %.2f rad; preserving last valid map pose.",
+            jump_distance, jump_yaw);
+        return false;
+    }
+
     bool same_pending = false;
     if (have_pending_jump_pose_) {
         const double pdx = est.x - pending_jump_pose_.x;

@@ -61,6 +61,15 @@ void test_braking_and_frozen_wheel()
   require(brake.speed_pred_mps > before.speed_mps - 0.11, "braking affine correction is small");
   const auto frozen = observer.update(observation(0.100, 10.0, 10.0, 0.0));
   require(frozen.speed_mps > 0.5, "frozen wheel does not zero moving speed");
+
+  // A persistent stopped signal must eventually clear the protected moving
+  // estimate; otherwise a simulator stop/collision leaves /odom moving
+  // forever and the speed controller can never re-arm.
+  auto stopped = frozen;
+  for (int i = 0; i < 12; ++i) {
+    stopped = observer.update(observation(0.125 + 0.025 * i, 10.0, 10.0));
+  }
+  require(stopped.speed_mps == 0.0, "persistent stationary evidence clears stale speed");
 }
 
 void test_epoch_and_timing()

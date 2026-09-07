@@ -35,14 +35,6 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
         std::bind(&PurePursuitNode::poseCallback, this, std::placeholders::_1)
     );
 
-    // The official practice API supplies complete LiDAR scans at about 10 Hz.
-    // One scan is one controller event; no synthetic wall-timer commands are
-    // generated between sensor updates.
-    lidar_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
-        lidar_topic_, state_qos,
-        std::bind(&PurePursuitNode::lidarCallback, this, std::placeholders::_1)
-    );
-
     steering_feedback_sub_ = create_subscription<std_msgs::msg::Float32>(
         steering_feedback_topic_, state_qos,
         std::bind(&PurePursuitNode::steeringFeedbackCallback, this, std::placeholders::_1)
@@ -73,12 +65,13 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(get_logger(), "  Speed limits: max_lat_accel=%.2f min_reg_speed=%.2f",
                 config_.max_lateral_accel, config_.min_regulated_speed);
     RCLCPP_INFO(get_logger(), "  Yaw-rate damping: %.3f s", config_.yaw_rate_damping);
+    RCLCPP_INFO(get_logger(), "  Target-heading turn-in gain: %.3f", config_.heading_error_gain);
     RCLCPP_INFO(get_logger(), "  Command shaping: steer_rate=%.2f accel=%.2f decel=%.2f",
                 max_steering_rate_, max_accel_cmd_, max_decel_cmd_);
     RCLCPP_INFO(get_logger(), "  Pose: %s (%s frame)", pose_topic_.c_str(), path_frame_.c_str());
     RCLCPP_INFO(get_logger(), "  Odom: %s", odom_topic_.c_str());
-    RCLCPP_INFO(get_logger(), "  Sensor trigger: %s (one command per scan; nominal %.1f Hz)",
-                lidar_topic_.c_str(), control_rate_hz_);
+    RCLCPP_INFO(get_logger(), "  Control trigger: %s (one command per odometry update; nominal %.1f Hz)",
+                odom_topic_.c_str(), control_rate_hz_);
     RCLCPP_INFO(get_logger(), "  Steering feedback: %s (lead gain %.2f)",
                 steering_feedback_topic_.c_str(), steering_feedback_lead_gain_);
     RCLCPP_INFO(get_logger(), "  Command: %s", command_topic_.c_str());
@@ -89,16 +82,15 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("trajectory_file", "");
     declare_parameter("odom_topic", odom_topic_);
     declare_parameter("pose_topic", pose_topic_);
-    declare_parameter("lidar_topic", lidar_topic_);
     declare_parameter("command_topic", command_topic_);
     declare_parameter("steering_feedback_topic", steering_feedback_topic_);
     declare_parameter("path_frame", path_frame_);
     declare_parameter("command_frame", command_frame_);
     
     // Lookahead - sweep-optimized defaults
-    declare_parameter("min_lookahead", 0.65);
-    declare_parameter("max_lookahead", 1.15);
-    declare_parameter("lookahead_gain", 0.14);
+    declare_parameter("min_lookahead", 0.45);
+    declare_parameter("max_lookahead", 0.95);
+    declare_parameter("lookahead_gain", 0.05);
     declare_parameter("max_speed", 22.88);
     declare_parameter("cte_lookahead_weight", 1.0);
     declare_parameter("cte_lookahead_gain", 0.041540516);
@@ -108,11 +100,13 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("cte_speed_factor", 1.50);
     declare_parameter("cte_speed_floor_ratio", 0.55);
     declare_parameter("max_lateral_accel", 6.50);
-    declare_parameter("min_regulated_speed", 0.12);
+    declare_parameter("min_regulated_speed", 1.50);
+    declare_parameter("offtrack_stop_error_m", 0.75);
     declare_parameter("speed_preview_distance", 4.0);
     declare_parameter("speed_profile_braking_decel", 1.50);
     declare_parameter("curvature_preview_factor", 1.6245233);
-    declare_parameter("curvature_feedforward_gain", 0.25);
+    declare_parameter("curvature_feedforward_gain", 0.50);
+    declare_parameter("heading_error_gain", 0.30);
     declare_parameter("yaw_rate_damping", 0.0);
     
     // Corridor-aware width regulation
@@ -134,7 +128,7 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("pose_timeout_s", 0.1);
     declare_parameter("odom_timeout_s", 0.2);
     declare_parameter("state_extrapolation_max_s", 0.12);
-    declare_parameter("control_rate_hz", 10.0);
+    declare_parameter("control_rate_hz", 20.0);
     declare_parameter("localization_covariance_xy_max", 0.25);
     declare_parameter("localization_covariance_yaw_max", 0.12);
     declare_parameter("localization_required_updates", 5);
@@ -150,7 +144,6 @@ void PurePursuitNode::loadParameters() {
     trajectory_file_ = get_parameter("trajectory_file").as_string();
     odom_topic_ = get_parameter("odom_topic").as_string();
     pose_topic_ = get_parameter("pose_topic").as_string();
-    lidar_topic_ = get_parameter("lidar_topic").as_string();
     command_topic_ = get_parameter("command_topic").as_string();
     steering_feedback_topic_ = get_parameter("steering_feedback_topic").as_string();
     path_frame_ = get_parameter("path_frame").as_string();
@@ -160,6 +153,7 @@ void PurePursuitNode::loadParameters() {
     config_.max_lookahead = std::max(config_.min_lookahead, get_parameter("max_lookahead").as_double());
     config_.lookahead_gain = std::max(0.0, get_parameter("lookahead_gain").as_double());
     max_speed_ = std::max(0.0, get_parameter("max_speed").as_double());
+    config_.max_command_speed = max_speed_;
     config_.cte_lookahead_weight = std::max(0.0, get_parameter("cte_lookahead_weight").as_double());
     config_.cte_lookahead_gain = std::max(0.0, get_parameter("cte_lookahead_gain").as_double());
     config_.curvature_lookahead_gain = std::max(0.0, get_parameter("curvature_lookahead_gain").as_double());
@@ -171,6 +165,8 @@ void PurePursuitNode::loadParameters() {
         get_parameter("cte_speed_floor_ratio").as_double(), 0.0, 1.0);
     config_.max_lateral_accel = std::max(0.5, get_parameter("max_lateral_accel").as_double());
     config_.min_regulated_speed = std::max(0.0, get_parameter("min_regulated_speed").as_double());
+    config_.offtrack_stop_error_m = std::max(
+        0.0, get_parameter("offtrack_stop_error_m").as_double());
     config_.speed_preview_distance = std::max(
         0.0, get_parameter("speed_preview_distance").as_double());
     config_.speed_profile_braking_decel = std::max(
@@ -178,6 +174,8 @@ void PurePursuitNode::loadParameters() {
     config_.curvature_preview_factor = std::max(1.0, get_parameter("curvature_preview_factor").as_double());
     config_.curvature_feedforward_gain = std::clamp(
         get_parameter("curvature_feedforward_gain").as_double(), 0.0, 1.0);
+    config_.heading_error_gain = std::max(
+        0.0, get_parameter("heading_error_gain").as_double());
     config_.yaw_rate_damping = std::max(0.0, get_parameter("yaw_rate_damping").as_double());
     
     // Corridor-aware width regulation
@@ -236,7 +234,6 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
     for (const auto& param : parameters) {
         if (param.get_name() == "odom_topic" ||
             param.get_name() == "pose_topic" ||
-            param.get_name() == "lidar_topic" ||
             param.get_name() == "command_topic" ||
             param.get_name() == "steering_feedback_topic") {
             result.reason = "topic parameters require node restart";
@@ -268,6 +265,8 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
             candidate.max_lateral_accel = param.as_double();
         } else if (param.get_name() == "min_regulated_speed") {
             candidate.min_regulated_speed = param.as_double();
+        } else if (param.get_name() == "offtrack_stop_error_m") {
+            candidate.offtrack_stop_error_m = param.as_double();
         } else if (param.get_name() == "speed_preview_distance") {
             candidate.speed_preview_distance = param.as_double();
         } else if (param.get_name() == "speed_profile_braking_decel") {
@@ -276,6 +275,8 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
             candidate.curvature_preview_factor = param.as_double();
         } else if (param.get_name() == "curvature_feedforward_gain") {
             candidate.curvature_feedforward_gain = param.as_double();
+        } else if (param.get_name() == "heading_error_gain") {
+            candidate.heading_error_gain = param.as_double();
         } else if (param.get_name() == "yaw_rate_damping") {
             candidate.yaw_rate_damping = param.as_double();
         } else if (param.get_name() == "vehicle_half_width") {
@@ -314,6 +315,10 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
             candidate_feedback_lead_gain = param.as_double();
         }
     }
+
+    // Keep the production controller's internal cap synchronized with the
+    // node-level cap used by the command publisher.
+    candidate.max_command_speed = candidate_max_speed;
 
     auto finite = [](double v) { return std::isfinite(v); };
     auto finite_and_nonnegative = [&](double v) { return finite(v) && v >= 0.0; };
@@ -362,6 +367,10 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
         result.reason = "min_regulated_speed must be finite and >= 0";
         return result;
     }
+    if (!finite_and_nonnegative(candidate.offtrack_stop_error_m)) {
+        result.reason = "offtrack_stop_error_m must be finite and >= 0";
+        return result;
+    }
     if (!finite_and_nonnegative(candidate.speed_preview_distance) ||
         !finite_and_nonnegative(candidate.speed_profile_braking_decel)) {
         result.reason = "speed preview parameters must be finite and >= 0";
@@ -375,6 +384,11 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
         candidate.curvature_feedforward_gain < 0.0 ||
         candidate.curvature_feedforward_gain > 1.0) {
         result.reason = "curvature_feedforward_gain must be finite and in [0,1]";
+        return result;
+    }
+    if (!finite_and_nonnegative(candidate.heading_error_gain) ||
+        candidate.heading_error_gain > 1.0) {
+        result.reason = "heading_error_gain must be finite and in [0,1]";
         return result;
     }
     if (!finite_and_nonnegative(candidate.yaw_rate_damping)) {
@@ -460,6 +474,7 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
     candidate.cte_speed_floor_ratio = std::clamp(candidate.cte_speed_floor_ratio, 0.0, 1.0);
     candidate.corridor_speed_floor_ratio = std::clamp(candidate.corridor_speed_floor_ratio, 0.0, 1.0);
     candidate.curvature_feedforward_gain = std::clamp(candidate.curvature_feedforward_gain, 0.0, 1.0);
+    candidate.heading_error_gain = std::clamp(candidate.heading_error_gain, 0.0, 1.0);
 
     {
         std::scoped_lock lock(state_mutex_, controller_mutex_);
@@ -497,6 +512,7 @@ bool PurePursuitNode::loadTrajectory() {
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             trajectory_loaded_ = true;
+            trajectory_aligned_ = false;
         }
         size_t count = 0;
         double len = 0.0;
@@ -514,6 +530,7 @@ bool PurePursuitNode::loadTrajectory() {
 }
 
 void PurePursuitNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    rclcpp::Time event_stamp;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         current_state_.velocity = msg->twist.twist.linear.x;
@@ -524,7 +541,12 @@ void PurePursuitNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
         if (last_odom_stamp_.nanoseconds() == 0) {
             last_odom_stamp_ = last_odom_time_;
         }
+        event_stamp = last_odom_stamp_;
     }
+
+    // Odometry is the available high-rate motion signal. Run PP from this
+    // callback so the controller is not limited by the slower LiDAR stream.
+    controlLoop(event_stamp);
 }
 
 void PurePursuitNode::steeringFeedbackCallback(
@@ -594,17 +616,6 @@ void PurePursuitNode::poseCallback(const geometry_msgs::msg::PoseWithCovarianceS
 
 }
 
-void PurePursuitNode::lidarCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
-    // Use the official LiDAR event as the control cadence. controlLoop() reads
-    // the newest AMCL pose and encoder/IMU odometry and fails safe if either is
-    // stale or not yet qualified.
-    rclcpp::Time event_stamp(msg->header.stamp, get_clock()->get_clock_type());
-    if (event_stamp.nanoseconds() == 0) {
-        event_stamp = now();
-    }
-    controlLoop(event_stamp);
-}
-
 void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     std::unique_lock<std::mutex> control_lock(control_mutex_, std::try_to_lock);
     if (!control_lock.owns_lock()) {
@@ -612,6 +623,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     }
 
     bool trajectory_loaded = false;
+    bool trajectory_aligned = false;
     bool pose_received = false;
     bool odom_received = false;
     rclcpp::Time last_pose_time;
@@ -631,6 +643,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         trajectory_loaded = trajectory_loaded_;
+        trajectory_aligned = trajectory_aligned_;
         pose_received = pose_received_;
         odom_received = odom_received_;
         last_pose_time = last_pose_time_;
@@ -691,12 +704,11 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
         state = current_state_;
     }
 
-    // AMCL/EKF is scan-driven while odometry is available continuously at the
-    // bridge cadence.  Compensate from the accepted pose timestamp to the
+    // AMCL/EKF remains scan-driven while odometry is available continuously at
+    // the bridge cadence. Compensate from the accepted pose timestamp to the
     // command publication time, using only allowed odometry velocity and yaw
-    // rate.  The scan timestamp describes when the measurement was taken; the
-    // command is applied now, so stopping the prediction at the scan event
-    // would intentionally leave one delivery interval of turn-in lag.
+    // rate. The odometry timestamp describes the newest motion measurement;
+    // the command is applied now, so the prediction covers delivery latency.
     const rclcpp::Time command_time = now();
     const rclcpp::Time prediction_stamp =
         event_stamp > command_time ? event_stamp : command_time;
@@ -734,6 +746,18 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
             publishDriveCommand(0.0, 0.0);
             return;
         }
+        if (!trajectory_aligned) {
+            const size_t aligned_index = controller_->alignTrajectoryStart(
+                Point2D{state.pose.x, state.pose.y});
+            {
+                std::lock_guard<std::mutex> state_lock(state_mutex_);
+                trajectory_aligned_ = true;
+            }
+            RCLCPP_INFO(
+                get_logger(),
+                "Aligned closed trajectory seam to startup pose at original waypoint %zu",
+                aligned_index);
+        }
         output = controller_->compute(state);
     }
     
@@ -748,7 +772,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
                 last_cmd_time_ = now_t;
                 // Start from the physical neutral command.  Initialising the
                 // history to the requested output bypasses the rate limiter
-                // on the first scan, which is unsafe when the spawn pose is
+                // on the first odometry event, which is unsafe when the spawn pose is
                 // a little off the raceline.
                 last_cmd_steering_ = 0.0;
                 last_cmd_speed_ = 0.0;
@@ -763,7 +787,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
 
         // AutoDRIVE publishes steering feedback in radians. Lead the
         // requested angle only when the actuator is lagging in the same
-        // direction. Never amplify a sign reversal: at 10 Hz an old feedback
+        // direction. Never amplify a sign reversal: at the source cadence an old feedback
         // sample can legitimately have the opposite sign while the requested
         // command is changing sides.
         const bool feedback_fresh = steering_feedback_received &&
@@ -797,6 +821,14 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
                 cmd_speed = last_cmd_speed_ + std::max(speed_err, -max_speed_step_down);
             }
 
+            // Keep the published PP target above the useful rolling floor.
+            // The floor is applied in PurePursuit::compute(), but the command
+            // slew limiter can otherwise emit a transient 0.003 m/s command
+            // when starting from zero. An explicit zero remains reserved for
+            // severe off-track/lost-state stopping.
+            if (output.target_speed > 0.0) {
+                cmd_speed = std::max(cmd_speed, config_.min_regulated_speed);
+            }
             cmd_speed = std::clamp(cmd_speed, 0.0, max_speed);
             last_cmd_steering_ = cmd_steer;
             last_cmd_speed_ = cmd_speed;

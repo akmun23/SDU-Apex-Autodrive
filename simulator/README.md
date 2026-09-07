@@ -30,7 +30,14 @@ git clone --branch AutoDRIVE-Simulator --depth 1 \
   https://github.com/Tinker-Twins/AutoDRIVE.git autodrive-simulator
 cd autodrive-simulator
 git apply /workspace/src/simulator/patches/0001-clean-40hz-telemetry.patch
+git apply /workspace/src/simulator/patches/0002-parallel-lidar-raycasts.patch
 ```
+
+The second patch is the performance-critical part for the compete scene. It
+uses Unity's `RaycastCommand.ScheduleBatch` for the independent 2-D LIDAR
+queries, preserving the 1080-ray/0.25-degree sensor contract while moving the
+raycast work off the Unity main thread. The prebuilt competition player cannot
+receive this code change; it must be rebuilt from the source project.
 
 Open the project with Unity `2022.3.52f1` and build the Linux x86_64 player.
 Use the resulting player directory as the simulator image payload, or build a

@@ -52,6 +52,12 @@ class SpeedControllerConfig:
     # deterministic unit-test behavior; production config enables a short
     # persistence interval.
     speed_overspeed_confirmation_sec: float = 0.0
+    # Hard coast threshold for a clearly unsafe target crossing.  This is
+    # deliberately separate from the slew-limited, noise-tolerant coast
+    # threshold: once the measured speed is materially above the request,
+    # retaining any throttle for the slew interval only makes the overshoot
+    # worse because AutoDRIVE has no active brake channel.
+    hard_overspeed_cutoff_mps: float = 0.50
     # Speed error is converted to a requested body acceleration before the
     # throttle inverse is applied.  These are not throttle ceilings.
     speed_error_to_accel_gain: float = 1.25
@@ -110,6 +116,7 @@ class SpeedControllerConfig:
             self.speed_downshift_stable_sec,
             self.speed_downshift_band_mps,
             self.speed_overspeed_confirmation_sec,
+            self.hard_overspeed_cutoff_mps,
         )
         if not all(math.isfinite(v) for v in scalars):
             raise ValueError("speed-controller values must be finite")
@@ -130,7 +137,8 @@ class SpeedControllerConfig:
                 self.speed_hold_entry_margin_mps < 0.0 or
                 self.speed_downshift_stable_sec <= 0.0 or
                 self.speed_downshift_band_mps < 0.0 or
-                self.speed_overspeed_confirmation_sec < 0.0):
+                self.speed_overspeed_confirmation_sec < 0.0 or
+                self.hard_overspeed_cutoff_mps < 0.0):
             raise ValueError("invalid speed-controller handoff configuration")
         if (
             self.speed_error_to_accel_gain < 0.0 or
@@ -680,6 +688,13 @@ class TargetSpeedController:
                 self._downshift_below_band_elapsed = 0.0
                 self.integral = 0.0
                 self.acceleration_controller.reset()
+                if measured - target >= self.config.hard_overspeed_cutoff_mps:
+                    # Preserve the downshift guard state, but do not leave a
+                    # residual throttle in the ordinary falling slew ramp
+                    # when the new target is materially below the measured
+                    # speed.
+                    self.last_output = 0.0
+                    return 0.0
                 return self._slew_to(0.0, dt_seconds)
             if measured < max(0.0, target - band):
                 self._downshift_stable_elapsed = 0.0
@@ -714,6 +729,22 @@ class TargetSpeedController:
             else:
                 return self._slew_to(self.feedforward(target), dt_seconds)
 
+        # A large target crossing is not a situation where actuator slew is
+        # useful. The competition interface exposes forward throttle and
+        # neutral, but no active brake; cut forward throttle immediately and
+        # clear accumulated demand. Smaller crossings still use the normal
+        # persistence and slew-limited coast logic below. This comes after the
+        # explicit target-downshift guard so its predicted passive-coast catch
+        # remains valid.
+        if measured - target >= self.config.hard_overspeed_cutoff_mps:
+            self.integral = 0.0
+            self.acceleration_controller.reset()
+            self._hold_approach = False
+            self._hold_reentry_requires_speed = False
+            self._overspeed_elapsed = 0.0
+            self.last_output = 0.0
+            return 0.0
+
         error = target - measured
         overspeed = measured - target > self._overspeed_limit(target)
         if overspeed:
@@ -728,8 +759,10 @@ class TargetSpeedController:
             self.acceleration_controller.reset()
             return self._slew_to(0.0, dt_seconds)
 
-        # A large error is the boost phase. The predicted handoff below keeps
-        # this from lasting until the target has already been crossed.
+        # A large error is handled by the same calibrated acceleration model
+        # as the rest of the loop. Do not jump to full normalized throttle:
+        # AutoDRIVE has no active brake channel, so an open-loop boost can
+        # cross a low target by several m/s before the next odometry sample.
         if (self._hold_approach and error > max(
                 self.config.speed_hold_error_deadband_mps,
                 self.config.speed_hold_recovery_error_mps)):
@@ -761,9 +794,20 @@ class TargetSpeedController:
             )
 
         if error >= self.config.speed_boost_error_mps:
+            # Keep the fast approach phase, but bound it by the calibrated
+            # acceleration envelope instead of issuing open-loop full
+            # throttle. This preserves useful launch response without
+            # outrunning the 40 Hz odometry feedback.
+            desired = self.feedforward(target) + (
+                self.acceleration_controller.throttle_per_acceleration(measured)
+                * self.acceleration_controller.maximum_acceleration(measured)
+            )
             self.integral = 0.0
             self.acceleration_controller.reset()
-            return self._slew_to(self.config.throttle_max_forward, dt_seconds)
+            return self._slew_to(
+                clamp(desired, 0.0, self.config.throttle_max_forward),
+                dt_seconds,
+            )
 
         candidate_integral = clamp(
             self.integral + error * dt_seconds,
