@@ -141,7 +141,7 @@ install(
 
 install(
   FILES
-    config/ftg_autodrive.yaml
+    config/ftg_params.yaml
     config/path_tracking_autodrive.yaml
   DESTINATION share/${PROJECT_NAME}/config
 )

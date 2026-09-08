@@ -50,12 +50,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "ftg_params",
-            default_value=os.path.join(control, "config", "ftg_autodrive.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "mapping_ftg_params",
-            default_value=os.path.join(
-                integration, "config", "mapping_ftg_2mps_recovery035.yaml"),
+            default_value=os.path.join(control, "config", "ftg_params.yaml"),
         ),
         DeclareLaunchArgument(
             "mapping_params",
@@ -148,13 +143,11 @@ def generate_launch_description():
                     name="ftg_node",
                     parameters=[
                         LaunchConfiguration("ftg_params"),
-                        LaunchConfiguration("mapping_ftg_params"),
-                        {
-                            # Mapping is allowed to use simulator odometry
-                            # for coverage memory; racing FTG leaves this
-                            # disabled and has no odometry dependency.
-                            "exploration_odom_topic": "/autodrive/roboracer_1/odom",
-                        },
+                    ],
+                    remappings=[
+                        ("scan", "/autodrive/roboracer_1/lidar"),
+                        ("odom", "/autodrive/roboracer_1/odom"),
+                        ("drive", "/cmd/speed"),
                     ],
                 ),
             ],

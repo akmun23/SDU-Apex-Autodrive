@@ -1,0 +1,77 @@
+# Weighted Free-Space Follow The Gap (FTG) Configuration
+# ======================================================
+# Steers toward the weighted centroid of all high-scoring directions,
+# naturally centring the car in corridors and biasing toward straight paths.
+
+ftg_node:
+  ros__parameters:
+    # ===================
+    # Vehicle Parameters
+    # ===================
+    # AutoDRIVE simulator geometry; keep aligned with
+    # f1tenth_planning/config/autodrive_sim_vehicle.yaml.
+    wheelbase: 0.324         # Distance between front and rear axles (m)
+    car_width: 0.273         # Vehicle width for the clearance cone (m)
+
+    # ===================
+    # Speed Control
+    # ===================
+    # Speed = min_speed + (max_speed - min_speed) * range_factor * steer_factor
+    # (range_factor and steer_factor are internal normalized terms computed in follow_the_gap.cpp)
+    max_speed: 2.0           # Maximum allowed speed (m/s)
+    min_speed: 1.0           # Minimum speed (m/s) - keeps car moving
+    speed_full_range: 4.0    # Range (m) at which full speed is used
+    steer_slowdown_gain: 0.5 # How much steering reduces speed (0=none, 1=max)
+
+    # ===================
+    # Steering Control
+    # ===================
+    max_steering: 0.5236          # [rad] AutoDRIVE steering saturation
+    steering_gain: 1.0            # Proportional gain on target angle
+    max_steering_rate: 3.2        # [rad/s] AutoDRIVE steering-rate limit
+    target_ema_alpha: 0.35        # EMA smoothing (lower = smoother, 1.0 = none)
+
+    # ===================
+    # Weighted Free-Space Scoring
+    # ===================
+    # These control how the algorithm picks a steering direction.
+    #
+    # heading_weight        - exponential decay for non-forward directions.
+    #                         Higher values bias toward going straight.
+    #
+    # score_power           - raise effective clearance to this power.
+    #                         Higher = sharper selection, lower = more averaging.
+    #
+    # clearance_cone_scale  - multiplier on car half-width for the safety
+    #                         cone used to compute effective clearance.
+    #                         Higher values = more conservative (wider cone), lower = more aggressive (narrower cone).
+    #
+    # min_score_range       - beams shorter than this (m) are scored as zero.
+    heading_weight: 1.0
+    score_power: 2.0
+    clearance_cone_scale: 1.5
+    min_score_range: 0.3
+
+    # ===================
+    # Safety Parameters
+    # ===================
+    emergency_brake_distance: 0.04  # Emergency stop if obstacle closer (m)
+
+    # ===================
+    # LiDAR Processing
+    # ===================
+    disparity_threshold: 0.5  # Disparity detection threshold (m)
+    wall_margin: 0.15         # Shrink all readings by this (m) for safety
+    gap_threshold: 0.5        # Min range to count as "gap" for visualisation
+    min_gap_width: 0.15       # Min angular gap width for visualisation (rad)
+
+    # ===================
+    # Generic LiDAR Preprocessing
+    # ===================
+    lidar:
+      range_min: 0.1         # Ignore readings closer than this (m)
+      range_max: 10.0        # Maximum range to consider (m)
+      angle_min: -1.5708     # Min angle to process (rad) = -90 deg
+      angle_max: 1.5708      # Max angle to process (rad) = +90 deg
+      apply_median_filter: true    # Median filter for noise reduction
+      median_window_size: 3        # Window (must be odd)

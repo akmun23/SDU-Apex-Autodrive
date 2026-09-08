@@ -56,7 +56,7 @@ regulate the actual corner speed.
 
 ## Configuration
 
-- `config/ftg_autodrive.yaml`
+- `config/ftg_params.yaml`
 - `config/path_tracking_autodrive.yaml`
 
 The launch file loads the appropriate YAML and selects exactly one controller.

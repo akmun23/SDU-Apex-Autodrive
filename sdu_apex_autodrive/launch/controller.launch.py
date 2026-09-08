@@ -225,6 +225,11 @@ def _setup(context):
             plugin="f1tenth_control::FTGNode",
             name="ftg_node",
             parameters=[LaunchConfiguration("ftg_params")],
+            remappings=[
+                ("scan", "/autodrive/roboracer_1/lidar"),
+                ("odom", "/autodrive/roboracer_1/odom"),
+                ("drive", "/cmd/speed"),
+            ],
         )
         actions.append(ComposableNodeContainer(
             name="controller_container",
@@ -429,7 +434,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "ftg_params",
-            default_value=os.path.join(control, "config", "ftg_autodrive.yaml"),
+            default_value=os.path.join(control, "config", "ftg_params.yaml"),
         ),
         DeclareLaunchArgument(
             "path_tracking_params",

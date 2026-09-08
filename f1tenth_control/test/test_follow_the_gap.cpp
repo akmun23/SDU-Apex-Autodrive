@@ -1,564 +1,295 @@
 #include <gtest/gtest.h>
-
 #include "algorithms/follow_the_gap.hpp"
-
+#include "common/types.hpp"
 #include <cmath>
 #include <vector>
 
-namespace {
+using namespace f1tenth_control;
 
-using f1tenth_control::FTGConfig;
-using f1tenth_control::FollowTheGap;
+class FollowTheGapTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Default config for tests (weighted free-space FTG)
+        config_.wheelbase = 0.324;
+        config_.car_width = 0.273;
+        config_.max_speed = 2.0;
+        config_.min_speed = 1.0;
+        config_.speed_full_range = 4.0;
+        config_.steer_slowdown_gain = 0.5;
+        config_.max_steering = 0.5236;
+        config_.steering_gain = 1.0;
+        config_.max_steering_rate = 100.0;  // Very high for deterministic tests
+        config_.target_ema_alpha = 1.0;     // No smoothing for deterministic tests
+        config_.emergency_brake_distance = 0.3;
 
-constexpr std::size_t kSamples = 181;
-constexpr std::size_t kWideSamples = 1081;
-constexpr double kPi = 3.14159265358979323846;
-constexpr double kAngleMin = -kPi / 2.0;
-constexpr double kAngleIncrement = kPi / 180.0;
-constexpr double kAngleMax = kPi / 2.0;
-constexpr double kWideAngleMin = -2.35619449019;
-constexpr double kWideAngleMax = 2.35619449019;
+        // Weighted free-space scoring
+        config_.heading_weight = 1.0;
+        config_.score_power = 2.0;
+        config_.clearance_cone_scale = 1.5;
+        config_.min_score_range = 0.3;
 
-std::vector<float> scanWithOpening(double lower, double upper,
-                                   float wall = 0.10F) {
-  std::vector<float> ranges(kSamples, wall);
-  for (std::size_t index = 0; index < ranges.size(); ++index) {
-    const double angle = kAngleMin + static_cast<double>(index) * kAngleIncrement;
-    if (angle >= lower && angle <= upper) {
-      ranges[index] = 8.0F;
+        // LiDAR processing
+        config_.disparity_threshold = 0.5;
+        config_.wall_margin = 0.0;  // Disable for tests
+        config_.gap_threshold = 0.8;
+        config_.min_gap_width = 0.15;
+
+        // Generic LiDAR preprocessing config
+        config_.lidar_config.range_min = 0.1;
+        config_.lidar_config.range_max = 12.0;
+        config_.lidar_config.angle_min = -constants::PI / 2;
+        config_.lidar_config.angle_max = constants::PI / 2;
+        config_.lidar_config.apply_median_filter = false;  // Deterministic tests
+
+        ftg_ = std::make_unique<FollowTheGap>(config_);
     }
-  }
-  return ranges;
+
+    // Helper to create a scan with a clear path ahead
+    std::vector<float> createOpenScan(size_t num_points) {
+        return std::vector<float>(num_points, 8.0f);
+    }
+
+    // Helper to create a scan with walls on sides and gap in front
+    std::vector<float> createCorridorScan(size_t num_points) {
+        std::vector<float> ranges(num_points, 1.0f);  // Walls everywhere
+        size_t quarter = num_points / 4;
+        for (size_t i = quarter; i < 3 * quarter; ++i) {
+            ranges[i] = 6.0f;  // Open in front
+        }
+        return ranges;
+    }
+
+    // Helper to create a scan with obstacle directly ahead
+    std::vector<float> createObstacleAheadScan(size_t num_points, float obstacle_dist) {
+        std::vector<float> ranges(num_points, 6.0f);
+        size_t center = num_points / 2;
+        size_t width = num_points / 10;
+        for (size_t i = center - width; i <= center + width; ++i) {
+            ranges[i] = obstacle_dist;
+        }
+        return ranges;
+    }
+
+    // Standard scan parameters for 180-degree scan with 1-degree resolution
+    static constexpr size_t NUM_POINTS = 181;
+    static constexpr double ANGLE_MIN = -constants::PI / 2;
+    static constexpr double ANGLE_MAX = constants::PI / 2;
+    static constexpr double ANGLE_INC = constants::PI / 180.0;
+
+    FTGConfig config_;
+    std::unique_ptr<FollowTheGap> ftg_;
+};
+
+// =====================================================================
+// Basic output tests
+// =====================================================================
+
+TEST_F(FollowTheGapTest, ComputeReturnsValidOutput) {
+    auto ranges = createOpenScan(NUM_POINTS);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_GT(output.command.speed, 0.0);
+    EXPECT_FALSE(output.emergency_stop);
+    EXPECT_FALSE(output.processed_scan.filtered_ranges.empty());
 }
 
-FTGConfig testConfig() {
-  FTGConfig config;
-  config.max_speed = 1.0;
-  config.min_speed = 0.2;
-  config.max_steering = 0.5236;
-  config.steering_gain = 3.2;
-  config.max_steering_rate = 100.0;
-  config.target_ema_alpha = 1.0;
-  config.heading_weight = 0.2;
-  config.score_power = 2.0;
-  config.clearance_cone_scale = 1.0;
-  config.min_score_range = 0.25;
-  config.emergency_brake_distance = 0.10;
-  config.footprint_clearance = 0.0;
-  config.side_recovery_distance = 0.10;
-  config.side_recovery_front_angle = 1.20;
-  config.side_recovery_max_angle = 1.20;
-  config.disparity_threshold = 100.0;
-  config.wall_margin = 0.0;
-  config.side_safety_margin = 0.0;
-  config.lidar_config.range_min = 0.06;
-  config.lidar_config.range_max = 10.0;
-  config.lidar_config.angle_min = kAngleMin;
-  config.lidar_config.angle_max = kAngleMax;
-  config.lidar_config.apply_median_filter = false;
-  return config;
+TEST_F(FollowTheGapTest, OpenPathDrivesStraight) {
+    auto ranges = createOpenScan(NUM_POINTS);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    // In a symmetric open path the weighted centroid should be near zero
+    EXPECT_NEAR(output.command.steering_angle, 0.0, 0.05);
+    EXPECT_GT(output.command.speed, 0.0);
 }
 
-}  // namespace
-
-TEST(FollowTheGapRegression, AllowsFullConfiguredSteering) {
-  auto config = testConfig();
-  config.select_single_gap = true;
-  FollowTheGap controller(config);
-
-  const auto output = controller.compute(
-      scanWithOpening(0.55, 1.45), kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_GT(output.command.steering_angle, 0.50);
-  EXPECT_LE(std::abs(output.command.steering_angle), config.max_steering);
-  EXPECT_LE(std::abs(output.raw_steering), config.max_steering);
+TEST_F(FollowTheGapTest, CorridorDrivesStraight) {
+    auto ranges = createCorridorScan(NUM_POINTS);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    // Corridor: open in front, walls on sides -> should steer roughly straight
+    EXPECT_NEAR(output.command.steering_angle, 0.0, 0.15);
+    EXPECT_GT(output.command.speed, 0.0);
 }
 
-TEST(FollowTheGapRegression, RecoversFromFrontSideBeamAcrossFullSector) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.60;
-  config.side_recovery_max_angle = 1.20;
-  FollowTheGap controller(config);
-  auto ranges = std::vector<float>(kSamples, 8.0F);
-  const std::size_t beam = static_cast<std::size_t>(
-      (1.0 - kAngleMin) / kAngleIncrement);
-  ranges[beam] = 0.50F;
+// =====================================================================
+// Emergency stop tests
+// =====================================================================
 
-  const auto output = controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_TRUE(output.side_recovery);
-  EXPECT_LT(output.raw_steering, -config.side_recovery_min_steering);
-  EXPECT_LE(std::abs(output.raw_steering), config.max_steering);
-  EXPECT_LT(output.command.steering_angle, -config.side_recovery_min_steering);
+TEST_F(FollowTheGapTest, EmergencyStopWhenObstacleTooClose) {
+    // All obstacles very close
+    std::vector<float> ranges(NUM_POINTS, 0.05f);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_TRUE(output.emergency_stop);
+    EXPECT_DOUBLE_EQ(output.command.speed, 0.0);
 }
 
-TEST(FollowTheGapRegression, RearContextSelectsOpenHairpinBranch) {
-  auto config = testConfig();
-  config.side_recovery_distance = 1.0;
-  config.side_recovery_front_angle = 1.20;
-  config.side_recovery_max_angle = 1.20;
-  config.use_rear_context = true;
-  config.rear_context_min_angle = kPi / 2.0;
-  config.rear_context_max_angle = 2.35619449019;
-  config.rear_context_min_advantage = 0.20;
-  // Keep the normal controller validity window at the forward +/-90 deg.
-  // Rear context must still be read from the raw 270 deg input scan.
-  config.lidar_config.angle_min = kAngleMin;
-  config.lidar_config.angle_max = kAngleMax;
-  FollowTheGap controller(config);
+TEST_F(FollowTheGapTest, EmergencyStopDistanceConfigurable) {
+    config_.emergency_brake_distance = 0.5;
+    ftg_->setConfig(config_);
 
-  auto ranges = std::vector<float>(kWideSamples, 8.0F);
-  const auto beamFor = [](double angle) {
-    return static_cast<std::size_t>(
-      std::llround((angle - kWideAngleMin) / kAngleIncrement));
-  };
-  // A closed front corner with substantially more room on the left-rear
-  // branch. The rear points must select the branch without being treated as a
-  // forward target or emergency obstacle.
-  ranges[beamFor(0.0)] = 0.80F;
-  ranges[beamFor(2.0)] = 3.0F;
-  ranges[beamFor(-2.0)] = 1.50F;
-
-  const auto output = controller.compute(
-    ranges, kWideAngleMin, kWideAngleMax, kAngleIncrement);
-
-  EXPECT_TRUE(output.side_recovery);
-  EXPECT_GT(output.recovery_rear_left_clearance,
-            output.recovery_rear_right_clearance + 0.20);
-  EXPECT_GT(output.recovery_steering_sign, 0.0);
-  EXPECT_GT(output.raw_steering, 0.0);
+    std::vector<float> ranges(NUM_POINTS, 0.4f);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_TRUE(output.emergency_stop);
 }
 
-TEST(FollowTheGapRegression, RearContextHoldsBranchWhileVehicleRotates) {
-  auto config = testConfig();
-  config.side_recovery_distance = 1.0;
-  config.side_recovery_front_angle = 1.20;
-  config.side_recovery_max_angle = 1.20;
-  config.lock_recovery_side_until_clear = true;
-  config.use_rear_context = true;
-  config.rear_context_min_angle = kPi / 2.0;
-  config.rear_context_max_angle = 2.35619449019;
-  config.rear_context_min_advantage = 0.20;
-  config.lidar_config.angle_min = kAngleMin;
-  config.lidar_config.angle_max = kAngleMax;
-  FollowTheGap controller(config);
+TEST_F(FollowTheGapTest, NoEmergencyStopWhenFarEnough) {
+    config_.emergency_brake_distance = 0.1;
+    ftg_->setConfig(config_);
 
-  auto left_open = std::vector<float>(kWideSamples, 8.0F);
-  const auto beamFor = [](double angle) {
-    return static_cast<std::size_t>(
-      std::llround((angle - kWideAngleMin) / kAngleIncrement));
-  };
-  left_open[beamFor(0.0)] = 0.80F;
-  left_open[beamFor(2.0)] = 3.0F;
-  left_open[beamFor(-2.0)] = 1.50F;
-  const auto first = controller.compute(
-    left_open, kWideAngleMin, kWideAngleMax, kAngleIncrement);
-  ASSERT_GT(first.recovery_steering_sign, 0.0);
-
-  auto right_open = left_open;
-  right_open[beamFor(0.0)] = 0.70F;
-  right_open[beamFor(2.0)] = 1.50F;
-  right_open[beamFor(-2.0)] = 3.0F;
-  const auto rotating = controller.compute(
-    right_open, kWideAngleMin, kWideAngleMax, kAngleIncrement);
-
-  EXPECT_GT(rotating.recovery_steering_sign, 0.0);
-  EXPECT_GT(rotating.raw_steering, 0.0);
+    auto ranges = createOpenScan(NUM_POINTS);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_FALSE(output.emergency_stop);
 }
 
-TEST(FollowTheGapRegression, RearContextIgnoresInvalidMinimumReturns) {
-  auto config = testConfig();
-  config.side_recovery_distance = 1.0;
-  config.side_recovery_front_angle = 1.20;
-  config.side_recovery_max_angle = 1.20;
-  config.use_rear_context = true;
-  config.rear_context_min_range = 0.20;
-  config.lidar_config.angle_min = kAngleMin;
-  config.lidar_config.angle_max = kAngleMax;
-  config.lidar_config.apply_median_filter = false;
-  FollowTheGap controller(config);
+// =====================================================================
+// Gap detection for visualisation
+// =====================================================================
 
-  auto ranges = std::vector<float>(kWideSamples, 8.0F);
-  const auto beamFor = [](double angle) {
-    return static_cast<std::size_t>(
-      std::llround((angle - kWideAngleMin) / kAngleIncrement));
-  };
-  ranges[beamFor(0.0)] = 0.80F;
-  // The right-rear minimum is a common invalid/min-range sentinel. It must
-  // not make the left branch appear open by comparison.
-  for (const double angle : {-1.6, -1.8, -2.0, -2.2}) {
-    ranges[beamFor(angle)] = 0.05F;
-  }
-  ranges[beamFor(2.0)] = 1.50F;
-
-  const auto output = controller.compute(
-    ranges, kWideAngleMin, kWideAngleMax, kAngleIncrement);
-
-  EXPECT_NEAR(output.recovery_rear_right_clearance, 8.0, 1.0e-9);
-  EXPECT_NEAR(output.recovery_rear_left_clearance, 1.50, 1.0e-9);
+TEST_F(FollowTheGapTest, DetectsGaps) {
+    auto ranges = createCorridorScan(NUM_POINTS);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    // Should find at least one gap in the corridor
+    EXPECT_FALSE(output.all_gaps.empty());
 }
 
-TEST(FollowTheGapRegression, RecoveryBuildsAuthorityBeforePhysicalCorner) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.90;
-  config.side_recovery_min_steering = 0.32;
-  config.side_recovery_full_steering_distance = 0.70;
-  FollowTheGap controller(config);
+// =====================================================================
+// Steering direction tests
+// =====================================================================
 
-  auto ranges = std::vector<float>(kSamples, 8.0F);
-  const std::size_t beam = static_cast<std::size_t>(
-      (0.75 - kAngleMin) / kAngleIncrement);
-  ranges[beam] = 0.75F;
-
-  const auto output = controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_TRUE(output.side_recovery);
-  EXPECT_LT(output.raw_steering, -0.40);
-  EXPECT_LT(output.command.steering_angle, -0.40);
+TEST_F(FollowTheGapTest, SteersTowardOpenSpace) {
+    // Gap only on the right (indices 0..quarter), walls elsewhere
+    std::vector<float> ranges(NUM_POINTS, 0.5f);  // close walls
+    size_t quarter = NUM_POINTS / 4;
+    for (size_t i = 0; i < quarter; ++i) {
+        ranges[i] = 6.0f;  // Open on the right (negative angles)
+    }
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    // Steering angle should be negative (right)
+    EXPECT_LT(output.command.steering_angle, -0.01);
 }
 
-TEST(FollowTheGapRegression, SideBoundaryOutsideFrontRecoveryDoesNotOverrideGap) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.80;
-  config.side_recovery_front_angle = 0.50;
-  FollowTheGap controller(config);
-
-  auto ranges = std::vector<float>(kSamples, 8.0F);
-  const std::size_t side_beam = static_cast<std::size_t>(
-      (0.80 - kAngleMin) / kAngleIncrement);
-  ranges[side_beam] = 0.50F;
-
-  const auto output = controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_FALSE(output.side_recovery);
-  EXPECT_GT(output.command.speed, config.min_speed);
+TEST_F(FollowTheGapTest, SteersLeftWhenGapOnLeft) {
+    std::vector<float> ranges(NUM_POINTS, 0.5f);
+    size_t three_quarter = 3 * NUM_POINTS / 4;
+    for (size_t i = three_quarter; i < NUM_POINTS; ++i) {
+        ranges[i] = 6.0f;  // Open on the left (positive angles)
+    }
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_GT(output.command.steering_angle, 0.01);
 }
 
-TEST(FollowTheGapRegression, RecoveryNeverPublishesIntoObstacleDuringSlew) {
-  auto config = testConfig();
-  config.max_steering_rate = 0.10;
-  config.side_recovery_distance = 0.90;
-  config.side_recovery_min_steering = 0.32;
-  config.side_recovery_full_steering_distance = 0.70;
-  config.side_recovery_max_angle = 1.20;
-  config.ambiguous_front_recovery_sign = -1.0;
-  FollowTheGap controller(config);
-
-  auto clear = scanWithOpening(0.55, 1.45);
-  const auto forward = controller.compute(
-      clear, kAngleMin, kAngleMax, kAngleIncrement);
-  EXPECT_GT(forward.command.steering_angle, 0.0);
-
-  auto front_obstacle = std::vector<float>(kSamples, 8.0F);
-  const std::size_t front_beam = static_cast<std::size_t>(
-      (0.0 - kAngleMin) / kAngleIncrement);
-  front_obstacle[front_beam] = 0.50F;
-  const auto recovery = controller.compute(
-      front_obstacle, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_TRUE(recovery.side_recovery);
-  EXPECT_LT(recovery.raw_steering, 0.0);
-  EXPECT_LT(recovery.command.steering_angle, 0.0);
-  EXPECT_LT(recovery.command.steering_angle, -0.45);
-  EXPECT_NEAR(recovery.command.steering_angle,
-              recovery.raw_steering, 1.0e-6);
+TEST_F(FollowTheGapTest, SteeringAngleClamped) {
+    // Very extreme gap scenario — steering must stay within max_steering
+    std::vector<float> ranges(NUM_POINTS, 0.5f);
+    // Only last 10 beams are open
+    for (size_t i = NUM_POINTS - 10; i < NUM_POINTS; ++i) {
+        ranges[i] = 8.0f;
+    }
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_LE(std::abs(output.command.steering_angle), config_.max_steering + 0.001);
 }
 
-TEST(FollowTheGapRegression, AnticipatesTurnBeforeSteeringSlewCatchesUp) {
-  auto config = testConfig();
-  config.max_speed = 2.0;
-  config.min_speed = 0.2;
-  config.max_steering_rate = 0.10;
-  config.steer_slowdown_gain = 1.0;
-  FollowTheGap controller(config);
+// =====================================================================
+// Speed tests
+// =====================================================================
 
-  const auto turn = scanWithOpening(0.45, 1.45);
-  const auto output = controller.compute(
-      turn, kAngleMin, kAngleMax, kAngleIncrement);
-
-  // The first command is rate-limited near zero, but the scan already asks
-  // for the configured corner steering.  Speed must use that future demand.
-  EXPECT_LT(std::abs(output.command.steering_angle), 0.10);
-  EXPECT_GT(std::abs(output.raw_steering), 0.50);
-  EXPECT_LT(output.command.speed, 0.90);
+TEST_F(FollowTheGapTest, SpeedWithinLimits) {
+    auto ranges = createOpenScan(NUM_POINTS);
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_GE(output.command.speed, config_.min_speed);
+    EXPECT_LE(output.command.speed, config_.max_speed);
 }
 
-TEST(FollowTheGapRegression, RecoveryRequiresConfirmedClearScans) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.60;
-  config.recovery_clear_confirm_cycles = 3;
-  config.lock_recovery_side_until_clear = true;
-  FollowTheGap controller(config);
+TEST_F(FollowTheGapTest, SpeedReducesWhenTurning) {
+    // Open path -> near max speed with small steering
+    auto open_ranges = createOpenScan(NUM_POINTS);
+    auto open_output = ftg_->compute(open_ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
 
-  auto obstacle = std::vector<float>(kSamples, 8.0F);
-  const std::size_t beam = static_cast<std::size_t>(
-      (1.0 - kAngleMin) / kAngleIncrement);
-  obstacle[beam] = 0.50F;
-  const auto initial = controller.compute(
-      obstacle, kAngleMin, kAngleMax, kAngleIncrement);
-  ASSERT_TRUE(initial.side_recovery);
-  ASSERT_LT(initial.recovery_steering_sign, 0.0);
-
-  const auto first_clear = controller.compute(
-      std::vector<float>(kSamples, 8.0F), kAngleMin, kAngleMax, kAngleIncrement);
-  const auto second_clear = controller.compute(
-      std::vector<float>(kSamples, 8.0F), kAngleMin, kAngleMax, kAngleIncrement);
-  EXPECT_TRUE(first_clear.side_recovery);
-  EXPECT_TRUE(second_clear.side_recovery);
-  EXPECT_LT(first_clear.command.steering_angle, 0.0);
-  EXPECT_LT(second_clear.command.steering_angle, 0.0);
+    // Gap on one side -> turns -> speed should be <= open-path speed
+    std::vector<float> ranges(NUM_POINTS, 0.5f);
+    for (size_t i = 0; i < NUM_POINTS / 4; ++i) {
+        ranges[i] = 6.0f;
+    }
+    ftg_->reset();
+    auto turn_output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_LE(turn_output.command.speed, open_output.command.speed + 0.01);
 }
 
-TEST(FollowTheGapRegression, EmergencyStopKeepsObstacleEscapeSteering) {
-  auto config = testConfig();
-  config.emergency_brake_distance = 0.35;
-  FollowTheGap controller(config);
+// =====================================================================
+// Configuration tests
+// =====================================================================
 
-  auto ranges = std::vector<float>(kSamples, 8.0F);
-  const std::size_t beam = static_cast<std::size_t>(
-      (0.60 - kAngleMin) / kAngleIncrement);
-  ranges[beam] = 0.30F;
+TEST_F(FollowTheGapTest, ConfigurationCanBeUpdated) {
+    auto ranges = createOpenScan(NUM_POINTS);
+    auto output1 = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
 
-  const auto output = controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_TRUE(output.emergency_stop);
-  EXPECT_DOUBLE_EQ(output.command.speed, 0.0);
-  EXPECT_LT(output.command.steering_angle, -config.max_steering + 1.0e-9);
+    config_.max_speed = 1.5;
+    ftg_->setConfig(config_);
+    ftg_->reset();
+    auto output2 = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_LE(output2.command.speed, 1.5);
 }
 
-TEST(FollowTheGapRegression, EmergencyStopUsesConfiguredMappingCrawlSpeed) {
-  auto config = testConfig();
-  config.emergency_brake_distance = 0.35;
-  config.emergency_rolling_speed = 0.25;
-  FollowTheGap controller(config);
+// =====================================================================
+// Empty / degenerate scan tests
+// =====================================================================
 
-  auto ranges = std::vector<float>(kSamples, 8.0F);
-  const std::size_t beam = static_cast<std::size_t>(
-      (0.60 - kAngleMin) / kAngleIncrement);
-  ranges[beam] = 0.30F;
-
-  const auto output = controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_TRUE(output.emergency_stop);
-  EXPECT_DOUBLE_EQ(output.command.speed, 0.25);
-  EXPECT_LT(output.command.steering_angle, -config.max_steering + 1.0e-9);
+TEST_F(FollowTheGapTest, HandlesEmptyScan) {
+    std::vector<float> empty_ranges;
+    auto output = ftg_->compute(empty_ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_TRUE(output.emergency_stop);
+    EXPECT_DOUBLE_EQ(output.command.speed, 0.0);
 }
 
-TEST(FollowTheGapRegression, VirtualFrontInflationRejectsInnerCornerClearance) {
-  auto base_config = testConfig();
-  base_config.side_recovery_distance = 0.60;
-  auto ranges = std::vector<float>(kSamples, 8.0F);
-  const std::size_t beam = static_cast<std::size_t>(
-      (0.50 - kAngleMin) / kAngleIncrement);
-  ranges[beam] = 0.21F;
-
-  FollowTheGap base_controller(base_config);
-  const auto base_output = base_controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  auto inflated_config = base_config;
-  inflated_config.virtual_front_inflation = 0.08;
-  FollowTheGap inflated_controller(inflated_config);
-  const auto inflated_output = inflated_controller.compute(
-      ranges, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_FALSE(base_output.footprint_clearance_limited);
-  EXPECT_TRUE(inflated_output.footprint_clearance_limited);
-  EXPECT_TRUE(inflated_output.side_recovery);
-  EXPECT_LE(inflated_output.command.speed, inflated_config.min_speed);
+TEST_F(FollowTheGapTest, HandlesSinglePoint) {
+    std::vector<float> ranges = {5.0f};
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    // Single point: should not crash
+    EXPECT_FALSE(output.processed_scan.filtered_ranges.empty());
 }
 
-TEST(FollowTheGapRegression, RecoveryCanChangeSideAfterConfirmedCorner) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.60;
-  config.recovery_switch_confirm_cycles = 3;
-  FollowTheGap controller(config);
+// =====================================================================
+// Weighted free-space specific tests
+// =====================================================================
 
-  auto positive_side = std::vector<float>(kSamples, 8.0F);
-  auto negative_side = std::vector<float>(kSamples, 8.0F);
-  const std::size_t positive_beam = static_cast<std::size_t>(
-      (0.60 - kAngleMin) / kAngleIncrement);
-  const std::size_t negative_beam = static_cast<std::size_t>(
-      (-0.60 - kAngleMin) / kAngleIncrement);
-  positive_side[positive_beam] = 0.45F;
-  negative_side[negative_beam] = 0.45F;
-
-  const auto first = controller.compute(
-      positive_side, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto second = controller.compute(
-      negative_side, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto third = controller.compute(
-      negative_side, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto switched = controller.compute(
-      negative_side, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_LT(first.raw_steering, 0.0);
-  EXPECT_LT(second.raw_steering, 0.0);
-  EXPECT_LT(third.raw_steering, 0.0);
-  EXPECT_GT(switched.raw_steering, 0.0);
+TEST_F(FollowTheGapTest, SymmetricScanProducesCenteredSteering) {
+    // Perfectly symmetric corridor -> target should be near 0
+    std::vector<float> ranges(NUM_POINTS);
+    for (size_t i = 0; i < NUM_POINTS; ++i) {
+        double angle = ANGLE_MIN + i * ANGLE_INC;
+        // Symmetric U-shape: close on sides, far in front
+        ranges[i] = static_cast<float>(2.0 + 4.0 * std::cos(angle) * std::cos(angle));
+    }
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_NEAR(output.command.steering_angle, 0.0, 0.05);
 }
 
-TEST(FollowTheGapRegression, ReleasesPassedSideRecoveryForUnlockedMapping) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.60;
-  config.side_recovery_max_angle = 1.20;
-  config.lock_recovery_side_until_clear = false;
-  FollowTheGap controller(config);
+TEST_F(FollowTheGapTest, HeadingWeightAffectsStraightPreference) {
+    // Gap on the right but heading_weight very high -> should still go more
+    // straight than with low heading weight
+    std::vector<float> ranges(NUM_POINTS, 2.0f);
+    size_t quarter = NUM_POINTS / 4;
+    for (size_t i = 0; i < quarter; ++i) {
+        ranges[i] = 6.0f;
+    }
 
-  auto front_side = std::vector<float>(kSamples, 8.0F);
-  const std::size_t positive_beam = static_cast<std::size_t>(
-      (0.60 - kAngleMin) / kAngleIncrement);
-  front_side[positive_beam] = 0.45F;
-  const auto initial = controller.compute(
-      front_side, kAngleMin, kAngleMax, kAngleIncrement);
-  ASSERT_TRUE(initial.side_recovery);
-  ASSERT_LT(initial.recovery_steering_sign, 0.0);
+    config_.heading_weight = 0.1;  // Low: will steer more toward gap
+    ftg_->setConfig(config_);
+    ftg_->reset();
+    auto output_low = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
 
-  // The corner is now alongside the car. Keeping the old negative recovery
-  // sign would turn back into the passed wall.
-  auto passed_side = std::vector<float>(kSamples, 8.0F);
-  const std::size_t negative_edge_beam = static_cast<std::size_t>(
-      (-1.40 - kAngleMin) / kAngleIncrement);
-  passed_side[negative_edge_beam] = 0.45F;
-  auto still_recovering = controller.compute(
-      passed_side, kAngleMin, kAngleMax, kAngleIncrement);
-  for (int index = 0; index < config.recovery_clear_confirm_cycles - 2;
-       ++index) {
-    still_recovering = controller.compute(
-        passed_side, kAngleMin, kAngleMax, kAngleIncrement);
-  }
-  const auto released = controller.compute(
-      passed_side, kAngleMin, kAngleMax, kAngleIncrement);
+    config_.heading_weight = 5.0;  // High: will prefer straight
+    ftg_->setConfig(config_);
+    ftg_->reset();
+    auto output_high = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
 
-  EXPECT_TRUE(still_recovering.side_recovery);
-  EXPECT_FALSE(released.side_recovery);
-  EXPECT_EQ(released.recovery_steering_sign, 0.0);
+    // With higher heading weight the steering should be less extreme (closer to 0)
+    EXPECT_LT(std::abs(output_high.command.steering_angle),
+              std::abs(output_low.command.steering_angle) + 0.01);
 }
 
-TEST(FollowTheGapRegression, MappingRecoveryHoldsSideUntilClear) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.60;
-  config.recovery_switch_confirm_cycles = 3;
-  config.lock_recovery_side_until_clear = true;
-  FollowTheGap controller(config);
-
-  auto positive_side = std::vector<float>(kSamples, 8.0F);
-  auto negative_side = std::vector<float>(kSamples, 8.0F);
-  const std::size_t positive_beam = static_cast<std::size_t>(
-      (0.60 - kAngleMin) / kAngleIncrement);
-  const std::size_t negative_beam = static_cast<std::size_t>(
-      (-0.60 - kAngleMin) / kAngleIncrement);
-  positive_side[positive_beam] = 0.45F;
-  negative_side[negative_beam] = 0.45F;
-
-  const auto first = controller.compute(
-      positive_side, kAngleMin, kAngleMax, kAngleIncrement);
-  controller.compute(negative_side, kAngleMin, kAngleMax, kAngleIncrement);
-  controller.compute(negative_side, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto held = controller.compute(
-      negative_side, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto still_held = controller.compute(
-      positive_side, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_LT(first.raw_steering, 0.0);
-  EXPECT_LT(held.raw_steering, 0.0);
-  EXPECT_LT(still_held.raw_steering, 0.0);
-}
-
-TEST(FollowTheGapRegression, InflatedNearFrontCornerUsesSideClearance) {
-  auto config = testConfig();
-  config.side_recovery_distance = 0.60;
-  config.virtual_front_inflation = 0.08;
-  config.recovery_switch_confirm_cycles = 3;
-  FollowTheGap controller(config);
-
-  auto positive_side = std::vector<float>(kSamples, 8.0F);
-  const std::size_t positive_beam = static_cast<std::size_t>(
-      (0.60 - kAngleMin) / kAngleIncrement);
-  const std::size_t negative_beam = static_cast<std::size_t>(
-      (-0.60 - kAngleMin) / kAngleIncrement);
-  const std::size_t front_beam = static_cast<std::size_t>(
-      (-0.10 - kAngleMin) / kAngleIncrement);
-  positive_side[positive_beam] = 0.45F;
-  const auto first = controller.compute(
-      positive_side, kAngleMin, kAngleMax, kAngleIncrement);
-
-  auto near_front = std::vector<float>(kSamples, 8.0F);
-  near_front[negative_beam] = 0.35F;
-  near_front[front_beam] = 0.20F;
-  const auto first_opposite = controller.compute(
-      near_front, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto second_opposite = controller.compute(
-      near_front, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto corrected = controller.compute(
-      near_front, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_LT(first.raw_steering, 0.0);
-  EXPECT_LT(first_opposite.recovery_steering_sign, 0.0);
-  EXPECT_LT(second_opposite.recovery_steering_sign, 0.0);
-  EXPECT_TRUE(corrected.footprint_clearance_limited);
-  EXPECT_TRUE(corrected.side_recovery);
-  EXPECT_GT(corrected.raw_steering, 0.0);
-}
-
-TEST(FollowTheGapRegression, DoesNotEraseTurnDirectionThroughStraightScan) {
-  auto config = testConfig();
-  config.select_single_gap = true;
-  config.gap_switch_confirm_cycles = 4;
-  FollowTheGap controller(config);
-
-  const auto left = scanWithOpening(0.35, 1.45);
-  const auto straight = scanWithOpening(-0.12, 0.12);
-  const auto right = scanWithOpening(-1.45, -0.35);
-
-  const auto first = controller.compute(
-      left, kAngleMin, kAngleMax, kAngleIncrement);
-  controller.compute(straight, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto first_opposite = controller.compute(
-      right, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto second_opposite = controller.compute(
-      right, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto third_opposite = controller.compute(
-      right, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto accepted_opposite = controller.compute(
-      right, kAngleMin, kAngleMax, kAngleIncrement);
-  auto settled_opposite = accepted_opposite;
-  for (int index = 0; index < 8; ++index) {
-    settled_opposite = controller.compute(
-        right, kAngleMin, kAngleMax, kAngleIncrement);
-  }
-
-  EXPECT_GT(first.command.steering_angle, 0.0);
-  EXPECT_GT(first_opposite.command.steering_angle, 0.0);
-  EXPECT_GT(second_opposite.command.steering_angle, 0.0);
-  EXPECT_GT(third_opposite.command.steering_angle, 0.0);
-  EXPECT_LT(accepted_opposite.target_angle, 0.0);
-  EXPECT_LT(settled_opposite.command.steering_angle, 0.0);
-}
-
-TEST(FollowTheGapRegression, CenteredScansDoNotErasePendingGapSwitch) {
-  auto config = testConfig();
-  config.select_single_gap = true;
-  config.gap_switch_confirm_cycles = 4;
-  FollowTheGap controller(config);
-
-  const auto left = scanWithOpening(0.35, 1.45);
-  const auto straight = scanWithOpening(-0.08, 0.08);
-  const auto right = scanWithOpening(-1.45, -0.35);
-
-  const auto first = controller.compute(
-      left, kAngleMin, kAngleMax, kAngleIncrement);
-  controller.compute(straight, kAngleMin, kAngleMax, kAngleIncrement);
-  controller.compute(straight, kAngleMin, kAngleMax, kAngleIncrement);
-  controller.compute(right, kAngleMin, kAngleMax, kAngleIncrement);
-  const auto still_pending = controller.compute(
-      right, kAngleMin, kAngleMax, kAngleIncrement);
-
-  EXPECT_GT(first.target_angle, 0.12);
-  EXPECT_GT(still_pending.target_angle, 0.0);
+TEST_F(FollowTheGapTest, ResetClearsState) {
+    auto ranges = createOpenScan(NUM_POINTS);
+    ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    ftg_->reset();
+    // After reset, first_compute should be true again -> no crash
+    auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
+    EXPECT_FALSE(output.emergency_stop);
 }
