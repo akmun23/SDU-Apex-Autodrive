@@ -84,6 +84,12 @@ add_executable(sensor_packet_assembler_test
 target_include_directories(sensor_packet_assembler_test PRIVATE include)
 add_test(NAME sensor_packet_assembler_test COMMAND sensor_packet_assembler_test)
 
+add_executable(amcl_localization_math_test
+  test/amcl_localization_math_test.cpp)
+target_include_directories(amcl_localization_math_test PRIVATE gpu_amcl_cpp/include)
+target_link_libraries(amcl_localization_math_test Eigen3::Eigen)
+add_test(NAME amcl_localization_math_test COMMAND amcl_localization_math_test)
+
 add_executable(odometry_observer_replay
   src/odometry_observer_replay.cpp
   src/odometry_observer.cpp)

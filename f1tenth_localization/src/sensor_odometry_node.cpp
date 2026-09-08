@@ -84,13 +84,17 @@ public:
     declare_parameter("max_imu_orientation_step_rad", 0.30);
     declare_parameter("max_pending_packets", 8);
     declare_parameter("pose_xy_variance", 0.01);
+    // An isolated bridge gap is diagnostic evidence, not a permanent loss of
+    // localization. Keep its covariance conservative but below the controller
+    // stop gate; the EKF treats source covariance as a floor for the epoch.
+    declare_parameter("timing_degraded_pose_xy_variance", 0.04);
     declare_parameter("pose_yaw_variance", 0.01);
     declare_parameter("twist_linear_variance", 0.04);
     declare_parameter("twist_yaw_variance", 0.04);
 
     declare_parameter("wheel_radius_m", 0.059);
     declare_parameter("reset_encoder_jump_rad", 50.0);
-    declare_parameter("normal_packet_dt_max_s", 0.040);
+    declare_parameter("normal_packet_dt_max_s", 0.080);
     declare_parameter("degraded_packet_dt_max_s", 0.100);
     declare_parameter("decel_detect_ax_mps2", -0.5);
     declare_parameter("decel_ax_scale", 1.005);
@@ -98,6 +102,7 @@ public:
     declare_parameter("wheel_update_ax_abs_max_mps2", 0.6);
     declare_parameter("wheel_freeze_speed_mps", 0.15);
     declare_parameter("wheel_innovation_max_mps", 0.30);
+    declare_parameter("stationary_speed_threshold_mps", 0.03);
     declare_parameter("wheel_update_beta", 0.20);
     declare_parameter("stationary_hold_s", 0.20);
     declare_parameter("stationary_ax_abs_max_mps2", 0.25);
@@ -108,6 +113,8 @@ public:
     declare_parameter("turn_exit_yaw_rate_radps", 0.1);
     declare_parameter("turn_exit_abs_ay_mps2", 0.5);
     declare_parameter("turn_exit_hold_s", 0.5);
+    declare_parameter("integrate_lateral_acceleration_in_turn", false);
+    declare_parameter("max_imu_ax_abs_mps2", 30.0);
 
     observer_config_ = load_observer_config();
     observer_ = f1tenth_localization::OdometryObserver(observer_config_);
@@ -133,6 +140,8 @@ public:
         process_packet(packet);
       });
     pose_xy_variance_ = std::max(0.0, get_parameter("pose_xy_variance").as_double());
+    timing_degraded_pose_xy_variance_ = std::max(
+      pose_xy_variance_, get_parameter("timing_degraded_pose_xy_variance").as_double());
     pose_yaw_variance_ = std::max(0.0, get_parameter("pose_yaw_variance").as_double());
     twist_linear_variance_ = std::max(
       0.0, get_parameter("twist_linear_variance").as_double());
@@ -183,7 +192,7 @@ private:
     f1tenth_localization::OdometryObserverConfig config;
     config.wheel_radius_m = 0.059;
     config.reset_encoder_jump_rad = 50.0;
-    config.normal_packet_dt_max_s = 0.040;
+    config.normal_packet_dt_max_s = 0.080;
     config.degraded_packet_dt_max_s = 0.100;
     config.decel_detect_ax_mps2 = -0.5;
     config.decel_ax_scale = 1.005;
@@ -191,6 +200,7 @@ private:
     config.wheel_update_ax_abs_max_mps2 = 0.6;
     config.wheel_freeze_speed_mps = 0.15;
     config.wheel_innovation_max_mps = 0.30;
+    config.stationary_speed_threshold_mps = 0.03;
     config.wheel_update_beta = 0.20;
     config.stationary_hold_s = 0.20;
     config.stationary_ax_abs_max_mps2 = 0.25;
@@ -202,6 +212,8 @@ private:
     config.turn_exit_abs_ay_mps2 = 0.5;
     config.turn_exit_hold_s = 0.5;
     config.imu_x_offset_m = 0.08;
+    config.integrate_lateral_acceleration_in_turn = false;
+    config.max_imu_ax_abs_mps2 = 30.0;
     return config;
   }
 
@@ -220,6 +232,8 @@ private:
     config.wheel_freeze_speed_mps = get_parameter("wheel_freeze_speed_mps").as_double();
     config.wheel_innovation_max_mps = get_parameter(
       "wheel_innovation_max_mps").as_double();
+    config.stationary_speed_threshold_mps = get_parameter(
+      "stationary_speed_threshold_mps").as_double();
     config.wheel_update_beta = get_parameter("wheel_update_beta").as_double();
     config.stationary_hold_s = get_parameter("stationary_hold_s").as_double();
     config.stationary_ax_abs_max_mps2 = get_parameter(
@@ -237,7 +251,10 @@ private:
     config.turn_exit_abs_ay_mps2 = get_parameter(
       "turn_exit_abs_ay_mps2").as_double();
     config.turn_exit_hold_s = get_parameter("turn_exit_hold_s").as_double();
+    config.integrate_lateral_acceleration_in_turn = get_parameter(
+      "integrate_lateral_acceleration_in_turn").as_bool();
     config.imu_x_offset_m = get_parameter("imu_x_m").as_double();
+    config.max_imu_ax_abs_mps2 = get_parameter("max_imu_ax_abs_mps2").as_double();
     return config;
   }
 
@@ -372,8 +389,14 @@ private:
     odom.twist.twist.linear.y = estimate.body_v_mps;
     odom.twist.twist.angular.z = estimate.yaw_rate_radps;
 
-    const double pose_variance = estimate.timing_degraded ?
-      std::max(pose_xy_variance_, 0.25) : pose_xy_variance_;
+    // A rejected IMU outlier does not move the causal pose. Keep its pose
+    // covariance at the normal floor so one discarded sample cannot poison
+    // the EKF covariance for the remainder of a run. An isolated timing gap
+    // gets a bounded inflation, not the old 0.25 m^2 stop-gate value: the EKF
+    // uses this covariance as a floor for the rest of the epoch.
+    const double pose_variance = estimate.timing_degraded &&
+      !estimate.sensor_outlier ?
+      timing_degraded_pose_xy_variance_ : pose_xy_variance_;
     odom.pose.covariance[0] = pose_variance;
     odom.pose.covariance[7] = pose_variance;
     odom.pose.covariance[35] = pose_yaw_variance_;
@@ -384,11 +407,11 @@ private:
 
     std_msgs::msg::Float64MultiArray diagnostics;
     diagnostics.layout.dim.resize(1);
-    diagnostics.layout.dim[0].label = "deterministic_odometry_v2";
-    diagnostics.layout.dim[0].size = 21;
-    diagnostics.layout.dim[0].stride = 21;
+    diagnostics.layout.dim[0].label = "deterministic_odometry_v3";
+    diagnostics.layout.dim[0].size = 25;
+    diagnostics.layout.dim[0].stride = 25;
     diagnostics.data = {
-      2.0,
+      3.0,
       estimate.stamp_s,
       estimate.dt_s,
       estimate.wheel_raw_mps,
@@ -408,7 +431,11 @@ private:
       static_cast<double>(packet_assembler_.packet_coherence_fault_count()),
       estimate.x_m,
       estimate.y_m,
-      estimate.yaw_rad};
+      estimate.yaw_rad,
+      estimate.sensor_outlier ? 1.0 : 0.0,
+      estimate.left_angle_rad,
+      estimate.right_angle_rad,
+      estimate.imu_yaw_rad};
     diagnostics_pub_->publish(diagnostics);
 
     geometry_msgs::msg::TransformStamped transform;
@@ -456,6 +483,7 @@ private:
   double imu_y_m_{0.0};
   double imu_z_m_{0.055};
   double pose_xy_variance_{0.01};
+  double timing_degraded_pose_xy_variance_{0.04};
   double pose_yaw_variance_{0.01};
   double twist_linear_variance_{0.04};
   double twist_yaw_variance_{0.04};

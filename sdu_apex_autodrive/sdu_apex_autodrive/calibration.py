@@ -72,7 +72,9 @@ FIELDS = (
     "odom_observer_turn_mode", "odom_observer_reset_epoch",
     "odom_observer_timing_degraded", "odom_observer_packet_drop_count",
     "odom_observer_packet_coherence_fault_count", "odom_observer_x_m",
-    "odom_observer_y_m", "odom_observer_yaw_rad",
+    "odom_observer_y_m", "odom_observer_yaw_rad", "odom_observer_sensor_outlier",
+    "odom_observer_left_angle_rad", "odom_observer_right_angle_rad",
+    "odom_observer_imu_yaw_rad",
     # Brake/coast completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
@@ -90,6 +92,30 @@ FIELDS = (
     "gt_ips_x_m", "gt_ips_y_m", "gt_ips_z_m",
     "x_amcl_m", "y_amcl_m", "yaw_amcl_rad", "amcl_xy_variance", "amcl_yaw_variance",
     "x_ekf_m", "y_ekf_m", "yaw_ekf_rad", "ekf_xy_variance", "ekf_yaw_variance",
+    "x_ekf_odom_m", "y_ekf_odom_m", "yaw_ekf_odom_rad",
+    "ekf_odom_xy_variance", "ekf_odom_yaw_variance", "ekf_odom_stamp_s",
+    "x_current_map_m", "y_current_map_m", "yaw_current_map_rad",
+    "current_map_xy_variance", "current_map_yaw_variance", "current_map_pose_stamp_s",
+    # Pure Pursuit's exact odometry-triggered control event.  These fields
+    # distinguish a bad pose/transform from a bad geometric command.
+    "pp_publish_stamp_s", "pp_odom_event_stamp_s", "pp_pose_x_m", "pp_pose_y_m",
+    "pp_pose_yaw_rad", "pp_velocity_mps", "pp_yaw_rate_radps", "pp_valid",
+    "pp_cross_track_error_m", "pp_closest_distance_m", "pp_heading_error_rad",
+    "pp_lookahead_distance_m", "pp_closest_index", "pp_target_index",
+    "pp_target_speed_mps", "pp_raw_steering_rad", "pp_command_steering_rad",
+    "pp_command_speed_mps", "pp_target_x_m", "pp_target_y_m",
+    # AMCL scan/health diagnostics. These are recorded as source events so a
+    # rejected scan, queued scan, or growing uncertainty can be aligned with
+    # the exact odometry-triggered PP command that followed it.
+    "amcl_scan_stamp_s", "amcl_scan_matched_odom_stamp_s",
+    "amcl_scan_source_error_ms", "amcl_scan_accepted",
+    "amcl_scan_queued", "amcl_scan_dropped",
+    "amcl_scan_bracket_before_stamp_s", "amcl_scan_bracket_after_stamp_s",
+    "amcl_scan_processing_dropped",
+    "amcl_health_correction_age_s", "amcl_health_correction_accepted",
+    "amcl_health_rejected_scans", "amcl_health_degraded",
+    "amcl_health_xy_variance", "amcl_health_yaw_variance",
+    "amcl_particle_count",
     "lidar_rate_hz", "lidar_event_count",
     "imu_rate_hz", "imu_event_count",
     "left_encoder_rate_hz", "left_encoder_event_count",
@@ -101,14 +127,24 @@ FIELDS = (
     "collision_rate_hz", "collision_event_count",
     "amcl_rate_hz", "amcl_event_count",
     "ekf_rate_hz", "ekf_event_count",
+    "ekf_odom_rate_hz", "ekf_odom_event_count",
     "speed_command_rate_hz", "speed_command_event_count",
     "acceleration_command_rate_hz", "acceleration_command_event_count",
     "throttle_command_rate_hz", "throttle_command_event_count",
     "steering_command_rate_hz", "steering_command_event_count",
     "throttle_feedback_rate_hz", "throttle_feedback_event_count",
     "steering_feedback_rate_hz", "steering_feedback_event_count",
+    "current_map_pose_rate_hz", "current_map_pose_event_count",
+    "pp_diagnostics_rate_hz", "pp_diagnostics_event_count",
+    "amcl_timing_rate_hz", "amcl_timing_event_count",
+    "amcl_gpu_timing_rate_hz", "amcl_gpu_timing_event_count",
+    "amcl_kld_diagnostics_rate_hz", "amcl_kld_diagnostics_event_count",
+    "amcl_scan_alignment_rate_hz", "amcl_scan_alignment_event_count",
+    "amcl_localization_health_rate_hz", "amcl_localization_health_event_count",
+    "amcl_particle_count_rate_hz", "amcl_particle_count_event_count",
     "amcl_timing_ms", "amcl_gpu_transfer_ms", "amcl_gpu_pf_ms",
     "amcl_gpu_callback_ms", "amcl_pose_published", "amcl_cluster_weight",
+    "amcl_cluster_second_weight",
     "amcl_kld_pre_particles", "amcl_kld_bins", "amcl_kld_target",
     "amcl_kld_particles",
     # Production controllers publish separate physical-unit abstractions.
@@ -164,9 +200,13 @@ class Calibration(Node):
         self.rate_event_names = (
             "lidar", "imu", "left_encoder", "right_encoder", "odom",
             "odom_diagnostics", "gt_odom", "gt_ips", "collision", "amcl", "ekf",
+            "ekf_odom",
             "speed_command", "acceleration_command",
             "throttle_command", "steering_command",
-            "throttle_feedback", "steering_feedback",
+            "throttle_feedback", "steering_feedback", "current_map_pose",
+            "pp_diagnostics", "amcl_timing", "amcl_gpu_timing",
+            "amcl_kld_diagnostics", "amcl_scan_alignment",
+            "amcl_localization_health", "amcl_particle_count",
         )
         self.event_counts = {name: 0 for name in self.rate_event_names}
         self.event_window_counts = {name: 0 for name in self.rate_event_names}
@@ -254,7 +294,12 @@ class Calibration(Node):
         self.create_subscription(
             PoseWithCovarianceStamped, "/amcl_pose", self._on_amcl, 10)
         self.create_subscription(
+            PoseWithCovarianceStamped, "/current_map_pose",
+            self._on_current_map_pose, 10)
+        self.create_subscription(
             PoseWithCovarianceStamped, "/ekf_pose", self._on_ekf, 10)
+        self.create_subscription(
+            Odometry, "/ekf_odom", self._on_ekf_odom, DERIVED_ODOMETRY_QOS)
         self.create_subscription(
             Imu, "/autodrive/roboracer_1/imu",
             self._on_imu, SOURCE_SENSOR_QOS)
@@ -282,17 +327,28 @@ class Calibration(Node):
         # These are diagnostics emitted by the team AMCL implementation. They
         # are recorded for offline tuning only and are not controller inputs.
         self.create_subscription(
-            Float64, "/amcl_timing", lambda m: self._set("amcl_timing_ms", m.data), 10)
+            Float64, "/amcl_timing", self._on_amcl_timing, 10)
         self.create_subscription(
             Float64MultiArray, "/amcl_gpu_timing", self._on_amcl_gpu_timing, 10)
         self.create_subscription(
             Float64MultiArray, "/amcl_kld_diagnostics", self._on_amcl_kld, 10)
+        self.create_subscription(
+            Float64MultiArray, "/amcl_scan_alignment",
+            self._on_amcl_scan_alignment, 10)
+        self.create_subscription(
+            Float64MultiArray, "/amcl_localization_health",
+            self._on_amcl_localization_health, 10)
+        self.create_subscription(
+            Int32, "/amcl_particle_count", self._on_amcl_particle_count, 10)
         self.create_subscription(
             Float32, "/autodrive/roboracer_1/throttle_command",
             lambda m: self._on_scalar(m, "throttle_command", "throttle_command"), 10)
         self.create_subscription(
             Float32, "/autodrive/roboracer_1/steering_command",
             lambda m: self._on_scalar(m, "steering_command", "steering_command"), 10)
+        self.create_subscription(
+            Float64MultiArray, "/pure_pursuit/diagnostics",
+            self._on_pure_pursuit_diagnostics, 10)
 
         self.phases = self._build_phases()
         self.phase_index = 0
@@ -678,9 +734,7 @@ class Calibration(Node):
         """Queue an exact callback snapshot when source logging is enabled."""
         if not self.capture_source_events:
             return
-        if name not in {
-                "imu", "left_encoder", "right_encoder", "odom",
-                "odom_diagnostics", "gt_odom"}:
+        if name not in self.rate_event_names:
             return
         now = self.get_clock().now()
         row = dict(self.state)
@@ -747,6 +801,8 @@ class Calibration(Node):
     def _on_scalar(self, msg: Float32, field: str, event_name: str) -> None:
         self._record_event(event_name)
         self._set(field, float(msg.data))
+        self._capture_source_event(
+            event_name, self.get_clock().now().nanoseconds * 1.0e-9)
 
     def _on_odom(self, msg: Odometry) -> None:
         self._record_event("odom")
@@ -790,14 +846,16 @@ class Calibration(Node):
         self._capture_source_event("odom", stamp_s)
 
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
-        """Record only the version-2 deterministic observer vector."""
-        if len(msg.data) != 21 or abs(float(msg.data[0]) - 2.0) >= 1.0e-9:
+        """Record versioned deterministic observer vectors."""
+        version = float(msg.data[0]) if msg.data else math.nan
+        if (len(msg.data) not in (21, 22, 25) or
+                not math.isfinite(version) or version not in (2.0, 3.0)):
             return
         self._on_deterministic_odom_diagnostics(msg)
 
     def _on_deterministic_odom_diagnostics(self, msg: Float64MultiArray) -> None:
         """Translate the deterministic observer diagnostics into CSV fields."""
-        values = [float(value) for value in msg.data[:21]]
+        values = [float(value) for value in msg.data]
         names = (
             "odom_observer_version", "odom_observer_source_stamp_s",
             "odom_observer_dt_s", "odom_raw_wheel_speed_mps",
@@ -815,6 +873,14 @@ class Calibration(Node):
         for name, value in zip(names, values):
             if math.isfinite(value):
                 self.state[name] = value
+        if len(values) > 21 and math.isfinite(values[21]):
+            self.state["odom_observer_sensor_outlier"] = values[21]
+        if len(values) > 22 and math.isfinite(values[22]):
+            self.state["odom_observer_left_angle_rad"] = values[22]
+        if len(values) > 23 and math.isfinite(values[23]):
+            self.state["odom_observer_right_angle_rad"] = values[23]
+        if len(values) > 24 and math.isfinite(values[24]):
+            self.state["odom_observer_imu_yaw_rad"] = values[24]
 
         self.state["odom_diagnostics_stamp_s"] = values[1]
         self.state["odom_longitudinal_slip_ratio"] = (
@@ -899,10 +965,14 @@ class Calibration(Node):
         self.state["gt_ips_x_m"] = float(msg.x)
         self.state["gt_ips_y_m"] = float(msg.y)
         self.state["gt_ips_z_m"] = float(msg.z)
+        self._capture_source_event(
+            "gt_ips", self.get_clock().now().nanoseconds * 1.0e-9)
 
     def _on_collision_count(self, msg: Int32) -> None:
         self._record_event("collision")
         self.state["gt_collision_count"] = int(msg.data)
+        self._capture_source_event(
+            "collision", self.get_clock().now().nanoseconds * 1.0e-9)
 
     def _on_imu(self, msg: Imu) -> None:
         self._record_event("imu")
@@ -956,27 +1026,108 @@ class Calibration(Node):
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
         self._record_event("amcl")
         self._on_pose(msg, "amcl")
+        self._capture_source_event("amcl", self._message_stamp_s(msg))
+
+    def _on_current_map_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        self._record_event("current_map_pose")
+        stamp_s = self._message_stamp_s(msg)
+        self._on_pose(msg, "current_map")
+        self.state["current_map_pose_stamp_s"] = stamp_s
+        self._capture_source_event("current_map_pose", stamp_s)
 
     def _on_ekf(self, msg: PoseWithCovarianceStamped) -> None:
         self._record_event("ekf")
         self._on_pose(msg, "ekf")
+        self._capture_source_event("ekf", self._message_stamp_s(msg))
+
+    def _on_ekf_odom(self, msg: Odometry) -> None:
+        """Record the exact covariance-bearing odometry consumed by AMCL."""
+        self._record_event("ekf_odom")
+        stamp_s = self._message_stamp_s(msg)
+        pose = msg.pose.pose
+        self.state["x_ekf_odom_m"] = float(pose.position.x)
+        self.state["y_ekf_odom_m"] = float(pose.position.y)
+        self.state["yaw_ekf_odom_rad"] = _yaw_from_quaternion(pose.orientation)
+        self.state["ekf_odom_xy_variance"] = max(
+            float(msg.pose.covariance[0]), float(msg.pose.covariance[7]))
+        self.state["ekf_odom_yaw_variance"] = float(msg.pose.covariance[35])
+        self.state["ekf_odom_stamp_s"] = stamp_s
+        self._capture_source_event("ekf_odom", stamp_s)
 
     def _on_amcl_gpu_timing(self, msg: Float64MultiArray) -> None:
         values = list(msg.data)
         if len(values) >= 20:
+            self._record_event("amcl_gpu_timing")
             self._set("amcl_gpu_transfer_ms", values[3])
             self._set("amcl_gpu_pf_ms", values[18])
             self._set("amcl_gpu_callback_ms", values[19])
             self._set("amcl_pose_published", values[20] if len(values) > 20 else math.nan)
             self._set("amcl_cluster_weight", values[21] if len(values) > 21 else math.nan)
+            self._set(
+                "amcl_cluster_second_weight",
+                values[25] if len(values) > 25 else math.nan)
+            self._capture_source_event(
+                "amcl_gpu_timing", self.get_clock().now().nanoseconds * 1.0e-9)
 
     def _on_amcl_kld(self, msg: Float64MultiArray) -> None:
         values = list(msg.data)
         if len(values) >= 4:
+            self._record_event("amcl_kld_diagnostics")
             self._set("amcl_kld_pre_particles", values[0])
             self._set("amcl_kld_bins", values[1])
             self._set("amcl_kld_target", values[2])
             self._set("amcl_kld_particles", values[3])
+            self._capture_source_event(
+                "amcl_kld_diagnostics", self.get_clock().now().nanoseconds * 1.0e-9)
+
+    def _on_amcl_timing(self, msg: Float64) -> None:
+        self._record_event("amcl_timing")
+        self._set("amcl_timing_ms", float(msg.data))
+        self._capture_source_event(
+            "amcl_timing", self.get_clock().now().nanoseconds * 1.0e-9)
+
+    def _on_amcl_scan_alignment(self, msg: Float64MultiArray) -> None:
+        values = [float(value) for value in msg.data]
+        if len(values) < 6:
+            return
+        names = (
+            "amcl_scan_stamp_s", "amcl_scan_matched_odom_stamp_s",
+            "amcl_scan_source_error_ms", "amcl_scan_accepted",
+            "amcl_scan_queued", "amcl_scan_dropped",
+            "amcl_scan_bracket_before_stamp_s",
+            "amcl_scan_bracket_after_stamp_s",
+            "amcl_scan_processing_dropped",
+        )
+        self._record_event("amcl_scan_alignment")
+        for name, value in zip(names, values[:len(names)]):
+            if name.startswith("_"):
+                continue
+            if math.isfinite(value):
+                self._set(name, value)
+        self._capture_source_event("amcl_scan_alignment", values[0])
+
+    def _on_amcl_localization_health(self, msg: Float64MultiArray) -> None:
+        values = [float(value) for value in msg.data]
+        if len(values) < 6:
+            return
+        names = (
+            "amcl_health_correction_age_s",
+            "amcl_health_correction_accepted",
+            "amcl_health_rejected_scans", "amcl_health_degraded",
+            "amcl_health_xy_variance", "amcl_health_yaw_variance",
+        )
+        self._record_event("amcl_localization_health")
+        for name, value in zip(names, values[:6]):
+            if math.isfinite(value):
+                self._set(name, value)
+        self._capture_source_event(
+            "amcl_localization_health", self.get_clock().now().nanoseconds * 1.0e-9)
+
+    def _on_amcl_particle_count(self, msg: Int32) -> None:
+        self._record_event("amcl_particle_count")
+        self._set("amcl_particle_count", float(msg.data))
+        self._capture_source_event(
+            "amcl_particle_count", self.get_clock().now().nanoseconds * 1.0e-9)
 
     def _on_controller_command(
             self, msg: AckermannDriveStamped, source: str) -> None:
@@ -1006,9 +1157,32 @@ class Calibration(Node):
             self.state["acceleration_command_accel_mps2"] = acceleration
             self.state["acceleration_command_steering_rad"] = steering
             self.state["acceleration_command_stamp_s"] = stamp_s
+        self._capture_source_event(f"{source}_command", stamp_s)
 
-    def _on_lidar(self, _msg: LaserScan) -> None:
+    def _on_pure_pursuit_diagnostics(self, msg: Float64MultiArray) -> None:
+        """Record the exact PP event that produced each speed command."""
+        values = [float(value) for value in msg.data]
+        if len(values) < 21 or abs(values[0] - 1.0) > 1.0e-9:
+            return
+        names = (
+            "pp_publish_stamp_s", "pp_odom_event_stamp_s", "pp_pose_x_m",
+            "pp_pose_y_m", "pp_pose_yaw_rad", "pp_velocity_mps",
+            "pp_yaw_rate_radps", "pp_valid", "pp_cross_track_error_m",
+            "pp_closest_distance_m", "pp_heading_error_rad",
+            "pp_lookahead_distance_m", "pp_closest_index", "pp_target_index",
+            "pp_target_speed_mps", "pp_raw_steering_rad",
+            "pp_command_steering_rad", "pp_command_speed_mps",
+            "pp_target_x_m", "pp_target_y_m",
+        )
+        self._record_event("pp_diagnostics")
+        for name, value in zip(names, values[1:]):
+            if math.isfinite(value):
+                self.state[name] = value
+        self._capture_source_event("pp_diagnostics", values[2])
+
+    def _on_lidar(self, msg: LaserScan) -> None:
         self._record_event("lidar")
+        self._capture_source_event("lidar", self._message_stamp_s(msg))
 
     def _neutral(self) -> None:
         self.throttle_pub.publish(Float32(data=0.0))

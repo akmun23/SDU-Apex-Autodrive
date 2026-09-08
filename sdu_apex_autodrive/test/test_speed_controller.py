@@ -225,6 +225,43 @@ def test_speed_controller_downshift_waits_for_fresh_stable_odom():
     assert not controller._downshift_guard
 
 
+def test_low_speed_downshift_does_not_starve_stationary_launch():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+        speed_downshift_stable_sec=0.2,
+        speed_downshift_band_mps=0.1,
+    ))
+    controller.update(0.4, 0.0, 0.0, 0.1)
+
+    # FTG may lower its request while the car is stationary in a tight
+    # corner. There is no overspeed to catch, so the new request must still
+    # produce forward throttle instead of entering a coast-only guard.
+    output = controller.update(0.08, 0.0, 0.0, 0.1)
+    assert output > 0.0
+    assert not controller._downshift_guard
+
+
+def test_downshift_restarts_after_passive_coast_crosses_target():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+        speed_downshift_stable_sec=0.2,
+        speed_downshift_band_mps=0.1,
+    ))
+    controller.update(1.0, 0.9, 0.0, 0.1)
+
+    # The vehicle coasts below the new target while the downshift guard is
+    # active. It must resume forward demand instead of remaining neutral.
+    output = controller.update(0.35, 0.0, 0.0, 0.1)
+    assert output > 0.0
+    assert not controller._downshift_guard
+
+
 def test_speed_controller_catches_predicted_downshift_coast():
     controller = TargetSpeedController(replace(
         config(),

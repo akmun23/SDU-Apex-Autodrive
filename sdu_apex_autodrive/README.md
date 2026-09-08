@@ -41,7 +41,7 @@ simulator rather than filtering the image after transmission:
 
 ~~~bash
 cd /home/autodrive_simulator
-./AutoDRIVE\ Simulator.x86_64 -batchmode -nographics \
+./AutoDRIVE\ Simulator.x86_64 -batchmode \
   -ip 127.0.0.1 -port 4567 -logFile /tmp/autodrive-nographics.log
 ~~~
 
@@ -192,7 +192,7 @@ Ground truth, throttle, camera, LiDAR, AMCL, and learned models are not runtime
 inputs.
 
 The observer constants are frozen in
-`f1tenth_localization/config/sensor_odometry.yaml`. Diagnostics are version 2
+`f1tenth_localization/config/sensor_odometry.yaml`. Diagnostics are version 3
 and publish source stamp, timing state, wheel-gate state, turn state, reset
 epoch, packet-drop count, and packet-coherence-fault count.
 
@@ -233,6 +233,28 @@ The analyzer deduplicates rows by timestamped simulator odom event and reports
 native rates from message source timestamps. It must not assume a fixed 40 or
 50 Hz sensor rate. Ground truth is allowed only for offline labels and targets;
 runtime never consumes ground truth, throttle, AMCL, or camera data.
+
+## Source-time controller diagnostics
+
+When investigating a live track run, enable both the telemetry recorder and
+the diagnostics-only ground-truth monitor. The recorder writes the lossless
+callback log (`sensor_record_*.csv`) including every source event, command,
+feedback, pose estimate, odometry diagnostic, PP diagnostic, scan alignment,
+and collision counter. Build a coherent one-row-per-simulator-odometry report
+after the run with:
+
+~~~bash
+ros2 run sdu_apex_autodrive source_time_diagnostic_report \
+  sensor_record_*.csv source_time_diagnostic.csv \
+  --output-json source_time_diagnostic.json
+~~~
+
+The report matches signals by source timestamp rather than callback order,
+records match offsets, computes frame-aligned estimator/PP errors, and marks
+the simulator reset sample invalid even when the collision counter increments
+one packet later. This is important for the compete scene, whose native track
+stream is approximately 20 Hz; a 40 Hz bridge request rate cannot create a
+second physical simulator sample.
 
 ## Controller abstractions
 

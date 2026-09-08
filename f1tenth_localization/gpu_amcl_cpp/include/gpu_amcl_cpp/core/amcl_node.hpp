@@ -17,6 +17,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <Eigen/Core>
 
 namespace gpu_amcl_cpp {
 
@@ -39,6 +40,17 @@ private:
     void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void publish_particle_cloud(const rclcpp::Time& stamp);
     void publish_pre_resample_weighted_cloud(const rclcpp::Time& stamp);
+    void publish_current_map_pose(const rclcpp::Time& stamp,
+                                  double odom_x,
+                                  double odom_y,
+                                  double odom_theta);
+    void publish_scan_alignment_diagnostic(const rclcpp::Time& scan_stamp,
+                                           const rclcpp::Time& matched_odom_stamp,
+                                           const rclcpp::Time& bracket_before_stamp,
+                                           const rclcpp::Time& bracket_after_stamp,
+                                           double matched_odom_error_ms,
+                                           bool accepted);
+    void retry_pending_scans();
 
     // ── Helpers ────────────────────────────────────────────────────
     void declare_all_parameters();
@@ -56,11 +68,16 @@ private:
     void push_odom_sample(const rclcpp::Time& stamp,
                           double x,
                           double y,
-                          double theta);
+                          double theta,
+                          const nav_msgs::msg::Odometry& msg);
     bool interpolate_odom_pose(const rclcpp::Time& stamp,
                                double& x,
                                double& y,
-                               double& theta) const;
+                               double& theta,
+                               rclcpp::Time* matched_stamp = nullptr,
+                               rclcpp::Time* bracket_before_stamp = nullptr,
+                               rclcpp::Time* bracket_after_stamp = nullptr,
+                               Eigen::Matrix3d* covariance = nullptr) const;
     double raceline_distance_to_pose(double x, double y) const;
     double raceline_heading_error_to_pose(double x, double y, double theta) const;
 
@@ -72,13 +89,17 @@ private:
 
     // Publishers    
     rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;  // /amcl_pose
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr current_map_pose_pub_;  // /current_map_pose
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr cloud_pub_;                 // /particlecloud
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pre_resample_cloud_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr timing_pub_;                       // /amcl_timing
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr particle_count_pub_;                  // /amcl_particle_count
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr kld_diag_pub_;            // /amcl_kld_diagnostics
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr gpu_timing_pub_;          // /amcl_gpu_timing
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr scan_alignment_pub_;     // /amcl_scan_alignment
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr localization_health_pub_; // /amcl_localization_health
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::TimerBase::SharedPtr scan_retry_timer_;
     
     // ── Core ───────────────────────────────────────────────────────
     ParticleFilter pf_;     // The particle filter
@@ -121,6 +142,17 @@ private:
     PoseEstimate local_pose_reference_;
     double force_max_particles_initial_sec_ = 0.0;
     rclcpp::Time localization_start_time_;
+    rclcpp::Time last_processed_scan_stamp_;
+    rclcpp::Time last_map_correction_stamp_;
+    rclcpp::Time last_current_map_pose_stamp_;
+    bool map_odom_valid_ = false;
+    Eigen::Vector3d map_odom_pose_{0.0, 0.0, 0.0};
+    Eigen::Matrix3d current_map_pose_covariance_ = Eigen::Matrix3d::Identity();
+    double current_map_pose_process_xy_m2_per_s_ = 0.002;
+    double current_map_pose_process_yaw2_per_s_ = 0.0005;
+    double localization_degraded_after_s_ = 0.30;
+    uint64_t consecutive_rejected_scans_ = 0;
+    bool last_scan_correction_accepted_ = false;
     double global_pose_covariance_xy_max_ = 0.25;
     double global_pose_covariance_yaw_max_ = 0.12;
     double global_pose_max_track_distance_m_ = 0.45;
@@ -136,11 +168,12 @@ private:
     double local_scan_correction_max_distance_m_ = 0.35;
     double local_scan_correction_max_yaw_rad_ = 0.45;
     double local_cluster_association_max_distance_m_ = 0.80;
+    double local_cluster_min_weight_ = 0.75;
     // A scan match is an absolute map-pose measurement.  Keep odometry as
     // the short-term prediction and apply only a bounded fraction of the
     // scan correction so a small systematic likelihood-field bias cannot
     // accumulate into a large along-track error at the native scan rate.
-    double local_scan_correction_gain_ = 0.08;
+    double local_scan_correction_gain_ = 0.35;
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
     double local_tracking_cloud_covariance_yaw_ = 0.01;
@@ -150,12 +183,26 @@ private:
         double x;
         double y;
         double theta;
+        double covariance_xx;
+        double covariance_xy;
+        double covariance_yy;
+        double covariance_xyaw;
+        double covariance_yyaw;
+        double covariance_yawyaw;
     };
 
     std::deque<OdomSample> odom_history_;
     double odom_history_duration_s_ = 0.2;
     double odom_reset_distance_m_ = 2.0;
     double odom_reset_yaw_rad_ = 1.5;
+
+    // A scan can be delivered before the odometry sample carrying the same
+    // source-time interval. Keep it briefly and retry once newer odometry is
+    // available; never process it against the previous sample.
+    std::deque<sensor_msgs::msg::LaserScan::SharedPtr> pending_scans_;
+    std::mutex pending_scan_mutex_;
+    std::atomic<size_t> pending_scan_drop_count_{0};
+    std::atomic<size_t> scan_processing_drop_count_{0};
 
     // Pose-jump guard: prevents one-frame false global relocalization from
     // teleporting the controller.

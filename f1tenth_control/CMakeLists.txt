@@ -187,6 +187,12 @@ if(BUILD_TESTING)
     install(TARGETS test_sim_drive_pure_pursuit RUNTIME DESTINATION lib/${PROJECT_NAME})
   endif()
 
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_follow_the_gap.cpp")
+    ament_add_gtest(test_follow_the_gap test/test_follow_the_gap.cpp)
+    target_link_libraries(test_follow_the_gap ftg_algorithm)
+    ament_target_dependencies(test_follow_the_gap ${DEPENDENCIES})
+  endif()
+
 endif()
 
 # Export

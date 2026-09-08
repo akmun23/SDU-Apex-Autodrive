@@ -240,6 +240,63 @@ size_t PurePursuit::findClosestPoint(const Point2D& position) {
     return closest_idx;
 }
 
+PurePursuit::PathProjection PurePursuit::projectToPath(
+    size_t anchor_idx, const Point2D& position) const {
+    PathProjection best;
+    if (trajectory_.size() < 2) {
+        if (!trajectory_.empty()) {
+            best.point = trajectory_.front();
+            best.distance = math::distance(
+                position.x, position.y, best.point.x, best.point.y);
+        }
+        return best;
+    }
+
+    const size_t n = trajectory_.size();
+    // The nearest waypoint is adjacent to the nearest segment for a uniformly
+    // sampled raceline. Check both sides plus one extra segment for sparse or
+    // uneven exported paths.
+    for (int offset = -2; offset <= 1; ++offset) {
+        int index = static_cast<int>(anchor_idx) + offset;
+        index %= static_cast<int>(n);
+        if (index < 0) {
+            index += static_cast<int>(n);
+        }
+        const size_t segment_idx = static_cast<size_t>(index);
+        const size_t next_idx = (segment_idx + 1) % n;
+        const auto& a = trajectory_[segment_idx];
+        const auto& b = trajectory_[next_idx];
+        const double dx = b.x - a.x;
+        const double dy = b.y - a.y;
+        const double length_sq = dx * dx + dy * dy;
+        if (length_sq <= 1.0e-12) {
+            continue;
+        }
+
+        const double t = std::clamp(
+            ((position.x - a.x) * dx + (position.y - a.y) * dy) / length_sq,
+            0.0, 1.0);
+        const auto projected = interpolate(segment_idx, next_idx, t);
+        const double distance = math::distance(
+            position.x, position.y, projected.x, projected.y);
+        if (distance < best.distance) {
+            best.segment_idx = segment_idx;
+            best.segment_t = t;
+            best.distance = distance;
+            best.point = projected;
+        }
+    }
+
+    if (!std::isfinite(best.distance)) {
+        best.segment_idx = anchor_idx % n;
+        best.segment_t = 0.0;
+        best.point = trajectory_[best.segment_idx];
+        best.distance = math::distance(
+            position.x, position.y, best.point.x, best.point.y);
+    }
+    return best;
+}
+
 TrajectoryPoint PurePursuit::interpolate(size_t idx1, size_t idx2, double t) const {
     // Linear interpolation between two trajectory points for continuous target tracking.
     const auto& p1 = trajectory_[idx1];
@@ -282,14 +339,20 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
     current_heading_ = heading;
 
     // Find closest point on trajectory.
-    const size_t closest_idx = findClosestPoint(position);
-    const auto& closest_pt = trajectory_[closest_idx];
+    const size_t closest_anchor_idx = findClosestPoint(position);
+    const PathProjection closest_projection = projectToPath(
+        closest_anchor_idx, position);
+    const size_t closest_idx = closest_projection.segment_idx;
+    const auto& closest_pt = closest_projection.point;
 
     // Compute cross-track error (signed distance to path).
     const double dx = closest_pt.x - position.x;
     const double dy = closest_pt.y - position.y;
     const double path_heading = closest_pt.heading;
     output.cross_track_error = -std::sin(path_heading) * dx + std::cos(path_heading) * dy;
+    output.closest_distance = closest_projection.distance;
+    output.heading_error = std::atan2(
+        std::sin(path_heading - heading), std::cos(path_heading - heading));
 
     // Corridor-aware footprint clearance at closest point.
     const bool have_bounds = std::isfinite(closest_pt.left_bound) && std::isfinite(closest_pt.right_bound);
@@ -338,27 +401,36 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
     double accumulated_dist = 0.0;
     bool found_target = false;
 
-    // Search forward until accumulated arc distance reaches lookahead distance.
-    for (size_t i = closest_idx; i < closest_idx + n; ++i) {
-        const size_t curr_idx = i % n;
-        const size_t next_idx = (i + 1) % n;
+    // Search forward from the continuous path projection. The old
+    // waypoint-anchored search counted the entire current segment even when
+    // the car was already partway through it, adding target delay at every
+    // update. That delay matters in the first tight bend.
+    for (size_t step = 0; step < n; ++step) {
+        const size_t curr_idx = (closest_idx + step) % n;
+        const size_t next_idx = (curr_idx + 1) % n;
         const double segment_dist = math::distance(
             trajectory_[curr_idx].x, trajectory_[curr_idx].y,
             trajectory_[next_idx].x, trajectory_[next_idx].y
         );
+        const double segment_start_t =
+            step == 0 ? closest_projection.segment_t : 0.0;
+        const double remaining_segment_dist =
+            segment_dist * (1.0 - segment_start_t);
 
         // Skip degenerate segments to avoid numerical issues.
-        if (segment_dist > 1e-9 && accumulated_dist + segment_dist >= lookahead_dist) {
+        if (segment_dist > 1e-9 &&
+            accumulated_dist + remaining_segment_dist >= lookahead_dist) {
             target_seg_start_idx = curr_idx;
             target_seg_end_idx = next_idx;
-            target_seg_t = (lookahead_dist - accumulated_dist) / segment_dist;
+            target_seg_t = segment_start_t +
+                (lookahead_dist - accumulated_dist) / segment_dist;
             target_seg_t = std::clamp(target_seg_t, 0.0, 1.0);
             target_idx = next_idx;
             found_target = true;
             break;
         }
 
-        accumulated_dist += segment_dist;
+        accumulated_dist += remaining_segment_dist;
         target_idx = next_idx;
     }
 

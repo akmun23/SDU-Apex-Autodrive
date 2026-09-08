@@ -645,7 +645,15 @@ class TargetSpeedController:
             self.integral = 0.0
             self.acceleration_controller.reset()
             self._overspeed_elapsed = 0.0
-            self._downshift_guard = downshift
+            # A target reduction needs a coast/catch phase only when the
+            # vehicle is already above the new request.  During a low-speed
+            # launch or a tight-corner recovery the measured speed can be
+            # below both targets; entering the downshift guard there starves
+            # the car of throttle whenever FTG changes its safe speed.
+            self._downshift_guard = downshift and measured > target + max(
+                self.config.speed_downshift_band_mps,
+                self.config.speed_hold_entry_margin_mps,
+            )
             self._downshift_catch = False
             self._downshift_stable_elapsed = 0.0
             self._downshift_below_band_elapsed = 0.0
@@ -697,14 +705,13 @@ class TargetSpeedController:
                     return 0.0
                 return self._slew_to(0.0, dt_seconds)
             if measured < max(0.0, target - band):
-                self._downshift_stable_elapsed = 0.0
-                self._downshift_below_band_elapsed += dt_seconds
-                if (self._downshift_below_band_elapsed <
-                        self.config.speed_downshift_stable_sec):
-                    self.integral = 0.0
-                    self.acceleration_controller.reset()
-                    return self._slew_to(0.0, dt_seconds)
+                # Passive coasting has already crossed below the new target.
+                # Holding neutral here cannot prevent overspeed and can leave
+                # the car stopped forever when FTG lowers its request for a
+                # recovery turn. Resume the ordinary speed loop immediately;
+                # the next branch applies the calibrated forward demand.
                 self._downshift_guard = False
+                self._downshift_below_band_elapsed = 0.0
             else:
                 self._downshift_below_band_elapsed = 0.0
                 self._downshift_stable_elapsed += dt_seconds

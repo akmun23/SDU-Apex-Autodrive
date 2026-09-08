@@ -44,6 +44,8 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
     drive_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
         command_topic_, 10
     );
+    diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/pure_pursuit/diagnostics", 10);
 
     // Setup parameter callback
     param_callback_handle_ = add_on_set_parameters_callback(
@@ -74,6 +76,8 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
                 odom_topic_.c_str(), control_rate_hz_);
     RCLCPP_INFO(get_logger(), "  Steering feedback: %s (lead gain %.2f)",
                 steering_feedback_topic_.c_str(), steering_feedback_lead_gain_);
+    RCLCPP_INFO(get_logger(), "  Startup path gate: distance <= %.2f m, heading <= %.2f rad",
+                startup_path_max_distance_m_, startup_path_heading_tolerance_rad_);
     RCLCPP_INFO(get_logger(), "  Command: %s", command_topic_.c_str());
 }
 
@@ -138,6 +142,8 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("max_decel_cmd", 8.0);
     declare_parameter("steering_feedback_timeout_s", 0.25);
     declare_parameter("steering_feedback_lead_gain", 0.25);
+    declare_parameter("startup_path_max_distance_m", 0.80);
+    declare_parameter("startup_path_heading_tolerance_rad", 0.75);
 }
 
 void PurePursuitNode::loadParameters() {
@@ -212,6 +218,10 @@ void PurePursuitNode::loadParameters() {
         0.01, get_parameter("steering_feedback_timeout_s").as_double());
     steering_feedback_lead_gain_ = std::clamp(
         get_parameter("steering_feedback_lead_gain").as_double(), 0.0, 1.0);
+    startup_path_max_distance_m_ = std::max(
+        0.0, get_parameter("startup_path_max_distance_m").as_double());
+    startup_path_heading_tolerance_rad_ = std::clamp(
+        get_parameter("startup_path_heading_tolerance_rad").as_double(), 0.0, M_PI);
 }
 
 rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
@@ -513,6 +523,7 @@ bool PurePursuitNode::loadTrajectory() {
             std::lock_guard<std::mutex> lock(state_mutex_);
             trajectory_loaded_ = true;
             trajectory_aligned_ = false;
+            startup_alignment_validated_ = false;
         }
         size_t count = 0;
         double len = 0.0;
@@ -626,6 +637,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     bool trajectory_aligned = false;
     bool pose_received = false;
     bool odom_received = false;
+    bool startup_alignment_validated = false;
     rclcpp::Time last_pose_time;
     rclcpp::Time last_odom_time;
     rclcpp::Time last_pose_stamp;
@@ -646,6 +658,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
         trajectory_aligned = trajectory_aligned_;
         pose_received = pose_received_;
         odom_received = odom_received_;
+        startup_alignment_validated = startup_alignment_validated_;
         last_pose_time = last_pose_time_;
         last_odom_time = last_odom_time_;
         last_pose_stamp = last_pose_stamp_;
@@ -764,6 +777,37 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     if (output.valid) {
         output.target_speed = std::clamp(output.target_speed, 0.0, max_speed);
 
+        // Do not let a map pose with an incorrect frame/orientation silently
+        // become a steering command. The previous implementation aligned the
+        // closed-path seam by position only, so an opposite-direction AMCL
+        // startup pose could pass through and drive away from the raceline.
+        if (!startup_alignment_validated) {
+            const bool path_distance_ok =
+                startup_path_max_distance_m_ <= 0.0 ||
+                output.closest_distance <= startup_path_max_distance_m_;
+            const bool path_heading_ok =
+                startup_path_heading_tolerance_rad_ <= 0.0 ||
+                std::abs(output.heading_error) <= startup_path_heading_tolerance_rad_;
+            if (!path_distance_ok || !path_heading_ok) {
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 1000,
+                    "Startup path gate: refusing drive; path_distance=%.3f m "
+                    "(max %.3f), heading_error=%.3f rad (max %.3f)",
+                    output.closest_distance, startup_path_max_distance_m_,
+                    output.heading_error, startup_path_heading_tolerance_rad_);
+                publishDriveCommand(0.0, 0.0);
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                startup_alignment_validated_ = true;
+            }
+            RCLCPP_INFO(
+                get_logger(),
+                "Startup path gate passed: path_distance=%.3f m heading_error=%.3f rad",
+                output.closest_distance, output.heading_error);
+        }
+
         const rclcpp::Time now_t = now();
         double dt_cmd = 0.01;
         {
@@ -838,10 +882,12 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
         RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), 1000,
             "Pure Pursuit: pose=(%.3f, %.3f, %.3f) cte=%.3f closest=%zu target=%zu "
-            "steer=%.3f speed=%.3f",
+            "path_dist=%.3f heading_err=%.3f steer=%.3f speed=%.3f",
             state.pose.x, state.pose.y, state.pose.theta,
             output.cross_track_error, output.closest_idx, output.target_idx,
-            cmd_steer, cmd_speed);
+            output.closest_distance, output.heading_error, cmd_steer, cmd_speed);
+
+        publishDiagnostics(event_stamp, state, output, cmd_steer, cmd_speed);
         
         // The actuator boundary already closes the longitudinal loop from the
         // requested speed and converts its speed error into throttle.  Do not
@@ -852,8 +898,52 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     } else {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, 
                             "Invalid Pure Pursuit output");
+        publishDiagnostics(event_stamp, state, output, 0.0, 0.0);
         publishDriveCommand(0.0, 0.0);
     }
+}
+
+void PurePursuitNode::publishDiagnostics(
+    const rclcpp::Time& event_stamp,
+    const VehicleState& state,
+    const PurePursuitOutput& output,
+    double command_steering,
+    double command_speed) {
+    if (!diagnostics_pub_) {
+        return;
+    }
+
+    // Version 1 layout consumed by the diagnostics recorder:
+    // [version, publish_stamp_s, odom_event_stamp_s, pose_x, pose_y,
+    //  pose_yaw, velocity, yaw_rate, valid, cte, closest_distance,
+    //  heading_error, lookahead_distance, closest_idx, target_idx,
+    //  target_speed, raw_steering, command_steering, command_speed,
+    //  target_x, target_y].
+    std_msgs::msg::Float64MultiArray msg;
+    msg.data = {
+        1.0,
+        now().seconds(),
+        event_stamp.seconds(),
+        state.pose.x,
+        state.pose.y,
+        state.pose.theta,
+        state.velocity,
+        state.angular_velocity,
+        output.valid ? 1.0 : 0.0,
+        output.cross_track_error,
+        output.closest_distance,
+        output.heading_error,
+        output.lookahead_distance,
+        static_cast<double>(output.closest_idx),
+        static_cast<double>(output.target_idx),
+        output.target_speed,
+        output.steering_angle,
+        command_steering,
+        command_speed,
+        output.target_point.x,
+        output.target_point.y,
+    };
+    diagnostics_pub_->publish(msg);
 }
 
 void PurePursuitNode::publishDriveCommand(double steering, double speed, double acceleration) {

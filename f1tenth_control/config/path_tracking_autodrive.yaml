@@ -1,9 +1,9 @@
 pure_pursuit_node:
   ros__parameters:
     odom_topic: /odom
-    # AMCL is the independent map-frame position source. /ekf_pose is local
-    # odom-frame motion and is not consumed as a map-frame correction.
-    pose_topic: /amcl_pose
+    # /amcl_pose is a scan-time measurement. Use the AMCL map->odom correction
+    # propagated with the newest allowed-sensor odometry for control-time pose.
+    pose_topic: /current_map_pose
     command_topic: /cmd/speed
     steering_feedback_topic: /autodrive/roboracer_1/steering
     path_frame: map
@@ -82,11 +82,16 @@ pure_pursuit_node:
     # Apply only a bounded same-direction lead; sign changes are handled by
     # the normal steering-rate limiter to avoid stale-feedback reversals.
     steering_feedback_lead_gain: 0.25
+    # Never turn a frame/heading mismatch at startup into a drive command.
+    # The reset pose can be offset from the raceline laterally, but it must
+    # have the correct travel direction.
+    startup_path_max_distance_m: 0.80
+    startup_path_heading_tolerance_rad: 0.75
 
 stanley_node:
   ros__parameters:
     odom_topic: /odom
-    pose_topic: /amcl_pose
+    pose_topic: /current_map_pose
     lidar_topic: /autodrive/roboracer_1/lidar
     command_topic: /cmd/speed
     path_frame: map

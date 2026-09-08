@@ -4,7 +4,9 @@ gpu_amcl_cpp:
     odom_frame_id: odom
     global_frame_id: map
     scan_topic: /autodrive/roboracer_1/lidar
-    odom_topic: /odom
+    # AMCL consumes the timestamped trust-filter output. The raw /odom topic
+    # remains available for diagnostics and offline odometry scoring.
+    odom_topic: /ekf_odom
 
     num_particles: 2500
     min_particles: 1000
@@ -27,9 +29,12 @@ gpu_amcl_cpp:
     # validated 40 Hz player; AMCL never fabricates an intermediate scan.
     max_scan_age: 0.25
     # LiDAR callbacks can arrive behind the odometry timestamp. Keep a full
-    # second so scan-time interpolation does not fall back to an old sample
-    # and create a false AMCL lag during acceleration.
+    # second so a scan delivered before its source-time odometry can wait for
+    # the bracket instead of being paired with an old sample.
     odom_history_duration_s: 1.00
+    current_map_pose_process_xy_m2_per_s: 0.002
+    current_map_pose_process_yaw2_per_s: 0.0005
+    localization_degraded_after_s: 0.30
 
     # The official bridge provides cumulative wheel angles plus IMU yaw. Keep
     # the motion model conservative so scan corrections do not let artificial
@@ -104,15 +109,25 @@ gpu_amcl_cpp:
     # allowing real map corrections to arrive within a few scans. A larger
     # single-scan jump is still rejected as a corridor alias and replaced by
     # the causal odometry prediction.
-    local_scan_correction_max_distance_m: 0.35
-    local_scan_correction_max_yaw_rad: 0.45
-    # Associate local scan clusters with the causal odometry-predicted pose;
-    # repeated corridor aliases outside this radius are not controller input.
+    # A scan correction must be geometrically tiny as well as locally
+    # associated. During the first bend an ambiguous cluster at weight 0.764
+    # produced a false 0.094 m correction while raw odometry was still within
+    # 0.032 m of ground truth. The innovation gate rejects that alias while
+    # allowing the small 0.003--0.02 m corrections seen on valid track scans.
+    local_scan_correction_max_distance_m: 0.06
+    local_scan_correction_max_yaw_rad: 0.12
     # Associate local scan clusters with the causal odometry-predicted pose;
     # repeated corridor aliases outside this radius are not controller input.
     local_cluster_association_max_distance_m: 0.80
+    # Moderate cluster weights are usable once the innovation gate above has
+    # passed. Very weak modes remain rejected before they can affect the map
+    # pose.
+    local_cluster_min_weight: 0.60
     # Keep the scan correction a bounded refinement of the odometry prediction.
-    local_scan_correction_gain: 0.08
+    # Apply a useful fraction of a validated local scan innovation. A very
+    # small gain makes AMCL follow drifting odometry for many scans after a
+    # turn even when the scan association is good.
+    local_scan_correction_gain: 0.35
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
     # matching bias is integrated again at every scan update.
@@ -136,7 +151,10 @@ gpu_amcl_cpp:
     global_max_lateral_offset_m: 1.50
     global_heading_trajectory_file: ""
     global_heading_trajectory_package: f1tenth_planning
-    global_heading_trajectory_rel_path: trajectories/icra_2025_raceline.csv
+    # Fallback for direct AMCL launches. AMCL and PP must use the same
+    # map-frame raceline; the old ICRA file runs in the opposite direction at
+    # the simulator start.
+    global_heading_trajectory_rel_path: trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv
     # Do not accept a global candidate until it meets the same safety envelope
     # required by the controller.  AMCL keeps refining while the vehicle is
     # stationary, so a wrong start guess cannot deadlock localization.

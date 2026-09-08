@@ -4,7 +4,9 @@ lateral_planner_node:
     base_frame: base_link
     laser_frame: lidar
     odom_topic: /odom
-    pose_topic: /ekf_pose
+    # The EKF is odom-frame. Consume the current map-frame pose propagated
+    # from AMCL's map->odom correction instead.
+    pose_topic: /current_map_pose
     obstacle_topic: /scan_obstacles
     local_raceline_topic: /local_raceline
     opponent_marker_topic: /opponent_marker

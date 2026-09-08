@@ -3,6 +3,18 @@ import os
 from setuptools import setup
 
 package_name = "sdu_apex_autodrive"
+package_root = os.path.dirname(os.path.abspath(__file__))
+os.chdir(package_root)
+
+
+def source_files(pattern):
+    """Resolve package data from this file, not the temporary build cwd.
+
+    Colcon may execute setup.py from a generated build directory.  Relative
+    globs then omit newly added config/launch files and can leave an otherwise
+    successful Python package without metadata or its runtime configuration.
+    """
+    return glob(pattern)
 
 setup(
     name=package_name,
@@ -13,10 +25,16 @@ setup(
         package_name + ".odometry_analysis",
     ],
     data_files=[
-        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        (
+            "share/ament_index/resource_index/packages",
+            ["resource/" + package_name],
+        ),
         ("share/" + package_name, ["package.xml"]),
-        (os.path.join("share", package_name, "config"), glob("config/*")),
-        (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
+        (os.path.join("share", package_name, "config"), source_files("config/*")),
+        (
+            os.path.join("share", package_name, "launch"),
+            source_files("launch/*.launch.py"),
+        ),
         (
             os.path.join("share", package_name, "artifacts", "calibration"),
             ["artifacts/calibration/MANIFEST.yaml"],
@@ -40,6 +58,8 @@ setup(
             "analyze_calibration = sdu_apex_autodrive.scripts.analyze_calibration:main",
             "audit_calibration_csv = sdu_apex_autodrive.scripts.audit_calibration_csv:main",
             "validate_odometry_observer = sdu_apex_autodrive.scripts.validate_odometry_observer:main",
+            "calibrate_ekf_covariance = sdu_apex_autodrive.odometry_analysis.covariance_calibration:main",
+            "source_time_diagnostic_report = sdu_apex_autodrive.odometry_analysis.source_time_diagnostic_report:main",
         ],
     },
 )

@@ -1,0 +1,12 @@
+five_lap_map_saver:
+  ros__parameters:
+    odom_topic: /odom
+    save_map_service: /slam_toolbox/save_map
+    completion_topic: /sdu/mapping_complete
+    output_directory: /workspace/src/f1tenth_planning/maps
+    map_name: ftg_test_one_lap_2mps_recovery035_20260908
+    target_laps: 1
+    start_radius_m: 1.0
+    departure_radius_m: 1.5
+    minimum_lap_distance_m: 8.0
+    maximum_odom_step_m: 1.0

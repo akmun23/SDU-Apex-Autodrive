@@ -419,11 +419,12 @@ class TimingValidator(Node):
         self._record(name, _stamp_ns(msg), time.monotonic_ns(), values)
 
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
-        # Version 2 stores source_stamp_s at index 1. Legacy vectors stored
-        # odom_stamp_s at index 15; retain that fallback for old recordings.
+        # Versions 2 and 3 store source_stamp_s at index 1. Legacy vectors
+        # stored odom_stamp_s at index 15; retain that fallback for old logs.
         values = tuple(float(value) for value in msg.data)
         source_ns = 0
-        source_index = 1 if len(values) >= 21 and values[0] == 2.0 else 15
+        source_index = 1 if (
+            len(values) >= 21 and values[0] in (2.0, 3.0)) else 15
         if len(values) > source_index and math.isfinite(values[source_index]):
             source_ns = int(round(values[source_index] * 1e9))
         self._record(
@@ -599,7 +600,7 @@ class TimingValidator(Node):
 
             if name == "odom_diagnostics":
                 if (values is not None and len(values) >= 21 and
-                        math.isfinite(values[0]) and values[0] == 2.0):
+                        math.isfinite(values[0]) and values[0] in (2.0, 3.0)):
                     diagnostic_version_samples += 1
                     max_packet_drop_count = max(max_packet_drop_count, values[16])
                     max_packet_coherence_fault_count = max(

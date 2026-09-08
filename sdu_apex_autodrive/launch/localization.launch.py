@@ -50,6 +50,16 @@ def _setup(context):
                 ("/tf_static", "/sdu/tf_static"),
             ],
         ),
+        Node(
+            package="f1tenth_localization",
+            executable="ekf_localization_node",
+            name="ekf_localization",
+            output="screen",
+            parameters=[
+                LaunchConfiguration("ekf_params"),
+                {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+            ],
+        ),
         LifecycleNode(
             package="nav2_map_server",
             executable="map_server",
@@ -117,7 +127,7 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument("amcl_max_track_distance", default_value="0.65"),
-        DeclareLaunchArgument("amcl_initial_heading_offset", default_value="-0.09"),
+        DeclareLaunchArgument("amcl_initial_heading_offset", default_value="0.0"),
         DeclareLaunchArgument(
             "sensor_odom_params",
             default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),
@@ -125,6 +135,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "amcl_params",
             default_value=os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "ekf_params",
+            default_value=os.path.join(localization, "config", "ekf.yaml"),
         ),
         OpaqueFunction(function=_setup),
     ])

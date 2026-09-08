@@ -4,7 +4,8 @@
 /**
  * @file pure_pursuit_node.hpp
  * @brief ROS2 node wrapper for the Pure Pursuit path-following controller.
- * @details Fuses encoder/IMU odometry (velocity) with the CUDA AMCL pose.
+ * @details Fuses encoder/IMU odometry (velocity) with the propagated CUDA
+ *          AMCL map pose.
  *          Applies command-side rate limiting on steering and acceleration.
  *          Follows the explicitly selected planning trajectory for the race.
  *          Commands are shaped only by configured actuator-rate limits.
@@ -16,6 +17,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 
 #include "algorithms/pure_pursuit.hpp"
 #include <memory>
@@ -30,13 +32,13 @@ namespace f1tenth_control {
  * 
  * This node:
  * - Loads a pre-computed racing line trajectory from CSV
- * - Subscribes to independent map-frame /amcl_pose and local /odom state
+ * - Subscribes to current map-frame /current_map_pose and local /odom state
  * - Publishes physical-unit speed commands to /cmd/speed
  * - Supports dynamic parameter reconfiguration
  * 
  * Topics:
  *   Subscriptions:
- *     - /amcl_pose (geometry_msgs/PoseWithCovarianceStamped): Map pose
+ *     - /current_map_pose (geometry_msgs/PoseWithCovarianceStamped): Current map pose
  *     - /odom (nav_msgs/Odometry): Encoder/IMU velocity and odometry
  *     - /odom (nav_msgs/Odometry): Control event and longitudinal state
  *   
@@ -69,6 +71,7 @@ private:
     std::mutex state_mutex_;        // Protects access to current_state_ for thread safety
     bool trajectory_loaded_{false}; // Whether a trajectory has been successfully loaded into the controller
     bool trajectory_aligned_{false}; // Whether the cyclic seam matches the startup pose
+    bool startup_alignment_validated_{false}; // Whether pose/path heading passed the startup gate
     
     // ROS2 Communication
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;                         // Subscription for odometry messages
@@ -76,6 +79,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_feedback_sub_;
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;    // Publisher for drive commands
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr diagnostics_pub_;
     std::mutex control_mutex_;             // Prevent overlapping sensor-triggered updates
     
     double last_cmd_steering_{0.0};         // Last commanded steering angle for rate limiting
@@ -86,7 +90,7 @@ private:
     // Parameters
     std::string trajectory_file_;           // Path to trajectory CSV file
     std::string odom_topic_{"/odom"};
-    std::string pose_topic_{"/amcl_pose"};
+    std::string pose_topic_{"/current_map_pose"};
     std::string command_topic_{"/cmd/speed"};
     std::string path_frame_{"map"};
     std::string command_frame_{"base_link"};
@@ -114,6 +118,8 @@ private:
     std::string steering_feedback_topic_{"/autodrive/roboracer_1/steering"};
     double steering_feedback_timeout_s_{0.25};
     double steering_feedback_lead_gain_{0.25};
+    double startup_path_max_distance_m_{0.80};
+    double startup_path_heading_tolerance_rad_{0.75};
     
     // Parameter handling
     /**
@@ -174,6 +180,13 @@ private:
      * @return None.
      */
     void publishDriveCommand(double steering, double speed, double acceleration = 0.0);
+
+    /** Publish one diagnostic record for the exact control event. */
+    void publishDiagnostics(const rclcpp::Time& event_stamp,
+                            const VehicleState& state,
+                            const PurePursuitOutput& output,
+                            double command_steering,
+                            double command_speed);
 
     // Helpers
 

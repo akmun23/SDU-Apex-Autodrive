@@ -18,6 +18,13 @@ void FollowTheGap::reset() {
     last_steering_ = 0.0;
     smoothed_target_ = 0.0;
     first_compute_ = true;
+    last_single_gap_angle_ = 0.0;
+    opposite_gap_cycles_ = 0;
+    has_single_gap_target_ = false;
+    recovery_steering_sign_ = 0.0;
+    recovery_opposite_cycles_ = 0;
+    recovery_clear_cycles_ = 0;
+    recovery_side_switched_ = false;
 }
 
 // =====================================================================
@@ -73,11 +80,13 @@ FTGOutput FollowTheGap::compute(
     output.closest_point_idx = lidar_processor_.findClosestPoint(scan);
     output.closest_point_dist = scan.filtered_ranges[output.closest_point_idx];
 
-    // Check both the absolute LiDAR threshold and the actual rectangular body
-    // envelope around the offset LiDAR. A single radial threshold cannot
-    // represent front, side, diagonal, and rear bumper clearance correctly.
-    if (output.closest_point_dist < config_.emergency_brake_distance ||
-        violatesFootprintClearance(scan)) {
+    // The absolute radial threshold is the hard stop.  A rectangular-footprint
+    // margin violation above that threshold is recoverable: stopping there can
+    // trap the vehicle beside a wall because it loses the forward motion
+    // needed to steer away.  Keep the distinction explicit so the caller can
+    // reduce speed without disabling the hard obstacle stop.
+    output.footprint_clearance_limited = violatesFootprintClearance(scan);
+    if (output.closest_point_dist < config_.emergency_brake_distance) {
         output.emergency_stop = true;
         output.command = DriveCommand(0.0, 0.0);
         output.processed_scan = scan;
@@ -98,6 +107,7 @@ FTGOutput FollowTheGap::compute(
 
     // --- Step 6: Compute weighted-centroid target angle ---
     double target_angle = computeTargetAngle(scan, eff_clearance);
+    output.target_angle = target_angle;
 
     // --- Step 7: EMA smoothing on the target angle ---
     // Not applied on first compute
@@ -117,9 +127,183 @@ FTGOutput FollowTheGap::compute(
         -config_.max_steering,
         config_.max_steering
     );
+    const double closest_angle = scan.angles[output.closest_point_idx];
+    double left_side_min = std::numeric_limits<double>::infinity();
+    double right_side_min = std::numeric_limits<double>::infinity();
+    for (size_t beam = 0; beam < scan.filtered_ranges.size(); ++beam) {
+        const double angle = scan.angles[beam];
+        if (!scan.valid[beam] || angle < 0.18 ||
+            angle > config_.side_recovery_max_angle) {
+            continue;
+        }
+        left_side_min = std::min(left_side_min, scan.filtered_ranges[beam]);
+    }
+    for (size_t beam = 0; beam < scan.filtered_ranges.size(); ++beam) {
+        const double angle = scan.angles[beam];
+        if (!scan.valid[beam] || angle > -0.18 ||
+            angle < -config_.side_recovery_max_angle) {
+            continue;
+        }
+        right_side_min = std::min(right_side_min, scan.filtered_ranges[beam]);
+    }
+    output.recovery_left_clearance = std::isfinite(left_side_min) ?
+        left_side_min : 0.0;
+    output.recovery_right_clearance = std::isfinite(right_side_min) ?
+        right_side_min : 0.0;
+    constexpr double kRecoverySideAdvantage = 0.03;
+    double desired_recovery_sign = 0.0;
+    constexpr double kNearFrontAngle = 0.15;
+    const bool closest_in_recovery_sector =
+        std::abs(closest_angle) <= config_.side_recovery_max_angle;
+    const bool have_both_side_clearances =
+        std::isfinite(left_side_min) && std::isfinite(right_side_min);
+    // Prefer the side with the larger measured opening.  The nearest beam
+    // alone is not sufficient at an inner corner: the scan can alternate
+    // between the two walls while the safe route remains on one side.
+    if (closest_in_recovery_sector && have_both_side_clearances &&
+        right_side_min + kRecoverySideAdvantage < left_side_min) {
+        desired_recovery_sign = 1.0;
+    } else if (closest_in_recovery_sector && have_both_side_clearances &&
+               left_side_min + kRecoverySideAdvantage < right_side_min) {
+        desired_recovery_sign = -1.0;
+    } else if (closest_angle > kNearFrontAngle &&
+               closest_angle <= config_.side_recovery_max_angle) {
+        desired_recovery_sign = -1.0;
+    } else if (closest_angle < -kNearFrontAngle &&
+               closest_angle >= -config_.side_recovery_max_angle) {
+        desired_recovery_sign = 1.0;
+    } else if (std::abs(closest_angle) <= kNearFrontAngle) {
+        // The closest beam can enter the front sector while the car is
+        // rotating around an inner corner. Use the side-sector clearance to
+        // retain the physically correct turn-away direction instead of
+        // carrying a stale latch through the corner.
+        const bool sides_are_ambiguous =
+            !have_both_side_clearances ||
+            std::abs(left_side_min - right_side_min) <=
+            kRecoverySideAdvantage;
+        if (sides_are_ambiguous &&
+            std::abs(config_.ambiguous_front_recovery_sign) > 0.5) {
+            desired_recovery_sign =
+                config_.ambiguous_front_recovery_sign > 0.0 ? 1.0 : -1.0;
+        } else if (std::isfinite(left_side_min) && std::isfinite(right_side_min) &&
+            right_side_min + kRecoverySideAdvantage < left_side_min) {
+            desired_recovery_sign = 1.0;
+        } else if (std::isfinite(left_side_min) &&
+                   std::isfinite(right_side_min) &&
+                   left_side_min + kRecoverySideAdvantage < right_side_min) {
+            desired_recovery_sign = -1.0;
+        }
+    }
+    const bool has_front_side_obstacle =
+        output.closest_point_dist < config_.side_recovery_distance &&
+        desired_recovery_sign != 0.0 && closest_in_recovery_sector;
+    const double recovery_release_margin = std::max(
+        0.15, 0.5 * config_.side_recovery_full_steering_distance);
+    const double recovery_release_distance =
+        config_.side_recovery_distance + recovery_release_margin;
+    const bool clear_recovery_candidate =
+        output.closest_point_dist >= recovery_release_distance &&
+        !output.footprint_clearance_limited;
+    if (recovery_steering_sign_ != 0.0) {
+        if (clear_recovery_candidate) {
+            ++recovery_clear_cycles_;
+            if (recovery_clear_cycles_ >=
+                std::max(1, config_.recovery_clear_confirm_cycles)) {
+                recovery_steering_sign_ = 0.0;
+                recovery_opposite_cycles_ = 0;
+                recovery_clear_cycles_ = 0;
+                recovery_side_switched_ = false;
+            }
+        } else {
+            recovery_clear_cycles_ = 0;
+        }
+    }
+    if (has_front_side_obstacle) {
+        recovery_clear_cycles_ = 0;
+        const double desired_sign = desired_recovery_sign;
+        if (recovery_steering_sign_ == 0.0) {
+            recovery_steering_sign_ = desired_sign;
+            recovery_opposite_cycles_ = 0;
+        } else if (desired_sign != recovery_steering_sign_) {
+            // A real inner-corner transition can move the closest beam from
+            // one side of the front sector to the other before the old wall
+            // has reached the release distance. Require a few consecutive
+            // opposite-side scans, rather than holding the stale direction
+            // or reversing on one noisy beam.
+            ++recovery_opposite_cycles_;
+            const bool may_switch_side =
+                !config_.lock_recovery_side_until_clear;
+            const bool near_front_inflated_corner =
+                output.footprint_clearance_limited &&
+                std::abs(closest_angle) <= 0.18;
+            if (may_switch_side &&
+                ((!config_.lock_recovery_side_until_clear &&
+                  near_front_inflated_corner) ||
+                 recovery_opposite_cycles_ >=
+                 std::max(1, config_.recovery_switch_confirm_cycles))) {
+                recovery_steering_sign_ = desired_sign;
+                recovery_opposite_cycles_ = 0;
+                if (config_.lock_recovery_side_until_clear) {
+                    recovery_side_switched_ = true;
+                }
+            }
+        } else {
+            recovery_opposite_cycles_ = 0;
+        }
+    } else {
+        recovery_opposite_cycles_ = 0;
+    }
+    output.recovery_steering_sign = recovery_steering_sign_;
+    // Once selected, keep the turn-away command authoritative until the wall
+    // has cleared the hysteresis envelope. A single scan whose closest beam
+    // lands just outside the sector must not let a normal gap command fight
+    // the recovery turn.
+    const bool carry_recovery =
+        recovery_steering_sign_ != 0.0 &&
+        (output.closest_point_dist < recovery_release_distance ||
+         recovery_clear_cycles_ <
+         std::max(1, config_.recovery_clear_confirm_cycles));
+    if (carry_recovery) {
+        // A close front-side wall is more reliable than a branch choice made
+        // from a rapidly changing gap profile. Use a proportional turn-away
+        // command while there is room, reserving full steering for the
+        // emergency envelope. This prevents alternating side detections from
+        // producing a full left/right oscillation in a narrow corridor.
+        const double full_distance = std::min(
+            config_.side_recovery_full_steering_distance,
+            config_.side_recovery_distance - 1.0e-3);
+        const double recovery_span = std::max(
+            config_.side_recovery_distance - full_distance, 1.0e-3);
+        const double proximity = std::clamp(
+            (config_.side_recovery_distance - output.closest_point_dist) /
+            recovery_span, 0.0, 1.0);
+        double recovery_magnitude =
+            config_.side_recovery_min_steering +
+            proximity * (config_.max_steering - config_.side_recovery_min_steering);
+        const double away_sign = recovery_steering_sign_;
+        // If the selected gap already points away from the close wall, retain
+        // that stronger command. Only replace a command that points into the
+        // wall with the proportional recovery authority.
+        if (raw_steering * away_sign > 0.0) {
+            recovery_magnitude = std::max(
+                recovery_magnitude, std::abs(raw_steering));
+        }
+        raw_steering = away_sign * recovery_magnitude;
+        output.side_recovery = true;
+    }
+    output.raw_steering = raw_steering;
 
     // --- Step 8: Time-based steering rate limiting ---
     double steering = rateLimitSteering(raw_steering, last_steering_, dt);
+    if (carry_recovery && steering * recovery_steering_sign_ <= 0.0) {
+        // Never publish a rate-limited command that turns into the obstacle.
+        // A recovery command may need to cross through zero from the previous
+        // normal-following command, but holding the old sign while the wall is
+        // inside the swept envelope is unsafe.  Preserve the recovery
+        // direction immediately; the next cycles can resume normal slew
+        // limiting once the command has the correct sign.
+        steering = raw_steering;
+    }
     last_steering_ = steering;
 
     // --- Step 9: Speed from forward clearance + steering ---
@@ -139,8 +323,19 @@ FTGOutput FollowTheGap::compute(
     // If no valid beams in forward cone, assume some small clearance to avoid zero speed
     fwd_clearance = (fwd_count > 0) ? fwd_clearance / fwd_count : 0.5;
 
-    // Calculate speed command based on forward clearance and steering angle
-    double speed = calculateSpeed(fwd_clearance, steering);
+    // Calculate speed using the steering demand that will be reached, not
+    // only the currently slew-limited command.  At the first scan of a turn
+    // the actuator may still be near zero while raw_steering is already at
+    // the corner limit; using only ``steering`` then commands high speed
+    // into a turn before the steering rate limiter catches up.
+    const double speed_steering =
+        std::max(std::abs(steering), std::abs(raw_steering));
+    double speed = calculateSpeed(fwd_clearance, speed_steering);
+    if (output.footprint_clearance_limited || output.side_recovery) {
+        // Retain a small rolling speed so the turn-away command can clear the
+        // wall.  The absolute emergency threshold above still commands zero.
+        speed = std::min(speed, config_.min_speed);
+    }
     output.command = DriveCommand(speed, steering);
 
     // --- Step 10: Populate gaps for visualisation ---
@@ -172,13 +367,19 @@ void FollowTheGap::applyWallMargin(ProcessedScan& scan) {
 
 bool FollowTheGap::violatesFootprintClearance(
     const ProcessedScan& scan) const {
-    const double half_width = std::max(0.0, config_.car_width * 0.5);
+    const double half_width = std::max(
+        0.0,
+        config_.car_width * 0.5 +
+        std::max(0.0, config_.side_safety_margin) +
+        std::max(0.0, config_.virtual_width_inflation));
     const double front_extent = std::max(
         0.0,
-        config_.car_length - config_.rear_overhang - config_.lidar_offset_x);
+        config_.car_length - config_.rear_overhang - config_.lidar_offset_x +
+        std::max(0.0, config_.virtual_front_inflation));
     const double rear_extent = std::max(
         0.0,
-        config_.rear_overhang + config_.lidar_offset_x);
+        config_.rear_overhang + config_.lidar_offset_x +
+        std::max(0.0, config_.virtual_rear_inflation));
     const double guard = std::max(0.0, config_.footprint_clearance);
 
     for (size_t i = 0; i < scan.filtered_ranges.size(); ++i) {
@@ -218,7 +419,8 @@ void FollowTheGap::applyDisparityExtension(ProcessedScan& scan) {
     // For convenience, create a reference to the filtered ranges vector
     std::vector<double>& ranges = scan.filtered_ranges;
     const double half_car = config_.car_width / 2.0 +
-        std::max(0.0, config_.side_safety_margin);
+        std::max(0.0, config_.side_safety_margin) +
+        std::max(0.0, config_.virtual_width_inflation);
     const auto& lidar_config = lidar_processor_.getConfig();
 
     // Cap pathological extensions while allowing the full body plus explicit
@@ -294,7 +496,8 @@ std::vector<double> FollowTheGap::computeEffectiveClearance(const ProcessedScan&
     // Precompute constants for cone calculation
     const double half_car = (
         config_.car_width / 2.0 +
-        std::max(0.0, config_.side_safety_margin)
+        std::max(0.0, config_.side_safety_margin) +
+        std::max(0.0, config_.virtual_width_inflation)
     ) * config_.clearance_cone_scale;
     const double abs_inc  = std::abs(scan.angle_increment);
     const auto& lidar_config = lidar_processor_.getConfig();
@@ -347,6 +550,117 @@ double FollowTheGap::computeTargetAngle(
     const ProcessedScan& scan,
     const std::vector<double>& eff_clearance
 ) {
+    if (config_.select_single_gap) {
+        // A global weighted centroid is unsafe in a hairpin: two valid
+        // openings on opposite sides can average to a straight command even
+        // though the straight beam is already blocked. Select one contiguous
+        // opening and aim at its clearance-weighted centre instead.
+        double best_score = -std::numeric_limits<double>::infinity();
+        double best_angle = 0.0;
+        size_t i = 0;
+        const auto& lidar_config = lidar_processor_.getConfig();
+        while (i < eff_clearance.size()) {
+            while (i < eff_clearance.size() &&
+                   (scan.angles[i] < lidar_config.angle_min ||
+                    scan.angles[i] > lidar_config.angle_max ||
+                    eff_clearance[i] < config_.min_score_range)) {
+                ++i;
+            }
+            if (i >= eff_clearance.size()) {
+                break;
+            }
+
+            const size_t start = i;
+            double sum_weight = 0.0;
+            double weighted_angle = 0.0;
+            double max_clearance = 0.0;
+            while (i < eff_clearance.size() &&
+                   scan.angles[i] >= lidar_config.angle_min &&
+                   scan.angles[i] <= lidar_config.angle_max &&
+                   eff_clearance[i] >= config_.min_score_range) {
+                const double weight = std::pow(
+                    eff_clearance[i] - config_.min_score_range,
+                    config_.score_power);
+                sum_weight += weight;
+                weighted_angle += scan.angles[i] * weight;
+                max_clearance = std::max(max_clearance, eff_clearance[i]);
+                ++i;
+            }
+
+            const size_t end = i - 1;
+            const double angular_width =
+                std::max(0.0, scan.angles[end] - scan.angles[start]);
+            if (sum_weight <= 1.0e-9 ||
+                angular_width < config_.min_gap_width) {
+                continue;
+            }
+
+            const double center = weighted_angle / sum_weight;
+            const double score =
+                std::pow(max_clearance - config_.min_score_range,
+                         config_.score_power) * angular_width *
+                std::exp(-config_.heading_weight * std::abs(center));
+            if (score > best_score) {
+                best_score = score;
+                best_angle = center;
+            }
+        }
+        if (best_score > -std::numeric_limits<double>::infinity()) {
+            if (config_.avoid_close_side) {
+                double left_min = std::numeric_limits<double>::infinity();
+                double right_min = std::numeric_limits<double>::infinity();
+                for (size_t beam = 0; beam < eff_clearance.size(); ++beam) {
+                    const double angle = scan.angles[beam];
+                    if (angle >= 0.15 && angle <= 1.20 &&
+                        eff_clearance[beam] >= config_.min_score_range) {
+                        left_min = std::min(left_min, eff_clearance[beam]);
+                    } else if (angle <= -0.15 && angle >= -1.20 &&
+                               eff_clearance[beam] >= config_.min_score_range) {
+                        right_min = std::min(right_min, eff_clearance[beam]);
+                    }
+                }
+                constexpr double kSideClearanceAdvantage = 0.03;
+                if (std::isfinite(left_min) && std::isfinite(right_min) &&
+                    right_min + kSideClearanceAdvantage < left_min) {
+                    // The negative-angle side is closer.  Turn away from it
+                    // even when the selected gap is currently near zero;
+                    // waiting for a large gap target leaves too little room
+                    // for the vehicle to rotate before the footprint guard.
+                    best_angle = std::max(
+                        std::abs(best_angle), config_.close_side_turn_angle);
+                } else if (std::isfinite(left_min) && std::isfinite(right_min) &&
+                           left_min + kSideClearanceAdvantage < right_min) {
+                    best_angle = -std::max(
+                        std::abs(best_angle), config_.close_side_turn_angle);
+                }
+            }
+            // Apply opposite-gap confirmation after side-safety shaping too.
+            // Keep the pending confirmation alive through a brief centred
+            // scan.  At an inner corner the selected gap can momentarily
+            // collapse to near-zero between two opposite openings; resetting
+            // the counter there permits an unsafe full reversal.
+            if (std::abs(best_angle) > 0.12) {
+                if (has_single_gap_target_ &&
+                    ((best_angle > 0.0) != (last_single_gap_angle_ > 0.0))) {
+                    ++opposite_gap_cycles_;
+                    if (opposite_gap_cycles_ <
+                        std::max(1, config_.gap_switch_confirm_cycles)) {
+                        best_angle = last_single_gap_angle_;
+                    } else {
+                        opposite_gap_cycles_ = 0;
+                    }
+                } else {
+                    opposite_gap_cycles_ = 0;
+                }
+                last_single_gap_angle_ = best_angle;
+                has_single_gap_target_ = true;
+            } else {
+                opposite_gap_cycles_ = std::max(0, opposite_gap_cycles_ - 1);
+            }
+            return best_angle;
+        }
+    }
+
     // Initialize accumulators for weighted average
     const size_t n = scan.filtered_ranges.size();
     const auto& lidar_config = lidar_processor_.getConfig();

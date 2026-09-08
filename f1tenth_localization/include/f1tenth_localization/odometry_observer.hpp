@@ -9,7 +9,11 @@ struct OdometryObserverConfig
 {
   double wheel_radius_m{0.059};
   double reset_encoder_jump_rad{50.0};
-  double normal_packet_dt_max_s{0.040};
+  // The competition player currently publishes native telemetry at about
+  // 20 Hz (roughly 0.050 s). Keep that cadence in the normal, non-degraded
+  // path; a 40 ms threshold falsely marked every track packet degraded and
+  // inflated /odom covariance to the controller stop threshold.
+  double normal_packet_dt_max_s{0.080};
   double degraded_packet_dt_max_s{0.100};
   double decel_detect_ax_mps2{-0.5};
   double decel_ax_scale{1.005};
@@ -21,6 +25,9 @@ struct OdometryObserverConfig
   // A frozen encoder must not immediately zero a moving estimate because a
   // single dropped packet is possible.  Sustained zero wheel motion together
   // with calm IMU data is, however, a reliable stopped/collision signature.
+  // This is deliberately much lower than wheel_freeze_speed_mps: the latter
+  // is an innovation/missing-packet guard, not a stopped-vehicle threshold.
+  double stationary_speed_threshold_mps{0.03};
   double stationary_hold_s{0.20};
   double stationary_ax_abs_max_mps2{0.25};
   double stationary_ay_abs_max_mps2{0.75};
@@ -31,6 +38,16 @@ struct OdometryObserverConfig
   double turn_exit_abs_ay_mps2{0.5};
   double turn_exit_hold_s{0.5};
   double imu_x_offset_m{0.08};
+  // The simulator's lateral IMU acceleration contains enough bias/noise to
+  // create a persistent pose error when integrated at native 20 Hz.  The
+  // default car model therefore uses wheel speed plus IMU yaw only (a
+  // no-lateral-slip kinematic update). Keep the dynamic option available for
+  // offline comparison and vehicles with a separately validated slip model.
+  bool integrate_lateral_acceleration_in_turn{false};
+  // A single impossible longitudinal IMU sample must not be integrated into
+  // odometry.  The competition vehicle's lateral acceleration can be large
+  // in a tight turn, so this guard is intentionally only for ax.
+  double max_imu_ax_abs_mps2{30.0};
 };
 
 struct OdometryObservation
@@ -55,6 +72,12 @@ struct OdometryEstimate
   double x_m{0.0};
   double y_m{0.0};
   double yaw_rad{0.0};
+  // Exact synchronized packet inputs used by the observer. These are kept in
+  // diagnostics so an offline replay cannot accidentally combine callback
+  // snapshots from different source timestamps.
+  double left_angle_rad{0.0};
+  double right_angle_rad{0.0};
+  double imu_yaw_rad{0.0};
   double wheel_raw_mps{0.0};
   double wheel_mapped_mps{0.0};
   double ax_mps2{0.0};
@@ -64,6 +87,7 @@ struct OdometryEstimate
   bool turn_mode{false};
   bool reset_epoch{false};
   bool timing_degraded{false};
+  bool sensor_outlier{false};
   bool valid{false};
 };
 

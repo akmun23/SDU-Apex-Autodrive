@@ -18,6 +18,7 @@ from sdu_apex_autodrive.scripts.analyze_calibration import (
     slip_model_samples,
     throttle_table,
     truth_stamp,
+    valid_ground_truth_row,
     valid_ground_truth_step,
 )
 
@@ -122,6 +123,14 @@ def test_ground_truth_position_prefers_timestamped_odom_over_legacy_fields():
     row = _row(gt_x_m=99.0, gt_y_m=98.0, gt_odom_x_m=1.25, gt_odom_y_m=-0.5)
 
     assert ground_truth_position(row) == (1.25, -0.5)
+
+
+def test_ground_truth_collision_epoch_is_not_scored():
+    row = {
+        "gt_odom_z_m": "0.01",
+        "gt_collision_count": "1",
+    }
+    assert not valid_ground_truth_row(row)
 
 
 def test_truth_derivatives_prefer_ground_truth_source_timestamp():

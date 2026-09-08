@@ -117,7 +117,7 @@ private:
     // Config
     std::string trajectory_file_;
     std::string odom_topic_{"/odom"};
-    std::string pose_topic_{"/amcl_pose"};
+    std::string pose_topic_{"/current_map_pose"};
     std::string lidar_topic_{"/autodrive/roboracer_1/lidar"};
     std::string local_raceline_topic_{"/local_raceline"};
     std::string command_topic_{"/cmd/speed"};

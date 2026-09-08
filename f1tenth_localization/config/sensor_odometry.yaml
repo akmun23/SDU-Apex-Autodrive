@@ -23,7 +23,10 @@ sensor_odometry:
     # VALIDATED_ODOMETRY_IMPLEMENTATION_HANDOFF.md.
     wheel_radius_m: 0.059
     reset_encoder_jump_rad: 50.0
-    normal_packet_dt_max_s: 0.040
+    # Track-scene native telemetry is approximately 20 Hz (0.050 s). A
+    # 0.040 s limit incorrectly marked every normal packet degraded and set
+    # the pose covariance to 0.25 m^2, which stopped Pure Pursuit.
+    normal_packet_dt_max_s: 0.080
     degraded_packet_dt_max_s: 0.100
     decel_detect_ax_mps2: -0.5
     decel_ax_scale: 1.005
@@ -31,6 +34,9 @@ sensor_odometry:
     wheel_update_ax_abs_max_mps2: 0.6
     wheel_freeze_speed_mps: 0.15
     wheel_innovation_max_mps: 0.30
+    # Separate true stopped detection from the 0.15 m/s missing-encoder gate;
+    # mapping and low-speed driving are valid below that gate.
+    stationary_speed_threshold_mps: 0.03
     wheel_update_beta: 0.20
     # Clear stale motion after sustained zero wheel motion and calm IMU data;
     # a single missing encoder packet is still rejected by the frozen-wheel
@@ -44,18 +50,31 @@ sensor_odometry:
     turn_exit_yaw_rate_radps: 0.1
     turn_exit_abs_ay_mps2: 0.5
     turn_exit_hold_s: 0.5
+    # Use the validated no-lateral-slip kinematic turn update. Integrating
+    # simulator lateral IMU acceleration at 20 Hz caused false pose drift in
+    # the first bend; enable only after a separately validated slip model.
+    integrate_lateral_acceleration_in_turn: false
+    # Reject impossible longitudinal IMU spikes before they can be integrated
+    # into odometry. Lateral acceleration remains unconstrained here because
+    # it is physically large in the tight track turns.
+    max_imu_ax_abs_mps2: 30.0
     imu_orientation_correction_gain: 1.0
     max_imu_orientation_step_rad: 0.30
     max_pending_packets: 8
 
     pose_xy_variance: 0.01
+    # A single native-bridge gap is recorded as degraded but must not make the
+    # EKF permanently exceed the controller's 0.25 m^2 covariance gate.
+    timing_degraded_pose_xy_variance: 0.04
     pose_yaw_variance: 0.01
     twist_linear_variance: 0.04
     twist_yaw_variance: 0.04
 
-    # /odom/diagnostics is Float64MultiArray version 2:
+    # /odom/diagnostics is Float64MultiArray version 3:
     # version, source_stamp_s, dt_s, raw_wheel_mps, mapped_wheel_mps,
     # speed_pred_mps, speed_mps, body_u_mps, body_v_mps, ax_mps2, ay_mps2,
     # yaw_rate_radps, wheel_update_used, turn_mode, reset_epoch,
     # timing_degraded, packet_drop_count, packet_coherence_fault_count,
-    # x_m, y_m, yaw_rad.
+    # x_m, y_m, yaw_rad, sensor_outlier, left_angle_rad, right_angle_rad,
+    # imu_yaw_rad. The last three values are the exact synchronized packet
+    # inputs used by the observer and make offline replay source-time exact.

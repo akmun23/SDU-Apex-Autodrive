@@ -59,6 +59,9 @@ OdometryEstimate OdometryObserver::estimate(
   output.x_m = x_m_;
   output.y_m = y_m_;
   output.yaw_rad = observation.yaw_rad;
+  output.left_angle_rad = observation.left_angle_rad;
+  output.right_angle_rad = observation.right_angle_rad;
+  output.imu_yaw_rad = observation.yaw_rad;
   output.wheel_raw_mps = last_wheel_raw_mps_;
   output.wheel_mapped_mps = last_wheel_mapped_mps_;
   output.ax_mps2 = observation.ax_mps2;
@@ -180,8 +183,48 @@ OdometryEstimate OdometryObserver::update(
   last_wheel_raw_mps_ = wheel_raw;
   last_wheel_mapped_mps_ = wheel_mapped;
 
+  const auto wheel_speed_is_valid = [&](double predicted_speed) {
+    if (dt_s > config_.normal_packet_dt_max_s || !finite(wheel_mapped)) {
+      return false;
+    }
+    // A zero encoder packet is allowed to brake a stopped/slow estimate, but
+    // not to erase a moving estimate after one missing callback.
+    if (wheel_raw < config_.wheel_freeze_speed_mps && predicted_speed > 0.5) {
+      return false;
+    }
+    // Permit the first positive wheel sample to establish motion.  The old
+    // innovation gate compared it with a zero IMU prediction and rejected
+    // the launch sample, which was especially harmful when turn mode was
+    // entered immediately by the steering transient.
+    return std::abs(wheel_mapped - predicted_speed) <=
+      config_.wheel_innovation_max_mps ||
+      (predicted_speed < config_.wheel_freeze_speed_mps &&
+      wheel_mapped >= config_.wheel_freeze_speed_mps);
+  };
+
+  // The simulator has emitted an impossible longitudinal acceleration sample
+  // while stationary (approximately -123 m/s^2).  In turn mode that value
+  // would be integrated as a real backwards velocity before the wheel gate
+  // can reject it.  Re-baseline the packet, hold the last causal state, and
+  // mark the sample degraded instead.  The raw IMU value remains available
+  // through the recorder for diagnosis.
+  if (std::abs(observation.ax_mps2) > config_.max_imu_ax_abs_mps2) {
+    previous_stamp_s_ = observation.stamp_s;
+    previous_left_angle_rad_ = observation.left_angle_rad;
+    previous_right_angle_rad_ = observation.right_angle_rad;
+    previous_yaw_rad_ = observation.yaw_rad;
+    previous_yaw_rate_radps_ = observation.yaw_rate_radps;
+    last_speed_pred_mps_ = speed_mps_;
+    stationary_time_s_ = 0.0;
+    auto output = estimate(observation);
+    output.dt_s = dt_s;
+    output.timing_degraded = true;
+    output.sensor_outlier = true;
+    return output;
+  }
+
   const bool calm_stationary_sample =
-    wheel_raw < config_.wheel_freeze_speed_mps &&
+    wheel_raw < config_.stationary_speed_threshold_mps &&
     std::abs(observation.ax_mps2) <= config_.stationary_ax_abs_max_mps2 &&
     std::abs(observation.ay_mps2) <= config_.stationary_ay_abs_max_mps2 &&
     std::abs(observation.yaw_rate_radps) <=
@@ -229,7 +272,28 @@ OdometryEstimate OdometryObserver::update(
   bool wheel_update_used = false;
   double speed_pred = speed_mps_;
   if (turn_mode_) {
-    update_turn(ax_origin, ay_origin, observation.yaw_rate_radps, dt_s);
+    // Longitudinal wheel speed is the observable with the correct scale in a
+    // turn.  Use it to anchor u before and after the IMU RK2 lateral update;
+    // otherwise the turn model integrates small ax bias and can report
+    // 0.30 m/s while the encoders and vehicle are travelling at 0.50 m/s.
+    const bool wheel_ok = wheel_speed_is_valid(speed_mps_);
+    if (wheel_ok) {
+      body_u_mps_ = wheel_mapped;
+      wheel_update_used = true;
+    }
+    if (config_.integrate_lateral_acceleration_in_turn) {
+      update_turn(ax_origin, ay_origin, observation.yaw_rate_radps, dt_s);
+      if (wheel_ok) {
+        body_u_mps_ = wheel_mapped;
+      }
+    } else {
+      // The encoder is the trusted longitudinal measurement in a turn. Do
+      // not integrate the simulator's lateral IMU sample into a persistent
+      // pose velocity: source-time replay showed that this creates several
+      // centimetres of false lateral displacement within the first corner.
+      body_v_mps_ = 0.0;
+    }
+    speed_mps_ = std::hypot(body_u_mps_, body_v_mps_);
     speed_pred = speed_mps_;
     const bool calm =
       std::abs(observation.yaw_rate_radps) < config_.turn_exit_yaw_rate_radps &&
@@ -253,11 +317,11 @@ OdometryEstimate OdometryObserver::update(
     if (dt_s <= config_.normal_packet_dt_max_s) {
       const bool wheel_ok =
         std::abs(observation.ax_mps2) < config_.wheel_update_ax_abs_max_mps2 &&
-        !(wheel_raw < config_.wheel_freeze_speed_mps && speed_pred > 0.5) &&
-        finite(wheel_mapped) &&
-        std::abs(wheel_mapped - speed_pred) <= config_.wheel_innovation_max_mps;
+        wheel_speed_is_valid(speed_pred);
       if (wheel_ok) {
-        speed_mps_ = (1.0 - config_.wheel_update_beta) * speed_pred +
+        speed_mps_ = speed_pred < config_.wheel_freeze_speed_mps ?
+          wheel_mapped :
+          (1.0 - config_.wheel_update_beta) * speed_pred +
           config_.wheel_update_beta * wheel_mapped;
         wheel_update_used = true;
       }

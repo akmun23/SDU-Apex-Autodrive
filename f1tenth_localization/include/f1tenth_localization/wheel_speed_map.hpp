@@ -19,7 +19,13 @@ public:
       return 0.0;
     }
     if (wheel_speed_mps < kWheelMps.front()) {
-      return 0.0;
+      // The identification run did not contain samples below the first
+      // breakpoint (0.703 m/s).  Returning zero there made a real low-speed
+      // encoder measurement look like a stopped vehicle and forced the
+      // observer onto IMU-only propagation.  At low speed the simulator's
+      // wheel measurement is already the useful body-speed estimate; use it
+      // until the identified map becomes valid.
+      return wheel_speed_mps;
     }
     if (wheel_speed_mps >= kWheelMps.back()) {
       return kBodyMps.back();
@@ -129,4 +135,3 @@ private:
 };
 
 }  // namespace f1tenth_localization
-

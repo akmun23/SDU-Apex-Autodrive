@@ -16,6 +16,7 @@ from geometry_msgs.msg import Point, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Int32
 
 
 PoseSample = Tuple[float, float, float, float]
@@ -87,6 +88,7 @@ class GroundTruthAmclMonitor(Node):
         super().__init__("ground_truth_amcl_monitor")
         self.declare_parameter("ground_truth_topic", "/autodrive/roboracer_1/ips")
         self.declare_parameter("ground_truth_odom_topic", "/autodrive/roboracer_1/odom")
+        self.declare_parameter("collision_topic", "/autodrive/roboracer_1/collision_count")
         self.declare_parameter("amcl_topic", "/amcl_pose")
         self.declare_parameter("report_period_sec", 1.0)
         self.declare_parameter("pair_timeout_sec", 0.30)
@@ -103,12 +105,15 @@ class GroundTruthAmclMonitor(Node):
         # simulator cadence while preventing old poses surviving a reset.
         self.gt_samples: Deque[PoseSample] = deque(maxlen=64)
         self.amcl_samples: Deque[PoseSample] = deque(maxlen=64)
+        self.current_map_samples: Deque[PoseSample] = deque(maxlen=128)
         self.odom_samples: Deque[PoseSample] = deque(maxlen=128)
         self.ekf_samples: Deque[PoseSample] = deque(maxlen=128)
         self.last_gt_position: Optional[Tuple[float, float]] = None
         self.gt_position: Optional[Tuple[float, float]] = None
         self.gt_yaw: Optional[float] = None
         self.gt_speed_mps = math.nan
+        self.collision_count: Optional[int] = None
+        self.invalid_collision_epoch = False
 
         self.map_to_world_yaw: Optional[float] = None
         self.map_to_world_translation: Optional[Tuple[float, float]] = None
@@ -137,15 +142,23 @@ class GroundTruthAmclMonitor(Node):
             self.csv_writer.writerow((
                 "stamp_s", "time_s", "gt_x_m", "gt_y_m", "gt_yaw_rad",
                 "amcl_x_m", "amcl_y_m", "amcl_yaw_rad", "amcl_error_m", "amcl_error_rad",
+                "current_map_x_m", "current_map_y_m", "current_map_yaw_rad",
+                "current_map_error_m", "current_map_error_rad",
                 "ekf_x_m", "ekf_y_m", "ekf_yaw_rad", "ekf_error_m", "ekf_error_rad",
                 "odom_x_m", "odom_y_m", "odom_yaw_rad", "odom_error_m", "odom_error_rad",
-                "gt_speed_mps",
+                "gt_speed_mps", "collision_count",
             ))
 
         self.create_subscription(Point, gt_topic, self._on_ground_truth, 10)
         self.create_subscription(Odometry, gt_odom_topic, self._on_ground_truth_odom, 10)
         self.create_subscription(
+            Int32, str(self.get_parameter("collision_topic").value),
+            self._on_collision, 10)
+        self.create_subscription(
             PoseWithCovarianceStamped, amcl_topic, self._on_amcl, 10)
+        self.create_subscription(
+            PoseWithCovarianceStamped, "/current_map_pose",
+            self._on_current_map_pose, 10)
         self.create_subscription(Odometry, "/odom", self._on_odom, 10)
         self.create_subscription(
             PoseWithCovarianceStamped, "/ekf_pose", self._on_ekf, 10)
@@ -158,6 +171,7 @@ class GroundTruthAmclMonitor(Node):
         self.odom_map_reference = None
         self.ekf_map_reference = None
         self.amcl_samples.clear()
+        self.current_map_samples.clear()
         self.odom_samples.clear()
         self.ekf_samples.clear()
         self.sum_sq_xy = 0.0
@@ -180,7 +194,37 @@ class GroundTruthAmclMonitor(Node):
         if math.isfinite(msg.x) and math.isfinite(msg.y):
             self.gt_position = (float(msg.x), float(msg.y))
 
+    def _on_collision(self, msg: Int32) -> None:
+        count = int(msg.data)
+        if self.collision_count is None:
+            self.collision_count = count
+            if count > 0:
+                self.invalid_collision_epoch = True
+                self.last_gt_position = None
+                self.gt_position = None
+                self.gt_yaw = None
+                self.gt_samples.clear()
+                self._reset_alignment("Ground-truth starts after a collision")
+            return
+        if count != self.collision_count:
+            previous_count = self.collision_count
+            self.collision_count = count
+            self.invalid_collision_epoch = count > 0
+            if count > 0:
+                self.last_gt_position = None
+                self.gt_position = None
+                self.gt_yaw = None
+                self.gt_samples.clear()
+                self._reset_alignment(
+                    "Collision epoch changed; discarding localization comparison")
+            elif previous_count > 0:
+                self.last_gt_position = None
+                self.gt_samples.clear()
+                self._reset_alignment("Simulator collision counter cleared; waiting for fresh truth")
+
     def _on_ground_truth_odom(self, msg: Odometry) -> None:
+        if self.invalid_collision_epoch:
+            return
         x = float(msg.pose.pose.position.x)
         y = float(msg.pose.pose.position.y)
         yaw = _yaw_from_quaternion(msg.pose.pose.orientation)
@@ -220,6 +264,22 @@ class GroundTruthAmclMonitor(Node):
         if stamp <= 0.0:
             stamp = self.get_clock().now().nanoseconds * 1.0e-9
         self._append(self.amcl_samples, (stamp, x, y, yaw))
+        self._compare_at(stamp)
+
+    def _on_current_map_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        """Record the map-frame pose consumed by the path-tracking controller."""
+        stamp = _stamp_seconds(msg.header.stamp)
+        startup_sec = self.startup_time.nanoseconds * 1.0e-9
+        if stamp > 0.0 and stamp + self.pair_timeout < startup_sec:
+            return
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
+        yaw = _yaw_from_quaternion(msg.pose.pose.orientation)
+        if not all(math.isfinite(v) for v in (x, y, yaw)):
+            return
+        if stamp <= 0.0:
+            stamp = self.get_clock().now().nanoseconds * 1.0e-9
+        self._append(self.current_map_samples, (stamp, x, y, yaw))
         self._compare_at(stamp)
 
     def _on_odom(self, msg: Odometry) -> None:
@@ -305,6 +365,19 @@ class GroundTruthAmclMonitor(Node):
         error_xy = math.hypot(amcl_x - expected_x, amcl_y - expected_y)
         error_yaw = abs(_wrap(amcl_yaw - expected_yaw))
 
+        current_map_pose = _interpolate(
+            self.current_map_samples, stamp, self.pair_timeout)
+        current_map_error_xy = math.nan
+        current_map_error_yaw = math.nan
+        current_map_report = "current_map=unavailable"
+        if current_map_pose is not None:
+            cx, cy, cyaw = current_map_pose
+            current_map_error_xy = math.hypot(cx - expected_x, cy - expected_y)
+            current_map_error_yaw = abs(_wrap(cyaw - expected_yaw))
+            current_map_report = (
+                "current_map=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad"
+                % (cx, cy, cyaw, current_map_error_xy, current_map_error_yaw))
+
         ekf_pose = _interpolate(self.ekf_samples, stamp, self.pair_timeout)
         if self.ekf_map_reference is None and ekf_pose is not None:
             # EKF may publish later than the first AMCL alignment sample.
@@ -353,10 +426,11 @@ class GroundTruthAmclMonitor(Node):
             rms_xy = math.sqrt(self.sum_sq_xy / self.samples)
             rms_yaw = math.sqrt(self.sum_sq_yaw / self.samples)
             self.get_logger().info(
-                "AMCL vs GT: gt=(%.3f, %.3f) amcl=(%.3f, %.3f) error=%.3f m / %.3f rad; %s; %s; "
+                "AMCL vs GT: gt=(%.3f, %.3f) amcl=(%.3f, %.3f) error=%.3f m / %.3f rad; %s; %s; %s; "
                 "RMS=%.3f m / %.3f rad max=%.3f m / %.3f rad samples=%d"
                 % (expected_x, expected_y, amcl_x, amcl_y, error_xy, error_yaw,
-                   odom_report, ekf_report, rms_xy, rms_yaw, self.max_xy,
+                   current_map_report, odom_report, ekf_report,
+                   rms_xy, rms_yaw, self.max_xy,
                    self.max_yaw, self.samples))
 
         if self.csv_writer is not None:
@@ -367,16 +441,22 @@ class GroundTruthAmclMonitor(Node):
             ox = oy = otheta = math.nan
             if odom_map_pose is not None:
                 ox, oy, otheta = odom_map_pose
+            cx = cy = ctheta = math.nan
+            if current_map_pose is not None:
+                cx, cy, ctheta = current_map_pose
             self.csv_writer.writerow((
                 f"{stamp:.6f}", f"{elapsed:.6f}",
                 f"{expected_x:.6f}", f"{expected_y:.6f}", f"{expected_yaw:.6f}",
                 f"{amcl_x:.6f}", f"{amcl_y:.6f}", f"{amcl_yaw:.6f}",
                 f"{error_xy:.6f}", f"{error_yaw:.6f}",
+                f"{cx:.6f}", f"{cy:.6f}", f"{ctheta:.6f}",
+                f"{current_map_error_xy:.6f}", f"{current_map_error_yaw:.6f}",
                 f"{ex:.6f}", f"{ey:.6f}", f"{etheta:.6f}",
                 f"{ekf_error_xy:.6f}", f"{ekf_error_yaw:.6f}",
                 f"{ox:.6f}", f"{oy:.6f}", f"{otheta:.6f}",
                 f"{odom_error_xy:.6f}", f"{odom_error_yaw:.6f}",
                 f"{self.gt_speed_mps:.6f}",
+                str(self.collision_count if self.collision_count is not None else -1),
             ))
             self.csv_stream.flush()
 

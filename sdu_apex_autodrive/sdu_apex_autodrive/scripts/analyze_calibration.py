@@ -273,11 +273,19 @@ def valid_ground_truth_step(
 
 
 def valid_ground_truth_row(row: dict[str, str]) -> bool:
-    """Reject samples after the open-ground vehicle leaves the world plane."""
+    """Reject samples from an already-collided or invalid truth epoch.
+
+    The simulator collision counter is cumulative. A nonzero value means the
+    recorded pose can include a teleport/reset response rather than physical
+    vehicle motion, so it must not be used to score odometry or localization.
+    Missing collision data remains supported for older recorder files.
+    """
     z = finite(row.get("gt_odom_z_m"))
     if z is None:
         z = finite(row.get("gt_z_m"))
-    return z is None or 0.0 <= z <= 0.20
+    collision_count = finite(row.get("gt_collision_count"))
+    return ((z is None or 0.0 <= z <= 0.20) and
+            (collision_count is None or collision_count <= 0.0))
 
 
 def ground_truth_position(row: dict[str, str]) -> tuple[float | None, float | None]:

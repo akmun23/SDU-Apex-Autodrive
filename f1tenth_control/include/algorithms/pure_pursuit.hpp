@@ -86,6 +86,8 @@ struct PurePursuitOutput {
     Point2D target_point;               // Lookahead point in world frame.
     double lookahead_distance{0.0};     // [m] Selected lookahead distance.
     double cross_track_error{0.0};      // [m] Lateral error from path.
+    double closest_distance{0.0};       // [m] Euclidean distance to projected path.
+    double heading_error{0.0};          // [rad] Path heading minus vehicle heading.
     bool valid{false};                  // Whether the output is valid.
 };
 
@@ -173,6 +175,13 @@ public:
     double getTrajectoryLength() const;
     
 private:
+    struct PathProjection {
+        size_t segment_idx{0};
+        double segment_t{0.0};
+        double distance{std::numeric_limits<double>::infinity()};
+        TrajectoryPoint point{};
+    };
+
     PurePursuitConfig config_;
     std::vector<TrajectoryPoint> trajectory_;
     size_t last_closest_idx_{0};   // Search anchor for closest-point lookup.
@@ -184,6 +193,9 @@ private:
      * @return Index of the selected closest trajectory point.
      */
     size_t findClosestPoint(const Point2D& position);
+
+    /** Project the pose onto the segment adjacent to the progress anchor. */
+    PathProjection projectToPath(size_t anchor_idx, const Point2D& position) const;
     
     /**
      * @brief Create a continuous target point along a trajectory segment.

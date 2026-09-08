@@ -25,6 +25,11 @@ EkfNode::EkfNode(const rclcpp::NodeOptions & options)
 
   pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
     output_topic_, rclcpp::QoS(10).reliable());
+  odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
+    output_odom_topic_, rclcpp::QoS(100).reliable());
+  if (publish_tf_) {
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+  }
 
   const auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -39,8 +44,8 @@ EkfNode::EkfNode(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(
     get_logger(),
-    "Local EKF ready: sensor odom=%s -> %s in frame %s; AMCL is independent; reset events=%s",
-    odom_topic_.c_str(), output_topic_.c_str(), odom_frame_.c_str(),
+    "Local odometry trust filter ready: %s -> %s and %s in frame %s; reset events=%s",
+    odom_topic_.c_str(), output_odom_topic_.c_str(), output_topic_.c_str(), odom_frame_.c_str(),
     reset_enabled_ ? reset_topic_.c_str() : "disabled");
 }
 
@@ -48,24 +53,40 @@ void EkfNode::declare_all_parameters()
 {
   declare_parameter("odom_topic", odom_topic_);
   declare_parameter("output_topic", output_topic_);
+  declare_parameter("output_odom_topic", output_odom_topic_);
   declare_parameter("odom_frame", odom_frame_);
   declare_parameter("process_noise_scale", process_noise_scale_);
+  declare_parameter("process_noise_xy_m2_per_m", process_noise_xy_m2_per_m_);
+  declare_parameter("process_noise_xy_m2_per_s", process_noise_xy_m2_per_s_);
+  declare_parameter("process_noise_yaw2_per_rad", process_noise_yaw2_per_rad_);
+  declare_parameter("process_noise_yaw2_per_m", process_noise_yaw2_per_m_);
   declare_parameter("max_odom_delta_m", max_odom_delta_m_);
   declare_parameter("reset_enabled", reset_enabled_);
   declare_parameter("reset_topic", reset_topic_);
+  declare_parameter("publish_tf", publish_tf_);
 }
 
 void EkfNode::load_parameters()
 {
   odom_topic_ = get_parameter("odom_topic").as_string();
   output_topic_ = get_parameter("output_topic").as_string();
+  output_odom_topic_ = get_parameter("output_odom_topic").as_string();
   odom_frame_ = get_parameter("odom_frame").as_string();
   process_noise_scale_ = std::max(
     0.0, get_parameter("process_noise_scale").as_double());
+  process_noise_xy_m2_per_m_ = std::max(
+    0.0, get_parameter("process_noise_xy_m2_per_m").as_double());
+  process_noise_xy_m2_per_s_ = std::max(
+    0.0, get_parameter("process_noise_xy_m2_per_s").as_double());
+  process_noise_yaw2_per_rad_ = std::max(
+    0.0, get_parameter("process_noise_yaw2_per_rad").as_double());
+  process_noise_yaw2_per_m_ = std::max(
+    0.0, get_parameter("process_noise_yaw2_per_m").as_double());
   max_odom_delta_m_ = std::max(
     1.0, get_parameter("max_odom_delta_m").as_double());
   reset_enabled_ = get_parameter("reset_enabled").as_bool();
   reset_topic_ = get_parameter("reset_topic").as_string();
+  publish_tf_ = get_parameter("publish_tf").as_bool();
 }
 
 Eigen::Matrix3d EkfNode::odom_process_covariance(
@@ -84,16 +105,28 @@ Eigen::Matrix3d EkfNode::odom_process_covariance(
 void EkfNode::predict(
   const Eigen::Vector3d & delta, const Eigen::Matrix3d & q, double dt)
 {
-  const double theta = state_[2];
-  const double c = std::cos(theta);
-  const double s = std::sin(theta);
-  Eigen::Matrix3d f = Eigen::Matrix3d::Identity();
-  f(0, 2) = -delta[0] * s - delta[1] * c;
-  f(1, 2) = delta[0] * c - delta[1] * s;
+  const Eigen::Vector3d previous_state = state_;
+  const double distance = std::hypot(delta[0], delta[1]);
+  const double bounded_dt = std::clamp(dt, 0.0, 0.5);
+  // The covariance on the raw /odom message describes the current absolute
+  // observer uncertainty. It is not a per-sample process covariance; adding
+  // it at every 20 Hz callback would inflate the EKF variance by roughly
+  // 20x per second. Use the configured motion-noise densities for propagation
+  // and retain the raw covariance only as a conservative lower bound below.
+  Eigen::Matrix3d motion_q = Eigen::Matrix3d::Zero();
+  motion_q(0, 0) = process_noise_xy_m2_per_m_ * distance +
+    process_noise_xy_m2_per_s_ * bounded_dt;
+  motion_q(1, 1) = motion_q(0, 0);
+  motion_q(2, 2) = process_noise_yaw2_per_rad_ * std::abs(delta[2]) +
+    process_noise_yaw2_per_m_ * distance;
+  covariance_ = localization_math::propagate_pose_covariance(
+    covariance_, previous_state, delta, process_noise_scale_ * motion_q);
   state_ = math_utils::se2_compose(state_, delta);
-  covariance_ = f * covariance_ * f.transpose() +
-    process_noise_scale_ * std::clamp(dt, 0.0, 0.5) * q;
-  covariance_ = 0.5 * (covariance_ + covariance_.transpose());
+  // The source covariance remains a floor on the propagated uncertainty. It
+  // is never repeatedly injected as process noise.
+  for (int i = 0; i < 3; ++i) {
+    covariance_(i, i) = std::max(covariance_(i, i), q(i, i));
+  }
   covariance_(0, 0) = std::max(kMinVariance, covariance_(0, 0));
   covariance_(1, 1) = std::max(kMinVariance, covariance_(1, 1));
   covariance_(2, 2) = std::max(kMinVariance, covariance_(2, 2));
@@ -146,8 +179,7 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
       // during full braking is intentionally not a discontinuity condition;
       // the sensor odometry and IMU-derived motion remain the source data.
       if (std::hypot(delta[0], delta[1]) > max_odom_delta_m_ ||
-        std::abs(delta[2]) > 3.141592653589793)
-      {
+        std::abs(delta[2]) > 3.141592653589793) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 2000,
           "Ignoring impossible sensor-odometry jump: %.3f m, %.3f rad",
@@ -165,20 +197,22 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
           reset_pending_ = false;
           initialized_ = true;
           publish = true;
+        } else {
+          return;
         }
-        return;
+      } else {
+        previous_odom_ = odom_pose;
+        previous_odom_stamp_ = stamp;
+
+        predict(delta, odom_process_covariance(*msg), dt);
+        publish = true;
       }
-
-      previous_odom_ = odom_pose;
-      previous_odom_stamp_ = stamp;
-
-      predict(delta, odom_process_covariance(*msg), dt);
-      publish = true;
     }
   }
 
   if (publish) {
     publish_pose(stamp);
+    publish_odom(stamp, *msg);
   }
 }
 
@@ -225,6 +259,53 @@ void EkfNode::publish_pose(const rclcpp::Time & stamp)
   c[31] = covariance(2, 1);
   c[35] = covariance(2, 2);
   pose_pub_->publish(output);
+}
+
+void EkfNode::publish_odom(
+  const rclcpp::Time & stamp, const nav_msgs::msg::Odometry & source)
+{
+  Eigen::Vector3d state;
+  Eigen::Matrix3d covariance;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_) {
+      return;
+    }
+    state = state_;
+    covariance = covariance_;
+  }
+
+  nav_msgs::msg::Odometry output;
+  output.header.stamp = stamp;
+  output.header.frame_id = odom_frame_;
+  output.child_frame_id = source.child_frame_id.empty() ? "base_link" : source.child_frame_id;
+  output.pose.pose = math_utils::vec_to_pose(state);
+  output.twist = source.twist;
+  auto & c = output.pose.covariance;
+  std::fill(c.begin(), c.end(), 0.0);
+  c[0] = covariance(0, 0);
+  c[1] = covariance(0, 1);
+  c[5] = covariance(0, 2);
+  c[6] = covariance(1, 0);
+  c[7] = covariance(1, 1);
+  c[11] = covariance(1, 2);
+  c[30] = covariance(2, 0);
+  c[31] = covariance(2, 1);
+  c[35] = covariance(2, 2);
+  output.twist.covariance[0] = std::max(output.twist.covariance[0], 1.0e-6);
+  output.twist.covariance[7] = std::max(output.twist.covariance[7], 1.0e-6);
+  output.twist.covariance[35] = std::max(output.twist.covariance[35], 1.0e-6);
+  odom_pub_->publish(output);
+
+  if (publish_tf_ && tf_broadcaster_) {
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header = output.header;
+    transform.child_frame_id = output.child_frame_id;
+    transform.transform.translation.x = state[0];
+    transform.transform.translation.y = state[1];
+    transform.transform.rotation = output.pose.pose.orientation;
+    tf_broadcaster_->sendTransform(transform);
+  }
 }
 
 }  // namespace gpu_amcl_cpp

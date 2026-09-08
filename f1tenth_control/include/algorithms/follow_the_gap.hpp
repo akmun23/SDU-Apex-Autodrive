@@ -36,6 +36,12 @@ struct FTGConfig {
     double car_width{0.270};         // Full body width (m)
     double rear_overhang{0.080};     // Rear axle to rear bumper (m)
     double lidar_offset_x{0.2733};   // Rear axle to LiDAR origin (m)
+    // Conservative virtual footprint inflation used by obstacle processing.
+    // These margins model the swept front/side envelope without changing the
+    // physical actuator or vehicle model.
+    double virtual_width_inflation{0.0}; // Added to each side (m)
+    double virtual_front_inflation{0.0}; // Added ahead of LiDAR (m)
+    double virtual_rear_inflation{0.0};  // Added behind LiDAR (m)
 
     // -- Speed control --------------------------------------------------------
     double max_speed{2.0};           // Maximum speed (m/s)
@@ -59,10 +65,30 @@ struct FTGConfig {
 
     double clearance_cone_scale{1.5};// Multiplier on car half-width for cone
     double min_score_range{0.3};     // Beams shorter than this get zero score (m)
+    // Select one contiguous free-space opening instead of averaging all
+    // openings. This is useful for slow mapping in hairpins where a global
+    // centroid can cancel symmetric left/right gaps and delay turn-in.
+    bool select_single_gap{false};
+    // In mapping mode, reject a selected target that points into a materially
+    // closer side wall when the opposite side has a valid opening.
+    bool avoid_close_side{false};
+    double close_side_turn_angle{0.22};
+    int gap_switch_confirm_cycles{6};
 
     // -- Safety ---------------------------------------------------------------
     double emergency_brake_distance{0.15}; // Brake if any beam closer (m)
     double footprint_clearance{0.08}; // Extra free space beyond body (m)
+    double side_recovery_distance{0.35}; // Begin turn-away recovery (m)
+    double side_recovery_max_angle{1.20}; // Front-side sector for recovery (rad)
+    double side_recovery_min_steering{0.12}; // Gentle turn-away authority (rad)
+    double side_recovery_full_steering_distance{0.30}; // Full authority below this (m)
+    int recovery_switch_confirm_cycles{4}; // Opposite-side confirmation
+    int recovery_clear_confirm_cycles{5}; // Clear scans before release
+    bool lock_recovery_side_until_clear{false}; // At most one mapping switch
+    // Optional mapping-only commitment for a genuinely front-facing obstacle
+    // when both side sectors are equally open. Zero keeps the measured-side
+    // heuristic; -1/+1 selects the known traversable branch.
+    double ambiguous_front_recovery_sign{0.0};
 
     // -- LiDAR processing -----------------------------------------------------
     double disparity_threshold{0.5}; // Threshold for disparity extension (m)
@@ -85,6 +111,13 @@ struct FTGOutput {
     size_t closest_point_idx{0};     // Index of nearest detected point in processed scan.
     double closest_point_dist{0.0};  // Distance to nearest detected point.
     bool emergency_stop{false};      // True when emergency brake condition is active.
+    bool footprint_clearance_limited{false};  // Tight body margin; slow recovery.
+    bool side_recovery{false};       // Close front-side beam; steer away.
+    double target_angle{0.0};        // Selected free-space target before gain.
+    double raw_steering{0.0};        // Gain/saturation result before rate limiting.
+    double recovery_steering_sign{0.0};
+    double recovery_left_clearance{0.0};
+    double recovery_right_clearance{0.0};
     std::vector<Gap> all_gaps;       // All detected gaps used for diagnostics/visualization.
     ProcessedScan processed_scan;    // Fully processed scan used for command generation.
 };
@@ -151,6 +184,13 @@ private:
     double last_steering_{0.0};
     double smoothed_target_{0.0};
     bool first_compute_{true};
+    double last_single_gap_angle_{0.0};
+    int opposite_gap_cycles_{0};
+    bool has_single_gap_target_{false};
+    double recovery_steering_sign_{0.0};
+    int recovery_opposite_cycles_{0};
+    int recovery_clear_cycles_{0};
+    bool recovery_side_switched_{false};
     std::chrono::steady_clock::time_point last_compute_time_;
 
     // -- LiDAR safety processing ----------------------------------------------

@@ -76,6 +76,15 @@ class ActuatorInterface(Node):
         # accepted raw odometry sample for the hard overspeed interlock so a
         # low-pass filter cannot hide a large target crossing.
         self.raw_speed = None
+        # Source time drives derivatives and controller freshness. Arrival
+        # time is kept separately for the transport watchdog: callback jitter
+        # must not change the physical dt used by the observer, and a
+        # duplicate source sample must not be treated as new control state.
+        self.odom_arrival_time = None
+        self.odom_source_stamp_ns = None
+        self.last_controller_odom_source_stamp_ns = None
+        # Compatibility alias for older diagnostics; runtime freshness uses
+        # odom_arrival_time explicitly.
         self.odom_time = None
         self.acceleration = 0.0
         self.imu_time = None
@@ -92,6 +101,7 @@ class ActuatorInterface(Node):
         )
         self.control_time = None
         self.last_controller_odom_time = None
+        self.last_controller_odom_source_stamp_ns = None
         self.last_neutral_reason = None
         self.external_stop_latched = False
         self.collision_count = None
@@ -106,7 +116,6 @@ class ActuatorInterface(Node):
             0.1, float(self.get_parameter("collision_baseline_stable_sec").value))
         self.reset_release_time = None
         self.reset_release_sent = False
-
         self.steering_pub = self.create_publisher(
             Float32, self.get_parameter("steering_topic").value, 10)
         self.throttle_pub = self.create_publisher(
@@ -382,15 +391,28 @@ class ActuatorInterface(Node):
                 speed > self.max_feedback_speed):
             self.speed = None
             self.raw_speed = None
+            self.odom_arrival_time = None
             self.odom_time = None
+            self.odom_source_stamp_ns = None
             return
-        now = self.get_clock().now()
-        now_sec = now.nanoseconds / 1e9
+        arrival_time = self.get_clock().now()
+        source_stamp_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000 +
+            int(msg.header.stamp.nanosec)
+        )
+        # A zero stamp is invalid for the source-time contract. Keep the
+        # watchdog alive, but use the arrival clock only as an explicit
+        # fallback so malformed telemetry cannot create an enormous dt.
+        if source_stamp_ns <= 0:
+            source_stamp_ns = arrival_time.nanoseconds
+        source_sec = source_stamp_ns / 1e9
         speed = max(0.0, speed)
         self.raw_speed = speed
-        self.speed = self.speed_estimator.update_odometry(speed, now_sec)
+        self.speed = self.speed_estimator.update_odometry(speed, source_sec)
         self.acceleration = self.speed_estimator.acceleration_mps2
-        self.odom_time = now
+        self.odom_arrival_time = arrival_time
+        self.odom_time = arrival_time
+        self.odom_source_stamp_ns = source_stamp_ns
 
     def _on_imu(self, msg: Imu) -> None:
         acceleration = float(msg.linear_acceleration.x)
@@ -514,13 +536,13 @@ class ActuatorInterface(Node):
             return
         if self.command is None or self.command_time is None:
             return self._neutral("no command")
-        if self.speed is None or self.odom_time is None:
+        if self.speed is None or self.odom_arrival_time is None:
             return self._neutral("no odometry")
         if self.raw_speed is None:
             return self._neutral("invalid odometry")
         if (now - self.command_time).nanoseconds / 1e9 > self.command_timeout:
             return self._neutral("command timeout")
-        if (now - self.odom_time).nanoseconds / 1e9 > self.odom_timeout:
+        if (now - self.odom_arrival_time).nanoseconds / 1e9 > self.odom_timeout:
             return self._neutral("odometry timeout")
 
         dt = self.nominal_dt
@@ -530,6 +552,7 @@ class ActuatorInterface(Node):
 
         steering_angle, target_speed, target_accel = self.command
         steering = clamp(steering_angle / self.max_steering, -1.0, 1.0)
+        fresh_odom = False
         if self.command_mode == "acceleration":
             throttle = self.acceleration_controller.update(
                 target_accel, self.speed, self.acceleration, dt)
@@ -546,12 +569,16 @@ class ActuatorInterface(Node):
                 throttle = 0.0
             else:
                 fresh_odom = (
-                    self.last_controller_odom_time is None or
-                    self.odom_time != self.last_controller_odom_time)
+                    self.odom_source_stamp_ns is not None and
+                    (self.last_controller_odom_source_stamp_ns is None or
+                     self.odom_source_stamp_ns !=
+                     self.last_controller_odom_source_stamp_ns))
                 throttle = self.speed_controller.update(
                     target_speed, self.speed, 0.0, dt, self.acceleration,
                     measurement_fresh=fresh_odom)
                 self.last_controller_odom_time = self.odom_time
+                if fresh_odom:
+                    self.last_controller_odom_source_stamp_ns = self.odom_source_stamp_ns
         self._publish(steering, throttle)
         self.last_neutral_reason = None
 

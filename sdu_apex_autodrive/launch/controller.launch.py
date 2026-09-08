@@ -94,6 +94,19 @@ def _setup(context):
             parameters=[{"yaml_filename": map_path}],
         )
         actions.extend([
+            # AMCL consumes this causal covariance-bearing local odometry
+            # stream. Raw /odom stays available for diagnostics and is never
+            # treated as a process covariance by the trust filter.
+            Node(
+                package="f1tenth_localization",
+                executable="ekf_localization_node",
+                name="ekf_localization",
+                output="screen",
+                parameters=[
+                    LaunchConfiguration("ekf_params"),
+                    {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+                ],
+            ),
             map_server,
             # Use a launch-owned lifecycle manager.  Emitting configure and
             # activate events directly can race map_server discovery and leave
@@ -131,19 +144,6 @@ def _setup(context):
                 ],
                 # AMCL and sensor odometry must publish into the same
                 # team-isolated TF tree so map->base_link is available.
-                remappings=[
-                    ("/tf", "/sdu/tf"),
-                    ("/tf_static", "/sdu/tf_static"),
-                ],
-            ),
-            # Local encoder/IMU filter. AMCL remains an independent map-frame
-            # position source and is never passed into this EKF.
-            Node(
-                package="f1tenth_localization",
-                executable="ekf_localization_node",
-                name="ekf_localization",
-                output="screen",
-                parameters=[LaunchConfiguration("ekf_params")],
                 remappings=[
                     ("/tf", "/sdu/tf"),
                     ("/tf_static", "/sdu/tf_static"),
@@ -211,6 +211,10 @@ def _setup(context):
                     "mode": "sensor_record",
                     "output_dir": LaunchConfiguration("telemetry_output_dir"),
                     "duration_sec": LaunchConfiguration("telemetry_duration_sec"),
+                    # Preserve callback-level snapshots as well as the 50 Hz
+                    # timer rows. This is required to reconstruct the exact
+                    # first-turn ordering at native 20 Hz simulator cadence.
+                    "capture_source_events": True,
                 },
             ],
         ))
@@ -268,10 +272,10 @@ def _setup(context):
             emulate_tty=True,
             additional_env={
                 "MPC_ODOM_TOPIC": "/odom",
-                # The existing MPC environment variable names its pose input;
-                # use the independent map-frame AMCL pose now that /ekf_pose
-                # is explicitly local odom-frame output.
-                "MPC_EKF_TOPIC": "/amcl_pose",
+                # The MPC input name is historical. Feed it the current
+                # map-frame pose propagated from AMCL's map->odom correction,
+                # not the scan-time /amcl_pose measurement.
+                "MPC_EKF_TOPIC": "/current_map_pose",
                 "MPC_LOCAL_RACELINE_TOPIC": "/local_raceline",
                 "MPC_DRIVE_TOPIC": "/cmd/acceleration",
                 "MPC_POSE_FRAME": "map",
@@ -403,10 +407,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "amcl_initial_heading_offset",
-            default_value="-0.09",
+            default_value="0.0",
             description=(
-                "Local AMCL startup yaw offset in map radians; calibrated to "
-                "the saved AutoDRIVE map and simulator reset spawn"
+                "Optional local AMCL startup yaw offset in map radians. The "
+                "default is zero so the known-start pose uses the raceline "
+                "heading exactly; only override for a measured frame offset."
             ),
         ),
 

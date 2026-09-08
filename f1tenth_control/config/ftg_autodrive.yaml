@@ -9,6 +9,9 @@ ftg_node:
     car_width: 0.270
     rear_overhang: 0.080
     lidar_offset_x: 0.2733
+    virtual_width_inflation: 0.0
+    virtual_front_inflation: 0.0
+    virtual_rear_inflation: 0.0
 
     max_speed: 1.8
     min_speed: 0.6
@@ -24,9 +27,18 @@ ftg_node:
     score_power: 2.0
     clearance_cone_scale: 1.0
     min_score_range: 0.35
+    select_single_gap: false
+    avoid_close_side: false
+    close_side_turn_angle: 0.22
+    gap_switch_confirm_cycles: 6
 
     emergency_brake_distance: 0.18
     footprint_clearance: 0.08
+    side_recovery_distance: 0.60
+    side_recovery_max_angle: 1.20
+    side_recovery_min_steering: 0.12
+    side_recovery_full_steering_distance: 0.30
+    recovery_switch_confirm_cycles: 4
     disparity_threshold: 0.5
     wall_margin: 0.05
     side_safety_margin: 0.10
