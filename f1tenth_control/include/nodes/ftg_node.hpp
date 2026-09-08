@@ -17,6 +17,7 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <tf2/utils.h>
 
@@ -102,6 +103,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;       // Subscription for enable/disable commands
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;    // Publisher for drive commands
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
     
     // Parameters
 
@@ -166,6 +168,9 @@ private:
      * @return None
      */
     void publishDriveCommand(const DriveCommand& cmd);
+
+    // Publish named, per-scan decision diagnostics for deterministic replay.
+    void publishDiagnostics(const FTGOutput& output);
 
     // Helpers
     

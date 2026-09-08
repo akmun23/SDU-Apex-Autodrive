@@ -1,7 +1,7 @@
-# Weighted Free-Space Follow The Gap (FTG) Configuration
-# ======================================================
-# Steers toward the weighted centroid of all high-scoring directions,
-# naturally centring the car in corridors and biasing toward straight paths.
+# Contiguous-gap Follow The Gap (FTG) mapping configuration
+# =========================================================
+# Selects one connected effective-clearance gap. Disconnected openings are
+# never averaged into a straight command.
 
 ftg_node:
   ros__parameters:
@@ -16,12 +16,10 @@ ftg_node:
     # ===================
     # Speed Control
     # ===================
-    # Speed = min_speed + (max_speed - min_speed) * range_factor * steer_factor
-    # (range_factor and steer_factor are internal normalized terms computed in follow_the_gap.cpp)
-    max_speed: 2.0           # Maximum allowed speed (m/s)
-    min_speed: 1.0           # Minimum speed (m/s) - keeps car moving
-    speed_full_range: 4.0    # Range (m) at which full speed is used
-    steer_slowdown_gain: 0.5 # How much steering reduces speed (0=none, 1=max)
+    max_speed: 0.40          # Initial hairpin mapping ceiling (m/s)
+    min_speed: 0.12          # Crawl speed while a path remains valid (m/s)
+    speed_full_range: 2.0    # Range (m) at which full speed is used
+    steer_slowdown_gain: 1.0 # Full anticipatory steering slowdown
 
     # ===================
     # Steering Control
@@ -29,47 +27,48 @@ ftg_node:
     max_steering: 0.5236          # [rad] AutoDRIVE steering saturation
     steering_gain: 1.0            # Proportional gain on target angle
     max_steering_rate: 3.2        # [rad/s] AutoDRIVE steering-rate limit
-    target_ema_alpha: 0.35        # EMA smoothing (lower = smoother, 1.0 = none)
+    target_ema_alpha: 1.0         # Disabled initially to avoid hairpin delay
 
     # ===================
-    # Weighted Free-Space Scoring
+    # Contiguous-gap scoring
     # ===================
-    # These control how the algorithm picks a steering direction.
-    #
-    # heading_weight        - exponential decay for non-forward directions.
-    #                         Higher values bias toward going straight.
-    #
-    # score_power           - raise effective clearance to this power.
-    #                         Higher = sharper selection, lower = more averaging.
-    #
-    # clearance_cone_scale  - multiplier on car half-width for the safety
-    #                         cone used to compute effective clearance.
-    #                         Higher values = more conservative (wider cone), lower = more aggressive (narrower cone).
-    #
-    # min_score_range       - beams shorter than this (m) are scored as zero.
-    heading_weight: 1.0
-    score_power: 2.0
-    clearance_cone_scale: 1.5
-    min_score_range: 0.3
+    heading_weight: 0.20       # Mild preference for forward gaps
+    score_power: 1.5
+    clearance_cone_scale: 1.05
+    min_score_range: 0.25
+    gap_switch_margin: 0.15    # Relative score advantage before switching branch
+    gap_switch_scans: 2        # Consecutive LiDAR scans required
+
+    # ===================
+    # Ackermann swept-footprint rollout
+    # ===================
+    car_length: 0.510
+    rear_overhang: 0.080
+    lidar_to_rear_axle: 0.2733  # Active mapping TF base_link -> lidar x
+    footprint_margin: 0.03
+    rollout_distance: 1.50
+    rollout_step: 0.05
+    trajectory_min_free_distance: 0.25
+    trajectory_candidate_count: 31
 
     # ===================
     # Safety Parameters
     # ===================
-    emergency_brake_distance: 0.04  # Emergency stop if obstacle closer (m)
+    emergency_brake_distance: 0.10  # Raw-return emergency threshold (m)
 
     # ===================
     # LiDAR Processing
     # ===================
     disparity_threshold: 0.5  # Disparity detection threshold (m)
-    wall_margin: 0.15         # Shrink all readings by this (m) for safety
+    wall_margin: 0.03         # Single explicit geometric wall margin (m)
     gap_threshold: 0.5        # Min range to count as "gap" for visualisation
-    min_gap_width: 0.15       # Min angular gap width for visualisation (rad)
+    min_gap_width: 0.10       # Minimum control-gap width (rad)
 
     # ===================
     # Generic LiDAR Preprocessing
     # ===================
     lidar:
-      range_min: 0.1         # Ignore readings closer than this (m)
+      range_min: 0.06        # Navigation minimum; raw safety runs independently
       range_max: 10.0        # Maximum range to consider (m)
       angle_min: -1.5708     # Min angle to process (rad) = -90 deg
       angle_max: 1.5708      # Max angle to process (rad) = +90 deg

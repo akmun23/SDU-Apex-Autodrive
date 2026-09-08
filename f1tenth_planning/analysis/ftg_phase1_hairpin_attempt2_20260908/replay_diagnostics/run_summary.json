@@ -1,0 +1,19 @@
+{
+  "bag": "/tmp/ftg_replay_output_attempt3_20260908",
+  "odom_rows": 0,
+  "lidar_scans": 0,
+  "lidar_wall_points": 0,
+  "cmd_rows": 0,
+  "steering_command_rows": 0,
+  "throttle_command_rows": 0,
+  "diagnostic_rows": 2609,
+  "path_length_m": 0,
+  "start": null,
+  "end": null,
+  "collision_final": null,
+  "lap_final": null,
+  "topic_counts": {
+    "/replay/cmd": 2609,
+    "/replay/ftg/diagnostics": 2609
+  }
+}

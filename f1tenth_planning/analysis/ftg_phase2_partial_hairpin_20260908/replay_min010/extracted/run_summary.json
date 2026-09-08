@@ -1,0 +1,19 @@
+{
+  "bag": "/workspace/src/f1tenth_planning/analysis/ftg_phase2_partial_hairpin_20260908/replay_min010/raw_output",
+  "odom_rows": 0,
+  "lidar_scans": 0,
+  "lidar_wall_points": 0,
+  "cmd_rows": 0,
+  "steering_command_rows": 0,
+  "throttle_command_rows": 0,
+  "diagnostic_rows": 3904,
+  "path_length_m": 0,
+  "start": null,
+  "end": null,
+  "collision_final": null,
+  "lap_final": null,
+  "topic_counts": {
+    "/replay/cmd": 3904,
+    "/replay/ftg/diagnostics": 3904
+  }
+}

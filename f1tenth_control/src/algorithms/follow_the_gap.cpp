@@ -18,6 +18,12 @@ void FollowTheGap::reset() {
     last_steering_ = 0.0;
     smoothed_target_ = 0.0;
     first_compute_ = true;
+    last_source_stamp_s_ = 0.0;
+    has_source_stamp_ = false;
+    has_selected_gap_ = false;
+    previous_gap_angle_ = 0.0;
+    previous_gap_score_ = 0.0;
+    pending_alternative_count_ = 0;
 }
 
 // =====================================================================
@@ -28,27 +34,27 @@ FTGOutput FollowTheGap::compute(
     const std::vector<float>& ranges,
     double angle_min,
     double angle_max,
-    double angle_increment
+    double angle_increment,
+    double source_stamp_s
 ) {
     FTGOutput output;
+    output.source_stamp_s = std::isfinite(source_stamp_s) ? source_stamp_s : 0.0;
 
-    // --- Time step ---
-    auto now = std::chrono::steady_clock::now();
-    double dt = 0.025;  // default ~40 Hz
-
-    // Calculate actual dt on subsequent calls for time-based rate limiting
-    if (!first_compute_) {
-        dt = std::chrono::duration<double>(now - last_compute_time_).count();
-        dt = std::clamp(dt, 0.001, 0.5);
-    }
-    last_compute_time_ = now;
+    // Steering-rate limiting is driven by the LiDAR source clock, never by
+    // executor scheduling. Calls without a source stamp use a fixed test step.
+    const double dt = computeDeltaTime(source_stamp_s);
 
     // --- Handle empty scan ---
     if (ranges.empty()) {
         output.emergency_stop = true;
+        output.no_path = true;
         output.command = DriveCommand(0.0, 0.0);
         return output;
     }
+
+    double raw_closest_range = std::numeric_limits<double>::infinity();
+    const bool raw_emergency = rawEmergency(ranges, raw_closest_range);
+    output.closest_point_dist = raw_closest_range;
 
     // --- Step 1: Generic LiDAR preprocessing (median filter, range clip) ---
     ProcessedScan scan = lidar_processor_.processScan(
@@ -58,7 +64,9 @@ FTGOutput FollowTheGap::compute(
     // If no valid points after preprocessing, trigger emergency stop
     if (scan.filtered_ranges.empty()) {
         output.emergency_stop = true;
+        output.no_path = true;
         output.command = DriveCommand(0.0, 0.0);
+        output.processed_scan = scan;
         return output;
     }
 
@@ -71,10 +79,13 @@ FTGOutput FollowTheGap::compute(
 
     // --- Step 3: Closest-point detection ---
     output.closest_point_idx = lidar_processor_.findClosestPoint(scan);
-    output.closest_point_dist = scan.filtered_ranges[output.closest_point_idx];
+    if (!std::isfinite(output.closest_point_dist)) {
+        output.closest_point_dist = scan.filtered_ranges[output.closest_point_idx];
+    }
 
-    // Check if closest point is below emergency brake threshold
-    if (output.closest_point_dist < config_.emergency_brake_distance) {
+    // Check raw returns before range_min/median preprocessing can hide a close
+    // obstacle. This is independent from navigation clearance processing.
+    if (raw_emergency) {
         output.emergency_stop = true;
         output.command = DriveCommand(0.0, 0.0);
         output.processed_scan = scan;
@@ -90,31 +101,73 @@ FTGOutput FollowTheGap::compute(
     // --- Step 5: Compute effective clearance per beam ---
     std::vector<double> eff_clearance = computeEffectiveClearance(scan);
 
-    // --- Step 6: Compute weighted-centroid target angle ---
-    double target_angle = computeTargetAngle(scan, eff_clearance);
-
-    // --- Step 7: EMA smoothing on the target angle ---
-    // Not applied on first compute
-    // Then creates a smoothing effect that helps prevent 
-    // oscillations when target angle changes rapidly between 
-    // different directions.
-    if (first_compute_) {
-        smoothed_target_ = target_angle;
-        first_compute_ = false;
-    } else {
-        smoothed_target_ = config_.target_ema_alpha * target_angle + (1.0 - config_.target_ema_alpha) * smoothed_target_;
+    // --- Step 6: Find and select exactly one connected control gap ---
+    output.drivable_gaps = findDrivableGaps(scan, eff_clearance);
+    if (output.drivable_gaps.empty()) {
+        has_selected_gap_ = false;
+        pending_alternative_count_ = 0;
+        output.no_path = true;
+        output.command = DriveCommand(0.0, 0.0);
+        output.all_gaps = findGapsForViz(scan);
+        output.selected_gap = findBestGapForViz(output.all_gaps);
+        output.processed_scan = scan;
+        return output;
     }
 
-    // Find raw steering command from smoothed target, applying gain and saturation
-    double raw_steering = std::clamp(
+    output.selected_drivable_gap = selectDrivableGap(output.drivable_gaps);
+    output.has_selected_drivable_gap = true;
+    const TargetResult target = computeTargetAngle(output.selected_drivable_gap);
+    if (!target.valid) {
+        output.no_path = true;
+        output.command = DriveCommand(0.0, 0.0);
+        output.processed_scan = scan;
+        return output;
+    }
+    output.raw_target_angle = target.angle;
+
+    // --- Step 7: EMA smoothing on the target angle ---
+    if (first_compute_) {
+        smoothed_target_ = target.angle;
+        first_compute_ = false;
+    } else {
+        const double alpha = std::clamp(config_.target_ema_alpha, 0.0, 1.0);
+        smoothed_target_ = alpha * target.angle + (1.0 - alpha) * smoothed_target_;
+    }
+    output.smoothed_target_angle = smoothed_target_;
+
+    // Raw demand is retained separately because speed must react before the
+    // physical steering-rate limit catches up.
+    const double desired_steering = std::clamp(
         config_.steering_gain * smoothed_target_,
         -config_.max_steering,
         config_.max_steering
     );
 
+    // Validate the requested branch against the vehicle footprint, not merely
+    // against individual LiDAR rays. A target can be ray-clear while the
+    // swept car body still clips the inside of a hairpin.
+    const TrajectoryResult trajectory = selectTrajectory(
+        ranges, angle_min, angle_increment, desired_steering);
+    output.trajectory_free_distance = trajectory.free_distance;
+    output.trajectory_min_clearance = trajectory.min_clearance;
+    output.trajectory_collision_free = trajectory.collision_free;
+    if (!trajectory.valid) {
+        output.no_path = true;
+        output.command = DriveCommand(0.0, 0.0);
+        last_steering_ = 0.0;
+        output.all_gaps = findGapsForViz(scan);
+        output.selected_gap = findBestGapForViz(output.all_gaps);
+        output.processed_scan = scan;
+        return output;
+    }
+
+    const double raw_steering = trajectory.steering;
+    output.raw_steering = raw_steering;
+
     // --- Step 8: Time-based steering rate limiting ---
     double steering = rateLimitSteering(raw_steering, last_steering_, dt);
     last_steering_ = steering;
+    output.rate_limited_steering = steering;
 
     // --- Step 9: Speed from forward clearance + steering ---
     // Forward clearance: average effective clearance in the central ±10 deg cone
@@ -130,11 +183,30 @@ FTGOutput FollowTheGap::compute(
             ++fwd_count;
         }
     }
-    // If no valid beams in forward cone, assume some small clearance to avoid zero speed
-    fwd_clearance = (fwd_count > 0) ? fwd_clearance / fwd_count : 0.5;
+    if (fwd_count > 0) {
+        fwd_clearance /= static_cast<double>(fwd_count);
+    }
+    // The rollout is the authoritative forward safety horizon. This also
+    // handles scans whose usable navigation sector has no central beam.
+    if (trajectory.free_distance > 0.0) {
+        fwd_clearance = fwd_count > 0
+            ? std::min(fwd_clearance, trajectory.free_distance)
+            : trajectory.free_distance;
+    }
+    output.forward_clearance = fwd_clearance;
 
-    // Calculate speed command based on forward clearance and steering angle
-    double speed = calculateSpeed(fwd_clearance, steering);
+    // Use demanded steering for anticipatory slowdown while the actuator is
+    // still ramping toward the requested turn.
+    const double speed_steering = std::max(std::abs(raw_steering), std::abs(steering));
+    double speed = calculateSpeed(fwd_clearance, speed_steering);
+    if (!trajectory.collision_free) {
+        // A partial rollout is usable only as a cautious escape/cornering
+        // command. Never let the normal mapping speed exceed the distance
+        // that the swept footprint has actually verified.
+        speed = std::min(
+            speed,
+            std::max(config_.min_speed, 0.5 * trajectory.free_distance));
+    }
     output.command = DriveCommand(speed, steering);
 
     // --- Step 10: Populate gaps for visualisation ---
@@ -143,6 +215,177 @@ FTGOutput FollowTheGap::compute(
     output.processed_scan = scan;
 
     return output;
+}
+
+FollowTheGap::TrajectoryResult FollowTheGap::selectTrajectory(
+    const std::vector<float>& ranges,
+    double angle_min,
+    double angle_increment,
+    double desired_steering
+) const {
+    TrajectoryResult best;
+    TrajectoryResult best_observed;
+    best.free_distance = 0.0;
+    best.min_clearance = 0.0;
+
+    if (ranges.empty()
+        || !std::isfinite(angle_min)
+        || !std::isfinite(angle_increment)
+        || std::abs(angle_increment) < 1e-9
+        || config_.wheelbase <= 0.0
+        || config_.rollout_distance <= 0.0
+        || config_.rollout_step <= 0.0
+        || config_.trajectory_candidate_count < 1) {
+        return best;
+    }
+
+    struct Point {
+        double x;
+        double y;
+    };
+    std::vector<Point> obstacles;
+    obstacles.reserve(ranges.size());
+    const double min_range = std::max(0.0, config_.lidar_config.range_min);
+    const double max_range = std::max(min_range, config_.lidar_config.range_max);
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const double range = static_cast<double>(ranges[i]);
+        if (!std::isfinite(range) || range < min_range || range > max_range) {
+            continue;
+        }
+        const double angle = angle_min + static_cast<double>(i) * angle_increment;
+        if (!std::isfinite(angle)) continue;
+        obstacles.push_back({
+            config_.lidar_to_rear_axle + range * std::cos(angle),
+            range * std::sin(angle),
+        });
+    }
+
+    const int candidate_count = std::max(1, config_.trajectory_candidate_count);
+    const double half_width = 0.5 * config_.car_width
+        + std::max(0.0, config_.footprint_margin);
+    const double x_min = -std::max(0.0, config_.rear_overhang)
+        - std::max(0.0, config_.footprint_margin);
+    const double x_max = config_.car_length
+        - std::max(0.0, config_.rear_overhang)
+        + std::max(0.0, config_.footprint_margin);
+    const double target = std::clamp(
+        desired_steering, -config_.max_steering, config_.max_steering);
+
+    auto better = [&](const TrajectoryResult& candidate,
+                      const TrajectoryResult& incumbent) {
+        if (!incumbent.valid) return true;
+        const double candidate_progress = candidate.free_distance
+            / std::max(config_.rollout_distance, 1e-9);
+        const double incumbent_progress = incumbent.free_distance
+            / std::max(config_.rollout_distance, 1e-9);
+        if (std::abs(candidate_progress - incumbent_progress) > 1e-9) {
+            return candidate_progress > incumbent_progress;
+        }
+        const double candidate_target_error = std::abs(candidate.steering - target);
+        const double incumbent_target_error = std::abs(incumbent.steering - target);
+        if (std::abs(candidate_target_error - incumbent_target_error) > 1e-9) {
+            return candidate_target_error < incumbent_target_error;
+        }
+        return candidate.min_clearance > incumbent.min_clearance;
+    };
+
+    for (int candidate_index = 0; candidate_index < candidate_count; ++candidate_index) {
+        const double fraction = candidate_count == 1
+            ? 0.5
+            : static_cast<double>(candidate_index)
+                / static_cast<double>(candidate_count - 1);
+        const double steering = -config_.max_steering
+            + 2.0 * config_.max_steering * fraction;
+        const double curvature = std::tan(steering) / config_.wheelbase;
+
+        double free_distance = config_.rollout_distance;
+        double min_clearance = std::numeric_limits<double>::infinity();
+        bool collision = false;
+        const int steps = std::max(
+            1, static_cast<int>(std::ceil(
+                config_.rollout_distance / config_.rollout_step)));
+        for (int step = 0; step <= steps; ++step) {
+            const double distance = std::min(
+                config_.rollout_distance,
+                static_cast<double>(step) * config_.rollout_step);
+            double pose_x = distance;
+            double pose_y = 0.0;
+            double pose_yaw = 0.0;
+            if (std::abs(curvature) > 1e-9) {
+                pose_x = std::sin(curvature * distance) / curvature;
+                pose_y = (1.0 - std::cos(curvature * distance)) / curvature;
+                pose_yaw = curvature * distance;
+            }
+            const double cos_yaw = std::cos(pose_yaw);
+            const double sin_yaw = std::sin(pose_yaw);
+
+            for (const auto& point : obstacles) {
+                const double dx = point.x - pose_x;
+                const double dy = point.y - pose_y;
+                const double local_x = cos_yaw * dx + sin_yaw * dy;
+                const double local_y = -sin_yaw * dx + cos_yaw * dy;
+                const double outside_x = std::max({x_min - local_x, 0.0, local_x - x_max});
+                const double outside_y = std::max(std::abs(local_y) - half_width, 0.0);
+                const double clearance = std::hypot(outside_x, outside_y);
+                min_clearance = std::min(min_clearance, clearance);
+                if (local_x >= x_min && local_x <= x_max
+                    && std::abs(local_y) <= half_width) {
+                    collision = true;
+                    free_distance = std::min(free_distance, distance);
+                    break;
+                }
+            }
+            if (collision) break;
+        }
+
+        if (!std::isfinite(min_clearance)) {
+            min_clearance = config_.rollout_distance;
+        }
+        TrajectoryResult candidate;
+        candidate.valid = free_distance
+            >= std::max(0.0, config_.trajectory_min_free_distance);
+        candidate.collision_free = !collision;
+        candidate.steering = steering;
+        candidate.free_distance = free_distance;
+        candidate.min_clearance = min_clearance;
+        if (better(candidate, best_observed)) best_observed = candidate;
+        if (candidate.valid && better(candidate, best)) best = candidate;
+    }
+
+    if (!best.valid) return best_observed;
+    return best;
+}
+
+double FollowTheGap::computeDeltaTime(double source_stamp_s) {
+    constexpr double DEFAULT_DT = 0.025;
+    if (!std::isfinite(source_stamp_s)) {
+        return DEFAULT_DT;
+    }
+
+    double dt = DEFAULT_DT;
+    if (has_source_stamp_) {
+        const double source_dt = source_stamp_s - last_source_stamp_s_;
+        if (source_dt > 0.0 && std::isfinite(source_dt)) {
+            dt = std::clamp(source_dt, 0.001, 0.5);
+        }
+    }
+    last_source_stamp_s_ = source_stamp_s;
+    has_source_stamp_ = true;
+    return dt;
+}
+
+bool FollowTheGap::rawEmergency(
+    const std::vector<float>& ranges,
+    double& closest_range
+) const {
+    closest_range = std::numeric_limits<double>::infinity();
+    for (const float raw_range : ranges) {
+        const double range = static_cast<double>(raw_range);
+        if (!std::isfinite(range)) continue;
+        closest_range = std::min(closest_range, range);
+    }
+    return std::isfinite(closest_range)
+        && closest_range <= config_.emergency_brake_distance;
 }
 
 // =====================================================================
@@ -289,44 +532,166 @@ std::vector<double> FollowTheGap::computeEffectiveClearance(const ProcessedScan&
     return eff;
 }
 
-double FollowTheGap::computeTargetAngle(
+std::vector<DrivableGap> FollowTheGap::findDrivableGaps(
     const ProcessedScan& scan,
     const std::vector<double>& eff_clearance
-) {
-    // Initialize accumulators for weighted average
-    const size_t n = scan.filtered_ranges.size();
+) const {
+    std::vector<DrivableGap> gaps;
+    if (scan.filtered_ranges.empty()) return gaps;
+
     const auto& lidar_config = lidar_processor_.getConfig();
+    const size_t n = scan.filtered_ranges.size();
 
-    double sum_score = 0.0;
-    double sum_weighted_angle = 0.0;
+    auto append_gap = [&](size_t start_idx, size_t end_idx) {
+        if (end_idx < start_idx) return;
+        DrivableGap gap;
+        gap.start_idx = start_idx;
+        gap.end_idx = end_idx;
+        gap.start_angle = scan.angles[start_idx];
+        gap.end_angle = scan.angles[end_idx];
+        gap.angular_width = std::abs(gap.end_angle - gap.start_angle);
+        if (gap.angular_width < config_.min_gap_width) return;
 
-    // Loop through all beams and compute score based on effective clearance and heading
-    for (size_t i = 0; i < n; ++i) {
-        double angle = scan.angles[i];
+        double weighted_sum = 0.0;
+        double weight_sum = 0.0;
+        double clearance_sum = 0.0;
+        size_t count = 0;
+        size_t deepest_idx = start_idx;
 
-        // Skip beams outside the configured angular processing range or invalid beams
-        if (angle < lidar_config.angle_min || angle > lidar_config.angle_max) continue;
+        for (size_t i = start_idx; i <= end_idx; ++i) {
+            const double clearance = eff_clearance[i];
+            const double angle = scan.angles[i];
+            const double beam_score = std::pow(
+                std::max(clearance, 0.0), config_.score_power)
+                * std::exp(-config_.heading_weight * std::abs(angle));
+            weighted_sum += angle * beam_score;
+            weight_sum += beam_score;
+            clearance_sum += clearance;
+            ++count;
+            if (clearance > eff_clearance[deepest_idx]
+                || (clearance == eff_clearance[deepest_idx]
+                    && std::abs(angle) < std::abs(scan.angles[deepest_idx]))) {
+                deepest_idx = i;
+            }
+            gap.max_clearance = std::max(gap.max_clearance, clearance);
+        }
 
-        double clearance = eff_clearance[i];
-        // Skip beams that are too close to be considered drivable
-        if (clearance < config_.min_score_range) continue;
+        gap.mean_clearance = count > 0 ? clearance_sum / static_cast<double>(count) : 0.0;
+        gap.weighted_center_angle = weight_sum > 1e-12
+            ? weighted_sum / weight_sum
+            : (gap.start_angle + gap.end_angle) / 2.0;
+        gap.deepest_angle = scan.angles[deepest_idx];
+        const double representative =
+            0.5 * gap.weighted_center_angle + 0.5 * gap.deepest_angle;
+        gap.score = std::pow(std::max(gap.max_clearance, 0.0), config_.score_power)
+            * gap.angular_width
+            * std::exp(-config_.heading_weight * std::abs(representative));
+        gaps.push_back(gap);
+    };
 
-        // Score = (clearance - min_score_range) ^ power  *  exp(-heading_weight * |angle|)
-        double base = clearance - config_.min_score_range;
-        double score = std::pow(base, config_.score_power)
-                     * std::exp(-config_.heading_weight * std::abs(angle));
+    bool in_gap = false;
+    size_t start_idx = 0;
+    for (size_t i = 0; i <= n; ++i) {
+        const bool usable = i < n
+            && scan.valid[i]
+            && scan.angles[i] >= lidar_config.angle_min
+            && scan.angles[i] <= lidar_config.angle_max
+            && eff_clearance[i] >= config_.min_score_range;
 
-        // Accumulate weighted angle and total score
-        sum_score += score;
-        sum_weighted_angle += angle * score;
+        if (usable && !in_gap) {
+            start_idx = i;
+            in_gap = true;
+        } else if (!usable && in_gap) {
+            append_gap(start_idx, i - 1);
+            in_gap = false;
+        }
+    }
+    return gaps;
+}
+
+DrivableGap FollowTheGap::selectDrivableGap(const std::vector<DrivableGap>& gaps) {
+    if (gaps.empty()) return DrivableGap();
+
+    const DrivableGap* best = &gaps.front();
+    for (const auto& gap : gaps) {
+        if (gap.score > best->score
+            || (gap.score == best->score
+                && std::abs(gap.weighted_center_angle)
+                    < std::abs(best->weighted_center_angle))) {
+            best = &gap;
+        }
     }
 
-    if (sum_score < 1e-9) {
-        // No drivable direction found — default to straight ahead
-        return 0.0;
+    const DrivableGap* incumbent = nullptr;
+    double incumbent_distance = std::numeric_limits<double>::infinity();
+    if (has_selected_gap_) {
+        for (const auto& gap : gaps) {
+            const double distance = std::abs(gap.weighted_center_angle - previous_gap_angle_);
+            if (distance < incumbent_distance) {
+                incumbent_distance = distance;
+                incumbent = &gap;
+            }
+        }
+        // A gap farther than this is a different local branch, not the same
+        // corridor moving slightly due to scan noise.
+        if (incumbent_distance > 0.35) incumbent = nullptr;
     }
 
-    return sum_weighted_angle / sum_score;
+    const bool substantially_different = has_selected_gap_
+        && std::abs(best->weighted_center_angle - previous_gap_angle_) > 0.35;
+    const DrivableGap* selected = best;
+    if (substantially_different && incumbent != nullptr) {
+        const double incumbent_score = incumbent->score;
+        const bool strong_alternative = best->score
+            > incumbent_score * (1.0 + std::max(0.0, config_.gap_switch_margin));
+        if (strong_alternative) {
+            ++pending_alternative_count_;
+        } else {
+            pending_alternative_count_ = 0;
+        }
+        const int required_scans = std::max(1, config_.gap_switch_scans);
+        if (pending_alternative_count_ < required_scans) {
+            selected = incumbent;
+        } else {
+            pending_alternative_count_ = 0;
+        }
+    } else {
+        pending_alternative_count_ = 0;
+    }
+
+    has_selected_gap_ = true;
+    previous_gap_angle_ = selected->weighted_center_angle;
+    previous_gap_score_ = selected->score;
+    return *selected;
+}
+
+TargetResult FollowTheGap::computeTargetAngle(const DrivableGap& gap) const {
+    TargetResult result;
+    if (gap.angular_width < config_.min_gap_width) return result;
+
+    // In a wide hairpin entrance the deepest return can belong to the dead
+    // corner while the gap centre already points toward the continuation.
+    // Averaging opposing, shallow directions would cancel them into a
+    // straight command. Preserve the centre direction in that case; retain
+    // the normal deepest-point blend for a decisive turn.
+    const bool opposing_directions =
+        gap.weighted_center_angle * gap.deepest_angle < 0.0;
+    const bool shallow_deepest_return = std::abs(gap.deepest_angle) < 0.30;
+    // Keep even a small non-zero centre direction: at a deep hairpin the
+    // deepest return can oppose it and cancelling both into zero sends the
+    // car straight into the corner.
+    const bool meaningful_centre_direction =
+        std::abs(gap.weighted_center_angle) > 0.02;
+    const bool wide_gap = gap.angular_width > 2.5;
+    const double target = opposing_directions
+        && shallow_deepest_return
+        && meaningful_centre_direction
+        && wide_gap
+        ? gap.weighted_center_angle
+        : 0.5 * gap.weighted_center_angle + 0.5 * gap.deepest_angle;
+    result.valid = true;
+    result.angle = std::clamp(target, gap.start_angle, gap.end_angle);
+    return result;
 }
 
 // =====================================================================

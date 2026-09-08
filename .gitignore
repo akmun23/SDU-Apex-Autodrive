@@ -41,3 +41,4 @@ sdu_apex_autodrive/artifacts/calibration/derived/**
 sdu_apex_autodrive/artifacts/calibration/derived/**/sensor_fusion_model*.hpp
 sdu_apex_autodrive/artifacts/calibration/derived/identification_grid_stop_gate_40hz_20260904/**
 sdu_apex_autodrive/artifacts/calibration/derived/odom_fusion_train_full_holdout_observer_median_20260904/**
+/f1tenth_planning/analysis/ftg_phase2_partial_hairpin_20260908/replay_final2/extracted

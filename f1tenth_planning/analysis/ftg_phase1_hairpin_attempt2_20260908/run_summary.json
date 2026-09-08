@@ -1,0 +1,48 @@
+{
+  "bag": "/tmp/ftg_phase1_hairpin_attempt2_20260908",
+  "odom_rows": 2609,
+  "lidar_scans": 2609,
+  "lidar_wall_points": 2803044,
+  "cmd_rows": 2609,
+  "steering_command_rows": 5237,
+  "throttle_command_rows": 5237,
+  "path_length_m": 45.83318372150055,
+  "start": [
+    0.8006,
+    3.1583
+  ],
+  "end": [
+    -4.7652,
+    -2.9572
+  ],
+  "collision_final": 1,
+  "lap_final": 0,
+  "topic_counts": {
+    "/rosout": 62,
+    "/sdu/tf_static": 6,
+    "/parameter_events": 147,
+    "/sdu/mapping_complete": 2,
+    "/autodrive/roboracer_1/throttle": 2609,
+    "/autodrive/roboracer_1/steering": 2609,
+    "/autodrive/roboracer_1/left_encoder": 2609,
+    "/autodrive/roboracer_1/right_encoder": 2609,
+    "/autodrive/roboracer_1/ips": 2609,
+    "/autodrive/roboracer_1/imu": 2609,
+    "/autodrive/roboracer_1/odom": 2609,
+    "/sdu/tf": 14371,
+    "/tf": 2609,
+    "/autodrive/roboracer_1/lidar": 2609,
+    "/autodrive/roboracer_1/lap_count": 2609,
+    "/autodrive/roboracer_1/best_lap_time": 2609,
+    "/autodrive/roboracer_1/last_lap_time": 2609,
+    "/autodrive/roboracer_1/lap_time": 2609,
+    "/autodrive/roboracer_1/collision_count": 2609,
+    "/cmd/speed": 2609,
+    "/autodrive/roboracer_1/steering_command": 5237,
+    "/autodrive/roboracer_1/throttle_command": 5237,
+    "/autodrive/roboracer_1/bridge_packet_timing": 2607,
+    "/pose": 379,
+    "/map": 262,
+    "/map_metadata": 262
+  }
+}
