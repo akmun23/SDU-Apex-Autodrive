@@ -11,10 +11,13 @@ using f1tenth_control::FTGConfig;
 using f1tenth_control::FollowTheGap;
 
 constexpr std::size_t kSamples = 181;
+constexpr std::size_t kWideSamples = 1081;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kAngleMin = -kPi / 2.0;
 constexpr double kAngleIncrement = kPi / 180.0;
 constexpr double kAngleMax = kPi / 2.0;
+constexpr double kWideAngleMin = -2.35619449019;
+constexpr double kWideAngleMax = 2.35619449019;
 
 std::vector<float> scanWithOpening(double lower, double upper,
                                    float wall = 0.10F) {
@@ -43,6 +46,7 @@ FTGConfig testConfig() {
   config.emergency_brake_distance = 0.10;
   config.footprint_clearance = 0.0;
   config.side_recovery_distance = 0.10;
+  config.side_recovery_front_angle = 1.20;
   config.side_recovery_max_angle = 1.20;
   config.disparity_threshold = 100.0;
   config.wall_margin = 0.0;
@@ -89,10 +93,156 @@ TEST(FollowTheGapRegression, RecoversFromFrontSideBeamAcrossFullSector) {
   EXPECT_LT(output.command.steering_angle, -config.side_recovery_min_steering);
 }
 
+TEST(FollowTheGapRegression, RearContextSelectsOpenHairpinBranch) {
+  auto config = testConfig();
+  config.side_recovery_distance = 1.0;
+  config.side_recovery_front_angle = 1.20;
+  config.side_recovery_max_angle = 1.20;
+  config.use_rear_context = true;
+  config.rear_context_min_angle = kPi / 2.0;
+  config.rear_context_max_angle = 2.35619449019;
+  config.rear_context_min_advantage = 0.20;
+  // Keep the normal controller validity window at the forward +/-90 deg.
+  // Rear context must still be read from the raw 270 deg input scan.
+  config.lidar_config.angle_min = kAngleMin;
+  config.lidar_config.angle_max = kAngleMax;
+  FollowTheGap controller(config);
+
+  auto ranges = std::vector<float>(kWideSamples, 8.0F);
+  const auto beamFor = [](double angle) {
+    return static_cast<std::size_t>(
+      std::llround((angle - kWideAngleMin) / kAngleIncrement));
+  };
+  // A closed front corner with substantially more room on the left-rear
+  // branch. The rear points must select the branch without being treated as a
+  // forward target or emergency obstacle.
+  ranges[beamFor(0.0)] = 0.80F;
+  ranges[beamFor(2.0)] = 3.0F;
+  ranges[beamFor(-2.0)] = 1.50F;
+
+  const auto output = controller.compute(
+    ranges, kWideAngleMin, kWideAngleMax, kAngleIncrement);
+
+  EXPECT_TRUE(output.side_recovery);
+  EXPECT_GT(output.recovery_rear_left_clearance,
+            output.recovery_rear_right_clearance + 0.20);
+  EXPECT_GT(output.recovery_steering_sign, 0.0);
+  EXPECT_GT(output.raw_steering, 0.0);
+}
+
+TEST(FollowTheGapRegression, RearContextHoldsBranchWhileVehicleRotates) {
+  auto config = testConfig();
+  config.side_recovery_distance = 1.0;
+  config.side_recovery_front_angle = 1.20;
+  config.side_recovery_max_angle = 1.20;
+  config.lock_recovery_side_until_clear = true;
+  config.use_rear_context = true;
+  config.rear_context_min_angle = kPi / 2.0;
+  config.rear_context_max_angle = 2.35619449019;
+  config.rear_context_min_advantage = 0.20;
+  config.lidar_config.angle_min = kAngleMin;
+  config.lidar_config.angle_max = kAngleMax;
+  FollowTheGap controller(config);
+
+  auto left_open = std::vector<float>(kWideSamples, 8.0F);
+  const auto beamFor = [](double angle) {
+    return static_cast<std::size_t>(
+      std::llround((angle - kWideAngleMin) / kAngleIncrement));
+  };
+  left_open[beamFor(0.0)] = 0.80F;
+  left_open[beamFor(2.0)] = 3.0F;
+  left_open[beamFor(-2.0)] = 1.50F;
+  const auto first = controller.compute(
+    left_open, kWideAngleMin, kWideAngleMax, kAngleIncrement);
+  ASSERT_GT(first.recovery_steering_sign, 0.0);
+
+  auto right_open = left_open;
+  right_open[beamFor(0.0)] = 0.70F;
+  right_open[beamFor(2.0)] = 1.50F;
+  right_open[beamFor(-2.0)] = 3.0F;
+  const auto rotating = controller.compute(
+    right_open, kWideAngleMin, kWideAngleMax, kAngleIncrement);
+
+  EXPECT_GT(rotating.recovery_steering_sign, 0.0);
+  EXPECT_GT(rotating.raw_steering, 0.0);
+}
+
+TEST(FollowTheGapRegression, RearContextIgnoresInvalidMinimumReturns) {
+  auto config = testConfig();
+  config.side_recovery_distance = 1.0;
+  config.side_recovery_front_angle = 1.20;
+  config.side_recovery_max_angle = 1.20;
+  config.use_rear_context = true;
+  config.rear_context_min_range = 0.20;
+  config.lidar_config.angle_min = kAngleMin;
+  config.lidar_config.angle_max = kAngleMax;
+  config.lidar_config.apply_median_filter = false;
+  FollowTheGap controller(config);
+
+  auto ranges = std::vector<float>(kWideSamples, 8.0F);
+  const auto beamFor = [](double angle) {
+    return static_cast<std::size_t>(
+      std::llround((angle - kWideAngleMin) / kAngleIncrement));
+  };
+  ranges[beamFor(0.0)] = 0.80F;
+  // The right-rear minimum is a common invalid/min-range sentinel. It must
+  // not make the left branch appear open by comparison.
+  for (const double angle : {-1.6, -1.8, -2.0, -2.2}) {
+    ranges[beamFor(angle)] = 0.05F;
+  }
+  ranges[beamFor(2.0)] = 1.50F;
+
+  const auto output = controller.compute(
+    ranges, kWideAngleMin, kWideAngleMax, kAngleIncrement);
+
+  EXPECT_NEAR(output.recovery_rear_right_clearance, 8.0, 1.0e-9);
+  EXPECT_NEAR(output.recovery_rear_left_clearance, 1.50, 1.0e-9);
+}
+
+TEST(FollowTheGapRegression, RecoveryBuildsAuthorityBeforePhysicalCorner) {
+  auto config = testConfig();
+  config.side_recovery_distance = 0.90;
+  config.side_recovery_min_steering = 0.32;
+  config.side_recovery_full_steering_distance = 0.70;
+  FollowTheGap controller(config);
+
+  auto ranges = std::vector<float>(kSamples, 8.0F);
+  const std::size_t beam = static_cast<std::size_t>(
+      (0.75 - kAngleMin) / kAngleIncrement);
+  ranges[beam] = 0.75F;
+
+  const auto output = controller.compute(
+      ranges, kAngleMin, kAngleMax, kAngleIncrement);
+
+  EXPECT_TRUE(output.side_recovery);
+  EXPECT_LT(output.raw_steering, -0.40);
+  EXPECT_LT(output.command.steering_angle, -0.40);
+}
+
+TEST(FollowTheGapRegression, SideBoundaryOutsideFrontRecoveryDoesNotOverrideGap) {
+  auto config = testConfig();
+  config.side_recovery_distance = 0.80;
+  config.side_recovery_front_angle = 0.50;
+  FollowTheGap controller(config);
+
+  auto ranges = std::vector<float>(kSamples, 8.0F);
+  const std::size_t side_beam = static_cast<std::size_t>(
+      (0.80 - kAngleMin) / kAngleIncrement);
+  ranges[side_beam] = 0.50F;
+
+  const auto output = controller.compute(
+      ranges, kAngleMin, kAngleMax, kAngleIncrement);
+
+  EXPECT_FALSE(output.side_recovery);
+  EXPECT_GT(output.command.speed, config.min_speed);
+}
+
 TEST(FollowTheGapRegression, RecoveryNeverPublishesIntoObstacleDuringSlew) {
   auto config = testConfig();
   config.max_steering_rate = 0.10;
-  config.side_recovery_distance = 0.60;
+  config.side_recovery_distance = 0.90;
+  config.side_recovery_min_steering = 0.32;
+  config.side_recovery_full_steering_distance = 0.70;
   config.side_recovery_max_angle = 1.20;
   config.ambiguous_front_recovery_sign = -1.0;
   FollowTheGap controller(config);
@@ -112,6 +262,9 @@ TEST(FollowTheGapRegression, RecoveryNeverPublishesIntoObstacleDuringSlew) {
   EXPECT_TRUE(recovery.side_recovery);
   EXPECT_LT(recovery.raw_steering, 0.0);
   EXPECT_LT(recovery.command.steering_angle, 0.0);
+  EXPECT_LT(recovery.command.steering_angle, -0.45);
+  EXPECT_NEAR(recovery.command.steering_angle,
+              recovery.raw_steering, 1.0e-6);
 }
 
 TEST(FollowTheGapRegression, AnticipatesTurnBeforeSteeringSlewCatchesUp) {
@@ -157,6 +310,43 @@ TEST(FollowTheGapRegression, RecoveryRequiresConfirmedClearScans) {
   EXPECT_TRUE(second_clear.side_recovery);
   EXPECT_LT(first_clear.command.steering_angle, 0.0);
   EXPECT_LT(second_clear.command.steering_angle, 0.0);
+}
+
+TEST(FollowTheGapRegression, EmergencyStopKeepsObstacleEscapeSteering) {
+  auto config = testConfig();
+  config.emergency_brake_distance = 0.35;
+  FollowTheGap controller(config);
+
+  auto ranges = std::vector<float>(kSamples, 8.0F);
+  const std::size_t beam = static_cast<std::size_t>(
+      (0.60 - kAngleMin) / kAngleIncrement);
+  ranges[beam] = 0.30F;
+
+  const auto output = controller.compute(
+      ranges, kAngleMin, kAngleMax, kAngleIncrement);
+
+  EXPECT_TRUE(output.emergency_stop);
+  EXPECT_DOUBLE_EQ(output.command.speed, 0.0);
+  EXPECT_LT(output.command.steering_angle, -config.max_steering + 1.0e-9);
+}
+
+TEST(FollowTheGapRegression, EmergencyStopUsesConfiguredMappingCrawlSpeed) {
+  auto config = testConfig();
+  config.emergency_brake_distance = 0.35;
+  config.emergency_rolling_speed = 0.25;
+  FollowTheGap controller(config);
+
+  auto ranges = std::vector<float>(kSamples, 8.0F);
+  const std::size_t beam = static_cast<std::size_t>(
+      (0.60 - kAngleMin) / kAngleIncrement);
+  ranges[beam] = 0.30F;
+
+  const auto output = controller.compute(
+      ranges, kAngleMin, kAngleMax, kAngleIncrement);
+
+  EXPECT_TRUE(output.emergency_stop);
+  EXPECT_DOUBLE_EQ(output.command.speed, 0.25);
+  EXPECT_LT(output.command.steering_angle, -config.max_steering + 1.0e-9);
 }
 
 TEST(FollowTheGapRegression, VirtualFrontInflationRejectsInnerCornerClearance) {
@@ -213,6 +403,43 @@ TEST(FollowTheGapRegression, RecoveryCanChangeSideAfterConfirmedCorner) {
   EXPECT_GT(switched.raw_steering, 0.0);
 }
 
+TEST(FollowTheGapRegression, ReleasesPassedSideRecoveryForUnlockedMapping) {
+  auto config = testConfig();
+  config.side_recovery_distance = 0.60;
+  config.side_recovery_max_angle = 1.20;
+  config.lock_recovery_side_until_clear = false;
+  FollowTheGap controller(config);
+
+  auto front_side = std::vector<float>(kSamples, 8.0F);
+  const std::size_t positive_beam = static_cast<std::size_t>(
+      (0.60 - kAngleMin) / kAngleIncrement);
+  front_side[positive_beam] = 0.45F;
+  const auto initial = controller.compute(
+      front_side, kAngleMin, kAngleMax, kAngleIncrement);
+  ASSERT_TRUE(initial.side_recovery);
+  ASSERT_LT(initial.recovery_steering_sign, 0.0);
+
+  // The corner is now alongside the car. Keeping the old negative recovery
+  // sign would turn back into the passed wall.
+  auto passed_side = std::vector<float>(kSamples, 8.0F);
+  const std::size_t negative_edge_beam = static_cast<std::size_t>(
+      (-1.40 - kAngleMin) / kAngleIncrement);
+  passed_side[negative_edge_beam] = 0.45F;
+  auto still_recovering = controller.compute(
+      passed_side, kAngleMin, kAngleMax, kAngleIncrement);
+  for (int index = 0; index < config.recovery_clear_confirm_cycles - 2;
+       ++index) {
+    still_recovering = controller.compute(
+        passed_side, kAngleMin, kAngleMax, kAngleIncrement);
+  }
+  const auto released = controller.compute(
+      passed_side, kAngleMin, kAngleMax, kAngleIncrement);
+
+  EXPECT_TRUE(still_recovering.side_recovery);
+  EXPECT_FALSE(released.side_recovery);
+  EXPECT_EQ(released.recovery_steering_sign, 0.0);
+}
+
 TEST(FollowTheGapRegression, MappingRecoveryHoldsSideUntilClear) {
   auto config = testConfig();
   config.side_recovery_distance = 0.60;
@@ -247,7 +474,7 @@ TEST(FollowTheGapRegression, InflatedNearFrontCornerUsesSideClearance) {
   auto config = testConfig();
   config.side_recovery_distance = 0.60;
   config.virtual_front_inflation = 0.08;
-  config.recovery_switch_confirm_cycles = 20;
+  config.recovery_switch_confirm_cycles = 3;
   FollowTheGap controller(config);
 
   auto positive_side = std::vector<float>(kSamples, 8.0F);
@@ -264,10 +491,16 @@ TEST(FollowTheGapRegression, InflatedNearFrontCornerUsesSideClearance) {
   auto near_front = std::vector<float>(kSamples, 8.0F);
   near_front[negative_beam] = 0.35F;
   near_front[front_beam] = 0.20F;
+  const auto first_opposite = controller.compute(
+      near_front, kAngleMin, kAngleMax, kAngleIncrement);
+  const auto second_opposite = controller.compute(
+      near_front, kAngleMin, kAngleMax, kAngleIncrement);
   const auto corrected = controller.compute(
       near_front, kAngleMin, kAngleMax, kAngleIncrement);
 
   EXPECT_LT(first.raw_steering, 0.0);
+  EXPECT_LT(first_opposite.recovery_steering_sign, 0.0);
+  EXPECT_LT(second_opposite.recovery_steering_sign, 0.0);
   EXPECT_TRUE(corrected.footprint_clearance_limited);
   EXPECT_TRUE(corrected.side_recovery);
   EXPECT_GT(corrected.raw_steering, 0.0);

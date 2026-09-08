@@ -9,4 +9,5 @@ five_lap_map_saver:
     start_radius_m: 1.0
     departure_radius_m: 1.5
     minimum_lap_distance_m: 8.0
+    start_heading_tolerance_rad: 0.75
     maximum_odom_step_m: 1.0

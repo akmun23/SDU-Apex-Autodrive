@@ -110,6 +110,8 @@ class ActuatorInterface(Node):
         self.collision_baseline_candidate_since = None
         self.collision_reset_enabled = bool(
             self.get_parameter("collision_reset_enabled").value)
+        self.collision_terminal_stop = bool(
+            self.get_parameter("collision_terminal_stop").value)
         self.collision_reset_pulse_sec = float(
             self.get_parameter("collision_reset_pulse_sec").value)
         self.collision_baseline_stable_sec = max(
@@ -142,6 +144,9 @@ class ActuatorInterface(Node):
         if self.collision_reset_enabled:
             self.reset_pub = self.create_publisher(
                 Bool, self.get_parameter("reset_command_topic").value, 10)
+        # Monitor collisions independently from reset handling. Mapping runs
+        # must abort on a crash without publishing a simulator reset command.
+        if self.collision_reset_enabled or self.collision_terminal_stop:
             self.collision_sub = self.create_subscription(
                 Int32, self.get_parameter("collision_topic").value,
                 self._on_collision_count, 10)
@@ -151,7 +156,11 @@ class ActuatorInterface(Node):
             stop_qos = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                # Completion is a current-run event. Do not replay a
+                # transient ``true`` from an earlier mapping session into a
+                # freshly started actuator; the actuator still latches any
+                # true event received during this process lifetime.
+                durability=DurabilityPolicy.VOLATILE,
             )
             self.external_stop_sub = self.create_subscription(
                 Bool, external_stop_topic, self._on_external_stop, stop_qos)
@@ -193,6 +202,9 @@ class ActuatorInterface(Node):
         self.declare_parameter("reset_command_topic", "/autodrive/reset_command")
         self.declare_parameter("collision_reset_enabled", False)
         self.declare_parameter("collision_reset_pulse_sec", 0.5)
+        # Collision stopping is terminal. Reset handling is a separate opt-in
+        # hook and is not required for collision monitoring.
+        self.declare_parameter("collision_terminal_stop", True)
         # The official counter is cumulative and can be published as zero
         # before the bridge delivers the simulator's existing count. Require a
         # stable observation before treating a later increment as this run's
@@ -476,7 +488,7 @@ class ActuatorInterface(Node):
             self._latch_collision(count)
 
     def _latch_collision(self, count: int) -> None:
-        self.external_stop_latched = True
+        self.external_stop_latched = self.collision_terminal_stop
         self.command = None
         self.command_time = None
         self.speed_controller.reset()
@@ -490,8 +502,13 @@ class ActuatorInterface(Node):
             self.reset_release_time = now.nanoseconds / 1e9 + self.collision_reset_pulse_sec
             self.reset_release_sent = False
             self.reset_pub.publish(Bool(data=True))
-        self.get_logger().error(
-            f"Collision count increased to {count}; terminal stop latched and simulator reset requested")
+        if self.reset_pub is not None:
+            self.get_logger().error(
+                f"Collision count increased to {count}; simulator reset requested")
+        else:
+            self.get_logger().error(
+                f"Collision count increased to {count}; terminal stop latched, "
+                "no simulator reset published")
 
     def _service_reset_pulse(self, now) -> None:
         if self.reset_pub is None or self.reset_release_time is None:
@@ -504,8 +521,13 @@ class ActuatorInterface(Node):
             self.reset_pub.publish(Bool(data=False))
             self.reset_release_sent = True
             self.reset_release_time = None
-            self.get_logger().error(
-                "Simulator reset pulse completed; actuator remains latched neutral after collision")
+            if self.collision_terminal_stop:
+                self.get_logger().error(
+                    "Simulator reset pulse completed; actuator remains latched neutral after collision")
+            else:
+                self.external_stop_latched = False
+                self.get_logger().warn(
+                    "Simulator reset pulse completed; mapping actuator resumed after collision")
 
     def _on_external_stop(self, msg: Bool) -> None:
         if not msg.data or self.external_stop_latched:

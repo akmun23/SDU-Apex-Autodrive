@@ -7,7 +7,8 @@ also usable by MPC).
 ## Quick Start
 
 ```bash
-# 1. Drive five FTG laps; the robot stops and SLAM Toolbox writes both files.
+# 1. Drive five FTG laps; the robot stops, waits for loop closure to settle,
+#    and SLAM Toolbox writes both files.
 ros2 launch sdu_apex_autodrive mapping.launch.py
 
 # 2. Generate the AutoDRIVE mintime raceline using the in-code settings.

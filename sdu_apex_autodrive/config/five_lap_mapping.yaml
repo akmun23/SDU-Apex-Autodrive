@@ -1,13 +1,15 @@
 five_lap_map_saver:
   ros__parameters:
-    odom_topic: /odom
+    # Ground truth is allowed only for this map-construction run. It makes
+    # the lap gate unambiguous; racing still uses the team /odom topic.
+    odom_topic: /autodrive/roboracer_1/odom
     save_map_service: /slam_toolbox/save_map
     completion_topic: /sdu/mapping_complete
 
     # The map name is written without an extension.  SLAM Toolbox creates the
     # matching .yaml and .pgm files in this directory.
     output_directory: /workspace/src/f1tenth_planning/maps
-    map_name: autodrive_track_5laps
+    map_name: autodrive_track_gt_norestart_20260908
     target_laps: 5
 
     # A lap is a return to the encoder/IMU odometry start point only after the
@@ -15,5 +17,18 @@ five_lap_map_saver:
     # the SLAM map pose while loop closure is still correcting it.
     start_radius_m: 1.00
     departure_radius_m: 1.50
-    minimum_lap_distance_m: 8.00
+    # The compete track is about 45 m in sensor-odometry distance.  Eight
+    # metres lets a short corner loop be misclassified as a lap and can save a
+    # partial SLAM map.  Keep the gate above the observed false-return path.
+    minimum_lap_distance_m: 35.00
+    start_heading_tolerance_rad: 0.75
     maximum_odom_step_m: 1.00
+    settle_before_save_s: 8.0
+    stop_before_save: true
+    save_each_lap: true
+    lap_snapshot_settle_s: 1.0
+    # Never reset the simulator during mapping. A collision is a crash and
+    # must terminate the run rather than contaminate later laps.
+    reset_at_lap_boundary: false
+    reset_topic: /autodrive/reset_command
+    reset_pulse_sec: 0.50

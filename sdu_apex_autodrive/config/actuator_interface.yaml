@@ -26,6 +26,7 @@ autodrive_actuator_interface:
     collision_reset_enabled: true
     collision_reset_pulse_sec: 0.5
     collision_baseline_stable_sec: 1.0
+    collision_terminal_stop: true
 
     max_steering_angle_rad: 0.5236
     # The actuator accepts the full characterized simulator body-speed range.

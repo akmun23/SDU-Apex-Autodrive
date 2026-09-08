@@ -1,6 +1,6 @@
 five_lap_map_saver:
   ros__parameters:
-    odom_topic: /odom
+    odom_topic: /autodrive/roboracer_1/odom
     save_map_service: /slam_toolbox/save_map
     completion_topic: /sdu/mapping_complete
     output_directory: /workspace/src/f1tenth_planning/maps
@@ -8,5 +8,8 @@ five_lap_map_saver:
     target_laps: 5
     start_radius_m: 1.00
     departure_radius_m: 1.50
-    minimum_lap_distance_m: 8.00
+    minimum_lap_distance_m: 35.00
+    start_heading_tolerance_rad: 0.75
     maximum_odom_step_m: 1.00
+    settle_before_save_s: 8.0
+    stop_before_save: true

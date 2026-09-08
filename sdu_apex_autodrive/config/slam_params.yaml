@@ -7,7 +7,9 @@ slam_toolbox:
     ceres_dogleg_type: TRADITIONAL_DOGLEG
     ceres_loss_function: SOFT_L1
 
-    odom_frame: odom
+    # Mapping-only frame driven by the simulator ground-truth transform.
+    # This is never used by the deployed racing localization stack.
+    odom_frame: gt_odom
     base_frame: base_link
     map_frame: map
     scan_topic: /autodrive/roboracer_1/lidar
@@ -15,41 +17,51 @@ slam_toolbox:
     mode: mapping
 
     debug_logging: false
-    throttle_scans: 1
+    # One of every two native scans is sufficient with the exact pose and
+    # keeps the mapper below its measured processing capacity, avoiding queue
+    # drops that would leave holes in the occupancy grid.
+    throttle_scans: 2
     transform_publish_period: 0.02
-    map_update_interval: 3.0
+    # Publish the corrected occupancy grid frequently enough that the final
+    # loop-closure result is what the map saver serializes.
+    map_update_interval: 0.5
     resolution: 0.05
     min_laser_range: 0.06
     max_laser_range: 10.0
-    minimum_time_interval: 0.05
-    # The simulator bridge delivers LiDAR and encoder events at roughly
-    # 4.3 Hz. Their source stamps agree, but DDS delivery can leave the
-    # transform briefly outside slam_toolbox's default 0.2 s lookup window.
-    # Keep the source timestamps intact and allow the measured delivery
-    # jitter instead of dropping otherwise valid scans.
+    minimum_time_interval: 0.10
+    # The compete scene delivers LiDAR at roughly 10 Hz and odometry at
+    # roughly 20 Hz. Allow normal DDS jitter without accepting a stale TF.
     transform_timeout: 1.0
-    tf_buffer_duration: 60.0
+    tf_buffer_duration: 120.0
     enable_interactive_mode: false
 
-    use_scan_matching: true
-    use_scan_barycenter: true
-    minimum_travel_distance: 0.05
-    minimum_travel_heading: 0.05
+    # Ground-truth mapping already supplies the globally correct pose. The
+    # previous scan matcher was free to perturb those poses and produced
+    # duplicated wall layers over repeated laps. Use the exact pose directly.
+    use_scan_matching: false
+    use_scan_barycenter: false
+    minimum_travel_distance: 0.10
+    minimum_travel_heading: 0.010
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.15
     link_scan_maximum_distance: 1.5
-    loop_search_maximum_distance: 2.0
-    do_loop_closing: true
+    # Five laps can accumulate more than 2 m of dead-reckoning error before
+    # the first reliable return. Use the standard search envelope and let the
+    # scan response, not odometry alone, decide the loop match.
+    loop_search_maximum_distance: 3.0
+    # Loop closure is unnecessary with the same simulator world pose for
+    # every scan and can introduce a second inconsistent correction source.
+    do_loop_closing: false
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.45
-    loop_match_minimum_response_fine: 0.55
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
 
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01
     correlation_search_space_smear_deviation: 0.1
-    loop_search_space_dimension: 4.0
+    loop_search_space_dimension: 8.0
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
 

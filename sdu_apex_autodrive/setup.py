@@ -52,6 +52,8 @@ setup(
             "calibration = sdu_apex_autodrive.calibration:main",
             "create_open_map = sdu_apex_autodrive.create_open_map:main",
             "lap_map_saver = sdu_apex_autodrive.lap_map_saver:main",
+            "ground_truth_mapping_tf = sdu_apex_autodrive.ground_truth_mapping_tf:main",
+            "ground_truth_path_pose = sdu_apex_autodrive.ground_truth_path_pose:main",
             "ground_truth_amcl_monitor = sdu_apex_autodrive.ground_truth_amcl_monitor:main",
             "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
             "timing_validator = sdu_apex_autodrive.timing_validator:main",

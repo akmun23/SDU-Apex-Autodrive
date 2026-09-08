@@ -1,5 +1,10 @@
 #include "nodes/ftg_node.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <utility>
+
 namespace f1tenth_control {
 
 FTGNode::FTGNode(const rclcpp::NodeOptions & options)
@@ -12,8 +17,19 @@ FTGNode::FTGNode(const rclcpp::NodeOptions & options)
   scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
     scan_topic_, rclcpp::SensorDataQoS().keep_last(1),
     std::bind(&FTGNode::scanCallback, this, std::placeholders::_1));
+  if (!exploration_odom_topic_.empty() && config_.exploration_history_enabled) {
+    exploration_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+      exploration_odom_topic_, rclcpp::QoS(20),
+      std::bind(&FTGNode::explorationOdomCallback, this, std::placeholders::_1));
+  }
   drive_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
     command_topic_, rclcpp::QoS(10));
+  if (publish_debug_topics_) {
+    processed_scan_pub_ = create_publisher<sensor_msgs::msg::LaserScan>(
+      processed_scan_topic_, rclcpp::SensorDataQoS().keep_last(2));
+    diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+      diagnostics_topic_, rclcpp::QoS(10));
+  }
 
   RCLCPP_INFO(get_logger(), "FTG ready: %s -> %s",
               scan_topic_.c_str(), command_topic_.c_str());
@@ -24,6 +40,10 @@ void FTGNode::declareParameters()
   declare_parameter("scan_topic", scan_topic_);
   declare_parameter("command_topic", command_topic_);
   declare_parameter("command_frame", command_frame_);
+  declare_parameter("processed_scan_topic", processed_scan_topic_);
+  declare_parameter("diagnostics_topic", diagnostics_topic_);
+  declare_parameter("exploration_odom_topic", exploration_odom_topic_);
+  declare_parameter("publish_debug_topics", publish_debug_topics_);
 
   declare_parameter("wheelbase", 0.324);
   declare_parameter("car_length", 0.500);
@@ -54,15 +74,30 @@ void FTGNode::declareParameters()
   declare_parameter("gap_switch_confirm_cycles", 6);
 
   declare_parameter("emergency_brake_distance", 0.18);
+  declare_parameter("emergency_rolling_speed", 0.0);
   declare_parameter("footprint_clearance", 0.08);
   declare_parameter("side_recovery_distance", 0.35);
   declare_parameter("side_recovery_max_angle", 1.20);
+  declare_parameter("side_recovery_front_angle", 0.65);
   declare_parameter("side_recovery_min_steering", 0.12);
   declare_parameter("side_recovery_full_steering_distance", 0.30);
   declare_parameter("recovery_switch_confirm_cycles", 4);
   declare_parameter("recovery_clear_confirm_cycles", 5);
   declare_parameter("lock_recovery_side_until_clear", false);
+  declare_parameter("recovery_override_selected_gap", true);
+  declare_parameter("recovery_gap_blend", 1.0);
   declare_parameter("ambiguous_front_recovery_sign", 0.0);
+  declare_parameter("use_rear_context", false);
+  declare_parameter("rear_context_min_angle", 1.57079632679);
+  declare_parameter("rear_context_max_angle", 2.35619449019);
+  declare_parameter("rear_context_min_range", 0.20);
+  declare_parameter("rear_context_min_advantage", 0.20);
+  declare_parameter("emergency_prefer_last_steering", false);
+  declare_parameter("exploration_history_enabled", false);
+  declare_parameter("exploration_probe_distance", 2.5);
+  declare_parameter("exploration_recent_exclusion_distance", 1.5);
+  declare_parameter("exploration_history_radius", 0.75);
+  declare_parameter("exploration_branch_penalty", 5.0);
   declare_parameter("disparity_threshold", 0.5);
   declare_parameter("wall_margin", 0.05);
   declare_parameter("side_safety_margin", 0.10);
@@ -76,6 +111,7 @@ void FTGNode::declareParameters()
   declare_parameter("lidar.angle_max", 1.57079632679);
   declare_parameter("lidar.apply_median_filter", true);
   declare_parameter("lidar.median_window_size", 3);
+
 }
 
 void FTGNode::loadParameters()
@@ -83,6 +119,10 @@ void FTGNode::loadParameters()
   scan_topic_ = get_parameter("scan_topic").as_string();
   command_topic_ = get_parameter("command_topic").as_string();
   command_frame_ = get_parameter("command_frame").as_string();
+  processed_scan_topic_ = get_parameter("processed_scan_topic").as_string();
+  diagnostics_topic_ = get_parameter("diagnostics_topic").as_string();
+  exploration_odom_topic_ = get_parameter("exploration_odom_topic").as_string();
+  publish_debug_topics_ = get_parameter("publish_debug_topics").as_bool();
 
   config_.wheelbase = get_parameter("wheelbase").as_double();
   config_.car_length = get_parameter("car_length").as_double();
@@ -118,12 +158,17 @@ void FTGNode::loadParameters()
     1, static_cast<int>(get_parameter("gap_switch_confirm_cycles").as_int()));
 
   config_.emergency_brake_distance = get_parameter("emergency_brake_distance").as_double();
+  config_.emergency_rolling_speed = std::max(
+    0.0, get_parameter("emergency_rolling_speed").as_double());
   config_.footprint_clearance = get_parameter("footprint_clearance").as_double();
   config_.side_recovery_distance = std::max(
     config_.emergency_brake_distance,
     get_parameter("side_recovery_distance").as_double());
   config_.side_recovery_max_angle = std::clamp(
-    get_parameter("side_recovery_max_angle").as_double(), 0.18, 1.50);
+    get_parameter("side_recovery_max_angle").as_double(), 0.18, 1.70);
+  config_.side_recovery_front_angle = std::clamp(
+    get_parameter("side_recovery_front_angle").as_double(),
+    0.15, config_.side_recovery_max_angle);
   config_.side_recovery_min_steering = std::clamp(
     get_parameter("side_recovery_min_steering").as_double(),
     0.0, config_.max_steering);
@@ -137,8 +182,35 @@ void FTGNode::loadParameters()
     1, static_cast<int>(get_parameter("recovery_clear_confirm_cycles").as_int()));
   config_.lock_recovery_side_until_clear =
     get_parameter("lock_recovery_side_until_clear").as_bool();
+  config_.recovery_override_selected_gap =
+    get_parameter("recovery_override_selected_gap").as_bool();
+  config_.recovery_gap_blend = std::clamp(
+    get_parameter("recovery_gap_blend").as_double(), 0.0, 1.0);
   config_.ambiguous_front_recovery_sign = std::clamp(
     get_parameter("ambiguous_front_recovery_sign").as_double(), -1.0, 1.0);
+  config_.use_rear_context = get_parameter("use_rear_context").as_bool();
+  config_.rear_context_min_angle = std::clamp(
+    get_parameter("rear_context_min_angle").as_double(), 1.0, 2.30);
+  config_.rear_context_max_angle = std::clamp(
+    get_parameter("rear_context_max_angle").as_double(),
+    config_.rear_context_min_angle + 0.05, 2.35619449019);
+  config_.rear_context_min_range = std::max(
+    config_.lidar_config.range_min,
+    get_parameter("rear_context_min_range").as_double());
+  config_.rear_context_min_advantage = std::max(
+    0.0, get_parameter("rear_context_min_advantage").as_double());
+  config_.emergency_prefer_last_steering =
+    get_parameter("emergency_prefer_last_steering").as_bool();
+  config_.exploration_history_enabled =
+    get_parameter("exploration_history_enabled").as_bool();
+  config_.exploration_probe_distance = std::max(
+    1.0, get_parameter("exploration_probe_distance").as_double());
+  config_.exploration_recent_exclusion_distance = std::max(
+    0.0, get_parameter("exploration_recent_exclusion_distance").as_double());
+  config_.exploration_history_radius = std::max(
+    0.05, get_parameter("exploration_history_radius").as_double());
+  config_.exploration_branch_penalty = std::max(
+    0.0, get_parameter("exploration_branch_penalty").as_double());
   config_.disparity_threshold = get_parameter("disparity_threshold").as_double();
   config_.wall_margin = get_parameter("wall_margin").as_double();
   config_.side_safety_margin = get_parameter("side_safety_margin").as_double();
@@ -155,6 +227,18 @@ void FTGNode::loadParameters()
     get_parameter("lidar.apply_median_filter").as_bool();
   config_.lidar_config.median_window_size =
     get_parameter("lidar.median_window_size").as_int();
+
+}
+
+void FTGNode::explorationOdomCallback(
+  const nav_msgs::msg::Odometry::ConstSharedPtr msg)
+{
+  const auto & position = msg->pose.pose.position;
+  const auto & orientation = msg->pose.pose.orientation;
+  const double yaw = std::atan2(
+    2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+    1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z));
+  ftg_->updateExplorationPose(position.x, position.y, yaw);
 }
 
 void FTGNode::scanCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg)
@@ -171,11 +255,12 @@ void FTGNode::scanCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg
   } else if (output.side_recovery) {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "FTG side recovery: closest %.3f m at %.3f rad, recovery sign %.0f, sides L/R %.3f/%.3f, raw %.3f, commanded steer %.3f, speed %.3f",
+      "FTG side recovery: closest %.3f m at %.3f rad, recovery sign %.0f, sides L/R %.3f/%.3f rear L/R %.3f/%.3f, raw %.3f, commanded steer %.3f, speed %.3f",
       output.closest_point_dist,
       msg->angle_min + static_cast<double>(output.closest_point_idx) * msg->angle_increment,
       output.recovery_steering_sign,
       output.recovery_left_clearance, output.recovery_right_clearance,
+      output.recovery_rear_left_clearance, output.recovery_rear_right_clearance,
       output.raw_steering, output.command.steering_angle, output.command.speed);
   } else if (output.footprint_clearance_limited) {
     RCLCPP_WARN_THROTTLE(
@@ -190,7 +275,84 @@ void FTGNode::scanCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr msg
       output.target_angle, output.raw_steering,
       output.command.speed, output.command.steering_angle);
   }
+  publishDebugScan(*msg, output);
+  publishDiagnostics(*msg, output);
   publishDriveCommand(output.command);
+}
+
+void FTGNode::publishDebugScan(
+  const sensor_msgs::msg::LaserScan & source,
+  const FTGOutput & output)
+{
+  if (!processed_scan_pub_) {
+    return;
+  }
+  sensor_msgs::msg::LaserScan scan;
+  scan.header = source.header;
+  scan.angle_min = output.processed_scan.angle_min;
+  scan.angle_max = output.processed_scan.angle_max;
+  scan.angle_increment = output.processed_scan.angle_increment;
+  scan.time_increment = source.time_increment;
+  scan.scan_time = source.scan_time;
+  scan.range_min = output.processed_scan.range_min;
+  scan.range_max = output.processed_scan.range_max;
+  scan.ranges.resize(output.processed_scan.filtered_ranges.size());
+  scan.intensities.resize(scan.ranges.size());
+  for (std::size_t index = 0; index < scan.ranges.size(); ++index) {
+    const bool valid = index < output.processed_scan.valid.size() &&
+      output.processed_scan.valid[index];
+    scan.ranges[index] = valid ?
+      static_cast<float>(output.processed_scan.filtered_ranges[index]) :
+      std::numeric_limits<float>::quiet_NaN();
+    const bool disparity = index < output.processed_scan.disparity_blocked.size() &&
+      output.processed_scan.disparity_blocked[index];
+    const bool bubble = index < output.processed_scan.bubble_blocked.size() &&
+      output.processed_scan.bubble_blocked[index];
+    scan.intensities[index] = static_cast<float>((disparity ? 1 : 0) + (bubble ? 2 : 0));
+  }
+  processed_scan_pub_->publish(scan);
+}
+
+void FTGNode::publishDiagnostics(
+  const sensor_msgs::msg::LaserScan & source,
+  const FTGOutput & output)
+{
+  if (!diagnostics_pub_) {
+    return;
+  }
+  const double closest_angle = source.angle_min +
+    static_cast<double>(output.closest_point_idx) * source.angle_increment;
+  const auto & gap = output.selected_gap;
+  std_msgs::msg::Float64MultiArray diagnostic;
+  // Fixed schema, kept deliberately flat for rosbag-to-CSV conversion:
+  // [0] time, [1] closest range, [2] closest angle, [3] target angle,
+  // [4] raw steer, [5] command steer, [6] command speed, [7] recovery sign,
+  // [8:12] front/rear side clearances L/R, [12:17] selected gap geometry,
+  // [17] gap count, [18:21] emergency/footprint/side flags,
+  // [21] valid beams, [22] disparity-blocked beams, [23] exploration overlap,
+  // [24] exploration-history enabled, [25:26] left/right branch overlap.
+  diagnostic.data = {
+    now().seconds(), output.closest_point_dist, closest_angle,
+    output.target_angle, output.raw_steering, output.command.steering_angle,
+    output.command.speed, output.recovery_steering_sign,
+    output.recovery_left_clearance, output.recovery_right_clearance,
+    output.recovery_rear_left_clearance, output.recovery_rear_right_clearance,
+    gap.start_angle, gap.end_angle, gap.min_range, gap.max_range,
+    gap.angular_width, static_cast<double>(output.all_gaps.size()),
+    output.emergency_stop ? 1.0 : 0.0,
+    output.footprint_clearance_limited ? 1.0 : 0.0,
+    output.side_recovery ? 1.0 : 0.0,
+    static_cast<double>(std::count(
+      output.processed_scan.valid.begin(), output.processed_scan.valid.end(), true)),
+    static_cast<double>(std::count(
+      output.processed_scan.disparity_blocked.begin(),
+      output.processed_scan.disparity_blocked.end(), true)),
+    output.exploration_overlap,
+    config_.exploration_history_enabled ? 1.0 : 0.0,
+    output.exploration_left_overlap,
+    output.exploration_right_overlap,
+  };
+  diagnostics_pub_->publish(diagnostic);
 }
 
 void FTGNode::publishDriveCommand(const DriveCommand & cmd)

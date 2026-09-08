@@ -1,0 +1,103 @@
+ftg_node:
+  ros__parameters:
+    # Mapping validation profile: choose one contiguous free-space branch so
+    # opposing hairpin openings cannot cancel into a straight command.
+    # Slow mapping validation run: preserve the same free-gap logic while
+    # giving the 20 Hz actuator more time to build the selected turn.
+    max_speed: 0.30
+    min_speed: 0.10
+    speed_full_range: 1.50
+    steering_gain: 3.20
+    # Keep a turn direction through the simulator's low-rate scan jitter;
+    # this remains responsive because it is still an EMA, not a fixed route.
+    target_ema_alpha: 0.45
+    heading_weight: 0.20
+    score_power: 2.0
+    clearance_cone_scale: 1.0
+    min_score_range: 0.35
+    select_single_gap: true
+    avoid_close_side: false
+    # At the observed ~10 Hz LiDAR rate, require about 0.8 s of a genuinely
+    # opposite opening before changing branch. Near-zero scans are already
+    # handled by the centered-gap hysteresis in FTG.
+    gap_switch_confirm_cycles: 8
+
+    emergency_brake_distance: 0.15
+    emergency_rolling_speed: 0.08
+    # Use the measured vehicle envelope plus a small margin. The previous
+    # virtual envelope made the 0.135 m half-width behave like 0.215 m.
+    footprint_clearance: 0.02
+    virtual_width_inflation: 0.0
+    virtual_front_inflation: 0.0
+    virtual_rear_inflation: 0.0
+    # Build turn-away authority while there is still lateral room. At the
+    # failing bend the previous 0.15 rad command was still present at 0.54 m;
+    # that was too late for the 20 Hz simulator/10 Hz LiDAR path.
+    # Begin the committed loop turn before the front wall enters the
+    # near-field. At 0.9 m the previous run was already geometrically late.
+    # Do not classify a normal parallel corridor wall as a hairpin merely
+    # because it is visible at +/-90 deg. Recovery is a soft nudge and starts
+    # early enough to give the normal gap time to turn.
+    side_recovery_distance: 1.80
+    # The first U-turn presents the inside wall almost at +/-90 degrees.
+    # Limiting recovery to 1.15 rad ignored that wall and selected the wrong
+    # branch. Keep this wide enough for side-facing returns, but still below
+    # the rear context used only for branch disambiguation.
+    side_recovery_max_angle: 1.70
+    # A return at roughly +/-90 degrees is a normal corridor side wall, not
+    # an unresolved front corner. Release the recovery latch there so its
+    # sign cannot fight a later gap choice at the next hairpin.
+    side_recovery_front_angle: 1.30
+    side_recovery_min_steering: 0.12
+    side_recovery_full_steering_distance: 1.10
+    recovery_switch_confirm_cycles: 3
+    recovery_clear_confirm_cycles: 4
+    # Permit the next hairpin to select the opposite direction. Switching is
+    # evidence-gated in FTG: weak nearest-beam flips cannot change the sign,
+    # while a strong side/rear or exploration-branch cue can.
+    # Once a close wall establishes a turn-away side, keep that local choice
+    # until the wall is geometrically clear. This is not a fixed track branch:
+    # the latch is released between corners by the front-sector and distance
+    # hysteresis, allowing the next gap to choose independently.
+    lock_recovery_side_until_clear: false
+    # Let measured gap/rear context choose each branch independently. No
+    # fixed sign is valid for this track: its successive hairpins turn in
+    # opposite directions.
+    # A close inside wall may be the wall the car must turn around. Keep the
+    # selected free-space branch authoritative; recovery only slows the car
+    # and guards the hard-stop envelope.
+    recovery_override_selected_gap: true
+    # Recovery is an assist, not a branch command. Keep most of the selected
+    # gap authority so a correct early turn is not cancelled by a side-wall
+    # sign that can only be resolved after the corner is visible.
+    recovery_gap_blend: 0.15
+    ambiguous_front_recovery_sign: 0.0
+    # Use the available +/-90..135 deg part of the simulator's 270 deg scan
+    # to disambiguate a hairpin branch. It is not included in FTG collision or
+    # target scoring.
+    use_rear_context: true
+    rear_context_min_angle: 1.57079632679
+    rear_context_max_angle: 2.35619449019
+    rear_context_min_range: 0.20
+    rear_context_min_advantage: 0.20
+    emergency_prefer_last_steering: true
+
+    # Mapping-only coverage memory softly penalises a gap whose forward
+    # projection overlaps older trajectory. The recent trail is excluded so
+    # ordinary bends remain reactive. It never directly commands a branch.
+    exploration_history_enabled: true
+    exploration_probe_distance: 5.0
+    exploration_recent_exclusion_distance: 1.5
+    exploration_history_radius: 0.75
+    # Keep this finite: enough to prefer an unexplored continuation when two
+    # gaps are otherwise comparable, without forcing a turn against a clearly
+    # larger or safer opening.
+    exploration_branch_penalty: 1.0
+
+    wall_margin: 0.01
+    side_safety_margin: 0.02
+    # Keep disparity protection for real wall edges, but do not let a large
+    # range jump erase most of a navigable opening.
+    disparity_threshold: 0.65
+    max_disparity_extension_angle: 0.25
+    steer_slowdown_gain: 1.0
