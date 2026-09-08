@@ -1,0 +1,1 @@
+stamp_s,time_s,gt_x_m,gt_y_m,gt_yaw_rad,amcl_x_m,amcl_y_m,amcl_yaw_rad,amcl_error_m,amcl_error_rad,current_map_x_m,current_map_y_m,current_map_yaw_rad,current_map_error_m,current_map_error_rad,ekf_x_m,ekf_y_m,ekf_yaw_rad,ekf_error_m,ekf_error_rad,odom_x_m,odom_y_m,odom_yaw_rad,odom_error_m,odom_error_rad,gt_speed_mps,collision_count

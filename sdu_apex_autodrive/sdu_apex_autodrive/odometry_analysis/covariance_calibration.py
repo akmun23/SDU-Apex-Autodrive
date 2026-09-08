@@ -188,7 +188,8 @@ def load_covariance_samples(
 
 def _coverage(samples: list[CovarianceSample], q_xy_m: float, q_xy_s: float,
               q_yaw_m: float, q_yaw_rad: float,
-              initial_xy: float, initial_yaw: float) -> dict[str, float]:
+              initial_xy: float, initial_yaw: float,
+              reference_stamp_s: float | None = None) -> dict[str, float]:
     if not samples:
         return {"component_coverage": 0.0, "ellipse_coverage": 0.0,
                 "yaw_coverage": 0.0, "nees2_p95": math.inf}
@@ -196,9 +197,11 @@ def _coverage(samples: list[CovarianceSample], q_xy_m: float, q_xy_s: float,
     ellipse = []
     yaw = []
     nees = []
+    if reference_stamp_s is None:
+        reference_stamp_s = samples[0].stamp_s
     for sample in samples:
         xy_var = max(1.0e-12, initial_xy + q_xy_m * sample.distance_m +
-                     q_xy_s * max(0.0, sample.stamp_s - samples[0].stamp_s))
+                     q_xy_s * max(0.0, sample.stamp_s - reference_stamp_s))
         yaw_var = max(1.0e-12, initial_yaw + q_yaw_m * sample.distance_m +
                       q_yaw_rad * sample.yaw_distance_rad)
         sigma = math.sqrt(xy_var)
@@ -214,6 +217,42 @@ def _coverage(samples: list[CovarianceSample], q_xy_m: float, q_xy_s: float,
         "yaw_coverage": sum(yaw) / len(yaw),
         "nees2_p95": sorted(nees)[max(0, int(math.ceil(0.95 * len(nees))) - 1)],
     }
+
+
+def evaluate_process_noise(
+    samples: list[CovarianceSample],
+    candidate: dict[str, float],
+    *,
+    initial_xy_variance_m2: float = 0.01,
+    initial_yaw_variance_rad2: float = 0.01,
+    reference_stamp_s: float | None = None,
+) -> dict[str, float]:
+    """Evaluate one fitted covariance candidate without refitting it.
+
+    ``samples`` may be a chronological holdout suffix. Their accumulated
+    distance remains relative to the original run, and ``reference_stamp_s``
+    keeps the time term on the same origin as the fit. This prevents a
+    candidate from being declared valid merely because it was fitted and
+    scored on the same samples.
+    """
+    required = (
+        "process_noise_xy_m2_per_m", "process_noise_xy_m2_per_s",
+        "process_noise_yaw2_per_m", "process_noise_yaw2_per_rad",
+    )
+    if any(key not in candidate for key in required):
+        raise ValueError("candidate is missing a process-noise coefficient")
+    if len(samples) < 1:
+        raise ValueError("cannot evaluate covariance on an empty sample set")
+    return _coverage(
+        samples,
+        float(candidate["process_noise_xy_m2_per_m"]),
+        float(candidate["process_noise_xy_m2_per_s"]),
+        float(candidate["process_noise_yaw2_per_m"]),
+        float(candidate["process_noise_yaw2_per_rad"]),
+        initial_xy_variance_m2,
+        initial_yaw_variance_rad2,
+        reference_stamp_s,
+    )
 
 
 def calibrate_process_noise(
@@ -286,9 +325,62 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--holdout-fraction", type=float, default=0.25,
+        help="chronological suffix fraction scored without refitting (default: 0.25)",
+    )
+    parser.add_argument(
+        "--initial-xy-variance-m2", type=float, default=0.01,
+        help="initial XY variance used by the covariance model",
+    )
+    parser.add_argument(
+        "--initial-yaw-variance-rad2", type=float, default=0.01,
+        help="initial yaw variance used by the covariance model",
+    )
+    parser.add_argument(
+        "--minimum-coverage", type=float, default=0.95,
+        help="required component, ellipse, and yaw coverage when validating",
+    )
+    parser.add_argument(
+        "--require-holdout", action="store_true",
+        help="return failure when the chronological holdout misses the coverage gate",
+    )
     args = parser.parse_args()
     samples = load_covariance_samples(args.input)
-    result = calibrate_process_noise(samples)
+    fraction = min(max(float(args.holdout_fraction), 0.0), 0.5)
+    split = len(samples) if fraction == 0.0 else max(3, int(len(samples) * (1.0 - fraction)))
+    split = min(split, len(samples))
+    fit_samples = samples[:split]
+    initial_xy = max(0.0, float(args.initial_xy_variance_m2))
+    initial_yaw = max(0.0, float(args.initial_yaw_variance_rad2))
+    minimum_coverage = min(max(float(args.minimum_coverage), 0.0), 1.0)
+    result = calibrate_process_noise(
+        fit_samples,
+        initial_xy_variance_m2=initial_xy,
+        initial_yaw_variance_rad2=initial_yaw,
+    )
+    if split < len(samples):
+        holdout_coverage = evaluate_process_noise(
+            samples[split:], result["candidate"],
+            initial_xy_variance_m2=initial_xy,
+            initial_yaw_variance_rad2=initial_yaw,
+            reference_stamp_s=samples[0].stamp_s,
+        )
+        result["holdout"] = {
+            "samples": len(samples) - split,
+            "coverage": holdout_coverage,
+            "fit_samples": split,
+            "passed": all(
+                holdout_coverage[key] >= minimum_coverage
+                for key in ("component_coverage", "ellipse_coverage", "yaw_coverage")
+            ),
+        }
+        if args.require_holdout and not result["holdout"]["passed"]:
+            raise ValueError(
+                "chronological holdout did not meet the minimum coverage gate"
+            )
+    else:
+        result["holdout"] = {"samples": 0, "fit_samples": split, "passed": None}
     encoded = json.dumps(result, indent=2, sort_keys=True)
     print(encoded)
     if args.output:

@@ -6,6 +6,7 @@ import pytest
 from sdu_apex_autodrive.odometry_analysis.covariance_calibration import (
     CovarianceSample,
     calibrate_process_noise,
+    evaluate_process_noise,
     load_covariance_samples,
 )
 
@@ -44,6 +45,60 @@ def test_covariance_fit_returns_coverage_candidate() -> None:
     assert coverage["component_coverage"] >= 0.95
     assert coverage["ellipse_coverage"] >= 0.95
     assert coverage["yaw_coverage"] >= 0.95
+
+
+def test_covariance_candidate_is_scored_on_a_chronological_holdout() -> None:
+    samples = []
+    for i in range(1, 81):
+        distance = i * 0.1
+        # The suffix is deliberately a little noisier than the fit prefix.
+        scale = 0.003 if i <= 60 else 0.006
+        error = scale * math.sin(i * 0.7)
+        samples.append(CovarianceSample(
+            stamp_s=i * 0.05,
+            distance_m=distance,
+            yaw_distance_rad=i * 0.01,
+            error_x_m=error,
+            error_y_m=-error * 0.5,
+            error_yaw_rad=error * 0.1,
+            step_distance_m=0.1,
+            step_yaw_rad=0.01,
+            dt_s=0.05,
+        ))
+    fit = calibrate_process_noise(samples[:60])
+    holdout = evaluate_process_noise(
+        samples[60:], fit["candidate"], reference_stamp_s=samples[0].stamp_s)
+    assert holdout["component_coverage"] >= 0.95
+    assert holdout["ellipse_coverage"] >= 0.95
+    assert holdout["yaw_coverage"] >= 0.95
+
+
+def test_covariance_evaluator_exposes_holdout_failure() -> None:
+    samples = []
+    for i in range(1, 21):
+        samples.append(CovarianceSample(
+            stamp_s=i * 0.05,
+            distance_m=i * 0.1,
+            yaw_distance_rad=i * 0.01,
+            error_x_m=0.0 if i < 16 else 1.0,
+            error_y_m=0.0,
+            error_yaw_rad=0.0,
+            step_distance_m=0.1,
+            step_yaw_rad=0.01,
+            dt_s=0.05,
+        ))
+    coverage = evaluate_process_noise(
+        samples[15:],
+        {
+            "process_noise_xy_m2_per_m": 1.0e-9,
+            "process_noise_xy_m2_per_s": 1.0e-9,
+            "process_noise_yaw2_per_m": 1.0e-9,
+            "process_noise_yaw2_per_rad": 1.0e-9,
+        },
+        reference_stamp_s=samples[0].stamp_s,
+    )
+    assert coverage["component_coverage"] < 0.95
+    assert coverage["ellipse_coverage"] < 0.95
 
 
 def test_covariance_loader_discards_startup_diagnostic_before_truth(tmp_path) -> None:

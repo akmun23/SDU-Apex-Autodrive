@@ -1,0 +1,33 @@
+{
+  "bag": "/workspace/src/f1tenth_planning/analysis/ftg_branch_authority_live_20260908/raw_bag",
+  "odom_rows": 3667,
+  "lidar_scans": 3667,
+  "lidar_wall_points": 3953155,
+  "cmd_rows": 0,
+  "steering_command_rows": 26136,
+  "throttle_command_rows": 26135,
+  "diagnostic_rows": 3654,
+  "path_length_m": 40.89648906773159,
+  "start": [
+    1.3057,
+    0.9102
+  ],
+  "end": [
+    -5.5187,
+    -5.172
+  ],
+  "collision_final": 0,
+  "lap_final": 0,
+  "topic_counts": {
+    "/autodrive/roboracer_1/steering_command": 26136,
+    "/autodrive/roboracer_1/throttle_command": 26135,
+    "/autodrive/roboracer_1/throttle": 3667,
+    "/autodrive/roboracer_1/steering": 3667,
+    "/autodrive/roboracer_1/bridge_packet_timing": 1508,
+    "/autodrive/roboracer_1/odom": 3667,
+    "/autodrive/roboracer_1/lidar": 3667,
+    "/autodrive/roboracer_1/lap_count": 3667,
+    "/autodrive/roboracer_1/collision_count": 3667,
+    "/ftg/diagnostics": 3654
+  }
+}

@@ -2743,9 +2743,12 @@ def main():
         # Map and output paths
         map=os.path.join(
             workspace, 'f1tenth_planning', 'maps',
-            'autodrive_compete_2026.yaml',
+            # Closed-loop map produced from the completed FTG lap.  Keep the
+            # source map explicit so mintime cannot silently fall back to the
+            # older supplied/partial map.
+            'autodrive_track_ftg_commit_20260908_lap01.yaml',
         ),
-        track_name='autodrive_compete_2026_mintime',
+        track_name='autodrive_track_ftg_commit_20260908_lap01_mintime',
         output=default_output,
 
         # Minimum-time optimizer settings

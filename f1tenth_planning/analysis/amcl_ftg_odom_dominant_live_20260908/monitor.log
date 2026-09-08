@@ -1,0 +1,17 @@
+[WARN] [1788896632.037676256] [ground_truth_amcl_monitor]: Ground-truth monitor is diagnostics-only; simulator IPS/odom are not controller inputs
+Traceback (most recent call last):
+  File "/workspace/install/lib/sdu_apex_autodrive/ground_truth_amcl_monitor", line 33, in <module>
+    sys.exit(load_entry_point('sdu-apex-autodrive==0.3.0', 'console_scripts', 'ground_truth_amcl_monitor')())
+  File "/workspace/install/lib/python3.10/site-packages/sdu_apex_autodrive/ground_truth_amcl_monitor.py", line 474, in main
+    rclpy.spin(node)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/__init__.py", line 229, in spin
+    executor.spin_once()
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 808, in spin_once
+    self._spin_once_impl(timeout_sec)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 797, in _spin_once_impl
+    handler, entity, node = self.wait_for_ready_callbacks(timeout_sec=timeout_sec)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 780, in wait_for_ready_callbacks
+    return next(self._cb_iter)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 681, in _wait_for_ready_callbacks
+    raise ExternalShutdownException()
+rclpy.executors.ExternalShutdownException

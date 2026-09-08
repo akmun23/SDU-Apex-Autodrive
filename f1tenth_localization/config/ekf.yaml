@@ -16,13 +16,22 @@ ekf_localization:
     # These are process-noise densities, not measurement noise copied from
     # the raw topic. They are deliberately explicit so replay tests can fit
     # and verify them against recorded truth.
-    process_noise_xy_m2_per_m: 0.0004
-    process_noise_xy_m2_per_s: 0.0001
-    process_noise_yaw2_per_rad: 0.0004
-    process_noise_yaw2_per_m: 0.0001
-    # Large enough for native bridge gaps at high speed. A frozen wheel
-    # encoder while braking is not a discontinuity and never triggers reset.
-    max_odom_delta_m: 20.0
+    # Source-time covariance fits from the clean moving runs are in the
+    # 8e-6--1.1e-5 range. Keep a small conservative envelope around that fit;
+    # the raw message covariance remains an initial/floor uncertainty and is
+    # never added as process noise on every callback.
+    # The full-lap source-time recorder fit is below 1e-8 in this regime. Use
+    # a conservative 1e-6 envelope without allowing the yaw floor to dominate
+    # lateral covariance over a long lap.
+    process_noise_xy_m2_per_m: 0.000001
+    process_noise_xy_m2_per_s: 0.000001
+    process_noise_yaw2_per_rad: 0.000001
+    process_noise_yaw2_per_m: 0.000001
+    # At the native 20 Hz track cadence even 23 m/s is about 1.15 m per
+    # packet. A multi-metre jump is therefore an epoch/teleport, not a valid
+    # motion sample. Keep this below the old 20 m value so a reset cannot be
+    # converted into several apparently valid one-metre updates.
+    max_odom_delta_m: 3.0
 
     # Enabled only by the finite open-ground identification suite. Production
     # runtime leaves this disabled; AMCL remains an independent map correction.

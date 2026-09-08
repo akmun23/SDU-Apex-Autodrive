@@ -1,0 +1,33 @@
+{
+  "bag": "/workspace/src/f1tenth_planning/analysis/ftg_fov120_live_20260908/raw_bag",
+  "odom_rows": 4011,
+  "lidar_scans": 4011,
+  "lidar_wall_points": 4284560,
+  "cmd_rows": 0,
+  "steering_command_rows": 36085,
+  "throttle_command_rows": 36085,
+  "diagnostic_rows": 4025,
+  "path_length_m": 52.49422869960844,
+  "start": [
+    0.7928,
+    -0.1459
+  ],
+  "end": [
+    0.7288,
+    2.8948
+  ],
+  "collision_final": 0,
+  "lap_final": 1,
+  "topic_counts": {
+    "/autodrive/roboracer_1/steering_command": 36085,
+    "/autodrive/roboracer_1/throttle_command": 36085,
+    "/ftg/diagnostics": 4025,
+    "/autodrive/roboracer_1/steering": 4012,
+    "/autodrive/roboracer_1/throttle": 4012,
+    "/autodrive/roboracer_1/bridge_packet_timing": 4012,
+    "/autodrive/roboracer_1/odom": 4011,
+    "/autodrive/roboracer_1/lidar": 4011,
+    "/autodrive/roboracer_1/lap_count": 4011,
+    "/autodrive/roboracer_1/collision_count": 4011
+  }
+}

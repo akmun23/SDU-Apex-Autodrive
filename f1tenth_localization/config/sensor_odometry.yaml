@@ -63,10 +63,14 @@ sensor_odometry:
     max_pending_packets: 8
 
     pose_xy_variance: 0.01
-    # A single native-bridge gap is recorded as degraded but must not make the
-    # EKF permanently exceed the controller's 0.25 m^2 covariance gate.
-    timing_degraded_pose_xy_variance: 0.04
-    pose_yaw_variance: 0.01
+    # A timing gap is handled by the EKF's source-time process term. Do not
+    # inject a larger permanent floor for one packet: that would contaminate
+    # the rest of the epoch even when the next packet is coherent.
+    timing_degraded_pose_xy_variance: 0.01
+    # The full-lap recorder showed sub-milliradian heading error. Keep a small
+    # calibrated floor so it cannot project 0.01 rad^2 into metres of lateral
+    # covariance over a long lap.
+    pose_yaw_variance: 0.0001
     twist_linear_variance: 0.04
     twist_yaw_variance: 0.04
 

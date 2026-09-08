@@ -1,0 +1,11 @@
+[37;1m2026-09-08 19:43:55.037 [31;1m[[37;1mRTPS_TRANSPORT_SHM[31;1m Error] [37mFailed init_port fastrtps_port7419: open_and_lock_file failed[34;1m -> Function [36mopen_port_internal[m
+[37;1m2026-09-08 19:43:55.049 [31;1m[[37;1mRTPS_TRANSPORT_SHM[31;1m Error] [37mFailed init_port fastrtps_port7419: open_and_lock_file failed[34;1m -> Function [36mopen_port_internal[m
+[INFO] [1788896636.129050910] [standalone_container_6ca738645fc8]: Load Library: /workspace/install/lib/libftg_node_component.so
+[INFO] [1788896636.131816077] [standalone_container_6ca738645fc8]: Found class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::FTGNode>
+[INFO] [1788896636.131872363] [standalone_container_6ca738645fc8]: Instantiate class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::FTGNode>
+[INFO] [1788896636.164377581] [ftg_amcl_odom_test]: FTG Node initialized
+[INFO] [1788896636.164437824] [ftg_amcl_odom_test]:   Subscribing to: scan, odom
+[INFO] [1788896636.164447803] [ftg_amcl_odom_test]:   Publishing to: drive
+[INFO] [1788896636.209390700] [ftg_amcl_odom_test]: PERF: dist=0.0m, avg_spd=0.00m/s, laps=0
+[INFO] [1788896666.226379558] [ftg_amcl_odom_test]: PERF: dist=8.3m, avg_spd=0.28m/s, laps=0
+[INFO] [1788896696.251067372] [ftg_amcl_odom_test]: PERF: dist=16.3m, avg_spd=0.27m/s, laps=0

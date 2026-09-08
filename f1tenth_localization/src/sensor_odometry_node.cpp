@@ -87,8 +87,8 @@ public:
     // An isolated bridge gap is diagnostic evidence, not a permanent loss of
     // localization. Keep its covariance conservative but below the controller
     // stop gate; the EKF treats source covariance as a floor for the epoch.
-    declare_parameter("timing_degraded_pose_xy_variance", 0.04);
-    declare_parameter("pose_yaw_variance", 0.01);
+    declare_parameter("timing_degraded_pose_xy_variance", 0.01);
+    declare_parameter("pose_yaw_variance", 0.0001);
     declare_parameter("twist_linear_variance", 0.04);
     declare_parameter("twist_yaw_variance", 0.04);
 
@@ -483,8 +483,8 @@ private:
   double imu_y_m_{0.0};
   double imu_z_m_{0.055};
   double pose_xy_variance_{0.01};
-  double timing_degraded_pose_xy_variance_{0.04};
-  double pose_yaw_variance_{0.01};
+  double timing_degraded_pose_xy_variance_{0.01};
+  double pose_yaw_variance_{0.0001};
   double twist_linear_variance_{0.04};
   double twist_yaw_variance_{0.04};
 };

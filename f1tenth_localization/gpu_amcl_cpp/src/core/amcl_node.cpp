@@ -1116,7 +1116,7 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
     push_odom_sample(odom_stamp, x, y, theta, *msg);
 
     if (map_odom_valid_) {
-        publish_current_map_pose(odom_stamp, x, y, theta);
+        publish_current_map_pose(odom_stamp, x, y, theta, *msg);
     }
 
     if (first_odom) {
@@ -1889,7 +1889,8 @@ void AmclNode::publish_current_map_pose(
     const rclcpp::Time& stamp,
     double odom_x,
     double odom_y,
-    double odom_theta) {
+    double odom_theta,
+    const nav_msgs::msg::Odometry& odom_msg) {
     if (!map_odom_valid_) {
         return;
     }
@@ -1898,7 +1899,43 @@ void AmclNode::publish_current_map_pose(
         return;
     }
 
-    if (last_current_map_pose_stamp_.nanoseconds() != 0) {
+    // The EKF output covariance is cumulative in its local odom epoch.  Use it
+    // as the lower bound for the propagated map pose instead of adding a
+    // fixed per-second ramp.  The old ramp reached 0.25 m^2 during a long but
+    // accurate run and made the controller reject the pose solely because of
+    // elapsed wall time.  Keep the configured process rates only as a legacy
+    // fallback for messages that do not carry finite source covariance.
+    Eigen::Matrix3d odom_covariance = Eigen::Matrix3d::Zero();
+    odom_covariance(0, 0) = odom_msg.pose.covariance[0];
+    odom_covariance(0, 1) = odom_msg.pose.covariance[1];
+    odom_covariance(1, 0) = odom_msg.pose.covariance[6];
+    odom_covariance(1, 1) = odom_msg.pose.covariance[7];
+    odom_covariance(0, 2) = odom_msg.pose.covariance[5];
+    odom_covariance(2, 0) = odom_msg.pose.covariance[30];
+    odom_covariance(1, 2) = odom_msg.pose.covariance[11];
+    odom_covariance(2, 1) = odom_msg.pose.covariance[31];
+    odom_covariance(2, 2) = odom_msg.pose.covariance[35];
+    const bool usable_odom_covariance = odom_covariance.allFinite() &&
+        odom_covariance(0, 0) >= 0.0 && odom_covariance(1, 1) >= 0.0 &&
+        odom_covariance(2, 2) >= 0.0;
+    if (usable_odom_covariance) {
+        // A previous scan estimate must never be allowed to poison the
+        // controller-facing propagated pose.  This also covers a malformed
+        // covariance from a legacy AMCL update before the EKF source arrives.
+        if (!current_map_pose_covariance_.allFinite()) {
+            current_map_pose_covariance_.setZero();
+        }
+        current_map_pose_covariance_ = 0.5 *
+            (current_map_pose_covariance_ + current_map_pose_covariance_.transpose());
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(current_map_pose_covariance_(i, i)) ||
+                current_map_pose_covariance_(i, i) < 0.0) {
+                current_map_pose_covariance_(i, i) = 0.0;
+            }
+            current_map_pose_covariance_(i, i) = std::max(
+                current_map_pose_covariance_(i, i), odom_covariance(i, i));
+        }
+    } else if (last_current_map_pose_stamp_.nanoseconds() != 0) {
         const double dt = (stamp - last_current_map_pose_stamp_).seconds();
         if (dt > 0.0) {
             current_map_pose_covariance_ = localization_math::grow_pose_covariance(

@@ -98,8 +98,8 @@ void FTGNode::declareParameters() {
     // Generic LiDAR preprocessing
     declare_parameter("lidar.range_min", 0.06);
     declare_parameter("lidar.range_max", 10.0);
-    declare_parameter("lidar.angle_min", -1.5708);
-    declare_parameter("lidar.angle_max", 1.5708);
+    declare_parameter("lidar.angle_min", -2.0944);
+    declare_parameter("lidar.angle_max", 2.0944);
     declare_parameter("lidar.apply_median_filter", true);
     declare_parameter("lidar.median_window_size", 3);
 }
@@ -290,6 +290,7 @@ void FTGNode::publishDiagnostics(const FTGOutput& output) {
         add(prefix + "width", gap.angular_width);
         add(prefix + "max_clearance", gap.max_clearance);
         add(prefix + "mean_clearance", gap.mean_clearance);
+        add(prefix + "mean_clipped_clearance", gap.mean_clipped_clearance);
         add(prefix + "weighted_center", gap.weighted_center_angle);
         add(prefix + "deepest_angle", gap.deepest_angle);
         add(prefix + "score", gap.score);
@@ -301,6 +302,7 @@ void FTGNode::publishDiagnostics(const FTGOutput& output) {
         add("selected_gap_width", gap.angular_width);
         add("selected_gap_max_clearance", gap.max_clearance);
         add("selected_gap_mean_clearance", gap.mean_clearance);
+        add("selected_gap_mean_clipped_clearance", gap.mean_clipped_clearance);
         add("selected_gap_score", gap.score);
         add("selected_gap_weighted_center", gap.weighted_center_angle);
         add("selected_gap_deepest_angle", gap.deepest_angle);

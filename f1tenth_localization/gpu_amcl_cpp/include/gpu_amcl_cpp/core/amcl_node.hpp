@@ -43,7 +43,8 @@ private:
     void publish_current_map_pose(const rclcpp::Time& stamp,
                                   double odom_x,
                                   double odom_y,
-                                  double odom_theta);
+                                  double odom_theta,
+                                  const nav_msgs::msg::Odometry& odom_msg);
     void publish_scan_alignment_diagnostic(const rclcpp::Time& scan_stamp,
                                            const rclcpp::Time& matched_odom_stamp,
                                            const rclcpp::Time& bracket_before_stamp,

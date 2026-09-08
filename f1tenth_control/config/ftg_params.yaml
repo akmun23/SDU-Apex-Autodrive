@@ -70,7 +70,7 @@ ftg_node:
     lidar:
       range_min: 0.06        # Navigation minimum; raw safety runs independently
       range_max: 10.0        # Maximum range to consider (m)
-      angle_min: -1.5708     # Min angle to process (rad) = -90 deg
-      angle_max: 1.5708      # Max angle to process (rad) = +90 deg
+      angle_min: -2.0944     # Min angle to process (rad) = -120 deg
+      angle_max: 2.0944      # Max angle to process (rad) = +120 deg
       apply_median_filter: true    # Median filter for noise reduction
       median_window_size: 3        # Window (must be odd)

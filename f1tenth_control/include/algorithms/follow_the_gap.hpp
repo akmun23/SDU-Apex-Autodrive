@@ -82,6 +82,7 @@ struct DrivableGap {
     double deepest_angle{0.0};
     double max_clearance{0.0};
     double mean_clearance{0.0};
+    double mean_clipped_clearance{0.0};
     double score{0.0};
 };
 
@@ -191,6 +192,7 @@ private:
         const std::vector<float>& ranges,
         double angle_min,
         double angle_increment,
+        const DrivableGap& selected_gap,
         double desired_steering
     ) const;
 

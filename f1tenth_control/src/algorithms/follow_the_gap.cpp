@@ -147,7 +147,11 @@ FTGOutput FollowTheGap::compute(
     // against individual LiDAR rays. A target can be ray-clear while the
     // swept car body still clips the inside of a hairpin.
     const TrajectoryResult trajectory = selectTrajectory(
-        ranges, angle_min, angle_increment, desired_steering);
+        ranges,
+        angle_min,
+        angle_increment,
+        output.selected_drivable_gap,
+        desired_steering);
     output.trajectory_free_distance = trajectory.free_distance;
     output.trajectory_min_clearance = trajectory.min_clearance;
     output.trajectory_collision_free = trajectory.collision_free;
@@ -221,6 +225,7 @@ FollowTheGap::TrajectoryResult FollowTheGap::selectTrajectory(
     const std::vector<float>& ranges,
     double angle_min,
     double angle_increment,
+    const DrivableGap& selected_gap,
     double desired_steering
 ) const {
     TrajectoryResult best;
@@ -270,6 +275,19 @@ FollowTheGap::TrajectoryResult FollowTheGap::selectTrajectory(
         + std::max(0.0, config_.footprint_margin);
     const double target = std::clamp(
         desired_steering, -config_.max_steering, config_.max_steering);
+    const TargetResult branch_target = computeTargetAngle(selected_gap);
+    const double gap_start = std::min(selected_gap.start_angle, selected_gap.end_angle);
+    const double gap_end = std::max(selected_gap.start_angle, selected_gap.end_angle);
+    const double branch_margin = 0.05;
+    const double validation_distance = std::min(0.75, config_.rollout_distance);
+    const double maximum_reachable_heading = std::abs(
+        std::tan(config_.max_steering) / config_.wheelbase)
+        * validation_distance;
+    const bool gap_reachable_at_validation = gap_start
+        <= maximum_reachable_heading + branch_margin
+        && gap_end >= -maximum_reachable_heading - branch_margin;
+    const bool material_branch = branch_target.valid
+        && std::abs(branch_target.angle) > 0.35;
 
     auto better = [&](const TrajectoryResult& candidate,
                       const TrajectoryResult& incumbent) {
@@ -336,6 +354,21 @@ FollowTheGap::TrajectoryResult FollowTheGap::selectTrajectory(
                 }
             }
             if (collision) break;
+        }
+
+        // The rollout refines the gap selected above; it must not replace it
+        // with a different, deeper branch. At an early rollout point require
+        // the candidate to point into the selected angular interval. For a
+        // clearly lateral branch also reject the opposite steering direction.
+        const double trajectory_heading = curvature * validation_distance;
+        const bool enters_selected_gap = trajectory_heading >= gap_start - branch_margin
+            && trajectory_heading <= gap_end + branch_margin;
+        const bool branch_compatible = !gap_reachable_at_validation
+            || enters_selected_gap;
+        const bool follows_material_branch = !material_branch
+            || steering * branch_target.angle >= -1e-9;
+        if (!branch_compatible || !follows_material_branch) {
+            continue;
         }
 
         if (!std::isfinite(min_clearance)) {
@@ -555,18 +588,24 @@ std::vector<DrivableGap> FollowTheGap::findDrivableGaps(
         double weighted_sum = 0.0;
         double weight_sum = 0.0;
         double clearance_sum = 0.0;
+        double clipped_clearance_sum = 0.0;
         size_t count = 0;
         size_t deepest_idx = start_idx;
+        const double decision_depth = std::max(
+            config_.rollout_distance,
+            config_.min_score_range);
 
         for (size_t i = start_idx; i <= end_idx; ++i) {
             const double clearance = eff_clearance[i];
+            const double clipped_clearance = std::min(clearance, decision_depth);
             const double angle = scan.angles[i];
             const double beam_score = std::pow(
-                std::max(clearance, 0.0), config_.score_power)
+                std::max(clipped_clearance, 0.0), config_.score_power)
                 * std::exp(-config_.heading_weight * std::abs(angle));
             weighted_sum += angle * beam_score;
             weight_sum += beam_score;
             clearance_sum += clearance;
+            clipped_clearance_sum += clipped_clearance;
             ++count;
             if (clearance > eff_clearance[deepest_idx]
                 || (clearance == eff_clearance[deepest_idx]
@@ -577,13 +616,18 @@ std::vector<DrivableGap> FollowTheGap::findDrivableGaps(
         }
 
         gap.mean_clearance = count > 0 ? clearance_sum / static_cast<double>(count) : 0.0;
+        gap.mean_clipped_clearance = count > 0
+            ? clipped_clearance_sum / static_cast<double>(count)
+            : 0.0;
         gap.weighted_center_angle = weight_sum > 1e-12
             ? weighted_sum / weight_sum
             : (gap.start_angle + gap.end_angle) / 2.0;
         gap.deepest_angle = scan.angles[deepest_idx];
         const double representative =
             0.5 * gap.weighted_center_angle + 0.5 * gap.deepest_angle;
-        gap.score = std::pow(std::max(gap.max_clearance, 0.0), config_.score_power)
+        gap.score = std::pow(
+                std::max(gap.mean_clipped_clearance, 0.0),
+                config_.score_power)
             * gap.angular_width
             * std::exp(-config_.heading_weight * std::abs(representative));
         gaps.push_back(gap);

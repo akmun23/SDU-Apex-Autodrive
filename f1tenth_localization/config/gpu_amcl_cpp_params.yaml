@@ -32,8 +32,12 @@ gpu_amcl_cpp:
     # second so a scan delivered before its source-time odometry can wait for
     # the bracket instead of being paired with an old sample.
     odom_history_duration_s: 1.00
-    current_map_pose_process_xy_m2_per_s: 0.002
-    current_map_pose_process_yaw2_per_s: 0.0005
+    # The EKF odom message already carries cumulative, calibrated source-time
+    # covariance. Do not add a second arbitrary time-based covariance ramp to
+    # an otherwise accurate map pose; nonzero values remain only as a fallback
+    # for legacy odometry messages without a usable covariance.
+    current_map_pose_process_xy_m2_per_s: 0.0
+    current_map_pose_process_yaw2_per_s: 0.0
     localization_degraded_after_s: 0.30
 
     # The official bridge provides cumulative wheel angles plus IMU yaw. Keep
@@ -110,12 +114,12 @@ gpu_amcl_cpp:
     # single-scan jump is still rejected as a corridor alias and replaced by
     # the causal odometry prediction.
     # A scan correction must be geometrically tiny as well as locally
-    # associated. During the first bend an ambiguous cluster at weight 0.764
-    # produced a false 0.094 m correction while raw odometry was still within
-    # 0.032 m of ground truth. The innovation gate rejects that alias while
-    # allowing the small 0.003--0.02 m corrections seen on valid track scans.
-    local_scan_correction_max_distance_m: 0.06
-    local_scan_correction_max_yaw_rad: 0.12
+    # associated. In the first live bend, the map scan mode repeatedly pulled
+    # the controller away from the ground-truth path while odometry remained
+    # within about 0.04 m. Tighten the innovation gate so that only the small
+    # corrections expected from this 5 cm map are allowed into the local pose.
+    local_scan_correction_max_distance_m: 0.04
+    local_scan_correction_max_yaw_rad: 0.08
     # Associate local scan clusters with the causal odometry-predicted pose;
     # repeated corridor aliases outside this radius are not controller input.
     local_cluster_association_max_distance_m: 0.80
@@ -124,10 +128,13 @@ gpu_amcl_cpp:
     # pose.
     local_cluster_min_weight: 0.60
     # Keep the scan correction a bounded refinement of the odometry prediction.
-    # Apply a useful fraction of a validated local scan innovation. A very
-    # small gain makes AMCL follow drifting odometry for many scans after a
-    # turn even when the scan association is good.
-    local_scan_correction_gain: 0.35
+    # Keep the known-start racing pose on the causal odometry prediction. The
+    # moving FTG validation showed that even individually small, valid-looking
+    # scan innovations accumulated to >1 m of map-pose bias while odometry
+    # stayed within about 0.08 m. The particle scan estimate is still computed
+    # and exposed through diagnostics; local tracking must not integrate its
+    # systematic map/scan bias into controller input.
+    local_scan_correction_gain: 0.0
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
     # matching bias is integrated again at every scan update.
@@ -154,7 +161,7 @@ gpu_amcl_cpp:
     # Fallback for direct AMCL launches. AMCL and PP must use the same
     # map-frame raceline; the old ICRA file runs in the opposite direction at
     # the simulator start.
-    global_heading_trajectory_rel_path: trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv
+    global_heading_trajectory_rel_path: trajectories/autodrive_track_ftg_commit_20260908_lap01_mintime_raceline.csv
     # Do not accept a global candidate until it meets the same safety envelope
     # required by the controller.  AMCL keeps refining while the vehicle is
     # stationary, so a wrong start guess cannot deadlock localization.

@@ -10,9 +10,13 @@ from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
 
 
-DEFAULT_MAP = "/workspace/src/f1tenth_planning/maps/autodrive_compete_2026.yaml"
+DEFAULT_MAP = (
+    "/workspace/src/f1tenth_planning/maps/"
+    "autodrive_track_ftg_commit_20260908_lap01.yaml"
+)
 DEFAULT_TRAJECTORY = (
-    "/workspace/src/f1tenth_planning/trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv"
+    "/workspace/src/f1tenth_planning/trajectories/"
+    "autodrive_track_ftg_commit_20260908_lap01_mintime_raceline.csv"
 )
 
 
