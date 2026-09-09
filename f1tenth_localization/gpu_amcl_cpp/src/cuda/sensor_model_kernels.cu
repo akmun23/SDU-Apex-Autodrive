@@ -19,7 +19,7 @@ void kernel_sensor_weights(const float* __restrict__ particles, int n,
                            int max_beams,
                            float angle_min, float angle_inc,
                            float z_hit, float z_rand,
-                           float sigma_hit, float laser_max,
+                           float sigma_hit, float laser_min, float laser_max,
                            float laser_ox, float laser_oy,
                            bool normalize_likelihood_by_beams,
                            float likelihood_scale,
@@ -71,7 +71,7 @@ void kernel_sensor_weights(const float* __restrict__ particles, int n,
         float r = s_ranges[b];  // §8: read from shared memory
 
         // Skip invalid beams.
-        if (r < 0.1f || r > laser_max) continue;
+        if (!isfinite(r) || r < laser_min || r > laser_max) continue;
         ++valid_beams;
 
         float cb = s_cos[b];
@@ -139,7 +139,8 @@ void launch_sensor_weights(const float* particles, int n,
                            int max_beams,
                            float angle_min, float angle_inc,
                            float z_hit, float z_rand,
-                           float sigma_hit, float laser_max_range,
+                           float sigma_hit, float laser_min_range,
+                           float laser_max_range,
                            float laser_offset_x, float laser_offset_y,
                            bool normalize_likelihood_by_beams,
                            float likelihood_scale,
@@ -157,7 +158,7 @@ void launch_sensor_weights(const float* particles, int n,
         particles, n,
         ranges, num_ranges, max_beams,
         angle_min, angle_inc,
-        z_hit, z_rand, sigma_hit,
+        z_hit, z_rand, sigma_hit, laser_min_range,
         laser_max_range, laser_offset_x, laser_offset_y,
         normalize_likelihood_by_beams, likelihood_scale,
         distance_field, map_w, map_h,
@@ -233,6 +234,7 @@ void kernel_raycast_scores(const float* __restrict__ particles,
                            float z_hit,
                            float z_rand,
                            float sigma_hit,
+                           float laser_min,
                            float laser_max,
                            float laser_ox,
                            float laser_oy,
@@ -255,7 +257,7 @@ void kernel_raycast_scores(const float* __restrict__ particles,
     if (candidate >= num_candidates || b >= num_ranges) return;
 
     const float observed = ranges[b];
-    if (!isfinite(observed) || observed < 0.1f || observed > laser_max) {
+    if (!isfinite(observed) || observed < laser_min || observed > laser_max) {
         return;
     }
 
@@ -296,7 +298,8 @@ void launch_raycast_scores(const float* particles,
                            int max_beams,
                            float angle_min, float angle_inc,
                            float z_hit, float z_rand,
-                           float sigma_hit, float laser_max_range,
+                           float sigma_hit, float laser_min_range,
+                           float laser_max_range,
                            float laser_offset_x, float laser_offset_y,
                            float step_m,
                            const int8_t* occupancy,
@@ -327,6 +330,7 @@ void launch_raycast_scores(const float* particles,
         z_hit,
         z_rand,
         sigma_hit,
+        laser_min_range,
         laser_max_range,
         laser_offset_x,
         laser_offset_y,
@@ -529,6 +533,7 @@ float evaluate_refined_pose_device(float x,
                                    int beam_step,
                                    float angle_min,
                                    float angle_inc,
+                                   float laser_min,
                                    float laser_max,
                                    float laser_ox,
                                    float laser_oy,
@@ -549,7 +554,7 @@ float evaluate_refined_pose_device(float x,
 
     for (int b = 0; b < num_ranges; b += beam_step) {
         const float r = ranges[b];
-        if (!isfinite(r) || r < 0.1f || r > laser_max) {
+        if (!isfinite(r) || r < laser_min || r > laser_max) {
             continue;
         }
         const float beam_angle = angle_min + static_cast<float>(b) * angle_inc;
@@ -581,6 +586,7 @@ void kernel_startup_scan_refinement(float* __restrict__ particles,
                                     int beam_step,
                                     float angle_min,
                                     float angle_inc,
+                                    float laser_min,
                                     float laser_max,
                                     float laser_ox,
                                     float laser_oy,
@@ -627,7 +633,7 @@ void kernel_startup_scan_refinement(float* __restrict__ particles,
 
         for (int beam = 0; beam < num_ranges; beam += beam_step) {
             const float r = ranges[beam];
-            if (!isfinite(r) || r < 0.1f || r > laser_max) {
+            if (!isfinite(r) || r < laser_min || r > laser_max) {
                 continue;
             }
             const float beam_angle = angle_min + static_cast<float>(beam) * angle_inc;
@@ -715,7 +721,7 @@ void kernel_startup_scan_refinement(float* __restrict__ particles,
     int count = 0;
     const float mean_dist = evaluate_refined_pose_device(
         x, y, theta, ranges, num_ranges, beam_step, angle_min, angle_inc,
-        laser_max, laser_ox, laser_oy, dist_field, map_w, map_h,
+        laser_min, laser_max, laser_ox, laser_oy, dist_field, map_w, map_h,
         map_res, map_ox, map_oy, max_match_distance, &count);
     if (count <= 0 || !isfinite(mean_dist)) {
         out_scores[i] = -INFINITY;
@@ -737,6 +743,7 @@ void launch_startup_scan_refinement(float* particles,
                                     int max_beams,
                                     float angle_min,
                                     float angle_inc,
+                                    float laser_min_range,
                                     float laser_max_range,
                                     float laser_offset_x,
                                     float laser_offset_y,
@@ -770,6 +777,7 @@ void launch_startup_scan_refinement(float* particles,
         beam_step,
         angle_min,
         angle_inc,
+        laser_min_range,
         laser_max_range,
         laser_offset_x,
         laser_offset_y,

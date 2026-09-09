@@ -17,7 +17,7 @@ from launch_ros.actions import LifecycleNode, Node
 
 DEFAULT_MAP = (
     "/workspace/src/f1tenth_planning/maps/"
-    "autodrive_track_ftg_commit_20260908_lap01.yaml"
+    "autodrive_track_ftg_commit_20260909_025m.yaml"
 )
 DEFAULT_TRAJECTORY = (
     "/workspace/src/f1tenth_planning/trajectories/"
@@ -102,6 +102,21 @@ def _setup(context):
                     "initial_pose_heading_offset_rad": LaunchConfiguration(
                         "amcl_initial_heading_offset"
                     ),
+                    # Explicit A/B hooks for offline scan-correction tuning.
+                    # Defaults match gpu_amcl_cpp_params.yaml, so production
+                    # behavior is unchanged unless a test supplies a value.
+                    "local_scan_correction_xy_gain": LaunchConfiguration(
+                        "amcl_local_scan_correction_xy_gain"
+                    ),
+                    "local_scan_correction_yaw_gain": LaunchConfiguration(
+                        "amcl_local_scan_correction_yaw_gain"
+                    ),
+                    "local_scan_correction_max_distance_m": LaunchConfiguration(
+                        "amcl_local_scan_correction_max_distance_m"
+                    ),
+                    "local_scan_correction_max_yaw_rad": LaunchConfiguration(
+                        "amcl_local_scan_correction_max_yaw_rad"
+                    ),
                 },
             ],
             # Keep the complete team localization tree together. Odometry is
@@ -132,6 +147,14 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("amcl_max_track_distance", default_value="0.65"),
         DeclareLaunchArgument("amcl_initial_heading_offset", default_value="0.0"),
+        DeclareLaunchArgument(
+            "amcl_local_scan_correction_xy_gain", default_value="0.0"),
+        DeclareLaunchArgument(
+            "amcl_local_scan_correction_yaw_gain", default_value="0.0"),
+        DeclareLaunchArgument(
+            "amcl_local_scan_correction_max_distance_m", default_value="0.04"),
+        DeclareLaunchArgument(
+            "amcl_local_scan_correction_max_yaw_rad", default_value="0.08"),
         DeclareLaunchArgument(
             "sensor_odom_params",
             default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),

@@ -81,6 +81,10 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "amcl_health_correction_age_s", "amcl_health_correction_accepted",
         "amcl_health_rejected_scans", "amcl_health_degraded",
         "amcl_health_xy_variance", "amcl_health_yaw_variance",
+        "amcl_health_scan_correction_distance_m",
+        "amcl_health_scan_correction_yaw_rad",
+        "amcl_health_applied_xy_correction_m",
+        "amcl_health_applied_yaw_correction_rad",
     ),
     "collision": ("gt_collision_count",),
     "imu": (

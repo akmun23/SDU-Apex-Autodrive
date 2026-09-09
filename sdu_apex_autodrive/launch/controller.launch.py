@@ -12,7 +12,7 @@ from launch_ros.descriptions import ComposableNode
 
 DEFAULT_MAP = (
     "/workspace/src/f1tenth_planning/maps/"
-    "autodrive_track_ftg_commit_20260908_lap01.yaml"
+    "autodrive_track_ftg_commit_20260909_025m.yaml"
 )
 DEFAULT_TRAJECTORY = (
     "/workspace/src/f1tenth_planning/trajectories/"

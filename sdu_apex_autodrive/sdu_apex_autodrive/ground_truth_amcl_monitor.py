@@ -386,6 +386,18 @@ class GroundTruthAmclMonitor(Node):
                 ekf_pose[0], ekf_pose[1], ekf_pose[2],
                 amcl_x, amcl_y, amcl_yaw,
             )
+
+        # The raw observer can arrive after the first AMCL message because
+        # AMCL is initialized from its map/raceline pose. Establish its
+        # local-to-map reference on the first later timestamped pair too;
+        # otherwise reports incorrectly say ``odom=unavailable`` even when
+        # the raw observer topic is healthy.
+        odom_pose = _interpolate(self.odom_samples, stamp, self.pair_timeout)
+        if self.odom_map_reference is None and odom_pose is not None:
+            self.odom_map_reference = (
+                odom_pose[0], odom_pose[1], odom_pose[2],
+                amcl_x, amcl_y, amcl_yaw,
+            )
         ekf_map_pose = self._map_pose_from_ekf(ekf_pose) if ekf_pose else None
         ekf_error_xy = math.nan
         ekf_error_yaw = math.nan
@@ -397,7 +409,6 @@ class GroundTruthAmclMonitor(Node):
             ekf_report = "ekf=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad" % (
                 ex, ey, eyaw, ekf_error_xy, ekf_error_yaw)
 
-        odom_pose = _interpolate(self.odom_samples, stamp, self.pair_timeout)
         odom_map_pose = self._map_pose_from_odom(odom_pose) if odom_pose else None
         odom_error_xy = math.nan
         odom_error_yaw = math.nan

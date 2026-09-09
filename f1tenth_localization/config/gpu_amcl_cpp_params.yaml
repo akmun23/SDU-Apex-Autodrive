@@ -54,6 +54,7 @@ gpu_amcl_cpp:
     z_hit: 0.90
     z_rand: 0.10
     sigma_hit: 0.05
+    laser_min_range: 0.06
     laser_max_range: 10.0
     laser_offset_x: 0.2733
     laser_offset_y: 0.0
@@ -127,14 +128,15 @@ gpu_amcl_cpp:
     # passed. Very weak modes remain rejected before they can affect the map
     # pose.
     local_cluster_min_weight: 0.60
-    # Keep the scan correction a bounded refinement of the odometry prediction.
-    # Keep the known-start racing pose on the causal odometry prediction. The
-    # moving FTG validation showed that even individually small, valid-looking
-    # scan innovations accumulated to >1 m of map-pose bias while odometry
-    # stayed within about 0.08 m. The particle scan estimate is still computed
-    # and exposed through diagnostics; local tracking must not integrate its
-    # systematic map/scan bias into controller input.
-    local_scan_correction_gain: 0.0
+    # Keep translational scan correction disabled: the current corridor scans
+    # do not observe along-track translation reliably. Wall orientation still
+    # contains useful heading information, so it is evaluated independently.
+    local_scan_correction_xy_gain: 0.0
+    # The offline yaw-only candidate was rejected by the held-out live run:
+    # it accumulated about 0.55 m of map-pose error while EKF odometry stayed
+    # near 0.05 m. Keep the parameter available for a future observability-
+    # aware matcher, but do not apply PF yaw corrections in production.
+    local_scan_correction_yaw_gain: 0.0
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
     # matching bias is integrated again at every scan update.

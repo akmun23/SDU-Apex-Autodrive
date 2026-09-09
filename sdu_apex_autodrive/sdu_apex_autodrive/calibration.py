@@ -115,6 +115,10 @@ FIELDS = (
     "amcl_health_correction_age_s", "amcl_health_correction_accepted",
     "amcl_health_rejected_scans", "amcl_health_degraded",
     "amcl_health_xy_variance", "amcl_health_yaw_variance",
+    "amcl_health_scan_correction_distance_m",
+    "amcl_health_scan_correction_yaw_rad",
+    "amcl_health_applied_xy_correction_m",
+    "amcl_health_applied_yaw_correction_rad",
     "amcl_particle_count",
     "lidar_rate_hz", "lidar_event_count",
     "imu_rate_hz", "imu_event_count",
@@ -1115,9 +1119,13 @@ class Calibration(Node):
             "amcl_health_correction_accepted",
             "amcl_health_rejected_scans", "amcl_health_degraded",
             "amcl_health_xy_variance", "amcl_health_yaw_variance",
+            "amcl_health_scan_correction_distance_m",
+            "amcl_health_scan_correction_yaw_rad",
+            "amcl_health_applied_xy_correction_m",
+            "amcl_health_applied_yaw_correction_rad",
         )
         self._record_event("amcl_localization_health")
-        for name, value in zip(names, values[:6]):
+        for name, value in zip(names, values[:len(names)]):
             if math.isfinite(value):
                 self._set(name, value)
         self._capture_source_event(

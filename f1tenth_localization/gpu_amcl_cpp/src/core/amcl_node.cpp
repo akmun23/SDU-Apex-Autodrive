@@ -140,6 +140,7 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("z_hit", 0.95);
     declare_parameter<double>("z_rand", 0.05);
     declare_parameter<double>("sigma_hit", 0.2);
+    declare_parameter<double>("laser_min_range", 0.06);
     declare_parameter<double>("laser_max_range", 10.0);
     declare_parameter<double>("laser_offset_x", 0.265);
     declare_parameter<double>("laser_offset_y", 0.0);
@@ -213,7 +214,8 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("local_scan_correction_max_yaw_rad", 0.45);
     declare_parameter<double>("local_cluster_association_max_distance_m", 0.80);
     declare_parameter<double>("local_cluster_min_weight", 0.75);
-    declare_parameter<double>("local_scan_correction_gain", 0.35);
+    declare_parameter<double>("local_scan_correction_xy_gain", 0.0);
+    declare_parameter<double>("local_scan_correction_yaw_gain", 0.0);
     declare_parameter<bool>("local_tracking_reinitialize_cloud", true);
     declare_parameter<double>("local_tracking_cloud_covariance_xy", 0.01);
     declare_parameter<double>("local_tracking_cloud_covariance_yaw", 0.01);
@@ -291,8 +293,10 @@ void AmclNode::load_parameters() {
         0.0, get_parameter("local_cluster_association_max_distance_m").as_double());
     local_cluster_min_weight_ = std::clamp(
         get_parameter("local_cluster_min_weight").as_double(), 0.0, 1.0);
-    local_scan_correction_gain_ = std::clamp(
-        get_parameter("local_scan_correction_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_xy_gain_ = std::clamp(
+        get_parameter("local_scan_correction_xy_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_yaw_gain_ = std::clamp(
+        get_parameter("local_scan_correction_yaw_gain").as_double(), 0.0, 1.0);
     local_tracking_reinitialize_cloud_ = get_parameter(
         "local_tracking_reinitialize_cloud").as_bool();
     local_tracking_cloud_covariance_xy_ = std::max(
@@ -315,13 +319,15 @@ void AmclNode::load_parameters() {
         "[AMCL] Parameters: update_min_d=%.5f, update_min_a=%.5f, "
         "max_scan_age=%.4f, odom_history=%.3fs, cloud_publish_rate=%.1f Hz, "
         "debug_pre_resample=%s, slip_threshold=%.2f rad/s, initial_raceline_heading=%s, "
-        "local_correction_gate=%.2fm/%.2frad gain=%.3f association=%.2fm recenter_cloud=%s",
+        "local_correction_gate=%.2fm/%.2frad xy_gain=%.3f yaw_gain=%.3f "
+        "association=%.2fm recenter_cloud=%s",
         update_min_d_, update_min_a_, max_scan_age_, odom_history_duration_s_,
         cloud_publish_rate_, debug_pre_resample_particles_ ? "true" : "false",
         slip_angular_threshold_,
         initial_heading_from_raceline_ ? "true" : "false",
         local_scan_correction_max_distance_m_, local_scan_correction_max_yaw_rad_,
-        local_scan_correction_gain_, local_cluster_association_max_distance_m_,
+        local_scan_correction_xy_gain_, local_scan_correction_yaw_gain_,
+        local_cluster_association_max_distance_m_,
         local_tracking_reinitialize_cloud_ ? "true" : "false");
 }
 
@@ -914,6 +920,7 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     sm_cfg.z_hit           = get_parameter("z_hit").as_double();
     sm_cfg.z_rand          = get_parameter("z_rand").as_double();
     sm_cfg.sigma_hit       = get_parameter("sigma_hit").as_double();
+    sm_cfg.laser_min_range = get_parameter("laser_min_range").as_double();
     sm_cfg.laser_max_range = get_parameter("laser_max_range").as_double();
     sm_cfg.laser_offset_x  = get_parameter("laser_offset_x").as_double();
     sm_cfg.laser_offset_y  = get_parameter("laser_offset_y").as_double();
@@ -947,6 +954,10 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     consecutive_rejected_scans_ = 0;
     last_scan_correction_accepted_ = false;
+    last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_applied_xy_correction_m_ = 0.0;
+    last_scan_applied_yaw_correction_rad_ = 0.0;
     current_map_pose_covariance_.setIdentity();
     local_odom_reference_ready_ = false;
     initial_scan_update_pending_ = true;
@@ -1065,6 +1076,10 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
             get_parameter("initial_cov_aa").as_double();
         consecutive_rejected_scans_ = 0;
         last_scan_correction_accepted_ = false;
+        last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_applied_xy_correction_m_ = 0.0;
+        last_scan_applied_yaw_correction_rad_ = 0.0;
 
         if (map_.is_loaded()) {
             if (pf_.config().global_initialization) {
@@ -1521,6 +1536,8 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 est.x - odom_prediction.x, est.y - odom_prediction.y);
             const double correction_yaw = std::abs(math_utils::angle_diff(
                 est.theta, odom_prediction.theta));
+            last_scan_correction_distance_m_ = correction_distance;
+            last_scan_correction_yaw_rad_ = correction_yaw;
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 1000,
                 "AMCL local correction: odom_prediction=(%.3f, %.3f, %.3f) "
@@ -1546,12 +1563,20 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             }
 
             if (!local_scan_correction_rejected) {
-                const double gain = local_scan_correction_gain_;
-                est.x = odom_prediction.x + gain * (est.x - odom_prediction.x);
-                est.y = odom_prediction.y + gain * (est.y - odom_prediction.y);
+                const double xy_gain = local_scan_correction_xy_gain_;
+                est.x = odom_prediction.x + xy_gain * (est.x - odom_prediction.x);
+                est.y = odom_prediction.y + xy_gain * (est.y - odom_prediction.y);
+                const double yaw_gain = local_scan_correction_yaw_gain_;
                 est.theta = math_utils::normalize_angle(
-                    odom_prediction.theta + gain * math_utils::angle_diff(
+                    odom_prediction.theta + yaw_gain * math_utils::angle_diff(
                         est.theta, odom_prediction.theta));
+                last_scan_applied_xy_correction_m_ = std::hypot(
+                    est.x - odom_prediction.x, est.y - odom_prediction.y);
+                last_scan_applied_yaw_correction_rad_ = std::abs(
+                    math_utils::angle_diff(est.theta, odom_prediction.theta));
+            } else {
+                last_scan_applied_xy_correction_m_ = 0.0;
+                last_scan_applied_yaw_correction_rad_ = 0.0;
             }
         }
         local_tracking_update = true;
@@ -2001,6 +2026,10 @@ void AmclNode::publish_current_map_pose(
             std::max(current_map_pose_covariance_(0, 0),
                      current_map_pose_covariance_(1, 1)),
             current_map_pose_covariance_(2, 2),
+            last_scan_correction_distance_m_,
+            last_scan_correction_yaw_rad_,
+            last_scan_applied_xy_correction_m_,
+            last_scan_applied_yaw_correction_rad_,
         };
         localization_health_pub_->publish(health);
     }

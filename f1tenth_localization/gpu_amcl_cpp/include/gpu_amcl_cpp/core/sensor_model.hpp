@@ -22,6 +22,7 @@ public:
         double z_hit           = 0.95;
         double z_rand          = 0.05;
         double sigma_hit       = 0.2;
+        double laser_min_range = 0.06;
         double laser_max_range = 10.0;
         double laser_offset_x  = 0.265;
         double laser_offset_y  = 0.0;
@@ -102,7 +103,8 @@ void launch_sensor_weights(const float* particles, int n,
                            int max_beams,
                            float angle_min, float angle_inc,
                            float z_hit, float z_rand,
-                           float sigma_hit, float laser_max_range,
+                           float sigma_hit, float laser_min_range,
+                           float laser_max_range,
                            float laser_offset_x, float laser_offset_y,
                            bool normalize_likelihood_by_beams,
                            float likelihood_scale,
@@ -120,7 +122,8 @@ void launch_raycast_scores(const float* particles,
                            int max_beams,
                            float angle_min, float angle_inc,
                            float z_hit, float z_rand,
-                           float sigma_hit, float laser_max_range,
+                           float sigma_hit, float laser_min_range,
+                           float laser_max_range,
                            float laser_offset_x, float laser_offset_y,
                            float step_m,
                            const int8_t* occupancy,
@@ -147,6 +150,7 @@ void launch_startup_scan_refinement(float* particles,
                                     int max_beams,
                                     float angle_min,
                                     float angle_inc,
+                                    float laser_min_range,
                                     float laser_max_range,
                                     float laser_offset_x,
                                     float laser_offset_y,

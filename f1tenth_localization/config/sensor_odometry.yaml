@@ -41,7 +41,11 @@ sensor_odometry:
     # Clear stale motion after sustained zero wheel motion and calm IMU data;
     # a single missing encoder packet is still rejected by the frozen-wheel
     # gate above.
-    stationary_hold_s: 0.20
+    # Native source intervals are about 0.067 s in the compete player. A
+    # 0.20 s hold let a stale 0.50 m/s prediction integrate for two packets
+    # after the encoders had already reached zero. 0.10 s still requires a
+    # second coherent zero packet while preventing that measured stop jump.
+    stationary_hold_s: 0.10
     stationary_ax_abs_max_mps2: 0.25
     stationary_ay_abs_max_mps2: 0.75
     stationary_yaw_rate_abs_max_radps: 0.15

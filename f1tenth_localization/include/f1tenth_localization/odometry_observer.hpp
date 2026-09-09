@@ -28,7 +28,7 @@ struct OdometryObserverConfig
   // This is deliberately much lower than wheel_freeze_speed_mps: the latter
   // is an innovation/missing-packet guard, not a stopped-vehicle threshold.
   double stationary_speed_threshold_mps{0.03};
-  double stationary_hold_s{0.20};
+  double stationary_hold_s{0.10};
   double stationary_ax_abs_max_mps2{0.25};
   double stationary_ay_abs_max_mps2{0.75};
   double stationary_yaw_rate_abs_max_radps{0.15};

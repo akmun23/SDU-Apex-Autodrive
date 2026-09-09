@@ -17,6 +17,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <limits>
 #include <Eigen/Core>
 
 namespace gpu_amcl_cpp {
@@ -154,6 +155,13 @@ private:
     double localization_degraded_after_s_ = 0.30;
     uint64_t consecutive_rejected_scans_ = 0;
     bool last_scan_correction_accepted_ = false;
+    // Last local scan innovation, exported only through diagnostics. The
+    // controller still receives the normal map pose; these values make an
+    // offline gain/observability test reproducible.
+    double last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
+    double last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+    double last_scan_applied_xy_correction_m_ = 0.0;
+    double last_scan_applied_yaw_correction_rad_ = 0.0;
     double global_pose_covariance_xy_max_ = 0.25;
     double global_pose_covariance_yaw_max_ = 0.12;
     double global_pose_max_track_distance_m_ = 0.45;
@@ -170,11 +178,12 @@ private:
     double local_scan_correction_max_yaw_rad_ = 0.45;
     double local_cluster_association_max_distance_m_ = 0.80;
     double local_cluster_min_weight_ = 0.75;
-    // A scan match is an absolute map-pose measurement.  Keep odometry as
-    // the short-term prediction and apply only a bounded fraction of the
-    // scan correction so a small systematic likelihood-field bias cannot
-    // accumulate into a large along-track error at the native scan rate.
-    double local_scan_correction_gain_ = 0.35;
+    // Keep translational scan correction independently disabled until a
+    // geometry-aware matcher supplies calibrated anisotropic information.
+    // Yaw is observable from the wall orientation even when along-corridor
+    // translation is not, so it has its own experimentally tunable gain.
+    double local_scan_correction_xy_gain_ = 0.0;
+    double local_scan_correction_yaw_gain_ = 0.0;
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
     double local_tracking_cloud_covariance_yaw_ = 0.01;

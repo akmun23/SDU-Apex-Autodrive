@@ -202,7 +202,7 @@ private:
     config.wheel_innovation_max_mps = 0.30;
     config.stationary_speed_threshold_mps = 0.03;
     config.wheel_update_beta = 0.20;
-    config.stationary_hold_s = 0.20;
+    config.stationary_hold_s = 0.10;
     config.stationary_ax_abs_max_mps2 = 0.25;
     config.stationary_ay_abs_max_mps2 = 0.75;
     config.stationary_yaw_rate_abs_max_radps = 0.15;

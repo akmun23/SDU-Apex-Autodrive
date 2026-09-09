@@ -16,15 +16,17 @@ ekf_localization:
     # These are process-noise densities, not measurement noise copied from
     # the raw topic. They are deliberately explicit so replay tests can fit
     # and verify them against recorded truth.
-    # Source-time covariance fits from the clean moving runs are in the
-    # 8e-6--1.1e-5 range. Keep a small conservative envelope around that fit;
-    # the raw message covariance remains an initial/floor uncertainty and is
-    # never added as process noise on every callback.
-    # The full-lap source-time recorder fit is below 1e-8 in this regime. Use
-    # a conservative 1e-6 envelope without allowing the yaw floor to dominate
-    # lateral covariance over a long lap.
+    # The raw message covariance remains an initial/floor uncertainty and is
+    # never added as process noise on every callback. The multi-stop
+    # source-time campaign showed that XY error accumulated mainly with wall
+    # time, including braking transients, so the time density below is fitted
+    # separately from the distance density.
     process_noise_xy_m2_per_m: 0.000001
-    process_noise_xy_m2_per_s: 0.000001
+    # Held-out source-time calibration on the multi-stop motion campaign
+    # required this time density for 95% XY ellipse coverage. The previous
+    # 1e-6 value covered only 48.1% of the clean observer samples and made
+    # AMCL over-trust a stale local pose after a braking transient.
+    process_noise_xy_m2_per_s: 0.0002
     process_noise_yaw2_per_rad: 0.000001
     process_noise_yaw2_per_m: 0.000001
     # At the native 20 Hz track cadence even 23 m/s is about 1.15 m per
