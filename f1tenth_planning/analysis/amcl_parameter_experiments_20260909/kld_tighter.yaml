@@ -1,0 +1,7 @@
+gpu_amcl_cpp:
+  ros__parameters:
+    # One-factor candidate: retain KLD adaptation but require a tighter
+    # approximation before reducing the cloud.  The max remains 2500 so this
+    # cannot silently trade localization quality for unbounded GPU work.
+    kld_epsilon: 0.03
+    kld_z: 2.33

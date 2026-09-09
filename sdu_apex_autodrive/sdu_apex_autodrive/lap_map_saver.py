@@ -6,6 +6,7 @@ localization.
 """
 
 from pathlib import Path
+import hashlib
 import math
 import time
 
@@ -15,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from slam_toolbox.srv import SaveMap
 from std_msgs.msg import Bool, Int32
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
 class FiveLapMapSaver(Node):
@@ -51,6 +53,18 @@ class FiveLapMapSaver(Node):
         self.output_path = Path(str(self.get_parameter("output_directory").value))
         self.map_name = str(self.get_parameter("map_name").value)
         self.save_map_service = str(self.get_parameter("save_map_service").value)
+        self.provenance_enabled = bool(self.get_parameter("provenance_enabled").value)
+        self.provenance_file = str(self.get_parameter("provenance_file").value).strip()
+        self.provenance_map_frame = str(
+            self.get_parameter("provenance_map_frame").value)
+        self.provenance_world_frame = str(
+            self.get_parameter("provenance_world_frame").value)
+        if self.provenance_enabled and not self.provenance_file:
+            self.provenance_file = str(
+                self.output_path / f"{self.map_name}.provenance.yaml")
+        if self.provenance_enabled and (
+                not self.provenance_map_frame or not self.provenance_world_frame):
+            raise ValueError("map provenance frame names must not be empty")
 
         if self.target_laps <= 0 or min(
             self.start_radius,
@@ -71,6 +85,9 @@ class FiveLapMapSaver(Node):
             raise ValueError("map_name must be a filename without a directory")
 
         self._save_client = self.create_client(SaveMap, self.save_map_service)
+        self._tf_buffer = Buffer() if self.provenance_enabled else None
+        self._tf_listener = (
+            TransformListener(self._tf_buffer, self) if self._tf_buffer is not None else None)
         completion_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -165,6 +182,10 @@ class FiveLapMapSaver(Node):
         self.declare_parameter(
             "collision_topic", "/autodrive/roboracer_1/collision_count")
         self.declare_parameter("collision_baseline_stable_sec", 1.0)
+        self.declare_parameter("provenance_enabled", False)
+        self.declare_parameter("provenance_file", "")
+        self.declare_parameter("provenance_map_frame", "map")
+        self.declare_parameter("provenance_world_frame", "gt_odom")
 
     def _on_collision_count(self, msg: Int32) -> None:
         """Abort mapping on a new collision; never continue after a crash."""
@@ -381,6 +402,10 @@ class FiveLapMapSaver(Node):
         if success:
             self.get_logger().info(
                 f"Lap {lap_number} map snapshot saved: {snapshot_name}")
+            if self.provenance_enabled:
+                self._write_provenance(
+                    self.output_path / f"{snapshot_name}.provenance.yaml",
+                    self.output_path / f"{snapshot_name}.yaml")
         else:
             self.get_logger().error(
                 f"Lap {lap_number} map snapshot did not succeed")
@@ -436,11 +461,72 @@ class FiveLapMapSaver(Node):
             self.get_logger().info(
                 f"{self.target_laps}-lap map saved successfully after "
                 "loop-closure settling")
+            if self.provenance_enabled:
+                self._write_provenance(
+                    Path(self.provenance_file),
+                    self.output_path / f"{self.map_name}.yaml")
         else:
             self.get_logger().error(
                 "Map save did not succeed; stopping after the requested five laps")
         self._finished = True
         self._completion_pub.publish(Bool(data=True))
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _write_provenance(self, output: Path, map_yaml: Path) -> bool:
+        """Save the fixed map->simulator transform alongside a map artifact."""
+        if self._tf_buffer is None:
+            return False
+        try:
+            # TF lookup(target, source) returns the transform that maps source
+            # coordinates into target coordinates. Thus this is map -> gt_odom.
+            transform = self._tf_buffer.lookup_transform(
+                self.provenance_world_frame,
+                self.provenance_map_frame,
+                rclpy.time.Time(),
+            )
+        except TransformException as exc:
+            self.get_logger().error(
+                f"Cannot write map provenance; missing "
+                f"{self.provenance_map_frame}->{self.provenance_world_frame} TF: {exc}")
+            return False
+
+        rotation = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        image_path = map_yaml.with_suffix(".pgm")
+        yaml_hash = self._sha256(map_yaml) if map_yaml.is_file() else ""
+        image_hash = self._sha256(image_path) if image_path.is_file() else ""
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            "# Fixed transform captured from mapping-only ground-truth TF.\n"
+            "# This file is for diagnostics/offline scoring; racing nodes never consume it.\n"
+            f"map_yaml: {map_yaml}\n"
+            f"map_frame: {self.provenance_map_frame}\n"
+            f"world_frame: {self.provenance_world_frame}\n"
+            "map_to_world:\n"
+            f"  x_m: {transform.transform.translation.x:.12g}\n"
+            f"  y_m: {transform.transform.translation.y:.12g}\n"
+            f"  yaw_rad: {yaw:.12g}\n"
+            "source: mapping_ground_truth_tf_at_save\n"
+            f"map_yaml_sha256: {yaml_hash}\n"
+            f"map_image_sha256: {image_hash}\n",
+            encoding="utf-8",
+        )
+        self.get_logger().info(
+            f"Map provenance saved to {output} "
+            f"(map->world yaw={yaw:.6f}, translation="
+            f"({transform.transform.translation.x:.3f}, "
+            f"{transform.transform.translation.y:.3f}))")
+        return True
 
 
 def main(args=None) -> None:

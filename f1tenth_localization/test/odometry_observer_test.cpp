@@ -98,7 +98,7 @@ void test_epoch_and_timing()
   auto epoch = observer.update(observation(0.025, 51.0, 0.0));
   require(epoch.reset_epoch, "large encoder jump resets epoch");
   require(epoch.speed_mps == 0.0, "epoch reset rebaselines speed");
-  auto gap = observer.update(observation(0.20, 51.0, 0.0));
+  auto gap = observer.update(observation(0.40, 51.0, 0.0));
   require(gap.timing_degraded, "long gap is degraded");
 
   OdometryObserver track_observer;
@@ -107,6 +107,19 @@ void test_epoch_and_timing()
     observation(0.050, 0.0, 0.0));
   require(!native_track_packet.timing_degraded,
     "native 20 Hz track packet is not degraded");
+
+  OdometryObserver gap_observer;
+  gap_observer.update(observation(0.0, 0.0, 0.0));
+  const double speed = 0.30;
+  const double first_delta = speed * 0.050 / 0.059;
+  gap_observer.update(observation(0.050, first_delta, first_delta));
+  const double gap_delta = speed * 0.150 / 0.059;
+  const auto integrated_gap = gap_observer.update(
+    observation(0.200, first_delta + gap_delta, first_delta + gap_delta));
+  require(integrated_gap.timing_degraded,
+    "a short source gap remains visible as degraded timing");
+  require(integrated_gap.x_m > 0.05,
+    "encoder endpoint displacement is retained across a short source gap");
 }
 
 void test_turn_mode_and_pose()

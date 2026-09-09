@@ -18,6 +18,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32
 
+from .map_provenance import MapProvenance, load_map_provenance
+
 
 PoseSample = Tuple[float, float, float, float]
 
@@ -93,6 +95,8 @@ class GroundTruthAmclMonitor(Node):
         self.declare_parameter("report_period_sec", 1.0)
         self.declare_parameter("pair_timeout_sec", 0.30)
         self.declare_parameter("output_csv", "")
+        self.declare_parameter("map_provenance_file", "")
+        self.declare_parameter("require_absolute_map_scoring", False)
 
         gt_topic = str(self.get_parameter("ground_truth_topic").value)
         gt_odom_topic = str(self.get_parameter("ground_truth_odom_topic").value)
@@ -115,6 +119,24 @@ class GroundTruthAmclMonitor(Node):
         self.collision_count: Optional[int] = None
         self.invalid_collision_epoch = False
 
+        provenance_file = str(self.get_parameter("map_provenance_file").value).strip()
+        self.map_provenance: Optional[MapProvenance] = None
+        if provenance_file:
+            self.map_provenance = load_map_provenance(provenance_file)
+            self.map_provenance.verify_files()
+            self.get_logger().info(
+                "Absolute map scoring enabled from %s (source=%s, map=%s, world=%s)"
+                % (provenance_file, self.map_provenance.source,
+                   self.map_provenance.map_frame, self.map_provenance.world_frame))
+        elif bool(self.get_parameter("require_absolute_map_scoring").value):
+            raise ValueError(
+                "require_absolute_map_scoring is true but map_provenance_file is empty")
+        else:
+            self.get_logger().warn(
+                "No map provenance supplied; AMCL error is relative-to-first-pair only")
+
+        # This transform is retained solely for the relative-drift metric. It
+        # is never used for the absolute metric when a provenance file exists.
         self.map_to_world_yaw: Optional[float] = None
         self.map_to_world_translation: Optional[Tuple[float, float]] = None
         # (odom x, odom y, odom yaw, map x, map y, map yaw) at alignment.
@@ -141,12 +163,22 @@ class GroundTruthAmclMonitor(Node):
             self.csv_writer = csv.writer(self.csv_stream)
             self.csv_writer.writerow((
                 "stamp_s", "time_s", "gt_x_m", "gt_y_m", "gt_yaw_rad",
+                "gt_world_x_m", "gt_world_y_m", "gt_world_yaw_rad",
                 "amcl_x_m", "amcl_y_m", "amcl_yaw_rad", "amcl_error_m", "amcl_error_rad",
+                "amcl_absolute_error_m", "amcl_absolute_error_rad",
+                "amcl_relative_drift_m", "amcl_relative_drift_rad",
                 "current_map_x_m", "current_map_y_m", "current_map_yaw_rad",
                 "current_map_error_m", "current_map_error_rad",
+                "current_map_absolute_error_m", "current_map_absolute_error_rad",
+                "current_map_relative_drift_m", "current_map_relative_drift_rad",
                 "ekf_x_m", "ekf_y_m", "ekf_yaw_rad", "ekf_error_m", "ekf_error_rad",
+                "ekf_absolute_error_m", "ekf_absolute_error_rad",
+                "ekf_relative_drift_m", "ekf_relative_drift_rad",
                 "odom_x_m", "odom_y_m", "odom_yaw_rad", "odom_error_m", "odom_error_rad",
+                "odom_absolute_error_m", "odom_absolute_error_rad",
+                "odom_relative_drift_m", "odom_relative_drift_rad",
                 "gt_speed_mps", "collision_count",
+                "scoring_mode", "map_provenance_file",
             ))
 
         self.create_subscription(Point, gt_topic, self._on_ground_truth, 10)
@@ -333,47 +365,70 @@ class GroundTruthAmclMonitor(Node):
         if gt_pose is None or amcl_pose is None:
             return
 
-        gt_x, gt_y, gt_yaw = gt_pose
+        gt_world_x, gt_world_y, gt_world_yaw = gt_pose
         amcl_x, amcl_y, amcl_yaw = amcl_pose
+        absolute_gt_pose = None
+        if self.map_provenance is not None:
+            absolute_gt_pose = self.map_provenance.world_to_map(
+                gt_world_x, gt_world_y, gt_world_yaw)
+
         if self.map_to_world_yaw is None:
-            self.map_to_world_yaw = _wrap(gt_yaw - amcl_yaw)
+            reference_gt = absolute_gt_pose or gt_pose
+            ref_gt_x, ref_gt_y, ref_gt_yaw = reference_gt
+            self.map_to_world_yaw = _wrap(ref_gt_yaw - amcl_yaw)
             rx, ry = _rotate(amcl_x, amcl_y, self.map_to_world_yaw)
-            self.map_to_world_translation = (gt_x - rx, gt_y - ry)
-            odom_pose = _interpolate(self.odom_samples, stamp, self.pair_timeout)
-            if odom_pose is not None:
-                self.odom_map_reference = (
-                    odom_pose[0], odom_pose[1], odom_pose[2],
-                    amcl_x, amcl_y, amcl_yaw,
-                )
-            ekf_pose = _interpolate(self.ekf_samples, stamp, self.pair_timeout)
-            if ekf_pose is not None:
-                self.ekf_map_reference = (
-                    ekf_pose[0], ekf_pose[1], ekf_pose[2],
-                    amcl_x, amcl_y, amcl_yaw,
-                )
+            self.map_to_world_translation = (ref_gt_x - rx, ref_gt_y - ry)
             self.get_logger().info(
-                "Ground-truth alignment initialized: map->world yaw=%.3f, translation=(%.3f, %.3f)"
+                "Relative GT alignment initialized: yaw=%.3f, translation=(%.3f, %.3f)"
                 % (self.map_to_world_yaw, self.map_to_world_translation[0],
                    self.map_to_world_translation[1]))
-            return
 
         tx, ty = self.map_to_world_translation
-        dx = gt_x - tx
-        dy = gt_y - ty
-        expected_x, expected_y = _rotate(dx, dy, -self.map_to_world_yaw)
-        expected_yaw = _wrap(gt_yaw - self.map_to_world_yaw)
-        error_xy = math.hypot(amcl_x - expected_x, amcl_y - expected_y)
-        error_yaw = abs(_wrap(amcl_yaw - expected_yaw))
+        relative_gt_x, relative_gt_y, relative_gt_yaw = absolute_gt_pose or gt_pose
+        dx = relative_gt_x - tx
+        dy = relative_gt_y - ty
+        relative_expected_x, relative_expected_y = _rotate(
+            dx, dy, -self.map_to_world_yaw)
+        relative_expected_yaw = _wrap(relative_gt_yaw - self.map_to_world_yaw)
+        relative_error_xy = math.hypot(
+            amcl_x - relative_expected_x, amcl_y - relative_expected_y)
+        relative_error_yaw = abs(_wrap(amcl_yaw - relative_expected_yaw))
+
+        if absolute_gt_pose is not None:
+            expected_x, expected_y, expected_yaw = absolute_gt_pose
+            absolute_error_xy = math.hypot(amcl_x - expected_x, amcl_y - expected_y)
+            absolute_error_yaw = abs(_wrap(amcl_yaw - expected_yaw))
+            error_xy, error_yaw = absolute_error_xy, absolute_error_yaw
+        else:
+            expected_x, expected_y, expected_yaw = (
+                relative_expected_x, relative_expected_y, relative_expected_yaw)
+            absolute_error_xy = math.nan
+            absolute_error_yaw = math.nan
+            error_xy, error_yaw = relative_error_xy, relative_error_yaw
 
         current_map_pose = _interpolate(
             self.current_map_samples, stamp, self.pair_timeout)
         current_map_error_xy = math.nan
         current_map_error_yaw = math.nan
+        current_map_absolute_error_xy = math.nan
+        current_map_absolute_error_yaw = math.nan
+        current_map_relative_error_xy = math.nan
+        current_map_relative_error_yaw = math.nan
         current_map_report = "current_map=unavailable"
         if current_map_pose is not None:
             cx, cy, cyaw = current_map_pose
-            current_map_error_xy = math.hypot(cx - expected_x, cy - expected_y)
-            current_map_error_yaw = abs(_wrap(cyaw - expected_yaw))
+            current_map_relative_error_xy = math.hypot(
+                cx - relative_expected_x, cy - relative_expected_y)
+            current_map_relative_error_yaw = abs(
+                _wrap(cyaw - relative_expected_yaw))
+            if absolute_gt_pose is not None:
+                current_map_absolute_error_xy = math.hypot(cx - expected_x, cy - expected_y)
+                current_map_absolute_error_yaw = abs(_wrap(cyaw - expected_yaw))
+                current_map_error_xy = current_map_absolute_error_xy
+                current_map_error_yaw = current_map_absolute_error_yaw
+            else:
+                current_map_error_xy = current_map_relative_error_xy
+                current_map_error_yaw = current_map_relative_error_yaw
             current_map_report = (
                 "current_map=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad"
                 % (cx, cy, cyaw, current_map_error_xy, current_map_error_yaw))
@@ -381,10 +436,17 @@ class GroundTruthAmclMonitor(Node):
         ekf_pose = _interpolate(self.ekf_samples, stamp, self.pair_timeout)
         if self.ekf_map_reference is None and ekf_pose is not None:
             # EKF may publish later than the first AMCL alignment sample.
-            # Establish its local-to-map origin at the first valid pair.
+            # Establish its local-to-map origin at the first valid pair.  The
+            # simulator odom/IPS pose is in the simulator world frame, while
+            # AMCL and the saved map are in the map frame.  Therefore the
+            # reference must be the already-aligned map pose, not gt_pose
+            # (which is still in the simulator world frame).
+            reference_pose = (
+                absolute_gt_pose
+                or (relative_expected_x, relative_expected_y, relative_expected_yaw))
             self.ekf_map_reference = (
                 ekf_pose[0], ekf_pose[1], ekf_pose[2],
-                amcl_x, amcl_y, amcl_yaw,
+                reference_pose[0], reference_pose[1], reference_pose[2],
             )
 
         # The raw observer can arrive after the first AMCL message because
@@ -394,29 +456,58 @@ class GroundTruthAmclMonitor(Node):
         # the raw observer topic is healthy.
         odom_pose = _interpolate(self.odom_samples, stamp, self.pair_timeout)
         if self.odom_map_reference is None and odom_pose is not None:
+            reference_pose = (
+                absolute_gt_pose
+                or (relative_expected_x, relative_expected_y, relative_expected_yaw))
             self.odom_map_reference = (
                 odom_pose[0], odom_pose[1], odom_pose[2],
-                amcl_x, amcl_y, amcl_yaw,
+                reference_pose[0], reference_pose[1], reference_pose[2],
             )
         ekf_map_pose = self._map_pose_from_ekf(ekf_pose) if ekf_pose else None
         ekf_error_xy = math.nan
         ekf_error_yaw = math.nan
+        ekf_absolute_error_xy = math.nan
+        ekf_absolute_error_yaw = math.nan
+        ekf_relative_error_xy = math.nan
+        ekf_relative_error_yaw = math.nan
         ekf_report = "ekf=unavailable"
         if ekf_map_pose is not None:
             ex, ey, eyaw = ekf_map_pose
-            ekf_error_xy = math.hypot(ex - expected_x, ey - expected_y)
-            ekf_error_yaw = abs(_wrap(eyaw - expected_yaw))
+            ekf_relative_error_xy = math.hypot(
+                ex - relative_expected_x, ey - relative_expected_y)
+            ekf_relative_error_yaw = abs(_wrap(eyaw - relative_expected_yaw))
+            if absolute_gt_pose is not None:
+                ekf_absolute_error_xy = math.hypot(ex - expected_x, ey - expected_y)
+                ekf_absolute_error_yaw = abs(_wrap(eyaw - expected_yaw))
+                ekf_error_xy = ekf_absolute_error_xy
+                ekf_error_yaw = ekf_absolute_error_yaw
+            else:
+                ekf_error_xy = ekf_relative_error_xy
+                ekf_error_yaw = ekf_relative_error_yaw
             ekf_report = "ekf=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad" % (
                 ex, ey, eyaw, ekf_error_xy, ekf_error_yaw)
 
         odom_map_pose = self._map_pose_from_odom(odom_pose) if odom_pose else None
         odom_error_xy = math.nan
         odom_error_yaw = math.nan
+        odom_absolute_error_xy = math.nan
+        odom_absolute_error_yaw = math.nan
+        odom_relative_error_xy = math.nan
+        odom_relative_error_yaw = math.nan
         odom_report = "odom=unavailable"
         if odom_map_pose is not None:
             ox, oy, oyaw = odom_map_pose
-            odom_error_xy = math.hypot(ox - expected_x, oy - expected_y)
-            odom_error_yaw = abs(_wrap(oyaw - expected_yaw))
+            odom_relative_error_xy = math.hypot(
+                ox - relative_expected_x, oy - relative_expected_y)
+            odom_relative_error_yaw = abs(_wrap(oyaw - relative_expected_yaw))
+            if absolute_gt_pose is not None:
+                odom_absolute_error_xy = math.hypot(ox - expected_x, oy - expected_y)
+                odom_absolute_error_yaw = abs(_wrap(oyaw - expected_yaw))
+                odom_error_xy = odom_absolute_error_xy
+                odom_error_yaw = odom_absolute_error_yaw
+            else:
+                odom_error_xy = odom_relative_error_xy
+                odom_error_yaw = odom_relative_error_yaw
             odom_report = (
                 "odom=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad"
                 % (ox, oy, oyaw, odom_error_xy, odom_error_yaw))
@@ -458,16 +549,29 @@ class GroundTruthAmclMonitor(Node):
             self.csv_writer.writerow((
                 f"{stamp:.6f}", f"{elapsed:.6f}",
                 f"{expected_x:.6f}", f"{expected_y:.6f}", f"{expected_yaw:.6f}",
+                f"{gt_world_x:.6f}", f"{gt_world_y:.6f}", f"{gt_world_yaw:.6f}",
                 f"{amcl_x:.6f}", f"{amcl_y:.6f}", f"{amcl_yaw:.6f}",
                 f"{error_xy:.6f}", f"{error_yaw:.6f}",
+                f"{absolute_error_xy:.6f}", f"{absolute_error_yaw:.6f}",
+                f"{relative_error_xy:.6f}", f"{relative_error_yaw:.6f}",
                 f"{cx:.6f}", f"{cy:.6f}", f"{ctheta:.6f}",
                 f"{current_map_error_xy:.6f}", f"{current_map_error_yaw:.6f}",
+                f"{current_map_absolute_error_xy:.6f}",
+                f"{current_map_absolute_error_yaw:.6f}",
+                f"{current_map_relative_error_xy:.6f}",
+                f"{current_map_relative_error_yaw:.6f}",
                 f"{ex:.6f}", f"{ey:.6f}", f"{etheta:.6f}",
                 f"{ekf_error_xy:.6f}", f"{ekf_error_yaw:.6f}",
+                f"{ekf_absolute_error_xy:.6f}", f"{ekf_absolute_error_yaw:.6f}",
+                f"{ekf_relative_error_xy:.6f}", f"{ekf_relative_error_yaw:.6f}",
                 f"{ox:.6f}", f"{oy:.6f}", f"{otheta:.6f}",
                 f"{odom_error_xy:.6f}", f"{odom_error_yaw:.6f}",
+                f"{odom_absolute_error_xy:.6f}", f"{odom_absolute_error_yaw:.6f}",
+                f"{odom_relative_error_xy:.6f}", f"{odom_relative_error_yaw:.6f}",
                 f"{self.gt_speed_mps:.6f}",
                 str(self.collision_count if self.collision_count is not None else -1),
+                "absolute" if absolute_gt_pose is not None else "relative_first_pair",
+                str(self.get_parameter("map_provenance_file").value),
             ))
             self.csv_stream.flush()
 

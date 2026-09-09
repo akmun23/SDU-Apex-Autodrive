@@ -1692,7 +1692,11 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             // Keep the accepted global mode, but hand subsequent updates to a
             // compact local cloud. The odometry prediction baseline is kept
             // unchanged, so no artificial motion is introduced.
-            pf_.reinitialize(est.x, est.y, est.theta, 0.04, 0.04, 0.02);
+            pf_.reinitialize(
+                est.x, est.y, est.theta,
+                local_tracking_cloud_covariance_xy_,
+                local_tracking_cloud_covariance_xy_,
+                local_tracking_cloud_covariance_yaw_);
             global_localization_locked_ = true;
             local_odom_reference_x_ = odom_x_at_scan;
             local_odom_reference_y_ = odom_y_at_scan;
@@ -1705,7 +1709,11 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 est.x, est.y, est.theta);
         } else {
             if (local_scan_correction_rejected) {
-                pf_.reinitialize(est.x, est.y, est.theta, 0.04, 0.04, 0.02);
+                pf_.reinitialize(
+                    est.x, est.y, est.theta,
+                    local_tracking_cloud_covariance_xy_,
+                    local_tracking_cloud_covariance_xy_,
+                    local_tracking_cloud_covariance_yaw_);
             }
             local_odom_reference_x_ = odom_x_at_scan;
             local_odom_reference_y_ = odom_y_at_scan;

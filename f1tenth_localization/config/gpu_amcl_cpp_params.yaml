@@ -141,8 +141,13 @@ gpu_amcl_cpp:
     # scan. Without this, the cloud retains the previous scan mode and a small
     # matching bias is integrated again at every scan update.
     local_tracking_reinitialize_cloud: true
-    local_tracking_cloud_covariance_xy: 0.04
-    local_tracking_cloud_covariance_yaw: 0.04
+    # The known-start local cloud is a scan-matching prior, not a global
+    # recovery distribution. Stationary and moving campaigns showed that the
+    # old 0.04 m^2 spread kept multiple wall modes alive and produced large
+    # local innovations; 0.01 m^2 kept the dominant mode continuous while
+    # reducing the measured innovation p95 to about 0.025 m.
+    local_tracking_cloud_covariance_xy: 0.01
+    local_tracking_cloud_covariance_yaw: 0.01
 
     # The compete simulator reset is deterministic and the first trajectory
     # sample is the checked-in map-frame start pose. Starting globally lets a

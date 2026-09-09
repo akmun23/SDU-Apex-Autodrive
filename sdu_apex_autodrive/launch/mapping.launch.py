@@ -37,6 +37,10 @@ def generate_launch_description():
         name="five_lap_map_saver",
         output="screen",
         parameters=[LaunchConfiguration("mapping_params")],
+        remappings=[
+            ("/tf", "/sdu/tf"),
+            ("/tf_static", "/sdu/tf_static"),
+        ],
     )
 
     return LaunchDescription([

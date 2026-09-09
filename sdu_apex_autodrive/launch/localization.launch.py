@@ -28,6 +28,15 @@ DEFAULT_TRAJECTORY = (
 def _setup(context):
     localization = get_package_share_directory("f1tenth_localization")
     map_path = LaunchConfiguration("map").perform(context)
+    amcl_override_path = LaunchConfiguration("amcl_override_params").perform(context)
+
+    amcl_parameter_sources = [LaunchConfiguration("amcl_params")]
+    if amcl_override_path.strip():
+        if not os.path.isfile(amcl_override_path):
+            raise RuntimeError(
+                f"amcl_override_params does not exist: {amcl_override_path}"
+            )
+        amcl_parameter_sources.append(amcl_override_path)
 
     return [
         Node(
@@ -88,7 +97,7 @@ def _setup(context):
             name="gpu_amcl_cpp",
             output="screen",
             parameters=[
-                LaunchConfiguration("amcl_params"),
+                *amcl_parameter_sources,
                 {
                     "global_heading_trajectory_file": LaunchConfiguration(
                         "trajectory"
@@ -162,6 +171,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "amcl_params",
             default_value=os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "amcl_override_params",
+            default_value="",
+            description=(
+                "Optional YAML layered after the production AMCL parameters "
+                "for one-factor offline/live experiments"
+            ),
         ),
         DeclareLaunchArgument(
             "ekf_params",

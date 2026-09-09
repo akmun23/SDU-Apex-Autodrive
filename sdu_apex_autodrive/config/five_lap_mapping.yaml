@@ -27,6 +27,15 @@ five_lap_map_saver:
     stop_before_save: true
     save_each_lap: true
     lap_snapshot_settle_s: 1.0
+    # Preserve the fixed map->gt_odom transform produced by the mapping-only
+    # ground-truth TF. This is required for absolute offline localization
+    # scoring; it is never consumed by the racing stack.
+    provenance_enabled: true
+    # Empty means <output_directory>/<map_name>.provenance.yaml, so changing
+    # map_name cannot accidentally reuse another map's transform.
+    provenance_file: ""
+    provenance_map_frame: map
+    provenance_world_frame: gt_odom
     # Never reset the simulator during mapping. A collision is a crash and
     # must terminate the run rather than contaminate later laps.
     reset_at_lap_boundary: false

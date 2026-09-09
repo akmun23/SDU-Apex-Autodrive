@@ -1,0 +1,6 @@
+gpu_amcl_cpp:
+  ros__parameters:
+    # One-factor candidate: use every second-degree LiDAR ray instead of the
+    # current 270-ray subset.  GPU timing is low enough to measure this
+    # without changing the motion or scan-correction policy.
+    max_beams: 540

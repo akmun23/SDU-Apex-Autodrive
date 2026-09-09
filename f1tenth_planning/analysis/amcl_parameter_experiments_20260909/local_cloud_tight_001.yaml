@@ -1,0 +1,8 @@
+gpu_amcl_cpp:
+  ros__parameters:
+    # One-factor candidate: after the known-start lock, use a 10 cm XY and
+    # 5.7 deg yaw 1-sigma local prior instead of the 20 cm/11.5 deg default.
+    # This tests whether the current cloud spread is larger than the map and
+    # odometry can justify.
+    local_tracking_cloud_covariance_xy: 0.01
+    local_tracking_cloud_covariance_yaw: 0.01

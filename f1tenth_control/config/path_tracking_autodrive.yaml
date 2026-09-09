@@ -29,15 +29,10 @@ pure_pursuit_node:
     speed_profile_braking_decel: 1.50
     corridor_half_width_ref: 0.35
     corridor_speed_floor_ratio: 0.25
-    # Permit real corner regulation when the node is deliberately capped at
-    # low speed. Neutral/zero remains reserved for invalid state or a safety
-    # stop; this floor only prevents tiny positive commands while recoverable.
-    # Do not crawl through the tightest bend. At very low speed the available
-    # yaw rate also becomes very low (r = v*tan(delta)/L), so a 0.40 m/s floor
-    # can leave the car's heading behind even though the geometric steering
-    # angle is within the actuator limit. Keep a recoverable rolling floor at
-    # 0.80 m/s; invalid/off-track state still commands zero.
-    min_regulated_speed: 0.80
+    # Do not impose a rolling speed floor. The raceline and its regulation
+    # terms may request any non-negative speed, including neutral when the
+    # path or localization requires it.
+    min_regulated_speed: 0.0
     # Stop instead of continuing to drive when localization/path association
     # has clearly been lost. Smaller errors still use the rolling floor above.
     offtrack_stop_error_m: 0.75

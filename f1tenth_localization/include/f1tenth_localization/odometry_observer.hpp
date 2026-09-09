@@ -15,6 +15,9 @@ struct OdometryObserverConfig
   // inflated /odom covariance to the controller stop threshold.
   double normal_packet_dt_max_s{0.080};
   double degraded_packet_dt_max_s{0.100};
+  // Short gaps still have valid encoder endpoints and can be integrated as an
+  // average displacement. Longer gaps are rebaselined conservatively.
+  double max_integratable_gap_s{0.250};
   double decel_detect_ax_mps2{-0.5};
   double decel_ax_scale{1.005};
   double decel_ax_offset_mps2{0.020};

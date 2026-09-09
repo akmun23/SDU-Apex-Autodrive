@@ -64,9 +64,12 @@ autodrive_actuator_interface:
     # measured deficit is large enough to represent a real loss of speed.
     speed_hold_recovery_error_mps: 0.75
     speed_hold_acceleration_deadband_mps2: 0.35
-    # Fast model-bounded approach while far below target, followed by a
-    # predictive handoff to the throttle mapped to the requested speed.
-    speed_boost_error_mps: 1.5
+    # The feed-forward table is the measured steady-speed map for this
+    # simulator.  The previous open-loop acceleration boost made a 0.8-1.0
+    # m/s PP request produce 1.5-2.3 m/s ground-truth motion before the
+    # native odometry caught up.  Disable that boost until a speed profile
+    # with validated transient response is available.
+    speed_boost_error_mps: 100.0
     speed_hold_prediction_horizon_sec: 0.35
     speed_hold_entry_margin_mps: 0.15
     # After a target decrease, require fresh odometry in the new band before
@@ -95,8 +98,11 @@ autodrive_actuator_interface:
     # sensor-fusion stream; this alpha prevents one odom sample from toggling
     # the speed loop between hold and coast.
     speed_measurement_filter_alpha: 0.75
-    speed_error_to_accel_gain: 1.25
-    speed_error_integral_to_accel_gain: 0.05
+    # Do not add an acceleration term to a speed command.  The calibrated
+    # feed-forward value is the stable operating point; adding acceleration
+    # here outruns the simulator's delayed/under-reporting speed feedback.
+    speed_error_to_accel_gain: 0.0
+    speed_error_integral_to_accel_gain: 0.0
     # Positive acceleration capability is a decreasing function of speed,
     # fitted from the full-throttle open-ground grid. The scalar is the
     # standstill cap; the table is the runtime reachable envelope.

@@ -62,6 +62,7 @@ setup(
             "validate_odometry_observer = sdu_apex_autodrive.scripts.validate_odometry_observer:main",
             "calibrate_ekf_covariance = sdu_apex_autodrive.odometry_analysis.covariance_calibration:main",
             "source_time_diagnostic_report = sdu_apex_autodrive.odometry_analysis.source_time_diagnostic_report:main",
+            "score_localization_run = sdu_apex_autodrive.odometry_analysis.localization_run_score:main",
         ],
     },
 )

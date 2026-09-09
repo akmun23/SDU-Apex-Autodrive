@@ -96,6 +96,7 @@ public:
     declare_parameter("reset_encoder_jump_rad", 50.0);
     declare_parameter("normal_packet_dt_max_s", 0.080);
     declare_parameter("degraded_packet_dt_max_s", 0.100);
+    declare_parameter("max_integratable_gap_s", 0.250);
     declare_parameter("decel_detect_ax_mps2", -0.5);
     declare_parameter("decel_ax_scale", 1.005);
     declare_parameter("decel_ax_offset_mps2", 0.020);
@@ -224,6 +225,7 @@ private:
     config.reset_encoder_jump_rad = get_parameter("reset_encoder_jump_rad").as_double();
     config.normal_packet_dt_max_s = get_parameter("normal_packet_dt_max_s").as_double();
     config.degraded_packet_dt_max_s = get_parameter("degraded_packet_dt_max_s").as_double();
+    config.max_integratable_gap_s = get_parameter("max_integratable_gap_s").as_double();
     config.decel_detect_ax_mps2 = get_parameter("decel_detect_ax_mps2").as_double();
     config.decel_ax_scale = get_parameter("decel_ax_scale").as_double();
     config.decel_ax_offset_mps2 = get_parameter("decel_ax_offset_mps2").as_double();

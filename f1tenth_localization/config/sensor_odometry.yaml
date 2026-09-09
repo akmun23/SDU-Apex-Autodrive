@@ -28,6 +28,9 @@ sensor_odometry:
     # the pose covariance to 0.25 m^2, which stopped Pure Pursuit.
     normal_packet_dt_max_s: 0.080
     degraded_packet_dt_max_s: 0.100
+    # Retain encoder displacement across short source gaps. Longer gaps are
+    # rebaselined because an endpoint delta is no longer a safe motion sample.
+    max_integratable_gap_s: 0.250
     decel_detect_ax_mps2: -0.5
     decel_ax_scale: 1.005
     decel_ax_offset_mps2: 0.020

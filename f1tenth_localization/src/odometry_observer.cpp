@@ -161,15 +161,26 @@ OdometryEstimate OdometryObserver::update(
     return output;
   }
 
-  if (dt_s > config_.degraded_packet_dt_max_s) {
+  const double wheel_raw = std::abs(config_.wheel_radius_m * 0.5 *
+    (left_delta + right_delta) / dt_s);
+  const double wheel_mapped = WheelSpeedMap::map(wheel_raw);
+  last_wheel_raw_mps_ = wheel_raw;
+  last_wheel_mapped_mps_ = wheel_mapped;
+
+  // A degraded packet is not necessarily a missing-motion packet. The
+  // synchronized encoder endpoints still describe the average displacement
+  // across a short gap. The old early return deleted that displacement and
+  // created a repeatable odometry error on the track. Rebaseline only for a
+  // genuinely long gap; short gaps continue through the normal wheel gate.
+  if (dt_s > config_.degraded_packet_dt_max_s &&
+    dt_s > config_.max_integratable_gap_s)
+  {
     previous_stamp_s_ = observation.stamp_s;
     previous_left_angle_rad_ = observation.left_angle_rad;
     previous_right_angle_rad_ = observation.right_angle_rad;
     previous_yaw_rad_ = observation.yaw_rad;
     previous_yaw_rate_radps_ = observation.yaw_rate_radps;
     last_speed_pred_mps_ = speed_mps_;
-    last_wheel_raw_mps_ = 0.0;
-    last_wheel_mapped_mps_ = 0.0;
     stationary_time_s_ = 0.0;
     auto output = estimate(observation);
     output.dt_s = dt_s;
@@ -177,14 +188,9 @@ OdometryEstimate OdometryObserver::update(
     return output;
   }
 
-  const double wheel_raw = std::abs(config_.wheel_radius_m * 0.5 *
-    (left_delta + right_delta) / dt_s);
-  const double wheel_mapped = WheelSpeedMap::map(wheel_raw);
-  last_wheel_raw_mps_ = wheel_raw;
-  last_wheel_mapped_mps_ = wheel_mapped;
-
   const auto wheel_speed_is_valid = [&](double predicted_speed) {
-    if (dt_s > config_.normal_packet_dt_max_s || !finite(wheel_mapped)) {
+    if ((dt_s > config_.normal_packet_dt_max_s &&
+      dt_s > config_.max_integratable_gap_s) || !finite(wheel_mapped)) {
       return false;
     }
     // A zero encoder packet is allowed to brake a stopped/slow estimate, but

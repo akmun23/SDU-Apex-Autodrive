@@ -43,10 +43,15 @@ def _setup(context):
         LaunchConfiguration("with_collision_safety").perform(context))
     with_telemetry_recorder = _bool(
         LaunchConfiguration("with_telemetry_recorder").perform(context))
+    force_localization = _bool(
+        LaunchConfiguration("force_localization").perform(context))
     lateral_value = LaunchConfiguration("with_lateral_planner").perform(context).lower()
     with_lateral = controller == "mpc" if lateral_value == "auto" else _bool(lateral_value)
     avoidance = _bool(LaunchConfiguration("avoidance_enabled").perform(context))
-    needs_localization = controller != "ftg"
+    # FTG normally runs without localization for mapping. This explicit
+    # diagnostic mode exercises the full localization stack alongside the
+    # same LiDAR-only FTG command path on a saved map.
+    needs_localization = controller != "ftg" or force_localization
 
     if needs_localization and not os.path.isfile(map_path):
         raise RuntimeError(f"map does not exist: {map_path}")
@@ -197,6 +202,9 @@ def _setup(context):
             output="screen",
             parameters=[{
                 "output_csv": LaunchConfiguration("ground_truth_output_csv"),
+                "map_provenance_file": LaunchConfiguration("map_provenance_file"),
+                "require_absolute_map_scoring": LaunchConfiguration(
+                    "require_absolute_map_scoring"),
             }],
         ))
 
@@ -224,11 +232,15 @@ def _setup(context):
         ))
 
     if controller == "ftg":
+        ftg_max_speed = float(LaunchConfiguration("ftg_max_speed").perform(context))
         component = ComposableNode(
             package="f1tenth_control",
             plugin="f1tenth_control::FTGNode",
             name="ftg_node",
-            parameters=[LaunchConfiguration("ftg_params")],
+            parameters=[
+                LaunchConfiguration("ftg_params"),
+                {"max_speed": ftg_max_speed},
+            ],
             remappings=[
                 ("scan", "/autodrive/roboracer_1/lidar"),
                 ("odom", "/autodrive/roboracer_1/odom"),
@@ -361,6 +373,14 @@ def generate_launch_description():
             description="Record allowed sensor/controller telemetry for offline tuning",
         ),
         DeclareLaunchArgument(
+            "force_localization",
+            default_value="false",
+            description=(
+                "Start map localization alongside FTG for diagnostics; FTG still "
+                "uses only LiDAR and official odometry for its command"
+            ),
+        ),
+        DeclareLaunchArgument(
             "telemetry_output_dir",
             default_value="/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw",
         ),
@@ -381,6 +401,22 @@ def generate_launch_description():
             description="Diagnostics-only AMCL/EKF/odom versus simulator ground-truth CSV",
         ),
         DeclareLaunchArgument(
+            "map_provenance_file",
+            default_value="",
+            description=(
+                "Diagnostics-only fixed map-to-simulator transform produced when the "
+                "map was saved"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "require_absolute_map_scoring",
+            default_value="false",
+            description=(
+                "Fail the diagnostics monitor instead of silently using relative "
+                "first-pair scoring"
+            ),
+        ),
+        DeclareLaunchArgument(
             "with_collision_safety",
             default_value="false",
             description=(
@@ -397,6 +433,11 @@ def generate_launch_description():
                 "Safe simulator startup cap for Pure Pursuit or Stanley [m/s]. "
                 "Raise explicitly only after the baseline follows the track."
             ),
+        ),
+        DeclareLaunchArgument(
+            "ftg_max_speed",
+            default_value="0.40",
+            description="FTG diagnostic speed cap [m/s]",
         ),
         DeclareLaunchArgument(
             "amcl_global_initialization",
