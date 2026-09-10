@@ -398,11 +398,33 @@ def _disable_camera_path() -> None:
         official_bridge.np.empty((1, 1, 3), dtype=official_bridge.np.uint8))
 
 
+def _force_ipv4_server() -> None:
+    """Make the SDK bridge reachable by the prebuilt Unity player.
+
+    The SDK calls ``WSGIServer(("", 4567), ...)``.  On this host gevent
+    resolves that wildcard to an IPv6-only listener, while the Unity player
+    is launched with its documented IPv4 loopback endpoint ``127.0.0.1``.
+    Unity then reports a connection refusal or enters its null SocketIO state
+    before any sensor packet exists.  Keep the SDK unchanged, but normalize
+    only its wildcard listener to an explicit IPv4 address.
+    """
+    original_server = official_bridge.pywsgi.WSGIServer
+
+    class IPv4WSGIServer(original_server):
+        def __init__(self, listener, *args, **kwargs):
+            if isinstance(listener, tuple) and len(listener) >= 2 and listener[0] == "":
+                listener = ("0.0.0.0", listener[1], *listener[2:])
+            super().__init__(listener, *args, **kwargs)
+
+    official_bridge.pywsgi.WSGIServer = IPv4WSGIServer
+
+
 def main() -> None:
     global _handler_timing_enabled
     rate_hz = _rate_hz()
     _handler_timing_enabled = _env_enabled(
         "AUTODRIVE_BRIDGE_LOG_HANDLER_TIMING", False)
+    _force_ipv4_server()
     _install_packet_timestamp_patch()
     publish_camera = _env_enabled("AUTODRIVE_BRIDGE_PUBLISH_CAMERA", False)
     publish_lidar_intensity = _env_enabled(

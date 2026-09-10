@@ -65,7 +65,8 @@ private:
         double y,
         double fallback_yaw,
         const std::vector<ParticleFilter::TrackHeadingPoint>& heading_points) const;
-    bool should_publish_pose_estimate(const PoseEstimate& est);
+    bool should_publish_pose_estimate(const PoseEstimate& est,
+                                      bool allow_locked_recovery = false);
     void reset_pose_jump_gate();
     void push_odom_sample(const rclcpp::Time& stamp,
                           double x,
@@ -155,19 +156,49 @@ private:
     double localization_degraded_after_s_ = 0.30;
     uint64_t consecutive_rejected_scans_ = 0;
     bool last_scan_correction_accepted_ = false;
+    bool recovery_injection_configured_ = false;
+    int local_tracking_recovery_after_rejected_scans_ = 3;
+    int local_tracking_recovery_confirm_scans_ = 3;
+    double local_tracking_recovery_min_cluster_weight_ = 0.80;
+    double local_tracking_recovery_stability_distance_m_ = 0.35;
+    double local_tracking_recovery_stability_yaw_rad_ = 0.25;
+    bool have_recovery_candidate_ = false;
+    int recovery_candidate_scans_ = 0;
+    PoseEstimate recovery_candidate_pose_;
     // Last local scan innovation, exported only through diagnostics. The
     // controller still receives the normal map pose; these values make an
     // offline gain/observability test reproducible.
     double last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
     double last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+    double last_scan_correction_x_m_ = std::numeric_limits<double>::quiet_NaN();
+    double last_scan_correction_y_m_ = std::numeric_limits<double>::quiet_NaN();
     double last_scan_applied_xy_correction_m_ = 0.0;
     double last_scan_applied_yaw_correction_rad_ = 0.0;
+    double last_scan_applied_x_m_ = 0.0;
+    double last_scan_applied_y_m_ = 0.0;
     double global_pose_covariance_xy_max_ = 0.25;
     double global_pose_covariance_yaw_max_ = 0.12;
     double global_pose_max_track_distance_m_ = 0.45;
     double global_pose_max_track_heading_error_rad_ = 0.45;
     bool global_start_anchor_enabled_ = true;
     double global_start_anchor_radius_m_ = 0.90;
+    double global_start_anchor_x_m_ = std::numeric_limits<double>::quiet_NaN();
+    double global_start_anchor_y_m_ = std::numeric_limits<double>::quiet_NaN();
+    double global_start_anchor_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+    double global_start_anchor_heading_tolerance_rad_ = 0.80;
+    int global_lock_confirm_scans_ = 5;
+    double global_lock_stability_distance_m_ = 0.35;
+    double global_lock_stability_yaw_rad_ = 0.25;
+    double global_lock_min_cluster_weight_ = 0.50;
+    double global_lock_min_travel_m_ = 0.75;
+    bool global_lock_use_odom_heading_ = true;
+    bool global_lock_use_anchor_position_ = false;
+    int global_lock_candidate_scans_ = 0;
+    PoseEstimate global_lock_candidate_pose_;
+    bool global_start_odom_ready_ = false;
+    double global_start_odom_x_ = 0.0;
+    double global_start_odom_y_ = 0.0;
+    double global_start_odom_theta_ = 0.0;
     std::vector<ParticleFilter::TrackHeadingPoint> global_heading_points_;
 
     // A likelihood-field match can select a visually similar section of the
@@ -183,6 +214,16 @@ private:
     // Yaw is observable from the wall orientation even when along-corridor
     // translation is not, so it has its own experimentally tunable gain.
     double local_scan_correction_xy_gain_ = 0.0;
+    bool local_scan_correction_cross_track_only_ = true;
+    // Attenuate only the raceline-tangent component of a local scan
+    // innovation. This is not a lifetime correction cap: the component is
+    // still applied on every accepted scan and can remain nonzero so AMCL
+    // continues removing odometry scale drift.
+    double local_scan_correction_along_track_gain_ = 1.0;
+    // Use a stronger tangent correction only in the fast-motion regime. The
+    // known low-speed hairpin alias keeps the conservative gain above.
+    double local_scan_correction_fast_speed_threshold_mps_ = 3.0;
+    double local_scan_correction_fast_along_track_gain_ = 0.25;
     double local_scan_correction_yaw_gain_ = 0.0;
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
@@ -230,6 +271,10 @@ private:
 
     // Thread safety
     std::mutex pf_mutex_;                       // Protects pf_ during GPU ops
+    // Protects the accepted map->odom correction and the propagated pose
+    // cache. Odom publication must not wait behind a multi-second scan/PF
+    // update, otherwise a stale LiDAR burst starves the controller pose.
+    std::mutex map_pose_mutex_;
     std::atomic<bool> processing_scan_{false};  // Drop scans during processing
 
     // Cached estimate for decoupled publishing

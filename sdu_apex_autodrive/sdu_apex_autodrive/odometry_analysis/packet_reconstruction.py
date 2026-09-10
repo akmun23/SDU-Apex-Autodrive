@@ -9,6 +9,47 @@ import pandas as pd
 
 
 _EVENTS = ("left_encoder", "right_encoder", "imu", "gt_odom")
+_IMU_YAW_MAX_STEP_RAD = 0.30
+
+
+def _wrap(angle: float) -> float:
+    return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+
+def _normalize_imu_yaw(packets: pd.DataFrame) -> None:
+    """Mirror sensor_odometry_node's raw-IMU-to-local-yaw conversion.
+
+    The deployed observer starts its odom frame at the first coherent IMU
+    sample. Replaying raw ``imu_yaw_rad`` directly would rotate the replay
+    pose by the simulator's absolute spawn heading and make pose scoring
+    invalid even when the speed replay is correct.
+    """
+    if packets.empty:
+        return
+    reference = float(packets.iloc[0].yaw_rad)
+    previous_raw_relative = 0.0
+    continuous = 0.0
+    previous_stamp = float(packets.iloc[0].stamp_s)
+    normalized = [continuous]
+    for index in range(1, len(packets)):
+        stamp = float(packets.iloc[index].stamp_s)
+        raw_yaw = float(packets.iloc[index].yaw_rad)
+        yaw_rate = float(packets.iloc[index].yaw_rate_radps)
+        dt = stamp - previous_stamp
+        raw_relative = _wrap(raw_yaw - reference)
+        raw_delta = _wrap(raw_relative - previous_raw_relative)
+        if 0.0 < dt <= 0.5:
+            continuous = _wrap(continuous + yaw_rate * dt)
+            if abs(raw_delta) <= _IMU_YAW_MAX_STEP_RAD:
+                continuous = _wrap(continuous + _wrap(raw_relative - continuous))
+            else:
+                reference = _wrap(raw_yaw - continuous)
+                previous_raw_relative = continuous
+        if abs(raw_delta) <= _IMU_YAW_MAX_STEP_RAD:
+            previous_raw_relative = raw_relative
+        previous_stamp = stamp
+        normalized.append(continuous)
+    packets["yaw_rad"] = normalized
 
 
 def _value(row: pd.Series, name: str) -> float:
@@ -78,6 +119,7 @@ def reconstruct_packets(csv_path: str | Path) -> pd.DataFrame:
     for column in packets.columns:
         if column != "stamp_s":
             packets[column] = pd.to_numeric(packets[column], errors="coerce")
+    _normalize_imu_yaw(packets)
     packets.attrs["coherence"] = {
         "input_source_rows": int(len(raw)),
         "unique_source_timestamps": int(raw.source_event_stamp_s.nunique()),

@@ -219,7 +219,7 @@ struct BoundaryPoint {
 };
 
 /**
- * @brief Trajectory waypoint for path following (shared by Pure Pursuit and Stanley)
+ * @brief Trajectory waypoint for Pure Pursuit path following.
  */
 struct TrajectoryPoint {
     double x{0.0};                                                  // [m] X position

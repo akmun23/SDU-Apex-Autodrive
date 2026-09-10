@@ -15,7 +15,7 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node, SetRemap
 from launch_ros.descriptions import ComposableNode
 
@@ -25,10 +25,6 @@ def generate_launch_description():
     localization = get_package_share_directory("f1tenth_localization")
     control = get_package_share_directory("f1tenth_control")
     slam = get_package_share_directory("slam_toolbox")
-    use_ftg = IfCondition(
-        PythonExpression(["'", LaunchConfiguration("mapping_controller"), "' == 'ftg'"]))
-    use_ground_truth_pp = IfCondition(
-        PythonExpression(["'", LaunchConfiguration("mapping_controller"), "' == 'gt_pp'"]))
     launch_bridge = IfCondition(LaunchConfiguration("launch_bridge"))
 
     map_saver = Node(
@@ -64,18 +60,10 @@ def generate_launch_description():
             "actuator_params",
             default_value=os.path.join(integration, "config", "actuator_interface.yaml"),
         ),
-        DeclareLaunchArgument("mapping_controller", default_value="ftg"),
         DeclareLaunchArgument(
             "launch_bridge",
             default_value="true",
             description="Start the simulator bridge in this launch instance",
-        ),
-        DeclareLaunchArgument(
-            "trajectory_file",
-            default_value=(
-                "/workspace/src/f1tenth_planning/trajectories/"
-                "autodrive_compete_2026_autodrive_sim_raceline.csv"
-            ),
         ),
         Node(
             package="sdu_apex_autodrive",
@@ -139,7 +127,6 @@ def generate_launch_description():
             namespace="",
             package="rclcpp_components",
             executable="component_container",
-            condition=use_ftg,
             composable_node_descriptions=[
                 ComposableNode(
                     package="f1tenth_control",
@@ -152,61 +139,6 @@ def generate_launch_description():
                         ("scan", "/autodrive/roboracer_1/lidar"),
                         ("odom", "/autodrive/roboracer_1/odom"),
                         ("drive", "/cmd/speed"),
-                    ],
-                ),
-            ],
-            output="screen",
-        ),
-        Node(
-            package="sdu_apex_autodrive",
-            executable="ground_truth_path_pose",
-            name="ground_truth_path_pose",
-            condition=use_ground_truth_pp,
-            output="screen",
-            parameters=[{
-                "ground_truth_topic": "/autodrive/roboracer_1/odom",
-                "pose_topic": "/current_map_pose",
-                "trajectory_file": LaunchConfiguration("trajectory_file"),
-                "path_frame": "map",
-            }],
-        ),
-        ComposableNodeContainer(
-            name="mapping_pure_pursuit_container",
-            namespace="",
-            package="rclcpp_components",
-            executable="component_container",
-            condition=use_ground_truth_pp,
-            composable_node_descriptions=[
-                ComposableNode(
-                    package="f1tenth_control",
-                    plugin="f1tenth_control::PurePursuitNode",
-                    name="mapping_ground_truth_pure_pursuit",
-                    parameters=[
-                        os.path.join(control, "config", "path_tracking_autodrive.yaml"),
-                        {
-                            "trajectory_file": LaunchConfiguration("trajectory_file"),
-                            "odom_topic": "/autodrive/roboracer_1/odom",
-                            "pose_topic": "/current_map_pose",
-                            "command_topic": "/cmd/speed",
-                            # Conservative mapping-only values.  The supplied
-                            # raceline already supplies the geometric turn;
-                            # extra curvature feed-forward double-counts it
-                            # in the first tight bend.
-                            "max_speed": 0.45,
-                            "min_regulated_speed": 0.30,
-                            "max_lateral_accel": 1.0,
-                            "min_lookahead": 0.35,
-                            "max_lookahead": 0.50,
-                            "lookahead_gain": 0.03,
-                            "curvature_feedforward_gain": 0.0,
-                            "heading_error_gain": 0.0,
-                            "steering_feedback_lead_gain": 0.0,
-                            "speed_preview_distance": 0.0,
-                            "speed_profile_braking_decel": 0.0,
-                            "max_accel_cmd": 1.0,
-                            "startup_path_max_distance_m": 1.0,
-                            "startup_path_heading_tolerance_rad": 0.80,
-                        },
                     ],
                 ),
             ],

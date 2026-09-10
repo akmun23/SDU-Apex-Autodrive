@@ -21,7 +21,7 @@ DEFAULT_MAP = (
 )
 DEFAULT_TRAJECTORY = (
     "/workspace/src/f1tenth_planning/trajectories/"
-    "autodrive_track_ftg_commit_20260908_lap01_mintime_raceline.csv"
+    "autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv"
 )
 
 
@@ -53,6 +53,7 @@ def _setup(context):
             output="screen",
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
+                {"use_sim_time": LaunchConfiguration("use_sim_time")},
                 # The simulator reset command changes encoder epoch and
                 # physical pose. Rebaseline the local observer with it so a
                 # previous run cannot leak stale speed into a new run.
@@ -61,6 +62,8 @@ def _setup(context):
             remappings=[
                 ("/tf", "/sdu/tf"),
                 ("/tf_static", "/sdu/tf_static"),
+                ("/odom", LaunchConfiguration("sensor_odom_output_topic")),
+                ("/odom/diagnostics", LaunchConfiguration("sensor_odom_diagnostics_topic")),
             ],
         ),
         Node(
@@ -70,6 +73,7 @@ def _setup(context):
             output="screen",
             parameters=[
                 LaunchConfiguration("ekf_params"),
+                {"use_sim_time": LaunchConfiguration("use_sim_time")},
                 {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
             ],
         ),
@@ -79,7 +83,10 @@ def _setup(context):
             name="map_server",
             namespace="",
             output="screen",
-            parameters=[{"yaml_filename": map_path}],
+            parameters=[
+                {"yaml_filename": map_path,
+                 "use_sim_time": LaunchConfiguration("use_sim_time")}
+            ],
         ),
         Node(
             package="nav2_lifecycle_manager",
@@ -88,6 +95,7 @@ def _setup(context):
             output="screen",
             parameters=[{
                 "autostart": True,
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "node_names": ["map_server"],
             }],
         ),
@@ -96,12 +104,14 @@ def _setup(context):
             executable="gpu_amcl_cpp_node",
             name="gpu_amcl_cpp",
             output="screen",
-            parameters=[
-                *amcl_parameter_sources,
-                {
+                parameters=[
+                    *amcl_parameter_sources,
+                    {
+                        "use_sim_time": LaunchConfiguration("use_sim_time"),
                     "global_heading_trajectory_file": LaunchConfiguration(
                         "trajectory"
                     ),
+                    "odom_topic": LaunchConfiguration("amcl_odom_topic"),
                     "global_initialization": LaunchConfiguration(
                         "amcl_global_initialization"
                     ),
@@ -147,23 +157,43 @@ def generate_launch_description():
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
         DeclareLaunchArgument("start_bridge", default_value="false"),
         DeclareLaunchArgument(
-            "amcl_global_initialization",
+            "use_sim_time",
             default_value="false",
+            description="Use ROS clock for deterministic bag replay",
+        ),
+        DeclareLaunchArgument(
+            "amcl_global_initialization",
+            default_value="true",
             description=(
-                "Use the known simulator reset/raceline start pose; enable "
-                "global recovery only for arbitrary track-position tests"
+                "Localize from LiDAR over the complete track at startup; "
+                "disable only for a deliberate known-pose unit test"
             ),
         ),
         DeclareLaunchArgument("amcl_max_track_distance", default_value="0.65"),
+        DeclareLaunchArgument(
+            "amcl_odom_topic",
+            default_value="/ekf_odom",
+            description="Timestamped odometry input used by AMCL",
+        ),
+        DeclareLaunchArgument(
+            "sensor_odom_output_topic",
+            default_value="/odom",
+            description="Sensor observer output topic; useful for bag replay isolation",
+        ),
+        DeclareLaunchArgument(
+            "sensor_odom_diagnostics_topic",
+            default_value="/odom/diagnostics",
+            description="Sensor observer diagnostics topic",
+        ),
         DeclareLaunchArgument("amcl_initial_heading_offset", default_value="0.0"),
         DeclareLaunchArgument(
-            "amcl_local_scan_correction_xy_gain", default_value="0.0"),
+            "amcl_local_scan_correction_xy_gain", default_value="0.25"),
         DeclareLaunchArgument(
             "amcl_local_scan_correction_yaw_gain", default_value="0.0"),
         DeclareLaunchArgument(
-            "amcl_local_scan_correction_max_distance_m", default_value="0.04"),
+            "amcl_local_scan_correction_max_distance_m", default_value="0.0"),
         DeclareLaunchArgument(
-            "amcl_local_scan_correction_max_yaw_rad", default_value="0.08"),
+            "amcl_local_scan_correction_max_yaw_rad", default_value="0.0"),
         DeclareLaunchArgument(
             "sensor_odom_params",
             default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),

@@ -45,23 +45,26 @@ struct PurePursuitConfig {
     double cte_speed_factor{1.50};             // [unitless] Slowdown gain based on |CTE|.
     double cte_speed_floor_ratio{0.55};        // [0..1] Minimum speed ratio from CTE slowdown.
     double max_lateral_accel{6.50};             // [m/s^2] Physics-aware cornering speed cap.
-    double min_regulated_speed{1.50};           // [m/s] Useful rolling floor after speed regulation.
+    double min_regulated_speed{0.0};            // [m/s] Rolling floor after speed regulation.
     double max_command_speed{22.88};            // [m/s] Runtime command cap used during regulation.
-    double offtrack_stop_error_m{0.75};         // [m] Stop when tracking error is no longer recoverable.
+    // Disabled by default: a transient CTE can be caused by pose/actuator
+    // latency, so PP must keep steering toward the path while regulating speed.
+    // Set >0 only when an external supervisor explicitly wants a CTE stop.
+    double offtrack_stop_error_m{0.0};          // [m] Optional hard CTE stop.
     double speed_preview_distance{4.0};         // [m] Distance used by the braking envelope.
     double speed_profile_braking_decel{1.50};   // [m/s^2] Effective idle-brake deceleration.
     double curvature_preview_factor{1.6245233}; // [unitless] Preview multiple for curvature braking.
-    double curvature_feedforward_gain{0.50};   // [0..1] Additive path-curvature feed-forward.
-    double heading_error_gain{0.30};           // [unitless] Add target-heading turn-in.
+    double curvature_feedforward_gain{0.0};    // [0..1] Optional path-curvature feed-forward.
+    double heading_error_gain{0.0};             // [unitless] Optional target-heading turn-in.
     double yaw_rate_damping{0.0};               // [s] Optional odometry yaw-rate damping.
 
     // -- Footprint-aware corridor regulation --------------------------------
     double vehicle_half_width{0.1365};          // [m] Half of the vehicle width.
     double wall_safety_margin{0.03};            // [m] Static wall clearance margin.
     double corridor_half_width_ref{0.35};       // [m] Reference usable half-width for full speed.
-    double corridor_speed_floor_ratio{0.25};    // [0..1] Floor for corridor-based speed scaling.
+    double corridor_speed_floor_ratio{1.0};     // [0..1] Recovery floor for corridor-based speed scaling.
     double corridor_lookahead_factor{2.0};      // [m/m] Extra lookahead per usable half-width.
-    double wall_bias_gain{0.25};                // [0..1] Move target toward corridor centre.
+    double wall_bias_gain{0.0};                 // [0..1] Optional move toward corridor centre.
     double wall_bias_max_m{0.10};               // [m] Maximum map-bound target shift.
 
     // -- Steering limits ----------------------------------------------------

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 
 namespace f1tenth_localization
 {
@@ -8,7 +9,18 @@ namespace f1tenth_localization
 struct OdometryObserverConfig
 {
   double wheel_radius_m{0.059};
+  // Direct wheel-to-body speed scale fit from the clean single-simulator
+  // 4 m/s track run. Keep the physical wheel radius separate from this
+  // runtime calibration.
+  double wheel_speed_scale{0.968};
   double reset_encoder_jump_rad{50.0};
+  // The simulator can repeat a cumulative encoder angle for several source
+  // packets and then publish the accumulated jump.  Differentiate over a
+  // short source-time window so the observer sees displacement, not bursts.
+  // The 20 Hz simulator encoder stream contains delayed cumulative-angle
+  // packets.  The recorded run comparison showed that 150 ms adds avoidable
+  // launch/braking lag; retain only two native samples for the rolling rate.
+  double wheel_speed_window_s{0.10};
   // The competition player currently publishes native telemetry at about
   // 20 Hz (roughly 0.050 s). Keep that cadence in the normal, non-degraded
   // path; a 40 ms threshold falsely marked every track packet degraded and
@@ -21,10 +33,19 @@ struct OdometryObserverConfig
   double decel_detect_ax_mps2{-0.5};
   double decel_ax_scale{1.005};
   double decel_ax_offset_mps2{0.020};
-  double wheel_update_ax_abs_max_mps2{0.6};
+  // Wheel speed is the direct longitudinal measurement.  Keep this gate
+  // above the measured launch acceleration so valid wheel updates are not
+  // replaced by the slower IMU prediction.
+  double wheel_update_ax_abs_max_mps2{6.5};
   double wheel_freeze_speed_mps{0.15};
-  double wheel_innovation_max_mps{0.30};
-  double wheel_update_beta{0.20};
+  // Permit recovery from a transient IMU-speed error while retaining the
+  // frozen-wheel and timing gates for missing packets.
+  double wheel_innovation_max_mps{1.50};
+  // A delayed cumulative-encoder burst appears first in the rolling rate and
+  // then again in the current packet. Reject only that two-stage signature;
+  // ordinary acceleration packets have no packet-vs-window disagreement.
+  double wheel_burst_disagreement_mps{1.0};
+  double wheel_update_beta{0.85};
   // A frozen encoder must not immediately zero a moving estimate because a
   // single dropped packet is possible.  Sustained zero wheel motion together
   // with calm IMU data is, however, a reliable stopped/collision signature.
@@ -40,6 +61,11 @@ struct OdometryObserverConfig
   double turn_exit_yaw_rate_radps{0.1};
   double turn_exit_abs_ay_mps2{0.5};
   double turn_exit_hold_s{0.5};
+  // During a hard turn/braking transient the IMU-integrated prediction can
+  // temporarily exceed the synchronized wheel estimate by more than the
+  // normal innovation gate.  A valid nonzero wheel packet is still useful in
+  // that case; isolated zero packets remain protected by wheel_freeze_speed.
+  double turn_wheel_braking_ax_mps2{-1.0};
   double imu_x_offset_m{0.08};
   // The simulator's lateral IMU acceleration contains enough bias/noise to
   // create a persistent pose error when integrated at native 20 Hz.  The
@@ -83,10 +109,14 @@ struct OdometryEstimate
   double imu_yaw_rad{0.0};
   double wheel_raw_mps{0.0};
   double wheel_mapped_mps{0.0};
+  // Diagnostic-only current-packet rate. The observer normally uses the
+  // short window rate because the simulator can burst cumulative angle.
+  double wheel_packet_mps{0.0};
   double ax_mps2{0.0};
   double ay_mps2{0.0};
   double yaw_rate_radps{0.0};
   bool wheel_update_used{false};
+  bool wheel_burst_rejected{false};
   bool turn_mode{false};
   bool reset_epoch{false};
   bool timing_degraded{false};
@@ -108,7 +138,9 @@ private:
   static bool finite(double value) noexcept;
 
   OdometryEstimate estimate(const OdometryObservation & observation) const noexcept;
-  void update_pose(double dt_s, double yaw_rad) noexcept;
+  void update_pose(
+    double dt_s, double yaw_rad,
+    double previous_body_u_mps, double previous_body_v_mps) noexcept;
   void update_turn(double ax_origin, double ay_origin, double yaw_rate, double dt_s) noexcept;
 
   OdometryObserverConfig config_;
@@ -128,7 +160,21 @@ private:
   double last_speed_pred_mps_{0.0};
   double last_wheel_raw_mps_{0.0};
   double last_wheel_mapped_mps_{0.0};
+  double last_wheel_packet_mps_{0.0};
   double stationary_time_s_{0.0};
+  bool wheel_dropout_active_{false};
+  bool wheel_burst_rejected_{false};
+  // Keep a burst dropout active until the current packet also agrees with
+  // the rolling-window rate; the first nonzero packet can still be delayed.
+  bool wheel_burst_recovery_pending_{false};
+
+  struct EncoderSample
+  {
+    double stamp_s;
+    double left_angle_rad;
+    double right_angle_rad;
+  };
+  std::deque<EncoderSample> encoder_history_;
 };
 
 }  // namespace f1tenth_localization

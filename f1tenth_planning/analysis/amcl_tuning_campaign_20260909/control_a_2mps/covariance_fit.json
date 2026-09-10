@@ -1,0 +1,33 @@
+{
+  "baseline_rates": {
+    "xy_m2_per_m": 1.6130680472357777e-07,
+    "xy_m2_per_s": 2.95305648072554e-07,
+    "yaw2_per_m": 1e-09,
+    "yaw2_per_rad": 1e-09
+  },
+  "candidate": {
+    "process_noise_xy_m2_per_m": 1.6130680472357777e-10,
+    "process_noise_xy_m2_per_s": 0.000295305648072554,
+    "process_noise_yaw2_per_m": 1.0000000000000002e-12,
+    "process_noise_yaw2_per_rad": 1.0000000000000002e-12
+  },
+  "coverage": {
+    "component_coverage": 1.0,
+    "ellipse_coverage": 1.0,
+    "nees2_p95": 3.253300945158758,
+    "yaw_coverage": 1.0
+  },
+  "distance_m": 86.22963609632791,
+  "holdout": {
+    "coverage": {
+      "component_coverage": 0.9896907216494846,
+      "ellipse_coverage": 0.9965635738831615,
+      "nees2_p95": 3.377772152882954,
+      "yaw_coverage": 0.9965635738831615
+    },
+    "fit_samples": 872,
+    "passed": true,
+    "samples": 291
+  },
+  "samples": 872
+}

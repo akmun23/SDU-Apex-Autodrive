@@ -15,7 +15,6 @@ from std_msgs.msg import Bool, Float32, Int32
 from .speed_controller import (
     LongitudinalStateEstimator,
     SpeedControllerConfig,
-    TargetAccelerationController,
     TargetSpeedController,
     clamp,
 )
@@ -46,9 +45,6 @@ class ActuatorInterface(Node):
 
         self.max_steering = float(self.get_parameter("max_steering_angle_rad").value)
         self.max_target_speed = float(self.get_parameter("max_target_speed_mps").value)
-        self.command_mode = str(self.get_parameter("command_mode").value).strip().lower()
-        if self.command_mode not in {"speed", "acceleration"}:
-            raise ValueError("command_mode must be 'speed' or 'acceleration'")
         self.command_timeout = float(self.get_parameter("command_timeout_sec").value)
         self.odom_timeout = float(self.get_parameter("odom_timeout_sec").value)
         self.max_feedback_speed = float(
@@ -64,8 +60,6 @@ class ActuatorInterface(Node):
 
         self.nominal_dt = 1.0 / rate
         self.speed_controller = TargetSpeedController(self._speed_config())
-        self.acceleration_controller = TargetAccelerationController(
-            self._speed_config())
 
         self.command = None
         self.command_time = None
@@ -172,7 +166,6 @@ class ActuatorInterface(Node):
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("input_topic", "/cmd/speed")
-        self.declare_parameter("command_mode", "speed")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("imu_topic", "/autodrive/roboracer_1/imu")
         self.declare_parameter("steering_topic", "/autodrive/roboracer_1/steering_command")
@@ -366,7 +359,6 @@ class ActuatorInterface(Node):
             candidate = replace(self.speed_controller.config, **changes)
             candidate.validate()
             self.speed_controller.reconfigure(candidate)
-            self.acceleration_controller.reconfigure(candidate)
         except (TypeError, ValueError) as exc:
             return SetParametersResult(successful=False, reason=str(exc))
         self.control_time = None
@@ -492,7 +484,6 @@ class ActuatorInterface(Node):
         self.command = None
         self.command_time = None
         self.speed_controller.reset()
-        self.acceleration_controller.reset()
         self.speed_estimator.reset()
         self.speed = 0.0
         self.acceleration = 0.0
@@ -551,7 +542,6 @@ class ActuatorInterface(Node):
             # diagnostics-only override is fresh. Reset controller state so
             # its previous closed-loop target cannot resume during braking.
             self.speed_controller.reset()
-            self.acceleration_controller.reset()
             self.control_time = None
             self._publish(0.0, self.raw_throttle_override)
             self.last_neutral_reason = None
@@ -574,33 +564,27 @@ class ActuatorInterface(Node):
 
         steering_angle, target_speed, target_accel = self.command
         steering = clamp(steering_angle / self.max_steering, -1.0, 1.0)
-        fresh_odom = False
-        if self.command_mode == "acceleration":
-            throttle = self.acceleration_controller.update(
-                target_accel, self.speed, self.acceleration, dt)
+        # The speed interface owns the speed target. Any acceleration field in
+        # an incoming speed command is diagnostic metadata and is ignored.
+        # Use raw accepted odometry for this safety decision so filtering can
+        # never retain forward throttle after a large target crossing.
+        if (self.raw_speed - target_speed >=
+                self.speed_controller.config.hard_overspeed_cutoff_mps):
+            self.speed_controller.reset()
+            self.control_time = None
+            throttle = 0.0
         else:
-            # The speed interface owns the speed target. Any acceleration
-            # field in a speed command is diagnostic metadata and is ignored.
-            # Use raw accepted odometry for this one safety decision. The
-            # filtered signal remains useful for normal control, but filtering
-            # must never retain forward throttle after a large target crossing.
-            if (self.raw_speed - target_speed >=
-                    self.speed_controller.config.hard_overspeed_cutoff_mps):
-                self.speed_controller.reset()
-                self.control_time = None
-                throttle = 0.0
-            else:
-                fresh_odom = (
-                    self.odom_source_stamp_ns is not None and
-                    (self.last_controller_odom_source_stamp_ns is None or
-                     self.odom_source_stamp_ns !=
-                     self.last_controller_odom_source_stamp_ns))
-                throttle = self.speed_controller.update(
-                    target_speed, self.speed, 0.0, dt, self.acceleration,
-                    measurement_fresh=fresh_odom)
-                self.last_controller_odom_time = self.odom_time
-                if fresh_odom:
-                    self.last_controller_odom_source_stamp_ns = self.odom_source_stamp_ns
+            fresh_odom = (
+                self.odom_source_stamp_ns is not None and
+                (self.last_controller_odom_source_stamp_ns is None or
+                 self.odom_source_stamp_ns !=
+                 self.last_controller_odom_source_stamp_ns))
+            throttle = self.speed_controller.update(
+                target_speed, self.speed, 0.0, dt, self.acceleration,
+                measurement_fresh=fresh_odom)
+            self.last_controller_odom_time = self.odom_time
+            if fresh_odom:
+                self.last_controller_odom_source_stamp_ns = self.odom_source_stamp_ns
         self._publish(steering, throttle)
         self.last_neutral_reason = None
 
@@ -610,7 +594,6 @@ class ActuatorInterface(Node):
 
     def _neutral(self, reason: str) -> None:
         self.speed_controller.reset()
-        self.acceleration_controller.reset()
         self.control_time = None
         self._publish(0.0, 0.0)
         if reason != self.last_neutral_reason:

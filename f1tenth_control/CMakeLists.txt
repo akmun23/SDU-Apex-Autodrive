@@ -72,14 +72,6 @@ add_library(pure_pursuit_algorithm SHARED
 ament_target_dependencies(pure_pursuit_algorithm ${DEPENDENCIES})
 
 # ===================
-# Stanley Algorithm Library
-# ===================
-add_library(stanley_algorithm SHARED
-  src/algorithms/stanley.cpp
-)
-ament_target_dependencies(stanley_algorithm ${DEPENDENCIES})
-
-# ===================
 # FTG Node Component (standardized runtime path)
 # ===================
 add_library(ftg_node_component SHARED
@@ -99,24 +91,12 @@ target_link_libraries(pure_pursuit_node pure_pursuit_algorithm)
 ament_target_dependencies(pure_pursuit_node ${DEPENDENCIES})
 rclcpp_components_register_nodes(pure_pursuit_node "f1tenth_control::PurePursuitNode")
 
-# ===================
-# Stanley Node Component
-# ===================
-add_library(stanley_node SHARED
-  src/nodes/stanley_node.cpp
-)
-target_link_libraries(stanley_node stanley_algorithm)
-ament_target_dependencies(stanley_node ${DEPENDENCIES})
-rclcpp_components_register_nodes(stanley_node "f1tenth_control::StanleyNode")
-
 foreach(control_target
   f1tenth_common
   ftg_algorithm
   pure_pursuit_algorithm
-  stanley_algorithm
   ftg_node_component
   pure_pursuit_node
-  stanley_node
 )
   target_include_directories(${control_target}
     PUBLIC
@@ -130,7 +110,7 @@ endforeach()
 
 # Install main libraries and node executables
 install(
-  TARGETS f1tenth_common ftg_algorithm pure_pursuit_algorithm stanley_algorithm pure_pursuit_node stanley_node ftg_node_component
+  TARGETS f1tenth_common ftg_algorithm pure_pursuit_algorithm pure_pursuit_node ftg_node_component
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -148,21 +128,6 @@ install(
   DESTINATION share/${PROJECT_NAME}/config
 )
 
-# Offline track-level test for tuning only the production Pure Pursuit
-# parameters against the current raceline and a fixed simulator envelope.
-add_executable(test_sim_drive_pp
-  tools/pure_pursuit_track_sweep.cpp
-)
-target_link_libraries(test_sim_drive_pp pure_pursuit_algorithm)
-target_include_directories(test_sim_drive_pp
-  PRIVATE ${F1TENTH_PUBLIC_INCLUDE_DIRS}
-)
-install(
-  TARGETS test_sim_drive_pp
-  RUNTIME DESTINATION lib/${PROJECT_NAME}
-)
-
-
 # ===================
 # Testing
 # ===================
@@ -179,16 +144,6 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_gtest REQUIRED)
 
-  # The repository currently contains one closed-loop controller test. Keep
-  # it conditional so a production checkout without test sources still builds.
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_sim_drive_pure_pursuit.cpp")
-    add_executable(test_sim_drive_pure_pursuit test/test_sim_drive_pure_pursuit.cpp)
-    target_link_libraries(test_sim_drive_pure_pursuit pure_pursuit_algorithm)
-    ament_target_dependencies(test_sim_drive_pure_pursuit ${DEPENDENCIES})
-    add_test(NAME pure_pursuit_closed_loop COMMAND test_sim_drive_pure_pursuit)
-    install(TARGETS test_sim_drive_pure_pursuit RUNTIME DESTINATION lib/${PROJECT_NAME})
-  endif()
-
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_follow_the_gap.cpp")
     ament_add_gtest(test_follow_the_gap test/test_follow_the_gap.cpp)
     target_link_libraries(test_follow_the_gap ftg_algorithm)
@@ -199,7 +154,7 @@ endif()
 
 # Export
 ament_export_include_directories(include)
-ament_export_libraries(f1tenth_common ftg_algorithm pure_pursuit_algorithm stanley_algorithm pure_pursuit_node stanley_node ftg_node_component)
+ament_export_libraries(f1tenth_common ftg_algorithm pure_pursuit_algorithm pure_pursuit_node ftg_node_component)
 ament_export_dependencies(${DEPENDENCIES})
 
 ament_package()

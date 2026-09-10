@@ -1,7 +1,6 @@
 autodrive_actuator_interface:
   ros__parameters:
     input_topic: /cmd/speed
-    command_mode: speed
     odom_topic: /odom
     steering_topic: /autodrive/roboracer_1/steering_command
     throttle_topic: /autodrive/roboracer_1/throttle_command
@@ -13,9 +12,8 @@ autodrive_actuator_interface:
     command_timeout_sec: 0.30
     odom_timeout_sec: 0.125
     max_feedback_speed_mps: 30.0
-    # The simulator source stream is now accepted at 40 Hz. Run the actuator
-    # loop at the same cadence so speed and acceleration feedback do not wait
-    # an extra 75 ms for the next controller tick.
+    # Keep the command loop at 40 Hz while every sensor freshness decision
+    # remains source-timestamped. This does not fabricate simulator samples.
     publish_rate_hz: 40.0
 
     # Simulator-only terminal failure handling. This is deliberately isolated
@@ -48,8 +46,8 @@ autodrive_actuator_interface:
     # measured feed-forward plus speed error and this is only the protocol
     # bound for forward throttle.
     throttle_max_forward: 1.0
-    # The speed loop is allowed to use the full normalized range at 40 Hz;
-    # acceleration mode applies its own independent slew limits below.
+    # The speed loop is allowed to use the full normalized range; acceleration
+    # capability tables below are model inputs, not a second command path.
     throttle_rise_rate_per_sec: 10.0
     throttle_fall_rate_per_sec: 10.0
     stop_speed_threshold_mps: 0.02
@@ -88,8 +86,8 @@ autodrive_actuator_interface:
     # model.
     # The observer uses /odom and IMU only. Ground truth is used solely by the
     # offline calibration recorder and never enters the race controller.
-    # The 40 Hz source stream supports a shorter acceleration-observer lag
-    # without relying on a single noisy native sample.
+    # Use the measured source cadence without relying on one noisy native
+    # sample.
     acceleration_filter_alpha: 0.20
     slip_threshold_mps: 0.75
     slip_ratio: 0.20
@@ -124,14 +122,14 @@ autodrive_actuator_interface:
                              16.0, 18.0, 20.0, 23.0]
     # Conservative fallback inverse gains retained for capability calculation;
     # acceleration commands are now integrated into the validated speed loop.
-    # Retuned from the model-led 40 Hz acceleration run: the previous
+    # Retuned from the model-led acceleration run: the previous
     # offline inverse table was approximately 3x too aggressive dynamically.
     acceleration_throttle_per_mps2: [0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
                                      0.066, 0.068, 0.070, 0.072, 0.074, 0.078]
     acceleration_throttle_rise_rate_per_sec: 2.0
     acceleration_throttle_fall_rate_per_sec: 4.0
 
-    # Monotonic response points from the completed 2026-09-04 40 Hz grid. The
+    # Monotonic response points from the completed open-ground grid. The
     # analyzer rejects moving-coast tails before producing this table; linear
     # interpolation supplies commands between the measured throttle points.
     # 1.0 throttle reaches the simulator envelope at 22.8836 m/s.

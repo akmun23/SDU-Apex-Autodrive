@@ -22,7 +22,17 @@ sensor_odometry:
     # Frozen deterministic observer constants from
     # VALIDATED_ODOMETRY_IMPLEMENTATION_HANDOFF.md.
     wheel_radius_m: 0.059
+    # Direct wheel-to-body scale selected from the valid ten-high-speed-lap
+    # campaign: 0.968 reduced deployed observer drift while retaining the
+    # best AMCL/current-map accuracy among the tested scales. The old lookup
+    # table belonged to another simulator operating point.
+    wheel_speed_scale: 0.968
     reset_encoder_jump_rad: 50.0
+    # Smooth the simulator's repeated cumulative-angle packets over two
+    # native 20 Hz samples.  The recorded run comparison showed that 150 ms
+    # adds avoidable launch/braking lag; 100 ms preserves burst rejection
+    # while responding faster to real motion.
+    wheel_speed_window_s: 0.10
     # Track-scene native telemetry is approximately 20 Hz (0.050 s). A
     # 0.040 s limit incorrectly marked every normal packet degraded and set
     # the pose covariance to 0.25 m^2, which stopped Pure Pursuit.
@@ -34,13 +44,24 @@ sensor_odometry:
     decel_detect_ax_mps2: -0.5
     decel_ax_scale: 1.005
     decel_ax_offset_mps2: 0.020
-    wheel_update_ax_abs_max_mps2: 0.6
+    # Wheel speed is the direct longitudinal measurement.  The previous
+    # 0.6 m/s^2 gate rejected valid wheel updates during normal launch
+    # acceleration, leaving /odom on the much slower IMU prediction.
+    wheel_update_ax_abs_max_mps2: 6.5
     wheel_freeze_speed_mps: 0.15
-    wheel_innovation_max_mps: 0.30
+    # Allow the wheel measurement to recover a transient IMU-speed error;
+    # frozen-wheel and source-timing gates still reject missing packets.
+    wheel_innovation_max_mps: 1.50
+    # Reject the measured two-stage cumulative-encoder burst signature when
+    # the rolling rate is already >1 m/s above causal speed and the current
+    # packet is another >1 m/s above that rolling rate.
+    wheel_burst_disagreement_mps: 1.0
+    # After a repeated cumulative-angle packet, the first valid packet
+    # re-baselines the rolling window before normal estimation resumes.
     # Separate true stopped detection from the 0.15 m/s missing-encoder gate;
     # mapping and low-speed driving are valid below that gate.
     stationary_speed_threshold_mps: 0.03
-    wheel_update_beta: 0.20
+    wheel_update_beta: 0.85
     # Clear stale motion after sustained zero wheel motion and calm IMU data;
     # a single missing encoder packet is still rejected by the frozen-wheel
     # gate above.
@@ -57,6 +78,11 @@ sensor_odometry:
     turn_exit_yaw_rate_radps: 0.1
     turn_exit_abs_ay_mps2: 0.5
     turn_exit_hold_s: 0.5
+    # A synchronized nonzero wheel packet may correct an over-accelerated IMU
+    # prediction during hard braking in a turn. Zero/frozen packets are still
+    # held by wheel_freeze_speed so one dropped encoder callback cannot erase
+    # valid motion.
+    turn_wheel_braking_ax_mps2: -1.0
     # Use the validated no-lateral-slip kinematic turn update. Integrating
     # simulator lateral IMU acceleration at 20 Hz caused false pose drift in
     # the first bend; enable only after a separately validated slip model.
@@ -81,11 +107,12 @@ sensor_odometry:
     twist_linear_variance: 0.04
     twist_yaw_variance: 0.04
 
-    # /odom/diagnostics is Float64MultiArray version 3:
+    # /odom/diagnostics is Float64MultiArray version 4:
     # version, source_stamp_s, dt_s, raw_wheel_mps, mapped_wheel_mps,
     # speed_pred_mps, speed_mps, body_u_mps, body_v_mps, ax_mps2, ay_mps2,
     # yaw_rate_radps, wheel_update_used, turn_mode, reset_epoch,
     # timing_degraded, packet_drop_count, packet_coherence_fault_count,
     # x_m, y_m, yaw_rad, sensor_outlier, left_angle_rad, right_angle_rad,
-    # imu_yaw_rad. The last three values are the exact synchronized packet
-    # inputs used by the observer and make offline replay source-time exact.
+    # imu_yaw_rad, packet_wheel_mps, wheel_burst_rejected. The last four values are the exact
+    # synchronized packet input/diagnostic values needed for replay and for
+    # diagnosing repeated cumulative-angle packets.

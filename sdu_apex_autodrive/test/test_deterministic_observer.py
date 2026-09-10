@@ -76,3 +76,23 @@ def test_reference_replay_updates_deterministically() -> None:
     assert update.speed_mps > 0.0
     assert update.body_u_mps == update.speed_mps
     assert update.body_v_mps == 0.0
+
+
+def test_reconstruction_zeroes_absolute_imu_yaw_for_observer_replay(tmp_path: Path) -> None:
+    rows = []
+    for stamp, yaw in ((1.0, -1.57), (1.05, -1.52)):
+        rows.extend([
+            _event(stamp, "left_encoder", left_encoder_rad=0.0),
+            _event(stamp, "right_encoder", right_encoder_rad=0.0),
+            _event(stamp, "imu", ax_mps2=0.0, ay_mps2=0.0,
+                   yaw_rate_radps=1.0, imu_yaw_rad=yaw),
+            _event(stamp, "gt_odom", gt_speed_mps=0.0, gt_x_m=0.0,
+                   gt_y_m=0.0, gt_yaw_rad=yaw),
+        ])
+    path = tmp_path / "absolute_yaw_events.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+    packets = reconstruct_packets(path)
+
+    assert packets.yaw_rad.iloc[0] == pytest.approx(0.0)
+    assert packets.yaw_rad.iloc[1] == pytest.approx(0.05, abs=1.0e-3)

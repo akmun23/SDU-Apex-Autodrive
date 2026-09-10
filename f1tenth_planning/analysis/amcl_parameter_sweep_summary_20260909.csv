@@ -1,9 +1,0 @@
-campaign,candidate,scenario,amcl_p95_m,ekf_p95_m,raw_scan_innovation_p95_m,raw_scan_innovation_p95_rad,accepted_scan_health,rejected_scan_health,particle_count_p50,cluster_weight_p50,amcl_timing_p95_ms,collision_count,decision
-amcl_xy015_campaign4_20260909,xy_gain=0.15,motion,0.7490,0.3764,0.0896,0.0252,40640,0,2500,0.7800,1.8445,0,reject_scan_gain
-amcl_sigma010_campaign5_20260909,sigma_hit=0.10,motion,0.9285,0.9537,0.0826,0.0251,31304,8589,2500,0.7845,1.9793,0,reject_sigma_candidate
-amcl_cloudtight_stationary_campaign6_20260909,local_cloud_covariance=0.01,stationary,0.0028,0.0028,0.0323,0.0001,13076,0,not_observed,not_observed,not_observed,0,retain_as_production_candidate
-amcl_rougheningoff_stationary_campaign7_20260909,roughening=false,stationary,0.0026,0.0026,0.0896,0.0236,0,13608,not_observed,not_observed,not_observed,0,reject_roughening_off
-amcl_cloudtight_motion_campaign8_20260909,local_cloud_covariance=0.01,motion,0.2697,0.7906,0.0247,0.0076,41308,0,2500,0.9978,1.8182,0,retain_as_production_candidate
-amcl_particles5000_stationary_campaign9_20260909,particles=5000,stationary,0.0028,0.0028,0.0340,0.0002,13831,0,5000,not_observed,not_observed,0,reject_no_measured_gain
-amcl_beams540_stationary_campaign10_20260909,max_beams=540,stationary,0.0024,0.0024,0.0323,0.0007,14401,0,not_observed,not_observed,not_observed,0,reject_no_measured_gain
-odom_covariance_calibration,multi-stop q_xy_time=0.0002,source-time holdout,not_applicable,not_applicable,not_applicable,not_applicable,100_percent_coverage,not_applicable,not_applicable,not_applicable,not_applicable,not_applicable,retain

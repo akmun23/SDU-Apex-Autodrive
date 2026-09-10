@@ -2,14 +2,12 @@
 
 The AutoDRIVE actuator interface has a normalized throttle input, not a direct
 acceleration input. The speed feed-forward table supplies the throttle needed
-to hold a body speed. Speed commands use that table directly; acceleration
-commands are integrated into a speed trajectory and then use the same speed
-loop. The online controller only consumes allowed odometry and IMU data;
-simulator truth is used offline to identify and validate the tables.
+to hold a body speed. The online controller only consumes allowed odometry and
+IMU data; simulator truth is used offline to identify and validate the tables.
 """
 
 from bisect import bisect_right
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import math
 
 
@@ -866,118 +864,5 @@ class TargetSpeedController:
             # waiting for passive coast-down.
             self.integral = 0.0
 
-        # The speed abstraction owns its own actuator slew limits. The
-        # acceleration-loop limits are deliberately independent and are used
-        # only by TargetAccelerationController below.
+        # The speed abstraction owns its actuator slew limits.
         return self._slew_to(desired, dt_seconds)
-
-
-class TargetAccelerationController:
-    """Convert a physical acceleration target into normalized throttle.
-
-    MPC publishes acceleration on its own command topic.  The command is
-    integrated into a short-horizon speed trajectory and passed through the
-    validated speed controller. This is intentional: the simulator's native
-    acceleration derivative can reverse sign between otherwise increasing
-    speed samples, so direct acceleration feedback relays throttle instead of
-    tracking the requested trajectory. Negative acceleration requests coast
-    because the AutoDRIVE competition interface exposes no active brake
-    channel.
-    """
-
-    def __init__(self, config: SpeedControllerConfig) -> None:
-        config.validate()
-        self.config = config
-        self.acceleration_controller = AccelerationController(config)
-        self.speed_controller = self._make_speed_controller(config)
-        self.target_speed_mps = None
-        self.last_output = 0.0
-
-    @staticmethod
-    def _make_speed_controller(config: SpeedControllerConfig) -> TargetSpeedController:
-        # Keep acceleration-mode output slew limits independent from the
-        # normal speed-command profile while reusing the same speed feedback
-        # and handoff logic.
-        return TargetSpeedController(replace(
-            config,
-            throttle_rise_rate_per_sec=(
-                config.acceleration_throttle_rise_rate_per_sec
-                if config.acceleration_throttle_rise_rate_per_sec is not None
-                else config.throttle_rise_rate_per_sec),
-            throttle_fall_rate_per_sec=(
-                config.acceleration_throttle_fall_rate_per_sec
-                if config.acceleration_throttle_fall_rate_per_sec is not None
-                else config.throttle_fall_rate_per_sec),
-        ))
-
-    def reset(self) -> None:
-        self.speed_controller.reset()
-        self.last_output = 0.0
-        self.acceleration_controller.reset()
-        self.target_speed_mps = None
-
-    def reconfigure(self, config: SpeedControllerConfig) -> None:
-        config.validate()
-        self.config = config
-        self.acceleration_controller = AccelerationController(config)
-        self.speed_controller = self._make_speed_controller(config)
-        self.reset()
-
-    def feedforward(self, speed_mps: float) -> float:
-        speeds = self.config.feedforward_speed_mps
-        throttles = self.config.feedforward_throttle
-        speed = max(0.0, speed_mps)
-        if speed <= speeds[0]:
-            return throttles[0]
-        if speed >= speeds[-1]:
-            return throttles[-1]
-        upper = bisect_right(speeds, speed)
-        lower = upper - 1
-        ratio = (speed - speeds[lower]) / (speeds[upper] - speeds[lower])
-        return throttles[lower] + ratio * (throttles[upper] - throttles[lower])
-
-    def update(
-        self,
-        target_accel_mps2: float,
-        measured_speed_mps: float,
-        measured_accel_mps2: float,
-        dt_seconds: float,
-    ) -> float:
-        if not all(math.isfinite(v) for v in (
-            target_accel_mps2, measured_speed_mps, measured_accel_mps2,
-            dt_seconds,
-        )) or dt_seconds <= 0.0:
-            raise ValueError("invalid acceleration-command input")
-
-        measured_speed = max(0.0, measured_speed_mps)
-        if target_accel_mps2 < 0.0:
-            # There is no active brake output in the competition actuator
-            # contract. Reset the trajectory and coast immediately; a later
-            # positive command will seed a new trajectory from fresh odom.
-            self.reset()
-            return 0.0
-
-        if self.target_speed_mps is None:
-            self.target_speed_mps = measured_speed
-        target_acceleration = min(
-            target_accel_mps2,
-            self.acceleration_controller.maximum_acceleration(measured_speed),
-        )
-        self.target_speed_mps = clamp(
-            self.target_speed_mps + target_acceleration * dt_seconds,
-            0.0,
-            self.config.feedforward_speed_mps[-1],
-        )
-        # The trajectory itself carries the acceleration request. Pass zero
-        # transient acceleration here so the noisy native derivative cannot
-        # re-enter the control law through the speed controller's predictive
-        # handoff.
-        self.last_output = self.speed_controller.update(
-            self.target_speed_mps,
-            measured_speed,
-            0.0,
-            dt_seconds,
-            measured_accel_mps2=0.0,
-            measurement_fresh=True,
-        )
-        return self.last_output

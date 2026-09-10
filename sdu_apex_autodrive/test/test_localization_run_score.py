@@ -67,3 +67,28 @@ def test_absolute_error_is_preferred_when_available(tmp_path):
 
     assert math.isclose(result["estimators"]["amcl"]["error_max_m"], 1.0)
     assert result["scoring_mode"] == "relative_first_pair"
+
+
+def test_recorder_collision_overrides_monitor_callback_order(tmp_path):
+    rows = [_row(0.0, 0.0, 0.0), _row(1.0, 20.0, 0.1), _row(2.0, 40.0, 0.1)]
+    monitor_path = tmp_path / "monitor.csv"
+    _write(monitor_path, rows)
+    telemetry_path = tmp_path / "telemetry.csv"
+    _write(
+        telemetry_path,
+        [
+            {"time_s": 0.0, "gt_collision_count": 0},
+            {"time_s": 1.5, "gt_collision_count": 1},
+        ],
+    )
+
+    result = score_csv(
+        monitor_path,
+        telemetry_csv=telemetry_path,
+        min_path_length_m=35.0,
+    )
+
+    assert result["collision_free"] is False
+    assert result["collision_row_index"] == 2
+    assert result["telemetry_collision_time_s"] == 1.5
+    assert result["overall_pass"] is False

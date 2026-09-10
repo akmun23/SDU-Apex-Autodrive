@@ -1,0 +1,73 @@
+{
+  "input_csv": "/workspace/src/f1tenth_planning/analysis/amcl_clean_baseline_20260909/amcl_vs_ground_truth.csv",
+  "scoring_mode": "relative_first_pair",
+  "sample_count": 1666,
+  "clean_sample_count": 1666,
+  "path_length_m": 42.32426085554923,
+  "min_path_length_m": 35.0,
+  "threshold_percent": 2.0,
+  "jump_threshold_m": 0.25,
+  "collision_free": true,
+  "collision_row_index": null,
+  "full_path": true,
+  "missing_estimators": [],
+  "estimators": {
+    "amcl": {
+      "samples": 1666,
+      "yaw_samples": 1666,
+      "error_p50_m": 0.0416845,
+      "error_p95_m": 0.0959715,
+      "error_p99_m": 0.1843516,
+      "error_max_m": 0.195679,
+      "error_mean_m": 0.048329398559423815,
+      "yaw_error_p95_rad": 0.02503875,
+      "error_p95_percent_of_path": 0.226752926241397,
+      "error_max_percent_of_path": 0.46233294107094625,
+      "jump_count": 0,
+      "within_threshold": true
+    },
+    "current_map": {
+      "samples": 1665,
+      "yaw_samples": 1665,
+      "error_p50_m": 0.031162,
+      "error_p95_m": 0.11474299999999998,
+      "error_p99_m": 0.15883084,
+      "error_max_m": 0.159688,
+      "error_mean_m": 0.04375621201201195,
+      "yaw_error_p95_rad": 0.0,
+      "error_p95_percent_of_path": 0.2711045572458137,
+      "error_max_percent_of_path": 0.377296606655478,
+      "jump_count": 0,
+      "within_threshold": true
+    },
+    "ekf": {
+      "samples": 1666,
+      "yaw_samples": 1666,
+      "error_p50_m": 0.042831499999999995,
+      "error_p95_m": 0.11761574999999999,
+      "error_p99_m": 0.13821774999999994,
+      "error_max_m": 0.15084,
+      "error_mean_m": 0.06058175810324129,
+      "yaw_error_p95_rad": 0.013520250000000001,
+      "error_p95_percent_of_path": 0.27789203549571057,
+      "error_max_percent_of_path": 0.3563913390355712,
+      "jump_count": 0,
+      "within_threshold": true
+    },
+    "odom": {
+      "samples": 1666,
+      "yaw_samples": 1666,
+      "error_p50_m": 0.0402825,
+      "error_p95_m": 0.11698925,
+      "error_p99_m": 0.11872780000000001,
+      "error_max_m": 0.120777,
+      "error_mean_m": 0.05957048559423776,
+      "yaw_error_p95_rad": 0.0,
+      "error_p95_percent_of_path": 0.2764117970052188,
+      "error_max_percent_of_path": 0.2853611558916679,
+      "jump_count": 0,
+      "within_threshold": true
+    }
+  },
+  "overall_pass": true
+}

@@ -104,22 +104,25 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("cte_speed_factor", 1.50);
     declare_parameter("cte_speed_floor_ratio", 0.55);
     declare_parameter("max_lateral_accel", 6.50);
-    declare_parameter("min_regulated_speed", 1.50);
-    declare_parameter("offtrack_stop_error_m", 0.75);
+    declare_parameter("min_regulated_speed", 0.0);
+    // CTE is a recovery signal, not a stop condition. Keep the legacy hard
+    // stop available as an explicit opt-in parameter, but disable it in the
+    // production default so a delayed pose/actuator sample cannot deadlock PP.
+    declare_parameter("offtrack_stop_error_m", 0.0);
     declare_parameter("speed_preview_distance", 4.0);
     declare_parameter("speed_profile_braking_decel", 1.50);
     declare_parameter("curvature_preview_factor", 1.6245233);
-    declare_parameter("curvature_feedforward_gain", 0.50);
-    declare_parameter("heading_error_gain", 0.30);
+    declare_parameter("curvature_feedforward_gain", 0.0);
+    declare_parameter("heading_error_gain", 0.0);
     declare_parameter("yaw_rate_damping", 0.0);
     
     // Corridor-aware width regulation
     declare_parameter("vehicle_half_width", 0.1365);
     declare_parameter("wall_safety_margin", 0.03);
     declare_parameter("corridor_half_width_ref", 0.35);
-    declare_parameter("corridor_speed_floor_ratio", 0.25);
+    declare_parameter("corridor_speed_floor_ratio", 1.0);
     declare_parameter("corridor_lookahead_factor", 2.0);
-    declare_parameter("wall_bias_gain", 0.25);
+    declare_parameter("wall_bias_gain", 0.0);
     declare_parameter("wall_bias_max_m", 0.10);
     
     // Steering
@@ -132,7 +135,7 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("pose_timeout_s", 0.1);
     declare_parameter("odom_timeout_s", 0.2);
     declare_parameter("state_extrapolation_max_s", 0.12);
-    declare_parameter("control_rate_hz", 20.0);
+    declare_parameter("control_rate_hz", 40.0);
     declare_parameter("localization_covariance_xy_max", 0.25);
     declare_parameter("localization_covariance_yaw_max", 0.12);
     declare_parameter("localization_required_updates", 5);
@@ -829,22 +832,20 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
         double cmd_steer = output.steering_angle;
         double cmd_speed = output.target_speed;
 
-        // AutoDRIVE publishes steering feedback in radians. Lead the
-        // requested angle only when the actuator is lagging in the same
-        // direction. Never amplify a sign reversal: at the source cadence an old feedback
-        // sample can legitimately have the opposite sign while the requested
-        // command is changing sides.
+        // AutoDRIVE publishes steering feedback in radians. The simulator's
+        // steering servo has a measurable response lag, so lead the requested
+        // angle from the fresh measured actuator state. This must also apply
+        // across a sign reversal: the old steering angle is precisely what
+        // makes the vehicle continue turning after PP has requested the other
+        // direction. The feedback timeout and the command slew/angle limits
+        // keep an old or excessive correction from becoming a new command.
         const bool feedback_fresh = steering_feedback_received &&
             (now_t - last_steering_feedback_time).seconds() <= steering_feedback_timeout_s;
         if (feedback_fresh && steering_feedback_lead_gain > 0.0) {
             const double feedback_angle = std::clamp(
                 steering_feedback_angle, -config_.max_steering, config_.max_steering);
             const double command_epsilon = 1.0e-4;
-            const bool same_direction =
-                std::abs(cmd_steer) <= command_epsilon ||
-                std::abs(feedback_angle) <= command_epsilon ||
-                cmd_steer * feedback_angle > 0.0;
-            if (same_direction && std::abs(cmd_steer) > std::abs(feedback_angle)) {
+            if (std::abs(cmd_steer - feedback_angle) > command_epsilon) {
                 cmd_steer += steering_feedback_lead_gain * (cmd_steer - feedback_angle);
                 cmd_steer = std::clamp(cmd_steer, -config_.max_steering, config_.max_steering);
             }

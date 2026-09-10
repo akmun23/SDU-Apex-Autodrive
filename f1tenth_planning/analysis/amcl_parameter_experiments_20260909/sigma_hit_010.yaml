@@ -1,6 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # One-factor candidate: tolerate the measured 2.5 cm map discretisation
-    # and simulator/LiDAR wall-return variation without changing the pose
-    # correction gain or particle cloud.
-    sigma_hit: 0.10

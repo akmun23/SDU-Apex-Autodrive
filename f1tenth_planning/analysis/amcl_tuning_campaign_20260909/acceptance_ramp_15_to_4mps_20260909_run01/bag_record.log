@@ -1,0 +1,19 @@
+stdin is not a terminal device. Keyboard handling disabled.[INFO] [1788989917.320949676] [rosbag2_recorder]: Press SPACE for pausing/resuming
+[INFO] [1788989917.333017697] [rosbag2_storage]: Opened database '/workspace/src/f1tenth_planning/analysis/amcl_tuning_campaign_20260909/acceptance_ramp_15_to_4mps_20260909_run01/rosbag_full/rosbag_full_0.db3' for READ_WRITE.
+[INFO] [1788989917.336199461] [rosbag2_recorder]: Listening for topics...
+[INFO] [1788989917.336221363] [rosbag2_recorder]: Event publisher thread: Starting
+[INFO] [1788989917.336474287] [rosbag2_recorder]: Recording...
+[INFO] [1788989933.482286688] [rosbag2_recorder]: Subscribed to topic '/ekf_odom'
+[INFO] [1788989933.490516672] [rosbag2_recorder]: Subscribed to topic '/ekf_pose'
+[INFO] [1788989933.495273314] [rosbag2_recorder]: Subscribed to topic '/odom'
+[INFO] [1788989933.504141747] [rosbag2_recorder]: Subscribed to topic '/sdu/tf'
+[INFO] [1788989933.612220142] [rosbag2_recorder]: Subscribed to topic '/cmd/speed'
+[INFO] [1788989933.919174047] [rosbag2_recorder]: Subscribed to topic '/amcl_pose'
+[INFO] [1788989933.921091497] [rosbag2_recorder]: Subscribed to topic '/current_map_pose'
+[INFO] [1788989934.632850527] [rosbag2_recorder]: Subscribed to topic '/autodrive/roboracer_1/lidar'
+[INFO] [1788989934.634256127] [rosbag2_recorder]: Subscribed to topic '/autodrive/roboracer_1/odom'
+[INFO] [1788989934.635740063] [rosbag2_recorder]: Subscribed to topic '/tf'
+[INFO] [1788989934.635814954] [rosbag2_recorder]: All requested topics are subscribed. Stopping discovery...
+[INFO] [1788990090.522530251] [rosbag2_cpp]: Writing remaining messages from cache to the bag. It may take a while
+[INFO] [1788990090.524752133] [rosbag2_recorder]: Event publisher thread: Exiting
+[INFO] [1788990090.524840679] [rosbag2_recorder]: Recording stopped

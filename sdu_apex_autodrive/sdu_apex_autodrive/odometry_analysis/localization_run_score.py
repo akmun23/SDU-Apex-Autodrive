@@ -48,6 +48,11 @@ def _time(row: dict[str, str], fallback: float) -> float:
     return _number(row, "stamp_s") or _number(row, "time_s") or fallback
 
 
+def _elapsed_time(row: dict[str, str], fallback: float) -> float:
+    """Prefer a recorder's process-relative time for cross-file matching."""
+    return _number(row, "time_s") or _number(row, "stamp_s") or fallback
+
+
 def _unique_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
     """Sort by source time and remove duplicate monitor snapshots."""
     indexed = sorted(enumerate(rows), key=lambda item: (_time(item[1], item[0]), item[0]))
@@ -124,6 +129,33 @@ def _first_collision_index(rows: list[dict[str, str]]) -> int | None:
     return None
 
 
+def _first_telemetry_collision_time(telemetry_csv: str | Path | None) -> float | None:
+    """Return the first simulator collision time from a recorder CSV.
+
+    The monitor intentionally discards the post-collision localization epoch.
+    DDS callback ordering can therefore leave its final row with the old
+    collision count even though the recorder captured the simulator counter.
+    Use the simulator's cumulative ground-truth counter as an independent
+    acceptance signal when the raw telemetry is supplied.
+    """
+    if telemetry_csv is None:
+        return None
+    with Path(telemetry_csv).open(newline="", encoding="utf-8") as stream:
+        for row in csv.DictReader(stream):
+            try:
+                count = float(row.get("gt_collision_count", ""))
+                # Monitor and recorder files both contain ``stamp_s`` and
+                # ``time_s``.  The monitor's ``time_s`` is relative to its
+                # process start, so compare the recorder's relative time to
+                # the monitor rows rather than mixing absolute ROS stamps.
+                stamp = _number(row, "time_s") or _number(row, "stamp_s")
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(count) and count > 0.0 and math.isfinite(stamp):
+                return stamp
+    return None
+
+
 def _estimator_summary(
     rows: list[dict[str, str]],
     estimator: str,
@@ -170,6 +202,7 @@ def _estimator_summary(
 def score_csv(
     input_csv: str | Path,
     *,
+    telemetry_csv: str | Path | None = None,
     threshold_percent: float = 2.0,
     min_path_length_m: float = 35.0,
     jump_threshold_m: float = 0.25,
@@ -187,6 +220,20 @@ def score_csv(
     if len(rows) < 2:
         raise ValueError("recording has fewer than two timestamped samples")
     collision_index = _first_collision_index(rows)
+    telemetry_collision_time = _first_telemetry_collision_time(telemetry_csv)
+    telemetry_collision_index = None
+    if telemetry_collision_time is not None:
+        for index, row in enumerate(rows):
+            if _elapsed_time(row, float(index)) >= telemetry_collision_time:
+                telemetry_collision_index = index
+                break
+        if telemetry_collision_index is None and rows:
+            telemetry_collision_index = len(rows) - 1
+        if collision_index is None or (
+            telemetry_collision_index is not None
+            and telemetry_collision_index < collision_index
+        ):
+            collision_index = telemetry_collision_index
     clean_rows = rows if collision_index is None else rows[:collision_index]
     path_length = _path_length(clean_rows)
     scoring_mode = next(
@@ -224,6 +271,7 @@ def score_csv(
         "jump_threshold_m": jump_threshold_m,
         "collision_free": collision_free,
         "collision_row_index": collision_index,
+        "telemetry_collision_time_s": telemetry_collision_time,
         "full_path": full_path,
         "missing_estimators": missing,
         "estimators": summaries,
@@ -234,6 +282,11 @@ def score_csv(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input_csv", type=Path)
+    parser.add_argument(
+        "--telemetry-csv",
+        type=Path,
+        help="Raw recorder CSV used to detect a simulator collision missed by the monitor callback",
+    )
     parser.add_argument("--json", dest="output_json", type=Path)
     parser.add_argument("--threshold-percent", type=float, default=2.0)
     parser.add_argument("--min-path-length-m", type=float, default=35.0)
@@ -241,6 +294,7 @@ def main() -> None:
     args = parser.parse_args()
     result = score_csv(
         args.input_csv,
+        telemetry_csv=args.telemetry_csv,
         threshold_percent=args.threshold_percent,
         min_path_length_m=args.min_path_length_m,
         jump_threshold_m=args.jump_threshold_m,

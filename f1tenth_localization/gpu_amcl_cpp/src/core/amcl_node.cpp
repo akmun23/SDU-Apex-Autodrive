@@ -193,8 +193,8 @@ void AmclNode::declare_all_parameters() {
 
     // Initial pose
     declare_parameter<bool>("global_initialization", true);
-    declare_parameter<bool>("initial_heading_from_raceline", true);
-    declare_parameter<bool>("initial_pose_from_raceline", true);
+    declare_parameter<bool>("initial_heading_from_raceline", false);
+    declare_parameter<bool>("initial_pose_from_raceline", false);
     declare_parameter<double>("initial_pose_heading_offset_rad", 0.0);
     declare_parameter<double>("global_heading_cone_rad", 0.5235987756);
     declare_parameter<double>("global_track_margin_m", 0.15);
@@ -203,18 +203,45 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<std::string>("global_heading_trajectory_package", "f1tenth_planning");
     declare_parameter<std::string>(
         "global_heading_trajectory_rel_path",
-        "trajectories/autodrive_compete_2026_autodrive_sim_raceline.csv");
+        "trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv");
     declare_parameter<double>("global_pose_covariance_xy_max", 0.25);
     declare_parameter<double>("global_pose_covariance_yaw_max", 0.12);
     declare_parameter<double>("global_pose_max_track_distance_m", 0.45);
     declare_parameter<double>("global_pose_max_track_heading_error_rad", 0.45);
-    declare_parameter<bool>("global_start_anchor_enabled", true);
+    declare_parameter<bool>("global_start_anchor_enabled", false);
     declare_parameter<double>("global_start_anchor_radius_m", 0.90);
-    declare_parameter<double>("local_scan_correction_max_distance_m", 0.35);
-    declare_parameter<double>("local_scan_correction_max_yaw_rad", 0.45);
+    declare_parameter<double>(
+        "global_start_anchor_x_m", std::numeric_limits<double>::quiet_NaN());
+    declare_parameter<double>(
+        "global_start_anchor_y_m", std::numeric_limits<double>::quiet_NaN());
+    declare_parameter<double>(
+        "global_start_anchor_yaw_rad", std::numeric_limits<double>::quiet_NaN());
+    declare_parameter<double>("global_start_anchor_heading_tolerance_rad", 0.80);
+    declare_parameter<int>("global_lock_confirm_scans", 5);
+    declare_parameter<double>("global_lock_stability_distance_m", 0.35);
+    declare_parameter<double>("global_lock_stability_yaw_rad", 0.25);
+    declare_parameter<double>("global_lock_min_cluster_weight", 0.50);
+    declare_parameter<double>("global_lock_min_travel_m", 0.75);
+    declare_parameter<bool>("global_lock_use_odom_heading", true);
+    declare_parameter<bool>("global_lock_use_anchor_position", false);
+    // A positive value would impose a per-scan innovation gate. Keep the
+    // default disabled: AMCL must be able to remove accumulated odometry
+    // drift continuously, with association/quality checks protecting against
+    // aliases rather than a correction budget.
+    declare_parameter<double>("local_scan_correction_max_distance_m", 0.0);
+    declare_parameter<double>("local_scan_correction_max_yaw_rad", 0.0);
     declare_parameter<double>("local_cluster_association_max_distance_m", 0.80);
     declare_parameter<double>("local_cluster_min_weight", 0.75);
+    declare_parameter<int>("local_tracking_recovery_after_rejected_scans", 3);
+    declare_parameter<int>("local_tracking_recovery_confirm_scans", 3);
+    declare_parameter<double>("local_tracking_recovery_min_cluster_weight", 0.80);
+    declare_parameter<double>("local_tracking_recovery_stability_distance_m", 0.35);
+    declare_parameter<double>("local_tracking_recovery_stability_yaw_rad", 0.25);
     declare_parameter<double>("local_scan_correction_xy_gain", 0.0);
+    declare_parameter<bool>("local_scan_correction_cross_track_only", true);
+    declare_parameter<double>("local_scan_correction_along_track_gain", 1.0);
+    declare_parameter<double>("local_scan_correction_fast_speed_threshold_mps", 3.0);
+    declare_parameter<double>("local_scan_correction_fast_along_track_gain", 0.25);
     declare_parameter<double>("local_scan_correction_yaw_gain", 0.0);
     declare_parameter<bool>("local_tracking_reinitialize_cloud", true);
     declare_parameter<double>("local_tracking_cloud_covariance_xy", 0.01);
@@ -285,6 +312,25 @@ void AmclNode::load_parameters() {
     global_start_anchor_enabled_ = get_parameter("global_start_anchor_enabled").as_bool();
     global_start_anchor_radius_m_ = std::max(
         0.0, get_parameter("global_start_anchor_radius_m").as_double());
+    global_start_anchor_x_m_ = get_parameter("global_start_anchor_x_m").as_double();
+    global_start_anchor_y_m_ = get_parameter("global_start_anchor_y_m").as_double();
+    global_start_anchor_yaw_rad_ = get_parameter("global_start_anchor_yaw_rad").as_double();
+    global_start_anchor_heading_tolerance_rad_ = std::max(
+        0.0, get_parameter("global_start_anchor_heading_tolerance_rad").as_double());
+    global_lock_confirm_scans_ = std::max(
+        1, static_cast<int>(get_parameter("global_lock_confirm_scans").as_int()));
+    global_lock_stability_distance_m_ = std::max(
+        0.0, get_parameter("global_lock_stability_distance_m").as_double());
+    global_lock_stability_yaw_rad_ = std::max(
+        0.0, get_parameter("global_lock_stability_yaw_rad").as_double());
+    global_lock_min_cluster_weight_ = std::clamp(
+        get_parameter("global_lock_min_cluster_weight").as_double(), 0.0, 1.0);
+    global_lock_min_travel_m_ = std::max(
+        0.0, get_parameter("global_lock_min_travel_m").as_double());
+    global_lock_use_odom_heading_ = get_parameter(
+        "global_lock_use_odom_heading").as_bool();
+    global_lock_use_anchor_position_ = get_parameter(
+        "global_lock_use_anchor_position").as_bool();
     local_scan_correction_max_distance_m_ = std::max(
         0.0, get_parameter("local_scan_correction_max_distance_m").as_double());
     local_scan_correction_max_yaw_rad_ = std::max(
@@ -293,10 +339,32 @@ void AmclNode::load_parameters() {
         0.0, get_parameter("local_cluster_association_max_distance_m").as_double());
     local_cluster_min_weight_ = std::clamp(
         get_parameter("local_cluster_min_weight").as_double(), 0.0, 1.0);
+    local_tracking_recovery_after_rejected_scans_ = std::max(
+        1, static_cast<int>(get_parameter(
+            "local_tracking_recovery_after_rejected_scans").as_int()));
+    local_tracking_recovery_confirm_scans_ = std::max(
+        1, static_cast<int>(get_parameter(
+            "local_tracking_recovery_confirm_scans").as_int()));
+    local_tracking_recovery_min_cluster_weight_ = std::clamp(
+        get_parameter("local_tracking_recovery_min_cluster_weight").as_double(), 0.0, 1.0);
+    local_tracking_recovery_stability_distance_m_ = std::max(
+        0.0, get_parameter("local_tracking_recovery_stability_distance_m").as_double());
+    local_tracking_recovery_stability_yaw_rad_ = std::max(
+        0.0, get_parameter("local_tracking_recovery_stability_yaw_rad").as_double());
+    recovery_injection_configured_ =
+        get_parameter("enable_recovery_injection").as_bool();
     local_scan_correction_xy_gain_ = std::clamp(
         get_parameter("local_scan_correction_xy_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_cross_track_only_ = get_parameter(
+        "local_scan_correction_cross_track_only").as_bool();
+    local_scan_correction_along_track_gain_ = std::clamp(
+        get_parameter("local_scan_correction_along_track_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_fast_speed_threshold_mps_ = std::max(
+        0.0, get_parameter("local_scan_correction_fast_speed_threshold_mps").as_double());
+    local_scan_correction_fast_along_track_gain_ = std::clamp(
+        get_parameter("local_scan_correction_fast_along_track_gain").as_double(), 0.0, 1.0);
     local_scan_correction_yaw_gain_ = std::clamp(
-        get_parameter("local_scan_correction_yaw_gain").as_double(), 0.0, 1.0);
+      get_parameter("local_scan_correction_yaw_gain").as_double(), 0.0, 1.0);
     local_tracking_reinitialize_cloud_ = get_parameter(
         "local_tracking_reinitialize_cloud").as_bool();
     local_tracking_cloud_covariance_xy_ = std::max(
@@ -319,14 +387,20 @@ void AmclNode::load_parameters() {
         "[AMCL] Parameters: update_min_d=%.5f, update_min_a=%.5f, "
         "max_scan_age=%.4f, odom_history=%.3fs, cloud_publish_rate=%.1f Hz, "
         "debug_pre_resample=%s, slip_threshold=%.2f rad/s, initial_raceline_heading=%s, "
-        "local_correction_gate=%.2fm/%.2frad xy_gain=%.3f yaw_gain=%.3f "
+        "local_correction_gate=%.2fm/%.2frad xy_gain=%.3f cross_track_only=%s "
+        "along_track_gain=%.3f fast_speed=%.2fmps fast_along_gain=%.3f yaw_gain=%.3f "
         "association=%.2fm recenter_cloud=%s",
         update_min_d_, update_min_a_, max_scan_age_, odom_history_duration_s_,
         cloud_publish_rate_, debug_pre_resample_particles_ ? "true" : "false",
         slip_angular_threshold_,
         initial_heading_from_raceline_ ? "true" : "false",
         local_scan_correction_max_distance_m_, local_scan_correction_max_yaw_rad_,
-        local_scan_correction_xy_gain_, local_scan_correction_yaw_gain_,
+        local_scan_correction_xy_gain_,
+        local_scan_correction_cross_track_only_ ? "true" : "false",
+        local_scan_correction_along_track_gain_,
+        local_scan_correction_fast_speed_threshold_mps_,
+        local_scan_correction_fast_along_track_gain_,
+        local_scan_correction_yaw_gain_,
         local_cluster_association_max_distance_m_,
         local_tracking_reinitialize_cloud_ ? "true" : "false");
 }
@@ -337,7 +411,8 @@ void AmclNode::reset_pose_jump_gate() {
     pending_jump_pose_count_ = 0;
 }
 
-bool AmclNode::should_publish_pose_estimate(const PoseEstimate& est) {
+bool AmclNode::should_publish_pose_estimate(
+    const PoseEstimate& est, bool allow_locked_recovery) {
     if (!pose_jump_gate_enabled_ || !have_last_published_pose_) {
         have_pending_jump_pose_ = false;
         pending_jump_pose_count_ = 0;
@@ -359,13 +434,11 @@ bool AmclNode::should_publish_pose_estimate(const PoseEstimate& est) {
         return true;
     }
 
-    // Once global localization has locked, local scan matching is only a
-    // bounded correction around the causal odometry prediction. A large
-    // alternative pose is therefore a corridor alias or a damaged scan, not
-    // a valid recovery path. Never let it re-anchor the controller after a
-    // collision/dropout; an explicit localization restart is safer than
-    // accepting a multi-metre map-frame teleport.
-    if (global_localization_locked_) {
+    // Normal local updates still reject a large alternative pose. A confirmed
+    // lost-track recovery is the one deliberate exception: AMCL must be able
+    // to remove accumulated odometry drift after several scan-supported
+    // candidates, rather than preserving a stale map->odom transform forever.
+    if (global_localization_locked_ && !allow_locked_recovery) {
         have_pending_jump_pose_ = false;
         pending_jump_pose_count_ = 0;
         RCLCPP_WARN_THROTTLE(
@@ -930,7 +1003,28 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
 
     // 5. Initialize particle filter with all configs
     pf_.init(pf_cfg, mm_cfg, sm_cfg, map_);
-    if (!pf_cfg.global_initialization) {
+    const bool explicit_start_anchor =
+        global_start_anchor_enabled_ &&
+        std::isfinite(global_start_anchor_x_m_) &&
+        std::isfinite(global_start_anchor_y_m_) &&
+        std::isfinite(global_start_anchor_yaw_rad_);
+    if (pf_cfg.global_initialization && explicit_start_anchor) {
+        // The scan model remains in global-initialization mode, but the saved
+        // map's measured start pose supplies the finite prior needed to avoid
+        // a symmetric opposite-direction corridor alias. This is still
+        // scan-supported localization; no simulator truth enters the filter.
+        pf_.reinitialize(
+            global_start_anchor_x_m_, global_start_anchor_y_m_,
+            global_start_anchor_yaw_rad_,
+            pf_cfg.init_cov_xx, pf_cfg.init_cov_yy, pf_cfg.init_cov_aa);
+        RCLCPP_INFO(
+            get_logger(),
+            "Global AMCL startup prior centred at saved map start "
+            "(%.3f, %.3f, %.3f) with covariance (%.3f, %.3f, %.3f).",
+            global_start_anchor_x_m_, global_start_anchor_y_m_,
+            global_start_anchor_yaw_rad_, pf_cfg.init_cov_xx,
+            pf_cfg.init_cov_yy, pf_cfg.init_cov_aa);
+    } else if (!pf_cfg.global_initialization) {
         // The competition launch knows the deterministic simulator start.
         // Keep the broad covariance for deliberate global-recovery tests, but
         // do not seed a known-start local run with half-metre particles: the
@@ -948,21 +1042,37 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     prediction_baseline_ready_ = false;
     global_pose_published_ = false;
     global_localization_locked_ = false;
-    map_odom_valid_ = false;
     last_processed_scan_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-    last_map_correction_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-    last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    {
+        std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+        map_odom_valid_ = false;
+        last_map_correction_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        current_map_pose_covariance_.setIdentity();
+    }
     consecutive_rejected_scans_ = 0;
     last_scan_correction_accepted_ = false;
+    have_recovery_candidate_ = false;
+    recovery_candidate_scans_ = 0;
+    recovery_candidate_pose_ = PoseEstimate{};
     last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
     last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_correction_x_m_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_correction_y_m_ = std::numeric_limits<double>::quiet_NaN();
     last_scan_applied_xy_correction_m_ = 0.0;
     last_scan_applied_yaw_correction_rad_ = 0.0;
-    current_map_pose_covariance_.setIdentity();
+    last_scan_applied_x_m_ = 0.0;
+    last_scan_applied_y_m_ = 0.0;
     local_odom_reference_ready_ = false;
     initial_scan_update_pending_ = true;
     localization_start_time_set_ = false;
     startup_scan_refinement_attempted_ = false;
+    global_lock_candidate_scans_ = 0;
+    global_lock_candidate_pose_ = PoseEstimate{};
+    global_start_odom_ready_ = false;
+    global_start_odom_x_ = 0.0;
+    global_start_odom_y_ = 0.0;
+    global_start_odom_theta_ = 0.0;
     reset_pose_jump_gate();
     RCLCPP_INFO(get_logger(), "Particle filter initialised with %d particles (%s)",
                 pf_cfg.num_particles,
@@ -1052,38 +1162,73 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         initial_scan_update_pending_ = true;
         localization_start_time_set_ = false;
         startup_scan_refinement_attempted_ = false;
+        global_lock_candidate_scans_ = 0;
+        global_lock_candidate_pose_ = PoseEstimate{};
+        global_start_odom_ready_ = false;
+        global_start_odom_x_ = 0.0;
+        global_start_odom_y_ = 0.0;
+        global_start_odom_theta_ = 0.0;
         last_scan_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         last_processed_scan_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         reset_pose_jump_gate();
-        map_odom_valid_ = false;
-        last_map_correction_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        {
+            std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+            map_odom_valid_ = false;
+            last_map_correction_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        }
         // A simulator reset starts a new localization epoch.  Do not carry
         // the previous run's propagated covariance or timestamp into the new
         // map pose: when the first post-reset scan is conservatively rejected,
         // that stale covariance would grow until controllers stop even though
         // the known-start pose has already been restored.
-        last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-        current_map_pose_covariance_.setZero();
+        {
+            std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+            last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+            current_map_pose_covariance_.setZero();
+        }
         const bool known_start = !pf_.config().global_initialization;
-        current_map_pose_covariance_(0, 0) = known_start ?
-            local_tracking_cloud_covariance_xy_ :
-            get_parameter("initial_cov_xx").as_double();
-        current_map_pose_covariance_(1, 1) = known_start ?
-            local_tracking_cloud_covariance_xy_ :
-            get_parameter("initial_cov_yy").as_double();
-        current_map_pose_covariance_(2, 2) = known_start ?
-            local_tracking_cloud_covariance_yaw_ :
-            get_parameter("initial_cov_aa").as_double();
+        {
+            std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+            current_map_pose_covariance_(0, 0) = known_start ?
+                local_tracking_cloud_covariance_xy_ :
+                get_parameter("initial_cov_xx").as_double();
+            current_map_pose_covariance_(1, 1) = known_start ?
+                local_tracking_cloud_covariance_xy_ :
+                get_parameter("initial_cov_yy").as_double();
+            current_map_pose_covariance_(2, 2) = known_start ?
+                local_tracking_cloud_covariance_yaw_ :
+                get_parameter("initial_cov_aa").as_double();
+        }
         consecutive_rejected_scans_ = 0;
         last_scan_correction_accepted_ = false;
+        have_recovery_candidate_ = false;
+        recovery_candidate_scans_ = 0;
+        recovery_candidate_pose_ = PoseEstimate{};
         last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
         last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_correction_x_m_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_correction_y_m_ = std::numeric_limits<double>::quiet_NaN();
         last_scan_applied_xy_correction_m_ = 0.0;
         last_scan_applied_yaw_correction_rad_ = 0.0;
+        last_scan_applied_x_m_ = 0.0;
+        last_scan_applied_y_m_ = 0.0;
 
         if (map_.is_loaded()) {
             if (pf_.config().global_initialization) {
                 pf_.reinitialize_global(map_);
+                const bool explicit_start_anchor =
+                    global_start_anchor_enabled_ &&
+                    std::isfinite(global_start_anchor_x_m_) &&
+                    std::isfinite(global_start_anchor_y_m_) &&
+                    std::isfinite(global_start_anchor_yaw_rad_);
+                if (explicit_start_anchor) {
+                    pf_.reinitialize(
+                        global_start_anchor_x_m_, global_start_anchor_y_m_,
+                        global_start_anchor_yaw_rad_,
+                        get_parameter("initial_cov_xx").as_double(),
+                        get_parameter("initial_cov_yy").as_double(),
+                        get_parameter("initial_cov_aa").as_double());
+                }
                 pf_.set_force_max_particles(force_max_particles_initial_sec_ > 0.0);
             } else {
                 // A simulator reset is not a reason to switch a known-start
@@ -1130,9 +1275,10 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
     const rclcpp::Time odom_stamp(msg->header.stamp, clock_type);
     push_odom_sample(odom_stamp, x, y, theta, *msg);
 
-    if (map_odom_valid_) {
-        publish_current_map_pose(odom_stamp, x, y, theta, *msg);
-    }
+    // Publish the last accepted map->odom correction from the newest odom
+    // sample before entering pf_mutex_. A slow or stale LiDAR callback must
+    // not block the controller-facing pose stream.
+    publish_current_map_pose(odom_stamp, x, y, theta, *msg);
 
     if (first_odom) {
         RCLCPP_INFO(get_logger(),
@@ -1247,6 +1393,12 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         pred_last_y_ = odom_y_at_scan;
         pred_last_theta_ = odom_theta_at_scan;
         prediction_baseline_ready_ = true;
+        if (!global_start_odom_ready_) {
+            global_start_odom_x_ = odom_x_at_scan;
+            global_start_odom_y_ = odom_y_at_scan;
+            global_start_odom_theta_ = odom_theta_at_scan;
+            global_start_odom_ready_ = true;
+        }
     }
 
     // Global initialization is a startup mode only. Once a scan-supported,
@@ -1361,9 +1513,10 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     if (last_scan_time_.nanoseconds() != 0) {
         dt = (scan_time - last_scan_time_).seconds();
     }
+    double scan_angular_velocity = 0.0;
     if (dt > 0.001 && dt < 1.0) {  // Valid dt range
-        double angular_velocity = std::abs(dtheta) / dt;
-        if (angular_velocity > slip_angular_threshold_) {
+        scan_angular_velocity = std::abs(dtheta) / dt;
+        if (scan_angular_velocity > slip_angular_threshold_) {
             pf_.motion_model().set_noise_multiplier(slip_noise_multiplier_);
         } else {
             pf_.motion_model().reset_noise_multiplier();
@@ -1446,6 +1599,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     bool local_scan_correction_rejected = false;
     bool local_tracking_update = false;
     const auto causal_odom_covariance = [&]() {
+        std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
         // A rejected scan does not make the already validated causal odometry
         // state instantly uncertain.  The previous implementation added a
         // fixed 0.01 m^2 on every scan, so a confidence floor at 20 Hz forced
@@ -1491,6 +1645,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                              c_map * dy_from_lock_robot;
         odom_prediction.theta = math_utils::normalize_angle(
             local_pose_reference_.theta + dtheta_from_lock);
+
     }
 
     // Estimate from the strongest local mode before resampling. A global
@@ -1512,12 +1667,77 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
 
     const double min_cluster_weight =
         std::clamp(pf_.config().cluster_publish_min_weight, 0.0, 1.0);
-    const bool local_cluster_valid =
+    bool local_cluster_valid =
         !pf_.config().use_cluster_estimate ||
         cluster_weight >= local_cluster_min_weight_;
     bool publish_cluster =
         local_tracking ? local_cluster_valid :
         (!pf_.config().use_cluster_estimate || cluster_weight >= min_cluster_weight);
+
+    bool local_tracking_recovery_confirmed = false;
+    if (local_tracking && local_odom_reference_ready_ &&
+        !local_cluster_valid &&
+        consecutive_rejected_scans_ + 1 >=
+            static_cast<uint64_t>(local_tracking_recovery_after_rejected_scans_)) {
+        // The normal local query deliberately rejects clusters outside the
+        // causal odometry neighbourhood. Once that query has failed
+        // repeatedly, search the recovery particles globally. They are
+        // sampled from the map/raceline envelope, never from simulator truth.
+        double recovery_cluster_weight = 0.0;
+        double recovery_second_cluster_weight = 0.0;
+        const auto recovery_est = pf_.get_cluster_estimate(
+            &recovery_cluster_weight, &recovery_second_cluster_weight);
+        const bool recovery_quality =
+            std::isfinite(recovery_est.x) && std::isfinite(recovery_est.y) &&
+            std::isfinite(recovery_est.theta) &&
+            recovery_cluster_weight >= local_tracking_recovery_min_cluster_weight_;
+        if (recovery_quality) {
+            const bool stable = have_recovery_candidate_ &&
+                std::hypot(
+                    recovery_est.x - recovery_candidate_pose_.x,
+                    recovery_est.y - recovery_candidate_pose_.y) <=
+                    local_tracking_recovery_stability_distance_m_ &&
+                std::abs(math_utils::angle_diff(
+                    recovery_est.theta, recovery_candidate_pose_.theta)) <=
+                    local_tracking_recovery_stability_yaw_rad_;
+            if (stable) {
+                ++recovery_candidate_scans_;
+            } else {
+                recovery_candidate_scans_ = 1;
+            }
+            recovery_candidate_pose_ = recovery_est;
+            have_recovery_candidate_ = true;
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "AMCL recovery candidate: pose=(%.3f, %.3f, %.3f) "
+                "weight=%.3f stable_scans=%d/%d odom_prediction=(%.3f, %.3f).",
+                recovery_est.x, recovery_est.y, recovery_est.theta,
+                recovery_cluster_weight, recovery_candidate_scans_,
+                local_tracking_recovery_confirm_scans_,
+                odom_prediction.x, odom_prediction.y);
+            if (recovery_candidate_scans_ >=
+                local_tracking_recovery_confirm_scans_) {
+                est = recovery_est;
+                cluster_weight = recovery_cluster_weight;
+                second_cluster_weight = recovery_second_cluster_weight;
+                local_cluster_valid = true;
+                publish_cluster = true;
+                local_tracking_recovery_confirmed = true;
+                have_recovery_candidate_ = false;
+                recovery_candidate_scans_ = 0;
+                RCLCPP_WARN(
+                    get_logger(),
+                    "AMCL accepted confirmed lost-track recovery after %d scans.",
+                    local_tracking_recovery_confirm_scans_);
+            }
+        } else {
+            have_recovery_candidate_ = false;
+            recovery_candidate_scans_ = 0;
+        }
+    } else if (!local_tracking || local_cluster_valid) {
+        have_recovery_candidate_ = false;
+        recovery_candidate_scans_ = 0;
+    }
 
     if (local_tracking && local_odom_reference_ready_) {
         if (!local_cluster_valid) {
@@ -1538,6 +1758,8 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 est.theta, odom_prediction.theta));
             last_scan_correction_distance_m_ = correction_distance;
             last_scan_correction_yaw_rad_ = correction_yaw;
+            last_scan_correction_x_m_ = est.x - odom_prediction.x;
+            last_scan_correction_y_m_ = est.y - odom_prediction.y;
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 1000,
                 "AMCL local correction: odom_prediction=(%.3f, %.3f, %.3f) "
@@ -1563,20 +1785,75 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             }
 
             if (!local_scan_correction_rejected) {
-                const double xy_gain = local_scan_correction_xy_gain_;
-                est.x = odom_prediction.x + xy_gain * (est.x - odom_prediction.x);
-                est.y = odom_prediction.y + xy_gain * (est.y - odom_prediction.y);
-                const double yaw_gain = local_scan_correction_yaw_gain_;
+                // A confirmed global recovery is already a full map-frame
+                // pose. Do not attenuate it back toward the failed odometry
+                // prediction; the locked-pose gate below still requires
+                // multiple consistent scans for a large jump.
+                const double xy_gain = local_tracking_recovery_confirmed ?
+                    1.0 : local_scan_correction_xy_gain_;
+                double correction_x = est.x - odom_prediction.x;
+                double correction_y = est.y - odom_prediction.y;
+                if (!global_heading_points_.empty()) {
+                    // A corridor scan observes wall distance much more
+                    // reliably normal to the raceline than along it. Keep
+                    // the measured normal innovation intact, while allowing
+                    // an independently tuned portion of the tangent
+                    // innovation. This prevents an ambiguous hairpin scan
+                    // from moving the pose to the wrong along-track branch
+                    // without disabling AMCL's continuous correction of
+                    // odometry scale drift.
+                    const double track_heading = raceline_heading_near_pose(
+                        odom_prediction.x, odom_prediction.y,
+                        odom_prediction.theta, global_heading_points_);
+                    const double tangent_x = std::cos(track_heading);
+                    const double tangent_y = std::sin(track_heading);
+                    const double normal_x = -std::sin(track_heading);
+                    const double normal_y = std::cos(track_heading);
+                    const double normal_error =
+                        correction_x * normal_x + correction_y * normal_y;
+                    const double along_error =
+                        correction_x * tangent_x + correction_y * tangent_y;
+                    double along_gain = local_scan_correction_cross_track_only_ ?
+                        0.0 : local_scan_correction_along_track_gain_;
+                    // The local cluster is already associated with the causal
+                    // odometry prediction and has passed the scan quality
+                    // gate. At high speed, a tangent innovation is the
+                    // measured odometry phase drift; at the slow upper
+                    // hairpin, the same component can be a corridor alias.
+                    // Use source-time motion, not a raceline index, to select
+                    // the observability regime.
+                    const double scan_speed_mps = dt > 0.001 && dt < 1.0 ?
+                        dist_moved / dt : 0.0;
+                    if (!local_scan_correction_cross_track_only_ &&
+                        local_scan_correction_fast_speed_threshold_mps_ > 0.0 &&
+                        scan_speed_mps >= local_scan_correction_fast_speed_threshold_mps_) {
+                        along_gain = std::max(
+                            along_gain, local_scan_correction_fast_along_track_gain_);
+                    }
+                    correction_x = normal_x * normal_error +
+                        tangent_x * along_gain * along_error;
+                    correction_y = normal_y * normal_error +
+                        tangent_y * along_gain * along_error;
+                }
+                est.x = odom_prediction.x + xy_gain * correction_x;
+                est.y = odom_prediction.y + xy_gain * correction_y;
+                const double yaw_gain = local_tracking_recovery_confirmed ?
+                    1.0 : local_scan_correction_yaw_gain_;
                 est.theta = math_utils::normalize_angle(
                     odom_prediction.theta + yaw_gain * math_utils::angle_diff(
                         est.theta, odom_prediction.theta));
+
                 last_scan_applied_xy_correction_m_ = std::hypot(
                     est.x - odom_prediction.x, est.y - odom_prediction.y);
+                last_scan_applied_x_m_ = est.x - odom_prediction.x;
+                last_scan_applied_y_m_ = est.y - odom_prediction.y;
                 last_scan_applied_yaw_correction_rad_ = std::abs(
                     math_utils::angle_diff(est.theta, odom_prediction.theta));
             } else {
                 last_scan_applied_xy_correction_m_ = 0.0;
                 last_scan_applied_yaw_correction_rad_ = 0.0;
+                last_scan_applied_x_m_ = 0.0;
+                last_scan_applied_y_m_ = 0.0;
             }
         }
         local_tracking_update = true;
@@ -1596,6 +1873,14 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         last_scan_correction_accepted_ = true;
         last_map_correction_stamp_ = scan_time;
     }
+
+    // Recovery particles are injected only after the local association has
+    // been rejected repeatedly. This keeps the normal locked cloud local and
+    // makes the global search an explicit lost-track path.
+    pf_.set_recovery_injection_enabled(
+        recovery_injection_configured_ && local_tracking &&
+        consecutive_rejected_scans_ >= static_cast<uint64_t>(
+            local_tracking_recovery_after_rejected_scans_));
 
     const double pose_covariance_xy = std::max(
         est.covariance(0, 0), est.covariance(1, 1));
@@ -1624,20 +1909,156 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
      * to unlock the controller. This remains a map/raceline prior and does
      * not consume simulator ground truth. Disable it only for deliberate
      * arbitrary-track-position localization experiments. */
+    const bool explicit_start_anchor =
+        std::isfinite(global_start_anchor_x_m_) &&
+        std::isfinite(global_start_anchor_y_m_) &&
+        std::isfinite(global_start_anchor_yaw_rad_);
     double start_distance = std::numeric_limits<double>::infinity();
-    if (!global_heading_points_.empty()) {
+    double start_heading_error = std::numeric_limits<double>::infinity();
+    if (explicit_start_anchor) {
+        start_distance = std::hypot(
+            est.x - global_start_anchor_x_m_,
+            est.y - global_start_anchor_y_m_);
+        start_heading_error = std::abs(math_utils::angle_diff(
+            est.theta, global_start_anchor_yaw_rad_));
+    } else if (!global_heading_points_.empty()) {
         const auto & start = global_heading_points_.front();
         start_distance = std::hypot(
             est.x - static_cast<double>(start.x),
             est.y - static_cast<double>(start.y));
     }
+    const double global_start_travel = global_start_odom_ready_ ?
+        std::hypot(
+            odom_x_at_scan - global_start_odom_x_,
+            odom_y_at_scan - global_start_odom_y_) : 0.0;
+    const bool global_travel_enough =
+        !global_sensor_bootstrap ||
+        global_lock_min_travel_m_ <= 0.0 ||
+        global_start_travel >= global_lock_min_travel_m_;
+
+    // The saved start anchor is only a startup disambiguation prior. Once
+    // the car has completed the slow-ramp travel gate, it must be allowed to
+    // leave the anchor and accept a stable scan estimate elsewhere on the
+    // circuit. Keeping the anchor active forever prevents global lock by
+    // design and leaves the controller on provisional localization.
     const bool global_pose_near_start =
         !global_sensor_bootstrap ||
+        global_travel_enough ||
         !global_start_anchor_enabled_ ||
         global_start_anchor_radius_m_ <= 0.0 ||
         start_distance <= global_start_anchor_radius_m_;
+    const bool global_heading_near_start =
+        !global_sensor_bootstrap ||
+        global_travel_enough ||
+        !global_start_anchor_enabled_ ||
+        !explicit_start_anchor ||
+        global_start_anchor_heading_tolerance_rad_ <= 0.0 ||
+        start_heading_error <= global_start_anchor_heading_tolerance_rad_;
 
-    pf_.resample_if_needed();
+    // A single low-covariance cluster is not enough to lock a closed track:
+    // the likelihood field can produce a plausible alias at another corridor.
+    // Require a strong cluster to remain spatially stable for several source
+    // scans before handing it to the controller. This is deliberately a
+    // startup-only gate; once locked, the causal odometry association and
+    // local innovation gates take over.
+    const bool global_scan_quality =
+        global_sensor_bootstrap &&
+        publish_cluster &&
+        cluster_weight >= global_lock_min_cluster_weight_ &&
+        global_pose_confident && global_pose_on_track && global_pose_near_start &&
+        global_heading_near_start;
+    const bool global_candidate_quality =
+        global_scan_quality && global_travel_enough;
+    if (global_sensor_bootstrap) {
+        if (!global_scan_quality) {
+            global_lock_candidate_scans_ = 0;
+        } else if (global_lock_candidate_scans_ == 0) {
+            global_lock_candidate_pose_ = est;
+            global_lock_candidate_scans_ = 1;
+        } else {
+            const double candidate_distance = std::hypot(
+                est.x - global_lock_candidate_pose_.x,
+                est.y - global_lock_candidate_pose_.y);
+            const double candidate_yaw = std::abs(math_utils::angle_diff(
+                est.theta, global_lock_candidate_pose_.theta));
+            if (candidate_distance <= global_lock_stability_distance_m_ &&
+                candidate_yaw <= global_lock_stability_yaw_rad_) {
+                global_lock_candidate_pose_ = est;
+                ++global_lock_candidate_scans_;
+            } else {
+                global_lock_candidate_pose_ = est;
+                global_lock_candidate_scans_ = 1;
+            }
+        }
+    }
+    const bool global_lock_confirmed =
+        !global_sensor_bootstrap ||
+        (global_candidate_quality &&
+         global_lock_candidate_scans_ >= global_lock_confirm_scans_);
+    // A global scan estimate must be made available to the slow ramp before
+    // the travel gate can be satisfied.  Otherwise PP waits for
+    // /current_map_pose while AMCL waits for the car to move: a deadlock.
+    // Requiring the same spatially stable scan streak as the lock gate keeps a
+    // single ambiguous stationary corridor from becoming the startup pose.
+    const bool global_provisional_pose_allowed =
+        global_scan_quality &&
+        global_lock_candidate_scans_ >= global_lock_confirm_scans_;
+
+    // The corridor likelihood-field match has a repeatable heading bias,
+    // while source-time odometry yaw is calibrated and agrees with truth.
+    // Keep LiDAR responsible for global x/y localization, but derive the
+    // startup heading from the saved map-start heading plus the odometry
+    // delta. Otherwise the scan bias is frozen into map->odom and becomes a
+    // growing lateral position error as the car travels.
+    const bool global_odom_heading_available =
+        global_sensor_bootstrap &&
+        global_lock_use_odom_heading_ &&
+        global_start_odom_ready_ &&
+        explicit_start_anchor;
+    const double global_odom_heading = global_odom_heading_available ?
+        math_utils::normalize_angle(
+            global_start_anchor_yaw_rad_ + math_utils::angle_diff(
+                odom_theta_at_scan, global_start_odom_theta_)) :
+        est.theta;
+
+    // The saved map-start pose is a measured map prior, not simulator truth.
+    // When enabled, use it only to remove the fixed startup translation bias
+    // observed in the first global scan match, then propagate the short slow
+    // ramp with the timestamped odometry delta.  The scan cluster still has
+    // to pass all global quality/track gates before this pose is published;
+    // after global lock, normal local scan corrections remain active.
+    const bool global_anchor_position_available =
+        global_sensor_bootstrap && global_lock_use_anchor_position_ &&
+        global_start_odom_ready_ && explicit_start_anchor;
+    PoseEstimate global_anchor_pose = est;
+    if (global_anchor_position_available) {
+        const double dx_from_start = odom_x_at_scan - global_start_odom_x_;
+        const double dy_from_start = odom_y_at_scan - global_start_odom_y_;
+        const double c_odom_start = std::cos(global_start_odom_theta_);
+        const double s_odom_start = std::sin(global_start_odom_theta_);
+        const double dx_robot =
+            dx_from_start * c_odom_start + dy_from_start * s_odom_start;
+        const double dy_robot =
+            -dx_from_start * s_odom_start + dy_from_start * c_odom_start;
+        const double c_anchor = std::cos(global_start_anchor_yaw_rad_);
+        const double s_anchor = std::sin(global_start_anchor_yaw_rad_);
+        global_anchor_pose.x = global_start_anchor_x_m_ +
+            c_anchor * dx_robot - s_anchor * dy_robot;
+        global_anchor_pose.y = global_start_anchor_y_m_ +
+            s_anchor * dx_robot + c_anchor * dy_robot;
+        global_anchor_pose.theta = global_odom_heading;
+    }
+
+    // Stationary scans on a closed track are often ambiguous. Resampling
+    // them immediately can collapse the global cloud onto a wrong but
+    // visually plausible corridor before motion provides disambiguation.
+    // Keep the weighted hypotheses until the configured startup travel has
+    // been reached; the first moving scan can then separate alternatives.
+    const bool hold_global_cloud =
+        global_sensor_bootstrap && !global_travel_enough;
+    if (!hold_global_cloud) {
+        pf_.resample_if_needed();
+    }
 
     if (pf_.config().use_kld) {
         const auto& diag = pf_.kld_diagnostics();
@@ -1677,18 +2098,33 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     const bool pose_candidate_allowed =
         publish_cluster &&
         (!global_sensor_bootstrap ||
-         (global_pose_confident && global_pose_on_track && global_pose_near_start));
+         global_lock_confirmed ||
+         global_provisional_pose_allowed);
     // Local estimates have already been gated against the odometry-predicted
     // pose above. Comparing them with the previous scan-time pose would gate
     // normal vehicle motion rather than a localization innovation.
     const bool pose_gate_passed =
         pose_candidate_allowed &&
-        (!local_tracking_update || should_publish_pose_estimate(est));
+        (!local_tracking_update || should_publish_pose_estimate(
+            est, local_tracking_recovery_confirmed));
+    if (!pose_gate_passed && local_tracking_recovery_confirmed) {
+        // The confirmed recovery still has to pass the large-jump guard. Keep
+        // it visible as an outage while the guard accumulates its evidence.
+        ++consecutive_rejected_scans_;
+        last_scan_correction_accepted_ = false;
+    }
     if (pose_gate_passed) {
+        if (global_anchor_position_available) {
+            est.x = global_anchor_pose.x;
+            est.y = global_anchor_pose.y;
+        }
+        if (global_odom_heading_available) {
+            est.theta = global_odom_heading;
+        }
         // Publish only when the best local mode is dominant enough. During
         // global localization, ambiguous clusters should stay visible in RViz
         // but not pull the controller to a wrong symmetric pose.
-        if (global_sensor_bootstrap) {
+        if (global_sensor_bootstrap && global_lock_confirmed) {
             // Keep the accepted global mode, but hand subsequent updates to a
             // compact local cloud. The odometry prediction baseline is kept
             // unchanged, so no artificial motion is introduced.
@@ -1707,6 +2143,17 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 get_logger(),
                 "Global AMCL lock accepted at (%.3f, %.3f, %.3f); continuing with local tracking.",
                 est.x, est.y, est.theta);
+        } else if (global_sensor_bootstrap) {
+            // Publish a provisional map pose so the controller can perform
+            // the deliberately slow localization ramp. Do not collapse the
+            // global cloud or mark the run locally locked until the vehicle
+            // has travelled and the startup gate is satisfied.
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Publishing provisional global AMCL pose for localization ramp; "
+                "travel=%.3f/%.3f m stable_scans=%d/%d.",
+                global_start_travel, global_lock_min_travel_m_,
+                global_lock_candidate_scans_, global_lock_confirm_scans_);
         } else {
             if (local_scan_correction_rejected) {
                 pf_.reinitialize(
@@ -1751,12 +2198,26 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             global_pose_covariance_xy_max_,
             pose_covariance_yaw,
             global_pose_covariance_yaw_max_);
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Global AMCL lock evidence: quality=%s stable_scans=%d/%d "
+            "travel=%.3f/%.3f m (min_weight=%.3f).",
+            global_candidate_quality ? "true" : "false",
+            global_lock_candidate_scans_, global_lock_confirm_scans_,
+            global_start_travel, global_lock_min_travel_m_,
+            global_lock_min_cluster_weight_);
         if (global_pose_confident && !global_pose_near_start &&
             global_start_anchor_enabled_ && global_start_anchor_radius_m_ > 0.0) {
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 2000,
                 "Global AMCL candidate rejected: start-anchor distance %.3f m > %.3f m.",
                 start_distance, global_start_anchor_radius_m_);
+        } else if (global_pose_confident && !global_heading_near_start &&
+                   global_start_anchor_enabled_ && explicit_start_anchor) {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Global AMCL candidate rejected: start-anchor heading error %.3f rad > %.3f rad.",
+                start_heading_error, global_start_anchor_heading_tolerance_rad_);
         } else if (global_pose_confident && !global_pose_on_track &&
             global_pose_max_track_distance_m_ > 0.0 &&
             raceline_distance > global_pose_max_track_distance_m_) {
@@ -1898,9 +2359,12 @@ void AmclNode::publish_pose(const PoseEstimate& est, const rclcpp::Time& stamp) 
     const Eigen::Vector3d odom_pose(odom_x, odom_y, odom_theta);
     const Eigen::Vector3d map_odom = math_utils::se2_compose(
         map_pose, math_utils::se2_inverse(odom_pose));
-    map_odom_pose_ = map_odom;
-    map_odom_valid_ = true;
-    current_map_pose_covariance_ = est.covariance;
+    {
+        std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+        map_odom_pose_ = map_odom;
+        map_odom_valid_ = true;
+        current_map_pose_covariance_ = est.covariance;
+    }
 
     // The propagated control pose is emitted only from odom_callback, once
     // per newest odometry source sample. Keep the scan-time correction in TF
@@ -1909,9 +2373,9 @@ void AmclNode::publish_pose(const PoseEstimate& est, const rclcpp::Time& stamp) 
     map_odom_tf.header.stamp = stamp;
     map_odom_tf.header.frame_id = global_frame_;
     map_odom_tf.child_frame_id = odom_frame_;
-    map_odom_tf.transform.translation.x = map_odom_pose_[0];
-    map_odom_tf.transform.translation.y = map_odom_pose_[1];
-    map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom_pose_[2]);
+    map_odom_tf.transform.translation.x = map_odom[0];
+    map_odom_tf.transform.translation.y = map_odom[1];
+    map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom[2]);
     tf_broadcaster_->sendTransform(map_odom_tf);
 
     last_published_pose_ = est;
@@ -1924,6 +2388,7 @@ void AmclNode::publish_current_map_pose(
     double odom_y,
     double odom_theta,
     const nav_msgs::msg::Odometry& odom_msg) {
+    std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
     if (!map_odom_valid_) {
         return;
     }
@@ -2038,6 +2503,10 @@ void AmclNode::publish_current_map_pose(
             last_scan_correction_yaw_rad_,
             last_scan_applied_xy_correction_m_,
             last_scan_applied_yaw_correction_rad_,
+            last_scan_correction_x_m_,
+            last_scan_correction_y_m_,
+            last_scan_applied_x_m_,
+            last_scan_applied_y_m_,
         };
         localization_health_pub_->publish(health);
     }
@@ -2052,9 +2521,8 @@ void AmclNode::publish_particle_cloud(const rclcpp::Time& stamp) {
         return;
     }
 
-    // The benchmark uses 40 Hz scans. At 40 Hz or higher, publish every
-    // accepted scan so visualization/recording does not drop clouds due to
-    // timestamp jitter around exactly 25 ms.
+    // At high requested publish rates, publish every accepted scan so
+    // visualization/recording does not discard source-timestamped clouds.
     if (cloud_publish_rate_ < 39.5) {
         const double period_s = 1.0 / cloud_publish_rate_;
         if (last_cloud_publish_time_.nanoseconds() != 0) {

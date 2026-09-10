@@ -3,11 +3,8 @@ from dataclasses import replace
 from sdu_apex_autodrive.speed_controller import (
     LongitudinalStateEstimator,
     SpeedControllerConfig,
-    TargetAccelerationController,
     TargetSpeedController,
 )
-
-
 def config():
     return SpeedControllerConfig(
         kp=0.02,
@@ -311,16 +308,6 @@ def test_speed_loop_uses_speed_slew_limits_not_acceleration_limits():
     assert output == 0.10
 
 
-def test_acceleration_loop_uses_its_independent_slew_limits():
-    controller = TargetAccelerationController(replace(
-        config(),
-        acceleration_throttle_rise_rate_per_sec=0.1,
-        acceleration_throttle_fall_rate_per_sec=0.1,
-    ))
-    output = controller.update(5.0, 0.0, 0.0, 0.1)
-    assert abs(output - 0.01) < 1.0e-12
-
-
 def test_feedforward_and_output_remain_bounded_above_measured_table():
     controller = TargetSpeedController(config())
     previous = 0.0
@@ -429,64 +416,3 @@ def test_odom_speed_derivative_drives_acceleration_feedback_after_startup():
 
     assert observer.speed_mps == 1.0
     assert observer.acceleration_mps2 == 10.0
-
-
-def test_acceleration_command_uses_speed_only_for_feedforward():
-    controller = TargetAccelerationController(config())
-    output = controller.update(
-        target_accel_mps2=0.0,
-        measured_speed_mps=1.5,
-        measured_accel_mps2=0.0,
-        dt_seconds=0.1,
-    )
-    # The zero-acceleration command still holds the measured speed with the
-    # feed-forward throttle; it is not interpreted as a stop request.
-    assert 0.0 < output <= 0.10
-
-
-def test_acceleration_command_coasts_for_negative_acceleration():
-    controller = TargetAccelerationController(config())
-    controller.update(1.0, 1.0, 0.0, 0.1)
-    assert controller.update(-1.0, 1.0, 0.0, 0.1) == 0.0
-    assert controller.last_output == 0.0
-
-
-def test_acceleration_command_is_slew_limited_and_bounded():
-    controller = TargetAccelerationController(config())
-    outputs = [controller.update(5.0, 0.0, 0.0, 0.1) for _ in range(20)]
-    assert all(0.0 <= value <= 0.10 for value in outputs)
-    assert all(b - a <= 0.10 + 1.0e-12 for a, b in zip(outputs, outputs[1:]))
-    assert all(a - b <= 0.20 + 1.0e-12 for a, b in zip(outputs, outputs[1:]))
-
-
-def test_acceleration_command_can_remain_model_led_with_bursty_feedback():
-    negative_sensor_controller = TargetAccelerationController(replace(
-        config(),
-        acceleration_feedback_gain=0.0,
-        acceleration_integral_gain=0.0,
-        acceleration_throttle_rise_rate_per_sec=10.0,
-        acceleration_throttle_fall_rate_per_sec=10.0,
-    ))
-    positive_sensor_controller = TargetAccelerationController(replace(
-        config(),
-        acceleration_feedback_gain=0.0,
-        acceleration_integral_gain=0.0,
-        acceleration_throttle_rise_rate_per_sec=10.0,
-        acceleration_throttle_fall_rate_per_sec=10.0,
-    ))
-    first = negative_sensor_controller.update(1.0, 0.0, -8.0, 0.1)
-    second = positive_sensor_controller.update(1.0, 0.0, 8.0, 0.1)
-
-    # With the production-style model-led profile, an isolated sign reversal
-    # in the diagnostic acceleration cannot relay the throttle command.
-    assert first == second
-
-
-def test_acceleration_controller_exposes_speed_dependent_capability():
-    controller = TargetAccelerationController(config())
-
-    at_zero = controller.acceleration_controller.maximum_acceleration(0.0)
-    at_ten = controller.acceleration_controller.maximum_acceleration(10.0)
-    at_top = controller.acceleration_controller.maximum_acceleration(23.0)
-
-    assert at_zero > at_ten > at_top

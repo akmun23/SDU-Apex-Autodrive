@@ -1,48 +1,30 @@
-# AutoDRIVE simulator telemetry patch
+# Optional simulator-side patches
 
-The deployed Docker image contains a prebuilt Unity IL2CPP player, not the
-Unity project. The source-side change therefore lives as an explicit patch
-against the official `AutoDRIVE-Simulator` source branch.
+The repository contains source-side patches and tools for a rebuilt Unity
+player. They cannot change a prebuilt IL2CPP player by themselves.
 
-This patch makes the numeric telemetry path suitable for the 40 Hz gate:
+The ROS bridge requests a 40 Hz command/polling cadence, but that is not a
+claim that the simulator produces 40 Hz physics or LiDAR data. The current
+prebuilt compete player must be measured from source timestamps; the retained
+live run measured approximately 20 Hz on the track. No duplicate or synthetic
+samples are accepted as a substitute.
 
-- camera capture and camera fields are disabled by default at the simulator,
-  before JPEG/base64 serialization;
-- unused LIDAR intensity serialization is disabled by default;
-- the API can explicitly keep both settings disabled in every `Bridge`
-  command;
-- each packet carries Unity `Simulation Time`, `Simulation Frame`, and a
-  telemetry sequence for diagnosing repeated physics states and bursty
-  delivery.
-
-The ROS API change is already in
-`sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py`. It accepts packets with
-no camera field, preserves the numeric topic contract, and includes the Unity
-metadata in `/autodrive/roboracer_1/bridge_packet_timing`.
-
-## Build the simulator player
-
-A Unity build is required before this can affect the running simulator image.
-The source branch currently targets Unity `2022.3.52f1`.
+If Unity source becomes available, apply the patches to the matching
+AutoDRIVE-Simulator source branch and rebuild the Linux player:
 
 ```bash
-git clone --branch AutoDRIVE-Simulator --depth 1 \
-  https://github.com/Tinker-Twins/AutoDRIVE.git autodrive-simulator
-cd autodrive-simulator
-git apply /workspace/src/simulator/patches/0001-clean-40hz-telemetry.patch
-git apply /workspace/src/simulator/patches/0002-parallel-lidar-raycasts.patch
+git apply simulator/patches/0001-clean-40hz-telemetry.patch
+git apply simulator/patches/0002-parallel-lidar-raycasts.patch
 ```
 
-The second patch is the performance-critical part for the compete scene. It
-uses Unity's `RaycastCommand.ScheduleBatch` for the independent 2-D LIDAR
-queries, preserving the 1080-ray/0.25-degree sensor contract while moving the
-raycast work off the Unity main thread. The prebuilt competition player cannot
-receive this code change; it must be rebuilt from the source project.
+The first patch removes camera/intensity serialization from the numeric path
+and adds timing metadata. The second moves independent LiDAR raycasts off the
+Unity main thread. Neither patch is active in the prebuilt competition image
+until a rebuilt player is installed.
 
-Open the project with Unity `2022.3.52f1` and build the Linux x86_64 player.
-Use the resulting player directory as the simulator image payload, or build a
-new image and set `AUTODRIVE_SIMULATOR_IMAGE` when starting this workspace.
+Run the HDRP player in graphical batch mode. Do not use `-no-graphics`:
 
-The current prebuilt `2026-iros-explore` image cannot be changed by the ROS
-container alone: it will continue to transmit its compiled camera path until a
-patched player is installed.
+```bash
+./AutoDRIVE\ Simulator.x86_64 -batchmode \
+  -ip 127.0.0.1 -port 4567 -logFile /tmp/autodrive.log
+```

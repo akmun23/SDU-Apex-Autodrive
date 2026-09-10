@@ -172,17 +172,11 @@ imp_opts = {"flip_imp_track": False,                # flip imported track to rev
 opt_type = 'mintime'
 
 # set mintime specific options (mintime only) --------------------------------------------------------------------------
-# tpadata:                      set individual friction map data file if desired (e.g. for varmue maps), else set None,
-#                               e.g. "berlin_2018_varmue08-12_tpadata.json"
 # warm_start:                   [True/False] warm start IPOPT if previous result is available for current track
-# var_friction:                 [-] None, "linear", "gauss" -> set if variable friction coefficients should be used
-#                               either with linear regression or with gaussian basis functions (requires friction map)
 # reopt_mintime_solution:       reoptimization of the mintime solution by min. curv. opt. for improved curv. smoothness
 # recalc_vel_profile_by_tph:    override mintime velocity profile by ggv based calculation (see TPH package)
 
-mintime_opts = {"tpadata": None,
-                "warm_start": False,
-                "var_friction": None,
+mintime_opts = {"warm_start": False,
                 "reopt_mintime_solution": True,
                 "recalc_vel_profile_by_tph": True}
 
@@ -233,25 +227,6 @@ with open(requirements_path, 'r') as fh:
 # assemble track import path
 file_paths["track_file"] = os.path.join(file_paths["module"], "inputs", "tracks", file_paths["track_name"] + ".csv")
 
-# assemble friction map import paths
-file_paths["tpamap"] = os.path.join(file_paths["module"], "inputs", "frictionmaps",
-                                    file_paths["track_name"] + "_tpamap.csv")
-
-if mintime_opts["tpadata"] is None:
-    file_paths["tpadata"] = os.path.join(file_paths["module"], "inputs", "frictionmaps",
-                                         file_paths["track_name"] + "_tpadata.json")
-else:
-    file_paths["tpadata"] = os.path.join(file_paths["module"], "inputs", "frictionmaps", mintime_opts["tpadata"])
-
-# check if friction map files are existing if the var_friction option was set
-if opt_type == 'mintime' \
-        and mintime_opts["var_friction"] is not None \
-        and not (os.path.exists(file_paths["tpadata"]) and os.path.exists(file_paths["tpamap"])):
-
-    mintime_opts["var_friction"] = None
-    print("WARNING: var_friction option is not None but friction map data is missing for current track -> Setting"
-          " var_friction to None!")
-
 # create outputs folder(s)
 os.makedirs(file_paths["module"] + "/outputs", exist_ok=True)
 
@@ -296,7 +271,6 @@ elif opt_type == 'mintime':
     pars["pwr_params_mintime"] = json.loads(parser.get('OPTIMIZATION_OPTIONS', 'pwr_params_mintime'))
 
     # modification of mintime options/parameters
-    pars["optim_opts"]["var_friction"] = mintime_opts["var_friction"]
     pars["optim_opts"]["warm_start"] = mintime_opts["warm_start"]
     pars["vehicle_params_mintime"]["wheelbase"] = (pars["vehicle_params_mintime"]["wheelbase_front"]
                                                    + pars["vehicle_params_mintime"]["wheelbase_rear"])
@@ -418,8 +392,6 @@ elif opt_type == 'mintime':
                     coeffs_y=coeffs_y_interp,
                     normvectors=normvec_normalized_interp,
                     pars=pars_tmp,
-                    tpamap_path=file_paths["tpamap"],
-                    tpadata_path=file_paths["tpadata"],
                     export_path=file_paths["mintime_export"],
                     print_debug=debug,
                     plot_debug=plot_opts["mintime_plots"])

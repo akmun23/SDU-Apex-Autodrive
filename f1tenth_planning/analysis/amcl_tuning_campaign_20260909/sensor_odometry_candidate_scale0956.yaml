@@ -1,0 +1,7 @@
+sensor_odometry:
+  ros__parameters:
+    # Run31 full-speed wheel-vs-GT comparison: above 5 m/s the 0.970
+    # candidate still left the deployed observer about 1.4% high.  This is a
+    # live-test candidate only; promote only after a collision-free ten-lap
+    # run improves the full-speed observer and localization errors.
+    wheel_speed_scale: 0.956

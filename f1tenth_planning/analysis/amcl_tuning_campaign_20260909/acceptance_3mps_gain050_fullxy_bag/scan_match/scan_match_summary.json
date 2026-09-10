@@ -1,0 +1,30 @@
+{
+  "bag": "/workspace/src/f1tenth_planning/analysis/amcl_tuning_campaign_20260909/acceptance_3mps_gain050_fullxy_bag/rosbag_full",
+  "map": "/workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml",
+  "trajectory": "/workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv",
+  "provenance": null,
+  "alignment_mode": "explicit_map_start",
+  "map_start_pose": {
+    "x_m": 0.8006,
+    "y_m": 3.1583,
+    "yaw_rad": -1.5708
+  },
+  "scans_total": 1225,
+  "first_collision_stamp_s": 1788985269.0711634,
+  "scans_scored": 266,
+  "stride": 4,
+  "max_beams": 120,
+  "seed_error_p50_m": 0.6938391160220521,
+  "seed_error_p95_m": 1.2240630074807954,
+  "seed_error_max_m": 1.3793694624638662,
+  "match_error_p50_m": 0.18590790180519312,
+  "match_error_p95_m": 1.6505379833577096,
+  "match_error_max_m": 2.0527455301628352,
+  "match_yaw_error_p95_rad": 0.35000000000000003,
+  "improved_samples": 224,
+  "map_resolution_m": 0.025,
+  "map_size_px": [
+    349,
+    877
+  ]
+}

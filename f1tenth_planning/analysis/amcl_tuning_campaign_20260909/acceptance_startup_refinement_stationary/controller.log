@@ -1,0 +1,196 @@
+[INFO] [launch]: All log files can be found below /root/.ros/log/2026-09-09-21-15-36-517678-ExternalDrive-1391
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: controller=pure_pursuit custom_amcl=True rviz=False
+[INFO] [autodrive_bridge_40hz-1]: process started with pid [1439]
+[INFO] [sensor_odometry_node-2]: process started with pid [1441]
+[INFO] [ekf_localization_node-3]: process started with pid [1443]
+[INFO] [map_server-4]: process started with pid [1445]
+[INFO] [lifecycle_manager-5]: process started with pid [1447]
+[INFO] [gpu_amcl_cpp_node-6]: process started with pid [1449]
+[INFO] [ground_truth_amcl_monitor-7]: process started with pid [1451]
+[INFO] [calibration-8]: process started with pid [1453]
+[INFO] [component_container-9]: process started with pid [1455]
+[INFO] [actuator_interface-10]: process started with pid [1457]
+[ekf_localization_node-3] [INFO] [1788988536.816653591] [ekf_localization]: Local odometry trust filter ready: /odom -> /ekf_odom and /ekf_pose in frame odom; reset events=/autodrive/reset_command
+[lifecycle_manager-5] [INFO] [1788988536.829971768] [lifecycle_manager_map]: Creating
+[lifecycle_manager-5] [INFO] [1788988536.837088889] [lifecycle_manager_map]: [34m[1mCreating and initializing lifecycle service clients[0m[0m
+[sensor_odometry_node-2] [INFO] [1788988536.842402707] [sensor_odometry]: Deterministic odometry observer: exact timestamp packets, encoders + IMU only
+[map_server-4] [INFO] [1788988536.847765827] [map_server]: 
+[map_server-4] 	map_server lifecycle node launched. 
+[map_server-4] 	Waiting on external lifecycle transitions to activate
+[map_server-4] 	See https://design.ros2.org/articles/node_lifecycle.html for more information.
+[map_server-4] [INFO] [1788988536.847993947] [map_server]: Creating
+[lifecycle_manager-5] [INFO] [1788988536.896921091] [lifecycle_manager_map]: [34m[1mStarting managed nodes bringup...[0m[0m
+[lifecycle_manager-5] [INFO] [1788988536.897138330] [lifecycle_manager_map]: [34m[1mConfiguring map_server[0m[0m
+[component_container-9] [INFO] [1788988537.000188035] [controller_container]: Load Library: /workspace/install/lib/libpure_pursuit_node.so
+[component_container-9] [INFO] [1788988537.004810161] [controller_container]: Found class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::PurePursuitNode>
+[component_container-9] [INFO] [1788988537.004893929] [controller_container]: Instantiate class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::PurePursuitNode>
+[component_container-9] [INFO] [1788988537.018856108] [pure_pursuit_node]: Initializing Pure Pursuit Node
+[component_container-9] [INFO] [1788988537.033524035] [pure_pursuit_node]: Loaded trajectory with 2586 waypoints (51.7 m)
+[map_server-4] [INFO] [1788988537.039887929] [map_server]: Configuring
+[map_server-4] [INFO] [1788988537.040013305] [map_io]: Loading yaml file: /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml
+[map_server-4] [INFO] [1788988537.040728921] [map_io]: resolution: 0.025
+[map_server-4] [INFO] [1788988537.040759168] [map_io]: origin[0]: -6.82
+[map_server-4] [INFO] [1788988537.040849358] [map_io]: origin[1]: -12.3
+[INFO] [launch_ros.actions.load_composable_nodes]: Loaded node '/pure_pursuit_node' in container '/controller_container'
+[map_server-4] [INFO] [1788988537.040866420] [map_io]: origin[2]: 0
+[map_server-4] [INFO] [1788988537.040881929] [map_io]: free_thresh: 0.25
+[map_server-4] [INFO] [1788988537.040896787] [map_io]: occupied_thresh: 0.65
+[map_server-4] [INFO] [1788988537.041036790] [map_io]: mode: trinary
+[map_server-4] [INFO] [1788988537.041054895] [map_io]: negate: 0
+[map_server-4] [INFO] [1788988537.041531331] [map_io]: Loading image_file: /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.pgm
+[component_container-9] [INFO] [1788988537.042218273] [pure_pursuit_node]: Pure Pursuit Node initialized
+[component_container-9] [INFO] [1788988537.042269329] [pure_pursuit_node]:   Trajectory: /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv (2586 points)
+[component_container-9] [INFO] [1788988537.042289006] [pure_pursuit_node]:   Lookahead: 0.35 - 0.95 m (gain: 0.05)
+[component_container-9] [INFO] [1788988537.042315687] [pure_pursuit_node]:   Max speed cap: 0.00 m/s
+[component_container-9] [INFO] [1788988537.042346184] [pure_pursuit_node]:   Lookahead adapt: cte_weight=1.00 cte_gain=0.042 curvature_gain=1.900
+[component_container-9] [INFO] [1788988537.042367985] [pure_pursuit_node]:   Speed adapt: curvature_factor=0.102 floor_ratio=0.52
+[component_container-9] [INFO] [1788988537.042398723] [pure_pursuit_node]:   Speed adapt (CTE): factor=1.500 floor_ratio=0.55
+[component_container-9] [INFO] [1788988537.042417759] [pure_pursuit_node]:   Speed limits: max_lat_accel=6.50 min_reg_speed=0.00
+[component_container-9] [INFO] [1788988537.042435502] [pure_pursuit_node]:   Yaw-rate damping: 0.000 s
+[component_container-9] [INFO] [1788988537.042452103] [pure_pursuit_node]:   Target-heading turn-in gain: 0.000
+[component_container-9] [INFO] [1788988537.042468745] [pure_pursuit_node]:   Command shaping: steer_rate=3.20 accel=3.00 decel=8.00
+[component_container-9] [INFO] [1788988537.042487660] [pure_pursuit_node]:   Pose: /current_map_pose (map frame)
+[component_container-9] [INFO] [1788988537.042503490] [pure_pursuit_node]:   Odom: /odom
+[component_container-9] [INFO] [1788988537.042518448] [pure_pursuit_node]:   Control trigger: /odom (one command per odometry update; nominal 40.0 Hz)
+[component_container-9] [INFO] [1788988537.042537163] [pure_pursuit_node]:   Steering feedback: /autodrive/roboracer_1/steering (lead gain 0.25)
+[component_container-9] [INFO] [1788988537.042555528] [pure_pursuit_node]:   Startup path gate: distance <= 0.80 m, heading <= 0.75 rad
+[component_container-9] [INFO] [1788988537.042573802] [pure_pursuit_node]:   Command: /cmd/speed
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.079593934] [gpu_amcl_cpp]: [AMCL] Parameters: update_min_d=0.02000, update_min_a=0.03500, max_scan_age=0.2500, odom_history=1.000s, cloud_publish_rate=1.0 Hz, debug_pre_resample=false, slip_threshold=1.00 rad/s, initial_raceline_heading=false, local_correction_gate=0.00m/0.00rad xy_gain=0.500 cross_track_only=false yaw_gain=0.000 association=0.80m recenter_cloud=true
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.114471224] [gpu_amcl_cpp]: Particle cloud publishing scan-synchronized, max 1.0 Hz
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.114543530] [gpu_amcl_cpp]: GPU AMCL C++ node created — waiting for map...
+[map_server-4] [INFO] [1788988537.121320792] [map_io]: Read map /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.pgm: 349 X 877 map @ 0.025 m/cell
+[lifecycle_manager-5] [INFO] [1788988537.134324718] [lifecycle_manager_map]: [34m[1mActivating map_server[0m[0m
+[map_server-4] [INFO] [1788988537.134820691] [map_server]: Activating
+[map_server-4] [INFO] [1788988537.135968441] [map_server]: Creating bond (map_server) to lifecycle manager.
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.137242277] [gpu_amcl_cpp]: Received first map (349x877 @ 0.025 m/cell) — initialising PF
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.162524244] [gpu_amcl_cpp]: Loaded 2587 global heading points from /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.184192312] [gpu_amcl_cpp]: Global AMCL startup prior centred at saved map start (0.801, 3.158, -1.571) with covariance (0.500, 0.500, 0.200).
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.184283975] [gpu_amcl_cpp]: Particle filter initialised with 2500 particles (global)
+[gpu_amcl_cpp_node-6] [INFO] [1788988537.184353175] [gpu_amcl_cpp]: Global particle initialization active; waiting for scans before publishing pose
+[lifecycle_manager-5] [INFO] [1788988537.245231976] [lifecycle_manager_map]: Server map_server connected with bond.
+[lifecycle_manager-5] [INFO] [1788988537.245294914] [lifecycle_manager_map]: [34m[1mManaged nodes are active[0m[0m
+[lifecycle_manager-5] [INFO] [1788988537.245313529] [lifecycle_manager_map]: [34m[1mCreating bond timer...[0m[0m
+[autodrive_bridge_40hz-1] /usr/local/lib/python3.10/dist-packages/numpy/core/getlimits.py:499: UserWarning: The value of the smallest subnormal for <class 'numpy.float64'> type is zero.
+[autodrive_bridge_40hz-1]   setattr(self, word, getattr(machar, word).flat[0])
+[autodrive_bridge_40hz-1] /usr/local/lib/python3.10/dist-packages/numpy/core/getlimits.py:89: UserWarning: The value of the smallest subnormal for <class 'numpy.float64'> type is zero.
+[autodrive_bridge_40hz-1]   return self._float_to_str(self.smallest_subnormal)
+[ground_truth_amcl_monitor-7] [INFO] [1788988537.279821635] [ground_truth_amcl_monitor]: Absolute map scoring enabled from explicit map start: (0.8006, 3.1583, -1.5708)
+[ground_truth_amcl_monitor-7] [WARN] [1788988537.298252772] [ground_truth_amcl_monitor]: Ground-truth monitor is diagnostics-only; simulator IPS/odom are not controller inputs
+[calibration-8] [INFO] [1788988537.339258052] [allowed_telemetry_recorder]: Calibration mode=sensor_record duration=25.000 s output=/workspace/src/f1tenth_planning/analysis/amcl_tuning_campaign_20260909/acceptance_startup_refinement_stationary/telemetry/sensor_record_20260909_211537.csv
+[actuator_interface-10] [INFO] [1788988537.394713439] [autodrive_actuator_interface]: Actuator interface ready; no arming state
+[actuator_interface-10] [WARN] [1788988537.396459294] [autodrive_actuator_interface]: Neutral output: no command
+[autodrive_bridge_40hz-1] [autodrive_bridge_40hz] camera decode/publication disabled
+[autodrive_bridge_40hz-1] [autodrive_bridge_40hz] bounded request pacing enabled at 40 Hz (max one outstanding request)
+[autodrive_bridge_40hz-1] Connected!
+[component_container-9] [WARN] [1788988538.094636597] [pure_pursuit_node]: No pose received on /current_map_pose yet
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.094874204] [gpu_amcl_cpp]: Received first odometry sample at (0.00, 0.00, 0.00).
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.096126109] [gpu_amcl_cpp]: Received LiDAR callback #1 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.096176314] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.055s
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.096204116] [gpu_amcl_cpp]: Starting AMCL scan update #1 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.099307175] [gpu_amcl_cpp]: AMCL scan update #1 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.106054409] [gpu_amcl_cpp]: Startup GPU scan refinement done: refined_particles=2234/2500, beams=180, best_mean_dist=0.000 m, time=6.69 ms
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.108849458] [gpu_amcl_cpp]: Global AMCL refining: cluster_weight=0.929, covariance xy=0.009 (max 0.250), yaw=0.000 (max 0.120).
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.108881929] [gpu_amcl_cpp]: Global AMCL lock evidence: quality=false stable_scans=1/5 travel=0.000/0.750 m (min_weight=0.500).
+[gpu_amcl_cpp_node-6] [INFO] [1788988538.322313240] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=5/5.
+[ground_truth_amcl_monitor-7] [INFO] [1788988538.323490625] [ground_truth_amcl_monitor]: Relative GT alignment initialized: yaw=-0.000, translation=(-0.000, 0.000)
+[ground_truth_amcl_monitor-7] [INFO] [1788988538.324164082] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=unavailable; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=1
+[component_container-9] [INFO] [1788988538.641476521] [pure_pursuit_node]: Aligned closed trajectory seam to startup pose at original waypoint 1090
+[component_container-9] [INFO] [1788988538.641587590] [pure_pursuit_node]: Startup path gate passed: path_distance=0.166 m heading_error=0.302 rad
+[component_container-9] [INFO] [1788988538.641610122] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.003 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988539.121940741] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.052s
+[actuator_interface-10] [INFO] [1788988539.122930193] [autodrive_actuator_interface]: Collision baseline established at cumulative count 0
+[ground_truth_amcl_monitor-7] [INFO] [1788988539.345918423] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=38
+[component_container-9] [INFO] [1788988539.667083338] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988540.147974688] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988540.373735593] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=76
+[gpu_amcl_cpp_node-6] [INFO] [1788988540.375997468] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=43/5.
+[component_container-9] [INFO] [1788988540.695538295] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988541.172955895] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988541.401714358] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=114
+[component_container-9] [INFO] [1788988541.721421685] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988542.196809743] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988542.420882679] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=152
+[gpu_amcl_cpp_node-6] [INFO] [1788988542.422924401] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=81/5.
+[component_container-9] [INFO] [1788988542.741106686] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988543.120441124] [gpu_amcl_cpp]: Received LiDAR callback #94 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988543.120501507] [gpu_amcl_cpp]: Starting AMCL scan update #94 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988543.121591248] [gpu_amcl_cpp]: AMCL scan update #94 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788988543.220152422] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988543.428261983] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=190
+[component_container-9] [INFO] [1788988543.746587756] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988544.243248308] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.052s
+[ground_truth_amcl_monitor-7] [INFO] [1788988544.447339827] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=228
+[gpu_amcl_cpp_node-6] [INFO] [1788988544.449130046] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=119/5.
+[component_container-9] [INFO] [1788988544.770973655] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988545.268194478] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988545.469916818] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=266
+[component_container-9] [INFO] [1788988545.793752492] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988546.274704894] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.053s
+[ground_truth_amcl_monitor-7] [INFO] [1788988546.505230603] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=304
+[gpu_amcl_cpp_node-6] [INFO] [1788988546.505834209] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=157/5.
+[component_container-9] [INFO] [1788988546.819952609] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988547.295908687] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988547.520425269] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=342
+[component_container-9] [INFO] [1788988547.843911210] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988548.168200953] [gpu_amcl_cpp]: Received LiDAR callback #188 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988548.168260475] [gpu_amcl_cpp]: Starting AMCL scan update #188 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988548.169058947] [gpu_amcl_cpp]: AMCL scan update #188 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788988548.320313794] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.052s
+[ground_truth_amcl_monitor-7] [INFO] [1788988548.521816136] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=380
+[gpu_amcl_cpp_node-6] [INFO] [1788988548.524250366] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=195/5.
+[component_container-9] [INFO] [1788988548.844612548] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [WARN] [1788988548.845995510] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788988549.367266795] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988549.522851486] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=419
+[component_container-9] [INFO] [1788988549.894546241] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988550.368701440] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988550.524350331] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=457
+[gpu_amcl_cpp_node-6] [INFO] [1788988550.572862390] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=234/5.
+[component_container-9] [INFO] [1788988550.941936522] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988551.369120287] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988551.527810419] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=495
+[component_container-9] [INFO] [1788988551.969441223] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988552.369624326] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988552.574190366] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=532
+[gpu_amcl_cpp_node-6] [INFO] [1788988552.577569223] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=271/5.
+[component_container-9] [INFO] [1788988552.992627671] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988553.222646665] [gpu_amcl_cpp]: Received LiDAR callback #284 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988553.222733008] [gpu_amcl_cpp]: Starting AMCL scan update #284 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988553.223333618] [gpu_amcl_cpp]: AMCL scan update #284 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788988553.396475266] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988553.574666013] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=566
+[component_container-9] [INFO] [1788988554.017156538] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988554.421866682] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988554.575790865] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=605
+[gpu_amcl_cpp_node-6] [INFO] [1788988554.625054977] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=308/5.
+[component_container-9] [INFO] [1788988555.045710519] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988555.470510936] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988555.620872976] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=644
+[component_container-9] [INFO] [1788988556.049877112] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988556.476261636] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.054s
+[ground_truth_amcl_monitor-7] [INFO] [1788988556.644299839] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=682
+[gpu_amcl_cpp_node-6] [INFO] [1788988556.646138909] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=346/5.
+[component_container-9] [INFO] [1788988557.072409589] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988557.495858678] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988557.667005147] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=720
+[component_container-9] [INFO] [1788988558.091842808] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988558.245765553] [gpu_amcl_cpp]: Received LiDAR callback #378 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988558.245816008] [gpu_amcl_cpp]: Starting AMCL scan update #378 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788988558.246889607] [gpu_amcl_cpp]: AMCL scan update #378 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788988558.518071753] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988558.669310429] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=758
+[gpu_amcl_cpp_node-6] [INFO] [1788988558.670698760] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=384/5.
+[component_container-9] [INFO] [1788988559.092071699] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988559.520293300] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.050s
+[ground_truth_amcl_monitor-7] [INFO] [1788988559.672294079] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=796
+[component_container-9] [INFO] [1788988560.095881461] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988560.571405428] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.051s
+[ground_truth_amcl_monitor-7] [INFO] [1788988560.692940721] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=834
+[gpu_amcl_cpp_node-6] [INFO] [1788988560.694769080] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=422/5.
+[component_container-9] [INFO] [1788988561.097014589] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[gpu_amcl_cpp_node-6] [INFO] [1788988561.575894255] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.053s
+[ground_truth_amcl_monitor-7] [INFO] [1788988561.693656870] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.801, 3.158) amcl=(0.801, 3.158) error=0.000 m / 0.000 rad; current_map=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; odom=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.801, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.000 m / 0.000 rad max=0.000 m / 0.000 rad samples=872
+[component_container-9] [INFO] [1788988562.149760617] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=18 path_dist=0.166 heading_err=0.302 steer=-0.239 speed=0.000
+[calibration-8] [INFO] [1788988562.299403557] [allowed_telemetry_recorder]: Finished (recording duration reached); Data: /workspace/src/f1tenth_planning/analysis/amcl_tuning_campaign_20260909/acceptance_startup_refinement_stationary/telemetry/sensor_record_20260909_211537.csv
+[INFO] [calibration-8]: process has finished cleanly [pid 1453]

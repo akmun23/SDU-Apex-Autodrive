@@ -9,7 +9,7 @@ five_lap_map_saver:
     # The map name is written without an extension.  SLAM Toolbox creates the
     # matching .yaml and .pgm files in this directory.
     output_directory: /workspace/src/f1tenth_planning/maps
-    map_name: autodrive_track_gt_norestart_20260908
+    map_name: autodrive_track_ftg_commit_20260909_025m
     target_laps: 5
 
     # A lap is a return to the encoder/IMU odometry start point only after the

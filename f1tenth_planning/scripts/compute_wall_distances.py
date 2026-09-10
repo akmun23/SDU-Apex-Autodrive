@@ -8,9 +8,9 @@ to find the distance to the nearest wall. Outputs a 9-column trajectory CSV:
 
 Usage:
   python3 compute_wall_distances.py \
-      --map f1tenth_planning/maps/autodrive_compete_2026.yaml \
-      --trajectory f1tenth_planning/trajectories/icra_2025_raceline.csv \
-      --output /tmp/icra_2025_raceline_walls.csv
+      --map f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml \
+      --trajectory f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv \
+      --output /tmp/raceline_with_walls.csv
 """
 
 import argparse
@@ -113,7 +113,7 @@ def compute_wall_distances(trajectory, is_wall, origin_x, origin_y,
     
     Returns list of (d_left, d_right) tuples.
     Distances are RAW center-to-wall (NOT car-half-subtracted), matching
-    the convention expected by the MPC controller and test harness.
+    the convention expected by the path controller.
     """
     wall_distances = []
 

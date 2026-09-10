@@ -74,7 +74,8 @@ FIELDS = (
     "odom_observer_packet_coherence_fault_count", "odom_observer_x_m",
     "odom_observer_y_m", "odom_observer_yaw_rad", "odom_observer_sensor_outlier",
     "odom_observer_left_angle_rad", "odom_observer_right_angle_rad",
-    "odom_observer_imu_yaw_rad",
+    "odom_observer_imu_yaw_rad", "odom_observer_packet_wheel_speed_mps",
+    "odom_observer_wheel_burst_rejected",
     # Brake/coast completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
@@ -119,6 +120,10 @@ FIELDS = (
     "amcl_health_scan_correction_yaw_rad",
     "amcl_health_applied_xy_correction_m",
     "amcl_health_applied_yaw_correction_rad",
+    "amcl_health_scan_correction_x_m",
+    "amcl_health_scan_correction_y_m",
+    "amcl_health_applied_x_m",
+    "amcl_health_applied_y_m",
     "amcl_particle_count",
     "lidar_rate_hz", "lidar_event_count",
     "imu_rate_hz", "imu_event_count",
@@ -133,7 +138,6 @@ FIELDS = (
     "ekf_rate_hz", "ekf_event_count",
     "ekf_odom_rate_hz", "ekf_odom_event_count",
     "speed_command_rate_hz", "speed_command_event_count",
-    "acceleration_command_rate_hz", "acceleration_command_event_count",
     "throttle_command_rate_hz", "throttle_command_event_count",
     "steering_command_rate_hz", "steering_command_event_count",
     "throttle_feedback_rate_hz", "throttle_feedback_event_count",
@@ -151,13 +155,9 @@ FIELDS = (
     "amcl_cluster_second_weight",
     "amcl_kld_pre_particles", "amcl_kld_bins", "amcl_kld_target",
     "amcl_kld_particles",
-    # Production controllers publish separate physical-unit abstractions.
-    # Both command streams are logged independently so a fit can distinguish
-    # speed-loop and acceleration-loop behavior.
+    # The production actuator has one physical-unit command abstraction.
     "speed_command_mps", "speed_command_accel_mps2",
     "speed_command_steering_rad", "speed_command_stamp_s",
-    "acceleration_command_mps", "acceleration_command_accel_mps2",
-    "acceleration_command_steering_rad", "acceleration_command_stamp_s",
 )
 
 
@@ -176,7 +176,6 @@ class Calibration(Node):
         allowed = {
             "sensor_record", "throttle_sweep", "throttle_steps",
             "zero_throttle_decel", "speed_steps", "speed_ramp",
-            "acceleration_steps",
             "steering_steps", "steering_response", "throttle_speed_grid",
             "identification_grid",
             "full_suite",
@@ -205,7 +204,7 @@ class Calibration(Node):
             "lidar", "imu", "left_encoder", "right_encoder", "odom",
             "odom_diagnostics", "gt_odom", "gt_ips", "collision", "amcl", "ekf",
             "ekf_odom",
-            "speed_command", "acceleration_command",
+            "speed_command",
             "throttle_command", "steering_command",
             "throttle_feedback", "steering_feedback", "current_map_pose",
             "pp_diagnostics", "amcl_timing", "amcl_gpu_timing",
@@ -264,8 +263,6 @@ class Calibration(Node):
             Float32, "/autodrive/roboracer_1/steering_command", 10)
         self.speed_drive_pub = self.create_publisher(
             AckermannDriveStamped, "/cmd/speed", 10)
-        self.acceleration_drive_pub = self.create_publisher(
-            AckermannDriveStamped, "/cmd/acceleration", 10)
         # Only diagnostic test launches consume this topic. It prevents a
         # production acceleration=0 hold request from fighting the recorder's
         # raw zero-throttle brake/coast phase.
@@ -318,10 +315,8 @@ class Calibration(Node):
             SOURCE_SENSOR_QOS)
         self.create_subscription(
             AckermannDriveStamped, "/cmd/speed",
-            lambda m: self._on_controller_command(m, "speed"), 10)
-        self.create_subscription(
-            AckermannDriveStamped, "/cmd/acceleration",
-            lambda m: self._on_controller_command(m, "acceleration"), 10)
+            self._on_controller_command, 10)
+        # The recorder follows the single production speed-command topic.
         self.create_subscription(
             Float32, "/autodrive/roboracer_1/throttle",
             lambda m: self._on_scalar(m, "throttle_feedback", "throttle_feedback"), 10)
@@ -375,8 +370,6 @@ class Calibration(Node):
         self.declare_parameter(
             "speed_sequence_mps", [0.0, 0.5, 1.0, 1.5, 2.0, 1.0, 0.0])
         self.declare_parameter(
-            "acceleration_sequence_mps2", [0.0, 1.0, 2.0, 4.0, 6.0, 2.0, -2.0])
-        self.declare_parameter(
             "steering_sequence",
             [0.0, -0.25, 0.0, 0.25, 0.0, -0.5, 0.0, 0.5, 0.0])
         self.declare_parameter(
@@ -415,7 +408,6 @@ class Calibration(Node):
         # Diagnostic guard defaults to the documented simulator command
         # envelope.  It is not a controller speed or throttle ceiling.
         self.declare_parameter("maximum_test_speed_mps", 22.88)
-        self.declare_parameter("maximum_acceleration_mps2", 8.0)
         self.declare_parameter("maximum_throttle", 1.0)
         self.declare_parameter("maximum_steering_command", 0.50)
         self.declare_parameter("encoder_wheel_radius_m", 0.0590)
@@ -521,25 +513,6 @@ class Calibration(Node):
                     max(1.0, float(self.get_parameter(
                         "grid_brake_timeout_sec").value))))
             return phases
-
-        if self.mode == "acceleration_steps":
-            sequence = [float(v) for v in self.get_parameter(
-                "acceleration_sequence_mps2").value]
-            maximum = float(self.get_parameter("maximum_acceleration_mps2").value)
-            if any(not math.isfinite(v) or abs(v) > maximum for v in sequence):
-                raise ValueError("acceleration sequence exceeds configured limit")
-            brake_timeout = max(1.0, float(self.get_parameter(
-                "grid_brake_timeout_sec").value))
-            phases = []
-            for value in sequence:
-                if self.reset_between_steps:
-                    phases.append(("reset", "reset", 1.0, self.reset_pulse_sec))
-                    phases.append(("settle", "raw_throttle", 0.0, settle))
-                phases.append((f"acceleration_{value:.2f}",
-                               "acceleration_steps", value, hold))
-                phases.append((f"grid_brake_acceleration_{value:.2f}",
-                               "raw_throttle", 0.0, brake_timeout))
-            return phases + [("final_zero", "raw_throttle", 0.0, settle)]
 
         if self.mode == "throttle_speed_grid":
             speeds = [float(v) for v in self.get_parameter(
@@ -852,8 +825,8 @@ class Calibration(Node):
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
         """Record versioned deterministic observer vectors."""
         version = float(msg.data[0]) if msg.data else math.nan
-        if (len(msg.data) not in (21, 22, 25) or
-                not math.isfinite(version) or version not in (2.0, 3.0)):
+        if (len(msg.data) not in (21, 22, 25, 26, 27) or
+                not math.isfinite(version) or version not in (2.0, 3.0, 4.0)):
             return
         self._on_deterministic_odom_diagnostics(msg)
 
@@ -872,6 +845,10 @@ class Calibration(Node):
             "odom_observer_packet_drop_count",
             "odom_observer_packet_coherence_fault_count", "odom_observer_x_m",
             "odom_observer_y_m", "odom_observer_yaw_rad",
+            "odom_observer_sensor_outlier", "odom_observer_left_angle_rad",
+            "odom_observer_right_angle_rad", "odom_observer_imu_yaw_rad",
+            "odom_observer_packet_wheel_speed_mps",
+            "odom_observer_wheel_burst_rejected",
         )
         self._record_event("odom_diagnostics")
         for name, value in zip(names, values):
@@ -1123,6 +1100,10 @@ class Calibration(Node):
             "amcl_health_scan_correction_yaw_rad",
             "amcl_health_applied_xy_correction_m",
             "amcl_health_applied_yaw_correction_rad",
+            "amcl_health_scan_correction_x_m",
+            "amcl_health_scan_correction_y_m",
+            "amcl_health_applied_x_m",
+            "amcl_health_applied_y_m",
         )
         self._record_event("amcl_localization_health")
         for name, value in zip(names, values[:len(names)]):
@@ -1137,35 +1118,23 @@ class Calibration(Node):
         self._capture_source_event(
             "amcl_particle_count", self.get_clock().now().nanoseconds * 1.0e-9)
 
-    def _on_controller_command(
-            self, msg: AckermannDriveStamped, source: str) -> None:
-        """Record command abstractions without merging their semantics."""
+    def _on_controller_command(self, msg: AckermannDriveStamped) -> None:
+        """Record the production speed command with its source timestamp."""
         speed = float(msg.drive.speed)
         acceleration = float(msg.drive.acceleration)
         steering = float(msg.drive.steering_angle)
         stamp_s = self._message_stamp_s(msg)
-        self._record_event(f"{source}_command")
-        if source == "speed":
-            self.state["target_speed_mps"] = speed
-            self.state["target_accel_mps2"] = acceleration
-            self.state["controller_speed_mps"] = speed
-            self.state["controller_accel_mps2"] = acceleration
-            self.state["controller_steering_rad"] = steering
-            self.state["speed_command_mps"] = speed
-            self.state["speed_command_accel_mps2"] = acceleration
-            self.state["speed_command_steering_rad"] = steering
-            self.state["speed_command_stamp_s"] = stamp_s
-        elif source == "acceleration":
-            self.state["target_speed_mps"] = speed
-            self.state["target_accel_mps2"] = acceleration
-            self.state["controller_speed_mps"] = speed
-            self.state["controller_accel_mps2"] = acceleration
-            self.state["controller_steering_rad"] = steering
-            self.state["acceleration_command_mps"] = speed
-            self.state["acceleration_command_accel_mps2"] = acceleration
-            self.state["acceleration_command_steering_rad"] = steering
-            self.state["acceleration_command_stamp_s"] = stamp_s
-        self._capture_source_event(f"{source}_command", stamp_s)
+        self._record_event("speed_command")
+        self.state["target_speed_mps"] = speed
+        self.state["target_accel_mps2"] = acceleration
+        self.state["controller_speed_mps"] = speed
+        self.state["controller_accel_mps2"] = acceleration
+        self.state["controller_steering_rad"] = steering
+        self.state["speed_command_mps"] = speed
+        self.state["speed_command_accel_mps2"] = acceleration
+        self.state["speed_command_steering_rad"] = steering
+        self.state["speed_command_stamp_s"] = stamp_s
+        self._capture_source_event("speed_command", stamp_s)
 
     def _on_pure_pursuit_diagnostics(self, msg: Float64MultiArray) -> None:
         """Record the exact PP event that produced each speed command."""
@@ -1198,12 +1167,8 @@ class Calibration(Node):
         self.raw_throttle_override_pub.publish(Float32(data=0.0))
         if self.reset_pub is not None:
             self.reset_pub.publish(Bool(data=False))
-        self._publish_neutral_commands()
-
-    def _publish_neutral_commands(self) -> None:
         neutral = AckermannDriveStamped()
         self.speed_drive_pub.publish(neutral)
-        self.acceleration_drive_pub.publish(neutral)
         self.raw_throttle_override_pub.publish(Float32(data=0.0))
 
     def _finish(self, reason: str = "completed") -> None:
@@ -1320,24 +1285,12 @@ class Calibration(Node):
         if kind == "speed_ramp" and self.phase_index > 0:
             previous = self.phases[self.phase_index - 1][2]
             value = previous + progress * (value - previous)
-        if kind == "acceleration_steps":
-            # Acceleration mode is a separate abstraction boundary: MPC's
-            # physical acceleration target belongs in AckermannDrive's
-            # acceleration field, while speed is only diagnostic metadata.
-            drive.drive.speed = max(0.0, float(self.state.get("speed_mps", 0.0)))
-            drive.drive.acceleration = value
-            self.state["target_accel_mps2"] = value
-            self.raw_throttle_override_pub.publish(Float32(data=math.nan))
-            if self.reset_pub is not None:
-                self.reset_pub.publish(Bool(data=False))
-            self.acceleration_drive_pub.publish(drive)
-        else:
-            drive.drive.speed = value
-            self.state["target_speed_mps"] = value
-            self.raw_throttle_override_pub.publish(Float32(data=math.nan))
-            if self.reset_pub is not None:
-                self.reset_pub.publish(Bool(data=False))
-            self.speed_drive_pub.publish(drive)
+        drive.drive.speed = value
+        self.state["target_speed_mps"] = value
+        self.raw_throttle_override_pub.publish(Float32(data=math.nan))
+        if self.reset_pub is not None:
+            self.reset_pub.publish(Bool(data=False))
+        self.speed_drive_pub.publish(drive)
 
     def _ground_truth_boundary_reached(self) -> bool:
         """Return true when a diagnostic run approaches the open-scene edge."""

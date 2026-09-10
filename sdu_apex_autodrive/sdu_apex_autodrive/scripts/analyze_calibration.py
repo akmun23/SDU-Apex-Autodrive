@@ -1617,25 +1617,6 @@ def motion_regime_metrics(
     return result
 
 
-def acceleration_command_metrics(
-    rows: list[dict[str, str]],
-) -> tuple[int, float, float] | None:
-    """Score requested acceleration against timestamped truth derivatives."""
-    errors: list[float] = []
-    for row in rows:
-        if not row.get("phase", "").startswith("acceleration_"):
-            continue
-        requested = finite(row.get("acceleration_command_accel_mps2"))
-        measured = finite(row.get("gt_longitudinal_accel_mps2"))
-        if requested is None or measured is None or abs(measured) > 50.0:
-            continue
-        errors.append(measured - requested)
-    if not errors:
-        return None
-    absolute = [abs(value) for value in errors]
-    return len(errors), statistics.mean(errors), percentile(absolute, 0.95)
-
-
 RELATIVE_ERROR_FIELDS = (
     "metric", "bin", "samples", "relative_samples",
     "absolute_error_median", "absolute_error_p95", "absolute_error_max",
@@ -2153,7 +2134,7 @@ def main() -> None:
         "imu_rate_hz", "left_encoder_rate_hz", "right_encoder_rate_hz",
         "odom_rate_hz", "amcl_rate_hz", "ekf_rate_hz",
         "gt_odom_rate_hz", "gt_ips_rate_hz", "collision_rate_hz",
-        "speed_command_rate_hz", "acceleration_command_rate_hz",
+        "speed_command_rate_hz",
         "steering_command_rate_hz", "throttle_feedback_rate_hz",
         "steering_feedback_rate_hz",
     ):
@@ -2445,14 +2426,6 @@ def main() -> None:
             "truth_speed_tracking_tail_error_mps="
             f"median={statistics.median(truth_phase_errors):.3f} "
             f"abs_p95={percentile([abs(value) for value in truth_phase_errors], 0.95):.3f}"
-        )
-
-    acceleration_metrics = acceleration_command_metrics(analysis_rows)
-    if acceleration_metrics is not None:
-        samples, bias, absolute_p95 = acceleration_metrics
-        print(
-            "acceleration_command_tracking_error_mps2="
-            f"bias={bias:.3f} abs_p95={absolute_p95:.3f} samples={samples}"
         )
 
     relative_metrics = relative_error_metrics(analysis_rows)

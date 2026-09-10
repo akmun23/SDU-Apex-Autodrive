@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minimum-time one-click trajectory optimization pipeline for F1Tenth MPC.
+Minimum-time one-click trajectory optimization pipeline for Pure Pursuit.
 
 Works with ANY map (.pgm/.yaml) -- no pre-made TUM track CSV required.
 This copy is intentionally fixed to TUM's ``mintime`` optimization method.
@@ -8,7 +8,7 @@ This copy is intentionally fixed to TUM's ``mintime`` optimization method.
 Pipeline steps:
   Step 0: Extract centerline + track widths from map image  (NEW)
   Step 1: Run TUM global_racetrajectory_optimization with opt_type='mintime'
-  Step 2: Convert to MPC format (psi += pi/2, delimiter, clamp velocity)
+  Step 2: Convert TUM output to the controller trajectory format
   Step 3: Add wall distances via ray-cast
   Step 4: Verify output trajectory
 
@@ -17,7 +17,7 @@ Output CSV format (7 or 9 columns):
 
 Usage:
     # Edit the User settings block in main(), then run:
-    python3 optimize_trajectory_mintime.py
+    python3 optimize_trajectory.py
 
 Requirements:
     pip install numpy opencv-python scipy pyyaml
@@ -1633,7 +1633,7 @@ def save_tum_track_csv(centerline, w_right, w_left, output_path):
 def save_smooth_centerline_csv(centerline, w_right, w_left, output_path):
     """
     Save the prepared/smoothed centerline in the same geometry-rich format used
-    by the MPC trajectories, but with zero velocity and acceleration.
+    by the controller trajectory, but with zero velocity and acceleration.
     """
     pts = np.asarray(centerline, dtype=float)
     w_right = np.asarray(w_right, dtype=float)
@@ -2396,12 +2396,12 @@ def patch_main_to_load_prepared_track(main_py_path, prepared_track_path):
 
 
 # =============================================================================
-#  Step 2 -- TUM -> MPC format conversion (kept from original)
+#  Step 2 -- TUM -> controller trajectory conversion
 # =============================================================================
 
-def convert_tum_to_mpc(input_csv, output_csv, max_speed=None, min_speed=None):
+def convert_tum_to_trajectory(input_csv, output_csv, max_speed=None, min_speed=None):
     """
-    Convert TUM global optimizer output to MPC-compatible CSV.
+    Convert TUM global optimizer output to the controller CSV.
 
     Changes:
       - Delimiter: semicolon -> comma
@@ -2451,7 +2451,7 @@ def convert_tum_to_mpc(input_csv, output_csv, max_speed=None, min_speed=None):
     return len(rows)
 
 
-def write_mpc_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
+def write_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
                                    max_speed=None, min_speed=None,
                                    lateral_acc_limit=3.8,
                                    accel_limit=3.8,
@@ -2459,7 +2459,7 @@ def write_mpc_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
                                    curvature_window_m=1.0,
                                    curvature_smooth_sigma_m=0.25,
                                    curvlim=None):
-    """Write a closed path directly to the MPC CSV format."""
+    """Write a closed path directly to the controller CSV format."""
     import trajectory_planning_helpers as tph
 
     path = np.asarray(path_xy, dtype=float)
@@ -2483,7 +2483,7 @@ def write_mpc_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
         ind_spls=spline_inds,
         t_spls=t_vals,
     )
-    psi_mpc = (psi_tum + math.pi / 2.0 + math.pi) % (2 * math.pi) - math.pi
+    psi_controller = (psi_tum + math.pi / 2.0 + math.pi) % (2 * math.pi) - math.pi
 
     max_abs_kappa = float(np.max(np.abs(kappa)))
     if curvlim is not None and max_abs_kappa > curvlim:
@@ -2544,7 +2544,7 @@ def write_mpc_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
     with open(output_csv, 'w') as f:
         f.write('# s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2\n')
         for s, xy, psi, kap, vel, acc in zip(
-                s_points, raceline, psi_mpc, kappa, vx, ax):
+                s_points, raceline, psi_controller, kappa, vx, ax):
             f.write(
                 f"{s:.6f},{xy[0]:.6f},{xy[1]:.6f},"
                 f"{psi:.7f},{kap:.7f},{vel:.7f},{acc:.7f}\n"
@@ -2739,17 +2739,19 @@ def main():
         print("  Edit the User settings block near the top of main().")
         sys.exit(2)
 
+    default_map = os.path.join(
+        workspace, 'f1tenth_planning', 'maps',
+        # Use the same 2.5 cm closed-loop map used by production
+        # localization. The raceline and AMCL must describe one geometry.
+        'autodrive_track_ftg_commit_20260909_025m.yaml',
+    )
     args = argparse.Namespace(
         # Map and output paths
-        map=os.path.join(
-            workspace, 'f1tenth_planning', 'maps',
-            # Closed-loop map produced from the completed FTG lap.  Keep the
-            # source map explicit so mintime cannot silently fall back to the
-            # older supplied/partial map.
-            'autodrive_track_ftg_commit_20260908_lap01.yaml',
-        ),
-        track_name='autodrive_track_ftg_commit_20260908_lap01_mintime',
-        output=default_output,
+        # Keep the checked-in production defaults, but allow an explicitly
+        # named offline map repair/validation run without editing this block.
+        map=os.environ.get('MINTIME_MAP', default_map),
+        track_name='autodrive_track_ftg_commit_20260909_025m_mintime',
+        output=os.environ.get('MINTIME_OUTPUT', default_output),
 
         # Minimum-time optimizer settings
         opt_type=MIN_TIME_OPT_TYPE,
@@ -2854,7 +2856,7 @@ def main():
         args.reopt_mintime_solution = True
 
 
-    track_name = args.track_name
+    track_name = os.environ.get('MINTIME_TRACK_NAME', args.track_name)
     track_csv = os.path.join(global_opt_dir, 'inputs', 'tracks', f'{track_name}.csv')
     prepared_track_npz = os.path.join(
         global_opt_dir, 'inputs', 'tracks', f'{track_name}_prepared.npz'
@@ -3201,16 +3203,16 @@ def main():
             )
             sys.exit(1)
 
-    # ---- Step 2: Convert to MPC format --------------------------------------
+    # ---- Step 2: Convert to controller format -------------------------------
     print(f"\n{'=' * 64}")
-    print(f"  Step 2: Convert to MPC format (psi += pi/2, ';' -> ',')")
+    print(f"  Step 2: Convert to controller format (psi += pi/2, ';' -> ',')")
     print(f"{'=' * 64}")
 
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
     # Intermediate 7-column CSV
     intermediate_csv = output_csv + '.7col'
-    n_waypoints = convert_tum_to_mpc(
+    n_waypoints = convert_tum_to_trajectory(
         tum_output, intermediate_csv,
         max_speed=args.max_speed, min_speed=args.min_speed
     )

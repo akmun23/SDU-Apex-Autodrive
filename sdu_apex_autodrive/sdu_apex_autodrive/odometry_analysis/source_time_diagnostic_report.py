@@ -23,6 +23,8 @@ import math
 from pathlib import Path
 from typing import Iterable
 
+from sdu_apex_autodrive.map_provenance import load_map_provenance
+
 
 EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "gt_odom": (
@@ -45,6 +47,8 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "odom_observer_y_m", "odom_observer_yaw_rad",
         "odom_observer_sensor_outlier", "odom_observer_left_angle_rad",
         "odom_observer_right_angle_rad", "odom_observer_imu_yaw_rad",
+        "odom_observer_packet_wheel_speed_mps",
+        "odom_observer_wheel_burst_rejected",
     ),
     "ekf_odom": (
         "x_ekf_odom_m", "y_ekf_odom_m", "yaw_ekf_odom_rad",
@@ -85,6 +89,10 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "amcl_health_scan_correction_yaw_rad",
         "amcl_health_applied_xy_correction_m",
         "amcl_health_applied_yaw_correction_rad",
+        "amcl_health_scan_correction_x_m",
+        "amcl_health_scan_correction_y_m",
+        "amcl_health_applied_x_m",
+        "amcl_health_applied_y_m",
     ),
     "collision": ("gt_collision_count",),
     "imu": (
@@ -185,8 +193,16 @@ def build_report(
     *,
     tolerance_s: float = 0.006,
     output_json: str | Path | None = None,
+    map_start_pose: tuple[float, float, float] | None = None,
+    provenance_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Write a source-time report and return its summary."""
+    if map_start_pose is not None and provenance_path is not None:
+        raise ValueError("provide either map_start_pose or provenance_path, not both")
+    provenance = None
+    if provenance_path is not None:
+        provenance = load_map_provenance(str(provenance_path))
+        provenance.verify_files()
     events = _read_events(input_csv)
     truth = events.get("gt_odom", [])
     if len(truth) < 2:
@@ -207,16 +223,23 @@ def build_report(
     if first_gt is None:
         raise ValueError("gt_odom events do not contain a finite pose")
 
-    # AMCL is normally published before the first GT odometry callback during
-    # startup.  Use the first finite AMCL pose, but only for frame alignment;
-    # the output still preserves its source-time match and age.
+    # Prefer recorded map provenance or an explicit map-frame start pose. The
+    # first AMCL pose is only a legacy fallback: using it to align truth makes
+    # a wrong AMCL startup pose appear correct by construction.
     initial_map_pose = None
-    for _, source in events.get("amcl", []):
-        values = tuple(_finite(source.get(key)) for key in (
-            "x_amcl_m", "y_amcl_m", "yaw_amcl_rad"))
-        if None not in values:
-            initial_map_pose = values
-            break
+    alignment_mode = "explicit_map_start" if map_start_pose is not None else None
+    if map_start_pose is not None:
+        initial_map_pose = tuple(float(value) for value in map_start_pose)
+    elif provenance is not None:
+        alignment_mode = "map_provenance"
+    else:
+        alignment_mode = "first_amcl_fallback"
+        for _, source in events.get("amcl", []):
+            values = tuple(_finite(source.get(key)) for key in (
+                "x_amcl_m", "y_amcl_m", "yaw_amcl_rad"))
+            if None not in values:
+                initial_map_pose = values
+                break
 
     rows: list[dict[str, object]] = []
     previous_gt_pose: tuple[float, float, float] | None = None
@@ -295,7 +318,10 @@ def build_report(
                 "gt_local_x_m": local[0], "gt_local_y_m": local[1],
                 "gt_local_yaw_rad": local[2],
             })
-            map_pose = _set_pose_frame(gt_pose, initial_values, initial_map_pose)
+            if provenance is not None:
+                map_pose = provenance.world_to_map(*gt_pose)
+            else:
+                map_pose = _set_pose_frame(gt_pose, initial_values, initial_map_pose)
             if map_pose is not None:
                 row.update({
                     "gt_map_x_m": map_pose[0], "gt_map_y_m": map_pose[1],
@@ -370,6 +396,7 @@ def build_report(
         "post_collision_rows": len(collisions),
         "source_events": {name: len(samples) for name, samples in events.items()},
         "match_tolerance_ms": tolerance_s * 1000.0,
+        "map_alignment_mode": alignment_mode,
         "max_pre_collision_observer_error_m": max(
             values("observer_xy_error_m", True), default=None),
         "max_pre_collision_ekf_odom_error_m": max(
@@ -394,12 +421,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("output_csv")
     parser.add_argument("--match-tolerance-ms", type=float, default=6.0)
     parser.add_argument("--output-json", default="")
+    parser.add_argument(
+        "--map-start-pose", nargs=3, type=float, metavar=("X", "Y", "YAW"),
+        help="explicit first GT pose in the map frame (offline only)")
+    parser.add_argument(
+        "--provenance", default="",
+        help="map provenance YAML containing the map-to-world transform")
     args = parser.parse_args(argv)
     summary = build_report(
         args.input_csv,
         args.output_csv,
         tolerance_s=max(0.0, args.match_tolerance_ms) / 1000.0,
         output_json=args.output_json or None,
+        map_start_pose=tuple(args.map_start_pose) if args.map_start_pose else None,
+        provenance_path=args.provenance or None,
     )
     print(json.dumps(summary, indent=2))
     return 0

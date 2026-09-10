@@ -1,0 +1,2 @@
+scan_index,scan_stamp_s,gt_x_m,gt_y_m,gt_yaw_rad,seed_x_m,seed_y_m,seed_yaw_rad,match_x_m,match_y_m,match_yaw_rad,seed_error_m,match_error_m,seed_yaw_error_rad,match_yaw_error_rad,match_score,score_margin,gt_score,seed_score,valid_beams
+0,1788984668.37987,0.8006,3.1583,-1.5708,0.8006,3.1583,-1.5708,0.5756,3.5833,-1.3208,0.0,0.4808846015417835,0.0,0.25,0.6280602439014241,0.000730672034926938,0.33866146660885216,0.33866146660885216,120

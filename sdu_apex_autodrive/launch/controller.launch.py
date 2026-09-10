@@ -8,6 +8,7 @@ from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 DEFAULT_MAP = (
@@ -16,7 +17,7 @@ DEFAULT_MAP = (
 )
 DEFAULT_TRAJECTORY = (
     "/workspace/src/f1tenth_planning/trajectories/"
-    "autodrive_track_ftg_commit_20260908_lap01_mintime_raceline.csv"
+    "autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv"
 )
 
 
@@ -31,11 +32,12 @@ def _bool(value: str) -> bool:
 
 def _setup(context):
     controller = LaunchConfiguration("controller").perform(context).lower()
-    if controller not in ("ftg", "pure_pursuit", "stanley", "mpc"):
-        raise RuntimeError("controller must be ftg, pure_pursuit, stanley, or mpc")
+    if controller not in ("ftg", "pure_pursuit"):
+        raise RuntimeError("controller must be ftg or pure_pursuit")
 
     map_path = LaunchConfiguration("map").perform(context)
     trajectory = LaunchConfiguration("trajectory").perform(context)
+    amcl_override_path = LaunchConfiguration("amcl_override_params").perform(context)
     with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
     with_ground_truth_monitor = _bool(
         LaunchConfiguration("with_ground_truth_monitor").perform(context))
@@ -45,24 +47,25 @@ def _setup(context):
         LaunchConfiguration("with_telemetry_recorder").perform(context))
     force_localization = _bool(
         LaunchConfiguration("force_localization").perform(context))
-    lateral_value = LaunchConfiguration("with_lateral_planner").perform(context).lower()
-    with_lateral = controller == "mpc" if lateral_value == "auto" else _bool(lateral_value)
-    avoidance = _bool(LaunchConfiguration("avoidance_enabled").perform(context))
+    use_localization = _bool(
+        LaunchConfiguration("use_localization").perform(context))
     # FTG normally runs without localization for mapping. This explicit
     # diagnostic mode exercises the full localization stack alongside the
     # same LiDAR-only FTG command path on a saved map.
-    needs_localization = controller != "ftg" or force_localization
+    needs_localization = use_localization and (
+        controller != "ftg" or force_localization)
 
     if needs_localization and not os.path.isfile(map_path):
         raise RuntimeError(f"map does not exist: {map_path}")
     if needs_localization and not os.path.isfile(trajectory):
         raise RuntimeError(f"trajectory does not exist: {trajectory}")
-    if controller == "mpc" and not with_lateral:
-        raise RuntimeError("mpc requires with_lateral_planner:=true")
-
-    actuator_input_topic = "/cmd/acceleration" if controller == "mpc" else "/cmd/speed"
-    actuator_command_mode = "acceleration" if controller == "mpc" else "speed"
-
+    amcl_parameter_sources = [LaunchConfiguration("amcl_params")]
+    if amcl_override_path.strip():
+        if not os.path.isfile(amcl_override_path):
+            raise RuntimeError(
+                f"amcl_override_params does not exist: {amcl_override_path}"
+            )
+        amcl_parameter_sources.append(amcl_override_path)
     actions = [
         # Pace commands independently of the official telemetry decoder so
         # the simulator is not throttled by camera/LIDAR ROS publication.
@@ -137,8 +140,11 @@ def _setup(context):
                 name="gpu_amcl_cpp",
                 output="screen",
                 parameters=[
-                    LaunchConfiguration("amcl_params"),
-                    {"global_heading_trajectory_file": trajectory},
+                    *amcl_parameter_sources,
+                    {
+                        "global_heading_trajectory_file": trajectory,
+                        "odom_topic": LaunchConfiguration("amcl_odom_topic"),
+                    },
                     {
                         "global_initialization": LaunchConfiguration(
                             "amcl_global_initialization"
@@ -160,38 +166,6 @@ def _setup(context):
             ),
         ])
 
-    if with_lateral:
-        actions.extend([
-            Node(
-                package="f1tenth_lidar",
-                executable="scan_splitter_node",
-                name="scan_splitter_node",
-                output="screen",
-                parameters=[LaunchConfiguration("scan_splitter_params")],
-                remappings=[
-                    ("/tf", "/sdu/tf"),
-                    ("/tf_static", "/sdu/tf_static"),
-                ],
-            ),
-            Node(
-                package="f1tenth_lateral_planner",
-                executable="lateral_planner_node",
-                name="lateral_planner_node",
-                output="screen",
-                parameters=[
-                    LaunchConfiguration("lateral_planner_params"),
-                    {
-                        "trajectory_file": trajectory,
-                        "avoidance_enabled": avoidance,
-                    },
-                ],
-                remappings=[
-                    ("/tf", "/sdu/tf"),
-                    ("/tf_static", "/sdu/tf_static"),
-                ],
-            ),
-        ])
-
     if with_ground_truth_monitor:
         # Development diagnostics only. Ground truth is not consumed by AMCL
         # or any controller and must be disabled for a rules-only run.
@@ -205,6 +179,9 @@ def _setup(context):
                 "map_provenance_file": LaunchConfiguration("map_provenance_file"),
                 "require_absolute_map_scoring": LaunchConfiguration(
                     "require_absolute_map_scoring"),
+                "map_start_x_m": LaunchConfiguration("map_start_x_m"),
+                "map_start_y_m": LaunchConfiguration("map_start_y_m"),
+                "map_start_yaw_rad": LaunchConfiguration("map_start_yaw_rad"),
             }],
         ))
 
@@ -222,7 +199,15 @@ def _setup(context):
                 {
                     "mode": "sensor_record",
                     "output_dir": LaunchConfiguration("telemetry_output_dir"),
-                    "duration_sec": LaunchConfiguration("telemetry_duration_sec"),
+                    # Launch arguments are strings and ROS 2 otherwise infers
+                    # an integer for values such as ``100``.  The recorder
+                    # declares this parameter as a double; force the type so
+                    # a valid test command cannot silently kill the recorder
+                    # before it captures source-time data.
+                    "duration_sec": ParameterValue(
+                        LaunchConfiguration("telemetry_duration_sec"),
+                        value_type=float,
+                    ),
                     # Preserve callback-level snapshots as well as the 50 Hz
                     # timer rows. This is required to reconstruct the exact
                     # first-turn ordering at native 20 Hz simulator cadence.
@@ -255,19 +240,11 @@ def _setup(context):
             composable_node_descriptions=[component],
             output="screen",
         ))
-    elif controller in ("pure_pursuit", "stanley"):
+    else:
         component = ComposableNode(
             package="f1tenth_control",
-            plugin=(
-                "f1tenth_control::PurePursuitNode"
-                if controller == "pure_pursuit"
-                else "f1tenth_control::StanleyNode"
-            ),
-            name=(
-                "pure_pursuit_node"
-                if controller == "pure_pursuit"
-                else "stanley_node"
-            ),
+            plugin="f1tenth_control::PurePursuitNode",
+            name="pure_pursuit_node",
             parameters=[
                 LaunchConfiguration("path_tracking_params"),
                 {
@@ -284,27 +261,6 @@ def _setup(context):
             composable_node_descriptions=[component],
             output="screen",
         ))
-    else:
-        actions.append(Node(
-            package="mpc_riccati",
-            executable="mpc_autodrive_node",
-            name="mpc_autodrive_node",
-            output="screen",
-            emulate_tty=True,
-            additional_env={
-                "MPC_ODOM_TOPIC": "/odom",
-                # The MPC input name is historical. Feed it the current
-                # map-frame pose propagated from AMCL's map->odom correction,
-                # not the scan-time /amcl_pose measurement.
-                "MPC_EKF_TOPIC": "/current_map_pose",
-                "MPC_LOCAL_RACELINE_TOPIC": "/local_raceline",
-                "MPC_DRIVE_TOPIC": "/cmd/acceleration",
-                "MPC_POSE_FRAME": "map",
-                "MPC_PATH_FRAME": "map",
-                "MPC_COMMAND_FRAME": "base_link",
-            },
-        ))
-
     actions.append(Node(
         package="sdu_apex_autodrive",
         executable="actuator_interface",
@@ -315,8 +271,7 @@ def _setup(context):
             # Keep the simulator-only collision reset outside the default
             # competition interface. Enable it explicitly for test runs.
             {
-                "input_topic": actuator_input_topic,
-                "command_mode": actuator_command_mode,
+                "input_topic": "/cmd/speed",
                 "collision_reset_enabled": with_collision_safety,
             },
         ],
@@ -337,7 +292,7 @@ def _setup(context):
 
     actions.append(LogInfo(msg=(
         f"controller={controller} custom_amcl={needs_localization} "
-        f"lateral_planner={with_lateral} rviz={with_rviz}"
+        f"rviz={with_rviz}"
     )))
     return actions
 
@@ -346,14 +301,12 @@ def generate_launch_description():
     integration = get_package_share_directory("sdu_apex_autodrive")
     localization = get_package_share_directory("f1tenth_localization")
     control = get_package_share_directory("f1tenth_control")
-    lidar = get_package_share_directory("f1tenth_lidar")
-    planner = get_package_share_directory("f1tenth_lateral_planner")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "controller",
             default_value="pure_pursuit",
-            description="Controller to run; Pure Pursuit is the validated simulator default",
+            description="Controller to run: FTG for mapping or Pure Pursuit for racing",
         ),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
@@ -378,6 +331,14 @@ def generate_launch_description():
             description=(
                 "Start map localization alongside FTG for diagnostics; FTG still "
                 "uses only LiDAR and official odometry for its command"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "use_localization",
+            default_value="true",
+            description=(
+                "Start the map/AMCL stack. Disable only for diagnostics that "
+                "provide an explicit external pose on /current_map_pose."
             ),
         ),
         DeclareLaunchArgument(
@@ -417,6 +378,27 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            "map_start_x_m",
+            default_value="nan",
+            description=(
+                "Diagnostics-only map-frame X of the vehicle at map recording start"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "map_start_y_m",
+            default_value="nan",
+            description=(
+                "Diagnostics-only map-frame Y of the vehicle at map recording start"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "map_start_yaw_rad",
+            default_value="nan",
+            description=(
+                "Diagnostics-only map-frame yaw of the vehicle at map recording start"
+            ),
+        ),
+        DeclareLaunchArgument(
             "with_collision_safety",
             default_value="false",
             description=(
@@ -424,13 +406,11 @@ def generate_launch_description():
                 "rules-compliant default"
             ),
         ),
-        DeclareLaunchArgument("with_lateral_planner", default_value="auto"),
-        DeclareLaunchArgument("avoidance_enabled", default_value="false"),
         DeclareLaunchArgument(
             "controller_max_speed",
             default_value="1.5",
             description=(
-                "Safe simulator startup cap for Pure Pursuit or Stanley [m/s]. "
+                "Safe simulator startup cap for Pure Pursuit [m/s]. "
                 "Raise explicitly only after the baseline follows the track."
             ),
         ),
@@ -441,10 +421,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "amcl_global_initialization",
-            default_value="false",
+            default_value="true",
             description=(
-                "Use known simulator reset/raceline startup; enable global "
-                "recovery only for arbitrary track-position tests."
+                "Localize from LiDAR over the complete track at startup; "
+                "disable only for a deliberate known-pose unit test."
             ),
         ),
         DeclareLaunchArgument(
@@ -454,6 +434,11 @@ def generate_launch_description():
                 "Maximum global AMCL candidate distance from the raceline [m]. "
                 "Use a temporary override only for measured acceptance tests."
             ),
+        ),
+        DeclareLaunchArgument(
+            "amcl_odom_topic",
+            default_value="/ekf_odom",
+            description="Timestamped odometry input used by AMCL",
         ),
         DeclareLaunchArgument(
             "amcl_initial_heading_offset",
@@ -474,6 +459,14 @@ def generate_launch_description():
             default_value=os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
         ),
         DeclareLaunchArgument(
+            "amcl_override_params",
+            default_value="",
+            description=(
+                "Optional YAML layered after the production AMCL parameters "
+                "for one-factor offline/live experiments"
+            ),
+        ),
+        DeclareLaunchArgument(
             "ekf_params",
             default_value=os.path.join(localization, "config", "ekf.yaml"),
         ),
@@ -484,14 +477,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "path_tracking_params",
             default_value=os.path.join(control, "config", "path_tracking_autodrive.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "scan_splitter_params",
-            default_value=os.path.join(lidar, "config", "scan_splitter.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "lateral_planner_params",
-            default_value=os.path.join(planner, "config", "lateral_planner.yaml"),
         ),
         DeclareLaunchArgument(
             "actuator_params",

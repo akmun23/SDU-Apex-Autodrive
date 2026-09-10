@@ -1,0 +1,810 @@
+[INFO] [launch]: All log files can be found below /root/.ros/log/2026-09-09-21-42-58-368080-ExternalDrive-4292
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: controller=pure_pursuit custom_amcl=True rviz=False
+[INFO] [autodrive_bridge_40hz-1]: process started with pid [4346]
+[INFO] [sensor_odometry_node-2]: process started with pid [4348]
+[INFO] [ekf_localization_node-3]: process started with pid [4350]
+[INFO] [map_server-4]: process started with pid [4352]
+[INFO] [lifecycle_manager-5]: process started with pid [4354]
+[INFO] [gpu_amcl_cpp_node-6]: process started with pid [4356]
+[INFO] [ground_truth_amcl_monitor-7]: process started with pid [4358]
+[INFO] [calibration-8]: process started with pid [4360]
+[INFO] [component_container-9]: process started with pid [4362]
+[INFO] [actuator_interface-10]: process started with pid [4364]
+[ekf_localization_node-3] [INFO] [1788990178.752342168] [ekf_localization]: Local odometry trust filter ready: /odom -> /ekf_odom and /ekf_pose in frame odom; reset events=/autodrive/reset_command
+[sensor_odometry_node-2] [INFO] [1788990178.799823501] [sensor_odometry]: Deterministic odometry observer: exact timestamp packets, encoders + IMU only
+[map_server-4] [INFO] [1788990178.821637070] [map_server]: 
+[map_server-4] 	map_server lifecycle node launched. 
+[map_server-4] 	Waiting on external lifecycle transitions to activate
+[map_server-4] 	See https://design.ros2.org/articles/node_lifecycle.html for more information.
+[map_server-4] [INFO] [1788990178.821974553] [map_server]: Creating
+[lifecycle_manager-5] [INFO] [1788990178.831414749] [lifecycle_manager_map]: Creating
+[lifecycle_manager-5] [INFO] [1788990178.849007913] [lifecycle_manager_map]: [34m[1mCreating and initializing lifecycle service clients[0m[0m
+[lifecycle_manager-5] [INFO] [1788990178.862605164] [lifecycle_manager_map]: [34m[1mStarting managed nodes bringup...[0m[0m
+[lifecycle_manager-5] [INFO] [1788990178.862705161] [lifecycle_manager_map]: [34m[1mConfiguring map_server[0m[0m
+[map_server-4] [INFO] [1788990178.864655464] [map_server]: Configuring
+[map_server-4] [INFO] [1788990178.864791810] [map_io]: Loading yaml file: /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml
+[map_server-4] [INFO] [1788990178.865323949] [map_io]: resolution: 0.025
+[map_server-4] [INFO] [1788990178.865350579] [map_io]: origin[0]: -6.82
+[map_server-4] [INFO] [1788990178.865366308] [map_io]: origin[1]: -12.3
+[map_server-4] [INFO] [1788990178.865394672] [map_io]: origin[2]: 0
+[map_server-4] [INFO] [1788990178.865408748] [map_io]: free_thresh: 0.25
+[map_server-4] [INFO] [1788990178.865422243] [map_io]: occupied_thresh: 0.65
+[map_server-4] [INFO] [1788990178.865436911] [map_io]: mode: trinary
+[map_server-4] [INFO] [1788990178.865450627] [map_io]: negate: 0
+[map_server-4] [INFO] [1788990178.865895061] [map_io]: Loading image_file: /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.pgm
+[component_container-9] [INFO] [1788990178.907663748] [controller_container]: Load Library: /workspace/install/lib/libpure_pursuit_node.so
+[component_container-9] [INFO] [1788990178.913451897] [controller_container]: Found class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::PurePursuitNode>
+[component_container-9] [INFO] [1788990178.913582532] [controller_container]: Instantiate class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::PurePursuitNode>
+[map_server-4] [INFO] [1788990178.955807907] [map_io]: Read map /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.pgm: 349 X 877 map @ 0.025 m/cell
+[lifecycle_manager-5] [INFO] [1788990178.986031036] [lifecycle_manager_map]: [34m[1mActivating map_server[0m[0m
+[map_server-4] [INFO] [1788990178.988201230] [map_server]: Activating
+[map_server-4] [INFO] [1788990178.991152181] [map_server]: Creating bond (map_server) to lifecycle manager.
+[component_container-9] [INFO] [1788990178.988799153] [pure_pursuit_node]: Initializing Pure Pursuit Node
+[component_container-9] [INFO] [1788990179.030536091] [pure_pursuit_node]: Loaded trajectory with 2586 waypoints (51.7 m)
+[component_container-9] [INFO] [1788990179.046327602] [pure_pursuit_node]: Pure Pursuit Node initialized
+[component_container-9] [INFO] [1788990179.046439692] [pure_pursuit_node]:   Trajectory: /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv (2586 points)
+[component_container-9] [INFO] [1788990179.046462956] [pure_pursuit_node]:   Lookahead: 0.75 - 1.10 m (gain: 0.05)
+[component_container-9] [INFO] [1788990179.046496799] [pure_pursuit_node]:   Max speed cap: 1.50 m/s
+[component_container-9] [INFO] [1788990179.046516587] [pure_pursuit_node]:   Lookahead adapt: cte_weight=1.00 cte_gain=0.042 curvature_gain=1.900
+[component_container-9] [INFO] [1788990179.046539880] [pure_pursuit_node]:   Speed adapt: curvature_factor=0.102 floor_ratio=0.52
+[component_container-9] [INFO] [1788990179.046561952] [pure_pursuit_node]:   Speed adapt (CTE): factor=1.500 floor_ratio=0.55
+[component_container-9] [INFO] [1788990179.046582390] [pure_pursuit_node]:   Speed limits: max_lat_accel=6.50 min_reg_speed=0.00
+[component_container-9] [INFO] [1788990179.046603710] [pure_pursuit_node]:   Yaw-rate damping: 0.000 s
+[component_container-9] [INFO] [1788990179.046622435] [pure_pursuit_node]:   Target-heading turn-in gain: 0.000
+[component_container-9] [INFO] [1788990179.046654766] [pure_pursuit_node]:   Command shaping: steer_rate=3.20 accel=3.00 decel=8.00
+[component_container-9] [INFO] [1788990179.046676817] [pure_pursuit_node]:   Pose: /current_map_pose (map frame)
+[component_container-9] [INFO] [1788990179.046694951] [pure_pursuit_node]:   Odom: /odom
+[component_container-9] [INFO] [1788990179.046711993] [pure_pursuit_node]:   Control trigger: /odom (one command per odometry update; nominal 40.0 Hz)
+[component_container-9] [INFO] [1788990179.046733334] [pure_pursuit_node]:   Steering feedback: /autodrive/roboracer_1/steering (lead gain 0.25)
+[component_container-9] [INFO] [1788990179.046753071] [pure_pursuit_node]:   Startup path gate: distance <= 0.80 m, heading <= 0.75 rad
+[component_container-9] [INFO] [1788990179.046773359] [pure_pursuit_node]:   Command: /cmd/speed
+[INFO] [launch_ros.actions.load_composable_nodes]: Loaded node '/pure_pursuit_node' in container '/controller_container'
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.073678538] [gpu_amcl_cpp]: [AMCL] Parameters: update_min_d=0.02000, update_min_a=0.03500, max_scan_age=0.2500, odom_history=1.000s, cloud_publish_rate=1.0 Hz, debug_pre_resample=false, slip_threshold=1.00 rad/s, initial_raceline_heading=false, local_correction_gate=0.00m/0.00rad xy_gain=0.500 cross_track_only=false yaw_gain=0.000 association=0.80m recenter_cloud=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.099827045] [gpu_amcl_cpp]: Particle cloud publishing scan-synchronized, max 1.0 Hz
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.099925160] [gpu_amcl_cpp]: GPU AMCL C++ node created — waiting for map...
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.113153458] [gpu_amcl_cpp]: Received first map (349x877 @ 0.025 m/cell) — initialising PF
+[lifecycle_manager-5] [INFO] [1788990179.114213558] [lifecycle_manager_map]: Server map_server connected with bond.
+[lifecycle_manager-5] [INFO] [1788990179.114296113] [lifecycle_manager_map]: [34m[1mManaged nodes are active[0m[0m
+[lifecycle_manager-5] [INFO] [1788990179.114326691] [lifecycle_manager_map]: [34m[1mCreating bond timer...[0m[0m
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.147003046] [gpu_amcl_cpp]: Loaded 2587 global heading points from /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.175415134] [gpu_amcl_cpp]: Global AMCL startup prior centred at saved map start (0.801, 3.158, -1.571) with covariance (0.500, 0.500, 0.200).
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.175527565] [gpu_amcl_cpp]: Particle filter initialised with 2500 particles (global)
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.175607726] [gpu_amcl_cpp]: Global particle initialization active; waiting for scans before publishing pose
+[autodrive_bridge_40hz-1] /usr/local/lib/python3.10/dist-packages/numpy/core/getlimits.py:499: UserWarning: The value of the smallest subnormal for <class 'numpy.float64'> type is zero.
+[autodrive_bridge_40hz-1]   setattr(self, word, getattr(machar, word).flat[0])
+[autodrive_bridge_40hz-1] /usr/local/lib/python3.10/dist-packages/numpy/core/getlimits.py:89: UserWarning: The value of the smallest subnormal for <class 'numpy.float64'> type is zero.
+[autodrive_bridge_40hz-1]   return self._float_to_str(self.smallest_subnormal)
+[ground_truth_amcl_monitor-7] [INFO] [1788990179.382887416] [ground_truth_amcl_monitor]: Absolute map scoring enabled from explicit map start: (0.8006, 3.1583, -1.5708)
+[calibration-8] [INFO] [1788990179.387584416] [allowed_telemetry_recorder]: Calibration mode=sensor_record duration=100.000 s output=/workspace/src/f1tenth_planning/analysis/amcl_tuning_campaign_20260909/acceptance_ramp_15_to_4mps_20260909_run02/telemetry/sensor_record_20260909_214259.csv
+[actuator_interface-10] [INFO] [1788990179.397089743] [autodrive_actuator_interface]: Actuator interface ready; no arming state
+[actuator_interface-10] [WARN] [1788990179.399939093] [autodrive_actuator_interface]: Neutral output: no command
+[ground_truth_amcl_monitor-7] [WARN] [1788990179.401740666] [ground_truth_amcl_monitor]: Ground-truth monitor is diagnostics-only; simulator IPS/odom are not controller inputs
+[autodrive_bridge_40hz-1] [autodrive_bridge_40hz] camera decode/publication disabled
+[autodrive_bridge_40hz-1] [autodrive_bridge_40hz] bounded request pacing enabled at 40 Hz (max one outstanding request)
+[autodrive_bridge_40hz-1] Connected!
+[autodrive_bridge_40hz-1] Connected!
+[component_container-9] [WARN] [1788990179.992435179] [pure_pursuit_node]: No pose received on /current_map_pose yet
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.992677143] [gpu_amcl_cpp]: Received first odometry sample at (0.00, 0.00, 0.00).
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.995279489] [gpu_amcl_cpp]: Received LiDAR callback #1 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.995361203] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.000, 0.000, 0.000) baseline=(0.000, 0.000, 0.000) delta=(0.000, 0.000, 0.000) moved=false scan_age=0.098s
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.995408802] [gpu_amcl_cpp]: Starting AMCL scan update #1 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990179.999343450] [gpu_amcl_cpp]: AMCL scan update #1 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990180.006353863] [gpu_amcl_cpp]: Startup GPU scan refinement done: refined_particles=2232/2500, beams=180, best_mean_dist=0.000 m, time=6.94 ms
+[gpu_amcl_cpp_node-6] [INFO] [1788990180.009767352] [gpu_amcl_cpp]: Global AMCL refining: cluster_weight=0.928, covariance xy=0.009 (max 0.250), yaw=0.000 (max 0.120).
+[gpu_amcl_cpp_node-6] [INFO] [1788990180.009826143] [gpu_amcl_cpp]: Global AMCL lock evidence: quality=false stable_scans=1/5 travel=0.000/0.750 m (min_weight=0.500).
+[gpu_amcl_cpp_node-6] [INFO] [1788990180.132535529] [gpu_amcl_cpp]: Publishing provisional global AMCL pose for localization ramp; travel=0.000/0.750 m stable_scans=5/5.
+[ground_truth_amcl_monitor-7] [INFO] [1788990180.134239028] [ground_truth_amcl_monitor]: Relative GT alignment initialized: yaw=-0.000, translation=(-0.001, 0.000)
+[ground_truth_amcl_monitor-7] [INFO] [1788990180.135059899] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.800, 3.158) amcl=(0.801, 3.158) error=0.001 m / 0.000 rad; current_map=unavailable; odom=(0.800, 3.158, -1.571) error=0.000 m / 0.000 rad; ekf=(0.800, 3.158, -1.571) error=0.000 m / 0.000 rad; RMS=0.001 m / 0.000 rad max=0.001 m / 0.000 rad samples=1
+[component_container-9] [INFO] [1788990180.212830956] [pure_pursuit_node]: Aligned closed trajectory seam to startup pose at original waypoint 1090
+[component_container-9] [INFO] [1788990180.212942185] [pure_pursuit_node]: Startup path gate passed: path_distance=0.166 m heading_error=0.302 rad
+[component_container-9] [INFO] [1788990180.212962113] [pure_pursuit_node]: Pure Pursuit: pose=(0.801, 3.158, -1.571) cte=-0.166 closest=0 target=38 path_dist=0.166 heading_err=0.302 steer=0.003 speed=0.003
+[gpu_amcl_cpp_node-6] [WARN] [1788990180.343632367] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990181.016689658] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.525, 0.032, 0.116) baseline=(0.513, 0.030, 0.111) delta=(0.012, 0.001, 0.005) moved=false scan_age=0.018s
+[actuator_interface-10] [INFO] [1788990181.018055533] [autodrive_actuator_interface]: Collision baseline established at cumulative count 0
+[ground_truth_amcl_monitor-7] [INFO] [1788990181.142497903] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.857, 2.380) amcl=(0.853, 2.474) error=0.094 m / 0.006 rad; current_map=(0.855, 2.463, -1.422) error=0.082 m / 0.000 rad; odom=(0.854, 2.463, -1.422) error=0.082 m / 0.000 rad; ekf=(0.854, 2.463, -1.422) error=0.082 m / 0.000 rad; RMS=0.059 m / 0.002 rad max=0.097 m / 0.007 rad samples=160
+[gpu_amcl_cpp_node-6] [INFO] [1788990181.149043984] [gpu_amcl_cpp]: Global AMCL candidate rejected: start-anchor distance 0.767 m > 0.750 m.
+[component_container-9] [INFO] [1788990181.217320194] [pure_pursuit_node]: Pure Pursuit: pose=(0.876, 2.331, -1.400) cte=-0.006 closest=40 target=82 path_dist=0.006 heading_err=0.087 steer=0.043 speed=1.476
+[gpu_amcl_cpp_node-6] [INFO] [1788990181.222765197] [gpu_amcl_cpp]: Global AMCL lock accepted at (0.875, 2.333, -1.405); continuing with local tracking.
+[gpu_amcl_cpp_node-6] [INFO] [1788990181.247447543] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.881, 2.300, -1.399) scan=(0.879, 2.265, -1.409) correction=0.035 m/0.010 rad cluster_weight=0.907 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990182.019249633] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.972, 0.320, 0.209) baseline=(1.937, 0.313, 0.212) delta=(0.035, 0.008, -0.003) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990182.142975838] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.153, 0.963) amcl=(1.120, 1.196) error=0.235 m / 0.002 rad; current_map=(1.122, 1.187, -1.376) error=0.226 m / 0.000 rad; odom=(1.152, 1.030, -1.376) error=0.066 m / 0.000 rad; ekf=(1.152, 1.030, -1.376) error=0.066 m / 0.000 rad; RMS=0.100 m / 0.003 rad max=0.235 m / 0.018 rad samples=315
+[component_container-9] [INFO] [1788990182.240306782] [pure_pursuit_node]: Pure Pursuit: pose=(1.149, 1.056, -1.383) cte=0.001 closest=106 target=148 path_dist=0.001 heading_err=-0.011 steer=-0.030 speed=1.485
+[gpu_amcl_cpp_node-6] [INFO] [1788990182.250065586] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.153, 1.045, -1.386) scan=(1.153, 1.044, -1.386) correction=0.002 m/0.001 rad cluster_weight=0.932 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990182.523416746] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990183.038943959] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.444, 0.541, 0.087) baseline=(3.431, 0.540, 0.089) delta=(0.013, 0.001, -0.002) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990183.143066416] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.350, -0.477) amcl=(1.321, -0.034) error=0.444 m / 0.003 rad; current_map=(1.322, -0.046, -1.494) error=0.431 m / 0.000 rad; odom=(1.353, -0.432, -1.494) error=0.045 m / 0.000 rad; ekf=(1.353, -0.432, -1.494) error=0.045 m / 0.000 rad; RMS=0.263 m / 0.003 rad max=0.542 m / 0.018 rad samples=475
+[component_container-9] [INFO] [1788990183.242175719] [pure_pursuit_node]: Pure Pursuit: pose=(1.339, -0.267, -1.507) cte=-0.015 closest=172 target=215 path_dist=0.015 heading_err=0.017 steer=-0.027 speed=1.455
+[gpu_amcl_cpp_node-6] [INFO] [1788990183.273423011] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.344, -0.361, -1.508) scan=(1.342, -0.516, -1.498) correction=0.155 m/0.011 rad cluster_weight=0.910 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990184.039946960] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.920, 0.576, -0.050) baseline=(4.909, 0.577, -0.047) delta=(0.012, -0.001, -0.003) moved=false scan_age=0.017s
+[ground_truth_amcl_monitor-7] [INFO] [1788990184.144195062] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.363, -1.930) amcl=(1.364, -1.907) error=0.023 m / 0.002 rad; current_map=(1.363, -1.931, -1.629) error=0.002 m / 0.002 rad; odom=(1.367, -1.933, -1.631) error=0.005 m / 0.000 rad; ekf=(1.369, -1.908, -1.631) error=0.022 m / 0.000 rad; RMS=0.241 m / 0.003 rad max=0.542 m / 0.018 rad samples=636
+[component_container-9] [INFO] [1788990184.265639743] [pure_pursuit_node]: Pure Pursuit: pose=(1.353, -2.124, -1.639) cte=-0.013 closest=265 target=308 path_dist=0.013 heading_err=0.014 steer=-0.021 speed=1.463
+[gpu_amcl_cpp_node-6] [INFO] [1788990184.298409233] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.352, -2.164, -1.643) scan=(1.348, -2.182, -1.642) correction=0.019 m/0.000 rad cluster_weight=0.952 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990185.014353320] [gpu_amcl_cpp]: Received LiDAR callback #397 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990185.018341649] [gpu_amcl_cpp]: Starting AMCL scan update #398 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990185.019237241] [gpu_amcl_cpp]: AMCL scan update #398 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990185.042547660] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(6.416, 0.444, -0.122) baseline=(6.380, 0.448, -0.121) delta=(0.036, -0.004, -0.002) moved=true scan_age=0.003s
+[gpu_amcl_cpp_node-6] [WARN] [1788990185.093149382] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[ground_truth_amcl_monitor-7] [INFO] [1788990185.150688601] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.222, -3.397) amcl=(1.229, -3.376) error=0.022 m / 0.000 rad; current_map=(1.229, -3.369, -1.698) error=0.028 m / 0.002 rad; odom=(1.225, -3.405, -1.699) error=0.009 m / 0.000 rad; ekf=(1.225, -3.405, -1.699) error=0.009 m / 0.000 rad; RMS=0.216 m / 0.003 rad max=0.542 m / 0.018 rad samples=797
+[component_container-9] [INFO] [1788990185.286994848] [pure_pursuit_node]: Pure Pursuit: pose=(1.208, -3.564, -1.706) cte=-0.005 closest=338 target=380 path_dist=0.005 heading_err=0.004 steer=-0.016 speed=1.482
+[gpu_amcl_cpp_node-6] [INFO] [1788990185.298420511] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.205, -3.578, -1.707) scan=(1.199, -3.619, -1.704) correction=0.042 m/0.002 rad cluster_weight=0.948 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990186.043406288] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(7.888, 0.223, -0.172) baseline=(7.851, 0.230, -0.171) delta=(0.037, -0.006, -0.001) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990186.150646348] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.996, -4.861) amcl=(1.004, -4.830) error=0.033 m / 0.000 rad; current_map=(1.007, -4.822, -1.745) error=0.041 m / 0.001 rad; odom=(0.998, -4.876, -1.746) error=0.015 m / 0.000 rad; ekf=(0.998, -4.876, -1.746) error=0.015 m / 0.000 rad; RMS=0.199 m / 0.002 rad max=0.542 m / 0.018 rad samples=957
+[component_container-9] [INFO] [1788990186.289245570] [pure_pursuit_node]: Pure Pursuit: pose=(0.967, -5.051, -1.751) cte=-0.002 closest=413 target=455 path_dist=0.002 heading_err=-0.002 steer=-0.012 speed=1.492
+[gpu_amcl_cpp_node-6] [INFO] [1788990186.299437307] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.963, -5.073, -1.752) scan=(0.963, -5.031, -1.749) correction=0.042 m/0.003 rad cluster_weight=0.934 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990187.062998883] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(9.366, -0.064, -0.215) baseline=(9.355, -0.062, -0.214) delta=(0.011, -0.002, -0.001) moved=false scan_age=0.015s
+[ground_truth_amcl_monitor-7] [INFO] [1788990187.151314088] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.704, -6.332) amcl=(0.714, -6.329) error=0.011 m / 0.000 rad; current_map=(0.718, -6.322, -1.788) error=0.017 m / 0.001 rad; odom=(0.705, -6.345, -1.789) error=0.013 m / 0.000 rad; ekf=(0.705, -6.345, -1.789) error=0.013 m / 0.000 rad; RMS=0.186 m / 0.002 rad max=0.542 m / 0.018 rad samples=1117
+[component_container-9] [INFO] [1788990187.291497735] [pure_pursuit_node]: Pure Pursuit: pose=(0.667, -6.523, -1.799) cte=-0.004 closest=488 target=530 path_dist=0.004 heading_err=0.007 steer=-0.005 speed=1.477
+[gpu_amcl_cpp_node-6] [INFO] [1788990187.322939542] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.660, -6.565, -1.799) scan=(0.655, -6.567, -1.798) correction=0.006 m/0.000 rad cluster_weight=0.951 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990188.063684817] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(10.816, -0.408, -0.251) baseline=(10.807, -0.405, -0.250) delta=(0.009, -0.002, -0.001) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990188.164026023] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.351, -7.794) amcl=(0.369, -7.746) error=0.051 m / 0.002 rad; current_map=(0.366, -7.759, -1.829) error=0.038 m / 0.000 rad; odom=(0.356, -7.799, -1.829) error=0.007 m / 0.000 rad; ekf=(0.356, -7.799, -1.829) error=0.007 m / 0.000 rad; RMS=0.174 m / 0.002 rad max=0.542 m / 0.018 rad samples=1278
+[component_container-9] [INFO] [1788990188.292473313] [pure_pursuit_node]: Pure Pursuit: pose=(0.310, -7.981, -1.842) cte=-0.000 closest=563 target=605 path_dist=0.000 heading_err=-0.002 steer=-0.035 speed=1.460
+[gpu_amcl_cpp_node-6] [INFO] [1788990188.348451130] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.290, -8.048, -1.845) scan=(0.291, -8.048, -1.849) correction=0.001 m/0.004 rad cluster_weight=0.982 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990188.542691707] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990189.064261836] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(12.204, -0.861, -0.425) baseline=(12.193, -0.856, -0.419) delta=(0.012, -0.005, -0.007) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990189.165538548] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.113, -9.128) amcl=(-0.087, -9.078) error=0.056 m / 0.007 rad; current_map=(-0.092, -9.089, -2.029) error=0.044 m / 0.000 rad; odom=(-0.121, -9.173, -2.029) error=0.046 m / 0.000 rad; ekf=(-0.121, -9.173, -2.029) error=0.046 m / 0.000 rad; RMS=0.165 m / 0.002 rad max=0.542 m / 0.018 rad samples=1439
+[component_container-9] [INFO] [1788990189.294912007] [pure_pursuit_node]: Pure Pursuit: pose=(-0.181, -9.270, -2.088) cte=0.005 closest=632 target=674 path_dist=0.005 heading_err=0.017 steer=-0.133 speed=1.352
+[gpu_amcl_cpp_node-6] [INFO] [1788990189.350219415] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.212, -9.324, -2.100) scan=(-0.213, -9.312, -2.096) correction=0.012 m/0.004 rad cluster_weight=0.997 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990190.022601667] [gpu_amcl_cpp]: Received LiDAR callback #800 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990190.027651148] [gpu_amcl_cpp]: Starting AMCL scan update #801 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990190.028332097] [gpu_amcl_cpp]: AMCL scan update #801 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990190.071388763] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(13.236, -1.708, -1.108) baseline=(13.233, -1.703, -1.078) delta=(0.003, -0.005, -0.029) moved=false scan_age=0.020s
+[ground_truth_amcl_monitor-7] [INFO] [1788990190.167759904] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.002, -10.045) amcl=(-0.957, -10.017) error=0.053 m / 0.028 rad; current_map=(-0.961, -10.019, -2.779) error=0.048 m / 0.000 rad; odom=(-1.022, -10.130, -2.779) error=0.087 m / 0.000 rad; ekf=(-1.018, -10.128, -2.751) error=0.084 m / 0.028 rad; RMS=0.157 m / 0.006 rad max=0.542 m / 0.033 rad samples=1598
+[component_container-9] [INFO] [1788990190.314077989] [pure_pursuit_node]: Pure Pursuit: pose=(-1.169, -10.077, -2.904) cte=0.010 closest=699 target=741 path_dist=0.010 heading_err=-0.062 steer=-0.296 speed=1.338
+[gpu_amcl_cpp_node-6] [INFO] [1788990190.373863456] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.254, -10.090, -2.990) scan=(-1.247, -10.086, -2.986) correction=0.008 m/0.004 rad cluster_weight=0.999 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990191.088502882] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(13.122, -3.011, -2.216) baseline=(13.128, -3.003, -2.186) delta=(-0.006, -0.009, -0.030) moved=false scan_age=0.015s
+[ground_truth_amcl_monitor-7] [INFO] [1788990191.167983649] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.224, -9.813) amcl=(-2.215, -9.797) error=0.018 m / 0.023 rad; current_map=(-2.231, -9.784, 2.459) error=0.030 m / 0.028 rad; odom=(-2.308, -9.886, 2.431) error=0.111 m / 0.000 rad; ekf=(-2.292, -9.899, 2.426) error=0.110 m / 0.005 rad; RMS=0.150 m / 0.009 rad max=0.542 m / 0.036 rad samples=1760
+[component_container-9] [INFO] [1788990191.317114406] [pure_pursuit_node]: Pure Pursuit: pose=(-2.396, -9.609, 2.288) cte=-0.009 closest=768 target=810 path_dist=0.009 heading_err=-0.016 steer=-0.159 speed=1.380
+[gpu_amcl_cpp_node-6] [INFO] [1788990191.374428732] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.435, -9.567, 2.270) scan=(-2.429, -9.583, 2.268) correction=0.017 m/0.002 rad cluster_weight=0.980 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990192.089468420] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(11.944, -3.789, -2.802) baseline=(11.956, -3.785, -2.788) delta=(-0.012, -0.004, -0.013) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990192.168929841] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.928, -8.634) amcl=(-2.924, -8.617) error=0.018 m / 0.006 rad; current_map=(-2.931, -8.596, 1.902) error=0.039 m / 0.011 rad; odom=(-3.025, -8.683, 1.887) error=0.108 m / 0.004 rad; ekf=(-3.025, -8.683, 1.887) error=0.108 m / 0.004 rad; RMS=0.144 m / 0.010 rad max=0.542 m / 0.036 rad samples=1920
+[component_container-9] [INFO] [1788990192.336342023] [pure_pursuit_node]: Pure Pursuit: pose=(-3.004, -8.358, 1.849) cte=-0.006 closest=838 target=880 path_dist=0.006 heading_err=-0.004 steer=-0.093 speed=1.433
+[gpu_amcl_cpp_node-6] [INFO] [1788990192.398228625] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.020, -8.278, 1.816) scan=(-3.017, -8.291, 1.824) correction=0.014 m/0.007 rad cluster_weight=0.983 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990193.093221331] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(10.491, -4.068, -3.087) baseline=(10.528, -4.066, -3.081) delta=(-0.036, -0.002, -0.005) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990193.170725296] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.170, -7.215) amcl=(-3.161, -7.231) error=0.019 m / 0.005 rad; current_map=(-3.162, -7.204, 1.616) error=0.014 m / 0.009 rad; odom=(-3.273, -7.218, 1.607) error=0.103 m / 0.000 rad; ekf=(-3.272, -7.246, 1.603) error=0.106 m / 0.004 rad; RMS=0.139 m / 0.010 rad max=0.542 m / 0.036 rad samples=2080
+[component_container-9] [INFO] [1788990193.336966359] [pure_pursuit_node]: Pure Pursuit: pose=(-3.164, -6.959, 1.576) cte=-0.004 closest=909 target=951 path_dist=0.004 heading_err=-0.014 steer=-0.060 speed=1.466
+[gpu_amcl_cpp_node-6] [INFO] [1788990193.422583569] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.160, -6.829, 1.550) scan=(-3.156, -6.834, 1.551) correction=0.006 m/0.001 rad cluster_weight=0.996 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990194.093771608] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(9.018, -3.983, 2.983) baseline=(9.049, -3.988, 2.988) delta=(-0.031, 0.005, -0.006) moved=true scan_age=0.004s
+[ground_truth_amcl_monitor-7] [INFO] [1788990194.170824667] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.067, -5.756) amcl=(-3.042, -5.751) error=0.026 m / 0.004 rad; current_map=(-3.037, -5.724, 1.406) error=0.044 m / 0.009 rad; odom=(-3.163, -5.747, 1.397) error=0.096 m / 0.000 rad; ekf=(-3.163, -5.747, 1.397) error=0.096 m / 0.000 rad; RMS=0.134 m / 0.010 rad max=0.542 m / 0.036 rad samples=2240
+[component_container-9] [INFO] [1788990194.337653053] [pure_pursuit_node]: Pure Pursuit: pose=(-2.988, -5.469, 1.376) cte=0.005 closest=984 target=1026 path_dist=0.005 heading_err=-0.027 steer=-0.051 speed=1.450
+[gpu_amcl_cpp_node-6] [INFO] [1788990194.446700897] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.956, -5.318, 1.352) scan=(-2.966, -5.325, 1.345) correction=0.012 m/0.007 rad cluster_weight=0.951 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990195.039827984] [gpu_amcl_cpp]: Received LiDAR callback #1202 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990195.043923755] [gpu_amcl_cpp]: Starting AMCL scan update #1203 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990195.045349572] [gpu_amcl_cpp]: AMCL scan update #1203 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990195.094913516] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(7.581, -3.633, 2.867) baseline=(7.619, -3.644, 2.866) delta=(-0.037, 0.011, 0.000) moved=true scan_age=0.004s
+[ground_truth_amcl_monitor-7] [INFO] [1788990195.174583138] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.715, -4.338) amcl=(-2.669, -4.272) error=0.080 m / 0.000 rad; current_map=(-2.673, -4.287, 1.301) error=0.066 m / 0.004 rad; odom=(-2.803, -4.316, 1.297) error=0.091 m / 0.000 rad; ekf=(-2.803, -4.316, 1.297) error=0.091 m / 0.000 rad; RMS=0.130 m / 0.009 rad max=0.542 m / 0.036 rad samples=2401
+[component_container-9] [INFO] [1788990195.338318596] [pure_pursuit_node]: Pure Pursuit: pose=(-2.599, -4.026, 1.299) cte=-0.008 closest=1058 target=1101 path_dist=0.008 heading_err=-0.005 steer=-0.008 speed=1.481
+[gpu_amcl_cpp_node-6] [INFO] [1788990195.472543584] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.570, -3.877, 1.294) scan=(-2.584, -3.898, 1.283) correction=0.025 m/0.011 rad cluster_weight=0.950 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990196.098867593] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990196.100187331] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(6.175, -3.223, 2.863) baseline=(6.201, -3.231, 2.859) delta=(-0.027, 0.008, 0.004) moved=true scan_age=0.005s
+[ground_truth_amcl_monitor-7] [INFO] [1788990196.177441137] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.306, -2.922) amcl=(-2.283, -2.888) error=0.041 m / 0.000 rad; current_map=(-2.287, -2.899, 1.301) error=0.030 m / 0.004 rad; odom=(-2.394, -2.912, 1.297) error=0.089 m / 0.000 rad; ekf=(-2.394, -2.912, 1.297) error=0.089 m / 0.000 rad; RMS=0.126 m / 0.009 rad max=0.542 m / 0.036 rad samples=2561
+[component_container-9] [INFO] [1788990196.339674395] [pure_pursuit_node]: Pure Pursuit: pose=(-2.211, -2.630, 1.306) cte=-0.007 closest=1131 target=1173 path_dist=0.007 heading_err=0.000 steer=-0.002 speed=1.478
+[gpu_amcl_cpp_node-6] [INFO] [1788990196.473242700] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.163, -2.451, 1.304) scan=(-2.167, -2.458, 1.294) correction=0.008 m/0.010 rad cluster_weight=0.947 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990197.117518446] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.734, -2.831, 2.886) baseline=(4.740, -2.833, 2.889) delta=(-0.005, 0.001, -0.004) moved=false scan_age=0.020s
+[ground_truth_amcl_monitor-7] [INFO] [1788990197.191253545] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.882, -1.463) amcl=(-1.897, -1.440) error=0.028 m / 0.004 rad; current_map=(-1.895, -1.430, 1.318) error=0.036 m / 0.000 rad; odom=(-2.003, -1.468, 1.318) error=0.122 m / 0.000 rad; ekf=(-2.003, -1.468, 1.318) error=0.122 m / 0.000 rad; RMS=0.122 m / 0.009 rad max=0.542 m / 0.036 rad samples=2722
+[component_container-9] [INFO] [1788990197.341400439] [pure_pursuit_node]: Pure Pursuit: pose=(-1.827, -1.171, 1.332) cte=-0.002 closest=1206 target=1249 path_dist=0.002 heading_err=-0.002 steer=0.005 speed=1.490
+[gpu_amcl_cpp_node-6] [INFO] [1788990197.473929142] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.785, -0.992, 1.334) scan=(-1.789, -0.991, 1.330) correction=0.004 m/0.005 rad cluster_weight=0.961 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990198.119742255] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.276, -2.481, 2.924) baseline=(3.314, -2.490, 2.923) delta=(-0.038, 0.009, 0.001) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990198.191354237] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.539, -0.031) amcl=(-1.572, -0.013) error=0.039 m / 0.003 rad; current_map=(-1.570, -0.002, 1.352) error=0.043 m / 0.000 rad; odom=(-1.664, -0.038, 1.352) error=0.125 m / 0.000 rad; ekf=(-1.664, -0.038, 1.352) error=0.125 m / 0.000 rad; RMS=0.119 m / 0.009 rad max=0.542 m / 0.036 rad samples=2883
+[component_container-9] [INFO] [1788990198.361456370] [pure_pursuit_node]: Pure Pursuit: pose=(-1.515, 0.275, 1.371) cte=-0.013 closest=1280 target=1323 path_dist=0.013 heading_err=0.006 steer=0.008 speed=1.446
+[gpu_amcl_cpp_node-6] [INFO] [1788990198.496445983] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.475, 0.486, 1.376) scan=(-1.475, 0.482, 1.370) correction=0.004 m/0.006 rad cluster_weight=0.940 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990199.138875042] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.823, -2.211, 3.009) baseline=(1.834, -2.213, 3.010) delta=(-0.011, 0.002, -0.001) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990199.192948002] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.280, 1.387) amcl=(-1.321, 1.434) error=0.063 m / 0.000 rad; current_map=(-1.320, 1.447, 1.447) error=0.072 m / 0.000 rad; odom=(-1.402, 1.407, 1.447) error=0.124 m / 0.000 rad; ekf=(-1.404, 1.395, 1.447) error=0.124 m / 0.000 rad; RMS=0.117 m / 0.008 rad max=0.542 m / 0.036 rad samples=3042
+[component_container-9] [INFO] [1788990199.361759702] [pure_pursuit_node]: Pure Pursuit: pose=(-1.298, 1.665, 1.480) cte=-0.012 closest=1351 target=1393 path_dist=0.012 heading_err=0.001 steer=0.052 speed=1.413
+[gpu_amcl_cpp_node-6] [INFO] [1788990199.503606321] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.279, 1.868, 1.516) scan=(-1.278, 1.882, 1.510) correction=0.014 m/0.006 rad cluster_weight=0.956 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990200.042502280] [gpu_amcl_cpp]: Received LiDAR callback #1604 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990200.065922254] [gpu_amcl_cpp]: Starting AMCL scan update #1606 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990200.066782089] [gpu_amcl_cpp]: AMCL scan update #1606 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990200.139119483] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.441, -2.210, -2.952) baseline=(0.451, -2.208, -2.957) delta=(-0.010, -0.002, 0.005) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990200.193736505] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.353, 2.762) amcl=(-1.334, 2.770) error=0.021 m / 0.013 rad; current_map=(-1.338, 2.791, 1.783) error=0.032 m / 0.007 rad; odom=(-1.428, 2.804, 1.790) error=0.086 m / 0.000 rad; ekf=(-1.428, 2.804, 1.790) error=0.086 m / 0.000 rad; RMS=0.115 m / 0.008 rad max=0.542 m / 0.036 rad samples=3204
+[component_container-9] [INFO] [1788990200.364082034] [pure_pursuit_node]: Pure Pursuit: pose=(-1.393, 2.987, 1.867) cte=-0.016 closest=1418 target=1459 path_dist=0.016 heading_err=0.004 steer=0.161 speed=1.251
+[gpu_amcl_cpp_node-6] [INFO] [1788990200.522246162] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.461, 3.170, 1.959) scan=(-1.461, 3.163, 1.958) correction=0.007 m/0.001 rad cluster_weight=0.984 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990200.542585081] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990201.140455103] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.626, -2.817, -2.095) baseline=(-0.621, -2.809, -2.117) delta=(-0.005, -0.008, 0.022) moved=false scan_age=0.017s
+[ground_truth_amcl_monitor-7] [INFO] [1788990201.200945954] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.974, 3.730) amcl=(-1.982, 3.768) error=0.039 m / 0.000 rad; current_map=(-1.976, 3.766, 2.656) error=0.036 m / 0.031 rad; odom=(-2.084, 3.820, 2.687) error=0.142 m / 0.000 rad; ekf=(-2.084, 3.820, 2.687) error=0.142 m / 0.000 rad; RMS=0.112 m / 0.009 rad max=0.542 m / 0.039 rad samples=3365
+[component_container-9] [INFO] [1788990201.366106678] [pure_pursuit_node]: Pure Pursuit: pose=(-2.165, 3.839, 2.970) cte=-0.010 closest=1480 target=1522 path_dist=0.010 heading_err=0.053 steer=0.412 speed=1.255
+[gpu_amcl_cpp_node-6] [INFO] [1788990201.543039857] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.354, 3.845, -3.074) scan=(-2.292, 3.846, -3.097) correction=0.062 m/0.023 rad cluster_weight=0.977 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990202.142285211] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.365, -3.933, -0.644) baseline=(-0.390, -3.913, -0.682) delta=(0.025, -0.020, 0.038) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990202.200763282] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.991, 3.409) amcl=(-2.991, 3.371) error=0.038 m / 0.000 rad; current_map=(-2.986, 3.384, -2.186) error=0.026 m / 0.029 rad; odom=(-3.169, 3.471, -2.158) error=0.188 m / 0.000 rad; ekf=(-3.169, 3.471, -2.158) error=0.188 m / 0.000 rad; RMS=0.110 m / 0.010 rad max=0.542 m / 0.045 rad samples=3525
+[component_container-9] [INFO] [1788990202.386326145] [pure_pursuit_node]: Pure Pursuit: pose=(-3.094, 3.140, -1.954) cte=0.029 closest=1544 target=1586 path_dist=0.029 heading_err=0.172 steer=0.216 speed=1.355
+[gpu_amcl_cpp_node-6] [INFO] [1788990202.546109682] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.152, 2.933, -1.804) scan=(-3.146, 2.925, -1.798) correction=0.011 m/0.006 rad cluster_weight=0.971 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990203.143132122] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.968, -4.248, -0.067) baseline=(0.935, -4.246, -0.068) delta=(0.033, -0.002, 0.002) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990203.201607969] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.264, 2.103) amcl=(-3.251, 2.057) error=0.047 m / 0.000 rad; current_map=(-3.250, 2.068, -1.633) error=0.037 m / 0.003 rad; odom=(-3.453, 2.119, -1.635) error=0.189 m / 0.000 rad; ekf=(-3.453, 2.119, -1.635) error=0.189 m / 0.000 rad; RMS=0.108 m / 0.010 rad max=0.542 m / 0.045 rad samples=3685
+[component_container-9] [INFO] [1788990203.388796945] [pure_pursuit_node]: Pure Pursuit: pose=(-3.267, 1.799, -1.632) cte=0.024 closest=1611 target=1654 path_dist=0.024 heading_err=-0.059 steer=-0.030 speed=1.375
+[gpu_amcl_cpp_node-6] [INFO] [1788990203.548458253] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.285, 1.617, -1.648) scan=(-3.284, 1.619, -1.639) correction=0.002 m/0.009 rad cluster_weight=0.952 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990204.145066325] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(2.367, -4.401, -0.222) baseline=(2.329, -4.392, -0.214) delta=(0.038, -0.009, -0.008) moved=true scan_age=0.004s
+[ground_truth_amcl_monitor-7] [INFO] [1788990204.215802423] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.380, 0.736) amcl=(-3.408, 0.760) error=0.036 m / 0.016 rad; current_map=(-3.411, 0.749, -1.833) error=0.033 m / 0.000 rad; odom=(-3.620, 0.715, -1.833) error=0.240 m / 0.000 rad; ekf=(-3.617, 0.725, -1.817) error=0.237 m / 0.016 rad; RMS=0.106 m / 0.010 rad max=0.542 m / 0.045 rad samples=3846
+[component_container-9] [INFO] [1788990204.390966029] [pure_pursuit_node]: Pure Pursuit: pose=(-3.486, 0.527, -1.936) cte=0.027 closest=1676 target=1718 path_dist=0.027 heading_err=0.015 steer=-0.159 speed=1.281
+[gpu_amcl_cpp_node-6] [INFO] [1788990204.572415237] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.572, 0.322, -2.024) scan=(-3.569, 0.331, -2.016) correction=0.010 m/0.008 rad cluster_weight=0.981 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990205.044502181] [gpu_amcl_cpp]: Received LiDAR callback #2006 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990205.067077269] [gpu_amcl_cpp]: Starting AMCL scan update #2008 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990205.067990775] [gpu_amcl_cpp]: AMCL scan update #2008 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990205.158342474] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.471, -5.072, -0.978) baseline=(3.460, -5.057, -0.950) delta=(0.011, -0.015, -0.028) moved=false scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990205.219067374] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-4.103, -0.287) amcl=(-4.043, -0.278) error=0.061 m / 0.045 rad; current_map=(-4.047, -0.281, -2.590) error=0.056 m / 0.000 rad; odom=(-4.278, -0.317, -2.545) error=0.178 m / 0.045 rad; ekf=(-4.278, -0.317, -2.545) error=0.178 m / 0.045 rad; RMS=0.104 m / 0.011 rad max=0.542 m / 0.045 rad samples=4002
+[component_container-9] [INFO] [1788990205.392714983] [pure_pursuit_node]: Pure Pursuit: pose=(-4.285, -0.393, -2.796) cte=-0.009 closest=1740 target=1781 path_dist=0.009 heading_err=-0.001 steer=-0.295 speed=1.265
+[gpu_amcl_cpp_node-6] [INFO] [1788990205.592276099] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-4.488, -0.461, -2.995) scan=(-4.463, -0.442, -2.969) correction=0.032 m/0.026 rad cluster_weight=0.983 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990206.164069788] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.509, -6.232, -2.128) baseline=(3.515, -6.223, -2.096) delta=(-0.006, -0.009, -0.032) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990206.221638392] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.216, -0.256) amcl=(-5.198, -0.279) error=0.029 m / 0.000 rad; current_map=(-5.192, -0.287, 2.520) error=0.039 m / 0.005 rad; odom=(-5.486, -0.316, 2.525) error=0.276 m / 0.000 rad; ekf=(-5.486, -0.316, 2.525) error=0.276 m / 0.000 rad; RMS=0.103 m / 0.011 rad max=0.542 m / 0.063 rad samples=4155
+[component_container-9] [INFO] [1788990206.412694538] [pure_pursuit_node]: Pure Pursuit: pose=(-5.434, -0.097, 2.339) cte=-0.024 closest=1804 target=1846 path_dist=0.024 heading_err=-0.108 steer=-0.255 speed=1.366
+[gpu_amcl_cpp_node-6] [INFO] [1788990206.599382683] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.587, 0.106, 2.137) scan=(-5.580, 0.108, 2.138) correction=0.008 m/0.001 rad cluster_weight=0.979 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990207.166987236] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(2.356, -6.942, -2.880) baseline=(2.389, -6.933, -2.873) delta=(-0.033, -0.009, -0.007) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990207.225628163] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.896, 0.866) amcl=(-5.886, 0.862) error=0.011 m / 0.000 rad; current_map=(-5.883, 0.856, 1.830) error=0.016 m / 0.010 rad; odom=(-6.160, 0.874, 1.819) error=0.264 m / 0.000 rad; ekf=(-6.160, 0.874, 1.819) error=0.264 m / 0.000 rad; RMS=0.101 m / 0.012 rad max=0.542 m / 0.063 rad samples=4317
+[component_container-9] [INFO] [1788990207.417062119] [pure_pursuit_node]: Pure Pursuit: pose=(-5.948, 1.121, 1.774) cte=-0.031 closest=1870 target=1912 path_dist=0.031 heading_err=0.042 steer=-0.038 speed=1.413
+[gpu_amcl_cpp_node-6] [INFO] [1788990207.621928887] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.001, 1.395, 1.750) scan=(-5.998, 1.385, 1.747) correction=0.011 m/0.003 rad cluster_weight=0.937 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990208.169148955] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.913, -7.192, -3.038) baseline=(0.952, -7.188, -3.034) delta=(-0.039, -0.004, -0.004) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990208.225524448] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-6.131, 2.265) amcl=(-6.119, 2.247) error=0.022 m / 0.000 rad; current_map=(-6.117, 2.235, 1.676) error=0.033 m / 0.007 rad; odom=(-6.399, 2.317, 1.669) error=0.273 m / 0.000 rad; ekf=(-6.399, 2.317, 1.669) error=0.273 m / 0.000 rad; RMS=0.100 m / 0.012 rad max=0.542 m / 0.063 rad samples=4477
+[component_container-9] [INFO] [1788990208.437246207] [pure_pursuit_node]: Pure Pursuit: pose=(-6.141, 2.547, 1.646) cte=-0.002 closest=1942 target=1984 path_dist=0.002 heading_err=-0.004 steer=-0.042 speed=1.476
+[gpu_amcl_cpp_node-6] [INFO] [1788990208.645454860] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.161, 2.877, 1.610) scan=(-6.162, 2.889, 1.606) correction=0.012 m/0.004 rad cluster_weight=0.961 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990209.189182460] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.577, -7.233, 3.084) baseline=(-0.564, -7.234, 3.092) delta=(-0.012, 0.001, -0.008) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990209.227846638] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-6.166, 3.737) amcl=(-6.150, 3.734) error=0.016 m / 0.000 rad; current_map=(-6.152, 3.724, 1.520) error=0.019 m / 0.007 rad; odom=(-6.429, 3.802, 1.513) error=0.271 m / 0.000 rad; ekf=(-6.429, 3.802, 1.513) error=0.271 m / 0.000 rad; RMS=0.099 m / 0.011 rad max=0.542 m / 0.063 rad samples=4637
+[component_container-9] [INFO] [1788990209.441298916] [pure_pursuit_node]: Pure Pursuit: pose=(-6.129, 4.064, 1.461) cte=-0.010 closest=2018 target=2060 path_dist=0.010 heading_err=0.005 steer=-0.052 speed=1.451
+[gpu_amcl_cpp_node-6] [INFO] [1788990209.648238236] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.090, 4.353, 1.426) scan=(-6.086, 4.361, 1.425) correction=0.009 m/0.001 rad cluster_weight=0.980 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990210.045608337] [gpu_amcl_cpp]: Received LiDAR callback #2400 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990210.067849529] [gpu_amcl_cpp]: Starting AMCL scan update #2402 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990210.068888069] [gpu_amcl_cpp]: AMCL scan update #2402 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990210.190337909] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-2.029, -7.002, 2.869) baseline=(-2.017, -7.005, 2.878) delta=(-0.012, 0.003, -0.010) moved=false scan_age=0.017s
+[ground_truth_amcl_monitor-7] [INFO] [1788990210.240423943] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.857, 5.229) amcl=(-5.911, 5.174) error=0.077 m / 0.010 rad; current_map=(-5.907, 5.186, 1.286) error=0.067 m / 0.000 rad; odom=(-6.182, 5.258, 1.286) error=0.327 m / 0.000 rad; ekf=(-6.186, 5.246, 1.296) error=0.329 m / 0.010 rad; RMS=0.098 m / 0.011 rad max=0.542 m / 0.063 rad samples=4798
+[component_container-9] [INFO] [1788990210.443516670] [pure_pursuit_node]: Pure Pursuit: pose=(-5.811, 5.488, 1.227) cte=-0.002 closest=2091 target=2133 path_dist=0.002 heading_err=0.005 steer=-0.065 speed=1.396
+[gpu_amcl_cpp_node-6] [INFO] [1788990210.649248442] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.705, 5.752, 1.180) scan=(-5.704, 5.740, 1.183) correction=0.012 m/0.003 rad cluster_weight=0.996 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990211.193636431] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-3.372, -6.422, 2.581) baseline=(-3.340, -6.442, 2.591) delta=(-0.032, 0.020, -0.010) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990211.241816056] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.282, 6.503) amcl=(-5.344, 6.449) error=0.081 m / 0.013 rad; current_map=(-5.338, 6.459, 0.984) error=0.071 m / 0.000 rad; odom=(-5.597, 6.570, 0.984) error=0.321 m / 0.000 rad; ekf=(-5.597, 6.570, 0.984) error=0.321 m / 0.000 rad; RMS=0.097 m / 0.011 rad max=0.542 m / 0.063 rad samples=4958
+[component_container-9] [INFO] [1788990211.461959688] [pure_pursuit_node]: Pure Pursuit: pose=(-5.154, 6.712, 0.896) cte=0.008 closest=2160 target=2203 path_dist=0.008 heading_err=-0.011 steer=-0.146 speed=1.371
+[gpu_amcl_cpp_node-6] [INFO] [1788990211.671416464] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-4.973, 6.912, 0.768) scan=(-4.979, 6.906, 0.779) correction=0.009 m/0.010 rad cluster_weight=0.997 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990212.214416788] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-4.327, -5.382, 2.028) baseline=(-4.321, -5.393, 2.047) delta=(-0.006, 0.011, -0.019) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990212.243647954] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-4.321, 7.390) amcl=(-4.351, 7.356) error=0.045 m / 0.015 rad; current_map=(-4.330, 7.366, 0.461) error=0.026 m / 0.017 rad; odom=(-4.529, 7.511, 0.444) error=0.241 m / 0.000 rad; ekf=(-4.529, 7.511, 0.444) error=0.241 m / 0.000 rad; RMS=0.096 m / 0.011 rad max=0.542 m / 0.063 rad samples=5120
+[component_container-9] [INFO] [1788990212.462734391] [pure_pursuit_node]: Pure Pursuit: pose=(-4.037, 7.486, 0.335) cte=-0.008 closest=2229 target=2271 path_dist=0.008 heading_err=-0.024 steer=-0.161 speed=1.405
+[gpu_amcl_cpp_node-6] [INFO] [1788990212.671711286] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.767, 7.557, 0.191) scan=(-3.766, 7.560, 0.201) correction=0.004 m/0.010 rad cluster_weight=0.989 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990212.993617603] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990213.215866218] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-4.567, -3.988, 1.449) baseline=(-4.568, -3.999, 1.464) delta=(0.001, 0.012, -0.015) moved=false scan_age=0.018s
+[ground_truth_amcl_monitor-7] [INFO] [1788990213.244112544] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.971, 7.594) amcl=(-2.972, 7.588) error=0.006 m / 0.014 rad; current_map=(-2.950, 7.585, -0.114) error=0.022 m / 0.018 rad; odom=(-3.129, 7.718, -0.131) error=0.201 m / 0.000 rad; ekf=(-3.129, 7.718, -0.131) error=0.201 m / 0.000 rad; RMS=0.096 m / 0.011 rad max=0.542 m / 0.063 rad samples=5280
+[component_container-9] [INFO] [1788990213.465235816] [pure_pursuit_node]: Pure Pursuit: pose=(-2.637, 7.525, -0.274) cte=-0.013 closest=2300 target=2342 path_dist=0.013 heading_err=0.010 steer=-0.132 speed=1.410
+[gpu_amcl_cpp_node-6] [INFO] [1788990213.672394768] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.371, 7.438, -0.366) scan=(-2.376, 7.433, -0.368) correction=0.008 m/0.001 rad cluster_weight=0.973 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990214.218826685] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-4.020, -2.641, 0.953) baseline=(-4.041, -2.672, 0.963) delta=(0.022, 0.031, -0.010) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990214.249426220] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.678, 7.049) amcl=(-1.665, 7.045) error=0.014 m / 0.000 rad; current_map=(-1.672, 7.050, -0.615) error=0.007 m / 0.014 rad; odom=(-1.812, 7.157, -0.629) error=0.171 m / 0.000 rad; ekf=(-1.812, 7.157, -0.629) error=0.171 m / 0.000 rad; RMS=0.095 m / 0.011 rad max=0.542 m / 0.063 rad samples=5441
+[component_container-9] [INFO] [1788990214.468463595] [pure_pursuit_node]: Pure Pursuit: pose=(-1.419, 6.846, -0.724) cte=-0.002 closest=2370 target=2412 path_dist=0.002 heading_err=0.007 steer=-0.081 speed=1.454
+[gpu_amcl_cpp_node-6] [INFO] [1788990214.673300426] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.201, 6.647, -0.783) scan=(-1.214, 6.655, -0.783) correction=0.015 m/0.000 rad cluster_weight=0.984 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990215.063272206] [gpu_amcl_cpp]: Received LiDAR callback #2803 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990215.094142640] [gpu_amcl_cpp]: Starting AMCL scan update #2806 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990215.094734371] [gpu_amcl_cpp]: AMCL scan update #2806 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990215.238188757] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-2.963, -1.617, 0.609) baseline=(-2.974, -1.624, 0.620) delta=(0.010, 0.007, -0.011) moved=false scan_age=0.015s
+[ground_truth_amcl_monitor-7] [INFO] [1788990215.249360284] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.685, 6.016) amcl=(-0.678, 6.015) error=0.007 m / 0.000 rad; current_map=(-0.681, 6.023, -0.947) error=0.007 m / 0.011 rad; odom=(-0.803, 6.102, -0.958) error=0.146 m / 0.000 rad; ekf=(-0.803, 6.102, -0.958) error=0.146 m / 0.000 rad; RMS=0.094 m / 0.011 rad max=0.542 m / 0.063 rad samples=5601
+[component_container-9] [INFO] [1788990215.486774434] [pure_pursuit_node]: Pure Pursuit: pose=(-0.480, 5.711, -1.006) cte=-0.007 closest=2444 target=2486 path_dist=0.007 heading_err=-0.004 steer=-0.060 speed=1.452
+[gpu_amcl_cpp_node-6] [INFO] [1788990215.697450659] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.328, 5.461, -1.056) scan=(-0.327, 5.451, -1.060) correction=0.010 m/0.004 rad cluster_weight=0.971 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990216.239582311] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-1.685, -0.902, 0.423) baseline=(-1.699, -0.908, 0.430) delta=(0.013, 0.006, -0.008) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990216.251584307] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.022, 4.752) amcl=(0.031, 4.748) error=0.010 m / 0.000 rad; current_map=(0.026, 4.755, -1.136) error=0.005 m / 0.008 rad; odom=(-0.092, 4.820, -1.144) error=0.132 m / 0.000 rad; ekf=(-0.092, 4.820, -1.144) error=0.132 m / 0.000 rad; RMS=0.093 m / 0.011 rad max=0.542 m / 0.063 rad samples=5761
+[component_container-9] [INFO] [1788990216.487851503] [pure_pursuit_node]: Pure Pursuit: pose=(0.169, 4.440, -1.168) cte=-0.011 closest=2515 target=2557 path_dist=0.011 heading_err=-0.001 steer=-0.039 speed=1.463
+[gpu_amcl_cpp_node-6] [INFO] [1788990216.722880515] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.296, 4.110, -1.200) scan=(0.306, 4.068, -1.210) correction=0.043 m/0.010 rad cluster_weight=0.932 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990217.241731083] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.279, -0.360, 0.318) baseline=(-0.312, -0.371, 0.320) delta=(0.033, 0.011, -0.003) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990217.264668862] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.619, 3.344) amcl=(0.561, 3.376) error=0.066 m / 0.006 rad; current_map=(0.565, 3.363, -1.259) error=0.057 m / 0.000 rad; odom=(0.444, 3.424, -1.259) error=0.192 m / 0.000 rad; ekf=(0.444, 3.424, -1.259) error=0.192 m / 0.000 rad; RMS=0.092 m / 0.011 rad max=0.542 m / 0.063 rad samples=5922
+[gpu_amcl_cpp_node-6] [WARN] [1788990217.422587538] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[component_container-9] [INFO] [1788990217.489322633] [pure_pursuit_node]: Pure Pursuit: pose=(0.667, 3.128, -1.278) cte=-0.029 closest=2585 target=41 path_dist=0.029 heading_err=0.009 steer=-0.036 speed=1.421
+[gpu_amcl_cpp_node-6] [INFO] [1788990217.746447482] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.765, 2.748, -1.304) scan=(0.765, 2.754, -1.312) correction=0.005 m/0.008 rad cluster_weight=0.966 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990218.242956341] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.140, 0.035, 0.242) baseline=(1.102, 0.026, 0.243) delta=(0.037, 0.009, -0.001) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990218.268574513] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.005, 1.939) amcl=(0.943, 2.102) error=0.174 m / 0.005 rad; current_map=(0.946, 2.089, -1.334) error=0.161 m / 0.000 rad; odom=(0.838, 2.006, -1.334) error=0.179 m / 0.000 rad; ekf=(0.838, 2.006, -1.334) error=0.179 m / 0.000 rad; RMS=0.093 m / 0.011 rad max=0.542 m / 0.063 rad samples=6082
+[component_container-9] [INFO] [1788990218.489685371] [pure_pursuit_node]: Pure Pursuit: pose=(1.019, 1.742, -1.349) cte=-0.006 closest=71 target=113 path_dist=0.006 heading_err=-0.002 steer=-0.029 speed=1.476
+[gpu_amcl_cpp_node-6] [INFO] [1788990218.748445962] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.085, 1.412, -1.376) scan=(1.083, 1.411, -1.382) correction=0.002 m/0.005 rad cluster_weight=0.919 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990219.195228692] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990219.263712871] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(2.608, 0.324, 0.147) baseline=(2.596, 0.322, 0.153) delta=(0.012, 0.002, -0.006) moved=false scan_age=0.016s
+[ground_truth_amcl_monitor-7] [INFO] [1788990219.268786527] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.240, 0.505) amcl=(1.200, 0.817) error=0.315 m / 0.002 rad; current_map=(1.203, 0.794, -1.413) error=0.291 m / 0.006 rad; odom=(1.127, 0.526, -1.419) error=0.114 m / 0.000 rad; ekf=(1.127, 0.526, -1.419) error=0.114 m / 0.000 rad; RMS=0.098 m / 0.011 rad max=0.542 m / 0.063 rad samples=6244
+[component_container-9] [INFO] [1788990219.491601495] [pure_pursuit_node]: Pure Pursuit: pose=(1.248, 0.545, -1.447) cte=-0.015 closest=132 target=174 path_dist=0.015 heading_err=0.018 steer=-0.024 speed=1.455
+[gpu_amcl_cpp_node-6] [INFO] [1788990219.871551867] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.311, 0.071, -1.482) scan=(1.320, 0.006, -1.463) correction=0.066 m/0.019 rad cluster_weight=0.907 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990220.065398092] [gpu_amcl_cpp]: Received LiDAR callback #3203 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990220.094299088] [gpu_amcl_cpp]: Starting AMCL scan update #3206 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990220.094942686] [gpu_amcl_cpp]: AMCL scan update #3206 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990220.264728173] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.077, 0.469, 0.034) baseline=(4.065, 0.468, 0.043) delta=(0.011, 0.000, -0.008) moved=false scan_age=0.017s
+[ground_truth_amcl_monitor-7] [INFO] [1788990220.269351584] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.384, -0.946) amcl=(1.364, -0.987) error=0.046 m / 0.004 rad; current_map=(1.365, -1.012, -1.524) error=0.069 m / 0.008 rad; odom=(1.270, -0.944, -1.532) error=0.114 m / 0.000 rad; ekf=(1.269, -0.918, -1.536) error=0.118 m / 0.004 rad; RMS=0.112 m / 0.011 rad max=0.542 m / 0.063 rad samples=6404
+[component_container-9] [INFO] [1788990220.492052207] [pure_pursuit_node]: Pure Pursuit: pose=(1.386, -1.351, -1.578) cte=-0.022 closest=227 target=269 path_dist=0.022 heading_err=0.002 steer=-0.040 speed=1.442
+[gpu_amcl_cpp_node-6] [INFO] [1788990220.872325155] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.378, -1.847, -1.626) scan=(1.373, -1.869, -1.628) correction=0.023 m/0.001 rad cluster_weight=0.945 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990221.268728340] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(5.572, 0.411, -0.087) baseline=(5.535, 0.415, -0.086) delta=(0.037, -0.003, -0.001) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990221.276391779] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.330, -2.403) amcl=(1.331, -2.407) error=0.004 m / 0.000 rad; current_map=(1.332, -2.406, -1.652) error=0.004 m / 0.005 rad; odom=(1.212, -2.414, -1.658) error=0.119 m / 0.000 rad; ekf=(1.212, -2.414, -1.658) error=0.119 m / 0.000 rad; RMS=0.111 m / 0.011 rad max=0.542 m / 0.063 rad samples=6565
+[component_container-9] [INFO] [1788990221.512321371] [pure_pursuit_node]: Pure Pursuit: pose=(1.300, -2.781, -1.664) cte=-0.008 closest=298 target=341 path_dist=0.008 heading_err=-0.000 steer=-0.026 speed=1.474
+[gpu_amcl_cpp_node-6] [INFO] [1788990221.898017081] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.246, -3.275, -1.695) scan=(1.249, -3.259, -1.694) correction=0.016 m/0.001 rad cluster_weight=0.961 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990222.270595622] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(7.049, 0.237, -0.143) baseline=(7.016, 0.242, -0.142) delta=(0.033, -0.005, -0.001) moved=true scan_age=0.003s
+[ground_truth_amcl_monitor-7] [INFO] [1788990222.277585707] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.161, -3.859) amcl=(1.171, -3.828) error=0.033 m / 0.000 rad; current_map=(1.176, -3.811, -1.709) error=0.050 m / 0.006 rad; odom=(1.037, -3.891, -1.714) error=0.129 m / 0.000 rad; ekf=(1.037, -3.891, -1.714) error=0.129 m / 0.000 rad; RMS=0.110 m / 0.011 rad max=0.542 m / 0.063 rad samples=6725
+[component_container-9] [INFO] [1788990222.515699169] [pure_pursuit_node]: Pure Pursuit: pose=(1.116, -4.213, -1.721) cte=-0.007 closest=370 target=413 path_dist=0.007 heading_err=-0.006 steer=-0.023 speed=1.479
+[gpu_amcl_cpp_node-6] [INFO] [1788990222.899343087] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.029, -4.715, -1.744) scan=(1.034, -4.687, -1.740) correction=0.028 m/0.003 rad cluster_weight=0.951 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990223.079292698] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990223.272785309] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(8.463, -0.006, -0.194) baseline=(8.459, -0.005, -0.189) delta=(0.005, -0.001, -0.005) moved=false scan_age=0.021s
+[ground_truth_amcl_monitor-7] [INFO] [1788990223.277560254] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.911, -5.336) amcl=(0.931, -5.247) error=0.091 m / 0.001 rad; current_map=(0.926, -5.278, -1.756) error=0.060 m / 0.005 rad; odom=(0.794, -5.305, -1.765) error=0.121 m / 0.004 rad; ekf=(0.794, -5.305, -1.765) error=0.121 m / 0.004 rad; RMS=0.109 m / 0.010 rad max=0.542 m / 0.063 rad samples=6876
+[component_container-9] [INFO] [1788990223.518915965] [pure_pursuit_node]: Pure Pursuit: pose=(0.852, -5.658, -1.774) cte=-0.004 closest=444 target=486 path_dist=0.004 heading_err=0.003 steer=-0.009 speed=1.487
+[gpu_amcl_cpp_node-6] [INFO] [1788990223.925270975] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.727, -6.247, -1.784) scan=(0.730, -6.267, -1.786) correction=0.020 m/0.002 rad cluster_weight=0.959 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990224.293196168] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(10.152, -0.371, -0.236) baseline=(10.135, -0.367, -0.231) delta=(0.017, -0.004, -0.004) moved=false scan_age=0.020s
+[ground_truth_amcl_monitor-7] [INFO] [1788990224.294715872] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.542, -7.107) amcl=(0.556, -6.999) error=0.109 m / 0.004 rad; current_map=(0.552, -7.016, -1.806) error=0.092 m / 0.000 rad; odom=(0.429, -6.994, -1.807) error=0.160 m / 0.000 rad; ekf=(0.429, -6.994, -1.807) error=0.160 m / 0.000 rad; RMS=0.109 m / 0.010 rad max=0.542 m / 0.063 rad samples=7038
+[component_container-9] [INFO] [1788990224.521409732] [pure_pursuit_node]: Pure Pursuit: pose=(0.372, -7.779, -1.819) cte=-0.008 closest=553 target=600 path_dist=0.008 heading_err=-0.003 steer=-0.043 speed=3.746
+[gpu_amcl_cpp_node-6] [INFO] [1788990224.943427031] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.003, -8.923, -2.011) scan=(-0.045, -9.004, -1.994) correction=0.091 m/0.017 rad cluster_weight=0.990 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990225.075740669] [gpu_amcl_cpp]: Received LiDAR callback #3601 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990225.105498013] [gpu_amcl_cpp]: Starting AMCL scan update #3604 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990225.106125841] [gpu_amcl_cpp]: AMCL scan update #3604 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990225.295474922] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(12.637, -1.402, -0.844) baseline=(12.608, -1.369, -0.851) delta=(0.030, -0.034, 0.007) moved=true scan_age=0.004s
+[ground_truth_amcl_monitor-7] [INFO] [1788990225.296883206] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.597, -9.859) amcl=(-0.548, -9.808) error=0.070 m / 0.000 rad; current_map=(-0.545, -9.803, -2.422) error=0.076 m / 0.000 rad; odom=(-0.569, -9.449, -2.422) error=0.410 m / 0.000 rad; ekf=(-0.569, -9.449, -2.422) error=0.410 m / 0.000 rad; RMS=0.109 m / 0.011 rad max=0.542 m / 0.063 rad samples=7199
+[component_container-9] [INFO] [1788990225.536078099] [pure_pursuit_node]: Pure Pursuit: pose=(-1.117, -10.111, -2.913) cte=-0.033 closest=697 target=742 path_dist=0.033 heading_err=-0.025 steer=-0.288 speed=2.440
+[gpu_amcl_cpp_node-6] [WARN] [1788990225.618261791] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990225.945993174] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.033, -9.947, 2.587) scan=(-2.040, -9.941, 2.613) correction=0.009 m/0.026 rad cluster_weight=0.988 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990226.299490286] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.665, -9.260) amcl=(-2.672, -9.226) error=0.035 m / 0.000 rad; current_map=(-2.669, -9.233, 2.097) error=0.027 m / 0.034 rad; odom=(-2.699, -8.881, 2.063) error=0.380 m / 0.000 rad; ekf=(-2.699, -8.881, 2.063) error=0.380 m / 0.000 rad; RMS=0.108 m / 0.011 rad max=0.542 m / 0.063 rad samples=7361
+[gpu_amcl_cpp_node-6] [INFO] [1788990226.313634053] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(12.019, -3.510, -2.679) baseline=(12.040, -3.499, -2.649) delta=(-0.021, -0.011, -0.030) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990226.539737935] [pure_pursuit_node]: Pure Pursuit: pose=(-2.981, -8.436, 1.858) cte=-0.006 closest=834 target=882 path_dist=0.006 heading_err=0.007 steer=-0.082 speed=3.824
+[gpu_amcl_cpp_node-6] [INFO] [1788990226.946937802] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.168, -7.044, 1.577) scan=(-3.158, -7.039, 1.588) correction=0.011 m/0.010 rad cluster_weight=0.995 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990227.300230941] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.056, -5.634) amcl=(-3.018, -5.595) error=0.054 m / 0.000 rad; current_map=(-3.018, -5.604, 1.380) error=0.049 m / 0.000 rad; odom=(-3.065, -5.301, 1.380) error=0.332 m / 0.000 rad; ekf=(-3.065, -5.301, 1.380) error=0.332 m / 0.000 rad; RMS=0.107 m / 0.011 rad max=0.542 m / 0.063 rad samples=7521
+[gpu_amcl_cpp_node-6] [INFO] [1788990227.314080335] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(8.432, -3.860, 2.933) baseline=(8.460, -3.865, 2.950) delta=(-0.028, 0.006, -0.017) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990227.542018922] [pure_pursuit_node]: Pure Pursuit: pose=(-2.823, -4.707, 1.278) cte=-0.032 closest=1023 target=1070 path_dist=0.032 heading_err=0.001 steer=-0.016 speed=3.803
+[gpu_amcl_cpp_node-6] [INFO] [1788990227.947597935] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.345, -3.209, 1.303) scan=(-2.366, -3.205, 1.291) correction=0.022 m/0.012 rad cluster_weight=0.950 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990228.300772752] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.037, -1.890) amcl=(-2.006, -1.868) error=0.039 m / 0.000 rad; current_map=(-1.994, -1.874, 1.324) error=0.047 m / 0.000 rad; odom=(-2.066, -1.681, 1.324) error=0.211 m / 0.000 rad; ekf=(-2.066, -1.681, 1.324) error=0.211 m / 0.000 rad; RMS=0.106 m / 0.011 rad max=0.542 m / 0.063 rad samples=7681
+[gpu_amcl_cpp_node-6] [INFO] [1788990228.317926300] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.757, -2.845, 2.894) baseline=(4.815, -2.859, 2.888) delta=(-0.058, 0.015, 0.007) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990228.563958721] [pure_pursuit_node]: Pure Pursuit: pose=(-1.725, -0.804, 1.341) cte=0.011 closest=1225 target=1273 path_dist=0.011 heading_err=-0.002 steer=0.018 speed=3.913
+[gpu_amcl_cpp_node-6] [WARN] [1788990228.744162600] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990228.948203757] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.419, 0.606, 1.395) scan=(-1.460, 0.608, 1.385) correction=0.041 m/0.011 rad cluster_weight=0.933 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990229.315010339] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.233, 1.919) amcl=(-1.290, 1.863) error=0.080 m / 0.013 rad; current_map=(-1.289, 1.882, 1.526) error=0.067 m / 0.000 rad; odom=(-1.363, 1.900, 1.526) error=0.132 m / 0.000 rad; ekf=(-1.364, 1.881, 1.513) error=0.137 m / 0.013 rad; RMS=0.105 m / 0.011 rad max=0.542 m / 0.063 rad samples=7842
+[gpu_amcl_cpp_node-6] [INFO] [1788990229.318249521] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.224, -2.162, 3.106) baseline=(1.277, -2.165, 3.084) delta=(-0.053, 0.002, 0.022) moved=true scan_age=0.003s
+[component_container-9] [INFO] [1788990229.567845513] [pure_pursuit_node]: Pure Pursuit: pose=(-1.309, 2.687, 1.737) cte=-0.005 closest=1402 target=1444 path_dist=0.005 heading_err=0.006 steer=0.148 speed=1.967
+[gpu_amcl_cpp_node-6] [INFO] [1788990229.950894512] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.537, 3.440, 2.106) scan=(-1.573, 3.436, 2.104) correction=0.036 m/0.003 rad cluster_weight=0.986 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990230.090260572] [gpu_amcl_cpp]: Received LiDAR callback #4007 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990230.116287251] [gpu_amcl_cpp]: Starting AMCL scan update #4009 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990230.117205736] [gpu_amcl_cpp]: AMCL scan update #4009 completed; evaluating pose confidence.
+[ground_truth_amcl_monitor-7] [INFO] [1788990230.316088466] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.994, 3.809) amcl=(-2.024, 3.849) error=0.050 m / 0.046 rad; current_map=(-2.036, 3.853, 2.845) error=0.061 m / 0.000 rad; odom=(-2.091, 3.501, 2.845) error=0.323 m / 0.000 rad; ekf=(-2.091, 3.501, 2.845) error=0.323 m / 0.000 rad; RMS=0.105 m / 0.011 rad max=0.542 m / 0.063 rad samples=8002
+[gpu_amcl_cpp_node-6] [INFO] [1788990230.320538622] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.351, -2.919, -1.861) baseline=(-0.342, -2.891, -1.867) delta=(-0.008, -0.028, 0.007) moved=true scan_age=0.005s
+[component_container-9] [INFO] [1788990230.588011912] [pure_pursuit_node]: Pure Pursuit: pose=(-2.489, 3.852, -2.841) cte=0.019 closest=1496 target=1538 path_dist=0.019 heading_err=-0.041 steer=0.385 speed=1.842
+[gpu_amcl_cpp_node-6] [INFO] [1788990230.969825591] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.997, 3.372, -2.093) scan=(-2.950, 3.379, -2.104) correction=0.047 m/0.011 rad cluster_weight=0.968 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990231.317229822] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.165, 2.585) amcl=(-3.204, 2.585) error=0.039 m / 0.018 rad; current_map=(-3.205, 2.565, -1.623) error=0.045 m / 0.000 rad; odom=(-3.302, 2.310, -1.623) error=0.307 m / 0.000 rad; ekf=(-3.302, 2.310, -1.623) error=0.307 m / 0.000 rad; RMS=0.104 m / 0.012 rad max=0.542 m / 0.115 rad samples=8155
+[gpu_amcl_cpp_node-6] [INFO] [1788990231.339730300] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.918, -4.106, -0.033) baseline=(0.897, -4.105, -0.048) delta=(0.022, -0.001, 0.015) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990231.588432314] [pure_pursuit_node]: Pure Pursuit: pose=(-3.222, 1.684, -1.670) cte=-0.034 closest=1617 target=1665 path_dist=0.034 heading_err=-0.018 steer=-0.056 speed=3.273
+[gpu_amcl_cpp_node-6] [INFO] [1788990231.973655646] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.444, 0.608, -1.858) scan=(-3.483, 0.579, -1.849) correction=0.049 m/0.009 rad cluster_weight=0.982 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990232.318410432] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.755, -0.100) amcl=(-3.754, -0.067) error=0.033 m / 0.042 rad; current_map=(-3.760, -0.074, -2.312) error=0.026 m / 0.000 rad; odom=(-3.784, -0.125, -2.312) error=0.039 m / 0.000 rad; ekf=(-3.784, -0.125, -2.312) error=0.039 m / 0.000 rad; RMS=0.104 m / 0.012 rad max=0.542 m / 0.115 rad samples=8314
+[gpu_amcl_cpp_node-6] [INFO] [1788990232.340604905] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.321, -4.618, -0.780) baseline=(3.313, -4.610, -0.737) delta=(0.008, -0.008, -0.043) moved=true scan_age=0.017s
+[gpu_amcl_cpp_node-6] [WARN] [1788990232.469243893] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990232.588649685] [pure_pursuit_node]: Pure Pursuit: pose=(-4.178, -0.429, -2.724) cte=-0.082 closest=1736 target=1779 path_dist=0.082 heading_err=-0.011 steer=-0.321 speed=1.850
+[gpu_amcl_cpp_node-6] [INFO] [1788990232.993737004] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-4.879, -0.466, 2.875) scan=(-4.830, -0.459, 2.910) correction=0.049 m/0.035 rad cluster_weight=0.979 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990233.319644482] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.409, -0.113) amcl=(-5.410, -0.154) error=0.041 m / 0.043 rad; current_map=(-5.421, -0.142, 2.304) error=0.032 m / 0.000 rad; odom=(-5.481, -0.174, 2.304) error=0.095 m / 0.000 rad; ekf=(-5.481, -0.174, 2.304) error=0.095 m / 0.000 rad; RMS=0.103 m / 0.012 rad max=0.542 m / 0.115 rad samples=8474
+[gpu_amcl_cpp_node-6] [INFO] [1788990233.345837864] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.266, -6.338, -2.446) baseline=(3.295, -6.315, -2.447) delta=(-0.028, -0.023, 0.001) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990233.589903241] [pure_pursuit_node]: Pure Pursuit: pose=(-5.797, 0.474, 1.941) cte=-0.076 closest=1837 target=1883 path_dist=0.076 heading_err=-0.013 steer=-0.125 speed=3.362
+[gpu_amcl_cpp_node-6] [INFO] [1788990233.998315142] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.062, 1.814, 1.706) scan=(-6.074, 1.805, 1.704) correction=0.015 m/0.003 rad cluster_weight=0.959 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990234.324808270] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-6.123, 3.069) amcl=(-6.137, 2.947) error=0.123 m / 0.000 rad; current_map=(-6.167, 2.935, 1.604) error=0.140 m / 0.000 rad; odom=(-6.186, 2.913, 1.604) error=0.168 m / 0.000 rad; ekf=(-6.186, 2.913, 1.604) error=0.168 m / 0.000 rad; RMS=0.103 m / 0.012 rad max=0.542 m / 0.115 rad samples=8635
+[gpu_amcl_cpp_node-6] [INFO] [1788990234.345883331] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.087, -6.991, -3.111) baseline=(0.170, -6.989, -3.104) delta=(-0.082, -0.002, -0.007) moved=true scan_age=0.004s
+[gpu_amcl_cpp_node-6] [WARN] [1788990234.521677029] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990234.592447067] [pure_pursuit_node]: Pure Pursuit: pose=(-6.112, 4.083, 1.476) cte=0.005 closest=2019 target=2066 path_dist=0.005 heading_err=-0.014 steer=-0.053 speed=3.889
+[gpu_amcl_cpp_node-6] [INFO] [1788990234.999722318] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.808, 5.508, 1.218) scan=(-5.801, 5.535, 1.224) correction=0.028 m/0.005 rad cluster_weight=0.993 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990235.119844909] [gpu_amcl_cpp]: Received LiDAR callback #4411 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990235.119923337] [gpu_amcl_cpp]: Starting AMCL scan update #4411 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990235.120592674] [gpu_amcl_cpp]: AMCL scan update #4411 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [WARN] [1788990235.135278405] [gpu_amcl_cpp]: Dropping out-of-order LiDAR scan at 1788990235.120838 s; last processed 1788990235.126435 s.
+[ground_truth_amcl_monitor-7] [INFO] [1788990235.327305425] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.370, 6.488) amcl=(-5.357, 6.434) error=0.055 m / 0.000 rad; current_map=(-5.370, 6.399, 1.024) error=0.089 m / 0.001 rad; odom=(-5.543, 5.994, 1.023) error=0.523 m / 0.000 rad; ekf=(-5.543, 5.994, 1.023) error=0.523 m / 0.000 rad; RMS=0.103 m / 0.012 rad max=0.542 m / 0.115 rad samples=8796
+[gpu_amcl_cpp_node-6] [INFO] [1788990235.364604780] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-2.909, -6.298, 2.577) baseline=(-2.886, -6.312, 2.588) delta=(-0.023, 0.014, -0.010) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990235.611902013] [pure_pursuit_node]: Pure Pursuit: pose=(-4.764, 7.143, 0.655) cte=-0.039 closest=2189 target=2237 path_dist=0.039 heading_err=-0.033 steer=-0.167 speed=3.136
+[gpu_amcl_cpp_node-6] [INFO] [1788990236.016748520] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.677, 7.590, 0.119) scan=(-3.631, 7.601, 0.147) correction=0.047 m/0.028 rad cluster_weight=0.980 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990236.232925926] [gpu_amcl_cpp]: Dropping out-of-order LiDAR scan at 1788990236.188192 s; last processed 1788990236.193471 s.
+[gpu_amcl_cpp_node-6] [WARN] [1788990236.232975139] [gpu_amcl_cpp]: Dropping scan #1 — PF can't keep up
+[ground_truth_amcl_monitor-7] [INFO] [1788990236.328584717] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.728, 7.580) amcl=(-2.814, 7.584) error=0.086 m / 0.000 rad; current_map=(-2.763, 7.572, -0.216) error=0.036 m / 0.000 rad; odom=(-3.067, 6.997, -0.216) error=0.675 m / 0.000 rad; ekf=(-3.067, 6.997, -0.216) error=0.675 m / 0.000 rad; RMS=0.103 m / 0.012 rad max=0.542 m / 0.115 rad samples=8936
+[gpu_amcl_cpp_node-6] [INFO] [1788990236.371045929] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-3.821, -3.803, 1.305) baseline=(-3.836, -3.857, 1.305) delta=(0.015, 0.054, 0.000) moved=true scan_age=0.023s
+[component_container-9] [INFO] [1788990236.656913645] [pure_pursuit_node]: Pure Pursuit: pose=(-1.785, 7.142, -0.659) cte=-0.017 closest=2347 target=2394 path_dist=0.017 heading_err=0.084 steer=-0.050 speed=3.780
+[gpu_amcl_cpp_node-6] [WARN] [1788990236.773091576] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [WARN] [1788990236.775239380] [gpu_amcl_cpp]: Dropping scan #2 — PF can't keep up
+[gpu_amcl_cpp_node-6] [INFO] [1788990237.018104409] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.698, 5.989, -0.946) scan=(-0.632, 5.995, -0.935) correction=0.066 m/0.010 rad cluster_weight=0.980 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990237.328528486] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.111, 4.963) amcl=(-0.082, 4.966) error=0.029 m / 0.000 rad; current_map=(-0.060, 4.969, -1.120) error=0.051 m / 0.000 rad; odom=(-0.809, 4.781, -1.120) error=0.721 m / 0.000 rad; ekf=(-0.809, 4.781, -1.120) error=0.721 m / 0.000 rad; RMS=0.103 m / 0.012 rad max=0.542 m / 0.115 rad samples=9082
+[gpu_amcl_cpp_node-6] [INFO] [1788990237.391899426] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-1.433, -1.521, 0.417) baseline=(-1.454, -1.530, 0.432) delta=(0.022, 0.010, -0.014) moved=true scan_age=0.018s
+[component_container-9] [INFO] [1788990237.665585172] [pure_pursuit_node]: Pure Pursuit: pose=(0.450, 3.788, -1.226) cte=-0.033 closest=2551 target=15 path_dist=0.033 heading_err=0.004 steer=-0.048 speed=3.772
+[gpu_amcl_cpp_node-6] [WARN] [1788990238.001310287] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990238.054351688] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.840, 2.607, -1.305) scan=(0.813, 2.620, -1.312) correction=0.030 m/0.008 rad cluster_weight=0.949 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990238.342401278] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.123, 1.289) amcl=(1.033, 1.693) error=0.414 m / 0.014 rad; current_map=(1.036, 1.672, -1.403) error=0.393 m / 0.000 rad; odom=(0.245, 1.449, -1.403) error=0.892 m / 0.000 rad; ekf=(0.245, 1.449, -1.403) error=0.892 m / 0.000 rad; RMS=0.108 m / 0.012 rad max=0.542 m / 0.115 rad samples=9243
+[gpu_amcl_cpp_node-6] [INFO] [1788990238.392368702] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.889, -0.525, 0.150) baseline=(1.858, -0.530, 0.172) delta=(0.030, 0.005, -0.022) moved=true scan_age=0.019s
+[component_container-9] [INFO] [1788990238.665935185] [pure_pursuit_node]: Pure Pursuit: pose=(1.215, 0.709, -1.418) cte=-0.006 closest=123 target=171 path_dist=0.006 heading_err=0.001 steer=-0.027 speed=3.928
+[gpu_amcl_cpp_node-6] [WARN] [1788990238.889529085] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990239.067909414] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.409, -1.229, -1.587) scan=(1.432, -1.243, -1.578) correction=0.028 m/0.009 rad cluster_weight=0.926 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990239.346848307] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.339, -2.507) amcl=(1.344, -2.402) error=0.105 m / 0.000 rad; current_map=(1.337, -2.390, -1.689) error=0.117 m / 0.000 rad; odom=(0.455, -2.121, -1.689) error=0.965 m / 0.000 rad; ekf=(0.455, -2.121, -1.689) error=0.965 m / 0.000 rad; RMS=0.127 m / 0.012 rad max=0.821 m / 0.115 rad samples=9404
+[gpu_amcl_cpp_node-6] [INFO] [1788990239.394584537] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(5.510, -0.372, -0.110) baseline=(5.450, -0.365, -0.122) delta=(0.061, -0.007, 0.012) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990239.668691316] [pure_pursuit_node]: Pure Pursuit: pose=(1.196, -3.703, -1.715) cte=-0.012 closest=345 target=392 path_dist=0.012 heading_err=0.007 steer=-0.018 speed=3.913
+[gpu_amcl_cpp_node-6] [INFO] [1788990240.069284922] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.948, -5.209, -1.766) scan=(0.935, -5.209, -1.763) correction=0.013 m/0.003 rad cluster_weight=0.941 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990240.139088078] [gpu_amcl_cpp]: Received LiDAR callback #4823 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990240.139154704] [gpu_amcl_cpp]: Starting AMCL scan update #4823 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990240.139733239] [gpu_amcl_cpp]: AMCL scan update #4823 completed; evaluating pose confidence.
+[ground_truth_amcl_monitor-7] [INFO] [1788990240.347302314] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.683, -6.354) amcl=(0.723, -6.257) error=0.106 m / 0.000 rad; current_map=(0.731, -6.262, -1.802) error=0.104 m / 0.000 rad; odom=(-0.158, -5.866, -1.802) error=0.973 m / 0.000 rad; ekf=(-0.158, -5.866, -1.802) error=0.973 m / 0.000 rad; RMS=0.126 m / 0.012 rad max=0.821 m / 0.115 rad samples=9564
+[gpu_amcl_cpp_node-6] [INFO] [1788990240.414274232] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(9.300, -1.021, -0.233) baseline=(9.266, -1.013, -0.221) delta=(0.035, -0.008, -0.013) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990240.688912229] [pure_pursuit_node]: Pure Pursuit: pose=(0.404, -7.670, -1.796) cte=-0.012 closest=547 target=598 path_dist=0.012 heading_err=-0.019 steer=-0.055 speed=3.770
+[gpu_amcl_cpp_node-6] [WARN] [1788990240.894299996] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990241.075351331] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.041, -8.866, -1.977) scan=(0.023, -8.921, -1.967) correction=0.058 m/0.010 rad cluster_weight=0.992 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990241.348761878] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.426, -9.604) amcl=(-0.325, -9.537) error=0.121 m / 0.052 rad; current_map=(-0.331, -9.544, -2.242) error=0.112 m / 0.000 rad; odom=(-1.073, -8.752, -2.242) error=1.070 m / 0.000 rad; ekf=(-1.073, -8.752, -2.242) error=1.070 m / 0.000 rad; RMS=0.126 m / 0.012 rad max=0.821 m / 0.115 rad samples=9723
+[gpu_amcl_cpp_node-6] [INFO] [1788990241.417716126] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(12.038, -1.982, -0.777) baseline=(12.023, -1.969, -0.731) delta=(0.015, -0.014, -0.046) moved=true scan_age=0.019s
+[component_container-9] [INFO] [1788990241.692147415] [pure_pursuit_node]: Pure Pursuit: pose=(-1.050, -10.085, -2.887) cte=-0.022 closest=693 target=738 path_dist=0.022 heading_err=-0.004 steer=-0.280 speed=2.490
+[gpu_amcl_cpp_node-6] [INFO] [1788990242.093977089] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.971, -9.973, 2.628) scan=(-2.003, -9.965, 2.661) correction=0.033 m/0.033 rad cluster_weight=0.988 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990242.348947065] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.429, -9.592) amcl=(-2.467, -9.551) error=0.056 m / 0.014 rad; current_map=(-2.496, -9.512, 2.217) error=0.105 m / 0.000 rad; odom=(-3.131, -8.696, 2.217) error=1.138 m / 0.000 rad; ekf=(-3.131, -8.696, 2.217) error=1.138 m / 0.000 rad; RMS=0.125 m / 0.013 rad max=0.821 m / 0.115 rad samples=9885
+[gpu_amcl_cpp_node-6] [INFO] [1788990242.421338275] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(11.686, -4.041, -2.589) baseline=(11.729, -4.015, -2.604) delta=(-0.042, -0.026, 0.015) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990242.694855026] [pure_pursuit_node]: Pure Pursuit: pose=(-2.957, -8.501, 1.874) cte=-0.003 closest=830 target=878 path_dist=0.003 heading_err=0.008 steer=-0.081 speed=3.843
+[gpu_amcl_cpp_node-6] [WARN] [1788990242.932708304] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990243.094029124] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.168, -7.097, 1.579) scan=(-3.194, -7.093, 1.593) correction=0.025 m/0.014 rad cluster_weight=0.995 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990243.350615443] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.108, -6.140) amcl=(-3.109, -6.113) error=0.027 m / 0.000 rad; current_map=(-3.115, -6.101, 1.443) error=0.040 m / 0.000 rad; odom=(-3.703, -5.646, 1.443) error=0.774 m / 0.000 rad; ekf=(-3.703, -5.646, 1.443) error=0.774 m / 0.000 rad; RMS=0.125 m / 0.013 rad max=0.821 m / 0.115 rad samples=10034
+[gpu_amcl_cpp_node-6] [INFO] [1788990243.438379759] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(8.482, -4.455, 2.964) baseline=(8.512, -4.460, 2.987) delta=(-0.031, 0.005, -0.023) moved=true scan_age=0.015s
+[component_container-9] [INFO] [1788990243.712247037] [pure_pursuit_node]: Pure Pursuit: pose=(-2.773, -4.637, 1.291) cte=-0.004 closest=1027 target=1077 path_dist=0.004 heading_err=-0.011 steer=-0.003 speed=3.965
+[gpu_amcl_cpp_node-6] [WARN] [1788990243.742496344] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990244.095457479] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.420, -3.347, 1.294) scan=(-2.432, -3.332, 1.286) correction=0.019 m/0.008 rad cluster_weight=0.932 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990244.350832389] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.153, -2.382) amcl=(-2.136, -2.353) error=0.034 m / 0.000 rad; current_map=(-2.135, -2.346, 1.306) error=0.041 m / 0.000 rad; odom=(-2.746, -1.973, 1.306) error=0.721 m / 0.000 rad; ekf=(-2.746, -1.973, 1.306) error=0.721 m / 0.000 rad; RMS=0.124 m / 0.013 rad max=0.821 m / 0.115 rad samples=10194
+[gpu_amcl_cpp_node-6] [INFO] [1788990244.439726842] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.821, -3.463, 2.880) baseline=(4.843, -3.469, 2.887) delta=(-0.022, 0.006, -0.007) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990244.716044128] [pure_pursuit_node]: Pure Pursuit: pose=(-1.752, -0.858, 1.342) cte=-0.003 closest=1222 target=1273 path_dist=0.003 heading_err=-0.004 steer=0.005 speed=3.961
+[gpu_amcl_cpp_node-6] [WARN] [1788990244.997166446] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990245.120969909] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.480, 0.488, 1.365) scan=(-1.448, 0.520, 1.355) correction=0.045 m/0.010 rad cluster_weight=0.941 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990245.147828399] [gpu_amcl_cpp]: Received LiDAR callback #5236 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990245.152483807] [gpu_amcl_cpp]: Starting AMCL scan update #5237 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990245.153092890] [gpu_amcl_cpp]: AMCL scan update #5237 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [WARN] [1788990245.330942425] [gpu_amcl_cpp]: Dropping scan #3 — PF can't keep up
+[ground_truth_amcl_monitor-7] [INFO] [1788990245.357413291] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.284, 1.433) amcl=(-1.300, 1.345) error=0.090 m / 0.000 rad; current_map=(-1.321, 1.335, 1.438) error=0.105 m / 0.000 rad; odom=(-1.954, 1.557, 1.438) error=0.682 m / 0.000 rad; ekf=(-1.954, 1.557, 1.438) error=0.682 m / 0.000 rad; RMS=0.123 m / 0.013 rad max=0.821 m / 0.115 rad samples=10351
+[gpu_amcl_cpp_node-6] [INFO] [1788990245.443989525] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.241, -2.715, 3.065) baseline=(1.298, -2.719, 3.047) delta=(-0.057, 0.005, 0.018) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990245.716887014] [pure_pursuit_node]: Pure Pursuit: pose=(-1.283, 2.595, 1.765) cte=0.007 closest=1397 target=1438 path_dist=0.007 heading_err=-0.058 steer=0.112 speed=1.997
+[gpu_amcl_cpp_node-6] [INFO] [1788990246.122512529] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.570, 3.385, 2.088) scan=(-1.568, 3.387, 2.082) correction=0.002 m/0.007 rad cluster_weight=0.983 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990246.366121002] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.797, 3.717) amcl=(-1.810, 3.692) error=0.028 m / 0.043 rad; current_map=(-1.822, 3.701, 2.534) error=0.030 m / 0.000 rad; odom=(-2.409, 3.540, 2.534) error=0.637 m / 0.000 rad; ekf=(-2.409, 3.540, 2.534) error=0.637 m / 0.000 rad; RMS=0.123 m / 0.013 rad max=0.821 m / 0.115 rad samples=10514
+[gpu_amcl_cpp_node-6] [INFO] [1788990246.444601866] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.449, -3.325, -2.025) baseline=(-0.438, -3.303, -2.030) delta=(-0.011, -0.022, 0.006) moved=true scan_age=0.005s
+[component_container-9] [INFO] [1788990246.717183280] [pure_pursuit_node]: Pure Pursuit: pose=(-2.413, 3.864, -2.961) cte=0.016 closest=1492 target=1535 path_dist=0.016 heading_err=-0.041 steer=0.404 speed=1.821
+[gpu_amcl_cpp_node-6] [INFO] [1788990247.122916468] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.940, 3.465, -2.187) scan=(-2.976, 3.430, -2.186) correction=0.050 m/0.001 rad cluster_weight=0.972 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990247.367138727] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.131, 3.019) amcl=(-3.151, 3.012) error=0.022 m / 0.018 rad; current_map=(-3.156, 2.993, -1.791) error=0.036 m / 0.000 rad; odom=(-3.743, 2.877, -1.791) error=0.628 m / 0.000 rad; ekf=(-3.743, 2.877, -1.791) error=0.628 m / 0.000 rad; RMS=0.122 m / 0.013 rad max=0.821 m / 0.115 rad samples=10675
+[gpu_amcl_cpp_node-6] [WARN] [1788990247.446465199] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990247.450446883] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.491, -4.580, -0.125) baseline=(0.455, -4.575, -0.132) delta=(0.035, -0.005, 0.006) moved=true scan_age=0.009s
+[component_container-9] [INFO] [1788990247.737604849] [pure_pursuit_node]: Pure Pursuit: pose=(-3.227, 1.886, -1.630) cte=-0.005 closest=1607 target=1655 path_dist=0.005 heading_err=-0.062 steer=-0.053 speed=3.476
+[gpu_amcl_cpp_node-6] [INFO] [1788990248.124809821] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.410, 0.687, -1.847) scan=(-3.434, 0.680, -1.839) correction=0.024 m/0.007 rad cluster_weight=0.989 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990248.372138591] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.638, 0.157) amcl=(-3.619, 0.178) error=0.028 m / 0.000 rad; current_map=(-3.634, 0.160, -2.121) error=0.005 m / 0.000 rad; odom=(-4.189, 0.221, -2.121) error=0.555 m / 0.000 rad; ekf=(-4.189, 0.221, -2.121) error=0.555 m / 0.000 rad; RMS=0.121 m / 0.013 rad max=0.821 m / 0.115 rad samples=10835
+[gpu_amcl_cpp_node-6] [INFO] [1788990248.464976095] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.104, -5.104, -0.692) baseline=(3.094, -5.096, -0.650) delta=(0.010, -0.008, -0.042) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990248.741907715] [pure_pursuit_node]: Pure Pursuit: pose=(-4.158, -0.373, -2.685) cte=-0.039 closest=1734 target=1776 path_dist=0.039 heading_err=-0.024 steer=-0.291 speed=1.917
+[gpu_amcl_cpp_node-6] [INFO] [1788990249.143956271] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-4.849, -0.484, 2.908) scan=(-4.823, -0.451, 2.945) correction=0.042 m/0.037 rad cluster_weight=0.977 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990249.372479104] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.255, -0.246) amcl=(-5.227, -0.267) error=0.035 m / 0.000 rad; current_map=(-5.240, -0.275, 2.499) error=0.033 m / 0.000 rad; odom=(-5.760, -0.163, 2.499) error=0.512 m / 0.000 rad; ekf=(-5.760, -0.163, 2.499) error=0.512 m / 0.000 rad; RMS=0.121 m / 0.013 rad max=0.821 m / 0.115 rad samples=10995
+[gpu_amcl_cpp_node-6] [INFO] [1788990249.468327131] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.173, -6.727, -2.379) baseline=(3.193, -6.708, -2.385) delta=(-0.020, -0.019, 0.005) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990249.743347529] [pure_pursuit_node]: Pure Pursuit: pose=(-5.780, 0.465, 1.898) cte=-0.064 closest=1836 target=1881 path_dist=0.064 heading_err=0.033 steer=-0.085 speed=3.357
+[gpu_amcl_cpp_node-6] [INFO] [1788990250.146155411] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.062, 1.756, 1.715) scan=(-6.078, 1.742, 1.715) correction=0.021 m/0.000 rad cluster_weight=0.959 publish=true
+[gpu_amcl_cpp_node-6] [INFO] [1788990250.166423909] [gpu_amcl_cpp]: Received LiDAR callback #5646 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990250.166492559] [gpu_amcl_cpp]: Starting AMCL scan update #5646 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990250.167307912] [gpu_amcl_cpp]: AMCL scan update #5646 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [WARN] [1788990250.295282210] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[ground_truth_amcl_monitor-7] [INFO] [1788990250.376564987] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-6.184, 2.628) amcl=(-6.149, 2.602) error=0.043 m / 0.000 rad; current_map=(-6.134, 2.617, 1.640) error=0.051 m / 0.000 rad; odom=(-6.613, 2.683, 1.640) error=0.432 m / 0.000 rad; ekf=(-6.613, 2.683, 1.640) error=0.432 m / 0.000 rad; RMS=0.120 m / 0.013 rad max=0.821 m / 0.115 rad samples=11157
+[gpu_amcl_cpp_node-6] [INFO] [1788990250.471268918] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.095, -7.430, -3.111) baseline=(0.164, -7.428, -3.117) delta=(-0.069, -0.002, 0.006) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990250.763544576] [pure_pursuit_node]: Pure Pursuit: pose=(-6.108, 4.214, 1.447) cte=-0.006 closest=2025 target=2076 path_dist=0.006 heading_err=-0.002 steer=-0.053 speed=3.881
+[gpu_amcl_cpp_node-6] [INFO] [1788990251.149328277] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.763, 5.622, 1.220) scan=(-5.812, 5.593, 1.214) correction=0.057 m/0.007 rad cluster_weight=0.993 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990251.391770975] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.417, 6.358) amcl=(-5.520, 6.188) error=0.199 m / 0.024 rad; current_map=(-5.511, 6.202, 1.034) error=0.182 m / 0.000 rad; odom=(-5.999, 6.081, 1.034) error=0.645 m / 0.000 rad; ekf=(-5.999, 6.081, 1.034) error=0.645 m / 0.000 rad; RMS=0.120 m / 0.013 rad max=0.821 m / 0.115 rad samples=11318
+[gpu_amcl_cpp_node-6] [INFO] [1788990251.471995057] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-3.112, -6.679, 2.556) baseline=(-3.070, -6.707, 2.548) delta=(-0.042, 0.028, 0.008) moved=true scan_age=0.006s
+[component_container-9] [INFO] [1788990251.766876097] [pure_pursuit_node]: Pure Pursuit: pose=(-4.772, 7.112, 0.612) cte=-0.019 closest=2188 target=2234 path_dist=0.019 heading_err=0.019 steer=-0.133 speed=3.229
+[gpu_amcl_cpp_node-6] [INFO] [1788990252.150226205] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.656, 7.592, 0.153) scan=(-3.672, 7.565, 0.152) correction=0.032 m/0.001 rad cluster_weight=0.981 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990252.395283944] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.782, 7.598) amcl=(-2.851, 7.590) error=0.069 m / 0.000 rad; current_map=(-2.864, 7.570, -0.203) error=0.087 m / 0.000 rad; odom=(-3.475, 7.294, -0.203) error=0.756 m / 0.000 rad; ekf=(-3.475, 7.294, -0.203) error=0.756 m / 0.000 rad; RMS=0.120 m / 0.013 rad max=0.821 m / 0.115 rad samples=11479
+[gpu_amcl_cpp_node-6] [INFO] [1788990252.490003459] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-4.050, -3.949, 1.233) baseline=(-4.059, -3.975, 1.274) delta=(0.008, 0.025, -0.041) moved=true scan_age=0.017s
+[gpu_amcl_cpp_node-6] [WARN] [1788990252.594551029] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990252.767827891] [pure_pursuit_node]: Pure Pursuit: pose=(-1.630, 7.010, -0.674) cte=0.003 closest=2357 target=2403 path_dist=0.003 heading_err=0.036 steer=-0.087 speed=3.767
+[gpu_amcl_cpp_node-6] [INFO] [1788990253.167950482] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.693, 5.975, -0.985) scan=(-0.626, 5.981, -0.980) correction=0.067 m/0.005 rad cluster_weight=0.975 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990253.396493269] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.163, 5.194) amcl=(-0.206, 5.238) error=0.062 m / 0.000 rad; current_map=(-0.228, 5.233, -1.093) error=0.076 m / 0.000 rad; odom=(-1.015, 5.134, -1.093) error=0.854 m / 0.000 rad; ekf=(-1.015, 5.134, -1.093) error=0.854 m / 0.000 rad; RMS=0.119 m / 0.014 rad max=0.821 m / 0.115 rad samples=11639
+[gpu_amcl_cpp_node-6] [INFO] [1788990253.490767630] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-1.637, -1.645, 0.437) baseline=(-1.658, -1.656, 0.457) delta=(0.021, 0.010, -0.020) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990253.787638209] [pure_pursuit_node]: Pure Pursuit: pose=(0.432, 3.784, -1.223) cte=-0.016 closest=2551 target=14 path_dist=0.016 heading_err=0.001 steer=-0.033 speed=3.863
+[gpu_amcl_cpp_node-6] [WARN] [1788990253.967495627] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990254.170981444] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.829, 2.443, -1.307) scan=(0.859, 2.436, -1.311) correction=0.030 m/0.004 rad cluster_weight=0.926 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990254.396456742] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.078, 1.524) amcl=(1.046, 1.687) error=0.166 m / 0.000 rad; current_map=(1.037, 1.679, -1.366) error=0.160 m / 0.000 rad; odom=(0.230, 1.523, -1.366) error=0.848 m / 0.000 rad; ekf=(0.230, 1.523, -1.366) error=0.848 m / 0.000 rad; RMS=0.119 m / 0.013 rad max=0.821 m / 0.115 rad samples=11799
+[gpu_amcl_cpp_node-6] [INFO] [1788990254.495673071] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(2.076, -0.484, 0.185) baseline=(2.011, -0.496, 0.175) delta=(0.066, 0.012, 0.010) moved=true scan_age=0.005s
+[gpu_amcl_cpp_node-6] [WARN] [1788990254.525586063] [gpu_amcl_cpp]: Dropping out-of-order LiDAR scan at 1788990254.498536 s; last processed 1788990254.517185 s.
+[component_container-9] [INFO] [1788990254.791503404] [pure_pursuit_node]: Pure Pursuit: pose=(1.274, 0.338, -1.460) cte=-0.013 closest=142 target=190 path_dist=0.013 heading_err=0.016 steer=-0.024 speed=3.874
+[gpu_amcl_cpp_node-6] [INFO] [1788990255.168896543] [gpu_amcl_cpp]: Received LiDAR callback #6055 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990255.168968619] [gpu_amcl_cpp]: Starting AMCL scan update #6055 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990255.169616485] [gpu_amcl_cpp]: AMCL scan update #6055 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990255.171963154] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.407, -1.520, -1.589) scan=(1.406, -1.510, -1.588) correction=0.009 m/0.000 rad cluster_weight=0.947 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990255.195692798] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[ground_truth_amcl_monitor-7] [INFO] [1788990255.396769902] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.347, -2.332) amcl=(1.355, -2.255) error=0.077 m / 0.010 rad; current_map=(1.349, -2.313, -1.670) error=0.019 m / 0.000 rad; odom=(0.505, -2.325, -1.670) error=0.842 m / 0.000 rad; ekf=(0.505, -2.325, -1.670) error=0.842 m / 0.000 rad; RMS=0.122 m / 0.013 rad max=0.821 m / 0.115 rad samples=11959
+[gpu_amcl_cpp_node-6] [INFO] [1788990255.514602488] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(5.885, -0.338, -0.115) baseline=(5.850, -0.335, -0.104) delta=(0.035, -0.004, -0.010) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990255.792115350] [pure_pursuit_node]: Pure Pursuit: pose=(1.169, -3.872, -1.730) cte=-0.008 closest=353 target=400 path_dist=0.008 heading_err=0.016 steer=-0.007 speed=3.940
+[gpu_amcl_cpp_node-6] [INFO] [1788990256.173231332] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.922, -5.252, -1.742) scan=(0.946, -5.268, -1.740) correction=0.029 m/0.002 rad cluster_weight=0.944 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990256.397052860] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.764, -6.191) amcl=(0.760, -6.080) error=0.111 m / 0.011 rad; current_map=(0.746, -6.143, -1.787) error=0.051 m / 0.000 rad; odom=(-0.065, -5.963, -1.787) error=0.860 m / 0.000 rad; ekf=(-0.065, -5.963, -1.787) error=0.860 m / 0.000 rad; RMS=0.122 m / 0.013 rad max=0.821 m / 0.115 rad samples=12099
+[gpu_amcl_cpp_node-6] [INFO] [1788990256.518356489] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(9.593, -0.975, -0.225) baseline=(9.533, -0.961, -0.236) delta=(0.060, -0.014, 0.011) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990256.793326333] [pure_pursuit_node]: Pure Pursuit: pose=(0.393, -7.701, -1.831) cte=-0.009 closest=549 target=596 path_dist=0.009 heading_err=0.015 steer=-0.027 speed=3.774
+[gpu_amcl_cpp_node-6] [INFO] [1788990257.194997623] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.037, -8.888, -2.005) scan=(-0.060, -8.936, -1.988) correction=0.108 m/0.017 rad cluster_weight=0.992 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990257.401449426] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.269, -9.518) amcl=(-0.268, -9.487) error=0.030 m / 0.000 rad; current_map=(-0.268, -9.461, -2.092) error=0.056 m / 0.030 rad; odom=(-0.983, -8.948, -2.122) error=0.913 m / 0.000 rad; ekf=(-0.983, -8.948, -2.122) error=0.913 m / 0.000 rad; RMS=0.122 m / 0.013 rad max=0.821 m / 0.115 rad samples=12260
+[gpu_amcl_cpp_node-6] [INFO] [1788990257.520207546] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(12.365, -1.984, -0.760) baseline=(12.333, -1.954, -0.759) delta=(0.031, -0.030, -0.001) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990257.810801782] [pure_pursuit_node]: Pure Pursuit: pose=(-1.107, -10.089, -2.886) cte=-0.013 closest=696 target=741 path_dist=0.013 heading_err=-0.042 steer=-0.289 speed=2.513
+[gpu_amcl_cpp_node-6] [WARN] [1788990257.817941840] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990258.196342185] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.007, -9.959, 2.643) scan=(-1.976, -9.968, 2.637) correction=0.032 m/0.007 rad cluster_weight=0.987 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990258.403012786] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.331, -9.699) amcl=(-2.373, -9.650) error=0.065 m / 0.000 rad; current_map=(-2.390, -9.651, 2.293) error=0.076 m / 0.000 rad; odom=(-3.044, -9.110, 2.293) error=0.925 m / 0.000 rad; ekf=(-3.044, -9.110, 2.293) error=0.925 m / 0.000 rad; RMS=0.121 m / 0.014 rad max=0.821 m / 0.115 rad samples=12420
+[gpu_amcl_cpp_node-6] [INFO] [1788990258.540103555] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(11.991, -4.039, -2.620) baseline=(12.012, -4.027, -2.585) delta=(-0.021, -0.012, -0.035) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990258.812565962] [pure_pursuit_node]: Pure Pursuit: pose=(-2.981, -8.449, 1.862) cte=-0.010 closest=833 target=881 path_dist=0.010 heading_err=0.006 steer=-0.087 speed=3.800
+[gpu_amcl_cpp_node-6] [INFO] [1788990259.199289333] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.173, -7.072, 1.587) scan=(-3.136, -7.102, 1.591) correction=0.048 m/0.004 rad cluster_weight=0.994 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990259.415625344] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.155, -6.197) amcl=(-3.109, -6.299) error=0.111 m / 0.018 rad; current_map=(-3.106, -6.273, 1.459) error=0.089 m / 0.000 rad; odom=(-3.744, -5.809, 1.459) error=0.706 m / 0.000 rad; ekf=(-3.747, -5.835, 1.477) error=0.695 m / 0.018 rad; RMS=0.121 m / 0.014 rad max=0.821 m / 0.115 rad samples=12581
+[gpu_amcl_cpp_node-6] [INFO] [1788990259.540515048] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(8.497, -4.482, 2.974) baseline=(8.521, -4.486, 2.993) delta=(-0.024, 0.004, -0.019) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990259.813344102] [pure_pursuit_node]: Pure Pursuit: pose=(-2.839, -4.744, 1.286) cte=-0.037 closest=1021 target=1068 path_dist=0.037 heading_err=-0.006 steer=-0.028 speed=3.779
+[gpu_amcl_cpp_node-6] [WARN] [1788990259.820691582] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990260.169308585] [gpu_amcl_cpp]: Received LiDAR callback #6458 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990260.169386853] [gpu_amcl_cpp]: Starting AMCL scan update #6458 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990260.170053094] [gpu_amcl_cpp]: AMCL scan update #6458 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990260.217217037] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.378, -3.281, 1.325) scan=(-2.402, -3.255, 1.313) correction=0.036 m/0.012 rad cluster_weight=0.959 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990260.415843610] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.210, -2.471) amcl=(-2.194, -2.552) error=0.083 m / 0.010 rad; current_map=(-2.186, -2.523, 1.294) error=0.057 m / 0.000 rad; odom=(-2.831, -2.136, 1.294) error=0.706 m / 0.000 rad; ekf=(-2.831, -2.136, 1.294) error=0.706 m / 0.000 rad; RMS=0.120 m / 0.014 rad max=0.821 m / 0.115 rad samples=12741
+[gpu_amcl_cpp_node-6] [WARN] [1788990260.521399156] [gpu_amcl_cpp]: Dropping scan #4 — PF can't keep up
+[gpu_amcl_cpp_node-6] [INFO] [1788990260.545043876] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.770, -3.484, 2.873) baseline=(4.829, -3.500, 2.866) delta=(-0.059, 0.017, 0.006) moved=true scan_age=0.005s
+[component_container-9] [INFO] [1788990260.814786935] [pure_pursuit_node]: Pure Pursuit: pose=(-1.764, -0.895, 1.347) cte=-0.006 closest=1220 target=1271 path_dist=0.006 heading_err=-0.010 steer=-0.001 speed=3.946
+[gpu_amcl_cpp_node-6] [INFO] [1788990261.220251510] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.458, 0.547, 1.377) scan=(-1.465, 0.517, 1.366) correction=0.031 m/0.012 rad cluster_weight=0.936 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990261.415696120] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.341, 1.324) amcl=(-1.337, 1.259) error=0.065 m / 0.002 rad; current_map=(-1.332, 1.293, 1.434) error=0.032 m / 0.000 rad; odom=(-1.993, 1.574, 1.434) error=0.698 m / 0.000 rad; ekf=(-1.993, 1.574, 1.434) error=0.698 m / 0.000 rad; RMS=0.120 m / 0.014 rad max=0.821 m / 0.115 rad samples=12900
+[gpu_amcl_cpp_node-6] [INFO] [1788990261.545358697] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(1.102, -2.741, 3.067) baseline=(1.168, -2.746, 3.060) delta=(-0.065, 0.005, 0.007) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990261.816431985] [pure_pursuit_node]: Pure Pursuit: pose=(-1.281, 2.484, 1.717) cte=-0.004 closest=1392 target=1435 path_dist=0.004 heading_err=-0.048 steer=0.085 speed=2.289
+[gpu_amcl_cpp_node-6] [WARN] [1788990262.119826855] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990262.224960507] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.547, 3.425, 2.105) scan=(-1.555, 3.421, 2.103) correction=0.010 m/0.001 rad cluster_weight=0.983 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990262.417330565] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.789, 3.707) amcl=(-1.759, 3.695) error=0.032 m / 0.052 rad; current_map=(-1.774, 3.707, 2.478) error=0.015 m / 0.000 rad; odom=(-2.369, 3.576, 2.478) error=0.595 m / 0.000 rad; ekf=(-2.369, 3.576, 2.478) error=0.595 m / 0.000 rad; RMS=0.119 m / 0.014 rad max=0.821 m / 0.115 rad samples=13060
+[gpu_amcl_cpp_node-6] [INFO] [1788990262.546956440] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.548, -3.392, -1.957) baseline=(-0.535, -3.362, -1.962) delta=(-0.012, -0.030, 0.006) moved=true scan_age=0.006s
+[component_container-9] [INFO] [1788990262.818972174] [pure_pursuit_node]: Pure Pursuit: pose=(-2.447, 3.867, -2.891) cte=0.026 closest=1494 target=1537 path_dist=0.026 heading_err=-0.061 steer=0.402 speed=1.800
+[gpu_amcl_cpp_node-6] [INFO] [1788990263.244039663] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.990, 3.379, -2.092) scan=(-2.983, 3.389, -2.108) correction=0.012 m/0.016 rad cluster_weight=0.972 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990263.418998309] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.149, 3.003) amcl=(-3.129, 3.017) error=0.025 m / 0.032 rad; current_map=(-3.140, 2.977, -1.841) error=0.027 m / 0.026 rad; odom=(-3.789, 2.922, -1.815) error=0.645 m / 0.000 rad; ekf=(-3.779, 2.962, -1.821) error=0.631 m / 0.006 rad; RMS=0.119 m / 0.014 rad max=0.821 m / 0.115 rad samples=13222
+[gpu_amcl_cpp_node-6] [INFO] [1788990263.564612616] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.531, -4.636, -0.092) baseline=(0.514, -4.634, -0.101) delta=(0.017, -0.002, 0.010) moved=false scan_age=0.016s
+[component_container-9] [INFO] [1788990263.837387269] [pure_pursuit_node]: Pure Pursuit: pose=(-3.256, 1.755, -1.646) cte=0.008 closest=1614 target=1661 path_dist=0.008 heading_err=-0.043 steer=-0.039 speed=3.401
+[gpu_amcl_cpp_node-6] [INFO] [1788990264.248922087] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.434, 0.587, -1.898) scan=(-3.451, 0.534, -1.890) correction=0.055 m/0.007 rad cluster_weight=0.988 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990264.424394542] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.640, 0.190) amcl=(-3.603, 0.202) error=0.039 m / 0.000 rad; current_map=(-3.603, 0.192, -2.110) error=0.038 m / 0.000 rad; odom=(-4.213, 0.351, -2.110) error=0.595 m / 0.000 rad; ekf=(-4.213, 0.351, -2.110) error=0.595 m / 0.000 rad; RMS=0.118 m / 0.014 rad max=0.821 m / 0.115 rad samples=13381
+[gpu_amcl_cpp_node-6] [INFO] [1788990264.565001061] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.018, -5.161, -0.744) baseline=(2.995, -5.142, -0.704) delta=(0.023, -0.020, -0.040) moved=true scan_age=0.017s
+[gpu_amcl_cpp_node-6] [WARN] [1788990264.820341619] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990264.838081156] [pure_pursuit_node]: Pure Pursuit: pose=(-4.214, -0.387, -2.691) cte=-0.029 closest=1736 target=1780 path_dist=0.029 heading_err=-0.054 steer=-0.320 speed=1.970
+[gpu_amcl_cpp_node-6] [INFO] [1788990265.189136028] [gpu_amcl_cpp]: Received LiDAR callback #6870 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990265.189209888] [gpu_amcl_cpp]: Starting AMCL scan update #6870 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990265.190208848] [gpu_amcl_cpp]: AMCL scan update #6870 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990265.268222511] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-4.944, -0.441, 2.801) scan=(-4.952, -0.422, 2.838) correction=0.020 m/0.037 rad cluster_weight=0.977 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990265.424033379] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.234, -0.330) amcl=(-5.209, -0.311) error=0.031 m / 0.011 rad; current_map=(-5.238, -0.290, 2.530) error=0.039 m / 0.000 rad; odom=(-5.790, -0.051, 2.530) error=0.622 m / 0.000 rad; ekf=(-5.790, -0.051, 2.530) error=0.622 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=13542
+[gpu_amcl_cpp_node-6] [INFO] [1788990265.570744152] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.001, -6.807, -2.443) baseline=(3.029, -6.784, -2.450) delta=(-0.029, -0.024, 0.007) moved=true scan_age=0.005s
+[component_container-9] [INFO] [1788990265.841327307] [pure_pursuit_node]: Pure Pursuit: pose=(-5.792, 0.539, 1.865) cte=-0.049 closest=1840 target=1884 path_dist=0.049 heading_err=0.050 steer=-0.061 speed=3.454
+[gpu_amcl_cpp_node-6] [INFO] [1788990266.272210364] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.090, 2.004, 1.709) scan=(-6.096, 1.998, 1.706) correction=0.009 m/0.002 rad cluster_weight=0.974 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990266.425956422] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-6.168, 2.576) amcl=(-6.154, 2.585) error=0.016 m / 0.000 rad; current_map=(-6.150, 2.588, 1.646) error=0.021 m / 0.000 rad; odom=(-6.666, 2.814, 1.646) error=0.552 m / 0.000 rad; ekf=(-6.666, 2.814, 1.646) error=0.552 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=13703
+[gpu_amcl_cpp_node-6] [INFO] [1788990266.588479482] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.259, -7.485, 3.130) baseline=(-0.227, -7.485, -3.134) delta=(-0.032, 0.000, -0.020) moved=true scan_age=0.016s
+[gpu_amcl_cpp_node-6] [WARN] [1788990266.843545739] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990266.864006292] [pure_pursuit_node]: Pure Pursuit: pose=(-6.099, 4.322, 1.430) cte=-0.012 closest=2030 target=2078 path_dist=0.012 heading_err=0.000 steer=-0.060 speed=3.847
+[gpu_amcl_cpp_node-6] [INFO] [1788990267.275144098] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.690, 5.823, 1.168) scan=(-5.709, 5.792, 1.163) correction=0.036 m/0.005 rad cluster_weight=0.991 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990267.427083134] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.535, 6.185) amcl=(-5.528, 6.121) error=0.064 m / 0.000 rad; current_map=(-5.552, 6.084, 1.093) error=0.102 m / 0.024 rad; odom=(-6.083, 6.210, 1.069) error=0.549 m / 0.000 rad; ekf=(-6.083, 6.210, 1.069) error=0.549 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=13863
+[gpu_amcl_cpp_node-6] [INFO] [1788990267.588851453] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-3.369, -6.682, 2.531) baseline=(-3.350, -6.696, 2.554) delta=(-0.019, 0.013, -0.023) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990267.867304541] [pure_pursuit_node]: Pure Pursuit: pose=(-4.689, 7.181, 0.554) cte=-0.028 closest=2193 target=2239 path_dist=0.028 heading_err=0.037 steer=-0.134 speed=3.186
+[gpu_amcl_cpp_node-6] [INFO] [1788990268.292935212] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.433, 7.595, 0.034) scan=(-3.436, 7.631, 0.062) correction=0.036 m/0.028 rad cluster_weight=0.973 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990268.441435149] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.873, 7.607) amcl=(-2.953, 7.583) error=0.084 m / 0.044 rad; current_map=(-2.925, 7.579, -0.173) error=0.060 m / 0.000 rad; odom=(-3.523, 7.482, -0.173) error=0.663 m / 0.000 rad; ekf=(-3.523, 7.482, -0.173) error=0.663 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=14024
+[gpu_amcl_cpp_node-6] [INFO] [1788990268.589984369] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-4.192, -3.823, 1.197) baseline=(-4.202, -3.850, 1.237) delta=(0.010, 0.027, -0.040) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990268.887611029] [pure_pursuit_node]: Pure Pursuit: pose=(-1.462, 6.896, -0.702) cte=-0.012 closest=2367 target=2416 path_dist=0.012 heading_err=0.002 steer=-0.087 speed=3.817
+[gpu_amcl_cpp_node-6] [WARN] [1788990268.894442050] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990269.293526506] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.524, 5.774, -1.019) scan=(-0.500, 5.796, -1.014) correction=0.033 m/0.006 rad cluster_weight=0.983 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990269.442075603] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.198, 5.240) amcl=(-0.255, 5.313) error=0.092 m / 0.016 rad; current_map=(-0.239, 5.282, -1.096) error=0.059 m / 0.000 rad; odom=(-0.859, 5.173, -1.096) error=0.664 m / 0.000 rad; ekf=(-0.859, 5.173, -1.096) error=0.664 m / 0.000 rad; RMS=0.116 m / 0.014 rad max=0.821 m / 0.115 rad samples=14184
+[gpu_amcl_cpp_node-6] [INFO] [1788990269.593382355] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-1.449, -1.385, 0.427) baseline=(-1.506, -1.411, 0.422) delta=(0.058, 0.026, 0.005) moved=true scan_age=0.003s
+[component_container-9] [INFO] [1788990269.888744504] [pure_pursuit_node]: Pure Pursuit: pose=(0.488, 3.590, -1.226) cte=-0.003 closest=2561 target=24 path_dist=0.003 heading_err=-0.010 steer=-0.031 speed=3.936
+[gpu_amcl_cpp_node-6] [INFO] [1788990270.193016813] [gpu_amcl_cpp]: Received LiDAR callback #7282 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990270.193099269] [gpu_amcl_cpp]: Starting AMCL scan update #7282 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990270.193696538] [gpu_amcl_cpp]: AMCL scan update #7282 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [WARN] [1788990270.196863288] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990270.298707448] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.928, 2.120, -1.318) scan=(0.929, 2.138, -1.329) correction=0.018 m/0.011 rad cluster_weight=0.911 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990270.445782312] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.068, 1.552) amcl=(1.043, 1.723) error=0.173 m / 0.000 rad; current_map=(1.042, 1.716, -1.368) error=0.166 m / 0.000 rad; odom=(0.406, 1.553, -1.368) error=0.662 m / 0.000 rad; ekf=(0.406, 1.553, -1.368) error=0.662 m / 0.000 rad; RMS=0.116 m / 0.014 rad max=0.821 m / 0.115 rad samples=14345
+[gpu_amcl_cpp_node-6] [INFO] [1788990270.594268887] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(2.229, -0.277, 0.167) baseline=(2.168, -0.288, 0.161) delta=(0.061, 0.010, 0.006) moved=true scan_age=0.005s
+[component_container-9] [INFO] [1788990270.892095590] [pure_pursuit_node]: Pure Pursuit: pose=(1.297, 0.126, -1.470) cte=-0.010 closest=153 target=200 path_dist=0.010 heading_err=0.011 steer=-0.026 speed=3.904
+[gpu_amcl_cpp_node-6] [WARN] [1788990271.020234426] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990271.316894766] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(1.399, -1.784, -1.645) scan=(1.384, -1.800, -1.638) correction=0.022 m/0.007 rad cluster_weight=0.938 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990271.447042089] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(1.334, -2.297) amcl=(1.350, -2.220) error=0.078 m / 0.000 rad; current_map=(1.357, -2.213, -1.678) error=0.087 m / 0.000 rad; odom=(0.686, -2.236, -1.678) error=0.650 m / 0.000 rad; ekf=(0.686, -2.236, -1.678) error=0.650 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=14505
+[gpu_amcl_cpp_node-6] [INFO] [1788990271.613261561] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(6.049, -0.185, -0.114) baseline=(6.016, -0.181, -0.106) delta=(0.033, -0.004, -0.008) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990271.892328955] [pure_pursuit_node]: Pure Pursuit: pose=(1.148, -4.019, -1.727) cte=-0.009 closest=361 target=408 path_dist=0.009 heading_err=0.007 steer=-0.013 speed=3.943
+[gpu_amcl_cpp_node-6] [INFO] [1788990272.317041968] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.867, -5.587, -1.774) scan=(0.844, -5.560, -1.770) correction=0.036 m/0.004 rad cluster_weight=0.943 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990272.448628509] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.712, -6.162) amcl=(0.755, -6.075) error=0.097 m / 0.000 rad; current_map=(0.769, -6.071, -1.787) error=0.108 m / 0.000 rad; odom=(0.097, -6.002, -1.787) error=0.636 m / 0.000 rad; ekf=(0.097, -6.002, -1.787) error=0.636 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=14665
+[gpu_amcl_cpp_node-6] [INFO] [1788990272.614464522] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(9.812, -0.849, -0.235) baseline=(9.772, -0.839, -0.224) delta=(0.040, -0.009, -0.011) moved=true scan_age=0.016s
+[component_container-9] [INFO] [1788990272.913368098] [pure_pursuit_node]: Pure Pursuit: pose=(0.304, -7.960, -1.835) cte=0.011 closest=562 target=610 path_dist=0.011 heading_err=-0.007 steer=-0.032 speed=3.640
+[gpu_amcl_cpp_node-6] [WARN] [1788990273.095506665] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990273.323040142] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.107, -9.168, -2.040) scan=(-0.102, -9.195, -2.034) correction=0.027 m/0.006 rad cluster_weight=0.995 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990273.451548428] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.280, -9.516) amcl=(-0.290, -9.493) error=0.025 m / 0.000 rad; current_map=(-0.307, -9.485, -2.161) error=0.041 m / 0.000 rad; odom=(-0.850, -9.070, -2.161) error=0.724 m / 0.000 rad; ekf=(-0.850, -9.070, -2.161) error=0.724 m / 0.000 rad; RMS=0.117 m / 0.014 rad max=0.821 m / 0.115 rad samples=14827
+[gpu_amcl_cpp_node-6] [INFO] [1788990273.619409577] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(12.555, -1.943, -0.859) baseline=(12.527, -1.911, -0.864) delta=(0.028, -0.032, 0.006) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990273.917073542] [pure_pursuit_node]: Pure Pursuit: pose=(-1.238, -10.117, -3.044) cte=-0.019 closest=703 target=747 path_dist=0.019 heading_err=0.026 steer=-0.274 speed=2.480
+[gpu_amcl_cpp_node-6] [INFO] [1788990274.325622651] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.202, -9.824, 2.487) scan=(-2.167, -9.833, 2.483) correction=0.035 m/0.004 rad cluster_weight=0.980 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990274.453046793] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.361, -9.679) amcl=(-2.400, -9.629) error=0.063 m / 0.000 rad; current_map=(-2.425, -9.615, 2.278) error=0.090 m / 0.000 rad; odom=(-2.917, -9.190, 2.278) error=0.740 m / 0.000 rad; ekf=(-2.917, -9.190, 2.278) error=0.740 m / 0.000 rad; RMS=0.116 m / 0.014 rad max=0.821 m / 0.115 rad samples=14987
+[gpu_amcl_cpp_node-6] [INFO] [1788990274.620223214] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(11.936, -3.983, -2.659) baseline=(11.975, -3.963, -2.666) delta=(-0.039, -0.020, 0.006) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990274.938155106] [pure_pursuit_node]: Pure Pursuit: pose=(-3.053, -8.152, 1.800) cte=-0.004 closest=849 target=896 path_dist=0.004 heading_err=-0.014 steer=-0.084 speed=3.836
+[gpu_amcl_cpp_node-6] [INFO] [1788990275.194327250] [gpu_amcl_cpp]: Received LiDAR callback #7699 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990275.194399366] [gpu_amcl_cpp]: Starting AMCL scan update #7699 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990275.195244164] [gpu_amcl_cpp]: AMCL scan update #7699 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990275.342683300] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.148, -6.716, 1.519) scan=(-3.180, -6.703, 1.526) correction=0.034 m/0.006 rad cluster_weight=0.991 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990275.394095671] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[ground_truth_amcl_monitor-7] [INFO] [1788990275.468089392] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.150, -6.175) amcl=(-3.113, -6.265) error=0.098 m / 0.015 rad; current_map=(-3.110, -6.236, 1.458) error=0.074 m / 0.000 rad; odom=(-3.614, -5.839, 1.458) error=0.573 m / 0.000 rad; ekf=(-3.614, -5.839, 1.458) error=0.573 m / 0.000 rad; RMS=0.116 m / 0.014 rad max=0.821 m / 0.115 rad samples=15148
+[gpu_amcl_cpp_node-6] [INFO] [1788990275.624780927] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(8.356, -4.316, 2.951) baseline=(8.436, -4.331, 2.947) delta=(-0.080, 0.016, 0.003) moved=true scan_age=0.004s
+[gpu_amcl_cpp_node-6] [WARN] [1788990275.903692559] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[component_container-9] [INFO] [1788990275.942209300] [pure_pursuit_node]: Pure Pursuit: pose=(-2.708, -4.446, 1.285) cte=0.003 closest=1037 target=1084 path_dist=0.003 heading_err=-0.001 steer=0.008 speed=3.968
+[gpu_amcl_cpp_node-6] [INFO] [1788990276.343780982] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-2.295, -2.958, 1.283) scan=(-2.322, -2.937, 1.274) correction=0.034 m/0.009 rad cluster_weight=0.968 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990276.471057960] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.184, -2.436) amcl=(-2.179, -2.495) error=0.059 m / 0.000 rad; current_map=(-2.165, -2.498, 1.301) error=0.065 m / 0.000 rad; odom=(-2.686, -2.203, 1.301) error=0.553 m / 0.000 rad; ekf=(-2.686, -2.203, 1.301) error=0.553 m / 0.000 rad; RMS=0.116 m / 0.014 rad max=0.821 m / 0.115 rad samples=15309
+[gpu_amcl_cpp_node-6] [INFO] [1788990276.639603642] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(4.715, -3.318, 2.895) baseline=(4.741, -3.324, 2.897) delta=(-0.026, 0.007, -0.003) moved=true scan_age=0.017s
+[component_container-9] [INFO] [1788990276.943682738] [pure_pursuit_node]: Pure Pursuit: pose=(-1.698, -0.598, 1.342) cte=-0.009 closest=1236 target=1283 path_dist=0.009 heading_err=0.003 steer=0.006 speed=3.898
+[gpu_amcl_cpp_node-6] [INFO] [1788990277.345810452] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.401, 0.870, 1.403) scan=(-1.409, 0.887, 1.393) correction=0.019 m/0.010 rad cluster_weight=0.936 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990277.420737345] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[ground_truth_amcl_monitor-7] [INFO] [1788990277.471890824] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.341, 1.353) amcl=(-1.331, 1.352) error=0.010 m / 0.000 rad; current_map=(-1.329, 1.346, 1.436) error=0.014 m / 0.000 rad; odom=(-1.867, 1.515, 1.436) error=0.550 m / 0.000 rad; ekf=(-1.867, 1.515, 1.436) error=0.550 m / 0.000 rad; RMS=0.115 m / 0.014 rad max=0.821 m / 0.115 rad samples=15469
+[gpu_amcl_cpp_node-6] [INFO] [1788990277.645533412] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.998, -2.608, 3.106) baseline=(1.049, -2.610, 3.101) delta=(-0.050, 0.002, 0.005) moved=true scan_age=0.005s
+[component_container-9] [INFO] [1788990277.943851866] [pure_pursuit_node]: Pure Pursuit: pose=(-1.307, 2.670, 1.802) cte=-0.006 closest=1401 target=1442 path_dist=0.006 heading_err=-0.065 steer=0.075 speed=1.967
+[gpu_amcl_cpp_node-6] [INFO] [1788990278.349758808] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-1.632, 3.550, 2.233) scan=(-1.633, 3.530, 2.229) correction=0.020 m/0.004 rad cluster_weight=0.985 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990278.472440649] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-1.791, 3.651) amcl=(-1.766, 3.677) error=0.036 m / 0.005 rad; current_map=(-1.786, 3.693, 2.484) error=0.042 m / 0.000 rad; odom=(-2.289, 3.611, 2.484) error=0.500 m / 0.000 rad; ekf=(-2.289, 3.611, 2.484) error=0.500 m / 0.000 rad; RMS=0.115 m / 0.014 rad max=0.821 m / 0.115 rad samples=15630
+[gpu_amcl_cpp_node-6] [INFO] [1788990278.645689118] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.596, -3.378, -1.867) baseline=(-0.586, -3.345, -1.872) delta=(-0.010, -0.033, 0.005) moved=true scan_age=0.004s
+[component_container-9] [INFO] [1788990278.961979545] [pure_pursuit_node]: Pure Pursuit: pose=(-2.607, 3.811, -2.732) cte=0.023 closest=1502 target=1546 path_dist=0.023 heading_err=0.044 steer=0.400 speed=1.879
+[calibration-8] [INFO] [1788990279.347322064] [allowed_telemetry_recorder]: Finished (recording duration reached); Data: /workspace/src/f1tenth_planning/analysis/amcl_tuning_campaign_20260909/acceptance_ramp_15_to_4mps_20260909_run02/telemetry/sensor_record_20260909_214259.csv
+[gpu_amcl_cpp_node-6] [INFO] [1788990279.355873227] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.055, 3.233, -1.987) scan=(-3.052, 3.221, -1.977) correction=0.012 m/0.011 rad cluster_weight=0.969 publish=true
+[INFO] [calibration-8]: process has finished cleanly [pid 4360]
+[ground_truth_amcl_monitor-7] [INFO] [1788990279.477633652] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.145, 2.997) amcl=(-3.134, 2.989) error=0.014 m / 0.000 rad; current_map=(-3.126, 3.017, -1.841) error=0.028 m / 0.001 rad; odom=(-3.681, 2.979, -1.839) error=0.536 m / 0.000 rad; ekf=(-3.681, 2.979, -1.839) error=0.536 m / 0.000 rad; RMS=0.114 m / 0.014 rad max=0.821 m / 0.115 rad samples=15791
+[gpu_amcl_cpp_node-6] [INFO] [1788990279.663097670] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.608, -4.543, -0.069) baseline=(0.573, -4.541, -0.075) delta=(0.035, -0.003, 0.007) moved=true scan_age=0.015s
+[component_container-9] [INFO] [1788990279.965035475] [pure_pursuit_node]: Pure Pursuit: pose=(-3.274, 1.461, -1.676) cte=-0.007 closest=1628 target=1676 path_dist=0.007 heading_err=-0.008 steer=-0.064 speed=3.315
+[gpu_amcl_cpp_node-6] [INFO] [1788990280.212916187] [gpu_amcl_cpp]: Received LiDAR callback #8114 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990280.216833996] [gpu_amcl_cpp]: Starting AMCL scan update #8115 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990280.217810844] [gpu_amcl_cpp]: AMCL scan update #8115 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990280.368488917] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.497, 0.426, -1.971) scan=(-3.512, 0.439, -1.949) correction=0.019 m/0.022 rad cluster_weight=0.991 publish=true
+[gpu_amcl_cpp_node-6] [WARN] [1788990280.420129444] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[ground_truth_amcl_monitor-7] [INFO] [1788990280.492091113] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-3.670, 0.140) amcl=(-3.612, 0.164) error=0.063 m / 0.045 rad; current_map=(-3.619, 0.152, -2.122) error=0.052 m / 0.000 rad; odom=(-4.121, 0.344, -2.122) error=0.495 m / 0.000 rad; ekf=(-4.121, 0.344, -2.122) error=0.495 m / 0.000 rad; RMS=0.114 m / 0.014 rad max=0.821 m / 0.115 rad samples=15952
+[gpu_amcl_cpp_node-6] [INFO] [1788990280.665811306] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(3.020, -5.081, -0.807) baseline=(3.008, -5.069, -0.766) delta=(0.012, -0.012, -0.041) moved=true scan_age=0.018s
+[component_container-9] [INFO] [1788990280.973590431] [pure_pursuit_node]: Pure Pursuit: pose=(-4.304, -0.420, -2.904) cte=-0.028 closest=1741 target=1783 path_dist=0.028 heading_err=0.098 steer=-0.326 speed=1.957
+[gpu_amcl_cpp_node-6] [INFO] [1788990281.376884282] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.030, -0.430, 2.756) scan=(-4.984, -0.457, 2.791) correction=0.053 m/0.035 rad cluster_weight=0.986 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990281.495264809] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.226, -0.334) amcl=(-5.217, -0.314) error=0.022 m / 0.000 rad; current_map=(-5.235, -0.304, 2.540) error=0.031 m / 0.000 rad; odom=(-5.494, -0.023, 2.540) error=0.411 m / 0.000 rad; ekf=(-5.494, -0.023, 2.540) error=0.411 m / 0.000 rad; RMS=0.113 m / 0.014 rad max=0.821 m / 0.118 rad samples=16071
+[gpu_amcl_cpp_node-6] [INFO] [1788990281.674712961] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(2.958, -6.522, -2.514) baseline=(2.968, -6.514, -2.464) delta=(-0.010, -0.008, -0.050) moved=true scan_age=0.019s
+[component_container-9] [INFO] [1788990281.974205857] [pure_pursuit_node]: Pure Pursuit: pose=(-5.822, 0.629, 1.864) cte=-0.048 closest=1844 target=1891 path_dist=0.048 heading_err=0.032 steer=-0.065 speed=3.600
+[gpu_amcl_cpp_node-6] [INFO] [1788990282.386559623] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-6.092, 2.038, 1.697) scan=(-6.103, 2.061, 1.704) correction=0.026 m/0.007 rad cluster_weight=0.948 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990282.504911132] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-6.176, 2.685) amcl=(-6.148, 2.493) error=0.193 m / 0.025 rad; current_map=(-6.151, 2.533, 1.630) error=0.154 m / 0.000 rad; odom=(-6.298, 2.602, 1.630) error=0.148 m / 0.000 rad; ekf=(-6.298, 2.602, 1.630) error=0.148 m / 0.000 rad; RMS=0.113 m / 0.014 rad max=0.821 m / 0.118 rad samples=16212
+[gpu_amcl_cpp_node-6] [INFO] [1788990282.683940918] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.095, -7.119, 3.136) baseline=(-0.044, -7.120, 3.127) delta=(-0.051, 0.001, 0.009) moved=true scan_age=0.007s
+[component_container-9] [INFO] [1788990282.975748964] [pure_pursuit_node]: Pure Pursuit: pose=(-6.093, 4.423, 1.408) cte=-0.020 closest=2036 target=2083 path_dist=0.020 heading_err=0.007 steer=-0.066 speed=3.797
+[gpu_amcl_cpp_node-6] [INFO] [1788990283.394363209] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-5.667, 5.905, 1.154) scan=(-5.677, 5.891, 1.156) correction=0.016 m/0.002 rad cluster_weight=0.993 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990283.506082253] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-5.490, 6.308) amcl=(-5.546, 6.148) error=0.170 m / 0.033 rad; current_map=(-5.541, 6.157, 1.052) error=0.160 m / 0.000 rad; odom=(-5.761, 5.780, 1.052) error=0.594 m / 0.000 rad; ekf=(-5.761, 5.780, 1.052) error=0.594 m / 0.000 rad; RMS=0.113 m / 0.014 rad max=0.821 m / 0.118 rad samples=16341
+[gpu_amcl_cpp_node-6] [WARN] [1788990283.605250671] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[gpu_amcl_cpp_node-6] [INFO] [1788990283.692843847] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-2.958, -6.341, 2.486) baseline=(-2.937, -6.356, 2.528) delta=(-0.021, 0.016, -0.042) moved=true scan_age=0.023s
+[component_container-9] [INFO] [1788990283.976563619] [pure_pursuit_node]: Pure Pursuit: pose=(-4.610, 7.259, 0.541) cte=-0.050 closest=2199 target=2245 path_dist=0.050 heading_err=0.012 steer=-0.151 speed=3.141
+[gpu_amcl_cpp_node-6] [INFO] [1788990284.400157743] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-3.333, 7.625, 0.038) scan=(-3.372, 7.611, 0.051) correction=0.042 m/0.013 rad cluster_weight=0.981 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990284.512786274] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-2.894, 7.608) amcl=(-3.014, 7.614) error=0.121 m / 0.063 rad; current_map=(-2.978, 7.610, -0.148) error=0.084 m / 0.000 rad; odom=(-3.375, 6.971, -0.148) error=0.798 m / 0.000 rad; ekf=(-3.375, 6.971, -0.148) error=0.798 m / 0.000 rad; RMS=0.113 m / 0.015 rad max=0.821 m / 0.118 rad samples=16464
+[gpu_amcl_cpp_node-6] [INFO] [1788990284.698146123] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-3.638, -3.535, 1.134) baseline=(-3.649, -3.560, 1.207) delta=(0.010, 0.024, -0.073) moved=true scan_age=0.019s
+[component_container-9] [INFO] [1788990284.979768782] [pure_pursuit_node]: Pure Pursuit: pose=(-1.449, 6.865, -0.748) cte=0.004 closest=2368 target=2416 path_dist=0.004 heading_err=0.040 steer=-0.061 speed=3.865
+[gpu_amcl_cpp_node-6] [INFO] [1788990285.224310430] [gpu_amcl_cpp]: Received LiDAR callback #8446 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990285.224382796] [gpu_amcl_cpp]: Starting AMCL scan update #8446 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990285.224920092] [gpu_amcl_cpp]: AMCL scan update #8446 completed; evaluating pose confidence.
+[gpu_amcl_cpp_node-6] [INFO] [1788990285.417689670] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(-0.432, 5.664, -1.075) scan=(-0.422, 5.633, -1.062) correction=0.032 m/0.013 rad cluster_weight=0.965 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990285.516420255] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(-0.242, 5.340) amcl=(-0.240, 5.317) error=0.023 m / 0.000 rad; current_map=(-0.244, 5.295, -1.090) error=0.045 m / 0.000 rad; odom=(-0.666, 4.660, -1.090) error=0.802 m / 0.000 rad; ekf=(-0.666, 4.660, -1.090) error=0.802 m / 0.000 rad; RMS=0.113 m / 0.015 rad max=0.821 m / 0.118 rad samples=16607
+[gpu_amcl_cpp_node-6] [INFO] [1788990285.703899909] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.847, -1.157, 0.431) baseline=(-0.923, -1.190, 0.398) delta=(0.075, 0.033, 0.032) moved=true scan_age=0.005s
+[gpu_amcl_cpp_node-6] [WARN] [1788990287.875383531] [gpu_amcl_cpp]: Discarding stale LiDAR scan (age 2.006 s > 0.250 s).
+[ground_truth_amcl_monitor-7] [INFO] [1788990287.876564224] [ground_truth_amcl_monitor]: AMCL vs GT: gt=(0.362, 4.052) amcl=(0.295, 4.122) error=0.098 m / 0.032 rad; current_map=(0.326, 4.044, -1.178) error=0.037 m / 0.000 rad; odom=(-0.113, 3.421, -1.178) error=0.790 m / 0.000 rad; ekf=(-0.113, 3.421, -1.178) error=0.790 m / 0.000 rad; RMS=0.113 m / 0.015 rad max=0.821 m / 0.118 rad samples=16658
+[actuator_interface-10] [WARN] [1788990287.879588012] [autodrive_actuator_interface]: Neutral output: command timeout
+[component_container-9] [INFO] [1788990287.892270406] [pure_pursuit_node]: Pure Pursuit: pose=(0.480, 3.626, -1.257) cte=-0.008 closest=2559 target=21 path_dist=0.008 heading_err=0.023 steer=-0.010 speed=3.909
+[gpu_amcl_cpp_node-6] [INFO] [1788990287.895219103] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(-0.262, -0.913, 0.393) baseline=(-0.341, -0.944, 0.361) delta=(0.078, 0.031, 0.032) moved=true scan_age=0.017s
+[gpu_amcl_cpp_node-6] [INFO] [1788990287.898529373] [gpu_amcl_cpp]: AMCL local correction: odom_prediction=(0.326, 4.044, -1.178) scan=(0.315, 4.033, -1.213) correction=0.016 m/0.035 rad cluster_weight=0.927 publish=true
+[ground_truth_amcl_monitor-7] [INFO] [1788990287.923092544] [ground_truth_amcl_monitor]: Ground-truth jump/reset detected; waiting for fresh AMCL alignment
+[actuator_interface-10] [ERROR] [1788990287.924915311] [autodrive_actuator_interface]: Collision count increased to 1; terminal stop latched, no simulator reset published
+[ground_truth_amcl_monitor-7] [INFO] [1788990287.925434102] [ground_truth_amcl_monitor]: Collision epoch changed; discarding localization comparison; waiting for fresh AMCL alignment
+[actuator_interface-10] [WARN] [1788990287.933750860] [autodrive_actuator_interface]: Neutral output: external stop
+[gpu_amcl_cpp_node-6] [WARN] [1788990287.935457578] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[component_container-9] [INFO] [1788990288.892764009] [pure_pursuit_node]: Pure Pursuit: pose=(0.528, 3.631, -1.131) cte=-0.055 closest=2559 target=12 path_dist=0.055 heading_err=-0.104 steer=-0.213 speed=3.500
+[gpu_amcl_cpp_node-6] [INFO] [1788990288.896239472] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.174, -0.729, 0.354) baseline=(0.174, -0.729, 0.440) delta=(0.000, 0.000, -0.087) moved=true scan_age=0.019s
+[gpu_amcl_cpp_node-6] [WARN] [1788990288.936534654] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [WARN] [1788990289.325824838] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990289.896206496] [pure_pursuit_node]: Pure Pursuit: pose=(0.571, 3.529, -1.217) cte=-0.062 closest=2565 target=17 path_dist=0.062 heading_err=-0.025 steer=-0.191 speed=3.415
+[gpu_amcl_cpp_node-6] [INFO] [1788990289.899658544] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.275, -0.687, 0.440) baseline=(0.272, -0.688, 0.353) delta=(0.003, 0.001, 0.087) moved=true scan_age=0.006s
+[gpu_amcl_cpp_node-6] [WARN] [1788990289.953038980] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [INFO] [1788990290.229048836] [gpu_amcl_cpp]: Received LiDAR callback #8660 (1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990290.229962154] [gpu_amcl_cpp]: Starting AMCL scan update #8660 (sampled from 1081 ranges).
+[gpu_amcl_cpp_node-6] [INFO] [1788990290.230784188] [gpu_amcl_cpp]: AMCL scan update #8660 completed; evaluating pose confidence.
+[component_container-9] [INFO] [1788990290.914501756] [pure_pursuit_node]: Pure Pursuit: pose=(0.612, 3.432, -1.131) cte=-0.070 closest=2570 target=23 path_dist=0.070 heading_err=-0.119 steer=-0.243 speed=3.269
+[gpu_amcl_cpp_node-6] [INFO] [1788990290.918088338] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.373, -0.646, 0.353) baseline=(0.373, -0.646, 0.440) delta=(0.000, 0.000, -0.087) moved=true scan_age=0.019s
+[gpu_amcl_cpp_node-6] [WARN] [1788990290.959093350] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[gpu_amcl_cpp_node-6] [WARN] [1788990291.512354027] [gpu_amcl_cpp]: Queued LiDAR scan until source-time odometry arrives (queued=1).
+[component_container-9] [INFO] [1788990291.919245676] [pure_pursuit_node]: Pure Pursuit: pose=(0.652, 3.336, -1.131) cte=-0.078 closest=2575 target=28 path_dist=0.078 heading_err=-0.126 steer=-0.257 speed=3.180
+[gpu_amcl_cpp_node-6] [INFO] [1788990291.922321472] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.467, -0.607, 0.353) baseline=(0.466, -0.607, 0.440) delta=(0.001, 0.000, -0.087) moved=true scan_age=0.019s
+[gpu_amcl_cpp_node-6] [WARN] [1788990291.961910836] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[component_container-9] [INFO] [1788990292.920779592] [pure_pursuit_node]: Pure Pursuit: pose=(0.691, 3.242, -1.217) cte=-0.086 closest=2580 target=33 path_dist=0.086 heading_err=-0.046 steer=-0.238 speed=3.112
+[gpu_amcl_cpp_node-6] [INFO] [1788990292.924471554] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.562, -0.567, 0.440) baseline=(0.559, -0.568, 0.353) delta=(0.003, 0.001, 0.087) moved=true scan_age=0.006s
+[gpu_amcl_cpp_node-6] [WARN] [1788990292.975034227] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[component_container-9] [INFO] [1788990293.923555344] [pure_pursuit_node]: Pure Pursuit: pose=(0.723, 3.166, -1.131) cte=-0.094 closest=2584 target=37 path_dist=0.094 heading_err=-0.137 steer=-0.287 speed=3.000
+[gpu_amcl_cpp_node-6] [INFO] [1788990293.925766606] [gpu_amcl_cpp]: AMCL odom delta: at_scan=(0.639, -0.535, 0.354) baseline=(0.639, -0.535, 0.440) delta=(0.000, 0.000, -0.086) moved=true scan_age=0.023s
+[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+[INFO] [actuator_interface-10]: sending signal 'SIGINT' to process[actuator_interface-10]
+[INFO] [component_container-9]: sending signal 'SIGINT' to process[component_container-9]
+[INFO] [ground_truth_amcl_monitor-7]: sending signal 'SIGINT' to process[ground_truth_amcl_monitor-7]
+[INFO] [gpu_amcl_cpp_node-6]: sending signal 'SIGINT' to process[gpu_amcl_cpp_node-6]
+[INFO] [lifecycle_manager-5]: sending signal 'SIGINT' to process[lifecycle_manager-5]
+[INFO] [map_server-4]: sending signal 'SIGINT' to process[map_server-4]
+[INFO] [ekf_localization_node-3]: sending signal 'SIGINT' to process[ekf_localization_node-3]
+[INFO] [sensor_odometry_node-2]: sending signal 'SIGINT' to process[sensor_odometry_node-2]
+[INFO] [autodrive_bridge_40hz-1]: sending signal 'SIGINT' to process[autodrive_bridge_40hz-1]
+[gpu_amcl_cpp_node-6] [WARN] [1788990293.992680347] [gpu_amcl_cpp]: No local AMCL cluster near odometry prediction; using causal odometry pose.
+[component_container-9] [INFO] [1788990294.122849551] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[gpu_amcl_cpp_node-6] [INFO] [1788990294.129101633] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[lifecycle_manager-5] [INFO] [1788990294.130838457] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[lifecycle_manager-5] [INFO] [1788990294.131051691] [lifecycle_manager_map]: Running Nav2 LifecycleManager rcl preshutdown (lifecycle_manager_map)
+[lifecycle_manager-5] [INFO] [1788990294.131115351] [lifecycle_manager_map]: [34m[1mTerminating bond timer...[0m[0m
+[map_server-4] [INFO] [1788990294.133473901] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[map_server-4] [INFO] [1788990294.133589119] [map_server]: Running Nav2 LifecycleNode rcl preshutdown (map_server)
+[map_server-4] [INFO] [1788990294.133679069] [map_server]: Deactivating
+[map_server-4] [INFO] [1788990294.133710448] [map_server]: Destroying bond (map_server) to lifecycle manager.
+[ekf_localization_node-3] [INFO] [1788990294.136430552] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[sensor_odometry_node-2] [INFO] [1788990294.138392351] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[map_server-4] [INFO] [1788990294.144078434] [map_server]: Cleaning up
+[map_server-4] [INFO] [1788990294.144330300] [map_server]: Destroying bond (map_server) to lifecycle manager.
+[autodrive_bridge_40hz-1] Traceback (most recent call last):
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/gevent/pywsgi.py", line 999, in handle_one_response
+[autodrive_bridge_40hz-1]     self.run_application()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/handler.py", line 75, in run_application
+[autodrive_bridge_40hz-1]     self.run_websocket()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/handler.py", line 52, in run_websocket
+[autodrive_bridge_40hz-1]     list(self.application(self.environ, lambda s, h, e=None: []))
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/middleware.py", line 60, in __call__
+[autodrive_bridge_40hz-1]     return self.engineio_app.handle_request(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/socketio/server.py", line 526, in handle_request
+[autodrive_bridge_40hz-1]     return self.eio.handle_request(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/server.py", line 367, in handle_request
+[autodrive_bridge_40hz-1]     r = self._handle_connect(environ, start_response,
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/server.py", line 515, in _handle_connect
+[autodrive_bridge_40hz-1]     ret = s.handle_get_request(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/socket.py", line 107, in handle_get_request
+[autodrive_bridge_40hz-1]     return getattr(self, '_upgrade_' + transport)(environ,
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/socket.py", line 152, in _upgrade_websocket
+[autodrive_bridge_40hz-1]     return ws(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/async_drivers/gevent.py", line 44, in __call__
+[autodrive_bridge_40hz-1]     return self.app(self)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/socket.py", line 218, in _websocket_handler
+[autodrive_bridge_40hz-1]     p = ws.wait()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/async_drivers/gevent.py", line 53, in wait
+[autodrive_bridge_40hz-1]     return self._sock.receive()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/websocket.py", line 301, in receive
+[autodrive_bridge_40hz-1]     return self.read_message()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/websocket.py", line 285, in read_message
+[autodrive_bridge_40hz-1]     self.validate_utf8(message)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/websocket.py", line 223, in validate_utf8
+[autodrive_bridge_40hz-1]     self.utf8validate_last = self.utf8validator.validate(payload)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/utf8validator.py", line 139, in validate
+[autodrive_bridge_40hz-1]     if state == UTF8_REJECT:
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/socketio/client.py", line 25, in signal_handler
+[autodrive_bridge_40hz-1]     return original_signal_handler(sig, frame)
+[autodrive_bridge_40hz-1] KeyboardInterrupt
+[autodrive_bridge_40hz-1] 2026-09-09T21:44:54Z {'REMOTE_ADDR': '::ffff:127.0.0.1', 'REMOTE_PORT': '47928', 'HTTP_HOST': '127.0.0.1:4567', (hidden keys: 24)} failed with KeyboardInterrupt
+[autodrive_bridge_40hz-1] 
+[autodrive_bridge_40hz-1] Traceback (most recent call last):
+[autodrive_bridge_40hz-1]   File "src/gevent/greenlet.py", line 906, in gevent._gevent_cgreenlet.Greenlet.run
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/socketio/server.py", line 640, in _handle_event_internal
+[autodrive_bridge_40hz-1]     r = server._trigger_event(data[0], namespace, sid, *data[1:])
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/socketio/server.py", line 669, in _trigger_event
+[autodrive_bridge_40hz-1]     return self.handlers[namespace][event](*args)
+[autodrive_bridge_40hz-1]   File "/workspace/build/sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py", line 368, in packet_handler
+[autodrive_bridge_40hz-1]     result = original_handler(sid, data)
+[autodrive_bridge_40hz-1]   File "/home/autodrive_devkit/install/autodrive_roboracer/lib/python3.10/site-packages/autodrive_roboracer/autodrive_bridge.py", line 345, in bridge
+[autodrive_bridge_40hz-1]     publish_actuator_feedbacks(autodrive.throttle, autodrive.steering)
+[autodrive_bridge_40hz-1]   File "/home/autodrive_devkit/install/autodrive_roboracer/lib/python3.10/site-packages/autodrive_roboracer/autodrive_bridge.py", line 241, in publish_actuator_feedbacks
+[autodrive_bridge_40hz-1]     publishers['pub_throttle'].publish(create_float_msg(msg_float32, throttle))
+[autodrive_bridge_40hz-1]   File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/publisher.py", line 70, in publish
+[autodrive_bridge_40hz-1]     self.__publisher.publish(msg)
+[autodrive_bridge_40hz-1] rclpy._rclpy_pybind11.RCLError: Failed to publish: publisher's context is invalid, at ./src/rcl/publisher.c:389
+[autodrive_bridge_40hz-1] 2026-09-09T21:44:54Z <Thread at 0x766f1d181ea0: <bound method Server._handle_event_internal of <socketio.server.Server object at 0x766f65336ef0>>(<socketio.server.Server object at 0x766f65336ef0>, '5cf858958209473d9e8b863018ab2ccb', ['Bridge', {'V1 Throttle': '0.0000', 'V1 Steering', '/', None)> failed with RCLError
+[autodrive_bridge_40hz-1] 
+[autodrive_bridge_40hz-1] Traceback (most recent call last):
+[autodrive_bridge_40hz-1]   File "/workspace/install/lib/sdu_apex_autodrive/autodrive_bridge_40hz", line 33, in <module>
+[autodrive_bridge_40hz-1]     sys.exit(load_entry_point('sdu-apex-autodrive', 'console_scripts', 'autodrive_bridge_40hz')())
+[autodrive_bridge_40hz-1]   File "/workspace/build/sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py", line 443, in main
+[autodrive_bridge_40hz-1]     official_bridge.main()
+[autodrive_bridge_40hz-1]   File "/home/autodrive_devkit/install/autodrive_roboracer/lib/python3.10/site-packages/autodrive_roboracer/autodrive_bridge.py", line 442, in main
+[autodrive_bridge_40hz-1]     pywsgi.WSGIServer(('', 4567), app, handler_class=WebSocketHandler).serve_forever() # Deploy as a gevent WSGI server
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/gevent/baseserver.py", line 400, in serve_forever
+[autodrive_bridge_40hz-1]     self._stop_event.wait()
+[autodrive_bridge_40hz-1]   File "src/gevent/event.py", line 163, in gevent._gevent_cevent.Event.wait
+[autodrive_bridge_40hz-1]   File "src/gevent/_abstract_linkable.py", line 521, in gevent._gevent_c_abstract_linkable.AbstractLinkable._wait
+[autodrive_bridge_40hz-1]   File "src/gevent/_abstract_linkable.py", line 487, in gevent._gevent_c_abstract_linkable.AbstractLinkable._wait_core
+[autodrive_bridge_40hz-1]   File "src/gevent/_abstract_linkable.py", line 490, in gevent._gevent_c_abstract_linkable.AbstractLinkable._wait_core
+[autodrive_bridge_40hz-1]   File "src/gevent/_abstract_linkable.py", line 442, in gevent._gevent_c_abstract_linkable.AbstractLinkable._AbstractLinkable__wait_to_be_notified
+[autodrive_bridge_40hz-1]   File "src/gevent/_abstract_linkable.py", line 451, in gevent._gevent_c_abstract_linkable.AbstractLinkable._switch_to_hub
+[autodrive_bridge_40hz-1]   File "src/gevent/_greenlet_primitives.py", line 61, in gevent._gevent_c_greenlet_primitives.SwitchOutGreenletWithLoop.switch
+[autodrive_bridge_40hz-1]   File "src/gevent/_greenlet_primitives.py", line 65, in gevent._gevent_c_greenlet_primitives.SwitchOutGreenletWithLoop.switch
+[autodrive_bridge_40hz-1]   File "src/gevent/_gevent_c_greenlet_primitives.pxd", line 35, in gevent._gevent_c_greenlet_primitives._greenlet_switch
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/gevent/pywsgi.py", line 999, in handle_one_response
+[autodrive_bridge_40hz-1]     self.run_application()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/handler.py", line 75, in run_application
+[autodrive_bridge_40hz-1]     self.run_websocket()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/handler.py", line 52, in run_websocket
+[autodrive_bridge_40hz-1]     list(self.application(self.environ, lambda s, h, e=None: []))
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/middleware.py", line 60, in __call__
+[autodrive_bridge_40hz-1]     return self.engineio_app.handle_request(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/socketio/server.py", line 526, in handle_request
+[autodrive_bridge_40hz-1]     return self.eio.handle_request(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/server.py", line 367, in handle_request
+[autodrive_bridge_40hz-1]     r = self._handle_connect(environ, start_response,
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/server.py", line 515, in _handle_connect
+[autodrive_bridge_40hz-1]     ret = s.handle_get_request(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/socket.py", line 107, in handle_get_request
+[autodrive_bridge_40hz-1]     return getattr(self, '_upgrade_' + transport)(environ,
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/socket.py", line 152, in _upgrade_websocket
+[autodrive_bridge_40hz-1]     return ws(environ, start_response)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/async_drivers/gevent.py", line 44, in __call__
+[autodrive_bridge_40hz-1]     return self.app(self)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/socket.py", line 218, in _websocket_handler
+[autodrive_bridge_40hz-1]     p = ws.wait()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/engineio/async_drivers/gevent.py", line 53, in wait
+[autodrive_bridge_40hz-1]     return self._sock.receive()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/websocket.py", line 301, in receive
+[autodrive_bridge_40hz-1]     return self.read_message()
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/websocket.py", line 285, in read_message
+[autodrive_bridge_40hz-1]     self.validate_utf8(message)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/websocket.py", line 223, in validate_utf8
+[autodrive_bridge_40hz-1]     self.utf8validate_last = self.utf8validator.validate(payload)
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/geventwebsocket/utf8validator.py", line 139, in validate
+[autodrive_bridge_40hz-1]     if state == UTF8_REJECT:
+[autodrive_bridge_40hz-1]   File "/usr/local/lib/python3.10/dist-packages/socketio/client.py", line 25, in signal_handler
+[autodrive_bridge_40hz-1]     return original_signal_handler(sig, frame)
+[autodrive_bridge_40hz-1] KeyboardInterrupt
+[lifecycle_manager-5] [INFO] [1788990294.163259724] [lifecycle_manager_map]: Destroying lifecycle_manager_map
+[map_server-4] [INFO] [1788990294.171464619] [map_server]: Destroying
+[INFO] [ekf_localization_node-3]: process has finished cleanly [pid 4350]
+[INFO] [component_container-9]: process has finished cleanly [pid 4362]
+[INFO] [lifecycle_manager-5]: process has finished cleanly [pid 4354]
+[INFO] [sensor_odometry_node-2]: process has finished cleanly [pid 4348]
+[INFO] [map_server-4]: process has finished cleanly [pid 4352]
+[INFO] [actuator_interface-10]: process has finished cleanly [pid 4364]
+[INFO] [ground_truth_amcl_monitor-7]: process has finished cleanly [pid 4358]
+[ERROR] [autodrive_bridge_40hz-1]: process has died [pid 4346, exit code -2, cmd '/workspace/install/lib/sdu_apex_autodrive/autodrive_bridge_40hz --ros-args -r __node:=autodrive_bridge'].
+[INFO] [gpu_amcl_cpp_node-6]: process has finished cleanly [pid 4356]

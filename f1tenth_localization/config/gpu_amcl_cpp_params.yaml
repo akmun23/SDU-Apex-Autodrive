@@ -26,7 +26,7 @@ gpu_amcl_cpp:
     update_min_a: 0.035
     # Accept transport/scheduling delay without treating an old scan as live.
     # This remains valid for both the current 20 Hz compete player and a
-    # validated 40 Hz player; AMCL never fabricates an intermediate scan.
+    # validated native-cadence player; AMCL never fabricates an intermediate scan.
     max_scan_age: 0.25
     # LiDAR callbacks can arrive behind the odometry timestamp. Keep a full
     # second so a scan delivered before its source-time odometry can wait for
@@ -73,8 +73,11 @@ gpu_amcl_cpp:
     # active before a pose is published to the controller.
     cluster_publish_min_weight: 0.20
 
-    enable_recovery_injection: false
-    recovery_injection_ratio: 0.05
+    # Keep the normal locked cloud local. After repeated local association
+    # failures, inject a small map/raceline-sampled recovery population so a
+    # real scan can re-acquire the track without a simulator reset.
+    enable_recovery_injection: true
+    recovery_injection_ratio: 0.10
     enable_local_roughening: true
     local_roughening_ratio: 0.20
     local_roughening_xy_std_m: 0.12
@@ -82,8 +85,11 @@ gpu_amcl_cpp:
     local_roughening_bad_log_weight_per_beam: -1.0
     local_roughening_max_cloud_std_m: 0.75
 
-    enable_raycast_verification: false
-    raycast_verification_global_only: true
+    # Use the map's ray geometry to verify local particle modes as well as
+    # startup modes. The likelihood-field score alone produced high-scoring
+    # but wrong corridor aliases in the fast recordings.
+    enable_raycast_verification: true
+    raycast_verification_global_only: false
     raycast_verification_max_clusters: 5
     raycast_verification_particles_per_cluster: 20
     raycast_verification_top_particles: 20
@@ -94,9 +100,13 @@ gpu_amcl_cpp:
     raycast_verification_min_factor: 0.20
     raycast_verification_step_m: 0.05
 
-    enable_startup_scan_refinement: false
-    startup_scan_refinement_max_beams: 90
-    startup_scan_refinement_iterations: 8
+    # The first global likelihood-field mode can be about 0.8 m from the
+    # simulator spawn even when the saved anchor is correct. Refine the
+    # startup cloud against the first scan so the existing anchor/travel gates
+    # do not deadlock PP waiting for /current_map_pose.
+    enable_startup_scan_refinement: true
+    startup_scan_refinement_max_beams: 180
+    startup_scan_refinement_iterations: 12
     startup_scan_refinement_max_match_distance_m: 0.60
     startup_scan_refinement_max_translation_m: 0.50
     startup_scan_refinement_max_yaw_rad: 0.52
@@ -110,56 +120,64 @@ gpu_amcl_cpp:
     pose_jump_confirm_distance_m: 0.75
     pose_jump_confirm_yaw_rad: 0.60
 
-    # Keep AMCL odometry-dominant at the native scan cadence while
-    # allowing real map corrections to arrive within a few scans. A larger
-    # single-scan jump is still rejected as a corridor alias and replaced by
-    # the causal odometry prediction.
-    # A scan correction must be geometrically tiny as well as locally
-    # associated. In the first live bend, the map scan mode repeatedly pulled
-    # the controller away from the ground-truth path while odometry remained
-    # within about 0.04 m. Tighten the innovation gate so that only the small
-    # corrections expected from this 5 cm map are allowed into the local pose.
-    local_scan_correction_max_distance_m: 0.04
-    local_scan_correction_max_yaw_rad: 0.08
+    # Do not cap the accumulated translational correction. AMCL must be able
+    # to apply the correction supported by repeated scans; the causal local
+    # cluster association and the 1 m pose-jump sanity gate remain the alias
+    # protections.
+    local_scan_correction_max_distance_m: 0.0
+    local_scan_correction_max_yaw_rad: 0.0
     # Associate local scan clusters with the causal odometry-predicted pose;
     # repeated corridor aliases outside this radius are not controller input.
     local_cluster_association_max_distance_m: 0.80
     # Moderate cluster weights are usable once the innovation gate above has
     # passed. Very weak modes remain rejected before they can affect the map
     # pose.
-    local_cluster_min_weight: 0.60
-    # Keep translational scan correction disabled: the current corridor scans
-    # do not observe along-track translation reliably. Wall orientation still
-    # contains useful heading information, so it is evaluated independently.
-    local_scan_correction_xy_gain: 0.0
-    # The offline yaw-only candidate was rejected by the held-out live run:
-    # it accumulated about 0.55 m of map-pose error while EKF odometry stayed
-    # near 0.05 m. Keep the parameter available for a future observability-
-    # aware matcher, but do not apply PF yaw corrections in production.
+    # The live acceptance traces separated stable local matches (typically
+    # >=0.92) from the ambiguous upper-hairpin modes (0.73-0.90). Reject the
+    # latter and continue from causal odometry until scan support improves.
+    local_cluster_min_weight: 0.90
+    local_tracking_recovery_after_rejected_scans: 3
+    local_tracking_recovery_confirm_scans: 3
+    local_tracking_recovery_min_cluster_weight: 0.80
+    local_tracking_recovery_stability_distance_m: 0.35
+    local_tracking_recovery_stability_yaw_rad: 0.25
+    # Apply each accepted scan innovation continuously. The fast acceptance
+    # recording showed that, once the causal prediction was at least 0.10 m
+    # from GT, the accepted innovation pointed back toward GT in about 92% of
+    # samples; 0.25 therefore left too much odometry drift to accumulate.
+    # Validate the higher gain at real driving speed while retaining the
+    # causal association and cluster-quality checks.
+    local_scan_correction_xy_gain: 0.50
+    # Apply each accepted scan innovation continuously. AMCL must be able to
+    # remove accumulated odometry drift in both map axes; this is not a
+    # lifetime correction budget. The accepted full-speed run showed that the
+    # upper-hairpin ambiguity is specifically in the raceline-tangent
+    # component, so only that component is attenuated below.
+    local_scan_correction_cross_track_only: false
+    # Keep continuous along-track drift correction enabled, but reduce the
+    # ambiguous branch-pulling component to the value accepted in the 11.77
+    # lap full-speed run. The normal component remains at full gain.
+    local_scan_correction_along_track_gain: 0.25
+    # Heading was already source-time stable in the crash run. Keep its map
+    # correction conservative until a heading-observability campaign justifies
+    # a larger value.
     local_scan_correction_yaw_gain: 0.0
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
     # matching bias is integrated again at every scan update.
     local_tracking_reinitialize_cloud: true
-    # The known-start local cloud is a scan-matching prior, not a global
-    # recovery distribution. Stationary and moving campaigns showed that the
-    # old 0.04 m^2 spread kept multiple wall modes alive and produced large
-    # local innovations; 0.01 m^2 kept the dominant mode continuous while
-    # reducing the measured innovation p95 to about 0.025 m.
-    local_tracking_cloud_covariance_xy: 0.01
+    # The sqrt(.04) = 0.20 m local cloud retained the stable long-run result
+    # (167 m at 3 m/s, 0.139 m current-map p95); tightening to .01 m^2 did not
+    # improve that error and still collided during the first hairpin.
+    local_tracking_cloud_covariance_xy: 0.04
     local_tracking_cloud_covariance_yaw: 0.01
 
-    # The compete simulator reset is deterministic and the first trajectory
-    # sample is the checked-in map-frame start pose. Starting globally lets a
-    # visually similar corridor win with high confidence, which gives the
-    # controller a valid-looking but physically wrong map association.
-    # Initialize at the known start and keep scan matching local thereafter.
-    global_initialization: false
-    # The circuit has visually identical straight sections.  Race startup uses
-    # the known first raceline waypoint as an acceptance anchor while global
-    # particles still recover from a wrong initial pose guess.
-    initial_pose_from_raceline: true
-    initial_heading_from_raceline: true
+    # The local odometry origin and generated map/raceline origin are
+    # different frames. Do not hide that mismatch by seeding a cloud at the
+    # first raceline waypoint; startup must be scan-supported and global.
+    global_initialization: true
+    initial_pose_from_raceline: false
+    initial_heading_from_raceline: false
     global_heading_cone_rad: 0.45
     global_track_margin_m: 0.15
     global_max_lateral_offset_m: 1.50
@@ -168,24 +186,44 @@ gpu_amcl_cpp:
     # Fallback for direct AMCL launches. AMCL and PP must use the same
     # map-frame raceline; the old ICRA file runs in the opposite direction at
     # the simulator start.
-    global_heading_trajectory_rel_path: trajectories/autodrive_track_ftg_commit_20260908_lap01_mintime_raceline.csv
+    global_heading_trajectory_rel_path: trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
     # Do not accept a global candidate until it meets the same safety envelope
     # required by the controller.  AMCL keeps refining while the vehicle is
     # stationary, so a wrong start guess cannot deadlock localization.
     global_pose_covariance_xy_max: 0.25
     global_pose_covariance_yaw_max: 0.12
-    # The simulator reset pose is ~0.51 m from the first raceline sample while
-    # still inside the measured track corridor. Keep a bounded startup margin
-    # so AMCL can publish its first map pose instead of deadlocking the EKF and
-    # lateral planner at the reset origin.
+    # Global localization starts from a saved-map start region, not from the
+    # first trajectory row. The trajectory is a closed loop whose CSV seam is
+    # elsewhere, while this measured map start disambiguates the opposite-
+    # heading corridor alias at the simulator spawn. The radius still permits
+    # a bounded startup offset and the scan matcher must support the pose.
     global_pose_max_track_distance_m: 0.65
     global_pose_max_track_heading_error_rad: 0.45
-    # The compete simulator reset returns the car to the known race start. AMCL
-    # must therefore reject visually similar sections elsewhere on the closed
-    # circuit during startup; otherwise the controller can align its seam to a
-    # valid but physically wrong map location.
     global_start_anchor_enabled: true
-    global_start_anchor_radius_m: 0.90
+    global_start_anchor_radius_m: 0.75
+    global_start_anchor_x_m: 0.8006
+    global_start_anchor_y_m: 3.1583
+    global_start_anchor_yaw_rad: -1.5707963267948966
+    global_start_anchor_heading_tolerance_rad: 0.80
+    # Do not lock a visually plausible closed-track alias from one scan.
+    # Require repeated strong, stable scan support during the slow startup
+    # localization phase before PP is allowed to use the pose.
+    global_lock_confirm_scans: 5
+    global_lock_stability_distance_m: 0.35
+    global_lock_stability_yaw_rad: 0.25
+    global_lock_min_cluster_weight: 0.50
+    # Do not lock on stationary closed-track scan aliases. Require the car to
+    # leave the spawn by a small odometry distance so moving scans can
+    # disambiguate the corridor before AMCL hands the pose to the controller.
+    global_lock_min_travel_m: 0.75
+    # Odom yaw was unbiased in the GT campaign, while the corridor scan
+    # likelihood had a repeatable heading offset. Use the saved map-start yaw
+    # plus the odom delta for the global lock heading.
+    global_lock_use_odom_heading: true
+    # Use the saved map-start translation during the slow localization ramp;
+    # LiDAR still validates the candidate and local scan corrections remain
+    # responsible for correcting odometry drift after lock.
+    global_lock_use_anchor_position: true
 
     initial_pose_x: 0.0
     initial_pose_y: 0.0

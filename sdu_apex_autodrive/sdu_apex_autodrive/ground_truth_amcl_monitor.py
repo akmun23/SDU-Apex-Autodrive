@@ -41,6 +41,25 @@ def _rotate(x: float, y: float, angle: float) -> Tuple[float, float]:
     return c * x - s * y, s * x + c * y
 
 
+def align_world_pose_to_map(
+    world_pose: Tuple[float, float, float],
+    world_start: Tuple[float, float, float],
+    map_start: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    """Transform a simulator-world pose into a saved map frame.
+
+    The map and the simulator may use different origins and axis headings.
+    The displacement therefore uses the relative start heading
+    ``map_yaw - world_yaw``; the pose heading uses the same rigid transform.
+    """
+    x, y, yaw = world_pose
+    x0, y0, yaw0 = world_start
+    mx0, my0, myaw0 = map_start
+    frame_yaw = _wrap(myaw0 - yaw0)
+    dx, dy = _rotate(x - x0, y - y0, frame_yaw)
+    return mx0 + dx, my0 + dy, _wrap(myaw0 + _wrap(yaw - yaw0))
+
+
 def _stamp_seconds(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1.0e-9
 
@@ -97,6 +116,13 @@ class GroundTruthAmclMonitor(Node):
         self.declare_parameter("output_csv", "")
         self.declare_parameter("map_provenance_file", "")
         self.declare_parameter("require_absolute_map_scoring", False)
+        # Explicit map-frame pose of the vehicle at the beginning of the map
+        # recording.  This is the diagnostics equivalent of the offline
+        # source-time report's --map-start-pose: it anchors simulator truth to
+        # the saved map without using the first AMCL estimate as an alignment.
+        self.declare_parameter("map_start_x_m", math.nan)
+        self.declare_parameter("map_start_y_m", math.nan)
+        self.declare_parameter("map_start_yaw_rad", math.nan)
 
         gt_topic = str(self.get_parameter("ground_truth_topic").value)
         gt_odom_topic = str(self.get_parameter("ground_truth_odom_topic").value)
@@ -116,6 +142,7 @@ class GroundTruthAmclMonitor(Node):
         self.gt_position: Optional[Tuple[float, float]] = None
         self.gt_yaw: Optional[float] = None
         self.gt_speed_mps = math.nan
+        self.first_gt_pose: Optional[Tuple[float, float, float]] = None
         self.collision_count: Optional[int] = None
         self.invalid_collision_epoch = False
 
@@ -128,9 +155,17 @@ class GroundTruthAmclMonitor(Node):
                 "Absolute map scoring enabled from %s (source=%s, map=%s, world=%s)"
                 % (provenance_file, self.map_provenance.source,
                    self.map_provenance.map_frame, self.map_provenance.world_frame))
+        map_start = tuple(float(self.get_parameter(name).value) for name in (
+            "map_start_x_m", "map_start_y_m", "map_start_yaw_rad"))
+        self.explicit_map_start = map_start if all(math.isfinite(v) for v in map_start) else None
+        if self.explicit_map_start is not None:
+            self.get_logger().info(
+                "Absolute map scoring enabled from explicit map start: "
+                "(%.4f, %.4f, %.4f)" % self.explicit_map_start)
         elif bool(self.get_parameter("require_absolute_map_scoring").value):
             raise ValueError(
-                "require_absolute_map_scoring is true but map_provenance_file is empty")
+                "require_absolute_map_scoring is true but neither map_provenance_file "
+                "nor all explicit map-start parameters were supplied")
         else:
             self.get_logger().warn(
                 "No map provenance supplied; AMCL error is relative-to-first-pair only")
@@ -202,6 +237,7 @@ class GroundTruthAmclMonitor(Node):
         self.map_to_world_translation = None
         self.odom_map_reference = None
         self.ekf_map_reference = None
+        self.first_gt_pose = None
         self.amcl_samples.clear()
         self.current_map_samples.clear()
         self.odom_samples.clear()
@@ -279,6 +315,8 @@ class GroundTruthAmclMonitor(Node):
         self.last_gt_position = (x, y)
         self.gt_position = (x, y)
         self.gt_yaw = yaw
+        if self.first_gt_pose is None:
+            self.first_gt_pose = (x, y, yaw)
         self._append(self.gt_samples, (stamp, x, y, yaw))
 
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
@@ -356,6 +394,20 @@ class GroundTruthAmclMonitor(Node):
         dx, dy = _rotate(ex - ex0, ey - ey0, myaw0)
         return mx0 + dx, my0 + dy, _wrap(myaw0 + _wrap(eyaw - eyaw0))
 
+    def _map_pose_from_explicit_start(
+        self, world_pose: Tuple[float, float, float]
+    ) -> Optional[Tuple[float, float, float]]:
+        """Place current-run truth in the saved map using the recorded start.
+
+        The simulator world origin can differ between the mapping session and
+        a controller session.  Preserve the measured map-start pose and apply
+        only the current run's displacement from its first truth sample.
+        """
+        if self.explicit_map_start is None or self.first_gt_pose is None:
+            return None
+        return align_world_pose_to_map(
+            world_pose, self.first_gt_pose, self.explicit_map_start)
+
     def _compare_at(self, stamp: float) -> None:
         gt_pose = _interpolate(self.gt_samples, stamp, self.pair_timeout)
         amcl_pose = _interpolate(self.amcl_samples, stamp, self.pair_timeout)
@@ -371,6 +423,8 @@ class GroundTruthAmclMonitor(Node):
         if self.map_provenance is not None:
             absolute_gt_pose = self.map_provenance.world_to_map(
                 gt_world_x, gt_world_y, gt_world_yaw)
+        elif self.explicit_map_start is not None:
+            absolute_gt_pose = self._map_pose_from_explicit_start(gt_pose)
 
         if self.map_to_world_yaw is None:
             reference_gt = absolute_gt_pose or gt_pose

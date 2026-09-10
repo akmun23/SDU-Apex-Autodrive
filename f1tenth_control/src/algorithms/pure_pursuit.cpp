@@ -209,10 +209,11 @@ size_t PurePursuit::findClosestPoint(const Point2D& position) {
         }
     }
 
-    // If the car is too far from path, do a full search (still heading-filtered)
-    const bool seam_region = (last_closest_idx_ < backtrack_points ||
-                              last_closest_idx_ + forward_points >= n);
-    if (min_dist > config_.position_tolerance * 2 || seam_region) {
+    // Only declare the local association lost when its geometric error is
+    // genuinely large. Being near index zero is not a reason to search the
+    // whole closed track: the local cyclic window already crosses the seam,
+    // while a global search can snap a hairpin to its parallel return leg.
+    if (min_dist > config_.position_tolerance * 2) {
         for (size_t i = 0; i < n; ++i) {
             if (!heading_ok(i)) continue;
             double d = math::distance(position.x, position.y, trajectory_[i].x, trajectory_[i].y);
@@ -360,8 +361,12 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
                                        std::max(0.0, config_.wall_safety_margin);
     double usable_half_width = std::numeric_limits<double>::infinity();
     if (have_bounds) {
-        const double left_clearance = closest_pt.left_bound - output.cross_track_error;
-        const double right_clearance = closest_pt.right_bound + output.cross_track_error;
+        // CTE is negative when the vehicle is on the path's left side. The
+        // bounds are center-to-wall distances along the path left/right
+        // normals, so move the left wall closer for positive CTE and the
+        // right wall closer for negative CTE.
+        const double left_clearance = closest_pt.left_bound + output.cross_track_error;
+        const double right_clearance = closest_pt.right_bound - output.cross_track_error;
         const double corridor_clearance = std::min(left_clearance, right_clearance);
         usable_half_width = corridor_clearance - required_half_width;
     }
@@ -525,36 +530,27 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
     const double pursuit_curvature =
         2.0 * target_vehicle.y / (actual_lookahead * actual_lookahead);
 
-    // At the native 10 Hz cadence, the geometric target is already a full
-    // scan interval ahead by the time the next command is issued.  Add the
-    // measured path curvature at that target as the standard curvature
-    // feed-forward term.  A convex blend suppresses the path curvature exactly
-    // where it is needed most: at the apex, the pursuit error can be near zero
-    // while the desired steering is still substantial.
+    // Standard Pure Pursuit already contains the nominal curvature on a
+    // correctly sampled curved reference path. Reference curvature is kept as
+    // an explicit optional experiment, but the production baseline leaves it
+    // disabled to avoid double-counting the bend.
     const double ff_gain = std::clamp(config_.curvature_feedforward_gain, 0.0, 1.0);
     const double target_curvature = std::isfinite(target_pt.curvature) ?
         target_pt.curvature : closest_pt.curvature;
     const double curvature = pursuit_curvature + ff_gain * target_curvature;
     double steering_angle = std::atan(config_.wheelbase * curvature);
-    // At the native scan-triggered cadence, the lateral target can still be
-    // close to the vehicle while its heading has already entered a tight
-    // corner.  Pure curvature feed-forward then turns too late: the first
-    // live failure commanded only about -0.21 rad while the target heading
-    // was already roughly one radian behind the vehicle.  Add a bounded
-    // target-heading correction so turn-in begins before CTE grows.
+    // A target-heading correction is retained as an optional experiment, but
+    // is disabled in the clean production baseline. Adding it on top of the
+    // geometric law can double-count tight-corner turn-in.
     double target_heading_error = target_pt.heading - heading;
     target_heading_error = std::atan2(
         std::sin(target_heading_error), std::cos(target_heading_error));
-    // Only use this anticipatory term for the tight bends where curvature
-    // feed-forward alone was observed to be insufficient. On a broad-radius
-    // turn the normal geometric law already supplies the correct heading
-    // evolution; applying this term there would double-count curvature.
+    // Only use this optional term for tight bends when explicitly enabled.
     if (std::abs(target_curvature) > 0.5) {
         steering_angle += config_.heading_error_gain * target_heading_error;
     }
-    // Native AutoDRIVE control is scan-triggered at about 10 Hz.  Use the
-    // allowed odometry yaw rate to damp steering reversals caused by vehicle
-    // and actuator lag between scans.
+    // Use the allowed odometry yaw rate only when explicitly configured to
+    // damp steering reversals caused by vehicle and actuator lag.
     steering_angle -= config_.yaw_rate_damping * state.angular_velocity;
     steering_angle = std::clamp(steering_angle, -config_.max_steering, config_.max_steering);
 
@@ -669,17 +665,20 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
     cte_speed_scale = std::clamp(cte_speed_scale, cte_floor_ratio, 1.0);
     target_speed *= cte_speed_scale;
 
-    // Corridor-aware speed scaling in narrow sections.
+    // Corridor-aware speed scaling in narrow sections.  Clearance is a
+    // measured, path-relative estimate and can briefly become negative when
+    // localization, projection, or a discrete wall-width sample places the
+    // car on the tight side of the raceline.  Treating that estimate as a
+    // hard stop deadlocks recovery: the car cannot move back toward the
+    // corridor even when the steering command is already correcting.  The
+    // configured floor is the recovery behavior; the optional off-track gate
+    // below is disabled in production by default.
     if (have_bounds) {
-        if (usable_half_width <= 0.0) {
-            target_speed = 0.0;
-        } else {
-            const double corridor_ref = std::max(0.05, config_.corridor_half_width_ref);
-            const double corridor_floor = std::clamp(config_.corridor_speed_floor_ratio, 0.0, 1.0);
-            double corridor_speed_scale = usable_half_width / corridor_ref;
-            corridor_speed_scale = std::clamp(corridor_speed_scale, corridor_floor, 1.0);
-            target_speed *= corridor_speed_scale;
-        }
+        const double corridor_ref = std::max(0.05, config_.corridor_half_width_ref);
+        const double corridor_floor = std::clamp(config_.corridor_speed_floor_ratio, 0.0, 1.0);
+        double corridor_speed_scale = usable_half_width / corridor_ref;
+        corridor_speed_scale = std::clamp(corridor_speed_scale, corridor_floor, 1.0);
+        target_speed *= corridor_speed_scale;
     }
 
     // Physics-aware lateral acceleration cap: v <= sqrt(a_lat_max / |kappa|).
@@ -693,10 +692,10 @@ PurePursuitOutput PurePursuit::compute(const VehicleState& state) {
         !std::isfinite(output.cross_track_error)) {
         return output;
     }
-    // A rolling floor is appropriate for a recoverable CTE, but it must not
-    // turn a lost localization/path association into continued throttle.
-    // Request neutral at severe tracking error; the actuator owns the final
-    // bounded neutral output and can require a fresh valid command afterward.
+    // A rolling floor is appropriate for recoverable CTE. Do not turn a
+    // transient path error into a hard stop: steering is the recovery action
+    // and the CTE speed scaling above already reduces demand. A hard CTE stop
+    // remains available only when explicitly configured.
     if (config_.offtrack_stop_error_m > 0.0 &&
         std::abs(output.cross_track_error) >= config_.offtrack_stop_error_m) {
         target_speed = 0.0;

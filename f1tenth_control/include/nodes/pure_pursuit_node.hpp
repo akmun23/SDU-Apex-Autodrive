@@ -107,7 +107,7 @@ private:
     double pose_timeout_s_{0.1};            // Timeout for considering pose data stale [s]
     double odom_timeout_s_{0.2};            // Timeout for considering odometry data stale [s]
     double state_extrapolation_max_s_{0.12}; // Allowed-sensor pose-to-command latency [s]
-    double control_rate_hz_{20.0};           // Nominal odometry cadence; actual rate follows /odom
+    double control_rate_hz_{40.0};           // Nominal odometry cadence; actual rate follows /odom
     double localization_covariance_xy_max_{0.25};   // Maximum AMCL x/y variance [m^2]
     double localization_covariance_yaw_max_{0.12};  // Maximum AMCL yaw variance [rad^2]
     int localization_required_updates_{5};          // Consecutive qualified poses before drive

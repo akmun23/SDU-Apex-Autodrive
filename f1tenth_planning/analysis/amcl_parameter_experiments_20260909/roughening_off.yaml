@@ -1,6 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # One-factor candidate: remove post-resample random roughening.  This
-    # measures whether the current 0.12 m/5 deg roughening adds pose noise
-    # during local tracking rather than helping retain a valid mode.
-    enable_local_roughening: false

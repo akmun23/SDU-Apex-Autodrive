@@ -12,8 +12,6 @@ def opt_mintime(reftrack: np.ndarray,
                 coeffs_y: np.ndarray,
                 normvectors: np.ndarray,
                 pars: dict,
-                tpamap_path: str,
-                tpadata_path: str,
                 export_path: str,
                 print_debug: bool = False,
                 plot_debug: bool = False) -> tuple:
@@ -42,8 +40,6 @@ def opt_mintime(reftrack: np.ndarray,
     coeffs_y:       coefficient matrix of the y splines with size (no_splines x 4)
     normvectors:    array containing normalized normal vectors for every traj. point [x_component, y_component]
     pars:           parameters dictionary
-    tpamap_path:    file path to tpa map (required for friction map loading)
-    tpadata_path:   file path to tpa data (required for friction map loading)
     export_path:    path to output folder for warm start files and solution files
     print_debug:    determines if debug messages are printed
     plot_debug:     determines if debug plots are shown
@@ -133,19 +129,6 @@ def opt_mintime(reftrack: np.ndarray,
     refline_y_interp = ca.interpolant('refline_y_interp', 'linear', [steps], refline_y_cl)
     normvec_x_interp = ca.interpolant('normvec_x_interp', 'linear', [steps], normvec_x_cl)
     normvec_y_interp = ca.interpolant('normvec_y_interp', 'linear', [steps], normvec_y_cl)
-
-    # describe friction coefficients from friction map with linear equations or gaussian basis functions
-    if pars["optim_opts"]["var_friction"] is not None:
-        w_mue_fl, w_mue_fr, w_mue_rl, w_mue_rr, center_dist = opt_mintime_traj.src. \
-            approx_friction_map.approx_friction_map(reftrack=reftrack,
-                                                    normvectors=normvectors,
-                                                    tpamap_path=tpamap_path,
-                                                    tpadata_path=tpadata_path,
-                                                    pars=pars,
-                                                    dn=pars["optim_opts"]["dn"],
-                                                    n_gauss=pars["optim_opts"]["n_gauss"],
-                                                    print_debug=print_debug,
-                                                    plot_debug=plot_debug)
 
     # ------------------------------------------------------------------------------------------------------------------
     # DIRECT GAUSS-LEGENDRE COLLOCATION --------------------------------------------------------------------------------
@@ -762,40 +745,13 @@ def opt_mintime(reftrack: np.ndarray,
         lbg.append([-np.inf])
         ubg.append([veh["power_max"] / (f_drive_s * v_s)])
 
-        # get constant friction coefficient
-        if pars["optim_opts"]["var_friction"] is None:
-            mue_fl = pars["optim_opts"]["mue"]
-            mue_fr = pars["optim_opts"]["mue"]
-            mue_rl = pars["optim_opts"]["mue"]
-            mue_rr = pars["optim_opts"]["mue"]
-
-        # calculate variable friction coefficients along the reference line (regression with linear equations)
-        elif pars["optim_opts"]["var_friction"] == "linear":
-            # friction coefficient for each tire
-            mue_fl = w_mue_fl[k + 1, 0] * Xk[3] * n_s + w_mue_fl[k + 1, 1]
-            mue_fr = w_mue_fr[k + 1, 0] * Xk[3] * n_s + w_mue_fr[k + 1, 1]
-            mue_rl = w_mue_rl[k + 1, 0] * Xk[3] * n_s + w_mue_rl[k + 1, 1]
-            mue_rr = w_mue_rr[k + 1, 0] * Xk[3] * n_s + w_mue_rr[k + 1, 1]
-
-        # calculate variable friction coefficients along the reference line (regression with gaussian basis functions)
-        elif pars["optim_opts"]["var_friction"] == "gauss":
-            # gaussian basis functions
-            sigma = 2.0 * center_dist[k + 1, 0]
-            n_gauss = pars["optim_opts"]["n_gauss"]
-            n_q = np.linspace(-n_gauss, n_gauss, 2 * n_gauss + 1) * center_dist[k + 1, 0]
-
-            gauss_basis = []
-            for i in range(2 * n_gauss + 1):
-                gauss_basis.append(ca.exp(-(Xk[3] * n_s - n_q[i]) ** 2 / (2 * (sigma ** 2))))
-            gauss_basis = ca.vertcat(*gauss_basis)
-
-            mue_fl = ca.dot(w_mue_fl[k + 1, :-1], gauss_basis) + w_mue_fl[k + 1, -1]
-            mue_fr = ca.dot(w_mue_fr[k + 1, :-1], gauss_basis) + w_mue_fr[k + 1, -1]
-            mue_rl = ca.dot(w_mue_rl[k + 1, :-1], gauss_basis) + w_mue_rl[k + 1, -1]
-            mue_rr = ca.dot(w_mue_rr[k + 1, :-1], gauss_basis) + w_mue_rr[k + 1, -1]
-
-        else:
-            raise ValueError("No friction coefficients are available!")
+        # The active trajectory uses one constant, measured vehicle-surface
+        # friction coefficient. Variable friction maps are not part of this
+        # repository's supported path.
+        mue_fl = pars["optim_opts"]["mue"]
+        mue_fr = pars["optim_opts"]["mue"]
+        mue_rl = pars["optim_opts"]["mue"]
+        mue_rr = pars["optim_opts"]["mue"]
 
         # path constraint: Kamm's Circle for each wheel
         g.append(((f_x_flk / (mue_fl * f_z_flk)) ** 2 + (f_y_flk / (mue_fl * f_z_flk)) ** 2))

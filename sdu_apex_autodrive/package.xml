@@ -22,9 +22,6 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>f1tenth_control</exec_depend>
   <exec_depend>f1tenth_localization</exec_depend>
-  <exec_depend>f1tenth_lateral_planner</exec_depend>
-  <exec_depend>f1tenth_lidar</exec_depend>
-  <exec_depend>mpc_riccati</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>

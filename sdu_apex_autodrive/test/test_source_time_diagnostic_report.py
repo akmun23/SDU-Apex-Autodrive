@@ -83,3 +83,43 @@ def test_source_time_report_marks_collision_epoch_and_aligns_poses(tmp_path) -> 
     assert report[-1]["pre_collision_valid"] == "0"
     assert report[-1]["gt_reset_detected"] == "1"
     assert float(report[1]["current_map_xy_error_m"]) == pytest.approx(0.0, abs=1.0e-9)
+
+
+def test_explicit_map_start_does_not_align_truth_to_wrong_amcl_pose(tmp_path) -> None:
+    input_path = tmp_path / "sensor_record.csv"
+    output_path = tmp_path / "source_time.csv"
+    fields = [
+        "source_event_name", "source_event_stamp_s", "gt_x_m", "gt_y_m",
+        "gt_yaw_rad", "gt_collision_count", "x_amcl_m", "y_amcl_m",
+        "yaw_amcl_rad",
+    ]
+    rows = []
+
+    def add(name, stamp, **values):
+        row = {field: "" for field in fields}
+        row.update({"source_event_name": name, "source_event_stamp_s": str(stamp)})
+        row.update({key: str(value) for key, value in values.items()})
+        rows.append(row)
+
+    add("amcl", 1.0, x_amcl_m=10.0, y_amcl_m=20.0, yaw_amcl_rad=0.5)
+    add("amcl", 1.1, x_amcl_m=10.0, y_amcl_m=20.0, yaw_amcl_rad=0.5)
+    add("gt_odom", 1.0, gt_x_m=0.0, gt_y_m=0.0, gt_yaw_rad=0.0,
+        gt_collision_count=0)
+    add("gt_odom", 1.1, gt_x_m=0.1, gt_y_m=0.0, gt_yaw_rad=0.0,
+        gt_collision_count=0)
+
+    with input_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    summary = build_report(
+        input_path, output_path, map_start_pose=(100.0, 200.0, 1.0))
+    assert summary["map_alignment_mode"] == "explicit_map_start"
+    with output_path.open(newline="") as stream:
+        report = list(csv.DictReader(stream))
+    assert float(report[1]["gt_map_x_m"]) == pytest.approx(
+        100.0 + 0.1 * 0.5403023059, abs=1.0e-9)
+    assert float(report[1]["gt_map_y_m"]) == pytest.approx(
+        200.0 + 0.1 * 0.8414709848, abs=1.0e-9)
+    assert float(report[1]["amcl_xy_error_m"]) > 100.0
