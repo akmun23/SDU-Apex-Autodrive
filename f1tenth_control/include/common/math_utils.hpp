@@ -4,8 +4,8 @@
 /**
  * @file math_utils.hpp
  * @brief Inline mathematical utilities shared across f1tenth_control algorithms.
- * @details Covers angle normalization, clamping, interpolation, distance computation,
- *          rigid-body frame transforms, and sliding-window median filtering.
+ * @details Covers angle normalization, interpolation, distance computation,
+ *          and sliding-window median filtering.
  *          All functions are pure (no side effects). Median filter declaration is
  *          here; implementation is in math_utils.cpp.
  * @dependencies types.hpp (Point2D, Pose2D), <cmath>, <vector>
@@ -66,21 +66,6 @@ inline double distance(const Point2D& a, const Point2D& b) {
  */
 inline double distance(double x1, double y1, double x2, double y2) {
     return std::hypot(x2 - x1, y2 - y1);
-}
-
-/**
- * @brief Apply rigid-body transform from local robot coordinates to global/map frame.
- * @param local_point Point in robot-local frame.
- * @param robot_pose Robot pose in global frame.
- * @return Transformed global-frame point.
- */
-inline Point2D localToGlobal(const Point2D& local_point, const Pose2D& robot_pose) {
-    const double cos_theta = std::cos(robot_pose.theta);
-    const double sin_theta = std::sin(robot_pose.theta);
-    return {
-        robot_pose.x + local_point.x * cos_theta - local_point.y * sin_theta,
-        robot_pose.y + local_point.x * sin_theta + local_point.y * cos_theta
-    };
 }
 
 /**

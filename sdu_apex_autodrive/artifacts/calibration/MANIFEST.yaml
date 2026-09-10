@@ -1,46 +1,13 @@
 schema_version: 1
 description: >-
-  Clean live-data baseline. Ground truth is recorded only for offline scoring;
-  it is never supplied to odometry, EKF, AMCL, or a controller.
+  Active artifact provenance only. Live recordings and derived score reports
+  are local ignored outputs, not repository inputs. Ground truth is allowed
+  for offline scoring only and is never supplied to runtime estimation or
+  control.
 repository:
-  base_revision: 7dc19eca
-  status_date: 2026-09-09
+  active_simulator_asset: autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete
   active_map: f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml
   active_trajectory: f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
   active_controller_path: FTG mapping or Pure Pursuit racing
   active_localization_path: sensor_odometry -> EKF -> CUDA AMCL
-  simulator_source_rate_hz: approximately 20
-  measured_recorder_rate_hz: 19.77 median for numeric sensor streams
-  camera_runtime_path: not used by this run
-latest_live_run:
-  path: f1tenth_planning/analysis/amcl_clean_baseline_20260909
-  comparison_csv: amcl_vs_ground_truth.csv
-  telemetry_csv: telemetry/sensor_record_20260909_171454.csv
-  aligned_rows: 1666
-  duration_s: 89.376757
-  scored_path_length_m: 42.324261
-  collision_count_max: 0
-  telemetry_mean_ground_truth_speed_mps: 0.473933
-  telemetry_p95_ground_truth_speed_mps: 0.507347
-  telemetry_max_ground_truth_speed_mps: 0.913923
-  amcl_position_error_mean_m: 0.048329
-  amcl_position_error_p95_m: 0.095972
-  amcl_position_error_max_m: 0.195679
-  current_map_position_error_mean_m: 0.043756
-  current_map_position_error_p95_m: 0.114743
-  current_map_position_error_max_m: 0.159688
-  ekf_position_error_mean_m: 0.060582
-  ekf_position_error_p95_m: 0.117616
-  ekf_position_error_max_m: 0.150840
-  odom_position_error_mean_m: 0.059570
-  odom_position_error_p95_m: 0.116989
-  odom_position_error_max_m: 0.120777
-  numeric_sensor_rate_hz_median: 19.77
-  command_rate_hz_median: 40.0
-  maximum_sensor_gap_ms: 99.25
-  sensor_gaps_over_75ms: 2-3 per stream
-acceptance:
-  status: baseline_only
-  high_speed_validation: not performed; run capped at 0.5 m/s
-  2_percent_acceptance: not claimed
-  next_run_must_use_same_csv_schema: true
+  camera_runtime_path: disabled unless explicitly enabled

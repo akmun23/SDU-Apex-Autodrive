@@ -1,8 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # Candidate for the repeated upper-hairpin alias observed in Run16.
-    # Normal local scan corrections keep the validated gain; a global
-    # lost-track recovery must have stronger support before it can replace
-    # the causal odometry pose.
-    local_scan_correction_xy_gain: 0.75
-    local_tracking_recovery_min_cluster_weight: 0.95

@@ -228,7 +228,6 @@ def _setup(context):
             ],
             remappings=[
                 ("scan", "/autodrive/roboracer_1/lidar"),
-                ("odom", "/autodrive/roboracer_1/odom"),
                 ("drive", "/cmd/speed"),
             ],
         )
@@ -329,8 +328,8 @@ def generate_launch_description():
             "force_localization",
             default_value="false",
             description=(
-                "Start map localization alongside FTG for diagnostics; FTG still "
-                "uses only LiDAR and official odometry for its command"
+                "Start map localization alongside FTG for diagnostics; FTG uses "
+                "only LiDAR for its command"
             ),
         ),
         DeclareLaunchArgument(

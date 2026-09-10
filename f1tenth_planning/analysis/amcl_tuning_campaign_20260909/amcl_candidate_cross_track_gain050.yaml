@@ -1,9 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # Candidate for the measured upper-hairpin failure.  The recorded
-    # innovations move along the raceline in the wrong direction while the
-    # lateral component remains observable.  Keep continuous correction
-    # enabled, but attenuate only the tangent innovation.
-    local_scan_correction_xy_gain: 0.50
-    local_scan_correction_cross_track_only: false
-    local_scan_correction_along_track_gain: 0.25

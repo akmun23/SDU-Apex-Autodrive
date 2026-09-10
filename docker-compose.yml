@@ -24,10 +24,10 @@ services:
     tty: true
 
   simulator:
-    # The IROS explore asset is the open-world RoboRacer simulator.  The
-    # practice/competition assets contain a visible track and are not valid
-    # for the reset-isolated sensor-identification run.
-    image: ${AUTODRIVE_SIMULATOR_IMAGE:-autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore}
+    # Use the ICRA compete asset by default.  It is the simulator scene for
+    # the production track map and raceline; override only when intentionally
+    # running another simulator asset.
+    image: ${AUTODRIVE_SIMULATOR_IMAGE:-autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete}
     # The official images use different entrypoints (one expects the command
     # directly, another wraps it).  Keep the container lifecycle uniform so a
     # local compete image can be selected without exiting before the player is

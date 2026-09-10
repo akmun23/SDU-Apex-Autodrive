@@ -87,27 +87,6 @@ public:
      */
     size_t findClosestPoint(const ProcessedScan& scan);
 
-    /**
-     * @brief Convert a polar scan point to Cartesian coordinates in robot frame.
-     * @param scan Preprocessed LiDAR scan containing angles and ranges.
-     * @param index Beam index to convert.
-     * @return Point2D corresponding to the selected beam.
-     */
-    Point2D scanPointToCartesian(const ProcessedScan& scan, size_t index);
-    
-    /**
-     * @brief Extract boundary points from a processed LiDAR scan.
-     * @param scan Preprocessed LiDAR scan with validity and angle/range data.
-     * @param robot_pose Current pose of the robot for transforming points to map frame.
-     * @param timestamp Timestamp to associate with extracted boundary points.
-     * @return Vector of BoundaryPoint representing detected track boundaries.
-     */
-    std::vector<BoundaryPoint> extractBoundaryPoints(
-        const ProcessedScan& scan,
-        const Pose2D& robot_pose,
-        double timestamp
-    );
-
 private:
     LidarProcessorConfig config_;
     
@@ -120,7 +99,7 @@ private:
     /**
      * @brief Validate and clip range measurements based on configured limits.
      * @param scan ProcessedScan to validate and modify in place.
-     * @return None (mutates scan.ranges and scan.valid).
+     * @return None (mutates scan.filtered_ranges and scan.valid).
      */
     void validateRanges(ProcessedScan& scan);
 };

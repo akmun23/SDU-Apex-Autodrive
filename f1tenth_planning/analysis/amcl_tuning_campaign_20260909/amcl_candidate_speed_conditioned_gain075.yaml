@@ -1,8 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # Keep the conservative tangent gain in the slow/ambiguous hairpin, but
-    # use the stronger value once source-time motion is above the measured
-    # alias regime. The normal correction remains unchanged.
-    local_scan_correction_along_track_gain: 0.25
-    local_scan_correction_fast_speed_threshold_mps: 3.0
-    local_scan_correction_fast_along_track_gain: 0.75

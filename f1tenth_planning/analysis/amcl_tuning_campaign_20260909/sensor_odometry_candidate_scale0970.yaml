@@ -1,7 +1,0 @@
-sensor_odometry:
-  ros__parameters:
-    # Run30 full-speed source-time comparison: the deployed 0.982 scale left
-    # observer speed about 1.2% high overall and about 1.9% high above 5 m/s.
-    # This is a live-test candidate only; promote only after a collision-free
-    # ten-full-lap run improves deployed observer error.
-    wheel_speed_scale: 0.970

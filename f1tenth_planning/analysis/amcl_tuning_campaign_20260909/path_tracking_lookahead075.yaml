@@ -1,9 +1,0 @@
-pure_pursuit_node:
-  ros__parameters:
-    # Diagnostic candidate only.  The 4 m/s collision log showed repeated
-    # full-steering saturation followed by a rate-limited sign reversal.  A
-    # longer geometric preview reduces that oscillation without changing the
-    # vehicle steering limit or injecting simulator state.
-    min_lookahead: 0.75
-    max_lookahead: 1.10
-    lookahead_gain: 0.05

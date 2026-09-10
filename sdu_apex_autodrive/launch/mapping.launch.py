@@ -137,7 +137,6 @@ def generate_launch_description():
                     ],
                     remappings=[
                         ("scan", "/autodrive/roboracer_1/lidar"),
-                        ("odom", "/autodrive/roboracer_1/odom"),
                         ("drive", "/cmd/speed"),
                     ],
                 ),

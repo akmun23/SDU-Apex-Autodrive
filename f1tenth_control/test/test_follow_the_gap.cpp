@@ -45,7 +45,6 @@ protected:
         // LiDAR processing
         config_.disparity_threshold = 0.5;
         config_.wall_margin = 0.0;  // Disable for tests
-        config_.gap_threshold = 0.8;
         config_.min_gap_width = 0.10;
 
         // Generic LiDAR preprocessing config
@@ -103,7 +102,6 @@ TEST_F(FollowTheGapTest, ComputeReturnsValidOutput) {
     auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
     EXPECT_GT(output.command.speed, 0.0);
     EXPECT_FALSE(output.emergency_stop);
-    EXPECT_FALSE(output.processed_scan.filtered_ranges.empty());
 }
 
 TEST_F(FollowTheGapTest, OpenPathDrivesStraight) {
@@ -153,14 +151,14 @@ TEST_F(FollowTheGapTest, NoEmergencyStopWhenFarEnough) {
 }
 
 // =====================================================================
-// Gap detection for visualisation
+// Contiguous drivable-gap detection
 // =====================================================================
 
 TEST_F(FollowTheGapTest, DetectsGaps) {
     auto ranges = createCorridorScan(NUM_POINTS);
     auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
-    // Should find at least one gap in the corridor
-    EXPECT_FALSE(output.all_gaps.empty());
+    // Should find at least one control-usable gap in the corridor
+    EXPECT_FALSE(output.drivable_gaps.empty());
 }
 
 // =====================================================================
@@ -256,7 +254,6 @@ TEST_F(FollowTheGapTest, HandlesSinglePoint) {
     std::vector<float> ranges = {5.0f};
     auto output = ftg_->compute(ranges, ANGLE_MIN, ANGLE_MAX, ANGLE_INC);
     // Single point: should not crash
-    EXPECT_FALSE(output.processed_scan.filtered_ranges.empty());
 }
 
 // =====================================================================

@@ -66,21 +66,19 @@ FTGOutput FollowTheGap::compute(
         output.emergency_stop = true;
         output.no_path = true;
         output.command = DriveCommand(0.0, 0.0);
-        output.processed_scan = scan;
         return output;
     }
 
-    // Initialise blocking flags (for visualisation)
+    // Initialise disparity markers used by the safety extension.
     scan.disparity_blocked.assign(scan.filtered_ranges.size(), false);
-    scan.bubble_blocked.assign(scan.filtered_ranges.size(), false);
 
     // --- Step 2: Wall margin  ---
     applyWallMargin(scan);
 
     // --- Step 3: Closest-point detection ---
-    output.closest_point_idx = lidar_processor_.findClosestPoint(scan);
+    const size_t closest_point_idx = lidar_processor_.findClosestPoint(scan);
     if (!std::isfinite(output.closest_point_dist)) {
-        output.closest_point_dist = scan.filtered_ranges[output.closest_point_idx];
+        output.closest_point_dist = scan.filtered_ranges[closest_point_idx];
     }
 
     // Check raw returns before range_min/median preprocessing can hide a close
@@ -88,10 +86,6 @@ FTGOutput FollowTheGap::compute(
     if (raw_emergency) {
         output.emergency_stop = true;
         output.command = DriveCommand(0.0, 0.0);
-        output.processed_scan = scan;
-
-        // Still populate gaps for viz
-        output.all_gaps = findGapsForViz(scan);
         return output;
     }
 
@@ -108,9 +102,6 @@ FTGOutput FollowTheGap::compute(
         pending_alternative_count_ = 0;
         output.no_path = true;
         output.command = DriveCommand(0.0, 0.0);
-        output.all_gaps = findGapsForViz(scan);
-        output.selected_gap = findBestGapForViz(output.all_gaps);
-        output.processed_scan = scan;
         return output;
     }
 
@@ -120,7 +111,6 @@ FTGOutput FollowTheGap::compute(
     if (!target.valid) {
         output.no_path = true;
         output.command = DriveCommand(0.0, 0.0);
-        output.processed_scan = scan;
         return output;
     }
     output.raw_target_angle = target.angle;
@@ -159,9 +149,6 @@ FTGOutput FollowTheGap::compute(
         output.no_path = true;
         output.command = DriveCommand(0.0, 0.0);
         last_steering_ = 0.0;
-        output.all_gaps = findGapsForViz(scan);
-        output.selected_gap = findBestGapForViz(output.all_gaps);
-        output.processed_scan = scan;
         return output;
     }
 
@@ -212,11 +199,6 @@ FTGOutput FollowTheGap::compute(
             std::max(config_.min_speed, 0.5 * trajectory.free_distance));
     }
     output.command = DriveCommand(speed, steering);
-
-    // --- Step 10: Populate gaps for visualisation ---
-    output.all_gaps = findGapsForViz(scan);
-    output.selected_gap = findBestGapForViz(output.all_gaps);
-    output.processed_scan = scan;
 
     return output;
 }
@@ -736,92 +718,6 @@ TargetResult FollowTheGap::computeTargetAngle(const DrivableGap& gap) const {
     result.valid = true;
     result.angle = std::clamp(target, gap.start_angle, gap.end_angle);
     return result;
-}
-
-// =====================================================================
-// Gap detection (visualisation only)
-// =====================================================================
-
-std::vector<Gap> FollowTheGap::findGapsForViz(const ProcessedScan& scan) {
-    std::vector<Gap> gaps;
-    if (scan.filtered_ranges.empty()) return gaps;
-
-    const auto& lidar_config = lidar_processor_.getConfig();
-    bool in_gap = false;
-    Gap current_gap;
-    size_t current_gap_count = 0;
-
-    for (size_t i = 0; i < scan.filtered_ranges.size(); ++i) {
-        double range = scan.filtered_ranges[i];
-        double angle = scan.angles[i];
-        if (angle < lidar_config.angle_min || angle > lidar_config.angle_max) continue;
-
-        bool is_gap = (range >= config_.gap_threshold && scan.valid[i]);
-
-        if (is_gap && !in_gap) {
-            in_gap = true;
-            current_gap = Gap();
-            current_gap.start_idx = i;
-            current_gap.start_angle = angle;
-            current_gap.min_range = range;
-            current_gap.max_range = range;
-            current_gap.deepest_idx = i;
-            current_gap.deepest_range = range;
-            current_gap.avg_range = range;
-            current_gap_count = 1;
-        } else if (is_gap && in_gap) {
-            current_gap.min_range = std::min(current_gap.min_range, range);
-            if (range > current_gap.deepest_range) {
-                current_gap.deepest_range = range;
-                current_gap.deepest_idx = i;
-            }
-            current_gap.max_range = std::max(current_gap.max_range, range);
-            current_gap.avg_range += range;
-            ++current_gap_count;
-        } else if (!is_gap && in_gap) {
-            in_gap = false;
-            current_gap.end_idx = i - 1;
-            current_gap.end_angle = scan.angles[i - 1];
-            current_gap.angular_width = current_gap.end_angle - current_gap.start_angle;
-            if (current_gap_count > 0) {
-                current_gap.avg_range /= static_cast<double>(current_gap_count);
-            }
-            if (current_gap.angular_width >= config_.min_gap_width) {
-                gaps.push_back(current_gap);
-            }
-        }
-    }
-
-    if (in_gap) {
-        current_gap.end_idx = scan.filtered_ranges.size() - 1;
-        current_gap.end_angle = scan.angles.back();
-        current_gap.angular_width = current_gap.end_angle - current_gap.start_angle;
-        if (current_gap_count > 0) {
-            current_gap.avg_range /= static_cast<double>(current_gap_count);
-        }
-        if (current_gap.angular_width >= config_.min_gap_width) {
-            gaps.push_back(current_gap);
-        }
-    }
-
-    return gaps;
-}
-
-Gap FollowTheGap::findBestGapForViz(const std::vector<Gap>& gaps) {
-    if (gaps.empty()) return Gap();
-
-    // Pick widest gap that is closest to straight ahead
-    double best = -std::numeric_limits<double>::infinity();
-    const Gap* best_gap = &gaps[0];
-    for (const auto& g : gaps) {
-        double score = g.angular_width * g.deepest_range
-                     * std::exp(-0.5 * std::abs(g.centerAngle()));
-        if (score > best) {
-            best = score;
-            best_gap = &g;
-        }
-    }
-    return *best_gap;
 }
 
 // =====================================================================

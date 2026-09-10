@@ -42,13 +42,18 @@ map:       f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml
 raceline:  f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
 ```
 
+This is the saved 2.5 cm FTG map of the ICRA compete track, paired with its
+mintime raceline. The simulator asset and ROS map are selected independently:
+the compose default now selects the compete scene, while these files remain
+the runtime map/raceline inputs.
+
 ## Simulator cadence
 
 `autodrive_bridge_40hz` is a bounded request-pacing bridge. Its name describes
-the request clock, not a fabricated sensor rate. The prebuilt compete player
-has been measured at approximately 20 Hz on the track; the bridge cannot create
-additional physics or LiDAR samples. Every analysis must use source timestamps
-and report gaps, duplicates, and bursts.
+the request clock; it does not fabricate sensor samples. The default simulator
+asset is the ICRA compete scene. When using the rebuilt source player, the
+source timestamps and measured native stream rate are the authority. Every
+analysis must use source timestamps and report gaps, duplicates, and bursts.
 
 Run the graphical Unity player in batch mode. Do not use `-no-graphics` for the
 HDRP simulator:
@@ -76,7 +81,4 @@ The recorder preserves source-event telemetry, commands, feedback, odometry,
 EKF, AMCL, current-map pose, scan alignment, and collision count. Score the
 recorded file with `score_localization_run`; use `scan_match_benchmark` only on
 scans from the recorded run. Do not use a synthetic offline plant as evidence
-for runtime acceptance.
-
-The newest retained recording and its measured summary are in
-`f1tenth_planning/analysis/amcl_final_validation_20260909/`.
+for runtime acceptance. These outputs are intentionally ignored by Git.

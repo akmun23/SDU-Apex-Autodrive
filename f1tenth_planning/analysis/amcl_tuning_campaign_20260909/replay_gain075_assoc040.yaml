@@ -1,6 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # A/B candidate: keep continuous full-XY correction, but do not accept a
-    # visually similar local mode more than 0.40 m from causal odometry.
-    # This is a mode-association gate, not a cumulative correction budget.
-    local_cluster_association_max_distance_m: 0.40

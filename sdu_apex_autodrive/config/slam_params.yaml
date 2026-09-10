@@ -29,8 +29,10 @@ slam_toolbox:
     min_laser_range: 0.06
     max_laser_range: 10.0
     minimum_time_interval: 0.10
-    # The compete scene delivers LiDAR at roughly 10 Hz and odometry at
-    # roughly 20 Hz. Allow normal DDS jitter without accepting a stale TF.
+    # The source-patched compete scene delivers LiDAR and odometry at 40 Hz;
+    # throttle_scans above intentionally feeds every second scan to mapping.
+    # The prebuilt compete asset can be slower, so allow normal DDS jitter
+    # without accepting a stale TF.
     transform_timeout: 1.0
     tf_buffer_duration: 120.0
     enable_interactive_mode: false

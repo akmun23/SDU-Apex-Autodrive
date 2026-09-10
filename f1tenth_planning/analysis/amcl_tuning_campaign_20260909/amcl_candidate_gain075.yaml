@@ -1,7 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # One-factor live candidate.  Run13 showed accepted local scan matches
-    # still left high-speed map error; increase only the applied XY correction
-    # from the production 0.50 to 0.75.  Association, raycast verification,
-    # particle count, and recovery behavior remain unchanged.
-    local_scan_correction_xy_gain: 0.75

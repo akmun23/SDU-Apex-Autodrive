@@ -62,10 +62,9 @@ struct FTGConfig {
     // Raw physical emergency check
     double emergency_brake_distance{0.10};
 
-    // LiDAR safety and visualization
+    // LiDAR safety
     double disparity_threshold{0.5};
     double wall_margin{0.03};
-    double gap_threshold{0.5};
     double min_gap_width{0.10};
 
     LidarProcessorConfig lidar_config;
@@ -95,12 +94,9 @@ struct TargetResult {
 /** @brief Output and diagnostics for one FTG compute cycle. */
 struct FTGOutput {
     DriveCommand command;
-    Gap selected_gap;
-    size_t closest_point_idx{0};
     double closest_point_dist{0.0};
     bool emergency_stop{false};
     bool no_path{false};
-    std::vector<Gap> all_gaps;
     std::vector<DrivableGap> drivable_gaps;
     DrivableGap selected_drivable_gap;
     bool has_selected_drivable_gap{false};
@@ -115,8 +111,6 @@ struct FTGOutput {
     double trajectory_free_distance{0.0};
     double trajectory_min_clearance{0.0};
     bool trajectory_collision_free{false};
-
-    ProcessedScan processed_scan;
 };
 
 /** @brief Mapless LiDAR-only Follow-The-Gap controller. */
@@ -195,9 +189,6 @@ private:
         const DrivableGap& selected_gap,
         double desired_steering
     ) const;
-
-    std::vector<Gap> findGapsForViz(const ProcessedScan& scan);
-    Gap findBestGapForViz(const std::vector<Gap>& gaps);
 
     double calculateSpeed(double forward_clearance, double steering_angle);
     double rateLimitSteering(double target, double last, double dt);

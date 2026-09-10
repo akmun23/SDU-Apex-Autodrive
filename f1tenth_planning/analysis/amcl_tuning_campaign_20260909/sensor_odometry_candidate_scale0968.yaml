@@ -1,7 +1,0 @@
-sensor_odometry:
-  ros__parameters:
-    # The valid 0.970 and 0.956 ten-lap candidates bracketed the deployed
-    # observer distance ratio at 1.0023 and 0.9829 respectively.  0.968 is
-    # the data-derived interpolation candidate; promote only after its own
-    # collision-free ten-high-speed-lap validation.
-    wheel_speed_scale: 0.968

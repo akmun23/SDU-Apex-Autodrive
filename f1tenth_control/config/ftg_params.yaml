@@ -61,7 +61,6 @@ ftg_node:
     # ===================
     disparity_threshold: 0.5  # Disparity detection threshold (m)
     wall_margin: 0.03         # Single explicit geometric wall margin (m)
-    gap_threshold: 0.5        # Min range to count as "gap" for visualisation
     min_gap_width: 0.10       # Minimum control-gap width (rad)
 
     # ===================

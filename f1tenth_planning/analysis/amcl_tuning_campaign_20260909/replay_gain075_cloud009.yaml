@@ -1,4 +1,0 @@
-gpu_amcl_cpp:
-  ros__parameters:
-    # A/B candidate between the measured tight and overly broad local clouds.
-    local_tracking_cloud_covariance_xy: 0.09

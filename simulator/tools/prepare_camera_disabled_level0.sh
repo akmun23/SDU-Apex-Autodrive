@@ -5,7 +5,7 @@ set -euo pipefail
 # removes the Socket component's serialized front-camera assignment without
 # modifying the Docker image or the original Unity asset.
 
-image="${1:-autodriveecosystem/autodrive_roboracer_sim:2026-iros-explore}"
+image="${1:-autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete}"
 output="${2:-$PWD/simulator/generated/level0-no-camera}"
 workdir="$(mktemp -d /tmp/autodrive-camera-off.XXXXXX)"
 container="autodrive_asset_extract_$$"
