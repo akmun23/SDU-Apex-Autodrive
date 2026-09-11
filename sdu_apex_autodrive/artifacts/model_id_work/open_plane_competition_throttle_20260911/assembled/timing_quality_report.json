@@ -1,0 +1,126 @@
+{
+  "duplicate_rows_discarded": 0,
+  "frame_convention": {
+    "frame_selection": "declared contract; no residual-based auto-selection",
+    "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+    "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+    "yaw": "normalized raw API quaternion, not Euler-only",
+    "yaw_rate": "raw API angular velocity z"
+  },
+  "ground_truth_use": "offline_transition_target_only",
+  "kinematic_consistency": {
+    "diagnostics": {
+      "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+      "position_vs_body_velocity_error_mps": {
+        "count": 1787,
+        "max": 0.045800010583163395,
+        "median": 0.0025813806367436243,
+        "p95": 0.0066432589787154125
+      },
+      "quaternion_vs_euler_yaw_error_rad": {
+        "count": 1788,
+        "max": 0.00018898038468950773,
+        "median": 5.248719450090533e-05,
+        "p95": 8.898038468974079e-05
+      },
+      "transition_count": 1787,
+      "yaw_derivative_vs_angular_z_error_radps": {
+        "count": 1787,
+        "max": 0.006149914802656729,
+        "median": 1.850163564307298e-14,
+        "p95": 0.0056574159761508015
+      },
+      "yaw_derivative_vs_each_angular_axis_error_radps": {
+        "x": {
+          "negated": {
+            "count": 1787,
+            "max": 0.006296220518675772,
+            "median": 9.371795783864024e-08,
+            "p95": 0.005656962076204183
+          },
+          "same_sign": {
+            "count": 1787,
+            "max": 0.006149914802656729,
+            "median": 9.371795783864024e-08,
+            "p95": 0.005618085001407803
+          }
+        },
+        "y": {
+          "negated": {
+            "count": 1787,
+            "max": 0.2128426779441218,
+            "median": 0.0193,
+            "p95": 0.1445998508200658
+          },
+          "same_sign": {
+            "count": 1787,
+            "max": 0.21225716333077005,
+            "median": 0.01970008391861049,
+            "p95": 0.14777816840677802
+          }
+        },
+        "z": {
+          "negated": {
+            "count": 1787,
+            "max": 0.006149914802656729,
+            "median": 1.850163564307298e-14,
+            "p95": 0.0056574159761508015
+          },
+          "same_sign": {
+            "count": 1787,
+            "max": 0.006149914802656729,
+            "median": 1.850163564307298e-14,
+            "p95": 0.0056574159761508015
+          }
+        }
+      },
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "maximum_allowed_median_error_mps": 0.75,
+    "maximum_allowed_yaw_rate_median_error_radps": 0.75,
+    "pass": true,
+    "selected_frame_median_error_mps": 0.05360024608700573,
+    "yaw_rate_median_error_radps": 1.850163564307298e-14,
+    "yaw_rate_pass": true,
+    "yaw_rate_source": "simulator_angular_velocity_z"
+  },
+  "malformed_rows_discarded": 0,
+  "model_boundary": "applied_throttle_to_body_u",
+  "physics_step_delta_max": 28,
+  "physics_step_delta_min": 22,
+  "quality_gate_failures": [],
+  "quality_gate_pass": true,
+  "raw_packet_count": 1788,
+  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/open_plane_competition_throttle_20260911",
+  "schema_version": 3,
+  "source_dt_s_median": 0.024999699999998626,
+  "source_dt_s_p95": 0.026001980000000202,
+  "source_order": {
+    "pass": true,
+    "physics_step_gap_count": 1787,
+    "physics_step_reverse_count": 0,
+    "time_reverse_count": 0,
+    "violations": 0
+  },
+  "source_rate_hz_median": 40.00048000576227,
+  "status": "timing_and_kinematics_gate_passed",
+  "timing_contract": {
+    "allow_non_target_rate": false,
+    "expected_source_rate_hz": 40.0,
+    "pass": true,
+    "raw_rows_are_never_upsampled": true
+  },
+  "transition_count": 1787,
+  "transition_schema": {
+    "ambiguous_transitions_discarded": false,
+    "control_alignment": "current_packet_applied_command_generates_previous_to_current",
+    "file": "model_transition_v3.csv",
+    "required_control_field": "applied_command_sequence_k1"
+  },
+  "twist_frame_median_displacement_error_mps": {
+    "body": 0.05360024608700573,
+    "world": 4.466428018002549
+  },
+  "twist_frame_selected": "body",
+  "unique_source_packet_count": 1788
+}

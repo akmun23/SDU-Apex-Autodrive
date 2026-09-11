@@ -21,6 +21,7 @@ def _write_packets(path, count=12, reverse_index=None):
         "simulator_linear_velocity_x", "simulator_linear_velocity_y",
         "simulator_linear_velocity_z", "simulator_angular_velocity_x",
         "simulator_angular_velocity_y", "simulator_angular_velocity_z",
+        "applied_command_sequence",
         "applied_throttle_norm", "applied_steering_norm",
     ]
     rows = []
@@ -49,8 +50,9 @@ def _write_packets(path, count=12, reverse_index=None):
             "simulator_angular_velocity_x": 0.0,
             "simulator_angular_velocity_y": 0.0,
             "simulator_angular_velocity_z": 0.0,
-            "applied_throttle_norm": 0.2,
-            "applied_steering_norm": 0.0,
+            "applied_command_sequence": index,
+            "applied_throttle_norm": 0.2 + 0.01 * index,
+            "applied_steering_norm": -0.1 + 0.01 * index,
         })
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
@@ -70,6 +72,13 @@ def test_assembler_uses_declared_body_frame_and_passes_known_fixture(tmp_path):
     assert report["kinematic_consistency"]["diagnostics"][
         "position_vs_body_velocity_error_mps"]["median"] == pytest.approx(0.0)
     assert report["kinematic_consistency"]["yaw_rate_pass"] is True
+    with (run_dir / "assembled" / "model_transition_v3.csv").open(
+            newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert float(rows[0]["throttle_k_norm"]) == pytest.approx(0.21)
+    assert float(rows[0]["steering_k_rad"]) == pytest.approx(
+        -0.09 * _ASSEMBLER.MAX_STEERING_RAD)
+    assert int(float(rows[0]["applied_command_sequence_k1"])) == 1
 
 
 def test_assembler_rejects_source_order_violation(tmp_path):

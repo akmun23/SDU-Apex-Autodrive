@@ -1,0 +1,2 @@
+phase,mode,duration_sec,source,status
+configured_capture_window,throttle_sweep,50.0,model_identification.launch.py,recorded

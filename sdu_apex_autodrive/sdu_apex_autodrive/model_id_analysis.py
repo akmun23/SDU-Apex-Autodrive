@@ -232,7 +232,7 @@ def _read_quality_report(run_dir: Path) -> dict[str, object]:
 
 def analyze(run_dir: Path) -> dict[str, object]:
     quality_report = _read_quality_report(run_dir)
-    transition_path = run_dir / "assembled" / "model_transition_v2.csv"
+    transition_path = run_dir / "assembled" / "model_transition_v3.csv"
     rows = [_transition_view(row) for row in _read_transitions(transition_path)]
     if len(rows) < 20:
         raise ValueError(f"only {len(rows)} usable transitions in {transition_path}")
@@ -242,7 +242,7 @@ def analyze(run_dir: Path) -> dict[str, object]:
     coefficients, singular_values = _fit(train)
     validation_score = _scores(validation, coefficients)
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_dir": str(run_dir),
         "model_boundary": "applied_throttle_to_simulator_body_u",
         "state_source": "simulator_packet_ground_truth_offline_only",

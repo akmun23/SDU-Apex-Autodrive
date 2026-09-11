@@ -96,6 +96,7 @@ class DecodedPacket:
     angular_velocity_z_radps: float
     throttle_norm: float
     steering_norm: float
+    applied_command_sequence: int | None = None
 
     @property
     def yaw_rate_radps(self) -> float:
@@ -111,6 +112,17 @@ def decode_packet(row: Mapping[str, object]) -> DecodedPacket:
         _number(row, "simulator_orientation_quaternion_z"),
         _number(row, "simulator_orientation_quaternion_w"),
     )
+    applied_command_sequence: int | None = None
+    raw_sequence = row.get("applied_command_sequence")
+    if raw_sequence not in (None, ""):
+        try:
+            parsed_sequence = int(float(raw_sequence))
+        except (TypeError, ValueError) as exc:
+            raise PacketFrameError(
+                "applied command sequence is not an integer") from exc
+        if parsed_sequence < 0:
+            raise PacketFrameError("applied command sequence is negative")
+        applied_command_sequence = parsed_sequence
     return DecodedPacket(
         time_s=_number(row, "simulation_time_s"),
         physics_step=int(round(_number(row, "simulation_physics_step"))),
@@ -127,4 +139,5 @@ def decode_packet(row: Mapping[str, object]) -> DecodedPacket:
         angular_velocity_z_radps=_number(row, "simulator_angular_velocity_z"),
         throttle_norm=_number(row, "applied_throttle_norm"),
         steering_norm=_number(row, "applied_steering_norm"),
+        applied_command_sequence=applied_command_sequence,
     )

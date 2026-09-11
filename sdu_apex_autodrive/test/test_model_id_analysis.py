@@ -20,7 +20,7 @@ def _write_run(tmp_path, quality_gate=True):
         "dt_sim_s", "u_k_mps", "u_k1_mps", "steering_k_rad",
         "throttle_k_norm",
     ]
-    with (assembled / "model_transition_v2.csv").open(
+    with (assembled / "model_transition_v3.csv").open(
             "w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()

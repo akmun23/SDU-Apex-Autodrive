@@ -6,6 +6,12 @@ This is an offline-only tool.  It consumes the packet table written by
 bridge observations of one simulator state are collapsed, not counted as
 extra samples.  Source gaps are retained in the output and reported.
 
+The simulator telemetry is emitted after the fixed-step update. Therefore the
+applied command recorded in the current packet is the command that generated
+the transition from the previous packet state to the current packet state.
+The assembler preserves that causal alignment explicitly; it does not mix
+controls from adjacent packets.
+
 The tool intentionally refuses to fit a model when the measured source rate
 does not meet the requested timing contract.  Use ``--allow-non-target-rate``
 only for an explicitly labelled exploratory artifact.
@@ -117,6 +123,7 @@ def _deduplicate(rows: Iterable[dict[str, str]]) -> tuple[list[dict[str, float]]
             "angular_z": packet.angular_velocity_z_radps,
             "throttle": packet.throttle_norm,
             "steering": packet.steering_norm,
+            "applied_command_sequence": packet.applied_command_sequence,
         }
         unique.append(current)
         previous_time = packet.time_s
@@ -239,6 +246,11 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str) -> list[dict[st
             continue
         u0, v0 = _body_velocity(previous, twist_frame)
         u1, v1 = _body_velocity(current, twist_frame)
+        applied_command_sequence = current["applied_command_sequence"]
+        if applied_command_sequence is None:
+            # Gate 0 requires a known command for every fitting transition.
+            # Do not infer it from request order or callback arrival time.
+            continue
         output.append({
             "simulation_time_k_s": previous["time"],
             "simulation_time_k1_s": current["time"],
@@ -249,12 +261,14 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str) -> list[dict[st
             "x_k_m": previous["x"], "y_k_m": previous["y"],
             "yaw_k_rad": previous["yaw_unwrapped"],
             "u_k_mps": u0, "v_k_mps": v0, "r_k_radps": previous["yaw_rate"],
-            "throttle_k_norm": previous["throttle"],
+            # The current packet is the post-step state and carries the
+            # command consumed for previous -> current.
+            "applied_command_sequence_k1": float(applied_command_sequence),
+            "throttle_k_norm": current["throttle"],
+            "steering_k_rad": current["steering"] * MAX_STEERING_RAD,
             "x_k1_m": current["x"], "y_k1_m": current["y"],
             "yaw_k1_rad": current["yaw_unwrapped"],
             "u_k1_mps": u1, "v_k1_mps": v1, "r_k1_radps": current["yaw_rate"],
-            "steering_k1_rad": current["steering"] * MAX_STEERING_RAD,
-            "throttle_k1_norm": current["throttle"],
         })
     return output
 
@@ -355,9 +369,9 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         status = "exploratory_only_non_target_rate" if not timing_pass else "timing_and_kinematics_gate_passed"
     output_dir = run_dir / "assembled"
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(output_dir / "model_transition_v2.csv", transitions)
+    _write_csv(output_dir / "model_transition_v3.csv", transitions)
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_dir": str(run_dir),
         "status": status,
         "quality_gate_failures": gate_failures,
@@ -405,6 +419,14 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         },
         "quality_gate_pass": timing_pass and kinematics_pass,
         "model_boundary": "applied_throttle_to_body_u",
+        "transition_schema": {
+            "file": "model_transition_v3.csv",
+            "control_alignment": (
+                "current_packet_applied_command_generates_previous_to_current"
+            ),
+            "required_control_field": "applied_command_sequence_k1",
+            "ambiguous_transitions_discarded": len(transitions) < len(step_deltas),
+        },
         "ground_truth_use": "offline_transition_target_only",
     }
     if fit_exploratory:

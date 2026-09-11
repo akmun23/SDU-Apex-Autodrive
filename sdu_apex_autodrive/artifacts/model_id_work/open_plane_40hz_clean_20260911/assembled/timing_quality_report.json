@@ -1,0 +1,126 @@
+{
+  "duplicate_rows_discarded": 2,
+  "frame_convention": {
+    "frame_selection": "declared contract; no residual-based auto-selection",
+    "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+    "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+    "yaw": "normalized raw API quaternion, not Euler-only",
+    "yaw_rate": "raw API angular velocity z"
+  },
+  "ground_truth_use": "offline_transition_target_only",
+  "kinematic_consistency": {
+    "diagnostics": {
+      "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+      "position_vs_body_velocity_error_mps": {
+        "count": 857,
+        "max": 4.328843660586199,
+        "median": 0.11997688615048305,
+        "p95": 0.2367761178284368
+      },
+      "quaternion_vs_euler_yaw_error_rad": {
+        "count": 858,
+        "max": 0.00015986448110805185,
+        "median": 4.61782926621801e-05,
+        "p95": 0.00011600580207367095
+      },
+      "transition_count": 857,
+      "yaw_derivative_vs_angular_z_error_radps": {
+        "count": 857,
+        "max": 6.994427850347089,
+        "median": 0.4602227328125439,
+        "p95": 6.983692185052405
+      },
+      "yaw_derivative_vs_each_angular_axis_error_radps": {
+        "x": {
+          "negated": {
+            "count": 857,
+            "max": 8.117709899505657,
+            "median": 0.3608761875015497,
+            "p95": 0.5322927889842467
+          },
+          "same_sign": {
+            "count": 857,
+            "max": 4.984190811717361,
+            "median": 0.3609245080043812,
+            "p95": 0.5340418476088524
+          }
+        },
+        "y": {
+          "negated": {
+            "count": 857,
+            "max": 7.305461035315791,
+            "median": 0.38063572660324707,
+            "p95": 0.5744219777495706
+          },
+          "same_sign": {
+            "count": 857,
+            "max": 6.2177598995056576,
+            "median": 0.3775594570868522,
+            "p95": 0.5829384003537144
+          }
+        },
+        "z": {
+          "negated": {
+            "count": 857,
+            "max": 13.020340811717361,
+            "median": 0.46133420020270505,
+            "p95": 6.986227008122004
+          },
+          "same_sign": {
+            "count": 857,
+            "max": 6.994427850347089,
+            "median": 0.4602227328125439,
+            "p95": 6.983692185052405
+          }
+        }
+      },
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "maximum_allowed_median_error_mps": 0.75,
+    "maximum_allowed_yaw_rate_median_error_radps": 0.75,
+    "pass": true,
+    "selected_frame_median_error_mps": 0.12132154215200952,
+    "yaw_rate_median_error_radps": 0.4602227328125439,
+    "yaw_rate_pass": true,
+    "yaw_rate_source": "simulator_angular_velocity_z"
+  },
+  "malformed_rows_discarded": 0,
+  "model_boundary": "applied_throttle_to_body_u",
+  "physics_step_delta_max": 43,
+  "physics_step_delta_min": 13,
+  "quality_gate_failures": [],
+  "quality_gate_pass": true,
+  "raw_packet_count": 860,
+  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/open_plane_40hz_clean_20260911",
+  "schema_version": 3,
+  "source_dt_s_median": 0.024999570000000304,
+  "source_dt_s_p95": 0.035199740000000125,
+  "source_order": {
+    "pass": true,
+    "physics_step_gap_count": 857,
+    "physics_step_reverse_count": 0,
+    "time_reverse_count": 0,
+    "violations": 0
+  },
+  "source_rate_hz_median": 40.00068801183332,
+  "status": "timing_and_kinematics_gate_passed",
+  "timing_contract": {
+    "allow_non_target_rate": false,
+    "expected_source_rate_hz": 40.0,
+    "pass": true,
+    "raw_rows_are_never_upsampled": true
+  },
+  "transition_count": 857,
+  "transition_schema": {
+    "ambiguous_transitions_discarded": false,
+    "control_alignment": "current_packet_applied_command_generates_previous_to_current",
+    "file": "model_transition_v3.csv",
+    "required_control_field": "applied_command_sequence_k1"
+  },
+  "twist_frame_median_displacement_error_mps": {
+    "body": 0.12132154215200952,
+    "world": 4.760757287615564
+  },
+  "twist_frame_selected": "body",
+  "unique_source_packet_count": 858
+}

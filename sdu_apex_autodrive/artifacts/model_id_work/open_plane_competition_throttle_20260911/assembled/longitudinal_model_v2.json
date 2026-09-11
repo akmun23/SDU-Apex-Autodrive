@@ -1,0 +1,293 @@
+{
+  "acceptance_criterion": {
+    "blind_data_required": true,
+    "full_vehicle_state_required": true,
+    "relative_error_denominator": "abs(actual body speed), eligible only when >= 1 m/s",
+    "target": "recursive open-loop state/horizon error <= 2%"
+  },
+  "acceptance_status": "candidate_only_full_state_blind_recursive_validation_required",
+  "coefficients": [
+    -0.7589408295009197,
+    -1.7205148756782693,
+    0.09426101501010997,
+    50.31227023611868,
+    0.575934379421254,
+    -65.73882432146068
+  ],
+  "design_matrix_rank": 6,
+  "design_matrix_singular_values": [
+    1069.5720743770405,
+    51.535142952573274,
+    27.46496948863771,
+    17.370931852342135,
+    3.0707885012280993,
+    0.7366836719667712
+  ],
+  "feature_names": [
+    "bias",
+    "u",
+    "u_squared",
+    "throttle",
+    "u_times_throttle",
+    "throttle_squared"
+  ],
+  "model_boundary": "applied_throttle_to_simulator_body_u",
+  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/open_plane_competition_throttle_20260911",
+  "schema_version": 3,
+  "source_quality_report": {
+    "duplicate_rows_discarded": 0,
+    "frame_convention": {
+      "frame_selection": "declared contract; no residual-based auto-selection",
+      "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+      "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+      "yaw": "normalized raw API quaternion, not Euler-only",
+      "yaw_rate": "raw API angular velocity z"
+    },
+    "ground_truth_use": "offline_transition_target_only",
+    "kinematic_consistency": {
+      "diagnostics": {
+        "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+        "position_vs_body_velocity_error_mps": {
+          "count": 1787,
+          "max": 0.045800010583163395,
+          "median": 0.0025813806367436243,
+          "p95": 0.0066432589787154125
+        },
+        "quaternion_vs_euler_yaw_error_rad": {
+          "count": 1788,
+          "max": 0.00018898038468950773,
+          "median": 5.248719450090533e-05,
+          "p95": 8.898038468974079e-05
+        },
+        "transition_count": 1787,
+        "yaw_derivative_vs_angular_z_error_radps": {
+          "count": 1787,
+          "max": 0.006149914802656729,
+          "median": 1.850163564307298e-14,
+          "p95": 0.0056574159761508015
+        },
+        "yaw_derivative_vs_each_angular_axis_error_radps": {
+          "x": {
+            "negated": {
+              "count": 1787,
+              "max": 0.006296220518675772,
+              "median": 9.371795783864024e-08,
+              "p95": 0.005656962076204183
+            },
+            "same_sign": {
+              "count": 1787,
+              "max": 0.006149914802656729,
+              "median": 9.371795783864024e-08,
+              "p95": 0.005618085001407803
+            }
+          },
+          "y": {
+            "negated": {
+              "count": 1787,
+              "max": 0.2128426779441218,
+              "median": 0.0193,
+              "p95": 0.1445998508200658
+            },
+            "same_sign": {
+              "count": 1787,
+              "max": 0.21225716333077005,
+              "median": 0.01970008391861049,
+              "p95": 0.14777816840677802
+            }
+          },
+          "z": {
+            "negated": {
+              "count": 1787,
+              "max": 0.006149914802656729,
+              "median": 1.850163564307298e-14,
+              "p95": 0.0056574159761508015
+            },
+            "same_sign": {
+              "count": 1787,
+              "max": 0.006149914802656729,
+              "median": 1.850163564307298e-14,
+              "p95": 0.0056574159761508015
+            }
+          }
+        },
+        "yaw_rate_source": "simulator_angular_velocity_z"
+      },
+      "maximum_allowed_median_error_mps": 0.75,
+      "maximum_allowed_yaw_rate_median_error_radps": 0.75,
+      "pass": true,
+      "selected_frame_median_error_mps": 0.05360024608700573,
+      "yaw_rate_median_error_radps": 1.850163564307298e-14,
+      "yaw_rate_pass": true,
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "malformed_rows_discarded": 0,
+    "model_boundary": "applied_throttle_to_body_u",
+    "physics_step_delta_max": 28,
+    "physics_step_delta_min": 22,
+    "quality_gate_failures": [],
+    "quality_gate_pass": true,
+    "raw_packet_count": 1788,
+    "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/open_plane_competition_throttle_20260911",
+    "schema_version": 3,
+    "source_dt_s_median": 0.024999699999998626,
+    "source_dt_s_p95": 0.026001980000000202,
+    "source_order": {
+      "pass": true,
+      "physics_step_gap_count": 1787,
+      "physics_step_reverse_count": 0,
+      "time_reverse_count": 0,
+      "violations": 0
+    },
+    "source_rate_hz_median": 40.00048000576227,
+    "status": "timing_and_kinematics_gate_passed",
+    "timing_contract": {
+      "allow_non_target_rate": false,
+      "expected_source_rate_hz": 40.0,
+      "pass": true,
+      "raw_rows_are_never_upsampled": true
+    },
+    "transition_count": 1787,
+    "transition_schema": {
+      "ambiguous_transitions_discarded": false,
+      "control_alignment": "current_packet_applied_command_generates_previous_to_current",
+      "file": "model_transition_v3.csv",
+      "required_control_field": "applied_command_sequence_k1"
+    },
+    "twist_frame_median_displacement_error_mps": {
+      "body": 0.05360024608700573,
+      "world": 4.466428018002549
+    },
+    "twist_frame_selected": "body",
+    "unique_source_packet_count": 1788
+  },
+  "state_source": "simulator_packet_ground_truth_offline_only",
+  "training_count": 1250,
+  "training_score": {
+    "invalid_rollout_count": 0,
+    "one_step": {
+      "count": 1250,
+      "finite_count": 1250,
+      "invalid_count": 0,
+      "mae": 0.026018633239438742,
+      "max": 0.245985609356749,
+      "p95": 0.07685568139808319,
+      "relative_eligible_count": 890,
+      "relative_p95": 0.03406287015124934,
+      "two_percent_gate": false
+    },
+    "recursive": {
+      "count": 1250,
+      "finite_count": 1250,
+      "invalid_count": 0,
+      "mae": 0.5445212279897738,
+      "max": 1.6532642573797238,
+      "p95": 1.3046033327590514,
+      "relative_eligible_count": 890,
+      "relative_p95": 0.5673055051496846,
+      "two_percent_gate": false
+    },
+    "samples": 1250
+  },
+  "transition_count": 1787,
+  "validation_count": 537,
+  "validation_recursive_horizon_scores": {
+    "0.05s": {
+      "count": 535,
+      "finite_count": 535,
+      "invalid_count": 0,
+      "invalid_rollout_count": 2,
+      "mae": 0.3528588484691143,
+      "max": 1.2335054226698055,
+      "p95": 1.178949968148955,
+      "relative_eligible_count": 486,
+      "relative_p95": 0.3512230464879497,
+      "two_percent_gate": false
+    },
+    "0.10s": {
+      "count": 533,
+      "finite_count": 533,
+      "invalid_count": 0,
+      "invalid_rollout_count": 4,
+      "mae": 0.6126683615431348,
+      "max": 2.0336287684460634,
+      "p95": 1.9082914442179195,
+      "relative_eligible_count": 486,
+      "relative_p95": 0.5869957745392753,
+      "two_percent_gate": false
+    },
+    "0.25s": {
+      "count": 528,
+      "finite_count": 528,
+      "invalid_count": 0,
+      "invalid_rollout_count": 9,
+      "mae": 1.3069681383628817,
+      "max": 4.33216666760144,
+      "p95": 3.868957327814296,
+      "relative_eligible_count": 479,
+      "relative_p95": 1.0237221140571664,
+      "two_percent_gate": false
+    },
+    "0.50s": {
+      "count": 517,
+      "finite_count": 517,
+      "invalid_count": 0,
+      "invalid_rollout_count": 20,
+      "mae": 2.297383838414842,
+      "max": 7.443326559646393,
+      "p95": 6.736305298122143,
+      "relative_eligible_count": 469,
+      "relative_p95": 1.624234352131999,
+      "two_percent_gate": false
+    },
+    "1.00s": {
+      "count": 497,
+      "finite_count": 497,
+      "invalid_count": 0,
+      "invalid_rollout_count": 40,
+      "mae": 3.582170669950259,
+      "max": 11.430771323825596,
+      "p95": 9.791589672499859,
+      "relative_eligible_count": 449,
+      "relative_p95": 2.137841355673363,
+      "two_percent_gate": false
+    },
+    "2.00s": {
+      "count": 458,
+      "finite_count": 458,
+      "invalid_count": 0,
+      "invalid_rollout_count": 79,
+      "mae": 4.676254409437101,
+      "max": 13.01069228294409,
+      "p95": 10.949345301967531,
+      "relative_eligible_count": 410,
+      "relative_p95": 2.1321908636394675,
+      "two_percent_gate": false
+    }
+  },
+  "validation_score": {
+    "invalid_rollout_count": 0,
+    "one_step": {
+      "count": 537,
+      "finite_count": 537,
+      "invalid_count": 0,
+      "mae": 0.14271528431805822,
+      "max": 0.4260568163512355,
+      "p95": 0.4084800279503943,
+      "relative_eligible_count": 489,
+      "relative_p95": 0.1395414647125332,
+      "two_percent_gate": false
+    },
+    "recursive": {
+      "count": 537,
+      "finite_count": 537,
+      "invalid_count": 0,
+      "mae": 4.544308738887587,
+      "max": 13.12568593664523,
+      "p95": 10.808239156304117,
+      "relative_eligible_count": 489,
+      "relative_p95": 2.1899299022714147,
+      "two_percent_gate": false
+    },
+    "samples": 537
+  }
+}

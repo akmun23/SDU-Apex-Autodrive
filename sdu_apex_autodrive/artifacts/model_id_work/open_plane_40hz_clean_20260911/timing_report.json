@@ -1,0 +1,34 @@
+{
+  "applied_command_present_count": 860,
+  "bridge_packet_count": 860,
+  "duration_wall_s": 35.327243954,
+  "event_count": 9453,
+  "physics_step_delta": {
+    "count": 859,
+    "max": 43,
+    "mean": 24.92200232828871,
+    "min": 0
+  },
+  "physics_step_present_count": 860,
+  "request_sequence": {
+    "count": 859,
+    "first": 1,
+    "gaps": 0,
+    "last": 859
+  },
+  "request_to_applied_command_lag": {
+    "count": 859,
+    "max": 3,
+    "mean": 1.0034924330616997,
+    "min": 1
+  },
+  "schema_version": 1,
+  "source_duplicate_or_reverse_count": 2,
+  "source_gaps_over_30ms": 130,
+  "source_time_s": {
+    "count": 859,
+    "max": 0.043001700000001364,
+    "mean": 0.02492200232828871,
+    "min": 0.0
+  }
+}
