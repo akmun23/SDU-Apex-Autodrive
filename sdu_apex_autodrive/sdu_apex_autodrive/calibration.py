@@ -1250,12 +1250,12 @@ class Calibration(Node):
             # closed-loop target while the simulator handles the diagnostic
             # reset.  Raw calibration outputs and the actuator otherwise
             # share the same normalized topics and would race each other.
-            self._publish_neutral_commands()
+            self._neutral()
             self.steering_pub.publish(Float32(data=0.0))
             self.throttle_pub.publish(Float32(data=0.0))
             return
         if kind == "raw_throttle":
-            self._publish_neutral_commands()
+            self._neutral()
             if self.reset_pub is not None:
                 self.reset_pub.publish(Bool(data=False))
             self.steering_pub.publish(Float32(data=0.0))
@@ -1263,7 +1263,7 @@ class Calibration(Node):
             self.raw_throttle_override_pub.publish(Float32(data=value))
             return
         if kind == "raw_steering":
-            self._publish_neutral_commands()
+            self._neutral()
             if self.reset_pub is not None:
                 self.reset_pub.publish(Bool(data=False))
             self.throttle_pub.publish(Float32(data=0.0))
@@ -1271,7 +1271,7 @@ class Calibration(Node):
             self.raw_throttle_override_pub.publish(Float32(data=0.0))
             return
         if kind == "raw_steering_with_throttle":
-            self._publish_neutral_commands()
+            self._neutral()
             if self.reset_pub is not None:
                 self.reset_pub.publish(Bool(data=False))
             throttle = float(self.get_parameter("steering_test_throttle").value)

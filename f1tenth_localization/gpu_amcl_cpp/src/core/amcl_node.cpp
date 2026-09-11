@@ -1675,7 +1675,8 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         (!pf_.config().use_cluster_estimate || cluster_weight >= min_cluster_weight);
 
     bool local_tracking_recovery_confirmed = false;
-    if (local_tracking && local_odom_reference_ready_ &&
+    if (recovery_injection_configured_ &&
+        local_tracking && local_odom_reference_ready_ &&
         !local_cluster_valid &&
         consecutive_rejected_scans_ + 1 >=
             static_cast<uint64_t>(local_tracking_recovery_after_rejected_scans_)) {
@@ -1936,6 +1937,16 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         global_lock_min_travel_m_ <= 0.0 ||
         global_start_travel >= global_lock_min_travel_m_;
 
+    // Startup anchor-position mode permits the scan cluster to carry a
+    // repeatable along-track translation bias. The published pose is replaced
+    // below by the scan-supported anchor propagated by odometry, so requiring
+    // the biased cluster itself to lie inside the anchor radius deadlocks this
+    // intended startup mode. The raw cluster still has to pass the map/
+    // raceline, heading, covariance, and stability gates.
+    const bool global_anchor_position_mode =
+        global_sensor_bootstrap && global_lock_use_anchor_position_ &&
+        global_start_odom_ready_ && explicit_start_anchor;
+
     // The saved start anchor is only a startup disambiguation prior. Once
     // the car has completed the slow-ramp travel gate, it must be allowed to
     // leave the anchor and accept a stable scan estimate elsewhere on the
@@ -1946,7 +1957,8 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         global_travel_enough ||
         !global_start_anchor_enabled_ ||
         global_start_anchor_radius_m_ <= 0.0 ||
-        start_distance <= global_start_anchor_radius_m_;
+        start_distance <= global_start_anchor_radius_m_ ||
+        global_anchor_position_mode;
     const bool global_heading_near_start =
         !global_sensor_bootstrap ||
         global_travel_enough ||

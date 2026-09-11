@@ -422,9 +422,21 @@ class ActuatorInterface(Node):
         acceleration = float(msg.linear_acceleration.x)
         if not math.isfinite(acceleration):
             return
-        now = self.get_clock().now()
+        arrival_time = self.get_clock().now()
+        source_stamp_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000 +
+            int(msg.header.stamp.nanosec)
+        )
+        # The observer's derivative must follow the sensor source clock. The
+        # callback clock is retained only as an explicit fallback for a
+        # malformed zero-stamped message; callback jitter must not become
+        # physical acceleration.
+        source_time_s = (
+            source_stamp_ns / 1e9 if source_stamp_ns > 0
+            else arrival_time.nanoseconds / 1e9
+        )
         self.speed_estimator.update_acceleration(
-            acceleration, now.nanoseconds / 1e9)
+            acceleration, source_time_s)
         # Once calibrated /odom is live, it is the absolute speed measurement
         # used by the controller. The estimator still filters IMU acceleration
         # for the acceleration-loop feedback, but its open-loop integral must
@@ -432,7 +444,7 @@ class ActuatorInterface(Node):
         if not self.speed_estimator.has_odom:
             self.speed = self.speed_estimator.speed_mps
         self.acceleration = self.speed_estimator.acceleration_mps2
-        self.imu_time = now
+        self.imu_time = arrival_time
 
     def _on_collision_count(self, msg: Int32) -> None:
         """Latch a terminal failure and reset the simulator vehicle.

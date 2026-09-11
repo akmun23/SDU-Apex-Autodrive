@@ -1,0 +1,116 @@
+{
+  "duplicate_rows_discarded": 992,
+  "frame_convention": {
+    "frame_selection": "declared contract; no residual-based auto-selection",
+    "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+    "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+    "yaw": "normalized raw API quaternion, not Euler-only",
+    "yaw_rate": "raw API angular velocity z"
+  },
+  "ground_truth_use": "offline_transition_target_only",
+  "kinematic_consistency": {
+    "diagnostics": {
+      "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+      "position_vs_body_velocity_error_mps": {
+        "count": 248,
+        "max": 0.016124614724518673,
+        "median": 0.003946596871870392,
+        "p95": 0.011095983501732546
+      },
+      "quaternion_vs_euler_yaw_error_rad": {
+        "count": 249,
+        "max": 0.00015930989648449412,
+        "median": 2.322175228730572e-05,
+        "p95": 0.00010451586411219792
+      },
+      "transition_count": 248,
+      "yaw_derivative_vs_angular_z_error_radps": {
+        "count": 248,
+        "max": 6.9784500000000005,
+        "median": 6.973100698079813,
+        "p95": 6.977142160890711
+      },
+      "yaw_derivative_vs_each_angular_axis_error_radps": {
+        "x": {
+          "negated": {
+            "count": 248,
+            "max": 0.2274,
+            "median": 0.22156239103515935,
+            "p95": 0.22623312662493697
+          },
+          "same_sign": {
+            "count": 248,
+            "max": 0.22767031133507246,
+            "median": 0.22171304770356376,
+            "p95": 0.22626666821853825
+          }
+        },
+        "y": {
+          "negated": {
+            "count": 248,
+            "max": 0.652822141851816,
+            "median": 0.570037396091454,
+            "p95": 0.5888067438790137
+          },
+          "same_sign": {
+            "count": 248,
+            "max": 0.6526778581481839,
+            "median": 0.5702631409581647,
+            "p95": 0.5887238565802901
+          }
+        },
+        "z": {
+          "negated": {
+            "count": 248,
+            "max": 6.9784500000000005,
+            "median": 6.973251083717321,
+            "p95": 6.977175708063902
+          },
+          "same_sign": {
+            "count": 248,
+            "max": 6.9784500000000005,
+            "median": 6.973100698079813,
+            "p95": 6.977142160890711
+          }
+        }
+      },
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "maximum_allowed_median_error_mps": 0.75,
+    "pass": true,
+    "selected_frame_median_error_mps": 0.008574175039517608,
+    "yaw_rate_source": "simulator_angular_velocity_z"
+  },
+  "malformed_rows_discarded": 0,
+  "model_boundary": "applied_throttle_to_body_u",
+  "physics_step_delta_max": 100,
+  "physics_step_delta_min": 100,
+  "quality_gate_pass": false,
+  "raw_packet_count": 1241,
+  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/open_plane_clean_20260910",
+  "schema_version": 2,
+  "source_dt_s_median": 0.0999984999999981,
+  "source_dt_s_p95": 0.10000999999999749,
+  "source_order": {
+    "pass": true,
+    "physics_step_gap_count": 248,
+    "physics_step_reverse_count": 0,
+    "time_reverse_count": 0,
+    "violations": 0
+  },
+  "source_rate_hz_median": 10.000150002250223,
+  "status": "rejected_non_target_source_rate",
+  "timing_contract": {
+    "allow_non_target_rate": false,
+    "expected_source_rate_hz": 40.0,
+    "pass": false,
+    "raw_rows_are_never_upsampled": true
+  },
+  "transition_count": 248,
+  "twist_frame_median_displacement_error_mps": {
+    "body": 0.008574175039517608,
+    "world": 0.9970858462987577
+  },
+  "twist_frame_selected": "body",
+  "unique_source_packet_count": 249
+}

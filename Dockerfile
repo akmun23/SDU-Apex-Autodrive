@@ -11,7 +11,7 @@ COPY --from=cuda_toolkit /usr/local/cuda-12.6 /usr/local/cuda-12.6
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake libeigen3-dev \
-    python3-colcon-common-extensions python3-matplotlib python3-numpy python3-opencv python3-pip python3-pytest python3-scipy python3-yaml \
+    python3-colcon-common-extensions python3-matplotlib python3-numpy python3-opencv python3-pandas python3-pip python3-pytest python3-scipy python3-yaml \
     ros-humble-ackermann-msgs ros-humble-ament-cmake-python \
     ros-humble-nav2-lifecycle-manager ros-humble-nav2-map-server \
     ros-humble-rclc ros-humble-rclcpp-components \

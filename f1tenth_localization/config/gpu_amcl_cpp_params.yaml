@@ -73,10 +73,11 @@ gpu_amcl_cpp:
     # active before a pose is published to the controller.
     cluster_publish_min_weight: 0.20
 
-    # Keep the normal locked cloud local. After repeated local association
-    # failures, inject a small map/raceline-sampled recovery population so a
-    # real scan can re-acquire the track without a simulator reset.
-    enable_recovery_injection: true
+    # Keep the normal locked cloud local. Global AMCL handles startup
+    # localization; after lock, do not inject map-wide recovery particles into
+    # a closed track, because a visually similar corridor can move the racing
+    # pose several metres away from the causal odometry prediction.
+    enable_recovery_injection: false
     recovery_injection_ratio: 0.10
     enable_local_roughening: true
     local_roughening_ratio: 0.20
@@ -187,16 +188,14 @@ gpu_amcl_cpp:
     # map-frame raceline; the old ICRA file runs in the opposite direction at
     # the simulator start.
     global_heading_trajectory_rel_path: trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
-    # Do not accept a global candidate until it meets the same safety envelope
-    # required by the controller.  AMCL keeps refining while the vehicle is
-    # stationary, so a wrong start guess cannot deadlock localization.
+    # Startup localization is scan-supported, but the deterministic simulator
+    # spawn still needs its saved map-start prior to reject closed-track
+    # aliases. The controller then uses the first-lap speed ramp while AMCL
+    # confirms the moving pose.
     global_pose_covariance_xy_max: 0.25
     global_pose_covariance_yaw_max: 0.12
-    # Global localization starts from a saved-map start region, not from the
-    # first trajectory row. The trajectory is a closed loop whose CSV seam is
-    # elsewhere, while this measured map start disambiguates the opposite-
-    # heading corridor alias at the simulator spawn. The radius still permits
-    # a bounded startup offset and the scan matcher must support the pose.
+    # Keep a bounded track/heading envelope for startup candidates. A saved
+    # map-start anchor disambiguates the opposite-looking corridors.
     global_pose_max_track_distance_m: 0.65
     global_pose_max_track_heading_error_rad: 0.45
     global_start_anchor_enabled: true

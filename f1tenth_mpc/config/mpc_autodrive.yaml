@@ -1,0 +1,38 @@
+control_state_node:
+  ros__parameters:
+    odom_topic: /odom
+    map_pose_topic: /current_map_pose
+    imu_topic: /autodrive/roboracer_1/imu
+    steering_feedback_topic: /autodrive/roboracer_1/steering
+    state_topic: /mpc/control_state
+    max_pose_age_s: 0.125
+    max_steering_age_s: 0.125
+    max_imu_age_s: 0.125
+    body_v_variance_when_unavailable: 1000000.0
+
+mpc_shadow_node:
+  ros__parameters:
+    trajectory_file: /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+    state_topic: /mpc/control_state
+    diagnostics_topic: /mpc/diagnostics
+    shadow_command_topic: /mpc/shadow_command
+    model_version: bachelor_mpc_riccati_augmented9_v1
+
+    # BachelorProject MPC: 9-state augmented Frenet model, 20 stages,
+    # 30 ms prediction steps, and direct steering-rate/acceleration inputs.
+    prediction_dt_s: 0.03
+    weight_lateral_error: 1500.0
+    weight_heading_error: 50.0
+    weight_velocity: 200.0
+    weight_lateral_velocity: 5.0
+    weight_yaw_rate: 1.5
+    weight_steering_effort: 2.0
+    weight_acceleration_effort: 0.5
+    weight_steering_rate: 5.0
+    weight_acceleration_rate: 5.0
+    weight_effective_steering: 1.0
+    cross_call_rate_scale: 0.1666666667
+    wall_margin: 0.0
+    max_solver_iterations: 50
+    solver_convergence_tolerance: 0.01
+    accept_max_iterations: true

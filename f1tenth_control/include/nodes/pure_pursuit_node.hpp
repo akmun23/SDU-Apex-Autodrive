@@ -118,8 +118,16 @@ private:
     std::string steering_feedback_topic_{"/autodrive/roboracer_1/steering"};
     double steering_feedback_timeout_s_{0.25};
     double steering_feedback_lead_gain_{0.25};
+    double startup_speed_mps_{1.5};         // First-lap speed at the start [m/s]
+    double startup_ramp_laps_{1.0};         // Laps over which startup speed reaches max_speed
     double startup_path_max_distance_m_{0.80};
     double startup_path_heading_tolerance_rad_{0.75};
+
+    // Progress state for the closed-loop first-lap speed ramp. This uses only
+    // raceline progress and never simulator ground truth.
+    bool startup_progress_initialized_{false};
+    size_t startup_previous_closest_idx_{0};
+    double startup_progress_m_{0.0};
     
     // Parameter handling
     /**

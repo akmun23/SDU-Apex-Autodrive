@@ -23,10 +23,19 @@ colcon build --base-paths f1tenth_control f1tenth_localization \
   --merge-install --cmake-args -DBUILD_TESTING=ON
 ```
 
+## Local startup
+
+Use the repository-level [startup guide](../STARTUP_GUIDE.md) for the complete
+simulator-plus-controller workflow. It starts the unified controller before
+Unity connects, so the GUI `Connect` action does not require a second ROS
+command.
+
 ## Active launches
 
-Use one bridge and one controller launch. The mapping launch is FTG-only and
-the racing launch is FTG or Pure Pursuit:
+The direct launch commands below are for controlled diagnostics only. For a
+normal simulator run, use the root startup guide so the bridge and controller
+are started exactly once before Unity connects. The mapping launch is FTG-only
+and the racing launch is FTG or Pure Pursuit:
 
 ```bash
 ros2 launch sdu_apex_autodrive mapping.launch.py
@@ -55,13 +64,25 @@ asset is the ICRA compete scene. When using the rebuilt source player, the
 source timestamps and measured native stream rate are the authority. Every
 analysis must use source timestamps and report gaps, duplicates, and bursts.
 
-Run the graphical Unity player in batch mode. Do not use `-no-graphics` for the
-HDRP simulator:
+For model-identification work, subscribe to
+`/autodrive/roboracer_1/bridge_packet_timing`. Schema version 2 links each
+packet to the bridge request sequence, sent normalized command, Unity
+`simulation_physics_step`, telemetry sequence, and the command sequence and
+normalized throttle/steering actually consumed by the vehicle controller.
+`simulation_render_frame` is retained only as a render diagnostic; it is not a
+physics-step identifier. This stream is diagnostics-only and must not be used
+as a replacement sensor input.
+
+The supported local player is the rebuilt source player described in the root
+startup guide. Run it with its normal GUI; do not add `-batchmode` or
+`-no-graphics` for the visible workflow:
 
 ```bash
-./AutoDRIVE\ Simulator.x86_64 -batchmode \
+./AutoDRIVE-Simulator.x86_64 \
   -ip 127.0.0.1 -port 4567 -logFile /tmp/autodrive.log
 ```
+
+Start the ROS controller first, then click `Connect` in the player window.
 
 ## Actual-data recording
 
@@ -82,3 +103,28 @@ EKF, AMCL, current-map pose, scan alignment, and collision count. Score the
 recorded file with `score_localization_run`; use `scan_match_benchmark` only on
 scans from the recorded run. Do not use a synthetic offline plant as evidence
 for runtime acceptance. These outputs are intentionally ignored by Git.
+
+## First model-identification run
+
+The first MPC milestone is a causal timing artifact, not a controller swap.
+The development-only launch uses the existing bounded calibration excitation
+and records the bridge request/applied-command association alongside allowed
+IMU, encoder, LiDAR, odometry, AMCL-health, and actuator-feedback events:
+
+```bash
+ros2 launch sdu_apex_autodrive model_identification.launch.py \
+  mode:=identification_grid \
+  output_dir:=/workspace/src/sdu_apex_autodrive/artifacts/model_id \
+  run_name:=model_id_timing_test_current \
+  duration_sec:=120
+```
+
+It writes the canonical `events.csv`, `manifest.json`, `timing_report.json`,
+and topic partitions named `bridge_requests.csv`, `simulator_packets.csv`,
+`imu.csv`, `encoders.csv`, `actuator_feedback.csv`, `gt_odom.csv`, and
+`experiment_schedule.csv`. `gt_odom.csv` is an explicit not-recorded marker:
+ground truth remains offline-only. A positive `duration_sec` shuts down the
+whole experiment automatically; `duration_sec:=0` leaves it running until
+interrupted. This launch does not start Pure Pursuit or use simulator ground
+truth as a runtime input. The current actuator remains a speed-target cascade;
+direct MPC actuation is a later, separately validated interface.

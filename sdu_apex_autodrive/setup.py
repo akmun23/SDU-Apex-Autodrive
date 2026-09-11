@@ -54,6 +54,8 @@ setup(
             "ground_truth_mapping_tf = sdu_apex_autodrive.ground_truth_mapping_tf:main",
             "ground_truth_amcl_monitor = sdu_apex_autodrive.ground_truth_amcl_monitor:main",
             "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
+            "model_id_timing_recorder = sdu_apex_autodrive.model_id_timing_recorder:main",
+            "analyze_model_id = sdu_apex_autodrive.model_id_analysis:main",
             "analyze_calibration = sdu_apex_autodrive.scripts.analyze_calibration:main",
             "audit_calibration_csv = sdu_apex_autodrive.scripts.audit_calibration_csv:main",
             "validate_odometry_observer = sdu_apex_autodrive.scripts.validate_odometry_observer:main",

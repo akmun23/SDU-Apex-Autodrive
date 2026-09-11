@@ -45,4 +45,5 @@ sdu_apex_autodrive/artifacts/calibration/derived/**
 !sdu_apex_autodrive/artifacts/calibration/derived/**/wheel_speed_map.csv
 !sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml
 sdu_apex_autodrive/artifacts/calibration/derived/**/sensor_fusion_model*.hpp
+sdu_apex_autodrive/artifacts/model_id/**
 sensor_record_*

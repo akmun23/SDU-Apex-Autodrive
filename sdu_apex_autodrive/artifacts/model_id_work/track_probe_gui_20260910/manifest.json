@@ -1,0 +1,20 @@
+{
+  "created_wall_time": "2026-09-10T20:22:00Z",
+  "dataset_files": [
+    "bridge_requests.csv",
+    "simulator_packets.csv",
+    "imu.csv",
+    "encoders.csv",
+    "actuator_feedback.csv",
+    "runtime_state.csv",
+    "gt_odom.csv",
+    "experiment_schedule.csv"
+  ],
+  "event_file": "events.csv",
+  "ground_truth_file_status": "packet_embedded_offline_diagnostic; no ground-truth ROS topic subscription and no runtime controller consumer",
+  "ground_truth_subscriptions": [],
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/track_probe_gui_20260910",
+  "schema_version": 1,
+  "source_time_policy": "ROS header stamps are recorded as supplied; bridge simulation_time_s is recorded separately and is not substituted into ROS headers.",
+  "timing_topic": "/autodrive/roboracer_1/bridge_packet_timing"
+}

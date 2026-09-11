@@ -1,0 +1,19 @@
+std_msgs/Header header
+
+bool valid
+bool shadow_only
+bool solver_success
+float64 solve_time_ms
+float64 proposed_steering_angle_rad
+float64 proposed_acceleration_mps2
+float64 current_lateral_error_m
+float64 current_heading_error_rad
+float64 predicted_lateral_error_m
+float64 predicted_distance_m
+uint32 horizon_steps
+uint32 solver_iterations
+uint32 solver_status
+float64 solver_primal_residual
+float64 solver_dual_residual
+string model_version
+string failure_reason

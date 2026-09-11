@@ -10,10 +10,12 @@ pure_pursuit_node:
     command_frame: base_link
     trajectory_file: ""
     wheelbase: 0.324
-    # Full AutoDRIVE simulator envelope. The raceline's own velocity column,
-    # curvature and clearance regulation still determine the actual target at
-    # each point; this removes the old project-wide 5.5 m/s ceiling.
+    # Full AutoDRIVE simulator envelope. The first lap applies the explicit
+    # startup ramp below; after that the raceline's velocity column, curvature
+    # and clearance regulation determine the requested speed.
     max_speed: 22.88
+    startup_speed_mps: 1.50
+    startup_ramp_laps: 1.0
     # The 0.35--0.95 m range repeatedly reversed steering at the first
     # hairpin before the 3.2 rad/s actuator could follow it. A longer target
     # preview was tested for 90 s at 3 m/s and 45 s at 4 m/s without collision.

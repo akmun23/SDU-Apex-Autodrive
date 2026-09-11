@@ -32,8 +32,8 @@ def _bool(value: str) -> bool:
 
 def _setup(context):
     controller = LaunchConfiguration("controller").perform(context).lower()
-    if controller not in ("ftg", "pure_pursuit"):
-        raise RuntimeError("controller must be ftg or pure_pursuit")
+    if controller not in ("ftg", "pure_pursuit", "mpc_shadow"):
+        raise RuntimeError("controller must be ftg, pure_pursuit, or mpc_shadow")
 
     map_path = LaunchConfiguration("map").perform(context)
     trajectory = LaunchConfiguration("trajectory").perform(context)
@@ -45,6 +45,8 @@ def _setup(context):
         LaunchConfiguration("with_collision_safety").perform(context))
     with_telemetry_recorder = _bool(
         LaunchConfiguration("with_telemetry_recorder").perform(context))
+    with_model_id_recorder = _bool(
+        LaunchConfiguration("with_model_id_recorder").perform(context))
     force_localization = _bool(
         LaunchConfiguration("force_localization").perform(context))
     use_localization = _bool(
@@ -216,6 +218,24 @@ def _setup(context):
             ],
         ))
 
+    if with_model_id_recorder:
+        # Causal diagnostics only. This recorder embeds the packet-side
+        # simulator fields offline and never publishes or feeds ground truth
+        # into localization/control.
+        actions.append(Node(
+            package="sdu_apex_autodrive",
+            executable="model_id_timing_recorder",
+            name="model_id_timing_recorder",
+            output="screen",
+            parameters=[{
+                "output_dir": LaunchConfiguration("model_id_output_dir"),
+                "run_name": LaunchConfiguration("model_id_run_name"),
+                "experiment_mode": "track_validation",
+                "duration_sec": ParameterValue(
+                    LaunchConfiguration("model_id_duration_sec"), value_type=float),
+            }],
+        ))
+
     if controller == "ftg":
         ftg_max_speed = float(LaunchConfiguration("ftg_max_speed").perform(context))
         component = ComposableNode(
@@ -260,6 +280,29 @@ def _setup(context):
             composable_node_descriptions=[component],
             output="screen",
         ))
+        if controller == "mpc_shadow":
+            # Pure Pursuit remains the sole /cmd/speed publisher.  The new
+            # MPC only consumes the authoritative legal control state and
+            # publishes diagnostics plus /mpc/shadow_command.
+            actions.extend([
+                Node(
+                    package="f1tenth_mpc",
+                    executable="control_state_node",
+                    name="mpc_control_state",
+                    output="screen",
+                    parameters=[LaunchConfiguration("mpc_params")],
+                ),
+                Node(
+                    package="f1tenth_mpc",
+                    executable="mpc_shadow_node",
+                    name="mpc_shadow",
+                    output="screen",
+                    parameters=[
+                        LaunchConfiguration("mpc_params"),
+                        {"trajectory_file": trajectory},
+                    ],
+                ),
+            ])
     actions.append(Node(
         package="sdu_apex_autodrive",
         executable="actuator_interface",
@@ -305,7 +348,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "controller",
             default_value="pure_pursuit",
-            description="Controller to run: FTG for mapping or Pure Pursuit for racing",
+            description=(
+                "Controller to run: FTG, Pure Pursuit, or mpc_shadow. "
+                "mpc_shadow never publishes actuator commands."
+            ),
         ),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
@@ -323,6 +369,27 @@ def generate_launch_description():
             "with_telemetry_recorder",
             default_value="false",
             description="Record allowed sensor/controller telemetry for offline tuning",
+        ),
+        DeclareLaunchArgument(
+            "with_model_id_recorder",
+            default_value="false",
+            description=(
+                "Record immutable causal bridge/packet/sensor tables for offline "
+                "model validation; no simulator truth enters runtime control"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "model_id_output_dir",
+            default_value="/workspace/src/sdu_apex_autodrive/artifacts/model_id",
+        ),
+        DeclareLaunchArgument(
+            "model_id_run_name",
+            default_value="track_validation",
+        ),
+        DeclareLaunchArgument(
+            "model_id_duration_sec",
+            default_value="0.0",
+            description="Optional finite duration for the causal model-ID recorder",
         ),
         DeclareLaunchArgument(
             "force_localization",
@@ -407,10 +474,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "controller_max_speed",
-            default_value="1.5",
+            default_value="22.88",
             description=(
-                "Safe simulator startup cap for Pure Pursuit [m/s]. "
-                "Raise explicitly only after the baseline follows the track."
+                "Normal Pure Pursuit maximum speed [m/s]. The first-lap "
+                "startup ramp is configured in path_tracking_autodrive.yaml."
             ),
         ),
         DeclareLaunchArgument(
@@ -431,7 +498,8 @@ def generate_launch_description():
             default_value="0.65",
             description=(
                 "Maximum global AMCL candidate distance from the raceline [m]. "
-                "Use a temporary override only for measured acceptance tests."
+                "This rejects visually plausible closed-track aliases during "
+                "startup."
             ),
         ),
         DeclareLaunchArgument(
@@ -480,6 +548,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "actuator_params",
             default_value=os.path.join(integration, "config", "actuator_interface.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "mpc_params",
+            default_value=os.path.join(
+                get_package_share_directory("f1tenth_mpc"), "config", "mpc_autodrive.yaml"),
+            description="Candidate model and shadow MPC parameters",
         ),
         DeclareLaunchArgument(
             "calibration_params",

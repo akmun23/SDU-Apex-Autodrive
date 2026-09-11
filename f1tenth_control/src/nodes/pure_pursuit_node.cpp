@@ -70,6 +70,8 @@ PurePursuitNode::PurePursuitNode(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(get_logger(), "  Target-heading turn-in gain: %.3f", config_.heading_error_gain);
     RCLCPP_INFO(get_logger(), "  Command shaping: steer_rate=%.2f accel=%.2f decel=%.2f",
                 max_steering_rate_, max_accel_cmd_, max_decel_cmd_);
+    RCLCPP_INFO(get_logger(), "  Startup speed ramp: %.2f -> %.2f m/s over %.2f lap(s)",
+                startup_speed_mps_, max_speed_, startup_ramp_laps_);
     RCLCPP_INFO(get_logger(), "  Pose: %s (%s frame)", pose_topic_.c_str(), path_frame_.c_str());
     RCLCPP_INFO(get_logger(), "  Odom: %s", odom_topic_.c_str());
     RCLCPP_INFO(get_logger(), "  Control trigger: %s (one command per odometry update; nominal %.1f Hz)",
@@ -145,6 +147,8 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("max_decel_cmd", 8.0);
     declare_parameter("steering_feedback_timeout_s", 0.25);
     declare_parameter("steering_feedback_lead_gain", 0.25);
+    declare_parameter("startup_speed_mps", 1.5);
+    declare_parameter("startup_ramp_laps", 1.0);
     declare_parameter("startup_path_max_distance_m", 0.80);
     declare_parameter("startup_path_heading_tolerance_rad", 0.75);
 }
@@ -221,6 +225,10 @@ void PurePursuitNode::loadParameters() {
         0.01, get_parameter("steering_feedback_timeout_s").as_double());
     steering_feedback_lead_gain_ = std::clamp(
         get_parameter("steering_feedback_lead_gain").as_double(), 0.0, 1.0);
+    startup_speed_mps_ = std::max(
+        0.0, get_parameter("startup_speed_mps").as_double());
+    startup_ramp_laps_ = std::max(
+        0.0, get_parameter("startup_ramp_laps").as_double());
     startup_path_max_distance_m_ = std::max(
         0.0, get_parameter("startup_path_max_distance_m").as_double());
     startup_path_heading_tolerance_rad_ = std::clamp(
@@ -527,6 +535,9 @@ bool PurePursuitNode::loadTrajectory() {
             trajectory_loaded_ = true;
             trajectory_aligned_ = false;
             startup_alignment_validated_ = false;
+            startup_progress_initialized_ = false;
+            startup_previous_closest_idx_ = 0;
+            startup_progress_m_ = 0.0;
         }
         size_t count = 0;
         double len = 0.0;
@@ -756,6 +767,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     
     // Compute control (protected against concurrent trajectory/config updates)
     PurePursuitOutput output;
+    double track_length_m = 0.0;
     {
         std::lock_guard<std::mutex> lock(controller_mutex_);
         if (!controller_ || !controller_->hasTrajectory()) {
@@ -775,10 +787,51 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
                 aligned_index);
         }
         output = controller_->compute(state);
+        const auto& trajectory = controller_->getTrajectory();
+        if (trajectory.size() > 1) {
+            track_length_m = trajectory.back().arc_length + std::hypot(
+                trajectory.front().x - trajectory.back().x,
+                trajectory.front().y - trajectory.back().y);
+
+            // Accumulate only forward progress around the closed trajectory.
+            // The seam was aligned to the accepted startup pose, so one wrap
+            // represents one completed lap. Ignore small reverse jitter.
+            const size_t closest_idx = std::min(
+                output.closest_idx, trajectory.size() - 1);
+            const double current_arc = trajectory[closest_idx].arc_length;
+            if (!startup_progress_initialized_) {
+                startup_previous_closest_idx_ = closest_idx;
+                startup_progress_m_ = current_arc;
+                startup_progress_initialized_ = true;
+            } else {
+                const double previous_arc = trajectory[
+                    std::min(startup_previous_closest_idx_, trajectory.size() - 1)].arc_length;
+                double delta_arc = current_arc - previous_arc;
+                if (delta_arc < -0.5 * track_length_m) {
+                    delta_arc += track_length_m;
+                }
+                if (delta_arc > 0.0 && delta_arc < 0.5 * track_length_m) {
+                    startup_progress_m_ += delta_arc;
+                }
+                startup_previous_closest_idx_ = closest_idx;
+            }
+        }
     }
     
     if (output.valid) {
-        output.target_speed = std::clamp(output.target_speed, 0.0, max_speed);
+        double effective_max_speed = max_speed;
+        double startup_lap_fraction = 1.0;
+        if (track_length_m > 1.0e-3 && startup_ramp_laps_ > 1.0e-6) {
+            startup_lap_fraction = std::clamp(
+                startup_progress_m_ / (startup_ramp_laps_ * track_length_m),
+                0.0, 1.0);
+            effective_max_speed = startup_speed_mps_ +
+                (max_speed - startup_speed_mps_) * startup_lap_fraction;
+            effective_max_speed = std::clamp(
+                effective_max_speed, 0.0, max_speed);
+        }
+        output.target_speed = std::clamp(
+            output.target_speed, 0.0, effective_max_speed);
 
         // Do not let a map pose with an incorrect frame/orientation silently
         // become a steering command. The previous implementation aligned the
@@ -874,7 +927,7 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
             if (output.target_speed > 0.0) {
                 cmd_speed = std::max(cmd_speed, config_.min_regulated_speed);
             }
-            cmd_speed = std::clamp(cmd_speed, 0.0, max_speed);
+            cmd_speed = std::clamp(cmd_speed, 0.0, effective_max_speed);
             last_cmd_steering_ = cmd_steer;
             last_cmd_speed_ = cmd_speed;
             last_cmd_time_ = now_t;
@@ -883,10 +936,12 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
         RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), 1000,
             "Pure Pursuit: pose=(%.3f, %.3f, %.3f) cte=%.3f closest=%zu target=%zu "
-            "path_dist=%.3f heading_err=%.3f steer=%.3f speed=%.3f",
-            state.pose.x, state.pose.y, state.pose.theta,
-            output.cross_track_error, output.closest_idx, output.target_idx,
-            output.closest_distance, output.heading_error, cmd_steer, cmd_speed);
+                "path_dist=%.3f heading_err=%.3f steer=%.3f speed=%.3f "
+                "startup_cap=%.3f lap_fraction=%.3f",
+                state.pose.x, state.pose.y, state.pose.theta,
+                output.cross_track_error, output.closest_idx, output.target_idx,
+                output.closest_distance, output.heading_error, cmd_steer, cmd_speed,
+                effective_max_speed, startup_lap_fraction);
 
         publishDiagnostics(event_stamp, state, output, cmd_steer, cmd_speed);
         
