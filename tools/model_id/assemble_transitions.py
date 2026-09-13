@@ -59,6 +59,9 @@ MAX_STEERING_RAD = 0.5236
 # rejected rather than hidden by a median-rate calculation.
 MIN_SOURCE_TRANSITION_DT_S = 0.015
 MAX_SOURCE_TRANSITION_DT_S = 0.035
+POSITION_DISCONTINUITY_THRESHOLD_M = 1.5
+YAW_DISCONTINUITY_THRESHOLD_RAD = 1.0
+ENCODER_WHEEL_RADIUS_M = 0.059
 
 
 def _read_packets(path: Path) -> list[dict[str, str]]:
@@ -78,6 +81,9 @@ def _read_packets(path: Path) -> list[dict[str, str]]:
         "simulator_angular_velocity_z",
         "applied_throttle_norm",
         "applied_steering_norm",
+        "commanded_throttle_norm", "commanded_steering_norm",
+        "simulator_feedback_steering_norm", "sent_reset",
+        "simulator_encoder_angles_left", "simulator_encoder_angles_right",
     }
     missing = sorted(required.difference(rows[0]))
     if missing:
@@ -135,6 +141,17 @@ def _deduplicate(rows: Iterable[dict[str, str]]) -> tuple[list[dict[str, float]]
             "angular_z": packet.angular_velocity_z_radps,
             "throttle": packet.throttle_norm,
             "steering": packet.steering_norm,
+            "commanded_throttle": _optional_float(
+                row, "commanded_throttle_norm"),
+            "commanded_steering": _optional_float(
+                row, "commanded_steering_norm"),
+            "feedback_steering": _optional_float(
+                row, "simulator_feedback_steering_norm"),
+            "encoder_left": _optional_float(
+                row, "simulator_encoder_angles_left"),
+            "encoder_right": _optional_float(
+                row, "simulator_encoder_angles_right"),
+            "sent_reset": _parse_bool(row.get("sent_reset")),
             "applied_command_sequence": packet.applied_command_sequence,
         }
         unique.append(current)
@@ -148,6 +165,97 @@ def _deduplicate(rows: Iterable[dict[str, str]]) -> tuple[list[dict[str, float]]
         "physics_step_reverse_count": physics_step_reverse_count,
         "source_step_gap_count": source_step_gap_count,
     }
+
+
+def _optional_float(row: dict[str, str], key: str) -> float | None:
+    raw = row.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _parse_bool(raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mark_segments(rows: list[dict[str, float]]) -> dict[str, object]:
+    """Mark reset/teleport boundaries without inventing source transitions."""
+    reset_epoch = 0
+    segment_id = 0
+    boundary_reasons: list[dict[str, object]] = []
+    previous_reset = False
+    last_reset_boundary_index: int | None = None
+    for index, row in enumerate(rows):
+        reason: str | None = None
+        reset_level = bool(row.get("sent_reset", False))
+        if index > 0:
+            previous = rows[index - 1]
+            if reset_level and not previous_reset:
+                reason = "reset_command_rising_edge"
+            else:
+                position_jump = math.hypot(
+                    row["x"] - previous["x"], row["y"] - previous["y"])
+                yaw_jump = abs(_unwrap(previous["yaw"], row["yaw"]) -
+                               previous["yaw"])
+                if position_jump > POSITION_DISCONTINUITY_THRESHOLD_M:
+                    if (last_reset_boundary_index is not None and
+                            index - last_reset_boundary_index <= 2):
+                        # A reset command and the following teleport can be
+                        # reported as two source packets. The reset already
+                        # created the new segment; only suppress the second
+                        # crossing transition as a boundary marker.
+                        reason = "reset_teleport"
+                    else:
+                        reason = "position_discontinuity"
+                elif yaw_jump > YAW_DISCONTINUITY_THRESHOLD_RAD:
+                    reason = "yaw_discontinuity"
+        if reason is not None and reason != "reset_teleport":
+            reset_epoch += 1
+            segment_id += 1
+            boundary_reasons.append({
+                "packet_index": index,
+                "physics_step": row["physics_step"],
+                "reason": reason,
+            })
+            if reason == "reset_command_rising_edge":
+                last_reset_boundary_index = index
+        row["reset_epoch"] = float(reset_epoch)
+        row["segment_id"] = float(segment_id)
+        row["segment_boundary_before"] = reason
+        previous_reset = reset_level
+    return {
+        "reset_epoch_count": reset_epoch,
+        "segment_count": segment_id + (1 if rows else 0),
+        "boundary_count": len(boundary_reasons),
+        "boundaries": boundary_reasons,
+        "position_threshold_m": POSITION_DISCONTINUITY_THRESHOLD_M,
+        "yaw_threshold_rad": YAW_DISCONTINUITY_THRESHOLD_RAD,
+    }
+
+
+def _derive_wheel_speeds(rows: list[dict[str, float]]) -> None:
+    """Derive source-time wheel surface speed without crossing boundaries."""
+    previous: dict[str, float] | None = None
+    for row in rows:
+        row["wheel_speed_mps"] = None
+        if previous is not None and previous["segment_id"] == row["segment_id"]:
+            dt = row["time"] - previous["time"]
+            if (MIN_SOURCE_TRANSITION_DT_S <= dt <= MAX_SOURCE_TRANSITION_DT_S and
+                    row["encoder_left"] is not None and
+                    row["encoder_right"] is not None and
+                    previous["encoder_left"] is not None and
+                    previous["encoder_right"] is not None):
+                left_rate = (row["encoder_left"] - previous["encoder_left"]) / dt
+                right_rate = (row["encoder_right"] - previous["encoder_right"]) / dt
+                row["wheel_speed_mps"] = ENCODER_WHEEL_RADIUS_M * 0.5 * (
+                    left_rate + right_rate)
+        previous = row
 
 
 def _unwrap(previous: float, current: float) -> float:
@@ -172,6 +280,9 @@ def _world_velocity(row: dict[str, float], twist_frame: str) -> tuple[float, flo
 def _frame_error(rows: list[dict[str, float]], frame: str) -> float:
     errors: list[float] = []
     for previous, current in zip(rows, rows[1:]):
+        if (previous.get("segment_id") != current.get("segment_id") or
+                current.get("segment_boundary_before") is not None):
+            continue
         dt = current["time"] - previous["time"]
         if not (dt > 1e-6 and dt < 2.0):
             continue
@@ -194,6 +305,9 @@ def _kinematic_diagnostics(rows: list[dict[str, float]]) -> dict[str, object]:
         for row in rows
     ]
     for previous, current in zip(rows, rows[1:]):
+        if (previous.get("segment_id") != current.get("segment_id") or
+                current.get("segment_boundary_before") is not None):
+            continue
         dt = current["time"] - previous["time"]
         step_delta = int(round(current["physics_step"] - previous["physics_step"]))
         if not (dt > 1.0e-6 and dt < 2.0 and step_delta > 0):
@@ -258,12 +372,21 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str,
         if not (MIN_SOURCE_TRANSITION_DT_S <= dt <= max_transition_dt_s and
                 step_delta > 0):
             continue
+        # A reset/teleport is a hard rollout boundary. Retain the packet on
+        # either side, but never fit the transition crossing the boundary.
+        if (previous["segment_id"] != current["segment_id"] or
+                current["segment_boundary_before"] is not None):
+            continue
         u0, v0 = _body_velocity(previous, twist_frame)
         u1, v1 = _body_velocity(current, twist_frame)
         applied_command_sequence = current["applied_command_sequence"]
-        if applied_command_sequence is None:
+        if (applied_command_sequence is None or
+                current["commanded_throttle"] is None or
+                current["commanded_steering"] is None or
+                current["feedback_steering"] is None):
             # Gate 0 requires a known command for every fitting transition.
-            # Do not infer it from request order or callback arrival time.
+            # Do not infer it from request order or callback arrival time, and
+            # do not silently recover an ambiguous steering unit.
             continue
         output.append({
             "simulation_time_k_s": previous["time"],
@@ -276,10 +399,20 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str,
             "yaw_k_rad": previous["yaw_unwrapped"],
             "u_k_mps": u0, "v_k_mps": v0, "r_k_radps": previous["yaw_rate"],
             # The current packet is the post-step state and carries the
-            # command consumed for previous -> current.
+            # command consumed for previous -> current. The applied and
+            # feedback steering fields are already physical radians in the
+            # source contract despite their historical ``_norm`` names.
             "applied_command_sequence_k1": float(applied_command_sequence),
-            "throttle_k_norm": current["throttle"],
-            "steering_k_rad": current["steering"] * MAX_STEERING_RAD,
+            "commanded_throttle_norm_k1": current["commanded_throttle"],
+            "commanded_steering_norm_k1": current["commanded_steering"],
+            "applied_throttle_norm_k1": current["throttle"],
+            "applied_steering_rad_k1": current["steering"],
+            "simulator_feedback_steering_rad_k1": current["feedback_steering"],
+            "wheel_speed_mps_k1": current["wheel_speed_mps"],
+            "encoder_left_rad_k1": current["encoder_left"],
+            "encoder_right_rad_k1": current["encoder_right"],
+            "reset_epoch": current["reset_epoch"],
+            "segment_id": current["segment_id"],
             "x_k1_m": current["x"], "y_k1_m": current["y"],
             "yaw_k1_rad": current["yaw_unwrapped"],
             "u_k1_mps": u1, "v_k1_mps": v1, "r_k1_radps": current["yaw_rate"],
@@ -301,9 +434,11 @@ def _write_csv(path: Path, rows: list[dict[str, float]]) -> None:
 def _fit_exploratory_longitudinal(rows: list[dict[str, float]]) -> dict[str, object]:
     """Fit a direct-throttle acceleration surface for exploration only."""
     features = np.asarray([
-        [1.0, r["u_k_mps"], r["u_k_mps"] ** 2, r["throttle_k_norm"],
-         r["u_k_mps"] * r["throttle_k_norm"], r["throttle_k_norm"] ** 2,
-         r["steering_k_rad"] ** 2]
+        [1.0, r["u_k_mps"], r["u_k_mps"] ** 2,
+         r["applied_throttle_norm_k1"],
+         r["u_k_mps"] * r["applied_throttle_norm_k1"],
+         r["applied_throttle_norm_k1"] ** 2,
+         r["applied_steering_rad_k1"] ** 2]
         for r in rows
     ])
     target = np.asarray([
@@ -340,6 +475,8 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
     unique, counts = _deduplicate(packets)
     if len(unique) < 3:
         raise ValueError("not enough unique source packets")
+    segment_report = _mark_segments(unique)
+    _derive_wheel_speeds(unique)
     dt = np.diff([row["time"] for row in unique])
     positive_dt = dt[dt > 1e-6]
     source_dt_gap_count = int(np.count_nonzero(
@@ -395,9 +532,9 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         status = "exploratory_only_non_target_rate" if not timing_pass else "timing_and_kinematics_gate_passed"
     output_dir = run_dir / "assembled"
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(output_dir / "model_transition_v3.csv", transitions)
+    _write_csv(output_dir / "model_transition_v4.csv", transitions)
     report: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_dir": str(run_dir),
         "status": status,
         "quality_gate_failures": gate_failures,
@@ -442,6 +579,7 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
             "physics_step_reverse_count": counts["physics_step_reverse_count"],
             "physics_step_gap_count": counts["source_step_gap_count"],
         },
+        "segments": segment_report,
         "timing_contract": {
             "expected_source_rate_hz": 40.0,
             "pass": timing_pass,
@@ -454,13 +592,30 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         "quality_gate_pass": timing_pass and kinematics_pass,
         "model_boundary": "applied_throttle_to_body_u",
         "transition_schema": {
-            "file": "model_transition_v3.csv",
+            "file": "model_transition_v4.csv",
+            "version": 4,
+            "fields": [
+                "commanded_throttle_norm_k1",
+                "commanded_steering_norm_k1",
+                "applied_throttle_norm_k1",
+                "applied_steering_rad_k1",
+                "simulator_feedback_steering_rad_k1",
+                "wheel_speed_mps_k1",
+                "reset_epoch",
+                "segment_id",
+            ],
+            "steering_contract": (
+                "commanded_steering_norm_k1 is normalized input; "
+                "applied_steering_rad_k1 and "
+                "simulator_feedback_steering_rad_k1 are already physical "
+                "radians copied from the source packet"
+            ),
             "control_alignment": (
                 "current_packet_applied_command_generates_previous_to_current"
             ),
             "required_control_field": "applied_command_sequence_k1",
             "ambiguous_transitions_discarded": False,
-            "timing_gap_transitions_discarded": (
+            "discarded_transition_count": (
                 len(unique) - 1 - len(transitions)),
         },
         "ground_truth_use": "offline_transition_target_only",

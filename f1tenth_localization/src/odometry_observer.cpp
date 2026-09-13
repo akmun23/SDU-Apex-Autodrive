@@ -266,6 +266,22 @@ OdometryEstimate OdometryObserver::update(
     wheel_burst_recovery_pending_ = true;
   }
 
+  // A coherent rolling-window/current-packet pair is not sufficient evidence
+  // during launch: both rates can describe wheel spin while the body is still
+  // accelerating from rest. The accepted model-identification recordings
+  // repeatedly show approximately 6 m/s wheel rates below 1 m/s body speed.
+  // Keep this gate limited to the low-speed recovery shortcut; established
+  // motion and ordinary innovation checks are unchanged.
+  const auto launch_wheel_spin = [&](double predicted_speed) {
+    return config_.wheel_recovery_launch_speed_mps > 0.0 &&
+           config_.wheel_recovery_launch_innovation_mps > 0.0 &&
+           config_.wheel_recovery_launch_wheel_speed_mps > 0.0 &&
+           predicted_speed < config_.wheel_recovery_launch_speed_mps &&
+           wheel_packet_mapped > config_.wheel_recovery_launch_wheel_speed_mps &&
+           wheel_packet_mapped > predicted_speed +
+           config_.wheel_recovery_launch_innovation_mps;
+  };
+
   // A degraded packet is not necessarily a missing-motion packet. The
   // synchronized encoder endpoints still describe the average displacement
   // across a short gap. The old early return deleted that displacement and
@@ -296,6 +312,9 @@ OdometryEstimate OdometryObserver::update(
   const auto wheel_speed_is_valid = [&](double predicted_speed) {
     if ((dt_s > config_.normal_packet_dt_max_s &&
       dt_s > config_.max_integratable_gap_s) || !finite(wheel_mapped)) {
+      return false;
+    }
+    if (launch_wheel_spin(predicted_speed)) {
       return false;
     }
     // A zero encoder packet is allowed to brake a stopped/slow estimate, but
@@ -404,6 +423,7 @@ OdometryEstimate OdometryObserver::update(
     // 0.30 m/s while the encoders and vehicle are travelling at 0.50 m/s.
     const bool wheel_recovery = wheel_dropout_active_ &&
       !wheel_burst_rejected_ &&
+      !launch_wheel_spin(speed_mps_) &&
       wheel_packet >= config_.wheel_freeze_speed_mps &&
       (!wheel_burst_recovery_pending_ ||
       (config_.wheel_burst_disagreement_mps > 0.0 &&
@@ -416,6 +436,7 @@ OdometryEstimate OdometryObserver::update(
       std::abs(wheel_packet_mapped - wheel_mapped) <=
       config_.wheel_burst_disagreement_mps));
     const bool wheel_coherent = !wheel_burst_rejected_ &&
+      !launch_wheel_spin(speed_mps_) &&
       wheel_packet >= config_.wheel_freeze_speed_mps &&
       config_.wheel_burst_disagreement_mps > 0.0 &&
       std::abs(wheel_packet_mapped - wheel_mapped) <=
@@ -505,6 +526,7 @@ OdometryEstimate OdometryObserver::update(
         std::max(0.0, config_.wheel_speed_scale);
       const bool wheel_recovery = wheel_dropout_active_ &&
         !wheel_burst_rejected_ &&
+        !launch_wheel_spin(speed_pred) &&
         wheel_packet >= config_.wheel_freeze_speed_mps &&
         (!wheel_burst_recovery_pending_ ||
         (config_.wheel_burst_disagreement_mps > 0.0 &&
@@ -521,6 +543,7 @@ OdometryEstimate OdometryObserver::update(
         (!wheel_dropout_active_ ?
         (wheel_speed_is_valid(speed_pred) ||
         (!wheel_burst_rejected_ &&
+        !launch_wheel_spin(speed_pred) &&
         wheel_packet >= config_.wheel_freeze_speed_mps &&
         config_.wheel_burst_disagreement_mps > 0.0 &&
         std::abs(wheel_packet_mapped - wheel_mapped) <=

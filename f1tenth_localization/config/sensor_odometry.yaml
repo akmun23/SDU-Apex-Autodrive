@@ -52,6 +52,13 @@ sensor_odometry:
     # Allow the wheel measurement to recover a transient IMU-speed error;
     # frozen-wheel and source-timing gates still reject missing packets.
     wheel_innovation_max_mps: 1.50
+    # Launch wheel-spin guard: a coherent encoder rate above the low-speed
+    # body prediction is not accepted as a recovery until the body is moving.
+    # This only blocks the coherence shortcut; normal established-speed
+    # updates and the physical simulator are unchanged.
+    wheel_recovery_launch_speed_mps: 2.0
+    wheel_recovery_launch_innovation_mps: 2.0
+    wheel_recovery_launch_wheel_speed_mps: 4.0
     # Reject the measured two-stage cumulative-encoder burst signature when
     # the rolling rate is already >1 m/s above causal speed and the current
     # packet is another >1 m/s above that rolling rate.

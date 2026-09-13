@@ -434,6 +434,26 @@ void test_coherent_wheel_rate_overrides_stale_innovation_gate()
     "coherent wheel rate updates the stale speed estimate");
 }
 
+void test_launch_wheel_spin_is_not_promoted_by_coherent_recovery()
+{
+  OdometryObserverConfig config;
+  config.max_imu_ax_abs_mps2 = 100.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+
+  // Reproduce the accepted launch pattern: the encoder window and current
+  // packet agree near 6 m/s, while the IMU-predicted body speed is still
+  // below 1 m/s. A coherent encoder pair must not overwrite that prediction.
+  const double spinning_delta = 6.0 * 0.025 / 0.059;
+  observer.update(observation(0.025, spinning_delta, spinning_delta, 5.0));
+  const auto launch = observer.update(observation(
+    0.050, 2.0 * spinning_delta, 2.0 * spinning_delta, 5.0));
+  require(!launch.wheel_update_used,
+    "coherent launch wheel spin is rejected");
+  require(launch.speed_mps < 0.5,
+    "launch wheel spin does not inflate body speed");
+}
+
 void test_lever_arm_and_rk2_reference()
 {
   OdometryObserverConfig config;
@@ -469,6 +489,7 @@ int main()
   test_recovery_rebases_stale_window();
   test_encoder_burst_is_rejected_until_coherent_recovery();
   test_coherent_wheel_rate_overrides_stale_innovation_gate();
+  test_launch_wheel_spin_is_not_promoted_by_coherent_recovery();
   std::cout << "odometry_observer_test: PASS" << std::endl;
   return EXIT_SUCCESS;
 }

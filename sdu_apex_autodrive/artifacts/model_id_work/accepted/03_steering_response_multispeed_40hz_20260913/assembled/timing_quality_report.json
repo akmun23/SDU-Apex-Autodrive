@@ -12,10 +12,10 @@
     "diagnostics": {
       "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
       "position_vs_body_velocity_error_mps": {
-        "count": 4047,
-        "max": 1871.6914744730996,
-        "median": 0.001974223103978545,
-        "p95": 0.17789792286862624
+        "count": 4023,
+        "max": 0.20888966325154304,
+        "median": 0.001974234153569733,
+        "p95": 0.17681863963022976
       },
       "quaternion_vs_euler_yaw_error_rad": {
         "count": 4048,
@@ -23,54 +23,54 @@
         "median": 1.1019615310026154e-05,
         "p95": 0.00011101961531068127
       },
-      "transition_count": 4047,
+      "transition_count": 4023,
       "yaw_derivative_vs_angular_z_error_radps": {
-        "count": 4047,
-        "max": 72.40056389566239,
+        "count": 4023,
+        "max": 0.11514236722766721,
         "median": 0.0,
-        "p95": 0.005657630996483254
+        "p95": 0.005613727778329716
       },
       "yaw_derivative_vs_each_angular_axis_error_radps": {
         "x": {
           "negated": {
-            "count": 4047,
-            "max": 72.40061389566239,
+            "count": 4023,
+            "max": 1.2805369848547945,
             "median": 5e-05,
-            "p95": 1.1175554417843727
+            "p95": 1.1170918898893598
           },
           "same_sign": {
-            "count": 4047,
-            "max": 72.40051389566239,
-            "median": 4.999999998223935e-05,
-            "p95": 1.1181725039189923
+            "count": 4023,
+            "max": 1.3053394542854062,
+            "median": 4.99788323953953e-05,
+            "p95": 1.1006949113169626
           }
         },
         "y": {
           "negated": {
-            "count": 4047,
-            "max": 72.3994638956624,
-            "median": 0.00705,
-            "p95": 1.1127170834678068
+            "count": 4023,
+            "max": 1.3719202567684927,
+            "median": 0.0071,
+            "p95": 1.1111530829278735
           },
           "same_sign": {
-            "count": 4047,
-            "max": 72.40166389566238,
-            "median": 0.0071,
-            "p95": 1.1119290731789773
+            "count": 4023,
+            "max": 1.3740394542854062,
+            "median": 0.007164220585747893,
+            "p95": 1.1096971871826933
           }
         },
         "z": {
           "negated": {
-            "count": 4047,
-            "max": 72.40056389566239,
+            "count": 4023,
+            "max": 2.5419894542854062,
             "median": 0.0,
-            "p95": 2.2962613409549197
+            "p95": 2.285948907993895
           },
           "same_sign": {
-            "count": 4047,
-            "max": 72.40056389566239,
+            "count": 4023,
+            "max": 0.11514236722766721,
             "median": 0.0,
-            "p95": 0.005657630996483254
+            "p95": 0.005613727778329716
           }
         }
       },
@@ -79,7 +79,7 @@
     "maximum_allowed_median_error_mps": 0.75,
     "maximum_allowed_yaw_rate_median_error_radps": 0.75,
     "pass": true,
-    "selected_frame_median_error_mps": 0.006640030118890384,
+    "selected_frame_median_error_mps": 0.0066814447422594014,
     "yaw_rate_median_error_radps": 0.0,
     "yaw_rate_pass": true,
     "yaw_rate_source": "simulator_angular_velocity_z"
@@ -93,8 +93,82 @@
   "quality_gate_failures": [],
   "quality_gate_pass": true,
   "raw_packet_count": 4048,
-  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/03_steering_response_multispeed_40hz_20260913",
-  "schema_version": 3,
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/accepted/03_steering_response_multispeed_40hz_20260913",
+  "schema_version": 4,
+  "segments": {
+    "boundaries": [
+      {
+        "packet_index": 17,
+        "physics_step": 7238.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 182,
+        "physics_step": 11364.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 420,
+        "physics_step": 17313.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 656,
+        "physics_step": 23213.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 896,
+        "physics_step": 29213.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 1183,
+        "physics_step": 36388.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 1469,
+        "physics_step": 43538.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 1756,
+        "physics_step": 50713.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 2104,
+        "physics_step": 59413.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 2459,
+        "physics_step": 68288.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 2798,
+        "physics_step": 76763.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 3168,
+        "physics_step": 86013.0,
+        "reason": "reset_command_rising_edge"
+      },
+      {
+        "packet_index": 3535,
+        "physics_step": 95188.0,
+        "reason": "reset_command_rising_edge"
+      }
+    ],
+    "boundary_count": 13,
+    "position_threshold_m": 1.5,
+    "reset_epoch_count": 13,
+    "segment_count": 14,
+    "yaw_threshold_rad": 1.0
+  },
   "source_dt_cadence_violation_count": 0,
   "source_dt_gap_count": 0,
   "source_dt_s_max": 0.029001999999998418,
@@ -120,17 +194,29 @@
       0.035
     ]
   },
-  "transition_count": 4047,
+  "transition_count": 4023,
   "transition_schema": {
     "ambiguous_transitions_discarded": false,
     "control_alignment": "current_packet_applied_command_generates_previous_to_current",
-    "file": "model_transition_v3.csv",
+    "discarded_transition_count": 24,
+    "fields": [
+      "commanded_throttle_norm_k1",
+      "commanded_steering_norm_k1",
+      "applied_throttle_norm_k1",
+      "applied_steering_rad_k1",
+      "simulator_feedback_steering_rad_k1",
+      "wheel_speed_mps_k1",
+      "reset_epoch",
+      "segment_id"
+    ],
+    "file": "model_transition_v4.csv",
     "required_control_field": "applied_command_sequence_k1",
-    "timing_gap_transitions_discarded": 0
+    "steering_contract": "commanded_steering_norm_k1 is normalized input; applied_steering_rad_k1 and simulator_feedback_steering_rad_k1 are already physical radians copied from the source packet",
+    "version": 4
   },
   "twist_frame_median_displacement_error_mps": {
-    "body": 0.006640030118890384,
-    "world": 2.891474141925045
+    "body": 0.0066814447422594014,
+    "world": 2.90201052277045
   },
   "twist_frame_selected": "body",
   "unique_source_packet_count": 4048

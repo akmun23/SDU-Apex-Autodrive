@@ -41,6 +41,13 @@ struct OdometryObserverConfig
   // Permit recovery from a transient IMU-speed error while retaining the
   // frozen-wheel and timing gates for missing packets.
   double wheel_innovation_max_mps{1.50};
+  // During launch the encoder can report a coherent wheel rate while the
+  // driven wheels are spinning far faster than the body. Do not let the
+  // coherent-recovery shortcut promote that value into odometry until the
+  // body-speed prediction has left the launch regime.
+  double wheel_recovery_launch_speed_mps{2.0};
+  double wheel_recovery_launch_innovation_mps{2.0};
+  double wheel_recovery_launch_wheel_speed_mps{4.0};
   // A delayed cumulative-encoder burst appears first in the rolling rate and
   // then again in the current packet. Reject only that two-stage signature;
   // ordinary acceleration packets have no packet-vs-window disagreement.

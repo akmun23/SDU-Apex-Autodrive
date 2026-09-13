@@ -93,8 +93,16 @@
   "quality_gate_failures": [],
   "quality_gate_pass": true,
   "raw_packet_count": 1041,
-  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/incoming/50_steering_multisine_6mps_40hz_20260913",
-  "schema_version": 3,
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/accepted/50_steering_multisine_6mps_40hz_20260913",
+  "schema_version": 4,
+  "segments": {
+    "boundaries": [],
+    "boundary_count": 0,
+    "position_threshold_m": 1.5,
+    "reset_epoch_count": 0,
+    "segment_count": 1,
+    "yaw_threshold_rad": 1.0
+  },
   "source_dt_cadence_violation_count": 0,
   "source_dt_gap_count": 0,
   "source_dt_s_max": 0.02800099999999972,
@@ -124,9 +132,21 @@
   "transition_schema": {
     "ambiguous_transitions_discarded": false,
     "control_alignment": "current_packet_applied_command_generates_previous_to_current",
-    "file": "model_transition_v3.csv",
+    "discarded_transition_count": 0,
+    "fields": [
+      "commanded_throttle_norm_k1",
+      "commanded_steering_norm_k1",
+      "applied_throttle_norm_k1",
+      "applied_steering_rad_k1",
+      "simulator_feedback_steering_rad_k1",
+      "wheel_speed_mps_k1",
+      "reset_epoch",
+      "segment_id"
+    ],
+    "file": "model_transition_v4.csv",
     "required_control_field": "applied_command_sequence_k1",
-    "timing_gap_transitions_discarded": 0
+    "steering_contract": "commanded_steering_norm_k1 is normalized input; applied_steering_rad_k1 and simulator_feedback_steering_rad_k1 are already physical radians copied from the source packet",
+    "version": 4
   },
   "twist_frame_median_displacement_error_mps": {
     "body": 0.07585144491327472,

@@ -82,13 +82,49 @@ reports are inside `reports/`.
 
 ## Current identification status
 
-The data-collection and timing gates have passed for the retained runs. A
-production-quality MPC model has not yet been identified: the first simple
-longitudinal model failed recursive validation, and steering/combined data
-still require candidate fitting plus blind recursive validation.
+The data-collection and timing gates have passed for the retained runs. The
+canonical transition file is now `assembled/model_transition_v4.csv`. It has
+explicit normalized-command and physical-radian steering fields, source
+derived wheel speed, `reset_epoch`, and `segment_id`. Reset commands and
+detected pose teleports are hard rollout boundaries; their crossing
+transitions are excluded rather than scored as plant error. The v4 assembler
+has unit coverage for steering semantics, source timing, reset boundaries,
+and pose discontinuities.
 
-The next identification step is steering actuator and lateral-dynamics fitting
-from the retained stationary, multispeed, combined, replay, and multisine runs.
+A production-quality MPC model has not yet been identified. The corrected
+structured vehicle candidate is recorded at
+`model_fits/vehicle_model_candidate_v2_steering_corrected.json`. It uses
+16,109 training transitions and 6,388 whole-run validation transitions after
+warm-up/boundary handling. Its steering actuator submodel still selects zero
+source-step lag and 3.2 rad/s rate limiting, with 0.00004 rad validation p95
+feedback error. The body-dynamics candidate remains rejected: its validation
+recursive p95 errors at 0.50 s are approximately 0.44 m position, 1.21 m/s
+longitudinal speed, 0.93 m/s lateral speed, and 1.12 rad/s yaw rate. Correcting
+the steering field therefore fixed the identification contract but did not,
+by itself, fix the plant model. No fitted parameters have been copied into the
+C MPC model.
+
+The longitudinal benchmark is recorded at
+`model_fits/longitudinal_model_benchmark_v1.json`. The wheel-slip candidate
+identifies approximately `17.72 N` force saturation, `2.26 1/(m/s)` slip gain,
+and `0.89 N/(m/s)` speed drag. With an explicitly fitted discrete wheel-speed
+state, its conditional longitudinal validation p95 is approximately 0.17 m/s
+at 0.10 s and 0.33 m/s at 0.50 s, compared with 0.49 m/s and 1.58 m/s for the
+direct throttle surface. This is encouraging evidence for the wheel-slip
+architecture, but the score conditions on recorded lateral `r*v` and is not a
+full six-state or blind MPC acceptance result.
+
+The next identification step is corrected lateral fitting with steering-ramp
+integration, followed by native recursive replay of the same candidate. A
+fresh untouched track-domain run remains required before freezing any model or
+changing MPC parameters.
+
+The dev-side odometry candidate now rejects only a low-speed coherent encoder
+recovery that is also above the launch wheel-spin threshold. This was driven
+by repeated accepted recordings where wheel rate was about 6 m/s while body
+speed was below 1 m/s. Existing observer unit tests pass; representative
+replay still exposes separate braking/turn transients that require more data
+before further tuning.
 Generated
 wide `identification_grid_*.csv` summaries are intentionally excluded; the
 source-event recorder partitions are authoritative.

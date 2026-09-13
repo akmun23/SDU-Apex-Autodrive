@@ -1,0 +1,945 @@
+{
+  "acceptance": {
+    "blind_run_required_after_model_freeze": true,
+    "production_mpc_parameters_updated": false,
+    "recursive_open_loop_required": true,
+    "repeatability_floor_required": true,
+    "required_horizons_s": [
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1.0,
+      1.5,
+      2.0
+    ],
+    "runtime_ground_truth_consumed": false,
+    "two_percent_target": true
+  },
+  "ground_truth_use": "offline_identification_and_scoring_only",
+  "model": {
+    "channels": {
+      "r": {
+        "channel": "r",
+        "coefficients": [
+          -5.62802177522362,
+          1.1686753692021432,
+          -0.048945785235489744,
+          -5.658430906493974,
+          -0.4917620947058657,
+          0.09292127458543817,
+          -31.51034341582423,
+          72.89393302429576,
+          -5.913553097693616,
+          369.1070908186308,
+          -135.59649251992627
+        ],
+        "column_scale": [
+          0.013677170678208663,
+          0.06713745878889825,
+          0.5252445986538019,
+          0.018043721721244497,
+          0.09357324013522306,
+          0.6392950541767521,
+          0.000709133899951768,
+          0.0036169018425904506,
+          0.027333800683777734,
+          5.433005771695578e-05,
+          0.00022617746176146596
+        ],
+        "feature_names": [
+          "v",
+          "v_times_u",
+          "v_times_u_squared",
+          "r",
+          "r_times_u",
+          "r_times_u_squared",
+          "steering",
+          "steering_times_u",
+          "steering_times_u_squared",
+          "steering_times_abs_steering",
+          "steering_times_abs_steering_times_u"
+        ],
+        "fit_method": "direct_transition_robust_ridge",
+        "ridge": 1e-05,
+        "samples": 16151,
+        "transition_error": {
+          "count": 16151,
+          "mae": 0.01459529068250392,
+          "max": 1.0564550034825586,
+          "p95": 0.05965948260341028,
+          "relative_eligible_count": 8,
+          "relative_p95": 0.8551601963448003
+        }
+      },
+      "u": {
+        "channel": "u",
+        "coefficients": [
+          0.006205197764676865,
+          -1.3841119459441371,
+          0.015382000785259514,
+          0.0019179856100209143,
+          30.390194578513807,
+          1.765550779239232,
+          -0.07539516347966775,
+          -31.38349157861165,
+          69.27820582774905,
+          -28.671454332646366,
+          0.885579791039692,
+          -0.05512125681004229,
+          -0.13174582570483584
+        ],
+        "column_scale": [
+          0.025008036638846872,
+          0.1354946711938528,
+          1.3243361865638172,
+          16.681170882822723,
+          0.007375949955151269,
+          0.061939446028879255,
+          0.7522376625598715,
+          0.004327984938526256,
+          5.433005771695578e-05,
+          0.00022617746176146596,
+          0.03758175806739608,
+          0.054389065356363696,
+          0.03811791550065257
+        ],
+        "feature_names": [
+          "bias",
+          "u",
+          "u_squared",
+          "u_cubed",
+          "throttle",
+          "throttle_times_u",
+          "throttle_times_u_squared",
+          "throttle_squared",
+          "steering_squared",
+          "steering_squared_times_u",
+          "v_times_r",
+          "v_squared",
+          "r_squared"
+        ],
+        "fit_method": "direct_transition_robust_ridge",
+        "ridge": 1e-05,
+        "samples": 16151,
+        "transition_error": {
+          "count": 16151,
+          "mae": 0.017276921609920042,
+          "max": 0.2850256001431568,
+          "p95": 0.0842172931429687,
+          "relative_eligible_count": 0,
+          "relative_p95": null
+        }
+      },
+      "v": {
+        "channel": "v",
+        "coefficients": [
+          -2.0673329817443995,
+          0.9094137726515475,
+          -0.06825922159479424,
+          0.3642017914263719,
+          -0.7160122049343951,
+          0.03451009996059043,
+          -69.98617721746314,
+          38.9875187726657,
+          -1.170438108539397,
+          885.5052583823712,
+          -336.4178155448536
+        ],
+        "column_scale": [
+          0.013677170678208663,
+          0.06713745878889825,
+          0.5252445986538019,
+          0.018043721721244497,
+          0.09357324013522306,
+          0.6392950541767521,
+          0.000709133899951768,
+          0.0036169018425904506,
+          0.027333800683777734,
+          5.433005771695578e-05,
+          0.00022617746176146596
+        ],
+        "feature_names": [
+          "v",
+          "v_times_u",
+          "v_times_u_squared",
+          "r",
+          "r_times_u",
+          "r_times_u_squared",
+          "steering",
+          "steering_times_u",
+          "steering_times_u_squared",
+          "steering_times_abs_steering",
+          "steering_times_abs_steering_times_u"
+        ],
+        "fit_method": "direct_transition_robust_ridge",
+        "ridge": 1e-05,
+        "samples": 16151,
+        "transition_error": {
+          "count": 16151,
+          "mae": 0.004403527064638664,
+          "max": 0.21053265731452106,
+          "p95": 0.02361065320073094,
+          "relative_eligible_count": 0,
+          "relative_p95": null
+        }
+      }
+    },
+    "kind": "continuous_derivative_basis_used_as_direct_transition",
+    "steering_actuator": {
+      "feedback_source_field": "simulator_feedback_steering_norm",
+      "feedback_source_unit_interpreted_as": "physical_radians",
+      "input": "commanded_steering_norm",
+      "lag_steps": 0,
+      "mae_rad": 0.000548103519876037,
+      "model": "rate_limited_first_order",
+      "p95_rad": 4.000000000000531e-05,
+      "rate_radps": 3.2,
+      "samples": 16779,
+      "state": "actual_steering_rad",
+      "status": "candidate_not_runtime_validated",
+      "steering_limit_rad": 0.5236,
+      "training_score": {
+        "mae_rad": 0.000548103519876037,
+        "max_rad": 0.18499999999999706,
+        "p95_rad": 4.000000000000531e-05,
+        "samples": 16779
+      },
+      "validation_score": {
+        "mae_rad": 5.43623058823458e-05,
+        "max_rad": 0.07379616000000123,
+        "p95_rad": 4.000000000000531e-05,
+        "samples": 6800
+      }
+    }
+  },
+  "next_action": "Use validation residuals to choose the next structured/discrete model revision, then collect a new untouched blind track-domain run before changing the C MPC model.",
+  "plant_boundary": {
+    "dynamic_state_update": "identified_body_u_v_yaw_rate_transition",
+    "inputs": [
+      "applied_throttle_norm",
+      "applied_steering_rad"
+    ],
+    "pose_update": "exact_planar_constant_body_twist",
+    "states": [
+      "x_m",
+      "y_m",
+      "yaw_rad",
+      "u_mps",
+      "v_mps",
+      "r_radps"
+    ],
+    "steering_actuator_is_separate": true
+  },
+  "schema_version": 1,
+  "status": "candidate_not_runtime_validated",
+  "timing_contract": {
+    "raw_rows_upsampled": false,
+    "source_dt_window_s": [
+      0.015,
+      0.035
+    ],
+    "source_time_used_for_dt": true
+  },
+  "train_runs": [
+    "01_longitudinal_throttle_from_rest_40hz_20260913",
+    "03_steering_response_multispeed_40hz_20260913",
+    "04_steering_response_single_regime_40hz_20260911",
+    "20_combined_throttle_steering_run01_40hz_20260913",
+    "20_combined_throttle_steering_run02_40hz_20260913",
+    "20_combined_throttle_steering_run03_40hz_20260913",
+    "30_zero_throttle_coast_map_40hz_20260913",
+    "50_steering_multisine_6mps_40hz_20260913",
+    "70_d1_d2_steady_corner_40hz_20260913"
+  ],
+  "train_transition_count": 16151,
+  "training_scores": {
+    "one_step": {
+      "heading_rad": {
+        "count": 16151,
+        "mae": 0.0008806956907505075,
+        "max": 1.810202338857727,
+        "p95": 0.0005768581325313882,
+        "relative_eligible_count": 14125,
+        "relative_p95": 0.00019525364644035163
+      },
+      "position_m": {
+        "count": 16151,
+        "mae": 0.03244145547104793,
+        "max": 65.02159818152738,
+        "p95": 0.005817907981705588,
+        "relative_eligible_count": 11014,
+        "relative_p95": 0.0016023946408007886
+      },
+      "u_mps": {
+        "count": 16151,
+        "mae": 0.017276921609920046,
+        "max": 0.2850256001431568,
+        "p95": 0.08421729314296877,
+        "relative_eligible_count": 11014,
+        "relative_p95": 0.032135426448277216
+      },
+      "v_mps": {
+        "count": 16151,
+        "mae": 0.004403527064638664,
+        "max": 0.210532657314521,
+        "p95": 0.02361065320073094,
+        "relative_eligible_count": 433,
+        "relative_p95": 0.06907151966070124
+      },
+      "yaw_rate_radps": {
+        "count": 16151,
+        "mae": 0.01459529068250392,
+        "max": 1.0564550034825586,
+        "p95": 0.05965948260341028,
+        "relative_eligible_count": 2392,
+        "relative_p95": 0.09764308570846097
+      }
+    },
+    "recursive": {
+      "0.05s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.0027756013407298917,
+          "max": 1.810202338857727,
+          "p95": 0.0040272186369385565,
+          "relative_eligible_count": 14126,
+          "relative_p95": 0.0015248692191083724
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 0.07825914440381182,
+          "max": 65.02160466550724,
+          "p95": 0.01605766630557307,
+          "relative_eligible_count": 11017,
+          "relative_p95": 0.005077961353198456
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.04072482585981554,
+          "max": 0.5599910385617366,
+          "p95": 0.2035521743866584,
+          "relative_eligible_count": 11017,
+          "relative_p95": 0.07372973487804795
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.010165806088159951,
+          "max": 0.5572319947860338,
+          "p95": 0.0528510321453911,
+          "relative_eligible_count": 432,
+          "relative_p95": 0.1706485724897366
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.030935825704741342,
+          "max": 1.7711339202391,
+          "p95": 0.15797335491682407,
+          "relative_eligible_count": 2397,
+          "relative_p95": 0.2729240027505471
+        }
+      },
+      "0.10s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.005693025982637081,
+          "max": 1.810202721593197,
+          "p95": 0.015805375924755616,
+          "relative_eligible_count": 14109,
+          "relative_p95": 0.005606476260843002
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 0.14824129753941287,
+          "max": 65.02162718776945,
+          "p95": 0.03401145254241208,
+          "relative_eligible_count": 11016,
+          "relative_p95": 0.011423138870818531
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.0720454530168802,
+          "max": 0.7566801484213808,
+          "p95": 0.36075667859233485,
+          "relative_eligible_count": 11016,
+          "relative_p95": 0.12919422480253173
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.017366197853848696,
+          "max": 0.7380997402038125,
+          "p95": 0.08323571432998378,
+          "relative_eligible_count": 427,
+          "relative_p95": 0.28302929241054253
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.04846696076614116,
+          "max": 2.135650465538694,
+          "p95": 0.2633050911195829,
+          "relative_eligible_count": 2377,
+          "relative_p95": 0.3916693392823361
+        }
+      },
+      "0.25s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.019415465936279533,
+          "max": 1.810203898285267,
+          "p95": 0.08635330689631004,
+          "relative_eligible_count": 14096,
+          "relative_p95": 0.03099555409153337
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 0.34139312079617057,
+          "max": 65.02195069780146,
+          "p95": 0.14113372349873746,
+          "relative_eligible_count": 11003,
+          "relative_p95": 0.04159700221055497
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.15846458629892063,
+          "max": 1.4838951820515691,
+          "p95": 0.7835971566573392,
+          "relative_eligible_count": 11003,
+          "relative_p95": 0.2529344554734381
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.037834787748659726,
+          "max": 1.2975563755194133,
+          "p95": 0.17449433384620938,
+          "relative_eligible_count": 431,
+          "relative_p95": 0.5765326932050784
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.09945402836761187,
+          "max": 2.3067175103717017,
+          "p95": 0.6365805335931354,
+          "relative_eligible_count": 2407,
+          "relative_p95": 0.8727401700851987
+        }
+      },
+      "0.50s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.05866165832037699,
+          "max": 1.810205557074121,
+          "p95": 0.3049941233806832,
+          "relative_eligible_count": 14061,
+          "relative_p95": 0.1234814362471127
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 0.7331693000447217,
+          "max": 65.02233093281467,
+          "p95": 0.5298322068843103,
+          "relative_eligible_count": 10933,
+          "relative_p95": 0.13082037784146988
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.2981831170569119,
+          "max": 2.2205161885985643,
+          "p95": 1.3657050042235905,
+          "relative_eligible_count": 10933,
+          "relative_p95": 0.3776665501084957
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.06655420183025379,
+          "max": 1.8369208516521605,
+          "p95": 0.288687188506195,
+          "relative_eligible_count": 430,
+          "relative_p95": 0.6841195527266691
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.17629043886068615,
+          "max": 3.2874338584558456,
+          "p95": 0.9427411626893045,
+          "relative_eligible_count": 2401,
+          "relative_p95": 1.352688997914223
+        }
+      },
+      "1.00s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.18898487018695842,
+          "max": 2.862738271240947,
+          "p95": 0.9568359876343875,
+          "relative_eligible_count": 14008,
+          "relative_p95": 0.42307287692585804
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 1.7316112202835559,
+          "max": 65.75853441797895,
+          "p95": 5.846144377184925,
+          "relative_eligible_count": 10789,
+          "relative_p95": 0.481055101819333
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.5376760323741437,
+          "max": 3.1871208579636243,
+          "p95": 2.0844553817673273,
+          "relative_eligible_count": 10789,
+          "relative_p95": 0.5437977646225198
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.1134163719613546,
+          "max": 1.9207218758876845,
+          "p95": 0.563440544582756,
+          "relative_eligible_count": 433,
+          "relative_p95": 0.6436040078915485
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.3124355857706716,
+          "max": 5.986694787375116,
+          "p95": 1.4156137226588699,
+          "relative_eligible_count": 2389,
+          "relative_p95": 1.6400494567847317
+        }
+      },
+      "1.50s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.33304374309629886,
+          "max": 3.1403205906094334,
+          "p95": 1.659750104136747,
+          "relative_eligible_count": 13944,
+          "relative_p95": 0.7185364151288154
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 2.9898820941081126,
+          "max": 67.50390677033813,
+          "p95": 15.161627809514457,
+          "relative_eligible_count": 10652,
+          "relative_p95": 1.070633720462319
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.723115783405602,
+          "max": 3.5585986101364946,
+          "p95": 2.2983977029256297,
+          "relative_eligible_count": 10652,
+          "relative_p95": 0.7023308947207316
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.14808912860875814,
+          "max": 2.0204940147037957,
+          "p95": 0.7619449956170965,
+          "relative_eligible_count": 431,
+          "relative_p95": 0.7210250950841425
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.43069022375778726,
+          "max": 8.59566612102627,
+          "p95": 2.0244490037234457,
+          "relative_eligible_count": 2395,
+          "relative_p95": 1.9231866395345028
+        }
+      },
+      "2.00s": {
+        "heading_rad": {
+          "count": 16151,
+          "mae": 0.46155781641480115,
+          "max": 3.1413316848283284,
+          "p95": 2.133001155402182,
+          "relative_eligible_count": 13887,
+          "relative_p95": 1.1031069621450404
+        },
+        "position_m": {
+          "count": 16151,
+          "mae": 4.428745675614447,
+          "max": 68.57659890472671,
+          "p95": 21.399272093895963,
+          "relative_eligible_count": 10516,
+          "relative_p95": 1.7547920927524208
+        },
+        "u_mps": {
+          "count": 16151,
+          "mae": 0.881458038531054,
+          "max": 3.922246897876724,
+          "p95": 2.371967141975546,
+          "relative_eligible_count": 10516,
+          "relative_p95": 0.8092651190082838
+        },
+        "v_mps": {
+          "count": 16151,
+          "mae": 0.17744179925247805,
+          "max": 2.135051901474413,
+          "p95": 1.0098620966368805,
+          "relative_eligible_count": 430,
+          "relative_p95": 0.7705197656452414
+        },
+        "yaw_rate_radps": {
+          "count": 16151,
+          "mae": 0.5320888055287767,
+          "max": 8.620559035931496,
+          "p95": 2.4052844085342677,
+          "relative_eligible_count": 2368,
+          "relative_p95": 2.1457682838762633
+        }
+      }
+    }
+  },
+  "validation_runs": [
+    "20_combined_throttle_steering_run04_40hz_20260913",
+    "20_combined_throttle_steering_run05_40hz_20260913",
+    "60_e1_corner_throttle_40hz_20260913",
+    "61_e2_steering_acceleration_40hz_20260913",
+    "62_e3_steering_reversal_speed_40hz_20260913",
+    "75_d3_lateral_envelope_60hzheadroom_40hz_20260913"
+  ],
+  "validation_scores": {
+    "one_step": {
+      "heading_rad": {
+        "count": 6388,
+        "mae": 0.00021817228853602305,
+        "max": 0.015936427584122725,
+        "p95": 0.0005818839434033052,
+        "relative_eligible_count": 4925,
+        "relative_p95": 0.0002300922738168183
+      },
+      "position_m": {
+        "count": 6388,
+        "mae": 0.003101462178249187,
+        "max": 0.013893848677006675,
+        "p95": 0.007643902330728009,
+        "relative_eligible_count": 5384,
+        "relative_p95": 0.0015847261180224669
+      },
+      "u_mps": {
+        "count": 6388,
+        "mae": 0.01290820848970458,
+        "max": 0.28165635173822723,
+        "p95": 0.058170456740855414,
+        "relative_eligible_count": 5384,
+        "relative_p95": 0.014164243706935344
+      },
+      "v_mps": {
+        "count": 6388,
+        "mae": 0.011682324606148606,
+        "max": 0.19012671052407926,
+        "p95": 0.04670083456264759,
+        "relative_eligible_count": 387,
+        "relative_p95": 0.07255992853627802
+      },
+      "yaw_rate_radps": {
+        "count": 6388,
+        "mae": 0.017427374731998853,
+        "max": 1.0489923439986768,
+        "p95": 0.052957096851332874,
+        "relative_eligible_count": 1947,
+        "relative_p95": 0.06728695308035545
+      }
+    },
+    "recursive": {
+      "0.05s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.0012176049850524567,
+          "max": 0.08737968638758886,
+          "p95": 0.004151099316430873,
+          "relative_eligible_count": 4923,
+          "relative_p95": 0.0017430962644426127
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 0.008004866786038841,
+          "max": 0.040355888005742566,
+          "p95": 0.018775211281572984,
+          "relative_eligible_count": 5383,
+          "relative_p95": 0.004444617881613707
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.03141755348758701,
+          "max": 0.5209580343371161,
+          "p95": 0.1415187038828396,
+          "relative_eligible_count": 5383,
+          "relative_p95": 0.03364599019307111
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.02872682706576509,
+          "max": 0.47703913152792765,
+          "p95": 0.13769939821465246,
+          "relative_eligible_count": 385,
+          "relative_p95": 0.16850990636206145
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.04139794885096778,
+          "max": 1.74320715955665,
+          "p95": 0.1434507694605318,
+          "relative_eligible_count": 1949,
+          "relative_p95": 0.1560488055117699
+        }
+      },
+      "0.10s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.0037352478574447464,
+          "max": 0.184618956793285,
+          "p95": 0.012835582345825713,
+          "relative_eligible_count": 4916,
+          "relative_p95": 0.006126700289487599
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 0.01514287003312696,
+          "max": 0.07746811718916706,
+          "p95": 0.03916204084150147,
+          "relative_eligible_count": 5384,
+          "relative_p95": 0.008893791791536189
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.05665803158010662,
+          "max": 0.7578855414747587,
+          "p95": 0.26361784194338256,
+          "relative_eligible_count": 5384,
+          "relative_p95": 0.06240344038045352
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.050056999121788605,
+          "max": 0.7917663222647473,
+          "p95": 0.2240024888237574,
+          "relative_eligible_count": 386,
+          "relative_p95": 0.29959451434310885
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.07130241491375135,
+          "max": 2.131976176847121,
+          "p95": 0.2825716663242754,
+          "relative_eligible_count": 1947,
+          "relative_p95": 0.2933650439053002
+        }
+      },
+      "0.25s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.01900485880793657,
+          "max": 0.46600483391404346,
+          "p95": 0.07739174238781432,
+          "relative_eligible_count": 4907,
+          "relative_p95": 0.03490407781596301
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 0.04429833651882898,
+          "max": 0.4787983954606423,
+          "p95": 0.13626238247557942,
+          "relative_eligible_count": 5373,
+          "relative_p95": 0.028810880411496976
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.1293968899795977,
+          "max": 1.47933702534925,
+          "p95": 0.6138065981164758,
+          "relative_eligible_count": 5373,
+          "relative_p95": 0.1311507733641412
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.11299831519374942,
+          "max": 1.6790216465015932,
+          "p95": 0.46734528390174523,
+          "relative_eligible_count": 386,
+          "relative_p95": 0.5782137209759335
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.1508536260699812,
+          "max": 3.3628050970128447,
+          "p95": 0.6846780582445227,
+          "relative_eligible_count": 1947,
+          "relative_p95": 0.7228761677485032
+        }
+      },
+      "0.50s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.06858128335019317,
+          "max": 1.5423218537535304,
+          "p95": 0.2763053210041142,
+          "relative_eligible_count": 4890,
+          "relative_p95": 0.1289865035675898
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 0.13025720490871318,
+          "max": 1.9549879689003287,
+          "p95": 0.43824568714544804,
+          "relative_eligible_count": 5313,
+          "relative_p95": 0.08704752187598261
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.24982839719390382,
+          "max": 2.2168555300379604,
+          "p95": 1.2039952565824374,
+          "relative_eligible_count": 5313,
+          "relative_p95": 0.22603181806416103
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.2085073128143789,
+          "max": 2.8888966028343903,
+          "p95": 0.9326368223384992,
+          "relative_eligible_count": 386,
+          "relative_p95": 0.6879027104391804
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.26596908157760496,
+          "max": 5.868495323693249,
+          "p95": 1.1111723733239613,
+          "relative_eligible_count": 1947,
+          "relative_p95": 1.350527045759214
+        }
+      },
+      "1.00s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.2336131413983738,
+          "max": 3.1045772001269842,
+          "p95": 0.8451593936058446,
+          "relative_eligible_count": 4848,
+          "relative_p95": 0.3789578036447094
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 0.5988219680657064,
+          "max": 8.519208742708157,
+          "p95": 1.5653964389966446,
+          "relative_eligible_count": 5191,
+          "relative_p95": 0.3943193960929408
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.4623000427109198,
+          "max": 3.1684997281247043,
+          "p95": 2.0832378638371742,
+          "relative_eligible_count": 5191,
+          "relative_p95": 0.3621722660559198
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.37310903892556435,
+          "max": 4.170801526627323,
+          "p95": 1.8511102647023159,
+          "relative_eligible_count": 385,
+          "relative_p95": 0.8639288084745237
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.45804967054066,
+          "max": 8.427365019556865,
+          "p95": 1.5589494812270936,
+          "relative_eligible_count": 1948,
+          "relative_p95": 1.60202640915943
+        }
+      },
+      "1.50s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.4609270069635391,
+          "max": 3.1413767524799017,
+          "p95": 1.536726193033017,
+          "relative_eligible_count": 4806,
+          "relative_p95": 0.7549285124434197
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 1.6087689632819586,
+          "max": 20.29143307897478,
+          "p95": 5.009652697144951,
+          "relative_eligible_count": 5072,
+          "relative_p95": 1.125235829138644
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.6324705602971179,
+          "max": 3.550325929193214,
+          "p95": 2.3125494687691472,
+          "relative_eligible_count": 5072,
+          "relative_p95": 0.4005625812899465
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.5060955119828399,
+          "max": 4.552146411833575,
+          "p95": 2.155542226235325,
+          "relative_eligible_count": 387,
+          "relative_p95": 0.9395926815278196
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.6177015674960384,
+          "max": 7.612696666687984,
+          "p95": 2.0261968775769947,
+          "relative_eligible_count": 1946,
+          "relative_p95": 1.653088700197502
+        }
+      },
+      "2.00s": {
+        "heading_rad": {
+          "count": 6388,
+          "mae": 0.7140466320472866,
+          "max": 3.140476507245925,
+          "p95": 2.4009115754477897,
+          "relative_eligible_count": 4765,
+          "relative_p95": 1.2869845338188486
+        },
+        "position_m": {
+          "count": 6388,
+          "mae": 3.137773520397411,
+          "max": 30.612361467185693,
+          "p95": 12.645691173819362,
+          "relative_eligible_count": 4950,
+          "relative_p95": 2.0035264285916643
+        },
+        "u_mps": {
+          "count": 6388,
+          "mae": 0.7832336646484521,
+          "max": 3.922327965308582,
+          "p95": 2.7530091238838708,
+          "relative_eligible_count": 4950,
+          "relative_p95": 0.49053682162093293
+        },
+        "v_mps": {
+          "count": 6388,
+          "mae": 0.6232594012538871,
+          "max": 6.034001830412009,
+          "p95": 2.5078178056615936,
+          "relative_eligible_count": 388,
+          "relative_p95": 0.825392037533145
+        },
+        "yaw_rate_radps": {
+          "count": 6388,
+          "mae": 0.7351202527796777,
+          "max": 7.479194901987792,
+          "p95": 2.2881026791301187,
+          "relative_eligible_count": 1945,
+          "relative_p95": 1.7523816734307838
+        }
+      }
+    }
+  },
+  "validation_transition_count": 6388
+}
