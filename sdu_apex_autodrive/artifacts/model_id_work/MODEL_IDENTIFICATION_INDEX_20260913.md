@@ -119,12 +119,18 @@ integration, followed by native recursive replay of the same candidate. A
 fresh untouched track-domain run remains required before freezing any model or
 changing MPC parameters.
 
-The dev-side odometry candidate now rejects only a low-speed coherent encoder
-recovery that is also above the launch wheel-spin threshold. This was driven
-by repeated accepted recordings where wheel rate was about 6 m/s while body
-speed was below 1 m/s. Existing observer unit tests pass; representative
-replay still exposes separate braking/turn transients that require more data
-before further tuning.
+The dev-side odometry observer now has a causal wheel-slew/slip gate at
+`40 m/s^2`. It rejects abrupt wheel-rate changes that are inconsistent with
+the current body-speed estimate, requires causal-speed agreement before
+recovery, and automatically enables the validated dynamic bicycle turn
+propagation only while the wheel measurement is rejected. Normal turns still
+use the stable wheel-anchored mode. The rebuilt C++ observer and Python
+reference match over all retained source replays to machine precision with
+zero flag mismatches. Across moving samples, body-forward p95 error is about
+`0.37 m/s` and body-lateral p95 error about `0.26 m/s`; the E1 slip run is
+approximately `0.50/0.18 m/s`. This is an observer candidate improvement,
+not a claim of the 2% final acceptance target. The runtime remains dev-side;
+no Unity physics or behavior was changed.
 Generated
 wide `identification_grid_*.csv` summaries are intentionally excluded; the
 source-event recorder partitions are authoritative.
@@ -173,3 +179,88 @@ measurement of Unity's rigid-body inertia and must not be frozen into MPC.
 The wheel state follows the same rule: it is an effective causal drive state,
 not a claim that its fitted coefficients equal a real wheel's mechanical
 rotational model.
+
+## Simulator-native strategy phase
+
+The latest simulator-native strategy is now represented by the following
+offline-only tools and artifacts:
+
+- `tools/model_id/wheel_friction_curve.py` implements the documented two-piece
+  cubic-Hermite surrogate for the public Unity friction breakpoints. It does
+  not claim to reproduce Unity's hidden interpolation exactly.
+- `tools/model_id/simulator_native_model.py` implements the VS1 virtual axle
+  and VS2 four-contact/Ackermann candidate structures. It supports the
+  compatibility mean-wheel state and a causal left/right encoder-state form
+  for four-contact replay. Its state stores encoder-derived wheel surface
+  speed in m/s; the slip calculation therefore does not multiply that state by
+  wheel radius a second time.
+- `tools/model_id/fit_simulator_native_model.py` fits only effective
+  translational/lateral/yaw gains. It does not fit or invent `I_z`, and it
+  keeps simulator truth offline. Recursive scoring now propagates each origin
+  once to 2 s and samples every requested horizon, avoiding repeated replay
+  of the same source transitions.
+- `tools/model_id/analyze_simulator_diagnostics.py` validates the required
+  diagnostic-only Unity parameter dump and derives yaw inertia from the full
+  principal inertia tensor and tensor rotation.
+
+The dump parser independently projects Unity's principal inertia tensor onto
+the body vertical axis and rejects a dump when its optional convenience scalar
+disagrees. It also preserves all four wheel friction curves and applies a
+non-zero pose/velocity lever arm only when it comes from the diagnostic dump.
+
+`model_fits_v2/simulator_native_model_benchmark_v4.json` is the corrected
+full-horizon comparison over 21,774 causal training transitions and 12 held-out
+runs. It includes all required horizons from 25 ms through 2 s and samples 200
+deterministic origins per validation run for recursive scoring. VS2 is only
+marginally better than VS1 at the longer horizons; at 0.50 s its validation
+position p95 is approximately 0.339 m versus 0.346 m, and at 2.0 s it is
+approximately 6.07 m versus 6.19 m. Both candidates fail the precision gate
+and remain unaccepted. No C replay or production MPC update has been made.
+
+`reference_point_audit_v2.json` audits all 32 accepted runs. The best
+candidate is that the recorded position point is approximately 0.15532 m
+behind the reported body-velocity point: aggregate midpoint-kinematic p95 is
+0.0112 m/s, versus 0.2282 m/s when both are treated as the same point. This is
+offline evidence only; runtime frames were not changed. A full 1,500-origin
+candidate replay of that correction improved the 25 ms position p95 from
+approximately 0.010 m to 0.003 m, but worsened the 0.50 s and 2.0 s position
+p95 to approximately 0.402 m and 6.52 m from 0.339 m and 6.07 m. It is
+therefore retained as an explicit diagnostic-derived option, not enabled for
+the accepted replay candidate.
+
+The four-contact side-wheel screen uses the two legal encoder streams to avoid
+collapsing left/right surface speeds. It is currently a candidate-only path;
+the reduced side state did not yet beat the mean-wheel VS2 validation profile
+in the sampled screening run, so it has not been promoted or ported to C.
+
+The mixed one-step/recursive effective-gain fit is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v7_mixed_prefab_screen.json`.
+It uses the checked-in F1TENTH prefab geometry/curve profile, 232 dynamic
+training origins per candidate, robust residuals at 0.10--1.00 s, and a
+held-out screen of 200 origins per validation run. The best screen result
+reduced VS1 validation position p95 to approximately 0.14 m at 0.50 s,
+0.60 m at 1.00 s, and 2.84 m at 2.00 s; this was a genuine recursive
+held-out improvement over the derivative-only fit, but the optimizer stopped
+at its configured evaluation cap.
+
+The fixed-gain full replay is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v8_mixed_prefab_full_replay.json`.
+It replays the exact v7 gains without refitting over the complete deterministic
+origin population (up to 1,500 origins per validation run) and all horizons
+from 25 ms through 2 s. VS1 is the better full-replay candidate: validation
+position p95 is approximately 0.157 m at 0.50 s, 0.628 m at 1.00 s, and
+3.067 m at 2.00 s. VS2 is approximately 0.162 m, 0.669 m, and 3.412 m at
+the same horizons. These are offline effective-model results, not a physical
+parameter identification or a production acceptance. The fixed replay tool
+now separates optimizer fitting from high-population validation so this
+comparison is reproducible.
+
+The Unity diagnostic exporter is present in the external simulator checkout at
+`Assets/Scripts/ModelIdentificationDiagnostics.cs`, with a disposable-scene
+build path in `Assets/Editor/BuildLinuxPlayer.cs`. A new diagnostic build has
+not yet been produced because this machine has no Unity Editor executable;
+the existing model-identification binaries predate the exporter and must not
+be treated as diagnostic dumps. The next required step is therefore to build
+and run that disposable diagnostic artifact, analyze its dump, and only then
+compare the fixed-structure VS3 model before any native C or production MPC
+integration.

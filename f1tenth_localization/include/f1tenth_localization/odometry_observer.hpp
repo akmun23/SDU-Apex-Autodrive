@@ -52,6 +52,10 @@ struct OdometryObserverConfig
   // then again in the current packet. Reject only that two-stage signature;
   // ordinary acceleration packets have no packet-vs-window disagreement.
   double wheel_burst_disagreement_mps{1.0};
+  // Reject abrupt rolling wheel-rate changes that are physically inconsistent
+  // with the causal body-speed estimate. A release back to causal speed is
+  // still allowed to recover.
+  double wheel_speed_slew_limit_mps2{40.0};
   double wheel_update_beta{0.85};
   // A frozen encoder must not immediately zero a moving estimate because a
   // single dropped packet is possible.  Sustained zero wheel motion together
@@ -77,8 +81,10 @@ struct OdometryObserverConfig
   // The simulator's lateral IMU acceleration contains enough bias/noise to
   // create a persistent pose error when integrated at native 20 Hz.  The
   // default car model therefore uses wheel speed plus IMU yaw only (a
-  // no-lateral-slip kinematic update). Keep the dynamic option available for
-  // offline comparison and vehicles with a separately validated slip model.
+  // no-lateral-slip kinematic update). The implementation automatically
+  // enables the dynamic option during an explicitly rejected wheel-slip or
+  // dropout interval; this flag remains available for offline comparison and
+  // vehicles with a separately validated slip model.
   bool integrate_lateral_acceleration_in_turn{false};
   // A single impossible longitudinal IMU sample must not be integrated into
   // odometry.  The competition vehicle's lateral acceleration can be large

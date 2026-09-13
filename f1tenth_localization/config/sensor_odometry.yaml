@@ -63,6 +63,10 @@ sensor_odometry:
     # the rolling rate is already >1 m/s above causal speed and the current
     # packet is another >1 m/s above that rolling rate.
     wheel_burst_disagreement_mps: 1.0
+    # Reject an abrupt rolling wheel-rate change that is not compatible with
+    # the causal body-speed estimate. This catches wheel slip even when the
+    # rolling and current packet rates agree. A causal-speed release recovers.
+    wheel_speed_slew_limit_mps2: 40.0
     # After a repeated cumulative-angle packet, the first valid packet
     # re-baselines the rolling window before normal estimation resumes.
     # Separate true stopped detection from the 0.15 m/s missing-encoder gate;
@@ -93,6 +97,9 @@ sensor_odometry:
     # Use the validated no-lateral-slip kinematic turn update. Integrating
     # simulator lateral IMU acceleration at 20 Hz caused false pose drift in
     # the first bend; enable only after a separately validated slip model.
+    # Keep lateral integration disabled in normal turns. The observer
+    # automatically enables the validated dynamic propagation during an
+    # explicitly rejected wheel-slip/dropout interval.
     integrate_lateral_acceleration_in_turn: false
     # Reject impossible longitudinal IMU spikes before they can be integrated
     # into odometry. Lateral acceleration remains unconstrained here because

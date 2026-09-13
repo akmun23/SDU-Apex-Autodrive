@@ -162,6 +162,31 @@ void test_turn_mode_and_pose()
   require(std::isfinite(calm.x_m) && std::isfinite(calm.y_m), "turn pose remains finite");
 }
 
+void test_wheel_slip_enables_dynamic_turn_observer()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 1.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double four_mps_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, four_mps_delta, four_mps_delta));
+  observer.update(observation(0.100, 2.0 * four_mps_delta, 2.0 * four_mps_delta));
+
+  // The wheel pair jumps to a coherent but implausible rate. With the
+  // explicit dynamic option disabled, this must still switch to the
+  // validated dynamic path because the wheel measurement was rejected.
+  const double twelve_mps_delta = 12.0 * 0.050 / config.wheel_radius_m;
+  const auto slip = observer.update(observation(
+    0.150, 2.0 * four_mps_delta + twelve_mps_delta,
+    2.0 * four_mps_delta + twelve_mps_delta, 0.0, 7.0, 0.7));
+  require(slip.wheel_burst_rejected,
+    "implausible wheel slew is diagnosed as rejected");
+  require(!slip.wheel_update_used,
+    "implausible wheel slew is not used for longitudinal speed");
+  require(std::abs(slip.body_v_mps) > 1.0e-5,
+    "rejected wheel slip enables dynamic lateral propagation");
+}
+
 void test_launch_uses_wheel_speed_during_acceleration()
 {
   OdometryObserver observer;
@@ -399,18 +424,35 @@ void test_encoder_burst_is_rejected_until_coherent_recovery()
   require(!stale.wheel_update_used,
     "stale-window packet remains excluded before coherent recovery");
 
-  // With the deployed 100 ms window, one additional coherent high-speed
-  // packet is needed to age the delayed burst out of the rolling estimate.
-  // It is intentionally far above the stale causal speed: agreement between
-  // the current packet and rolling rate is the evidence that recovery is safe.
+  // A coherent high-rate pair is not enough to recover: both rates can still
+  // be the same stale wheel-spin value. Recovery must agree with the causal
+  // body-speed estimate as well.
   const double coherent_delta = 6.0 * 0.050 / 0.059;
-  const auto recovered = observer.update(observation(
+  const auto stale_coherent = observer.update(observation(
     0.325, 2.0 * normal_delta + burst_delta + delayed_delta + 2.0 * coherent_delta,
     2.0 * normal_delta + burst_delta + delayed_delta + 2.0 * coherent_delta));
-  require(recovered.wheel_update_used,
-    "coherent packet clears the burst dropout");
-  require(!recovered.wheel_burst_rejected,
-    "coherent recovery packet is not diagnosed as a burst");
+  require(!stale_coherent.wheel_update_used,
+    "coherent stale high-rate pair remains excluded");
+
+  // Once the rolling window is rebased by a genuinely causal-speed packet,
+  // recovery is allowed and the next normal packet can update again.
+  const double causal_delta = 4.0 * 0.050 / 0.059;
+  const auto recovered = observer.update(observation(
+    0.375, 2.0 * normal_delta + burst_delta + delayed_delta +
+    2.0 * coherent_delta + causal_delta,
+    2.0 * normal_delta + burst_delta + delayed_delta +
+    2.0 * coherent_delta + causal_delta));
+  require(!recovered.wheel_update_used,
+    "first causal packet waits for the rolling window to age");
+  const auto recovered_after_window = observer.update(observation(
+    0.425, 2.0 * normal_delta + burst_delta + delayed_delta +
+    2.0 * coherent_delta + 2.0 * causal_delta,
+    2.0 * normal_delta + burst_delta + delayed_delta +
+    2.0 * coherent_delta + 2.0 * causal_delta));
+  require(recovered_after_window.wheel_update_used,
+    "causal-speed packet clears the burst dropout after window aging");
+  require(!recovered_after_window.wheel_burst_rejected,
+    "causal-speed recovery packet is not diagnosed as a burst");
 }
 
 void test_coherent_wheel_rate_overrides_stale_innovation_gate()
@@ -478,6 +520,7 @@ int main()
   test_braking_and_frozen_wheel();
   test_epoch_and_timing();
   test_turn_mode_and_pose();
+  test_wheel_slip_enables_dynamic_turn_observer();
   test_launch_uses_wheel_speed_during_acceleration();
   test_pose_integration_uses_velocity_midpoint();
   test_turn_entry_uses_coherent_launch_wheel_speed();

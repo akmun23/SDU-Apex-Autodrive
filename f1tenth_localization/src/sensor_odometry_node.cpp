@@ -110,6 +110,7 @@ public:
     declare_parameter("wheel_recovery_launch_wheel_speed_mps", 4.0);
     declare_parameter("stationary_speed_threshold_mps", 0.03);
     declare_parameter("wheel_burst_disagreement_mps", 1.0);
+    declare_parameter("wheel_speed_slew_limit_mps2", 40.0);
     declare_parameter("wheel_update_beta", 0.85);
     declare_parameter("stationary_hold_s", 0.10);
     declare_parameter("stationary_ax_abs_max_mps2", 0.25);
@@ -214,6 +215,7 @@ private:
     config.wheel_recovery_launch_innovation_mps = 2.0;
     config.wheel_recovery_launch_wheel_speed_mps = 4.0;
     config.wheel_burst_disagreement_mps = 1.0;
+    config.wheel_speed_slew_limit_mps2 = 40.0;
     config.stationary_speed_threshold_mps = 0.03;
     config.wheel_update_beta = 0.85;
     config.stationary_hold_s = 0.10;
@@ -260,6 +262,8 @@ private:
       0.0, get_parameter("wheel_recovery_launch_wheel_speed_mps").as_double());
     config.wheel_burst_disagreement_mps = get_parameter(
       "wheel_burst_disagreement_mps").as_double();
+    config.wheel_speed_slew_limit_mps2 = std::max(
+      0.0, get_parameter("wheel_speed_slew_limit_mps2").as_double());
     config.stationary_speed_threshold_mps = get_parameter(
       "stationary_speed_threshold_mps").as_double();
     config.wheel_update_beta = get_parameter("wheel_update_beta").as_double();

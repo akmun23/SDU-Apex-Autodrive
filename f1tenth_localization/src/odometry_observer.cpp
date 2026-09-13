@@ -223,6 +223,13 @@ OdometryEstimate OdometryObserver::update(
   const double wheel_mapped = wheel_raw * std::max(0.0, config_.wheel_speed_scale);
   const double wheel_packet_mapped = wheel_packet *
     std::max(0.0, config_.wheel_speed_scale);
+  const bool wheel_slew_rejected =
+    config_.wheel_speed_slew_limit_mps2 > 0.0 &&
+    speed_mps_ > std::max(2.0, config_.wheel_recovery_launch_speed_mps) &&
+    last_wheel_mapped_mps_ > 0.0 &&
+    std::abs(wheel_mapped - last_wheel_mapped_mps_) / dt_s >
+    config_.wheel_speed_slew_limit_mps2 &&
+    std::abs(wheel_mapped - speed_mps_) > config_.wheel_innovation_max_mps;
   last_wheel_raw_mps_ = wheel_raw;
   last_wheel_mapped_mps_ = wheel_mapped;
   last_wheel_packet_mps_ = wheel_packet;
@@ -233,10 +240,10 @@ OdometryEstimate OdometryObserver::update(
   // instantaneous packet. Do not let either part of that burst update speed;
   // the existing dropout path propagates the last causal speed with IMU data
   // until a coherent packet returns.
-  wheel_burst_rejected_ =
-    config_.wheel_burst_disagreement_mps > 0.0 &&
+  wheel_burst_rejected_ = wheel_slew_rejected ||
+    (config_.wheel_burst_disagreement_mps > 0.0 &&
     wheel_mapped > speed_mps_ + config_.wheel_burst_disagreement_mps &&
-    wheel_packet_mapped > wheel_mapped + config_.wheel_burst_disagreement_mps;
+    wheel_packet_mapped > wheel_mapped + config_.wheel_burst_disagreement_mps);
 
   // A repeated cumulative-angle packet can land just above the absolute
   // frozen-wheel threshold (the recorded failure was 0.151 m/s against a
@@ -315,6 +322,9 @@ OdometryEstimate OdometryObserver::update(
       return false;
     }
     if (launch_wheel_spin(predicted_speed)) {
+      return false;
+    }
+    if (wheel_slew_rejected) {
       return false;
     }
     // A zero encoder packet is allowed to brake a stopped/slow estimate, but
@@ -417,6 +427,8 @@ OdometryEstimate OdometryObserver::update(
   bool wheel_update_used = false;
   double speed_pred = speed_mps_;
   if (turn_mode_) {
+    const bool integrate_lateral_dynamics =
+      config_.integrate_lateral_acceleration_in_turn || wheel_dropout_active_;
     // Longitudinal wheel speed is the observable with the correct scale in a
     // turn.  Use it to anchor u before and after the IMU RK2 lateral update;
     // otherwise the turn model integrates small ax bias and can report
@@ -430,15 +442,12 @@ OdometryEstimate OdometryObserver::update(
       std::abs(wheel_packet_mapped - wheel_mapped) <=
       config_.wheel_burst_disagreement_mps)) &&
       (std::abs(wheel_packet_mapped - speed_mps_) <=
-      config_.wheel_innovation_max_mps ||
-      (wheel_dropout_active_ &&
-      config_.wheel_burst_disagreement_mps > 0.0 &&
-      std::abs(wheel_packet_mapped - wheel_mapped) <=
-      config_.wheel_burst_disagreement_mps));
+      config_.wheel_innovation_max_mps);
     const bool wheel_coherent = !wheel_burst_rejected_ &&
       !launch_wheel_spin(speed_mps_) &&
       wheel_packet >= config_.wheel_freeze_speed_mps &&
       config_.wheel_burst_disagreement_mps > 0.0 &&
+      !wheel_slew_rejected &&
       std::abs(wheel_packet_mapped - wheel_mapped) <=
       config_.wheel_burst_disagreement_mps;
     const bool wheel_ok = !wheel_burst_rejected_ && !wheel_dropout_active_ &&
@@ -457,7 +466,7 @@ OdometryEstimate OdometryObserver::update(
       encoder_history_.push_back({
         observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
       wheel_update_used = true;
-    } else if (wheel_dropout_active_) {
+    } else if (wheel_dropout_active_ && !integrate_lateral_dynamics) {
       // The encoder stream can repeat one cumulative angle for several source
       // packets while the car is braking in a turn. Propagate the last causal
       // longitudinal speed with the IMU until a coherent encoder displacement
@@ -469,7 +478,12 @@ OdometryEstimate OdometryObserver::update(
       }
       braking_ax += observation.yaw_rate_radps * observation.yaw_rate_radps *
         config_.imu_x_offset_m;
-      body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
+      // Positive ax is ambiguous while wheel slip is active because the
+      // unobserved r*v term can have either sign. Apply only deceleration and
+      // hold through positive acceleration until a causal wheel sample returns.
+      if (braking_ax < 0.0) {
+        body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
+      }
     } else if (wheel_raw < config_.wheel_freeze_speed_mps &&
       observation.ax_mps2 <= config_.turn_wheel_braking_ax_mps2)
     {
@@ -486,9 +500,11 @@ OdometryEstimate OdometryObserver::update(
       }
       braking_ax += observation.yaw_rate_radps * observation.yaw_rate_radps *
         config_.imu_x_offset_m;
-      body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
+      if (braking_ax < 0.0) {
+        body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
+      }
     }
-    if (config_.integrate_lateral_acceleration_in_turn) {
+    if (integrate_lateral_dynamics) {
       update_turn(ax_origin, ay_origin, observation.yaw_rate_radps, dt_s);
       if (wheel_ok) {
         body_u_mps_ = wheel_mapped;
@@ -533,17 +549,14 @@ OdometryEstimate OdometryObserver::update(
         std::abs(wheel_packet_mapped - wheel_mapped) <=
         config_.wheel_burst_disagreement_mps)) &&
         (std::abs(wheel_packet_mapped - speed_pred) <=
-        config_.wheel_innovation_max_mps ||
-        (wheel_dropout_active_ &&
-        config_.wheel_burst_disagreement_mps > 0.0 &&
-        std::abs(wheel_packet_mapped - wheel_mapped) <=
-        config_.wheel_burst_disagreement_mps));
+        config_.wheel_innovation_max_mps);
       const bool wheel_ok =
         std::abs(observation.ax_mps2) < config_.wheel_update_ax_abs_max_mps2 &&
         (!wheel_dropout_active_ ?
         (wheel_speed_is_valid(speed_pred) ||
         (!wheel_burst_rejected_ &&
         !launch_wheel_spin(speed_pred) &&
+        !wheel_slew_rejected &&
         wheel_packet >= config_.wheel_freeze_speed_mps &&
         config_.wheel_burst_disagreement_mps > 0.0 &&
         std::abs(wheel_packet_mapped - wheel_mapped) <=

@@ -37,12 +37,14 @@ def _wrap(angle: float) -> float:
 class ReferenceObserver:
     def __init__(self, normal_packet_dt_max_s: float = 0.080,
                  integrate_lateral_acceleration_in_turn: bool = False,
-                 wheel_speed_scale: float = 0.982,
-                 wheel_burst_disagreement_mps: float = 1.0) -> None:
+                 wheel_speed_scale: float = 0.968,
+                 wheel_burst_disagreement_mps: float = 1.0,
+                 wheel_speed_slew_limit_mps2: float = 40.0) -> None:
         self.normal_packet_dt_max_s = float(normal_packet_dt_max_s)
         self.wheel_speed_window_s = 0.10
         self.wheel_speed_scale = max(0.0, float(wheel_speed_scale))
         self.wheel_burst_disagreement_mps = float(wheel_burst_disagreement_mps)
+        self.wheel_speed_slew_limit_mps2 = max(0.0, float(wheel_speed_slew_limit_mps2))
         # Keep the offline replay numerically aligned with the deployed
         # observer.  A stale replay gate can make a valid runtime change look
         # ineffective during offline validation.
@@ -115,6 +117,7 @@ class ReferenceObserver:
             result = self._result(row, dt)
             result.timing_degraded = True
             return result
+        previous_u, previous_v = self.u, self.v
         dl = left - self.previous_left
         dr = right - self.previous_right
         if abs(dl) > 50.0 or abs(dr) > 50.0:
@@ -162,11 +165,19 @@ class ReferenceObserver:
         packet = abs(0.059 * 0.5 * (dl + dr) / dt)
         mapped = self.map_wheel(raw * self.wheel_speed_scale)
         packet_mapped = packet * self.wheel_speed_scale
+        wheel_slew_rejected = (
+            self.wheel_speed_slew_limit_mps2 > 0.0 and
+            self.speed > 2.0 and self.last_mapped > 0.0 and
+            abs(mapped - self.last_mapped) / dt > self.wheel_speed_slew_limit_mps2 and
+            abs(mapped - self.speed) > self.wheel_innovation_max_mps)
         self.last_raw, self.last_mapped, self.last_packet = raw, mapped, packet
-        self.wheel_burst_rejected = (
+        self.wheel_burst_rejected = wheel_slew_rejected or (
             self.wheel_burst_disagreement_mps > 0.0 and
             mapped > self.speed + self.wheel_burst_disagreement_mps and
             packet_mapped > mapped + self.wheel_burst_disagreement_mps)
+        near_zero_packet_limit = max(0.5, 0.25 * self.speed)
+        if self.speed > 0.5 and packet_mapped < near_zero_packet_limit:
+            self.wheel_dropout_active = True
         if packet < 0.15 and self.speed > 0.5:
             self.wheel_dropout_active = True
         if self.wheel_burst_rejected:
@@ -194,10 +205,12 @@ class ReferenceObserver:
             self.wheel_burst_recovery_pending = False
             dyaw = _wrap(yaw - self.previous_yaw)
             yaw_mid = _wrap(self.previous_yaw + 0.5 * dyaw)
-            self.x += (self.u * math.cos(yaw_mid) -
-                       self.v * math.sin(yaw_mid)) * dt
-            self.y += (self.u * math.sin(yaw_mid) +
-                       self.v * math.cos(yaw_mid)) * dt
+            u_mid = 0.5 * (previous_u + self.u)
+            v_mid = 0.5 * (previous_v + self.v)
+            self.x += (u_mid * math.cos(yaw_mid) -
+                       v_mid * math.sin(yaw_mid)) * dt
+            self.y += (u_mid * math.sin(yaw_mid) +
+                       v_mid * math.cos(yaw_mid)) * dt
             self.previous_stamp, self.previous_left, self.previous_right = (
                 stamp, left, right)
             self.previous_yaw, self.previous_yaw_rate = yaw, yaw_rate
@@ -205,6 +218,9 @@ class ReferenceObserver:
         yaw_alpha = (yaw_rate - self.previous_yaw_rate) / dt
         ax_origin = ax + yaw_rate * yaw_rate * 0.08
         ay_origin = ay - yaw_alpha * 0.08
+        def launch_wheel_spin(predicted: float) -> bool:
+            return (predicted < 2.0 and packet_mapped > 4.0 and
+                    packet_mapped > predicted + 2.0)
         if not self.turn and (abs(yaw_rate) >= 0.6 or abs(ay) >= 6.0):
             self.turn = True
             self.calm = 0.0
@@ -216,10 +232,17 @@ class ReferenceObserver:
             self.v = 0.0
         wheel_used = False
         pred = self.speed
+        integrate_lateral_dynamics = (
+            self.integrate_lateral_acceleration_in_turn or
+            self.wheel_dropout_active)
         def wheel_speed_is_valid(predicted: float) -> bool:
             if (dt > self.normal_packet_dt_max_s and dt > 0.250) or not np.isfinite(mapped):
                 return False
             if raw < 0.15 and predicted > 0.5:
+                return False
+            if launch_wheel_spin(predicted):
+                return False
+            if wheel_slew_rejected:
                 return False
             return (abs(mapped - predicted) <= self.wheel_innovation_max_mps or
                     (predicted < 0.15 and mapped >= 0.03))
@@ -227,18 +250,17 @@ class ReferenceObserver:
         if self.turn:
             wheel_recovery = (self.wheel_dropout_active and packet >= 0.15 and
                               not self.wheel_burst_rejected and
+                              not launch_wheel_spin(self.speed) and
                               (not self.wheel_burst_recovery_pending or
                                (self.wheel_burst_disagreement_mps > 0.0 and
                                 abs(packet_mapped - mapped) <=
                                 self.wheel_burst_disagreement_mps)) and
                               (abs(packet_mapped - self.speed) <=
-                               self.wheel_innovation_max_mps or
-                               (self.wheel_dropout_active and
-                                self.wheel_burst_disagreement_mps > 0.0 and
-                                abs(packet_mapped - mapped) <=
-                                self.wheel_burst_disagreement_mps)))
+                               self.wheel_innovation_max_mps))
             wheel_coherent = (not self.wheel_burst_rejected and packet >= 0.15 and
+                              not launch_wheel_spin(self.speed) and
                               self.wheel_burst_disagreement_mps > 0.0 and
+                              not wheel_slew_rejected and
                               abs(packet_mapped - mapped) <=
                               self.wheel_burst_disagreement_mps)
             wheel_ok = (not self.wheel_burst_rejected and
@@ -254,7 +276,7 @@ class ReferenceObserver:
                 self.encoder_history.clear()
                 self.encoder_history.append((stamp, left, right))
                 wheel_used = True
-            elif self.wheel_dropout_active:
+            elif self.wheel_dropout_active and not integrate_lateral_dynamics:
                 # Repeated cumulative encoder samples are missing motion, not
                 # zero vehicle speed. Propagate the causal longitudinal speed
                 # with the synchronized IMU until a coherent packet returns.
@@ -262,14 +284,16 @@ class ReferenceObserver:
                 if ax < -0.5:
                     braking_ax = 1.005 * ax + 0.020
                 braking_ax += yaw_rate * yaw_rate * 0.08
-                self.u = max(0.0, self.u + braking_ax * dt)
+                if braking_ax < 0.0:
+                    self.u = max(0.0, self.u + braking_ax * dt)
             elif raw < 0.15 and ax <= self.turn_wheel_braking_ax_mps2:
                 braking_ax = ax
                 if ax < -0.5:
                     braking_ax = 1.005 * ax + 0.020
                 braking_ax += yaw_rate * yaw_rate * 0.08
-                self.u = max(0.0, self.u + braking_ax * dt)
-            if self.integrate_lateral_acceleration_in_turn:
+                if braking_ax < 0.0:
+                    self.u = max(0.0, self.u + braking_ax * dt)
+            if integrate_lateral_dynamics:
                 du = ax_origin + yaw_rate * self.v
                 dv = ay_origin - yaw_rate * self.u
                 u_mid = self.u + 0.5 * dt * du
@@ -298,20 +322,19 @@ class ReferenceObserver:
             if dt <= self.normal_packet_dt_max_s:
                 wheel_recovery = (self.wheel_dropout_active and packet >= 0.15 and
                                   not self.wheel_burst_rejected and
+                                  not launch_wheel_spin(pred) and
                                   (not self.wheel_burst_recovery_pending or
                                    (self.wheel_burst_disagreement_mps > 0.0 and
                                     abs(packet_mapped - mapped) <=
                                     self.wheel_burst_disagreement_mps)) and
                                   (abs(packet_mapped - pred) <=
-                                   self.wheel_innovation_max_mps or
-                                   (self.wheel_dropout_active and
-                                    self.wheel_burst_disagreement_mps > 0.0 and
-                                    abs(packet_mapped - mapped) <=
-                                    self.wheel_burst_disagreement_mps)))
+                                   self.wheel_innovation_max_mps))
                 wheel_ok = abs(ax) < 6.5 and (
                     (wheel_recovery if self.wheel_dropout_active else
                      (wheel_speed_is_valid(pred) or
                       (not self.wheel_burst_rejected and packet >= 0.15 and
+                       not launch_wheel_spin(pred) and
+                       not wheel_slew_rejected and
                        self.wheel_burst_disagreement_mps > 0.0 and
                        abs(packet_mapped - mapped) <=
                        self.wheel_burst_disagreement_mps))))
@@ -331,8 +354,10 @@ class ReferenceObserver:
 
         dyaw = _wrap(yaw - self.previous_yaw)
         yaw_mid = _wrap(self.previous_yaw + 0.5 * dyaw)
-        self.x += (self.u * math.cos(yaw_mid) - self.v * math.sin(yaw_mid)) * dt
-        self.y += (self.u * math.sin(yaw_mid) + self.v * math.cos(yaw_mid)) * dt
+        u_mid = 0.5 * (previous_u + self.u)
+        v_mid = 0.5 * (previous_v + self.v)
+        self.x += (u_mid * math.cos(yaw_mid) - v_mid * math.sin(yaw_mid)) * dt
+        self.y += (u_mid * math.sin(yaw_mid) + v_mid * math.cos(yaw_mid)) * dt
         self.last_pred = pred
         self.previous_stamp, self.previous_left, self.previous_right = stamp, left, right
         self.previous_yaw, self.previous_yaw_rate = yaw, yaw_rate

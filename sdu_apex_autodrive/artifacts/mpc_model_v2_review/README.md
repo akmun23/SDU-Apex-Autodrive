@@ -35,9 +35,44 @@ The current Y1 lateral candidate is not accepted. A fit that moves `I_z` and
 tire stiffnesses to bounds is reported as non-identifiable, not as a physical
 measurement.
 
-The current standalone C sources compile cleanly and all 91 Python tests pass.
+The simulator-native VS1/VS2 comparison is recorded in
+`../model_id_work/model_fits_v2/simulator_native_model_benchmark_v4.json`.
+The corrected candidate uses encoder-derived wheel surface speed directly in
+the dimensionless longitudinal slip calculation. Both effective-gain
+variants remain rejected by recursive validation; neither has been copied
+into the production MPC.
+
+The current standalone C sources compile cleanly and all 99 non-ROS Python
+tests pass.
 The ROS/Humble colcon build was attempted in the existing workspace container
 but is blocked by that container's missing `ament_package` Python module.
+
+The dev-side odometry candidate was subsequently improved without using
+simulator truth at runtime: abrupt wheel-rate slews are rejected, recovery
+requires causal-speed agreement, and lateral dynamics are integrated only
+during an explicitly rejected wheel-slip/dropout interval. Rebuilt C++/Python
+source replay is numerically aligned across the retained recordings. This
+improves the observable body-velocity estimate, but does not yet accept or
+replace the MPC plant.
+
+The model-identification parser now derives Unity yaw inertia from the full
+principal tensor and tensor rotation, validates any reported scalar against
+that projection, and retains per-wheel friction curves. The native candidate
+also supports a causal left/right encoder-state replay path and an explicit
+diagnostic-only pose/velocity lever arm. Neither path is accepted for
+production: the complete reference-point replay improved short-horizon error
+but worsened 0.5--2.0 s held-out error, and the sampled side-wheel screen did
+not beat the mean-wheel candidate.
+
+The mixed recursive effective-gain screen is recorded in
+`../model_id_work/model_fits_v2/simulator_native_model_benchmark_v7_mixed_prefab_screen.json`.
+The fixed-gain full replay is recorded in
+`../model_id_work/model_fits_v2/simulator_native_model_benchmark_v8_mixed_prefab_full_replay.json`.
+The latter uses up to 1,500 deterministic origins per validation run. Its
+best VS1 position p95 is 0.157 m at 0.50 s, 0.628 m at 1.00 s, and 3.067 m at
+2.00 s. This is a substantial recursive improvement over the derivative-only
+prefab fit, but it does not satisfy the final precision gate and is not
+production-ready.
 
 ## Next work
 
