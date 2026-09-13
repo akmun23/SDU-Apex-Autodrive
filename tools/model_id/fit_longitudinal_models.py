@@ -6,11 +6,12 @@ surface, an equilibrium-speed servo, and a wheel-slip force model using the
 canonical ``model_transition_v4.csv`` tables.  It does not alter the native
 MPC, runtime odometry, or simulator.
 
-The recursive score is a longitudinal subsystem score: recorded lateral
-``r*v`` coupling is supplied as an exogenous diagnostic term.  This isolates
-the longitudinal actuator question and must not be presented as full vehicle
-acceptance.  The wheel-slip candidate uses measured encoder-derived wheel
-speed only to fit/initialize the offline subsystem state.
+The recursive score is a causal longitudinal subsystem score.  It does not
+use future measured body speed or wheel speed.  A separate diagnostic score
+can condition the body acceleration on recorded lateral ``r*v`` coupling,
+but that score is explicitly not full-vehicle MPC acceptance.  The
+wheel-slip candidate uses measured encoder-derived wheel speed only to fit and
+initialize the offline subsystem state.
 """
 
 from __future__ import annotations
@@ -28,7 +29,14 @@ import numpy as np
 MASS_KG = 3.314
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
-HORIZONS_S = (0.05, 0.10, 0.25, 0.50, 1.00, 1.50, 2.00)
+HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
+
+
+def _horizon_key(horizon: float) -> str:
+    """Use labels that retain the 25 ms source-step horizon exactly."""
+    if abs(horizon - 0.025) < 1.0e-9:
+        return "0.025s"
+    return f"{horizon:.2f}s"
 
 
 def _read_rows(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, float]]]:
@@ -259,11 +267,12 @@ def _fit_wheel_time_constant(rows: Sequence[dict[str, float]], model_map: dict[s
     return best_tau
 
 
-def _wheel_features(row: dict[str, float], wheel: float) -> np.ndarray:
+def _wheel_features(row: dict[str, float], wheel: float,
+                    body_speed: float) -> np.ndarray:
     throttle = row["applied_throttle_norm_k1"]
     return np.asarray([
         1.0, wheel, throttle, wheel * throttle,
-        throttle * throttle, row["u_k_mps"],
+        throttle * throttle, body_speed,
     ], dtype=float)
 
 
@@ -273,7 +282,8 @@ def _fit_wheel_dynamics(rows: Sequence[dict[str, float]]) -> dict[str, object]:
         if _straight(row) and math.isfinite(row["wheel_k_mps"]) and
         math.isfinite(row["wheel_speed_mps_k1"])
     ]
-    features = np.vstack([_wheel_features(row, row["wheel_k_mps"])
+    features = np.vstack([_wheel_features(row, row["wheel_k_mps"],
+                                          row["u_k_mps"])
                           for row in selected])
     target = np.asarray([row["wheel_speed_mps_k1"] for row in selected])
     ridge = 1.0e-6 * np.eye(features.shape[1])
@@ -293,7 +303,8 @@ def _fit_wheel_dynamics(rows: Sequence[dict[str, float]]) -> dict[str, object]:
 
 
 def _wheel_acceleration(model: dict[str, object], row: dict[str, float],
-                        u: float, wheel: float) -> tuple[float, float]:
+                        u: float, wheel: float,
+                        lateral_coupling: float) -> tuple[float, float]:
     target = _map_value(model["equilibrium_map"], row["applied_throttle_norm_k1"])
     fraction = min(1.0, row["dt_sim_s"] / float(model["wheel_time_constant_s"]))
     wheel_next = wheel + fraction * (target - wheel)
@@ -301,24 +312,28 @@ def _wheel_acceleration(model: dict[str, object], row: dict[str, float],
     force = (float(model["force_max_n"]) *
              math.tanh(float(model["slip_gain_per_mps"]) * slip) -
              float(model["coast_speed_drag_n_per_mps"]) * u)
-    return force / MASS_KG + row["r_k_radps"] * row["v_k_mps"], wheel_next
+    return force / MASS_KG + lateral_coupling, wheel_next
 
 
 def _wheel_acceleration_dynamic(model: dict[str, object], row: dict[str, float],
-                                u: float, wheel: float) -> tuple[float, float]:
+                                u: float, wheel: float,
+                                lateral_coupling: float) -> tuple[float, float]:
     wheel_coefficients = np.asarray(model["wheel_dynamics"]["coefficients"],
                                     dtype=float)
-    wheel_next = max(0.0, float(_wheel_features(row, wheel) @ wheel_coefficients))
+    wheel_next = max(0.0, float(_wheel_features(row, wheel, u) @
+                                wheel_coefficients))
     slip = 0.5 * (wheel + wheel_next) - u
     force = (float(model["force_max_n"]) *
              math.tanh(float(model["slip_gain_per_mps"]) * slip) -
              float(model["coast_speed_drag_n_per_mps"]) * u)
-    return force / MASS_KG + row["r_k_radps"] * row["v_k_mps"], wheel_next
+    return force / MASS_KG + lateral_coupling, wheel_next
 
 
 def _predict_acceleration(model_name: str, model: dict[str, object],
                           row: dict[str, float], u: float,
-                          wheel: float | None) -> tuple[float, float | None]:
+                          wheel: float | None,
+                          lateral_coupling: float = 0.0
+                          ) -> tuple[float, float | None]:
     if model_name == "direct":
         return _direct_acceleration(model, row, u), wheel
     if model_name == "servo":
@@ -326,8 +341,9 @@ def _predict_acceleration(model_name: str, model: dict[str, object],
     if wheel is None or not math.isfinite(wheel):
         return math.nan, wheel
     if model_name == "wheel_dynamic":
-        return _wheel_acceleration_dynamic(model, row, u, wheel)
-    return _wheel_acceleration(model, row, u, wheel)
+        return _wheel_acceleration_dynamic(model, row, u, wheel,
+                                           lateral_coupling)
+    return _wheel_acceleration(model, row, u, wheel, lateral_coupling)
 
 
 def _score_one_step(runs: dict[str, list[dict[str, float]]], model_name: str,
@@ -337,8 +353,9 @@ def _score_one_step(runs: dict[str, list[dict[str, float]]], model_name: str,
     for rows in runs.values():
         for row in rows:
             wheel = row["wheel_k_mps"] if math.isfinite(row["wheel_k_mps"]) else None
-            prediction, _ = _predict_acceleration(model_name, model, row,
-                                                  row["u_k_mps"], wheel)
+            prediction, _ = _predict_acceleration(
+                model_name, model, row, row["u_k_mps"], wheel,
+                lateral_coupling=row["r_k_radps"] * row["v_k_mps"])
             if math.isfinite(prediction):
                 errors.append(abs(prediction - _observed_acceleration(row)))
                 actual.append(abs(_observed_acceleration(row)))
@@ -355,7 +372,7 @@ def _score_recursive(runs: dict[str, list[dict[str, float]]], model_name: str,
             for origin, origin_row in enumerate(rows):
                 wheel = (origin_row["wheel_k_mps"]
                          if math.isfinite(origin_row["wheel_k_mps"]) else None)
-                if model_name == "wheel" and wheel is None:
+                if model_name in {"wheel", "wheel_dynamic"} and wheel is None:
                     continue
                 elapsed = 0.0
                 index = origin
@@ -364,13 +381,16 @@ def _score_recursive(runs: dict[str, list[dict[str, float]]], model_name: str,
                     row = rows[index]
                     if int(row["segment_id"]) != segment:
                         break
-                    acceleration, wheel = _predict_acceleration(
-                        model_name, model, row, origin_row["u_k_mps"]
-                        if index == origin else predicted_u, wheel)
-                    if not math.isfinite(acceleration):
-                        break
                     current_u = (origin_row["u_k_mps"]
                                  if index == origin else predicted_u)
+                    # This strict recursive score intentionally uses no
+                    # recorded future r/v. The full plant owns that coupling;
+                    # using it here would make this a GT-conditioned score.
+                    acceleration, wheel = _predict_acceleration(
+                        model_name, model, row, current_u, wheel,
+                        lateral_coupling=0.0)
+                    if not math.isfinite(acceleration):
+                        break
                     predicted_u = max(0.0, current_u + row["dt_sim_s"] * acceleration)
                     elapsed += row["dt_sim_s"]
                     index += 1
@@ -379,7 +399,7 @@ def _score_recursive(runs: dict[str, list[dict[str, float]]], model_name: str,
                 truth = rows[index - 1]
                 errors.append(abs(predicted_u - truth["u_k1_mps"]))
                 actual.append(abs(truth["u_k1_mps"]))
-        output[f"{horizon:.2f}s"] = _stats(errors, actual)
+        output[_horizon_key(horizon)] = _stats(errors, actual)
     return output
 
 
@@ -436,7 +456,7 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         "wheel_dynamic": wheel_dynamic,
     }
     report: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "offline_benchmark_not_runtime_validated",
         "ground_truth_use": "offline_identification_and_scoring_only",
         "train_runs": list(train_names),
@@ -444,7 +464,13 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         "train_transition_count": len(train_rows),
         "validation_transition_count": sum(len(rows) for rows in validation.values()),
         "recursive_score_boundary": "segment_id_hard_stop",
-        "recursive_score_scope": "longitudinal_u_conditioned_on_recorded_r_times_v",
+        "recursive_score_scope": "longitudinal_u_causal_zero_lateral_coupling",
+        "recursive_prediction_uses_future_gt": False,
+        "one_step_prediction_uses_future_gt": False,
+        "measured_state_use": (
+            "origin_u_and_origin_encoder_wheel_speed_only; measured states "
+            "are used for one-step fitting/scoring, not recursive propagation"
+        ),
         "models": {},
         "next_action": (
             "Use the best longitudinal candidate only as an input to native "

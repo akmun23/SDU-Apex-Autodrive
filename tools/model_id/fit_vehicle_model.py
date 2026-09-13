@@ -43,8 +43,15 @@ import numpy as np
 MAX_STEERING_RAD = 0.5236
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
-HORIZONS_S = (0.05, 0.10, 0.25, 0.50, 1.00, 1.50, 2.00)
+HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
 STATE_NAMES = ("x_m", "y_m", "yaw_rad", "u_mps", "v_mps", "r_radps")
+
+
+def _horizon_key(horizon: float) -> str:
+    """Use labels that retain the 25 ms source-step horizon exactly."""
+    if abs(horizon - 0.025) < 1.0e-9:
+        return "0.025s"
+    return f"{horizon:.2f}s"
 
 
 def _finite(raw: str, field: str, path: Path, row_number: int) -> float:
@@ -143,13 +150,9 @@ def _read_bridge_feedback(run_dir: Path) -> list[dict[str, float]]:
     return result
 
 
-def _basis(row: dict[str, float], channel: str) -> tuple[list[str], np.ndarray]:
-    """Return a bounded, interpretable basis for one derivative channel."""
-    u = row["u_k_mps"]
-    v = row["v_k_mps"]
-    r = row["r_k_radps"]
-    delta = row["applied_steering_rad_k1"]
-    throttle = row["applied_throttle_norm_k1"]
+def _basis_values(u: float, v: float, r: float, delta: float,
+                  throttle: float, channel: str) -> tuple[list[str], np.ndarray]:
+    """Build a derivative basis from model state plus current inputs."""
 
     if channel == "u":
         # rv and lateral-state terms are retained because the body-frame
@@ -187,6 +190,14 @@ def _basis(row: dict[str, float], channel: str) -> tuple[list[str], np.ndarray]:
     else:
         raise ValueError(f"unknown model channel: {channel}")
     return list(names), np.asarray(values, dtype=float)
+
+
+def _basis(row: dict[str, float], channel: str) -> tuple[list[str], np.ndarray]:
+    """Return a basis for fitting from the measured current state."""
+    return _basis_values(
+        row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
+        row["applied_steering_rad_k1"],
+        row["applied_throttle_norm_k1"], channel)
 
 
 def _fit_robust_transition(
@@ -262,9 +273,15 @@ def _stats(errors: Iterable[float], actual: Iterable[float]) -> dict[str, object
     }
 
 
-def _channel_prediction(row: dict[str, float], channel: str,
-                        model: dict[str, object]) -> float:
-    _, values = _basis(row, channel)
+def _channel_prediction(state: np.ndarray, row: dict[str, float],
+                        channel: str, model: dict[str, object]) -> float:
+    # Recursive prediction is deliberately state-only. The transition row
+    # supplies timing and applied inputs; its future measured u/v/r fields are
+    # never allowed into this path.
+    _, values = _basis_values(
+        float(state[3]), float(state[4]), float(state[5]),
+        row["applied_steering_rad_k1"],
+        row["applied_throttle_norm_k1"], channel)
     coefficients = np.asarray(model["coefficients"], dtype=float)
     return float(row["dt_sim_s"] * values @ coefficients)
 
@@ -296,9 +313,9 @@ def _predict(state: np.ndarray, row: dict[str, float], models: dict[str, object]
     pose = _pose_step(state, row["dt_sim_s"])
     next_state = np.asarray([
         pose[0], pose[1], pose[2],
-        state[3] + _channel_prediction(row, "u", models["u"]),
-        state[4] + _channel_prediction(row, "v", models["v"]),
-        state[5] + _channel_prediction(row, "r", models["r"]),
+        state[3] + _channel_prediction(state, row, "u", models["u"]),
+        state[4] + _channel_prediction(state, row, "v", models["v"]),
+        state[5] + _channel_prediction(state, row, "r", models["r"]),
     ], dtype=float)
     return next_state
 
@@ -379,7 +396,7 @@ def _recursive_scores(
                 for key, value in row_errors.items():
                     errors[key].append(value)
                     actual[key].append(truth[truth_keys[key]])
-        output[f"{horizon:.2f}s"] = {
+        output[_horizon_key(horizon)] = {
             key: _stats(errors[key], actual[key]) for key in fields
         }
     return output
@@ -521,7 +538,7 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         actuator, validation_bridge)
 
     report: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "candidate_not_runtime_validated",
         "ground_truth_use": "offline_identification_and_scoring_only",
         "train_runs": list(train_names),
@@ -557,6 +574,7 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
             "two_percent_target": True,
             "required_horizons_s": list(HORIZONS_S),
             "recursive_open_loop_required": True,
+            "recursive_prediction_uses_future_gt": False,
             "repeatability_floor_required": True,
             "blind_run_required_after_model_freeze": True,
             "production_mpc_parameters_updated": False,

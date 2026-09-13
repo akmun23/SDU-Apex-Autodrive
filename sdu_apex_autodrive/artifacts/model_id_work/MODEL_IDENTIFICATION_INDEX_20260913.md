@@ -131,3 +131,45 @@ source-event recorder partitions are authoritative.
 
 Ground truth remains offline-only. No Unity simulator physics or behavior was
 changed during this cleanup.
+
+## Causal scoring and structured-plant phase
+
+The updated handoff identified future-state leakage in both previous
+recursive scorers. That is now fixed in `tools/model_id/fit_longitudinal_models.py`
+and `tools/model_id/fit_vehicle_model.py`. Recursive prediction consumes only
+the initialized state, applied inputs, and source `dt`; the required 25 ms and
+750 ms horizons are reported explicitly. Anti-leak regression tests are in
+`test/test_model_id_recursive_causality.py`.
+
+Versioned reports are stored under `model_fits_v2/` because the historical
+`model_fits/` directory is Docker-owned:
+
+- `longitudinal_model_benchmark_v2.json` is causal and reports approximately
+  0.83 m/s validation p95 at 0.50 s for the wheel-state candidate. The earlier
+  0.33 m/s result was GT-conditioned and is not accepted.
+- `vehicle_model_candidate_v3_true_open_loop.json` is causal and remains
+  rejected; at 0.50 s it reports approximately 0.375 m position, 1.05 m/s
+  `u`, 1.18 m/s `v`, and 0.77 rad/s yaw-rate p95.
+- `lateral_model_benchmark_v1.json` compares Y0 kinematic, Y1 saturated-linear,
+  and Y2 tanh candidates using 2 ms steering-ramp integration. Y1 is currently
+  the best candidate, but it does not meet the recursive precision gates.
+- `python_vs_c_parity.json` compares the same provisional Y1 plant equations
+  against `f1tenth_mpc/src/vehicle_plant.c`; four fixtures pass with maximum
+  absolute error approximately `1.3e-6`.
+
+`vehicle_plant.c` is an offline native replay target only. It is not wired into
+the production MPC and no MPC parameters or simulator behavior were changed.
+The next unresolved work is model improvement/relaxation analysis, native
+replay over the complete V4 dataset, observer replay, and a fresh untouched
+blind track run before production MPC integration.
+
+The lateral inertia question is now measured rather than assumed. The profile
+diagnostic in `model_fits_v2/lateral_identifiability_v1.json` refits tire
+stiffness while sweeping `I_z`; its optimum is at the upper profile bound
+`0.08 kg m^2` and the local sensitivity condition number is approximately
+`7,484`. This means `I_z` and tire stiffness are not separately identifiable
+under the current candidate and excitation. The value is therefore not a
+measurement of Unity's rigid-body inertia and must not be frozen into MPC.
+The wheel state follows the same rule: it is an effective causal drive state,
+not a claim that its fitted coefficients equal a real wheel's mechanical
+rotational model.

@@ -17,6 +17,7 @@ find_package(ament_cmake REQUIRED)
 # built in this package.
 add_library(mpc_core STATIC
   src/util_math.c
+  src/vehicle_plant.c
   src/vehicle_model.c
   src/riccati_solver.c
   src/mpc.c)
@@ -30,6 +31,10 @@ if(BUILD_TESTING)
   add_executable(vehicle_model_test test/test_vehicle_model.c)
   target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
   add_test(NAME vehicle_model_test COMMAND vehicle_model_test)
+
+  add_executable(vehicle_plant_test test/test_vehicle_plant.c)
+  target_link_libraries(vehicle_plant_test PRIVATE mpc_core m)
+  add_test(NAME vehicle_plant_test COMMAND vehicle_plant_test)
 endif()
 
 install(TARGETS mpc_core
