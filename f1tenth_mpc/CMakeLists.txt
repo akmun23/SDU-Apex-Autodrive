@@ -5,7 +5,9 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 if(NOT MSVC)
-  add_compile_options(-Wall -Wextra -Wpedantic -O3 -ffast-math)
+  # Keep IEEE floating-point behaviour during model and solver validation.
+  # In particular, the core deliberately checks for non-finite values.
+  add_compile_options(-Wall -Wextra -Wpedantic -O3)
 endif()
 
 find_package(ament_cmake REQUIRED)
@@ -22,6 +24,13 @@ target_include_directories(mpc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(mpc_core PUBLIC m)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(vehicle_model_test test/test_vehicle_model.c)
+  target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
+  add_test(NAME vehicle_model_test COMMAND vehicle_model_test)
+endif()
 
 install(TARGETS mpc_core
   ARCHIVE DESTINATION lib

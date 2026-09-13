@@ -4,7 +4,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    LogInfo,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
@@ -32,8 +37,10 @@ def _bool(value: str) -> bool:
 
 def _setup(context):
     controller = LaunchConfiguration("controller").perform(context).lower()
-    if controller not in ("ftg", "pure_pursuit", "mpc_shadow"):
-        raise RuntimeError("controller must be ftg, pure_pursuit, or mpc_shadow")
+    if controller not in ("ftg", "pure_pursuit"):
+        raise RuntimeError(
+            "controller must be ftg or pure_pursuit; MPC integration is not "
+            "available until the native-core ROS adapter is installed")
 
     map_path = LaunchConfiguration("map").perform(context)
     trajectory = LaunchConfiguration("trajectory").perform(context)
@@ -69,6 +76,8 @@ def _setup(context):
             )
         amcl_parameter_sources.append(amcl_override_path)
     actions = [
+        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
         # Pace commands independently of the official telemetry decoder so
         # the simulator is not throttled by camera/LIDAR ROS publication.
         Node(
@@ -280,29 +289,6 @@ def _setup(context):
             composable_node_descriptions=[component],
             output="screen",
         ))
-        if controller == "mpc_shadow":
-            # Pure Pursuit remains the sole /cmd/speed publisher.  The new
-            # MPC only consumes the authoritative legal control state and
-            # publishes diagnostics plus /mpc/shadow_command.
-            actions.extend([
-                Node(
-                    package="f1tenth_mpc",
-                    executable="control_state_node",
-                    name="mpc_control_state",
-                    output="screen",
-                    parameters=[LaunchConfiguration("mpc_params")],
-                ),
-                Node(
-                    package="f1tenth_mpc",
-                    executable="mpc_shadow_node",
-                    name="mpc_shadow",
-                    output="screen",
-                    parameters=[
-                        LaunchConfiguration("mpc_params"),
-                        {"trajectory_file": trajectory},
-                    ],
-                ),
-            ])
     actions.append(Node(
         package="sdu_apex_autodrive",
         executable="actuator_interface",
@@ -315,6 +301,7 @@ def _setup(context):
             {
                 "input_topic": "/cmd/speed",
                 "collision_reset_enabled": with_collision_safety,
+                "external_stop_topic": "/autodrive/roboracer_1/bridge_timing_fault",
             },
         ],
     ))
@@ -349,8 +336,8 @@ def generate_launch_description():
             "controller",
             default_value="pure_pursuit",
             description=(
-                "Controller to run: FTG, Pure Pursuit, or mpc_shadow. "
-                "mpc_shadow never publishes actuator commands."
+                "Controller to run: FTG or Pure Pursuit. MPC will be exposed "
+                "after its separate native-core ROS adapter is validated."
             ),
         ),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
@@ -548,12 +535,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "actuator_params",
             default_value=os.path.join(integration, "config", "actuator_interface.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "mpc_params",
-            default_value=os.path.join(
-                get_package_share_directory("f1tenth_mpc"), "config", "mpc_autodrive.yaml"),
-            description="Candidate model and shadow MPC parameters",
         ),
         DeclareLaunchArgument(
             "calibration_params",

@@ -29,6 +29,13 @@ from typing import Iterable
 
 import numpy as np
 
+# When invoked directly from the repository root, Python can otherwise see
+# the outer ROS package directory as a namespace package before it sees the
+# actual import package one level below it.
+_SOURCE_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "sdu_apex_autodrive"
+if _SOURCE_PACKAGE_ROOT.is_dir():
+    sys.path.insert(0, str(_SOURCE_PACKAGE_ROOT))
+
 try:
     from sdu_apex_autodrive.model_id_frames import (
         PacketFrameError,
@@ -47,6 +54,11 @@ except ModuleNotFoundError:
 
 
 MAX_STEERING_RAD = 0.5236
+# A 40 Hz source transition should be approximately 25 ms.  Keep the same
+# cadence window as the runtime bridge: a slow or over-rate stream must be
+# rejected rather than hidden by a median-rate calculation.
+MIN_SOURCE_TRANSITION_DT_S = 0.015
+MAX_SOURCE_TRANSITION_DT_S = 0.035
 
 
 def _read_packets(path: Path) -> list[dict[str, str]]:
@@ -232,7 +244,8 @@ def _kinematic_diagnostics(rows: list[dict[str, float]]) -> dict[str, object]:
     }
 
 
-def _transitions(rows: list[dict[str, float]], twist_frame: str) -> list[dict[str, float]]:
+def _transitions(rows: list[dict[str, float]], twist_frame: str,
+                 max_transition_dt_s: float) -> list[dict[str, float]]:
     output: list[dict[str, float]] = []
     if not rows:
         return output
@@ -242,7 +255,8 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str) -> list[dict[st
         current["yaw_unwrapped"] = _unwrap(previous["yaw_unwrapped"], current["yaw"])
         dt = current["time"] - previous["time"]
         step_delta = int(round(current["physics_step"] - previous["physics_step"]))
-        if not (dt > 1e-6 and step_delta > 0):
+        if not (MIN_SOURCE_TRANSITION_DT_S <= dt <= max_transition_dt_s and
+                step_delta > 0):
             continue
         u0, v0 = _body_velocity(previous, twist_frame)
         u1, v1 = _body_velocity(current, twist_frame)
@@ -328,6 +342,12 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         raise ValueError("not enough unique source packets")
     dt = np.diff([row["time"] for row in unique])
     positive_dt = dt[dt > 1e-6]
+    source_dt_gap_count = int(np.count_nonzero(
+        positive_dt > MAX_SOURCE_TRANSITION_DT_S))
+    source_dt_cadence_violation_count = int(np.count_nonzero(
+        (positive_dt < MIN_SOURCE_TRANSITION_DT_S) |
+        (positive_dt > MAX_SOURCE_TRANSITION_DT_S)))
+    source_dt_max = float(np.max(positive_dt)) if len(positive_dt) else None
     source_hz = 1.0 / float(np.median(positive_dt)) if len(positive_dt) else 0.0
     frame_errors = {frame: _frame_error(unique, frame) for frame in ("body", "world")}
     selected_frame = twist_frame
@@ -337,10 +357,12 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         # from the smallest residual.
         selected_frame = "body"
     kinematic_diagnostics = _kinematic_diagnostics(unique)
-    transitions = _transitions(unique, selected_frame)
+    transitions = _transitions(
+        unique, selected_frame, MAX_SOURCE_TRANSITION_DT_S)
     step_deltas = [int(round(row["physics_step_delta"])) for row in transitions]
     source_order_pass = counts["source_order_violations"] == 0
     timing_pass = (36.0 <= source_hz <= 44.0 and source_order_pass and
+                   source_dt_cadence_violation_count == 0 and
                    all(delta >= 1 for delta in step_deltas))
     kinematics_error = frame_errors[selected_frame]
     yaw_rate_stats = kinematic_diagnostics[
@@ -355,6 +377,10 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         gate_failures.append("source_order")
     if not timing_pass:
         gate_failures.append("source_rate")
+    if source_dt_gap_count:
+        gate_failures.append("source_time_gap")
+    if source_dt_cadence_violation_count:
+        gate_failures.append("source_cadence")
     if kinematics_error > max_kinematic_error_mps:
         gate_failures.append("position_velocity_consistency")
     if not yaw_rate_pass:
@@ -383,6 +409,11 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         "source_rate_hz_median": source_hz,
         "source_dt_s_median": float(np.median(positive_dt)) if len(positive_dt) else None,
         "source_dt_s_p95": float(np.percentile(positive_dt, 95)) if len(positive_dt) else None,
+        "source_dt_s_max": source_dt_max,
+        "source_dt_gap_count": source_dt_gap_count,
+        "source_dt_cadence_violation_count": source_dt_cadence_violation_count,
+        "minimum_allowed_source_transition_dt_s": MIN_SOURCE_TRANSITION_DT_S,
+        "maximum_allowed_source_transition_dt_s": MAX_SOURCE_TRANSITION_DT_S,
         "physics_step_delta_min": min(step_deltas, default=None),
         "physics_step_delta_max": max(step_deltas, default=None),
         "twist_frame_selected": selected_frame,
@@ -416,6 +447,9 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
             "pass": timing_pass,
             "allow_non_target_rate": allow_non_target_rate,
             "raw_rows_are_never_upsampled": True,
+            "source_cadence_window_s": [
+                MIN_SOURCE_TRANSITION_DT_S, MAX_SOURCE_TRANSITION_DT_S],
+            "source_cadence_violations_rejected": True,
         },
         "quality_gate_pass": timing_pass and kinematics_pass,
         "model_boundary": "applied_throttle_to_body_u",
@@ -425,7 +459,9 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
                 "current_packet_applied_command_generates_previous_to_current"
             ),
             "required_control_field": "applied_command_sequence_k1",
-            "ambiguous_transitions_discarded": len(transitions) < len(step_deltas),
+            "ambiguous_transitions_discarded": False,
+            "timing_gap_transitions_discarded": (
+                len(unique) - 1 - len(transitions)),
         },
         "ground_truth_use": "offline_transition_target_only",
     }

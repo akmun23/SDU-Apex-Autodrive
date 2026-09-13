@@ -1,0 +1,1141 @@
+{
+  "schema_version": 1,
+  "source_contract": {
+    "expected_rate_hz": 40.0,
+    "source_dt_window_s": [
+      0.015,
+      0.035
+    ],
+    "accepted_run_count": 5,
+    "all_runs_have_no_source_dt_violations": true,
+    "all_runs_have_no_timing_fault": true
+  },
+  "alignment": {
+    "method": "relative simulator source time with linear comparison interpolation",
+    "raw_packets_unchanged": true,
+    "common_horizon_s": 21.099,
+    "report_horizons_s": [
+      0.0,
+      0.025,
+      0.05,
+      0.1,
+      0.2,
+      0.5,
+      1.0,
+      2.0,
+      5.0,
+      8.0
+    ]
+  },
+  "timing_and_frame": [
+    {
+      "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run01_40hz_20260913",
+      "packet_count": 845,
+      "source_duration_s": 21.101000000000003,
+      "source_dt_s": {
+        "count": 844,
+        "max": 0.027999900000001077,
+        "median": 0.02499999999999858,
+        "p95": 0.026000031000000017
+      },
+      "source_dt_out_of_window_count": 0,
+      "bridge_timing_fault_count": 0,
+      "physics_step_delta": {
+        "count": 844,
+        "max": 28,
+        "median": 25.0,
+        "p95": 26.0
+      },
+      "render_frame_delta": {
+        "count": 844,
+        "max": 145,
+        "median": 123.0,
+        "p95": 138.0
+      },
+      "telemetry_sequence_reverse_or_duplicate_count": 0,
+      "bridge_timing_report": {
+        "applied_command_present_count": 845,
+        "bridge_packet_count": 845,
+        "duration_wall_s": 23.331458015,
+        "event_count": 7708,
+        "physics_step_delta": {
+          "count": 844,
+          "max": 28,
+          "mean": 25.001184834123222,
+          "min": 23
+        },
+        "physics_step_present_count": 845,
+        "request_sequence": {
+          "count": 845,
+          "first": 5,
+          "gaps": 0,
+          "last": 849
+        },
+        "request_to_applied_command_lag": {
+          "count": 845,
+          "max": 1,
+          "mean": 1.0,
+          "min": 1
+        },
+        "schema_version": 1,
+        "source_duplicate_or_reverse_count": 0,
+        "source_gaps_over_30ms": 0,
+        "source_time_s": {
+          "count": 844,
+          "max": 0.027999900000001077,
+          "mean": 0.025001184834123225,
+          "min": 0.022998300000001137
+        }
+      }
+    },
+    {
+      "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run02_40hz_20260913",
+      "packet_count": 847,
+      "source_duration_s": 21.148001895,
+      "source_dt_s": {
+        "count": 846,
+        "max": 0.027999999999998693,
+        "median": 0.02499999999999858,
+        "p95": 0.026000099999999193
+      },
+      "source_dt_out_of_window_count": 0,
+      "bridge_timing_fault_count": 0,
+      "physics_step_delta": {
+        "count": 846,
+        "max": 28,
+        "median": 25.0,
+        "p95": 26.0
+      },
+      "render_frame_delta": {
+        "count": 846,
+        "max": 153,
+        "median": 125.0,
+        "p95": 142.0
+      },
+      "telemetry_sequence_reverse_or_duplicate_count": 0,
+      "bridge_timing_report": {
+        "applied_command_present_count": 847,
+        "bridge_packet_count": 847,
+        "duration_wall_s": 29.782326437,
+        "event_count": 8045,
+        "physics_step_delta": {
+          "count": 846,
+          "max": 28,
+          "mean": 24.997635933806148,
+          "min": 22
+        },
+        "physics_step_present_count": 847,
+        "request_sequence": {
+          "count": 847,
+          "first": 5,
+          "gaps": 0,
+          "last": 851
+        },
+        "request_to_applied_command_lag": {
+          "count": 847,
+          "max": 1,
+          "mean": 1.0,
+          "min": 1
+        },
+        "schema_version": 1,
+        "source_duplicate_or_reverse_count": 0,
+        "source_gaps_over_30ms": 0,
+        "source_time_s": {
+          "count": 846,
+          "max": 0.027999999999998693,
+          "mean": 0.024997638173758864,
+          "min": 0.021999839999999438
+        }
+      }
+    },
+    {
+      "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run03_40hz_20260913",
+      "packet_count": 848,
+      "source_duration_s": 21.1750012957,
+      "source_dt_s": {
+        "count": 847,
+        "max": 0.028000000000002245,
+        "median": 0.02499999999999858,
+        "p95": 0.026000099999999193
+      },
+      "source_dt_out_of_window_count": 0,
+      "bridge_timing_fault_count": 0,
+      "physics_step_delta": {
+        "count": 847,
+        "max": 28,
+        "median": 25,
+        "p95": 26.0
+      },
+      "render_frame_delta": {
+        "count": 847,
+        "max": 146,
+        "median": 111,
+        "p95": 128.69999999999993
+      },
+      "telemetry_sequence_reverse_or_duplicate_count": 0,
+      "bridge_timing_report": {
+        "applied_command_present_count": 848,
+        "bridge_packet_count": 848,
+        "duration_wall_s": 29.828258094,
+        "event_count": 8054,
+        "physics_step_delta": {
+          "count": 847,
+          "max": 28,
+          "mean": 25.0,
+          "min": 21
+        },
+        "physics_step_present_count": 848,
+        "request_sequence": {
+          "count": 848,
+          "first": 4,
+          "gaps": 0,
+          "last": 851
+        },
+        "request_to_applied_command_lag": {
+          "count": 848,
+          "max": 1,
+          "mean": 1.0,
+          "min": 1
+        },
+        "schema_version": 1,
+        "source_duplicate_or_reverse_count": 0,
+        "source_gaps_over_30ms": 0,
+        "source_time_s": {
+          "count": 847,
+          "max": 0.028000000000002245,
+          "mean": 0.025000001529752066,
+          "min": 0.021000000000000796
+        }
+      }
+    },
+    {
+      "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run04_40hz_20260913",
+      "packet_count": 846,
+      "source_duration_s": 21.125,
+      "source_dt_s": {
+        "count": 845,
+        "max": 0.027000799999999714,
+        "median": 0.024999999999999467,
+        "p95": 0.026000099999999193
+      },
+      "source_dt_out_of_window_count": 0,
+      "bridge_timing_fault_count": 0,
+      "physics_step_delta": {
+        "count": 845,
+        "max": 27,
+        "median": 25,
+        "p95": 26.0
+      },
+      "render_frame_delta": {
+        "count": 845,
+        "max": 151,
+        "median": 109,
+        "p95": 128.0
+      },
+      "telemetry_sequence_reverse_or_duplicate_count": 0,
+      "bridge_timing_report": {
+        "applied_command_present_count": 846,
+        "bridge_packet_count": 846,
+        "duration_wall_s": 29.866030578,
+        "event_count": 8039,
+        "physics_step_delta": {
+          "count": 845,
+          "max": 27,
+          "mean": 25.0,
+          "min": 22
+        },
+        "physics_step_present_count": 846,
+        "request_sequence": {
+          "count": 846,
+          "first": 8,
+          "gaps": 0,
+          "last": 853
+        },
+        "request_to_applied_command_lag": {
+          "count": 846,
+          "max": 2,
+          "mean": 2.0,
+          "min": 2
+        },
+        "schema_version": 1,
+        "source_duplicate_or_reverse_count": 0,
+        "source_gaps_over_30ms": 0,
+        "source_time_s": {
+          "count": 845,
+          "max": 0.027000799999999714,
+          "mean": 0.025,
+          "min": 0.022000300000000195
+        }
+      }
+    },
+    {
+      "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run05_40hz_20260913",
+      "packet_count": 845,
+      "source_duration_s": 21.099,
+      "source_dt_s": {
+        "count": 844,
+        "max": 0.027001000000000275,
+        "median": 0.02499999999999858,
+        "p95": 0.026000020000000568
+      },
+      "source_dt_out_of_window_count": 0,
+      "bridge_timing_fault_count": 0,
+      "physics_step_delta": {
+        "count": 844,
+        "max": 27,
+        "median": 25.0,
+        "p95": 26.0
+      },
+      "render_frame_delta": {
+        "count": 844,
+        "max": 137,
+        "median": 85.0,
+        "p95": 114.0
+      },
+      "telemetry_sequence_reverse_or_duplicate_count": 0,
+      "bridge_timing_report": {
+        "applied_command_present_count": 845,
+        "bridge_packet_count": 845,
+        "duration_wall_s": 29.403476032,
+        "event_count": 8008,
+        "physics_step_delta": {
+          "count": 844,
+          "max": 27,
+          "mean": 24.998815165876778,
+          "min": 23
+        },
+        "physics_step_present_count": 845,
+        "request_sequence": {
+          "count": 845,
+          "first": 6,
+          "gaps": 0,
+          "last": 850
+        },
+        "request_to_applied_command_lag": {
+          "count": 845,
+          "max": 1,
+          "mean": 1.0,
+          "min": 1
+        },
+        "schema_version": 1,
+        "source_duplicate_or_reverse_count": 0,
+        "source_gaps_over_30ms": 0,
+        "source_time_s": {
+          "count": 844,
+          "max": 0.027001000000000275,
+          "mean": 0.024998815165876778,
+          "min": 0.022999549999999758
+        }
+      }
+    }
+  ],
+  "collision_count_by_run": {
+    "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run01_40hz_20260913": null,
+    "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run02_40hz_20260913": null,
+    "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run03_40hz_20260913": null,
+    "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run04_40hz_20260913": null,
+    "sdu_apex_autodrive/artifacts/model_id_work/accepted/40_steering_replay_run05_40hz_20260913": null
+  },
+  "per_state_max_median_p95_difference_by_horizon": {
+    "0.000": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.0047999999999999154,
+        "median": 0.00029999999999996696,
+        "p95": 0.0047999999999999154
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.001100000000000101,
+        "median": 0.0003500000000000725,
+        "p95": 0.0010550000000002055
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.052199999999999996,
+        "median": 0.025999999999999995,
+        "p95": 0.05211
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.0702,
+        "median": 0.0655,
+        "p95": 0.0702
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0002,
+        "median": 0.0002,
+        "p95": 0.0002
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.7767,
+        "median": 0.38835,
+        "p95": 0.7630649999999999
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 0.0023,
+        "median": 0.0021,
+        "p95": 0.0023
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.8633,
+        "median": 0.8014,
+        "p95": 0.8633
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.0068,
+        "median": 0.0066,
+        "p95": 0.0068
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.0068,
+        "median": 0.0066,
+        "p95": 0.0068
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      }
+    },
+    "0.025": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.0046999999999999265,
+        "median": 0.00019999999999997797,
+        "p95": 0.004699999992259918
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.00139999978720029,
+        "median": 0.0006673074787209021,
+        "p95": 0.0012874998520003176
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.032299994374400426,
+        "median": 0.005980766774086453,
+        "p95": 0.03228268655766915
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.1277999526376174,
+        "median": 0.025519208955434483,
+        "p95": 0.12419995364004073
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0001999999266608696,
+        "median": 9.615378435385907e-05,
+        "p95": 0.0001999999174808812
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.958699856950042,
+        "median": 0.6338805487052662,
+        "p95": 0.9529052290375417
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 0.0020999990891130437,
+        "median": 0.0012519222490979596,
+        "p95": 0.0020601912389226294
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 1.7003993422697394,
+        "median": 0.3049650924614311,
+        "p95": 1.6635893720579813
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 1.7200000007600022e-11,
+        "median": 0.0,
+        "p95": 1.7200000007600022e-11
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 9.999996400000821e-05,
+        "median": 9.615380547345342e-05,
+        "p95": 9.999996400000821e-05
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.009299998515200322,
+        "median": 0.004598076081490764,
+        "p95": 0.009253267656701866
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.009299998515200322,
+        "median": 0.004598076081490764,
+        "p95": 0.009253267656701866
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 9.999996400000821e-05,
+        "median": 9.615380547345342e-05,
+        "p95": 9.999996400000821e-05
+      }
+    },
+    "0.050": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.0046999999999998154,
+        "median": 0.00019999999999986695,
+        "p95": 0.00465499999999987
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.001176000190560078,
+        "median": 0.0006499999991662619,
+        "p95": 0.0011418000004081996
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.007999998127400154,
+        "median": 0.002123998749940355,
+        "p95": 0.007999998116150184
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.13009997663480072,
+        "median": 0.024014021562329832,
+        "p95": 0.13005497663705062
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.00029999996560000004,
+        "median": 9.199998352000726e-05,
+        "p95": 0.00029999996560000004
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.8347998499356043,
+        "median": 0.06284597190001831,
+        "p95": 0.8346648499232288
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 0.0035999993762000216,
+        "median": 0.00073599971566009,
+        "p95": 0.003599999351450032
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 1.8666996672520086,
+        "median": 0.12581992289922578,
+        "p95": 1.8665196672520072
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 9.999998280000002e-05,
+        "median": 0.0,
+        "p95": 9.999998280000002e-05
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 9.99999666666529e-05,
+        "p95": 9.999999999998899e-05
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.006199998856800042,
+        "median": 0.0007159998492100219,
+        "p95": 0.006199998853425037
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.006299998796800058,
+        "median": 0.0008079997714800415,
+        "p95": 0.006299998792300051
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 9.99999580666433e-05,
+        "p95": 9.999999999998899e-05
+      }
+    },
+    "0.100": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.0046999999999999265,
+        "median": 0.00019999999999997797,
+        "p95": 0.004654999999999981
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.008675001749999467,
+        "median": 0.004944230230277347,
+        "p95": 0.007955002095599293
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.0034499996138463718,
+        "median": 0.0010416657084447375,
+        "p95": 0.0032699996264464685
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.30772534532588575,
+        "median": 0.1395865665414187,
+        "p95": 0.2908925923300381
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.02437307535284207,
+        "median": 0.006099994129668572,
+        "p95": 0.02315807536454266
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 9.999990000001649e-05,
+        "median": 2.710505431213761e-20,
+        "p95": 9.999990000001649e-05
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.12268072040996711,
+        "median": 0.007156198855601488,
+        "p95": 0.1209257444084558
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 9.61538440829024e-05,
+        "p95": 9.999999999998899e-05
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.001732692376074891,
+        "median": 0.0009846154413312687,
+        "p95": 0.0015942309673411198
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.001732692376074891,
+        "median": 0.000984615489331246,
+        "p95": 0.0015942309889411094
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 9.61538440829024e-05,
+        "p95": 9.999999999998899e-05
+      }
+    },
+    "0.200": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.0048000000000000265,
+        "median": 0.00019999999999997797,
+        "p95": 0.004755000000000032
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.06669997971249053,
+        "median": 0.02196481873140388,
+        "p95": 0.06422498884186975
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.0036384614516864755,
+        "median": 0.0005987183244125643,
+        "p95": 0.0034857046556279543
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.840203408543022,
+        "median": 0.1579387208452102,
+        "p95": 0.8235553362482804
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.021634614839172173,
+        "median": 0.003907017495533625,
+        "p95": 0.02117621524278291
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 9.61538337574097e-05,
+        "median": 8.858613736598849e-05,
+        "p95": 9.600965083221964e-05
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.07350542056217142,
+        "median": 0.010878014212743547,
+        "p95": 0.06973509661571212
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 0.0,
+        "p95": 9.999999999998899e-05
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.00461634588447163,
+        "median": 0.0008506948179617794,
+        "p95": 0.004520721011268563
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.004520512457214642,
+        "median": 0.0007527781043332855,
+        "p95": 0.004423012626277219
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 0.0,
+        "p95": 9.999999999998899e-05
+      }
+    },
+    "0.500": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.0049000000000000155,
+        "median": 0.00019999999999997797,
+        "p95": 0.004855000000000021
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.5211439158074733,
+        "median": 0.06787202676919901,
+        "p95": 0.5137891525408522
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.0024999996579998934,
+        "median": 9.999987199987848e-05,
+        "p95": 0.002460399592839717
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 1.8282357324624443,
+        "median": 0.16036803172875214,
+        "p95": 1.8074746427227004
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.010699998272799485,
+        "median": 0.0013599965879954445,
+        "p95": 0.010699998157599373
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 1.2800012281211083e-10,
+        "median": 1.719997257091064e-11,
+        "p95": 1.2800012281211083e-10
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.06299999627600036,
+        "median": 0.016355962465537166,
+        "p95": 0.059310002208806056
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 1.1102230246251565e-16,
+        "median": 0.0,
+        "p95": 1.1102230246251565e-16
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.004815999362399312,
+        "median": 0.00026599959359926875,
+        "p95": 0.004763799602879695
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.004719999228799097,
+        "median": 0.00020999992199971138,
+        "p95": 0.0047109995293995776
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 1.1102230246251565e-16,
+        "median": 0.0,
+        "p95": 1.1102230246251565e-16
+      }
+    },
+    "1.000": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.005199999999999982,
+        "median": 0.00024999999999997247,
+        "p95": 0.005110000000000042
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 1.0720279808364235,
+        "median": 0.09012999672201172,
+        "p95": 1.062550983786613
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.0024959999396000423,
+        "median": 0.00010399999560001261,
+        "p95": 0.002492399943560027
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.05713199626760046,
+        "median": 0.0002079999911999142,
+        "p95": 0.05704545807233334
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.04509999900840042,
+        "median": 0.0015519999428002043,
+        "p95": 0.044963199059880235
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.046564000228000654,
+        "median": 0.0027839999076003305,
+        "p95": 0.04630840031116036
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.005383999888000033,
+        "median": 0.00025399999560001604,
+        "p95": 0.005335399891960019
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.005383999888000033,
+        "median": 0.00025399999560001604,
+        "p95": 0.005335399891960019
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 0.0,
+        "p95": 9.999999999998899e-05
+      }
+    },
+    "2.000": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.005600000000000049,
+        "median": 0.0001576922855029972,
+        "p95": 0.005555000000000055
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 1.074454352561612,
+        "median": 0.09003845295122903,
+        "p95": 1.0649905141362743
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.00010000000000021103,
+        "median": 0.0,
+        "p95": 0.00010000000000021103
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.0003000007027949281,
+        "median": 1.3877787807814457e-17,
+        "p95": 0.0003000007027949281
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 0.0001,
+        "median": 0.0,
+        "p95": 0.0001
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.0006000007027949393,
+        "median": 0.0,
+        "p95": 0.0006000007027949393
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 9.999999999998899e-05,
+        "median": 9.61538461538014e-05,
+        "p95": 9.999999999998899e-05
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 9.99999999999994e-05,
+        "median": 0.0,
+        "p95": 9.99999999999994e-05
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 9.99999999999994e-05,
+        "median": 0.0,
+        "p95": 9.99999999999994e-05
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      }
+    },
+    "5.000": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.8967399895493204,
+        "median": 0.06845916364453464,
+        "p95": 0.895136593814513
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.6032329498589366,
+        "median": 0.07909714103243815,
+        "p95": 0.5768948444610414
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 4.440892098500626e-16,
+        "median": 0.0,
+        "p95": 4.440892098500626e-16
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.0,
+        "median": 0.0,
+        "p95": 0.0
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.00010000000000000286,
+        "median": 9.583450867223231e-05,
+        "p95": 0.00010000000000000286
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 9.99999999999994e-05,
+        "median": 4.082745663887277e-06,
+        "p95": 9.826924674541347e-05
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.00019615284319573524,
+        "median": 9.615387230882183e-05,
+        "p95": 0.0001941346542553261
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 5.551115123125783e-17,
+        "median": 0.0,
+        "p95": 5.551115123125783e-17
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 0.02144999923934099,
+        "median": 0.0013470143076833585,
+        "p95": 0.021447299447031373
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.0009038461183435258,
+        "median": 0.00010176337267963839,
+        "p95": 0.0009003153650889388
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.0008000000000000004,
+        "median": 9.799999999999913e-05,
+        "p95": 0.0007982000000000002
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 0.07772692004750256,
+        "median": 0.005551520721856884,
+        "p95": 0.07765900560548197
+      }
+    },
+    "8.000": {
+      "simulator_position_x": {
+        "count": 10,
+        "max": 0.8355042723717006,
+        "median": 0.0607740838136408,
+        "p95": 0.8347176274500026
+      },
+      "simulator_position_y": {
+        "count": 10,
+        "max": 0.6954474093437781,
+        "median": 0.05463115687480524,
+        "p95": 0.6904488396205399
+      },
+      "simulator_position_z": {
+        "count": 10,
+        "max": 1.3877787807814457e-17,
+        "median": 6.938893903907228e-18,
+        "p95": 1.0755285551056197e-17
+      },
+      "simulator_linear_velocity_x": {
+        "count": 10,
+        "max": 0.0026641299803986662,
+        "median": 0.0,
+        "p95": 0.0026641299803986662
+      },
+      "simulator_linear_velocity_y": {
+        "count": 10,
+        "max": 0.06697831670946906,
+        "median": 0.00010000199992001718,
+        "p95": 0.06697831483446906
+      },
+      "simulator_linear_velocity_z": {
+        "count": 10,
+        "max": 0.00039600382295292,
+        "median": 9.999600016000199e-05,
+        "p95": 0.00039600382295292
+      },
+      "simulator_angular_velocity_x": {
+        "count": 10,
+        "max": 0.009376349809491364,
+        "median": 0.001779171027725392,
+        "p95": 0.009032551131869262
+      },
+      "simulator_angular_velocity_y": {
+        "count": 10,
+        "max": 0.005432156397355944,
+        "median": 0.00019599967348693775,
+        "p95": 0.005387158272355941
+      },
+      "simulator_angular_velocity_z": {
+        "count": 10,
+        "max": 0.4427936125209859,
+        "median": 3.999840014756728e-09,
+        "p95": 0.44279361072105794
+      },
+      "simulator_orientation_quaternion_w": {
+        "count": 10,
+        "max": 0.026575952104384126,
+        "median": 0.004166661611075262,
+        "p95": 0.025841554602209035
+      },
+      "simulator_orientation_quaternion_x": {
+        "count": 10,
+        "max": 0.00414804969838795,
+        "median": 0.00010000000000000005,
+        "p95": 0.004103049698387949
+      },
+      "simulator_orientation_quaternion_y": {
+        "count": 10,
+        "max": 0.0014880114688587565,
+        "median": 9.99999999999994e-05,
+        "p95": 0.0014880114688587565
+      },
+      "simulator_orientation_quaternion_z": {
+        "count": 10,
+        "max": 0.10317590184487394,
+        "median": 0.013489581930541839,
+        "p95": 0.10080170257300311
+      }
+    }
+  }
+}

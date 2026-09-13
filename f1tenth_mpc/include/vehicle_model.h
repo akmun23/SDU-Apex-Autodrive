@@ -3,8 +3,8 @@
  * @brief Dynamic nonlinear bicycle model for F1/10th vehicle.
  *
  * Provides vehicle dynamics prediction for Model Predictive Control.
- * Uses the dynamic bicycle model with linear tire forces and wheel
- * dynamics, appropriate for high-speed autonomous vehicles like F1/10th.
+ * Uses the dynamic bicycle model with one shared nonlinear lateral-force law
+ * for global rollout, Frenet rollout, and linearization.
  *
  * State vector (6 states): [x, y, psi, v_x, v_y, omega]
  *   x, y       = position in world frame [meters]
@@ -28,10 +28,7 @@
  * Longitudinal force: F_x = m * a_cmd (direct acceleration input)
  *
  * Tire model:
- *   Prediction uses a linear model:
- *     F_yf = mu * C_Sf * alpha_f * F_zf
- *     F_yr = mu * C_Sr * alpha_r * F_zr
- *   Linearization uses a Pacejka-like model for tire force saturation.
+ *   Both rollout and linearization use the shared Pacejka-like force law.
  *
  * Discretization:
  *   - Pose states (x, y, psi): analytical SE(2) integration of constant body twist
@@ -84,6 +81,56 @@ void vehicle_model_compute_normal_loads(
     float *front_normal_load,
     float *rear_normal_load);
 
+/**
+ * @brief Return the calibrated default physical model parameters.
+ */
+VehicleParameters_t vehicle_model_default_parameters(void);
+
+/**
+ * @brief Read the active physical model parameters.
+ */
+VehicleParameters_t vehicle_model_get_parameters(void);
+
+/**
+ * @brief Replace the active physical model parameters.
+ *
+ * Invalid or non-positive values are rejected as a whole; this keeps a
+ * partially initialized parameter set from silently reaching the solver.
+ */
+int vehicle_model_set_parameters(const VehicleParameters_t *parameters);
+
+/**
+ * @brief Body-dynamics terms shared by every vehicle-model path.
+ *
+ * The structure is observable for native replay tests: it makes it possible
+ * to verify that nonlinear rollout and linearization use the same slip angles,
+ * loads, and tire forces.
+ */
+typedef struct
+{
+    SlipTerms_t slip_terms;
+    float longitudinal_force;
+    float front_normal_load;
+    float rear_normal_load;
+    float front_lateral_force;
+    float rear_lateral_force;
+    float long_acceleration;
+    float lateral_acceleration;
+    float yaw_acceleration;
+} VehicleBodyDynamics_t;
+
+/**
+ * @brief Evaluate the authoritative body dynamics at one state/control point.
+ * @param current_state Current vehicle state; only body velocity components
+ *                      are used.
+ * @param control_input Steering and longitudinal model input.
+ * @param dynamics Output force and derivative terms.
+ */
+void vehicle_model_compute_body_dynamics(
+    const VehicleState_t *current_state,
+    const ControlInput_t *control_input,
+    VehicleBodyDynamics_t *dynamics);
+
 /*===========================================================================
  * Control Input Saturation
  *===========================================================================*/
@@ -110,7 +157,7 @@ ControlInput_t vehicle_model_saturate_control(const ControlInput_t *raw_control)
  * Uses analytical pose integration for (x, y, psi) with constant body twist
  * over the step, and Forward Euler for body dynamic states (v_x, v_y, omega).
  *
- * Includes tire force computation using linear tire model.
+ * Includes the shared nonlinear tire-force computation.
  * The control input is automatically saturated to physical limits.
  *
  * @param current_state   Current vehicle state (6 states)
@@ -122,6 +169,19 @@ VehicleState_t vehicle_model_predict_next_state(
     const VehicleState_t *current_state,
     const ControlInput_t *control_input,
     float time_step);
+
+/**
+ * @brief Predict the next Frenet state using the shared body dynamics.
+ *
+ * This nonlinear rollout is used to form the affine term of the MPC
+ * linearization. Keeping it in the model module prevents a second force law
+ * from drifting inside the controller implementation.
+ */
+FrenetState_t vehicle_model_predict_next_frenet_state(
+    const FrenetState_t *state,
+    const ControlInput_t *control,
+    float time_step,
+    float path_curvature);
 
 /*===========================================================================
  * Trajectory Prediction (Multiple Steps)

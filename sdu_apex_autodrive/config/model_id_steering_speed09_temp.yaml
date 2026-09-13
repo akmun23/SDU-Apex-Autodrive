@@ -1,0 +1,31 @@
+model_id_excitation:
+  ros__parameters:
+    mode: identification_grid
+    sample_rate_hz: 50.0
+    grid_speed_sequence_mps: [0.0]
+    grid_base_throttle_sequence: [0.0]
+    grid_throttle_sequence: [0.0]
+    grid_steering_enabled: true
+    grid_steering_speed_sequence_mps: [9.0]
+    grid_steering_base_throttle_sequence: [0.25]
+    grid_steering_sequence: [-0.25, 0.25, 0.0]
+    grid_steering_hold_sec: 1.5
+    steering_test_throttle: 0.25
+    grid_base_hold_sec: 1.0
+    grid_step_hold_sec: 1.0
+    hold_sec: 2.0
+    zero_settle_sec: 1.0
+    grid_brake_timeout_sec: 30.0
+    throttle_settle_speed_rate_mps2: 0.50
+    throttle_settle_stable_sec: 0.50
+    throttle_settle_timeout_sec: 20.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    reset_signal_hold_sec: 0.20
+    reset_min_subscribers: 2
+    reset_zero_odom_stable_sec: 0.75
+    reset_confirmation_timeout_sec: 20.0
+    ground_truth_boundary_distance_m: 450.0

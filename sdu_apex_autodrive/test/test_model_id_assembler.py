@@ -11,7 +11,8 @@ _ASSEMBLER = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_ASSEMBLER)
 
 
-def _write_packets(path, count=12, reverse_index=None):
+def _write_packets(path, count=12, reverse_index=None, time_gap_index=None,
+                   time_step_s=0.025):
     fields = [
         "simulation_time_s", "simulation_physics_step", "simulation_render_frame",
         "simulator_position_x", "simulator_position_y", "simulator_position_z",
@@ -32,8 +33,11 @@ def _write_packets(path, count=12, reverse_index=None):
             step = index - 1
         else:
             step = index
+        source_time = index * time_step_s
+        if time_gap_index is not None and index > time_gap_index:
+            source_time += 1.0
         rows.append({
-            "simulation_time_s": index * 0.025,
+            "simulation_time_s": source_time,
             "simulation_physics_step": step,
             "simulation_render_frame": index,
             "simulator_position_x": index * 0.05,
@@ -90,3 +94,26 @@ def test_assembler_rejects_source_order_violation(tmp_path):
     assert report["status"] == "rejected_source_order"
     assert report["quality_gate_pass"] is False
     assert "source_order" in report["quality_gate_failures"]
+
+
+def test_assembler_rejects_long_source_time_gap(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_packets(run_dir / "simulator_packets.csv", time_gap_index=6)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    assert report["status"] == "rejected_non_target_source_rate"
+    assert report["quality_gate_pass"] is False
+    assert report["source_dt_gap_count"] == 1
+    assert report["source_dt_s_max"] == pytest.approx(1.025)
+    assert report["transition_schema"]["timing_gap_transitions_discarded"] == 1
+    assert "source_time_gap" in report["quality_gate_failures"]
+
+
+def test_assembler_rejects_ten_hz_source_cadence(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_packets(run_dir / "simulator_packets.csv", time_step_s=0.1)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    assert report["quality_gate_pass"] is False
+    assert report["source_dt_cadence_violation_count"] == 11
+    assert "source_cadence" in report["quality_gate_failures"]

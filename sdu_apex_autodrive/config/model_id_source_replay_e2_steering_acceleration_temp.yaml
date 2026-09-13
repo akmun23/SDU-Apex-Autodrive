@@ -1,0 +1,15 @@
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    # E2: steering steps at a fixed accelerating input. Every phase length is
+    # a count of fresh simulator source packets.
+    replay_throttle_sequence: [0.0, 0.25, 0.50, 0.50, 0.50, 0.50, 0.0]
+    replay_steering_sequence: [0.0, 0.0, 0.0, 0.15, -0.15, 0.0, 0.0]
+    replay_phase_steps: [80, 160, 160, 160, 160, 160, 120]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: false

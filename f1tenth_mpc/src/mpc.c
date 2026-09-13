@@ -40,9 +40,8 @@ typedef struct
 } SteeringDynamicsCoefficients_t;
 
 static inline SteeringDynamicsCoefficients_t
-steering_dynamics_coefficients(float dt_seconds)
+steering_dynamics_coefficients(float dt_seconds, float tau)
 {
-    const float tau = STEERING_EFFECTIVE_TIME_CONSTANT_SECONDS;
     const float retention = expf(-dt_seconds / tau);
     const float command_gain = 1.0f - retention;
     SteeringDynamicsCoefficients_t coefficients;
@@ -203,10 +202,13 @@ static int warm_start_prev_model_signature = MPC_MODEL_SIGNATURE;
 
 static void refresh_steering_dynamics(void)
 {
+    const VehicleParameters_t parameters = vehicle_model_get_parameters();
     control_steering_dynamics =
-        steering_dynamics_coefficients(control_dt_seconds);
+        steering_dynamics_coefficients(
+            control_dt_seconds, parameters.steering_time_constant_seconds);
     prediction_steering_dynamics =
-        steering_dynamics_coefficients(config.time_step);
+        steering_dynamics_coefficients(
+            config.time_step, parameters.steering_time_constant_seconds);
 }
 
 static void reset_steering_state(void)
@@ -225,76 +227,9 @@ static FrenetState_t mpc_predict_frenet_next_state(
     float path_curvature,
     float v_ref)
 {
-    FrenetState_t next = *state;
-    const float vx = state->flong_vel;
-    const float vy = state->flat_vel;
-    const float omega = state->fyaw_rate;
-    const float delta = control->steer_ang;
-    const float a_cmd = control->long_acc;
-
-    const float cos_delta = cosf(delta);
-    const float sin_delta = sinf(delta);
-
-    SlipTerms_t slip_terms;
-    vehicle_model_compute_slip_terms(vx, vy, omega, delta, &slip_terms);
-
-    const float Fx = VP_MASS_KG * a_cmd;
-
-    float F_zf;
-    float F_zr;
-    vehicle_model_compute_normal_loads(Fx, &F_zf, &F_zr);
-
-    float C_Sf_Fzf;
-    float C_Sr_Fzr;
-    float F_yf;
-    float F_yr;
-    vehicle_model_compute_effective_lateral_stiffness(
-        1u,
-        F_zf,
-        slip_terms.alpha_front,
-        &C_Sf_Fzf,
-        &F_yf);
-    vehicle_model_compute_effective_lateral_stiffness(
-        0u,
-        F_zr,
-        slip_terms.alpha_rear,
-        &C_Sr_Fzr,
-        &F_yr);
-
-    const float dvx_dt = (Fx - F_yf * sin_delta) * VP_INV_MASS_1_PER_KG + vy * omega;
-    const float dvy_dt = (F_yf * cos_delta + F_yr) * VP_INV_MASS_1_PER_KG - vx * omega;
-    const float domega_dt =
-        (VP_CG_TO_FRONT_AXLE_M * F_yf * cos_delta - VP_CG_TO_REAR_AXLE_M * F_yr) *
-        VP_INV_YAW_INERTIA_1_PER_KGM2;
-
-    float ey_denom = 1.0f - path_curvature * state->flat_error;
-    if (fabsf(ey_denom) < 1e-3f)
-        ey_denom = (ey_denom >= 0.0f) ? 1e-3f : -1e-3f;
-
-    /* Frenet error kinematics use the ACTUAL longitudinal speed, not the
-     * reference speed: e_y_dot / e_psi_dot are geometric identities in the
-     * true vehicle speed, so substituting v_ref injects a model-plant
-     * mismatch on every accel/decel transient.
-     *
-     * Loss-of-rank safeguard: as vx -> 0 the (e_y, e_psi) subsystem becomes
-     * uncontrollable (steering produces no lateral motion) and the Riccati
-     * recursion degenerates. Flooring the speed at VP_MIN_VELOCITY_MPS keeps
-     * the subsystem controllable at standstill — this is the regularization
-     * the old v_ref substitution was really standing in for. */
     (void)v_ref;
-    const float v_eff =
-        (vx > VP_MIN_VELOCITY_MPS) ? vx : VP_MIN_VELOCITY_MPS;
-    const float e_y_dot = v_eff * sinf(state->fhead_error) + vy * cosf(state->fhead_error);
-    const float e_psi_dot = omega -
-        path_curvature * v_eff * cosf(state->fhead_error) / ey_denom;
-
-    next.flat_error = state->flat_error + dt * e_y_dot;
-    next.fhead_error = util_normalize_angle(state->fhead_error + dt * e_psi_dot);
-    next.flong_vel = util_clamp(vx + dt * dvx_dt, VP_MIN_VELOCITY_MPS, VP_MAX_VELOCITY_MPS);
-    next.flat_vel = vy + dt * dvy_dt;
-    next.fyaw_rate = omega + dt * domega_dt;
-
-    return next;
+    return vehicle_model_predict_next_frenet_state(
+        state, control, dt, path_curvature);
 }
 
 
@@ -458,22 +393,30 @@ void mpc_set_previous_command_with_dt(
         control_dt_seconds = CONTROL_DT_SECONDS;
     }
     control_steering_dynamics =
-        steering_dynamics_coefficients(control_dt_seconds);
+        steering_dynamics_coefficients(
+            control_dt_seconds,
+            vehicle_model_get_parameters().steering_time_constant_seconds);
 
     if (has_measured_steering && isfinite(measured_steering_rad)) {
+        const VehicleParameters_t parameters = vehicle_model_get_parameters();
         measured_steering_angle = util_clamp(
-            measured_steering_rad, -VP_MAX_STEERING_RAD, VP_MAX_STEERING_RAD);
+            measured_steering_rad,
+            -parameters.max_steering_angle,
+            parameters.max_steering_angle);
         measured_steering_valid = 1;
     } else {
         measured_steering_valid = 0;
     }
 
     if (command) {
+        const VehicleParameters_t parameters = vehicle_model_get_parameters();
         float new_command = command->steer_ang;
         if (!isfinite(new_command))
             new_command = commanded_steering_angle;
         new_command = util_clamp(
-            new_command, -VP_MAX_STEERING_RAD, VP_MAX_STEERING_RAD);
+            new_command,
+            -parameters.max_steering_angle,
+            parameters.max_steering_angle);
 
         if (!steering_command_initialized) {
             commanded_steering_angle = new_command;
@@ -493,7 +436,9 @@ void mpc_set_previous_command_with_dt(
 
         if (isfinite(command->long_acc)) {
             prev_control.long_acc = util_clamp(
-                command->long_acc, VP_MIN_ACCEL_MPS2, VP_MAX_ACCEL_MPS2);
+                command->long_acc,
+                parameters.min_acceleration,
+                parameters.max_acceleration);
         }
     }
 }
@@ -529,6 +474,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     // Auto-initialize on first use if not already initialized.
     if (!initialized) mpc_initialize();
 
+    const VehicleParameters_t vehicle_parameters = vehicle_model_get_parameters();
+
     /* The command supplied before this call acted during the preceding
      * source-time interval. Use actual steering feedback when available;
      * otherwise propagate the actuator state once using measured source dt. */
@@ -556,7 +503,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
      * feedforward steering operating point.
      * --------------------------------------------------------------- */
 
-    float delta_clamp = VP_MAX_STEERING_RAD * STEERING_FEEDFORWARD_CLAMP_FACTOR;
+    float delta_clamp = vehicle_parameters.max_steering_angle *
+        STEERING_FEEDFORWARD_CLAMP_FACTOR;
 
     const float wall_bias_clear_m = get_wall_bias_clearance_m();
     const float wall_bias_max_m = get_wall_bias_max_shift_m();
@@ -572,8 +520,6 @@ MpcSolverStatus_t mpc_compute_optimal_control(
      * built because it needs the first and terminal lateral-error boxes. */
 
     FrenetState_t lin_state = *frenet;
-    if (lin_state.flong_vel < MIN_LINEARIZATION_VELOCITY)
-        lin_state.flong_vel = MIN_LINEARIZATION_VELOCITY;
 
     /* Step 2: Build augmented dynamics, costs, and bounds over the horizon. */
 
@@ -610,7 +556,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         float v_state_for_limits = lin_state.flong_vel;
 
         ControlInput_t lin_control;
-        lin_control.steer_ang = atanf(VP_WHEELBASE_M * kappa_k);
+        lin_control.steer_ang = atanf(vehicle_parameters.wheelbase_meters * kappa_k);
         if (lin_control.steer_ang > delta_clamp)
             lin_control.steer_ang = delta_clamp;
         if (lin_control.steer_ang < -delta_clamp)
@@ -796,9 +742,11 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         /* Effective-steering reference: delta_ff = atan(L*kappa). */
         {
-            float delta_ff_k = atanf(VP_WHEELBASE_M * kappa_k);
-            if (delta_ff_k > VP_MAX_STEERING_RAD) delta_ff_k = VP_MAX_STEERING_RAD;
-            if (delta_ff_k < -VP_MAX_STEERING_RAD) delta_ff_k = -VP_MAX_STEERING_RAD;
+            float delta_ff_k = atanf(vehicle_parameters.wheelbase_meters * kappa_k);
+            if (delta_ff_k > vehicle_parameters.max_steering_angle)
+                delta_ff_k = vehicle_parameters.max_steering_angle;
+            if (delta_ff_k < -vehicle_parameters.max_steering_angle)
+                delta_ff_k = -vehicle_parameters.max_steering_angle;
             sd->q[IDX_DELTA_EFFECTIVE] =
                 -(sd->Q_diag[IDX_DELTA_EFFECTIVE] * delta_ff_k);
         }
@@ -844,8 +792,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         }
 
         /* The issued command carries the hard steering-angle constraint. */
-        sd->x_lb[IDX_DELTA_COMMAND] = -VP_MAX_STEERING_RAD;
-        sd->x_ub[IDX_DELTA_COMMAND] = VP_MAX_STEERING_RAD;
+        sd->x_lb[IDX_DELTA_COMMAND] = -vehicle_parameters.max_steering_angle;
+        sd->x_ub[IDX_DELTA_COMMAND] = vehicle_parameters.max_steering_angle;
 
         /* The stable pole stays inside bounded commands without an extra ADMM
          * projection channel. */
@@ -868,17 +816,19 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             float v_ref_k = reference_trajectory[k].reference_velocity;
             float v_model_k = v_state_for_limits;
             float v_for_limit;
-            float a_max = VP_MAX_ACCEL_MPS2;
-            float a_min = VP_MIN_ACCEL_MPS2;
+            float a_max = vehicle_parameters.max_acceleration;
+            float a_min = vehicle_parameters.min_acceleration;
 
-            if (v_model_k < MIN_LINEARIZATION_VELOCITY)
-                v_model_k = MIN_LINEARIZATION_VELOCITY;
+            /* Keep a physical zero speed. Only this reciprocal-like limit
+             * calculation uses a numeric floor, never the state itself. */
+            if (v_model_k < 0.1f)
+                v_model_k = 0.1f;
 
             /* Blend model speed with reference speed so under-speed states are not
              * over-limited by an aggressive reference profile. */
             v_for_limit = 0.7f * v_model_k + 0.3f * v_ref_k;
-            if (v_for_limit < MIN_LINEARIZATION_VELOCITY)
-                v_for_limit = MIN_LINEARIZATION_VELOCITY;
+            if (v_for_limit < 0.1f)
+                v_for_limit = 0.1f;
 
             if (v_for_limit > V_SWITCH) {
                 float scale = V_SWITCH / v_for_limit;
@@ -891,8 +841,6 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         }
 
         lin_state = lin_state_next;
-        if (lin_state.flong_vel < MIN_LINEARIZATION_VELOCITY)
-            lin_state.flong_vel = MIN_LINEARIZATION_VELOCITY;
     }
 
     /* Terminal state cost */
@@ -928,9 +876,11 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* Effective steering tracks terminal curvature feedforward. */
         {
             float kappa_N = reference_trajectory[N-1].path_curvature;
-            float delta_ff_N = atanf(VP_WHEELBASE_M * kappa_N);
-            if (delta_ff_N > VP_MAX_STEERING_RAD) delta_ff_N = VP_MAX_STEERING_RAD;
-            if (delta_ff_N < -VP_MAX_STEERING_RAD) delta_ff_N = -VP_MAX_STEERING_RAD;
+            float delta_ff_N = atanf(vehicle_parameters.wheelbase_meters * kappa_N);
+            if (delta_ff_N > vehicle_parameters.max_steering_angle)
+                delta_ff_N = vehicle_parameters.max_steering_angle;
+            if (delta_ff_N < -vehicle_parameters.max_steering_angle)
+                delta_ff_N = -vehicle_parameters.max_steering_angle;
             terminal_q[IDX_DELTA_EFFECTIVE] =
                 -(terminal_Q[IDX_DELTA_EFFECTIVE] * delta_ff_N);
         }
@@ -985,8 +935,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             terminal_x_lb[s] = -BIG_BOUND;
             terminal_x_ub[s] = BIG_BOUND;
         }
-        terminal_x_lb[IDX_DELTA_COMMAND] = -VP_MAX_STEERING_RAD;
-        terminal_x_ub[IDX_DELTA_COMMAND] = VP_MAX_STEERING_RAD;
+        terminal_x_lb[IDX_DELTA_COMMAND] = -vehicle_parameters.max_steering_angle;
+        terminal_x_ub[IDX_DELTA_COMMAND] = vehicle_parameters.max_steering_angle;
         terminal_x_lb[IDX_DELTA_EFFECTIVE] = -BIG_BOUND;
         terminal_x_ub[IDX_DELTA_EFFECTIVE] = BIG_BOUND;
         terminal_x_lb[IDX_DRATE_PREV] = -BIG_BOUND;
@@ -1093,7 +1043,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
          * previous acceleration command. */
         result->optimal_control.long_acc = prev_control.long_acc;
         result->iterations_used = (uint16_t)riccati_sol.iterations;
-        result->final_cost = riccati_sol.primal_residual;
+        result->primal_residual = riccati_sol.primal_residual;
         result->dual_residual = riccati_sol.dual_residual;
         result->solver_status = MPC_STATUS_ERROR;
         return result->solver_status;
@@ -1110,10 +1060,10 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         commanded_steering_angle + config.time_step * delta_rate;
 
     /* Clamp to physical steering limits */
-    if (delta_cmd > VP_MAX_STEERING_RAD)
-        delta_cmd = VP_MAX_STEERING_RAD;
-    if (delta_cmd < -VP_MAX_STEERING_RAD)
-        delta_cmd = -VP_MAX_STEERING_RAD;
+    if (delta_cmd > vehicle_parameters.max_steering_angle)
+        delta_cmd = vehicle_parameters.max_steering_angle;
+    if (delta_cmd < -vehicle_parameters.max_steering_angle)
+        delta_cmd = -vehicle_parameters.max_steering_angle;
 
     ControlInput_t raw_control;
     raw_control.steer_ang = delta_cmd;
@@ -1123,7 +1073,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
     result->optimal_control = saturated;
     result->iterations_used = (uint16_t)riccati_sol.iterations;
-    result->final_cost = riccati_sol.primal_residual;
+    result->primal_residual = riccati_sol.primal_residual;
     result->dual_residual = riccati_sol.dual_residual;
 
     switch (rstatus) {

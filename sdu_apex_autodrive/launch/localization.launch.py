@@ -9,7 +9,11 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+)
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node
@@ -153,6 +157,8 @@ def generate_launch_description():
     localization = get_package_share_directory("f1tenth_localization")
 
     return LaunchDescription([
+        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
         DeclareLaunchArgument("start_bridge", default_value="false"),

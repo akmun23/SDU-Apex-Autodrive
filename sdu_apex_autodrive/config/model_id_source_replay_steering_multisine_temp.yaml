@@ -1,0 +1,17 @@
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    # B3/E2: bounded source-indexed steering excitation around the measured
+    # 0.25 throttle operating point (approximately 6 m/s). The command pair
+    # changes only after a fresh simulator source packet, preserving causal
+    # input/state alignment.
+    replay_throttle_sequence: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+    replay_steering_sequence: [0.0, 0.05, 0.10, 0.15, 0.10, 0.0, -0.05, -0.10, -0.15, -0.10, 0.0, 0.10, 0.20, 0.10, 0.0, -0.10, -0.20, -0.10, 0.0, 0.15, -0.15, 0.0]
+    replay_phase_steps: [160, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 80]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: false

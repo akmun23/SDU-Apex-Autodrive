@@ -1,0 +1,304 @@
+{
+  "acceptance_criterion": {
+    "blind_data_required": true,
+    "full_vehicle_state_required": true,
+    "relative_error_denominator": "abs(actual body speed), eligible only when >= 1 m/s",
+    "target": "recursive open-loop state/horizon error <= 2%"
+  },
+  "acceptance_status": "candidate_only_full_state_blind_recursive_validation_required",
+  "coefficients": [
+    -0.18846991156222018,
+    -1.7162650658953567,
+    0.05756384655444857,
+    44.90105090590866,
+    1.1686902212727956,
+    -59.3586035137817
+  ],
+  "design_matrix_rank": 6,
+  "design_matrix_singular_values": [
+    1478.7637146882125,
+    68.8564486128984,
+    31.955849825157774,
+    21.44378121756969,
+    2.92876644295138,
+    0.6907674566112099
+  ],
+  "feature_names": [
+    "bias",
+    "u",
+    "u_squared",
+    "throttle",
+    "u_times_throttle",
+    "throttle_squared"
+  ],
+  "model_boundary": "applied_throttle_to_simulator_body_u",
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/accepted/01_longitudinal_throttle_from_rest_40hz_20260913",
+  "schema_version": 3,
+  "source_quality_report": {
+    "duplicate_rows_discarded": 0,
+    "frame_convention": {
+      "frame_selection": "declared contract; no residual-based auto-selection",
+      "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+      "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+      "yaw": "normalized raw API quaternion, not Euler-only",
+      "yaw_rate": "raw API angular velocity z"
+    },
+    "ground_truth_use": "offline_transition_target_only",
+    "kinematic_consistency": {
+      "diagnostics": {
+        "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+        "position_vs_body_velocity_error_mps": {
+          "count": 3749,
+          "max": 2708.6577178080156,
+          "median": 0.0017964577230221272,
+          "p95": 0.007999654437318577
+        },
+        "quaternion_vs_euler_yaw_error_rad": {
+          "count": 3750,
+          "max": 0.00015259143065105008,
+          "median": 5.248062520735175e-05,
+          "p95": 0.00011101961531068127
+        },
+        "transition_count": 3749,
+        "yaw_derivative_vs_angular_z_error_radps": {
+          "count": 3749,
+          "max": 0.006157397967783643,
+          "median": 0.0,
+          "p95": 8.766109242428956e-05
+        },
+        "yaw_derivative_vs_each_angular_axis_error_radps": {
+          "x": {
+            "negated": {
+              "count": 3749,
+              "max": 0.006311149807062488,
+              "median": 0.0,
+              "p95": 0.0002
+            },
+            "same_sign": {
+              "count": 3749,
+              "max": 0.006157397967783643,
+              "median": 0.0,
+              "p95": 0.0002
+            }
+          },
+          "y": {
+            "negated": {
+              "count": 3749,
+              "max": 0.25122726154904995,
+              "median": 0.0013,
+              "p95": 0.07036047608742049
+            },
+            "same_sign": {
+              "count": 3749,
+              "max": 0.25137273845095,
+              "median": 0.0013,
+              "p95": 0.07048005541477663
+            }
+          },
+          "z": {
+            "negated": {
+              "count": 3749,
+              "max": 0.006157397967783643,
+              "median": 0.0,
+              "p95": 8.766109242428956e-05
+            },
+            "same_sign": {
+              "count": 3749,
+              "max": 0.006157397967783643,
+              "median": 0.0,
+              "p95": 8.766109242428956e-05
+            }
+          }
+        },
+        "yaw_rate_source": "simulator_angular_velocity_z"
+      },
+      "maximum_allowed_median_error_mps": 0.75,
+      "maximum_allowed_yaw_rate_median_error_radps": 0.75,
+      "pass": true,
+      "selected_frame_median_error_mps": 0.0025865521802844803,
+      "yaw_rate_median_error_radps": 0.0,
+      "yaw_rate_pass": true,
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "malformed_rows_discarded": 0,
+    "maximum_allowed_source_transition_dt_s": 0.035,
+    "minimum_allowed_source_transition_dt_s": 0.015,
+    "model_boundary": "applied_throttle_to_body_u",
+    "physics_step_delta_max": 29,
+    "physics_step_delta_min": 21,
+    "quality_gate_failures": [],
+    "quality_gate_pass": true,
+    "raw_packet_count": 3750,
+    "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/accepted/01_longitudinal_throttle_from_rest_40hz_20260913",
+    "schema_version": 3,
+    "source_dt_cadence_violation_count": 0,
+    "source_dt_gap_count": 0,
+    "source_dt_s_max": 0.029000000000010573,
+    "source_dt_s_median": 0.025000000000005684,
+    "source_dt_s_p95": 0.02600100000000083,
+    "source_order": {
+      "pass": true,
+      "physics_step_gap_count": 3749,
+      "physics_step_reverse_count": 0,
+      "time_reverse_count": 0,
+      "violations": 0
+    },
+    "source_rate_hz_median": 39.999999999990905,
+    "status": "timing_and_kinematics_gate_passed",
+    "timing_contract": {
+      "allow_non_target_rate": false,
+      "expected_source_rate_hz": 40.0,
+      "pass": true,
+      "raw_rows_are_never_upsampled": true,
+      "source_cadence_violations_rejected": true,
+      "source_cadence_window_s": [
+        0.015,
+        0.035
+      ]
+    },
+    "transition_count": 3749,
+    "transition_schema": {
+      "ambiguous_transitions_discarded": false,
+      "control_alignment": "current_packet_applied_command_generates_previous_to_current",
+      "file": "model_transition_v3.csv",
+      "required_control_field": "applied_command_sequence_k1",
+      "timing_gap_transitions_discarded": 0
+    },
+    "twist_frame_median_displacement_error_mps": {
+      "body": 0.0025865521802844803,
+      "world": 2.117165848069215
+    },
+    "twist_frame_selected": "body",
+    "unique_source_packet_count": 3750
+  },
+  "state_source": "simulator_packet_ground_truth_offline_only",
+  "training_count": 2624,
+  "training_score": {
+    "invalid_rollout_count": 0,
+    "one_step": {
+      "count": 2624,
+      "finite_count": 2624,
+      "invalid_count": 0,
+      "mae": 0.016880021700804954,
+      "max": 0.2740893130727667,
+      "p95": 0.07523315960806747,
+      "relative_eligible_count": 1369,
+      "relative_p95": 0.03056612943176814,
+      "two_percent_gate": false
+    },
+    "recursive": {
+      "count": 2624,
+      "finite_count": 2624,
+      "invalid_count": 0,
+      "mae": 0.32587761300054086,
+      "max": 2.2572676982791045,
+      "p95": 1.1005339466447264,
+      "relative_eligible_count": 1369,
+      "relative_p95": 0.4201535828267045,
+      "two_percent_gate": false
+    },
+    "samples": 2624
+  },
+  "transition_count": 3749,
+  "validation_count": 1125,
+  "validation_recursive_horizon_scores": {
+    "0.05s": {
+      "count": 1124,
+      "finite_count": 1124,
+      "invalid_count": 0,
+      "invalid_rollout_count": 1,
+      "mae": 0.1539005471478031,
+      "max": 0.6544309965737796,
+      "p95": 0.44301437192348736,
+      "relative_eligible_count": 762,
+      "relative_p95": 0.12709476025140598,
+      "two_percent_gate": false
+    },
+    "0.10s": {
+      "count": 1122,
+      "finite_count": 1122,
+      "invalid_count": 0,
+      "invalid_rollout_count": 3,
+      "mae": 0.282504078071375,
+      "max": 1.0786784582941218,
+      "p95": 0.8662743990118847,
+      "relative_eligible_count": 758,
+      "relative_p95": 0.21710123818688815,
+      "two_percent_gate": false
+    },
+    "0.25s": {
+      "count": 1116,
+      "finite_count": 1116,
+      "invalid_count": 0,
+      "invalid_rollout_count": 9,
+      "mae": 0.6341960363155851,
+      "max": 2.31493131385103,
+      "p95": 2.0622715964297686,
+      "relative_eligible_count": 753,
+      "relative_p95": 0.46155111917104874,
+      "two_percent_gate": false
+    },
+    "0.50s": {
+      "count": 1106,
+      "finite_count": 1106,
+      "invalid_count": 0,
+      "invalid_rollout_count": 19,
+      "mae": 1.2183514613469295,
+      "max": 4.279746678011533,
+      "p95": 3.9470120332451426,
+      "relative_eligible_count": 743,
+      "relative_p95": 0.7577290441125066,
+      "two_percent_gate": false
+    },
+    "1.00s": {
+      "count": 1086,
+      "finite_count": 1086,
+      "invalid_count": 0,
+      "invalid_rollout_count": 39,
+      "mae": 2.263509298108307,
+      "max": 7.75209523365001,
+      "p95": 7.38481747953502,
+      "relative_eligible_count": 723,
+      "relative_p95": 1.2552204949885728,
+      "two_percent_gate": false
+    },
+    "2.00s": {
+      "count": 1046,
+      "finite_count": 1046,
+      "invalid_count": 0,
+      "invalid_rollout_count": 79,
+      "mae": 4.0307988119387055,
+      "max": 13.077012689514886,
+      "p95": 12.770296058052015,
+      "relative_eligible_count": 683,
+      "relative_p95": 1.3279829727185668,
+      "two_percent_gate": false
+    }
+  },
+  "validation_score": {
+    "invalid_rollout_count": 0,
+    "one_step": {
+      "count": 1125,
+      "finite_count": 1125,
+      "invalid_count": 0,
+      "mae": 0.06332857411685291,
+      "max": 0.22745948611930888,
+      "p95": 0.20556583904168188,
+      "relative_eligible_count": 762,
+      "relative_p95": 0.05060574042938287,
+      "two_percent_gate": false
+    },
+    "recursive": {
+      "count": 1125,
+      "finite_count": 1125,
+      "invalid_count": 0,
+      "mae": 6.017664712563478,
+      "max": 21.08607984641269,
+      "p95": 19.640288975886342,
+      "relative_eligible_count": 762,
+      "relative_p95": 1.3202424838782245,
+      "two_percent_gate": false
+    },
+    "samples": 1125
+  }
+}

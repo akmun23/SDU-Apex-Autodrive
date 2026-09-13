@@ -177,7 +177,7 @@ class Calibration(Node):
             "sensor_record", "throttle_sweep", "throttle_steps",
             "zero_throttle_decel", "speed_steps", "speed_ramp",
             "steering_steps", "steering_response", "throttle_speed_grid",
-            "identification_grid",
+            "identification_grid", "source_replay",
             "full_suite",
         }
         if self.mode not in allowed:
@@ -227,8 +227,16 @@ class Calibration(Node):
         self.reset_gt_confirmed = False
         self.reset_gt_baseline_event = 0
         self.reset_zero_gt_since = None
+        # The competition scene's spawn pose is not the world origin.  Learn
+        # the initial stationary truth pose for the diagnostics-only reset
+        # gate, so reset confirmation is independent of the scene's chosen
+        # world coordinates.
+        self.reset_reference_x_m = None
+        self.reset_reference_y_m = None
         self.boundary_reset_count = 0
         self.active_phase = None
+        self.sequence_started = False
+        self.source_replay_phase_start_event = None
         self.brake_stop_since = None
         self.brake_event_baseline = None
         self.speed_settle_since = None
@@ -236,6 +244,7 @@ class Calibration(Node):
         self.reset_signal_sent = False
         self.reset_connection_ready = False
         self.reset_signal_cleared = False
+        self.bridge_timing_fault = False
 
         self.max_speed = float(self.get_parameter("maximum_test_speed_mps").value)
         self.max_throttle = float(self.get_parameter("maximum_throttle").value)
@@ -268,6 +277,8 @@ class Calibration(Node):
         # raw zero-throttle brake/coast phase.
         self.raw_throttle_override_pub = self.create_publisher(
             Float32, "/autodrive/roboracer_1/raw_throttle_override", 10)
+        self.raw_steering_override_pub = self.create_publisher(
+            Float32, "/autodrive/roboracer_1/raw_steering_override", 10)
         self.reset_pub = None
         if self.reset_between_steps:
             # Diagnostics-only simulator reset.  No controller subscribes to
@@ -348,6 +359,9 @@ class Calibration(Node):
         self.create_subscription(
             Float64MultiArray, "/pure_pursuit/diagnostics",
             self._on_pure_pursuit_diagnostics, 10)
+        self.create_subscription(
+            Bool, "/autodrive/roboracer_1/bridge_timing_fault",
+            self._on_bridge_timing_fault, 10)
 
         self.phases = self._build_phases()
         self.phase_index = 0
@@ -372,6 +386,13 @@ class Calibration(Node):
         self.declare_parameter(
             "steering_sequence",
             [0.0, -0.25, 0.0, 0.25, 0.0, -0.5, 0.0, 0.5, 0.0])
+        # Source-step replay is the deterministic path for repeatability
+        # campaigns. Each entry is a paired normalized throttle/steering
+        # command and its hold length is measured in fresh GT source events,
+        # never in wall-clock timer callbacks.
+        self.declare_parameter("replay_throttle_sequence", [0.0, 0.20, 0.0])
+        self.declare_parameter("replay_steering_sequence", [0.0, 0.0, 0.0])
+        self.declare_parameter("replay_phase_steps", [40, 100, 40])
         self.declare_parameter(
             "grid_speed_sequence_mps", [0.0, 3.0, 6.0, 9.0, 12.0])
         self.declare_parameter(
@@ -631,7 +652,8 @@ class Calibration(Node):
                         ])
                         phases.append((
                             f"steering_{steering:.3f}_at_{nominal_speed:.2f}",
-                            "raw_steering_with_throttle", steering, steering_hold))
+                            "raw_steering_with_throttle",
+                            (steering, base_throttle), steering_hold))
                         phases.append((
                             f"grid_brake_{label}_{steering:.3f}",
                             "raw_throttle", 0.0, brake_timeout))
@@ -654,6 +676,33 @@ class Calibration(Node):
                     f"steering_{value:.3f}",
                     "raw_steering_with_throttle", value, hold))
             return phases + [("final_zero", "raw_throttle", 0.0, settle)]
+
+        if self.mode == "source_replay":
+            throttles = [float(v) for v in self.get_parameter(
+                "replay_throttle_sequence").value]
+            steerings = [float(v) for v in self.get_parameter(
+                "replay_steering_sequence").value]
+            steps = [int(v) for v in self.get_parameter(
+                "replay_phase_steps").value]
+            if not (len(throttles) == len(steerings) == len(steps)):
+                raise ValueError(
+                    "source replay command and step sequences must have equal length")
+            if not steps or any(value < 1 for value in steps):
+                raise ValueError("source replay phase steps must be positive")
+            if any(value < 0.0 or value > self.max_throttle for value in throttles):
+                raise ValueError("source replay throttle exceeds configured limit")
+            if any(abs(value) > self.max_steering for value in steerings):
+                raise ValueError("source replay steering exceeds configured limit")
+            return [
+                (
+                    f"replay_{index:02d}_t{throttle:.3f}_s{steering:.3f}",
+                    "source_replay",
+                    (throttle, steering),
+                    hold_steps,
+                )
+                for index, (throttle, steering, hold_steps)
+                in enumerate(zip(throttles, steerings, steps))
+            ]
 
         if self.mode == "full_suite":
             throttle_sequence = [
@@ -918,13 +967,28 @@ class Calibration(Node):
         self.state["gt_speed_rate_mps2"] = gt_longitudinal_accel
         self.state["gt_dt_s"] = gt_dt
         self.state["gt_yaw_rate_radps"] = float(twist.angular.z)
+        if (self.reset_reference_x_m is None and
+                not self.reset_pending and
+                speed <= float(self.get_parameter(
+                    "reset_odom_speed_threshold_mps").value)):
+            self.reset_reference_x_m = float(pose.position.x)
+            self.reset_reference_y_m = float(pose.position.y)
+            self.get_logger().info(
+                "Using initial stationary ground-truth pose "
+                f"({self.reset_reference_x_m:.3f}, "
+                f"{self.reset_reference_y_m:.3f}) m as reset reference")
         self._update_encoder_slip()
         self.last_gt_odom = self.get_clock().now()
         if (self.reset_pending and
                 self.event_counts["gt_odom"] > self.reset_gt_baseline_event):
             now = self.get_clock().now()
-            position_distance = math.hypot(
-                float(pose.position.x), float(pose.position.y))
+            if self.reset_reference_x_m is None:
+                position_distance = math.hypot(
+                    float(pose.position.x), float(pose.position.y))
+            else:
+                position_distance = math.hypot(
+                    float(pose.position.x) - self.reset_reference_x_m,
+                    float(pose.position.y) - self.reset_reference_y_m)
             position_limit = max(0.1, float(self.get_parameter(
                 "reset_ground_truth_position_tolerance_m").value))
             if (speed <= float(self.get_parameter(
@@ -939,6 +1003,58 @@ class Calibration(Node):
             else:
                 self.reset_zero_gt_since = None
         self._capture_source_event("gt_odom", stamp_s)
+        if self.mode == "source_replay":
+            self._source_replay_on_gt_event()
+
+    def _source_replay_on_gt_event(self) -> None:
+        """Advance a paired replay only on fresh source telemetry events."""
+        if self.finished or self.phase_index >= len(self.phases):
+            return
+        overrides_ready = (
+            self.raw_throttle_override_pub.get_subscription_count() >= 1 and
+            self.raw_steering_override_pub.get_subscription_count() >= 1)
+        if not self.sequence_started and not overrides_ready:
+            # Do not spend replay steps while DDS is still connecting the
+            # actuator's two explicit diagnostics-only override subscribers.
+            # Starting earlier would make one input silently remain neutral.
+            return
+        if self.sequence_started and not overrides_ready:
+            self.get_logger().error(
+                "Source replay override subscription disappeared")
+            self._finish("source replay override subscription lost")
+            return
+        event_count = self.event_counts["gt_odom"]
+        if not self.sequence_started:
+            self.sequence_started = True
+            self.source_replay_phase_start_event = event_count
+            self.active_phase = self.phases[self.phase_index][0]
+            self.state["phase"] = self.active_phase
+            self._command("source_replay", self.phases[self.phase_index][2], 0.0)
+            return
+
+        phase, kind, value, hold_steps = self.phases[self.phase_index]
+        self.state["phase"] = self.active_phase or phase
+        phase_start = self.source_replay_phase_start_event
+        if phase_start is None:
+            phase_start = event_count
+            self.source_replay_phase_start_event = phase_start
+        # The packet that triggered this callback was generated by the
+        # previous command. Record it first; the next command is published
+        # for the following source packet. This keeps command/packet
+        # association causal and makes every phase exactly source-step based.
+        if event_count - phase_start < hold_steps:
+            self._command("source_replay", value, 0.0)
+            return
+
+        self.phase_index += 1
+        self.source_replay_phase_start_event = event_count
+        if self.phase_index >= len(self.phases):
+            self._neutral()
+            self._finish("source-step replay completed")
+            return
+        self.active_phase = self.phases[self.phase_index][0]
+        self.state["phase"] = self.active_phase
+        self._command("source_replay", self.phases[self.phase_index][2], 0.0)
 
     def _on_gt_ips(self, msg: Point) -> None:
         """Record the simulator IPS position as a second truth stream."""
@@ -1161,11 +1277,21 @@ class Calibration(Node):
         self._record_event("lidar")
         self._capture_source_event("lidar", self._message_stamp_s(msg))
 
-    def _neutral(self) -> None:
+    def _on_bridge_timing_fault(self, msg: Bool) -> None:
+        if not msg.data or self.bridge_timing_fault or self.finished:
+            return
+        self.bridge_timing_fault = True
+        self._record_event("bridge_timing_fault")
+        self.get_logger().error(
+            "Bridge timing contract failed; terminating model-ID run")
+        self._finish("bridge timing fault")
+
+    def _neutral(self, publish_reset: bool = True) -> None:
         self.throttle_pub.publish(Float32(data=0.0))
         self.steering_pub.publish(Float32(data=0.0))
         self.raw_throttle_override_pub.publish(Float32(data=0.0))
-        if self.reset_pub is not None:
+        self.raw_steering_override_pub.publish(Float32(data=0.0))
+        if publish_reset and self.reset_pub is not None:
             self.reset_pub.publish(Bool(data=False))
         neutral = AckermannDriveStamped()
         self.speed_drive_pub.publish(neutral)
@@ -1188,6 +1314,7 @@ class Calibration(Node):
 
     def _command(self, kind: str, value: float, progress: float) -> None:
         if kind == "reset":
+            reset_level_for_this_tick = False
             if not self.reset_pending:
                 self.reset_pending = True
                 self.reset_odom_confirmed = False
@@ -1207,19 +1334,21 @@ class Calibration(Node):
                     # until the bridge and local epoch subscriber are both
                     # present; after discovery it is a single rising edge
                     # and cannot queue teleports.
-                    self.reset_pub.publish(Bool(data=True))
                     self.reset_connection_ready = (
                         self.reset_pub.get_subscription_count() >= max(
                             1, int(self.get_parameter(
                                 "reset_min_subscribers").value)))
                     self.reset_signal_sent = self.reset_connection_ready
+                    reset_level_for_this_tick = True
                 elif (not self.reset_signal_cleared and
                       progress * self.reset_pulse_sec >= self.reset_signal_hold_sec):
                     # Complete the pulse explicitly. Leaving the bridge's
                     # reset flag latched makes the car appear stationary
                     # while wheel/IMU values continue to change.
-                    self.reset_pub.publish(Bool(data=False))
                     self.reset_signal_cleared = True
+                    reset_level_for_this_tick = False
+                elif not self.reset_signal_cleared:
+                    reset_level_for_this_tick = True
             # Do not write the previous run's ground truth into the new
             # experiment while the simulator processes the reset pulse.
             for field in (
@@ -1250,34 +1379,64 @@ class Calibration(Node):
             # closed-loop target while the simulator handles the diagnostic
             # reset.  Raw calibration outputs and the actuator otherwise
             # share the same normalized topics and would race each other.
-            self._neutral()
+            # Do not let the neutral helper publish a competing False reset
+            # after the rising edge. The reset level is the final command on
+            # this timer tick so the bridge and the local odometry observer
+            # receive the same bounded pulse.
+            self._neutral(publish_reset=False)
             self.steering_pub.publish(Float32(data=0.0))
             self.throttle_pub.publish(Float32(data=0.0))
+            if self.reset_pub is not None:
+                self.reset_pub.publish(Bool(data=reset_level_for_this_tick))
             return
         if kind == "raw_throttle":
-            self._neutral()
             if self.reset_pub is not None:
                 self.reset_pub.publish(Bool(data=False))
             self.steering_pub.publish(Float32(data=0.0))
             self.throttle_pub.publish(Float32(data=value))
+            # Do not call _neutral() here: it publishes a raw-zero override
+            # immediately before this value.  The calibration timer is 50 Hz
+            # while the actuator/bridge path is 40 Hz, so that pair can be
+            # observed as an unintended throttle pulse.  One explicit pair
+            # is the complete diagnostics command.
+            self.raw_steering_override_pub.publish(Float32(data=0.0))
             self.raw_throttle_override_pub.publish(Float32(data=value))
             return
+        if kind == "source_replay":
+            throttle, steering = value
+            if self.reset_pub is not None:
+                self.reset_pub.publish(Bool(data=False))
+            # Source replay must have one command owner. Publishing the
+            # normalized actuator topics here as well as through the
+            # actuator's diagnostic override creates two competing ROS
+            # publishers and can stretch a phase. The actuator is the sole
+            # publisher of the simulator command topics; this node only
+            # refreshes its explicit diagnostics-only override.
+            self.raw_throttle_override_pub.publish(Float32(data=float(throttle)))
+            self.raw_steering_override_pub.publish(Float32(data=float(steering)))
+            return
         if kind == "raw_steering":
-            self._neutral()
             if self.reset_pub is not None:
                 self.reset_pub.publish(Bool(data=False))
             self.throttle_pub.publish(Float32(data=0.0))
             self.steering_pub.publish(Float32(data=value))
             self.raw_throttle_override_pub.publish(Float32(data=0.0))
+            self.raw_steering_override_pub.publish(Float32(data=value))
             return
         if kind == "raw_steering_with_throttle":
-            self._neutral()
             if self.reset_pub is not None:
                 self.reset_pub.publish(Bool(data=False))
+            steering = value
             throttle = float(self.get_parameter("steering_test_throttle").value)
+            # Grid steering phases carry the base throttle for their own
+            # operating regime. The legacy steering_response mode still uses
+            # the single steering_test_throttle parameter.
+            if isinstance(value, (tuple, list)) and len(value) == 2:
+                steering, throttle = float(value[0]), float(value[1])
             self.throttle_pub.publish(Float32(data=throttle))
-            self.steering_pub.publish(Float32(data=value))
+            self.steering_pub.publish(Float32(data=steering))
             self.raw_throttle_override_pub.publish(Float32(data=throttle))
+            self.raw_steering_override_pub.publish(Float32(data=steering))
             return
 
         drive = AckermannDriveStamped()
@@ -1486,10 +1645,23 @@ class Calibration(Node):
         # sensor event is lost merely because the recorder cadence is lower.
         self._flush_source_event_rows()
 
+        if self.bridge_timing_fault:
+            self._finish("bridge timing fault")
+            return
+
         if self.mode != "sensor_record":
-            telemetry_time = (self.last_gt_odom
-                              if self.mode == "identification_grid"
-                              else self.last_odom)
+            # Model-ID phases must not consume their startup duration while
+            # only local /odom is available.  The bridge source contract can
+            # already be established while the ground-truth callback is
+            # still queued, which otherwise shortens the first excitation in
+            # the recorded source window.  Source-event capture is enabled by
+            # the model-identification launch, so gate those runs on fresh GT
+            # telemetry; non-capture legacy calibration keeps its old /odom
+            # watchdog behavior.
+            telemetry_time = (
+                self.last_gt_odom
+                if self.capture_source_events or self.mode == "identification_grid"
+                else self.last_odom)
             if telemetry_time is None:
                 self._neutral()
                 # A diagnostic reset intentionally invalidates the recorded
@@ -1502,6 +1674,10 @@ class Calibration(Node):
             if (not self.reset_pending and
                     (now - telemetry_time).nanoseconds / 1e9 > self.telemetry_timeout):
                 self._finish("telemetry timeout")
+                return
+            if (self.mode == "source_replay" and
+                    not self.sequence_started and elapsed > self.startup_timeout):
+                self._finish("source replay override startup timeout")
                 return
             observed_speed = (self.state.get("gt_speed_mps", math.nan)
                               if self.mode == "identification_grid"
@@ -1518,12 +1694,31 @@ class Calibration(Node):
                 self._finish("ground-truth speed safety limit")
                 return
 
+            # The phase list is a source-data experiment.  Start its clock at
+            # the first usable telemetry event, not at node construction;
+            # otherwise Unity/ROS startup latency silently consumes the first
+            # excitation phase before a source-aligned row exists.
+            if (self.mode != "source_replay" and
+                    not self.sequence_started):
+                self.sequence_started = True
+                self.phase_start = now
+                self.active_phase = None
+
         if self.mode == "sensor_record":
             self.state["phase"] = "record"
             self.writer.writerow(self.state)
             self.stream.flush()
             if self.duration > 0.0 and elapsed >= self.duration:
                 self._finish("recording duration reached")
+            return
+
+        if self.mode == "source_replay":
+            # The paired source-replay command is advanced by _on_gt_odom;
+            # this timer row is diagnostics only and must not introduce a
+            # second wall-clock phase scheduler.
+            self.state["phase"] = self.active_phase or "waiting"
+            self.writer.writerow(self.state)
+            self.stream.flush()
             return
 
         if self.phase_index >= len(self.phases):

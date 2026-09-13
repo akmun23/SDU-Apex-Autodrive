@@ -65,6 +65,8 @@ class ActuatorInterface(Node):
         self.command_time = None
         self.raw_throttle_override = None
         self.raw_throttle_override_time = None
+        self.raw_steering_override = None
+        self.raw_steering_override_time = None
         self.speed = None
         # The conditioned speed drives ordinary feedback. Keep the latest
         # accepted raw odometry sample for the hard overspeed interlock so a
@@ -127,6 +129,14 @@ class ActuatorInterface(Node):
                 self._on_raw_throttle_override,
                 10,
             )
+        self.raw_steering_override_sub = None
+        if bool(self.get_parameter("allow_raw_steering_override").value):
+            self.raw_steering_override_sub = self.create_subscription(
+                Float32,
+                self.get_parameter("raw_steering_override_topic").value,
+                self._on_raw_steering_override,
+                10,
+            )
         self.odom_sub = self.create_subscription(
             Odometry, self.get_parameter("odom_topic").value,
             self._on_odom, 10)
@@ -177,6 +187,11 @@ class ActuatorInterface(Node):
         self.declare_parameter(
             "raw_throttle_override_topic",
             "/autodrive/roboracer_1/raw_throttle_override",
+        )
+        self.declare_parameter("allow_raw_steering_override", False)
+        self.declare_parameter(
+            "raw_steering_override_topic",
+            "/autodrive/roboracer_1/raw_steering_override",
         )
         # Mapping completion is not part of the race actuator contract. The
         # mapping launch enables its optional hook explicitly when needed.
@@ -389,6 +404,15 @@ class ActuatorInterface(Node):
         self.raw_throttle_override = clamp(value, 0.0, self.speed_controller.config.throttle_max_forward)
         self.raw_throttle_override_time = self.get_clock().now()
 
+    def _on_raw_steering_override(self, msg: Float32) -> None:
+        value = float(msg.data)
+        if not math.isfinite(value):
+            self.raw_steering_override = None
+            self.raw_steering_override_time = None
+            return
+        self.raw_steering_override = clamp(value, -1.0, 1.0)
+        self.raw_steering_override_time = self.get_clock().now()
+
     def _on_odom(self, msg: Odometry) -> None:
         speed = float(msg.twist.twist.linear.x)
         if (not math.isfinite(speed) or speed < -0.05 or
@@ -555,7 +579,33 @@ class ActuatorInterface(Node):
             # its previous closed-loop target cannot resume during braking.
             self.speed_controller.reset()
             self.control_time = None
-            self._publish(0.0, self.raw_throttle_override)
+            steering = (
+                self.raw_steering_override
+                if (self.raw_steering_override is not None and
+                    self.raw_steering_override_time is not None and
+                    (now - self.raw_steering_override_time).nanoseconds / 1e9
+                    <= self.command_timeout)
+                else 0.0)
+            self._publish(steering, self.raw_throttle_override)
+            self.last_neutral_reason = None
+            return
+        if (self.raw_steering_override is not None and
+                self.raw_steering_override_time is not None and
+                (now - self.raw_steering_override_time).nanoseconds / 1e9
+                <= self.command_timeout):
+            # Calibration owns both normalized actuator channels only while
+            # explicit diagnostics overrides are fresh. This prevents the
+            # ordinary Ackermann path from overwriting a steering step.
+            self.speed_controller.reset()
+            self.control_time = None
+            throttle = (
+                self.raw_throttle_override
+                if (self.raw_throttle_override is not None and
+                    self.raw_throttle_override_time is not None and
+                    (now - self.raw_throttle_override_time).nanoseconds / 1e9
+                    <= self.command_timeout)
+                else 0.0)
+            self._publish(self.raw_steering_override, throttle)
             self.last_neutral_reason = None
             return
         if self.command is None or self.command_time is None:

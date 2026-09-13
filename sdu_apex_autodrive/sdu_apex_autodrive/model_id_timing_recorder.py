@@ -23,10 +23,11 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, JointState, LaserScan
-from std_msgs.msg import Float32, Float64, Float64MultiArray, Int32, String
+from std_msgs.msg import Bool, Float32, Float64, Float64MultiArray, Int32, String
 
 
 BRIDGE_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
+BRIDGE_TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 EVENT_FIELDS = (
     "event_index", "arrival_monotonic_ns", "topic", "message_type",
     "header_stamp_ns", "simulation_time_s", "payload_json",
@@ -41,6 +42,7 @@ SOURCE_SENSOR_QOS = QoSProfile(
 EVENT_FILE_NAMES = {
     "bridge_requests.csv": (BRIDGE_TIMING_TOPIC,),
     "simulator_packets.csv": (BRIDGE_TIMING_TOPIC,),
+    "bridge_timing_fault.csv": (BRIDGE_TIMING_FAULT_TOPIC,),
     "imu.csv": ("/autodrive/roboracer_1/imu",),
     "encoders.csv": (
         "/autodrive/roboracer_1/left_encoder",
@@ -170,6 +172,9 @@ class ModelIdTimingRecorder(Node):
         self.create_subscription(
             String, BRIDGE_TIMING_TOPIC,
             lambda message: self._record_bridge_timing(message), depth)
+        self.create_subscription(
+            Bool, BRIDGE_TIMING_FAULT_TOPIC,
+            lambda message: self._record_ros(BRIDGE_TIMING_FAULT_TOPIC, message), depth)
         self.create_subscription(
             Imu, "/autodrive/roboracer_1/imu",
             lambda message: self._record_ros("/autodrive/roboracer_1/imu", message), sensor_qos)
@@ -314,6 +319,8 @@ class ModelIdTimingRecorder(Node):
             payload = {"value": float(message.data)}
         elif isinstance(message, Int32):
             payload = {"value": int(message.data)}
+        elif isinstance(message, Bool):
+            payload = {"value": bool(message.data)}
         else:
             payload = {"repr": repr(message)}
         self._record(topic, type(message).__name__, _header_stamp_ns(message), None, payload)

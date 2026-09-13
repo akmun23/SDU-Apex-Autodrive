@@ -10,6 +10,7 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     RegisterEventHandler,
+    SetEnvironmentVariable,
 )
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -40,6 +41,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
         DeclareLaunchArgument(
             "sensor_odom_params",
             default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),

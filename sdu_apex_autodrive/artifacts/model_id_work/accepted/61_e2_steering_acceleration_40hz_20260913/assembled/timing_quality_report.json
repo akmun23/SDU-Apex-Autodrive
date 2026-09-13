@@ -1,0 +1,137 @@
+{
+  "duplicate_rows_discarded": 0,
+  "frame_convention": {
+    "frame_selection": "declared contract; no residual-based auto-selection",
+    "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+    "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+    "yaw": "normalized raw API quaternion, not Euler-only",
+    "yaw_rate": "raw API angular velocity z"
+  },
+  "ground_truth_use": "offline_transition_target_only",
+  "kinematic_consistency": {
+    "diagnostics": {
+      "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+      "position_vs_body_velocity_error_mps": {
+        "count": 1000,
+        "max": 0.12161835814229079,
+        "median": 0.0036825599390936086,
+        "p95": 0.1188344388105067
+      },
+      "quaternion_vs_euler_yaw_error_rad": {
+        "count": 1001,
+        "max": 0.00015247229346915248,
+        "median": 5.00272897863141e-05,
+        "p95": 0.00010527372650592781
+      },
+      "transition_count": 1000,
+      "yaw_derivative_vs_angular_z_error_radps": {
+        "count": 1000,
+        "max": 0.10142456824316132,
+        "median": 0.0,
+        "p95": 0.006032555946406421
+      },
+      "yaw_derivative_vs_each_angular_axis_error_radps": {
+        "x": {
+          "negated": {
+            "count": 1000,
+            "max": 1.2246982355978862,
+            "median": 5e-05,
+            "p95": 0.7012334835593238
+          },
+          "same_sign": {
+            "count": 1000,
+            "max": 0.7949156910473637,
+            "median": 5e-05,
+            "p95": 0.6936023020412718
+          }
+        },
+        "y": {
+          "negated": {
+            "count": 1000,
+            "max": 0.7444202201604406,
+            "median": 0.006934732866773605,
+            "p95": 0.7373448977749576
+          },
+          "same_sign": {
+            "count": 1000,
+            "max": 0.7425676564682296,
+            "median": 0.00667624060435818,
+            "p95": 0.7372921686575512
+          }
+        },
+        "z": {
+          "negated": {
+            "count": 1000,
+            "max": 1.3666702201604406,
+            "median": 0.0,
+            "p95": 1.3620047345869994
+          },
+          "same_sign": {
+            "count": 1000,
+            "max": 0.10142456824316132,
+            "median": 0.0,
+            "p95": 0.006032555946406421
+          }
+        }
+      },
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "maximum_allowed_median_error_mps": 0.75,
+    "maximum_allowed_yaw_rate_median_error_radps": 0.75,
+    "pass": true,
+    "selected_frame_median_error_mps": 0.008726722497328507,
+    "yaw_rate_median_error_radps": 0.0,
+    "yaw_rate_pass": true,
+    "yaw_rate_source": "simulator_angular_velocity_z"
+  },
+  "malformed_rows_discarded": 0,
+  "maximum_allowed_source_transition_dt_s": 0.035,
+  "minimum_allowed_source_transition_dt_s": 0.015,
+  "model_boundary": "applied_throttle_to_body_u",
+  "physics_step_delta_max": 30,
+  "physics_step_delta_min": 19,
+  "quality_gate_failures": [],
+  "quality_gate_pass": true,
+  "raw_packet_count": 1001,
+  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/incoming/61_e2_steering_acceleration_40hz_20260913",
+  "schema_version": 3,
+  "source_dt_cadence_violation_count": 0,
+  "source_dt_gap_count": 0,
+  "source_dt_s_max": 0.029999740000000052,
+  "source_dt_s_median": 0.02499960000000101,
+  "source_dt_s_p95": 0.02600129999999723,
+  "source_order": {
+    "pass": true,
+    "physics_step_gap_count": 1000,
+    "physics_step_reverse_count": 0,
+    "time_reverse_count": 0,
+    "violations": 0
+  },
+  "source_rate_hz_median": 40.00064001023855,
+  "status": "timing_and_kinematics_gate_passed",
+  "timing_contract": {
+    "allow_non_target_rate": false,
+    "expected_source_rate_hz": 40.0,
+    "pass": true,
+    "raw_rows_are_never_upsampled": true,
+    "source_cadence_violations_rejected": true,
+    "source_cadence_window_s": [
+      0.015,
+      0.035
+    ]
+  },
+  "transition_count": 1000,
+  "transition_schema": {
+    "ambiguous_transitions_discarded": false,
+    "control_alignment": "current_packet_applied_command_generates_previous_to_current",
+    "file": "model_transition_v3.csv",
+    "required_control_field": "applied_command_sequence_k1",
+    "timing_gap_transitions_discarded": 0
+  },
+  "twist_frame_median_displacement_error_mps": {
+    "body": 0.008726722497328507,
+    "world": 8.663011302129757
+  },
+  "twist_frame_selected": "body",
+  "unique_source_packet_count": 1001
+}

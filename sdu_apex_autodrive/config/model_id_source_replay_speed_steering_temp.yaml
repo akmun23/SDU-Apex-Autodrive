@@ -1,0 +1,45 @@
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    # Continuous source-step-indexed speed-dependent steering response.
+    # The throttle plateaus are selected from the measured open-plane map:
+    # approximately 2, 4, 6, 10, and 12 m/s.  The exact speed is always
+    # measured offline from the embedded simulator packet; it is never used
+    # by the runtime excitation node.
+    replay_throttle_sequence: [
+      0.0,
+      0.08, 0.08, 0.08, 0.08, 0.08,
+      0.16, 0.16, 0.16, 0.16, 0.16,
+      0.25, 0.25, 0.25, 0.25, 0.25,
+      0.40, 0.40, 0.40, 0.40, 0.40,
+      0.50, 0.50, 0.50, 0.50, 0.50,
+      0.0
+    ]
+    replay_steering_sequence: [
+      0.0,
+      0.0, 0.25, 0.0, -0.25, 0.0,
+      0.0, 0.25, 0.0, -0.25, 0.0,
+      0.0, 0.25, 0.0, -0.25, 0.0,
+      0.0, 0.25, 0.0, -0.25, 0.0,
+      0.0, 0.25, 0.0, -0.25, 0.0,
+      0.0
+    ]
+    # Each plateau is 3 s; each steering step and neutral interval is 2 s.
+    # The final neutral phase provides a clean tail without relying on a
+    # timer callback to advance the experiment.
+    replay_phase_steps: [
+      40,
+      120, 80, 60, 80, 60,
+      120, 80, 60, 80, 60,
+      120, 80, 60, 80, 60,
+      120, 80, 60, 80, 60,
+      120, 80, 60, 80, 60,
+      120
+    ]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: false

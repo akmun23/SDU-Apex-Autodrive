@@ -1,0 +1,16 @@
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    # D1/D2: bounded steady left/right cornering with mirrored steering
+    # magnitudes. The throttle plateau is intentionally long enough for the
+    # speed response to settle before and during each corner.
+    replay_throttle_sequence: [0.0, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.0]
+    replay_steering_sequence: [0.0, 0.0, 0.10, 0.15, 0.0, -0.10, -0.15, 0.0]
+    replay_phase_steps: [80, 240, 320, 320, 120, 320, 320, 200]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: false

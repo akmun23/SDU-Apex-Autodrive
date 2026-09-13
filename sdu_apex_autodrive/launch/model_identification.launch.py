@@ -50,14 +50,17 @@ def _setup(context):
             },
         ],
     )
-    actions = [
-        SetEnvironmentVariable("AUTODRIVE_ALLOW_MISSING_LIDAR", "1"),
-        Node(
+    bridge_node = Node(
             package="sdu_apex_autodrive",
             executable="autodrive_bridge_40hz",
             name="autodrive_bridge",
             output="screen",
-        ),
+    )
+    actions = [
+        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
+        SetEnvironmentVariable("AUTODRIVE_ALLOW_MISSING_LIDAR", "1"),
+        bridge_node,
         Node(
             package="f1tenth_localization",
             executable="sensor_odometry_node",
@@ -65,7 +68,10 @@ def _setup(context):
             output="screen",
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
-                {"reset_enabled": False},
+                {
+                    "reset_enabled": True,
+                    "reset_topic": "/autodrive/reset_command",
+                },
             ],
             remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         ),
@@ -78,7 +84,9 @@ def _setup(context):
                 LaunchConfiguration("actuator_params"),
                 {
                     "allow_raw_throttle_override": True,
+                    "allow_raw_steering_override": True,
                     "collision_reset_enabled": False,
+                    "external_stop_topic": "/autodrive/roboracer_1/bridge_timing_fault",
                 },
             ],
         ),
@@ -98,11 +106,14 @@ def _setup(context):
             ],
         ),
     ]
-    if duration > 0.0:
-        actions.append(RegisterEventHandler(OnProcessExit(
-            target_action=calibration_node,
-            on_exit=[Shutdown(reason="model-identification duration reached")],
-        )))
+    # Calibration is finite for every model-ID phase list, including the
+    # duration==0 command-line mode.  A normal completion or a timing fault
+    # must terminate the bridge/recorder too; otherwise a stopped calibration
+    # process can leave a live command publisher behind.
+    actions.append(RegisterEventHandler(OnProcessExit(
+        target_action=calibration_node,
+        on_exit=[Shutdown(reason="model-identification process exited")],
+    )))
     return actions
 
 

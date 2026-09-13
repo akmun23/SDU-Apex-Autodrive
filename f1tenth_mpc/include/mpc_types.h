@@ -266,6 +266,12 @@ typedef struct
     float min_velocity;                  /* Minimum velocity [meters per second]. */
     float max_acceleration;              /* Maximum longitudinal acceleration [m/s^2]. */
     float min_acceleration;              /* Minimum longitudinal acceleration (braking) [m/s^2]. */
+    float friction_coefficient;           /* Effective tire-road friction coefficient. */
+    float gravity_mps2;                  /* Gravitational acceleration [m/s^2]. */
+    float tire_shape_factor;              /* Shape factor for the lateral-force law. */
+    float minimum_slip_velocity;          /* Denominator regularization [m/s]. */
+    float minimum_stiffness_scale;        /* Jacobian stiffness floor fraction. */
+    float steering_time_constant_seconds; /* Identified effective-steering pole [s]. */
 } VehicleParameters_t;
 
 /**
@@ -356,7 +362,7 @@ typedef enum
  * @param solver_status Solver termination state.
  * @param optimal_control First-step optimal control command.
  * @param iterations_used Number of iterations consumed by the solver.
- * @param final_cost Final primal residual metric reported by the solver.
+ * @param primal_residual Final primal residual metric reported by the solver.
  * @param dual_residual Final dual residual from ADMM convergence checks.
  */
 typedef struct
@@ -364,7 +370,7 @@ typedef struct
     MpcSolverStatus_t solver_status;  /* Solver termination status. */
     ControlInput_t optimal_control;   /* First-step optimal control command. */
     uint16_t iterations_used;         /* Number of solver iterations used. */
-    float final_cost;                 /* Final solver primal residual metric. */
+    float primal_residual;            /* Final solver primal residual metric. */
     float dual_residual;              /* Final dual residual (ADMM metric). */
 } MpcSolverResult_t;
 
