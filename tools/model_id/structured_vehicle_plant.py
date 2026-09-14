@@ -15,14 +15,21 @@ from typing import Any
 import numpy as np
 
 
-MASS_KG = 3.314
-LF_M = 0.166
-LR_M = 0.160
-IZ_KGM2 = 0.035
+"""Measured Unity structural anchors used by the offline plant candidate.
+
+These are not fitted from the old replay data.  The tire/drive coefficients
+below remain candidate parameters and must still pass the current handoff's
+blind plant gates before any runtime use.
+"""
+
+MASS_KG = 3.470
+LF_M = 0.174679914
+LR_M = 0.155320086
+IZ_KGM2 = 0.0276985662
 MAX_STEERING_RAD = 0.5236
 STEERING_RATE_RADPS = 3.2
 WHEEL_RADIUS_M = 0.059
-GRAVITY_MPS2 = 9.82
+GRAVITY_MPS2 = 9.81
 MAX_SPEED_MPS = 22.88
 MIN_SLIP_SPEED_MPS = 0.5
 INTEGRATION_SUBSTEP_S = 0.002

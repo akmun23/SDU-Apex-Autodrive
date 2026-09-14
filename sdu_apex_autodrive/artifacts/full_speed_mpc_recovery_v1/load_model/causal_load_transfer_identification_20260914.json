@@ -1,0 +1,236 @@
+{
+  "acceptance": "not_accepted",
+  "causal_states": {
+    "front_rear": {
+      "causal_replay": {
+        "residual": {
+          "bias": -0.00031171373355376133,
+          "count": 69729,
+          "mae": 1.2930995094745916,
+          "max": 10.676757135547142,
+          "p50": 1.3206018421414205,
+          "p95": 2.783559122994012,
+          "rmse": 1.4977597197757977
+        },
+        "samples": 69729,
+        "segments": 1
+      },
+      "optimizer": {
+        "cost": 78210.98123025689,
+        "message": "`ftol` termination condition is satisfied.",
+        "nfev": 7,
+        "optimality": 0.14773457383651825,
+        "status": 2
+      },
+      "parameters": {
+        "steady_bias_N": -6.385056918091243,
+        "time_constant_s": 0.011532935710945373,
+        "transfer_gain_N_per_mps2": -1.4451120720715567
+      },
+      "static_linear_screen": {
+        "intercept_N": -6.389610305057776,
+        "residual": {
+          "bias": 1.408653775870877e-15,
+          "count": 69730,
+          "mae": 1.304421581686783,
+          "max": 12.06234392903442,
+          "p50": 1.327868058051631,
+          "p95": 2.7899457085103516,
+          "rmse": 1.519735445531658
+        },
+        "samples": 69730,
+        "slope_N_per_mps2": -1.422203957589201
+      }
+    },
+    "left_right": {
+      "causal_replay": {
+        "residual": {
+          "bias": -4.2353236189716874e-07,
+          "count": 69729,
+          "mae": 0.2619161978544879,
+          "max": 26.472925926279803,
+          "p50": 0.21482226566127416,
+          "p95": 0.5143629427388298,
+          "rmse": 0.42373296322856785
+        },
+        "samples": 69729,
+        "segments": 1
+      },
+      "optimizer": {
+        "cost": 6259.907870357063,
+        "message": "`ftol` termination condition is satisfied.",
+        "nfev": 15,
+        "optimality": 0.1130913308913131,
+        "status": 2
+      },
+      "parameters": {
+        "steady_bias_N": 0.00799181662767228,
+        "time_constant_s": 0.0069878694739124204,
+        "transfer_gain_N_per_mps2": 2.35935827611286
+      },
+      "static_linear_screen": {
+        "intercept_N": 0.006613047027796664,
+        "residual": {
+          "bias": -2.4553617898860425e-15,
+          "count": 69730,
+          "mae": 0.2727469186819264,
+          "max": 22.629894872620106,
+          "p50": 0.21325467348868354,
+          "p95": 0.5423295153894792,
+          "rmse": 0.4624346390189038
+        },
+        "samples": 69730,
+        "slope_N_per_mps2": 2.358854218689728
+      }
+    }
+  },
+  "future_ground_truth_used": false,
+  "input": {
+    "static_dump": "sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/contact_model/simulator_parameters_combined_slip_matrix_20260914.json",
+    "trace": "sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/contact_model/combined_slip_matrix_trace_20260914.csv"
+  },
+  "limitations": [
+    "WheelHit.force*normal_y is a normal-load proxy.",
+    "Automatic zero-throttle brake phases are excluded from fit selection.",
+    "The fitted states are effective simulator-load states, not a mechanical CG-height estimate."
+  ],
+  "linear_screens": {
+    "front_rear_from_longitudinal_acceleration": {
+      "intercept_N": -6.389610305057776,
+      "residual": {
+        "bias": 1.408653775870877e-15,
+        "count": 69730,
+        "mae": 1.304421581686783,
+        "max": 12.06234392903442,
+        "p50": 1.327868058051631,
+        "p95": 2.7899457085103516,
+        "rmse": 1.519735445531658
+      },
+      "samples": 69730,
+      "slope_N_per_mps2": -1.422203957589201
+    },
+    "left_right_from_lateral_acceleration": {
+      "intercept_N": 0.006613047027796664,
+      "residual": {
+        "bias": -2.4553617898860425e-15,
+        "count": 69730,
+        "mae": 0.2727469186819264,
+        "max": 22.629894872620106,
+        "p50": 0.21325467348868354,
+        "p95": 0.5423295153894792,
+        "rmse": 0.4624346390189038
+      },
+      "samples": 69730,
+      "slope_N_per_mps2": 2.358854218689728
+    }
+  },
+  "measured_loads": {
+    "front_rear_transfer_N": {
+      "bias": -6.64193254460436,
+      "count": 69730,
+      "mae": 6.778874853226474,
+      "max": 19.41647838,
+      "p50": 7.066309639999999,
+      "p95": 9.865408760000003,
+      "rmse": 7.081998669357122
+    },
+    "lateral_acceleration_mps2": {
+      "bias": -0.008917570510929564,
+      "count": 69730,
+      "mae": 6.04583173155196,
+      "max": 10.301517989212707,
+      "p50": 6.291501710357133,
+      "p95": 8.770510924539158,
+      "rmse": 6.599915690976679
+    },
+    "left_right_transfer_N": {
+      "bias": -0.014422201792371248,
+      "count": 69730,
+      "mae": 14.226354039266342,
+      "max": 39.9273806,
+      "p50": 14.642669605,
+      "p95": 21.1815732065,
+      "rmse": 15.575097943867167
+    },
+    "longitudinal_acceleration_mps2": {
+      "bias": 0.1774163531187873,
+      "count": 69730,
+      "mae": 0.4916792703519869,
+      "max": 11.029365143289764,
+      "p50": 0.03447172508560242,
+      "p95": 3.1451807897127586,
+      "rmse": 1.3694892084804284
+    },
+    "wheel_loads_N": [
+      {
+        "bias": 6.802638381838348,
+        "count": 69730,
+        "mae": 6.802638381838348,
+        "max": 15.6261606,
+        "p50": 7.480171445,
+        "p95": 12.532634295,
+        "rmse": 7.907239585428244
+      },
+      {
+        "bias": 6.810038665913668,
+        "count": 69730,
+        "mae": 6.810038665913668,
+        "max": 12.6299257,
+        "p50": 7.471977,
+        "p95": 12.503292595,
+        "rmse": 7.787421087337137
+      },
+      {
+        "bias": 10.123793837319663,
+        "count": 69730,
+        "mae": 10.123793837319663,
+        "max": 24.30122,
+        "p50": 9.5192195,
+        "p95": 15.07455569,
+        "rmse": 10.834258696523747
+      },
+      {
+        "bias": 10.130815755036712,
+        "count": 69730,
+        "mae": 10.130815755036712,
+        "max": 16.592083,
+        "p50": 9.510036755,
+        "p95": 15.097771980000001,
+        "rmse": 10.93266753571826
+      }
+    ]
+  },
+  "model_form": {
+    "distribution": "add z_lr/4 to each left wheel and subtract from each right; add z_fr/4 to each front wheel and subtract from each rear",
+    "front_rear": "z_fr_dot = (k_fr * ax - z_fr) / tau_fr",
+    "left_right": "z_lr_dot = (k_lr * ay - z_lr) / tau_lr",
+    "total_supported_load_conserved": true
+  },
+  "next_action": "Re-run body force/moment inversion with the causal load state and compare force-distribution residuals by regime.",
+  "offline_only": true,
+  "schema_version": 1,
+  "selection": {
+    "all_four_wheels_grounded": true,
+    "max_abs_acceleration_mps2": 30.0,
+    "speed_min_mps": 1.0,
+    "total_rows": 76059,
+    "valid_rows": 69730,
+    "zero_brake_event_rows_only": true
+  },
+  "source_time": {
+    "callback_time_used": false,
+    "derivative_field": "fixed_time_s",
+    "derivative_smoothing": "Savitzky-Golay 21 samples, offline only"
+  },
+  "status": "causal_load_transfer_identification_offline_only",
+  "structural_parameters": {
+    "rigidbody_mass_kg": 3.4700000286102295,
+    "static_sprung_load_sum_N": 34.04070028066636,
+    "static_sprung_loads_N_from_dump": [
+      8.016682932972909,
+      8.005149884819986,
+      9.015308429002761,
+      9.003559033870697
+    ]
+  }
+}

@@ -68,7 +68,7 @@
 
 /* Solver and model safeguards */
 #define RICCATI_COST_FACTOR 2.0f                         /* Global scaling factor applied to stage and terminal costs. */
-#define STEERING_RATE_LIMIT 2.849f                       /* Hard bound on steering-rate command in optimization. */
+#define STEERING_RATE_LIMIT 3.2f                         /* Unity-measured steering-rate limit [rad/s]. */
 #define STEERING_FEEDFORWARD_CLAMP_FACTOR 1.0f           /* Limits feedforward steering around linearization operating point. */
 #define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
 #define MIN_LINEARIZATION_VELOCITY 0.5f                  /* Lower velocity clamp aligned with slip-angle floor for low-speed recovery. */
@@ -94,15 +94,15 @@
 #define STEERING_CORRECTION_C0 0.001490f                 /* Constant term in empirical steering-command correction model. */
 
 /* Vehicle parameter defaults and derived constants */
-#define VP_MAX_STEERING_RAD 0.39f                      /* Steering-angle saturation used by controller and model limits. */
+#define VP_MAX_STEERING_RAD 0.5235987756f               /* Unity steering limit: 30 degrees [rad]. */
 #define VP_MAX_VELOCITY_MPS 20.0f                        /* Upper velocity limit used by vehicle model clamping logic. */
 #define VP_MIN_VELOCITY_MPS 0.5f                         /* Lower velocity limit used by vehicle model clamping logic. */
-#define VP_CG_TO_FRONT_AXLE_M 0.166f                     /* Center-of-gravity distance from front axle for load transfer. */
-#define VP_CG_TO_REAR_AXLE_M 0.16f                       /* Center-of-gravity distance from rear axle for load transfer. */
+#define VP_CG_TO_FRONT_AXLE_M 0.174679914f               /* Contact front axle distance from measured COM [m]. */
+#define VP_CG_TO_REAR_AXLE_M 0.155320086f                /* Contact rear axle distance from measured COM [m]. */
 #define VP_WHEELBASE_M (VP_CG_TO_FRONT_AXLE_M + VP_CG_TO_REAR_AXLE_M) /* Distance between front and rear axle centers. */
-#define VP_MASS_KG 3.314f                                /* Vehicle mass used in dynamic equations and load calculations. */
-#define VP_YAW_INERTIA_KGM2 0.035f                       /* Yaw inertia governing rotational response to tire moments. */
-#define VP_CG_HEIGHT_M 0.0703f                           /* Center-of-gravity height driving longitudinal load transfer. */
+#define VP_MASS_KG 3.470f                                /* Unity Rigidbody mass; wheel masses remain separate accounting. */
+#define VP_YAW_INERTIA_KGM2 0.0276985662f                /* Unity inertia tensor projected onto body yaw axis. */
+#define VP_CG_HEIGHT_M 0.01434f                          /* Unity diagnostic center-of-mass height [m]. */
 #define VP_FRICTION_COEFF 0.72f                         /* Effective tire-road friction coefficient for force limits. */
 #define GRAVITY_MPS2 9.82f                               /* Gravitational acceleration constant used in vehicle load equations. */
 #define VP_MASS_TIMES_GRAVITY_N (VP_MASS_KG * GRAVITY_MPS2) /* Vehicle weight magnitude used by normal-load equations. */

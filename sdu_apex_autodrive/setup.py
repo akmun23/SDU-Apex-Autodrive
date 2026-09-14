@@ -16,6 +16,13 @@ def source_files(pattern):
     """
     return glob(pattern)
 
+
+calibration_manifest = "artifacts/calibration/MANIFEST.yaml"
+calibration_manifest_files = (
+    [calibration_manifest] if os.path.isfile(calibration_manifest) else []
+)
+
+
 setup(
     name=package_name,
     version="0.3.0",
@@ -37,7 +44,7 @@ setup(
         ),
         (
             os.path.join("share", package_name, "artifacts", "calibration"),
-            ["artifacts/calibration/MANIFEST.yaml"],
+            calibration_manifest_files,
         ),
     ],
     install_requires=["setuptools"],
@@ -61,6 +68,7 @@ setup(
             "validate_odometry_observer = sdu_apex_autodrive.scripts.validate_odometry_observer:main",
             "calibrate_ekf_covariance = sdu_apex_autodrive.odometry_analysis.covariance_calibration:main",
             "source_time_diagnostic_report = sdu_apex_autodrive.odometry_analysis.source_time_diagnostic_report:main",
+            "full_speed_localization_report = sdu_apex_autodrive.odometry_analysis.full_speed_localization_report:main",
             "score_localization_run = sdu_apex_autodrive.odometry_analysis.localization_run_score:main",
             "scan_match_benchmark = sdu_apex_autodrive.odometry_analysis.scan_match_benchmark:main",
         ],

@@ -17,6 +17,8 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
     private const string ExperimentEnvironmentVariable =
         "AUTODRIVE_MODEL_ID_EXPERIMENT";
     private const string RampSweepExperiment = "ramp_sweep_v1";
+    private const string DriveExcitationExperiment = "drive_excitation_v1";
+    private const string CombinedSlipMatrixExperiment = "combined_slip_matrix_v1";
 
     public VehicleController Controller;
     public Rigidbody VehicleRigidBody;
@@ -177,9 +179,14 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
             trace.WriteLine(BuildTraceHeader());
             trace.Flush();
             recordStride = Mathf.Max(1, RecordEveryFixedSteps);
+            string experiment = Environment.GetEnvironmentVariable(
+                ExperimentEnvironmentVariable);
             experimentActive = string.Equals(
-                Environment.GetEnvironmentVariable(ExperimentEnvironmentVariable),
-                RampSweepExperiment, StringComparison.Ordinal);
+                experiment, RampSweepExperiment, StringComparison.Ordinal) ||
+                string.Equals(experiment, DriveExcitationExperiment,
+                              StringComparison.Ordinal) ||
+                string.Equals(experiment, CombinedSlipMatrixExperiment,
+                              StringComparison.Ordinal);
             active = true;
             Debug.Log("[ModelIdentificationDiagnostics] Writing offline diagnostics to " +
                       Path.GetFullPath(outputDirectory));
@@ -223,6 +230,21 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
 
     private void ApplyExperimentCommand(float timeSeconds)
     {
+        if (string.Equals(Environment.GetEnvironmentVariable(
+                ExperimentEnvironmentVariable), DriveExcitationExperiment,
+                StringComparison.Ordinal))
+        {
+            ApplyDriveExcitationCommand(timeSeconds);
+            return;
+        }
+        if (string.Equals(Environment.GetEnvironmentVariable(
+                ExperimentEnvironmentVariable), CombinedSlipMatrixExperiment,
+                StringComparison.Ordinal))
+        {
+            ApplyCombinedSlipMatrixCommand(timeSeconds);
+            return;
+        }
+
         float throttle;
         float steering;
         if (timeSeconds < 4.0f)
@@ -254,6 +276,115 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         {
             throttle = 0.30f;
             steering = 0.0f;
+        }
+        else
+        {
+            throttle = 0.0f;
+            steering = 0.0f;
+        }
+        Controller.AutonomousThrottle = throttle;
+        Controller.AutonomousSteering = steering;
+    }
+
+    private void ApplyDriveExcitationCommand(float timeSeconds)
+    {
+        // Straight-line, diagnostic-only torque excitation. The plateaus are
+        // long enough to reach distinct speed/load regions while the command
+        // remains bounded and the competition scene is never modified.
+        float throttle;
+        if (timeSeconds < 2.0f)
+            throttle = 0.08f;
+        else if (timeSeconds < 8.0f)
+            throttle = 0.20f;
+        else if (timeSeconds < 12.0f)
+            throttle = 0.0f;
+        else if (timeSeconds < 18.0f)
+            throttle = 0.40f;
+        else if (timeSeconds < 22.0f)
+            throttle = 0.0f;
+        else if (timeSeconds < 28.0f)
+            throttle = 0.65f;
+        else if (timeSeconds < 32.0f)
+            throttle = 0.30f;
+        else if (timeSeconds < 36.0f)
+            throttle = 0.0f;
+        else if (timeSeconds < 42.0f)
+            throttle = 0.45f;
+        else if (timeSeconds < 46.0f)
+            throttle = 0.10f;
+        else
+            throttle = 0.0f;
+
+        Controller.AutonomousThrottle = throttle;
+        Controller.AutonomousSteering = 0.0f;
+    }
+
+    private void ApplyCombinedSlipMatrixCommand(float timeSeconds)
+    {
+        // Diagnostic-only paired throttle/steering plateaus. This is a
+        // straight/open-plane excitation profile for offline combined-slip
+        // identification; it never feeds the competition controller.
+        float throttle;
+        float steering;
+        if (timeSeconds < 4.0f)
+        {
+            throttle = 0.20f;
+            steering = 0.0f;
+        }
+        else if (timeSeconds < 10.0f)
+        {
+            throttle = 0.35f;
+            steering = 0.08f;
+        }
+        else if (timeSeconds < 16.0f)
+        {
+            throttle = 0.45f;
+            steering = 0.16f;
+        }
+        else if (timeSeconds < 22.0f)
+        {
+            throttle = 0.55f;
+            steering = 0.24f;
+        }
+        else if (timeSeconds < 28.0f)
+        {
+            throttle = 0.65f;
+            steering = 0.32f;
+        }
+        else if (timeSeconds < 34.0f)
+        {
+            throttle = 0.65f;
+            steering = -0.32f;
+        }
+        else if (timeSeconds < 40.0f)
+        {
+            throttle = 0.55f;
+            steering = -0.24f;
+        }
+        else if (timeSeconds < 46.0f)
+        {
+            throttle = 0.45f;
+            steering = -0.16f;
+        }
+        else if (timeSeconds < 52.0f)
+        {
+            throttle = 0.35f;
+            steering = -0.08f;
+        }
+        else if (timeSeconds < 58.0f)
+        {
+            throttle = 0.25f;
+            steering = 0.0f;
+        }
+        else if (timeSeconds < 64.0f)
+        {
+            throttle = 0.65f;
+            steering = 0.32f;
+        }
+        else if (timeSeconds < 70.0f)
+        {
+            throttle = 0.65f;
+            steering = -0.32f;
         }
         else
         {

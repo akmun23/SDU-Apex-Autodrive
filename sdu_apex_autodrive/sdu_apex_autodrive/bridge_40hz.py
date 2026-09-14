@@ -4,10 +4,11 @@ The simulator returns one telemetry packet after each ``Bridge`` request. The
 official bridge requests the next packet from inside the previous packet's
 callback, so simulator image capture, image decoding, and ROS publication can
 create a request backlog. This wrapper keeps the official decoder and topic
-contract, but sends one request at a time from an independent 40 Hz clock.
-The one-request contract makes request/response association unambiguous. A
-missing response is a transport fault: the bridge raises a fault and stops
-the stream instead of repeating, interpolating, or misassociating data.
+contract, but sends requests from an independent 40 Hz clock with a bounded
+two-entry FIFO. Socket.IO preserves response order, and each entry retains its
+request sequence, making request/response association explicit. A missing
+response is a transport fault: the bridge raises a fault and stops the stream
+instead of repeating, interpolating, or misassociating data.
 
 No ROS sensor sample is fabricated, interpolated, or repeated. The bridge also
 publishes a diagnostic packet-arrival event containing monotonic bridge-side
@@ -58,7 +59,12 @@ MAX_SOURCE_INTERVAL_S = 0.035
 MAX_BRIDGE_ARRIVAL_INTERVAL_S = 0.075
 MAX_RESPONSE_WAIT_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
 MAX_REQUEST_SCHEDULE_GAP_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
-MAX_OUTSTANDING_REQUESTS = 1
+# Unity's competition-track socket round trip is about 50 ms even though the
+# simulator builds each response in about 1 ms. Two bounded FIFO slots keep
+# the wire cadence at 40 Hz without allowing an unbounded request backlog.
+# Socket.IO preserves event order, and request_sequence is retained in every
+# slot so command/response association remains explicit.
+MAX_OUTSTANDING_REQUESTS = 2
 # Unity may need several seconds to finish loading the scene and accept the
 # first Bridge request.  This is a startup transport allowance only.  The
 # first few source packets can also straddle Unity's connection/bootstrap
@@ -150,6 +156,8 @@ _publication_diagnostic_enabled = False
 _publication_diagnostic_count = 0
 _timing_fault = False
 _timing_fault_reason = ""
+_timing_debug_count = 0
+_request_timing_debug_count = 0
 
 # Unity can emit one startup packet before its LiDAR range buffer has been
 # populated.  The official decoder treats that optional field as mandatory and
@@ -169,7 +177,7 @@ def _set_pending_request(
         generation: int,
         request_sequence: int,
         command: dict[str, str]) -> bool:
-    """Record one request boundary for its single expected response."""
+    """Record one request boundary in the bounded response FIFO."""
     global _pending_request_started_ns, _first_request_sent
     node = getattr(official_bridge, "autodrive_bridge", None)
     if node is None:
@@ -183,14 +191,14 @@ def _set_pending_request(
         if (not _client_connected.is_set() or
                 generation != _connection_generation):
             return False
-        if _pending_requests:
-            # This should be impossible with MAX_OUTSTANDING_REQUESTS=1.
-            # Refuse the request rather than allowing FIFO association to
-            # become ambiguous if the state machine is ever changed.
+        if len(_pending_requests) >= MAX_OUTSTANDING_REQUESTS:
+            # Refuse only when the explicitly bounded FIFO is full.
+            # Responses are consumed in Socket.IO order, preserving the
+            # request-sequence association stored in each slot.
             return False
         _pending_requests.append((_copy_stamp(stamp), request_ns, slot_pool,
                                   generation, request_sequence, dict(command)))
-        _pending_request_started_ns = request_ns
+        _pending_request_started_ns = _pending_requests[0][1]
         _first_request_sent = True
     return True
 
@@ -201,7 +209,8 @@ def _discard_pending_request() -> None:
     with _pending_request_lock:
         if _pending_requests:
             _pending_requests.pop()
-        _pending_request_started_ns = None
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
 
 
 def _next_request_sequence() -> int:
@@ -217,7 +226,7 @@ def _reset_request_pipeline() -> None:
 
     Each connection gets its own semaphore. A late callback from the old
     socket can therefore release only its old pool and cannot over-credit the
-    new connection's single request slot.
+    new connection's bounded request slots.
     """
     global _request_slots, _connection_generation
     global _pending_request_started_ns, _last_request_emit_ns
@@ -301,7 +310,8 @@ def _finish_packet() -> None:
         _active_telemetry_sequence = None
         _active_simulator_packet = {}
         _active_request_slot_pool = None
-        _pending_request_started_ns = None
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
     if slot_pool is not None:
         slot_pool.release()
 
@@ -403,6 +413,7 @@ def _capture_simulation_metadata(data: Any) -> bool:
     global _active_simulation_physics_step, _active_telemetry_sequence
     global _active_simulator_packet
     global _active_request_slot_pool
+    global _pending_request_started_ns
     request_stamp = None
     request_ns = None
     slot_pool = None
@@ -412,6 +423,8 @@ def _capture_simulation_metadata(data: Any) -> bool:
         if _pending_requests:
             (request_stamp, request_ns, slot_pool, _, request_sequence,
              command) = _pending_requests.popleft()
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
         _active_request_slot_pool = slot_pool
     if not isinstance(data, dict):
         return request_sequence is not None
@@ -523,6 +536,7 @@ def _validate_source_packet(data: Any) -> bool:
     global _last_source_physics_step, _last_source_frame
     global _last_source_telemetry_sequence
     global _source_startup_stable_intervals, _source_startup_started_ns
+    global _timing_debug_count
     if not REQUIRE_SOURCE_TIMING:
         return True
     if not isinstance(data, dict):
@@ -571,6 +585,16 @@ def _validate_source_packet(data: Any) -> bool:
             ordering_is_stable and
             MIN_BRIDGE_ARRIVAL_INTERVAL_S <= arrival_dt <= MAX_BRIDGE_ARRIVAL_INTERVAL_S and
             MIN_SOURCE_INTERVAL_S <= source_dt <= MAX_SOURCE_INTERVAL_S)
+        if _env_enabled("AUTODRIVE_TIMING_DEBUG", False) and _timing_debug_count < 20:
+            _timing_debug_count += 1
+            print(
+                "[autodrive_bridge_40hz] startup timing candidate: "
+                f"source={source_time:.9f} source_dt={source_dt!r} "
+                f"arrival_dt={arrival_dt!r} step={source_step} "
+                f"frame={source_frame} telemetry={telemetry_sequence} "
+                f"ordering={ordering_is_stable} stable={interval_is_stable}",
+                flush=True,
+            )
         if interval_is_stable:
             _source_startup_stable_intervals += 1
         else:
@@ -760,6 +784,7 @@ def _remember_command(data: Any) -> None:
 def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
     """Send one request per source period with a response deadline."""
     global _request_slots, _connection_generation, _last_request_emit_ns
+    global _request_timing_debug_count
     period = 1.0 / rate_hz
     next_send = time.monotonic()
     while not _stop_sender.is_set():
@@ -827,6 +852,14 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             with _emit_lock:
                 _last_request_emit_ns = time.monotonic()
                 original_emit("Bridge", data=command)
+            if (_env_enabled("AUTODRIVE_TIMING_DEBUG", False) and
+                    _request_timing_debug_count < 20):
+                _request_timing_debug_count += 1
+                print(
+                    "[autodrive_bridge_40hz] request sent: "
+                    f"sequence={request_sequence} monotonic={time.monotonic():.9f}",
+                    flush=True,
+                )
         except Exception as exc:
             _discard_pending_request()
             slot_pool.release()
@@ -1064,7 +1097,8 @@ def main() -> None:
         _run_command_sender, original_emit, rate_hz)
     print(
         f"[autodrive_bridge_40hz] strict request pacing enabled at {rate_hz:g} Hz "
-        "(one outstanding request; missing/deadline data is a fatal fault)")
+        f"({MAX_OUTSTANDING_REQUESTS} bounded outstanding requests; "
+        "missing/deadline data is a fatal fault)")
     try:
         official_bridge.main()
     finally:

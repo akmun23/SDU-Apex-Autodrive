@@ -26,7 +26,9 @@ from typing import Iterable, Sequence
 import numpy as np
 
 
-MASS_KG = 3.314
+# Unity diagnostic anchor.  The previous 3.314 kg value belonged to the
+# obsolete replay candidate and must not be reused for new fits.
+MASS_KG = 3.470
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
 HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)

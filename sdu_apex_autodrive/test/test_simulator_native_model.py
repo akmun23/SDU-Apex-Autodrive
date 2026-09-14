@@ -48,6 +48,12 @@ def test_ackermann_has_inner_wheel_larger_for_positive_turn():
 
 def test_prefab_profile_preserves_contact_and_command_geometry():
     parameters = f1tenth_prefab_parameters()
+    assert parameters.mass_kg == pytest.approx(3.47)
+    assert parameters.wheel_mass_total_kg == pytest.approx(0.436)
+    assert parameters.additive_system_mass_kg == pytest.approx(3.906)
+    assert parameters.wheel_radius_m == pytest.approx(0.059)
+    assert parameters.controller_wheel_radius_m == pytest.approx(0.0325)
+    assert parameters.drive_type == "CAWD"
     assert parameters.wheelbase_m == pytest.approx(0.330)
     assert parameters.steering_geometry_wheelbase_m == pytest.approx(0.324)
     assert parameters.track_m == pytest.approx(0.236)
@@ -57,6 +63,16 @@ def test_prefab_profile_preserves_contact_and_command_geometry():
     assert parameters.lateral_curve.source == "unity_prefab:F1TENTH.prefab"
     assert parameters.steering_rate_radps == pytest.approx(
         np.deg2rad(183.346))
+
+
+def test_default_candidate_uses_measured_unity_structural_anchors():
+    parameters = NativeModelParameters()
+    assert parameters.mass_kg == pytest.approx(3.47)
+    assert parameters.com_x_from_rear_axle_m == pytest.approx(0.155320086)
+    assert parameters.wheelbase_m == pytest.approx(0.33000004)
+    assert parameters.lf_m == pytest.approx(0.174679914)
+    assert parameters.lr_m == pytest.approx(0.155320086)
+    assert parameters.steering_geometry_wheelbase_m == pytest.approx(0.324)
 
 
 def test_prefab_profile_uses_controller_wheelbase_for_ackermann_angles():
@@ -305,6 +321,13 @@ def test_parameters_from_dump_preserves_dump_provenance(tmp_path: Path):
         "required_dynamic_fields_present"] is True
     assert diagnostic_report["derived"]["rigid_body_damping"][
         "max_angular_velocity_radps"] == pytest.approx(7.0)
+    assert diagnostic_report["derived"]["controller_parameters"][
+        "physical_wheel_radius_m"] == pytest.approx(0.059)
+    assert diagnostic_report["derived"]["controller_parameters"][
+        "controller_wheel_radius_role"].startswith(
+            "VehicleController.WheelRadius")
+    assert diagnostic_report["derived"]["mass_accounting"][
+        "status"] == "explicit_body_and_wheel_accounting"
     assert diagnostic_report["derived"]["wheel_dynamics"][0][
         "sprung_mass_kg"] == pytest.approx(0.8675)
     assert diagnostic_report["derived"]["wheel_dynamics"][0][

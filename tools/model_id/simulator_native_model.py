@@ -89,21 +89,31 @@ class DriveStateParameters:
 class NativeModelParameters:
     """Structural parameters with provenance kept outside the flat fit vector."""
 
-    mass_kg: float = 3.906
+    # Unity Rigidbody.mass is the chassis/body mass used for body translation
+    # and static support loads. WheelCollider.mass is kept separately below;
+    # the additive sum is not assumed to be Unity's rigid-body mass.
+    mass_kg: float = 3.470
     yaw_inertia_kgm2: float | None = None
-    com_x_from_rear_axle_m: float = 0.15532
+    com_x_from_rear_axle_m: float = 0.155320086
     # Position point relative to the point at which [u, v] is reported.  The
     # accepted replay data currently uses the source convention directly;
     # an offline Unity dump may establish a non-zero lever arm explicitly.
     position_offset_from_velocity_point_x_m: float = 0.0
-    wheelbase_m: float = 0.324
+    # Contact geometry is measured from WheelCollider positions.  The
+    # controller's Ackermann geometry is kept separately below.
+    wheelbase_m: float = 0.33000004
     # The source controller can use a steering-geometry wheelbase that is
     # distinct from the measured WheelCollider axle spacing.  Keep both
     # values so the offline plant follows the actual contact points and the
     # actual Ackermann command calculation.
-    steering_geometry_wheelbase_m: float | None = None
+    steering_geometry_wheelbase_m: float | None = 0.324
     track_m: float = 0.236
     wheel_radius_m: float = 0.059
+    # VehicleController.WheelRadius is a legacy controller parameter. It is
+    # distinct from WheelCollider.radius and is only used by the skid-steer
+    # branch in the competition controller.
+    controller_wheel_radius_m: float | None = None
+    drive_type: str | None = None
     steering_limit_rad: float = MAX_STEERING_RAD
     steering_rate_radps: float = STEERING_RATE_RADPS
     # Keep the effective API-frame to model-frame conversion explicit. The
@@ -228,6 +238,17 @@ class NativeModelParameters:
             return self.lateral_curve
         return self.wheel_lateral_curves[index]
 
+    @property
+    def wheel_mass_total_kg(self) -> float:
+        """Return the recorded WheelCollider masses, when available."""
+        return (sum(self.wheel_masses_kg)
+                if self.wheel_masses_kg is not None else 0.0)
+
+    @property
+    def additive_system_mass_kg(self) -> float:
+        """Return an accounting sum, not a claim about Unity dynamics."""
+        return self.mass_kg + self.wheel_mass_total_kg
+
 
 def f1tenth_prefab_parameters(
         contact_model: str = "four_wheel") -> NativeModelParameters:
@@ -240,18 +261,21 @@ def f1tenth_prefab_parameters(
     longitudinal = _prefab_curve(0.15, 0.9, 0.25, 0.58, 0.8)
     lateral = _prefab_curve(0.01, 1.0, 0.1, 0.5, 1.0)
     return NativeModelParameters(
-        mass_kg=3.906,
+        mass_kg=3.470,
         com_x_from_rear_axle_m=0.15532,
         position_offset_from_velocity_point_x_m=-0.15532,
         wheelbase_m=0.33,
         steering_geometry_wheelbase_m=0.324,
         track_m=0.236,
         wheel_radius_m=0.059,
+        controller_wheel_radius_m=0.0325,
+        drive_type="CAWD",
         steering_limit_rad=math.radians(30.0),
         steering_rate_radps=math.radians(183.346),
         steering_to_wheel_angle_sign=1.0,
         longitudinal_curve=longitudinal,
         lateral_curve=lateral,
+        wheel_masses_kg=(0.109,) * 4,
         parameter_provenance=(
             "unity_prefab:F1TENTH.prefab;"
             "inertia=not_serialized;"
@@ -751,6 +775,11 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
             vehicle.get("wheelbaseM", wheelbase)),
         track_m=track,
         wheel_radius_m=sum(float(wheel["radius"]) for wheel in wheels) / 4.0,
+        controller_wheel_radius_m=(
+            float(vehicle["wheelRadiusControllerM"])
+            if "wheelRadiusControllerM" in vehicle else None),
+        drive_type=(str(vehicle["driveType"])
+                    if vehicle.get("driveType") is not None else None),
         steering_limit_rad=float(vehicle["steeringLimitRad"]),
         steering_rate_radps=float(vehicle["steeringRateRadPerSecond"]),
         steering_to_wheel_angle_sign=1.0,

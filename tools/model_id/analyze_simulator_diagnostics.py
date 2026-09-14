@@ -17,6 +17,7 @@ GUIDE = {
     "wheelbase_m": 0.324,
     "track_m": 0.236,
     "wheel_radius_m": 0.059,
+    "controller_wheel_radius_m": 0.0325,
     "com_x_from_rear_axle_m": 0.15532,
     "com_z_m": 0.01434,
     "longitudinal_extremum_slip": 0.15,
@@ -139,9 +140,13 @@ def analyze(path: Path) -> dict[str, Any]:
             "controller_wheelbase_m", float(vehicle["wheelbaseM"]), GUIDE["wheelbase_m"]),
         "controller_track_m": _check(
             "controller_track_m", float(vehicle["trackWidthM"]), GUIDE["track_m"]),
+        "physical_wheel_radius_m": _check(
+            "physical_wheel_radius_m",
+            sum(float(wheel["radius"]) for wheel in wheels) / len(wheels),
+            GUIDE["wheel_radius_m"]),
         "controller_wheel_radius_m": _check(
             "controller_wheel_radius_m", float(vehicle["wheelRadiusControllerM"]),
-            GUIDE["wheel_radius_m"]),
+            GUIDE["controller_wheel_radius_m"]),
         "computed_yaw_inertia_kgm2": _check(
             "computed_yaw_inertia_kgm2", derived_iz,
             float(rigid_body["yawInertiaBodyFrame"]), 1.0e-5),
@@ -196,6 +201,20 @@ def analyze(path: Path) -> dict[str, Any]:
                 "track_m": derived_track,
                 "com_x_from_rear_axle_m": com_x_from_rear,
             },
+            "controller_parameters": {
+                "drive_type": vehicle.get("driveType"),
+                "steer_type": vehicle.get("steerType"),
+                "controller_wheel_radius_m": float(
+                    vehicle["wheelRadiusControllerM"]),
+                "controller_wheel_radius_role": (
+                    "VehicleController.WheelRadius; used by the skid-steer "
+                    "ExtendedDifferentialDrive branch, not the CAWD car "
+                    "drive branch"),
+                "competition_drive_type_uses_controller_radius": (
+                    str(vehicle.get("driveType")) == "SkidSteer"),
+                "physical_wheel_radius_m": sum(
+                    float(wheel["radius"]) for wheel in wheels) / len(wheels),
+            },
             "yaw_inertia_body_frame_kgm2": derived_iz,
             "static_normal_loads_N": {
                 "front_axle": front_axle_load,
@@ -207,7 +226,7 @@ def analyze(path: Path) -> dict[str, Any]:
                 "rigidbody_mass_kg": sprung_mass,
                 "wheel_mass_total_kg": wheel_mass,
                 "sum_if_additive_kg": mass_sum_if_additive,
-                "status": "unresolved_from_dump_alone",
+                "status": "explicit_body_and_wheel_accounting",
                 "body_load_calculation_uses": "Rigidbody.mass only",
                 "reason": (
                     "WheelCollider.mass is recorded separately; the dump and "
@@ -277,8 +296,9 @@ def analyze(path: Path) -> dict[str, Any]:
         "guide_crosscheck": checks,
         "friction_curve_guide_crosscheck": curve_checks,
         "next_action": (
-            "Use dump values as fixed structural parameters; fit only actuator, "
-            "drag, load-transfer, or residual terms that remain unexplained."
+            "Use Rigidbody.mass for body equations, retain WheelCollider.mass "
+            "as a separate wheel accounting term, audit the controller radius "
+            "semantics, then fit continuous drive and causal load terms."
             if diagnostic_fields_complete else
             "Rebuild the diagnostic player with the complete v2 static field "
             "set before using suspension or wheel-load values."

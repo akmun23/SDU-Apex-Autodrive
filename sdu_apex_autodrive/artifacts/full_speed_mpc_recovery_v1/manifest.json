@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "artifact": "full_speed_mpc_recovery_v1",
+  "handoff": "/home/akselmo/Downloads/SDU_Apex_Full_Speed_MPC_Recovery_Handoff_2026-09-14.md",
+  "status": "in_progress",
+  "acceptance": "E1_pure_pursuit_full_speed_accepted; no_production_model_or_mpc_candidate_accepted",
+  "ground_truth_use": "offline_only",
+  "simulator_physics_modified": false,
+  "production_controller_modified": false,
+  "unity_diagnostic_source_modified": true,
+  "unity_run": {
+    "mode": "batchmode_with_graphics",
+    "nographics": false,
+    "experiment": "drive_excitation_v1",
+    "duration_s": 55.8480034,
+    "rows": 55849,
+    "columns": 110,
+    "source_fixed_dt_median_s": 0.0009999200000008202,
+    "fixed_step_gaps": 0,
+    "trace": "drive_model/drive_excitation_trace_20260914.csv",
+    "static_dump": "drive_model/simulator_parameters_drive_excitation_20260914.json",
+    "contact_analysis": "drive_model/drive_excitation_analysis_20260914.json"
+  },
+  "structural_audits": {
+    "controller_parameters": "drive_model/controller_parameter_audit_20260914.json",
+    "rigidbody_mass_kg": 3.47,
+    "wheel_mass_each_kg": 0.109,
+    "physical_wheel_radius_m": 0.059,
+    "controller_wheel_radius_m": 0.0325,
+    "drive_type": "CAWD",
+    "yaw_inertia_kgm2": 0.0276985662
+  },
+  "drive_model": {
+    "identification": "drive_model/continuous_drive_identification_v2_20260914.json",
+    "status": "not_accepted",
+    "brake_semantics_separated": true,
+    "combined_slip_identified": false,
+    "runtime_consumption": false
+  },
+  "transport_recovery": {
+    "bridge_max_outstanding_requests": 2,
+    "source_contract_hz": 40.0,
+    "accepted_run": "runtime_track/e1_pp_full_speed_accept_20260914_1145",
+    "accepted_packets": 6531,
+    "accepted_simulation_duration_s": 163.25,
+    "source_interval_min_s": 0.021995,
+    "source_interval_max_s": 0.028,
+    "source_gaps_over_30ms": 0,
+    "request_sequence_gaps": 0,
+    "request_to_applied_command_lag": 1,
+    "complete_raceline_crossings": 11,
+    "collision_count_max": 0,
+    "ground_truth_collision_source": "../calibration/ground_truth_amcl.csv"
+  },
+  "latest_follow_on": {
+    "e1_localization_score": "not_accepted",
+    "e1_score": "runtime_track/e1_pp_full_speed_yaw_20260914_1220",
+    "e3_combined_slip": "../model_id_work/diagnostics_20260914_v2/combined_slip_matrix_v1_20260914",
+    "e3_status": "coverage_captured_force_law_not_accepted",
+    "e4_load_transfer": "../model_id_work/diagnostics_20260914_v2/combined_slip_matrix_v1_20260914/causal_load_transfer_fit.json",
+    "e4_status": "offline_candidate_not_accepted",
+    "e5_status": "existing_drive_fit_not_accepted",
+    "regime_cross_score": {
+      "status": "offline_only_not_accepted",
+      "report": "../model_id_work/model_fits_v2/regime_cross_score_v1.json",
+      "fit_method": "causal_derivative",
+      "replay_origins_per_run": 12,
+      "interpretation": "same split-contact structure is not globally valid; diagonal regime fits also fail long-horizon gates"
+    },
+    "e1_amcl_along_track_ab": {
+      "status": "invalid_timing_collision_not_accepted",
+      "override": "../../../f1tenth_localization/config/experiments/amcl_full_speed_along_track_ab.yaml",
+      "run": "runtime_track/e1_amcl_fast_along_20260914_1230",
+      "reason": "one collision followed by a 41 ms source-cadence fault; no localization score promoted"
+    }
+  },
+  "next_campaigns": ["E4_load_transfer", "E5_continuous_drive", "speed_slip_scheduling", "regime_blind_validation"]
+}

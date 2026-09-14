@@ -1,0 +1,752 @@
+{
+  "acceptance": "effective_structural_screen_only",
+  "front_rear_force_fit_and_moment_check": {
+    "force_fit": {
+      "lateral_residual": {
+        "bias": -0.11628189434594098,
+        "count": 69730,
+        "mae": 0.5472077905328806,
+        "max": 11.723031689024207,
+        "p50": 0.28817639741603074,
+        "p95": 1.2230853849651757,
+        "rmse": 0.9499478434300047
+      },
+      "longitudinal_residual": {
+        "bias": 0.8643064314642936,
+        "count": 69730,
+        "mae": 2.6686221989942225,
+        "max": 36.682846992339925,
+        "p50": 1.686174946347913,
+        "p95": 9.315016786326245,
+        "rmse": 4.486566868073147
+      }
+    },
+    "implied_alternate_yaw_moment_check": {
+      "residual": {
+        "bias": 0.07335856348553473,
+        "count": 69730,
+        "mae": 1.228531515053496,
+        "max": 2.5800137553256626,
+        "p50": 1.5543591717640763,
+        "p95": 1.9657523762830842,
+        "rmse": 1.4130646229644324
+      },
+      "target_moment": {
+        "bias": 0.0004911731255263893,
+        "count": 69730,
+        "mae": 0.013461624996098829,
+        "max": 4.878068592278721,
+        "p50": 0.00018855939614708167,
+        "p95": 0.034225885500244094,
+        "rmse": 0.13662228132897844
+      }
+    },
+    "implied_yaw_moment_check": {
+      "predicted_moment": {
+        "bias": 0.07384973661106115,
+        "count": 69730,
+        "mae": 1.2334435410141122,
+        "max": 5.416643870366867,
+        "p50": 1.5544796083911832,
+        "p95": 1.9849233211564203,
+        "rmse": 1.4220914258877555
+      },
+      "residual": {
+        "bias": 0.07370830577574225,
+        "count": 69730,
+        "mae": 1.2316263659144053,
+        "max": 4.220204580408135,
+        "p50": 1.5544698922734628,
+        "p95": 1.9770836023846035,
+        "rmse": 1.418149411877247
+      },
+      "target_moment": {
+        "bias": 0.00014143083531888994,
+        "count": 69730,
+        "mae": 0.0038762073269125097,
+        "max": 1.404615358402289,
+        "p50": 5.429473136529426e-05,
+        "p95": 0.009855171881891042,
+        "rmse": 0.03933969992927
+      }
+    },
+    "optimizer": {
+      "active_mask": [
+        -1,
+        0,
+        0,
+        0
+      ],
+      "message": "The relative change of the cost function is less than `tol`.",
+      "optimality": 5.820766091346741e-10,
+      "status": 2
+    },
+    "parameters": {
+      "front_lateral_scale": 0.9535956363400385,
+      "front_longitudinal_scale": 1.0693373156135814e-17,
+      "rear_lateral_scale": 0.9826426822898812,
+      "rear_longitudinal_scale": 0.15420148593528635
+    }
+  },
+  "front_rear_joint_inversion": {
+    "equation_normalization": {
+      "lateral_force_rms_N": 22.90170763651418,
+      "longitudinal_force_rms_N": 4.752127592608488,
+      "purpose": "balance force and moment residuals during the joint screen",
+      "yaw_moment_rms_Nm": 0.03933969992927
+    },
+    "optimizer": {
+      "active_mask": [
+        -1,
+        -1,
+        0,
+        0
+      ],
+      "message": "The relative change of the cost function is less than `tol`.",
+      "optimality": 5.529727786779404e-10,
+      "status": 2
+    },
+    "parameters": {
+      "front_lateral_scale": 0.020430789196018283,
+      "front_longitudinal_scale": 9.855344637294058e-34,
+      "rear_lateral_scale": 0.010865555222725858,
+      "rear_longitudinal_scale": 3.1977265654038935e-26
+    },
+    "residual_all_equations": {
+      "bias": -0.19465314335670697,
+      "count": 209190,
+      "mae": 7.466083037914076,
+      "max": 38.27189736276815,
+      "p50": 0.023815137377760677,
+      "p95": 29.949579016768077,
+      "rmse": 13.318921145279758
+    },
+    "residual_lateral_force": {
+      "bias": 0.0307884580528528,
+      "count": 69730,
+      "mae": 20.680982564331647,
+      "max": 35.202370552023694,
+      "p50": 21.54259517622757,
+      "p95": 29.95890487867642,
+      "rmse": 22.57425091838331
+    },
+    "residual_longitudinal_force": {
+      "bias": -0.6156347503981147,
+      "count": 69730,
+      "mae": 1.7061270821884513,
+      "max": 38.27189736276815,
+      "p50": 0.11961688703328435,
+      "p95": 10.913777430287617,
+      "rmse": 4.752127592608488
+    },
+    "residual_yaw_moment": {
+      "bias": 0.0008868622751401785,
+      "count": 69730,
+      "mae": 0.01113946722212695,
+      "max": 1.3140020170875157,
+      "p50": 0.009153211863390388,
+      "p95": 0.01879725864433401,
+      "rmse": 0.03821308650143033
+    }
+  },
+  "future_ground_truth_used": false,
+  "global_inversion": {
+    "lateral_force_N": {
+      "basis_rms": 23.50973175283471,
+      "nonnegative_scale": 0.9732952458954015,
+      "raw_residual": {
+        "bias": -0.11447993697486422,
+        "count": 69730,
+        "mae": 0.7163311237991211,
+        "max": 12.670064025236059,
+        "p50": 0.3699042681079838,
+        "p95": 1.3712062011807382,
+        "rmse": 1.140421258640017
+      },
+      "raw_scale": 1.0,
+      "scaled_residual": {
+        "bias": -0.11059642730009162,
+        "count": 69730,
+        "mae": 0.5687291870656903,
+        "max": 11.825550609742344,
+        "p50": 0.36246053117129406,
+        "p95": 1.2081819496782769,
+        "rmse": 0.9520507753238259
+      },
+      "signed_least_squares_scale": 0.9732952458954015,
+      "target_rms": 22.90170763651418
+    },
+    "longitudinal_force_N": {
+      "basis_rms": 17.672397331398788,
+      "nonnegative_scale": 0.08519099766259672,
+      "raw_residual": {
+        "bias": 16.07862121358154,
+        "count": 69730,
+        "mae": 16.11865339439412,
+        "max": 36.714457182111516,
+        "p50": 17.11275171733881,
+        "p95": 21.00152381509403,
+        "rmse": 16.78343603333313
+      },
+      "raw_scale": 1.0,
+      "scaled_residual": {
+        "bias": 0.8065655704080674,
+        "count": 69730,
+        "mae": 2.667340990236652,
+        "max": 36.297000765846974,
+        "p50": 1.650271252347963,
+        "p95": 9.521589741227384,
+        "rmse": 4.50733830609245
+      },
+      "signed_least_squares_scale": 0.08519099766259672,
+      "target_rms": 4.752127592608488
+    },
+    "yaw_moment_Nm": {
+      "basis_rms": 2.2107034697553347,
+      "nonnegative_scale": 0.001471498265197811,
+      "raw_residual": {
+        "bias": 0.11923224648312396,
+        "count": 69730,
+        "mae": 1.9599239506424764,
+        "max": 5.086202196369893,
+        "p50": 2.3331173242421617,
+        "p95": 2.9889962242355614,
+        "rmse": 2.2077985418969504
+      },
+      "raw_scale": 1.0,
+      "scaled_residual": {
+        "bias": 3.422732376548169e-05,
+        "count": 69730,
+        "mae": 0.006025640956454062,
+        "max": 1.3967398673346187,
+        "p50": 0.0033070214667499645,
+        "p95": 0.00850797091418928,
+        "rmse": 0.03920497009514177
+      },
+      "signed_least_squares_scale": 0.001471498265197811,
+      "target_rms": 0.03933969992927
+    },
+    "yaw_moment_unity_y_axis_Nm": {
+      "basis_rms": 2.2107034697553347,
+      "nonnegative_scale": 0.005110345282867279,
+      "raw_residual": {
+        "bias": 0.11888250419291657,
+        "count": 69730,
+        "mae": 1.9569340747735173,
+        "max": 3.881088310813222,
+        "p50": 2.3331172222367913,
+        "p95": 2.9764764280288385,
+        "rmse": 2.203616304969951
+      },
+      "raw_scale": 1.0,
+      "scaled_residual": {
+        "bias": 0.00011886758325643653,
+        "count": 69730,
+        "mae": 0.020926362311359855,
+        "max": 4.850717911968866,
+        "p50": 0.011484907561664485,
+        "p95": 0.02954721052440684,
+        "rmse": 0.13615438001466318
+      },
+      "signed_least_squares_scale": 0.005110345282867279,
+      "target_rms": 0.13662228132897844
+    }
+  },
+  "input": {
+    "static_dump": "sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/contact_model/simulator_parameters_combined_slip_matrix_20260914.json",
+    "trace": "sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/contact_model/combined_slip_matrix_trace_20260914.csv"
+  },
+  "limitations": [
+    "WheelHit.force is a normal-load proxy, not measured tire Fx/Fy.",
+    "Body acceleration and yaw acceleration are differentiated from the diagnostic trace.",
+    "The dump's yawInertiaBodyFrame field is exported from a local-Z projection; Unity physical yaw is local-Y, so inertia semantics require resolution before MPC use.",
+    "A fitted scale is not a tire coefficient or proof of the assumed force sign.",
+    "No combined-slip law is promoted from this inversion alone."
+  ],
+  "next_action": "Compare force/moment residuals against the same regimes after a causal load-state fit; add direct force export if the residual cannot be explained by measured load and configured curves.",
+  "offline_only": true,
+  "regime_inversion": {
+    "high_longitudinal_slip": {
+      "lateral_force": {
+        "basis_rms": 21.081541522110207,
+        "nonnegative_scale": 0.936000771565666,
+        "raw_residual": {
+          "bias": -1.260373978202288,
+          "count": 3565,
+          "mae": 1.2733948025709745,
+          "max": 7.489923097249381,
+          "p50": 0.59332193527041,
+          "p95": 7.210018840453381,
+          "rmse": 2.469876744609566
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": -0.026324402464816783,
+          "count": 3565,
+          "mae": 1.288227491189469,
+          "max": 6.129353223077986,
+          "p50": 0.8895613523448134,
+          "p95": 5.834373389839049,
+          "rmse": 2.068802561871522
+        },
+        "signed_least_squares_scale": 0.936000771565666,
+        "target_rms": 19.840492725752174
+      },
+      "longitudinal_force": {
+        "basis_rms": 16.258388278802634,
+        "nonnegative_scale": 0.6115235938424499,
+        "raw_residual": {
+          "bias": 6.12616647867594,
+          "count": 3565,
+          "mae": 6.794157733303599,
+          "max": 11.559674470678203,
+          "p50": 7.431451380567982,
+          "p95": 10.76590290175971,
+          "rmse": 7.449907785130383
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": -0.1814887234400329,
+          "count": 3565,
+          "mae": 3.1841195889331226,
+          "max": 9.050614570146076,
+          "p50": 2.8798561544351395,
+          "p95": 8.16279539591629,
+          "rmse": 3.95085647276108
+        },
+        "signed_least_squares_scale": 0.6115235938424499,
+        "target_rms": 10.698614238030709
+      },
+      "samples": 3565,
+      "yaw_moment": {
+        "basis_rms": 2.415407152924296,
+        "nonnegative_scale": 0.0019566731920773366,
+        "raw_residual": {
+          "bias": 2.1440963954830874,
+          "count": 3565,
+          "mae": 2.1641047991943623,
+          "max": 2.839771005824575,
+          "p50": 2.8121658647628456,
+          "p95": 2.8210622150984563,
+          "rmse": 2.4118652586772935
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 0.013929108651112576,
+          "count": 3565,
+          "mae": 0.015501924672282319,
+          "max": 0.7102907639870913,
+          "p50": 0.002442121032518974,
+          "p95": 0.018624121641499642,
+          "rmse": 0.07557240273657388
+        },
+        "signed_least_squares_scale": 0.0019566731920773366,
+        "target_rms": 0.07572004138032211
+      }
+    },
+    "low_slip": {
+      "lateral_force": {
+        "basis_rms": 20.95902676027755,
+        "nonnegative_scale": 1.02426238930207,
+        "raw_residual": {
+          "bias": -0.3402096765678499,
+          "count": 356,
+          "mae": 0.34506707174425566,
+          "max": 1.9339019925034933,
+          "p50": 0.04500413250081101,
+          "p95": 1.588036493035645,
+          "rmse": 0.6350050142934837
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": -0.01939867175424417,
+          "count": 356,
+          "mae": 0.23140188098947864,
+          "max": 1.1243505417823627,
+          "p50": 0.04921833622805571,
+          "p95": 0.8817218056453484,
+          "rmse": 0.38031931075915404
+        },
+        "signed_least_squares_scale": 1.02426238930207,
+        "target_rms": 21.470911433940575
+      },
+      "longitudinal_force": {
+        "basis_rms": 5.414739642766133,
+        "nonnegative_scale": 0.4711140770995299,
+        "raw_residual": {
+          "bias": 7.41360089824959,
+          "count": 356,
+          "mae": 7.41360089824959,
+          "max": 11.059032241982333,
+          "p50": 7.9105422094788,
+          "p95": 10.415507401348803,
+          "rmse": 7.780129179122499
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 7.0727362700248335,
+          "count": 356,
+          "mae": 7.0727362700248335,
+          "max": 10.202381446722564,
+          "p50": 5.987249441423888,
+          "p95": 9.580220404595943,
+          "rmse": 7.2338908341074095
+        },
+        "signed_least_squares_scale": 0.4711140770995299,
+        "target_rms": 7.670500236369876
+      },
+      "samples": 356,
+      "yaw_moment": {
+        "basis_rms": 0.6449042903451238,
+        "nonnegative_scale": 0.0,
+        "raw_residual": {
+          "bias": 0.3422110603431525,
+          "count": 356,
+          "mae": 0.34290266197614366,
+          "max": 1.9168029268243687,
+          "p50": 0.0018619390684160638,
+          "p95": 1.6221105731004,
+          "rmse": 0.6502736656211568
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 0.003666858228270297,
+          "count": 356,
+          "mae": 0.004183121069260791,
+          "max": 0.011864182414059891,
+          "p50": 0.0006793635839603032,
+          "p95": 0.011692316558784277,
+          "rmse": 0.00628179106634106
+        },
+        "signed_least_squares_scale": -0.008313067961011075,
+        "target_rms": 0.00628179106634106
+      }
+    },
+    "moderate_lateral_slip": {
+      "lateral_force": {
+        "basis_rms": 22.037267072391767,
+        "nonnegative_scale": 0.9717703981583269,
+        "raw_residual": {
+          "bias": 0.059283963922416735,
+          "count": 31234,
+          "mae": 0.6316952887724386,
+          "max": 5.042804208512933,
+          "p50": 0.3207463109135258,
+          "p95": 1.2504754275924015,
+          "rmse": 0.7996367798233402
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": -0.028463035155157343,
+          "count": 31234,
+          "mae": 0.4489611681445122,
+          "max": 4.417463956836837,
+          "p50": 0.3861311523318527,
+          "p95": 0.6381274378427266,
+          "rmse": 0.502400731205672
+        },
+        "signed_least_squares_scale": 0.9717703981583269,
+        "target_rms": 21.421056158793185
+      },
+      "longitudinal_force": {
+        "basis_rms": 20.312189788732205,
+        "nonnegative_scale": 0.012115436491603479,
+        "raw_residual": {
+          "bias": 20.162597585723766,
+          "count": 31234,
+          "mae": 20.162597585723766,
+          "max": 36.582488277973766,
+          "p50": 20.89700470269191,
+          "p95": 21.025637723395825,
+          "rmse": 20.200046890826883
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 0.313133728719112,
+          "count": 31234,
+          "mae": 0.6367947520708671,
+          "max": 34.474018510711986,
+          "p50": 0.24769571738340596,
+          "p95": 2.0723647547699144,
+          "rmse": 2.322407288585818
+        },
+        "signed_least_squares_scale": 0.012115436491603479,
+        "target_rms": 2.3354092610713986
+      },
+      "samples": 31234,
+      "yaw_moment": {
+        "basis_rms": 2.625491007680394,
+        "nonnegative_scale": 0.0001430794441309244,
+        "raw_residual": {
+          "bias": -0.33807296286582494,
+          "count": 31234,
+          "mae": 2.606905241396525,
+          "max": 3.4460486092707625,
+          "p50": 2.7752758915485742,
+          "p95": 2.8209388720629343,
+          "rmse": 2.6251342002781923
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 8.08729513793584e-05,
+          "count": 31234,
+          "mae": 0.001429819116228719,
+          "max": 0.35725902658114833,
+          "p50": 0.0003813039988303734,
+          "p95": 0.001982009831339091,
+          "rmse": 0.009947273992048481
+        },
+        "signed_least_squares_scale": 0.0001430794441309244,
+        "target_rms": 0.00995436465304506
+      }
+    },
+    "moderate_longitudinal_slip": {
+      "lateral_force": {
+        "basis_rms": 25.051271980469195,
+        "nonnegative_scale": 0.9135571922247703,
+        "raw_residual": {
+          "bias": -1.5988457666729603,
+          "count": 3292,
+          "mae": 2.12762692907917,
+          "max": 8.344749161014954,
+          "p50": 1.6675648897209712,
+          "p95": 6.480500829156273,
+          "rmse": 2.8150705339975604
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 0.2696135070327354,
+          "count": 3292,
+          "mae": 1.3265282427704006,
+          "max": 8.76385506991442,
+          "p50": 1.0392338598991184,
+          "p95": 4.010707449898027,
+          "rmse": 1.7986722743755066
+        },
+        "signed_least_squares_scale": 0.9135571922247703,
+        "target_rms": 22.95634283487073
+      },
+      "longitudinal_force": {
+        "basis_rms": 22.76488356128189,
+        "nonnegative_scale": 0.5569616683653079,
+        "raw_residual": {
+          "bias": 11.427398815211406,
+          "count": 3292,
+          "mae": 11.550134845131748,
+          "max": 20.999179792095273,
+          "p50": 11.866740289187064,
+          "p95": 15.495147979967895,
+          "rmse": 12.041206410359191
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 2.995578197936609,
+          "count": 3292,
+          "mae": 4.286577875986196,
+          "max": 25.360419229520282,
+          "p50": 3.2244195167397613,
+          "p95": 18.84502163638581,
+          "rmse": 6.5779163814707164
+        },
+        "signed_least_squares_scale": 0.5569616683653079,
+        "target_rms": 14.283916589496874
+      },
+      "samples": 3292,
+      "yaw_moment": {
+        "basis_rms": 3.338162700254117,
+        "nonnegative_scale": 0.005087573733037598,
+        "raw_residual": {
+          "bias": 3.1188059461847724,
+          "count": 3292,
+          "mae": 3.1762181725076633,
+          "max": 4.214952074349006,
+          "p50": 3.5200808062766535,
+          "p95": 3.876748267191561,
+          "rmse": 3.3224388811914727
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 0.017765170721890624,
+          "count": 3292,
+          "mae": 0.0282455690852071,
+          "max": 1.3773865519277775,
+          "p50": 0.015951707189951633,
+          "p95": 0.06861829061018151,
+          "rmse": 0.09146861059196183
+        },
+        "signed_least_squares_scale": 0.005087573733037598,
+        "target_rms": 0.09303189812735606
+      }
+    },
+    "ordinary_combined_or_transition": {
+      "lateral_force": {
+        "basis_rms": 25.008420283052057,
+        "nonnegative_scale": 0.9833981720690764,
+        "raw_residual": {
+          "bias": 0.0013869132316800881,
+          "count": 31283,
+          "mae": 0.5930618679077861,
+          "max": 12.670064025236059,
+          "p50": 0.3820449748912367,
+          "p95": 1.3059006701158502,
+          "rmse": 0.852545398326985
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": -0.013453760841813335,
+          "count": 31283,
+          "mae": 0.5674604464063928,
+          "max": 12.145046406482965,
+          "p50": 0.6951810130403331,
+          "p95": 0.9143034204434756,
+          "rmse": 0.7446171263140386
+        },
+        "signed_least_squares_scale": 0.9833981720690764,
+        "target_rms": 24.60450471424104
+      },
+      "longitudinal_force": {
+        "basis_rms": 14.114429510035198,
+        "nonnegative_scale": 0.026915193029300115,
+        "raw_residual": {
+          "bias": 13.723289387674205,
+          "count": 31283,
+          "mae": 13.723481445175587,
+          "max": 36.714457182111516,
+          "p50": 13.672308169937242,
+          "p95": 17.143257637869418,
+          "rmse": 14.078369722065469
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": 0.7912693551798973,
+          "count": 31283,
+          "mae": 1.0896508362635882,
+          "max": 36.09191973613997,
+          "p50": 0.5949373664089552,
+          "p95": 2.471918661175032,
+          "rmse": 3.092408406750547
+        },
+        "signed_least_squares_scale": 0.026915193029300115,
+        "target_rms": 3.115655330375254
+      },
+      "samples": 31283,
+      "yaw_moment": {
+        "basis_rms": 1.472743990260109,
+        "nonnegative_scale": 0.0036043404985947897,
+        "raw_residual": {
+          "bias": 0.026877074040206075,
+          "count": 31283,
+          "mae": 1.1810952142644306,
+          "max": 5.086202196369893,
+          "p50": 1.108467425062603,
+          "p95": 2.1296226800314186,
+          "rmse": 1.4680345678242348
+        },
+        "raw_scale": 1.0,
+        "scaled_residual": {
+          "bias": -0.0016948753676080364,
+          "count": 31283,
+          "mae": 0.006934744316807442,
+          "max": 1.1881369935205202,
+          "p50": 0.0040062468312761,
+          "p95": 0.007923333690576604,
+          "rmse": 0.04192733718493348
+        },
+        "signed_least_squares_scale": 0.0036043404985947897,
+        "target_rms": 0.042262031924551774
+      }
+    }
+  },
+  "schema_version": 1,
+  "selection": {
+    "accepted_rows": 69730,
+    "all_four_wheels_grounded": true,
+    "brake_torque_max_nm": 0.01,
+    "rejected_rows": 6329,
+    "speed_min_mps": 1.0
+  },
+  "sign_convention": {
+    "body_forward": "Unity body +z mapped to API +x",
+    "body_lateral": "Unity body -x mapped to API +y",
+    "force_basis": "signed slip curve along wheel directions",
+    "yaw_moment": "x_forward*Fy_left - y_left*Fx_forward"
+  },
+  "sign_selection": {
+    "initial_negative_force_basis_trial": {
+      "interpretation": "opposite to measured body-force convention",
+      "result": "all global signed scales were negative"
+    },
+    "must_be_verified_by_direct_force_export": true,
+    "selected_force_basis": "positive signed slip curve"
+  },
+  "slip_samples": {
+    "forward": {
+      "bias": 0.07523873830211983,
+      "count": 278920,
+      "mae": 0.07730662458791049,
+      "max": 0.783066452,
+      "p50": 0.058758517950000005,
+      "p95": 0.2570992546,
+      "rmse": 0.11850605180494343
+    },
+    "sideways": {
+      "bias": -0.00029289790545419336,
+      "count": 278920,
+      "mae": 0.04327352481013827,
+      "max": 0.165548876,
+      "p50": 0.005711405540000001,
+      "p95": 0.163337439,
+      "rmse": 0.07295561063165767
+    }
+  },
+  "source_time": {
+    "callback_time_used": false,
+    "derivative_smoothing": "Savitzky-Golay 21 samples, offline only",
+    "derivative_time_field": "fixed_time_s"
+  },
+  "status": "body_force_moment_inversion_offline_only",
+  "structural_parameters": {
+    "exported_vs_physical_yaw_axis_mismatch": true,
+    "exported_yawInertiaBodyFrame_projection_axis": "local_z",
+    "force_basis": "dumped WheelCollider curves and WheelHit.force*normal_y",
+    "raw_body_inertia_tensor_kgm2": [
+      [
+        0.09352723976393092,
+        -0.000302775978559733,
+        0.00025401634996807874
+      ],
+      [
+        -0.00030277597855973306,
+        0.09619074922080222,
+        0.018001541625546607
+      ],
+      [
+        0.000254016349968079,
+        0.018001541625546603,
+        0.027697644042999205
+      ]
+    ],
+    "raw_tensor_local_y_axis_inertia_kgm2": 0.09619074922080222,
+    "rigidbody_mass_kg": 3.4700000286102295,
+    "unity_physical_yaw_axis": "local_y",
+    "wheel_geometry_api_body_frame": [
+      {
+        "x_m": 0.17467986745759845,
+        "y_m": 0.11791998581611551
+      },
+      {
+        "x_m": 0.17468004627153277,
+        "y_m": -0.11808000071323477
+      },
+      {
+        "x_m": -0.15532005624845624,
+        "y_m": 0.11791999326669611
+      },
+      {
+        "x_m": -0.15532011585310102,
+        "y_m": -0.11807999326265417
+      }
+    ],
+    "yaw_inertia_kgm2": 0.027697643265128136
+  }
+}

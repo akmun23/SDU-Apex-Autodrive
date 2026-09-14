@@ -9,6 +9,14 @@
       "y": 0.0643400028347969,
       "z": -0.004679999779909849
     },
+    "controller_parameters": {
+      "competition_drive_type_uses_controller_radius": false,
+      "controller_wheel_radius_m": 0.032499998807907104,
+      "controller_wheel_radius_role": "VehicleController.WheelRadius; used by the skid-steer ExtendedDifferentialDrive branch, not the CAWD car drive branch",
+      "drive_type": "CAWD",
+      "physical_wheel_radius_m": 0.05900000035762787,
+      "steer_type": "FrontWheelSteer"
+    },
     "derived_contact_geometry": {
       "com_x_from_rear_axle_m": 0.15532008605077863,
       "track_m": 0.23599998652935028,
@@ -50,7 +58,7 @@
       "body_load_calculation_uses": "Rigidbody.mass only",
       "reason": "WheelCollider.mass is recorded separately; the dump and source architecture do not prove that it is added to Rigidbody.mass for body translation or inertia.",
       "rigidbody_mass_kg": 3.4700000286102295,
-      "status": "unresolved_from_dump_alone",
+      "status": "explicit_body_and_wheel_accounting",
       "sum_if_additive_kg": 3.906000018119812,
       "wheel_mass_total_kg": 0.4359999895095825
     },
@@ -423,10 +431,10 @@
       "match": true
     },
     "controller_wheel_radius_m": {
-      "absolute_difference": 0.026500001192092892,
+      "absolute_difference": 1.1920928966180355e-09,
       "actual": 0.032499998807907104,
-      "expected_guide": 0.059,
-      "match": false
+      "expected_guide": 0.0325,
+      "match": true
     },
     "controller_wheelbase_m": {
       "absolute_difference": 9.536743061921982e-10,
@@ -438,6 +446,12 @@
       "absolute_difference": 1.8119811873162917e-08,
       "actual": 3.906000018119812,
       "expected_guide": 3.906,
+      "match": true
+    },
+    "physical_wheel_radius_m": {
+      "absolute_difference": 3.576278717609682e-10,
+      "actual": 0.05900000035762787,
+      "expected_guide": 0.059,
       "match": true
     },
     "sprung_mass_kg": {
@@ -454,7 +468,7 @@
     }
   },
   "input": "sdu_apex_autodrive/artifacts/model_id_work/diagnostics_20260914_v2/simulator_parameters_ramp_sweep_v2_20260914.json",
-  "next_action": "Use dump values as fixed structural parameters; fit only actuator, drag, load-transfer, or residual terms that remain unexplained.",
+  "next_action": "Use Rigidbody.mass for body equations, retain WheelCollider.mass as a separate wheel accounting term, audit the controller radius semantics, then fit continuous drive and causal load terms.",
   "schema_version": 1,
   "simulator_build_tag": "model-identification-ramp-sweep-v2-20260914",
   "source_provenance": {

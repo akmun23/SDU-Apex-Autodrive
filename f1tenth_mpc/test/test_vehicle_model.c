@@ -136,6 +136,23 @@ static void test_runtime_parameters_are_active(void)
                "default model parameters can be restored");
 }
 
+static void test_unity_structural_anchors(void)
+{
+    const VehicleParameters_t parameters = vehicle_model_default_parameters();
+    check_close(parameters.vehicle_mass, 3.470f, 1.0e-6f,
+                "Unity Rigidbody mass is used");
+    check_close(parameters.yaw_moment_of_inertia, 0.0276985662f, 1.0e-7f,
+                "projected Unity yaw inertia is used");
+    check_close(parameters.wheelbase_meters, 0.330000f, 1.0e-5f,
+                "contact wheelbase is used");
+    check_close(parameters.distance_cg_to_front_axle, 0.174679914f, 1.0e-6f,
+                "front COM contact distance is used");
+    check_close(parameters.distance_cg_to_rear_axle, 0.155320086f, 1.0e-6f,
+                "rear COM contact distance is used");
+    check_close(parameters.max_steering_angle, 0.5235987756f, 1.0e-6f,
+                "Unity steering limit is used");
+}
+
 int main(void)
 {
     test_zero_speed_is_physical();
@@ -143,6 +160,7 @@ int main(void)
     test_low_speed_linearization_is_finite();
     test_rollouts_share_body_force_path();
     test_runtime_parameters_are_active();
+    test_unity_structural_anchors();
     if (failures != 0) {
         fprintf(stderr, "%d vehicle-model test(s) failed\n", failures);
         return 1;

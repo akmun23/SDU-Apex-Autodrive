@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
 import statistics
 import time
@@ -280,17 +281,27 @@ class ModelIdTimingRecorder(Node):
                 "velocity": list(message.velocity),
             })
         elif isinstance(message, Odometry):
+            q = message.pose.pose.orientation
+            yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             payload = _finite_payload({
                 "x_m": float(message.pose.pose.position.x),
                 "y_m": float(message.pose.pose.position.y),
+                "yaw_rad": yaw,
                 "yaw_rate_radps": float(message.twist.twist.angular.z),
                 "speed_mps": float(message.twist.twist.linear.x),
                 "lateral_speed_mps": float(message.twist.twist.linear.y),
             })
         elif isinstance(message, PoseWithCovarianceStamped):
+            q = message.pose.pose.orientation
+            yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             payload = _finite_payload({
                 "x_m": float(message.pose.pose.position.x),
                 "y_m": float(message.pose.pose.position.y),
+                "yaw_rad": yaw,
             })
         elif isinstance(message, Float32):
             payload = {"value": float(message.data)}

@@ -6,4 +6,5 @@
 **/__pycache__
 **/*.pyc
 .pytest_cache
+/sdu_apex_autodrive/artifacts/
 /f1tenth_planning/analysis/

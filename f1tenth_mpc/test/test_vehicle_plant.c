@@ -38,6 +38,19 @@ static void test_zero_input_is_identity(void)
                "stationary lateral state remains finite");
 }
 
+static void test_default_parameters_use_unity_structural_anchors(void)
+{
+    const VehiclePlantParameters_t parameters = vehicle_plant_default_parameters();
+    check_close(parameters.mass_kg, 3.470f, 1.0e-6f,
+                "plant uses Unity Rigidbody mass");
+    check_close(parameters.lf_m, 0.174679914f, 1.0e-6f,
+                "plant uses measured front contact geometry");
+    check_close(parameters.lr_m, 0.155320086f, 1.0e-6f,
+                "plant uses measured rear contact geometry");
+    check_close(parameters.iz_kgm2, 0.0276985662f, 1.0e-7f,
+                "plant uses projected Unity yaw inertia");
+}
+
 static void test_actuator_limits_and_forward_motion(void)
 {
     const VehiclePlantParameters_t parameters = vehicle_plant_default_parameters();
@@ -57,6 +70,7 @@ static void test_actuator_limits_and_forward_motion(void)
 
 int main(void)
 {
+    test_default_parameters_use_unity_structural_anchors();
     test_zero_input_is_identity();
     test_actuator_limits_and_forward_motion();
     if (failures != 0) {

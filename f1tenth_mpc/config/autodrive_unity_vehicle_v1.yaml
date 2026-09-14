@@ -1,0 +1,102 @@
+# Authoritative structural anchors for the AutoDRIVE Unity vehicle.
+#
+# This file is provenance/configuration data only. It is not read by the
+# ROS-free C core at runtime; callers must pass a validated C parameter
+# structure. The simulator was not modified to produce this artifact.
+
+schema_version: 1
+status: structural_anchors_only
+runtime_ready: false
+simulator_behavior_modified: false
+
+simulator_build:
+  source: diagnostic_dump
+  dump: sdu_apex_autodrive/artifacts/model_id_work/diagnostics_20260914_v2
+  ground_truth_runtime_input: false
+
+geometry:
+  contact_wheelbase_m:
+    value: 0.33000004
+    source: unity_dump
+  steering_geometry_wheelbase_m:
+    value: 0.324
+    source: unity_dump
+  track_m:
+    value: 0.23599999
+    source: unity_dump
+  com_from_rear_contact_axle_m:
+    value: 0.155320086
+    source: unity_dump
+  physical_wheel_radius_m:
+    value: 0.059
+    source: unity_dump
+  controller_wheel_radius_m:
+    value: 0.0325
+    source: unity_dump
+    role: skid_steer_branch_only_not_CA_WD
+
+rigid_body:
+  mass_kg:
+    value: 3.47
+    source: unity_dump
+  yaw_inertia_kgm2:
+    value: 0.0276985662
+    source: unity_dump_projected_body_yaw
+  center_of_mass_height_m:
+    value: 0.01434
+    source: unity_dump
+  drag:
+    value: 0.273
+    source: unity_dump
+  angular_drag:
+    value: 0.1
+    source: unity_dump
+  max_angular_velocity_radps:
+    value: 7.0
+    source: unity_dump
+
+steering:
+  max_angle_rad:
+    value: 0.5235987756
+    source: unity_dump
+  rate_radps:
+    value: 3.2
+    source: accepted_source_replay_identification
+
+wheel:
+  mass_each_kg:
+    value: 0.109
+    source: unity_dump
+  damping_rate:
+    value: 0.25
+    source: unity_dump
+
+friction_curves:
+  source: unity_dump
+  status: structural_reference_not_runtime_tuned
+  lateral:
+    extremum_slip: 0.01
+    extremum_value: 1.0
+    asymptote_slip: 0.1
+    asymptote_value: 0.5
+    stiffness: 1.0
+  longitudinal:
+    extremum_slip: 0.15
+    extremum_value: 0.9
+    asymptote_slip: 0.25
+    asymptote_value: 0.58
+    stiffness: 0.8
+
+drive_model:
+  status: not_accepted
+  source: sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/drive_model
+  required_next_step: continuous_time_regime_specific_fit
+
+load_transfer_model:
+  status: not_accepted
+  source: sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/load_model
+  required_next_step: causal_state_cross_score
+
+model_validity_envelope:
+  status: pending_regime_cross_score
+  production_mpc_authority: disabled

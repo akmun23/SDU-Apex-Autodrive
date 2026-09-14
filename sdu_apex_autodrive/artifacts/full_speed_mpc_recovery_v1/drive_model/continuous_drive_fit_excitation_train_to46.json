@@ -1,0 +1,462 @@
+{
+  "ground_truth_use": "offline_identification_and_scoring_only",
+  "model": {
+    "coefficients_are_physical_inertia_claims": false,
+    "contact_impulse_rejection_limit_radps2": 500.0,
+    "continuous_derivative_smoothing": {
+      "method": "savgol",
+      "polynomial_order": 2,
+      "purpose": "reject unobserved contact-solver impulses",
+      "window_samples": 21
+    },
+    "equation": "domega = km*motor_torque - kb*brake_torque*sign(omega) - kx*radius*Fz*phi_x(Sx) - kd*omega",
+    "separate_tire_force_components_observed": false
+  },
+  "next_action": "Compare this continuous drive state against the existing 25 ms discrete map, then collect repeated torque/speed excitation if the diagnostic sweep does not identify all drive regimes.",
+  "physical_parameters": {
+    "longitudinal_curve": "unity_prefab:F1TENTH.prefab",
+    "wheel_load": "WheelHit.force scalar proxy, clipped nonnegative",
+    "wheel_radius_m": 0.059
+  },
+  "recursive_prediction_uses_future_gt": false,
+  "schema_version": 1,
+  "split": {
+    "reason": "causal temporal holdout within diagnostic sweep",
+    "train_time_s": [
+      0.15,
+      46.0
+    ],
+    "validation_time_s": [
+      46.0,
+      55.0
+    ]
+  },
+  "status": "continuous_drive_fit_offline_only",
+  "trace": "sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/drive_model/drive_excitation_trace_20260914.csv",
+  "trace_timing": {
+    "nominal_dt_s": 0.001,
+    "state_source": "Unity diagnostic wheel rpm"
+  },
+  "wheels": {
+    "wheel_0": {
+      "arbitrary_dt_replay": {
+        "0.001": {
+          "error_radps": {
+            "bias": 3.9699779297613547,
+            "count": 8999,
+            "mae": 3.9699779297613547,
+            "max": 42.570832795345055,
+            "p95": 24.897422383268868,
+            "rmse": 9.195411611228838
+          },
+          "sample_period_s": 0.001,
+          "samples": 8999
+        },
+        "0.005": {
+          "error_radps": {
+            "bias": 3.9605282376656135,
+            "count": 1800,
+            "mae": 3.9605282376656135,
+            "max": 42.36842827843881,
+            "p95": 24.783517100167867,
+            "rmse": 9.173865242616651
+          },
+          "sample_period_s": 0.005,
+          "samples": 1800
+        },
+        "0.01": {
+          "error_radps": {
+            "bias": 3.948731077601473,
+            "count": 900,
+            "mae": 3.948731077601473,
+            "max": 42.11660580824026,
+            "p95": 24.643555625074296,
+            "rmse": 9.1465053516807
+          },
+          "sample_period_s": 0.01,
+          "samples": 900
+        },
+        "0.025": {
+          "error_radps": {
+            "bias": 3.91387799929541,
+            "count": 360,
+            "mae": 3.91387799929541,
+            "max": 41.370083303104316,
+            "p95": 24.22889724308869,
+            "rmse": 9.065523974722295
+          },
+          "sample_period_s": 0.025,
+          "samples": 360
+        }
+      },
+      "train": {
+        "coefficients": {
+          "brake_torque_to_omega_dot_per_kgm2": 1.1490022249456652e-07,
+          "contact_torque_to_omega_dot_per_kgm2": 1.1885742309516306e-20,
+          "motor_torque_to_omega_dot_per_kgm2": 4.753813385827839,
+          "wheel_damping_per_kgm2": 1.1915620838399723
+        },
+        "derivative_fit": {
+          "bias": -0.04907340405583648,
+          "count": 45664,
+          "mae": 0.4763873433585899,
+          "max": 487.4662438464602,
+          "p95": 1.6576636897997317,
+          "rmse": 5.073795638903018
+        },
+        "derivative_outlier_limit_radps2": 500.0,
+        "optimizer": {
+          "active_mask": [
+            0,
+            0,
+            -1,
+            0
+          ],
+          "cost": 587773.3586959405,
+          "message": "The relative change of the cost function is less than `tol`.",
+          "optimality": 0.0003095782364515279,
+          "status": 2
+        },
+        "samples_excluded_as_contact_impulses": 186,
+        "samples_total": 45850,
+        "samples_used": 45664,
+        "time_s": [
+          0.15,
+          46.0
+        ]
+      },
+      "validation": {
+        "derivative_fit": {
+          "bias": -4.917729522767449e-05,
+          "count": 8989,
+          "mae": 4.917729522767449e-05,
+          "max": 4.9177295227674474e-05,
+          "p95": 4.9177295227674474e-05,
+          "rmse": 4.9177295227674474e-05
+        },
+        "samples": 9000,
+        "samples_excluded_as_contact_impulses": 11,
+        "samples_used": 8989,
+        "time_s": [
+          46.0,
+          55.0
+        ]
+      }
+    },
+    "wheel_1": {
+      "arbitrary_dt_replay": {
+        "0.001": {
+          "error_radps": {
+            "bias": 3.972038384249725,
+            "count": 8999,
+            "mae": 3.972038384249725,
+            "max": 42.57101041210513,
+            "p95": 24.904405373133816,
+            "rmse": 9.19781596924273
+          },
+          "sample_period_s": 0.001,
+          "samples": 8999
+        },
+        "0.005": {
+          "error_radps": {
+            "bias": 3.9625884739607233,
+            "count": 1800,
+            "mae": 3.9625884739607233,
+            "max": 42.368709045377564,
+            "p95": 24.790526678344072,
+            "rmse": 9.176274923836884
+          },
+          "sample_period_s": 0.005,
+          "samples": 1800
+        },
+        "0.01": {
+          "error_radps": {
+            "bias": 3.9507912506412213,
+            "count": 900,
+            "mae": 3.9507912506412213,
+            "max": 42.11701421484154,
+            "p95": 24.650597484458864,
+            "rmse": 9.14892195857468
+          },
+          "sample_period_s": 0.01,
+          "samples": 900
+        },
+        "0.025": {
+          "error_radps": {
+            "bias": 3.9159379036418334,
+            "count": 360,
+            "mae": 3.9159379036418334,
+            "max": 41.37086552225213,
+            "p95": 24.236032200101025,
+            "rmse": 9.067961016591061
+          },
+          "sample_period_s": 0.025,
+          "samples": 360
+        }
+      },
+      "train": {
+        "coefficients": {
+          "brake_torque_to_omega_dot_per_kgm2": 1.152046681289424e-07,
+          "contact_torque_to_omega_dot_per_kgm2": 1.592252063604947e-25,
+          "motor_torque_to_omega_dot_per_kgm2": 4.751390131517866,
+          "wheel_damping_per_kgm2": 1.190948767599443
+        },
+        "derivative_fit": {
+          "bias": -0.04892621896885182,
+          "count": 45664,
+          "mae": 0.47568353211246833,
+          "max": 487.46176656225225,
+          "p95": 1.6527122536191594,
+          "rmse": 5.072109219285874
+        },
+        "derivative_outlier_limit_radps2": 500.0,
+        "optimizer": {
+          "active_mask": [
+            0,
+            0,
+            -1,
+            0
+          ],
+          "cost": 587382.6973997517,
+          "message": "The relative change of the cost function is less than `tol`.",
+          "optimality": 2.902899624506822e-05,
+          "status": 2
+        },
+        "samples_excluded_as_contact_impulses": 186,
+        "samples_total": 45850,
+        "samples_used": 45664,
+        "time_s": [
+          0.15,
+          46.0
+        ]
+      },
+      "validation": {
+        "derivative_fit": {
+          "bias": -4.9307597959187333e-05,
+          "count": 8989,
+          "mae": 4.9307597959187333e-05,
+          "max": 4.930759795918735e-05,
+          "p95": 4.930759795918735e-05,
+          "rmse": 4.930759795918734e-05
+        },
+        "samples": 9000,
+        "samples_excluded_as_contact_impulses": 11,
+        "samples_used": 8989,
+        "time_s": [
+          46.0,
+          55.0
+        ]
+      }
+    },
+    "wheel_2": {
+      "arbitrary_dt_replay": {
+        "0.001": {
+          "error_radps": {
+            "bias": 4.5739939071462565,
+            "count": 8999,
+            "mae": 4.5739939071462565,
+            "max": 42.56897108044267,
+            "p95": 26.726193857309788,
+            "rmse": 9.869907721127504
+          },
+          "sample_period_s": 0.001,
+          "samples": 8999
+        },
+        "0.005": {
+          "error_radps": {
+            "bias": 4.564490612194606,
+            "count": 1800,
+            "mae": 4.564490612194606,
+            "max": 42.39328089605345,
+            "p95": 26.6200542495691,
+            "rmse": 9.84979703792455
+          },
+          "sample_period_s": 0.005,
+          "samples": 1800
+        },
+        "0.01": {
+          "error_radps": {
+            "bias": 4.552689849034938,
+            "count": 900,
+            "mae": 4.552689849034938,
+            "max": 42.1745401493786,
+            "p95": 26.489541695406945,
+            "rmse": 9.824309508876604
+          },
+          "sample_period_s": 0.01,
+          "samples": 900
+        },
+        "0.025": {
+          "error_radps": {
+            "bias": 4.517804467230677,
+            "count": 360,
+            "mae": 4.517804467230677,
+            "max": 41.525066585517855,
+            "p95": 26.10226834631801,
+            "rmse": 9.748853277905638
+          },
+          "sample_period_s": 0.025,
+          "samples": 360
+        }
+      },
+      "train": {
+        "coefficients": {
+          "brake_torque_to_omega_dot_per_kgm2": 1.1520659113416774e-07,
+          "contact_torque_to_omega_dot_per_kgm2": 5.499856178321538e-27,
+          "motor_torque_to_omega_dot_per_kgm2": 4.119081786797185,
+          "wheel_damping_per_kgm2": 1.0340948398861614
+        },
+        "derivative_fit": {
+          "bias": -0.057166790384875016,
+          "count": 45664,
+          "mae": 0.6218936485954701,
+          "max": 472.1832678629362,
+          "p95": 2.290789642057572,
+          "rmse": 4.950789883958876
+        },
+        "derivative_outlier_limit_radps2": 500.0,
+        "optimizer": {
+          "active_mask": [
+            0,
+            0,
+            -1,
+            0
+          ],
+          "cost": 559619.6370877011,
+          "message": "The relative change of the cost function is less than `tol`.",
+          "optimality": 2.9029965361654695e-05,
+          "status": 2
+        },
+        "samples_excluded_as_contact_impulses": 186,
+        "samples_total": 45850,
+        "samples_used": 45664,
+        "time_s": [
+          0.15,
+          46.0
+        ]
+      },
+      "validation": {
+        "derivative_fit": {
+          "bias": -4.930842100542377e-05,
+          "count": 8989,
+          "mae": 4.930842100542377e-05,
+          "max": 4.930842100542379e-05,
+          "p95": 4.930842100542379e-05,
+          "rmse": 4.930842100542379e-05
+        },
+        "samples": 9000,
+        "samples_excluded_as_contact_impulses": 11,
+        "samples_used": 8989,
+        "time_s": [
+          46.0,
+          55.0
+        ]
+      }
+    },
+    "wheel_3": {
+      "arbitrary_dt_replay": {
+        "0.001": {
+          "error_radps": {
+            "bias": 4.577540415669351,
+            "count": 8999,
+            "mae": 4.577540415669351,
+            "max": 42.56917992452152,
+            "p95": 26.735917210766818,
+            "rmse": 9.873758791942093
+          },
+          "sample_period_s": 0.001,
+          "samples": 8999
+        },
+        "0.005": {
+          "error_radps": {
+            "bias": 4.568036752539888,
+            "count": 1800,
+            "mae": 4.568036752539888,
+            "max": 42.3936240393469,
+            "p95": 26.629820666504926,
+            "rmse": 9.853655515163553
+          },
+          "sample_period_s": 0.005,
+          "samples": 1800
+        },
+        "0.01": {
+          "error_radps": {
+            "bias": 4.556235906665748,
+            "count": 900,
+            "mae": 4.556235906665748,
+            "max": 42.17504971606257,
+            "p95": 26.499360593114947,
+            "rmse": 9.828177678627108
+          },
+          "sample_period_s": 0.01,
+          "samples": 900
+        },
+        "0.025": {
+          "error_radps": {
+            "bias": 4.521350166826982,
+            "count": 360,
+            "mae": 4.521350166826982,
+            "max": 41.52606512045496,
+            "p95": 26.11223988917028,
+            "rmse": 9.7527500498651
+          },
+          "sample_period_s": 0.025,
+          "samples": 360
+        }
+      },
+      "train": {
+        "coefficients": {
+          "brake_torque_to_omega_dot_per_kgm2": 1.1511819862458897e-07,
+          "contact_torque_to_omega_dot_per_kgm2": 5.475597092484399e-27,
+          "motor_torque_to_omega_dot_per_kgm2": 4.115929149652814,
+          "wheel_damping_per_kgm2": 1.0332980644311014
+        },
+        "derivative_fit": {
+          "bias": -0.0570023662064096,
+          "count": 45664,
+          "mae": 0.6210677485419293,
+          "max": 472.1819131393364,
+          "p95": 2.288672325541167,
+          "rmse": 4.949125153901925
+        },
+        "derivative_outlier_limit_radps2": 500.0,
+        "optimizer": {
+          "active_mask": [
+            0,
+            0,
+            -1,
+            0
+          ],
+          "cost": 559243.3500620999,
+          "message": "The relative change of the cost function is less than `tol`.",
+          "optimality": 2.8985435841782022e-05,
+          "status": 2
+        },
+        "samples_excluded_as_contact_impulses": 186,
+        "samples_total": 45850,
+        "samples_used": 45664,
+        "time_s": [
+          0.15,
+          46.0
+        ]
+      },
+      "validation": {
+        "derivative_fit": {
+          "bias": -4.9270589011324084e-05,
+          "count": 8989,
+          "mae": 4.9270589011324084e-05,
+          "max": 4.927058901132408e-05,
+          "p95": 4.927058901132408e-05,
+          "rmse": 4.9270589011324084e-05
+        },
+        "samples": 9000,
+        "samples_excluded_as_contact_impulses": 11,
+        "samples_used": 8989,
+        "time_s": [
+          46.0,
+          55.0
+        ]
+      }
+    }
+  }
+}
