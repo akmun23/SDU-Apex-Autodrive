@@ -2,11 +2,13 @@
 """Fit and score the simulator-native MPC plant candidates offline.
 
 This is the first comparison in the current model-fitting strategy.  It
-keeps the documented wheel-friction shape and compares two contact
+keeps the documented wheel-friction shape and compares multiple contact
 representations:
 
 * ``VS1``: one virtual front/rear contact per axle;
-* ``VS2``: four contacts with Ackermann steering and wheel kinematics.
+* ``VS2``: four contacts with Ackermann steering and wheel kinematics;
+* ``VS2.5``: four-contact normalized body force and yaw-moment basis.
+* ``VS2.75``: split front/rear lateral and geometric yaw-moment bases.
 
 The dynamic coefficients are *effective simulator gains*.  They are not
 reported as physical cornering stiffness or yaw inertia.  In particular, the
@@ -37,6 +39,8 @@ from simulator_native_model import (  # noqa: E402
     MAX_STEERING_RAD,
     NativeModelParameters,
     _effective_coordinates,
+    _moment_basis_coordinates,
+    _split_moment_basis_coordinates,
     f1tenth_prefab_parameters,
     step,
 )
@@ -59,9 +63,35 @@ EFFECTIVE_GAIN_FIELDS = (
     "effective_yaw_front_per_s2",
     "effective_yaw_rear_per_s2",
 )
+MOMENT_BASIS_GAIN_FIELDS = (
+    "effective_force_x_gain_mps2",
+    "effective_drag_linear_per_s",
+    "effective_drag_quadratic_per_m",
+    "effective_force_y_gain_mps2",
+    "effective_yaw_moment_gain_per_s2",
+    "effective_yaw_damping_per_s",
+)
+SPLIT_MOMENT_BASIS_GAIN_FIELDS = (
+    "effective_force_x_gain_mps2",
+    "effective_drag_linear_per_s",
+    "effective_drag_quadratic_per_m",
+    "effective_force_y_front_gain_mps2",
+    "effective_force_y_rear_gain_mps2",
+    "effective_yaw_lateral_front_gain_per_s2",
+    "effective_yaw_lateral_rear_gain_per_s2",
+    "effective_yaw_longitudinal_gain_per_s2",
+)
 STATE_FIELDS = ("x_m", "y_m", "position_m", "heading_rad", "u_mps",
                 "v_mps", "r_radps", "steering_rad", "wheel_mps",
                 "wheel_left_mps", "wheel_right_mps")
+
+
+def _gain_fields(contact_model: str) -> tuple[str, ...]:
+    if contact_model == "moment_basis":
+        return MOMENT_BASIS_GAIN_FIELDS
+    if contact_model == "moment_basis_split":
+        return SPLIT_MOMENT_BASIS_GAIN_FIELDS
+    return EFFECTIVE_GAIN_FIELDS
 
 
 def _horizon_key(horizon: float) -> str:
@@ -173,10 +203,11 @@ def _fit_examples(runs: dict[str, list[dict[str, float]]],
     measured transition.  The row's k+1 state is not used as a rollout input;
     it is used here solely to form the offline derivative target.
     """
-    q_values: list[tuple[float, float, float]] = []
+    q_values: list[tuple[float, ...]] = []
     longitudinal_targets: list[float] = []
     lateral_targets: list[float] = []
     yaw_targets: list[float] = []
+    yaw_rates: list[float] = []
     longitudinal_speeds: list[float] = []
     usable_rows = 0
     for rows in runs.values():
@@ -199,18 +230,27 @@ def _fit_examples(runs: dict[str, list[dict[str, float]]],
                 row["wheel_left_k_mps"] + row["wheel_left_speed_mps_k1"])
             state_mid[8] = 0.5 * (
                 row["wheel_right_k_mps"] + row["wheel_right_speed_mps_k1"])
-            qx, q_front, q_rear = _effective_coordinates(
-                state_mid, state_mid[6], parameters)
+            if contact_model in ("moment_basis", "moment_basis_split"):
+                if contact_model == "moment_basis_split":
+                    coordinates = _split_moment_basis_coordinates(
+                        state_mid, state_mid[6], parameters)
+                else:
+                    coordinates = _moment_basis_coordinates(
+                        state_mid, state_mid[6], parameters)
+            else:
+                coordinates = _effective_coordinates(
+                    state_mid, state_mid[6], parameters)
             dt = row["dt_sim_s"]
             u_mid = state_mid[3]
             v_mid = state_mid[4]
             r_mid = state_mid[5]
-            q_values.append((qx, q_front, q_rear))
+            q_values.append(coordinates)
             longitudinal_targets.append(
                 (row["u_k1_mps"] - row["u_k_mps"]) / dt - r_mid * v_mid)
             lateral_targets.append(
                 (row["v_k1_mps"] - row["v_k_mps"]) / dt + r_mid * u_mid)
             yaw_targets.append((row["r_k1_radps"] - row["r_k_radps"]) / dt)
+            yaw_rates.append(r_mid)
             longitudinal_speeds.append(u_mid)
             usable_rows += 1
 
@@ -219,11 +259,17 @@ def _fit_examples(runs: dict[str, list[dict[str, float]]],
     q = np.asarray(q_values, dtype=float)
     u = np.asarray(longitudinal_speeds, dtype=float)
     return {
+        "coordinates": q,
         "longitudinal_features": np.column_stack((q[:, 0], u, u * np.abs(u))),
         "longitudinal_target": np.asarray(longitudinal_targets, dtype=float),
         "lateral_features": q[:, 1:3],
         "lateral_target": np.asarray(lateral_targets, dtype=float),
-        "yaw_features": np.column_stack((q[:, 1], -q[:, 2])),
+        "yaw_features": (
+            np.column_stack((q[:, 2], -np.asarray(yaw_rates)))
+            if contact_model == "moment_basis" else
+            np.asarray(q[:, 3:6], dtype=float)
+            if contact_model == "moment_basis_split" else
+            np.column_stack((q[:, 1], -q[:, 2]))),
         "yaw_target": np.asarray(yaw_targets, dtype=float),
         "samples": usable_rows,
     }
@@ -304,6 +350,130 @@ def _fit_parameters(runs: dict[str, list[dict[str, float]]],
     if base.contact_model != contact_model:
         base = replace(base, contact_model=contact_model)
     examples = _fit_examples(runs, contact_model, base)
+    if contact_model == "moment_basis_split":
+        coordinates = np.asarray(examples["coordinates"], dtype=float)
+        longitudinal_q = coordinates[:, 0]
+        lateral_q = coordinates[:, 1:3]
+        yaw_q = coordinates[:, 3:6]
+        longitudinal_weights = 0.10 + 0.90 * np.minimum(
+            1.0, np.abs(longitudinal_q) / 0.05)
+        lateral_weights = 0.10 + 0.90 * np.minimum(
+            1.0, np.linalg.norm(lateral_q, axis=1) / 0.05)
+        yaw_weights = 0.10 + 0.90 * np.minimum(
+            1.0, np.linalg.norm(yaw_q, axis=1) / 0.01)
+        longitudinal, longitudinal_fit = _robust_linear_fit(
+            examples["longitudinal_features"],
+            examples["longitudinal_target"],
+            (np.asarray([0.0, -np.inf, -np.inf]),
+             np.asarray([np.inf, 0.0, 0.0])),
+            longitudinal_weights, huber_scale=1.0)
+        lateral, lateral_fit = _robust_linear_fit(
+            lateral_q, examples["lateral_target"],
+            (np.zeros(2, dtype=float), np.full(2, np.inf, dtype=float)),
+            lateral_weights, huber_scale=0.5)
+        yaw, yaw_fit = _robust_linear_fit(
+            yaw_q, examples["yaw_target"],
+            (np.zeros(3, dtype=float), np.full(3, np.inf, dtype=float)),
+            yaw_weights, huber_scale=7.0)
+        values = {
+            "effective_force_x_gain_mps2": float(longitudinal[0]),
+            "effective_drag_linear_per_s": float(-longitudinal[1]),
+            "effective_drag_quadratic_per_m": float(-longitudinal[2]),
+            "effective_force_y_front_gain_mps2": float(lateral[0]),
+            "effective_force_y_rear_gain_mps2": float(lateral[1]),
+            "effective_yaw_lateral_front_gain_per_s2": float(yaw[0]),
+            "effective_yaw_lateral_rear_gain_per_s2": float(yaw[1]),
+            "effective_yaw_longitudinal_gain_per_s2": float(yaw[2]),
+        }
+        fitted = replace(
+            base,
+            effective_force_x_gain_mps2=values[
+                "effective_force_x_gain_mps2"],
+            effective_drag_linear_per_s=values[
+                "effective_drag_linear_per_s"],
+            effective_drag_quadratic_per_m=values[
+                "effective_drag_quadratic_per_m"],
+            effective_force_y_front_gain_mps2=values[
+                "effective_force_y_front_gain_mps2"],
+            effective_force_y_rear_gain_mps2=values[
+                "effective_force_y_rear_gain_mps2"],
+            effective_yaw_lateral_front_gain_per_s2=values[
+                "effective_yaw_lateral_front_gain_per_s2"],
+            effective_yaw_lateral_rear_gain_per_s2=values[
+                "effective_yaw_lateral_rear_gain_per_s2"],
+            effective_yaw_longitudinal_gain_per_s2=values[
+                "effective_yaw_longitudinal_gain_per_s2"],
+            parameter_provenance=(
+                f"{base.parameter_provenance};"
+                "effective_gains_fit:moment_basis_split"),
+        )
+        return fitted, {
+            "contact_model": contact_model,
+            "parameter_provenance": fitted.parameter_provenance,
+            "effective_gains": values,
+            "longitudinal_regression": longitudinal_fit,
+            "lateral_regression": lateral_fit,
+            "yaw_regression": yaw_fit,
+        }
+    if contact_model == "moment_basis":
+        coordinates = np.asarray(examples["coordinates"], dtype=float)
+        longitudinal_q = coordinates[:, 0]
+        lateral_q = coordinates[:, 1]
+        yaw_q = coordinates[:, 2]
+        longitudinal_weights = 0.10 + 0.90 * np.minimum(
+            1.0, np.abs(longitudinal_q) / 0.05)
+        lateral_weights = 0.10 + 0.90 * np.minimum(
+            1.0, np.abs(lateral_q) / 0.05)
+        yaw_weights = 0.10 + 0.90 * np.minimum(
+            1.0, np.abs(yaw_q) / 0.01)
+        longitudinal, longitudinal_fit = _robust_linear_fit(
+            examples["longitudinal_features"],
+            examples["longitudinal_target"],
+            (np.asarray([0.0, -np.inf, -np.inf]),
+             np.asarray([np.inf, 0.0, 0.0])),
+            longitudinal_weights, huber_scale=1.0)
+        lateral, lateral_fit = _robust_linear_fit(
+            lateral_q[:, None], examples["lateral_target"],
+            (np.zeros(1, dtype=float), np.full(1, np.inf, dtype=float)),
+            lateral_weights, huber_scale=0.5)
+        yaw, yaw_fit = _robust_linear_fit(
+            np.asarray(examples["yaw_features"], dtype=float),
+            examples["yaw_target"],
+            (np.zeros(2, dtype=float), np.full(2, np.inf, dtype=float)),
+            yaw_weights, huber_scale=7.0)
+        values = {
+            "effective_force_x_gain_mps2": float(longitudinal[0]),
+            "effective_drag_linear_per_s": float(-longitudinal[1]),
+            "effective_drag_quadratic_per_m": float(-longitudinal[2]),
+            "effective_force_y_gain_mps2": float(lateral[0]),
+            "effective_yaw_moment_gain_per_s2": float(yaw[0]),
+            "effective_yaw_damping_per_s": float(yaw[1]),
+        }
+        fitted = replace(
+            base,
+            effective_force_x_gain_mps2=values[
+                "effective_force_x_gain_mps2"],
+            effective_drag_linear_per_s=values["effective_drag_linear_per_s"],
+            effective_drag_quadratic_per_m=values[
+                "effective_drag_quadratic_per_m"],
+            effective_force_y_gain_mps2=values[
+                "effective_force_y_gain_mps2"],
+            effective_yaw_moment_gain_per_s2=values[
+                "effective_yaw_moment_gain_per_s2"],
+            effective_yaw_damping_per_s=values[
+                "effective_yaw_damping_per_s"],
+            parameter_provenance=(
+                f"{base.parameter_provenance};"
+                "effective_gains_fit:moment_basis"),
+        )
+        return fitted, {
+            "contact_model": contact_model,
+            "parameter_provenance": fitted.parameter_provenance,
+            "effective_gains": values,
+            "longitudinal_regression": longitudinal_fit,
+            "lateral_regression": lateral_fit,
+            "yaw_regression": yaw_fit,
+        }
     # These bounds preserve the sign implied by the documented force
     # coordinates while keeping the coefficients explicitly effective.
     inf = np.full(3, np.inf, dtype=float)
@@ -379,7 +549,31 @@ def _mixed_fit_origins(
     """
     origins: list[tuple[list[dict[str, float]], int]] = []
     for rows in runs.values():
-        for index in _score_origins(rows, max_origins_per_run):
+        eligible = [index for index, row in enumerate(rows)
+                    if math.isfinite(row["wheel_k_mps"])]
+        # Uniform sampling alone routinely misses the one or two transitions
+        # where the steering actuator crosses through zero. Preserve those
+        # causal events first, then fill the remaining budget uniformly. The
+        # selection uses only origin state and applied input; no future target
+        # state is used to construct a rollout.
+        event_indices = [
+            index for index in eligible
+            if abs(rows[index]["applied_steering_rad_k1"] -
+                   rows[index]["delta_k_rad"]) > 0.02 or
+            abs(rows[index]["r_k_radps"]) > 0.75 or
+            abs(rows[index]["v_k_mps"]) > 0.15]
+        if len(event_indices) > max_origins_per_run:
+            event_indices = [
+                event_indices[int(position)] for position in np.linspace(
+                    0, len(event_indices) - 1, max_origins_per_run,
+                    dtype=int)]
+        selected = list(dict.fromkeys(event_indices))
+        remaining = max_origins_per_run - len(selected)
+        if remaining > 0:
+            uniform = _score_origins(rows, max_origins_per_run)
+            selected.extend(index for index in uniform if index not in selected)
+            selected = selected[:max_origins_per_run]
+        for index in sorted(selected):
             row = rows[index]
             if (row["u_k_mps"] > 0.8 or
                     abs(row["applied_steering_rad_k1"]) > 0.03):
@@ -392,9 +586,12 @@ def _mixed_fit_origins(
 def _mixed_fit_residual(
         gains: np.ndarray,
         base: NativeModelParameters,
-        origins: Sequence[tuple[list[dict[str, float]], int]]) -> np.ndarray:
+        origins: Sequence[tuple[list[dict[str, float]], int]],
+        gain_fields: tuple[str, ...] | None = None) -> np.ndarray:
     """Return one-step plus recursive residuals for robust gain fitting."""
-    parameters = replace(base, **dict(zip(EFFECTIVE_GAIN_FIELDS, gains)))
+    fields = gain_fields if gain_fields is not None else _gain_fields(
+        base.contact_model)
+    parameters = replace(base, **dict(zip(fields, gains)))
     residuals: list[float] = []
     for rows, origin in origins:
         first = rows[origin]
@@ -460,20 +657,27 @@ def _fit_mixed_parameters(
     """Fit effective gains against local and recursive training behavior."""
     initial, initial_report = _fit_parameters(runs, contact_model, base)
     origins = _mixed_fit_origins(runs, max_origins_per_run)
+    gain_fields = _gain_fields(contact_model)
     initial_gains = np.asarray(
-        [getattr(initial, field) for field in EFFECTIVE_GAIN_FIELDS], dtype=float)
-    initial_residual = _mixed_fit_residual(initial_gains, base, origins)
-    lower = np.zeros(len(EFFECTIVE_GAIN_FIELDS), dtype=float)
-    upper = np.asarray((20.0, 2.0, 1.0, 20.0, 20.0, 20.0, 20.0), dtype=float)
+        [getattr(initial, field) for field in gain_fields], dtype=float)
+    initial_residual = _mixed_fit_residual(
+        initial_gains, base, origins, gain_fields)
+    lower = np.zeros(len(gain_fields), dtype=float)
+    upper = np.asarray(
+        (20.0, 2.0, 1.0, 20.0, 100.0, 20.0)
+        if contact_model == "moment_basis" else
+        (20.0, 2.0, 1.0, 20.0, 20.0, 100.0, 100.0, 100.0)
+        if contact_model == "moment_basis_split" else
+        (20.0, 2.0, 1.0, 20.0, 20.0, 20.0, 20.0), dtype=float)
     from scipy.optimize import least_squares
     result = least_squares(
-        lambda gains: _mixed_fit_residual(gains, base, origins),
+        lambda gains: _mixed_fit_residual(gains, base, origins, gain_fields),
         initial_gains, bounds=(lower, upper), loss="soft_l1", f_scale=1.0,
         x_scale=np.maximum(np.abs(initial_gains), 0.1), diff_step=0.01,
         max_nfev=max_nfev)
     fitted = replace(
         base,
-        **dict(zip(EFFECTIVE_GAIN_FIELDS, result.x)),
+        **dict(zip(gain_fields, result.x)),
         parameter_provenance=(
             f"{base.parameter_provenance};"
             f"effective_gains_fit:mixed_recursive:{contact_model}"),
@@ -486,6 +690,9 @@ def _fit_mixed_parameters(
         "mixed_fit_one_step_weight": 0.25,
         "mixed_fit_origins": len(origins),
         "mixed_fit_max_origins_per_run": max_origins_per_run,
+        "mixed_fit_origin_selection": (
+            "event_preserving:steering_rate_or_high_yaw_or_lateral_state_then_uniform"),
+        "mixed_fit_gain_fields": list(gain_fields),
         "mixed_fit_optimizer": {
             "loss": "soft_l1",
             "f_scale": 1.0,
@@ -495,12 +702,14 @@ def _fit_mixed_parameters(
             "nfev": int(result.nfev),
             "status": int(result.status),
             "message": result.message,
+            "cost": float(result.cost),
+            "optimality": float(result.optimality),
+            "active_mask": result.active_mask.tolist(),
             "initial_rms": float(np.sqrt(np.mean(initial_residual ** 2))),
             "final_rms": float(np.sqrt(np.mean(result.fun ** 2))),
         },
         "effective_gains": {
-            field: float(getattr(fitted, field))
-            for field in EFFECTIVE_GAIN_FIELDS
+            field: float(getattr(fitted, field)) for field in gain_fields
         },
         "parameter_provenance": fitted.parameter_provenance,
     }
@@ -678,8 +887,8 @@ def score_existing_report(
         contact_model = str(parent_parameters["contact_model"])
         base = profile_factory(contact_model)
         gains = {
-            field: float(parent_parameters["effective_gains"][field])
-            for field in EFFECTIVE_GAIN_FIELDS
+            field: float(parent_parameters["effective_gains"].get(field, 0.0))
+            for field in _gain_fields(contact_model)
         }
         parameters = replace(
             base, **gains,
@@ -756,29 +965,44 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         parameter_profile: str = "guide",
         fit_method: str = "derivative",
         mixed_fit_origins_per_run: int = 35,
-        mixed_fit_max_nfev: int = 18) -> dict[str, Any]:
+        mixed_fit_max_nfev: int = 18,
+        candidate_models: Sequence[str] | None = None) -> dict[str, Any]:
     overlap = set(train_names).intersection(validation_names)
     if overlap:
         raise ValueError(f"training and validation runs overlap: {sorted(overlap)}")
     train = _read_runs(root, train_names)
     validation = _read_runs(root, validation_names)
     profile_factory = _profile_factory(parameter_profile)
-    candidates = {
-        "VS1_documented_slip_spline_axle_effective": _candidate_report(
-            train, validation, "axle", max_origins_per_run,
-            profile_factory("axle"), fit_method, mixed_fit_origins_per_run,
-            mixed_fit_max_nfev),
-        "VS2_documented_slip_spline_four_wheel_effective": _candidate_report(
-            train, validation, "four_wheel", max_origins_per_run,
-            profile_factory("four_wheel"), fit_method,
-            mixed_fit_origins_per_run, mixed_fit_max_nfev),
+    definitions = {
+        "vs1": (
+            "VS1_documented_slip_spline_axle_effective", "axle"),
+        "vs2": (
+            "VS2_documented_slip_spline_four_wheel_effective", "four_wheel"),
+        "vs25": (
+            "VS2_5_documented_slip_spline_four_contact_moment_basis",
+            "moment_basis"),
+        "vs275": (
+            "VS2_75_documented_slip_spline_split_contact_moment_basis",
+            "moment_basis_split"),
     }
+    selected_models = tuple(candidate_models or definitions)
+    unknown = sorted(set(selected_models).difference(definitions))
+    if unknown:
+        raise ValueError(f"unsupported candidate models: {unknown}")
+    candidates: dict[str, Any] = {}
+    for model_key in selected_models:
+        name, contact_model = definitions[model_key]
+        candidates[name] = _candidate_report(
+            train, validation, contact_model, max_origins_per_run,
+            profile_factory(contact_model), fit_method,
+            mixed_fit_origins_per_run, mixed_fit_max_nfev)
     report: dict[str, Any] = {
         "schema_version": 1,
         "status": "simulator_native_effective_candidates_not_accepted",
         "strategy_reference": "SDU_Apex_Virtual_Simulator_Model_Fitting_Strategy_2026-09-13.md",
         "parameter_profile": parameter_profile,
         "fit_method": fit_method,
+        "candidate_models": list(selected_models),
         "ground_truth_use": "offline_identification_and_scoring_only",
         "recursive_prediction_uses_future_gt": False,
         "train_runs": list(train_names),
@@ -852,6 +1076,9 @@ def main() -> None:
         help="prior report to replay when --fit-method=fixed_replay")
     parser.add_argument("--mixed-fit-origins-per-run", type=int, default=35)
     parser.add_argument("--mixed-fit-max-nfev", type=int, default=18)
+    parser.add_argument(
+        "--candidates", default="vs1,vs2,vs25",
+        help="comma-separated candidates: vs1, vs2, vs25, vs275")
     args = parser.parse_args()
     if args.max_origins_per_run < 1:
         raise ValueError("--max-origins-per-run must be positive")
@@ -870,7 +1097,7 @@ def main() -> None:
             args.accepted_root, train_names, validation_names,
             args.output, args.max_origins_per_run, args.parameter_profile,
             args.fit_method, args.mixed_fit_origins_per_run,
-            args.mixed_fit_max_nfev)
+            args.mixed_fit_max_nfev, _names(args.candidates))
     print(json.dumps({
         "output": str(args.output),
         "status": report["status"],

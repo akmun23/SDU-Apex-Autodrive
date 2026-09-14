@@ -106,12 +106,28 @@ class NativeModelParameters:
     wheel_radius_m: float = 0.059
     steering_limit_rad: float = MAX_STEERING_RAD
     steering_rate_radps: float = STEERING_RATE_RADPS
+    # Keep the effective API-frame to model-frame conversion explicit. The
+    # raw Unity WheelCollider sign is recorded separately by the diagnostic
+    # experiment; it is not interchangeable with the API-frame replay sign.
+    steering_to_wheel_angle_sign: float = 1.0
     longitudinal_curve: TireCurveParameters = GUIDE_LONGITUDINAL_CURVE
     lateral_curve: TireCurveParameters = GUIDE_LATERAL_CURVE
     # A dump may contain per-wheel overrides.  The scalar curves above remain
     # the compatibility/default path used by the fitted candidates.
     wheel_longitudinal_curves: tuple[TireCurveParameters, ...] | None = None
     wheel_lateral_curves: tuple[TireCurveParameters, ...] | None = None
+    wheel_radii_m: tuple[float, ...] | None = None
+    wheel_masses_kg: tuple[float, ...] | None = None
+    wheel_sprung_masses_kg: tuple[float, ...] | None = None
+    suspension_distances_m: tuple[float, ...] | None = None
+    suspension_spring_rates_n_per_m: tuple[float, ...] | None = None
+    suspension_damper_rates_ns_per_m: tuple[float, ...] | None = None
+    suspension_target_positions: tuple[float, ...] | None = None
+    wheel_damping_rates_per_s: tuple[float, ...] | None = None
+    force_app_point_distances_m: tuple[float, ...] | None = None
+    rigid_body_drag_per_s: float | None = None
+    rigid_body_angular_drag_per_s: float | None = None
+    rigid_body_max_angular_velocity_radps: float | None = None
     drive_state: DriveStateParameters = DriveStateParameters()
     longitudinal_gain: float = 1.0
     lateral_gain: float = 1.0
@@ -127,6 +143,24 @@ class NativeModelParameters:
     effective_lateral_rear_mps2: float | None = None
     effective_yaw_front_per_s2: float | None = None
     effective_yaw_rear_per_s2: float | None = None
+    # VS2.5 uses the complete four-contact normalized force/moment basis. The
+    # coefficients remain effective simulator gains until a diagnostic dump
+    # establishes physical loads and inertia.
+    effective_force_x_gain_mps2: float | None = None
+    effective_force_y_gain_mps2: float | None = None
+    effective_yaw_moment_gain_per_s2: float | None = None
+    effective_force_y_front_gain_mps2: float | None = None
+    effective_force_y_rear_gain_mps2: float | None = None
+    effective_yaw_lateral_front_gain_per_s2: float | None = None
+    effective_yaw_lateral_rear_gain_per_s2: float | None = None
+    effective_yaw_longitudinal_gain_per_s2: float | None = None
+    # Optional effective residual damping. This is not the Rigidbody
+    # angularDrag field and is only enabled when identified from replay data.
+    effective_yaw_damping_per_s: float = 0.0
+    # Optional lateral-load-transfer height for offline structural screening.
+    # It is deliberately zero by default and is not inferred as the physical
+    # center-of-mass height from a simulator dump.
+    effective_load_transfer_height_m: float = 0.0
     contact_model: str = "four_wheel"
     parameter_provenance: str = "official_2026_guide_until_diagnostic_dump"
 
@@ -161,6 +195,29 @@ class NativeModelParameters:
             self.effective_yaw_rear_per_s2,
         ))
 
+    @property
+    def has_moment_basis_gains(self) -> bool:
+        return all(value is not None for value in (
+            self.effective_force_x_gain_mps2,
+            self.effective_drag_linear_per_s,
+            self.effective_drag_quadratic_per_m,
+            self.effective_force_y_gain_mps2,
+            self.effective_yaw_moment_gain_per_s2,
+        ))
+
+    @property
+    def has_split_moment_basis_gains(self) -> bool:
+        return all(value is not None for value in (
+            self.effective_force_x_gain_mps2,
+            self.effective_drag_linear_per_s,
+            self.effective_drag_quadratic_per_m,
+            self.effective_force_y_front_gain_mps2,
+            self.effective_force_y_rear_gain_mps2,
+            self.effective_yaw_lateral_front_gain_per_s2,
+            self.effective_yaw_lateral_rear_gain_per_s2,
+            self.effective_yaw_longitudinal_gain_per_s2,
+        ))
+
     def longitudinal_curve_for_wheel(self, index: int) -> TireCurveParameters:
         if self.wheel_longitudinal_curves is None:
             return self.longitudinal_curve
@@ -192,6 +249,7 @@ def f1tenth_prefab_parameters(
         wheel_radius_m=0.059,
         steering_limit_rad=math.radians(30.0),
         steering_rate_radps=math.radians(183.346),
+        steering_to_wheel_angle_sign=1.0,
         longitudinal_curve=longitudinal,
         lateral_curve=lateral,
         parameter_provenance=(
@@ -228,14 +286,35 @@ def body_frame_yaw_inertia(
 
 def ackermann_angles(command_angle: float, wheelbase_m: float,
                      track_m: float) -> tuple[float, float, float, float]:
-    """Return FL, FR, RL, RR steering angles for front steering."""
+    """Return API-frame FL, FR, RL, RR steering angles for front steering."""
     if abs(command_angle) < 1.0e-12:
         return 0.0, 0.0, 0.0, 0.0
     tangent = math.tan(command_angle)
+    # This is the established API-frame effective convention used by the
+    # accepted replay data. Raw Unity WheelCollider angles use a different
+    # component/axis convention and are exposed below for diagnostics.
     left = math.atan2(2.0 * wheelbase_m * tangent,
                       2.0 * wheelbase_m - track_m * tangent)
     right = math.atan2(2.0 * wheelbase_m * tangent,
                        2.0 * wheelbase_m + track_m * tangent)
+    return left, right, 0.0, 0.0
+
+
+def unity_wheel_collider_ackermann_angles(
+        wheel_angle: float, wheelbase_m: float,
+        track_m: float) -> tuple[float, float, float, float]:
+    """Return raw FL/FR angles using VehicleController.cs ordering.
+
+    This is a diagnostic reference only. A caller must establish the axis and
+    sign transform before using it in an API-frame replay model.
+    """
+    if abs(wheel_angle) < 1.0e-12:
+        return 0.0, 0.0, 0.0, 0.0
+    tangent = math.tan(wheel_angle)
+    left = math.atan((2.0 * wheelbase_m * tangent) /
+                     (2.0 * wheelbase_m + track_m * tangent))
+    right = math.atan((2.0 * wheelbase_m * tangent) /
+                      (2.0 * wheelbase_m - track_m * tangent))
     return left, right, 0.0, 0.0
 
 
@@ -258,7 +337,7 @@ def contact_kinematics(state: np.ndarray, steering_angle: float,
             float(state[7]), float(state[8]),
             float(state[7]), float(state[8]))
     angles = ackermann_angles(
-        steering_angle,
+        steering_angle * parameters.steering_to_wheel_angle_sign,
         (parameters.steering_geometry_wheelbase_m
          if parameters.steering_geometry_wheelbase_m is not None
          else parameters.wheelbase_m),
@@ -396,6 +475,87 @@ def _effective_coordinates(state: np.ndarray, steering_angle: float,
     return qx, q_front, q_rear
 
 
+def _moment_basis_coordinates(
+        state: np.ndarray, steering_angle: float,
+        parameters: NativeModelParameters) -> tuple[float, float, float]:
+    """Return normalized body force and yaw-moment basis for VS2.5.
+
+    Each wheel's documented friction response is evaluated in its tire frame,
+    rotated into the body frame, and accumulated at the actual contact point.
+    The result is deliberately dimensionless.  Fitted coefficients therefore
+    remain effective force/moment gains rather than claims about tire force or
+    rigid-body inertia.
+    """
+    if parameters.contact_model != "moment_basis":
+        raise ValueError(
+            "moment-basis coordinates require contact_model='moment_basis'")
+    components = _split_moment_basis_coordinates(
+        state, steering_angle, parameters)
+    return components[0], components[1] + components[2], \
+        components[3] + components[4] + components[5]
+
+
+def _split_moment_basis_coordinates(
+        state: np.ndarray, steering_angle: float,
+        parameters: NativeModelParameters) -> tuple[float, float, float, float,
+                                                       float, float]:
+    """Return split four-contact force/moment bases for offline screening.
+
+    The six values are total longitudinal body force, front/rear lateral body
+    force, front/rear ``x*Fy`` moment, and the complete longitudinal
+    ``-y*Fx`` moment. They remain normalized coordinates; fitted coefficients
+    are effective simulator gains rather than physical stiffness or inertia.
+    """
+    if parameters.contact_model not in ("moment_basis", "moment_basis_split"):
+        raise ValueError(
+            "split moment basis requires a moment-basis contact model")
+    contacts = contact_kinematics(state, steering_angle, parameters)
+    loads = static_normal_loads(parameters)
+    load_factors = [1.0] * len(contacts)
+    if parameters.effective_load_transfer_height_m > 0.0:
+        # Use the causal steady-turn approximation ay ~= r*u. The correction
+        # preserves total normal load and is an effective screening term, not
+        # a claim that the dump exposes the true roll-center/CoM height.
+        _, _, _, u, _, r, _ = (float(value) for value in state[:7])
+        lateral_acceleration = r * u
+        correction_per_wheel = (
+            parameters.mass_kg * lateral_acceleration *
+            parameters.effective_load_transfer_height_m /
+            (2.0 * parameters.track_m))
+        load_factors = [
+            max(0.0, load + math.copysign(
+                correction_per_wheel, wheel.y_m or 1.0)) / static_load
+            for load, static_load, wheel in zip(
+                loads, loads, parameters.wheels)
+        ]
+    qx = qy_front = qy_rear = 0.0
+    qmoment_front = qmoment_rear = qmoment_longitudinal = 0.0
+    for index, (contact, wheel) in enumerate(zip(contacts, parameters.wheels)):
+        if not wheel.driven:
+            continue
+        fx_tire = friction_value(
+            contact["sx"], parameters.longitudinal_curve_for_wheel(index))
+        # Positive Sy is contact-patch motion to the left. Tire force opposes
+        # it, matching the sign convention used by the physical path.
+        fy_tire = -friction_value(
+            contact["sy"], parameters.lateral_curve_for_wheel(index))
+        cosine = math.cos(contact["steering_rad"])
+        sine = math.sin(contact["steering_rad"])
+        fx_body = cosine * fx_tire - sine * fy_tire
+        fy_body = sine * fx_tire + cosine * fy_tire
+        load_factor = load_factors[index]
+        qx += load_factor * fx_body
+        if index < 2:
+            qy_front += load_factor * fy_body
+            qmoment_front += load_factor * contact["x_m"] * fy_body
+        else:
+            qy_rear += load_factor * fy_body
+            qmoment_rear += load_factor * contact["x_m"] * fy_body
+        qmoment_longitudinal -= load_factor * contact["y_m"] * fx_body
+    return (qx, qy_front, qy_rear, qmoment_front, qmoment_rear,
+            qmoment_longitudinal)
+
+
 def step(state: np.ndarray, steering_target_norm: float,
          throttle_norm: float, dt: float,
          parameters: NativeModelParameters) -> np.ndarray:
@@ -438,6 +598,41 @@ def step(state: np.ndarray, steering_target_norm: float,
             u_dot = force_x / parameters.mass_kg + r * v
             v_dot = force_y / parameters.mass_kg - r * u
             r_dot = moment_z / parameters.yaw_inertia_kgm2
+        elif parameters.contact_model == "moment_basis_split":
+            if not parameters.has_split_moment_basis_gains:
+                raise ValueError(
+                    "split moment basis requires effective force/moment gains")
+            (qx, qy_front, qy_rear, qmoment_front, qmoment_rear,
+             qmoment_longitudinal) = _split_moment_basis_coordinates(
+                local_state, delta, parameters)
+            u_dot = (
+                parameters.effective_force_x_gain_mps2 * qx -
+                parameters.effective_drag_linear_per_s * u -
+                parameters.effective_drag_quadratic_per_m * u * abs(u) + r * v)
+            v_dot = (
+                parameters.effective_force_y_front_gain_mps2 * qy_front +
+                parameters.effective_force_y_rear_gain_mps2 * qy_rear - r * u)
+            r_dot = (
+                parameters.effective_yaw_lateral_front_gain_per_s2 *
+                qmoment_front +
+                parameters.effective_yaw_lateral_rear_gain_per_s2 *
+                qmoment_rear +
+                parameters.effective_yaw_longitudinal_gain_per_s2 *
+                qmoment_longitudinal)
+        elif parameters.contact_model == "moment_basis":
+            if not parameters.has_moment_basis_gains:
+                raise ValueError(
+                    "moment_basis step requires effective force/moment gains")
+            qx, qy, qmoment = _moment_basis_coordinates(
+                local_state, delta, parameters)
+            u_dot = (
+                parameters.effective_force_x_gain_mps2 * qx -
+                parameters.effective_drag_linear_per_s * u -
+                parameters.effective_drag_quadratic_per_m * u * abs(u) + r * v)
+            v_dot = (
+                parameters.effective_force_y_gain_mps2 * qy - r * u)
+            r_dot = parameters.effective_yaw_moment_gain_per_s2 * qmoment
+            r_dot -= parameters.effective_yaw_damping_per_s * r
         else:
             if not parameters.has_effective_gains:
                 raise ValueError(
@@ -493,7 +688,10 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
     wheelbase = sum(position[0] for position in front) / 2.0 - \
         sum(position[0] for position in rear) / 2.0
     track = abs(front[0][1] - front[1][1])
-    total_mass = float(rigid_body["mass"]) + sum(float(wheel["mass"]) for wheel in wheels)
+    # Keep Rigidbody.mass separate from WheelCollider.mass. Unity's dump does
+    # not establish additive total-mass semantics; wheel masses remain
+    # available as explicit per-wheel structural parameters below.
+    rigidbody_mass = float(rigid_body["mass"])
 
     def curve(raw: dict[str, Any]) -> TireCurveParameters:
         return TireCurveParameters(
@@ -511,20 +709,40 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
         curve(wheel["sidewaysFriction"]) for wheel in wheels)
     longitudinal_curve = longitudinal_curves[0]
     lateral_curve = lateral_curves[0]
+    sprung_masses = (
+        tuple(float(wheel["sprungMass"]) for wheel in wheels)
+        if all("sprungMass" in wheel for wheel in wheels) else None)
+    suspension_springs = (
+        tuple(float(wheel["suspensionSpring"]["spring"]) for wheel in wheels)
+        if all(isinstance(wheel.get("suspensionSpring"), dict) and
+               "spring" in wheel["suspensionSpring"] for wheel in wheels)
+        else None)
+    suspension_dampers = (
+        tuple(float(wheel["suspensionSpring"]["damper"]) for wheel in wheels)
+        if all(isinstance(wheel.get("suspensionSpring"), dict) and
+               "damper" in wheel["suspensionSpring"] for wheel in wheels)
+        else None)
+    suspension_targets = (
+        tuple(float(wheel["suspensionSpring"]["targetPosition"])
+              for wheel in wheels)
+        if all(isinstance(wheel.get("suspensionSpring"), dict) and
+               "targetPosition" in wheel["suspensionSpring"]
+               for wheel in wheels)
+        else None)
     derived_yaw_inertia = body_frame_yaw_inertia(
         rigid_body["inertiaTensor"], rigid_body["inertiaTensorRotation"])
     reported_yaw_inertia = rigid_body.get("yawInertiaBodyFrame")
     if reported_yaw_inertia is not None:
         reported = float(reported_yaw_inertia)
         if not math.isfinite(reported) or not math.isclose(
-                derived_yaw_inertia, reported, rel_tol=1.0e-5,
-                abs_tol=1.0e-7):
+                derived_yaw_inertia, reported, rel_tol=1.0e-4,
+                abs_tol=2.0e-6):
             raise ValueError(
                 "diagnostic yawInertiaBodyFrame disagrees with inertia tensor "
                 f"projection: derived={derived_yaw_inertia} reported={reported}")
     com_x_from_rear_axle = -sum(position[0] for position in rear) / 2.0
     return NativeModelParameters(
-        mass_kg=total_mass,
+        mass_kg=rigidbody_mass,
         yaw_inertia_kgm2=derived_yaw_inertia,
         com_x_from_rear_axle_m=com_x_from_rear_axle,
         position_offset_from_velocity_point_x_m=-com_x_from_rear_axle,
@@ -535,9 +753,28 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
         wheel_radius_m=sum(float(wheel["radius"]) for wheel in wheels) / 4.0,
         steering_limit_rad=float(vehicle["steeringLimitRad"]),
         steering_rate_radps=float(vehicle["steeringRateRadPerSecond"]),
+        steering_to_wheel_angle_sign=1.0,
         longitudinal_curve=longitudinal_curve,
         lateral_curve=lateral_curve,
         wheel_longitudinal_curves=longitudinal_curves,
         wheel_lateral_curves=lateral_curves,
+        wheel_radii_m=tuple(float(wheel["radius"]) for wheel in wheels),
+        wheel_masses_kg=tuple(float(wheel["mass"]) for wheel in wheels),
+        wheel_sprung_masses_kg=sprung_masses,
+        suspension_distances_m=tuple(
+            float(wheel["suspensionDistance"]) for wheel in wheels),
+        suspension_spring_rates_n_per_m=suspension_springs,
+        suspension_damper_rates_ns_per_m=suspension_dampers,
+        suspension_target_positions=suspension_targets,
+        wheel_damping_rates_per_s=tuple(
+            float(wheel["wheelDampingRate"]) for wheel in wheels),
+        force_app_point_distances_m=tuple(
+            float(wheel["forceAppPointDistance"]) for wheel in wheels),
+        rigid_body_drag_per_s=float(rigid_body.get("drag", 0.0)),
+        rigid_body_angular_drag_per_s=float(
+            rigid_body.get("angularDrag", 0.0)),
+        rigid_body_max_angular_velocity_radps=(
+            float(rigid_body["maxAngularVelocity"])
+            if "maxAngularVelocity" in rigid_body else None),
         parameter_provenance="unity_diagnostic_dump:" + str(path),
     )

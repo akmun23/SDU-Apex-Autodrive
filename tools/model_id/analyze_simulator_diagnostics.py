@@ -11,7 +11,7 @@ from typing import Any
 
 
 GUIDE = {
-    "total_mass_kg": 3.906,
+    "total_mass_if_additive_kg": 3.906,
     "sprung_mass_kg": 3.470,
     "wheel_mass_each_kg": 0.109,
     "wheelbase_m": 0.324,
@@ -58,6 +58,13 @@ def _check(name: str, actual: float, expected: float, tolerance: float = 1.0e-4)
     }
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
 def analyze(path: Path) -> dict[str, Any]:
     payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("diagnosticOnly") is not True:
@@ -72,15 +79,62 @@ def analyze(path: Path) -> dict[str, Any]:
 
     sprung_mass = float(rigid_body["mass"])
     wheel_mass = sum(float(wheel["mass"]) for wheel in wheels)
-    total_mass = sprung_mass + wheel_mass
+    mass_sum_if_additive = sprung_mass + wheel_mass
     com = rigid_body["centerOfMass"]
+    # Unity uses x-right/z-forward; the model/API uses x-forward/y-left.
+    com_api_x = float(com["z"])
+    com_api_y = -float(com["x"])
+    wheel_positions_api = [
+        {
+            "x_m": float(wheel["positionVehicleFrame"]["z"]) - com_api_x,
+            "y_m": -float(wheel["positionVehicleFrame"]["x"]) - com_api_y,
+        }
+        for wheel in wheels
+    ]
+    front_positions = wheel_positions_api[:2]
+    rear_positions = wheel_positions_api[2:]
+    derived_wheelbase = (
+        sum(position["x_m"] for position in front_positions) / 2.0 -
+        sum(position["x_m"] for position in rear_positions) / 2.0)
+    derived_track = abs(front_positions[0]["y_m"] -
+                        front_positions[1]["y_m"])
+    com_x_from_rear = -sum(position["x_m"] for position in rear_positions) / 2.0
+    # WheelCollider.mass is a separate wheel parameter. The dump does not
+    # establish that Unity adds it to Rigidbody.mass for body load/inertia, so
+    # use Rigidbody.mass for this body-load report and expose the additive sum
+    # only as an unresolved accounting alternative.
+    front_axle_load = sprung_mass * 9.81 * com_x_from_rear / derived_wheelbase
+    rear_axle_load = sprung_mass * 9.81 * (
+        derived_wheelbase - com_x_from_rear) / derived_wheelbase
     derived_iz = _body_yaw_inertia(
         rigid_body["inertiaTensor"], rigid_body["inertiaTensorRotation"])
+    wheel_diagnostic_completeness = []
+    for wheel in wheels:
+        spring = wheel.get("suspensionSpring")
+        wheel_diagnostic_completeness.append({
+            "name": wheel.get("name", "unspecified"),
+            "sprung_mass_present": _optional_float(
+                wheel.get("sprungMass")) is not None,
+            "local_rotation_present": "localRotation" in wheel,
+            "suspension_spring_present": isinstance(spring, dict) and all(
+                key in spring for key in (
+                    "spring", "damper", "targetPosition")),
+        })
+    rigid_body_diagnostic_completeness = {
+        "max_angular_velocity_present": (
+            _optional_float(rigid_body.get("maxAngularVelocity")) is not None),
+    }
+    diagnostic_fields_complete = (
+        all(all(value for key, value in item.items() if key != "name")
+            for item in wheel_diagnostic_completeness) and
+        all(rigid_body_diagnostic_completeness.values()))
     checks = {
         "sprung_mass_kg": _check("sprung_mass_kg", sprung_mass, GUIDE["sprung_mass_kg"]),
         "wheel_mass_total_kg": _check(
             "wheel_mass_total_kg", wheel_mass, 4.0 * GUIDE["wheel_mass_each_kg"]),
-        "total_mass_kg": _check("total_mass_kg", total_mass, GUIDE["total_mass_kg"]),
+        "mass_sum_if_additive_kg": _check(
+            "mass_sum_if_additive_kg", mass_sum_if_additive,
+            GUIDE["total_mass_if_additive_kg"]),
         "controller_wheelbase_m": _check(
             "controller_wheelbase_m", float(vehicle["wheelbaseM"]), GUIDE["wheelbase_m"]),
         "controller_track_m": _check(
@@ -93,26 +147,28 @@ def analyze(path: Path) -> dict[str, Any]:
             float(rigid_body["yawInertiaBodyFrame"]), 1.0e-5),
     }
     curve_checks: dict[str, Any] = {}
-    forward = wheels[0]["forwardFriction"]
-    sideways = wheels[0]["sidewaysFriction"]
-    for prefix, curve, keys in (
-        ("longitudinal", forward, (
-            ("extremum_slip", "extremumSlip"),
-            ("extremum_value", "extremumValue"),
-            ("asymptote_slip", "asymptoteSlip"),
-            ("asymptote_value", "asymptoteValue"),
-        )),
-        ("lateral", sideways, (
-            ("extremum_slip", "extremumSlip"),
-            ("extremum_value", "extremumValue"),
-            ("asymptote_slip", "asymptoteSlip"),
-            ("asymptote_value", "asymptoteValue"),
-        )),
-    ):
-        curve_checks[prefix] = {
-            name: _check(name, float(curve[field]), GUIDE[f"{prefix}_{name}"])
-            for name, field in keys
-        }
+    for wheel_index, wheel in enumerate(wheels):
+        wheel_checks: dict[str, Any] = {}
+        for prefix, curve, keys in (
+            ("longitudinal", wheel["forwardFriction"], (
+                ("extremum_slip", "extremumSlip"),
+                ("extremum_value", "extremumValue"),
+                ("asymptote_slip", "asymptoteSlip"),
+                ("asymptote_value", "asymptoteValue"),
+            )),
+            ("lateral", wheel["sidewaysFriction"], (
+                ("extremum_slip", "extremumSlip"),
+                ("extremum_value", "extremumValue"),
+                ("asymptote_slip", "asymptoteSlip"),
+                ("asymptote_value", "asymptoteValue"),
+            )),
+        ):
+            wheel_checks[prefix] = {
+                name: _check(
+                    name, float(curve[field]), GUIDE[f"{prefix}_{name}"])
+                for name, field in keys
+            }
+        curve_checks[f"wheel_{wheel_index}"] = wheel_checks
 
     return {
         "schema_version": 1,
@@ -128,12 +184,94 @@ def analyze(path: Path) -> dict[str, Any]:
         "derived": {
             "sprung_mass_kg": sprung_mass,
             "wheel_mass_total_kg": wheel_mass,
-            "total_mass_kg": total_mass,
+            "rigidbody_mass_kg": sprung_mass,
             "center_of_mass_unity_body_frame": com,
+            "center_of_mass_api_body_frame": {
+                "x_m": com_api_x,
+                "y_m": com_api_y,
+            },
+            "wheel_positions_api_body_frame": wheel_positions_api,
+            "derived_contact_geometry": {
+                "wheelbase_m": derived_wheelbase,
+                "track_m": derived_track,
+                "com_x_from_rear_axle_m": com_x_from_rear,
+            },
             "yaw_inertia_body_frame_kgm2": derived_iz,
             "static_normal_loads_N": {
-                "front_axle": total_mass * 9.81 * 0.15532 / 0.324,
-                "rear_axle": total_mass * 9.81 * (0.324 - 0.15532) / 0.324,
+                "front_axle": front_axle_load,
+                "rear_axle": rear_axle_load,
+                "front_each": front_axle_load / 2.0,
+                "rear_each": rear_axle_load / 2.0,
+            },
+            "mass_accounting": {
+                "rigidbody_mass_kg": sprung_mass,
+                "wheel_mass_total_kg": wheel_mass,
+                "sum_if_additive_kg": mass_sum_if_additive,
+                "status": "unresolved_from_dump_alone",
+                "body_load_calculation_uses": "Rigidbody.mass only",
+                "reason": (
+                    "WheelCollider.mass is recorded separately; the dump and "
+                    "source architecture do not prove that it is added to "
+                    "Rigidbody.mass for body translation or inertia."),
+            },
+            "wheel_dynamics": [
+                {
+                    "wheel": index,
+                    "name": wheel["name"],
+                    "radius_m": float(wheel["radius"]),
+                    "mass_kg": float(wheel["mass"]),
+                    "sprung_mass_kg": _optional_float(
+                        wheel.get("sprungMass")),
+                    "suspension_distance_m": float(
+                        wheel["suspensionDistance"]),
+                    "wheel_damping_rate": float(
+                        wheel["wheelDampingRate"]),
+                    "force_app_point_distance_m": float(
+                        wheel["forceAppPointDistance"]),
+                    "local_rotation": wheel.get("localRotation"),
+                    "suspension_spring": (
+                        {
+                            "spring_n_per_m": float(
+                                wheel["suspensionSpring"]["spring"]),
+                            "damper_ns_per_m": float(
+                                wheel["suspensionSpring"]["damper"]),
+                            "target_position": float(
+                                wheel["suspensionSpring"]["targetPosition"]),
+                        }
+                        if isinstance(wheel.get("suspensionSpring"), dict)
+                        else None),
+                }
+                for index, wheel in enumerate(wheels)
+            ],
+            "rigid_body_damping": {
+                "drag": float(rigid_body["drag"]),
+                "angular_drag": float(rigid_body["angularDrag"]),
+                "max_angular_velocity_radps": _optional_float(
+                    rigid_body.get("maxAngularVelocity")),
+            },
+            "diagnostic_field_completeness": {
+                "required_dynamic_fields_present": diagnostic_fields_complete,
+                "rigid_body": rigid_body_diagnostic_completeness,
+                "wheels": wheel_diagnostic_completeness,
+            },
+            "solver_and_timing": {
+                "fixed_delta_time_s": float(payload["fixedDeltaTime"]),
+                "maximum_allowed_timestep_s": float(
+                    payload["maximumAllowedTimestep"]),
+                "time_scale": float(payload["timeScale"]),
+                "gravity_mps2": payload["gravity"],
+                "default_solver_iterations": int(
+                    payload["defaultSolverIterations"]),
+                "default_solver_velocity_iterations": int(
+                    payload["defaultSolverVelocityIterations"]),
+                "default_contact_offset_m": float(
+                    payload["defaultContactOffset"]),
+                "default_max_depenetration_velocity_mps": float(
+                    payload["defaultMaxDepenetrationVelocity"]),
+                "default_max_angular_speed_radps": float(
+                    payload["defaultMaxAngularSpeed"]),
+                "v_sync_count": int(payload["vSyncCount"]),
+                "target_frame_rate": int(payload["targetFrameRate"]),
             },
         },
         "guide_crosscheck": checks,
@@ -141,6 +279,9 @@ def analyze(path: Path) -> dict[str, Any]:
         "next_action": (
             "Use dump values as fixed structural parameters; fit only actuator, "
             "drag, load-transfer, or residual terms that remain unexplained."
+            if diagnostic_fields_complete else
+            "Rebuild the diagnostic player with the complete v2 static field "
+            "set before using suspension or wheel-load values."
         ),
     }
 

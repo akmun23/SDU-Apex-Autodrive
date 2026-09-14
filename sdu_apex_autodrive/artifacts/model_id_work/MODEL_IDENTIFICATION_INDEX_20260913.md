@@ -257,10 +257,201 @@ comparison is reproducible.
 
 The Unity diagnostic exporter is present in the external simulator checkout at
 `Assets/Scripts/ModelIdentificationDiagnostics.cs`, with a disposable-scene
-build path in `Assets/Editor/BuildLinuxPlayer.cs`. A new diagnostic build has
-not yet been produced because this machine has no Unity Editor executable;
-the existing model-identification binaries predate the exporter and must not
-be treated as diagnostic dumps. The next required step is therefore to build
-and run that disposable diagnostic artifact, analyze its dump, and only then
-compare the fixed-structure VS3 model before any native C or production MPC
-integration.
+build path in `Assets/Editor/BuildLinuxPlayer.cs`. The Unity 2022.3.52f1 editor
+was found and used in batchmode to build the disposable player; no
+`-nographics` flag was used. The source competition scene was restored after
+the build. The build succeeded despite pre-existing missing-prefab and
+LLMUnity asset-copy warnings.
+
+The first no-command diagnostic run exposed a CSV logger schema bug and was
+not used for fitting. The logger was corrected to write the root quaternion
+that its header declared. A second run used the opt-in offline-only
+`ramp_sweep_v1` command profile and is preserved under
+`diagnostics_20260914/`. It is 51.856 s of simulator time, 51,857 fixed-step
+rows, 110/110 valid columns, and 42 MB, below the 100 MB repository limit.
+The player ran in batchmode with graphics enabled and the competition physics
+was not changed.
+
+The static dump now establishes Gate B for this build: Unity fixed timestep is
+0.001 s, dumped yaw inertia is 0.0276986 kg m^2, all four wheel curves and
+wheel dynamic settings are present, and the dump is marked
+`simulatorPhysicsUnmodified=true`. It also records differences from the guide:
+the controller radius is 0.0325 m while WheelCollider radius is 0.059 m, and
+the longitudinal curve values are 0.90/0.58 rather than the guide's 0.72/0.464.
+These values must remain provenance-labelled rather than silently reconciled.
+
+The dynamic analyzer is
+`tools/model_id/analyze_wheel_contact_diagnostics.py`. The sweep confirms
+monotonic 1 kHz physics timing, forward speed up to 15.3 m/s, raw Unity
+Ackermann side/sign behavior, and highly correlated but non-identical front
+/rear wheel RPM states. The stream contains `WheelHit.force` and direction
+data but no separate tire Fx/Fy magnitudes, so it reports a normal-load proxy
+and deliberately does not fabricate normalized friction curves. Gate C is
+therefore only partially addressed; a force-law fit still requires either
+force components exposed by Unity or an explicitly effective acceleration /
+moment inversion.
+
+The exporter was then completed to schema v2 and rebuilt in Unity batchmode.
+The fresh artifacts are under `diagnostics_20260914_v2/`; the trace contains
+52.053 s of simulator time, 52,054 rows, 110 columns, exact one-step
+fixed-step continuity, and median `dt` approximately 0.001 s. All four wheels
+now report sprung mass and suspension spring/damper/target-position values,
+and the Rigidbody reports `maxAngularVelocity=7.0 rad/s`. The model parser
+preserves these values as offline structural provenance. The small serialized-
+float discrepancy in the dumped convenience yaw-inertia scalar is accepted by
+a bounded cross-check tolerance; material disagreement is still rejected. No
+simulator physics or runtime control path was changed.
+
+## Latest push review: residual slices and VS2.5 preparation
+
+The latest review is
+`SDU_Apex_Latest_Push_Model_Analysis_and_Development_Plan_2026-09-13.md`.
+Its main conclusion is followed here: the current error tail is a lateral/yaw
+structure problem, so no new broad generic dataset was collected and no
+production MPC changes were made.
+
+`model_fits_v2/simulator_native_model_benchmark_v9_event_preserving_screen.json`
+records the event-preserving screen fit. It deliberately retains steering
+slew/reversal, high-yaw, and lateral-state origins before uniform fill. The
+optimizer still stopped at its configured screen cap; validation position p95
+for VS1/VS2 at 0.50 s was approximately 0.118/0.113 m and at 2.00 s
+approximately 1.751/1.762 m. Neither candidate is accepted.
+
+`model_fits_v2/simulator_native_residual_slices_v8.json` ranks the failure
+regimes from the immutable v8 replay. At 2.00 s, the largest VS1 run p99
+errors were steering reversal run 62 (11.01 m) and combined
+throttle/steering runs 04/05 (10.65/10.55 m). The high-`|Sy|` slice had a
+9.70 m p95, while low-demand origins were approximately 0.11 m p95. This
+supports prioritizing contact-force/moment structure over another optimizer
+budget on the unchanged VS1/VS2 equations.
+
+The offline model now includes a VS2.5 four-contact normalized force/moment
+basis in `tools/model_id/simulator_native_model.py`. It evaluates all four
+wheel slip responses, rotates each tire force into the body frame, and forms
+`qX`, `qY`, and `qM = sum(x_i*qY_i - y_i*qX_i)`. Its fitted coefficients remain
+explicit effective simulator gains; no `I_z` is invented or promoted. The
+corresponding fit path and candidate are in
+`tools/model_id/fit_simulator_native_model.py`; this candidate is still
+offline-only and awaits the screen/full-replay result.
+
+The converged VS2.5 screen is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v11_vs25_converged_screen.json`.
+The optimizer terminated by `xtol` after 24 evaluations and the yaw-moment gain
+was no longer at the temporary bound. The complete fixed-gain replay is
+`model_fits_v2/simulator_native_model_benchmark_v12_vs25_full_replay.json`.
+At up to 1,500 origins per validation run, VS2.5 validation position p95 is
+approximately 0.123 m at 0.50 s, 0.433 m at 1.00 s, and 1.385 m at 2.00 s.
+The same replay reports `v` p95 of approximately 0.059/0.079/0.154 m/s and
+`r` p95 of approximately 0.192/0.302/0.353 rad/s at those horizons. This is a
+material offline improvement over v8 VS1, but it remains above the desired
+precision and has no native parity, observer, or blind-run acceptance.
+
+The remaining tail is recorded in
+`model_fits_v2/simulator_native_residual_slices_v12_vs25.json`. The worst
+validation runs are combined throttle/cornering runs 04/05, with 2.00 s
+position p95 approximately 6.04/5.99 m in the 200-origin slice; the top
+origins reach approximately 13.25 m. Low-demand origins are approximately
+0.08 m p95 at 2.00 s. This is the expected signature of unresolved
+load/contact dynamics and is not addressed by promoting the effective model
+or by changing the simulator.
+
+The diagnostic analyzer now reports all wheel curves, contact geometry,
+mass/load semantics, suspension/damping, rigid-body damping, solver/timing,
+and inertia cross-checks. The exporter source is versioned at
+`tools/model_id/unity/ModelIdentificationDiagnostics.cs` and matches the
+external diagnostic component. It remains a disposable diagnostic artifact;
+it does not alter the competition simulator.
+
+## Steering-map experiment and current model decision
+
+The dynamic trace shows that the raw Unity `WheelCollider.steerAngle` sign and
+left/right Ackermann ordering differ from the API-frame steering convention
+used by the accepted replay data. Both conventions are now explicit in
+`simulator_native_model.py`; the raw Unity formula is retained as a diagnostic
+reference and is not silently applied to API-frame states.
+
+The corrected raw-map VS2.5 fit is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v13_vs25_unity_steering_map.json`.
+It terminated after 11 evaluations with poor conditioning and worsened held-
+out 2.00 s position p95 to approximately 4.89 m, versus approximately 1.38 m
+for the prior API-frame v11/v12 candidate. It is rejected. The prior effective
+API-frame convention remains the current offline baseline, and no production
+MPC change has been made.
+
+The optional effective yaw-damping audit is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v14_vs25_yaw_damping.json`.
+The damping-enabled VS2.5 fit drove the new coefficient to the lower bound
+(`approximately 5e-11 1/s`) and did not improve held-out replay: the 200-origin
+screen gave position p95 of approximately 0.119/0.419/1.411 m at 0.50/1.00/2.00
+s, versus 0.118/0.409/1.399 m for v11. VS1 and VS2 also remained worse in the
+multi-step comparison. This is evidence against adding an unobserved residual
+damping term to the candidate; it is retained only as an offline audit field,
+not as a production or baseline parameter.
+
+The same fixed gains were then scored over the full deterministic validation
+population in
+`model_fits_v2/simulator_native_model_benchmark_v15_yaw_damping_full_replay.json`.
+VS2.5 with damping reached position p95 approximately
+`0.123/0.434/1.390 m` at 0.50/1.00/2.00 s, compared with
+`0.123/0.433/1.385 m` for the retained v12 replay. The full replay therefore
+confirms the screen decision: damping is rejected and the v12 VS2.5 gains
+remain the best current offline baseline.
+
+The v2 contact trace also showed strong measured lateral load-transfer
+correlation, so a causal lateral-load-transfer screen was run without changing
+the v12 gains. Its results are preserved in
+`model_fits_v2/simulator_native_load_transfer_screen_v1.json`. With the
+effective `a_y ~= r*u` estimate, heights of 0.08 m and 0.16 m worsened 2.00 s
+position p95 from 1.399 m to 3.132 m and 3.758 m respectively. The structure is
+rejected: contact-load correlation alone is not enough to infer a usable
+reduced-model load law, and the default height remains zero.
+
+The next model step is to use targeted diagnostic data to identify effective
+force/moment behavior without conflating raw Unity axes with API axes. The
+v2 dump and sweep pass the provenance/timing/static-field checks, but they do
+not yet pass
+the contact-law, native-parity, observer, blind-run, or shadow-MPC gates.
+
+## VS2.75 split-contact structural screen
+
+The next structural experiment retained the full four-contact body-frame
+geometry but split the lateral and yaw terms by front/rear axle. It explicitly
+keeps the complete longitudinal yaw contribution `-y_i*Fx_i` rather than
+discarding left/right longitudinal asymmetry. The implementation is an
+offline-only `moment_basis_split` candidate in
+`tools/model_id/simulator_native_model.py` and
+`tools/model_id/fit_simulator_native_model.py`.
+
+The screen fit is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v16_vs275_split_moment_basis.json`;
+the full fixed-gain replay is
+`model_fits_v2/simulator_native_model_benchmark_v17_vs275_split_moment_basis_full_replay.json`.
+On the complete deterministic validation population, position p95 improved
+from v12's `0.123/0.433/1.385 m` to `0.121/0.392/1.234 m` at 0.50/1.00/2.00 s,
+and 2.00 s position p99 improved from `5.614 m` to `3.975 m`. The residual
+slice report
+`model_fits_v2/simulator_native_residual_slices_v17_vs275.json` shows lower
+combined throttle/cornering p95 (`3.391` to `3.005 m`) and high-`|Sy|` p95
+(`9.485` to `8.895 m`), but steering-reversal p95 worsens (`1.389` to
+`2.128 m`) and the optimizer reports high numerical optimality. VS2.75 is
+therefore the best provisional offline structure, not an accepted plant; it
+still requires optimizer refinement, native parity, observer replay, and
+blind-track acceptance before any MPC integration.
+
+The optimizer refinement is recorded in
+`model_fits_v2/simulator_native_model_benchmark_v18_vs275_split_moment_basis_refined.json`.
+It used 70 event-preserving origins per training run and allowed 60 optimizer
+evaluations; the optimizer converged after 23 evaluations. Compared with v17,
+it improved validation position p95 at 0.50 s from `0.121` to `0.119 m`, was
+effectively unchanged at 1.00 s (`0.392` to `0.392 m`), but worsened the
+long-horizon 2.00 s value from `1.234` to `1.277 m`. The 2.00 s residual
+slice is also mixed: steering reversal improved from `2.128` to `1.752 m`
+and low-demand p95 from `0.084` to `0.079 m`, while combined corner/throttle
+and high-`|Sy|` tails did not improve. Its optimizer optimality remains high.
+The refinement is therefore retained as an audit candidate, while v17
+remains the best provisional long-horizon structure. The residual comparison
+is in `model_fits_v2/simulator_native_residual_slices_v18_vs275_refined.json`.
+
+No candidate is promoted to production MPC: native C parity, observer replay,
+and blind-track acceptance are still outstanding, and all simulator truth
+continues to be used offline only.
