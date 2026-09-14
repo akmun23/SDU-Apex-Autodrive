@@ -79,6 +79,10 @@ def _body_inertia_tensor(principal: dict[str, float],
     y = float(rotation["y"])
     z = float(rotation["z"])
     w = float(rotation["w"])
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm <= 1.0e-12:
+        raise ValueError("inertia tensor rotation has zero norm")
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
     rotation_matrix = np.asarray([
         [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
          2.0 * (x * z + y * w)],
@@ -316,10 +320,28 @@ def analyze(trace_path: Path, dump_path: Path,
     vehicle = payload["vehicle"]
     rigid_body = vehicle["rigidBody"]
     mass_kg = float(rigid_body["mass"])
-    yaw_inertia = float(rigid_body["yawInertiaBodyFrame"])
+    if rigid_body.get("yawAxis") != "body_y":
+        raise ValueError(
+            "diagnostic dump must explicitly declare Unity body Y as yaw axis")
     inertia_tensor = _body_inertia_tensor(
         rigid_body["inertiaTensor"], rigid_body["inertiaTensorRotation"])
     unity_yaw_inertia = float(inertia_tensor[1, 1])
+    reported_yaw_inertia = float(rigid_body["yawInertiaBodyFrame"])
+    if not math.isclose(
+            unity_yaw_inertia, reported_yaw_inertia,
+            rel_tol=1.0e-4, abs_tol=2.0e-6):
+        raise ValueError(
+            "diagnostic yawInertiaBodyFrame does not match corrected body-Y "
+            f"inertia: tensor={unity_yaw_inertia} reported={reported_yaw_inertia}")
+    for axis_index, axis in enumerate(("X", "Y", "Z")):
+        field = f"bodyInertia{axis}"
+        if field not in rigid_body:
+            raise ValueError(f"diagnostic dump is missing corrected {field} field")
+        if not math.isclose(
+                float(np.diag(inertia_tensor)[axis_index]),
+                float(rigid_body[field]), rel_tol=1.0e-4, abs_tol=2.0e-6):
+            raise ValueError(f"diagnostic {field} disagrees with inertia tensor")
+    yaw_inertia = unity_yaw_inertia
     com = rigid_body["centerOfMass"]
     wheel_geometry: list[tuple[float, float]] = []
     wheel_curves: list[tuple[TireCurveParameters, TireCurveParameters]] = []
@@ -531,10 +553,14 @@ def analyze(trace_path: Path, dump_path: Path,
             "rigidbody_mass_kg": mass_kg,
             "yaw_inertia_kgm2": yaw_inertia,
             "raw_body_inertia_tensor_kgm2": inertia_tensor.tolist(),
-            "unity_physical_yaw_axis": "local_y",
-            "raw_tensor_local_y_axis_inertia_kgm2": unity_yaw_inertia,
-            "exported_yawInertiaBodyFrame_projection_axis": "local_z",
-            "exported_vs_physical_yaw_axis_mismatch": True,
+            "body_frame_inertia_kgm2": {
+                "x": float(inertia_tensor[0, 0]),
+                "y": float(inertia_tensor[1, 1]),
+                "z": float(inertia_tensor[2, 2]),
+            },
+            "unity_physical_yaw_axis": "body_y",
+            "exported_yawInertiaBodyFrame_projection_axis": "body_y",
+            "exported_vs_physical_yaw_axis_mismatch": False,
             "wheel_geometry_api_body_frame": [
                 {"x_m": x, "y_m": y} for x, y in wheel_geometry],
             "force_basis": "dumped WheelCollider curves and WheelHit.force*normal_y",
@@ -576,13 +602,13 @@ def analyze(trace_path: Path, dump_path: Path,
         "limitations": [
             "WheelHit.force is a normal-load proxy, not measured tire Fx/Fy.",
             "Body acceleration and yaw acceleration are differentiated from the diagnostic trace.",
-            "The dump's yawInertiaBodyFrame field is exported from a local-Z projection; Unity physical yaw is local-Y, so inertia semantics require resolution before MPC use.",
+            "The corrected diagnostic exporter explicitly emits all body-axis inertia projections and declares body Y as the physical yaw axis.",
             "A fitted scale is not a tire coefficient or proof of the assumed force sign.",
             "No combined-slip law is promoted from this inversion alone.",
         ],
         "next_action": (
-            "Compare force/moment residuals against the same regimes after a "
-            "causal load-state fit; add direct force export if the residual "
+            "Compare force/moment residuals against the same regimes using the "
+            "corrected body-Y inertia; add direct force export if the residual "
             "cannot be explained by measured load and configured curves."),
     }
 

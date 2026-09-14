@@ -20,7 +20,8 @@ add_library(mpc_core STATIC
   src/vehicle_plant.c
   src/vehicle_model.c
   src/riccati_solver.c
-  src/mpc.c)
+  src/mpc.c
+  src/mpc_observer.c)
 target_include_directories(mpc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -35,6 +36,10 @@ if(BUILD_TESTING)
   add_executable(vehicle_plant_test test/test_vehicle_plant.c)
   target_link_libraries(vehicle_plant_test PRIVATE mpc_core m)
   add_test(NAME vehicle_plant_test COMMAND vehicle_plant_test)
+
+  add_executable(mpc_observer_test test/test_mpc_observer.c)
+  target_link_libraries(mpc_observer_test PRIVATE mpc_core m)
+  add_test(NAME mpc_observer_test COMMAND mpc_observer_test)
 endif()
 
 install(TARGETS mpc_core

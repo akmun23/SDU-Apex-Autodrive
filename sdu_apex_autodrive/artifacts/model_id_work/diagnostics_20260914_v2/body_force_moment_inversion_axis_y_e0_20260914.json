@@ -1,0 +1,34 @@
+{
+  "status": "offline_only_structural_screen_not_accepted",
+  "trace": "combined_slip_matrix_v1_20260914/wheel_contact_trace.csv",
+  "static_dump": "corrected disposable E0 diagnostic dump",
+  "accepted_rows": 69731,
+  "structural_parameters": {
+    "mass_kg": 3.47000003,
+    "yaw_axis": "body_y",
+    "yaw_inertia_kgm2": 0.09619075
+  },
+  "global_effective_fit": {
+    "lateral_force": {
+      "scale": 0.97331344,
+      "scaled_residual_p95_N": 1.20563767,
+      "target_rms_N": 22.90530363
+    },
+    "longitudinal_force": {
+      "scale": 0.08520699,
+      "scaled_residual_p95_N": 9.53724401,
+      "target_rms_N": 4.75399886
+    },
+    "yaw_moment": {
+      "scale": 0.00512595,
+      "scaled_residual_p95_Nm": 0.02681927,
+      "target_rms_Nm": 0.13650006
+    }
+  },
+  "interpretation": [
+    "Corrected body-Y inertia is now used consistently.",
+    "Lateral curve magnitude remains near unity in this effective screen.",
+    "Longitudinal contact/actuator basis remains strongly inconsistent.",
+    "No tire coefficient or runtime MPC parameter is promoted from this screen."
+  ]
+}

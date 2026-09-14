@@ -69,6 +69,7 @@ setup(
             "calibrate_ekf_covariance = sdu_apex_autodrive.odometry_analysis.covariance_calibration:main",
             "source_time_diagnostic_report = sdu_apex_autodrive.odometry_analysis.source_time_diagnostic_report:main",
             "full_speed_localization_report = sdu_apex_autodrive.odometry_analysis.full_speed_localization_report:main",
+            "localization_error_decomposition = sdu_apex_autodrive.odometry_analysis.localization_error_decomposition:main",
             "score_localization_run = sdu_apex_autodrive.odometry_analysis.localization_run_score:main",
             "scan_match_benchmark = sdu_apex_autodrive.odometry_analysis.scan_match_benchmark:main",
         ],

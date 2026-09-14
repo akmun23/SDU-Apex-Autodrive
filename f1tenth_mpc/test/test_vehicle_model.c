@@ -142,7 +142,7 @@ static void test_unity_structural_anchors(void)
     check_close(parameters.vehicle_mass, 3.470f, 1.0e-6f,
                 "Unity Rigidbody mass is used");
     check_close(parameters.yaw_moment_of_inertia, 0.0276985662f, 1.0e-7f,
-                "projected Unity yaw inertia is used");
+                "MPC retains provisional legacy inertia until model gate");
     check_close(parameters.wheelbase_meters, 0.330000f, 1.0e-5f,
                 "contact wheelbase is used");
     check_close(parameters.distance_cg_to_front_axle, 0.174679914f, 1.0e-6f,
@@ -151,6 +151,15 @@ static void test_unity_structural_anchors(void)
                 "rear COM contact distance is used");
     check_close(parameters.max_steering_angle, 0.5235987756f, 1.0e-6f,
                 "Unity steering limit is used");
+    check_close(parameters.height_cg_to_ground, 0.0f, 1.0e-7f,
+                "unvalidated Unity-local COM coordinate is not used as load height");
+
+    float front_load = 0.0f;
+    float rear_load = 0.0f;
+    vehicle_model_compute_normal_loads(10.0f, &front_load, &rear_load);
+    const float static_total_load = parameters.vehicle_mass * 9.82f;
+    check_close(front_load + rear_load, static_total_load, 1.0e-4f,
+                "unknown CG height preserves total static normal load");
 }
 
 int main(void)

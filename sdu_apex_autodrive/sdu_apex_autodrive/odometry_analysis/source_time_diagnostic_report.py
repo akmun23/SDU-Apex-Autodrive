@@ -93,6 +93,7 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "amcl_health_scan_correction_y_m",
         "amcl_health_applied_x_m",
         "amcl_health_applied_y_m",
+        "amcl_health_source_stamp_s",
     ),
     "collision": ("gt_collision_count",),
     "imu": (

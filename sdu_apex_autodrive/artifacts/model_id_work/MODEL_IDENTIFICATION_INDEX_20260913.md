@@ -455,3 +455,208 @@ is in `model_fits_v2/simulator_native_residual_slices_v18_vs275_refined.json`.
 No candidate is promoted to production MPC: native C parity, observer replay,
 and blind-track acceptance are still outstanding, and all simulator truth
 continues to be used offline only.
+
+## 2026-09-14 latest-plan E0 superseding addendum
+
+The latest review and recovery plan changes the priority order: vehicle-axis
+semantics and the hybrid longitudinal actuator must be corrected before tire
+law tuning or MPC tuning. The earlier `0.0276986 kg m^2` convenience value is a
+local-Z projection and is now explicitly legacy; it must not be interpreted as
+the physical yaw inertia.
+
+The disposable Unity diagnostic exporter was corrected to emit all body-frame
+inertia projections and `yawAxis=body_y`. A fresh batchmode-with-graphics
+diagnostic run passed the parser/analyzer gate with
+`I_body_x=0.09352724`, `I_body_y=0.09619075`, and `I_body_z=0.02769764 kg m^2`.
+The native plant and MPC constants were intentionally not changed. The durable
+E0 report is
+`diagnostics_20260914_v2/inertia_axes_e0_20260914.json`.
+
+The corrected existing force/moment screen still gives a lateral effective
+scale near unity (`0.973`) but a longitudinal scale near `0.085`, so the next
+campaign is the repeated near-zero throttle/brake map and hybrid continuous
+wheel model. The corrected inversion summary is
+`diagnostics_20260914_v2/body_force_moment_inversion_axis_y_e0_20260914.json`.
+
+The new sequence is: E1 near-zero actuator semantics, E2 repeated powered
+drive, E3 corrected force/moment inversion, E4 cross/along-track localization
+decomposition, E5 source-time controller contract, then only after accepted
+high-fidelity replay derive the reduced MPC model, observer, and shadow MPC.
+No simulator physics or competition runtime behavior was changed.
+
+The canonical E1 campaign was then completed with 105/105 successful
+normal-graphics batchmode runs: 5 commanded speeds, 7 near-zero commands, and
+3 repeats per condition. A 0.1 s disposable 0.65-throttle precondition was used
+so WheelCollider RPM was initialized before the measurement command; the
+measurement interval is explicitly marked in each trace. The compact report is
+`diagnostics_20260914_v2/near_zero_actuator_e1_20260914.json`; raw traces remain
+outside the repository under `/tmp/autodrive-model-id-near-zero-e1-clean-20260914`.
+
+E1 confirms the hybrid actuator mapping exactly: command zero applies 428 Nm
+brake torque to every wheel, while each positive tested command applies
+`107 * command` Nm motor torque per wheel and zero brake torque. No tested
+positive command behaved as coast; wheel RPM and body speed collapse after the
+command transition. The actuator gate is therefore passed, but the continuous
+longitudinal plant remains not accepted and the next step is repeated powered
+drive identification with explicit drive-only windows. No simulator physics or
+competition runtime behavior was changed.
+
+E2 then completed five independent 51.017 s positive-drive repeats using 17
+ three-second upstep/downstep plateaus. All repeats contain 51,018 rows, have
+ approximately 1 ms source timing, and contain no brake torque. Fitting the
+ existing effective wheel-state basis on repeats 1--3 and validating on repeats
+ 4--5 gives held-out wheel replay p95 errors of approximately 0.54--0.70
+ rad/s at 25 ms, with similar results at 50 ms. The compact report is
+ `diagnostics_20260914_v2/powered_drive_e2_20260914.json`.
+
+The optimizer drives the contact-force coefficient to approximately zero on all
+four wheels and identifies repeatable motor/damping coefficients instead. This
+passes the independent wheel replay gate only; it does not pass body-u
+recursive prediction, force/moment parity, or MPC promotion. The measured
+contact force/slip regressors remain offline-only, and no simulator physics or
+competition runtime behavior was changed.
+
+E3 was rerun with the corrected body-Y inertia and is recorded in
+`diagnostics_20260914_v2/body_force_moment_inversion_e3_20260914.json`. The
+global screen remains consistent: lateral scale approximately `0.973`,
+longitudinal scale approximately `0.085`, and yaw-moment scale approximately
+`0.00513`. This confirms that correcting inertia semantics does not explain the
+longitudinal mismatch; the actuator/wheel/contact model remains the dominant
+open physics issue. E3 is an offline structural screen only and does not
+promote a tire law or MPC plant.
+
+## 2026-09-14 latest-plan E4 localization decomposition
+
+E4 was completed offline against the accepted full-speed Pure Pursuit run
+`full_speed_mpc_recovery_v1/runtime_track/e1_pp_full_speed_yaw_20260914_1220`.
+The new tool is
+`sdu_apex_autodrive.odometry_analysis.localization_error_decomposition`; it
+uses the existing source-stamped localization report, the bridge source-time
+stream, and the saved raceline. It writes per-sample signed cross-track,
+along-track, wrapped raceline-s, yaw, speed, curvature, and segment data. The
+raw decomposition CSV is kept outside the repository; the compact result is
+`diagnostics_20260914_v2/localization_decomposition_e4_20260914.json`.
+
+The source stream contains 6,703 packets with `dt` p95 `26.001 ms` and max
+`28 ms`. AMCL is predominantly along-track biased: `/amcl_pose` has cross-track
+p95 `0.0313 m` and along-track p95 `0.2133 m`; `/current_map_pose` has
+`0.0328 m` and `0.2196 m`. Local `/odom` and `/ekf_odom` are identical in this
+run and have mixed cross/along p95 errors of `0.8884/0.8709 m`.
+
+AMCL correction age is normally approximately `25 ms` and scan alignment has
+zero source error and zero queue/drop counters. The health diagnostics have no
+source header, however, so exact correction age cannot yet be joined to an
+individual estimator row. This establishes the E5 requirement for a
+source-stamped state-age contract; no AMCL or EKF tuning is promoted from E4.
+
+## 2026-09-14 E5 source-stamped AMCL health contract
+
+The E4 result identified a missing observability contract: AMCL correction age
+was available, but the health `Float64MultiArray` had no source stamp. The AMCL
+publisher now appends the scan/source timestamp as field 15 while preserving
+the original fourteen fields. The diagnostics recorder stores that field and
+uses it as `source_event_stamp_s`; old 14-field AMCL binaries retain the
+arrival-time fallback. The offline decomposition joins the correction age to
+source rows within a 1 ms timestamp tolerance when the extension is present.
+The compact implementation record is
+`diagnostics_20260914_v2/source_stamped_health_contract_e5_20260914.json`.
+
+This is a dev-side diagnostic/estimator observability change only: it does not
+alter the particle filter, simulator, physics, controller inputs, or command
+path. A ROS 2 Humble build with CUDA AMCL enabled passed all three localization
+C++ tests, and the Python analysis suite passed 119 tests. The existing E4
+recording predates field 15, so it correctly remains marked
+`state_age_exactly_joined=false`; a new clean localization recording is still
+required to validate the source-stamped health join live.
+
+## 2026-09-14 E5 source-time contract live validation
+
+The source-epoch bridge contract was validated in a clean track run using Unity
+batchmode with normal graphics. The compact evidence is
+`diagnostics_20260914_v2/source_time_contract_e5_live_20260914.json`; the raw
+run is `accepted/82_e5_source_epoch_fault_diagnostic_track_40hz_20260914`.
+
+The bridge recorded 1,331 valid simulator packets over 33.249 s of source time.
+Source intervals were 17.000--33.002 ms, with zero samples outside the strict
+15--35 ms window. Request and telemetry sequences had zero gaps or reversals,
+and the applied command lag was exactly one packet. The two source intervals
+above 30 ms were still valid 33 ms intervals, not 40 Hz failures. Pure Pursuit
+reached repeated `lap_fraction=1.000` with zero recorded collisions. The only
+timing fault was the expected Socket.IO disconnect when the test player was
+stopped.
+
+This validates the source-time/header contract and the fail-closed diagnostic
+path, but it does not promote the current continuous body-dynamics candidate
+or MPC tuning. The next implementation phase is a dev-side dynamic observer
+and replay score using legal sensor/runtime inputs only; simulator truth and
+embedded simulator dynamics remain offline diagnostics.
+
+## 2026-09-14 E6 MPC dynamic observer prototype
+
+The source-time observer prototype is implemented in
+`f1tenth_mpc/include/mpc_observer.h` and `f1tenth_mpc/src/mpc_observer.c`.
+It carries `[u, v, r, delta, q_drive]`, rejects source intervals outside
+15--35 ms, exposes source state age for a future solve/application epoch, and
+uses no simulator truth at runtime. Its source-time update consumes odometry
+speed, IMU yaw rate/lateral acceleration, source-associated applied steering,
+and applied throttle. The bridge timing record is used for the latter two
+until typed feedback messages carry source headers.
+
+The offline fit/evaluation tool is `tools/model_id/evaluate_mpc_observer.py`.
+The compact evidence is
+`diagnostics_20260914_v2/mpc_dynamic_observer_e6_20260914.json`: run 81 was
+the training trace and the independent run 82 was held out. On run 82, `r`
+matched the recorded IMU/vehicle yaw rate exactly, `u` had p95 absolute error
+`0.342 m/s` after the causal IMU-`a_x`/odometry correction, and the prototype
+`v` estimate had p95 absolute error `0.00404 m/s` and maximum error
+`0.01072 m/s`. These are absolute metrics
+because lateral velocity crosses zero; they must not be reported as a
+misleading percentage.
+
+The observer remains unaccepted: `u`, `v`, and `r` are all marked false until
+open-scene and cross-regime data are available, and the current `v` mapping is
+an empirical observer prototype rather than an accepted high-fidelity plant.
+The native MPC model also no longer uses the invalid `0.01434 m` Unity-local
+COM coordinate as a physical load-transfer height; that parameter is now
+explicitly unresolved and load transfer is disabled pending measurement.
+
+## 2026-09-14 E7 LiDAR transport-cache validation
+
+The two rejected long runs E6-83 and E6-84 both lost simulator telemetry at
+the same sequence transition (`1010 -> 1012`). Bridge callback serialization
+did not change that result. Source inspection identified a deterministic
+performance hotspot: the Unity socket recompressed the complete LiDAR array on
+every 40 Hz reply, although the sensor scans at 20 Hz. The Unity-side fix
+caches only the compressed transport string per completed scan. It does not
+change raycasts, range values, scan timing, collision geometry, rigid-body
+settings, or controller behavior. The player was rebuilt from a temporary copy
+of the checked-out competition scene, leaving the source scene untouched.
+
+The accepted validation run is
+`accepted/85_e7_lidar_cache_validation_track_40hz_20260914`. It used
+batchmode with normal graphics and Pure Pursuit. It captured 3,121 valid
+bridge packets through source time `78.135 s`; source intervals were
+`21.999--27.999 ms` with zero intervals above 30 ms, zero request gaps, zero
+telemetry gaps, zero reversals, and exactly one packet of applied-command lag.
+The prior `1010 -> 1012` loss did not recur. The compact evidence is
+`diagnostics_20260914_v2/timing_cache_e7_20260914.json`, and the raw event log
+and finalized timing partitions remain in the accepted run directory.
+
+Using the same dev-side observer fit as E6, the independent E7 validation gives
+`u` p95 absolute error `0.357 m/s`, `v` p95 absolute error `0.00407 m/s`, and
+`r` p95 absolute error `0`. These values are offline scoring against embedded
+simulator truth only; no simulator truth enters runtime. The observer and MPC
+plant remain unpromoted pending the planned open-scene, cross-regime, and
+longitudinal-model validation.
+
+An independent repeat, `accepted/86_e7_lidar_cache_repeat2_track_40hz_20260914`,
+captured 3,403 valid packets with source intervals `21.998--28.000 ms`, zero
+source/request/telemetry gaps, zero reversals, and one-packet command lag. Its
+observer score was `u` p95 `0.332 m/s`, `v` p95 `0.00428 m/s`, and `r` p95 `0`.
+The repeat report is
+`diagnostics_20260914_v2/timing_cache_e7_repeat2_20260914.json`; the combined
+two-run observer report is
+`diagnostics_20260914_v2/mpc_dynamic_observer_e7_cross_run_20260914.json`.
+Together E7 provides 6,524 clean source-time validation packets after the
+cache change, but it is still one track regime and therefore not a promotion
+gate for the observer or MPC plant.

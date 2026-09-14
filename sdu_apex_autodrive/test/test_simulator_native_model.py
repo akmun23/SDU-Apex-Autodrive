@@ -14,7 +14,8 @@ from tools.model_id.simulator_native_model import (
     GUIDE_LATERAL_CURVE,
     NativeModelParameters,
     ackermann_angles,
-    body_frame_yaw_inertia,
+    body_axis_inertia,
+    body_frame_inertias,
     contact_kinematics,
     f1tenth_prefab_parameters,
     _moment_basis_coordinates,
@@ -250,7 +251,11 @@ def test_parameters_from_dump_preserves_dump_provenance(tmp_path: Path):
             "rigidBody": {
                 "mass": 3.47,
                 "centerOfMass": {"x": 0.0, "y": 0.06434, "z": 0.0},
-                "yawInertiaBodyFrame": 0.04,
+                "bodyInertiaX": 0.01,
+                "bodyInertiaY": 0.02,
+                "bodyInertiaZ": 0.04,
+                "yawAxis": "body_y",
+                "yawInertiaBodyFrame": 0.02,
                 "inertiaTensor": {"x": 0.01, "y": 0.02, "z": 0.04},
                 "inertiaTensorRotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
                 "drag": 0.27,
@@ -334,13 +339,50 @@ def test_parameters_from_dump_preserves_dump_provenance(tmp_path: Path):
         "suspension_spring"]["damper_ns_per_m"] == pytest.approx(1.0)
 
 
-def test_yaw_inertia_is_projected_from_rotated_principal_tensor():
-    # A 90-degree rotation about Unity's y axis maps the principal x axis to
-    # the body z axis.  The body-frame yaw inertia is therefore I_x, not the
-    # scalar stored in any convenience field in a diagnostic dump.
+def test_body_inertia_axes_are_projected_explicitly():
+    # A 90-degree rotation about Unity's y axis maps principal x to body -z
+    # and principal z to body +x.  Physical yaw remains Unity body y.
     half_sqrt_two = 2.0 ** -0.5
-    inertia = body_frame_yaw_inertia(
+    moments = {"x": 0.01, "y": 0.02, "z": 0.04}
+    rotation = {
+        "x": 0.0, "y": half_sqrt_two,
+        "z": 0.0, "w": half_sqrt_two,
+    }
+    assert body_axis_inertia(moments, rotation, "x") == pytest.approx(
+        0.04, abs=1.0e-10)
+    assert body_axis_inertia(moments, rotation, "y") == pytest.approx(
+        0.02, abs=1.0e-10)
+    assert body_axis_inertia(moments, rotation, "z") == pytest.approx(
+        0.01, abs=1.0e-10)
+    assert body_frame_inertias(moments, rotation) == pytest.approx({
+        "x": 0.04, "y": 0.02, "z": 0.01}, abs=1.0e-10)
+
+
+def test_body_inertia_accepts_a_normalized_arbitrary_body_axis():
+    half_sqrt_two = 2.0 ** -0.5
+    inertia = body_axis_inertia(
         {"x": 0.01, "y": 0.02, "z": 0.04},
         {"x": 0.0, "y": half_sqrt_two,
-         "z": 0.0, "w": half_sqrt_two})
-    assert inertia == pytest.approx(0.01, abs=1.0e-10)
+         "z": 0.0, "w": half_sqrt_two}, (0.0, 2.0, 0.0))
+    assert inertia == pytest.approx(0.02, abs=1.0e-10)
+
+
+def test_parameters_from_dump_rejects_legacy_implicit_yaw_axis(tmp_path: Path):
+    payload = {
+        "diagnosticOnly": True,
+        "runtimeControlInput": False,
+        "vehicle": {
+            "rigidBody": {
+                "mass": 3.47,
+                "inertiaTensor": {"x": 0.01, "y": 0.02, "z": 0.04},
+                "inertiaTensorRotation": {
+                    "x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                "yawInertiaBodyFrame": 0.04,
+            },
+            "wheels": [],
+        },
+    }
+    path = tmp_path / "legacy_simulator_parameters.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="body Y as yawAxis"):
+        parameters_from_dump(path)

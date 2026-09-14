@@ -29,6 +29,8 @@ from std_msgs.msg import Bool, Float32, Float64, Float64MultiArray, Int32, Strin
 
 BRIDGE_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
 BRIDGE_TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
+BRIDGE_TIMING_FAULT_DETAIL_TOPIC = \
+    "/autodrive/roboracer_1/bridge_timing_fault_detail"
 EVENT_FIELDS = (
     "event_index", "arrival_monotonic_ns", "topic", "message_type",
     "header_stamp_ns", "simulation_time_s", "payload_json",
@@ -44,6 +46,7 @@ EVENT_FILE_NAMES = {
     "bridge_requests.csv": (BRIDGE_TIMING_TOPIC,),
     "simulator_packets.csv": (BRIDGE_TIMING_TOPIC,),
     "bridge_timing_fault.csv": (BRIDGE_TIMING_FAULT_TOPIC,),
+    "bridge_timing_fault_detail.csv": (BRIDGE_TIMING_FAULT_DETAIL_TOPIC,),
     "imu.csv": ("/autodrive/roboracer_1/imu",),
     "encoders.csv": (
         "/autodrive/roboracer_1/left_encoder",
@@ -99,6 +102,11 @@ def _timing_report(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         for row in timing
         if row.get("request_sequence") is not None
     ]
+    telemetry_sequences = [
+        int(row["telemetry_sequence"])
+        for row in timing
+        if row.get("telemetry_sequence") is not None
+    ]
     applied_lag = [
         int(row["request_sequence"]) - int(row["applied_command_sequence"])
         for row in timing
@@ -130,6 +138,14 @@ def _timing_report(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "first": request_sequences[0] if request_sequences else None,
             "last": request_sequences[-1] if request_sequences else None,
             "gaps": sequence_gaps,
+        },
+        "telemetry_sequence": {
+            "count": len(telemetry_sequences),
+            "first": telemetry_sequences[0] if telemetry_sequences else None,
+            "last": telemetry_sequences[-1] if telemetry_sequences else None,
+            "gaps": sum(
+                b - a != 1
+                for a, b in zip(telemetry_sequences, telemetry_sequences[1:])),
         },
         "request_to_applied_command_lag": summary(applied_lag),
         "source_duplicate_or_reverse_count": duplicate_or_reverse,
@@ -176,6 +192,10 @@ class ModelIdTimingRecorder(Node):
         self.create_subscription(
             Bool, BRIDGE_TIMING_FAULT_TOPIC,
             lambda message: self._record_ros(BRIDGE_TIMING_FAULT_TOPIC, message), depth)
+        self.create_subscription(
+            String, BRIDGE_TIMING_FAULT_DETAIL_TOPIC,
+            lambda message: self._record_ros(
+                BRIDGE_TIMING_FAULT_DETAIL_TOPIC, message), depth)
         self.create_subscription(
             Imu, "/autodrive/roboracer_1/imu",
             lambda message: self._record_ros("/autodrive/roboracer_1/imu", message), sensor_qos)
@@ -244,8 +264,10 @@ class ModelIdTimingRecorder(Node):
                 "subscription and no runtime controller consumer"
             ),
             "source_time_policy": (
-                "ROS header stamps are recorded as supplied; bridge simulation_time_s "
-                "is recorded separately and is not substituted into ROS headers."
+                "ROS sensor headers are source-epoch mapped by the bridge: the first "
+                "validated simulator time anchors one ROS epoch and later headers "
+                "advance by simulator source-time deltas; host arrival remains a "
+                "watchdog timestamp. bridge simulation_time_s is retained separately."
             ),
         }
         (self.run_dir / "manifest.json").write_text(
@@ -332,6 +354,8 @@ class ModelIdTimingRecorder(Node):
             payload = {"value": int(message.data)}
         elif isinstance(message, Bool):
             payload = {"value": bool(message.data)}
+        elif isinstance(message, String):
+            payload = {"value": str(message.data)}
         else:
             payload = {"repr": repr(message)}
         self._record(topic, type(message).__name__, _header_stamp_ns(message), None, payload)

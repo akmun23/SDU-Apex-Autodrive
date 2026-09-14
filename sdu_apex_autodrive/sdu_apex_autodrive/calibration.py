@@ -124,6 +124,7 @@ FIELDS = (
     "amcl_health_scan_correction_y_m",
     "amcl_health_applied_x_m",
     "amcl_health_applied_y_m",
+    "amcl_health_source_stamp_s",
     "amcl_particle_count",
     "lidar_rate_hz", "lidar_event_count",
     "imu_rate_hz", "imu_event_count",
@@ -1220,13 +1221,22 @@ class Calibration(Node):
             "amcl_health_scan_correction_y_m",
             "amcl_health_applied_x_m",
             "amcl_health_applied_y_m",
+            "amcl_health_source_stamp_s",
         )
         self._record_event("amcl_localization_health")
         for name, value in zip(names, values[:len(names)]):
             if math.isfinite(value):
                 self._set(name, value)
-        self._capture_source_event(
-            "amcl_localization_health", self.get_clock().now().nanoseconds * 1.0e-9)
+        # New AMCL builds append the source scan stamp as field 15. Keep the
+        # arrival-time fallback for old binaries so mixed deployments remain
+        # recordable, but make the source-time contract explicit whenever it
+        # is available.
+        source_stamp_s = (
+            values[14] if len(values) > 14 and math.isfinite(values[14])
+            else self.get_clock().now().nanoseconds * 1.0e-9)
+        if len(values) > 14 and math.isfinite(values[14]):
+            self.state["amcl_health_source_stamp_s"] = values[14]
+        self._capture_source_event("amcl_localization_health", source_stamp_s)
 
     def _on_amcl_particle_count(self, msg: Int32) -> None:
         self._record_event("amcl_particle_count")

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "implemented_static_validation_live_recording_pending",
+  "scope": "dev-side AMCL diagnostics and offline recorder",
+  "simulator_physics_modified": false,
+  "particle_filter_behavior_modified": false,
+  "health_array_compatibility": {
+    "legacy_fields_preserved": 14,
+    "new_field_index_one_based": 15,
+    "new_field": "source_scan_stamp_s",
+    "old_binary_fallback": "host arrival timestamp"
+  },
+  "runtime_join": {
+    "offline_join_tolerance_ns": 1000000,
+    "correction_age_is_joined_when_field_15_is_finite": true,
+    "old_e4_recording_has_field_15": false
+  },
+  "validation": {
+    "ros_humble_cuda_amcl_build": "passed",
+    "localization_cpp_ctest": "3 passed",
+    "python_test_suite": "119 passed",
+    "python_compileall": "passed",
+    "live_source_stamped_recording": "pending"
+  },
+  "promotion": {
+    "estimator_tuning": false,
+    "mpc_tuning": false,
+    "production_model": false
+  }
+}

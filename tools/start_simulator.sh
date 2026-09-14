@@ -26,7 +26,7 @@ if [[ ! -x "${player}" ]]; then
   if [[ "${AUTODRIVE_MODEL_ID_MODE:-0}" == "1" ]]; then
     echo "    -executeMethod BuildLinuxPlayer.BuildModelIdentification \\" >&2
   else
-    echo "    -executeMethod BuildLinuxPlayer.BuildCompete \\" >&2
+    echo "    -executeMethod BuildLinuxPlayer.BuildCompeteCurrentScene \\" >&2
   fi
   echo "    -logFile /tmp/autodrive-compete-build.log" >&2
   exit 1

@@ -10,6 +10,11 @@ request sequence, making request/response association explicit. A missing
 response is a transport fault: the bridge raises a fault and stops the stream
 instead of repeating, interpolating, or misassociating data.
 
+Packet callbacks are serialized before source-sequence validation. The
+Socket.IO server may dispatch callbacks concurrently; without this gate a
+slow LiDAR decode/publication callback can let the next callback update shared
+sequence state first and create a false packet-gap fault.
+
 No ROS sensor sample is fabricated, interpolated, or repeated. The bridge also
 publishes a diagnostic packet-arrival event containing monotonic bridge-side
 timestamps. That diagnostic stream is not a sensor input and is used only by
@@ -43,6 +48,7 @@ EXPECTED_RATE_HZ = 40.0
 DEFAULT_RATE_HZ = EXPECTED_RATE_HZ
 PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
+TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 
 # The source cadence is 40 Hz (25 ms). This is the hard data contract: source
 # time, physics step, and telemetry sequence must advance inside this 15--35
@@ -50,11 +56,16 @@ TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 # source identity: in batchmode Unity may execute multiple FixedUpdate steps
 # without advancing its render-frame counter. Bridge arrival is measured
 # separately because host scheduling and socket buffering can deliver two
-# distinct, source-valid packets less than 15 ms apart. A 75 ms transport
-# deadline still fails a stalled/10 Hz response; no sample is held,
+# distinct, source-valid packets less than 15 ms apart. There is deliberately
+# no positive minimum on host arrival spacing: a scheduler/socket burst is
+# not a source-rate violation. A 75 ms transport deadline still fails a
+# stalled/10 Hz response; no sample is held,
 # interpolated, or fabricated.
 MIN_SOURCE_INTERVAL_S = 0.015
-MIN_BRIDGE_ARRIVAL_INTERVAL_S = 0.005
+# Keep an explicit lower bound for the startup check and diagnostics, but set
+# it to zero because host arrival may bunch valid source packets. Source
+# cadence remains guarded independently by MIN_SOURCE_INTERVAL_S.
+MIN_BRIDGE_ARRIVAL_INTERVAL_S = 0.0
 MAX_SOURCE_INTERVAL_S = 0.035
 MAX_BRIDGE_ARRIVAL_INTERVAL_S = 0.075
 MAX_RESPONSE_WAIT_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
@@ -128,7 +139,10 @@ _last_source_frame: int | None = None
 _last_source_telemetry_sequence: int | None = None
 _source_startup_stable_intervals = 0
 _source_startup_started_ns: int | None = None
+_source_time_origin_s: float | None = None
+_source_ros_origin_ns: int | None = None
 _active_request_stamp: Any = None
+_active_source_stamp: Any = None
 _active_request_monotonic_ns: int | None = None
 _active_request_sequence: int | None = None
 _active_command: dict[str, str] = {}
@@ -145,8 +159,10 @@ _active_simulator_packet: dict[str, float | None] = {}
 _active_request_slot_pool: Semaphore | None = None
 
 _packet_timing_lock = Semaphore()
+_packet_handler_lock = Semaphore(1)
 _packet_timing_publisher: Any = None
 _timing_fault_publisher: Any = None
+_timing_fault_detail_publisher: Any = None
 _packet_sequence = 0
 _packet_contract_installed = False
 _handler_timing_enabled = False
@@ -236,7 +252,8 @@ def _reset_request_pipeline() -> None:
     global _last_source_time_s, _last_source_physics_step
     global _last_source_frame, _last_source_telemetry_sequence
     global _source_startup_stable_intervals, _source_startup_started_ns
-    global _active_request_stamp, _active_request_monotonic_ns
+    global _source_time_origin_s, _source_ros_origin_ns
+    global _active_request_stamp, _active_source_stamp, _active_request_monotonic_ns
     global _active_request_sequence, _active_command
     global _active_applied_command_sequence
     global _active_commanded_throttle_norm, _active_commanded_steering_norm
@@ -261,7 +278,10 @@ def _reset_request_pipeline() -> None:
         _last_source_telemetry_sequence = None
         _source_startup_stable_intervals = 0
         _source_startup_started_ns = None
+        _source_time_origin_s = None
+        _source_ros_origin_ns = None
         _active_request_stamp = None
+        _active_source_stamp = None
         _active_request_monotonic_ns = None
         _active_request_sequence = None
         _active_command = {}
@@ -319,6 +339,7 @@ def _finish_packet() -> None:
 def _packet_timing_pub() -> Any:
     """Create the bridge-side timing publisher after the official node exists."""
     global _packet_timing_publisher, _timing_fault_publisher
+    global _timing_fault_detail_publisher
     node = getattr(official_bridge, "autodrive_bridge", None)
     if node is None:
         return None
@@ -333,12 +354,16 @@ def _packet_timing_pub() -> Any:
         if _timing_fault_publisher is None:
             _timing_fault_publisher = node.create_publisher(
                 Bool, TIMING_FAULT_TOPIC, 10)
+        if _timing_fault_detail_publisher is None:
+            _timing_fault_detail_publisher = node.create_publisher(
+                String, TIMING_FAULT_DETAIL_TOPIC, 10)
         return _packet_timing_publisher
 
 
 def _trigger_timing_fault(reason: str) -> None:
     """Fail closed when the native 40 Hz source contract is broken."""
     global _timing_fault, _timing_fault_reason
+    global _timing_fault_detail_publisher
     with _pending_request_lock:
         if _timing_fault:
             return
@@ -372,6 +397,27 @@ def _trigger_timing_fault(reason: str) -> None:
                 f"[autodrive_bridge_40hz] timing fault publication failed: {exc}",
                 flush=True,
             )
+    detail_publisher = _timing_fault_detail_publisher
+    if detail_publisher is None and node is not None:
+        try:
+            detail_publisher = node.create_publisher(
+                String, TIMING_FAULT_DETAIL_TOPIC, 10)
+            _timing_fault_detail_publisher = detail_publisher
+        except Exception as exc:
+            print(
+                f"[autodrive_bridge_40hz] timing fault detail publication failed: {exc}",
+                flush=True,
+            )
+    if detail_publisher is not None:
+        try:
+            detail = String()
+            detail.data = reason
+            detail_publisher.publish(detail)
+        except Exception as exc:
+            print(
+                f"[autodrive_bridge_40hz] timing fault detail publication failed: {exc}",
+                flush=True,
+            )
 
 
 def _on_reset_command(message: Bool) -> None:
@@ -401,10 +447,10 @@ def _capture_simulation_metadata(data: Any) -> bool:
     """Capture optional Unity physics metadata before official decoding.
 
     The patched simulator sends these values in the same packet as the
-    sensors. They are diagnostics only; ROS header stamps remain host-side
-    packet-boundary stamps until a source-time ROS clock contract exists.
+    sensors. They are captured before official decoding; the validated source
+    time is mapped to a ROS epoch immediately before publication.
     """
-    global _active_request_stamp, _active_request_monotonic_ns
+    global _active_request_stamp, _active_source_stamp, _active_request_monotonic_ns
     global _active_request_sequence, _active_command
     global _active_applied_command_sequence
     global _active_commanded_throttle_norm, _active_commanded_steering_norm
@@ -414,25 +460,21 @@ def _capture_simulation_metadata(data: Any) -> bool:
     global _active_simulator_packet
     global _active_request_slot_pool
     global _pending_request_started_ns
+    global _last_source_time_s, _last_source_physics_step
+    global _last_source_frame, _last_source_telemetry_sequence
     request_stamp = None
     request_ns = None
     slot_pool = None
     request_sequence = None
     command: dict[str, str] = {}
-    with _pending_request_lock:
-        if _pending_requests:
-            (request_stamp, request_ns, slot_pool, _, request_sequence,
-             command) = _pending_requests.popleft()
-        _pending_request_started_ns = (
-            _pending_requests[0][1] if _pending_requests else None)
-        _active_request_slot_pool = slot_pool
     if not isinstance(data, dict):
-        return request_sequence is not None
+        return False
     time_value = data.get("Simulation Time")
     frame_value = data.get("Simulation Frame")
     physics_step_value = data.get(
         "V1 Physics Step", data.get("Physics Step"))
     telemetry_sequence_value = data.get("Telemetry Sequence")
+    response_request_sequence_value = data.get("V1 Bridge Request Sequence")
     applied_sequence_value = data.get("V1 Applied Command Sequence")
     commanded_throttle_value = data.get("V1 Commanded Throttle")
     commanded_steering_value = data.get("V1 Commanded Steering")
@@ -457,6 +499,12 @@ def _capture_simulation_metadata(data: Any) -> bool:
             else int(telemetry_sequence_value))
     except (TypeError, ValueError):
         telemetry_sequence = None
+    try:
+        response_request_sequence = (
+            None if response_request_sequence_value in (None, "")
+            else int(response_request_sequence_value))
+    except (TypeError, ValueError):
+        response_request_sequence = None
     try:
         applied_command_sequence = (
             None if applied_sequence_value in (None, "")
@@ -496,8 +544,65 @@ def _capture_simulation_metadata(data: Any) -> bool:
         "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
         "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
     })
+
+    # Unity's GUI path can emit an unsolicited telemetry packet from its
+    # connect callback. It is not a sensor sample associated with a Bridge
+    # request, but its source metadata is still useful as the continuity
+    # predecessor for the next requested packet. Do not consume a pending
+    # request slot for it and do not publish it to ROS.
+    if response_request_sequence is None:
+        if (simulation_time_s is not None and simulation_physics_step is not None and
+                simulation_frame is not None and telemetry_sequence is not None):
+            with _pending_request_lock:
+                previous_sequence = _last_source_telemetry_sequence
+                if (previous_sequence is None or
+                        telemetry_sequence > previous_sequence):
+                    _last_source_time_s = simulation_time_s
+                    _last_source_physics_step = simulation_physics_step
+                    _last_source_frame = simulation_frame
+                    _last_source_telemetry_sequence = telemetry_sequence
+        return False
+
+    # Requested responses must match the oldest outstanding Bridge request.
+    # This makes response identity explicit and prevents a reconnect/bootstrap
+    # packet from being associated with a real command merely because a FIFO
+    # slot happens to be waiting.
+    with _pending_request_lock:
+        expected_request_sequence = (
+            _pending_requests[0][4] if _pending_requests else None)
+    if expected_request_sequence is None:
+        _trigger_timing_fault(
+            "simulator response has no outstanding Bridge request: "
+            f"request_sequence={response_request_sequence}")
+        return False
+    if response_request_sequence != expected_request_sequence:
+        _trigger_timing_fault(
+            "simulator response Bridge request sequence out of order: "
+            f"expected={expected_request_sequence} "
+            f"current={response_request_sequence}")
+        return False
+    association_lost = False
+    with _pending_request_lock:
+        # The pending FIFO cannot be changed by another packet callback while
+        # the packet handler lock is held, but re-check the identity before
+        # consuming it so this remains safe if the transport is changed later.
+        if (not _pending_requests or
+                _pending_requests[0][4] != response_request_sequence):
+            association_lost = True
+        else:
+            (request_stamp, request_ns, slot_pool, _, request_sequence,
+             command) = _pending_requests.popleft()
+            _pending_request_started_ns = (
+                _pending_requests[0][1] if _pending_requests else None)
+            _active_request_slot_pool = slot_pool
+    if association_lost:
+        _trigger_timing_fault(
+            "simulator response Bridge request disappeared before "
+            f"association: request_sequence={response_request_sequence}")
+        return False
     with _pending_request_lock:
         _active_request_stamp = request_stamp
+        _active_source_stamp = None
         _active_request_monotonic_ns = request_ns
         _active_request_sequence = request_sequence
         _active_command = command
@@ -512,6 +617,36 @@ def _capture_simulation_metadata(data: Any) -> bool:
         _active_telemetry_sequence = telemetry_sequence
         _active_simulator_packet = simulator_packet
     return request_sequence is not None
+
+
+def _set_source_ros_stamp() -> None:
+    """Map relative Unity source time onto one ROS time epoch per connection.
+
+    Unity's ``Simulation Time`` starts at zero for a player session, so it
+    cannot be copied directly into a ROS header consumed by map/TF nodes. The
+    first validated source packet anchors the relative source epoch to its
+    request-boundary ROS stamp; later headers advance only by simulator
+    source-time deltas. Host arrival remains a separate watchdog clock.
+    """
+    global _source_time_origin_s, _source_ros_origin_ns, _active_source_stamp
+    with _pending_request_lock:
+        source_time_s = _active_simulation_time_s
+        request_stamp = _active_request_stamp
+        if source_time_s is None or request_stamp is None:
+            _active_source_stamp = None
+            return
+        request_ns = (
+            int(request_stamp.sec) * 1_000_000_000 +
+            int(request_stamp.nanosec))
+        if _source_time_origin_s is None or _source_ros_origin_ns is None:
+            _source_time_origin_s = source_time_s
+            _source_ros_origin_ns = request_ns
+        source_ns = _source_ros_origin_ns + int(round(
+            (source_time_s - _source_time_origin_s) * 1.0e9))
+        stamp = copy(request_stamp)
+        stamp.sec = int(source_ns // 1_000_000_000)
+        stamp.nanosec = int(source_ns % 1_000_000_000)
+        _active_source_stamp = stamp
 
 
 def _parse_required_float(data: dict[str, Any], key: str) -> float | None:
@@ -625,6 +760,12 @@ def _validate_source_packet(data: Any) -> bool:
             telemetry_sequence <= previous_telemetry_sequence):
         _trigger_timing_fault("simulator telemetry sequence reversed or duplicated")
         return False
+    if (previous_telemetry_sequence is not None and
+            telemetry_sequence != previous_telemetry_sequence + 1):
+        _trigger_timing_fault(
+            "simulator telemetry sequence gap: "
+            f"previous={previous_telemetry_sequence} current={telemetry_sequence}")
+        return False
 
     if arrival_dt is not None:
         if not MIN_BRIDGE_ARRIVAL_INTERVAL_S <= arrival_dt <= MAX_BRIDGE_ARRIVAL_INTERVAL_S:
@@ -638,7 +779,13 @@ def _validate_source_packet(data: Any) -> bool:
             _trigger_timing_fault(
                 f"simulator source cadence {source_dt:.6f}s is outside the "
                 f"40 Hz window [{MIN_SOURCE_INTERVAL_S:.3f}, "
-                f"{MAX_SOURCE_INTERVAL_S:.3f}]s")
+                f"{MAX_SOURCE_INTERVAL_S:.3f}]s; "
+                f"previous_source_time={previous_source_time:.9f} "
+                f"current_source_time={source_time:.9f} "
+                f"previous_physics_step={previous_source_step} "
+                f"current_physics_step={source_step} "
+                f"previous_telemetry_sequence={previous_telemetry_sequence} "
+                f"current_telemetry_sequence={telemetry_sequence}")
             return False
     _first_valid_source_packet = True
     _valid_source_packet_count += 1
@@ -707,14 +854,12 @@ def _record_packet_arrival() -> None:
 
 
 def _install_packet_timestamp_patch() -> None:
-    """Give every ROS message from one packet one request-boundary stamp.
+    """Give every ROS message from one packet one source-epoch stamp.
 
-    AutoDRIVE ROS messages use host-side clock stamps. The FIFO request context
-    identifies the request boundary for each response even when two requests
-    overlap. That boundary is preferable to independently stamping every
-    helper during callback processing. The patched simulator's physics
-    time/frame are carried in the diagnostic packet and are not substituted
-    into ROS headers.
+    The source-epoch stamp is anchored to the first request-boundary ROS stamp
+    for the connection and then advanced by simulator source time. The FIFO
+    request context remains the fallback for legacy/bootstrap packets and
+    keeps response association explicit when requests overlap.
     """
     global _packet_timestamp_patch_installed
     if _packet_timestamp_patch_installed:
@@ -729,7 +874,8 @@ def _install_packet_timestamp_patch() -> None:
             with _packet_stamp_lock:
                 if _packet_stamp is None:
                     with _pending_request_lock:
-                        pending = _active_request_stamp
+                        pending = (_active_source_stamp if _active_source_stamp is not None
+                                   else _active_request_stamp)
                     _packet_stamp = _copy_stamp(
                         pending if pending is not None else message.header.stamp)
                 message.header.stamp = _copy_stamp(_packet_stamp)
@@ -879,6 +1025,14 @@ def _install_packet_contract(publish_camera: bool) -> None:
         raise RuntimeError("official AutoDRIVE bridge has no Bridge handler")
 
     def packet_handler(sid: Any, data: Any) -> Any:
+        # Socket.IO may schedule event callbacks concurrently. Keep the
+        # source packet contract and official decoder in arrival order so the
+        # shared timing state cannot observe packet N+1 before packet N has
+        # finished decoding/publication.
+        with _packet_handler_lock:
+            return _packet_handler_body(sid, data)
+
+    def _packet_handler_body(sid: Any, data: Any) -> Any:
         global _handler_timing_count, _handler_timing_total_ns
         handler_start_ns = time.monotonic_ns()
         has_request = _capture_simulation_metadata(data)
@@ -895,6 +1049,7 @@ def _install_packet_contract(publish_camera: bool) -> None:
                 return None
             if not _validate_source_packet(data):
                 return None
+            _set_source_ros_stamp()
             if not publish_camera and isinstance(data, dict):
                 # The official bridge accesses this key unconditionally.
                 # Injecting an empty placeholder keeps its numeric decoder

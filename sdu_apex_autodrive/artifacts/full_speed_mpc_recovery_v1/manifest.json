@@ -28,7 +28,9 @@
     "physical_wheel_radius_m": 0.059,
     "controller_wheel_radius_m": 0.0325,
     "drive_type": "CAWD",
-    "yaw_inertia_kgm2": 0.0276985662
+    "yaw_inertia_kgm2": 0.0961907506,
+    "yaw_inertia_axis": "unity_body_y",
+    "legacy_local_z_inertia_kgm2": 0.0276985662
   },
   "drive_model": {
     "identification": "drive_model/continuous_drive_identification_v2_20260914.json",
@@ -53,10 +55,22 @@
     "ground_truth_collision_source": "../calibration/ground_truth_amcl.csv"
   },
   "latest_follow_on": {
+    "e0_inertia_axes": {
+      "status": "inertia_axis_gate_passed_cg_height_gate_pending",
+      "diagnostic_run": "../model_id_work/diagnostics_20260914_v2/inertia_axes_e0_20260914.json",
+      "body_inertia_x_kgm2": 0.09352724,
+      "body_inertia_y_kgm2": 0.09619075,
+      "body_inertia_z_kgm2": 0.02769764,
+      "yaw_axis": "body_y",
+      "native_mpc_update": "not_done_by_design",
+      "static_report": "../model_id_work/diagnostics_20260914_v2/inertia_axes_e0_20260914.json"
+    },
     "e1_localization_score": "not_accepted",
     "e1_score": "runtime_track/e1_pp_full_speed_yaw_20260914_1220",
     "e3_combined_slip": "../model_id_work/diagnostics_20260914_v2/combined_slip_matrix_v1_20260914",
     "e3_status": "coverage_captured_force_law_not_accepted",
+    "e3_corrected_inversion": "../model_id_work/diagnostics_20260914_v2/body_force_moment_inversion_axis_y_e0_20260914.json",
+    "e3_corrected_inversion_status": "offline_only_not_accepted",
     "e4_load_transfer": "../model_id_work/diagnostics_20260914_v2/combined_slip_matrix_v1_20260914/causal_load_transfer_fit.json",
     "e4_status": "offline_candidate_not_accepted",
     "e5_status": "existing_drive_fit_not_accepted",
@@ -74,5 +88,5 @@
       "reason": "one collision followed by a 41 ms source-cadence fault; no localization score promoted"
     }
   },
-  "next_campaigns": ["E4_load_transfer", "E5_continuous_drive", "speed_slip_scheduling", "regime_blind_validation"]
+  "next_campaigns": ["E1_near_zero_actuator", "E2_repeated_drive", "E3_corrected_force_moment", "E4_localization_decomposition", "E5_source_time_contract"]
 }

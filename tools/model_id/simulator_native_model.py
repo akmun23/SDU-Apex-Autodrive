@@ -284,14 +284,17 @@ def f1tenth_prefab_parameters(
     )
 
 
-def body_frame_yaw_inertia(
+def body_axis_inertia(
         principal_moments: dict[str, float],
-        principal_rotation: dict[str, float]) -> float:
-    """Project Unity's principal inertia tensor onto the body z axis.
+        principal_rotation: dict[str, float],
+        axis: str | tuple[float, float, float]) -> float:
+    """Project Unity's principal inertia tensor onto an explicit body axis.
 
-    Unity reports principal moments plus a quaternion rotating the principal
-    frame into the Rigidbody frame.  The scalar ``yawInertiaBodyFrame`` in a
-    diagnostic file is treated as a cross-check, never as the source value.
+    ``inertiaTensorRotation`` rotates the principal-inertia frame into the
+    Rigidbody body frame.  Unity's vehicle forward axis is body ``z`` and its
+    vertical/yaw axis is body ``y``; therefore callers must select the axis
+    explicitly instead of relying on a function named "yaw" with a hidden
+    projection convention.
     """
     x, y, z, w = (float(principal_rotation[key])
                   for key in ("x", "y", "z", "w"))
@@ -299,13 +302,48 @@ def body_frame_yaw_inertia(
     if norm <= 1.0e-12:
         raise ValueError("inertia tensor rotation has zero norm")
     x, y, z, w = x / norm, y / norm, z / norm, w / norm
-    # z components of the three principal axes after quaternion rotation.
-    axis0_z = 2.0 * (x * z + w * y)
-    axis1_z = 2.0 * (y * z - w * x)
-    axis2_z = 1.0 - 2.0 * (x * x + y * y)
-    return (float(principal_moments["x"]) * axis0_z * axis0_z +
-            float(principal_moments["y"]) * axis1_z * axis1_z +
-            float(principal_moments["z"]) * axis2_z * axis2_z)
+    if isinstance(axis, str):
+        if axis not in ("x", "y", "z"):
+            raise ValueError("body inertia axis must be x, y, or z")
+        selected_axis = {
+            "x": np.asarray((1.0, 0.0, 0.0), dtype=float),
+            "y": np.asarray((0.0, 1.0, 0.0), dtype=float),
+            "z": np.asarray((0.0, 0.0, 1.0), dtype=float),
+        }[axis]
+    else:
+        selected_axis = np.asarray(axis, dtype=float)
+        if selected_axis.shape != (3,):
+            raise ValueError("body inertia axis vector must have three entries")
+        axis_norm = float(np.linalg.norm(selected_axis))
+        if axis_norm <= 1.0e-12:
+            raise ValueError("body inertia axis vector has zero norm")
+        selected_axis = selected_axis / axis_norm
+
+    # Columns are the principal axes expressed in the Rigidbody frame.
+    rotation_matrix = np.asarray([
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
+         2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
+         2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
+         1.0 - 2.0 * (x * x + y * y)],
+    ])
+    tensor = rotation_matrix @ np.diag([
+        float(principal_moments["x"]),
+        float(principal_moments["y"]),
+        float(principal_moments["z"]),
+    ]) @ rotation_matrix.T
+    return float(selected_axis @ tensor @ selected_axis)
+
+
+def body_frame_inertias(
+        principal_moments: dict[str, float],
+        principal_rotation: dict[str, float]) -> dict[str, float]:
+    """Return all principal-tensor projections in the Rigidbody frame."""
+    return {
+        axis: body_axis_inertia(principal_moments, principal_rotation, axis)
+        for axis in ("x", "y", "z")
+    }
 
 
 def ackermann_angles(command_angle: float, wheelbase_m: float,
@@ -690,6 +728,11 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
     payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     vehicle = payload["vehicle"]
     rigid_body = vehicle["rigidBody"]
+    yaw_axis = rigid_body.get("yawAxis")
+    if yaw_axis != "body_y":
+        raise ValueError(
+            "diagnostic dump must explicitly declare Unity body Y as yawAxis; "
+            "the legacy local-Z yaw field is not accepted")
     wheels = vehicle["wheels"]
     if len(wheels) != 4:
         raise ValueError("diagnostic dump must contain four wheels")
@@ -753,8 +796,21 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
                "targetPosition" in wheel["suspensionSpring"]
                for wheel in wheels)
         else None)
-    derived_yaw_inertia = body_frame_yaw_inertia(
+    body_inertias = body_frame_inertias(
         rigid_body["inertiaTensor"], rigid_body["inertiaTensorRotation"])
+    for axis in ("x", "y", "z"):
+        field = f"bodyInertia{axis.upper()}"
+        if field not in rigid_body:
+            raise ValueError(
+                f"diagnostic dump is missing corrected {field} field")
+        reported = float(rigid_body[field])
+        if not math.isfinite(reported) or not math.isclose(
+                body_inertias[axis], reported, rel_tol=1.0e-4,
+                abs_tol=2.0e-6):
+            raise ValueError(
+                f"diagnostic {field} disagrees with inertia tensor projection: "
+                f"derived={body_inertias[axis]} reported={reported}")
+    derived_yaw_inertia = body_inertias["y"]
     reported_yaw_inertia = rigid_body.get("yawInertiaBodyFrame")
     if reported_yaw_inertia is not None:
         reported = float(reported_yaw_inertia)
@@ -762,7 +818,7 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
                 derived_yaw_inertia, reported, rel_tol=1.0e-4,
                 abs_tol=2.0e-6):
             raise ValueError(
-                "diagnostic yawInertiaBodyFrame disagrees with inertia tensor "
+                "diagnostic yawInertiaBodyFrame disagrees with body-Y inertia "
                 f"projection: derived={derived_yaw_inertia} reported={reported}")
     com_x_from_rear_axle = -sum(position[0] for position in rear) / 2.0
     return NativeModelParameters(

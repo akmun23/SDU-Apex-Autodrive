@@ -2519,6 +2519,11 @@ void AmclNode::publish_current_map_pose(
             last_scan_correction_y_m_,
             last_scan_applied_x_m_,
             last_scan_applied_y_m_,
+            // Backward-compatible source-time extension.  The first fourteen
+            // fields retain their existing meaning; this fifteenth field lets
+            // offline/runtime diagnostics causally join correction age to the
+            // scan/pose source packet instead of the host callback arrival.
+            stamp.seconds(),
         };
         localization_health_pub_->publish(health);
     }

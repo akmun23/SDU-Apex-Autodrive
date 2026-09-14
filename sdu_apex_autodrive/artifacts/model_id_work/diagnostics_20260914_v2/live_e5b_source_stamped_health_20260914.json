@@ -1,0 +1,168 @@
+{
+  "amcl_correction_accepted_fraction": 0.9394977168949772,
+  "amcl_degraded_fraction": 0.0502283105022831,
+  "amcl_source_stamped_correction_age_s": {
+    "count": 832,
+    "max": 0.075754152,
+    "p50": 0.024955057000000003,
+    "p95": 0.025718002
+  },
+  "bridge_timing_fault_observed_during_recording": false,
+  "collision_count_max": 0.0,
+  "ground_truth_monitor_error_m": {
+    "amcl_error_m": {
+      "count": 3398,
+      "max": 0.541046,
+      "p50": 0.083197,
+      "p95": 0.242286
+    },
+    "current_map_error_m": {
+      "count": 3397,
+      "max": 0.435382,
+      "p50": 0.047807,
+      "p95": 0.180567
+    },
+    "ekf_error_m": {
+      "count": 3398,
+      "max": 0.742876,
+      "p50": 0.252966,
+      "p95": 0.674751
+    },
+    "odom_error_m": {
+      "count": 3398,
+      "max": 0.715597,
+      "p50": 0.248215,
+      "p95": 0.674751
+    }
+  },
+  "ground_truth_rows": 3398,
+  "note": "The later Socket.IO disconnect was caused by the intentional batchmode timeout after the 30 s recorder window; it was not a source-cadence fault.",
+  "run_dir": "sdu_apex_autodrive/artifacts/full_speed_mpc_recovery_v1/runtime_track/e5_source_stamped_health_20260914_1600",
+  "schema": "sdu_apex_live_e5b_source_stamped_health_v1",
+  "sensor_file": "sensor_record_20260914_134810.csv",
+  "sensor_file_bytes": 73049905,
+  "sensor_rows": 24334,
+  "source_streams": {
+    "amcl": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955034255981445,
+      "dt_p95_ms": 25.693416595458984,
+      "duration_s": 21.97503423690796,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 39.99993768035564,
+      "unique": 880
+    },
+    "current_map_pose": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.954795837402344,
+      "dt_p95_ms": 25.693416595458984,
+      "duration_s": 21.874862670898438,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00025111764792,
+      "unique": 876
+    },
+    "ekf": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "ekf_odom": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "gt_odom": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "imu": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "left_encoder": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "lidar": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "odom": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    },
+    "odom_diagnostics": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.001121520996094,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468421936035,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.000944001081855,
+      "unique": 902
+    },
+    "right_encoder": {
+      "dt_max_ms": 25.961875915527344,
+      "dt_min_ms": 24.000883102416992,
+      "dt_p50_ms": 24.955272674560547,
+      "dt_p95_ms": 25.693893432617188,
+      "duration_s": 22.524468183517456,
+      "gt35ms": 0,
+      "lt15ms": 0,
+      "rate_hz": 40.00094442448667,
+      "unique": 902
+    }
+  }
+}

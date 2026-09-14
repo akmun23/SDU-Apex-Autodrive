@@ -40,11 +40,24 @@ rigid_body:
     value: 3.47
     source: unity_dump
   yaw_inertia_kgm2:
-    value: 0.0276985662
-    source: unity_dump_projected_body_yaw
-  center_of_mass_height_m:
-    value: 0.01434
-    source: unity_dump
+    value: null
+    source: pending_corrected_diagnostic_dump_body_y
+    status: unresolved_legacy_dump_not_accepted
+    legacy_local_z_projection_kgm2: 0.0276985662
+    yaw_axis: unity_body_y
+  rigidbody_center_of_mass_local_y_m:
+    value: 0.06434
+    source: legacy_derived_coordinate_not_ground_height
+    status: not_a_load_transfer_height
+  load_transfer:
+    physical_cg_height_above_contact_m:
+      value: null
+      source: pending_geometry_reference_measurement
+      status: unresolved
+    effective_load_transfer_height_m:
+      value: 0.0703
+      source: offline_load_transfer_hypothesis
+      status: offline_only_not_mpc_ready
   drag:
     value: 0.273
     source: unity_dump

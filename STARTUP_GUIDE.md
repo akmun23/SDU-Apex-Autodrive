@@ -31,7 +31,8 @@ The verified player is:
 ```
 
 It was built from `Assets/Scenes/RoboRacer - Sim Racing.unity` with the local
-camera-disabled/timing and parallel/reusable-LiDAR source changes. The Linux
+camera-disabled/timing, parallel/reusable-LiDAR, and per-scan LiDAR transport
+cache source changes. The Linux
 Unity editor cannot import the source SketchUp track prefab, so the build uses
 the exact official `SRL 2026 ICRA Track.obj` geometry recovered from the local
 `2026-icra-compete` player, combined into both official mesh submeshes and
@@ -48,9 +49,12 @@ If the player is ever missing, rebuild it with:
 /home/akselmo/Unity/Hub/Editor/2022.3.52f1/Editor/Unity \
   -batchmode -quit \
   -projectPath /home/akselmo/Documents/GitHub/AutoDRIVE \
-  -executeMethod BuildLinuxPlayer.BuildCompete \
+  -executeMethod BuildLinuxPlayer.BuildCompeteCurrentScene \
   -logFile /tmp/autodrive-compete-build.log
 ```
+
+`BuildCompeteCurrentScene` builds a temporary copy of the checked-out scene and
+does not run the older track-recovery helper that edits the source scene.
 
 ## Terminal 1 — simulator
 

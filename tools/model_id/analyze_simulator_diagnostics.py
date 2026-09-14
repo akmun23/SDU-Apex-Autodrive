@@ -19,7 +19,7 @@ GUIDE = {
     "wheel_radius_m": 0.059,
     "controller_wheel_radius_m": 0.0325,
     "com_x_from_rear_axle_m": 0.15532,
-    "com_z_m": 0.01434,
+    "rigidbody_com_local_y_m": 0.06434,
     "longitudinal_extremum_slip": 0.15,
     "longitudinal_extremum_value": 0.72,
     "longitudinal_asymptote_slip": 0.25,
@@ -35,19 +35,29 @@ def _close(actual: float, expected: float, tolerance: float = 1.0e-4) -> bool:
     return abs(actual - expected) <= tolerance * max(1.0, abs(expected))
 
 
-def _body_yaw_inertia(moments: dict[str, float], rotation: dict[str, float]) -> float:
+def _body_axis_inertia(moments: dict[str, float], rotation: dict[str, float],
+                       axis: str) -> float:
+    if axis not in ("x", "y", "z"):
+        raise ValueError("body inertia axis must be x, y, or z")
     x, y, z, w = (float(rotation[key]) for key in ("x", "y", "z", "w"))
     norm = math.sqrt(x * x + y * y + z * z + w * w)
     if norm <= 1.0e-12:
         raise ValueError("inertia tensor rotation has zero norm")
     x, y, z, w = x / norm, y / norm, z / norm, w / norm
-    # Body-frame z components of R*ex, R*ey, and R*ez.
-    rz0 = 2.0 * (x * z + w * y)
-    rz1 = 2.0 * (y * z - w * x)
-    rz2 = 1.0 - 2.0 * (x * x + y * y)
-    return (float(moments["x"]) * rz0 * rz0 +
-            float(moments["y"]) * rz1 * rz1 +
-            float(moments["z"]) * rz2 * rz2)
+    rotation_matrix = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
+         2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
+         2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
+         1.0 - 2.0 * (x * x + y * y)],
+    ]
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    # The diagonal element is the sum of each principal moment times the
+    # squared component of that principal axis along the selected body axis.
+    return sum(
+        float(moments[principal]) * rotation_matrix[axis_index][index] ** 2
+        for index, principal in enumerate(("x", "y", "z")))
 
 
 def _check(name: str, actual: float, expected: float, tolerance: float = 1.0e-4) -> dict[str, Any]:
@@ -107,8 +117,25 @@ def analyze(path: Path) -> dict[str, Any]:
     front_axle_load = sprung_mass * 9.81 * com_x_from_rear / derived_wheelbase
     rear_axle_load = sprung_mass * 9.81 * (
         derived_wheelbase - com_x_from_rear) / derived_wheelbase
-    derived_iz = _body_yaw_inertia(
-        rigid_body["inertiaTensor"], rigid_body["inertiaTensorRotation"])
+    body_inertias = {
+        axis: _body_axis_inertia(
+            rigid_body["inertiaTensor"],
+            rigid_body["inertiaTensorRotation"], axis)
+        for axis in ("x", "y", "z")
+    }
+    if rigid_body.get("yawAxis") != "body_y":
+        raise ValueError(
+            "diagnostic dump must explicitly declare Unity body Y as yawAxis")
+    for axis in ("x", "y", "z"):
+        field = f"bodyInertia{axis.upper()}"
+        if field not in rigid_body:
+            raise ValueError(f"diagnostic dump is missing corrected {field} field")
+        if not math.isclose(
+                body_inertias[axis], float(rigid_body[field]),
+                rel_tol=1.0e-4, abs_tol=2.0e-6):
+            raise ValueError(
+                f"diagnostic {field} disagrees with inertia tensor projection")
+    derived_iz = body_inertias["y"]
     wheel_diagnostic_completeness = []
     for wheel in wheels:
         spring = wheel.get("suspensionSpring")
@@ -215,6 +242,8 @@ def analyze(path: Path) -> dict[str, Any]:
                 "physical_wheel_radius_m": sum(
                     float(wheel["radius"]) for wheel in wheels) / len(wheels),
             },
+            "body_frame_inertia_kgm2": body_inertias,
+            "yaw_axis": "body_y",
             "yaw_inertia_body_frame_kgm2": derived_iz,
             "static_normal_loads_N": {
                 "front_axle": front_axle_load,

@@ -48,7 +48,7 @@ static void test_default_parameters_use_unity_structural_anchors(void)
     check_close(parameters.lr_m, 0.155320086f, 1.0e-6f,
                 "plant uses measured rear contact geometry");
     check_close(parameters.iz_kgm2, 0.0276985662f, 1.0e-7f,
-                "plant uses projected Unity yaw inertia");
+                "plant retains provisional legacy inertia until E0/MPC gate");
 }
 
 static void test_actuator_limits_and_forward_motion(void)

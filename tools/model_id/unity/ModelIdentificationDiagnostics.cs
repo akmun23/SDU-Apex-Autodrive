@@ -19,6 +19,21 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
     private const string RampSweepExperiment = "ramp_sweep_v1";
     private const string DriveExcitationExperiment = "drive_excitation_v1";
     private const string CombinedSlipMatrixExperiment = "combined_slip_matrix_v1";
+    private const string NearZeroActuatorExperiment = "near_zero_actuator_v1";
+    private const string PoweredDriveRepeatExperiment =
+        "powered_drive_repeat_v1";
+    private const string InitialSpeedEnvironmentVariable =
+        "AUTODRIVE_MODEL_ID_INITIAL_SPEED_MPS";
+    private const string CommandEnvironmentVariable =
+        "AUTODRIVE_MODEL_ID_THROTTLE_NORM";
+    private const string WarmupSecondsEnvironmentVariable =
+        "AUTODRIVE_MODEL_ID_WARMUP_SECONDS";
+    private const string WarmupThrottleEnvironmentVariable =
+        "AUTODRIVE_MODEL_ID_WARMUP_THROTTLE_NORM";
+    private const string MeasurementSecondsEnvironmentVariable =
+        "AUTODRIVE_MODEL_ID_MEASUREMENT_SECONDS";
+    private const string DurationEnvironmentVariable =
+        "AUTODRIVE_MODEL_ID_EXPERIMENT_DURATION_SECONDS";
 
     public VehicleController Controller;
     public Rigidbody VehicleRigidBody;
@@ -31,6 +46,16 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
     private bool experimentActive;
     private int fixedStep;
     private int recordStride;
+    private float experimentInitialSpeedMps;
+    private float experimentThrottleNorm;
+    private float experimentWarmupSeconds;
+    private float experimentWarmupThrottleNorm;
+    private float experimentMeasurementSeconds;
+    private float experimentDurationSeconds;
+    private float experimentElapsedSeconds;
+    private float experimentRequestedThrottleNorm;
+    private float experimentRequestedSteeringNorm;
+    private bool experimentMeasurementActive;
 
     [Serializable]
     private sealed class FrictionSnapshot
@@ -93,6 +118,10 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         public Vector3 worldCenterOfMass;
         public Vector3 inertiaTensor;
         public Quaternion inertiaTensorRotation;
+        public float bodyInertiaX;
+        public float bodyInertiaY;
+        public float bodyInertiaZ;
+        public string yawAxis;
         public float yawInertiaBodyFrame;
         public float drag;
         public float angularDrag;
@@ -141,6 +170,13 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         public float defaultMaxAngularSpeed;
         public int vSyncCount;
         public int targetFrameRate;
+        public string experiment;
+        public float experimentInitialSpeedMps;
+        public float experimentThrottleNorm;
+        public float experimentWarmupSeconds;
+        public float experimentWarmupThrottleNorm;
+        public float experimentMeasurementSeconds;
+        public float experimentDurationSeconds;
         public VehicleSnapshot vehicle;
     }
 
@@ -186,7 +222,23 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
                 string.Equals(experiment, DriveExcitationExperiment,
                               StringComparison.Ordinal) ||
                 string.Equals(experiment, CombinedSlipMatrixExperiment,
+                              StringComparison.Ordinal) ||
+                string.Equals(experiment, NearZeroActuatorExperiment,
+                              StringComparison.Ordinal) ||
+                string.Equals(experiment, PoweredDriveRepeatExperiment,
                               StringComparison.Ordinal);
+            experimentInitialSpeedMps = ReadEnvironmentFloat(
+                InitialSpeedEnvironmentVariable, 0.0f, 0.0f, 30.0f);
+            experimentThrottleNorm = ReadEnvironmentFloat(
+                CommandEnvironmentVariable, 0.0f, 0.0f, 1.0f);
+            experimentWarmupSeconds = ReadEnvironmentFloat(
+                WarmupSecondsEnvironmentVariable, 0.5f, 0.0f, 5.0f);
+            experimentWarmupThrottleNorm = ReadEnvironmentFloat(
+                WarmupThrottleEnvironmentVariable, 0.65f, 0.0f, 1.0f);
+            experimentMeasurementSeconds = ReadEnvironmentFloat(
+                MeasurementSecondsEnvironmentVariable, 1.5f, 0.1f, 10.0f);
+            experimentDurationSeconds = ReadEnvironmentFloat(
+                DurationEnvironmentVariable, 0.0f, 0.0f, 120.0f);
             active = true;
             Debug.Log("[ModelIdentificationDiagnostics] Writing offline diagnostics to " +
                       Path.GetFullPath(outputDirectory));
@@ -204,6 +256,13 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         // This command profile is opt-in and exists only for the disposable
         // offline identification player. It is never used by the competition
         // scene and does not modify any physics or vehicle parameters.
+        if (active && experimentInitialSpeedMps > 0.0f)
+        {
+            VehicleRigidBody.velocity = VehicleRigidBody.transform.forward *
+                                         experimentInitialSpeedMps;
+            VehicleRigidBody.angularVelocity = Vector3.zero;
+        }
+        experimentElapsedSeconds = 0.0f;
         if (active && experimentActive)
             ApplyExperimentCommand(0.0f);
     }
@@ -225,7 +284,21 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         if (fixedStep % recordStride == 0)
             WriteTraceRow();
         if (experimentActive)
-            ApplyExperimentCommand(Time.fixedTime + Time.fixedDeltaTime);
+        {
+            ApplyExperimentCommand(experimentElapsedSeconds);
+            bool nearZeroComplete = string.Equals(Environment.GetEnvironmentVariable(
+                    ExperimentEnvironmentVariable), NearZeroActuatorExperiment,
+                    StringComparison.Ordinal) &&
+                experimentElapsedSeconds >= experimentWarmupSeconds +
+                    experimentMeasurementSeconds;
+            bool timedExperimentComplete = experimentDurationSeconds > 0.0f &&
+                experimentElapsedSeconds >= experimentDurationSeconds;
+            if (nearZeroComplete || timedExperimentComplete)
+            {
+                Application.Quit();
+            }
+            experimentElapsedSeconds += Time.fixedDeltaTime;
+        }
     }
 
     private void ApplyExperimentCommand(float timeSeconds)
@@ -242,6 +315,25 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
                 StringComparison.Ordinal))
         {
             ApplyCombinedSlipMatrixCommand(timeSeconds);
+            return;
+        }
+        if (string.Equals(Environment.GetEnvironmentVariable(
+                ExperimentEnvironmentVariable), NearZeroActuatorExperiment,
+                StringComparison.Ordinal))
+        {
+            experimentMeasurementActive = timeSeconds >= experimentWarmupSeconds;
+            experimentRequestedThrottleNorm = experimentMeasurementActive
+                ? experimentThrottleNorm : experimentWarmupThrottleNorm;
+            experimentRequestedSteeringNorm = 0.0f;
+            Controller.AutonomousThrottle = experimentRequestedThrottleNorm;
+            Controller.AutonomousSteering = experimentRequestedSteeringNorm;
+            return;
+        }
+        if (string.Equals(Environment.GetEnvironmentVariable(
+                ExperimentEnvironmentVariable), PoweredDriveRepeatExperiment,
+                StringComparison.Ordinal))
+        {
+            ApplyPoweredDriveRepeatCommand(timeSeconds);
             return;
         }
 
@@ -395,6 +487,29 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         Controller.AutonomousSteering = steering;
     }
 
+    private void ApplyPoweredDriveRepeatCommand(float timeSeconds)
+    {
+        // Positive-drive-only excitation for the continuous wheel-state fit.
+        // Zero is deliberately absent because VehicleController interprets it
+        // as a four-wheel brake event. Repeated downsteps provide excitation of
+        // wheel relaxation without mixing that hybrid event into the fit.
+        float[] throttleSchedule = {
+            0.05f, 0.10f, 0.20f, 0.35f, 0.50f, 0.65f,
+            0.50f, 0.35f, 0.20f, 0.10f, 0.05f,
+            0.20f, 0.50f, 0.65f, 0.35f, 0.10f, 0.05f,
+        };
+        const float plateauSeconds = 3.0f;
+        int plateau = Mathf.Clamp(
+            Mathf.FloorToInt(timeSeconds / plateauSeconds),
+            0, throttleSchedule.Length - 1);
+        float throttle = throttleSchedule[plateau];
+        experimentMeasurementActive = true;
+        experimentRequestedThrottleNorm = throttle;
+        experimentRequestedSteeringNorm = 0.0f;
+        Controller.AutonomousThrottle = throttle;
+        Controller.AutonomousSteering = 0.0f;
+    }
+
     private WheelCollider[] ResolveWheels()
     {
         if (Controller != null && Controller.FrontLeftWheelCollider != null &&
@@ -447,6 +562,8 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
 
         Vector3 inertiaTensor = VehicleRigidBody.inertiaTensor;
         Quaternion inertiaRotation = VehicleRigidBody.inertiaTensorRotation;
+        Vector3 bodyInertias = ComputeBodyFrameInertiaAxes(
+            inertiaTensor, inertiaRotation);
         var snapshot = new StaticSnapshot {
             simulatorBuildTag = Environment.GetEnvironmentVariable(
                 BuildTagEnvironmentVariable) ?? "unspecified",
@@ -466,6 +583,14 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
             defaultMaxAngularSpeed = Physics.defaultMaxAngularSpeed,
             vSyncCount = QualitySettings.vSyncCount,
             targetFrameRate = Application.targetFrameRate,
+            experiment = Environment.GetEnvironmentVariable(
+                ExperimentEnvironmentVariable) ?? "none",
+            experimentInitialSpeedMps = experimentInitialSpeedMps,
+            experimentThrottleNorm = experimentThrottleNorm,
+            experimentWarmupSeconds = experimentWarmupSeconds,
+            experimentWarmupThrottleNorm = experimentWarmupThrottleNorm,
+            experimentMeasurementSeconds = experimentMeasurementSeconds,
+            experimentDurationSeconds = experimentDurationSeconds,
             vehicle = new VehicleSnapshot {
                 objectName = VehicleRigidBody.gameObject.name,
                 rootLocalPosition = VehicleRigidBody.transform.localPosition,
@@ -484,8 +609,11 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
                     worldCenterOfMass = VehicleRigidBody.worldCenterOfMass,
                     inertiaTensor = inertiaTensor,
                     inertiaTensorRotation = inertiaRotation,
-                    yawInertiaBodyFrame = ComputeBodyFrameYawInertia(
-                        inertiaTensor, inertiaRotation),
+                    bodyInertiaX = bodyInertias.x,
+                    bodyInertiaY = bodyInertias.y,
+                    bodyInertiaZ = bodyInertias.z,
+                    yawAxis = "body_y",
+                    yawInertiaBodyFrame = bodyInertias.y,
                     drag = VehicleRigidBody.drag,
                     angularDrag = VehicleRigidBody.angularDrag,
                     maxAngularVelocity = VehicleRigidBody.maxAngularVelocity,
@@ -500,15 +628,23 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
             new UTF8Encoding(false));
     }
 
-    private static float ComputeBodyFrameYawInertia(
+    private static Vector3 ComputeBodyFrameInertiaAxes(
         Vector3 principalMoments, Quaternion principalRotation)
     {
+        principalRotation = principalRotation.normalized;
         Vector3 axis0 = principalRotation * Vector3.right;
         Vector3 axis1 = principalRotation * Vector3.up;
         Vector3 axis2 = principalRotation * Vector3.forward;
-        return principalMoments.x * axis0.z * axis0.z +
-               principalMoments.y * axis1.z * axis1.z +
-               principalMoments.z * axis2.z * axis2.z;
+        return new Vector3(
+            principalMoments.x * axis0.x * axis0.x +
+                principalMoments.y * axis1.x * axis1.x +
+                principalMoments.z * axis2.x * axis2.x,
+            principalMoments.x * axis0.y * axis0.y +
+                principalMoments.y * axis1.y * axis1.y +
+                principalMoments.z * axis2.y * axis2.y,
+            principalMoments.x * axis0.z * axis0.z +
+                principalMoments.y * axis1.z * axis1.z +
+                principalMoments.z * axis2.z * axis2.z);
     }
 
     private string BuildTraceHeader()
@@ -526,6 +662,8 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
             "body_angular_velocity_y_radps", "body_angular_velocity_z_radps",
             "controller_physics_step", "applied_command_sequence",
             "applied_throttle_norm", "applied_steering_norm", "applied_steering_rad",
+            "experiment_elapsed_s", "experiment_measurement_active",
+            "experiment_requested_throttle_norm", "experiment_requested_steering_norm",
         };
         for (int index = 0; index < fields.Length; index++)
         {
@@ -576,6 +714,10 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
         float steeringLimit = Mathf.Max(Controller.SteeringLimit * Mathf.Deg2Rad, 1.0e-6f);
         Append(row, Controller.AppliedSteering / steeringLimit);
         Append(row, Controller.AppliedSteering);
+        Append(row, experimentElapsedSeconds);
+        Append(row, experimentMeasurementActive ? 1 : 0);
+        Append(row, experimentRequestedThrottleNorm);
+        Append(row, experimentRequestedSteeringNorm);
 
         for (int index = 0; index < Wheels.Length; index++)
         {
@@ -652,6 +794,19 @@ public sealed class ModelIdentificationDiagnostics : MonoBehaviour
     {
         if (builder.Length > 0)
             builder.Append(',');
+    }
+
+    private static float ReadEnvironmentFloat(string name, float fallback,
+                                               float minimum, float maximum)
+    {
+        string raw = Environment.GetEnvironmentVariable(name);
+        float parsed;
+        if (string.IsNullOrWhiteSpace(raw) ||
+            !float.TryParse(raw, NumberStyles.Float,
+                            CultureInfo.InvariantCulture, out parsed) ||
+            (float.IsNaN(parsed) || float.IsInfinity(parsed)))
+            return fallback;
+        return Mathf.Clamp(parsed, minimum, maximum);
     }
 
     private void OnApplicationQuit()

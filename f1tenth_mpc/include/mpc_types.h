@@ -101,8 +101,8 @@
 #define VP_CG_TO_REAR_AXLE_M 0.155320086f                /* Contact rear axle distance from measured COM [m]. */
 #define VP_WHEELBASE_M (VP_CG_TO_FRONT_AXLE_M + VP_CG_TO_REAR_AXLE_M) /* Distance between front and rear axle centers. */
 #define VP_MASS_KG 3.470f                                /* Unity Rigidbody mass; wheel masses remain separate accounting. */
-#define VP_YAW_INERTIA_KGM2 0.0276985662f                /* Unity inertia tensor projected onto body yaw axis. */
-#define VP_CG_HEIGHT_M 0.01434f                          /* Unity diagnostic center-of-mass height [m]. */
+#define VP_YAW_INERTIA_KGM2 0.0276985662f                /* Legacy local-Z projection retained pending corrected body-Y diagnostic gate; do not treat as accepted yaw inertia. */
+#define VP_CG_HEIGHT_M 0.0f                              /* Unknown physical CG-to-contact height; do not use the Unity-local COM coordinate for load transfer. */
 #define VP_FRICTION_COEFF 0.72f                         /* Effective tire-road friction coefficient for force limits. */
 #define GRAVITY_MPS2 9.82f                               /* Gravitational acceleration constant used in vehicle load equations. */
 #define VP_MASS_TIMES_GRAVITY_N (VP_MASS_KG * GRAVITY_MPS2) /* Vehicle weight magnitude used by normal-load equations. */
