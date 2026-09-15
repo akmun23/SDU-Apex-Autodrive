@@ -141,8 +141,8 @@ static void test_unity_structural_anchors(void)
     const VehicleParameters_t parameters = vehicle_model_default_parameters();
     check_close(parameters.vehicle_mass, 3.470f, 1.0e-6f,
                 "Unity Rigidbody mass is used");
-    check_close(parameters.yaw_moment_of_inertia, 0.0276985662f, 1.0e-7f,
-                "MPC retains provisional legacy inertia until model gate");
+    check_close(parameters.yaw_moment_of_inertia, 0.0961908f, 1.0e-7f,
+                "MPC uses corrected Unity body-Y inertia");
     check_close(parameters.wheelbase_meters, 0.330000f, 1.0e-5f,
                 "contact wheelbase is used");
     check_close(parameters.distance_cg_to_front_axle, 0.174679914f, 1.0e-6f,

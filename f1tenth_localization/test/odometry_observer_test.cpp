@@ -64,6 +64,22 @@ void test_stationary_and_wheel_gate()
   require(!rejected.wheel_update_used, "large wheel innovation is rejected");
 }
 
+void test_speed_dependent_wheel_scale()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 0.968;
+  config.wheel_speed_scale_speeds_mps = {0.0, 4.0, 8.0};
+  config.wheel_speed_scale_values = {1.0, 0.90, 0.80};
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double four_mps_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  const auto estimate = observer.update(observation(
+    0.050, four_mps_delta, four_mps_delta));
+  require(estimate.wheel_update_used, "speed-table wheel sample is accepted");
+  require(std::abs(estimate.wheel_mapped_mps - 3.6) < 1.0e-9,
+    "speed-table interpolation overrides the scalar wheel scale");
+}
+
 void test_braking_and_frozen_wheel()
 {
   OdometryObserverConfig synthetic_config;
@@ -103,9 +119,13 @@ void test_epoch_and_timing()
   OdometryObserver track_observer;
   track_observer.update(observation(0.0, 0.0, 0.0));
   const auto native_track_packet = track_observer.update(
-    observation(0.050, 0.0, 0.0));
+    observation(0.030, 0.0, 0.0));
   require(!native_track_packet.timing_degraded,
-    "native 20 Hz track packet is not degraded");
+    "30 ms source jitter remains inside the 40 Hz contract");
+  const auto slow_track_packet = track_observer.update(
+    observation(0.080, 0.0, 0.0));
+  require(slow_track_packet.timing_degraded,
+    "source interval above 35 ms is diagnosed as degraded");
 
   OdometryObserver gap_observer;
   gap_observer.update(observation(0.0, 0.0, 0.0));
@@ -119,6 +139,24 @@ void test_epoch_and_timing()
     "a short source gap remains visible as degraded timing");
   require(integrated_gap.x_m > 0.05,
     "encoder endpoint displacement is retained across a short source gap");
+}
+
+void test_bounded_turn_speed_bias_model()
+{
+  OdometryObserverConfig config;
+  config.use_turn_speed_bias_model = true;
+  config.turn_speed_bias_constant_mps = 0.40;
+  config.turn_speed_bias_max_mps = 0.10;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double wheel_delta = 2.0 * 0.050 / config.wheel_radius_m;
+  const auto estimate = observer.update(
+    observation(0.050, wheel_delta, wheel_delta, 0.0, 0.0, 0.7));
+  require(estimate.turn_mode, "turn bias test enters turn mode");
+  require(estimate.turn_speed_bias_mps == 0.10,
+    "turn speed bias is bounded before it reaches odometry");
+  require(estimate.body_u_mps > estimate.wheel_mapped_mps,
+    "bounded turn speed bias corrects the causal body-speed estimate");
 }
 
 void test_turn_mode_and_pose()
@@ -160,6 +198,33 @@ void test_turn_mode_and_pose()
   }
   require(!calm.turn_mode, "turn mode exits only after calm hold");
   require(std::isfinite(calm.x_m) && std::isfinite(calm.y_m), "turn pose remains finite");
+}
+
+void test_bounded_kinematic_lateral_slip_model()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 1.0;
+  config.use_kinematic_lateral_slip_model = true;
+  config.lateral_slip_ratio = 0.015;
+  config.lateral_slip_yaw_rate_scale_radps = 0.15;
+  config.lateral_slip_max_mps = 0.30;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  // Stay below the launch wheel-spin guard so this test exercises the
+  // sideslip model rather than the launch-protection path.
+  const double speed = 3.0;
+  const double delta = speed * 0.050 / config.wheel_radius_m;
+  const auto left_turn = observer.update(observation(
+    0.050, delta, delta, 0.0, 0.0, 0.8));
+  require(left_turn.turn_mode, "sideslip model enters turn mode");
+  require(left_turn.body_v_mps < 0.0, "left turn sideslip has the identified sign");
+  require(std::abs(left_turn.body_v_mps) < 0.30,
+    "sideslip model is bounded");
+
+  const auto straight = observer.update(observation(
+    0.100, 2.0 * delta, 2.0 * delta, 0.0, 0.0, 0.0));
+  require(std::abs(straight.body_v_mps) < 1.0e-12,
+    "sideslip model goes to zero with no yaw rate");
 }
 
 void test_wheel_slip_enables_dynamic_turn_observer()
@@ -219,6 +284,31 @@ void test_pose_integration_uses_velocity_midpoint()
   const auto second = observer.update(observation(0.100, 2.0 * delta, 2.0 * delta));
   require(std::abs(second.x_m - 0.150) < 1.0e-9,
     "constant-speed displacement remains exact after launch");
+}
+
+void test_coherent_current_packet_updates_pose_without_changing_state()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 1.0;
+  config.wheel_burst_disagreement_mps = 2.0;
+  config.use_coherent_packet_velocity_for_pose = true;
+  config.coherent_packet_pose_blend = 1.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double one_mps_delta = 1.0 * 0.050 / config.wheel_radius_m;
+  const double three_mps_delta = 3.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, one_mps_delta, one_mps_delta));
+  const auto current_packet = observer.update(observation(
+    0.100, one_mps_delta + three_mps_delta,
+    one_mps_delta + three_mps_delta, 0.0, 0.0, 0.7));
+  require(current_packet.wheel_update_used,
+    "coherent current packet remains a valid wheel update");
+  require(std::abs(current_packet.speed_mps - 2.0) < 1.0e-9,
+    "published state remains anchored to the rolling wheel estimate");
+  // The first interval contributes 0.025 m. The pose-only current-packet
+  // endpoint contributes (1 + 3) * 0.5 * 0.05 = 0.10 m.
+  require(std::abs(current_packet.x_m - 0.125) < 1.0e-9,
+    "coherent current packet removes turn-window pose lag");
 }
 
 void test_turn_entry_uses_coherent_launch_wheel_speed()
@@ -298,6 +388,87 @@ void test_repeated_encoder_packet_uses_imu_until_recovery()
     "dropout recovery does not reintroduce the lagging window speed");
 }
 
+void test_turn_dropout_does_not_integrate_braking_twice()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 1.0;
+  config.imu_x_offset_m = 0.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double speed_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, speed_delta, speed_delta, 0.0, 0.0, 0.7));
+  const auto before = observer.update(observation(
+    0.100, 2.0 * speed_delta, 2.0 * speed_delta, 0.0, 0.0, 0.7));
+  require(before.body_u_mps > 3.9, "turn dropout test seeds four m/s motion");
+
+  // A repeated encoder packet enters the dropout path.  The RK2 turn update
+  // must consume this -2 m/s^2 sample once; the old implementation applied
+  // the same braking sample a second time in the frozen-wheel branch.
+  const auto missing = observer.update(observation(
+    0.150, 2.0 * speed_delta, 2.0 * speed_delta, -2.0, 0.0, 0.7));
+  require(!missing.wheel_update_used,
+    "repeated turn encoder packet remains excluded");
+  require(missing.body_u_mps > 3.87,
+    "turn dropout braking acceleration is integrated exactly once");
+}
+
+void test_turn_dropout_uses_calibrated_braking_acceleration()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 1.0;
+  config.imu_x_offset_m = 0.0;
+  config.decel_ax_scale = 0.5;
+  config.decel_ax_offset_mps2 = 0.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double speed_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, speed_delta, speed_delta, 0.0, 0.0, 0.7));
+  const auto before = observer.update(observation(
+    0.100, 2.0 * speed_delta, 2.0 * speed_delta, 0.0, 0.0, 0.7));
+
+  // The repeated encoder angle enters the RK2 turn-dropout path. With the
+  // configured 0.5 braking scale, the longitudinal correction must be about
+  // half the raw -2 m/s^2 sample; raw acceleration would under-report speed
+  // by an additional 50 mm/s over this interval.
+  const auto missing = observer.update(observation(
+    0.150, 2.0 * speed_delta, 2.0 * speed_delta, -2.0, 0.0, 0.7));
+  require(!missing.wheel_update_used,
+    "calibrated turn dropout test keeps the repeated packet excluded");
+  require(missing.body_u_mps > before.body_u_mps - 0.070,
+    "turn dropout applies the calibrated braking acceleration");
+  require(missing.body_u_mps < before.body_u_mps - 0.030,
+    "turn dropout retains a real calibrated braking correction");
+}
+
+void test_turn_recovery_reanchors_after_dynamic_update()
+{
+  OdometryObserverConfig config;
+  config.wheel_speed_scale = 1.0;
+  config.imu_x_offset_m = 0.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double speed_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, speed_delta, speed_delta, 0.0, 0.0, 0.7));
+  observer.update(observation(
+    0.100, 2.0 * speed_delta, 2.0 * speed_delta, 0.0, 0.0, 0.7));
+
+  // Repeat the cumulative encoder angle to enter the dynamic dropout path,
+  // then provide a fresh synchronized recovery packet. The recovery packet
+  // must remain the final longitudinal anchor; otherwise the same interval's
+  // turn acceleration moves it away from the measured 3.4 m/s.
+  observer.update(observation(
+    0.150, 2.0 * speed_delta, 2.0 * speed_delta, -6.2, 0.0, 0.7));
+  const double recovery_speed = 3.4;
+  const double recovery_delta = recovery_speed * 0.050 / config.wheel_radius_m;
+  const auto recovered = observer.update(observation(
+    0.200, 2.0 * speed_delta + recovery_delta,
+    2.0 * speed_delta + recovery_delta, 0.0, 0.0, 0.7));
+  require(recovered.wheel_update_used,
+    "fresh turn recovery packet is accepted");
+  require(std::abs(recovered.body_u_mps - recovery_speed) < 1.0e-9,
+    "turn recovery packet remains the final longitudinal anchor");
+}
+
 void test_near_freeze_encoder_packet_cannot_collapse_motion()
 {
   OdometryObserverConfig config;
@@ -352,6 +523,67 @@ void test_recovery_rebases_stale_window()
     "normal wheel update remains accepted after recovery");
   require(coherent.body_u_mps > 3.5,
     "rebased rolling window does not retain the stale low speed");
+}
+
+void test_turn_current_packet_recovers_stale_window()
+{
+  OdometryObserverConfig config;
+  config.reset_encoder_jump_rad = 50.0;
+  config.wheel_speed_scale = 1.0;
+  config.wheel_innovation_max_mps = 1.5;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double four_mps_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, four_mps_delta, four_mps_delta));
+  observer.update(observation(0.100, 2.0 * four_mps_delta, 2.0 * four_mps_delta,
+    0.0, 0.0, 0.7));
+
+  // Repeated cumulative encoder angles put the rolling window behind the
+  // current packet. The packet itself is close to the causal turn speed and
+  // must recover motion without waiting for the stale window to age.
+  observer.update(observation(
+    0.150, 2.0 * four_mps_delta, 2.0 * four_mps_delta,
+    0.0, 0.0, 0.7));
+  const double current_delta = 4.2 * 0.050 / config.wheel_radius_m;
+  const auto recovered = observer.update(observation(
+    0.200, 2.0 * four_mps_delta + current_delta,
+    2.0 * four_mps_delta + current_delta, 0.0, 0.0, 0.7));
+  require(recovered.wheel_update_used,
+    "turn current packet recovers a stale rolling window");
+  require(recovered.body_u_mps > 4.0,
+    "turn current packet preserves causal longitudinal motion");
+}
+
+void test_turn_current_packet_recovery_is_bounded()
+{
+  OdometryObserverConfig config;
+  config.reset_encoder_jump_rad = 50.0;
+  config.wheel_speed_scale = 1.0;
+  config.turn_current_packet_max_increase_mps = 0.20;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+  const double four_mps_delta = 4.0 * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, four_mps_delta, four_mps_delta));
+  const auto before = observer.update(observation(
+    0.100, 2.0 * four_mps_delta, 2.0 * four_mps_delta,
+    0.0, 0.0, 0.7));
+  require(before.body_u_mps > 3.5, "bounded recovery test seeds causal speed");
+
+  // Mark the rolling window as stale, then present a packet that would raise
+  // the speed by 0.5 m/s in one 50 ms source interval. It is above the
+  // configured recovery bound and must remain on the causal dropout path.
+  observer.update(observation(
+    0.150, 2.0 * four_mps_delta, 2.0 * four_mps_delta,
+    0.0, 0.0, 0.7));
+  const double delayed_recovery_delta = 4.5 * 0.050 / config.wheel_radius_m;
+  const auto bounded = observer.update(observation(
+    0.200, 2.0 * four_mps_delta + delayed_recovery_delta,
+    2.0 * four_mps_delta + delayed_recovery_delta,
+    0.0, 0.0, 0.7));
+  require(!bounded.wheel_update_used,
+    "over-limit current recovery packet remains excluded");
+  require(bounded.body_u_mps < before.body_u_mps + 0.30,
+    "over-limit current recovery packet cannot create an instantaneous jump");
 }
 
 void test_impossible_longitudinal_acceleration_is_rejected()
@@ -517,19 +749,28 @@ void test_lever_arm_and_rk2_reference()
 int main()
 {
   test_stationary_and_wheel_gate();
+  test_speed_dependent_wheel_scale();
   test_braking_and_frozen_wheel();
   test_epoch_and_timing();
+  test_bounded_turn_speed_bias_model();
   test_turn_mode_and_pose();
+  test_bounded_kinematic_lateral_slip_model();
   test_wheel_slip_enables_dynamic_turn_observer();
   test_launch_uses_wheel_speed_during_acceleration();
   test_pose_integration_uses_velocity_midpoint();
+  test_coherent_current_packet_updates_pose_without_changing_state();
   test_turn_entry_uses_coherent_launch_wheel_speed();
   test_impossible_longitudinal_acceleration_is_rejected();
   test_lever_arm_and_rk2_reference();
   test_turn_braking_recovers_nonzero_wheel_sample();
   test_repeated_encoder_packet_uses_imu_until_recovery();
+  test_turn_dropout_does_not_integrate_braking_twice();
+  test_turn_dropout_uses_calibrated_braking_acceleration();
+  test_turn_recovery_reanchors_after_dynamic_update();
   test_near_freeze_encoder_packet_cannot_collapse_motion();
   test_recovery_rebases_stale_window();
+  test_turn_current_packet_recovers_stale_window();
+  test_turn_current_packet_recovery_is_bounded();
   test_encoder_burst_is_rejected_until_coherent_recovery();
   test_coherent_wheel_rate_overrides_stale_innovation_gate();
   test_launch_wheel_spin_is_not_promoted_by_coherent_recovery();

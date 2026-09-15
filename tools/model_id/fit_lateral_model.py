@@ -125,20 +125,47 @@ def _predict_lateral(row: dict[str, float], values: np.ndarray,
         row["dt_sim_s"], parameters)
 
 
-def _fit_candidate(rows: Sequence[dict[str, float]], kind: str) -> dict[str, Any]:
+def _fit_candidate(
+    rows: Sequence[dict[str, float]], kind: str,
+    fixed_iz_kgm2: float | None = None,
+) -> dict[str, Any]:
+    if fixed_iz_kgm2 is not None and (
+        not math.isfinite(fixed_iz_kgm2) or fixed_iz_kgm2 <= 0.0
+    ):
+        raise ValueError("fixed yaw inertia must be finite and positive")
     if kind == "linear_saturated":
-        initial = np.asarray([800.0, 800.0, 0.035], dtype=float)
-        lower = np.asarray([1.0, 1.0, 0.003])
-        upper = np.asarray([5000.0, 5000.0, 0.080])
+        if fixed_iz_kgm2 is None:
+            initial = np.asarray([800.0, 800.0, 0.035], dtype=float)
+            lower = np.asarray([1.0, 1.0, 0.003])
+            upper = np.asarray([5000.0, 5000.0, 0.080])
+        else:
+            initial = np.asarray([800.0, 800.0], dtype=float)
+            lower = np.asarray([1.0, 1.0])
+            upper = np.asarray([5000.0, 5000.0])
     else:
-        initial = np.asarray([800.0, 800.0, 11.50, 10.60, 0.035], dtype=float)
-        lower = np.asarray([1.0, 1.0, 2.0, 2.0, 0.003])
-        upper = np.asarray([5000.0, 5000.0, 30.0, 30.0, 0.080])
+        if fixed_iz_kgm2 is None:
+            initial = np.asarray([800.0, 800.0, 11.50, 10.60, 0.035], dtype=float)
+            lower = np.asarray([1.0, 1.0, 2.0, 2.0, 0.003])
+            upper = np.asarray([5000.0, 5000.0, 30.0, 30.0, 0.080])
+        else:
+            initial = np.asarray([800.0, 800.0, 11.50, 10.60], dtype=float)
+            lower = np.asarray([1.0, 1.0, 2.0, 2.0])
+            upper = np.asarray([5000.0, 5000.0, 30.0, 30.0])
+
+    def parameter_values(values: np.ndarray) -> np.ndarray:
+        if fixed_iz_kgm2 is None:
+            return values
+        if kind == "linear_saturated":
+            return np.asarray([values[0], values[1], fixed_iz_kgm2])
+        return np.asarray([
+            values[0], values[1], values[2], values[3], fixed_iz_kgm2])
 
     def residual(values: np.ndarray) -> np.ndarray:
         output = np.empty(2 * len(rows), dtype=float)
+        candidate_values = parameter_values(values)
         for index, row in enumerate(rows):
-            predicted_v, predicted_r = _predict_lateral(row, values, kind)
+            predicted_v, predicted_r = _predict_lateral(
+                row, candidate_values, kind)
             output[2 * index] = (predicted_v - row["v_k1_mps"]) / 0.05
             output[2 * index + 1] = (predicted_r - row["r_k1_radps"]) / 0.10
         return output
@@ -147,7 +174,7 @@ def _fit_candidate(rows: Sequence[dict[str, float]], kind: str) -> dict[str, Any
         residual, initial, bounds=(lower, upper), loss="soft_l1",
         f_scale=1.0, x_scale="jac", max_nfev=160, verbose=0)
     return {
-        "parameters": _candidate_parameters(kind, result.x),
+        "parameters": _candidate_parameters(kind, parameter_values(result.x)),
         "optimizer": {
             "success": bool(result.success),
             "message": str(result.message),
@@ -308,7 +335,8 @@ def _write_regime_csv(path: Path, rows: Sequence[dict[str, float]],
 
 
 def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
-        longitudinal_model: Path, output: Path, residual_csv: Path) -> dict[str, Any]:
+        longitudinal_model: Path, output: Path, residual_csv: Path,
+        fixed_iz_kgm2: float | None = None) -> dict[str, Any]:
     if set(train_names).intersection(validation_names):
         raise ValueError("training and validation runs overlap")
     train = _read_runs(root, train_names)
@@ -329,9 +357,11 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         }
     }
     fitted: dict[str, tuple[np.ndarray, dict[str, Any]]] = {}
-    for kind, name in (("linear_saturated", "Y1_linear_saturated"),
-                       ("tanh", "Y2_tanh")):
-        fit_result = _fit_candidate(train_rows, kind)
+    candidate_suffix = "_fixed_iz" if fixed_iz_kgm2 is not None else ""
+    for kind, base_name in (("linear_saturated", "Y1_linear_saturated"),
+                            ("tanh", "Y2_tanh")):
+        name = base_name + candidate_suffix
+        fit_result = _fit_candidate(train_rows, kind, fixed_iz_kgm2)
         values = np.asarray([
             fit_result["parameters"][key]
             for key in (("cf_n_per_rad", "cr_n_per_rad", "iz_kgm2")
@@ -349,8 +379,12 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
             "validation_recursive": _recursive_scores(validation, parameters, False),
         }
 
-    tanh_values, _ = fitted["tanh"]
-    _write_regime_csv(residual_csv, validation_rows, tanh_values, "tanh")
+    selected_name = (
+        "Y2_tanh_fixed_iz"
+        if fixed_iz_kgm2 is not None else "Y2_tanh")
+    selected_kind = "tanh"
+    selected_values, _ = fitted[selected_kind]
+    _write_regime_csv(residual_csv, validation_rows, selected_values, selected_kind)
     report: dict[str, Any] = {
         "schema_version": 2,
         "status": "structured_lateral_candidate_not_runtime_validated",
@@ -360,6 +394,7 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         "validation_runs": list(validation_names),
         "train_transition_count": len(train_rows),
         "validation_transition_count": len(validation_rows),
+        "fixed_iz_kgm2": fixed_iz_kgm2,
         "state_definition": ["x_m", "y_m", "yaw_rad", "u_mps", "v_mps",
                               "r_radps", "steering_rad", "wheel_speed_mps"],
         "input_definition": ["steering_target_norm", "throttle_norm"],
@@ -382,10 +417,11 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
             "production_mpc_parameters_updated": False,
             "runtime_ground_truth_consumed": False,
         },
-        "selected_for_next_full_plant_replay": "Y2_tanh",
+        "selected_for_next_full_plant_replay": selected_name,
         "next_action": (
-            "Use the causal Y2 candidate for composed Python plant replay, then "
-            "port the same equations to native C and compare numerical parity."
+            f"Use the causal {selected_name} candidate for composed Python plant "
+            "replay, then port the same equations to native C and compare "
+            "numerical parity."
         ),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -409,10 +445,14 @@ def main() -> None:
     parser.add_argument("--longitudinal-model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--residual-csv", type=Path, required=True)
+    parser.add_argument(
+        "--fixed-iz-kgm2", type=float, default=None,
+        help="keep yaw inertia fixed during fitting instead of optimizing it")
     args = parser.parse_args()
     report = fit(
         args.accepted_root, _names(args.train_runs), _names(args.validation_runs),
-        args.longitudinal_model, args.output, args.residual_csv)
+        args.longitudinal_model, args.output, args.residual_csv,
+        args.fixed_iz_kgm2)
     print(json.dumps({
         "output": str(args.output),
         "status": report["status"],

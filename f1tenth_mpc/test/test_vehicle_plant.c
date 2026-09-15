@@ -47,8 +47,8 @@ static void test_default_parameters_use_unity_structural_anchors(void)
                 "plant uses measured front contact geometry");
     check_close(parameters.lr_m, 0.155320086f, 1.0e-6f,
                 "plant uses measured rear contact geometry");
-    check_close(parameters.iz_kgm2, 0.0276985662f, 1.0e-7f,
-                "plant retains provisional legacy inertia until E0/MPC gate");
+    check_close(parameters.iz_kgm2, 0.0961908f, 1.0e-7f,
+                "plant uses corrected Unity body-Y inertia");
 }
 
 static void test_actuator_limits_and_forward_motion(void)
@@ -68,11 +68,49 @@ static void test_actuator_limits_and_forward_motion(void)
                "wheel state remains physically nonnegative");
 }
 
+static void test_zero_throttle_is_active_braking(void)
+{
+    const VehiclePlantParameters_t parameters = vehicle_plant_default_parameters();
+    const VehiclePlantState_t state = {0.0f, 0.0f, 0.0f, 8.0f, 0.0f, 0.0f,
+                                       0.0f, 8.0f};
+    const VehiclePlantInput_t input = {0.0f, 0.0f};
+    VehiclePlantState_t next = {0};
+    vehicle_plant_step(&state, &input, 0.025f, &parameters, &next);
+    check_true(next.u_mps < state.u_mps,
+               "zero throttle applies active braking to moving state");
+}
+
+static void test_continuous_wheel_dynamics_uses_dt(void)
+{
+    VehiclePlantParameters_t parameters = vehicle_plant_default_parameters();
+    parameters.wheel_dynamics_model = VEHICLE_PLANT_WHEEL_DYNAMICS_CONTINUOUS;
+    parameters.wheel_coefficients[0] = 0.0f;
+    parameters.wheel_coefficients[1] = 0.0f;
+    parameters.wheel_coefficients[2] = 4.0f;
+    parameters.wheel_coefficients[3] = 0.0f;
+    parameters.wheel_coefficients[4] = 0.0f;
+    parameters.wheel_coefficients[5] = 0.0f;
+    const VehiclePlantState_t state = {0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+                                       0.0f, 2.0f};
+    const VehiclePlantInput_t input = {0.0f, 0.5f};
+    VehiclePlantState_t short_next = {0};
+    VehiclePlantState_t long_next = {0};
+    vehicle_plant_step(&state, &input, 0.025f, &parameters, &short_next);
+    vehicle_plant_step(&state, &input, 0.050f, &parameters, &long_next);
+    check_true(long_next.wheel_speed_mps > short_next.wheel_speed_mps,
+               "continuous wheel state responds to measured dt");
+    check_close(long_next.wheel_speed_mps,
+                2.0f * short_next.wheel_speed_mps - state.wheel_speed_mps,
+                1.0e-6f, "continuous wheel state scales with dt");
+}
+
 int main(void)
 {
     test_default_parameters_use_unity_structural_anchors();
     test_zero_input_is_identity();
     test_actuator_limits_and_forward_motion();
+    test_zero_throttle_is_active_braking();
+    test_continuous_wheel_dynamics_uses_dt();
     if (failures != 0) {
         fprintf(stderr, "%d vehicle-plant test(s) failed\n", failures);
         return 1;

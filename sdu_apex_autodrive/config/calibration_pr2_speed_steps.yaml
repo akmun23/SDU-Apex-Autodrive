@@ -1,0 +1,19 @@
+model_id_excitation:
+  ros__parameters:
+    mode: speed_steps
+    output_dir: /workspace/src/sdu_apex_autodrive/artifacts/model_id_work/accepted
+    sample_rate_hz: 50.0
+    duration_sec: 0.0
+    throttle_sequence: [0.0]
+    speed_sequence_mps: [0.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 0.0]
+    steering_sequence: [0.0]
+    hold_sec: 3.0
+    zero_settle_sec: 2.0
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    speed_steps_brake_between_targets: true
+    grid_brake_timeout_sec: 20.0
+    speed_settle_timeout_sec: 15.0

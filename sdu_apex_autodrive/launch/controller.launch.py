@@ -1,6 +1,7 @@
 """Single user-facing launch for one AutoDRIVE racing controller."""
 
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -35,6 +36,47 @@ def _bool(value: str) -> bool:
     raise RuntimeError(f"expected boolean, got {value!r}")
 
 
+def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
+    """Fail before startup if a previous controller stack is still alive.
+
+    ROS 2 permits two processes with the same node name.  That is unsafe for
+    this stack because both processes can publish the absolute ``/odom`` and
+    ``/cmd/speed`` topics, producing alternating states that look like an
+    odometry fault.  The check is deliberately launch-local and does not
+    touch simulator state.
+    """
+    try:
+        result = subprocess.run(
+            ["ros2", "node", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "unable to verify that no previous controller stack is running"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ros2 node list failed during controller-stack preflight: "
+            f"{result.stderr.strip()}"
+        )
+    existing_names = {
+        line.strip().rsplit("/", 1)[-1]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    }
+    duplicates = sorted(expected_names.intersection(existing_names))
+    if duplicates:
+        raise RuntimeError(
+            "controller-stack preflight found existing runtime node(s): "
+            f"{', '.join(duplicates)}. Stop the previous launch/container "
+            "before starting another one; duplicate publishers corrupt "
+            "/odom and /cmd/speed."
+        )
+
+
 def _setup(context):
     controller = LaunchConfiguration("controller").perform(context).lower()
     if controller not in ("ftg", "pure_pursuit"):
@@ -63,6 +105,23 @@ def _setup(context):
     # same LiDAR-only FTG command path on a saved map.
     needs_localization = use_localization and (
         controller != "ftg" or force_localization)
+
+    expected_runtime_nodes = {
+        "autodrive_bridge",
+        "sensor_odometry",
+        "controller_container",
+        "autodrive_actuator_interface",
+    }
+    if needs_localization:
+        expected_runtime_nodes.update({
+            "ekf_localization", "map_server", "lifecycle_manager_map",
+            "gpu_amcl_cpp",
+        })
+    if with_ground_truth_monitor:
+        expected_runtime_nodes.add("ground_truth_amcl_monitor")
+    if with_model_id_recorder:
+        expected_runtime_nodes.add("model_id_timing_recorder")
+    _reject_existing_runtime_nodes(expected_runtime_nodes)
 
     if needs_localization and not os.path.isfile(map_path):
         raise RuntimeError(f"map does not exist: {map_path}")

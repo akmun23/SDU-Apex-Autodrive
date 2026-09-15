@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/accepted/106_pr6_bounded_recovery_020_20260914",
+  "offline_only": true,
+  "future_ground_truth_used": false,
+  "truth_velocity_contract": {
+    "position_point": "simulator GPS vehicle-frame point",
+    "pose_u_mps": "finite difference of the reported position at source-time yaw midpoint",
+    "pose_v_mps": "finite difference of the reported position at source-time yaw midpoint",
+    "com_v_mps": "raw simulator rigidbody/COM lateral velocity, diagnostic only",
+    "odom_v_metric": "pose-point lateral velocity; COM comparison is reported separately"
+  },
+  "source_timing": {
+    "packets": 2193,
+    "dt_s": {
+      "samples": 2192,
+      "p50": 0.02499999999999858,
+      "p90": 0.02599999999999625,
+      "p95": 0.026000500000000315,
+      "p99": 0.02600269999999938,
+      "max": 0.027999990000000086,
+      "mean": 0.025000001228102194,
+      "bias": 0.025000001228102194
+    },
+    "sequence_gaps": 0,
+    "command_lag_packets": {
+      "samples": 2193,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "p99": 1.0,
+      "max": 1.0,
+      "mean": 1.0,
+      "bias": 1.0
+    }
+  },
+  "metrics": {
+    "/odom": {
+      "position_error_m": {
+        "samples": 2193,
+        "p50": 3.299593231329882,
+        "p90": 3.300220606598021,
+        "p95": 3.300288133081129,
+        "p99": 3.3003677788160095,
+        "max": 3.3003677788160095,
+        "mean": 3.0859120524233217,
+        "bias": 3.0859120524233217
+      },
+      "yaw_error_rad": {
+        "samples": 2193,
+        "p50": 0.5382381527642508,
+        "p90": 0.5382381527642508,
+        "p95": 0.5382381527642508,
+        "p99": 0.5382381527642508,
+        "max": 0.538238152764251,
+        "mean": 0.5041227386127751,
+        "bias": 0.5041227386127751
+      },
+      "u_error_mps": {
+        "samples": 2192,
+        "p50": 0.0,
+        "p90": 0.001330608650438625,
+        "p95": 0.005466408788864317,
+        "p99": 0.37723501730081743,
+        "max": 92.85817960047532,
+        "mean": 0.057811004780574146,
+        "bias": 0.057811004780574146
+      },
+      "v_error_mps": {
+        "samples": 2192,
+        "p50": 0.0,
+        "p90": 0.00039055696233870137,
+        "p95": 0.0032883468160538813,
+        "p99": 0.04104263452946578,
+        "max": 3.2172929611614096,
+        "mean": 0.004655757672363217,
+        "bias": 0.004655757672363217
+      },
+      "v_error_mps_com": {
+        "samples": 2193,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.02240000000000041,
+        "p99": 0.2961744162654202,
+        "max": 0.523012036819919,
+        "mean": 0.009089102950673562,
+        "bias": 0.009089102950673562
+      },
+      "r_error_radps": {
+        "samples": 2193,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "bias": 0.0
+      }
+    },
+    "/ekf_odom": {
+      "position_error_m": {
+        "samples": 2193,
+        "p50": 3.2995932313298875,
+        "p90": 3.3002206065980264,
+        "p95": 3.3002881330811342,
+        "p99": 3.300367778816015,
+        "max": 3.300367778816015,
+        "mean": 3.085912052423322,
+        "bias": 3.085912052423322
+      },
+      "yaw_error_rad": {
+        "samples": 2193,
+        "p50": 0.5382381527642508,
+        "p90": 0.5382381527642508,
+        "p95": 0.5382381527642508,
+        "p99": 0.5382381527642508,
+        "max": 0.538238152764251,
+        "mean": 0.5041227386127751,
+        "bias": 0.5041227386127751
+      },
+      "u_error_mps": {
+        "samples": 2192,
+        "p50": 0.0,
+        "p90": 0.001330608650438625,
+        "p95": 0.005466408788864317,
+        "p99": 0.37723501730081743,
+        "max": 92.85817960047532,
+        "mean": 0.057811004780574146,
+        "bias": 0.057811004780574146
+      },
+      "v_error_mps": {
+        "samples": 2192,
+        "p50": 0.0,
+        "p90": 0.00039055696233870137,
+        "p95": 0.0032883468160538813,
+        "p99": 0.04104263452946578,
+        "max": 3.2172929611614096,
+        "mean": 0.004655757672363217,
+        "bias": 0.004655757672363217
+      },
+      "v_error_mps_com": {
+        "samples": 2193,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.02240000000000041,
+        "p99": 0.2961744162654202,
+        "max": 0.523012036819919,
+        "mean": 0.009089102950673562,
+        "bias": 0.009089102950673562
+      },
+      "r_error_radps": {
+        "samples": 2193,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "bias": 0.0
+      }
+    },
+    "/amcl_pose": {
+      "position_error_m": {
+        "samples": 2189,
+        "p50": 3.247763227642879,
+        "p90": 3.248349030534022,
+        "p95": 3.2484138782574212,
+        "p99": 3.2484923149906586,
+        "max": 3.2484923149906586,
+        "mean": 3.0443601184825027,
+        "bias": 3.0443601184825027
+      },
+      "yaw_error_rad": {
+        "samples": 2189,
+        "p50": 0.5380903464167812,
+        "p90": 0.5380903464167812,
+        "p95": 0.5380903464167812,
+        "p99": 0.5383060999869362,
+        "max": 0.5383633772762766,
+        "mean": 0.5049132245007034,
+        "bias": 0.5049132245007034
+      },
+      "u_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps_com": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "r_error_radps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      }
+    },
+    "/current_map_pose": {
+      "position_error_m": {
+        "samples": 2188,
+        "p50": 3.24776322764288,
+        "p90": 3.248349030534023,
+        "p95": 3.2484138782574217,
+        "p99": 3.248492314990659,
+        "max": 3.248492314990659,
+        "mean": 3.045750165582662,
+        "bias": 3.045750165582662
+      },
+      "yaw_error_rad": {
+        "samples": 2188,
+        "p50": 0.5380903464167812,
+        "p90": 0.5380903464167812,
+        "p95": 0.5380903464167812,
+        "p99": 0.5383060999869365,
+        "max": 0.5383633772762761,
+        "mean": 0.5051440567817126,
+        "bias": 0.5051440567817126
+      },
+      "u_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps_com": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "r_error_radps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      }
+    }
+  },
+  "acceptance_targets": {
+    "current_map_position_p95_m": 0.05,
+    "current_map_yaw_p95_rad": 0.02,
+    "odom_u_p95_mps": 0.1,
+    "odom_v_p95_mps": 0.1,
+    "odom_r_p95_radps": 0.05
+  },
+  "acceptance": {
+    "transport_sequence_clean": true,
+    "localization_targets_available": true,
+    "full_speed_localization_pass": false
+  }
+}

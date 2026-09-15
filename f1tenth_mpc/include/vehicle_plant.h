@@ -40,6 +40,7 @@ typedef struct
     float steering_rate_radps;
     float max_speed_mps;
     float force_max_n;
+    float hard_brake_force_n;
     float slip_gain_per_mps;
     float coast_speed_drag_n_per_mps;
     float cf_n_per_rad;
@@ -47,12 +48,18 @@ typedef struct
     float df_n;
     float dr_n;
     uint8_t tire_model;
+    uint8_t wheel_dynamics_model;
     float wheel_coefficients[6];
 } VehiclePlantParameters_t;
 
 enum {
     VEHICLE_PLANT_TIRE_LINEAR_SATURATED = 0,
     VEHICLE_PLANT_TIRE_TANH = 1
+};
+
+enum {
+    VEHICLE_PLANT_WHEEL_DYNAMICS_DISCRETE = 0,
+    VEHICLE_PLANT_WHEEL_DYNAMICS_CONTINUOUS = 1
 };
 
 VehiclePlantParameters_t vehicle_plant_default_parameters(void);

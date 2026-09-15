@@ -660,3 +660,186 @@ two-run observer report is
 Together E7 provides 6,524 clean source-time validation packets after the
 cache change, but it is still one track regime and therefore not a promotion
 gate for the observer or MPC plant.
+
+## 2026-09-14 E8 request-identity and track regression
+
+The bridge now associates every accepted telemetry response with the exact
+Bridge request that produced it. Batchmode no longer emits an unsolicited
+bootstrap telemetry packet, while interactive GUI startup retains its manual
+connection behavior. A response without a request identity is ignored as
+bootstrap traffic; a response with the wrong identity is a fatal transport
+fault. This prevents reconnect/bootstrap packets from being mistaken for a
+missing 40 Hz sample. The change is transport bookkeeping only: it does not
+alter Unity physics, sensor rays, scene geometry, or vehicle behavior.
+
+The clean open-scene run
+`accepted/91_e8_open_scene_speed_steps_rebuilt_workspace_20260914` completed
+1,200 requested speed-step packets with source intervals
+`21.999--28.002 ms`, zero source/request/telemetry gaps, zero duplicate or
+reverse sequences, and one-packet command lag. All four commanded speed phases
+completed. Its causal transition assembly passed with 1,199 transitions and a
+body-frame displacement p95 of `0.00423 m/s`.
+
+The independent track regression
+`accepted/92_e8_track_transport_regression_20260914` completed 3,583 packets,
+six raceline crossings, and no recorded collision events. Source intervals
+were `20.990--29.000 ms`, with zero source gaps above 30 ms, zero request or
+telemetry gaps, zero sequence reversals, and exactly one packet of applied
+command lag. Pure Pursuit stayed on the raceline; the run is a transport and
+regression validation, not the full-speed MPC gate because its measured peak
+speed was `8.34 m/s`.
+
+The compact evidence is
+`diagnostics_20260914_v2/track_regression_e8_20260914.json`. The legal-input
+observer scored the track holdout at `u` p95 `0.3525 m/s`, `v` p95
+`0.00442 m/s`, and `r` p95 `0`. A new mixed-recursive VS2.75 split-contact
+candidate scored the independent track run at position p95 `0.0866 m` at
+0.50 s, `0.2025 m` at 1.00 s, and `0.4314 m` at 2.00 s. The optimizer reached
+its evaluation limit and native C parity/blind full-speed acceptance are still
+outstanding, so no model or production MPC parameters were changed.
+
+## 2026-09-14 PR1 explicit drive/brake controller semantics
+
+The speed-controller actuator contract is now explicit in
+`sdu_apex_autodrive/sdu_apex_autodrive/speed_controller.py`. It exposes
+`LongitudinalMode.DRIVE`, `LongitudinalMode.BRAKE`, and
+`LongitudinalMode.STOP` through `LongitudinalCommand`, while retaining the
+existing normalized-throttle return path for compatibility. Positive throttle
+is `DRIVE`; zero throttle selected for overspeed or target downshift is
+`BRAKE`; watchdog/reset/target-zero output is `STOP`. The measured simulator
+maps both brake and stop to zero on the legacy wire topic, so this is a
+dev-side semantic correction and does not alter simulator behavior.
+
+The Humble package rebuilt successfully and the focused Python suite passed
+`59` tests, including the new semantic and immediate-brake tests. The first
+runtime smoke run used the calibration node's built-in `0.5--2.0 m/s` sequence
+and completed its brake confirmations. Its temporary parameter-file mistake
+was corrected without changing tracked runtime configuration.
+
+The intended independent `4--20 m/s` regression is
+`accepted/94_pr1_speed_steps_4_to_20mps_20260914`. It captured `2,412`
+bridge packets with source intervals `21.999--28.000 ms`, zero sequence gaps,
+zero telemetry gaps, and exactly one packet of applied-command lag. Targets
+`4, 6, 8, 10, 12, and 14 m/s` settled. The `16 m/s` target did not: the legal
+conditioned speed estimate reached the target while embedded simulator truth
+peaked at `15.5615 m/s`; the trace shows growing wheel/ground-speed
+disagreement and no collision-count increase. This is an odometry/longitudinal
+validity failure, not a transport failure. The compact evidence is
+`diagnostics_20260914_v2/speed_controller_pr1_evidence_20260914.json`.
+
+PR1 is therefore implemented and unit/runtime-smoke validated, but the
+high-speed controller is not promoted and no MPC weights, plant constants, or
+simulator physics were changed. The next step is to use this clean failure to
+improve the legal longitudinal observer/hybrid plant, then repeat the
+independent speed/brake holdout.
+
+## 2026-09-14 PR5 odometry dropout and coherent-pose validation
+
+The observer no longer integrates longitudinal braking twice when a repeated
+encoder packet activates the turn-dropout dynamic path. The second frozen-wheel
+braking branch is now mutually exclusive with the RK2 dropout propagation, and
+`test_turn_dropout_does_not_integrate_braking_twice` covers the regression.
+On `accepted/102_pr5_turn_dropout_single_integration_20260914`, the recorded
+turn-dropout longitudinal error fell to approximately `0.121 m/s` p95 from the
+`1.1--1.3 m/s` p95 errors in the earlier runs. The run remained on the track
+until the reproducible Unity CPU stall at source time `113.105 s`; it is not a
+full-lap acceptance result.
+
+The active observer also has a bounded coherent-current-packet path used only
+for pose trapezoidal integration. The rolling 100 ms encoder estimate remains
+the published longitudinal state, so burst rejection and controller speed
+semantics are unchanged. The current packet is used only when it is nonzero,
+non-burst, and agrees with the rolling estimate. This is a legal sensor-side
+estimator change and does not modify simulator physics.
+
+Source-time replay of the same observer on runs 97, 98, and 102 reduced pose
+position p95 from `0.692` to `0.472 m`, `1.413` to `1.001 m`, and `0.765` to
+`0.482 m`, respectively. A clean live validation,
+`accepted/103_pr5_pose_packet_live_20260914`, captured `1,914` packets at a
+median source rate of `40.000 Hz`, source intervals `21.999--28.000 ms`, zero
+request/telemetry gaps, zero sequence reversals, and one-packet command lag.
+Its active `/odom` scores are position p95 `0.466 m`, longitudinal
+pose-point velocity p95 `0.174 m/s`, lateral pose-point velocity p95
+`0.086 m/s`, and yaw-rate p95 `0`. `/current_map_pose` position p95 was
+`0.116 m`; AMCL remained stable enough for Pure Pursuit to complete multiple
+laps, but the run does not pass the `0.05 m` map-position target.
+
+The full-speed report now distinguishes the simulator rigidbody/COM lateral
+velocity from the GPS/reference-point velocity represented by the odometry
+pose. Raw COM lateral velocity is retained as a diagnostic; it is not used as
+an odometry error target for the pose point.
+
+The expanded mixed-recursive VS2.75 fit
+`model_fits_v2/simulator_native_model_benchmark_pr5_full_train_validate103_20260914.json`
+was rejected. Adding run 102 to the training set reduced local training error
+but diverged on the independent run 103 (`1.313 m` position p95 at `1.00 s`,
+`6.439 m` at `2.00 s`). The prior cross-regime candidate replayed in
+`model_fits_v2/simulator_native_model_benchmark_pr5_replay_e8_on_103_20260914.json`
+remained the better holdout (`0.196 m` at `1.00 s`, `0.419 m` at `2.00 s`),
+but still requires native C parity and blind closed-loop validation. No MPC
+model, weights, simulator physics, or runtime ground-truth input were changed.
+
+## 2026-09-15 source-time wheel model and odometry recovery fixes
+
+The longitudinal identification tool now fits an explicit source-time
+continuous wheel-speed derivative model in addition to the legacy discrete
+wheel model. Both models use the measured source `dt`; neither consumes
+future ground truth during recursive rollout. The same choice is represented
+in the Python reference plant and native `vehicle_plant.c`, including the
+offline hybrid zero-throttle hard-brake force fit. The open/track fit estimated
+`18.718 N` hard-brake force from `13` qualifying transitions. Native/Python
+parity remains clean: the v6 fixture report is below `8.3e-7` maximum absolute
+error, and the fixed-inertia lateral replay parity report is below `1.7e-6`
+against a `3.0e-5` tolerance.
+
+The observer recovery path now re-anchors `body_u` to a fresh synchronized
+wheel packet after a turn dropout instead of allowing the same packet's IMU
+RK2 update to overwrite the recovered speed. Turn-dropout RK2 propagation now
+also applies the calibrated braking acceleration (`decel_ax_scale` and
+`decel_ax_offset`) that was previously bypassed in that branch. The Python
+reference and C++ implementation are covered by native regression tests and
+remain runtime-input compliant; simulator truth is used only in offline
+scoring.
+
+The clean post-fix track runs were
+`accepted/119_pr14_turn_recovery_reanchor_20260915` and
+`accepted/120_pr15_turn_dropout_calibrated_braking_20260915`. Both preserved
+the 40 Hz source contract with zero request/telemetry sequence gaps, one
+packet of command lag, no collision events, and repeated full-speed Pure
+Pursuit laps. Run 119 scored `/odom` position p95 `0.2822 m`, longitudinal
+velocity p95 `0.1268 m/s`, lateral velocity p95 `0.0656 m/s`, and current-map
+position p95 `0.1059 m`. Run 120 scored `0.3743 m`, `0.1320 m/s`,
+`0.0659 m/s`, and `0.0925 m`, respectively. The run-to-run variation means
+the braking correction is a safety/no-regression fix, not a claimed universal
+2% result. The source-time braking sweep retained the active
+`1.005 / 0.020 m/s^2` calibration as the best tested safe point.
+A separate bounded dropout-onset reuse of the preceding coherent current
+packet was tested in the Python reference and rejected: over both runs it
+extended the dropout state and increased position p95 from `0.338 m` to
+`1.546 m`. That candidate was removed from both the C++ observer and the
+reference replay, so it cannot silently affect runtime.
+
+## 2026-09-15 fixed-inertia lateral candidate replay
+
+The lateral fitter now supports keeping the corrected body-Y yaw inertia fixed
+at `0.0961908 kg m^2` rather than re-fitting it inside the old `0.003--0.080`
+bound. The resulting candidates are in
+`model_fits_v2/lateral_model_benchmark_fixed_iz_20260915.json`. On the
+combined clean 119/120 recordings, the fixed-inertia Y2 tanh candidate is the
+best current offline composed-plant candidate. Its native recursive position
+p95 is `0.0396 m` at `0.10 s`, `0.1884 m` at `0.50 s`, `0.3701 m` at `1.00 s`,
+and `0.7447 m` at `2.00 s`; lateral-velocity p95 is `0.0187`, `0.0211`,
+`0.0216`, and `0.0217 m/s`. The old unconstrained Y2 candidate reaches
+`2.249 m` at `1.00 s` and `7.492 m` at `2.00 s` on the same replay. The
+fixed candidate is therefore selected for the next blind validation, but it
+has not been loaded into runtime MPC and is not promoted: the 2-second error
+still exceeds the project target, and closed-loop blind validation remains
+required.
+
+The corresponding native replay is
+`model_fits_v2/native_replay_Y2_fixed_iz_wheel_continuous_v6_on_119_120_20260915.json`;
+the parity evidence is
+`model_fits_v2/native_plant_parity_fixed_iz_20260915.json`. The replay is
+offline-only and does not modify simulator physics, runtime odometry, MPC
+weights, or the simulator data path. Focused Humble tests pass `44` tests
+with `3` non-fatal dependency warnings.

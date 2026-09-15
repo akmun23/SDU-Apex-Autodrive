@@ -78,7 +78,7 @@
 /* CPU warm-start / cold-start policy. */
 #define MPC_WS_CURVATURE_THRESH 0.25f                    /* Curvature jump that forces a cold start. */
 #define MPC_WS_BOUND_THRESH 0.05f                        /* Slack on ey box before a stale warm start is treated as bound-incompatible. */
-#define MPC_MODEL_SIGNATURE 2                            /* Bumped when the CPU augmented model changes. */
+#define MPC_MODEL_SIGNATURE 3                            /* Bumped when the CPU augmented model changes. */
 
 /* Default MPC configuration values */
 #define TRAJECTORY_MAXIMUM_WAYPOINTS 4000                /* Maximum trajectory samples accepted by MPC reference buffers. */
@@ -101,7 +101,7 @@
 #define VP_CG_TO_REAR_AXLE_M 0.155320086f                /* Contact rear axle distance from measured COM [m]. */
 #define VP_WHEELBASE_M (VP_CG_TO_FRONT_AXLE_M + VP_CG_TO_REAR_AXLE_M) /* Distance between front and rear axle centers. */
 #define VP_MASS_KG 3.470f                                /* Unity Rigidbody mass; wheel masses remain separate accounting. */
-#define VP_YAW_INERTIA_KGM2 0.0276985662f                /* Legacy local-Z projection retained pending corrected body-Y diagnostic gate; do not treat as accepted yaw inertia. */
+#define VP_YAW_INERTIA_KGM2 0.0961908f                   /* Corrected Unity body-Y inertia projection used by the yaw model. */
 #define VP_CG_HEIGHT_M 0.0f                              /* Unknown physical CG-to-contact height; do not use the Unity-local COM coordinate for load transfer. */
 #define VP_FRICTION_COEFF 0.72f                         /* Effective tire-road friction coefficient for force limits. */
 #define GRAVITY_MPS2 9.82f                               /* Gravitational acceleration constant used in vehicle load equations. */

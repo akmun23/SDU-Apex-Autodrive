@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -94,10 +95,12 @@ public:
 
     declare_parameter("wheel_radius_m", 0.059);
     declare_parameter("wheel_speed_scale", 0.968);
+    declare_parameter<std::vector<double>>("wheel_speed_scale_speeds_mps", std::vector<double>{});
+    declare_parameter<std::vector<double>>("wheel_speed_scale_values", std::vector<double>{});
     declare_parameter("reset_encoder_jump_rad", 50.0);
     declare_parameter("wheel_speed_window_s", 0.10);
-    declare_parameter("normal_packet_dt_max_s", 0.080);
-    declare_parameter("degraded_packet_dt_max_s", 0.100);
+    declare_parameter("normal_packet_dt_max_s", 0.035);
+    declare_parameter("degraded_packet_dt_max_s", 0.050);
     declare_parameter("max_integratable_gap_s", 0.250);
     declare_parameter("decel_detect_ax_mps2", -0.5);
     declare_parameter("decel_ax_scale", 1.005);
@@ -110,6 +113,18 @@ public:
     declare_parameter("wheel_recovery_launch_wheel_speed_mps", 4.0);
     declare_parameter("stationary_speed_threshold_mps", 0.03);
     declare_parameter("wheel_burst_disagreement_mps", 1.0);
+    declare_parameter("allow_turn_current_packet_recovery", true);
+    declare_parameter("turn_current_packet_max_increase_mps", 0.20);
+    declare_parameter("use_turn_speed_bias_model", false);
+    declare_parameter("turn_speed_bias_constant_mps", 0.0);
+    declare_parameter("turn_speed_bias_speed_mps", 0.0);
+    declare_parameter("turn_speed_bias_speed_squared_mps", 0.0);
+    declare_parameter("turn_speed_bias_yaw_rate_abs_mps", 0.0);
+    declare_parameter("turn_speed_bias_yaw_rate_squared_mps", 0.0);
+    declare_parameter("turn_speed_bias_speed_yaw_rate_abs_mps", 0.0);
+    declare_parameter("turn_speed_bias_max_mps", 0.10);
+    declare_parameter("use_coherent_packet_velocity_for_pose", false);
+    declare_parameter("coherent_packet_pose_blend", 1.0);
     declare_parameter("wheel_speed_slew_limit_mps2", 40.0);
     declare_parameter("wheel_update_beta", 0.85);
     declare_parameter("stationary_hold_s", 0.10);
@@ -123,6 +138,10 @@ public:
     declare_parameter("turn_exit_hold_s", 0.5);
     declare_parameter("turn_wheel_braking_ax_mps2", -1.0);
     declare_parameter("integrate_lateral_acceleration_in_turn", false);
+    declare_parameter("use_kinematic_lateral_slip_model", false);
+    declare_parameter("lateral_slip_ratio", 0.016);
+    declare_parameter("lateral_slip_yaw_rate_scale_radps", 0.15);
+    declare_parameter("lateral_slip_max_mps", 0.30);
     declare_parameter("max_imu_ax_abs_mps2", 30.0);
 
     observer_config_ = load_observer_config();
@@ -203,8 +222,8 @@ private:
     config.wheel_speed_scale = 0.968;
     config.reset_encoder_jump_rad = 50.0;
     config.wheel_speed_window_s = 0.10;
-    config.normal_packet_dt_max_s = 0.080;
-    config.degraded_packet_dt_max_s = 0.100;
+    config.normal_packet_dt_max_s = 0.035;
+    config.degraded_packet_dt_max_s = 0.050;
     config.decel_detect_ax_mps2 = -0.5;
     config.decel_ax_scale = 1.005;
     config.decel_ax_offset_mps2 = 0.020;
@@ -215,6 +234,11 @@ private:
     config.wheel_recovery_launch_innovation_mps = 2.0;
     config.wheel_recovery_launch_wheel_speed_mps = 4.0;
     config.wheel_burst_disagreement_mps = 1.0;
+    config.turn_current_packet_max_increase_mps = 0.20;
+    config.use_turn_speed_bias_model = false;
+    config.turn_speed_bias_max_mps = 0.10;
+    config.use_coherent_packet_velocity_for_pose = false;
+    config.coherent_packet_pose_blend = 1.0;
     config.wheel_speed_slew_limit_mps2 = 40.0;
     config.stationary_speed_threshold_mps = 0.03;
     config.wheel_update_beta = 0.85;
@@ -240,6 +264,10 @@ private:
     config.wheel_radius_m = get_parameter("wheel_radius_m").as_double();
     config.wheel_speed_scale = std::max(
       0.0, get_parameter("wheel_speed_scale").as_double());
+    config.wheel_speed_scale_speeds_mps = get_parameter(
+      "wheel_speed_scale_speeds_mps").as_double_array();
+    config.wheel_speed_scale_values = get_parameter(
+      "wheel_speed_scale_values").as_double_array();
     config.reset_encoder_jump_rad = get_parameter("reset_encoder_jump_rad").as_double();
     config.wheel_speed_window_s = std::max(
       0.0, get_parameter("wheel_speed_window_s").as_double());
@@ -262,6 +290,30 @@ private:
       0.0, get_parameter("wheel_recovery_launch_wheel_speed_mps").as_double());
     config.wheel_burst_disagreement_mps = get_parameter(
       "wheel_burst_disagreement_mps").as_double();
+    config.allow_turn_current_packet_recovery = get_parameter(
+      "allow_turn_current_packet_recovery").as_bool();
+    config.turn_current_packet_max_increase_mps = std::max(
+      0.0, get_parameter("turn_current_packet_max_increase_mps").as_double());
+    config.use_turn_speed_bias_model = get_parameter(
+      "use_turn_speed_bias_model").as_bool();
+    config.turn_speed_bias_constant_mps = get_parameter(
+      "turn_speed_bias_constant_mps").as_double();
+    config.turn_speed_bias_speed_mps = get_parameter(
+      "turn_speed_bias_speed_mps").as_double();
+    config.turn_speed_bias_speed_squared_mps = get_parameter(
+      "turn_speed_bias_speed_squared_mps").as_double();
+    config.turn_speed_bias_yaw_rate_abs_mps = get_parameter(
+      "turn_speed_bias_yaw_rate_abs_mps").as_double();
+    config.turn_speed_bias_yaw_rate_squared_mps = get_parameter(
+      "turn_speed_bias_yaw_rate_squared_mps").as_double();
+    config.turn_speed_bias_speed_yaw_rate_abs_mps = get_parameter(
+      "turn_speed_bias_speed_yaw_rate_abs_mps").as_double();
+    config.turn_speed_bias_max_mps = std::max(
+      0.0, get_parameter("turn_speed_bias_max_mps").as_double());
+    config.use_coherent_packet_velocity_for_pose = get_parameter(
+      "use_coherent_packet_velocity_for_pose").as_bool();
+    config.coherent_packet_pose_blend = std::clamp(
+      get_parameter("coherent_packet_pose_blend").as_double(), 0.0, 1.0);
     config.wheel_speed_slew_limit_mps2 = std::max(
       0.0, get_parameter("wheel_speed_slew_limit_mps2").as_double());
     config.stationary_speed_threshold_mps = get_parameter(
@@ -287,6 +339,14 @@ private:
       "turn_wheel_braking_ax_mps2").as_double();
     config.integrate_lateral_acceleration_in_turn = get_parameter(
       "integrate_lateral_acceleration_in_turn").as_bool();
+    config.use_kinematic_lateral_slip_model = get_parameter(
+      "use_kinematic_lateral_slip_model").as_bool();
+    config.lateral_slip_ratio = std::max(
+      0.0, get_parameter("lateral_slip_ratio").as_double());
+    config.lateral_slip_yaw_rate_scale_radps = std::max(
+      0.0, get_parameter("lateral_slip_yaw_rate_scale_radps").as_double());
+    config.lateral_slip_max_mps = std::max(
+      0.0, get_parameter("lateral_slip_max_mps").as_double());
     config.imu_x_offset_m = get_parameter("imu_x_m").as_double();
     config.max_imu_ax_abs_mps2 = get_parameter("max_imu_ax_abs_mps2").as_double();
     return config;
@@ -441,11 +501,11 @@ private:
 
     std_msgs::msg::Float64MultiArray diagnostics;
     diagnostics.layout.dim.resize(1);
-    diagnostics.layout.dim[0].label = "deterministic_odometry_v4";
-    diagnostics.layout.dim[0].size = 27;
-    diagnostics.layout.dim[0].stride = 27;
+    diagnostics.layout.dim[0].label = "deterministic_odometry_v5";
+    diagnostics.layout.dim[0].size = 28;
+    diagnostics.layout.dim[0].stride = 28;
     diagnostics.data = {
-      4.0,
+      5.0,
       estimate.stamp_s,
       estimate.dt_s,
       estimate.wheel_raw_mps,
@@ -471,7 +531,8 @@ private:
       estimate.right_angle_rad,
       estimate.imu_yaw_rad,
       estimate.wheel_packet_mps,
-      estimate.wheel_burst_rejected ? 1.0 : 0.0};
+      estimate.wheel_burst_rejected ? 1.0 : 0.0,
+      estimate.turn_speed_bias_mps};
     diagnostics_pub_->publish(diagnostics);
 
     geometry_msgs::msg::TransformStamped transform;

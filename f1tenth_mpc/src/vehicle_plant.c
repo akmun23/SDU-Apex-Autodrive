@@ -11,11 +11,12 @@
 #define PLANT_DEFAULT_MASS_KG 3.470f
 #define PLANT_DEFAULT_LF_M 0.174679914f
 #define PLANT_DEFAULT_LR_M 0.155320086f
-#define PLANT_DEFAULT_IZ_KGM2 0.0276985662f /* Legacy local-Z diagnostic projection; plant remains not accepted. */
+#define PLANT_DEFAULT_IZ_KGM2 0.0961908f /* Corrected Unity body-Y inertia projection. */
 #define PLANT_DEFAULT_MAX_STEERING_RAD 0.5236f
 #define PLANT_DEFAULT_STEERING_RATE_RADPS 3.2f
 #define PLANT_DEFAULT_MAX_SPEED_MPS 22.88f
 #define PLANT_DEFAULT_FORCE_MAX_N 17.7166f
+#define PLANT_DEFAULT_HARD_BRAKE_FORCE_N 17.7166f /* Provisional friction-limited brake force. */
 #define PLANT_DEFAULT_SLIP_GAIN_PER_MPS 2.2574f
 #define PLANT_DEFAULT_DRAG_N_PER_MPS 0.8910f
 #define PLANT_DEFAULT_CF_N_PER_RAD 30.007231f
@@ -51,6 +52,7 @@ VehiclePlantParameters_t vehicle_plant_default_parameters(void)
         .steering_rate_radps = PLANT_DEFAULT_STEERING_RATE_RADPS,
         .max_speed_mps = PLANT_DEFAULT_MAX_SPEED_MPS,
         .force_max_n = PLANT_DEFAULT_FORCE_MAX_N,
+        .hard_brake_force_n = PLANT_DEFAULT_HARD_BRAKE_FORCE_N,
         .slip_gain_per_mps = PLANT_DEFAULT_SLIP_GAIN_PER_MPS,
         .coast_speed_drag_n_per_mps = PLANT_DEFAULT_DRAG_N_PER_MPS,
         .cf_n_per_rad = PLANT_DEFAULT_CF_N_PER_RAD,
@@ -58,6 +60,7 @@ VehiclePlantParameters_t vehicle_plant_default_parameters(void)
         .df_n = PLANT_DEFAULT_DF_N,
         .dr_n = PLANT_DEFAULT_DR_N,
         .tire_model = VEHICLE_PLANT_TIRE_LINEAR_SATURATED,
+        .wheel_dynamics_model = VEHICLE_PLANT_WHEEL_DYNAMICS_DISCRETE,
         .wheel_coefficients = {
             -0.0003516271f, 0.0419576436f, 23.9652144f,
             0.0251136087f, -0.4763574048f, 0.0006345492f,
@@ -90,7 +93,7 @@ static void lateral_forces(float u, float v, float r, float delta,
                        p->tire_model);
 }
 
-static float wheel_next(float body_u, float wheel, float throttle,
+static float wheel_next(float body_u, float wheel, float throttle, float dt_s,
                         const VehiclePlantParameters_t *p)
 {
     const float features[6] = {
@@ -100,6 +103,8 @@ static float wheel_next(float body_u, float wheel, float throttle,
     float result = 0.0f;
     for (int index = 0; index < 6; ++index)
         result += features[index] * p->wheel_coefficients[index];
+    if (p->wheel_dynamics_model == VEHICLE_PLANT_WHEEL_DYNAMICS_CONTINUOUS)
+        result = wheel + dt_s * result;
     return fmaxf(0.0f, result);
 }
 
@@ -121,7 +126,7 @@ void vehicle_plant_step(
     const float steering_end = move_towards(
         state->steering_rad, target, parameters->steering_rate_radps * dt_s);
     const float wheel_end = wheel_next(
-        state->u_mps, state->wheel_speed_mps, throttle, parameters);
+        state->u_mps, state->wheel_speed_mps, throttle, dt_s, parameters);
     const int count = (int)fmaxf(1.0f, ceilf(dt_s / PLANT_INTEGRATION_SUBSTEP_S));
     const float sub_dt = dt_s / (float)count;
 
@@ -141,9 +146,15 @@ void vehicle_plant_step(
         float rear_force = 0.0f;
         lateral_forces(u, v, r, delta, parameters,
                        &front_force, &rear_force);
-        const float longitudinal_force =
+        // AutoDRIVE's zero-throttle command is not passive coasting: the
+        // vehicle controller applies brake torque to all driven wheels. Keep
+        // this branch explicit so offline recursive prediction does not
+        // systematically under-predict braking distance.
+        const float longitudinal_force = throttle > 1.0e-5f ?
             parameters->force_max_n * tanhf(
                 parameters->slip_gain_per_mps * (wheel - u)) -
+            parameters->coast_speed_drag_n_per_mps * u :
+            -fmaxf(0.0f, parameters->hard_brake_force_n) -
             parameters->coast_speed_drag_n_per_mps * u;
         const float u_dot = (longitudinal_force -
                              front_force * sinf(delta)) / parameters->mass_kg + r * v;

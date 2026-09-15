@@ -62,6 +62,13 @@ TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 # stalled/10 Hz response; no sample is held,
 # interpolated, or fabricated.
 MIN_SOURCE_INTERVAL_S = 0.015
+# Unity serializes its source time as decimal seconds.  A source interval at
+# the exact lower boundary can therefore arrive as 0.014999... after the
+# JSON/float conversion even though the physics-step delta is exactly the
+# configured 15 ms boundary.  This epsilon is only for boundary comparison;
+# it is far smaller than a meaningful cadence fault and does not accept a
+# 10 Hz/stalled stream.
+SOURCE_INTERVAL_COMPARISON_EPSILON_S = 1.0e-6
 # Keep an explicit lower bound for the startup check and diagnostics, but set
 # it to zero because host arrival may bunch valid source packets. Source
 # cadence remains guarded independently by MIN_SOURCE_INTERVAL_S.
@@ -85,6 +92,18 @@ MAX_OUTSTANDING_REQUESTS = 2
 # never establishes that contract still fails within this same grace period.
 STARTUP_RESPONSE_GRACE_S = 15.0
 SOURCE_STARTUP_STABLE_INTERVALS = 3
+
+
+def _source_interval_is_valid(source_dt: float) -> bool:
+    """Return whether a source interval satisfies the 40 Hz contract.
+
+    The tolerance compensates for decimal serialization at the exact 15/35 ms
+    boundaries.  It is deliberately not applied to ordering or sequence
+    checks, and it is too small to mask a substantive cadence failure.
+    """
+    return (
+        MIN_SOURCE_INTERVAL_S - SOURCE_INTERVAL_COMPARISON_EPSILON_S <= source_dt <=
+        MAX_SOURCE_INTERVAL_S + SOURCE_INTERVAL_COMPARISON_EPSILON_S)
 
 
 def _env_enabled(name: str, default: bool) -> bool:
@@ -719,7 +738,7 @@ def _validate_source_packet(data: Any) -> bool:
             arrival_dt is not None and source_dt is not None and
             ordering_is_stable and
             MIN_BRIDGE_ARRIVAL_INTERVAL_S <= arrival_dt <= MAX_BRIDGE_ARRIVAL_INTERVAL_S and
-            MIN_SOURCE_INTERVAL_S <= source_dt <= MAX_SOURCE_INTERVAL_S)
+            _source_interval_is_valid(source_dt))
         if _env_enabled("AUTODRIVE_TIMING_DEBUG", False) and _timing_debug_count < 20:
             _timing_debug_count += 1
             print(
@@ -775,7 +794,7 @@ def _validate_source_packet(data: Any) -> bool:
                 f"{MAX_BRIDGE_ARRIVAL_INTERVAL_S:.3f}]s")
             return False
     if source_dt is not None:
-        if not MIN_SOURCE_INTERVAL_S <= source_dt <= MAX_SOURCE_INTERVAL_S:
+        if not _source_interval_is_valid(source_dt):
             _trigger_timing_fault(
                 f"simulator source cadence {source_dt:.6f}s is outside the "
                 f"40 Hz window [{MIN_SOURCE_INTERVAL_S:.3f}, "

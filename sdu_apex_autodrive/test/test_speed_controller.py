@@ -2,6 +2,7 @@ from dataclasses import replace
 
 from sdu_apex_autodrive.speed_controller import (
     LongitudinalStateEstimator,
+    LongitudinalMode,
     SpeedControllerConfig,
     TargetSpeedController,
 )
@@ -31,6 +32,45 @@ def test_stop_resets_controller():
     controller.update(1.0, 0.0, 0.0, 0.1)
     assert controller.update(0.0, 0.2, 0.0, 0.1) == 0.0
     assert controller.integral == 0.0
+
+
+def test_controller_exposes_stop_drive_and_brake_semantics():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=10.0,
+    ))
+
+    stop = controller.update_command(0.0, 0.2, 0.0, 0.1)
+    assert stop.mode is LongitudinalMode.STOP
+    assert stop.throttle_normalized == 0.0
+
+    drive = controller.update_command(5.0, 0.0, 0.0, 0.1)
+    assert drive.mode is LongitudinalMode.DRIVE
+    assert drive.throttle_normalized > 0.0
+
+    brake = controller.update_command(2.0, 5.0, 0.0, 0.1)
+    assert brake.mode is LongitudinalMode.BRAKE
+    assert brake.throttle_normalized == 0.0
+    assert controller.last_output == 0.0
+
+
+def test_active_brake_is_not_slew_delayed_after_downshift():
+    controller = TargetSpeedController(replace(
+        config(),
+        throttle_max_forward=1.0,
+        throttle_rise_rate_per_sec=10.0,
+        throttle_fall_rate_per_sec=0.1,
+        hard_overspeed_cutoff_mps=10.0,
+    ))
+    controller.update_command(8.0, 0.0, 0.0, 0.1)
+
+    command = controller.update_command(2.0, 7.0, 0.0, 0.025)
+
+    assert command.mode is LongitudinalMode.BRAKE
+    assert command.throttle_normalized == 0.0
+    assert controller.last_output == 0.0
 
 
 def test_output_never_exceeds_limit():

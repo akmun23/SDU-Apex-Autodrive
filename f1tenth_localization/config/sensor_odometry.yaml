@@ -22,26 +22,36 @@ sensor_odometry:
     # Frozen deterministic observer constants from
     # VALIDATED_ODOMETRY_IMPLEMENTATION_HANDOFF.md.
     wheel_radius_m: 0.059
-    # Direct wheel-to-body scale selected from the valid ten-high-speed-lap
-    # campaign: 0.968 reduced deployed observer drift while retaining the
-    # best AMCL/current-map accuracy among the tested scales. The old lookup
-    # table belonged to another simulator operating point.
+    # Fallback scale for deployments without the identified speed table.
     wheel_speed_scale: 0.968
+    # Source-time speed-step data show a repeatable speed-dependent encoder
+    # bias. These values are a legal sensor calibration (raw encoder speed to
+    # body-speed estimate); they do not use simulator truth at runtime and do
+    # not alter simulator physics. Values above 14 m/s are held at the last
+    # identified point until a clean high-speed body-speed experiment exists.
+    wheel_speed_scale_speeds_mps: [0.0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0, 8.0,
+      10.0, 12.0, 14.0]
+    wheel_speed_scale_values: [1.0, 0.998, 0.994, 0.992, 0.990, 0.9815,
+      0.9735, 0.9658, 0.9587, 0.9520, 0.9445]
     reset_encoder_jump_rad: 50.0
     # Smooth the simulator's repeated cumulative-angle packets over two
     # native 20 Hz samples.  The recorded run comparison showed that 150 ms
     # adds avoidable launch/braking lag; 100 ms preserves burst rejection
     # while responding faster to real motion.
     wheel_speed_window_s: 0.10
-    # Track-scene native telemetry is approximately 20 Hz (0.050 s). A
-    # 0.040 s limit incorrectly marked every normal packet degraded and set
-    # the pose covariance to 0.25 m^2, which stopped Pure Pursuit.
-    normal_packet_dt_max_s: 0.080
-    degraded_packet_dt_max_s: 0.100
+    # The bridge source contract is 15--35 ms. A 30 ms packet is valid source
+    # jitter; intervals above 35 ms are marked degraded for diagnostics.
+    normal_packet_dt_max_s: 0.035
+    degraded_packet_dt_max_s: 0.050
     # Retain encoder displacement across short source gaps. Longer gaps are
     # rebaselined because an endpoint delta is no longer a safe motion sample.
     max_integratable_gap_s: 0.250
     decel_detect_ax_mps2: -0.5
+    # Repeated encoder dropouts can coincide with genuine hard braking. The
+    # calibrated IMU contribution is retained until a fresh wheel packet
+    # returns; reducing it leaves /odom above the physical vehicle speed and
+    # destabilises the closed-loop path follower. This is sensor estimation,
+    # not simulator physics.
     decel_ax_scale: 1.005
     decel_ax_offset_mps2: 0.020
     # Wheel speed is the direct longitudinal measurement.  The previous
@@ -63,6 +73,34 @@ sensor_odometry:
     # the rolling rate is already >1 m/s above causal speed and the current
     # packet is another >1 m/s above that rolling rate.
     wheel_burst_disagreement_mps: 1.0
+    # In a turn, use a fresh synchronized packet to recover from a stale
+    # rolling window when it is close to the causal speed. Straight-line
+    # burst recovery remains window-coherent.
+    allow_turn_current_packet_recovery: true
+    # A recovery packet is one source interval, not an accumulated burst.
+    # Limit its instantaneous positive correction while keeping normal
+    # coherent wheel updates and causal IMU dropout braking unchanged.
+    turn_current_packet_max_increase_mps: 0.20
+    # Provisional held-out turn-speed residual model. Runtime inputs are only
+    # mapped encoder speed and IMU yaw rate; simulator truth was used offline
+    # to identify/score these coefficients. The correction is bounded to 0.10
+    # m/s and is reported in diagnostic vector element 28. The earlier
+    # polynomial candidate increased integrated drift and is not used. This
+    # controlled A/B candidate applies only a small constant turn correction;
+    # it remains subject to live collision-free pose scoring.
+    use_turn_speed_bias_model: true
+    turn_speed_bias_constant_mps: -0.03
+    turn_speed_bias_speed_mps: 0.0
+    turn_speed_bias_speed_squared_mps: 0.0
+    turn_speed_bias_yaw_rate_abs_mps: 0.0
+    turn_speed_bias_yaw_rate_squared_mps: 0.0
+    turn_speed_bias_speed_yaw_rate_abs_mps: 0.0
+    turn_speed_bias_max_mps: 0.03
+    # The rolling window remains the published speed estimate. When its
+    # current packet agrees with the window, use that newer packet only for
+    # turn-pose trapezoidal integration to remove transient window lag.
+    use_coherent_packet_velocity_for_pose: true
+    coherent_packet_pose_blend: 1.0
     # Reject an abrupt rolling wheel-rate change that is not compatible with
     # the causal body-speed estimate. This catches wheel slip even when the
     # rolling and current packet rates agree. A causal-speed release recovers.
@@ -101,6 +139,18 @@ sensor_odometry:
     # automatically enables the validated dynamic propagation during an
     # explicitly rejected wheel-slip/dropout interval.
     integrate_lateral_acceleration_in_turn: false
+    # Four independent track replays show a small, repeatable velocity-vector
+    # sideslip in turns. This bounded sensor-only model uses causal wheel
+    # speed and IMU yaw rate; it does not use simulator truth or change the
+    # simulator. The ratio remains provisional pending further live runs.
+    use_kinematic_lateral_slip_model: true
+    # Five held-out source-time track replays showed that the previous
+    # 0.016 ratio overestimated the reported pose-point lateral velocity.
+    # 0.012 is the current sensor-only validation candidate; it changes only
+    # the odometry estimate and does not alter simulator physics.
+    lateral_slip_ratio: 0.012
+    lateral_slip_yaw_rate_scale_radps: 0.15
+    lateral_slip_max_mps: 0.30
     # Reject impossible longitudinal IMU spikes before they can be integrated
     # into odometry. Lateral acceleration remains unconstrained here because
     # it is physically large in the tight track turns.
@@ -121,12 +171,12 @@ sensor_odometry:
     twist_linear_variance: 0.04
     twist_yaw_variance: 0.04
 
-    # /odom/diagnostics is Float64MultiArray version 4:
+    # /odom/diagnostics is Float64MultiArray version 5:
     # version, source_stamp_s, dt_s, raw_wheel_mps, mapped_wheel_mps,
     # speed_pred_mps, speed_mps, body_u_mps, body_v_mps, ax_mps2, ay_mps2,
     # yaw_rate_radps, wheel_update_used, turn_mode, reset_epoch,
     # timing_degraded, packet_drop_count, packet_coherence_fault_count,
     # x_m, y_m, yaw_rad, sensor_outlier, left_angle_rad, right_angle_rad,
-    # imu_yaw_rad, packet_wheel_mps, wheel_burst_rejected. The last four values are the exact
+    # imu_yaw_rad, packet_wheel_mps, wheel_burst_rejected, turn_speed_bias_mps. The last four values are the exact
     # synchronized packet input/diagnostic values needed for replay and for
     # diagnosing repeated cumulative-angle packets.

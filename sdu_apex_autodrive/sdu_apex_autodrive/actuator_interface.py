@@ -14,6 +14,7 @@ from std_msgs.msg import Bool, Float32, Int32
 
 from .speed_controller import (
     LongitudinalStateEstimator,
+    LongitudinalMode,
     SpeedControllerConfig,
     TargetSpeedController,
     clamp,
@@ -98,6 +99,7 @@ class ActuatorInterface(Node):
         self.control_time = None
         self.last_controller_odom_time = None
         self.last_controller_odom_source_stamp_ns = None
+        self.last_longitudinal_mode = LongitudinalMode.STOP
         self.last_neutral_reason = None
         self.external_stop_latched = False
         self.collision_count = None
@@ -587,6 +589,11 @@ class ActuatorInterface(Node):
                     <= self.command_timeout)
                 else 0.0)
             self._publish(steering, self.raw_throttle_override)
+            self.last_longitudinal_mode = (
+                LongitudinalMode.DRIVE
+                if self.raw_throttle_override > 0.0
+                else LongitudinalMode.BRAKE
+            )
             self.last_neutral_reason = None
             return
         if (self.raw_steering_override is not None and
@@ -606,6 +613,9 @@ class ActuatorInterface(Node):
                     <= self.command_timeout)
                 else 0.0)
             self._publish(self.raw_steering_override, throttle)
+            self.last_longitudinal_mode = (
+                LongitudinalMode.DRIVE if throttle > 0.0 else LongitudinalMode.BRAKE
+            )
             self.last_neutral_reason = None
             return
         if self.command is None or self.command_time is None:
@@ -635,15 +645,18 @@ class ActuatorInterface(Node):
             self.speed_controller.reset()
             self.control_time = None
             throttle = 0.0
+            self.last_longitudinal_mode = LongitudinalMode.BRAKE
         else:
             fresh_odom = (
                 self.odom_source_stamp_ns is not None and
                 (self.last_controller_odom_source_stamp_ns is None or
                  self.odom_source_stamp_ns !=
                  self.last_controller_odom_source_stamp_ns))
-            throttle = self.speed_controller.update(
+            command = self.speed_controller.update_command(
                 target_speed, self.speed, 0.0, dt, self.acceleration,
                 measurement_fresh=fresh_odom)
+            throttle = command.throttle_normalized
+            self.last_longitudinal_mode = command.mode
             self.last_controller_odom_time = self.odom_time
             if fresh_odom:
                 self.last_controller_odom_source_stamp_ns = self.odom_source_stamp_ns
@@ -657,6 +670,7 @@ class ActuatorInterface(Node):
     def _neutral(self, reason: str) -> None:
         self.speed_controller.reset()
         self.control_time = None
+        self.last_longitudinal_mode = LongitudinalMode.STOP
         self._publish(0.0, 0.0)
         if reason != self.last_neutral_reason:
             self.get_logger().warn(f"Neutral output: {reason}")

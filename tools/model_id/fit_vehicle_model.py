@@ -46,6 +46,21 @@ MAX_DT_S = 0.035
 HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
 STATE_NAMES = ("x_m", "y_m", "yaw_rad", "u_mps", "v_mps", "r_radps")
 
+# These are numerical guard rails for offline recursive scoring, not runtime
+# vehicle limits.  A candidate that leaves this envelope has already
+# diverged, so continuing the rollout would only turn a useful rejection into
+# a Python overflow/domain error.  The envelope is intentionally far outside
+# the accepted simulator operating range (roughly 0--23 m/s).
+MAX_RECURSIVE_POSITION_M = 1.0e6
+MAX_RECURSIVE_HEADING_RAD = 1.0e6
+MAX_RECURSIVE_SPEED_MPS = 100.0
+MAX_RECURSIVE_YAW_RATE_RADPS = 1000.0
+MAX_DIVERGENCE_EXAMPLES = 3
+
+
+class PredictionDiverged(RuntimeError):
+    """Raised when a candidate produces a non-finite or unstable state."""
+
 
 def _horizon_key(horizon: float) -> str:
     """Use labels that retain the 25 ms source-step horizon exactly."""
@@ -310,6 +325,19 @@ def _pose_step(state: np.ndarray, dt: float) -> tuple[float, float, float]:
 
 
 def _predict(state: np.ndarray, row: dict[str, float], models: dict[str, object]) -> np.ndarray:
+    state = np.asarray(state, dtype=float)
+    if state.shape != (6,) or not np.all(np.isfinite(state)):
+        raise PredictionDiverged("non-finite input state")
+    if (abs(state[0]) > MAX_RECURSIVE_POSITION_M or
+            abs(state[1]) > MAX_RECURSIVE_POSITION_M or
+            abs(state[2]) > MAX_RECURSIVE_HEADING_RAD or
+            abs(state[3]) > MAX_RECURSIVE_SPEED_MPS or
+            abs(state[4]) > MAX_RECURSIVE_SPEED_MPS or
+            abs(state[5]) > MAX_RECURSIVE_YAW_RATE_RADPS):
+        raise PredictionDiverged("input state outside recursive envelope")
+    dt = float(row["dt_sim_s"])
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise PredictionDiverged("invalid transition dt")
     pose = _pose_step(state, row["dt_sim_s"])
     next_state = np.asarray([
         pose[0], pose[1], pose[2],
@@ -317,6 +345,15 @@ def _predict(state: np.ndarray, row: dict[str, float], models: dict[str, object]
         state[4] + _channel_prediction(state, row, "v", models["v"]),
         state[5] + _channel_prediction(state, row, "r", models["r"]),
     ], dtype=float)
+    if not np.all(np.isfinite(next_state)):
+        raise PredictionDiverged("non-finite predicted state")
+    if (abs(next_state[0]) > MAX_RECURSIVE_POSITION_M or
+            abs(next_state[1]) > MAX_RECURSIVE_POSITION_M or
+            abs(next_state[2]) > MAX_RECURSIVE_HEADING_RAD or
+            abs(next_state[3]) > MAX_RECURSIVE_SPEED_MPS or
+            abs(next_state[4]) > MAX_RECURSIVE_SPEED_MPS or
+            abs(next_state[5]) > MAX_RECURSIVE_YAW_RATE_RADPS):
+        raise PredictionDiverged("predicted state outside recursive envelope")
     return next_state
 
 
@@ -342,17 +379,41 @@ def _one_step_scores(
         "u_mps": "u_k1_mps", "v_mps": "v_k1_mps",
         "yaw_rate_radps": "r_k1_radps",
     }
-    for rows in runs.values():
+    attempted = 0
+    valid = 0
+    divergent = 0
+    divergence_examples: list[dict[str, object]] = []
+    for run_name, rows in runs.items():
         for row in rows:
+            attempted += 1
             state = np.asarray([
                 row["x_k_m"], row["y_k_m"], row["yaw_k_rad"],
                 row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
             ], dtype=float)
-            row_errors = _state_errors(_predict(state, row, models), row)
+            try:
+                predicted = _predict(state, row, models)
+            except PredictionDiverged as exc:
+                divergent += 1
+                if len(divergence_examples) < MAX_DIVERGENCE_EXAMPLES:
+                    divergence_examples.append({
+                        "run": run_name,
+                        "reason": str(exc),
+                    })
+                continue
+            valid += 1
+            row_errors = _state_errors(predicted, row)
             for key, value in row_errors.items():
                 errors[key].append(value)
                 actual[key].append(row[actual_keys[key]])
-    return {key: _stats(errors[key], actual[key]) for key in errors}
+    result = {key: _stats(errors[key], actual[key]) for key in errors}
+    result.update({
+        "attempted_transition_count": attempted,
+        "valid_transition_count": valid,
+        "divergent_transition_count": divergent,
+        "valid_transition_fraction": valid / attempted if attempted else 0.0,
+        "divergence_examples": divergence_examples,
+    })
+    return result
 
 
 def _recursive_scores(
@@ -368,8 +429,13 @@ def _recursive_scores(
     for horizon in HORIZONS_S:
         errors: dict[str, list[float]] = {key: [] for key in fields}
         actual: dict[str, list[float]] = {key: [] for key in fields}
-        for rows in runs.values():
+        attempted_origins = 0
+        valid_origins = 0
+        divergent_origins = 0
+        divergence_examples: list[dict[str, object]] = []
+        for run_name, rows in runs.items():
             for origin in range(len(rows)):
+                attempted_origins += 1
                 state = np.asarray([
                     rows[origin]["x_k_m"], rows[origin]["y_k_m"],
                     rows[origin]["yaw_k_rad"], rows[origin]["u_k_mps"],
@@ -379,16 +445,31 @@ def _recursive_scores(
                 index = origin
                 origin_segment = int(rows[origin]["segment_id"])
                 crossed_segment_boundary = False
+                diverged = False
                 while index < len(rows) and elapsed < horizon - 1.0e-10:
                     if int(rows[index]["segment_id"]) != origin_segment:
                         crossed_segment_boundary = True
                         break
-                    state = _predict(state, rows[index], models)
+                    try:
+                        state = _predict(state, rows[index], models)
+                    except PredictionDiverged as exc:
+                        divergent_origins += 1
+                        diverged = True
+                        if len(divergence_examples) < MAX_DIVERGENCE_EXAMPLES:
+                            divergence_examples.append({
+                                "run": run_name,
+                                "origin_index": origin,
+                                "transition_index": index,
+                                "elapsed_s": elapsed,
+                                "reason": str(exc),
+                            })
+                        break
                     elapsed += rows[index]["dt_sim_s"]
                     index += 1
-                if (index == origin or index > len(rows) or
+                if (diverged or index == origin or index > len(rows) or
                         crossed_segment_boundary or elapsed < horizon - 1.0e-10):
                     continue
+                valid_origins += 1
                 # The last transition has produced the state represented by
                 # row index-1's k+1 fields.
                 truth = rows[index - 1]
@@ -399,6 +480,14 @@ def _recursive_scores(
         output[_horizon_key(horizon)] = {
             key: _stats(errors[key], actual[key]) for key in fields
         }
+        output[_horizon_key(horizon)].update({
+            "attempted_origin_count": attempted_origins,
+            "valid_origin_count": valid_origins,
+            "divergent_origin_count": divergent_origins,
+            "valid_origin_fraction": (
+                valid_origins / attempted_origins if attempted_origins else 0.0),
+            "divergence_examples": divergence_examples,
+        })
     return output
 
 

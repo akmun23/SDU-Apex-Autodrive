@@ -40,9 +40,9 @@ rigid_body:
     value: 3.47
     source: unity_dump
   yaw_inertia_kgm2:
-    value: null
-    source: pending_corrected_diagnostic_dump_body_y
-    status: unresolved_legacy_dump_not_accepted
+    value: 0.0961908
+    source: unity_dump_corrected_body_y
+    status: measured_structural_anchor
     legacy_local_z_projection_kgm2: 0.0276985662
     yaw_axis: unity_body_y
   rigidbody_center_of_mass_local_y_m:

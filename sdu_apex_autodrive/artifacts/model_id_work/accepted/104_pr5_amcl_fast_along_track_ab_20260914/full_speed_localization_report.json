@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/accepted/104_pr5_amcl_fast_along_track_ab_20260914",
+  "offline_only": true,
+  "future_ground_truth_used": false,
+  "truth_velocity_contract": {
+    "position_point": "simulator GPS vehicle-frame point",
+    "pose_u_mps": "finite difference of the reported position at source-time yaw midpoint",
+    "pose_v_mps": "finite difference of the reported position at source-time yaw midpoint",
+    "com_v_mps": "raw simulator rigidbody/COM lateral velocity, diagnostic only",
+    "odom_v_metric": "pose-point lateral velocity; COM comparison is reported separately"
+  },
+  "source_timing": {
+    "packets": 2183,
+    "dt_s": {
+      "samples": 2182,
+      "p50": 0.025000000000000355,
+      "p90": 0.0259999999999998,
+      "p95": 0.02600089999999966,
+      "p99": 0.026002799999993442,
+      "max": 0.02800000000000047,
+      "mean": 0.02500000187488543,
+      "bias": 0.02500000187488543
+    },
+    "sequence_gaps": 0,
+    "command_lag_packets": {
+      "samples": 2183,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "p99": 1.0,
+      "max": 1.0,
+      "mean": 1.0,
+      "bias": 1.0
+    }
+  },
+  "metrics": {
+    "/odom": {
+      "position_error_m": {
+        "samples": 2183,
+        "p50": 0.22382356879876475,
+        "p90": 0.39149552958451656,
+        "p95": 0.4176910688710373,
+        "p99": 0.4622846449678211,
+        "max": 0.4646220943684776,
+        "mean": 0.22438448577603162,
+        "bias": 0.22438448577603162
+      },
+      "yaw_error_rad": {
+        "samples": 2183,
+        "p50": 0.0,
+        "p90": 4.440892098500626e-16,
+        "p95": 4.440892098500626e-16,
+        "p99": 8.881784197001252e-16,
+        "max": 8.881784197001252e-16,
+        "mean": 1.0924248253337271e-16,
+        "bias": 1.0924248253337271e-16
+      },
+      "u_error_mps": {
+        "samples": 2182,
+        "p50": 0.0488721639180687,
+        "p90": 0.12654429174789344,
+        "p95": 0.1790669270719656,
+        "p99": 0.21314723849783507,
+        "max": 0.5699863516596331,
+        "mean": 0.060848026184934685,
+        "bias": 0.060848026184934685
+      },
+      "v_error_mps": {
+        "samples": 2182,
+        "p50": 0.040791791507859235,
+        "p90": 0.07779802711551327,
+        "p95": 0.08905857375562976,
+        "p99": 0.10422617229134586,
+        "max": 0.1176266282475148,
+        "mean": 0.04438283984019457,
+        "bias": 0.04438283984019457
+      },
+      "v_error_mps_com": {
+        "samples": 2183,
+        "p50": 0.1775587793522976,
+        "p90": 0.32825530125805513,
+        "p95": 0.34735641994770705,
+        "p99": 0.3861646130395986,
+        "max": 0.39149729483050283,
+        "mean": 0.18479140328066002,
+        "bias": 0.18479140328066002
+      },
+      "r_error_radps": {
+        "samples": 2183,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "bias": 0.0
+      }
+    },
+    "/ekf_odom": {
+      "position_error_m": {
+        "samples": 2183,
+        "p50": 0.22382356879880805,
+        "p90": 0.3914955295845648,
+        "p95": 0.4176910688710865,
+        "p99": 0.46228464496784305,
+        "max": 0.4646220943685025,
+        "mean": 0.22438448577605705,
+        "bias": 0.22438448577605705
+      },
+      "yaw_error_rad": {
+        "samples": 2183,
+        "p50": 4.440892098500626e-16,
+        "p90": 8.881784197001252e-16,
+        "p95": 8.881784197001252e-16,
+        "p99": 1.3322676295501878e-15,
+        "max": 1.7763568394002505e-15,
+        "mean": 3.579138611053545e-16,
+        "bias": 3.579138611053545e-16
+      },
+      "u_error_mps": {
+        "samples": 2182,
+        "p50": 0.0488721639180687,
+        "p90": 0.12654429174789344,
+        "p95": 0.1790669270719656,
+        "p99": 0.21314723849783507,
+        "max": 0.5699863516596331,
+        "mean": 0.060848026184934685,
+        "bias": 0.060848026184934685
+      },
+      "v_error_mps": {
+        "samples": 2182,
+        "p50": 0.040791791507859235,
+        "p90": 0.07779802711551327,
+        "p95": 0.08905857375562976,
+        "p99": 0.10422617229134586,
+        "max": 0.1176266282475148,
+        "mean": 0.04438283984019457,
+        "bias": 0.04438283984019457
+      },
+      "v_error_mps_com": {
+        "samples": 2183,
+        "p50": 0.1775587793522976,
+        "p90": 0.32825530125805513,
+        "p95": 0.34735641994770705,
+        "p99": 0.3861646130395986,
+        "max": 0.39149729483050283,
+        "mean": 0.18479140328066002,
+        "bias": 0.18479140328066002
+      },
+      "r_error_radps": {
+        "samples": 2183,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "bias": 0.0
+      }
+    },
+    "/amcl_pose": {
+      "position_error_m": {
+        "samples": 2179,
+        "p50": 0.033946754634646345,
+        "p90": 0.06922648371234705,
+        "p95": 0.08423892678087987,
+        "p99": 0.14544762051052484,
+        "max": 0.17633961855881883,
+        "mean": 0.03974298226667633,
+        "bias": 0.03974298226667633
+      },
+      "yaw_error_rad": {
+        "samples": 2179,
+        "p50": 3.4902556948102064e-05,
+        "p90": 3.490255695082211e-05,
+        "p95": 3.490255695171029e-05,
+        "p99": 3.490255695193233e-05,
+        "max": 3.490255695259847e-05,
+        "mean": 3.4902556948450275e-05,
+        "bias": 3.4902556948450275e-05
+      },
+      "u_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps_com": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "r_error_radps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      }
+    },
+    "/current_map_pose": {
+      "position_error_m": {
+        "samples": 2178,
+        "p50": 0.03346327895090512,
+        "p90": 0.06984436520677847,
+        "p95": 0.08252013268483605,
+        "p99": 0.14146654092059305,
+        "max": 0.1768259133040305,
+        "mean": 0.039343726131624464,
+        "bias": 0.039343726131624464
+      },
+      "yaw_error_rad": {
+        "samples": 2178,
+        "p50": 3.49025569480678e-05,
+        "p90": 3.490255695082211e-05,
+        "p95": 3.4902556951488244e-05,
+        "p99": 3.490255695193233e-05,
+        "max": 3.4902556953042556e-05,
+        "mean": 3.490255694845569e-05,
+        "bias": 3.490255694845569e-05
+      },
+      "u_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "v_error_mps_com": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      },
+      "r_error_radps": {
+        "samples": 0,
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null,
+        "bias": null
+      }
+    }
+  },
+  "acceptance_targets": {
+    "current_map_position_p95_m": 0.05,
+    "current_map_yaw_p95_rad": 0.02,
+    "odom_u_p95_mps": 0.1,
+    "odom_v_p95_mps": 0.1,
+    "odom_r_p95_radps": 0.05
+  },
+  "acceptance": {
+    "transport_sequence_clean": true,
+    "localization_targets_available": true,
+    "full_speed_localization_pass": false
+  }
+}

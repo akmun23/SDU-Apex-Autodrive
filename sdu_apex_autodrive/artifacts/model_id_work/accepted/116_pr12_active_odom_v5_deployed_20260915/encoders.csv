@@ -1,0 +1,3 @@
+event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
+804,52931963248244,/autodrive/roboracer_1/left_encoder,JointState,1789423982702761949,,"{""position"":[0.0],""velocity"":[]}"
+806,52931964589725,/autodrive/roboracer_1/right_encoder,JointState,1789423982702761949,,"{""position"":[0.0],""velocity"":[]}"

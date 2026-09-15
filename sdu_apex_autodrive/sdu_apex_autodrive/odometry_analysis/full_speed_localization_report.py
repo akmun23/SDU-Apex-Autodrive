@@ -102,6 +102,7 @@ def build_report(run_dir: str | Path, output_json: str | Path | None = None,
     timing_dts: list[float] = []
     command_lags: list[float] = []
     previous_time: float | None = None
+    previous_truth_pose: tuple[float, float, float, float] | None = None
     sequence_gaps = 0
     previous_sequence: int | None = None
     for timing, imu in zip(timing_rows, imu_rows):
@@ -112,13 +113,41 @@ def build_report(run_dir: str | Path, output_json: str | Path | None = None,
             "y_m": _finite(bridge.get("simulator_position_y")),
             "yaw_rad": _yaw_from_quaternion(bridge),
             "u_mps": _finite(bridge.get("simulator_linear_velocity_x")),
-            "v_mps": _finite(bridge.get("simulator_linear_velocity_y")),
+            # The raw simulator velocity is measured at the rigidbody/COM,
+            # while the reported simulator position is the GPS vehicle-frame
+            # point. Keep the COM value for diagnostics, but do not compare it
+            # directly with the odometry twist of the reported pose point.
+            "com_v_mps": _finite(bridge.get("simulator_linear_velocity_y")),
             "r_radps": _finite(bridge.get("simulator_angular_velocity_z")),
             "simulation_time_s": _finite(bridge.get("simulation_time_s")),
         }
+        source_time = truth["simulation_time_s"]
+        if all(isinstance(truth.get(key), float) for key in
+               ("x_m", "y_m", "yaw_rad", "simulation_time_s")):
+            current_pose = (
+                float(truth["x_m"]), float(truth["y_m"]),
+                float(truth["yaw_rad"]), float(source_time))
+            if previous_truth_pose is not None:
+                previous_x, previous_y, previous_yaw, previous_stamp = previous_truth_pose
+                dt_pose = current_pose[3] - previous_stamp
+                if dt_pose > 0.0:
+                    yaw_mid = previous_yaw + 0.5 * _angle_diff(
+                        current_pose[2], previous_yaw)
+                    dx = current_pose[0] - previous_x
+                    dy = current_pose[1] - previous_y
+                    truth["pose_u_mps"] = (
+                        (dx * math.cos(yaw_mid) + dy * math.sin(yaw_mid)) /
+                        dt_pose)
+                    truth["pose_v_mps"] = (
+                        (-dx * math.sin(yaw_mid) + dy * math.cos(yaw_mid)) /
+                        dt_pose)
+            previous_truth_pose = current_pose
+        else:
+            previous_truth_pose = None
+        truth.setdefault("pose_u_mps", None)
+        truth.setdefault("pose_v_mps", None)
         if source_stamp:
             truth_by_stamp[source_stamp] = truth
-        source_time = truth["simulation_time_s"]
         if isinstance(source_time, float) and previous_time is not None:
             timing_dts.append(source_time - previous_time)
         if isinstance(source_time, float):
@@ -180,16 +209,24 @@ def build_report(run_dir: str | Path, output_json: str | Path | None = None,
                     estimate_y - float(truth["y_m"])),
                 "estimate_yaw_rad": estimate_yaw,
                 "truth_yaw_rad": truth["yaw_rad"],
+                "truth_pose_u_mps": truth["pose_u_mps"],
+                "truth_pose_v_mps": truth["pose_v_mps"],
+                "truth_com_v_mps": truth["com_v_mps"],
                 "u_error_mps": (
-                    _finite(payload.get("speed_mps")) - float(truth["u_mps"])
+                    _finite(payload.get("speed_mps")) - float(truth["pose_u_mps"])
                     if topic in ("/odom", "/ekf_odom") and
                     _finite(payload.get("speed_mps")) is not None and
-                    isinstance(truth["u_mps"], float) else None),
+                    isinstance(truth["pose_u_mps"], float) else None),
                 "v_error_mps": (
-                    _finite(payload.get("lateral_speed_mps")) - float(truth["v_mps"])
+                    _finite(payload.get("lateral_speed_mps")) - float(truth["pose_v_mps"])
                     if topic in ("/odom", "/ekf_odom") and
                     _finite(payload.get("lateral_speed_mps")) is not None and
-                    isinstance(truth["v_mps"], float) else None),
+                    isinstance(truth["pose_v_mps"], float) else None),
+                "v_error_mps_com": (
+                    _finite(payload.get("lateral_speed_mps")) - float(truth["com_v_mps"])
+                    if topic in ("/odom", "/ekf_odom") and
+                    _finite(payload.get("lateral_speed_mps")) is not None and
+                    isinstance(truth["com_v_mps"], float) else None),
                 "r_error_radps": (
                     _finite(payload.get("yaw_rate_radps")) - float(truth["r_radps"])
                     if topic in ("/odom", "/ekf_odom") and
@@ -215,6 +252,9 @@ def build_report(run_dir: str | Path, output_json: str | Path | None = None,
             "v_error_mps": _metric([
                 float(row["v_error_mps"]) for row in rows
                 if isinstance(row["v_error_mps"], float)]),
+            "v_error_mps_com": _metric([
+                float(row["v_error_mps_com"]) for row in rows
+                if isinstance(row["v_error_mps_com"], float)]),
             "r_error_radps": _metric([
                 float(row["r_error_radps"]) for row in rows
                 if isinstance(row["r_error_radps"], float)]),
@@ -225,6 +265,13 @@ def build_report(run_dir: str | Path, output_json: str | Path | None = None,
         "run_dir": str(root),
         "offline_only": True,
         "future_ground_truth_used": False,
+        "truth_velocity_contract": {
+            "position_point": "simulator GPS vehicle-frame point",
+            "pose_u_mps": "finite difference of the reported position at source-time yaw midpoint",
+            "pose_v_mps": "finite difference of the reported position at source-time yaw midpoint",
+            "com_v_mps": "raw simulator rigidbody/COM lateral velocity, diagnostic only",
+            "odom_v_metric": "pose-point lateral velocity; COM comparison is reported separately",
+        },
         "source_timing": {
             "packets": len(timing_rows),
             "dt_s": _metric(timing_dts, absolute=False),

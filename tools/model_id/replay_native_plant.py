@@ -109,12 +109,22 @@ def _score(runs: dict[str, list[dict[str, float]]], function: Any,
 
 def replay(source_root: Path, accepted_root: Path, run_names: list[str],
            lateral_report: Path, longitudinal_report: Path,
-           output: Path) -> dict[str, object]:
+           output: Path, longitudinal_model: str = "wheel_dynamic",
+           lateral_model: str = "Y1_linear_saturated") -> dict[str, object]:
     lateral = json.loads(lateral_report.read_text(encoding="utf-8"))
     longitudinal = json.loads(longitudinal_report.read_text(encoding="utf-8"))
-    lateral_parameters = lateral["candidate_comparison"]["Y1_linear_saturated"][
-        "parameters"]["parameters"]
-    longitudinal_parameters = longitudinal["models"]["wheel_dynamic"]["parameters"]
+    lateral_candidates = lateral.get("candidate_comparison", {})
+    if lateral_model not in lateral_candidates:
+        raise ValueError(
+            f"lateral report has no candidate named {lateral_model!r}; "
+            f"available={sorted(lateral_candidates)}")
+    lateral_parameters = lateral_candidates[lateral_model]["parameters"][
+        "parameters"]
+    if longitudinal_model not in longitudinal["models"]:
+        raise ValueError(
+            f"longitudinal report has no model named {longitudinal_model!r}")
+    longitudinal_parameters = longitudinal["models"][longitudinal_model][
+        "parameters"]
     plant_parameters = PlantParameters.from_longitudinal_parameters(
         longitudinal_parameters).with_lateral(lateral_parameters)
     runs = _read_runs(accepted_root, run_names)
@@ -137,7 +147,8 @@ def replay(source_root: Path, accepted_root: Path, run_names: list[str],
         "plant_parameters": {
             "source_lateral_report": str(lateral_report),
             "source_longitudinal_report": str(longitudinal_report),
-            "candidate": "Y1_linear_saturated",
+            "candidate": lateral_model,
+            "longitudinal_model": longitudinal_model,
         },
         "native_source": "f1tenth_mpc/src/vehicle_plant.c",
         "recursive_scores": scores,
@@ -160,12 +171,19 @@ def main() -> None:
     parser.add_argument("--run-names", required=True)
     parser.add_argument("--lateral-report", type=Path, required=True)
     parser.add_argument("--longitudinal-report", type=Path, required=True)
+    parser.add_argument(
+        "--longitudinal-model", default="wheel_dynamic",
+        help="model key from the longitudinal benchmark (default: wheel_dynamic)")
+    parser.add_argument(
+        "--lateral-model", default="Y1_linear_saturated",
+        help="candidate key from the lateral benchmark (default: Y1_linear_saturated)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = replay(
         args.source_root, args.accepted_root,
         [value.strip() for value in args.run_names.split(",") if value.strip()],
-        args.lateral_report, args.longitudinal_report, args.output)
+        args.lateral_report, args.longitudinal_report, args.output,
+        args.longitudinal_model, args.lateral_model)
     print(json.dumps({
         "output": str(args.output),
         "status": report["status"],

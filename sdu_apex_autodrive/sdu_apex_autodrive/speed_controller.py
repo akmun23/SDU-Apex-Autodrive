@@ -8,11 +8,44 @@ IMU data; simulator truth is used offline to identify and validate the tables.
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from enum import Enum
 import math
 
 
 def clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
+
+
+class LongitudinalMode(str, Enum):
+    """Semantic mode behind the normalized AutoDRIVE throttle channel.
+
+    The simulator has no separate brake topic: zero throttle applies its
+    measured brake torque.  Keeping this semantic distinction in the
+    controller prevents a zero command from being treated as passive coast.
+    ``STOP`` is reserved for a deliberate stop/watchdog reset; ``BRAKE`` is
+    an active speed-reduction command.  Both currently serialize as zero on
+    the legacy normalized-throttle wire interface.
+    """
+
+    DRIVE = "drive"
+    BRAKE = "brake"
+    STOP = "stop"
+
+
+@dataclass(frozen=True)
+class LongitudinalCommand:
+    """Controller output with explicit semantics and legacy wire value."""
+
+    mode: LongitudinalMode
+    throttle_normalized: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.throttle_normalized):
+            raise ValueError("longitudinal throttle must be finite")
+        if not 0.0 <= self.throttle_normalized <= 1.0:
+            raise ValueError("longitudinal throttle must be in [0, 1]")
+        if self.mode is not LongitudinalMode.DRIVE and self.throttle_normalized != 0.0:
+            raise ValueError("brake and stop commands serialize as zero throttle")
 
 
 @dataclass(frozen=True)
@@ -40,21 +73,20 @@ class SpeedControllerConfig:
     speed_boost_error_mps: float = 1.5
     speed_hold_prediction_horizon_sec: float = 0.50
     speed_hold_entry_margin_mps: float = 0.15
-    # After a target decrease, passive coasting must observe fresh odometry
+    # After a target decrease, active braking must observe fresh odometry
     # inside the new target band for this long before feed-forward resumes.
     speed_downshift_stable_sec: float = 0.20
     speed_downshift_band_mps: float = 0.10
     # A single native telemetry sample above the target is not enough to
-    # command coast: the simulator publishes longitudinal telemetry at about
-    # 10 Hz and wheel/IMU fusion can produce one-sample spikes. Zero keeps the
-    # deterministic unit-test behavior; production config enables a short
-    # persistence interval.
+    # command braking: the simulator publishes longitudinal telemetry at
+    # about 10 Hz and wheel/IMU fusion can produce one-sample spikes. Zero
+    # keeps the deterministic unit-test behavior; production config enables a
+    # short persistence interval.
     speed_overspeed_confirmation_sec: float = 0.0
-    # Hard coast threshold for a clearly unsafe target crossing.  This is
-    # deliberately separate from the slew-limited, noise-tolerant coast
-    # threshold: once the measured speed is materially above the request,
-    # retaining any throttle for the slew interval only makes the overshoot
-    # worse because AutoDRIVE has no active brake channel.
+    # Hard brake threshold for a clearly unsafe target crossing. This is
+    # deliberately separate from the slew-limited, noise-tolerant threshold:
+    # once the measured speed is materially above the request, retaining any
+    # throttle for the slew interval only makes the overshoot worse.
     hard_overspeed_cutoff_mps: float = 0.50
     # Speed error is converted to a requested body acceleration before the
     # throttle inverse is applied.  These are not throttle ceilings.
@@ -346,8 +378,8 @@ class AccelerationController:
             -self.config.max_deceleration_mps2,
             self.maximum_acceleration(speed_mps),
         )
-        # Do not build an integral wind-up around the unavailable reverse/brake
-        # channel.  The outer speed controller handles passive coasting.
+        # Do not build an integral wind-up around reverse demand. The outer
+        # speed controller selects the active brake mode for negative demand.
         if desired_accel_mps2 >= 0.0 or measured_accel_mps2 > 0.0:
             self.integral = candidate_integral
         else:
@@ -457,7 +489,7 @@ class LongitudinalStateEstimator:
             # The estimator is a control-side measurement conditioner, not a
             # second odometry source. A short causal low-pass prevents one
             # noisy native odom sample from switching the speed controller
-            # between boost, hold, and coast. The published /odom topic is
+            # between boost, hold, and brake. The published /odom topic is
             # untouched, and alpha=1 preserves the raw calibrated value.
             alpha = self.speed_measurement_filter_alpha
             previous_speed = self.speed_mps
@@ -505,6 +537,7 @@ class TargetSpeedController:
         self._downshift_catch = False
         self._downshift_stable_elapsed = 0.0
         self._downshift_below_band_elapsed = 0.0
+        self.last_command = LongitudinalCommand(LongitudinalMode.STOP, 0.0)
 
     def reset(self) -> None:
         self.integral = 0.0
@@ -518,6 +551,7 @@ class TargetSpeedController:
         self._downshift_catch = False
         self._downshift_stable_elapsed = 0.0
         self._downshift_below_band_elapsed = 0.0
+        self.last_command = LongitudinalCommand(LongitudinalMode.STOP, 0.0)
 
     def reconfigure(self, config: SpeedControllerConfig) -> None:
         config.validate()
@@ -540,7 +574,7 @@ class TargetSpeedController:
         return throttles[lower] + ratio * (throttles[upper] - throttles[lower])
 
     def _slew_to(self, desired: float, dt_seconds: float) -> float:
-        """Apply the speed-loop actuator slew limit to a throttle target."""
+        """Apply the speed-loop slew limit to a DRIVE throttle target."""
         rate = (
             self.config.throttle_rise_rate_per_sec
             if desired >= self.last_output
@@ -554,8 +588,24 @@ class TargetSpeedController:
         )
         return self.last_output
 
+    def _drive(self, desired: float, dt_seconds: float) -> LongitudinalCommand:
+        command = LongitudinalCommand(
+            LongitudinalMode.DRIVE,
+            self._slew_to(desired, dt_seconds),
+        )
+        self.last_command = command
+        return command
+
+    def _brake(self) -> LongitudinalCommand:
+        # Zero is an active brake command in the measured simulator actuator.
+        # Do not pass it through the falling throttle slew ramp.
+        self.last_output = 0.0
+        command = LongitudinalCommand(LongitudinalMode.BRAKE, 0.0)
+        self.last_command = command
+        return command
+
     def _overspeed_limit(self, target_speed_mps: float) -> float:
-        """Return a bounded, partly target-relative coast threshold.
+        """Return a bounded, partly target-relative brake threshold.
 
         A fixed 1 m/s threshold is too permissive for a 5 m/s target. The
         configured value remains the upper bound, while the 10 percent term
@@ -617,6 +667,29 @@ class TargetSpeedController:
         measured_accel_mps2: float = 0.0,
         measurement_fresh: bool = True,
     ) -> float:
+        """Return the legacy normalized throttle value.
+
+        Call :meth:`update_command` when the caller needs the semantic
+        ``DRIVE``/``BRAKE``/``STOP`` mode as well as the wire value.
+        """
+        return self.update_command(
+            target_speed_mps,
+            measured_speed_mps,
+            requested_accel_mps2,
+            dt_seconds,
+            measured_accel_mps2,
+            measurement_fresh,
+        ).throttle_normalized
+
+    def update_command(
+        self,
+        target_speed_mps: float,
+        measured_speed_mps: float,
+        requested_accel_mps2: float,
+        dt_seconds: float,
+        measured_accel_mps2: float = 0.0,
+        measurement_fresh: bool = True,
+    ) -> LongitudinalCommand:
         if not all(math.isfinite(v) for v in (
             target_speed_mps, measured_speed_mps, requested_accel_mps2,
             dt_seconds, measured_accel_mps2,
@@ -627,7 +700,7 @@ class TargetSpeedController:
         measured = max(0.0, measured_speed_mps)
         if target <= self.config.stop_speed_threshold_mps:
             self.reset()
-            return 0.0
+            return self.last_command
 
         target_changed = (
             self._last_target_speed is None or
@@ -662,7 +735,7 @@ class TargetSpeedController:
         # much too large for the new target, and one stale/low odometry sample
         # must not immediately restart it.  Require fresh measurements to be
         # in the target band for a short dwell; while the vehicle is still
-        # above the band, command passive coast.
+        # above the band, command active brake.
         if self._downshift_guard:
             band = self.config.speed_downshift_band_mps
             if not measurement_fresh:
@@ -670,10 +743,10 @@ class TargetSpeedController:
                 self._downshift_below_band_elapsed = 0.0
                 self.integral = 0.0
                 self.acceleration_controller.reset()
-                return self._slew_to(0.0, dt_seconds)
+                return self._brake()
             if measured > target + band:
-                # Passive simulator coast-down is much faster than the
-                # actuator/telemetry loop. Waiting until the speed is already
+                # The measured simulator brake response can cross the target
+                # faster than the actuator/telemetry loop. Waiting until the
                 # inside the target band can therefore skip past the target
                 # by several metres per second. Start the new target's
                 # calibrated hold throttle when the allowed IMU acceleration
@@ -689,22 +762,17 @@ class TargetSpeedController:
                     self._downshift_below_band_elapsed = 0.0
                     self.integral = 0.0
                     self.acceleration_controller.reset()
-                    return self._slew_to(self.feedforward(target), dt_seconds)
+                    return self._drive(self.feedforward(target), dt_seconds)
                 self._downshift_stable_elapsed = 0.0
                 self._downshift_below_band_elapsed = 0.0
                 self.integral = 0.0
                 self.acceleration_controller.reset()
-                if measured - target >= self.config.hard_overspeed_cutoff_mps:
-                    # Preserve the downshift guard state, but do not leave a
-                    # residual throttle in the ordinary falling slew ramp
-                    # when the new target is materially below the measured
-                    # speed.
-                    self.last_output = 0.0
-                    return 0.0
-                return self._slew_to(0.0, dt_seconds)
+                # Preserve the downshift guard state. Zero is an active brake
+                # in the simulator, so it must not be slew limited.
+                return self._brake()
             if measured < max(0.0, target - band):
-                # Passive coasting has already crossed below the new target.
-                # Holding neutral here cannot prevent overspeed and can leave
+                # Active braking has already crossed below the new target.
+                # Holding brake here cannot prevent underspeed and can leave
                 # the car stopped forever when FTG lowers its request for a
                 # recovery turn. Resume the ordinary speed loop immediately;
                 # the next branch applies the calibrated forward demand.
@@ -717,38 +785,35 @@ class TargetSpeedController:
                         self.config.speed_downshift_stable_sec):
                     self.integral = 0.0
                     self.acceleration_controller.reset()
-                    return self._slew_to(0.0, dt_seconds)
+                    return self._brake()
                 self._downshift_guard = False
                 self._hold_approach = True
 
         if self._downshift_catch:
             # Keep the new target's hold throttle during the brief catch phase,
             # including while the vehicle is still above the nominal target.
-            # The ordinary overspeed coast guard must not undo this correction;
-            # it is the catch that prevents passive deceleration from carrying
-            # the car below the requested speed.
+            # The ordinary overspeed brake guard must not undo this correction;
+            # it is the catch that prevents braking from carrying the car below
+            # the requested speed.
             self.integral = 0.0
             self.acceleration_controller.reset()
             if measured <= target + self.config.speed_downshift_band_mps:
                 self._downshift_catch = False
             else:
-                return self._slew_to(self.feedforward(target), dt_seconds)
+                return self._drive(self.feedforward(target), dt_seconds)
 
         # A large target crossing is not a situation where actuator slew is
         # useful. The competition interface exposes forward throttle and
-        # neutral, but no active brake; cut forward throttle immediately and
-        # clear accumulated demand. Smaller crossings still use the normal
-        # persistence and slew-limited coast logic below. This comes after the
-        # explicit target-downshift guard so its predicted passive-coast catch
-        # remains valid.
+        # active brake through zero throttle; cut forward throttle immediately
+        # and clear accumulated demand. This comes after the explicit
+        # target-downshift guard so its predicted catch remains valid.
         if measured - target >= self.config.hard_overspeed_cutoff_mps:
             self.integral = 0.0
             self.acceleration_controller.reset()
             self._hold_approach = False
             self._hold_reentry_requires_speed = False
             self._overspeed_elapsed = 0.0
-            self.last_output = 0.0
-            return 0.0
+            return self._brake()
 
         error = target - measured
         overspeed = measured - target > self._overspeed_limit(target)
@@ -762,12 +827,12 @@ class TargetSpeedController:
             self._hold_reentry_requires_speed = False
             self.integral = 0.0
             self.acceleration_controller.reset()
-            return self._slew_to(0.0, dt_seconds)
+            return self._brake()
 
         # A large error is handled by the same calibrated acceleration model
         # as the rest of the loop. Do not jump to full normalized throttle:
-        # AutoDRIVE has no active brake channel, so an open-loop boost can
-        # cross a low target by several m/s before the next odometry sample.
+        # an open-loop boost can cross a low target by several m/s before the
+        # next odometry sample.
         if (self._hold_approach and error > max(
                 self.config.speed_hold_error_deadband_mps,
                 self.config.speed_hold_recovery_error_mps)):
@@ -793,7 +858,7 @@ class TargetSpeedController:
             self.integral = 0.0
             self.acceleration_controller.reset()
             desired = self.feedforward(target)
-            return self._slew_to(
+            return self._drive(
                 clamp(desired, 0.0, self.config.throttle_max_forward),
                 dt_seconds,
             )
@@ -809,7 +874,7 @@ class TargetSpeedController:
             )
             self.integral = 0.0
             self.acceleration_controller.reset()
-            return self._slew_to(
+            return self._drive(
                 clamp(desired, 0.0, self.config.throttle_max_forward),
                 dt_seconds,
             )
@@ -839,18 +904,16 @@ class TargetSpeedController:
             + self.config.kp * error
             + self.config.ki * candidate_integral
         )
-        # AutoDRIVE has no active brake channel in the competition actuator
-        # contract. Once measured speed is materially above the requested
-        # speed, positive feed-forward would prolong the overspeed. Coast
-        # immediately and clear the integral so the next target does not
-        # inherit stale acceleration demand.
+        # Once measured speed is materially above the requested speed, zero
+        # throttle applies active brake torque. Do that immediately and clear
+        # the integral so the next target does not inherit stale demand.
         materially_overspeed = (
             measured - target > self.config.overspeed_coast_threshold_mps
         )
         if materially_overspeed:
-            desired = 0.0
-        else:
-            desired = clamp(unsaturated, 0.0, self.config.throttle_max_forward)
+            self.integral = 0.0
+            return self._brake()
+        desired = clamp(unsaturated, 0.0, self.config.throttle_max_forward)
 
         if not materially_overspeed and (
             0.0 < unsaturated < self.config.throttle_max_forward
@@ -858,11 +921,5 @@ class TargetSpeedController:
             or (unsaturated <= 0.0 and error > 0.0)
         ):
             self.integral = candidate_integral
-        elif materially_overspeed:
-            # No active brake channel is available in the competition
-            # actuator contract. Do not retain acceleration demand while
-            # waiting for passive coast-down.
-            self.integral = 0.0
-
         # The speed abstraction owns its actuator slew limits.
-        return self._slew_to(desired, dt_seconds)
+        return self._drive(desired, dt_seconds)

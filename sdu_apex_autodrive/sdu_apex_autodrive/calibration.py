@@ -875,8 +875,8 @@ class Calibration(Node):
     def _on_odom_diagnostics(self, msg: Float64MultiArray) -> None:
         """Record versioned deterministic observer vectors."""
         version = float(msg.data[0]) if msg.data else math.nan
-        if (len(msg.data) not in (21, 22, 25, 26, 27) or
-                not math.isfinite(version) or version not in (2.0, 3.0, 4.0)):
+        if (len(msg.data) not in (21, 22, 25, 26, 27, 28) or
+                not math.isfinite(version) or version not in (2.0, 3.0, 4.0, 5.0)):
             return
         self._on_deterministic_odom_diagnostics(msg)
 
@@ -898,7 +898,7 @@ class Calibration(Node):
             "odom_observer_sensor_outlier", "odom_observer_left_angle_rad",
             "odom_observer_right_angle_rad", "odom_observer_imu_yaw_rad",
             "odom_observer_packet_wheel_speed_mps",
-            "odom_observer_wheel_burst_rejected",
+            "odom_observer_wheel_burst_rejected", "odom_observer_turn_speed_bias_mps",
         )
         self._record_event("odom_diagnostics")
         for name, value in zip(names, values):

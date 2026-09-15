@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <vector>
 
 namespace f1tenth_localization
 {
@@ -9,10 +10,16 @@ namespace f1tenth_localization
 struct OdometryObserverConfig
 {
   double wheel_radius_m{0.059};
-  // Direct wheel-to-body speed scale fit from the clean single-simulator
-  // 4 m/s track run. Keep the physical wheel radius separate from this
-  // runtime calibration.
+  // Fallback direct wheel-to-body speed scale. Keep the physical wheel radius
+  // separate from this runtime calibration.
   double wheel_speed_scale{0.968};
+  // Optional monotone calibration of the wheel-to-body speed scale. The
+  // values are linearly interpolated against the raw rolling wheel speed and
+  // endpoint values are held outside the identified range. An invalid or
+  // incomplete table falls back to wheel_speed_scale, so a bad deployment
+  // parameter cannot silently disable odometry.
+  std::vector<double> wheel_speed_scale_speeds_mps;
+  std::vector<double> wheel_speed_scale_values;
   double reset_encoder_jump_rad{50.0};
   // The simulator can repeat a cumulative encoder angle for several source
   // packets and then publish the accumulated jump.  Differentiate over a
@@ -21,16 +28,20 @@ struct OdometryObserverConfig
   // packets.  The recorded run comparison showed that 150 ms adds avoidable
   // launch/braking lag; retain only two native samples for the rolling rate.
   double wheel_speed_window_s{0.10};
-  // The competition player currently publishes native telemetry at about
-  // 20 Hz (roughly 0.050 s). Keep that cadence in the normal, non-degraded
-  // path; a 40 ms threshold falsely marked every track packet degraded and
-  // inflated /odom covariance to the controller stop threshold.
-  double normal_packet_dt_max_s{0.080};
-  double degraded_packet_dt_max_s{0.100};
+  // The bridge accepts source intervals in the 15--35 ms contract. Keep the
+  // normal observer path aligned with that contract: a 30 ms packet is still
+  // valid jitter, while a real >35 ms source interval is observable as
+  // degraded instead of being silently treated as nominal.
+  double normal_packet_dt_max_s{0.035};
+  double degraded_packet_dt_max_s{0.050};
   // Short gaps still have valid encoder endpoints and can be integrated as an
   // average displacement. Longer gaps are rebaselined conservatively.
   double max_integratable_gap_s{0.250};
   double decel_detect_ax_mps2{-0.5};
+  // The repeated-encoder dropout can coincide with genuine hard braking. Use
+  // the calibrated IMU deceleration until a fresh wheel packet returns; a
+  // reduced scale leaves /odom dangerously above the actual vehicle speed in
+  // the closed loop.
   double decel_ax_scale{1.005};
   double decel_ax_offset_mps2{0.020};
   // Wheel speed is the direct longitudinal measurement.  Keep this gate
@@ -52,6 +63,30 @@ struct OdometryObserverConfig
   // then again in the current packet. Reject only that two-stage signature;
   // ordinary acceleration packets have no packet-vs-window disagreement.
   double wheel_burst_disagreement_mps{1.0};
+  // In a turn, a fresh synchronized packet can be a valid current-motion
+  // sample while the rolling window still contains a repeated angle. Permit
+  // that recovery only when the packet is close to the causal speed and is
+  // clearly newer than the stale window; straight-line burst recovery keeps
+  // the stricter window-coherence rule.
+  bool allow_turn_current_packet_recovery{true};
+  double turn_current_packet_max_increase_mps{0.20};
+  // Provisional, bounded turn-speed residual calibration identified from
+  // held-out live runs. It uses only mapped wheel speed and IMU yaw rate at
+  // runtime; simulator truth is used offline to fit/score the coefficients.
+  bool use_turn_speed_bias_model{false};
+  double turn_speed_bias_constant_mps{0.0};
+  double turn_speed_bias_speed_mps{0.0};
+  double turn_speed_bias_speed_squared_mps{0.0};
+  double turn_speed_bias_yaw_rate_abs_mps{0.0};
+  double turn_speed_bias_yaw_rate_squared_mps{0.0};
+  double turn_speed_bias_speed_yaw_rate_abs_mps{0.0};
+  double turn_speed_bias_max_mps{0.10};
+  // The rolling encoder window rejects delayed cumulative-angle bursts, but
+  // it lags the current motion during a genuine turn transient. When both
+  // rates are coherent, use the current packet only for pose integration;
+  // keep the published longitudinal state anchored to the rolling estimate.
+  bool use_coherent_packet_velocity_for_pose{false};
+  double coherent_packet_pose_blend{1.0};
   // Reject abrupt rolling wheel-rate changes that are physically inconsistent
   // with the causal body-speed estimate. A release back to causal speed is
   // still allowed to recover.
@@ -86,6 +121,14 @@ struct OdometryObserverConfig
   // dropout interval; this flag remains available for offline comparison and
   // vehicles with a separately validated slip model.
   bool integrate_lateral_acceleration_in_turn{false};
+  // Optional bounded sideslip model using only causal wheel speed and yaw
+  // rate. It is separate from integrating lateral acceleration, which can
+  // drift at the native sensor rate. Keep disabled by default for library
+  // users and select it explicitly in a deployment configuration.
+  bool use_kinematic_lateral_slip_model{false};
+  double lateral_slip_ratio{0.016};
+  double lateral_slip_yaw_rate_scale_radps{0.15};
+  double lateral_slip_max_mps{0.30};
   // A single impossible longitudinal IMU sample must not be integrated into
   // odometry.  The competition vehicle's lateral acceleration can be large
   // in a tight turn, so this guard is intentionally only for ax.
@@ -125,6 +168,7 @@ struct OdometryEstimate
   // Diagnostic-only current-packet rate. The observer normally uses the
   // short window rate because the simulator can burst cumulative angle.
   double wheel_packet_mps{0.0};
+  double turn_speed_bias_mps{0.0};
   double ax_mps2{0.0};
   double ay_mps2{0.0};
   double yaw_rate_radps{0.0};
@@ -149,11 +193,17 @@ public:
 private:
   static double wrap_angle(double angle) noexcept;
   static bool finite(double value) noexcept;
+  double wheel_scale_for_speed(double raw_speed_mps) const noexcept;
+  double turn_speed_bias_mps(
+    double wheel_mapped_mps, double yaw_rate_radps) const noexcept;
+  double kinematic_lateral_velocity(
+    double yaw_rate_radps, double longitudinal_speed_mps) const noexcept;
 
   OdometryEstimate estimate(const OdometryObservation & observation) const noexcept;
   void update_pose(
     double dt_s, double yaw_rad,
-    double previous_body_u_mps, double previous_body_v_mps) noexcept;
+    double previous_body_u_mps, double previous_body_v_mps,
+    double body_u_mps, double body_v_mps) noexcept;
   void update_turn(double ax_origin, double ay_origin, double yaw_rate, double dt_s) noexcept;
 
   OdometryObserverConfig config_;
@@ -168,12 +218,15 @@ private:
   double speed_mps_{0.0};
   double body_u_mps_{0.0};
   double body_v_mps_{0.0};
+  double previous_pose_body_u_mps_{0.0};
+  double previous_pose_body_v_mps_{0.0};
   double x_m_{0.0};
   double y_m_{0.0};
   double last_speed_pred_mps_{0.0};
   double last_wheel_raw_mps_{0.0};
   double last_wheel_mapped_mps_{0.0};
   double last_wheel_packet_mps_{0.0};
+  double last_turn_speed_bias_mps_{0.0};
   double stationary_time_s_{0.0};
   bool wheel_dropout_active_{false};
   bool wheel_burst_rejected_{false};

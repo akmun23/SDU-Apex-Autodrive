@@ -25,7 +25,7 @@ blind plant gates before any runtime use.
 MASS_KG = 3.470
 LF_M = 0.174679914
 LR_M = 0.155320086
-IZ_KGM2 = 0.0276985662
+IZ_KGM2 = 0.0961908
 MAX_STEERING_RAD = 0.5236
 STEERING_RATE_RADPS = 3.2
 WHEEL_RADIUS_M = 0.059
@@ -47,6 +47,7 @@ class PlantParameters:
     steering_rate_radps: float = STEERING_RATE_RADPS
     max_speed_mps: float = MAX_SPEED_MPS
     force_max_n: float = 17.7166
+    hard_brake_force_n: float = 17.7166
     slip_gain_per_mps: float = 2.2574
     coast_speed_drag_n_per_mps: float = 0.8910
     cf_n_per_rad: float = 51.40
@@ -57,6 +58,11 @@ class PlantParameters:
         -0.0003516271, 0.0419576436, 23.9652144, 0.0251136087,
         -0.4763574048, 0.0006345492,
     )
+    # The discrete candidate maps one source transition directly to the next
+    # wheel speed.  The continuous candidate maps wheel-speed derivative and
+    # multiplies it by the measured transition dt.  Keep the former as the
+    # default until blind full-vehicle validation selects otherwise.
+    wheel_dynamics_kind: str = "discrete"
     tire_model: str = "tanh"
 
     @classmethod
@@ -66,6 +72,8 @@ class PlantParameters:
         dynamics = longitudinal.get("wheel_dynamics", {})
         values = {
             "force_max_n": float(longitudinal.get("force_max_n", cls.force_max_n)),
+            "hard_brake_force_n": float(longitudinal.get(
+                "hard_brake_force_n", cls.hard_brake_force_n)),
             "slip_gain_per_mps": float(longitudinal.get(
                 "slip_gain_per_mps", cls.slip_gain_per_mps)),
             "coast_speed_drag_n_per_mps": float(longitudinal.get(
@@ -74,6 +82,8 @@ class PlantParameters:
         if dynamics.get("coefficients"):
             values["wheel_coefficients"] = tuple(
                 float(value) for value in dynamics["coefficients"])
+        if dynamics.get("kind") == "identified_continuous_wheel_speed_derivative":
+            values["wheel_dynamics_kind"] = "continuous"
         values.update(overrides)
         return cls(**values)
 
@@ -94,14 +104,20 @@ def _move_towards(current: float, target: float, maximum_delta: float) -> float:
     return current + max(-maximum_delta, min(maximum_delta, difference))
 
 
-def _wheel_next(body_u: float, wheel: float, throttle: float,
+def _wheel_next(body_u: float, wheel: float, throttle: float, dt: float,
                 parameters: PlantParameters) -> float:
     coeff = np.asarray(parameters.wheel_coefficients, dtype=float)
     features = np.asarray([
         1.0, wheel, throttle, wheel * throttle,
         throttle * throttle, body_u,
     ])
-    return max(0.0, float(features @ coeff))
+    wheel_prediction = float(features @ coeff)
+    if parameters.wheel_dynamics_kind == "continuous":
+        wheel_prediction = wheel + dt * wheel_prediction
+    elif parameters.wheel_dynamics_kind != "discrete":
+        raise ValueError(
+            f"unsupported wheel dynamics: {parameters.wheel_dynamics_kind}")
+    return max(0.0, wheel_prediction)
 
 
 def _tire_force(alpha: float, stiffness: float, peak: float,
@@ -129,13 +145,21 @@ def lateral_forces(u: float, v: float, r: float, delta: float,
 
 def _body_derivative(u: float, v: float, r: float, delta: float,
                      wheel: float, parameters: PlantParameters,
+                     throttle: float = 1.0,
                      include_longitudinal: bool = True) -> tuple[float, float, float]:
     front_force, rear_force = lateral_forces(u, v, r, delta, parameters)
     if include_longitudinal:
-        longitudinal_force = (
-            parameters.force_max_n * math.tanh(
-                parameters.slip_gain_per_mps * (wheel - u)) -
-            parameters.coast_speed_drag_n_per_mps * u)
+        if throttle > 1.0e-5:
+            longitudinal_force = (
+                parameters.force_max_n * math.tanh(
+                    parameters.slip_gain_per_mps * (wheel - u)) -
+                parameters.coast_speed_drag_n_per_mps * u)
+        else:
+            # Zero throttle is an active all-wheel brake command in the
+            # simulator, not a passive-coast input.
+            longitudinal_force = (
+                -max(0.0, parameters.hard_brake_force_n) -
+                parameters.coast_speed_drag_n_per_mps * u)
         u_dot = (longitudinal_force - front_force * math.sin(delta)) / parameters.mass_kg + r * v
     else:
         u_dot = 0.0
@@ -168,7 +192,7 @@ def lateral_body_step(u: float, v: float, r: float, delta_start: float,
         delta = delta_start + fraction * (delta_end - delta_start)
         _, v_dot, r_dot = _body_derivative(
             u, current_v, current_r, delta, 0.0, parameters,
-            include_longitudinal=False)
+            throttle=0.0, include_longitudinal=False)
         current_v += sub_dt * v_dot
         current_r += sub_dt * r_dot
     return current_v, current_r
@@ -187,7 +211,7 @@ def step(state: np.ndarray, steering_target_norm: float,
     x, y, yaw, u, v, r, delta, wheel = (float(value) for value in state)
     delta_end = _move_towards(
         delta, steering_target, parameters.steering_rate_radps * dt)
-    wheel_end = _wheel_next(u, wheel, throttle, parameters)
+    wheel_end = _wheel_next(u, wheel, throttle, dt, parameters)
     count = max(1, int(math.ceil(dt / INTEGRATION_SUBSTEP_S)))
     sub_dt = dt / count
     start_delta, start_wheel = delta, wheel
@@ -196,7 +220,8 @@ def step(state: np.ndarray, steering_target_norm: float,
         delta_mid = start_delta + fraction * (delta_end - start_delta)
         wheel_mid = start_wheel + fraction * (wheel_end - start_wheel)
         u_dot, v_dot, r_dot = _body_derivative(
-            u, v, r, delta_mid, wheel_mid, parameters)
+            u, v, r, delta_mid, wheel_mid, parameters,
+            throttle=throttle)
         x += sub_dt * (u * math.cos(yaw) - v * math.sin(yaw))
         y += sub_dt * (u * math.sin(yaw) + v * math.cos(yaw))
         yaw += sub_dt * r

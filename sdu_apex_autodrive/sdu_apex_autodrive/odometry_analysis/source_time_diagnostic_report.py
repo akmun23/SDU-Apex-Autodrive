@@ -48,7 +48,7 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "odom_observer_sensor_outlier", "odom_observer_left_angle_rad",
         "odom_observer_right_angle_rad", "odom_observer_imu_yaw_rad",
         "odom_observer_packet_wheel_speed_mps",
-        "odom_observer_wheel_burst_rejected",
+        "odom_observer_wheel_burst_rejected", "odom_observer_turn_speed_bias_mps",
     ),
     "ekf_odom": (
         "x_ekf_odom_m", "y_ekf_odom_m", "yaw_ekf_odom_rad",

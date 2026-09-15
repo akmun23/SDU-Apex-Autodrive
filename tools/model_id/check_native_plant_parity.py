@@ -31,9 +31,11 @@ class CParameters(ctypes.Structure):
         (name, ctypes.c_float) for name in (
             "mass_kg", "lf_m", "lr_m", "iz_kgm2", "max_steering_rad",
             "steering_rate_radps", "max_speed_mps", "force_max_n",
+            "hard_brake_force_n",
             "slip_gain_per_mps", "coast_speed_drag_n_per_mps",
             "cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n")
     ] + [("tire_model", ctypes.c_uint8),
+         ("wheel_dynamics_model", ctypes.c_uint8),
          ("wheel_coefficients", ctypes.c_float * 6)]
 
 
@@ -42,10 +44,13 @@ def _parameters(parameters: PlantParameters) -> CParameters:
     for name in (
             "mass_kg", "lf_m", "lr_m", "iz_kgm2", "max_steering_rad",
             "steering_rate_radps", "max_speed_mps", "force_max_n",
+            "hard_brake_force_n",
             "slip_gain_per_mps", "coast_speed_drag_n_per_mps",
             "cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n"):
         setattr(result, name, getattr(parameters, name))
     result.tire_model = 0 if parameters.tire_model == "linear_saturated" else 1
+    result.wheel_dynamics_model = (
+        1 if parameters.wheel_dynamics_kind == "continuous" else 0)
     result.wheel_coefficients = (ctypes.c_float * 6)(*parameters.wheel_coefficients)
     return result
 
@@ -71,15 +76,17 @@ def _compile(source_root: Path, output: Path) -> None:
 
 
 def check(source_root: Path, lateral_report: Path,
-          longitudinal_report: Path, output: Path) -> dict[str, object]:
+          longitudinal_report: Path, output: Path,
+          lateral_model: str = "Y1_linear_saturated") -> dict[str, object]:
     lateral = json.loads(lateral_report.read_text(encoding="utf-8"))
     longitudinal = json.loads(longitudinal_report.read_text(encoding="utf-8"))
-    lateral_values = lateral["candidate_comparison"]["Y1_linear_saturated"]
+    candidates = lateral.get("candidate_comparison", {})
+    if lateral_model not in candidates:
+        raise ValueError(
+            f"lateral report has no candidate named {lateral_model!r}; "
+            f"available={sorted(candidates)}")
+    lateral_values = candidates[lateral_model]
     lateral_parameters = lateral_values["parameters"]["parameters"]
-    longitudinal_parameters = longitudinal["models"]["wheel_dynamic"]["parameters"]
-    parameters = PlantParameters.from_longitudinal_parameters(
-        longitudinal_parameters).with_lateral(lateral_parameters)
-
     fixtures = [
         (np.asarray([0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0]), 0.0, 0.2, 0.025),
         (np.asarray([1.0, -0.4, 0.2, 4.0, 0.15, 0.3, 0.05, 4.5]), 0.5, 0.6, 0.024),
@@ -94,34 +101,50 @@ def check(source_root: Path, lateral_report: Path,
             ctypes.POINTER(CState), ctypes.POINTER(CInput), ctypes.c_float,
             ctypes.POINTER(CParameters), ctypes.POINTER(CState)]
         native.vehicle_plant_step.restype = None
-        c_parameters = _parameters(parameters)
-        fixture_reports = []
-        maximum = 0.0
-        for initial, steering, throttle, dt in fixtures:
-            expected = step(initial, steering, throttle, dt, parameters)
-            actual = CState()
-            native.vehicle_plant_step(
-                ctypes.byref(_state(initial)),
-                ctypes.byref(CInput(steering, throttle)),
-                dt, ctypes.byref(c_parameters), ctypes.byref(actual))
-            actual_array = _state_array(actual)
-            error = np.abs(expected - actual_array)
-            maximum = max(maximum, float(np.max(error)))
-            fixture_reports.append({
-                "dt_s": dt,
-                "max_abs_error": float(np.max(error)),
-                "errors": [float(value) for value in error],
-            })
+        candidate_reports = {}
+        for candidate_name in ("wheel_dynamic", "wheel_continuous"):
+            candidate = longitudinal["models"].get(candidate_name)
+            if candidate is None:
+                continue
+            parameters = PlantParameters.from_longitudinal_parameters(
+                candidate["parameters"]).with_lateral(lateral_parameters)
+            c_parameters = _parameters(parameters)
+            fixture_reports = []
+            maximum = 0.0
+            for initial, steering, throttle, dt in fixtures:
+                expected = step(initial, steering, throttle, dt, parameters)
+                actual = CState()
+                native.vehicle_plant_step(
+                    ctypes.byref(_state(initial)),
+                    ctypes.byref(CInput(steering, throttle)),
+                    dt, ctypes.byref(c_parameters), ctypes.byref(actual))
+                actual_array = _state_array(actual)
+                error = np.abs(expected - actual_array)
+                maximum = max(maximum, float(np.max(error)))
+                fixture_reports.append({
+                    "dt_s": dt,
+                    "max_abs_error": float(np.max(error)),
+                    "errors": [float(value) for value in error],
+                })
+            candidate_reports[candidate_name] = {
+                "fixture_count": len(fixtures),
+                "max_abs_error": maximum,
+                "fixtures": fixture_reports,
+            }
+    maximum = max(
+        (candidate["max_abs_error"] for candidate in candidate_reports.values()),
+        default=float("inf"))
     report = {
         "schema_version": 1,
         "status": "pass" if maximum <= 3.0e-5 else "fail",
         "ground_truth_use": "none",
         "python_reference": "tools/model_id/structured_vehicle_plant.py",
         "native_source": "f1tenth_mpc/src/vehicle_plant.c",
+        "lateral_model": lateral_model,
         "fixture_count": len(fixtures),
         "max_abs_error": maximum,
         "tolerance": 3.0e-5,
-        "fixtures": fixture_reports,
+        "candidates": candidate_reports,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -134,11 +157,15 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--lateral-report", type=Path, required=True)
     parser.add_argument("--longitudinal-report", type=Path, required=True)
+    parser.add_argument(
+        "--lateral-model", default="Y1_linear_saturated",
+        help="candidate key from the lateral benchmark")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     print(json.dumps(check(
         args.source_root, args.lateral_report,
-        args.longitudinal_report, args.output), indent=2, sort_keys=True))
+        args.longitudinal_report, args.output, args.lateral_model),
+        indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

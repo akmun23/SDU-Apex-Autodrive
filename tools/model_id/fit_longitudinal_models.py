@@ -32,6 +32,9 @@ MASS_KG = 3.470
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
 HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
+MAX_RECURSIVE_SPEED_MPS = 100.0
+MAX_RECURSIVE_ACCELERATION_MPS2 = 1.0e4
+MAX_DIVERGENCE_EXAMPLES = 3
 
 
 def _horizon_key(horizon: float) -> str:
@@ -247,6 +250,41 @@ def _fit_wheel_force(rows: Sequence[dict[str, float]], model_map: dict[str, obje
     }
 
 
+def _fit_hard_brake_force(rows: Sequence[dict[str, float]],
+                          coast_drag: float) -> dict[str, float | int | str]:
+    """Identify the active zero-throttle brake force from straight runs.
+
+    AutoDRIVE applies a brake command when normalized throttle is zero.  The
+    old longitudinal benchmark folded those transitions into the wheel-slip
+    force surface, which made recursive braking predictions depend on the
+    wheel-state fit.  Estimate the constant brake component separately after
+    removing the fitted speed-proportional drag.  This remains an offline
+    candidate parameter and is not copied into the runtime controller.
+    """
+    selected = [
+        row for row in rows
+        if _straight(row) and row["applied_throttle_norm_k1"] <= 0.005 and
+        row["u_k_mps"] >= 1.0 and row["dt_sim_s"] > 0.0
+    ]
+    if len(selected) < 8:
+        raise ValueError("insufficient zero-throttle braking transitions")
+    estimates = np.asarray([
+        -(MASS_KG * _observed_acceleration(row) + coast_drag * row["u_k_mps"])
+        for row in selected
+    ])
+    # A median is deliberately used here: one transition can straddle a
+    # command edge or a source jitter interval, but the brake component is
+    # expected to remain positive and nearly constant over speed.
+    force = max(0.0, float(np.median(estimates)))
+    return {
+        "kind": "identified_active_zero_throttle_brake",
+        "force_n": force,
+        "fit_samples": len(selected),
+        "fit_force_p05_n": float(np.percentile(estimates, 5)),
+        "fit_force_p95_n": float(np.percentile(estimates, 95)),
+    }
+
+
 def _fit_wheel_time_constant(rows: Sequence[dict[str, float]], model_map: dict[str, object]) -> float:
     selected = [
         row for row in rows
@@ -304,6 +342,50 @@ def _fit_wheel_dynamics(rows: Sequence[dict[str, float]]) -> dict[str, object]:
     }
 
 
+def _fit_wheel_dynamics_continuous(
+        rows: Sequence[dict[str, float]]) -> dict[str, object]:
+    """Fit a source-dt-aware wheel-state derivative.
+
+    The existing wheel-dynamic candidate predicts the next wheel speed
+    directly and is therefore tied to the transition interval represented by
+    its training data.  This candidate fits the observed wheel-speed rate
+    instead.  Recursive replay can consequently use the actual source ``dt``
+    (including valid 22--35 ms jitter) without silently applying a fixed
+    25 ms transition.  It is intentionally reported as a separate candidate
+    until mixed drive/brake and track holdouts accept it.
+    """
+    selected = [
+        row for row in rows
+        if _straight(row) and math.isfinite(row["wheel_k_mps"]) and
+        math.isfinite(row["wheel_speed_mps_k1"]) and row["dt_sim_s"] > 0.0
+    ]
+    if len(selected) < 100:
+        raise ValueError("insufficient encoder-derived wheel transitions")
+    features = np.vstack([
+        _wheel_features(row, row["wheel_k_mps"], row["u_k_mps"])
+        for row in selected
+    ])
+    target = np.asarray([
+        (row["wheel_speed_mps_k1"] - row["wheel_k_mps"]) / row["dt_sim_s"]
+        for row in selected
+    ])
+    ridge = 1.0e-6 * np.eye(features.shape[1])
+    coefficients = np.linalg.solve(features.T @ features + ridge,
+                                   features.T @ target)
+    errors = np.abs(features @ coefficients - target)
+    return {
+        "kind": "identified_continuous_wheel_speed_derivative",
+        "feature_names": ["bias", "wheel_speed", "throttle",
+                           "wheel_speed_times_throttle", "throttle_squared",
+                           "body_speed"],
+        "coefficients": [float(value) for value in coefficients],
+        "reference_dt_s": "measured per-transition dt_sim_s",
+        "fit_samples": len(selected),
+        "fit_wheel_speed_rate_mae_mps2": float(np.mean(errors)),
+        "fit_wheel_speed_rate_p95_mps2": float(np.percentile(errors, 95)),
+    }
+
+
 def _wheel_acceleration(model: dict[str, object], row: dict[str, float],
                         u: float, wheel: float,
                         lateral_coupling: float) -> tuple[float, float]:
@@ -311,10 +393,18 @@ def _wheel_acceleration(model: dict[str, object], row: dict[str, float],
     fraction = min(1.0, row["dt_sim_s"] / float(model["wheel_time_constant_s"]))
     wheel_next = wheel + fraction * (target - wheel)
     slip = 0.5 * (wheel + wheel_next) - u
-    force = (float(model["force_max_n"]) *
-             math.tanh(float(model["slip_gain_per_mps"]) * slip) -
-             float(model["coast_speed_drag_n_per_mps"]) * u)
+    force = _wheel_force(model, row, slip, u)
     return force / MASS_KG + lateral_coupling, wheel_next
+
+
+def _wheel_force(model: dict[str, object], row: dict[str, float],
+                 slip: float, u: float) -> float:
+    if row["applied_throttle_norm_k1"] <= 1.0e-5:
+        return (-float(model.get("hard_brake_force_n", 0.0)) -
+                float(model["coast_speed_drag_n_per_mps"]) * u)
+    return (float(model["force_max_n"]) *
+            math.tanh(float(model["slip_gain_per_mps"]) * slip) -
+            float(model["coast_speed_drag_n_per_mps"]) * u)
 
 
 def _wheel_acceleration_dynamic(model: dict[str, object], row: dict[str, float],
@@ -325,9 +415,20 @@ def _wheel_acceleration_dynamic(model: dict[str, object], row: dict[str, float],
     wheel_next = max(0.0, float(_wheel_features(row, wheel, u) @
                                 wheel_coefficients))
     slip = 0.5 * (wheel + wheel_next) - u
-    force = (float(model["force_max_n"]) *
-             math.tanh(float(model["slip_gain_per_mps"]) * slip) -
-             float(model["coast_speed_drag_n_per_mps"]) * u)
+    force = _wheel_force(model, row, slip, u)
+    return force / MASS_KG + lateral_coupling, wheel_next
+
+
+def _wheel_acceleration_continuous(
+        model: dict[str, object], row: dict[str, float], u: float,
+        wheel: float, lateral_coupling: float) -> tuple[float, float]:
+    """Predict one transition with a wheel-speed derivative and measured dt."""
+    wheel_coefficients = np.asarray(model["wheel_dynamics"]["coefficients"],
+                                    dtype=float)
+    wheel_rate = float(_wheel_features(row, wheel, u) @ wheel_coefficients)
+    wheel_next = max(0.0, wheel + row["dt_sim_s"] * wheel_rate)
+    slip = 0.5 * (wheel + wheel_next) - u
+    force = _wheel_force(model, row, slip, u)
     return force / MASS_KG + lateral_coupling, wheel_next
 
 
@@ -345,6 +446,9 @@ def _predict_acceleration(model_name: str, model: dict[str, object],
     if model_name == "wheel_dynamic":
         return _wheel_acceleration_dynamic(model, row, u, wheel,
                                            lateral_coupling)
+    if model_name == "wheel_continuous":
+        return _wheel_acceleration_continuous(model, row, u, wheel,
+                                              lateral_coupling)
     return _wheel_acceleration(model, row, u, wheel, lateral_coupling)
 
 
@@ -370,21 +474,30 @@ def _score_recursive(runs: dict[str, list[dict[str, float]]], model_name: str,
     for horizon in HORIZONS_S:
         errors: list[float] = []
         actual: list[float] = []
-        for rows in runs.values():
+        attempted = 0
+        divergent = 0
+        divergence_examples: list[dict[str, object]] = []
+        for run_name, rows in runs.items():
             for origin, origin_row in enumerate(rows):
-                wheel = (origin_row["wheel_k_mps"]
-                         if math.isfinite(origin_row["wheel_k_mps"]) else None)
-                if model_name in {"wheel", "wheel_dynamic"} and wheel is None:
+                wheel_value = origin_row.get("wheel_k_mps", math.nan)
+                wheel = (wheel_value if math.isfinite(wheel_value) else None)
+                if model_name in {"wheel", "wheel_dynamic", "wheel_continuous"} and wheel is None:
                     continue
+                attempted += 1
                 elapsed = 0.0
                 index = origin
                 segment = int(origin_row["segment_id"])
+                diverged = False
                 while index < len(rows) and elapsed < horizon - 1.0e-10:
                     row = rows[index]
                     if int(row["segment_id"]) != segment:
                         break
                     current_u = (origin_row["u_k_mps"]
                                  if index == origin else predicted_u)
+                    if (not math.isfinite(current_u) or
+                            abs(current_u) > MAX_RECURSIVE_SPEED_MPS):
+                        diverged = True
+                        break
                     # This strict recursive score intentionally uses no
                     # recorded future r/v. The full plant owns that coupling;
                     # using it here would make this a GT-conditioned score.
@@ -392,16 +505,40 @@ def _score_recursive(runs: dict[str, list[dict[str, float]]], model_name: str,
                         model_name, model, row, current_u, wheel,
                         lateral_coupling=0.0)
                     if not math.isfinite(acceleration):
+                        diverged = True
+                        break
+                    if abs(acceleration) > MAX_RECURSIVE_ACCELERATION_MPS2:
+                        diverged = True
                         break
                     predicted_u = max(0.0, current_u + row["dt_sim_s"] * acceleration)
+                    if (not math.isfinite(predicted_u) or
+                            predicted_u > MAX_RECURSIVE_SPEED_MPS):
+                        diverged = True
+                        break
                     elapsed += row["dt_sim_s"]
                     index += 1
+                if diverged:
+                    divergent += 1
+                    if len(divergence_examples) < MAX_DIVERGENCE_EXAMPLES:
+                        divergence_examples.append({
+                            "run": run_name,
+                            "origin_index": origin,
+                            "horizon_s": horizon,
+                        })
+                    continue
                 if elapsed < horizon - 1.0e-10 or index == origin:
                     continue
                 truth = rows[index - 1]
                 errors.append(abs(predicted_u - truth["u_k1_mps"]))
                 actual.append(abs(truth["u_k1_mps"]))
-        output[_horizon_key(horizon)] = _stats(errors, actual)
+        stats = _stats(errors, actual)
+        stats.update({
+            "attempted_origin_count": attempted,
+            "valid_origin_count": len(errors),
+            "divergent_origin_count": divergent,
+            "divergence_examples": divergence_examples,
+        })
+        output[_horizon_key(horizon)] = stats
     return output
 
 
@@ -446,16 +583,25 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
     servo = _fit_servo_gain(train_rows, model_map)
     wheel = _fit_wheel_force(train_rows, model_map)
     wheel["wheel_time_constant_s"] = _fit_wheel_time_constant(train_rows, model_map)
+    brake = _fit_hard_brake_force(
+        train_rows, float(wheel["coast_speed_drag_n_per_mps"]))
+    wheel["hard_brake_force_n"] = float(brake["force_n"])
+    wheel["hard_brake_identification"] = brake
     wheel_dynamic = dict(wheel)
     wheel_dynamic["kind"] = "wheel_slip_force_with_discrete_wheel_state"
     wheel_dynamic.pop("wheel_time_constant_s", None)
     wheel_dynamic["wheel_dynamics"] = _fit_wheel_dynamics(train_rows)
+    wheel_continuous = dict(wheel)
+    wheel_continuous["kind"] = "wheel_slip_force_with_continuous_wheel_state"
+    wheel_continuous.pop("wheel_time_constant_s", None)
+    wheel_continuous["wheel_dynamics"] = _fit_wheel_dynamics_continuous(train_rows)
 
     models = {
         "direct": direct,
         "servo": servo,
         "wheel": wheel,
         "wheel_dynamic": wheel_dynamic,
+        "wheel_continuous": wheel_continuous,
     }
     report: dict[str, object] = {
         "schema_version": 2,
