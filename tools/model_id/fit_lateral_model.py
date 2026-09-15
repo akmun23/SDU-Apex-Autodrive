@@ -2,16 +2,17 @@
 """Fit and recursively score structured lateral vehicle candidates.
 
 The fitter compares a kinematic baseline, a saturated linear dynamic bicycle,
-and a low-parameter tanh tire model.  Steering is integrated as the measured
-3.2 rad/s rate-limited ramp.  All recursive rollouts use only the initialized
-state, recorded commands, and source ``dt``; simulator truth is used only for
-offline fitting and final error scoring.
+and a low-parameter tanh tire model.  Steering follows the explicitly selected
+measured transition contract (rate-limited or instantaneous).  All recursive
+rollouts use only the initialized state, recorded commands, and source ``dt``;
+simulator truth is used only for offline fitting and final error scoring.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -28,6 +29,7 @@ from structured_vehicle_plant import (  # noqa: E402
     LR_M,
     MAX_STEERING_RAD,
     PlantParameters,
+    _steering_next,
     lateral_body_step,
     step,
 )
@@ -35,7 +37,8 @@ from structured_vehicle_plant import (  # noqa: E402
 
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
-HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
+HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75)
+RECURSIVE_LATERAL_HORIZONS_S = (0.25, 0.50, 0.75)
 
 
 def _horizon_key(horizon: float) -> str:
@@ -112,22 +115,131 @@ def _candidate_parameters(kind: str, values: np.ndarray) -> dict[str, float | st
             "dr_n": float(values[3]),
             "iz_kgm2": float(values[4]),
         }
+    if kind == "speed_combined_tanh":
+        return {
+            "tire_model": kind,
+            "cf_n_per_rad": float(values[0]),
+            "cr_n_per_rad": float(values[1]),
+            "df_n": float(values[2]),
+            "dr_n": float(values[3]),
+            "lateral_speed_stiffness_gain": float(values[4]),
+            "lateral_speed_peak_gain": float(values[5]),
+            "combined_slip_gain": float(values[6]),
+            "iz_kgm2": float(values[7]),
+        }
     raise ValueError(f"unknown candidate: {kind}")
 
 
 def _predict_lateral(row: dict[str, float], values: np.ndarray,
-                     kind: str) -> tuple[float, float]:
+                     kind: str,
+                     steering_dynamics_kind: str = "rate_limited") -> tuple[float, float]:
     parameters = PlantParameters().with_lateral(
         _candidate_parameters(kind, values))
+    parameters = replace(
+        parameters, steering_dynamics_kind=steering_dynamics_kind)
     return lateral_body_step(
         row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
         row["delta_k_rad"], row["applied_steering_rad_k1"],
-        row["dt_sim_s"], parameters)
+        row["dt_sim_s"], parameters, wheel=row["wheel_k_mps"],
+        throttle=row["applied_throttle_norm_k1"])
+
+
+def _recursive_lateral_windows(
+        runs: dict[str, list[dict[str, float]]],
+        origin_stride: int = 10,
+        min_speed_mps: float = 1.0,
+        max_speed_mps: float = 16.0,
+        max_abs_steering_rad: float = 0.45,
+        max_abs_lateral_accel_mps2: float = 14.0,
+        maximum_horizon_s: float = 0.75,
+) -> list[list[dict[str, float]]]:
+    """Select contiguous, physically reachable turn windows for fitting.
+
+    The lateral fit is deliberately not driven by arbitrary full-lock,
+    full-speed commands.  This selector keeps the speed envelope at the
+    project limit and rejects windows whose measured lateral acceleration is
+    outside the intended raceline regime.  Measured ``u`` and wheel speed are
+    used only as offline conditioning variables while identifying lateral
+    dynamics; recursive validation still uses the complete causal plant.
+    """
+    if origin_stride < 1:
+        raise ValueError("recursive origin stride must be positive")
+    if min_speed_mps < 0.0 or max_speed_mps <= min_speed_mps:
+        raise ValueError("invalid recursive speed envelope")
+    if max_abs_steering_rad <= 0.0 or max_abs_lateral_accel_mps2 <= 0.0:
+        raise ValueError("recursive lateral limits must be positive")
+    needed = max(1, int(math.ceil(maximum_horizon_s / MIN_DT_S)) + 2)
+    windows: list[list[dict[str, float]]] = []
+    for rows in runs.values():
+        for origin in range(1, len(rows) - needed, origin_stride):
+            first = rows[origin]
+            if (not math.isfinite(first["wheel_k_mps"]) or
+                    not math.isfinite(first["delta_k_rad"])):
+                continue
+            window = rows[origin:origin + needed]
+            if any(
+                    int(row["segment_id"]) != int(first["segment_id"]) or
+                    not (min_speed_mps <= row["u_k_mps"] <= max_speed_mps) or
+                    abs(row["applied_steering_rad_k1"]) > max_abs_steering_rad or
+                    abs(row["u_k_mps"] * row["r_k_radps"]) >
+                    max_abs_lateral_accel_mps2 or
+                    not math.isfinite(row["wheel_k_mps"])
+                    for row in window):
+                continue
+            windows.append(window)
+    if not windows:
+        raise ValueError("recursive lateral regime selected no windows")
+    return windows
+
+
+def _recursive_lateral_errors(
+        windows: Sequence[Sequence[dict[str, float]]],
+        values: np.ndarray,
+        kind: str,
+        steering_dynamics_kind: str,
+        v_scale: float = 0.05,
+        r_scale: float = 0.05,
+) -> np.ndarray:
+    """Return causal v/r residuals at multi-step lateral horizons."""
+    parameters = replace(
+        PlantParameters().with_lateral(_candidate_parameters(kind, values)),
+        steering_dynamics_kind=steering_dynamics_kind)
+    errors: list[float] = []
+    for rows in windows:
+        current_v = rows[0]["v_k_mps"]
+        current_r = rows[0]["r_k_radps"]
+        current_delta = rows[0]["delta_k_rad"]
+        elapsed = 0.0
+        horizon_index = 0
+        for row in rows:
+            current_v, current_r = lateral_body_step(
+                row["u_k_mps"], current_v, current_r, current_delta,
+                row["applied_steering_rad_k1"], row["dt_sim_s"],
+                parameters, wheel=row["wheel_k_mps"],
+                throttle=row["applied_throttle_norm_k1"])
+            current_delta = _steering_next(
+                current_delta, row["applied_steering_rad_k1"],
+                row["dt_sim_s"], parameters)
+            elapsed += row["dt_sim_s"]
+            while (horizon_index < len(RECURSIVE_LATERAL_HORIZONS_S) and
+                   elapsed + 1.0e-9 >=
+                   RECURSIVE_LATERAL_HORIZONS_S[horizon_index]):
+                errors.extend([
+                    (current_v - row["v_k1_mps"]) / v_scale,
+                    (current_r - row["r_k1_radps"]) / r_scale,
+                ])
+                horizon_index += 1
+            if horizon_index == len(RECURSIVE_LATERAL_HORIZONS_S):
+                break
+    return np.asarray(errors, dtype=float)
 
 
 def _fit_candidate(
     rows: Sequence[dict[str, float]], kind: str,
     fixed_iz_kgm2: float | None = None,
+    steering_dynamics_kind: str = "rate_limited",
+    fit_objective: str = "one_step",
+    recursive_windows: Sequence[Sequence[dict[str, float]]] | None = None,
 ) -> dict[str, Any]:
     if fixed_iz_kgm2 is not None and (
         not math.isfinite(fixed_iz_kgm2) or fixed_iz_kgm2 <= 0.0
@@ -142,7 +254,7 @@ def _fit_candidate(
             initial = np.asarray([800.0, 800.0], dtype=float)
             lower = np.asarray([1.0, 1.0])
             upper = np.asarray([5000.0, 5000.0])
-    else:
+    elif kind == "tanh":
         if fixed_iz_kgm2 is None:
             initial = np.asarray([800.0, 800.0, 11.50, 10.60, 0.035], dtype=float)
             lower = np.asarray([1.0, 1.0, 2.0, 2.0, 0.003])
@@ -151,28 +263,60 @@ def _fit_candidate(
             initial = np.asarray([800.0, 800.0, 11.50, 10.60], dtype=float)
             lower = np.asarray([1.0, 1.0, 2.0, 2.0])
             upper = np.asarray([5000.0, 5000.0, 30.0, 30.0])
+    elif kind == "speed_combined_tanh":
+        if fixed_iz_kgm2 is None:
+            initial = np.asarray(
+                [3000.0, 5000.0, 13.0, 15.0, 0.0, 0.0, 1.0, 0.035],
+                dtype=float)
+            lower = np.asarray(
+                [1.0, 1.0, 2.0, 2.0, -1.0, -1.0, 0.0, 0.003])
+            upper = np.asarray(
+                [10000.0, 10000.0, 40.0, 40.0, 2.0, 2.0, 20.0, 0.080])
+        else:
+            initial = np.asarray(
+                [3000.0, 5000.0, 13.0, 15.0, 0.0, 0.0, 1.0],
+                dtype=float)
+            lower = np.asarray([1.0, 1.0, 2.0, 2.0, -1.0, -1.0, 0.0])
+            upper = np.asarray(
+                [10000.0, 10000.0, 40.0, 40.0, 2.0, 2.0, 20.0])
+    else:
+        raise ValueError(f"unknown candidate: {kind}")
 
     def parameter_values(values: np.ndarray) -> np.ndarray:
         if fixed_iz_kgm2 is None:
             return values
         if kind == "linear_saturated":
             return np.asarray([values[0], values[1], fixed_iz_kgm2])
-        return np.asarray([
+        if kind == "tanh":
+            return np.asarray([
             values[0], values[1], values[2], values[3], fixed_iz_kgm2])
+        return np.asarray([
+            values[0], values[1], values[2], values[3], values[4],
+            values[5], values[6], fixed_iz_kgm2])
 
     def residual(values: np.ndarray) -> np.ndarray:
-        output = np.empty(2 * len(rows), dtype=float)
         candidate_values = parameter_values(values)
+        if fit_objective == "recursive_raceline":
+            if recursive_windows is None:
+                raise ValueError("recursive fit objective has no windows")
+            return _recursive_lateral_errors(
+                recursive_windows, candidate_values, kind,
+                steering_dynamics_kind)
+        if fit_objective != "one_step":
+            raise ValueError(f"unsupported lateral fit objective: {fit_objective}")
+        output = np.empty(2 * len(rows), dtype=float)
         for index, row in enumerate(rows):
             predicted_v, predicted_r = _predict_lateral(
-                row, candidate_values, kind)
+                row, candidate_values, kind, steering_dynamics_kind)
             output[2 * index] = (predicted_v - row["v_k1_mps"]) / 0.05
             output[2 * index + 1] = (predicted_r - row["r_k1_radps"]) / 0.10
         return output
 
     result = least_squares(
         residual, initial, bounds=(lower, upper), loss="soft_l1",
-        f_scale=1.0, x_scale="jac", max_nfev=160, verbose=0)
+        f_scale=1.0, x_scale="jac",
+        max_nfev=120 if fit_objective == "recursive_raceline" else 160,
+        verbose=0)
     return {
         "parameters": _candidate_parameters(kind, parameter_values(result.x)),
         "optimizer": {
@@ -204,11 +348,13 @@ def _stats(values: Iterable[float]) -> dict[str, float | int | None]:
 
 
 def _one_step_scores(rows: Sequence[dict[str, float]], values: np.ndarray,
-                     kind: str) -> dict[str, Any]:
+                     kind: str,
+                     steering_dynamics_kind: str = "rate_limited") -> dict[str, Any]:
     v_errors: list[float] = []
     r_errors: list[float] = []
     for row in rows:
-        predicted_v, predicted_r = _predict_lateral(row, values, kind)
+        predicted_v, predicted_r = _predict_lateral(
+            row, values, kind, steering_dynamics_kind)
         v_errors.append(predicted_v - row["v_k1_mps"])
         r_errors.append(predicted_r - row["r_k1_radps"])
     return {"v_mps": _stats(v_errors), "r_radps": _stats(r_errors)}
@@ -220,9 +366,7 @@ def _kinematic_step(state: np.ndarray, steering_target_norm: float,
     """Kinematic baseline with the same actuator and wheel-state semantics."""
     result = state.copy()
     target = max(-1.0, min(1.0, steering_target_norm)) * parameters.max_steering_rad
-    delta_end = state[6] + max(
-        -parameters.steering_rate_radps * dt,
-        min(parameters.steering_rate_radps * dt, target - state[6]))
+    delta_end = _steering_next(state[6], target, dt, parameters)
     delta_mid = 0.5 * (state[6] + delta_end)
     speed = max(0.0, state[3])
     yaw_rate = speed * math.tan(delta_mid) / (parameters.lf_m + parameters.lr_m)
@@ -317,14 +461,16 @@ def _regime(row: dict[str, float]) -> str:
 
 
 def _write_regime_csv(path: Path, rows: Sequence[dict[str, float]],
-                      values: np.ndarray, kind: str) -> None:
+                      values: np.ndarray, kind: str,
+                      steering_dynamics_kind: str = "rate_limited") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["regime", "speed_mps", "steering_rad", "v_error_mps", "r_error_radps"]
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            predicted_v, predicted_r = _predict_lateral(row, values, kind)
+            predicted_v, predicted_r = _predict_lateral(
+                row, values, kind, steering_dynamics_kind)
             writer.writerow({
                 "regime": _regime(row),
                 "speed_mps": f"{row['u_k_mps']:.9g}",
@@ -336,7 +482,31 @@ def _write_regime_csv(path: Path, rows: Sequence[dict[str, float]],
 
 def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         longitudinal_model: Path, output: Path, residual_csv: Path,
-        fixed_iz_kgm2: float | None = None) -> dict[str, Any]:
+        fixed_iz_kgm2: float | None = None,
+        steering_dynamics_kind: str = "rate_limited",
+        candidate_kinds: Sequence[str] | None = None,
+        include_train_recursive: bool = True,
+        longitudinal_model_key: str = "wheel_continuous",
+        fit_objective: str = "one_step",
+        recursive_origin_stride: int = 10,
+        recursive_min_speed_mps: float = 1.0,
+        recursive_max_speed_mps: float = 16.0,
+        recursive_max_abs_steering_rad: float = 0.45,
+        recursive_max_abs_lateral_accel_mps2: float = 14.0) -> dict[str, Any]:
+    if steering_dynamics_kind not in {"rate_limited", "instantaneous"}:
+        raise ValueError(
+            f"unsupported steering dynamics: {steering_dynamics_kind}")
+    if fit_objective not in {"one_step", "recursive_raceline"}:
+        raise ValueError(f"unsupported lateral fit objective: {fit_objective}")
+    all_candidate_kinds = (
+        "linear_saturated", "tanh", "speed_combined_tanh")
+    selected_candidate_kinds = tuple(
+        candidate_kinds if candidate_kinds is not None else all_candidate_kinds)
+    unknown = set(selected_candidate_kinds).difference(all_candidate_kinds)
+    if unknown:
+        raise ValueError(f"unsupported candidate kinds: {sorted(unknown)}")
+    if "tanh" not in selected_candidate_kinds:
+        raise ValueError("the Y2 tanh candidate must be included")
     if set(train_names).intersection(validation_names):
         raise ValueError("training and validation runs overlap")
     train = _read_runs(root, train_names)
@@ -345,10 +515,27 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
     validation_rows = _examples(validation)
     if len(train_rows) < 100 or len(validation_rows) < 100:
         raise ValueError("insufficient lateral fitting transitions")
+    recursive_windows = None
+    if fit_objective == "recursive_raceline":
+        recursive_windows = _recursive_lateral_windows(
+            train, origin_stride=recursive_origin_stride,
+            min_speed_mps=recursive_min_speed_mps,
+            max_speed_mps=recursive_max_speed_mps,
+            max_abs_steering_rad=recursive_max_abs_steering_rad,
+            max_abs_lateral_accel_mps2=recursive_max_abs_lateral_accel_mps2)
 
     longitudinal_report = json.loads(longitudinal_model.read_text(encoding="utf-8"))
-    longitudinal = longitudinal_report["models"]["wheel_dynamic"]["parameters"]
-    base_parameters = PlantParameters.from_longitudinal_parameters(longitudinal)
+    try:
+        longitudinal = longitudinal_report["models"][longitudinal_model_key][
+            "parameters"]
+    except KeyError as exc:
+        available = sorted(longitudinal_report.get("models", {}).keys())
+        raise ValueError(
+            f"longitudinal model {longitudinal_model_key!r} is unavailable; "
+            f"available models: {available}") from exc
+    base_parameters = replace(
+        PlantParameters.from_longitudinal_parameters(longitudinal),
+        steering_dynamics_kind=steering_dynamics_kind)
     candidates: dict[str, Any] = {
         "Y0_kinematic_bicycle": {
             "parameters": {"model": "kinematic_bicycle"},
@@ -358,24 +545,39 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
     }
     fitted: dict[str, tuple[np.ndarray, dict[str, Any]]] = {}
     candidate_suffix = "_fixed_iz" if fixed_iz_kgm2 is not None else ""
-    for kind, base_name in (("linear_saturated", "Y1_linear_saturated"),
-                            ("tanh", "Y2_tanh")):
+    candidate_specs = (("linear_saturated", "Y1_linear_saturated"),
+                       ("tanh", "Y2_tanh"),
+                       ("speed_combined_tanh", "Y3_speed_combined_tanh"))
+    for kind, base_name in candidate_specs:
+        if kind not in selected_candidate_kinds:
+            continue
         name = base_name + candidate_suffix
-        fit_result = _fit_candidate(train_rows, kind, fixed_iz_kgm2)
+        fit_result = _fit_candidate(
+            train_rows, kind, fixed_iz_kgm2, steering_dynamics_kind,
+            fit_objective, recursive_windows)
+        parameter_keys = {
+            "linear_saturated": ("cf_n_per_rad", "cr_n_per_rad", "iz_kgm2"),
+            "tanh": ("cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n",
+                     "iz_kgm2"),
+            "speed_combined_tanh": (
+                "cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n",
+                "lateral_speed_stiffness_gain", "lateral_speed_peak_gain",
+                "combined_slip_gain", "iz_kgm2"),
+        }[kind]
         values = np.asarray([
-            fit_result["parameters"][key]
-            for key in (("cf_n_per_rad", "cr_n_per_rad", "iz_kgm2")
-                        if kind == "linear_saturated" else
-                        ("cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n",
-                         "iz_kgm2"))
+            fit_result["parameters"][key] for key in parameter_keys
         ], dtype=float)
         fitted[kind] = (values, fit_result)
         parameters = base_parameters.with_lateral(fit_result["parameters"])
         candidates[name] = {
             "parameters": fit_result,
-            "train_one_step": _one_step_scores(train_rows, values, kind),
-            "validation_one_step": _one_step_scores(validation_rows, values, kind),
-            "train_recursive": _recursive_scores(train, parameters, False),
+            "train_one_step": _one_step_scores(
+                train_rows, values, kind, steering_dynamics_kind),
+            "validation_one_step": _one_step_scores(
+                validation_rows, values, kind, steering_dynamics_kind),
+            "train_recursive": (
+                _recursive_scores(train, parameters, False)
+                if include_train_recursive else {"status": "skipped"}),
             "validation_recursive": _recursive_scores(validation, parameters, False),
         }
 
@@ -384,7 +586,9 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         if fixed_iz_kgm2 is not None else "Y2_tanh")
     selected_kind = "tanh"
     selected_values, _ = fitted[selected_kind]
-    _write_regime_csv(residual_csv, validation_rows, selected_values, selected_kind)
+    _write_regime_csv(
+        residual_csv, validation_rows, selected_values, selected_kind,
+        steering_dynamics_kind)
     report: dict[str, Any] = {
         "schema_version": 2,
         "status": "structured_lateral_candidate_not_runtime_validated",
@@ -399,11 +603,24 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
                               "r_radps", "steering_rad", "wheel_speed_mps"],
         "input_definition": ["steering_target_norm", "throttle_norm"],
         "steering_integration": {
-            "rate_radps": 3.2,
+            "rate_radps": 3.2 if steering_dynamics_kind == "rate_limited" else None,
+            "dynamics_kind": steering_dynamics_kind,
             "substep_s": 0.002,
             "endpoint_target_semantics": "applied_physical_steering_rad",
         },
         "longitudinal_source_report": str(longitudinal_model),
+        "longitudinal_source_model_key": longitudinal_model_key,
+        "fit_objective": fit_objective,
+        "recursive_lateral_regime": ({
+            "window_count": len(recursive_windows),
+            "origin_stride": recursive_origin_stride,
+            "min_speed_mps": recursive_min_speed_mps,
+            "max_speed_mps": recursive_max_speed_mps,
+            "max_abs_steering_rad": recursive_max_abs_steering_rad,
+            "max_abs_lateral_accel_mps2": recursive_max_abs_lateral_accel_mps2,
+            "horizons_s": list(RECURSIVE_LATERAL_HORIZONS_S),
+            "measured_longitudinal_state_use": "offline_fit_only",
+        } if recursive_windows is not None else None),
         "candidate_comparison": candidates,
         "residual_by_regime_csv": str(residual_csv),
         "native_parity": {"status": "not_run"},
@@ -418,6 +635,10 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
             "runtime_ground_truth_consumed": False,
         },
         "selected_for_next_full_plant_replay": selected_name,
+        "candidate_kinds_evaluated": [
+            "kinematic_bicycle", *selected_candidate_kinds],
+        "train_recursive_scoring": (
+            "included" if include_train_recursive else "skipped_for_targeted_holdout"),
         "next_action": (
             f"Use the causal {selected_name} candidate for composed Python plant "
             "replay, then port the same equations to native C and compare "
@@ -448,11 +669,41 @@ def main() -> None:
     parser.add_argument(
         "--fixed-iz-kgm2", type=float, default=None,
         help="keep yaw inertia fixed during fitting instead of optimizing it")
+    parser.add_argument(
+        "--steering-dynamics", choices=("rate_limited", "instantaneous"),
+        default="rate_limited",
+        help="identified applied-steering transition used by the offline plant")
+    parser.add_argument(
+        "--candidate-kinds", default="linear_saturated,tanh,speed_combined_tanh",
+        help="comma-separated candidate kinds to evaluate")
+    parser.add_argument(
+        "--skip-train-recursive", action="store_true",
+        help="skip exhaustive training recursive scoring for a holdout-only run")
+    parser.add_argument(
+        "--longitudinal-model-key", default="wheel_continuous",
+        help=("model entry to use from the longitudinal report; the default "
+              "matches the canonical continuous-wheel candidate"))
+    parser.add_argument(
+        "--fit-objective", choices=("one_step", "recursive_raceline"),
+        default="one_step",
+        help="optimize one-step dynamics or multi-step reachable-turn errors")
+    parser.add_argument("--recursive-origin-stride", type=int, default=10)
+    parser.add_argument("--recursive-min-speed-mps", type=float, default=1.0)
+    parser.add_argument("--recursive-max-speed-mps", type=float, default=16.0)
+    parser.add_argument(
+        "--recursive-max-abs-steering-rad", type=float, default=0.45)
+    parser.add_argument(
+        "--recursive-max-abs-lateral-accel-mps2", type=float, default=14.0)
     args = parser.parse_args()
     report = fit(
         args.accepted_root, _names(args.train_runs), _names(args.validation_runs),
         args.longitudinal_model, args.output, args.residual_csv,
-        args.fixed_iz_kgm2)
+        args.fixed_iz_kgm2, args.steering_dynamics,
+        _names(args.candidate_kinds), not args.skip_train_recursive,
+        args.longitudinal_model_key, args.fit_objective,
+        args.recursive_origin_stride, args.recursive_min_speed_mps,
+        args.recursive_max_speed_mps, args.recursive_max_abs_steering_rad,
+        args.recursive_max_abs_lateral_accel_mps2)
     print(json.dumps({
         "output": str(args.output),
         "status": report["status"],

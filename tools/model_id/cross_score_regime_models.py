@@ -64,7 +64,7 @@ def _discover_groups(root: Path) -> dict[str, list[str]]:
 
 def _score_summary(scores: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for horizon in ("0.50s", "1.00s", "2.00s"):
+    for horizon in ("0.50s", "0.75s"):
         horizon_scores = scores.get(horizon, {})
         position = horizon_scores.get("position_m", {})
         result[horizon] = {
@@ -146,7 +146,7 @@ def analyze(
         "fit_regime_to_score_regime": matrix,
         "evaluation": {
             "max_origins_per_run": max_origins_per_run,
-            "horizons_s": [0.50, 1.00, 2.00],
+            "horizons_s": [0.50, 0.75],
             "source_time_used_for_replay": True,
             "future_measured_states_used_for_rollout": False,
         },

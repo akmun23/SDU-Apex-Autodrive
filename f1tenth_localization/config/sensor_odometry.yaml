@@ -73,6 +73,10 @@ sensor_odometry:
     # the rolling rate is already >1 m/s above causal speed and the current
     # packet is another >1 m/s above that rolling rate.
     wheel_burst_disagreement_mps: 1.0
+    # A repeated cumulative-angle burst can make rolling/current wheel rates
+    # agree while both are still far above causal speed. Established-speed
+    # turn entry rejects that positive innovation and propagates with IMU
+    # dynamics until a packet returns inside wheel_innovation_max_mps.
     # In a turn, use a fresh synchronized packet to recover from a stale
     # rolling window when it is close to the causal speed. Straight-line
     # burst recovery remains window-coherent.
@@ -139,18 +143,17 @@ sensor_odometry:
     # automatically enables the validated dynamic propagation during an
     # explicitly rejected wheel-slip/dropout interval.
     integrate_lateral_acceleration_in_turn: false
-    # Four independent track replays show a small, repeatable velocity-vector
-    # sideslip in turns. This bounded sensor-only model uses causal wheel
-    # speed and IMU yaw rate; it does not use simulator truth or change the
-    # simulator. The ratio remains provisional pending further live runs.
+    # Clean track replays show a repeatable body-lateral velocity in turns.
+    # This bounded sensor-only model uses only causal mapped wheel speed and
+    # IMU yaw rate; simulator truth is used offline for identification only.
     use_kinematic_lateral_slip_model: true
-    # Five held-out source-time track replays showed that the previous
-    # 0.016 ratio overestimated the reported pose-point lateral velocity.
-    # 0.012 is the current sensor-only validation candidate; it changes only
-    # the odometry estimate and does not alter simulator physics.
-    lateral_slip_ratio: 0.012
-    lateral_slip_yaw_rate_scale_radps: 0.15
-    lateral_slip_max_mps: 0.30
+    # Identified from four prior clean track replays plus the fresh
+    # 2026-09-15 baseline, with leave-one-run-out validation. The model is:
+    # v = yaw_rate * (0.167 - 0.0063 * mapped_wheel_speed), bounded to 0.35.
+    # It changes only /odom and does not alter simulator physics.
+    lateral_velocity_yaw_rate_gain_m: 0.167
+    lateral_velocity_speed_yaw_rate_gain_s: -0.0063
+    lateral_velocity_max_mps: 0.35
     # Reject impossible longitudinal IMU spikes before they can be integrated
     # into odometry. Lateral acceleration remains unconstrained here because
     # it is physically large in the tight track turns.

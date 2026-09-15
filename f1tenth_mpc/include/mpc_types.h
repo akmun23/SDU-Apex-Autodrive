@@ -41,7 +41,7 @@
 #define TWO_PI (2.0 * M_PI)                              /* Full-angle constant used for heading wrap operations. */
 #define CONTROL_RATE_HZ 40.0f                            /* Nominal dev-side source/control rate; runtime may provide measured dt. */
 #define CONTROL_DT_SECONDS (1.0f / CONTROL_RATE_HZ)      /* Controller sample period derived from control-rate definition. */
-#define PREDICTION_DT_SECONDS 0.03f                     /* Nominal prediction-step duration used for model rollout defaults. */
+#define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
 #define CROSS_CALL_RATE_SCALE (CONTROL_DT_SECONDS / PREDICTION_DT_SECONDS) /* Normalizes first-step rate penalties across sample times. */
 #define STEERING_EFFECTIVE_TIME_CONSTANT_SECONDS 0.025f  /* Recorded-data-selected zero-dead-time effective-steering pole. */
 
@@ -63,8 +63,8 @@
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
-#define PREDICTION_HORIZON 20                            /* Default maximum number of prediction stages used by the controller. */
-#define TIME_STEP_SECONDS 0.03f                         /* Default model integration period per horizon stage. */
+#define PREDICTION_HORIZON 30                            /* 30 commands at 40 Hz = 0.75 s. */
+#define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
 
 /* Solver and model safeguards */
 #define RICCATI_COST_FACTOR 2.0f                         /* Global scaling factor applied to stage and terminal costs. */

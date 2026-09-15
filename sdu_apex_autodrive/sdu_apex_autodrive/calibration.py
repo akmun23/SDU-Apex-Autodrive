@@ -21,6 +21,12 @@ from sensor_msgs.msg import Imu, JointState, LaserScan
 from std_msgs.msg import Bool, Float32, Float64, Float64MultiArray, Int32
 
 
+# Project-wide operating/model-identification ceiling. This is enforced only
+# in the dev command and diagnostics paths; it never changes Unity physics,
+# vehicle dynamics, or recorded historical data.
+OPERATIONAL_SPEED_LIMIT_MPS = 16.0
+
+
 # The simulator bridge is best-effort and can deliver several native samples
 # in one executor burst. The default sensor-data depth is only five, which
 # lets the Python diagnostics recorder drop source events while it flushes
@@ -75,7 +81,7 @@ FIELDS = (
     "odom_observer_y_m", "odom_observer_yaw_rad", "odom_observer_sensor_outlier",
     "odom_observer_left_angle_rad", "odom_observer_right_angle_rad",
     "odom_observer_imu_yaw_rad", "odom_observer_packet_wheel_speed_mps",
-    "odom_observer_wheel_burst_rejected",
+    "odom_observer_wheel_burst_rejected", "odom_observer_turn_speed_bias_mps",
     # Brake/coast completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
@@ -195,6 +201,12 @@ class Calibration(Node):
         self.state = {field: math.nan for field in FIELDS}
         self.state["phase"] = "waiting"
         self.start = self.get_clock().now()
+        self.calibration_record_rate_hz = max(0.0, float(
+            self.get_parameter("calibration_record_rate_hz").value))
+        self.calibration_record_period_s = (
+            1.0 / self.calibration_record_rate_hz
+            if self.calibration_record_rate_hz > 0.0 else 0.0)
+        self.last_calibration_row_time_s = -math.inf
         self.phase_start = self.start
         self.last_odom = None
         self.last_odom_speed_sample = None
@@ -218,6 +230,12 @@ class Calibration(Node):
         self.rate_window_start = self.start
         self.capture_source_events = bool(
             self.get_parameter("capture_source_events").value)
+        configured_source_events = self.get_parameter(
+            "capture_source_event_names").value
+        self.capture_source_event_names = {
+            str(name).strip() for name in configured_source_events
+            if str(name).strip()
+        }
         self.source_event_rows = []
         self.finished = False
         self.reset_pending = False
@@ -247,7 +265,14 @@ class Calibration(Node):
         self.reset_signal_cleared = False
         self.bridge_timing_fault = False
 
-        self.max_speed = float(self.get_parameter("maximum_test_speed_mps").value)
+        configured_max_speed = float(
+            self.get_parameter("maximum_test_speed_mps").value)
+        self.max_speed = min(configured_max_speed, OPERATIONAL_SPEED_LIMIT_MPS)
+        if configured_max_speed > OPERATIONAL_SPEED_LIMIT_MPS:
+            self.get_logger().warning(
+                "maximum_test_speed_mps=%.3f exceeds the project operating "
+                "ceiling; clamping diagnostics to %.3f m/s"
+                % (configured_max_speed, OPERATIONAL_SPEED_LIMIT_MPS))
         self.max_throttle = float(self.get_parameter("maximum_throttle").value)
         self.max_steering = float(self.get_parameter("maximum_steering_command").value)
         self.encoder_wheel_radius = float(
@@ -379,6 +404,20 @@ class Calibration(Node):
         # enabled, important sensor callbacks also enqueue exact snapshots;
         # the analyzer selects the GT-aligned rows for model fitting.
         self.declare_parameter("capture_source_events", False)
+        # Wide calibration rows are supplemental phase/state diagnostics. The
+        # recorder's events.csv remains the complete source-time stream. A
+        # bounded rate keeps long identification campaigns below repository
+        # file limits without dropping any model-ID source packet.
+        self.declare_parameter("calibration_record_rate_hz", 50.0)
+        # Optional compacting filter for the wide calibration CSV.  An empty
+        # list preserves the legacy all-callback capture; model-ID launches
+        # select only the exact source events needed for packet reconstruction
+        # and odometry analysis. The complete topic event stream remains in
+        # model_id_timing_recorder/events.csv.
+        # ``[]`` is inferred as a ROS BYTE_ARRAY by Humble; use an empty
+        # string sentinel so YAML/launch string-array overrides have the same
+        # declared type.
+        self.declare_parameter("capture_source_event_names", [""])
         self.declare_parameter("duration_sec", 0.0)
         self.declare_parameter(
             "throttle_sequence", [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07])
@@ -427,9 +466,10 @@ class Calibration(Node):
         self.declare_parameter("steering_test_throttle", 0.23)
         self.declare_parameter("hold_sec", 3.0)
         self.declare_parameter("zero_settle_sec", 2.0)
-        # Diagnostic guard defaults to the documented simulator command
-        # envelope.  It is not a controller speed or throttle ceiling.
-        self.declare_parameter("maximum_test_speed_mps", 22.88)
+        # Diagnostic guard defaults to the project operating/model-ID ceiling.
+        # It is not a simulator physics or throttle modification.
+        self.declare_parameter(
+            "maximum_test_speed_mps", OPERATIONAL_SPEED_LIMIT_MPS)
         self.declare_parameter("maximum_throttle", 1.0)
         self.declare_parameter("maximum_steering_command", 0.50)
         self.declare_parameter("encoder_wheel_radius_m", 0.0590)
@@ -763,6 +803,9 @@ class Calibration(Node):
             return
         if name not in self.rate_event_names:
             return
+        if (self.capture_source_event_names and
+                name not in self.capture_source_event_names):
+            return
         now = self.get_clock().now()
         row = dict(self.state)
         row["stamp_s"] = now.nanoseconds * 1.0e-9
@@ -779,6 +822,17 @@ class Calibration(Node):
         for row in self.source_event_rows:
             self.writer.writerow(row)
         self.source_event_rows.clear()
+        self.stream.flush()
+
+    def _write_calibration_state(self) -> None:
+        """Write a bounded-rate supplemental phase/state snapshot."""
+        elapsed = (self.get_clock().now() - self.start).nanoseconds * 1.0e-9
+        if (self.calibration_record_period_s > 0.0 and
+                elapsed < self.last_calibration_row_time_s +
+                self.calibration_record_period_s):
+            return
+        self.last_calibration_row_time_s = elapsed
+        self.writer.writerow(self.state)
         self.stream.flush()
 
     def _message_stamp_s(self, msg) -> float:
@@ -1716,8 +1770,7 @@ class Calibration(Node):
 
         if self.mode == "sensor_record":
             self.state["phase"] = "record"
-            self.writer.writerow(self.state)
-            self.stream.flush()
+            self._write_calibration_state()
             if self.duration > 0.0 and elapsed >= self.duration:
                 self._finish("recording duration reached")
             return
@@ -1726,9 +1779,15 @@ class Calibration(Node):
             # The paired source-replay command is advanced by _on_gt_odom;
             # this timer row is diagnostics only and must not introduce a
             # second wall-clock phase scheduler.
+            # Keep the finite open-scene boundary guard active here too;
+            # source replay otherwise returns before the ordinary phase
+            # scheduler and could leave a cadence-valid but physically
+            # invalid tail after the car leaves the plane.
+            if self._ground_truth_boundary_reached():
+                self._finish("ground-truth boundary guard")
+                return
             self.state["phase"] = self.active_phase or "waiting"
-            self.writer.writerow(self.state)
-            self.stream.flush()
+            self._write_calibration_state()
             return
 
         if self.phase_index >= len(self.phases):
@@ -1794,8 +1853,7 @@ class Calibration(Node):
             self.state["phase"] = phase
             progress = min(max(phase_elapsed / max(duration, 1e-6), 0.0), 1.0)
             self._command(kind, value, progress)
-            self.writer.writerow(self.state)
-            self.stream.flush()
+            self._write_calibration_state()
             reset_timeout = max(duration, float(self.get_parameter(
                 "reset_confirmation_timeout_sec").value))
             if (self.reset_connection_ready and phase_elapsed >= duration):
@@ -1836,8 +1894,7 @@ class Calibration(Node):
                     return
                 self.state["phase"] = phase
                 self._command("raw_throttle", 0.0, 0.0)
-                self.writer.writerow(self.state)
-                self.stream.flush()
+                self._write_calibration_state()
                 return
 
         if phase.startswith("grid_base_") or phase.startswith("grid_throttle_"):
@@ -1845,8 +1902,7 @@ class Calibration(Node):
             progress = min(max(phase_elapsed / max(duration, 1e-6), 0.0), 1.0)
             self._command(kind, value, progress)
             settled = self._update_speed_settled(now)
-            self.writer.writerow(self.state)
-            self.stream.flush()
+            self._write_calibration_state()
             minimum_hold = duration
             if phase.startswith("grid_throttle_"):
                 minimum_hold = max(duration, float(self.get_parameter(
@@ -1867,8 +1923,7 @@ class Calibration(Node):
             self.state["phase"] = phase
             self._command("raw_throttle", 0.0, 0.0)
             confirmed = self._update_brake_stop(now)
-            self.writer.writerow(self.state)
-            self.stream.flush()
+            self._write_calibration_state()
             if confirmed:
                 self.phase_index += 1
                 self.phase_start = now
@@ -1884,8 +1939,7 @@ class Calibration(Node):
             progress = min(max(phase_elapsed / max(duration, 1e-6), 0.0), 1.0)
             self._command(kind, value, progress)
             settled = self._update_target_speed_settled(now)
-            self.writer.writerow(self.state)
-            self.stream.flush()
+            self._write_calibration_state()
             if settled and phase_elapsed >= duration:
                 self.phase_index += 1
                 self.phase_start = now
@@ -1906,8 +1960,7 @@ class Calibration(Node):
         self.state["phase"] = phase
         progress = min(max(phase_elapsed / max(duration, 1e-6), 0.0), 1.0)
         self._command(kind, value, progress)
-        self.writer.writerow(self.state)
-        self.stream.flush()
+        self._write_calibration_state()
 
     def destroy_node(self):
         if not self.finished and rclpy.ok(context=self.context):

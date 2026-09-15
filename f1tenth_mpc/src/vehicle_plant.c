@@ -15,17 +15,17 @@
 #define PLANT_DEFAULT_POSITION_OFFSET_X_M -0.155320086f /* rear pose vs COM velocity point */
 #define PLANT_DEFAULT_MAX_STEERING_RAD 0.5236f
 #define PLANT_DEFAULT_STEERING_RATE_RADPS 3.2f
-#define PLANT_DEFAULT_MAX_SPEED_MPS 22.88f
+#define PLANT_DEFAULT_MAX_SPEED_MPS 16.0f /* Project offline identification ceiling. */
 #define PLANT_DEFAULT_LINEAR_DAMPING_PER_S 0.273f /* Unity Rigidbody.drag [1/s]. */
 #define PLANT_DEFAULT_ANGULAR_DAMPING_PER_S 0.1f /* Unity Rigidbody.angularDrag [1/s]. */
-#define PLANT_DEFAULT_FORCE_MAX_N 18.4075037f
-#define PLANT_DEFAULT_HARD_BRAKE_FORCE_N 18.9627038f /* Latest causal fit; offline only. */
-#define PLANT_DEFAULT_SLIP_GAIN_PER_MPS 3.3656066f
+#define PLANT_DEFAULT_FORCE_MAX_N 19.89360065f /* Clean measured-damping holdout fit; offline only. */
+#define PLANT_DEFAULT_HARD_BRAKE_FORCE_N 18.57580700f /* Clean measured-damping holdout fit; offline only. */
+#define PLANT_DEFAULT_SLIP_GAIN_PER_MPS 0.97150588f /* Clean measured-damping holdout fit; offline only. */
 #define PLANT_DEFAULT_DRAG_N_PER_MPS 0.0f /* Explicit Rigidbody drag prevents double counting. */
-#define PLANT_DEFAULT_CF_N_PER_RAD 2869.4211f
-#define PLANT_DEFAULT_CR_N_PER_RAD 4964.7012f
-#define PLANT_DEFAULT_DF_N 13.1631691f
-#define PLANT_DEFAULT_DR_N 14.7715213f
+#define PLANT_DEFAULT_CF_N_PER_RAD 2674.084021452388f /* Manifest candidate Y2. */
+#define PLANT_DEFAULT_CR_N_PER_RAD 4853.771529131131f /* Manifest candidate Y2. */
+#define PLANT_DEFAULT_DF_N 12.63696205350674f /* Manifest candidate Y2. */
+#define PLANT_DEFAULT_DR_N 14.123309383979418f /* Manifest candidate Y2. */
 #define PLANT_MIN_SLIP_SPEED_MPS 0.5f
 #define PLANT_INTEGRATION_SUBSTEP_S 0.002f
 
@@ -68,8 +68,8 @@ VehiclePlantParameters_t vehicle_plant_default_parameters(void)
         .tire_model = VEHICLE_PLANT_TIRE_TANH,
         .wheel_dynamics_model = VEHICLE_PLANT_WHEEL_DYNAMICS_CONTINUOUS,
         .wheel_coefficients = {
-            -0.12427204f, -37.842430f, 954.15636f,
-            5.4744243f, -159.15294f, 0.07234303f,
+            -0.05503404f, -38.442266f, 967.47575f,
+            1.4255339f, -37.163453f, 0.02705089f,
         },
     };
     return parameters;

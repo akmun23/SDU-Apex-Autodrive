@@ -1,0 +1,187 @@
+{
+  "candidates": {
+    "wheel_continuous": {
+      "fixture_count": 4,
+      "fixtures": [
+        {
+          "dt_s": 0.025,
+          "errors": [
+            2.8119312711627487e-09,
+            0.0,
+            0.0,
+            1.933890314553821e-07,
+            0.0,
+            0.0,
+            0.0,
+            4.356723923848449e-07
+          ],
+          "max_abs_error": 4.356723923848449e-07
+        },
+        {
+          "dt_s": 0.024,
+          "errors": [
+            1.1797005594615939e-07,
+            3.792805736146931e-09,
+            1.1202800132004143e-08,
+            5.661888975438956e-07,
+            5.030047822707218e-09,
+            2.4193574477138213e-08,
+            6.675719976811934e-10,
+            9.166600136722991e-07
+          ],
+          "max_abs_error": 9.166600136722991e-07
+        },
+        {
+          "dt_s": 0.028,
+          "errors": [
+            6.765249382922889e-08,
+            2.706616188952182e-07,
+            7.277798408367175e-08,
+            4.152727326456329e-07,
+            1.8477603960787015e-08,
+            1.7121047513057874e-07,
+            1.4686584448586615e-08,
+            0.0
+          ],
+          "max_abs_error": 4.152727326456329e-07
+        },
+        {
+          "dt_s": 0.025,
+          "errors": [
+            2.0089490870844884e-07,
+            4.4018530820366664e-08,
+            1.3046724056664516e-07,
+            1.0129533922764722e-06,
+            1.7118035967877976e-08,
+            3.891917232934361e-08,
+            7.152557379708213e-09,
+            3.071732280091055e-06
+          ],
+          "max_abs_error": 3.071732280091055e-06
+        }
+      ],
+      "max_abs_error": 3.071732280091055e-06
+    },
+    "wheel_dynamic": {
+      "fixture_count": 4,
+      "fixtures": [
+        {
+          "dt_s": 0.025,
+          "errors": [
+            1.880370477380655e-09,
+            0.0,
+            0.0,
+            2.184536862515074e-08,
+            0.0,
+            0.0,
+            0.0,
+            9.925827271217713e-09
+          ],
+          "max_abs_error": 2.184536862515074e-08
+        },
+        {
+          "dt_s": 0.024,
+          "errors": [
+            1.3255923270172332e-07,
+            1.9466969314319016e-08,
+            2.6164017286056662e-08,
+            2.7166614824380986e-07,
+            5.140354752963816e-09,
+            3.047212449036607e-08,
+            6.675719976811934e-10,
+            3.8862056683797164e-08
+          ],
+          "max_abs_error": 2.7166614824380986e-07
+        },
+        {
+          "dt_s": 0.028,
+          "errors": [
+            6.765249382922889e-08,
+            2.706616188952182e-07,
+            7.277798408367175e-08,
+            4.152727326456329e-07,
+            1.8477603960787015e-08,
+            1.7121047513057874e-07,
+            1.4686584448586615e-08,
+            6.907633220976095e-08
+          ],
+          "max_abs_error": 4.152727326456329e-07
+        },
+        {
+          "dt_s": 0.025,
+          "errors": [
+            1.5118555296567138e-08,
+            9.034248771300213e-08,
+            1.2551790096182458e-07,
+            2.1479796608048218e-07,
+            1.593317824899465e-08,
+            4.829338240419645e-08,
+            7.152557379708213e-09,
+            5.255799369052738e-07
+          ],
+          "max_abs_error": 5.255799369052738e-07
+        }
+      ],
+      "max_abs_error": 5.255799369052738e-07
+    }
+  },
+  "default_parameter_parity": {
+    "field_errors": {
+      "angular_damping_per_s": 0.0,
+      "cf_n_per_rad": 0.0,
+      "coast_speed_drag_n_per_mps": 0.0,
+      "cr_n_per_rad": 0.0,
+      "df_n": 0.0,
+      "dr_n": 0.0,
+      "force_max_n": 0.0,
+      "hard_brake_force_n": 0.0,
+      "iz_kgm2": 0.0,
+      "lf_m": 0.0,
+      "linear_damping_per_s": 0.0,
+      "lr_m": 0.0,
+      "mass_kg": 0.0,
+      "max_speed_mps": 0.0,
+      "max_steering_rad": 0.0,
+      "position_offset_from_velocity_point_x_m": 0.0,
+      "slip_gain_per_mps": 0.0,
+      "steering_rate_radps": 0.0,
+      "tire_model": 0,
+      "wheel_coefficients": 1.862645149230957e-09,
+      "wheel_dynamics_model": 0
+    },
+    "max_abs_error": 1.862645149230957e-09,
+    "status": "pass",
+    "tolerance": 0.0002
+  },
+  "fixture_count": 4,
+  "ground_truth_use": "none",
+  "lateral_model": "Y2_tanh_fixed_iz",
+  "max_abs_error": 3.071732280091055e-06,
+  "native_source": "f1tenth_mpc/src/vehicle_plant.c",
+  "python_reference": "tools/model_id/structured_vehicle_plant.py",
+  "resolved_plant_defaults": {
+    "angular_damping_per_s": 0.1,
+    "cf_n_per_rad": 2674.084021452388,
+    "coast_speed_drag_n_per_mps": 0.0,
+    "cr_n_per_rad": 4853.771529131131,
+    "df_n": 12.63696205350674,
+    "dr_n": 14.123309383979418,
+    "force_max_n": 19.893600647379536,
+    "hard_brake_force_n": 18.575806999393215,
+    "iz_kgm2": 0.0961908,
+    "lf_m": 0.174679914,
+    "linear_damping_per_s": 0.273,
+    "lr_m": 0.155320086,
+    "mass_kg": 3.47,
+    "max_speed_mps": 22.88,
+    "max_steering_rad": 0.5236,
+    "position_offset_from_velocity_point_x_m": -0.155320086,
+    "slip_gain_per_mps": 0.9715058770352094,
+    "steering_rate_radps": 3.2,
+    "tire_model": "tanh",
+    "wheel_dynamics_kind": "continuous"
+  },
+  "schema_version": 1,
+  "status": "pass",
+  "tolerance": 3e-05
+}

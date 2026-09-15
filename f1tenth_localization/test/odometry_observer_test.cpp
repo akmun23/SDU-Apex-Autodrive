@@ -205,9 +205,9 @@ void test_bounded_kinematic_lateral_slip_model()
   OdometryObserverConfig config;
   config.wheel_speed_scale = 1.0;
   config.use_kinematic_lateral_slip_model = true;
-  config.lateral_slip_ratio = 0.015;
-  config.lateral_slip_yaw_rate_scale_radps = 0.15;
-  config.lateral_slip_max_mps = 0.30;
+  config.lateral_velocity_yaw_rate_gain_m = 0.167;
+  config.lateral_velocity_speed_yaw_rate_gain_s = -0.0063;
+  config.lateral_velocity_max_mps = 0.35;
   OdometryObserver observer(config);
   observer.update(observation(0.0, 0.0, 0.0));
   // Stay below the launch wheel-spin guard so this test exercises the
@@ -217,8 +217,8 @@ void test_bounded_kinematic_lateral_slip_model()
   const auto left_turn = observer.update(observation(
     0.050, delta, delta, 0.0, 0.0, 0.8));
   require(left_turn.turn_mode, "sideslip model enters turn mode");
-  require(left_turn.body_v_mps < 0.0, "left turn sideslip has the identified sign");
-  require(std::abs(left_turn.body_v_mps) < 0.30,
+  require(left_turn.body_v_mps > 0.0, "positive yaw turn has the identified sign");
+  require(std::abs(left_turn.body_v_mps) < 0.35,
     "sideslip model is bounded");
 
   const auto straight = observer.update(observation(
@@ -728,6 +728,70 @@ void test_launch_wheel_spin_is_not_promoted_by_coherent_recovery()
     "launch wheel spin does not inflate body speed");
 }
 
+void test_established_turn_rejects_coherent_positive_wheel_burst()
+{
+  OdometryObserverConfig config;
+  config.reset_encoder_jump_rad = 50.0;
+  config.wheel_speed_scale = 1.0;
+  config.wheel_speed_scale_speeds_mps.clear();
+  config.wheel_speed_scale_values.clear();
+  config.wheel_speed_window_s = 0.05;
+  config.wheel_innovation_max_mps = 1.5;
+  config.wheel_recovery_launch_speed_mps = 0.0;
+  config.wheel_recovery_launch_innovation_mps = 0.0;
+  config.wheel_recovery_launch_wheel_speed_mps = 0.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+
+  const double causal_speed = 5.0;
+  const double causal_delta = causal_speed * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, causal_delta, causal_delta));
+
+  // Both encoder windows now agree at 20 m/s, but the causal state is still
+  // 5 m/s. A steering transient must not promote that coherent burst.
+  const double burst_speed = 20.0;
+  const double burst_delta = burst_speed * 0.050 / config.wheel_radius_m;
+  const auto entered = observer.update(observation(
+    0.100, causal_delta + burst_delta, causal_delta + burst_delta,
+    0.0, 0.0, 0.7));
+  require(entered.turn_mode, "positive burst test enters turn mode");
+  require(!entered.wheel_update_used,
+    "coherent positive wheel burst is rejected at established speed");
+  require(entered.body_u_mps < causal_speed + 0.5,
+    "coherent positive wheel burst does not inflate turn speed");
+}
+
+void test_established_straight_rejects_positive_burst_recovery()
+{
+  OdometryObserverConfig config;
+  config.reset_encoder_jump_rad = 50.0;
+  config.wheel_speed_scale = 1.0;
+  config.wheel_speed_scale_speeds_mps.clear();
+  config.wheel_speed_scale_values.clear();
+  config.wheel_speed_window_s = 0.05;
+  config.wheel_innovation_max_mps = 1.5;
+  config.wheel_recovery_launch_speed_mps = 0.0;
+  config.wheel_recovery_launch_innovation_mps = 0.0;
+  config.wheel_recovery_launch_wheel_speed_mps = 0.0;
+  OdometryObserver observer(config);
+  observer.update(observation(0.0, 0.0, 0.0));
+
+  const double causal_speed = 5.0;
+  const double causal_delta = causal_speed * 0.050 / config.wheel_radius_m;
+  observer.update(observation(0.050, causal_delta, causal_delta));
+
+  // A coherent 20 m/s pair is inside the ordinary 1.5 m/s recovery gate
+  // only because the pending-burst path used to accept a positive jump.
+  const double burst_speed = 20.0;
+  const double burst_delta = burst_speed * 0.050 / config.wheel_radius_m;
+  const auto rejected = observer.update(observation(
+    0.100, causal_delta + burst_delta, causal_delta + burst_delta));
+  require(!rejected.wheel_update_used,
+    "straight positive wheel burst is rejected during recovery");
+  require(rejected.body_u_mps < causal_speed + 0.5,
+    "straight positive wheel burst does not inflate body speed");
+}
+
 void test_lever_arm_and_rk2_reference()
 {
   OdometryObserverConfig config;
@@ -774,6 +838,8 @@ int main()
   test_encoder_burst_is_rejected_until_coherent_recovery();
   test_coherent_wheel_rate_overrides_stale_innovation_gate();
   test_launch_wheel_spin_is_not_promoted_by_coherent_recovery();
+  test_established_turn_rejects_coherent_positive_wheel_burst();
+  test_established_straight_rejects_positive_burst_recovery();
   std::cout << "odometry_observer_test: PASS" << std::endl;
   return EXIT_SUCCESS;
 }

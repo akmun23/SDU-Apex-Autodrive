@@ -16,7 +16,7 @@ import statistics
 
 
 DOCUMENTED_WHEEL_RADIUS_M = 0.0590
-DOCUMENTED_MAX_SPEED_MPS = 22.88
+DOCUMENTED_MAX_SPEED_MPS = 16.0
 DEFAULT_GROUND_TRUTH_STEP_JITTER_FACTOR = 1.5
 DEFAULT_GROUND_TRUTH_POSITION_MARGIN_M = 0.15
 DEFAULT_GROUND_TRUTH_MAX_GAP_S = 0.5
@@ -874,7 +874,7 @@ def longitudinal_fit_samples(
             acceleration = (after_speed - before_speed) / dt
             if not math.isfinite(acceleration) or not -15.0 <= acceleration <= 15.0:
                 continue
-            if not 0.0 <= center_speed <= 22.88:
+            if not 0.0 <= center_speed <= DOCUMENTED_MAX_SPEED_MPS:
                 continue
             result.append((throttle, center_speed, acceleration))
     return result
@@ -884,7 +884,7 @@ def longitudinal_acceleration_fit(
     rows: list[dict[str, str]],
     operating_speeds: tuple[float, ...] = (
         0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0,
-        14.0, 16.0, 18.0, 20.0, 23.0,
+        14.0, 16.0,
     ),
 ) -> tuple[list[float], list[tuple[float, float, float]], float, int] | None:
     """Fit ``a = c0 + c1*u + c2*v + c3*u*v`` with Huber reweighting.

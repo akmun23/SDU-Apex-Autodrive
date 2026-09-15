@@ -88,7 +88,9 @@ def test_reference_observer_loads_deployed_parameter_contract() -> None:
     assert observer.wheel_speed_scale_values[-1] == pytest.approx(0.9445)
     assert observer.use_coherent_packet_velocity_for_pose
     assert observer.use_kinematic_lateral_slip_model
-    assert observer.lateral_slip_ratio == pytest.approx(0.012)
+    assert observer.lateral_velocity_yaw_rate_gain_m == pytest.approx(0.167)
+    assert observer.lateral_velocity_speed_yaw_rate_gain_s == pytest.approx(-0.0063)
+    assert observer.lateral_velocity_max_mps == pytest.approx(0.35)
     assert observer.turn_speed_bias_constant_mps == pytest.approx(-0.03)
     assert observer.max_integratable_gap_s == pytest.approx(0.250)
     assert observer.wheel_update_ax_abs_max_mps2 == pytest.approx(6.5)

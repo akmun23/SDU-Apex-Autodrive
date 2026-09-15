@@ -1,0 +1,1362 @@
+{
+  "ground_truth_use": "offline_identification_and_scoring_only",
+  "measured_state_use": "origin_u_and_origin_encoder_wheel_speed_only; measured states are used for one-step fitting/scoring, not recursive propagation",
+  "models": {
+    "direct": {
+      "parameters": {
+        "coefficients": [
+          -0.4557658580623026,
+          -0.7588720671063743,
+          0.00379907705875251,
+          20.302163505204064,
+          0.4674228123646369,
+          -15.254486921832141,
+          0.0
+        ],
+        "feature_names": [
+          "bias",
+          "u",
+          "u_squared",
+          "throttle",
+          "throttle_times_u",
+          "throttle_squared",
+          "steering_squared"
+        ],
+        "fit_samples": 8180,
+        "kind": "direct_empirical_throttle_surface"
+      },
+      "train_one_step_acceleration": {
+        "count": 9380,
+        "mae_mps2_or_mps": 0.4412504868193877,
+        "max": 10.642879665391922,
+        "p95": 1.9657808292419339,
+        "relative_p95": 0.8569090929502808
+      },
+      "train_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 9380,
+          "count": 9376,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.014367745463438913,
+          "max": 0.4787261730605472,
+          "p95": 0.07178073952518282,
+          "relative_p95": 0.007281269023105666,
+          "valid_origin_count": 9376
+        },
+        "0.05s": {
+          "attempted_origin_count": 9380,
+          "count": 9366,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.02290208877688412,
+          "max": 0.6996816948895948,
+          "p95": 0.11756781692181395,
+          "relative_p95": 0.011379664626398346,
+          "valid_origin_count": 9366
+        },
+        "0.10s": {
+          "attempted_origin_count": 9380,
+          "count": 9354,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.03997993420792246,
+          "max": 1.0778530754917597,
+          "p95": 0.20876468150612926,
+          "relative_p95": 0.020120375412030947,
+          "valid_origin_count": 9354
+        },
+        "0.25s": {
+          "attempted_origin_count": 9380,
+          "count": 9307,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.08960255524017095,
+          "max": 1.8782950567779366,
+          "p95": 0.4671455940331626,
+          "relative_p95": 0.04511178300337164,
+          "valid_origin_count": 9307
+        },
+        "0.50s": {
+          "attempted_origin_count": 9380,
+          "count": 9228,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.16643700070117673,
+          "max": 2.4682456246625897,
+          "p95": 0.8757248605022028,
+          "relative_p95": 0.07169145849661467,
+          "valid_origin_count": 9228
+        },
+        "0.75s": {
+          "attempted_origin_count": 9380,
+          "count": 9148,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.23327689152307696,
+          "max": 2.6017990763111136,
+          "p95": 1.2388176336839085,
+          "relative_p95": 0.08709670742901483,
+          "valid_origin_count": 9148
+        },
+        "1.00s": {
+          "attempted_origin_count": 9380,
+          "count": 9067,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.2913202606409794,
+          "max": 2.676162757401916,
+          "p95": 1.517202425261594,
+          "relative_p95": 0.09686318382290299,
+          "valid_origin_count": 9067
+        },
+        "1.50s": {
+          "attempted_origin_count": 9380,
+          "count": 8906,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.38406745819152327,
+          "max": 2.908161188581113,
+          "p95": 1.8286039889027457,
+          "relative_p95": 0.10961161750312487,
+          "valid_origin_count": 8906
+        },
+        "2.00s": {
+          "attempted_origin_count": 9380,
+          "count": 8747,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.4547047742217572,
+          "max": 2.839116951773883,
+          "p95": 1.9469810727419663,
+          "relative_p95": 0.11836946549902187,
+          "valid_origin_count": 8747
+        }
+      },
+      "validation_one_step_acceleration": {
+        "count": 2180,
+        "mae_mps2_or_mps": 0.45822421819595605,
+        "max": 7.957374295286208,
+        "p95": 2.4726217772149144,
+        "relative_p95": 0.9578717552581334
+      },
+      "validation_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 2180,
+          "count": 2179,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.014218476310875115,
+          "max": 0.3150314433603726,
+          "p95": 0.0890196384042583,
+          "relative_p95": 0.006041500553375397,
+          "valid_origin_count": 2179
+        },
+        "0.05s": {
+          "attempted_origin_count": 2180,
+          "count": 2176,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.023584142594563397,
+          "max": 0.42731812352502985,
+          "p95": 0.1496603310604243,
+          "relative_p95": 0.00971003639120376,
+          "valid_origin_count": 2176
+        },
+        "0.10s": {
+          "attempted_origin_count": 2180,
+          "count": 2173,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.04037942132093875,
+          "max": 0.6645286070962761,
+          "p95": 0.26025015470493074,
+          "relative_p95": 0.01566784329668979,
+          "valid_origin_count": 2173
+        },
+        "0.25s": {
+          "attempted_origin_count": 2180,
+          "count": 2161,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.09085432191210696,
+          "max": 1.2908560348276055,
+          "p95": 0.5998618830246762,
+          "relative_p95": 0.03349116890845611,
+          "valid_origin_count": 2161
+        },
+        "0.50s": {
+          "attempted_origin_count": 2180,
+          "count": 2141,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.1687221985672296,
+          "max": 2.1136156997021445,
+          "p95": 1.077480501698874,
+          "relative_p95": 0.06064888548361141,
+          "valid_origin_count": 2141
+        },
+        "0.75s": {
+          "attempted_origin_count": 2180,
+          "count": 2121,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.23684231345096204,
+          "max": 2.7082707240142305,
+          "p95": 1.4440293528972177,
+          "relative_p95": 0.07968231669695218,
+          "valid_origin_count": 2121
+        },
+        "1.00s": {
+          "attempted_origin_count": 2180,
+          "count": 2101,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.2955783722329228,
+          "max": 2.9483071325411494,
+          "p95": 1.7331275766024277,
+          "relative_p95": 0.09436587575643024,
+          "valid_origin_count": 2101
+        },
+        "1.50s": {
+          "attempted_origin_count": 2180,
+          "count": 2061,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.38728451517766377,
+          "max": 3.0090213534165677,
+          "p95": 2.0504818051693157,
+          "relative_p95": 0.10592472329450069,
+          "valid_origin_count": 2061
+        },
+        "2.00s": {
+          "attempted_origin_count": 2180,
+          "count": 2021,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.45091383639547983,
+          "max": 3.0346635321349993,
+          "p95": 2.13564715442282,
+          "relative_p95": 0.11077640527601802,
+          "valid_origin_count": 2021
+        }
+      }
+    },
+    "servo": {
+      "parameters": {
+        "equilibrium_map": {
+          "fit_source": "source_aligned_95th_percentile_by_applied_throttle",
+          "point_counts": {
+            "0.6": 876,
+            "0.7": 1556,
+            "0.75": 1700,
+            "0.8": 941,
+            "0.85": 1058,
+            "0.9": 179
+          },
+          "throttle_norm": [
+            0.0,
+            0.6,
+            0.7,
+            0.75,
+            0.8,
+            0.85,
+            0.9
+          ],
+          "u_inf_mps": [
+            0.0,
+            14.2418,
+            16.4701,
+            17.569105,
+            18.6555,
+            19.7316,
+            20.7952
+          ]
+        },
+        "fit_samples": 2588,
+        "gain_per_second": 0.43044837483308795,
+        "kind": "equilibrium_speed_servo"
+      },
+      "train_one_step_acceleration": {
+        "count": 9380,
+        "mae_mps2_or_mps": 0.47647850514753787,
+        "max": 11.204232230959569,
+        "p95": 3.1711265855989055,
+        "relative_p95": 0.8868330712065936
+      },
+      "train_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 9380,
+          "count": 9376,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.01834705354853109,
+          "max": 0.44390035046720655,
+          "p95": 0.11722466895753048,
+          "relative_p95": 0.017140092413195442,
+          "valid_origin_count": 9376
+        },
+        "0.05s": {
+          "attempted_origin_count": 9380,
+          "count": 9366,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.029280512238067997,
+          "max": 0.6456688367008603,
+          "p95": 0.19350043093983338,
+          "relative_p95": 0.027800120064668827,
+          "valid_origin_count": 9366
+        },
+        "0.10s": {
+          "attempted_origin_count": 9380,
+          "count": 9354,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.05110738809600838,
+          "max": 0.9898444624387004,
+          "p95": 0.34035386285185965,
+          "relative_p95": 0.04868934817761245,
+          "valid_origin_count": 9354
+        },
+        "0.25s": {
+          "attempted_origin_count": 9380,
+          "count": 9307,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.11469271881005651,
+          "max": 1.691613037918568,
+          "p95": 0.7572782428647411,
+          "relative_p95": 0.11078668701449831,
+          "valid_origin_count": 9307
+        },
+        "0.50s": {
+          "attempted_origin_count": 9380,
+          "count": 9228,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.21307904320996626,
+          "max": 2.4757654550856936,
+          "p95": 1.3388181647380897,
+          "relative_p95": 0.17260937701720036,
+          "valid_origin_count": 9228
+        },
+        "0.75s": {
+          "attempted_origin_count": 9380,
+          "count": 9148,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.29895495868016664,
+          "max": 3.37383193890526,
+          "p95": 1.7368284467196649,
+          "relative_p95": 0.21109643236545914,
+          "valid_origin_count": 9148
+        },
+        "1.00s": {
+          "attempted_origin_count": 9380,
+          "count": 9067,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.373752371652003,
+          "max": 4.131982490081245,
+          "p95": 2.1035330001050987,
+          "relative_p95": 0.21683929689276804,
+          "valid_origin_count": 9067
+        },
+        "1.50s": {
+          "attempted_origin_count": 9380,
+          "count": 8906,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.49449942118845813,
+          "max": 5.3271912315167596,
+          "p95": 2.5149320792220027,
+          "relative_p95": 0.21109650010125824,
+          "valid_origin_count": 8906
+        },
+        "2.00s": {
+          "attempted_origin_count": 9380,
+          "count": 8747,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.5839558404936995,
+          "max": 6.150374668350997,
+          "p95": 2.948224979637829,
+          "relative_p95": 0.20294948489517797,
+          "valid_origin_count": 8747
+        }
+      },
+      "validation_one_step_acceleration": {
+        "count": 2180,
+        "mae_mps2_or_mps": 0.9068384944232276,
+        "max": 8.48197427219761,
+        "p95": 3.4169249545790894,
+        "relative_p95": 1.0327535907579046
+      },
+      "validation_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 2180,
+          "count": 2179,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.034089400475853245,
+          "max": 0.3431849845287442,
+          "p95": 0.13673839317752368,
+          "relative_p95": 0.025227413830570956,
+          "valid_origin_count": 2179
+        },
+        "0.05s": {
+          "attempted_origin_count": 2180,
+          "count": 2176,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.05561697904164036,
+          "max": 0.47235545010852126,
+          "p95": 0.2218354668104361,
+          "relative_p95": 0.04180389890907285,
+          "valid_origin_count": 2176
+        },
+        "0.10s": {
+          "attempted_origin_count": 2180,
+          "count": 2173,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.0968489439402369,
+          "max": 0.6573804237968766,
+          "p95": 0.3680512217428178,
+          "relative_p95": 0.07456077091484431,
+          "valid_origin_count": 2173
+        },
+        "0.25s": {
+          "attempted_origin_count": 2180,
+          "count": 2161,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.21905242491796384,
+          "max": 1.330132640875271,
+          "p95": 0.8169464890378588,
+          "relative_p95": 0.1669908785590091,
+          "valid_origin_count": 2161
+        },
+        "0.50s": {
+          "attempted_origin_count": 2180,
+          "count": 2141,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.4056450579167663,
+          "max": 2.392430579690239,
+          "p95": 1.4861408799579734,
+          "relative_p95": 0.297863407783394,
+          "valid_origin_count": 2141
+        },
+        "0.75s": {
+          "attempted_origin_count": 2180,
+          "count": 2121,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.5645018793605427,
+          "max": 3.3041116054183104,
+          "p95": 2.058943009611699,
+          "relative_p95": 0.3542561672034191,
+          "valid_origin_count": 2121
+        },
+        "1.00s": {
+          "attempted_origin_count": 2180,
+          "count": 2101,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.6986143598328144,
+          "max": 4.144577617264505,
+          "p95": 2.5344919704639475,
+          "relative_p95": 0.38549883882629,
+          "valid_origin_count": 2101
+        },
+        "1.50s": {
+          "attempted_origin_count": 2180,
+          "count": 2061,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.9015192117726156,
+          "max": 5.2689711241061135,
+          "p95": 3.1381218262320116,
+          "relative_p95": 0.40302730389243474,
+          "valid_origin_count": 2061
+        },
+        "2.00s": {
+          "attempted_origin_count": 2180,
+          "count": 2021,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 1.033021453765587,
+          "max": 6.078544624755854,
+          "p95": 3.601803212409881,
+          "relative_p95": 0.38498264510153024,
+          "valid_origin_count": 2021
+        }
+      }
+    },
+    "wheel": {
+      "parameters": {
+        "body_linear_damping_per_s": 0.273,
+        "coast_speed_drag_n_per_mps": 0.0,
+        "equilibrium_map": {
+          "fit_source": "source_aligned_95th_percentile_by_applied_throttle",
+          "point_counts": {
+            "0.6": 876,
+            "0.7": 1556,
+            "0.75": 1700,
+            "0.8": 941,
+            "0.85": 1058,
+            "0.9": 179
+          },
+          "throttle_norm": [
+            0.0,
+            0.6,
+            0.7,
+            0.75,
+            0.8,
+            0.85,
+            0.9
+          ],
+          "u_inf_mps": [
+            0.0,
+            14.2418,
+            16.4701,
+            17.569105,
+            18.6555,
+            19.7316,
+            20.7952
+          ]
+        },
+        "fit_force_mae_n": 0.7670312161795623,
+        "fit_samples": 8172,
+        "force_max_n": 19.658863682824332,
+        "hard_brake_force_n": 18.576299303391146,
+        "hard_brake_identification": {
+          "fit_force_p05_n": 18.558413447003357,
+          "fit_force_p95_n": 18.75412586323205,
+          "fit_samples": 434,
+          "force_n": 18.576299303391146,
+          "kind": "identified_active_zero_throttle_brake"
+        },
+        "kind": "wheel_slip_force",
+        "mass_kg": 3.47,
+        "slip_gain_per_mps": 0.9901588876362003,
+        "wheel_time_constant_s": 2.0
+      },
+      "train_one_step_acceleration": {
+        "count": 9372,
+        "mae_mps2_or_mps": 0.997353037279036,
+        "max": 9.6612088912518,
+        "p95": 5.353400375617045,
+        "relative_p95": 0.7377984713297099
+      },
+      "train_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 9372,
+          "count": 9368,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.0075331657735888,
+          "max": 0.4836260049624208,
+          "p95": 0.02157627128367423,
+          "relative_p95": 0.0032072959236139243,
+          "valid_origin_count": 9368
+        },
+        "0.05s": {
+          "attempted_origin_count": 9372,
+          "count": 9358,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.011893202999033252,
+          "max": 0.7220055339810543,
+          "p95": 0.03550167382925906,
+          "relative_p95": 0.005201904576460596,
+          "valid_origin_count": 9358
+        },
+        "0.10s": {
+          "attempted_origin_count": 9372,
+          "count": 9346,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.020652181256328176,
+          "max": 1.1098819826391768,
+          "p95": 0.06351475242577109,
+          "relative_p95": 0.009423929754956973,
+          "valid_origin_count": 9346
+        },
+        "0.25s": {
+          "attempted_origin_count": 9372,
+          "count": 9299,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.04945037069098364,
+          "max": 1.9116639144929621,
+          "p95": 0.14588550626101693,
+          "relative_p95": 0.021666655058063578,
+          "valid_origin_count": 9299
+        },
+        "0.50s": {
+          "attempted_origin_count": 9372,
+          "count": 9220,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.11180788384796876,
+          "max": 2.4023734913773502,
+          "p95": 0.3315498929030234,
+          "relative_p95": 0.036670682686170186,
+          "valid_origin_count": 9220
+        },
+        "0.75s": {
+          "attempted_origin_count": 9372,
+          "count": 9140,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.18466321075318884,
+          "max": 2.363448450229054,
+          "p95": 0.5310814315454593,
+          "relative_p95": 0.047243892060966276,
+          "valid_origin_count": 9140
+        },
+        "1.00s": {
+          "attempted_origin_count": 9372,
+          "count": 9059,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.2573024118727422,
+          "max": 2.230432808730413,
+          "p95": 0.7523580769403999,
+          "relative_p95": 0.054346868989614876,
+          "valid_origin_count": 9059
+        },
+        "1.50s": {
+          "attempted_origin_count": 9372,
+          "count": 8898,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.38635096829796006,
+          "max": 2.0068975389522272,
+          "p95": 1.0135636775642176,
+          "relative_p95": 0.0627788607735551,
+          "valid_origin_count": 8898
+        },
+        "2.00s": {
+          "attempted_origin_count": 9372,
+          "count": 8739,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.4902222385675498,
+          "max": 2.1192819913858862,
+          "p95": 1.1446480980265505,
+          "relative_p95": 0.06680554252534465,
+          "valid_origin_count": 8739
+        }
+      },
+      "validation_one_step_acceleration": {
+        "count": 2178,
+        "mae_mps2_or_mps": 1.3082018460402929,
+        "max": 5.382174813011665,
+        "p95": 5.353400375617045,
+        "relative_p95": 1.0190448028609824
+      },
+      "validation_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 2178,
+          "count": 2177,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.014686007717369118,
+          "max": 0.25983113628373644,
+          "p95": 0.06230534154212464,
+          "relative_p95": 0.00470552723436914,
+          "valid_origin_count": 2177
+        },
+        "0.05s": {
+          "attempted_origin_count": 2178,
+          "count": 2174,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.02459093416389213,
+          "max": 0.38871144233947774,
+          "p95": 0.11290082423499101,
+          "relative_p95": 0.0077569128213831155,
+          "valid_origin_count": 2174
+        },
+        "0.10s": {
+          "attempted_origin_count": 2178,
+          "count": 2171,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.04305264017597814,
+          "max": 0.6200269710044992,
+          "p95": 0.20537809854602074,
+          "relative_p95": 0.013391267115220519,
+          "valid_origin_count": 2171
+        },
+        "0.25s": {
+          "attempted_origin_count": 2178,
+          "count": 2159,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.09816120835313083,
+          "max": 1.1770818486662584,
+          "p95": 0.4501387849212044,
+          "relative_p95": 0.030277150360692895,
+          "valid_origin_count": 2159
+        },
+        "0.50s": {
+          "attempted_origin_count": 2178,
+          "count": 2139,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.18833810987624158,
+          "max": 1.9138881308258817,
+          "p95": 0.8344000876277065,
+          "relative_p95": 0.05245988503022263,
+          "valid_origin_count": 2139
+        },
+        "0.75s": {
+          "attempted_origin_count": 2178,
+          "count": 2119,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.2732648991217446,
+          "max": 2.353674967411962,
+          "p95": 1.1742569747835852,
+          "relative_p95": 0.06908201549774409,
+          "valid_origin_count": 2119
+        },
+        "1.00s": {
+          "attempted_origin_count": 2178,
+          "count": 2099,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.35201089853967255,
+          "max": 2.4787057325053254,
+          "p95": 1.4113597475931563,
+          "relative_p95": 0.07737243632549066,
+          "valid_origin_count": 2099
+        },
+        "1.50s": {
+          "attempted_origin_count": 2178,
+          "count": 2059,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.48865911170431425,
+          "max": 2.294592861045871,
+          "p95": 1.7459755088212034,
+          "relative_p95": 0.09007117991660149,
+          "valid_origin_count": 2059
+        },
+        "2.00s": {
+          "attempted_origin_count": 2178,
+          "count": 2019,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.5978703604897758,
+          "max": 2.0987445776537967,
+          "p95": 1.7899633830758326,
+          "relative_p95": 0.091136335266396,
+          "valid_origin_count": 2019
+        }
+      }
+    },
+    "wheel_continuous": {
+      "parameters": {
+        "body_linear_damping_per_s": 0.273,
+        "coast_speed_drag_n_per_mps": 0.0,
+        "equilibrium_map": {
+          "fit_source": "source_aligned_95th_percentile_by_applied_throttle",
+          "point_counts": {
+            "0.6": 876,
+            "0.7": 1556,
+            "0.75": 1700,
+            "0.8": 941,
+            "0.85": 1058,
+            "0.9": 179
+          },
+          "throttle_norm": [
+            0.0,
+            0.6,
+            0.7,
+            0.75,
+            0.8,
+            0.85,
+            0.9
+          ],
+          "u_inf_mps": [
+            0.0,
+            14.2418,
+            16.4701,
+            17.569105,
+            18.6555,
+            19.7316,
+            20.7952
+          ]
+        },
+        "fit_force_mae_n": 0.7670312161795623,
+        "fit_samples": 8172,
+        "force_max_n": 19.658863682824332,
+        "hard_brake_force_n": 18.576299303391146,
+        "hard_brake_identification": {
+          "fit_force_p05_n": 18.558413447003357,
+          "fit_force_p95_n": 18.75412586323205,
+          "fit_samples": 434,
+          "force_n": 18.576299303391146,
+          "kind": "identified_active_zero_throttle_brake"
+        },
+        "kind": "wheel_slip_force_with_continuous_wheel_state",
+        "mass_kg": 3.47,
+        "slip_gain_per_mps": 0.9901588876362003,
+        "wheel_dynamics": {
+          "coefficients": [
+            -0.04794120891278526,
+            -38.515559160334234,
+            967.1746537260434,
+            1.8091281274758975,
+            -43.88503406650463,
+            0.027495453025406718
+          ],
+          "feature_names": [
+            "bias",
+            "wheel_speed",
+            "throttle",
+            "wheel_speed_times_throttle",
+            "throttle_squared",
+            "body_speed"
+          ],
+          "fit_samples": 8172,
+          "fit_wheel_speed_rate_mae_mps2": 0.32059991944361527,
+          "fit_wheel_speed_rate_p95_mps2": 1.0354522339281278,
+          "kind": "identified_continuous_wheel_speed_derivative",
+          "reference_dt_s": "measured per-transition dt_sim_s"
+        }
+      },
+      "train_one_step_acceleration": {
+        "count": 9372,
+        "mae_mps2_or_mps": 0.994450473252404,
+        "max": 5.901640445901162,
+        "p95": 5.353400375617045,
+        "relative_p95": 0.7262538441483287
+      },
+      "train_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 9372,
+          "count": 9368,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.0074087572819841055,
+          "max": 0.2542598889674288,
+          "p95": 0.02107980761235595,
+          "relative_p95": 0.003171808809928739,
+          "valid_origin_count": 9368
+        },
+        "0.05s": {
+          "attempted_origin_count": 9372,
+          "count": 9358,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.011670464181142298,
+          "max": 0.37547716406756493,
+          "p95": 0.03330936860792022,
+          "relative_p95": 0.005155227865051122,
+          "valid_origin_count": 9358
+        },
+        "0.10s": {
+          "attempted_origin_count": 9372,
+          "count": 9346,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.02036563168455362,
+          "max": 0.6018715639937753,
+          "p95": 0.05557528962138747,
+          "relative_p95": 0.009239691353379521,
+          "valid_origin_count": 9346
+        },
+        "0.25s": {
+          "attempted_origin_count": 9372,
+          "count": 9299,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.043761980063294646,
+          "max": 1.2053597651935632,
+          "p95": 0.11379694197044898,
+          "relative_p95": 0.020923392745762614,
+          "valid_origin_count": 9299
+        },
+        "0.50s": {
+          "attempted_origin_count": 9372,
+          "count": 9220,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.07755259734690567,
+          "max": 1.9096310574834696,
+          "p95": 0.23030326072364815,
+          "relative_p95": 0.03393930164900332,
+          "valid_origin_count": 9220
+        },
+        "0.75s": {
+          "attempted_origin_count": 9372,
+          "count": 9140,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.10464876891212221,
+          "max": 2.3108703080836044,
+          "p95": 0.39542917704415004,
+          "relative_p95": 0.04262912248104501,
+          "valid_origin_count": 9140
+        },
+        "1.00s": {
+          "attempted_origin_count": 9372,
+          "count": 9059,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.126071948476726,
+          "max": 2.433786174833692,
+          "p95": 0.5795700653491451,
+          "relative_p95": 0.04832714940548189,
+          "valid_origin_count": 9059
+        },
+        "1.50s": {
+          "attempted_origin_count": 9372,
+          "count": 8898,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.15442003556156214,
+          "max": 2.4142538854025837,
+          "p95": 0.7228454192517262,
+          "relative_p95": 0.05191513603632382,
+          "valid_origin_count": 8898
+        },
+        "2.00s": {
+          "attempted_origin_count": 9372,
+          "count": 8739,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.16827106156703842,
+          "max": 2.402655384721779,
+          "p95": 0.7644991543210384,
+          "relative_p95": 0.05212794500807698,
+          "valid_origin_count": 8739
+        }
+      },
+      "validation_one_step_acceleration": {
+        "count": 2178,
+        "mae_mps2_or_mps": 1.3014662188890602,
+        "max": 5.382174813011665,
+        "p95": 5.353400375617045,
+        "relative_p95": 1.0150254398146261
+      },
+      "validation_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 2178,
+          "count": 2177,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.014372813643770526,
+          "max": 0.26059657297629,
+          "p95": 0.06146028095206546,
+          "relative_p95": 0.0046958932234515815,
+          "valid_origin_count": 2177
+        },
+        "0.05s": {
+          "attempted_origin_count": 2178,
+          "count": 2174,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.023799284466020074,
+          "max": 0.3903663654337848,
+          "p95": 0.10991362915972758,
+          "relative_p95": 0.007755452522884487,
+          "valid_origin_count": 2174
+        },
+        "0.10s": {
+          "attempted_origin_count": 2178,
+          "count": 2171,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.041046070044321745,
+          "max": 0.6241778571124179,
+          "p95": 0.19788786064986752,
+          "relative_p95": 0.013391267115220519,
+          "valid_origin_count": 2171
+        },
+        "0.25s": {
+          "attempted_origin_count": 2178,
+          "count": 2159,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.09067055098483912,
+          "max": 1.198671145280521,
+          "p95": 0.44998025988122237,
+          "relative_p95": 0.030251097434356056,
+          "valid_origin_count": 2159
+        },
+        "0.50s": {
+          "attempted_origin_count": 2178,
+          "count": 2139,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.16650826352366319,
+          "max": 1.968832279193201,
+          "p95": 0.8342112743851544,
+          "relative_p95": 0.05271464031676713,
+          "valid_origin_count": 2139
+        },
+        "0.75s": {
+          "attempted_origin_count": 2178,
+          "count": 2119,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.23174757590856815,
+          "max": 2.4843298426387257,
+          "p95": 1.1725114534027092,
+          "relative_p95": 0.06560131660312818,
+          "valid_origin_count": 2119
+        },
+        "1.00s": {
+          "attempted_origin_count": 2178,
+          "count": 2099,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.2872727138149474,
+          "max": 2.6757122161235927,
+          "p95": 1.440328958141908,
+          "relative_p95": 0.07843863977328899,
+          "valid_origin_count": 2099
+        },
+        "1.50s": {
+          "attempted_origin_count": 2178,
+          "count": 2059,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.3748964457965678,
+          "max": 2.646390406793177,
+          "p95": 1.7718900364186752,
+          "relative_p95": 0.09059862247541417,
+          "valid_origin_count": 2059
+        },
+        "2.00s": {
+          "attempted_origin_count": 2178,
+          "count": 2019,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.43743924659467054,
+          "max": 2.6007034284941497,
+          "p95": 1.8503325018345684,
+          "relative_p95": 0.09219765914097156,
+          "valid_origin_count": 2019
+        }
+      }
+    },
+    "wheel_dynamic": {
+      "parameters": {
+        "body_linear_damping_per_s": 0.273,
+        "coast_speed_drag_n_per_mps": 0.0,
+        "equilibrium_map": {
+          "fit_source": "source_aligned_95th_percentile_by_applied_throttle",
+          "point_counts": {
+            "0.6": 876,
+            "0.7": 1556,
+            "0.75": 1700,
+            "0.8": 941,
+            "0.85": 1058,
+            "0.9": 179
+          },
+          "throttle_norm": [
+            0.0,
+            0.6,
+            0.7,
+            0.75,
+            0.8,
+            0.85,
+            0.9
+          ],
+          "u_inf_mps": [
+            0.0,
+            14.2418,
+            16.4701,
+            17.569105,
+            18.6555,
+            19.7316,
+            20.7952
+          ]
+        },
+        "fit_force_mae_n": 0.7670312161795623,
+        "fit_samples": 8172,
+        "force_max_n": 19.658863682824332,
+        "hard_brake_force_n": 18.576299303391146,
+        "hard_brake_identification": {
+          "fit_force_p05_n": 18.558413447003357,
+          "fit_force_p95_n": 18.75412586323205,
+          "fit_samples": 434,
+          "force_n": 18.576299303391146,
+          "kind": "identified_active_zero_throttle_brake"
+        },
+        "kind": "wheel_slip_force_with_discrete_wheel_state",
+        "mass_kg": 3.47,
+        "slip_gain_per_mps": 0.9901588876362003,
+        "wheel_dynamics": {
+          "coefficients": [
+            -0.001423576318213228,
+            0.039826857175418534,
+            24.105294526096152,
+            0.023534023987097027,
+            -0.5443641521113095,
+            0.000717871501388979
+          ],
+          "feature_names": [
+            "bias",
+            "wheel_speed",
+            "throttle",
+            "wheel_speed_times_throttle",
+            "throttle_squared",
+            "body_speed"
+          ],
+          "fit_samples": 8172,
+          "fit_wheel_speed_mae_mps": 0.007759380779507952,
+          "fit_wheel_speed_p95_mps": 0.02636238586043866,
+          "kind": "identified_discrete_wheel_speed_state"
+        }
+      },
+      "train_one_step_acceleration": {
+        "count": 9372,
+        "mae_mps2_or_mps": 0.9942481839519385,
+        "max": 5.901640445901162,
+        "p95": 5.353400375617045,
+        "relative_p95": 0.7262473073474891
+      },
+      "train_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 9372,
+          "count": 9368,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.007400769979562618,
+          "max": 0.25424322318088954,
+          "p95": 0.02108584922671497,
+          "relative_p95": 0.0031718467622141124,
+          "valid_origin_count": 9368
+        },
+        "0.05s": {
+          "attempted_origin_count": 9372,
+          "count": 9358,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.011655696680018071,
+          "max": 0.3754692583910533,
+          "p95": 0.03324515823666374,
+          "relative_p95": 0.005147075274639193,
+          "valid_origin_count": 9358
+        },
+        "0.10s": {
+          "attempted_origin_count": 9372,
+          "count": 9346,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.02034155372784328,
+          "max": 0.6018806142663209,
+          "p95": 0.05560691457569433,
+          "relative_p95": 0.00923969135337885,
+          "valid_origin_count": 9346
+        },
+        "0.25s": {
+          "attempted_origin_count": 9372,
+          "count": 9299,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.0437272503771591,
+          "max": 1.205415651697301,
+          "p95": 0.11391430648039957,
+          "relative_p95": 0.020922322700324802,
+          "valid_origin_count": 9299
+        },
+        "0.50s": {
+          "attempted_origin_count": 9372,
+          "count": 9220,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.07753050661712681,
+          "max": 1.9097852975315845,
+          "p95": 0.23020837417435658,
+          "relative_p95": 0.03393930164900332,
+          "valid_origin_count": 9220
+        },
+        "0.75s": {
+          "attempted_origin_count": 9372,
+          "count": 9140,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.10461849377915045,
+          "max": 2.3110386089060775,
+          "p95": 0.3953967789722803,
+          "relative_p95": 0.042631840101468005,
+          "valid_origin_count": 9140
+        },
+        "1.00s": {
+          "attempted_origin_count": 9372,
+          "count": 9059,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.12603266413473357,
+          "max": 2.4340166093806275,
+          "p95": 0.5794727453344173,
+          "relative_p95": 0.04832714940548189,
+          "valid_origin_count": 9059
+        },
+        "1.50s": {
+          "attempted_origin_count": 9372,
+          "count": 8898,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.1543715794550206,
+          "max": 2.41453234721498,
+          "p95": 0.7228439621389775,
+          "relative_p95": 0.05191571935393357,
+          "valid_origin_count": 8898
+        },
+        "2.00s": {
+          "attempted_origin_count": 9372,
+          "count": 8739,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.16822049472331346,
+          "max": 2.402960387679773,
+          "p95": 0.7645109537471306,
+          "relative_p95": 0.05212997742331716,
+          "valid_origin_count": 8739
+        }
+      },
+      "validation_one_step_acceleration": {
+        "count": 2178,
+        "mae_mps2_or_mps": 1.3013752889172079,
+        "max": 5.382174813011665,
+        "p95": 5.353400375617045,
+        "relative_p95": 1.0148250282542541
+      },
+      "validation_recursive_u": {
+        "0.025s": {
+          "attempted_origin_count": 2178,
+          "count": 2177,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.01436820350253714,
+          "max": 0.26061356421133297,
+          "p95": 0.06145097984749981,
+          "relative_p95": 0.0046958932234515815,
+          "valid_origin_count": 2177
+        },
+        "0.05s": {
+          "attempted_origin_count": 2178,
+          "count": 2174,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.023791038998812495,
+          "max": 0.3903936626229729,
+          "p95": 0.10991367953883113,
+          "relative_p95": 0.007755433569216314,
+          "valid_origin_count": 2174
+        },
+        "0.10s": {
+          "attempted_origin_count": 2178,
+          "count": 2171,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.04103144206261997,
+          "max": 0.6242234407339033,
+          "p95": 0.1978874393070491,
+          "relative_p95": 0.013391267115220519,
+          "valid_origin_count": 2171
+        },
+        "0.25s": {
+          "attempted_origin_count": 2178,
+          "count": 2159,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.09063954318379033,
+          "max": 1.1987886481326662,
+          "p95": 0.44997861900371205,
+          "relative_p95": 0.030250657435169484,
+          "valid_origin_count": 2159
+        },
+        "0.50s": {
+          "attempted_origin_count": 2178,
+          "count": 2139,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.16645465852794988,
+          "max": 1.968987785047382,
+          "p95": 0.8342090776432904,
+          "relative_p95": 0.05271456860917125,
+          "valid_origin_count": 2139
+        },
+        "0.75s": {
+          "attempted_origin_count": 2178,
+          "count": 2119,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.23167670861117193,
+          "max": 2.4845648854163613,
+          "p95": 1.1725086075166757,
+          "relative_p95": 0.0656012449170488,
+          "valid_origin_count": 2119
+        },
+        "1.00s": {
+          "attempted_origin_count": 2178,
+          "count": 2099,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.2871891955368938,
+          "max": 2.67598199001867,
+          "p95": 1.4403172823487544,
+          "relative_p95": 0.07843833465978893,
+          "valid_origin_count": 2099
+        },
+        "1.50s": {
+          "attempted_origin_count": 2178,
+          "count": 2059,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.3747952040856704,
+          "max": 2.6467070862448203,
+          "p95": 1.7718840308745492,
+          "relative_p95": 0.09059849561335581,
+          "valid_origin_count": 2059
+        },
+        "2.00s": {
+          "attempted_origin_count": 2178,
+          "count": 2019,
+          "divergence_examples": [],
+          "divergent_origin_count": 0,
+          "mae_mps2_or_mps": 0.43733080836022,
+          "max": 2.6010536219227554,
+          "p95": 1.8503290568709012,
+          "relative_p95": 0.09219747218088356,
+          "valid_origin_count": 2019
+        }
+      }
+    }
+  },
+  "next_action": "Use the best longitudinal candidate only as an input to native recursive replay; do not copy parameters into MPC until full vehicle blind validation passes.",
+  "one_step_prediction_uses_future_gt": false,
+  "recursive_prediction_uses_future_gt": false,
+  "recursive_score_boundary": "segment_id_hard_stop",
+  "recursive_score_scope": "longitudinal_u_causal_zero_lateral_coupling",
+  "schema_version": 2,
+  "status": "offline_benchmark_not_runtime_validated",
+  "train_runs": [
+    "high_speed_lateral_14mps_nolidar_40hz_20260915",
+    "high_speed_lateral_16mps_nolidar_40hz_20260915",
+    "high_speed_lateral_18mps_nolidar_40hz_20260915",
+    "high_speed_braking_16mps_nolidar_40hz_20260915",
+    "high_speed_throttle_sweep_nolidar_40hz_20260915",
+    "high_speed_constant_075_nolidar_40hz_20260915",
+    "high_speed_constant_080_nolidar_40hz_20260915",
+    "high_speed_constant_075_repeat2_nolidar_40hz_20260915"
+  ],
+  "train_transition_count": 9380,
+  "validation_runs": [
+    "high_speed_braking_20mps_nolidar_40hz_20260915",
+    "high_speed_lateral_20mps_nolidar_40hz_20260915"
+  ],
+  "validation_transition_count": 2180
+}

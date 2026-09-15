@@ -67,9 +67,9 @@ class ReferenceObserver:
                  use_coherent_packet_velocity_for_pose: bool = True,
                  coherent_packet_pose_blend: float = 1.0,
                  use_kinematic_lateral_slip_model: bool = True,
-                 lateral_slip_ratio: float = 0.012,
-                 lateral_slip_yaw_rate_scale_radps: float = 0.15,
-                 lateral_slip_max_mps: float = 0.30,
+                 lateral_velocity_yaw_rate_gain_m: float = 0.167,
+                 lateral_velocity_speed_yaw_rate_gain_s: float = -0.0063,
+                 lateral_velocity_max_mps: float = 0.35,
                  decel_detect_ax_mps2: float = -0.5,
                  decel_ax_scale: float = 1.005,
                  decel_ax_offset_mps2: float = 0.020,
@@ -126,10 +126,12 @@ class ReferenceObserver:
             coherent_packet_pose_blend, 0.0, 1.0))
         self.use_kinematic_lateral_slip_model = bool(
             use_kinematic_lateral_slip_model)
-        self.lateral_slip_ratio = max(0.0, float(lateral_slip_ratio))
-        self.lateral_slip_yaw_rate_scale_radps = max(
-            0.0, float(lateral_slip_yaw_rate_scale_radps))
-        self.lateral_slip_max_mps = max(0.0, float(lateral_slip_max_mps))
+        self.lateral_velocity_yaw_rate_gain_m = float(
+            lateral_velocity_yaw_rate_gain_m)
+        self.lateral_velocity_speed_yaw_rate_gain_s = float(
+            lateral_velocity_speed_yaw_rate_gain_s)
+        self.lateral_velocity_max_mps = max(
+            0.0, float(lateral_velocity_max_mps))
         self.decel_detect_ax_mps2 = float(decel_detect_ax_mps2)
         self.decel_ax_scale = float(decel_ax_scale)
         self.decel_ax_offset_mps2 = float(decel_ax_offset_mps2)
@@ -182,8 +184,10 @@ class ReferenceObserver:
             "turn_speed_bias_yaw_rate_squared_mps", "turn_speed_bias_speed_yaw_rate_abs_mps",
             "turn_speed_bias_max_mps", "use_coherent_packet_velocity_for_pose",
             "coherent_packet_pose_blend", "integrate_lateral_acceleration_in_turn",
-            "use_kinematic_lateral_slip_model", "lateral_slip_ratio",
-            "lateral_slip_yaw_rate_scale_radps", "lateral_slip_max_mps",
+            "use_kinematic_lateral_slip_model",
+            "lateral_velocity_yaw_rate_gain_m",
+            "lateral_velocity_speed_yaw_rate_gain_s",
+            "lateral_velocity_max_mps",
             "decel_detect_ax_mps2", "decel_ax_scale", "decel_ax_offset_mps2",
             "imu_x_m", "wheel_update_ax_abs_max_mps2", "wheel_freeze_speed_mps",
             "wheel_innovation_max_mps", "wheel_recovery_launch_speed_mps",
@@ -285,14 +289,16 @@ class ReferenceObserver:
         if (not self.use_kinematic_lateral_slip_model or
                 not np.isfinite(yaw_rate_radps) or
                 not np.isfinite(longitudinal_speed_mps) or
-                self.lateral_slip_ratio <= 0.0 or
-                self.lateral_slip_max_mps <= 0.0):
+                not np.isfinite(self.lateral_velocity_yaw_rate_gain_m) or
+                not np.isfinite(self.lateral_velocity_speed_yaw_rate_gain_s) or
+                self.lateral_velocity_max_mps <= 0.0):
             return 0.0
-        transition = max(1.0e-3, self.lateral_slip_yaw_rate_scale_radps)
-        direction = math.tanh(yaw_rate_radps / transition)
+        speed = max(0.0, longitudinal_speed_mps)
+        speed_gain = (self.lateral_velocity_yaw_rate_gain_m +
+                      self.lateral_velocity_speed_yaw_rate_gain_s * speed)
         return float(np.clip(
-            -self.lateral_slip_ratio * direction * max(0.0, longitudinal_speed_mps),
-            -self.lateral_slip_max_mps, self.lateral_slip_max_mps))
+            yaw_rate_radps * speed_gain,
+            -self.lateral_velocity_max_mps, self.lateral_velocity_max_mps))
 
     def _result(self, row: pd.Series, dt: float = 0.0) -> Estimate:
         return Estimate(
@@ -400,6 +406,18 @@ class ReferenceObserver:
         if packet < self.wheel_freeze_speed_mps and self.speed > 0.5:
             self.wheel_dropout_active = True
         if self.wheel_burst_rejected:
+            self.wheel_dropout_active = True
+            self.wheel_burst_recovery_pending = True
+        positive_wheel_innovation_fault = (
+            self.wheel_innovation_max_mps > 0.0 and
+            self.speed >= max(2.0, self.wheel_recovery_launch_speed_mps) and
+            mapped > self.speed + self.wheel_innovation_max_mps and
+            packet_mapped > self.speed + self.wheel_innovation_max_mps and
+            self.wheel_burst_disagreement_mps > 0.0 and
+            abs(packet_mapped - mapped) <=
+            0.25 * self.wheel_burst_disagreement_mps and
+            not self.wheel_burst_rejected)
+        if positive_wheel_innovation_fault:
             self.wheel_dropout_active = True
             self.wheel_burst_recovery_pending = True
         if abs(ax) > self.max_imu_ax_abs_mps2:
@@ -615,7 +633,11 @@ class ReferenceObserver:
                                     abs(packet_mapped - mapped) <=
                                     self.wheel_burst_disagreement_mps)) and
                                   (abs(packet_mapped - pred) <=
-                                   self.wheel_innovation_max_mps))
+                                   self.wheel_innovation_max_mps) and
+                                  (not self.wheel_burst_recovery_pending or
+                                   self.turn_current_packet_max_increase_mps <= 0.0 or
+                                   packet_mapped <= pred +
+                                   self.turn_current_packet_max_increase_mps))
                 wheel_ok = abs(ax) < self.wheel_update_ax_abs_max_mps2 and (
                     (wheel_recovery if self.wheel_dropout_active else
                      (wheel_speed_is_valid(pred) or

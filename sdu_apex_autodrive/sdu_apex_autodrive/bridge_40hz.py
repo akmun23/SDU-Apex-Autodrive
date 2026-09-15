@@ -191,6 +191,7 @@ _publication_diagnostic_enabled = False
 _publication_diagnostic_count = 0
 _timing_fault = False
 _timing_fault_reason = ""
+_shutdown_requested = False
 _timing_debug_count = 0
 _request_timing_debug_count = 0
 
@@ -383,6 +384,11 @@ def _trigger_timing_fault(reason: str) -> None:
     """Fail closed when the native 40 Hz source contract is broken."""
     global _timing_fault, _timing_fault_reason
     global _timing_fault_detail_publisher
+    # An already-buffered Socket.IO response can arrive after orderly ROS
+    # teardown has cleared the request FIFO. That is not a source-timing
+    # fault, and must not publish a false fatal condition while stopping.
+    if _shutdown_requested:
+        return
     with _pending_request_lock:
         if _timing_fault:
             return
@@ -448,6 +454,8 @@ def _on_reset_command(message: Bool) -> None:
     still releases it immediately.
     """
     global _reset_level, _reset_deadline_monotonic
+    global _first_valid_source_packet, _source_startup_stable_intervals
+    global _source_startup_started_ns
     next_level = bool(message.data)
     with _command_lock:
         changed = next_level != _reset_level
@@ -455,6 +463,16 @@ def _on_reset_command(message: Bool) -> None:
         _reset_deadline_monotonic = (
             time.monotonic() + _RESET_HOLD_SEC if _reset_level else None)
         _latest_command["V1 Reset"] = "True" if _reset_level else "False"
+    if changed and next_level:
+        # A diagnostics reset is an epoch boundary. Unity can spend one
+        # source interval processing the teleport; do not turn that expected
+        # transient into a fatal racing-stream fault. Source metadata still
+        # advances while packets are discarded, and normal publication is
+        # re-enabled only after the post-reset 40 Hz handshake below.
+        with _pending_request_lock:
+            _first_valid_source_packet = False
+            _source_startup_stable_intervals = 0
+            _source_startup_started_ns = None
     if changed:
         print(
             f"[autodrive_bridge_40hz] reset ROS callback: {next_level}",
@@ -718,6 +736,14 @@ def _validate_source_packet(data: Any) -> bool:
         _last_source_physics_step = source_step
         _last_source_frame = source_frame
         _last_source_telemetry_sequence = telemetry_sequence
+
+    # Reset/teleport packets are diagnostics-only and must never reach the
+    # official decoder as sensor data. Keep their source metadata for ordering,
+    # then require three stable post-reset intervals before publication.
+    with _command_lock:
+        reset_active = _reset_level
+    if reset_active:
+        return False
 
     arrival_dt = None if previous_arrival_ns is None else (
         (now_ns - previous_arrival_ns) / 1e9)
@@ -1056,6 +1082,8 @@ def _install_packet_contract(publish_camera: bool) -> None:
         handler_start_ns = time.monotonic_ns()
         has_request = _capture_simulation_metadata(data)
         try:
+            if _shutdown_requested:
+                return None
             if _timing_fault:
                 return None
             if not has_request:
@@ -1192,6 +1220,8 @@ def _force_ipv4_server() -> None:
 
 def main() -> None:
     global _handler_timing_enabled, _publication_diagnostic_enabled
+    global _shutdown_requested
+    _shutdown_requested = False
     rate_hz = _rate_hz()
     _handler_timing_enabled = _env_enabled(
         "AUTODRIVE_BRIDGE_LOG_HANDLER_TIMING", False)
@@ -1244,7 +1274,7 @@ def main() -> None:
         had_active_session = _client_connected.is_set() or _first_request_sent
         _client_connected.clear()
         _reset_request_pipeline()
-        if had_active_session:
+        if had_active_session and not _shutdown_requested:
             _trigger_timing_fault("simulator Socket.IO connection lost")
         if original_disconnect is not None:
             return original_disconnect(sid)
@@ -1276,6 +1306,7 @@ def main() -> None:
     try:
         official_bridge.main()
     finally:
+        _shutdown_requested = True
         _stop_sender.set()
         _client_connected.clear()
         _reset_request_pipeline()

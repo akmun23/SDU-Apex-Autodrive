@@ -81,7 +81,7 @@ def _compile(source_root: Path, output: Path) -> None:
 
 def check(source_root: Path, lateral_report: Path,
           longitudinal_report: Path, output: Path,
-          lateral_model: str = "Y1_linear_saturated") -> dict[str, object]:
+          lateral_model: str = "Y2_tanh_fixed_iz") -> dict[str, object]:
     lateral = json.loads(lateral_report.read_text(encoding="utf-8"))
     longitudinal = json.loads(longitudinal_report.read_text(encoding="utf-8"))
     candidates = lateral.get("candidate_comparison", {})
@@ -199,7 +199,7 @@ def main() -> None:
     parser.add_argument("--lateral-report", type=Path, required=True)
     parser.add_argument("--longitudinal-report", type=Path, required=True)
     parser.add_argument(
-        "--lateral-model", default="Y1_linear_saturated",
+        "--lateral-model", default="Y2_tanh_fixed_iz",
         help="candidate key from the lateral benchmark")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

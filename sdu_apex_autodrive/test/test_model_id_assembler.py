@@ -12,7 +12,8 @@ _SPEC.loader.exec_module(_ASSEMBLER)
 
 
 def _write_packets(path, count=12, reverse_index=None, time_gap_index=None,
-                   time_step_s=0.025, reset_index=None, position_jump_index=None):
+                   time_step_s=0.025, reset_index=None, position_jump_index=None,
+                   off_plane_index=None):
     fields = [
         "simulation_time_s", "simulation_physics_step", "simulation_render_frame",
         "simulator_position_x", "simulator_position_y", "simulator_position_z",
@@ -43,13 +44,16 @@ def _write_packets(path, count=12, reverse_index=None, time_gap_index=None,
         position_x = index * 0.05
         if position_jump_index is not None and index >= position_jump_index:
             position_x += 2.0
+        position_z = 0.0
+        if off_plane_index is not None and index >= off_plane_index:
+            position_z = 2.0
         rows.append({
             "simulation_time_s": source_time,
             "simulation_physics_step": step,
             "simulation_render_frame": index,
             "simulator_position_x": position_x,
             "simulator_position_y": 0.0,
-            "simulator_position_z": 0.0,
+            "simulator_position_z": position_z,
             "simulator_orientation_euler_z": 0.0,
             "simulator_orientation_quaternion_x": 0.0,
             "simulator_orientation_quaternion_y": 0.0,
@@ -167,3 +171,14 @@ def test_assembler_marks_pose_discontinuity_as_hard_rollout_boundary(tmp_path):
     assert report["segments"]["boundary_count"] == 1
     assert report["segments"]["boundaries"][0]["reason"] == \
         "position_discontinuity"
+
+
+def test_assembler_rejects_cadence_valid_capture_after_leaving_plane(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_packets(run_dir / "simulator_packets.csv", off_plane_index=6)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    assert report["scene_validity"]["pass"] is False
+    assert report["status"] == "rejected_off_plane_motion"
+    assert report["quality_gate_pass"] is False
+    assert "off_plane_motion" in report["quality_gate_failures"]

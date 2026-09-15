@@ -46,7 +46,7 @@ struct PurePursuitConfig {
     double cte_speed_floor_ratio{0.55};        // [0..1] Minimum speed ratio from CTE slowdown.
     double max_lateral_accel{6.50};             // [m/s^2] Physics-aware cornering speed cap.
     double min_regulated_speed{0.0};            // [m/s] Rolling floor after speed regulation.
-    double max_command_speed{22.88};            // [m/s] Runtime command cap used during regulation.
+    double max_command_speed{16.0};             // [m/s] Runtime command cap used during regulation.
     // Disabled by default: a transient CTE can be caused by pose/actuator
     // latency, so PP must keep steering toward the path while regulating speed.
     // Set >0 only when an external supervisor explicitly wants a CTE stop.

@@ -1,0 +1,22 @@
+# Continuous high-speed throttle-sweep identification.
+#
+# The player is started fresh and there are no reset phases.  The stepped
+# throttle sequence separates high-speed driven acceleration from the
+# explicit zero-throttle deceleration while keeping the complete trajectory
+# inside the open-plane identification boundary.
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    replay_throttle_sequence: [0.70, 0.80, 0.85, 0.90, 0.75, 0.0]
+    replay_steering_sequence: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    replay_phase_steps: [320, 180, 180, 180, 180, 420]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 450.0
+    capture_source_events: false
+    calibration_record_rate_hz: 10.0

@@ -1,0 +1,2 @@
+event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
+3978,10533282624371,/autodrive/roboracer_1/bridge_timing_fault,Bool,,,"{""value"":true}"

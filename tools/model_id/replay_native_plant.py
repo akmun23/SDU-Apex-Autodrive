@@ -30,6 +30,7 @@ from fit_lateral_model import (  # noqa: E402
     _read_runs,
 )
 from structured_vehicle_plant import (  # noqa: E402
+    DEFAULT_MANIFEST_PATH,
     MAX_STEERING_RAD,
     PlantParameters,
 )
@@ -109,9 +110,10 @@ def _score(runs: dict[str, list[dict[str, float]]], function: Any,
 
 def replay(source_root: Path, accepted_root: Path, run_names: list[str],
            lateral_report: Path, longitudinal_report: Path,
-           output: Path, longitudinal_model: str = "wheel_dynamic",
-           lateral_model: str = "Y1_linear_saturated",
+           output: Path, longitudinal_model: str = "wheel_continuous",
+           lateral_model: str = "Y2_tanh_fixed_iz",
            damping_profile: str = "unity_measured",
+           use_manifest: bool = False,
            position_offset_from_velocity_point_x_m: float | None = None,
            coast_speed_drag_n_per_mps: float | None = None,
            linear_damping_per_s: float | None = None,
@@ -130,8 +132,16 @@ def replay(source_root: Path, accepted_root: Path, run_names: list[str],
             f"longitudinal report has no model named {longitudinal_model!r}")
     longitudinal_parameters = longitudinal["models"][longitudinal_model][
         "parameters"]
-    plant_parameters = PlantParameters.from_longitudinal_parameters(
-        longitudinal_parameters).with_lateral(lateral_parameters)
+    if use_manifest:
+        # Manifest resolution is explicit.  This prevents an offline A/B
+        # replay from silently evaluating a different parameter set merely
+        # because it uses the canonical model names.
+        plant_parameters = PlantParameters.from_manifest()
+    else:
+        # Report-driven replay is the default for offline comparison: the
+        # selected report files are the parameter authority for this run.
+        plant_parameters = PlantParameters.from_longitudinal_parameters(
+            longitudinal_parameters).with_lateral(lateral_parameters)
     overrides: dict[str, float] = {}
     if damping_profile == "unity_measured":
         overrides.update({
@@ -181,6 +191,8 @@ def replay(source_root: Path, accepted_root: Path, run_names: list[str],
         "plant_parameters": {
             "source_lateral_report": str(lateral_report),
             "source_longitudinal_report": str(longitudinal_report),
+            "parameter_authority": str(DEFAULT_MANIFEST_PATH)
+            if use_manifest else "source_reports",
             "candidate": lateral_model,
             "longitudinal_model": longitudinal_model,
             "damping_profile": damping_profile,
@@ -190,6 +202,7 @@ def replay(source_root: Path, accepted_root: Path, run_names: list[str],
             },
             "wheel_coefficients": list(plant_parameters.wheel_coefficients),
             "damping_overrides": overrides,
+            "manifest_requested": use_manifest,
         },
         "native_source": "f1tenth_mpc/src/vehicle_plant.c",
         "recursive_scores": scores,
@@ -213,15 +226,18 @@ def main() -> None:
     parser.add_argument("--lateral-report", type=Path, required=True)
     parser.add_argument("--longitudinal-report", type=Path, required=True)
     parser.add_argument(
-        "--longitudinal-model", default="wheel_dynamic",
-        help="model key from the longitudinal benchmark (default: wheel_dynamic)")
+        "--longitudinal-model", default="wheel_continuous",
+        help="model key from the longitudinal benchmark (default: wheel_continuous)")
     parser.add_argument(
-        "--lateral-model", default="Y1_linear_saturated",
-        help="candidate key from the lateral benchmark (default: Y1_linear_saturated)")
+        "--lateral-model", default="Y2_tanh_fixed_iz",
+        help="candidate key from the lateral benchmark (default: Y2_tanh_fixed_iz)")
     parser.add_argument(
         "--damping-profile", choices=("unity_measured", "fitted"),
         default="unity_measured",
         help="resolved offline damping profile (default: unity_measured)")
+    parser.add_argument(
+        "--use-manifest", action="store_true",
+        help="explicitly resolve the canonical candidate from the manifest")
     parser.add_argument(
         "--position-offset-from-velocity-point-x-m", type=float, default=None,
         help="offline A/B override for the recorded pose-point lever arm [m]")
@@ -241,6 +257,7 @@ def main() -> None:
         [value.strip() for value in args.run_names.split(",") if value.strip()],
         args.lateral_report, args.longitudinal_report, args.output,
         args.longitudinal_model, args.lateral_model, args.damping_profile,
+        args.use_manifest,
         args.position_offset_from_velocity_point_x_m,
         args.coast_speed_drag_n_per_mps,
         args.linear_damping_per_s, args.angular_damping_per_s)

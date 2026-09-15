@@ -48,8 +48,8 @@ from simulator_native_model import (  # noqa: E402
 
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
-HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
-MIXED_FIT_HORIZONS_S = (0.10, 0.25, 0.50, 1.00)
+HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75)
+MIXED_FIT_HORIZONS_S = (0.10, 0.25, 0.50, 0.75)
 MIXED_FIT_STATE_SCALES = np.asarray(
     (0.50, 0.50, 0.20, 0.35, 0.60, 1.00), dtype=float)
 MIXED_FIT_ONE_STEP_SCALES = np.asarray(

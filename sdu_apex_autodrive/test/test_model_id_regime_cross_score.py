@@ -35,16 +35,14 @@ def test_regime_discovery_keeps_low_demand_reference_and_dynamic_origins(tmp_pat
     assert "60_e1_corner_throttle_40hz_20260913" in groups["corner_throttle"]
 
 
-def test_score_summary_reports_required_long_horizons():
+def test_score_summary_reports_active_mpc_horizons():
     module = _load()
     summary = module._score_summary({
         "0.50s": {"position_m": {"count": 4, "p95": 0.1,
                                     "p99": 0.2, "max": 0.3}},
-        "1.00s": {"position_m": {"count": 4, "p95": 0.4,
+        "0.75s": {"position_m": {"count": 4, "p95": 0.4,
                                     "p99": 0.5, "max": 0.6}},
-        "2.00s": {"position_m": {"count": 4, "p95": 0.7,
-                                    "p99": 0.8, "max": 0.9}},
     })
     assert summary["0.50s"]["p95_m"] == 0.1
-    assert summary["1.00s"]["p95_m"] == 0.4
-    assert summary["2.00s"]["p95_m"] == 0.7
+    assert summary["0.75s"]["p95_m"] == 0.4
+    assert set(summary) == {"0.50s", "0.75s"}

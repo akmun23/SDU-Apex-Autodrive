@@ -1,0 +1,9 @@
+event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
+61,15275470208340,/odom,Odometry,1789468238669030497,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+71,15275492464604,/odom,Odometry,1789468238694035697,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+80,15275518330139,/odom,Odometry,1789468238719035697,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+89,15275544241590,/odom,Odometry,1789468238745025697,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+98,15275567344326,/odom,Odometry,1789468238769025697,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+107,15275593706701,/odom,Odometry,1789468238795029897,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+116,15275616888916,/odom,Odometry,1789468238819035697,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"
+125,15275643389049,/odom,Odometry,1789468238845035697,,"{""lateral_speed_mps"":0.0,""speed_mps"":0.0,""x_m"":0.0,""y_m"":0.0,""yaw_rad"":0.0,""yaw_rate_radps"":0.0}"

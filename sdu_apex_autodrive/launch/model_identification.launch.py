@@ -41,7 +41,16 @@ def _setup(context):
                 "mode": mode,
                 "output_dir": artifact_dir,
                 "duration_sec": ParameterValue(duration, value_type=float),
-                "capture_source_events": True,
+                # The timing recorder below is the canonical 40 Hz source
+                # stream. Keep this wide phase/state CSV supplemental and
+                # bounded; storing every callback snapshot here duplicates
+                # the recorder and can exceed the repository file limit.
+                "capture_source_events": False,
+                "calibration_record_rate_hz": 10.0,
+                "capture_source_event_names": [
+                    "gt_odom", "imu", "left_encoder", "right_encoder",
+                    "odom_diagnostics",
+                ],
                 # The identification grid has explicit teleport epochs. The
                 # continuous throttle/speed sweeps deliberately keep one
                 # plant trajectory so their recursive transitions remain

@@ -1,0 +1,58 @@
+{
+  "baseline": {
+    "body_u_bias_mps": 0.2384869169864749,
+    "body_v_bias_mps": 0.0030489065770030383,
+    "body_v_mae_mps": 0.016527966045473613,
+    "body_v_p95_abs_mps": 0.06774436822509103,
+    "n": 831,
+    "position_max_m": 4.884123248573003,
+    "position_median_m": 1.552000003856998,
+    "position_p95_by_speed_bin_m": {
+      "0": 4.884123248573003,
+      "1": 4.733919155786028,
+      "2": 4.64913042874531,
+      "3": 4.565195270167401,
+      "4": 4.493725644726927,
+      "5": 4.422940956384499,
+      "6": 4.352330740190721,
+      "7": 3.9611371939500164
+    },
+    "position_p95_m": 4.884017126650322,
+    "yaw_p95_rad": 0.00014881050968673648
+  },
+  "candidate": {
+    "body_u_bias_mps": 0.2384869169864749,
+    "body_v_bias_mps": 0.0030489065770030383,
+    "body_v_mae_mps": 0.016527966045473613,
+    "body_v_p95_abs_mps": 0.06774436822509103,
+    "n": 831,
+    "position_max_m": 4.884123248573003,
+    "position_median_m": 1.552000003856998,
+    "position_p95_by_speed_bin_m": {
+      "0": 4.884123248573003,
+      "1": 4.733919155786028,
+      "2": 4.64913042874531,
+      "3": 4.565195270167401,
+      "4": 4.493725644726927,
+      "5": 4.422940956384499,
+      "6": 4.352330740190721,
+      "7": 3.9611371939500164
+    },
+    "position_p95_m": 4.884017126650322,
+    "yaw_p95_rad": 0.00014881050968673648
+  },
+  "candidate_model": "lateral_velocity_yaw_rate_model_v1",
+  "candidate_parameters": {
+    "lateral_velocity_max_mps": 0.35,
+    "lateral_velocity_speed_yaw_rate_gain_s": -0.0063,
+    "lateral_velocity_yaw_rate_gain_m": 0.167
+  },
+  "candidate_runtime_inputs": [
+    "mapped wheel speed",
+    "IMU yaw rate"
+  ],
+  "fit_source": "four prior clean track replays plus fresh live baseline; truth only for offline scoring",
+  "promotion": "requires fresh live /odom EKF AMCL validation before MPC or final odom promotion",
+  "simulator_behavior_modified": false,
+  "status": "offline_replay_only"
+}

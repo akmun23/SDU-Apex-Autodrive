@@ -29,7 +29,7 @@ COPY . /workspace/src
 
 RUN source /opt/ros/humble/setup.bash \
     && source /home/autodrive_devkit/install/setup.bash \
-    && CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --parallel-workers 1 --merge-install \
+    && CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --parallel-workers 1 --merge-install --symlink-install \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
       -DCMAKE_CUDA_ARCHITECTURES="61;89"
 

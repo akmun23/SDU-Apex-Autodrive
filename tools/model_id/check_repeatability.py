@@ -21,7 +21,8 @@ from typing import Iterable
 
 SOURCE_DT_MIN_S = 0.015
 SOURCE_DT_MAX_S = 0.035
-REPORT_HORIZONS_S = (0.0, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 8.0)
+# Keep repeatability reporting on the active 40 Hz / 30-command horizon.
+REPORT_HORIZONS_S = (0.0, 0.025, 0.05, 0.1, 0.2, 0.5, 0.75)
 STATE_FIELDS = (
     "simulator_position_x",
     "simulator_position_y",

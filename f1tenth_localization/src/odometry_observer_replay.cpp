@@ -22,7 +22,7 @@ int main(int argc, char ** argv)
   f1tenth_localization::OdometryObserver observer(
     f1tenth_localization::deployment_observer_config());
   output << "stamp_s,speed_pred_mps,speed_mps,body_u_mps,body_v_mps,x_m,y_m"
-    ",wheel_update_used,turn_mode,reset_epoch,timing_degraded\n";
+    ",yaw_rad,wheel_update_used,wheel_burst_rejected,turn_mode,reset_epoch,timing_degraded\n";
   std::string line;
   bool header = true;
   output << std::setprecision(17);
@@ -49,7 +49,9 @@ int main(int argc, char ** argv)
     output << estimate.stamp_s << ',' << estimate.speed_pred_mps << ',' <<
       estimate.speed_mps << ',' << estimate.body_u_mps << ',' <<
       estimate.body_v_mps << ',' << estimate.x_m << ',' << estimate.y_m << ',' <<
+      estimate.yaw_rad << ',' <<
       (estimate.wheel_update_used ? 1 : 0) << ',' <<
+      (estimate.wheel_burst_rejected ? 1 : 0) << ',' <<
       (estimate.turn_mode ? 1 : 0) << ',' << (estimate.reset_epoch ? 1 : 0) << ',' <<
       (estimate.timing_degraded ? 1 : 0) << '\n';
   }

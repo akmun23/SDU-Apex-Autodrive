@@ -26,7 +26,8 @@ FEATURE_NAMES = (
     "bias", "u", "u_squared", "throttle", "u_times_throttle",
     "throttle_squared",
 )
-HORIZON_TARGETS_S = (0.05, 0.10, 0.25, 0.50, 1.00, 2.00)
+# MPC-relevant open-loop gate: 30 commands at 40 Hz = 0.75 s.
+HORIZON_TARGETS_S = (0.05, 0.10, 0.25, 0.50, 0.75)
 TWO_PERCENT = 0.02
 
 

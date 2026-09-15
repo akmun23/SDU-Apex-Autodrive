@@ -1,0 +1,165 @@
+{
+  "duplicate_rows_discarded": 0,
+  "frame_convention": {
+    "frame_selection": "declared contract; no residual-based auto-selection",
+    "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
+    "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
+    "yaw": "normalized raw API quaternion, not Euler-only",
+    "yaw_rate": "raw API angular velocity z"
+  },
+  "ground_truth_use": "offline_transition_target_only",
+  "kinematic_consistency": {
+    "diagnostics": {
+      "position_velocity_comparison": "trapezoidal_midpoint_over_source_transition",
+      "position_vs_body_velocity_error_mps": {
+        "count": 830,
+        "max": 0.07579551348279255,
+        "median": 0.0037167378183923724,
+        "p95": 0.05402928725742922
+      },
+      "quaternion_vs_euler_yaw_error_rad": {
+        "count": 831,
+        "max": 0.0001654468958145472,
+        "median": 2.0489668300704977e-05,
+        "p95": 9.513202974975599e-05
+      },
+      "transition_count": 830,
+      "yaw_derivative_vs_angular_z_error_radps": {
+        "count": 830,
+        "max": 0.13468850851111228,
+        "median": 0.0,
+        "p95": 0.005902564961495453
+      },
+      "yaw_derivative_vs_each_angular_axis_error_radps": {
+        "x": {
+          "negated": {
+            "count": 830,
+            "max": 1.0049371867144452,
+            "median": 0.0001,
+            "p95": 0.5292125404205478
+          },
+          "same_sign": {
+            "count": 830,
+            "max": 0.4194885085111123,
+            "median": 0.0001,
+            "p95": 0.3230084650473637
+          }
+        },
+        "y": {
+          "negated": {
+            "count": 830,
+            "max": 0.5119871867144451,
+            "median": 0.0005646172653746217,
+            "p95": 0.36849854941881355
+          },
+          "same_sign": {
+            "count": 830,
+            "max": 0.5064381090658797,
+            "median": 0.0006243564180047256,
+            "p95": 0.35510271834889146
+          }
+        },
+        "z": {
+          "negated": {
+            "count": 830,
+            "max": 0.9689871867144451,
+            "median": 0.0,
+            "p95": 0.7067473305162421
+          },
+          "same_sign": {
+            "count": 830,
+            "max": 0.13468850851111228,
+            "median": 0.0,
+            "p95": 0.005902564961495453
+          }
+        }
+      },
+      "yaw_rate_source": "simulator_angular_velocity_z"
+    },
+    "maximum_allowed_median_error_mps": 0.75,
+    "maximum_allowed_yaw_rate_median_error_radps": 0.75,
+    "pass": true,
+    "selected_frame_median_error_mps": 0.030613666104542803,
+    "yaw_rate_median_error_radps": 0.0,
+    "yaw_rate_pass": true,
+    "yaw_rate_source": "simulator_angular_velocity_z"
+  },
+  "malformed_rows_discarded": 0,
+  "maximum_allowed_source_transition_dt_s": 0.035,
+  "minimum_allowed_source_transition_dt_s": 0.015,
+  "model_boundary": "applied_throttle_to_body_u",
+  "physics_step_delta_max": 28,
+  "physics_step_delta_min": 23,
+  "quality_gate_failures": [],
+  "quality_gate_pass": true,
+  "raw_packet_count": 831,
+  "run_dir": "sdu_apex_autodrive/artifacts/model_id_work/run_live/high_speed_corner_20_openplane_20260915",
+  "scene_validity": {
+    "initial_z_m": 0.0724,
+    "maximum_abs_vertical_velocity_mps": 0.812,
+    "maximum_abs_z_deviation_m": 0.01870000000000001,
+    "maximum_allowed_abs_z_deviation_m": 1.0,
+    "pass": true,
+    "reason": null
+  },
+  "schema_version": 4,
+  "segments": {
+    "boundaries": [],
+    "boundary_count": 0,
+    "position_threshold_m": 1.5,
+    "reset_epoch_count": 0,
+    "segment_count": 1,
+    "yaw_threshold_rad": 1.0
+  },
+  "source_dt_cadence_violation_count": 0,
+  "source_dt_gap_count": 0,
+  "source_dt_s_max": 0.028001099999999113,
+  "source_dt_s_median": 0.025000000000000355,
+  "source_dt_s_p95": 0.0259999999999998,
+  "source_order": {
+    "pass": true,
+    "physics_step_gap_count": 830,
+    "physics_step_reverse_count": 0,
+    "time_reverse_count": 0,
+    "violations": 0
+  },
+  "source_rate_hz_median": 39.99999999999943,
+  "status": "timing_and_kinematics_gate_passed",
+  "timing_contract": {
+    "allow_non_target_rate": false,
+    "expected_source_rate_hz": 40.0,
+    "pass": true,
+    "raw_rows_are_never_upsampled": true,
+    "source_cadence_violations_rejected": true,
+    "source_cadence_window_s": [
+      0.015,
+      0.035
+    ]
+  },
+  "transition_count": 830,
+  "transition_schema": {
+    "ambiguous_transitions_discarded": false,
+    "control_alignment": "current_packet_applied_command_generates_previous_to_current",
+    "discarded_transition_count": 0,
+    "fields": [
+      "commanded_throttle_norm_k1",
+      "commanded_steering_norm_k1",
+      "applied_throttle_norm_k1",
+      "applied_steering_rad_k1",
+      "simulator_feedback_steering_rad_k1",
+      "wheel_speed_mps_k1",
+      "reset_epoch",
+      "segment_id"
+    ],
+    "file": "model_transition_v4.csv",
+    "required_control_field": "applied_command_sequence_k1",
+    "steering_contract": "commanded_steering_norm_k1 is normalized input; applied_steering_rad_k1 and simulator_feedback_steering_rad_k1 are already physical radians copied from the source packet",
+    "version": 4
+  },
+  "twist_frame_median_displacement_error_mps": {
+    "body": 0.030613666104542803,
+    "world": 19.93511021991669
+  },
+  "twist_frame_selected": "body",
+  "unique_source_packet_count": 831
+}

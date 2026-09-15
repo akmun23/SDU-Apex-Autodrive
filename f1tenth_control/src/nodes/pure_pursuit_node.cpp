@@ -97,7 +97,7 @@ void PurePursuitNode::declareParameters() {
     declare_parameter("min_lookahead", 0.45);
     declare_parameter("max_lookahead", 0.95);
     declare_parameter("lookahead_gain", 0.05);
-    declare_parameter("max_speed", 22.88);
+    declare_parameter("max_speed", 16.0);
     declare_parameter("cte_lookahead_weight", 1.0);
     declare_parameter("cte_lookahead_gain", 0.041540516);
     declare_parameter("curvature_lookahead_gain", 1.9003721);

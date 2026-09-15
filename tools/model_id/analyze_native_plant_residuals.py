@@ -26,9 +26,9 @@ from structured_vehicle_plant import (  # noqa: E402
     MAX_STEERING_RAD,
     MIN_SLIP_SPEED_MPS,
     PlantParameters,
-    _body_derivative,
-    _move_towards,
+    _steering_next,
     _wheel_next,
+    step,
 )
 
 
@@ -87,8 +87,19 @@ def _resolve_parameters(lateral_report: Path, longitudinal_report: Path,
         raise ValueError(f"unknown longitudinal model {longitudinal_model!r}")
     lateral_values = candidates[lateral_model]["parameters"]["parameters"]
     longitudinal_values = models[longitudinal_model]["parameters"]
+    # This tool is report-driven by design: the caller selected these exact
+    # candidate reports and the residual attribution must evaluate those
+    # coefficients.  Canonical native replay resolves its defaults from the
+    # manifest in replay_native_plant.py; silently switching this diagnostic
+    # back to the manifest when the model names happen to match would hide a
+    # newly fitted candidate (and can make stale parameters look current).
     parameters = PlantParameters.from_longitudinal_parameters(
         longitudinal_values).with_lateral(lateral_values)
+    steering_dynamics = lateral.get("steering_integration", {}).get(
+        "dynamics_kind", "rate_limited")
+    parameters = PlantParameters(
+        **{**parameters.__dict__,
+           "steering_dynamics_kind": str(steering_dynamics)})
     if damping_profile == "unity_measured":
         overrides = {
             "coast_speed_drag_n_per_mps": 0.0,
@@ -123,17 +134,31 @@ def _residual_rows(run_name: str, rows: list[dict[str, float]],
             continue
 
         steering_target = row["applied_steering_rad_k1"]
-        steering_next = _move_towards(
-            steering, steering_target, parameters.steering_rate_radps * dt)
+        steering_next = _steering_next(
+            steering, steering_target, dt, parameters)
         wheel_next = _wheel_next(
             row["u_k_mps"], wheel, throttle, dt, parameters)
-        model_u_dot, model_v_dot, model_r_dot = _body_derivative(
-            row["u_k_mps"], row["v_k_mps"], row["r_k_radps"], steering,
-            wheel, parameters, throttle=throttle)
-        # The recursive plant clamps u at zero.  The unconstrained force
-        # derivative is not a meaningful residual at a stationary sample.
-        if row["u_k_mps"] <= 0.0 and model_u_dot < 0.0:
-            model_u_dot = 0.0
+        # Score the same discrete transition used by the recursive plant.
+        # Evaluating the force derivative only at ``steering`` (the beginning
+        # of the sample) is wrong for a 40 Hz steering ramp: a reversal can
+        # move through zero steering during this transition.  That old
+        # approximation produced artificial 40--50 rad/s^2 yaw residuals.
+        # ``step`` integrates the measured source dt with the same steering
+        # ramp and wheel interpolation as the candidate plant.
+        model_next = step(
+            np.asarray([
+                row["x_k_m"], row["y_k_m"], row["yaw_k_rad"],
+                row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
+                steering, wheel,
+            ], dtype=float),
+            steering_target / MAX_STEERING_RAD,
+            throttle,
+            dt,
+            parameters,
+        )
+        model_u_dot = (model_next[3] - row["u_k_mps"]) / dt
+        model_v_dot = (model_next[4] - row["v_k_mps"]) / dt
+        model_r_dot = (model_next[5] - row["r_k_radps"]) / dt
         model_wheel_dot = (wheel_next - wheel) / dt
         model_steering_dot = (steering_next - steering) / dt
         measured = {

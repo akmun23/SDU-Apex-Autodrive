@@ -1,0 +1,22 @@
+{
+  "created_wall_time": "2026-09-15T09:31:14Z",
+  "dataset_files": [
+    "bridge_requests.csv",
+    "simulator_packets.csv",
+    "bridge_timing_fault.csv",
+    "bridge_timing_fault_detail.csv",
+    "imu.csv",
+    "encoders.csv",
+    "actuator_feedback.csv",
+    "runtime_state.csv",
+    "gt_odom.csv",
+    "experiment_schedule.csv"
+  ],
+  "event_file": "events.csv",
+  "ground_truth_file_status": "packet_embedded_offline_diagnostic; no ground-truth ROS topic subscription and no runtime controller consumer",
+  "ground_truth_subscriptions": [],
+  "run_dir": "/workspace/src/sdu_apex_autodrive/artifacts/model_id_work/run_live/high_speed_braking_16mps_nolidar_40hz_20260915",
+  "schema_version": 1,
+  "source_time_policy": "ROS sensor headers are source-epoch mapped by the bridge: the first validated simulator time anchors one ROS epoch and later headers advance by simulator source-time deltas; host arrival remains a watchdog timestamp. bridge simulation_time_s is retained separately.",
+  "timing_topic": "/autodrive/roboracer_1/bridge_packet_timing"
+}

@@ -207,7 +207,7 @@ class ActuatorInterface(Node):
         # watchdog still neutralizes the outputs if commands or odometry stop.
         self.declare_parameter("publish_rate_hz", 40.0)
         self.declare_parameter("max_steering_angle_rad", 0.5236)
-        self.declare_parameter("max_target_speed_mps", 22.88)
+        self.declare_parameter("max_target_speed_mps", 16.0)
         self.declare_parameter("collision_topic", "/autodrive/roboracer_1/collision_count")
         self.declare_parameter("reset_command_topic", "/autodrive/reset_command")
         self.declare_parameter("collision_reset_enabled", False)

@@ -27,7 +27,7 @@ from typing import Iterable
 STATE_FIELDS = (
     "x_m", "y_m", "yaw_rad", "u_mps", "v_mps", "r_radps", "steering_rad",
 )
-HORIZONS_S = (0.05, 0.10, 0.25, 0.50, 1.00, 1.50, 2.00)
+HORIZONS_S = (0.05, 0.10, 0.25, 0.50, 0.75)
 TWO_PERCENT = 0.02
 
 

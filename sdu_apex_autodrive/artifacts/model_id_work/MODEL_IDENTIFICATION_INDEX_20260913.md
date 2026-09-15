@@ -1,8 +1,20 @@
 # Model-identification data index
 
 Only accepted or directly useful model-identification runs remain in this
-directory. Raw CSV files are kept inside `accepted/`; comparison plots and
-reports are inside `reports/`.
+directory. Legacy raw CSV files are kept inside `accepted/`; the current
+2026-09-15 high-speed set is under `accepted_20260915/`. Rejected captures
+remain recoverable under `failed_20260915/`; comparison plots and reports are
+inside `reports/`.
+
+## Project speed envelope
+
+The project operating and model-identification ceiling is now **16 m/s**.
+New controller commands, calibration safety checks, and model-fitting data
+must stay at or below this speed. Existing 18/20 m/s captures are retained as
+historical offline evidence only; they are out of the current operating
+envelope and must not be used to define new production candidates. This limit
+is implemented in the dev command/diagnostic paths only and does not modify
+Unity physics, vehicle parameters, or simulator behavior.
 
 ## Accepted data
 
@@ -914,3 +926,473 @@ The full reports are
 `model_fits_v2/native_replay_Y2_fixed_iz_damped_wheel_continuous_all_dynamic_20260915.json`,
 `model_fits_v2/native_residual_analysis_damped_all_dynamic_20260915.json`, and
 `model_fits_v2/native_residuals_damped_all_dynamic_20260915.csv`.
+
+## 2026-09-15 model-authority gate
+
+The active authorities are now explicit in
+`f1tenth_mpc/config/vehicle_model_manifest_v1.json`:
+
+- `production_mpc_baseline` is the only active runtime MPC profile. It remains
+  the BachelorProject six-state Frenet/augmented model and is unchanged by the
+  offline candidate work.
+- `offline_candidate_fixed_iz_damped_y2_continuous_wheel` is the only canonical
+  replay candidate. Its resolved Python and native C defaults now use the same
+  fixed-inertia damped Y2 lateral parameters, continuous wheel derivative,
+  active zero-throttle braking, measured body damping, and rear-pose lever arm.
+- Historical model reports and simulator-native diagnostic models remain
+  offline evidence only; they are not active runtime or canonical replay
+  authorities.
+
+The manifest gate checks production constants/structure, candidate report
+provenance, Python/native offline defaults, and the complete deployed odometry
+YAML/C++/Python mapping. The clean Humble milestone passed `7` tests with
+`0` errors and `0` failures. Candidate/runtime compatibility is deliberately
+still `false`: the candidate has an eight-state normalized-throttle/wheel-state
+architecture while production MPC has a six-state direct-acceleration
+architecture. No candidate parameter has therefore been copied into runtime
+MPC.
+
+The compact live capture
+`run_live/compact_capture_baseline_20260915/` passed the source timing gate
+for `30.13 s` and `556` packets: mean source interval `25.002 ms`, maximum
+`28.001 ms`, zero source gaps over `30 ms`, and no sequence gaps. It is a
+transport/capture acceptance artifact, not a high-speed model-identification
+run. The next data step is a compact high-speed lateral excitation campaign,
+followed by whole-run held-out residual scoring and only then the explicit
+plant-to-MPC architecture migration.
+
+## 2026-09-15 high-speed longitudinal identification and source shutdown fix
+
+The open-plane model-identification player was run in `-batchmode` with the
+existing disposable no-LiDAR diagnostic build. No Unity physics, timestep,
+scene geometry, or runtime controller behavior was changed. The accepted
+high-speed data now includes independent 0.70, 0.75, 0.80, 0.85, and 0.90
+throttle regimes, 16 m/s and 20 m/s zero-throttle braking runs, a continuous
+0.70 -> 0.80 -> 0.85 -> 0.90 -> 0.75 -> 0.00 throttle sweep, and a repeated
+0.75 run. Every accepted run has one causal source segment and passes the
+40 Hz source gate. The new sweep has `1,461` packets and `1,460` transitions,
+mean source interval `25.000 ms`, range `21.999--28.000 ms`, zero sequence
+gaps, zero source gaps over `30 ms`, and one-packet command lag. The isolated
+constant-throttle runs each have `1,120` transitions and zero collisions.
+
+The isolated 0.75 repeat reaches `17.5685` versus `17.5691 m/s`, confirming
+repeatability of that equilibrium point. Refitting the pre-gate high-speed
+data selected `wheel_continuous` again. The superseded v3 report is
+`model_fits_v2/longitudinal_model_benchmark_measured_damping_holdout20brake20driven_20260915.json`.
+It uses the measured `0.273 /s` Unity body damping once and sets the fitted
+speed-drag term to zero; the independent 20 m/s braking and driven runs are
+both held out. The combined validation is `5.27%` relative p95 at `0.50 s`
+and `9.22%` at `2.00 s`. Those values remain historical offline evidence only;
+the v4 clean-data report below is the current candidate authority.
+
+The report-driven native residual analysis is
+`model_fits_v2/native_plant_residuals_measured_damping_20260915.csv` and its
+JSON report. Across `11,550` transitions, the corrected plant has
+longitudinal derivative residual MAE `0.250 m/s^2`, p95 `0.837 m/s^2`, lateral
+derivative MAE `0.418 m/s^2`, and yaw derivative MAE `0.276 rad/s^2`. The
+measured-damping correction reduces longitudinal bias from `0.259` to
+`0.047 m/s^2` and reduces the high-speed (>16 m/s) bias to `0.131 m/s^2`.
+The remaining high-speed error points to an unmodeled driven transient or
+state-memory effect, not a reason to force an arbitrary correction term into
+MPC.
+
+The manifest was temporarily version `2026-09-15.v3` for this historical
+comparison and has since moved to v4 after the off-plane data gate. Native C
+and Python offline defaults are now standardized against the clean v4 report;
+the manifest checker passes candidate-report provenance, native/Python parity,
+production MPC constants, and odometry mapping. Canonical replay now resolves
+the manifest only when `--use-manifest` is explicit; otherwise it evaluates
+the exact reports supplied for an offline A/B comparison. The production
+six-state BachelorProject MPC remains unchanged and is still the only active
+runtime profile. The v3 native replay remains at
+`model_fits_v2/native_replay_report_driven_measured_damping_20260915.json` as
+historical offline evidence.
+
+Finally, the recurring false fatal message at normal finite-run shutdown was
+fixed in `sdu_apex_autodrive/bridge_40hz.py`: a buffered Socket.IO response
+after the request FIFO is cleared is ignored only after shutdown has begun;
+real source gaps still fail closed. The live repeat completed without that
+false timing fault, and the focused Humble tests pass `10` tests. The next
+model step is a new high-speed powered transient/release experiment designed
+to distinguish wheel-state lag from speed-dependent drive force. In parallel,
+fresh live track `/odom` versus ground-truth scoring should be used to tune
+the observer; no MPC migration should occur until both the candidate model and
+deployed odometry pass blind acceptance.
+
+## 2026-09-15 clean-data gate and standardized candidate v4
+
+The high-speed acceptance rule now includes an offline open-plane validity
+check in `tools/model_id/assemble_transitions.py`. A capture is rejected when
+the ground-truth vertical position deviates more than `1.0 m` from its initial
+plane, even if its source packets remain perfectly regular at 40 Hz. This
+identified two previously retained but invalid captures: the 18 m/s and 20
+m/s lateral runs left the plane with maximum vertical deviations of `11.3 m`
+and `27.0 m`; both are preserved under `failed_20260915/` and are excluded
+from all current fitting.
+
+The clean powered transient/release capture is
+`accepted_20260915/high_speed_powered_transient_080_070_060_release_nolidar_40hz_20260915/`:
+`1,061` packets, `1,060` transitions, median source rate `40.0006 Hz`, no
+source gaps, no reset/teleport boundary, peak speed `18.66 m/s`, and vertical
+deviation `0.006 m`. It was run with the normal-graphics Unity player in
+`-batchmode`; `-no-graphics` was not used and simulator physics was not edited.
+
+The clean refit is
+`model_fits_v2/longitudinal_model_benchmark_measured_damping_clean_holdout_brake20_lateral16_20260915.json`.
+It uses `7,880` training transitions and `2,180` clean validation transitions,
+with the 20 m/s braking and 16 m/s lateral runs held out. The selected
+continuous-wheel longitudinal candidate scores `4.03%` relative p95 at `0.50
+s` and `6.45%` at `2.00 s` in its causal longitudinal score. The corresponding
+native full-plant replay is
+`model_fits_v2/native_replay_report_driven_clean_holdout_brake20_lateral16_20260915.json`;
+at `0.50 s` it scores position p95 `0.223 m`, body-forward-speed p95 `0.260
+m/s`, lateral-speed p95 `0.983 m/s`, and yaw-rate p95 `0.141 rad/s`. At `2.00
+s`, the full-plant scores are position `4.633 m`, `u` `2.911 m/s`, `v` `6.318
+m/s`, and `r` `1.128 rad/s`. These are offline candidate results, not a 2%
+runtime acceptance.
+
+The canonical manifest is now `2026-09-15.v4` and points to this clean report;
+native C defaults and the Python reference use the same resolved parameters,
+with the manifest checker passing. The active runtime remains the unchanged
+BachelorProject six-state MPC. The offline candidate remains explicitly
+`not_promoted` because the full-plant lateral/yaw error is still the dominant
+limitation and clean 18/20 m/s lateral holdouts must be recollected before
+claiming high-speed blind validation.
+
+## 2026-09-15 lateral/yaw holdouts and live odometry validation
+
+Clean lateral holdouts were recollected at the high-speed 18/20 m/s operating
+points:
+
+- `accepted_20260915/high_speed_lateral_18mps_clean_nolidar_40hz_20260915/`
+- `accepted_20260915/high_speed_lateral_20mps_clean_nolidar_40hz_20260915/`
+
+Each contains `861` packets and `860` transitions, has a `40.0006 Hz` median
+source rate, no source cadence/sequence gaps, no reset boundary, no collision,
+and less than `0.007 m` vertical deviation. The explicit speed/combined-slip
+candidate was tested on both blind holdouts and did not improve the canonical
+Y2 tanh model: the combined-slip gain converged to approximately zero, and its
+recursive position p95 was worse at both `0.50 s` and `2.00 s`. It remains an
+offline experiment only.
+
+An independent normal-range repeat is at
+`run_live/lateral_speed_bands_2_12_repeat_20260915/`. It passed with `1,941`
+packets, `40.0000 Hz` median source rate, `21.999--28.000 ms` source intervals,
+zero source gaps/cadence violations, no reset boundary, and no collision. A
+blind Y2/Y3 refit using the original 2--12 m/s run as training and this repeat
+as validation selected Y2 again. On the repeat, Y2 scored one-step p95
+`0.0224 m/s` lateral velocity and `0.0827 rad/s` yaw rate; recursive full-plant
+position p95 was `0.306 m` at `0.50 s` and `6.401 m` at `2.00 s`. Y3 was not a
+robust improvement (`0.301 m` and `6.533 m` at those horizons). The remaining
+long-horizon error is therefore not evidence for promoting the current
+speed/combined-slip extension; it points to state-memory/actuator/longitudinal
+coupling that needs a separate model revision.
+
+The live track validation was run with the rebuilt competition player in
+`-batchmode` using normal graphics; `-no-graphics` was not used and no Unity
+physics, scene geometry, or vehicle behavior was edited. The accepted run is
+`run_live/live_odom_ekf_amcl_pp_12mps_lateral_candidate_20260915_valid/`.
+It completed multiple laps without collision. The 40 Hz bridge recorded `8,633`
+packets with no sequence loss, one-command applied lag, and no mid-run timing
+fault; the only timing-fault row is the expected final socket disconnect during
+shutdown. The sub-100 MB validation bag is retained under its `rosbags/`
+directory.
+
+The new causal runtime odometry lateral model uses only mapped wheel speed and
+IMU yaw rate:
+`v = yaw_rate * (0.167 - 0.0063 * forward_speed)`, clamped to `+-0.35 m/s`.
+Against the recorded simulator packet truth offline, its direct body-lateral
+velocity p95 absolute error was `0.056 m/s`, versus `0.337 m/s` for the prior
+observer. In the matched `174.569 s` live comparison, raw odometry position p95
+fell from `2.266 m` to `1.370 m`; AMCL position p95 was `0.129 m`, and raw
+odometry yaw p95 was `0.0095 rad`. The C++ observer, YAML, Python reference,
+manifest mapping, and tests use the same lateral parameters; Humble build and
+observer tests pass.
+
+The lateral/yaw plant candidate has not been migrated into MPC. The next model
+revision must isolate and reduce the remaining recursive yaw/lateral drift
+with a causal state/actuator treatment, followed by another independent blind
+holdout and fresh live odometry/EKF/AMCL validation.
+
+## 2026-09-15 steering-transition identification revision
+
+The transition schema was audited before adding another lateral correction.
+At a commanded reversal the source packet reports the applied physical
+steering angle directly: for example, `-0.1047 rad` becomes `0.0 rad` in the
+next 25 ms packet. The previous offline plant nevertheless imposed a
+`3.2 rad/s` ramp, which created artificial yaw residuals at exactly those
+reversals. This was an identification-model mismatch, not a Unity-physics
+change.
+
+`tools/model_id/structured_vehicle_plant.py` now makes the choice explicit
+with `steering_dynamics_kind`: the existing rate-limited behavior remains the
+default, while the data-supported instantaneous transition is available only
+to offline candidate fits. The fitter and residual analyzer record and honor
+that choice; focused causality tests pass `11/11`.
+
+The instantaneous high-speed benchmark is
+`model_fits_v2/lateral_model_benchmark_instantaneous_highspeed_holdout_20260915.json`.
+Its Y2 tanh candidate, trained on clean 14/16 m/s data and held out at clean
+18/20 m/s, scores one-step p95 `0.0249 m/s` lateral velocity and `0.0404
+rad/s` yaw rate. Full-plant p95 at 2 s is `2.485 m` position, `0.0475 m/s`
+lateral velocity, and `0.0906 rad/s` yaw rate. The direct-steering Y3
+speed/combined-slip candidate is worse on the same holdout.
+
+The independent normal-range repeat benchmark is
+`model_fits_v2/lateral_model_benchmark_instantaneous_normal_repeat_20260915.json`.
+The high-speed Y2 parameter set also cross-scores that repeat at 2 s with
+`2.259 m` position, `0.0191 m/s` lateral velocity, and `0.1311 rad/s` yaw
+rate. A normal-range-only fit does not extrapolate to 18/20 m/s: its 2 s
+lateral-velocity p95 reaches `4.953 m/s` on that holdout. The old combined
+throttle/steering manoeuvre remains a coupled longitudinal regime and is not
+being hidden by the lateral fit.
+
+Free-`I_z` and free effective yaw-damping experiments were also rejected as
+promotions: free `I_z` hit its lower search bound and traded high-speed yaw
+against the normal repeat, while fitted damping converged to approximately
+zero and did not improve the fixed measured-damping candidate. The canonical
+manifest, native runtime, production MPC, and Unity simulator remain
+unchanged; this steering candidate is still offline and not promoted.
+
+## 2026-09-15 positive wheel-burst guard and fresh track validation
+
+The source-time replay exposed a coherent positive cumulative-encoder burst at
+established speed. Both the rolling and current encoder rates could agree with
+each other while remaining above the causal body-speed prediction, so the old
+straight-line recovery branch could incorrectly accept the burst. The C++
+observer and Python reference now keep the recovery pending until the current
+packet is also inside the bounded positive-increase gate. A focused regression
+test covers this established-speed straight burst; the Humble localization
+build and all three localization tests pass.
+
+On the clean 18 m/s and 20 m/s corner replays, the guarded candidate reduced
+the offline raw-odometry position p95 from `4.884 m` to `0.523 m` and from
+`1.875 m` to `0.672 m`, respectively. Its lateral velocity p95 remained
+approximately `0.100/0.112 m/s`, so this is a longitudinal/pose-burst
+improvement, not a claim that lateral odometry is solved.
+
+The fresh competition-track validation is retained at
+`run_live/live_odom_ekf_amcl_pp_16mps_positive_burst_guard_20260915/`. It used
+the required Unity `-batchmode` player with normal graphics; `-no-graphics` was
+not used, and no Unity physics, geometry, or vehicle behavior was changed. It
+recorded `8,798` source packets over approximately `220 s`, source median
+`40.0000 Hz`, source interval `21--29 ms`, zero sequence gaps, one-command
+applied lag, and zero collisions. Pure Pursuit completed repeated laps; the
+recorded track speed reached approximately `8.44 m/s`.
+
+The fresh source-time localization report shows AMCL p95 `0.180 m`, current
+map p95 `0.110 m`, and raw `/odom`/EKF p95 `1.662 m`. The odometry yaw error is
+below numerical precision, while the track-frame decomposition is dominated
+by cross-track drift (`1.492 m` p95) with a smaller along-track component
+(`1.274 m` p95). This separates the next work from timing and global AMCL:
+audit the runtime/reference point and the causal lateral pose integration,
+then validate any observer change on a new blind track run. The guarded
+observer and any lateral/yaw plant candidate remain unpromoted into MPC.
+
+## 2026-09-15 capped 14 m/s lateral/yaw holdout
+
+The next clean identification run used the open-plane model-identification
+player and the existing single-regime steering excitation at the new project
+ceiling. It is retained at
+`run_live/lateral_yaw_14_single_openplane_20260915/`: `1,281` packets and
+`1,280` transitions, median source rate `40.0000 Hz`, source interval
+`22--28 ms`, zero cadence gaps, zero reset boundaries, zero collisions, and
+maximum measured speed `14.24 m/s`. The v4 timing/kinematic gate passed; the
+selected body-frame displacement consistency median was `0.0091 m/s`.
+
+The independent blind fit is
+`model_fits_v2/lateral_model_benchmark_instantaneous_highspeed_14_holdout_20260915.json`.
+On this 14 m/s holdout, fixed-`I_z` Y2 tanh gives one-step p95 errors of
+`0.0392 m/s` lateral velocity and `0.0555 rad/s` yaw rate; causal recursive
+position p95 is `0.313 m` at `0.50 s` and `5.368 m` at `2.00 s`. The Y3
+speed/combined-slip extension gives `0.323 m` and `5.326 m` at those horizons,
+so it is not a robust improvement. Neither candidate is runtime-validated or
+promoted to MPC.
+
+Two preliminary attempts were excluded from fitting: a competition-track
+source replay without a path follower hit a barrier and is stored under
+`failed_20260915/lateral_yaw_16_single_competition_barrier_20260915/`; the
+open-plane 16 m/s attempt terminated at the speed guard after a measured
+`16.0668 m/s` overshoot and is stored under
+`failed_20260915/lateral_yaw_16_single_openplane_speed_guard_20260915/`. No
+simulator physics or behavior was changed by either attempt.
+
+## 2026-09-15 recursive-position regression and model-kind correction
+
+The `5.368 m` two-second position result was traced to a model-selection
+regression in the offline lateral fitter. The longitudinal report contains
+both a discrete wheel-state model and a continuous wheel-derivative model.
+The fitter had selected `wheel_dynamic` while the structured plant integrated
+the coefficients as a derivative. At the measured 14 m/s operating point this
+made the predicted wheel state grow by approximately `15 m/s` per second. The
+resulting wheel p95 error reached `32.3 m/s` at two seconds and contaminated
+the longitudinal force, yaw, and pose scores.
+
+`tools/model_id/structured_vehicle_plant.py` now rejects unknown wheel-model
+kind strings and maps the discrete and continuous identified kinds explicitly.
+`tools/model_id/fit_lateral_model.py` now defaults to the canonical
+`wheel_continuous` report entry and records the selected source-model key.
+The regression suite covers both mappings and rejects an ambiguous kind;
+`sdu_apex_autodrive/test/test_model_id_recursive_causality.py` passes `10/10`.
+
+The corrected 14 m/s replay is
+`model_fits_v2/lateral_model_benchmark_instantaneous_highspeed_14_holdout_corrected_wheel_20260915.json`.
+It removes the wheel blow-up and reduces Y2 two-second position p95 from
+`5.368 m` to `3.708 m`; wheel p95 falls from `32.3 m/s` to `0.023 m/s`.
+The remaining error is not primarily lateral-velocity magnitude: a causal
+decomposition gives two-second position p95 `3.706 m` with the full plant,
+`3.671 m` with measured longitudinal state, and `0.577 m` with measured
+heading. The remaining dominant error is accumulated yaw/heading, with a
+smaller longitudinal speed bias (`0.504 m/s` p95).
+
+The first recursive raceline objective was added to the lateral fitter. It
+uses contiguous, reachable windows only: project speed `1--16 m/s`, steering
+within `+-0.45 rad`, and measured lateral acceleration within `14 m/s^2`.
+The fit uses measured longitudinal state only while identifying lateral
+dynamics offline; complete recursive scoring remains causal. A track-only
+fit improved its own held-out track score to approximately `0.84 m` position
+p95 at two seconds but extrapolated to approximately `22 m` on the 14 m/s
+holdout, so it was rejected.
+
+A mixed track plus capped-14 m/s speed-dependent fit was also rejected after
+per-run cross-checking: the Y3 candidate was approximately `0.83--0.85 m`
+on the 8 m/s track holdouts but approximately `5.0 m` on the 14 m/s holdout,
+worse than the corrected baseline. Likewise, a combined longitudinal refit
+reduced track speed error to approximately `0.17 m/s` p95 but increased the
+14 m/s speed error to approximately `1.68 m/s` p95. These results show why a
+single regime-specific model must not be promoted or wired into MPC.
+
+The completed candidate reports are retained for audit:
+
+- `model_fits_v2/lateral_model_raceline_recursive_track_holdout_20260915.json`
+- `model_fits_v2/lateral_model_speed_dependent_recursive_raceline_20260915.json`
+- `model_fits_v2/lateral_model_recursive_highspeed14_repeat_20260915.json`
+- `model_fits_v2/longitudinal_model_benchmark_raceline_and_14_holdout_20260915.json`
+
+The corrected instantaneous-steering residual CSV was regenerated after the
+fit so its p95 values match the JSON exactly (`0.03922 m/s` for lateral
+velocity and `0.05554 rad/s` for yaw rate).
+
+None is promoted. The next model revision must fit the speed-dependent
+longitudinal slip/force relation and the causal yaw response jointly, with
+balanced per-regime weighting and separate track/14 m/s holdouts. Unity,
+production MPC, odometry, EKF, and AMCL were not modified in this analysis.
+
+## 2026-09-15 equal-horizon regime-model implementation
+
+The next offline-only model implementation is
+`tools/model_id/fit_speed_regime_vehicle_model.py`. It adds a causal
+effective-steering state with a fitted first-order lag diagnostic, smooth
+low/mid/high speed blending at 2--8, 8--12, and 12--16 m/s, combined-slip
+lateral-force scaling using wheel/body longitudinal slip, and speed-dependent
+drive-force/slip-gain profiles. Unity's measured `0.273 1/s` linear damping
+remains the only longitudinal drag term; the fitted residual-drag term is
+zero. Rows above the project `16 m/s` ceiling, full-lock commands, and
+excessive lateral acceleration are excluded from identification.
+
+The retained candidate report is
+`model_fits_v2/speed_regime_vehicle_candidate_recursive_instantaneous_20260915.json`.
+It is explicitly not runtime validated or promoted. The steering-lag fit is
+approximately `0.0475 s`, but the selected replay uses the measured effective
+steering state instantaneously because the retained command/feedback data do
+not independently establish that lag. The combined-slip gain is driven to
+approximately zero in the fitted regimes, so it is not being forced into the
+model without evidence.
+
+On the actual track holdouts at the MPC-relevant `0.60 s`, the new profile
+reduced position p95 from approximately `0.213 m` to `0.089 m` and longitudinal
+speed p95 from `0.496 m/s` to `0.191 m/s`. Heading p95 remained approximately
+`0.071 rad`, so this is a useful raceline-speed improvement but not a yaw
+solution. On the capped 14 m/s turn, lateral-velocity p95 improved to roughly
+`0.018 m/s`, while position/heading remained approximately `0.514 m`/`0.125
+rad` at `0.60 s`; the high-speed lateral candidate is therefore still not
+accepted.
+
+The equal-physical-horizon benchmark is
+`model_fits_v2/mpc_equal_horizon_discretization_candidate_20260915.json`.
+For the combined track and 14 m/s sample at `0.60 s`, the coarse
+`N=20, dt=0.030, internal=0.030` grid produced approximately `0.430 m`
+position p95 and `0.313 rad` heading p95. Matched internal half-steps reduced
+this to `0.359 m` and `0.097 rad` for `N=20`, and `0.357 m` and `0.094 rad`
+for `N=24, dt=0.025`. `N=40, dt=0.015` gave `0.359 m` and `0.092 rad`, so
+doubling the stage count adds little after the integration is resolved.
+No simulator or production MPC constants were changed. The next fit must
+focus on the remaining causal yaw response and be validated on an independent
+12--16 m/s turning holdout before any controller migration.
+
+## 2026-09-15 regime-separated lateral screening and MPC horizon gate
+
+The offline plant now supports explicit effective steering, smooth regime
+profiles, and separate lateral training pools through
+`tools/model_id/fit_speed_regime_vehicle_model.py`. Straight samples are no
+longer allowed to dominate the lateral fit: a lateral sample must contain
+nontrivial steering or lateral acceleration, while straight powered samples
+remain available to the longitudinal fit. This keeps the requested
+2--8/8--12/12--16 m/s bands tied to turning behaviour.
+
+The first regime-separated screening artifact is
+`model_fits_v2/speed_regime_vehicle_candidate_regime_screen_20260915.json`.
+It used an 8-origin screening stride and is not an acceptance result. On the
+actual track holdouts its `.60 s` position p95 was approximately `0.10 m`,
+versus `0.21 m` for the canonical scalar baseline. On the capped 14 m/s
+temporal turn holdout it was approximately `0.34 m`/`0.08 rad` for
+position/heading, versus `0.29 m`/`0.10 rad` for the scalar baseline. On the
+2--12 m/s repeat it was worse (`0.49 m`/`0.29 rad` versus `0.25 m`/`0.09
+rad`), so the candidate is rejected pending a better mid-speed yaw model.
+
+The earlier equal-horizon benchmark remains as a historical
+`model_fits_v2/mpc_equal_horizon_discretization_candidate_20260915.json`.
+Its result is unchanged: matched internal half-steps produce nearly the same
+`.60 s` error for `N=20, dt=.03`, `N=24, dt=.025`, and `N=40, dt=.015`; the
+coarse single-step integrator is the bad case. It is superseded as an active
+gate by the `.75 s`/30-command result recorded below. No Unity, production
+MPC, odometry, EKF, or AMCL behavior was changed. Focused model tests remain
+green (`24 passed`).
+
+## 2026-09-15 active 40 Hz horizon standardization and full holdout score
+
+The active prediction contract is now standardized everywhere the model is
+fit, replayed, scored, or compiled into the MPC: `30` commands at `40 Hz`,
+with `0.025 s` per stage and a physical horizon of `0.75 s`. The production
+MPC defaults in `f1tenth_mpc/include/mpc_types.h` and the canonical manifest
+now use this contract, and the manifest checker rejects timing drift. The
+legacy one- and two-second prediction targets were removed from executable
+fitters, repeatability reports, replay scoring, and tests. Historical JSON
+reports that contain those old metrics remain unchanged as audit evidence and
+are not re-run.
+
+The full stride-1 offline candidate score is
+`model_fits_v2/speed_regime_vehicle_candidate_canonical_lateral_steering_rate_075_20260915.json`.
+It uses the canonical lateral law, the fitted longitudinal speed profile, and
+a causal steering-transition residual. The simulator was not modified and no
+candidate parameters were copied into runtime MPC. On `8,364` valid holdout
+origins at the active `.75 s` horizon, the candidate gives position p95
+`0.268 m`, heading p95 `0.106 rad`, longitudinal-speed p95 `0.151 m/s`,
+lateral-speed p95 `0.141 m/s`, and yaw-rate p95 `0.182 rad/s`. The scalar
+baseline gives position p95 `0.306 m`, heading `0.099 rad`, longitudinal speed
+`0.506 m/s`, lateral speed `0.076 m/s`, and yaw rate `0.192 rad/s`; therefore
+the candidate is a useful longitudinal/position improvement but is not yet a
+uniform lateral/yaw improvement or a 2% model. It remains rejected for
+runtime migration until an independent blind turning holdout and native
+parity pass.
+
+The equal-horizon discretization result is
+`model_fits_v2/mpc_equal_horizon_discretization_candidate_075_20260915.json`.
+The requested `N=30, dt=.025 s` grid gives position p95 `0.323 m`; the
+`N=50, dt=.015 s` resolution diagnostic gives `0.289 m`, while the coarse
+`N=25, dt=.030 s` single-step case gives `0.339 m`. The matched half-step
+`N=30` diagnostic gives `0.285 m`. This indicates that the 40 Hz grid is
+adequate and that integration resolution, not a longer horizon, is the
+important numerical factor.
+
+The latest clean Pure Pursuit track run remains
+`run_live/live_odom_ekf_amcl_pp_16mps_positive_burst_guard_20260915/`:
+`8,798` source packets over about `808 m`, median source interval `25 ms`,
+maximum interval `29 ms`, zero sequence gaps, zero collisions, and maximum
+measured speed `8.44 m/s`. Current-map localization is approximately
+`0.110 m` p95, AMCL `0.180 m` p95, while raw `/odom` and `/ekf_odom` position
+are approximately `1.66 m` p95 on the path-relative localization score.
+The run demonstrates repeatable collision-free driving and clean timing, but
+does not demonstrate 16 m/s operation or MPC acceptance. Odom velocity is
+approximately `0.152 m/s` p95 longitudinal and `0.311 m/s` p95 at the
+GPS/pose point laterally (`0.063 m/s` p95 against the COM diagnostic).

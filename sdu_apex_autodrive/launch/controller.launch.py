@@ -520,10 +520,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "controller_max_speed",
-            default_value="22.88",
+            default_value="16.0",
             description=(
-                "Normal Pure Pursuit maximum speed [m/s]. The first-lap "
-                "startup ramp is configured in path_tracking_autodrive.yaml."
+                "Normal Pure Pursuit maximum speed [m/s]. The project "
+                "operating ceiling is 16 m/s; this does not alter simulator physics."
             ),
         ),
         DeclareLaunchArgument(

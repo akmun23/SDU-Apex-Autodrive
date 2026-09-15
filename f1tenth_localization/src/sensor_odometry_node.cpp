@@ -175,11 +175,14 @@ public:
       observer_defaults.integrate_lateral_acceleration_in_turn);
     declare_parameter(
       "use_kinematic_lateral_slip_model", observer_defaults.use_kinematic_lateral_slip_model);
-    declare_parameter("lateral_slip_ratio", observer_defaults.lateral_slip_ratio);
     declare_parameter(
-      "lateral_slip_yaw_rate_scale_radps",
-      observer_defaults.lateral_slip_yaw_rate_scale_radps);
-    declare_parameter("lateral_slip_max_mps", observer_defaults.lateral_slip_max_mps);
+      "lateral_velocity_yaw_rate_gain_m",
+      observer_defaults.lateral_velocity_yaw_rate_gain_m);
+    declare_parameter(
+      "lateral_velocity_speed_yaw_rate_gain_s",
+      observer_defaults.lateral_velocity_speed_yaw_rate_gain_s);
+    declare_parameter(
+      "lateral_velocity_max_mps", observer_defaults.lateral_velocity_max_mps);
     declare_parameter("max_imu_ax_abs_mps2", observer_defaults.max_imu_ax_abs_mps2);
 
     observer_config_ = load_observer_config();
@@ -341,12 +344,12 @@ private:
       "integrate_lateral_acceleration_in_turn").as_bool();
     config.use_kinematic_lateral_slip_model = get_parameter(
       "use_kinematic_lateral_slip_model").as_bool();
-    config.lateral_slip_ratio = std::max(
-      0.0, get_parameter("lateral_slip_ratio").as_double());
-    config.lateral_slip_yaw_rate_scale_radps = std::max(
-      0.0, get_parameter("lateral_slip_yaw_rate_scale_radps").as_double());
-    config.lateral_slip_max_mps = std::max(
-      0.0, get_parameter("lateral_slip_max_mps").as_double());
+    config.lateral_velocity_yaw_rate_gain_m = get_parameter(
+      "lateral_velocity_yaw_rate_gain_m").as_double();
+    config.lateral_velocity_speed_yaw_rate_gain_s = get_parameter(
+      "lateral_velocity_speed_yaw_rate_gain_s").as_double();
+    config.lateral_velocity_max_mps = std::max(
+      0.0, get_parameter("lateral_velocity_max_mps").as_double());
     config.imu_x_offset_m = get_parameter("imu_x_m").as_double();
     config.max_imu_ax_abs_mps2 = get_parameter("max_imu_ax_abs_mps2").as_double();
     return config;

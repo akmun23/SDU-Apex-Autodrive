@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "manifest_id": "sdu_apex_vehicle_model",
+  "manifest_version": "2026-09-15.v4",
+  "status": "transition_manifest",
+  "simulator_behavior_modified": false,
+  "runtime_ground_truth_inputs": false,
+  "operational_limits": {
+    "maximum_command_speed_mps": 16.0,
+    "maximum_model_identification_speed_mps": 16.0,
+    "scope": "dev_command_and_identification_envelope",
+    "historical_above_limit_data": "offline_only_not_for_new_fits",
+    "simulator_physics_modified": false
+  },
+  "active_runtime_profile": "production_mpc_baseline",
+  "canonical_candidate_profile": "offline_candidate_fixed_iz_damped_y2_continuous_wheel",
+  "source_commit": "c95dbd08b31354f10090488053a68fcafe9a8c36",
+  "model_fingerprint_algorithm": "sha256(canonical_json(model_contract + resolved_parameters))",
+  "promotion_rule": "offline_candidate_requires_independent_held_out_and_blind_live_acceptance_before_runtime_mpc_promotion",
+  "odometry_profile": {
+    "status": "active_deployed",
+    "yaml": "f1tenth_localization/config/sensor_odometry.yaml",
+    "cpp_defaults": "f1tenth_localization/src/odometry_observer.cpp::deployment_observer_config",
+    "python_reference": "sdu_apex_autodrive/sdu_apex_autodrive/odometry_analysis/reference_observer.py::ReferenceObserver",
+    "fingerprint_algorithm": "sha256(canonical_json(sensor_odometry.ros__parameters))",
+    "fingerprint": "9c6480aa87053f8b7b209c60073fa3b84464863e728200db35c484a72b541fb1",
+    "observer_parameter_mapping": [
+      {"yaml": "wheel_radius_m", "cpp": "wheel_radius_m", "python": "wheel_radius_m"},
+      {"yaml": "wheel_speed_scale", "cpp": "wheel_speed_scale", "python": "wheel_speed_scale"},
+      {"yaml": "wheel_speed_scale_speeds_mps", "cpp": "wheel_speed_scale_speeds_mps", "python": "wheel_speed_scale_speeds_mps"},
+      {"yaml": "wheel_speed_scale_values", "cpp": "wheel_speed_scale_values", "python": "wheel_speed_scale_values"},
+      {"yaml": "reset_encoder_jump_rad", "cpp": "reset_encoder_jump_rad", "python": "reset_encoder_jump_rad"},
+      {"yaml": "wheel_speed_window_s", "cpp": "wheel_speed_window_s", "python": "wheel_speed_window_s"},
+      {"yaml": "normal_packet_dt_max_s", "cpp": "normal_packet_dt_max_s", "python": "normal_packet_dt_max_s"},
+      {"yaml": "degraded_packet_dt_max_s", "cpp": "degraded_packet_dt_max_s", "python": "degraded_packet_dt_max_s"},
+      {"yaml": "max_integratable_gap_s", "cpp": "max_integratable_gap_s", "python": "max_integratable_gap_s"},
+      {"yaml": "decel_detect_ax_mps2", "cpp": "decel_detect_ax_mps2", "python": "decel_detect_ax_mps2"},
+      {"yaml": "decel_ax_scale", "cpp": "decel_ax_scale", "python": "decel_ax_scale"},
+      {"yaml": "decel_ax_offset_mps2", "cpp": "decel_ax_offset_mps2", "python": "decel_ax_offset_mps2"},
+      {"yaml": "wheel_update_ax_abs_max_mps2", "cpp": "wheel_update_ax_abs_max_mps2", "python": "wheel_update_ax_abs_max_mps2"},
+      {"yaml": "wheel_freeze_speed_mps", "cpp": "wheel_freeze_speed_mps", "python": "wheel_freeze_speed_mps"},
+      {"yaml": "wheel_innovation_max_mps", "cpp": "wheel_innovation_max_mps", "python": "wheel_innovation_max_mps"},
+      {"yaml": "wheel_recovery_launch_speed_mps", "cpp": "wheel_recovery_launch_speed_mps", "python": "wheel_recovery_launch_speed_mps"},
+      {"yaml": "wheel_recovery_launch_innovation_mps", "cpp": "wheel_recovery_launch_innovation_mps", "python": "wheel_recovery_launch_innovation_mps"},
+      {"yaml": "wheel_recovery_launch_wheel_speed_mps", "cpp": "wheel_recovery_launch_wheel_speed_mps", "python": "wheel_recovery_launch_wheel_speed_mps"},
+      {"yaml": "wheel_burst_disagreement_mps", "cpp": "wheel_burst_disagreement_mps", "python": "wheel_burst_disagreement_mps"},
+      {"yaml": "allow_turn_current_packet_recovery", "cpp": "allow_turn_current_packet_recovery", "python": "allow_turn_current_packet_recovery"},
+      {"yaml": "turn_current_packet_max_increase_mps", "cpp": "turn_current_packet_max_increase_mps", "python": "turn_current_packet_max_increase_mps"},
+      {"yaml": "use_turn_speed_bias_model", "cpp": "use_turn_speed_bias_model", "python": "use_turn_speed_bias_model"},
+      {"yaml": "turn_speed_bias_constant_mps", "cpp": "turn_speed_bias_constant_mps", "python": "turn_speed_bias_constant_mps"},
+      {"yaml": "turn_speed_bias_speed_mps", "cpp": "turn_speed_bias_speed_mps", "python": "turn_speed_bias_speed_mps"},
+      {"yaml": "turn_speed_bias_speed_squared_mps", "cpp": "turn_speed_bias_speed_squared_mps", "python": "turn_speed_bias_speed_squared_mps"},
+      {"yaml": "turn_speed_bias_yaw_rate_abs_mps", "cpp": "turn_speed_bias_yaw_rate_abs_mps", "python": "turn_speed_bias_yaw_rate_abs_mps"},
+      {"yaml": "turn_speed_bias_yaw_rate_squared_mps", "cpp": "turn_speed_bias_yaw_rate_squared_mps", "python": "turn_speed_bias_yaw_rate_squared_mps"},
+      {"yaml": "turn_speed_bias_speed_yaw_rate_abs_mps", "cpp": "turn_speed_bias_speed_yaw_rate_abs_mps", "python": "turn_speed_bias_speed_yaw_rate_abs_mps"},
+      {"yaml": "turn_speed_bias_max_mps", "cpp": "turn_speed_bias_max_mps", "python": "turn_speed_bias_max_mps"},
+      {"yaml": "use_coherent_packet_velocity_for_pose", "cpp": "use_coherent_packet_velocity_for_pose", "python": "use_coherent_packet_velocity_for_pose"},
+      {"yaml": "coherent_packet_pose_blend", "cpp": "coherent_packet_pose_blend", "python": "coherent_packet_pose_blend"},
+      {"yaml": "wheel_speed_slew_limit_mps2", "cpp": "wheel_speed_slew_limit_mps2", "python": "wheel_speed_slew_limit_mps2"},
+      {"yaml": "stationary_speed_threshold_mps", "cpp": "stationary_speed_threshold_mps", "python": "stationary_speed_threshold_mps"},
+      {"yaml": "wheel_update_beta", "cpp": "wheel_update_beta", "python": "wheel_update_beta"},
+      {"yaml": "stationary_hold_s", "cpp": "stationary_hold_s", "python": "stationary_hold_s"},
+      {"yaml": "stationary_ax_abs_max_mps2", "cpp": "stationary_ax_abs_max_mps2", "python": "stationary_ax_abs_max_mps2"},
+      {"yaml": "stationary_ay_abs_max_mps2", "cpp": "stationary_ay_abs_max_mps2", "python": "stationary_ay_abs_max_mps2"},
+      {"yaml": "stationary_yaw_rate_abs_max_radps", "cpp": "stationary_yaw_rate_abs_max_radps", "python": "stationary_yaw_rate_abs_radps"},
+      {"yaml": "turn_enter_yaw_rate_radps", "cpp": "turn_enter_yaw_rate_radps", "python": "turn_enter_yaw_rate_radps"},
+      {"yaml": "turn_enter_abs_ay_mps2", "cpp": "turn_enter_abs_ay_mps2", "python": "turn_enter_abs_ay_mps2"},
+      {"yaml": "turn_exit_yaw_rate_radps", "cpp": "turn_exit_yaw_rate_radps", "python": "turn_exit_yaw_rate_radps"},
+      {"yaml": "turn_exit_abs_ay_mps2", "cpp": "turn_exit_abs_ay_mps2", "python": "turn_exit_abs_ay_mps2"},
+      {"yaml": "turn_exit_hold_s", "cpp": "turn_exit_hold_s", "python": "turn_exit_hold_s"},
+      {"yaml": "turn_wheel_braking_ax_mps2", "cpp": "turn_wheel_braking_ax_mps2", "python": "turn_wheel_braking_ax_mps2"},
+      {"yaml": "integrate_lateral_acceleration_in_turn", "cpp": "integrate_lateral_acceleration_in_turn", "python": "integrate_lateral_acceleration_in_turn"},
+      {"yaml": "use_kinematic_lateral_slip_model", "cpp": "use_kinematic_lateral_slip_model", "python": "use_kinematic_lateral_slip_model"},
+      {"yaml": "lateral_velocity_yaw_rate_gain_m", "cpp": "lateral_velocity_yaw_rate_gain_m", "python": "lateral_velocity_yaw_rate_gain_m"},
+      {"yaml": "lateral_velocity_speed_yaw_rate_gain_s", "cpp": "lateral_velocity_speed_yaw_rate_gain_s", "python": "lateral_velocity_speed_yaw_rate_gain_s"},
+      {"yaml": "lateral_velocity_max_mps", "cpp": "lateral_velocity_max_mps", "python": "lateral_velocity_max_mps"},
+      {"yaml": "max_imu_ax_abs_mps2", "cpp": "max_imu_ax_abs_mps2", "python": "max_imu_ax_abs_mps2"},
+      {"yaml": "imu_x_m", "cpp": "imu_x_offset_m", "python": "imu_x_offset_m"}
+    ]
+  },
+  "candidate_compatibility": {
+    "production_profile_compatible": false,
+    "migration_status": "not_started",
+    "blocking_differences": [
+      "state_order_and_dimension",
+      "normalized_throttle_to_wheel_state_vs_direct_acceleration_input",
+      "continuous_wheel_dynamics_absent_from_production_mpc",
+      "tire_law_and_damping_structure",
+      "reference_point_and_numerical_integration_contract"
+    ]
+  },
+  "physical_anchors": {
+    "mass_kg": 3.47,
+    "contact_geometry": {
+      "front_axle_from_com_m": 0.174679914,
+      "rear_axle_from_com_m": 0.155320086,
+      "wheelbase_m": 0.33000004
+    },
+    "steering_geometry": {
+      "wheelbase_m": 0.324,
+      "max_angle_rad": 0.5235987756,
+      "rate_radps": 3.2
+    },
+    "wheel": {
+      "physical_radius_m": 0.059,
+      "controller_radius_m": 0.0325,
+      "controller_radius_role": "skid_steer_branch_only_not_ackermann_drive"
+    },
+    "yaw_inertia": {
+      "value_kgm2": 0.0961908,
+      "axis": "unity_body_y",
+      "status": "measured_structural_anchor",
+      "legacy_local_z_projection_kgm2": 0.0276985662
+    },
+    "rigid_body_damping": {
+      "linear_drag_per_s": 0.273,
+      "angular_drag_per_s": 0.1
+    }
+  },
+  "profiles": {
+    "production_mpc_baseline": {
+      "status": "active_runtime",
+      "implementation": "f1tenth_mpc/src/vehicle_model.c",
+      "constants_header": "f1tenth_mpc/include/mpc_types.h",
+      "model_family": "bachelor_mpc_nonlinear_bicycle",
+      "model_fingerprint": "20c8d832203353c815b8d9687064469be4bdf0a2c63cf153edc5606f39acb0c2",
+      "model_contract": {
+        "state_order": ["pos_x_m", "pos_y_m", "heading_rad", "long_vel_mps", "lat_vel_mps", "yaw_rate_radps"],
+        "state_frame": "world_pose_and_body_velocity",
+        "reference_point": "center_of_mass_for_velocity_and_pose_state",
+        "input_order": ["steering_rate_radps", "longitudinal_acceleration_mps2"],
+        "input_semantics": "solver_input_is_steering_rate_and_direct_acceleration; output_is_steering_angle_and_acceleration",
+        "steering_dynamics": "exponential_effective_steering_pole_with_rate_limited_command",
+        "wheel_state_present": false,
+        "longitudinal_dynamics": "direct_acceleration_force_mass_times_commanded_acceleration",
+        "lateral_dynamics": "pacejka_like_nonlinear_bicycle_with_load_transfer_path",
+        "body_damping": {"linear": false, "angular": false},
+        "numerics": {"prediction_dt_s": 0.025, "control_dt_s": 0.025, "prediction_horizon_commands": 30, "physical_horizon_s": 0.75, "integration": "forward_euler"}
+      },
+      "constants": {
+        "model_signature": 3,
+        "control_rate_hz": 40.0,
+        "prediction_dt_s": 0.025,
+        "prediction_horizon_commands": 30,
+        "physical_horizon_s": 0.75,
+        "steering_rate_radps": 3.2,
+        "steering_time_constant_s": 0.025,
+        "max_steering_rad": 0.5235987756,
+        "max_velocity_mps": 20.0,
+        "wheelbase_m": 0.33,
+        "front_axle_from_com_m": 0.174679914,
+        "rear_axle_from_com_m": 0.155320086,
+        "mass_kg": 3.47,
+        "yaw_inertia_kgm2": 0.0961908,
+        "cg_height_m": 0.0,
+        "friction_coefficient": 0.72,
+        "gravity_mps2": 9.82,
+        "max_acceleration_mps2": 7.0704,
+        "min_acceleration_mps2": -7.0704,
+        "front_lateral_force_scale_n": 11.547477945784147,
+        "rear_lateral_force_scale_n": 12.986810054215855,
+        "front_cornering_stiffness_per_rad": 4.4511884102593635,
+        "rear_cornering_stiffness_per_rad": 3.3187518582370137,
+        "tire_shape_factor": 1.9,
+        "minimum_slip_velocity_mps": 0.5,
+        "minimum_stiffness_scale": 0.1
+      }
+    },
+    "offline_candidate_fixed_iz_damped_y2_continuous_wheel": {
+      "status": "not_promoted",
+      "implementation": "f1tenth_mpc/src/vehicle_plant.c",
+      "source_reports": {
+        "lateral": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/lateral_model_benchmark_fixed_iz_damped_20260915.json",
+        "longitudinal": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/longitudinal_model_benchmark_measured_damping_clean_holdout_brake20_lateral16_20260915.json"
+      },
+      "resolved_parameters_source": "selected_model_parameters_from_source_reports",
+      "model_contract": {
+        "state_order": ["x_m", "y_m", "yaw_rad", "u_mps", "v_mps", "r_radps", "steering_rad", "wheel_speed_mps"],
+        "state_frame": "world_pose_and_body_velocity",
+        "pose_reference_point": "rear_contact_axle",
+        "velocity_reference_point": "center_of_mass",
+        "input_order": ["steering_target_norm", "throttle_norm"],
+        "input_semantics": "normalized_steering_target_and_normalized_throttle",
+        "steering_dynamics": {"type": "rate_limited_move_towards", "max_angle_rad": 0.5235987756, "rate_radps": 3.2},
+        "wheel_state_present": true,
+        "wheel_state_semantics": "continuous_wheel_speed_mps_with_identified_derivative",
+        "longitudinal_dynamics": {"type": "hybrid_wheel_slip_force", "zero_throttle": "active_all_wheel_brake", "body_damping": "explicit_linear_drag"},
+        "lateral_dynamics": {"type": "bicycle_tanh_tire", "load_transfer": "disabled_in_selected_fit", "angular_damping": "explicit"},
+        "numerics": {"source_dt": "measured_per_transition_dt_sim_s", "substep_dt_s": 0.002, "integration": "midpoint_style_substepped"}
+      },
+      "lateral_model": "Y2_tanh_fixed_iz",
+      "longitudinal_model": "wheel_continuous",
+      "pose_reference": {
+        "position_offset_from_velocity_point_x_m": -0.155320086
+      },
+      "damping_profile": {
+        "linear_damping_per_s": 0.273,
+        "angular_damping_per_s": 0.1,
+        "coast_speed_drag_n_per_mps": 0.0,
+        "coast_drag_zero_reason": "explicit_unity_rigidbody_drag_is_included",
+        "identified_source_report_coast_speed_drag_n_per_mps": 0.0,
+        "parameter_selection": "measured_damping_clean_holdout_brake20_lateral16"
+      },
+      "parameters": {
+        "mass_kg": 3.47,
+        "lf_m": 0.174679914,
+        "lr_m": 0.155320086,
+        "iz_kgm2": 0.0961908,
+        "max_steering_rad": 0.5236,
+        "steering_rate_radps": 3.2,
+        "max_speed_mps": 16.0,
+        "force_max_n": 19.893600647379536,
+        "hard_brake_force_n": 18.575806999393215,
+        "slip_gain_per_mps": 0.9715058770352094,
+        "linear_damping_per_s": 0.273,
+        "angular_damping_per_s": 0.1,
+        "coast_speed_drag_n_per_mps": 0.0,
+        "cf_n_per_rad": 2674.084021452388,
+        "cr_n_per_rad": 4853.771529131131,
+        "df_n": 12.63696205350674,
+        "dr_n": 14.123309383979418,
+        "tire_model": "tanh",
+        "wheel_dynamics": "continuous",
+        "wheel_coefficients": [
+          -0.055034041731618855,
+          -38.44226600983389,
+          967.4757492136804,
+          1.425533941018024,
+          -37.16345280265934,
+          0.027050887976534637
+        ]
+      },
+      "model_fingerprint": "174fb01c2b79dd2df429c5a86ea944983d51d6661c6dea564c625a8257f38599"
+    }
+  }
+}

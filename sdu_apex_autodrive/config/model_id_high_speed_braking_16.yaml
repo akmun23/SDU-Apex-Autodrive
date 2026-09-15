@@ -1,0 +1,21 @@
+# High-speed longitudinal acceleration/coast/braking identification.
+#
+# The run starts from a fresh model-identification player and deliberately has
+# no reset phases.  The second phase is an explicit zero-throttle command;
+# this must be visible in applied_throttle_norm before the run is accepted.
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    replay_throttle_sequence: [0.70, 0.0]
+    replay_steering_sequence: [0.0, 0.0]
+    replay_phase_steps: [360, 360]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 450.0
+    capture_source_events: false
+    calibration_record_rate_hz: 10.0

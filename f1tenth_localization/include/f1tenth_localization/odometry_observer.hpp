@@ -121,14 +121,16 @@ struct OdometryObserverConfig
   // dropout interval; this flag remains available for offline comparison and
   // vehicles with a separately validated slip model.
   bool integrate_lateral_acceleration_in_turn{false};
-  // Optional bounded sideslip model using only causal wheel speed and yaw
-  // rate. It is separate from integrating lateral acceleration, which can
-  // drift at the native sensor rate. Keep disabled by default for library
-  // users and select it explicitly in a deployment configuration.
+  // Optional bounded body-lateral-velocity model using only causal wheel
+  // speed and yaw rate. It is separate from integrating lateral acceleration,
+  // which can drift at the native sensor rate. The gains are identified from
+  // held-out sensor-packet replays; simulator truth is never a runtime input.
   bool use_kinematic_lateral_slip_model{false};
-  double lateral_slip_ratio{0.016};
-  double lateral_slip_yaw_rate_scale_radps{0.15};
-  double lateral_slip_max_mps{0.30};
+  // v = yaw_rate * (lateral_velocity_yaw_rate_gain_m +
+  //                  lateral_velocity_speed_yaw_rate_gain_s * u)
+  double lateral_velocity_yaw_rate_gain_m{0.167};
+  double lateral_velocity_speed_yaw_rate_gain_s{-0.0063};
+  double lateral_velocity_max_mps{0.35};
   // A single impossible longitudinal IMU sample must not be integrated into
   // odometry.  The competition vehicle's lateral acceleration can be large
   // in a tight turn, so this guard is intentionally only for ax.

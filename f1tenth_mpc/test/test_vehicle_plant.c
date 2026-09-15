@@ -56,8 +56,8 @@ static void test_default_parameters_use_unity_structural_anchors(void)
                 "plant uses measured Unity linear damping");
     check_close(parameters.angular_damping_per_s, 0.1f, 1.0e-7f,
                 "plant uses measured Unity angular damping");
-    check_close(parameters.hard_brake_force_n, 18.9627038f, 1.0e-5f,
-                "plant uses latest identified hard-brake force");
+    check_close(parameters.hard_brake_force_n, 18.5758070f, 1.0e-5f,
+                "plant uses latest clean measured-damping hard-brake force");
     check_true(parameters.tire_model == VEHICLE_PLANT_TIRE_TANH,
                "plant default uses the current tanh tire candidate");
     check_true(parameters.wheel_dynamics_model ==

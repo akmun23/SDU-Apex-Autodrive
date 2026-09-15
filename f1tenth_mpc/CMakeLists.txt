@@ -29,6 +29,32 @@ target_link_libraries(mpc_core PUBLIC m)
 
 include(CTest)
 if(BUILD_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+  add_test(
+    NAME vehicle_model_manifest_check
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../tools/model_id/check_vehicle_model_manifest.py
+      --manifest ${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_model_manifest_v1.json
+      --mpc-header ${CMAKE_CURRENT_SOURCE_DIR}/include/mpc_types.h
+      --vehicle-source ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_model.c
+      --mpc-source ${CMAKE_CURRENT_SOURCE_DIR}/src/mpc.c
+      --candidate-lateral-report
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/lateral_model_benchmark_fixed_iz_damped_20260915.json
+      --candidate-longitudinal-report
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/longitudinal_model_benchmark_measured_damping_clean_holdout_brake20_lateral16_20260915.json
+      --odom-yaml
+        ${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_localization/config/sensor_odometry.yaml
+      --odom-cpp-source
+        ${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_localization/src/odometry_observer.cpp
+      --odom-python-source
+        ${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/sdu_apex_autodrive/odometry_analysis/reference_observer.py
+      --odom-node-source
+        ${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_localization/src/sensor_odometry_node.cpp
+      --plant-source ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_plant.c
+      --plant-python-source
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools/model_id/structured_vehicle_plant.py)
+
   add_executable(vehicle_model_test test/test_vehicle_model.c)
   target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
   add_test(NAME vehicle_model_test COMMAND vehicle_model_test)

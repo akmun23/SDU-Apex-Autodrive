@@ -62,6 +62,10 @@ MAX_SOURCE_TRANSITION_DT_S = 0.035
 POSITION_DISCONTINUITY_THRESHOLD_M = 1.5
 YAW_DISCONTINUITY_THRESHOLD_RAD = 1.0
 ENCODER_WHEEL_RADIUS_M = 0.059
+# The model-ID player is an open-ground diagnostic scene.  A car leaving the
+# plane can still produce perfectly regular source packets, so cadence and
+# kinematic checks alone are not sufficient to accept its falling tail.
+MAX_OFF_PLANE_Z_DEVIATION_M = 1.0
 
 
 def _read_packets(path: Path) -> list[dict[str, str]]:
@@ -358,6 +362,39 @@ def _kinematic_diagnostics(rows: list[dict[str, float]]) -> dict[str, object]:
     }
 
 
+def _scene_validity_diagnostics(rows: list[dict[str, float]]) -> dict[str, object]:
+    """Reject an open-plane capture after the vehicle leaves the ground.
+
+    This is an offline data-quality gate.  It does not infer or alter vehicle
+    physics; it prevents a regular 40 Hz stream from hiding a rollover or an
+    edge departure inside the identification dataset.
+    """
+    z_values = [float(row["z"]) for row in rows if math.isfinite(row["z"])]
+    if not z_values:
+        return {
+            "pass": False,
+            "reason": "no_finite_ground_truth_z",
+            "initial_z_m": None,
+            "maximum_abs_z_deviation_m": None,
+            "maximum_abs_vertical_velocity_mps": None,
+            "maximum_allowed_abs_z_deviation_m": MAX_OFF_PLANE_Z_DEVIATION_M,
+        }
+    initial_z = z_values[0]
+    deviations = [abs(value - initial_z) for value in z_values]
+    vertical_speeds = [abs(float(row["vz"])) for row in rows
+                       if math.isfinite(row["vz"])]
+    maximum_deviation = max(deviations)
+    return {
+        "pass": maximum_deviation <= MAX_OFF_PLANE_Z_DEVIATION_M,
+        "reason": None if maximum_deviation <= MAX_OFF_PLANE_Z_DEVIATION_M
+        else "ground_truth_left_open_plane",
+        "initial_z_m": initial_z,
+        "maximum_abs_z_deviation_m": maximum_deviation,
+        "maximum_abs_vertical_velocity_mps": max(vertical_speeds, default=None),
+        "maximum_allowed_abs_z_deviation_m": MAX_OFF_PLANE_Z_DEVIATION_M,
+    }
+
+
 def _transitions(rows: list[dict[str, float]], twist_frame: str,
                  max_transition_dt_s: float) -> list[dict[str, float]]:
     output: list[dict[str, float]] = []
@@ -494,6 +531,7 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         # from the smallest residual.
         selected_frame = "body"
     kinematic_diagnostics = _kinematic_diagnostics(unique)
+    scene_validity = _scene_validity_diagnostics(unique)
     transitions = _transitions(
         unique, selected_frame, MAX_SOURCE_TRANSITION_DT_S)
     step_deltas = [int(round(row["physics_step_delta"])) for row in transitions]
@@ -509,6 +547,7 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
                      yaw_rate_error <= max_yaw_rate_error_radps)
     kinematics_pass = (kinematics_error <= max_kinematic_error_mps and
                        yaw_rate_pass)
+    scene_validity_pass = bool(scene_validity["pass"])
     gate_failures: list[str] = []
     if not source_order_pass:
         gate_failures.append("source_order")
@@ -522,12 +561,16 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         gate_failures.append("position_velocity_consistency")
     if not yaw_rate_pass:
         gate_failures.append("yaw_rate_consistency")
+    if not scene_validity_pass:
+        gate_failures.append("off_plane_motion")
     if not source_order_pass:
         status = "rejected_source_order"
     elif not timing_pass and not allow_non_target_rate:
         status = "rejected_non_target_source_rate"
     elif not kinematics_pass:
         status = "rejected_kinematic_consistency"
+    elif not scene_validity_pass:
+        status = "rejected_off_plane_motion"
     else:
         status = "exploratory_only_non_target_rate" if not timing_pass else "timing_and_kinematics_gate_passed"
     output_dir = run_dir / "assembled"
@@ -565,6 +608,7 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
             "yaw_rate_source": "simulator_angular_velocity_z",
             "diagnostics": kinematic_diagnostics,
         },
+        "scene_validity": scene_validity,
         "frame_convention": {
             "position": "raw AutoDRIVE API x/y, copied unchanged by official bridge",
             "linear_velocity": "raw AutoDRIVE API body x/y; x forward, y lateral",
@@ -589,7 +633,8 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
                 MIN_SOURCE_TRANSITION_DT_S, MAX_SOURCE_TRANSITION_DT_S],
             "source_cadence_violations_rejected": True,
         },
-        "quality_gate_pass": timing_pass and kinematics_pass,
+        "quality_gate_pass": timing_pass and kinematics_pass and
+        scene_validity_pass,
         "model_boundary": "applied_throttle_to_body_u",
         "transition_schema": {
             "file": "model_transition_v4.csv",

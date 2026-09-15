@@ -29,9 +29,13 @@ import numpy as np
 # Unity diagnostic anchor.  The previous 3.314 kg value belonged to the
 # obsolete replay candidate and must not be reused for new fits.
 MASS_KG = 3.470
+# Unity's measured Rigidbody drag is part of the selected replay profile.
+# Fit drive/brake force after accounting for this term so replay does not
+# estimate it once as fitted drag and then apply it a second way.
+LINEAR_DAMPING_PER_S = 0.273
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
-HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
+HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75)
 MAX_RECURSIVE_SPEED_MPS = 100.0
 MAX_RECURSIVE_ACCELERATION_MPS2 = 1.0e4
 MAX_DIVERGENCE_EXAMPLES = 3
@@ -205,7 +209,9 @@ def _servo_acceleration(model: dict[str, object], row: dict[str, float], u: floa
     return float(model["gain_per_second"]) * (target - u)
 
 
-def _fit_wheel_force(rows: Sequence[dict[str, float]], model_map: dict[str, object]) -> dict[str, object]:
+def _fit_wheel_force(rows: Sequence[dict[str, float]], model_map: dict[str, object],
+                     linear_damping_per_s: float = LINEAR_DAMPING_PER_S
+                     ) -> dict[str, object]:
     selected = [
         row for row in rows
         if _straight(row) and math.isfinite(row["wheel_k_mps"]) and
@@ -222,44 +228,54 @@ def _fit_wheel_force(rows: Sequence[dict[str, float]], model_map: dict[str, obje
         0.5 * (row["u_k_mps"] + row["u_k1_mps"])
         for row in selected
     ])
-    force = np.asarray([MASS_KG * _observed_acceleration(row)
-                        for row in selected])
-    best: tuple[float, float, float, float] | None = None
+    # Observed longitudinal acceleration contains explicit body damping. Move
+    # that known term to the force side before fitting the wheel-slip drive
+    # law; the replay plant then applies the same damping exactly once.
+    force = np.asarray([
+        MASS_KG * (_observed_acceleration(row) +
+                   linear_damping_per_s * speed_value)
+        for row, speed_value in zip(selected, speed)
+    ])
+    best: tuple[float, float, float] | None = None
     for k_x in np.geomspace(0.05, 100.0, 1200):
-        design = np.column_stack((np.tanh(k_x * slip), -speed))
+        design = np.tanh(k_x * slip)[:, None]
         coefficients, *_ = np.linalg.lstsq(design, force, rcond=None)
-        if coefficients[0] <= 0.0 or coefficients[1] < 0.0:
+        if coefficients[0] <= 0.0:
             continue
         residual = force - design @ coefficients
         mae = float(np.mean(np.abs(residual)))
-        candidate = (mae, k_x, float(coefficients[0]), float(coefficients[1]))
+        candidate = (mae, k_x, float(coefficients[0]))
         if best is None or candidate[0] < best[0]:
             best = candidate
     if best is None:
         raise ValueError("wheel-force fit produced no positive force parameters")
-    _, k_x, f_max, c_v = best
+    _, k_x, f_max = best
     return {
         "kind": "wheel_slip_force",
         "mass_kg": MASS_KG,
         "force_max_n": f_max,
         "slip_gain_per_mps": k_x,
-        "coast_speed_drag_n_per_mps": c_v,
+        "coast_speed_drag_n_per_mps": 0.0,
+        "body_linear_damping_per_s": linear_damping_per_s,
         "equilibrium_map": model_map,
         "fit_samples": len(selected),
         "fit_force_mae_n": best[0],
     }
 
 
-def _fit_hard_brake_force(rows: Sequence[dict[str, float]],
-                          coast_drag: float) -> dict[str, float | int | str]:
+def _fit_hard_brake_force(
+        rows: Sequence[dict[str, float]], coast_drag: float,
+        linear_damping_per_s: float = LINEAR_DAMPING_PER_S
+        ) -> dict[str, float | int | str]:
     """Identify the active zero-throttle brake force from straight runs.
 
     AutoDRIVE applies a brake command when normalized throttle is zero.  The
     old longitudinal benchmark folded those transitions into the wheel-slip
     force surface, which made recursive braking predictions depend on the
-    wheel-state fit.  Estimate the constant brake component separately after
-    removing the fitted speed-proportional drag.  This remains an offline
-    candidate parameter and is not copied into the runtime controller.
+    wheel-state fit. Estimate the constant brake component separately after
+    removing the selected measured body damping and any residual
+    speed-proportional drag. This remains an offline candidate parameter and
+    is not copied into the runtime controller.
     """
     selected = [
         row for row in rows
@@ -269,7 +285,9 @@ def _fit_hard_brake_force(rows: Sequence[dict[str, float]],
     if len(selected) < 8:
         raise ValueError("insufficient zero-throttle braking transitions")
     estimates = np.asarray([
-        -(MASS_KG * _observed_acceleration(row) + coast_drag * row["u_k_mps"])
+        -(MASS_KG * (_observed_acceleration(row) +
+                     linear_damping_per_s * row["u_k_mps"]) +
+          coast_drag * row["u_k_mps"])
         for row in selected
     ])
     # A median is deliberately used here: one transition can straddle a
@@ -394,7 +412,8 @@ def _wheel_acceleration(model: dict[str, object], row: dict[str, float],
     wheel_next = wheel + fraction * (target - wheel)
     slip = 0.5 * (wheel + wheel_next) - u
     force = _wheel_force(model, row, slip, u)
-    return force / MASS_KG + lateral_coupling, wheel_next
+    return (force / MASS_KG - LINEAR_DAMPING_PER_S * u +
+            lateral_coupling, wheel_next)
 
 
 def _wheel_force(model: dict[str, object], row: dict[str, float],
@@ -416,7 +435,8 @@ def _wheel_acceleration_dynamic(model: dict[str, object], row: dict[str, float],
                                 wheel_coefficients))
     slip = 0.5 * (wheel + wheel_next) - u
     force = _wheel_force(model, row, slip, u)
-    return force / MASS_KG + lateral_coupling, wheel_next
+    return (force / MASS_KG - LINEAR_DAMPING_PER_S * u +
+            lateral_coupling, wheel_next)
 
 
 def _wheel_acceleration_continuous(
@@ -429,7 +449,8 @@ def _wheel_acceleration_continuous(
     wheel_next = max(0.0, wheel + row["dt_sim_s"] * wheel_rate)
     slip = 0.5 * (wheel + wheel_next) - u
     force = _wheel_force(model, row, slip, u)
-    return force / MASS_KG + lateral_coupling, wheel_next
+    return (force / MASS_KG - LINEAR_DAMPING_PER_S * u +
+            lateral_coupling, wheel_next)
 
 
 def _predict_acceleration(model_name: str, model: dict[str, object],
@@ -581,10 +602,12 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
     model_map = _fit_equilibrium_map(train)
     direct = _fit_direct_surface(train_rows)
     servo = _fit_servo_gain(train_rows, model_map)
-    wheel = _fit_wheel_force(train_rows, model_map)
+    wheel = _fit_wheel_force(
+        train_rows, model_map, linear_damping_per_s=LINEAR_DAMPING_PER_S)
     wheel["wheel_time_constant_s"] = _fit_wheel_time_constant(train_rows, model_map)
     brake = _fit_hard_brake_force(
-        train_rows, float(wheel["coast_speed_drag_n_per_mps"]))
+        train_rows, float(wheel["coast_speed_drag_n_per_mps"]),
+        linear_damping_per_s=LINEAR_DAMPING_PER_S)
     wheel["hard_brake_force_n"] = float(brake["force_n"])
     wheel["hard_brake_identification"] = brake
     wheel_dynamic = dict(wheel)
@@ -613,6 +636,12 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         "validation_transition_count": sum(len(rows) for rows in validation.values()),
         "recursive_score_boundary": "segment_id_hard_stop",
         "recursive_score_scope": "longitudinal_u_causal_zero_lateral_coupling",
+        "longitudinal_damping_profile": {
+            "name": "unity_measured",
+            "linear_damping_per_s": LINEAR_DAMPING_PER_S,
+            "coast_speed_drag_n_per_mps": 0.0,
+            "application": "explicit_body_damping_applied_once_in_replay",
+        },
         "recursive_prediction_uses_future_gt": False,
         "one_step_prediction_uses_future_gt": False,
         "measured_state_use": (

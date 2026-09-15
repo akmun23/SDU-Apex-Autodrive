@@ -1,0 +1,20 @@
+# Fresh 18 m/s lateral/yaw holdout. Diagnostics-only source replay.
+# Stronger steering than the clean 18 m/s holdout is used to excite yaw and
+# combined-slip behavior while the phases remain short enough for the open
+# plane boundary guard.
+model_id_excitation:
+  ros__parameters:
+    mode: source_replay
+    sample_rate_hz: 50.0
+    replay_throttle_sequence: [0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.0]
+    replay_steering_sequence: [0.0, 0.30, -0.30, 0.40, -0.40, 0.20, 0.0, 0.0]
+    replay_phase_steps: [320, 45, 45, 45, 45, 45, 45, 240]
+    maximum_test_speed_mps: 22.88
+    maximum_throttle: 1.0
+    maximum_steering_command: 0.50
+    telemetry_timeout_sec: 0.50
+    startup_timeout_sec: 30.0
+    ground_truth_boundary_guard_enabled: true
+    ground_truth_boundary_distance_m: 430.0
+    capture_source_events: false
+    calibration_record_rate_hz: 10.0

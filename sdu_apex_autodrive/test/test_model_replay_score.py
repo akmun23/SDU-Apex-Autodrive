@@ -39,7 +39,8 @@ def test_replay_score_reports_recursive_horizons_and_finite_values(tmp_path):
     _write(truth)
     report = _MODULE.score(predicted, truth)
     assert report["matched_row_count"] == 81
-    assert "2.00s" in report["recursive_horizon_scores"]
+    assert "0.75s" in report["recursive_horizon_scores"]
+    assert max(float(key[:-1]) for key in report["recursive_horizon_scores"]) <= 0.75
     assert report["state_scores"]["u_mps"]["relative_p95"] < 0.01
     assert json.dumps(report, allow_nan=False)
 

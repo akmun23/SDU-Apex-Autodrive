@@ -1,0 +1,85 @@
+[INFO] [launch]: All log files can be found below /root/.ros/log/2026-09-15-11-56-46-171468-ExternalDrive-98
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: controller=pure_pursuit custom_amcl=True rviz=False
+[INFO] [autodrive_bridge_40hz-1]: process started with pid [207]
+[INFO] [sensor_odometry_node-2]: process started with pid [209]
+[INFO] [ekf_localization_node-3]: process started with pid [211]
+[INFO] [map_server-4]: process started with pid [213]
+[INFO] [lifecycle_manager-5]: process started with pid [215]
+[INFO] [gpu_amcl_cpp_node-6]: process started with pid [217]
+[INFO] [ground_truth_amcl_monitor-7]: process started with pid [219]
+[INFO] [model_id_timing_recorder-8]: process started with pid [221]
+[INFO] [component_container-9]: process started with pid [223]
+[INFO] [actuator_interface-10]: process started with pid [225]
+[ekf_localization_node-3] [INFO] [1789473407.681237553] [ekf_localization]: Local odometry trust filter ready: /odom -> /ekf_odom and /ekf_pose in frame odom; reset events=/autodrive/reset_command
+[sensor_odometry_node-2] [INFO] [1789473407.689995913] [sensor_odometry]: Deterministic odometry observer: exact timestamp packets, encoders + IMU only
+[lifecycle_manager-5] [INFO] [1789473407.701447862] [lifecycle_manager_map]: Creating
+[lifecycle_manager-5] [INFO] [1789473407.706789035] [lifecycle_manager_map]: [34m[1mCreating and initializing lifecycle service clients[0m[0m
+[map_server-4] [INFO] [1789473407.708728428] [map_server]: 
+[map_server-4] 	map_server lifecycle node launched. 
+[map_server-4] 	Waiting on external lifecycle transitions to activate
+[map_server-4] 	See https://design.ros2.org/articles/node_lifecycle.html for more information.
+[map_server-4] [INFO] [1789473407.708840904] [map_server]: Creating
+[lifecycle_manager-5] [INFO] [1789473407.788516410] [lifecycle_manager_map]: [34m[1mStarting managed nodes bringup...[0m[0m
+[lifecycle_manager-5] [INFO] [1789473407.788567734] [lifecycle_manager_map]: [34m[1mConfiguring map_server[0m[0m
+[component_container-9] [INFO] [1789473407.897781095] [controller_container]: Load Library: /workspace/src/install/lib/libpure_pursuit_node.so
+[component_container-9] [INFO] [1789473407.926304507] [controller_container]: Found class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::PurePursuitNode>
+[component_container-9] [INFO] [1789473407.926359618] [controller_container]: Instantiate class: rclcpp_components::NodeFactoryTemplate<f1tenth_control::PurePursuitNode>
+[component_container-9] [INFO] [1789473407.937824250] [pure_pursuit_node]: Initializing Pure Pursuit Node
+[map_server-4] [INFO] [1789473407.943062363] [map_server]: Configuring
+[map_server-4] [INFO] [1789473407.943144595] [map_io]: Loading yaml file: /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml
+[map_server-4] [INFO] [1789473407.943423687] [map_io]: resolution: 0.025
+[map_server-4] [INFO] [1789473407.943435409] [map_io]: origin[0]: -6.82
+[map_server-4] [INFO] [1789473407.943440438] [map_io]: origin[1]: -12.3
+[map_server-4] [INFO] [1789473407.943444626] [map_io]: origin[2]: 0
+[map_server-4] [INFO] [1789473407.943448984] [map_io]: free_thresh: 0.25
+[map_server-4] [INFO] [1789473407.943453252] [map_io]: occupied_thresh: 0.65
+[map_server-4] [INFO] [1789473407.943459102] [map_io]: mode: trinary
+[map_server-4] [INFO] [1789473407.943464312] [map_io]: negate: 0
+[gpu_amcl_cpp_node-6] [INFO] [1789473407.943072101] [gpu_amcl_cpp]: [AMCL] Parameters: update_min_d=0.02000, update_min_a=0.03500, max_scan_age=0.2500, odom_history=1.000s, cloud_publish_rate=1.0 Hz, debug_pre_resample=false, slip_threshold=1.00 rad/s, initial_raceline_heading=false, local_correction_gate=0.00m/0.00rad xy_gain=0.500 cross_track_only=false along_track_gain=0.250 fast_speed=3.00mps fast_along_gain=0.250 yaw_gain=0.000 association=0.80m recenter_cloud=true
+[map_server-4] [INFO] [1789473407.949019397] [map_io]: Loading image_file: /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.pgm
+[component_container-9] [INFO] [1789473407.953504998] [pure_pursuit_node]: Loaded trajectory with 2586 waypoints (51.7 m)
+[autodrive_bridge_40hz-1] /usr/local/lib/python3.10/dist-packages/numpy/core/getlimits.py:499: UserWarning: The value of the smallest subnormal for <class 'numpy.float64'> type is zero.
+[autodrive_bridge_40hz-1]   setattr(self, word, getattr(machar, word).flat[0])
+[autodrive_bridge_40hz-1] /usr/local/lib/python3.10/dist-packages/numpy/core/getlimits.py:89: UserWarning: The value of the smallest subnormal for <class 'numpy.float64'> type is zero.
+[autodrive_bridge_40hz-1]   return self._float_to_str(self.smallest_subnormal)
+[gpu_amcl_cpp_node-6] [INFO] [1789473407.954724919] [gpu_amcl_cpp]: Particle cloud publishing scan-synchronized, max 1.0 Hz
+[gpu_amcl_cpp_node-6] [INFO] [1789473407.954760364] [gpu_amcl_cpp]: GPU AMCL C++ node created — waiting for map...
+[component_container-9] [INFO] [1789473407.966412762] [pure_pursuit_node]: Pure Pursuit Node initialized
+[component_container-9] [INFO] [1789473407.966447455] [pure_pursuit_node]:   Trajectory: /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv (2586 points)
+[component_container-9] [INFO] [1789473407.966455330] [pure_pursuit_node]:   Lookahead: 0.75 - 1.10 m (gain: 0.05)
+[INFO] [launch_ros.actions.load_composable_nodes]: Loaded node '/pure_pursuit_node' in container '/controller_container'
+[component_container-9] [INFO] [1789473407.966466681] [pure_pursuit_node]:   Max speed cap: 12.00 m/s
+[component_container-9] [INFO] [1789473407.966473102] [pure_pursuit_node]:   Lookahead adapt: cte_weight=1.00 cte_gain=0.042 curvature_gain=1.900
+[component_container-9] [INFO] [1789473407.966479384] [pure_pursuit_node]:   Speed adapt: curvature_factor=0.102 floor_ratio=0.52
+[component_container-9] [INFO] [1789473407.966485465] [pure_pursuit_node]:   Speed adapt (CTE): factor=1.500 floor_ratio=0.55
+[component_container-9] [INFO] [1789473407.966491857] [pure_pursuit_node]:   Speed limits: max_lat_accel=6.50 min_reg_speed=0.00
+[component_container-9] [INFO] [1789473407.966497487] [pure_pursuit_node]:   Yaw-rate damping: 0.000 s
+[component_container-9] [INFO] [1789473407.966506985] [pure_pursuit_node]:   Target-heading turn-in gain: 0.000
+[component_container-9] [INFO] [1789473407.966512475] [pure_pursuit_node]:   Command shaping: steer_rate=3.20 accel=3.00 decel=8.00
+[component_container-9] [INFO] [1789473407.966518355] [pure_pursuit_node]:   Startup speed ramp: 1.50 -> 12.00 m/s over 1.00 lap(s)
+[component_container-9] [INFO] [1789473407.966524417] [pure_pursuit_node]:   Pose: /current_map_pose (map frame)
+[component_container-9] [INFO] [1789473407.966529466] [pure_pursuit_node]:   Odom: /odom
+[component_container-9] [INFO] [1789473407.966534706] [pure_pursuit_node]:   Control trigger: /odom (one command per odometry update; nominal 40.0 Hz)
+[component_container-9] [INFO] [1789473407.966540356] [pure_pursuit_node]:   Steering feedback: /autodrive/roboracer_1/steering (lead gain 0.25)
+[component_container-9] [INFO] [1789473407.966545746] [pure_pursuit_node]:   Startup path gate: distance <= 0.80 m, heading <= 0.75 rad
+[component_container-9] [INFO] [1789473407.966551306] [pure_pursuit_node]:   Command: /cmd/speed
+[map_server-4] [INFO] [1789473407.978437903] [map_io]: Read map /workspace/src/f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.pgm: 349 X 877 map @ 0.025 m/cell
+[lifecycle_manager-5] [INFO] [1789473407.982445015] [lifecycle_manager_map]: [34m[1mActivating map_server[0m[0m
+[map_server-4] [INFO] [1789473407.982541803] [map_server]: Activating
+[map_server-4] [INFO] [1789473407.983024019] [map_server]: Creating bond (map_server) to lifecycle manager.
+[gpu_amcl_cpp_node-6] [INFO] [1789473407.983788113] [gpu_amcl_cpp]: Received first map (349x877 @ 0.025 m/cell) — initialising PF
+[ground_truth_amcl_monitor-7] [WARN] [1789473407.984382865] [ground_truth_amcl_monitor]: No map provenance supplied; AMCL error is relative-to-first-pair only
+[ground_truth_amcl_monitor-7] [WARN] [1789473407.992766107] [ground_truth_amcl_monitor]: Ground-truth monitor is diagnostics-only; simulator IPS/odom are not controller inputs
+[gpu_amcl_cpp_node-6] [INFO] [1789473407.997068110] [gpu_amcl_cpp]: Loaded 2587 global heading points from /workspace/src/f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+[model_id_timing_recorder-8] [INFO] [1789473408.000809584] [model_id_timing_recorder]: Recording causal model-ID events to /workspace/src/sdu_apex_autodrive/artifacts/model_id_work/run_live/live_odom_ekf_amcl_pp_12mps_20260915/live_odom_ekf_amcl_pp_12mps_20260915
+[actuator_interface-10] [INFO] [1789473408.010555528] [autodrive_actuator_interface]: Actuator interface ready; no arming state
+[actuator_interface-10] [WARN] [1789473408.014026856] [autodrive_actuator_interface]: Neutral output: no command
+[lifecycle_manager-5] [INFO] [1789473408.087253234] [lifecycle_manager_map]: Server map_server connected with bond.
+[lifecycle_manager-5] [INFO] [1789473408.087310680] [lifecycle_manager_map]: [34m[1mManaged nodes are active[0m[0m
+[lifecycle_manager-5] [INFO] [1789473408.087322973] [lifecycle_manager_map]: [34m[1mCreating bond timer...[0m[0m
+[autodrive_bridge_40hz-1] [autodrive_bridge_40hz] camera decode/publication disabled
+[autodrive_bridge_40hz-1] [autodrive_bridge_40hz] strict request pacing enabled at 40 Hz (2 bounded outstanding requests; missing/deadline data is a fatal fault)
+[gpu_amcl_cpp_node-6] [INFO] [1789473409.338286960] [gpu_amcl_cpp]: Global AMCL startup prior centred at saved map start (0.801, 3.158, -1.571) with covariance (0.500, 0.500, 0.200).
+[gpu_amcl_cpp_node-6] [INFO] [1789473409.338349525] [gpu_amcl_cpp]: Particle filter initialised with 2500 particles (global)
+[gpu_amcl_cpp_node-6] [INFO] [1789473409.338416307] [gpu_amcl_cpp]: Global particle initialization active; waiting for scans before publishing pose

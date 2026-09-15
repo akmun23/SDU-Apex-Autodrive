@@ -27,11 +27,10 @@ autodrive_actuator_interface:
     collision_terminal_stop: true
 
     max_steering_angle_rad: 0.5236
-    # The actuator accepts the full characterized simulator body-speed range.
-    # Pure Pursuit keeps its independent track/raceline cap in its own config.
-    # Official model envelope. This is an input validation bound, not a
-    # project-specific racing target or throttle ceiling.
-    max_target_speed_mps: 22.88
+    # Project operating ceiling. This clamps all controller requests at the
+    # actuator boundary as a final safety net; it does not alter simulator
+    # physics or the measured historical data.
+    max_target_speed_mps: 16.0
 
     # Ground-truth open-ground response fit. Keep correction modest because
     # the direct throttle response already supplies most of the demand.
@@ -133,7 +132,8 @@ autodrive_actuator_interface:
     # Monotonic response points from the completed open-ground grid. The
     # analyzer rejects moving-coast tails before producing this table; linear
     # interpolation supplies commands between the measured throttle points.
-    # 1.0 throttle reaches the simulator envelope at 22.8836 m/s.
+    # Historical feed-forward points above 16 m/s are retained for offline
+    # provenance, but the command ceiling above makes them unreachable.
     feedforward_speed_mps: [0.0, 0.7537, 1.5008, 2.4883, 3.7113, 4.9226,
                             7.3138, 9.6633, 11.9725, 15.3610, 18.6555,
                             22.8836]

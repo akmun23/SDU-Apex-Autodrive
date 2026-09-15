@@ -38,6 +38,11 @@ OdometryObserverConfig deployment_observer_config()
   config.turn_current_packet_max_increase_mps = 0.20;
   config.use_turn_speed_bias_model = true;
   config.turn_speed_bias_constant_mps = -0.03;
+  config.turn_speed_bias_speed_mps = 0.0;
+  config.turn_speed_bias_speed_squared_mps = 0.0;
+  config.turn_speed_bias_yaw_rate_abs_mps = 0.0;
+  config.turn_speed_bias_yaw_rate_squared_mps = 0.0;
+  config.turn_speed_bias_speed_yaw_rate_abs_mps = 0.0;
   config.turn_speed_bias_max_mps = 0.03;
   config.use_coherent_packet_velocity_for_pose = true;
   config.coherent_packet_pose_blend = 1.0;
@@ -56,9 +61,9 @@ OdometryObserverConfig deployment_observer_config()
   config.turn_wheel_braking_ax_mps2 = -1.0;
   config.integrate_lateral_acceleration_in_turn = false;
   config.use_kinematic_lateral_slip_model = true;
-  config.lateral_slip_ratio = 0.012;
-  config.lateral_slip_yaw_rate_scale_radps = 0.15;
-  config.lateral_slip_max_mps = 0.30;
+  config.lateral_velocity_yaw_rate_gain_m = 0.167;
+  config.lateral_velocity_speed_yaw_rate_gain_s = -0.0063;
+  config.lateral_velocity_max_mps = 0.35;
   config.max_imu_ax_abs_mps2 = 30.0;
   config.imu_x_offset_m = 0.08;
   return config;
@@ -168,18 +173,19 @@ double OdometryObserver::kinematic_lateral_velocity(
 {
   if (!config_.use_kinematic_lateral_slip_model ||
     !finite(yaw_rate_radps) || !finite(longitudinal_speed_mps) ||
-    config_.lateral_slip_ratio <= 0.0 || config_.lateral_slip_max_mps <= 0.0)
+    !finite(config_.lateral_velocity_yaw_rate_gain_m) ||
+    !finite(config_.lateral_velocity_speed_yaw_rate_gain_s) ||
+    config_.lateral_velocity_max_mps <= 0.0)
   {
     return 0.0;
   }
 
-  const double transition = std::max(
-    1.0e-3, config_.lateral_slip_yaw_rate_scale_radps);
-  const double turn_direction = std::tanh(yaw_rate_radps / transition);
   const double forward_speed = std::max(0.0, longitudinal_speed_mps);
+  const double speed_gain = config_.lateral_velocity_yaw_rate_gain_m +
+    config_.lateral_velocity_speed_yaw_rate_gain_s * forward_speed;
   return std::clamp(
-    -config_.lateral_slip_ratio * turn_direction * forward_speed,
-    -config_.lateral_slip_max_mps, config_.lateral_slip_max_mps);
+    yaw_rate_radps * speed_gain,
+    -config_.lateral_velocity_max_mps, config_.lateral_velocity_max_mps);
 }
 
 OdometryEstimate OdometryObserver::estimate(
@@ -407,6 +413,27 @@ OdometryEstimate OdometryObserver::update(
     wheel_burst_recovery_pending_ = true;
   }
 
+  // A repeated cumulative-encoder burst can make the rolling and current
+  // packet rates agree while both are far above the causal body speed. The
+  // coherence shortcut below is useful for a stale low window, but it must
+  // not promote this physically impossible positive jump when a steering
+  // transient enters turn mode. Hold the causal state and let IMU
+  // propagation catch up until a wheel packet returns inside the innovation
+  // gate.
+  const bool positive_wheel_innovation_fault =
+    config_.wheel_innovation_max_mps > 0.0 &&
+    speed_mps_ >= std::max(2.0, config_.wheel_recovery_launch_speed_mps) &&
+    wheel_mapped > speed_mps_ + config_.wheel_innovation_max_mps &&
+    wheel_packet_mapped > speed_mps_ + config_.wheel_innovation_max_mps &&
+    config_.wheel_burst_disagreement_mps > 0.0 &&
+    std::abs(wheel_packet_mapped - wheel_mapped) <=
+    0.25 * config_.wheel_burst_disagreement_mps &&
+    !wheel_burst_rejected_;
+  if (positive_wheel_innovation_fault) {
+    wheel_dropout_active_ = true;
+    wheel_burst_recovery_pending_ = true;
+  }
+
   // A coherent rolling-window/current-packet pair is not sufficient evidence
   // during launch: both rates can describe wheel spin while the body is still
   // accelerating from rest. The accepted model-identification recordings
@@ -612,6 +639,9 @@ OdometryEstimate OdometryObserver::update(
       wheel_packet >= config_.wheel_freeze_speed_mps &&
       config_.wheel_burst_disagreement_mps > 0.0 &&
       !wheel_slew_rejected &&
+      (speed_mps_ < std::max(2.0, config_.wheel_recovery_launch_speed_mps) ||
+      std::abs(turn_wheel_mapped - speed_mps_) <=
+      config_.wheel_innovation_max_mps) &&
       std::abs(turn_wheel_packet_mapped - turn_wheel_mapped) <=
       config_.wheel_burst_disagreement_mps;
     const bool wheel_ok = !wheel_burst_rejected_ && !wheel_dropout_active_ &&
@@ -756,7 +786,11 @@ OdometryEstimate OdometryObserver::update(
         std::abs(wheel_packet_mapped - wheel_mapped) <=
         config_.wheel_burst_disagreement_mps)) &&
         (std::abs(wheel_packet_mapped - speed_pred) <=
-        config_.wheel_innovation_max_mps);
+        config_.wheel_innovation_max_mps) &&
+        (!wheel_burst_recovery_pending_ ||
+        config_.turn_current_packet_max_increase_mps <= 0.0 ||
+        wheel_packet_mapped <= speed_pred +
+        config_.turn_current_packet_max_increase_mps);
       const bool wheel_ok =
         std::abs(observation.ax_mps2) < config_.wheel_update_ax_abs_max_mps2 &&
         (!wheel_dropout_active_ ?

@@ -10,10 +10,11 @@ pure_pursuit_node:
     command_frame: base_link
     trajectory_file: ""
     wheelbase: 0.324
-    # Full AutoDRIVE simulator envelope. The first lap applies the explicit
-    # startup ramp below; after that the raceline's velocity column, curvature
-    # and clearance regulation determine the requested speed.
-    max_speed: 22.88
+    # Project operating ceiling. The first lap applies the explicit startup
+    # ramp below; after that the raceline's velocity column, curvature and
+    # clearance regulation determine the requested speed up to this ceiling.
+    # This is a dev/controller limit and does not change simulator physics.
+    max_speed: 16.0
     startup_speed_mps: 1.50
     startup_ramp_laps: 1.0
     # The 0.35--0.95 m range repeatedly reversed steering at the first

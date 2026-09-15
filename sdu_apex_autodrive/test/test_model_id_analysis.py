@@ -54,7 +54,9 @@ def test_analysis_reports_finite_recursive_scores_and_horizons(tmp_path):
     assert score["invalid_rollout_count"] == 0
     assert score["recursive"]["finite_count"] == score["samples"]
     assert score["recursive"]["mae"] is not None
-    assert "2.00s" in report["validation_recursive_horizon_scores"]
+    assert "0.75s" in report["validation_recursive_horizon_scores"]
+    assert max(float(key[:-1]) for key in report[
+        "validation_recursive_horizon_scores"]) <= 0.75
     serialized = json.dumps(report, allow_nan=False)
     assert np.isfinite(report["validation_score"]["recursive"]["p95"])
     assert serialized

@@ -43,7 +43,9 @@ import numpy as np
 MAX_STEERING_RAD = 0.5236
 MIN_DT_S = 0.015
 MAX_DT_S = 0.035
-HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00)
+# Active model gate: 30 commands at 40 Hz = 0.75 s.  Historical long-horizon
+# reports are not recomputed by this tool.
+HORIZONS_S = (0.025, 0.05, 0.10, 0.25, 0.50, 0.75)
 STATE_NAMES = ("x_m", "y_m", "yaw_rad", "u_mps", "v_mps", "r_radps")
 
 # These are numerical guard rails for offline recursive scoring, not runtime

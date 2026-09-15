@@ -111,7 +111,7 @@ private:
     double localization_covariance_xy_max_{0.25};   // Maximum AMCL x/y variance [m^2]
     double localization_covariance_yaw_max_{0.12};  // Maximum AMCL yaw variance [rad^2]
     int localization_required_updates_{5};          // Consecutive qualified poses before drive
-    double max_speed_{22.88};               // [m/s] Documented simulator envelope
+    double max_speed_{16.0};                // [m/s] Project operating ceiling
     double max_steering_rate_{3.2};         // [rad/s] AutoDRIVE documented limit
     double max_accel_cmd_{3.0};             // [m/s^2] Maximum acceleration command for speed ramping
     double max_decel_cmd_{8.0};             // [m/s^2] Maximum deceleration command for speed ramping
