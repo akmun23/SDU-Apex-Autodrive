@@ -29,8 +29,10 @@ class CInput(ctypes.Structure):
 class CParameters(ctypes.Structure):
     _fields_ = [
         (name, ctypes.c_float) for name in (
-            "mass_kg", "lf_m", "lr_m", "iz_kgm2", "max_steering_rad",
-            "steering_rate_radps", "max_speed_mps", "force_max_n",
+            "mass_kg", "lf_m", "lr_m", "iz_kgm2",
+            "position_offset_from_velocity_point_x_m", "max_steering_rad",
+            "steering_rate_radps", "max_speed_mps", "linear_damping_per_s",
+            "angular_damping_per_s", "force_max_n",
             "hard_brake_force_n",
             "slip_gain_per_mps", "coast_speed_drag_n_per_mps",
             "cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n")
@@ -42,8 +44,10 @@ class CParameters(ctypes.Structure):
 def _parameters(parameters: PlantParameters) -> CParameters:
     result = CParameters()
     for name in (
-            "mass_kg", "lf_m", "lr_m", "iz_kgm2", "max_steering_rad",
-            "steering_rate_radps", "max_speed_mps", "force_max_n",
+            "mass_kg", "lf_m", "lr_m", "iz_kgm2",
+            "position_offset_from_velocity_point_x_m", "max_steering_rad",
+            "steering_rate_radps", "max_speed_mps", "linear_damping_per_s",
+            "angular_damping_per_s", "force_max_n",
             "hard_brake_force_n",
             "slip_gain_per_mps", "coast_speed_drag_n_per_mps",
             "cf_n_per_rad", "cr_n_per_rad", "df_n", "dr_n"):
@@ -101,6 +105,32 @@ def check(source_root: Path, lateral_report: Path,
             ctypes.POINTER(CState), ctypes.POINTER(CInput), ctypes.c_float,
             ctypes.POINTER(CParameters), ctypes.POINTER(CState)]
         native.vehicle_plant_step.restype = None
+        native.vehicle_plant_default_parameters.argtypes = []
+        native.vehicle_plant_default_parameters.restype = CParameters
+        native_defaults = native.vehicle_plant_default_parameters()
+        python_defaults = _parameters(PlantParameters())
+        default_field_errors = {}
+        for name in (
+                "mass_kg", "lf_m", "lr_m", "iz_kgm2",
+                "position_offset_from_velocity_point_x_m", "max_steering_rad",
+                "steering_rate_radps", "max_speed_mps",
+                "linear_damping_per_s", "angular_damping_per_s", "force_max_n",
+                "hard_brake_force_n", "slip_gain_per_mps",
+                "coast_speed_drag_n_per_mps", "cf_n_per_rad", "cr_n_per_rad",
+                "df_n", "dr_n"):
+            default_field_errors[name] = abs(
+                float(getattr(native_defaults, name)) -
+                float(getattr(python_defaults, name)))
+        default_field_errors["tire_model"] = abs(
+            int(native_defaults.tire_model) - int(python_defaults.tire_model))
+        default_field_errors["wheel_dynamics_model"] = abs(
+            int(native_defaults.wheel_dynamics_model) -
+            int(python_defaults.wheel_dynamics_model))
+        default_field_errors["wheel_coefficients"] = max(
+            abs(float(native_defaults.wheel_coefficients[index]) -
+                float(python_defaults.wheel_coefficients[index]))
+            for index in range(6))
+        default_max_error = max(default_field_errors.values())
         candidate_reports = {}
         for candidate_name in ("wheel_dynamic", "wheel_continuous"):
             candidate = longitudinal["models"].get(candidate_name)
@@ -134,16 +164,27 @@ def check(source_root: Path, lateral_report: Path,
     maximum = max(
         (candidate["max_abs_error"] for candidate in candidate_reports.values()),
         default=float("inf"))
+    default_tolerance = 2.0e-4
     report = {
         "schema_version": 1,
-        "status": "pass" if maximum <= 3.0e-5 else "fail",
+        "status": "pass" if maximum <= 3.0e-5 and default_max_error <= default_tolerance else "fail",
         "ground_truth_use": "none",
         "python_reference": "tools/model_id/structured_vehicle_plant.py",
         "native_source": "f1tenth_mpc/src/vehicle_plant.c",
         "lateral_model": lateral_model,
+        "resolved_plant_defaults": {
+            key: value for key, value in PlantParameters().__dict__.items()
+            if key != "wheel_coefficients"
+        },
         "fixture_count": len(fixtures),
         "max_abs_error": maximum,
         "tolerance": 3.0e-5,
+        "default_parameter_parity": {
+            "max_abs_error": default_max_error,
+            "tolerance": default_tolerance,
+            "field_errors": default_field_errors,
+            "status": "pass" if default_max_error <= default_tolerance else "fail",
+        },
         "candidates": candidate_reports,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import yaml
 
 
 @dataclass
@@ -37,34 +39,66 @@ def _wrap(angle: float) -> float:
 
 class ReferenceObserver:
     def __init__(self, normal_packet_dt_max_s: float = 0.035,
+                 degraded_packet_dt_max_s: float = 0.050,
+                 wheel_radius_m: float = 0.059,
+                 reset_encoder_jump_rad: float = 50.0,
+                 wheel_speed_window_s: float = 0.10,
+                 max_integratable_gap_s: float = 0.250,
                  integrate_lateral_acceleration_in_turn: bool = False,
                  wheel_speed_scale: float = 0.968,
                  wheel_burst_disagreement_mps: float = 1.0,
                  wheel_speed_slew_limit_mps2: float = 40.0,
-                 wheel_speed_scale_speeds_mps: tuple[float, ...] = (),
-                 wheel_speed_scale_values: tuple[float, ...] = (),
+                 wheel_speed_scale_speeds_mps: tuple[float, ...] = (
+                     0.0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0, 8.0,
+                     10.0, 12.0, 14.0),
+                 wheel_speed_scale_values: tuple[float, ...] = (
+                     1.0, 0.998, 0.994, 0.992, 0.990, 0.9815,
+                     0.9735, 0.9658, 0.9587, 0.9520, 0.9445),
                  allow_turn_current_packet_recovery: bool = True,
                  turn_current_packet_max_increase_mps: float = 0.20,
-                 use_turn_speed_bias_model: bool = False,
-                 turn_speed_bias_constant_mps: float = 0.0,
+                 use_turn_speed_bias_model: bool = True,
+                 turn_speed_bias_constant_mps: float = -0.03,
                  turn_speed_bias_speed_mps: float = 0.0,
                  turn_speed_bias_speed_squared_mps: float = 0.0,
                  turn_speed_bias_yaw_rate_abs_mps: float = 0.0,
                  turn_speed_bias_yaw_rate_squared_mps: float = 0.0,
                  turn_speed_bias_speed_yaw_rate_abs_mps: float = 0.0,
-                 turn_speed_bias_max_mps: float = 0.10,
-                 use_coherent_packet_velocity_for_pose: bool = False,
+                 turn_speed_bias_max_mps: float = 0.03,
+                 use_coherent_packet_velocity_for_pose: bool = True,
                  coherent_packet_pose_blend: float = 1.0,
-                 use_kinematic_lateral_slip_model: bool = False,
-                 lateral_slip_ratio: float = 0.016,
+                 use_kinematic_lateral_slip_model: bool = True,
+                 lateral_slip_ratio: float = 0.012,
                  lateral_slip_yaw_rate_scale_radps: float = 0.15,
                  lateral_slip_max_mps: float = 0.30,
                  decel_detect_ax_mps2: float = -0.5,
                  decel_ax_scale: float = 1.005,
                  decel_ax_offset_mps2: float = 0.020,
-                 imu_x_offset_m: float = 0.08) -> None:
+                 imu_x_offset_m: float = 0.08,
+                 wheel_update_ax_abs_max_mps2: float = 6.5,
+                 wheel_freeze_speed_mps: float = 0.15,
+                 wheel_innovation_max_mps: float = 1.50,
+                 wheel_recovery_launch_speed_mps: float = 2.0,
+                 wheel_recovery_launch_innovation_mps: float = 2.0,
+                 wheel_recovery_launch_wheel_speed_mps: float = 4.0,
+                 stationary_speed_threshold_mps: float = 0.03,
+                 wheel_update_beta: float = 0.85,
+                 stationary_hold_s: float = 0.10,
+                 stationary_ax_abs_max_mps2: float = 0.25,
+                 stationary_ay_abs_max_mps2: float = 0.75,
+                 stationary_yaw_rate_abs_radps: float = 0.15,
+                 turn_enter_yaw_rate_radps: float = 0.6,
+                 turn_enter_abs_ay_mps2: float = 6.0,
+                 turn_exit_yaw_rate_radps: float = 0.1,
+                 turn_exit_abs_ay_mps2: float = 0.5,
+                 turn_exit_hold_s: float = 0.5,
+                 turn_wheel_braking_ax_mps2: float = -1.0,
+                 max_imu_ax_abs_mps2: float = 30.0) -> None:
         self.normal_packet_dt_max_s = float(normal_packet_dt_max_s)
-        self.wheel_speed_window_s = 0.10
+        self.degraded_packet_dt_max_s = float(degraded_packet_dt_max_s)
+        self.wheel_radius_m = max(0.0, float(wheel_radius_m))
+        self.reset_encoder_jump_rad = max(0.0, float(reset_encoder_jump_rad))
+        self.wheel_speed_window_s = max(0.0, float(wheel_speed_window_s))
+        self.max_integratable_gap_s = max(0.0, float(max_integratable_gap_s))
         self.wheel_speed_scale = max(0.0, float(wheel_speed_scale))
         self.wheel_speed_scale_speeds_mps = tuple(
             float(value) for value in wheel_speed_scale_speeds_mps)
@@ -103,12 +137,80 @@ class ReferenceObserver:
         # Keep the offline replay numerically aligned with the deployed
         # observer.  A stale replay gate can make a valid runtime change look
         # ineffective during offline validation.
-        self.wheel_innovation_max_mps = 1.50
-        self.wheel_update_beta = 0.85
+        self.wheel_update_ax_abs_max_mps2 = max(
+            0.0, float(wheel_update_ax_abs_max_mps2))
+        self.wheel_freeze_speed_mps = max(0.0, float(wheel_freeze_speed_mps))
+        self.wheel_innovation_max_mps = max(0.0, float(wheel_innovation_max_mps))
+        self.wheel_recovery_launch_speed_mps = max(
+            0.0, float(wheel_recovery_launch_speed_mps))
+        self.wheel_recovery_launch_innovation_mps = max(
+            0.0, float(wheel_recovery_launch_innovation_mps))
+        self.wheel_recovery_launch_wheel_speed_mps = max(
+            0.0, float(wheel_recovery_launch_wheel_speed_mps))
+        self.stationary_speed_threshold_mps = max(
+            0.0, float(stationary_speed_threshold_mps))
+        self.wheel_update_beta = float(np.clip(wheel_update_beta, 0.0, 1.0))
+        self.stationary_hold_s = max(0.0, float(stationary_hold_s))
+        self.stationary_ax_abs_max_mps2 = max(0.0, float(stationary_ax_abs_max_mps2))
+        self.stationary_ay_abs_max_mps2 = max(0.0, float(stationary_ay_abs_max_mps2))
+        self.stationary_yaw_rate_abs_radps = max(
+            0.0, float(stationary_yaw_rate_abs_radps))
+        self.turn_enter_yaw_rate_radps = max(0.0, float(turn_enter_yaw_rate_radps))
+        self.turn_enter_abs_ay_mps2 = max(0.0, float(turn_enter_abs_ay_mps2))
+        self.turn_exit_yaw_rate_radps = max(0.0, float(turn_exit_yaw_rate_radps))
+        self.turn_exit_abs_ay_mps2 = max(0.0, float(turn_exit_abs_ay_mps2))
+        self.turn_exit_hold_s = max(0.0, float(turn_exit_hold_s))
+        self.turn_wheel_braking_ax_mps2 = float(turn_wheel_braking_ax_mps2)
+        self.max_imu_ax_abs_mps2 = max(0.0, float(max_imu_ax_abs_mps2))
         self.integrate_lateral_acceleration_in_turn = bool(
             integrate_lateral_acceleration_in_turn)
-        self.turn_wheel_braking_ax_mps2 = -1.0
         self.reset()
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "ReferenceObserver":
+        """Construct the offline mirror from the deployed observer YAML."""
+        config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        parameters = config.get("sensor_odometry", {}).get("ros__parameters", {})
+        required = {
+            "normal_packet_dt_max_s", "degraded_packet_dt_max_s",
+            "wheel_radius_m", "reset_encoder_jump_rad", "wheel_speed_window_s",
+            "max_integratable_gap_s", "wheel_speed_scale", "wheel_burst_disagreement_mps",
+            "wheel_speed_slew_limit_mps2", "allow_turn_current_packet_recovery",
+            "turn_current_packet_max_increase_mps", "use_turn_speed_bias_model",
+            "turn_speed_bias_constant_mps", "turn_speed_bias_speed_mps",
+            "turn_speed_bias_speed_squared_mps", "turn_speed_bias_yaw_rate_abs_mps",
+            "turn_speed_bias_yaw_rate_squared_mps", "turn_speed_bias_speed_yaw_rate_abs_mps",
+            "turn_speed_bias_max_mps", "use_coherent_packet_velocity_for_pose",
+            "coherent_packet_pose_blend", "integrate_lateral_acceleration_in_turn",
+            "use_kinematic_lateral_slip_model", "lateral_slip_ratio",
+            "lateral_slip_yaw_rate_scale_radps", "lateral_slip_max_mps",
+            "decel_detect_ax_mps2", "decel_ax_scale", "decel_ax_offset_mps2",
+            "imu_x_m", "wheel_update_ax_abs_max_mps2", "wheel_freeze_speed_mps",
+            "wheel_innovation_max_mps", "wheel_recovery_launch_speed_mps",
+            "wheel_recovery_launch_innovation_mps", "wheel_recovery_launch_wheel_speed_mps",
+            "stationary_speed_threshold_mps", "wheel_update_beta", "stationary_hold_s",
+            "stationary_ax_abs_max_mps2", "stationary_ay_abs_max_mps2",
+            "stationary_yaw_rate_abs_max_radps", "turn_enter_yaw_rate_radps",
+            "turn_enter_abs_ay_mps2", "turn_exit_yaw_rate_radps", "turn_exit_abs_ay_mps2",
+            "turn_exit_hold_s", "turn_wheel_braking_ax_mps2", "max_imu_ax_abs_mps2",
+        }
+        missing = sorted(required.difference(parameters))
+        if missing:
+            raise ValueError(f"{path} is missing observer parameters: {missing}")
+        values = dict(parameters)
+        values["wheel_speed_scale_speeds_mps"] = tuple(
+            values.get("wheel_speed_scale_speeds_mps", ()))
+        values["wheel_speed_scale_values"] = tuple(
+            values.get("wheel_speed_scale_values", ()))
+        values["stationary_yaw_rate_abs_radps"] = values.pop(
+            "stationary_yaw_rate_abs_max_radps")
+        values["imu_x_offset_m"] = values.pop("imu_x_m")
+        constructor_keys = (required - {
+            "stationary_yaw_rate_abs_max_radps", "imu_x_m"}) | {
+            "stationary_yaw_rate_abs_radps", "imu_x_offset_m",
+            "wheel_speed_scale_speeds_mps", "wheel_speed_scale_values",
+        }
+        return cls(**{key: values[key] for key in constructor_keys})
 
     def reset(self) -> None:
         self.initialized = False
@@ -230,7 +332,8 @@ class ReferenceObserver:
             return result
         dl = left - self.previous_left
         dr = right - self.previous_right
-        if abs(dl) > 50.0 or abs(dr) > 50.0:
+        if (abs(dl) > self.reset_encoder_jump_rad or
+                abs(dr) > self.reset_encoder_jump_rad):
             self.previous_stamp, self.previous_left, self.previous_right = stamp, left, right
             self.previous_yaw, self.previous_yaw_rate = yaw, yaw_rate
             self.turn = False
@@ -248,7 +351,7 @@ class ReferenceObserver:
         # Match the deployed observer: a short source gap still has valid
         # synchronized encoder endpoints and is integrated. Only a gap longer
         # than the configured integratable horizon is re-baselined.
-        if dt > 0.250:
+        if dt > self.max_integratable_gap_s:
             self.previous_stamp, self.previous_left, self.previous_right = stamp, left, right
             self.previous_yaw, self.previous_yaw_rate = yaw, yaw_rate
             self.last_pred = self.speed
@@ -274,14 +377,15 @@ class ReferenceObserver:
             wheel_stamp, wheel_left, wheel_right = (
                 self.previous_stamp, self.previous_left, self.previous_right)
         wheel_dt = stamp - wheel_stamp
-        raw = (abs(0.059 * 0.5 * ((left - wheel_left) + (right - wheel_right)) /
+        raw = (abs(self.wheel_radius_m * 0.5 * ((left - wheel_left) + (right - wheel_right)) /
                    wheel_dt) if wheel_dt > 0.0 else 0.0)
-        packet = abs(0.059 * 0.5 * (dl + dr) / dt)
+        packet = abs(self.wheel_radius_m * 0.5 * (dl + dr) / dt)
         mapped = self.map_wheel(raw)
         packet_mapped = packet * self.wheel_scale_for_speed(packet)
         wheel_slew_rejected = (
             self.wheel_speed_slew_limit_mps2 > 0.0 and
-            self.speed > 2.0 and self.last_mapped > 0.0 and
+            self.speed > max(2.0, self.wheel_recovery_launch_speed_mps) and
+            self.last_mapped > 0.0 and
             abs(mapped - self.last_mapped) / dt > self.wheel_speed_slew_limit_mps2 and
             abs(mapped - self.speed) > self.wheel_innovation_max_mps)
         self.last_raw, self.last_mapped, self.last_packet = raw, mapped, packet
@@ -293,12 +397,12 @@ class ReferenceObserver:
         near_zero_packet_limit = max(0.5, 0.25 * self.speed)
         if self.speed > 0.5 and packet_mapped < near_zero_packet_limit:
             self.wheel_dropout_active = True
-        if packet < 0.15 and self.speed > 0.5:
+        if packet < self.wheel_freeze_speed_mps and self.speed > 0.5:
             self.wheel_dropout_active = True
         if self.wheel_burst_rejected:
             self.wheel_dropout_active = True
             self.wheel_burst_recovery_pending = True
-        if abs(ax) > 30.0:
+        if abs(ax) > self.max_imu_ax_abs_mps2:
             self.previous_stamp, self.previous_left, self.previous_right = stamp, left, right
             self.previous_yaw, self.previous_yaw_rate = yaw, yaw_rate
             self.last_pred = self.speed
@@ -307,11 +411,13 @@ class ReferenceObserver:
             result.sensor_outlier = True
             return result
         calm_stationary_sample = (
-            raw < 0.03 and abs(ax) <= 0.25 and abs(ay) <= 0.75 and
-            abs(yaw_rate) <= 0.15)
+            raw < self.stationary_speed_threshold_mps and
+            abs(ax) <= self.stationary_ax_abs_max_mps2 and
+            abs(ay) <= self.stationary_ay_abs_max_mps2 and
+            abs(yaw_rate) <= self.stationary_yaw_rate_abs_radps)
         self.stationary_time = (
             self.stationary_time + dt if calm_stationary_sample else 0.0)
-        if self.stationary_time >= 0.10:
+        if self.stationary_time >= self.stationary_hold_s:
             self.speed = self.u = self.v = 0.0
             self.turn = False
             self.calm = 0.0
@@ -336,13 +442,16 @@ class ReferenceObserver:
         ax_origin = ax + yaw_rate * yaw_rate * self.imu_x_offset_m
         ay_origin = ay - yaw_alpha * self.imu_x_offset_m
         def launch_wheel_spin(predicted: float) -> bool:
-            return (predicted < 2.0 and packet_mapped > 4.0 and
-                    packet_mapped > predicted + 2.0)
-        if not self.turn and (abs(yaw_rate) >= 0.6 or abs(ay) >= 6.0):
+            return (predicted < self.wheel_recovery_launch_speed_mps and
+                    packet_mapped > self.wheel_recovery_launch_wheel_speed_mps and
+                    packet_mapped > predicted + self.wheel_recovery_launch_innovation_mps)
+        if not self.turn and (abs(yaw_rate) >= self.turn_enter_yaw_rate_radps or
+                              abs(ay) >= self.turn_enter_abs_ay_mps2):
             turn_bias = self.turn_speed_bias(mapped, yaw_rate)
             self.turn = True
             self.calm = 0.0
-            if (not self.wheel_dropout_active and packet >= 0.15 and
+            if (not self.wheel_dropout_active and
+                    packet >= self.wheel_freeze_speed_mps and
                     np.isfinite(mapped)):
                 self.u = self.speed = max(0.0, mapped + turn_bias)
             else:
@@ -356,16 +465,18 @@ class ReferenceObserver:
             self.integrate_lateral_acceleration_in_turn or
             self.wheel_dropout_active)
         def wheel_speed_is_valid(predicted: float) -> bool:
-            if (dt > self.normal_packet_dt_max_s and dt > 0.250) or not np.isfinite(mapped):
+            if (dt > self.normal_packet_dt_max_s and
+                    dt > self.max_integratable_gap_s) or not np.isfinite(mapped):
                 return False
-            if raw < 0.15 and predicted > 0.5:
+            if raw < self.wheel_freeze_speed_mps and predicted > 0.5:
                 return False
             if launch_wheel_spin(predicted):
                 return False
             if wheel_slew_rejected:
                 return False
             return (abs(mapped - predicted) <= self.wheel_innovation_max_mps or
-                    (predicted < 0.15 and mapped >= 0.03))
+                    (predicted < self.wheel_freeze_speed_mps and
+                     mapped >= self.stationary_speed_threshold_mps))
 
         if self.turn:
             turn_bias = self.turn_speed_bias(mapped, yaw_rate)
@@ -373,7 +484,8 @@ class ReferenceObserver:
             turn_packet_mapped = max(
                 0.0, packet_mapped + self.turn_speed_bias(packet_mapped, yaw_rate))
             self.last_turn_speed_bias = turn_bias
-            normal_wheel_recovery = (self.wheel_dropout_active and packet >= 0.15 and
+            normal_wheel_recovery = (self.wheel_dropout_active and
+                              packet >= self.wheel_freeze_speed_mps and
                               not self.wheel_burst_rejected and
                               not launch_wheel_spin(self.speed) and
                               (not self.wheel_burst_recovery_pending or
@@ -388,12 +500,14 @@ class ReferenceObserver:
                 self.allow_turn_current_packet_recovery and
                 self.wheel_dropout_active and self.wheel_burst_recovery_pending and
                 not self.wheel_burst_rejected and not launch_wheel_spin(self.speed) and
-                packet >= 0.15 and turn_packet_mapped >= self.speed and
+                packet >= self.wheel_freeze_speed_mps and
+                turn_packet_mapped >= self.speed and
                 turn_packet_mapped <= self.speed + self.turn_current_packet_max_increase_mps and
                 self.wheel_burst_disagreement_mps > 0.0 and
                 turn_packet_mapped > turn_mapped + self.wheel_burst_disagreement_mps)
             wheel_recovery = normal_wheel_recovery or turn_current_packet_recovery
-            wheel_coherent = (not self.wheel_burst_rejected and packet >= 0.15 and
+            wheel_coherent = (not self.wheel_burst_rejected and
+                              packet >= self.wheel_freeze_speed_mps and
                               not launch_wheel_spin(self.speed) and
                               self.wheel_burst_disagreement_mps > 0.0 and
                               not wheel_slew_rejected and
@@ -423,7 +537,8 @@ class ReferenceObserver:
                 braking_ax += yaw_rate * yaw_rate * self.imu_x_offset_m
                 if braking_ax < 0.0:
                     self.u = max(0.0, self.u + braking_ax * dt)
-            elif (not integrate_lateral_dynamics and raw < 0.15 and
+            elif (not integrate_lateral_dynamics and
+                  raw < self.wheel_freeze_speed_mps and
                   ax <= self.turn_wheel_braking_ax_mps2):
                 braking_ax = ax
                 if ax < self.decel_detect_ax_mps2:
@@ -461,7 +576,8 @@ class ReferenceObserver:
                 self.v = self.kinematic_lateral_velocity(yaw_rate, self.u)
             coherent_current_packet = (
                 wheel_used and not self.wheel_burst_rejected and
-                packet >= 0.15 and self.wheel_burst_disagreement_mps > 0.0 and
+                packet >= self.wheel_freeze_speed_mps and
+                self.wheel_burst_disagreement_mps > 0.0 and
                 abs(packet_mapped - mapped) <= self.wheel_burst_disagreement_mps)
             if (self.use_coherent_packet_velocity_for_pose and
                     coherent_current_packet and np.isfinite(packet_mapped)):
@@ -472,9 +588,10 @@ class ReferenceObserver:
                 pose_u, pose_v = self.u, self.v
             self.speed = math.hypot(self.u, self.v)
             pred = self.speed
-            calm = abs(yaw_rate) < 0.1 and abs(ay) < 0.5
+            calm = (abs(yaw_rate) < self.turn_exit_yaw_rate_radps and
+                    abs(ay) < self.turn_exit_abs_ay_mps2)
             self.calm = self.calm + dt if calm else 0.0
-            if self.calm >= 0.5:
+            if self.calm >= self.turn_exit_hold_s:
                 self.speed = math.hypot(self.u, self.v)
                 self.u, self.v = self.speed, 0.0
                 self.turn = False
@@ -488,8 +605,9 @@ class ReferenceObserver:
             self.speed = pred
             # Keep short degraded gaps usable: synchronized encoder endpoints
             # still describe displacement inside the integratable horizon.
-            if dt <= 0.250:
-                wheel_recovery = (self.wheel_dropout_active and packet >= 0.15 and
+            if dt <= self.max_integratable_gap_s:
+                wheel_recovery = (self.wheel_dropout_active and
+                                  packet >= self.wheel_freeze_speed_mps and
                                   not self.wheel_burst_rejected and
                                   not launch_wheel_spin(pred) and
                                   (not self.wheel_burst_recovery_pending or
@@ -498,10 +616,11 @@ class ReferenceObserver:
                                     self.wheel_burst_disagreement_mps)) and
                                   (abs(packet_mapped - pred) <=
                                    self.wheel_innovation_max_mps))
-                wheel_ok = abs(ax) < 6.5 and (
+                wheel_ok = abs(ax) < self.wheel_update_ax_abs_max_mps2 and (
                     (wheel_recovery if self.wheel_dropout_active else
                      (wheel_speed_is_valid(pred) or
-                      (not self.wheel_burst_rejected and packet >= 0.15 and
+                     (not self.wheel_burst_rejected and
+                      packet >= self.wheel_freeze_speed_mps and
                        not launch_wheel_spin(pred) and
                        not wheel_slew_rejected and
                        self.wheel_burst_disagreement_mps > 0.0 and
@@ -515,7 +634,7 @@ class ReferenceObserver:
                         self.encoder_history.clear()
                         self.encoder_history.append((stamp, left, right))
                     else:
-                        self.speed = mapped if pred < 0.15 else (
+                        self.speed = mapped if pred < self.wheel_freeze_speed_mps else (
                             (1.0 - self.wheel_update_beta) * pred
                             + self.wheel_update_beta * mapped)
                     wheel_used = True

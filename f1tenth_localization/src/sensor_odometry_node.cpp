@@ -63,6 +63,7 @@ public:
     static_tf_broadcaster_(
       std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this))
   {
+    const auto observer_defaults = default_observer_config();
     declare_parameter("left_encoder_topic", "/autodrive/roboracer_1/left_encoder");
     declare_parameter("right_encoder_topic", "/autodrive/roboracer_1/right_encoder");
     declare_parameter("imu_topic", "/autodrive/roboracer_1/imu");
@@ -78,7 +79,7 @@ public:
     declare_parameter("lidar_x_m", 0.2733);
     declare_parameter("lidar_y_m", 0.0);
     declare_parameter("lidar_z_m", 0.096);
-    declare_parameter("imu_x_m", 0.08);
+    declare_parameter("imu_x_m", observer_defaults.imu_x_offset_m);
     declare_parameter("imu_y_m", 0.0);
     declare_parameter("imu_z_m", 0.055);
     declare_parameter("imu_orientation_correction_gain", 1.0);
@@ -93,56 +94,93 @@ public:
     declare_parameter("twist_linear_variance", 0.04);
     declare_parameter("twist_yaw_variance", 0.04);
 
-    declare_parameter("wheel_radius_m", 0.059);
-    declare_parameter("wheel_speed_scale", 0.968);
-    declare_parameter<std::vector<double>>("wheel_speed_scale_speeds_mps", std::vector<double>{});
-    declare_parameter<std::vector<double>>("wheel_speed_scale_values", std::vector<double>{});
-    declare_parameter("reset_encoder_jump_rad", 50.0);
-    declare_parameter("wheel_speed_window_s", 0.10);
-    declare_parameter("normal_packet_dt_max_s", 0.035);
-    declare_parameter("degraded_packet_dt_max_s", 0.050);
-    declare_parameter("max_integratable_gap_s", 0.250);
-    declare_parameter("decel_detect_ax_mps2", -0.5);
-    declare_parameter("decel_ax_scale", 1.005);
-    declare_parameter("decel_ax_offset_mps2", 0.020);
-    declare_parameter("wheel_update_ax_abs_max_mps2", 6.5);
-    declare_parameter("wheel_freeze_speed_mps", 0.15);
-    declare_parameter("wheel_innovation_max_mps", 1.50);
-    declare_parameter("wheel_recovery_launch_speed_mps", 2.0);
-    declare_parameter("wheel_recovery_launch_innovation_mps", 2.0);
-    declare_parameter("wheel_recovery_launch_wheel_speed_mps", 4.0);
-    declare_parameter("stationary_speed_threshold_mps", 0.03);
-    declare_parameter("wheel_burst_disagreement_mps", 1.0);
-    declare_parameter("allow_turn_current_packet_recovery", true);
-    declare_parameter("turn_current_packet_max_increase_mps", 0.20);
-    declare_parameter("use_turn_speed_bias_model", false);
-    declare_parameter("turn_speed_bias_constant_mps", 0.0);
-    declare_parameter("turn_speed_bias_speed_mps", 0.0);
-    declare_parameter("turn_speed_bias_speed_squared_mps", 0.0);
-    declare_parameter("turn_speed_bias_yaw_rate_abs_mps", 0.0);
-    declare_parameter("turn_speed_bias_yaw_rate_squared_mps", 0.0);
-    declare_parameter("turn_speed_bias_speed_yaw_rate_abs_mps", 0.0);
-    declare_parameter("turn_speed_bias_max_mps", 0.10);
-    declare_parameter("use_coherent_packet_velocity_for_pose", false);
-    declare_parameter("coherent_packet_pose_blend", 1.0);
-    declare_parameter("wheel_speed_slew_limit_mps2", 40.0);
-    declare_parameter("wheel_update_beta", 0.85);
-    declare_parameter("stationary_hold_s", 0.10);
-    declare_parameter("stationary_ax_abs_max_mps2", 0.25);
-    declare_parameter("stationary_ay_abs_max_mps2", 0.75);
-    declare_parameter("stationary_yaw_rate_abs_max_radps", 0.15);
-    declare_parameter("turn_enter_yaw_rate_radps", 0.6);
-    declare_parameter("turn_enter_abs_ay_mps2", 6.0);
-    declare_parameter("turn_exit_yaw_rate_radps", 0.1);
-    declare_parameter("turn_exit_abs_ay_mps2", 0.5);
-    declare_parameter("turn_exit_hold_s", 0.5);
-    declare_parameter("turn_wheel_braking_ax_mps2", -1.0);
-    declare_parameter("integrate_lateral_acceleration_in_turn", false);
-    declare_parameter("use_kinematic_lateral_slip_model", false);
-    declare_parameter("lateral_slip_ratio", 0.016);
-    declare_parameter("lateral_slip_yaw_rate_scale_radps", 0.15);
-    declare_parameter("lateral_slip_max_mps", 0.30);
-    declare_parameter("max_imu_ax_abs_mps2", 30.0);
+    declare_parameter("wheel_radius_m", observer_defaults.wheel_radius_m);
+    declare_parameter("wheel_speed_scale", observer_defaults.wheel_speed_scale);
+    declare_parameter<std::vector<double>>(
+      "wheel_speed_scale_speeds_mps", observer_defaults.wheel_speed_scale_speeds_mps);
+    declare_parameter<std::vector<double>>(
+      "wheel_speed_scale_values", observer_defaults.wheel_speed_scale_values);
+    declare_parameter("reset_encoder_jump_rad", observer_defaults.reset_encoder_jump_rad);
+    declare_parameter("wheel_speed_window_s", observer_defaults.wheel_speed_window_s);
+    declare_parameter("normal_packet_dt_max_s", observer_defaults.normal_packet_dt_max_s);
+    declare_parameter("degraded_packet_dt_max_s", observer_defaults.degraded_packet_dt_max_s);
+    declare_parameter("max_integratable_gap_s", observer_defaults.max_integratable_gap_s);
+    declare_parameter("decel_detect_ax_mps2", observer_defaults.decel_detect_ax_mps2);
+    declare_parameter("decel_ax_scale", observer_defaults.decel_ax_scale);
+    declare_parameter("decel_ax_offset_mps2", observer_defaults.decel_ax_offset_mps2);
+    declare_parameter(
+      "wheel_update_ax_abs_max_mps2", observer_defaults.wheel_update_ax_abs_max_mps2);
+    declare_parameter("wheel_freeze_speed_mps", observer_defaults.wheel_freeze_speed_mps);
+    declare_parameter("wheel_innovation_max_mps", observer_defaults.wheel_innovation_max_mps);
+    declare_parameter(
+      "wheel_recovery_launch_speed_mps", observer_defaults.wheel_recovery_launch_speed_mps);
+    declare_parameter(
+      "wheel_recovery_launch_innovation_mps",
+      observer_defaults.wheel_recovery_launch_innovation_mps);
+    declare_parameter(
+      "wheel_recovery_launch_wheel_speed_mps",
+      observer_defaults.wheel_recovery_launch_wheel_speed_mps);
+    declare_parameter(
+      "stationary_speed_threshold_mps", observer_defaults.stationary_speed_threshold_mps);
+    declare_parameter(
+      "wheel_burst_disagreement_mps", observer_defaults.wheel_burst_disagreement_mps);
+    declare_parameter(
+      "allow_turn_current_packet_recovery", observer_defaults.allow_turn_current_packet_recovery);
+    declare_parameter(
+      "turn_current_packet_max_increase_mps",
+      observer_defaults.turn_current_packet_max_increase_mps);
+    declare_parameter(
+      "use_turn_speed_bias_model", observer_defaults.use_turn_speed_bias_model);
+    declare_parameter(
+      "turn_speed_bias_constant_mps", observer_defaults.turn_speed_bias_constant_mps);
+    declare_parameter("turn_speed_bias_speed_mps", observer_defaults.turn_speed_bias_speed_mps);
+    declare_parameter(
+      "turn_speed_bias_speed_squared_mps", observer_defaults.turn_speed_bias_speed_squared_mps);
+    declare_parameter(
+      "turn_speed_bias_yaw_rate_abs_mps",
+      observer_defaults.turn_speed_bias_yaw_rate_abs_mps);
+    declare_parameter(
+      "turn_speed_bias_yaw_rate_squared_mps",
+      observer_defaults.turn_speed_bias_yaw_rate_squared_mps);
+    declare_parameter(
+      "turn_speed_bias_speed_yaw_rate_abs_mps",
+      observer_defaults.turn_speed_bias_speed_yaw_rate_abs_mps);
+    declare_parameter("turn_speed_bias_max_mps", observer_defaults.turn_speed_bias_max_mps);
+    declare_parameter(
+      "use_coherent_packet_velocity_for_pose",
+      observer_defaults.use_coherent_packet_velocity_for_pose);
+    declare_parameter(
+      "coherent_packet_pose_blend", observer_defaults.coherent_packet_pose_blend);
+    declare_parameter(
+      "wheel_speed_slew_limit_mps2", observer_defaults.wheel_speed_slew_limit_mps2);
+    declare_parameter("wheel_update_beta", observer_defaults.wheel_update_beta);
+    declare_parameter("stationary_hold_s", observer_defaults.stationary_hold_s);
+    declare_parameter(
+      "stationary_ax_abs_max_mps2", observer_defaults.stationary_ax_abs_max_mps2);
+    declare_parameter(
+      "stationary_ay_abs_max_mps2", observer_defaults.stationary_ay_abs_max_mps2);
+    declare_parameter(
+      "stationary_yaw_rate_abs_max_radps",
+      observer_defaults.stationary_yaw_rate_abs_max_radps);
+    declare_parameter(
+      "turn_enter_yaw_rate_radps", observer_defaults.turn_enter_yaw_rate_radps);
+    declare_parameter("turn_enter_abs_ay_mps2", observer_defaults.turn_enter_abs_ay_mps2);
+    declare_parameter("turn_exit_yaw_rate_radps", observer_defaults.turn_exit_yaw_rate_radps);
+    declare_parameter("turn_exit_abs_ay_mps2", observer_defaults.turn_exit_abs_ay_mps2);
+    declare_parameter("turn_exit_hold_s", observer_defaults.turn_exit_hold_s);
+    declare_parameter(
+      "turn_wheel_braking_ax_mps2", observer_defaults.turn_wheel_braking_ax_mps2);
+    declare_parameter(
+      "integrate_lateral_acceleration_in_turn",
+      observer_defaults.integrate_lateral_acceleration_in_turn);
+    declare_parameter(
+      "use_kinematic_lateral_slip_model", observer_defaults.use_kinematic_lateral_slip_model);
+    declare_parameter("lateral_slip_ratio", observer_defaults.lateral_slip_ratio);
+    declare_parameter(
+      "lateral_slip_yaw_rate_scale_radps",
+      observer_defaults.lateral_slip_yaw_rate_scale_radps);
+    declare_parameter("lateral_slip_max_mps", observer_defaults.lateral_slip_max_mps);
+    declare_parameter("max_imu_ax_abs_mps2", observer_defaults.max_imu_ax_abs_mps2);
 
     observer_config_ = load_observer_config();
     observer_ = f1tenth_localization::OdometryObserver(observer_config_);
@@ -217,45 +255,7 @@ public:
 private:
   static f1tenth_localization::OdometryObserverConfig default_observer_config()
   {
-    f1tenth_localization::OdometryObserverConfig config;
-    config.wheel_radius_m = 0.059;
-    config.wheel_speed_scale = 0.968;
-    config.reset_encoder_jump_rad = 50.0;
-    config.wheel_speed_window_s = 0.10;
-    config.normal_packet_dt_max_s = 0.035;
-    config.degraded_packet_dt_max_s = 0.050;
-    config.decel_detect_ax_mps2 = -0.5;
-    config.decel_ax_scale = 1.005;
-    config.decel_ax_offset_mps2 = 0.020;
-    config.wheel_update_ax_abs_max_mps2 = 6.5;
-    config.wheel_freeze_speed_mps = 0.15;
-    config.wheel_innovation_max_mps = 1.50;
-    config.wheel_recovery_launch_speed_mps = 2.0;
-    config.wheel_recovery_launch_innovation_mps = 2.0;
-    config.wheel_recovery_launch_wheel_speed_mps = 4.0;
-    config.wheel_burst_disagreement_mps = 1.0;
-    config.turn_current_packet_max_increase_mps = 0.20;
-    config.use_turn_speed_bias_model = false;
-    config.turn_speed_bias_max_mps = 0.10;
-    config.use_coherent_packet_velocity_for_pose = false;
-    config.coherent_packet_pose_blend = 1.0;
-    config.wheel_speed_slew_limit_mps2 = 40.0;
-    config.stationary_speed_threshold_mps = 0.03;
-    config.wheel_update_beta = 0.85;
-    config.stationary_hold_s = 0.10;
-    config.stationary_ax_abs_max_mps2 = 0.25;
-    config.stationary_ay_abs_max_mps2 = 0.75;
-    config.stationary_yaw_rate_abs_max_radps = 0.15;
-    config.turn_enter_yaw_rate_radps = 0.6;
-    config.turn_enter_abs_ay_mps2 = 6.0;
-    config.turn_exit_yaw_rate_radps = 0.1;
-    config.turn_exit_abs_ay_mps2 = 0.5;
-    config.turn_exit_hold_s = 0.5;
-    config.turn_wheel_braking_ax_mps2 = -1.0;
-    config.imu_x_offset_m = 0.08;
-    config.integrate_lateral_acceleration_in_turn = false;
-    config.max_imu_ax_abs_mps2 = 30.0;
-    return config;
+    return f1tenth_localization::deployment_observer_config();
   }
 
   f1tenth_localization::OdometryObserverConfig load_observer_config() const

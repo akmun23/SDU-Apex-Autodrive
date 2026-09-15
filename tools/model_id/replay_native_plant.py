@@ -110,7 +110,12 @@ def _score(runs: dict[str, list[dict[str, float]]], function: Any,
 def replay(source_root: Path, accepted_root: Path, run_names: list[str],
            lateral_report: Path, longitudinal_report: Path,
            output: Path, longitudinal_model: str = "wheel_dynamic",
-           lateral_model: str = "Y1_linear_saturated") -> dict[str, object]:
+           lateral_model: str = "Y1_linear_saturated",
+           damping_profile: str = "unity_measured",
+           position_offset_from_velocity_point_x_m: float | None = None,
+           coast_speed_drag_n_per_mps: float | None = None,
+           linear_damping_per_s: float | None = None,
+           angular_damping_per_s: float | None = None) -> dict[str, object]:
     lateral = json.loads(lateral_report.read_text(encoding="utf-8"))
     longitudinal = json.loads(longitudinal_report.read_text(encoding="utf-8"))
     lateral_candidates = lateral.get("candidate_comparison", {})
@@ -127,6 +132,35 @@ def replay(source_root: Path, accepted_root: Path, run_names: list[str],
         "parameters"]
     plant_parameters = PlantParameters.from_longitudinal_parameters(
         longitudinal_parameters).with_lateral(lateral_parameters)
+    overrides: dict[str, float] = {}
+    if damping_profile == "unity_measured":
+        overrides.update({
+            "coast_speed_drag_n_per_mps": 0.0,
+            "linear_damping_per_s": 0.273,
+            "angular_damping_per_s": 0.1,
+        })
+    elif damping_profile == "fitted":
+        overrides.update({
+            "linear_damping_per_s": 0.0,
+            "angular_damping_per_s": 0.0,
+        })
+    else:
+        raise ValueError(
+            f"unsupported damping profile {damping_profile!r}; "
+            "expected unity_measured or fitted")
+    if position_offset_from_velocity_point_x_m is not None:
+        overrides["position_offset_from_velocity_point_x_m"] = float(
+            position_offset_from_velocity_point_x_m)
+    if coast_speed_drag_n_per_mps is not None:
+        overrides["coast_speed_drag_n_per_mps"] = float(
+            coast_speed_drag_n_per_mps)
+    if linear_damping_per_s is not None:
+        overrides["linear_damping_per_s"] = float(linear_damping_per_s)
+    if angular_damping_per_s is not None:
+        overrides["angular_damping_per_s"] = float(angular_damping_per_s)
+    if overrides:
+        plant_parameters = PlantParameters(
+            **{**plant_parameters.__dict__, **overrides})
     runs = _read_runs(accepted_root, run_names)
     with tempfile.TemporaryDirectory(prefix="vehicle_plant_replay_") as temp:
         library_path = Path(temp) / "libvehicle_plant.so"
@@ -149,6 +183,13 @@ def replay(source_root: Path, accepted_root: Path, run_names: list[str],
             "source_longitudinal_report": str(longitudinal_report),
             "candidate": lateral_model,
             "longitudinal_model": longitudinal_model,
+            "damping_profile": damping_profile,
+            "resolved": {
+                key: value for key, value in plant_parameters.__dict__.items()
+                if key != "wheel_coefficients"
+            },
+            "wheel_coefficients": list(plant_parameters.wheel_coefficients),
+            "damping_overrides": overrides,
         },
         "native_source": "f1tenth_mpc/src/vehicle_plant.c",
         "recursive_scores": scores,
@@ -177,13 +218,32 @@ def main() -> None:
     parser.add_argument(
         "--lateral-model", default="Y1_linear_saturated",
         help="candidate key from the lateral benchmark (default: Y1_linear_saturated)")
+    parser.add_argument(
+        "--damping-profile", choices=("unity_measured", "fitted"),
+        default="unity_measured",
+        help="resolved offline damping profile (default: unity_measured)")
+    parser.add_argument(
+        "--position-offset-from-velocity-point-x-m", type=float, default=None,
+        help="offline A/B override for the recorded pose-point lever arm [m]")
+    parser.add_argument(
+        "--coast-speed-drag-n-per-mps", type=float, default=None,
+        help="offline A/B override for the fitted longitudinal drag force term")
+    parser.add_argument(
+        "--linear-damping-per-s", type=float, default=None,
+        help="offline A/B override for explicit body linear damping [1/s]")
+    parser.add_argument(
+        "--angular-damping-per-s", type=float, default=None,
+        help="offline A/B override for explicit yaw damping [1/s]")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = replay(
         args.source_root, args.accepted_root,
         [value.strip() for value in args.run_names.split(",") if value.strip()],
         args.lateral_report, args.longitudinal_report, args.output,
-        args.longitudinal_model, args.lateral_model)
+        args.longitudinal_model, args.lateral_model, args.damping_profile,
+        args.position_offset_from_velocity_point_x_m,
+        args.coast_speed_drag_n_per_mps,
+        args.linear_damping_per_s, args.angular_damping_per_s)
     print(json.dumps({
         "output": str(args.output),
         "status": report["status"],

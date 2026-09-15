@@ -20,8 +20,8 @@ from sdu_apex_autodrive.odometry_analysis.reference_observer import (
 )
 
 
-def replay_python(packets: pd.DataFrame) -> pd.DataFrame:
-    observer = ReferenceObserver()
+def replay_python(packets: pd.DataFrame, params: Path) -> pd.DataFrame:
+    observer = ReferenceObserver.from_yaml(params)
     rows = []
     for _, packet in packets.iterrows():
         estimate = observer.update(packet)
@@ -61,12 +61,18 @@ def score(predictions: pd.DataFrame, packets: pd.DataFrame) -> dict[str, float |
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("csv", type=Path)
+    parser.add_argument(
+        "--params", type=Path,
+        default=Path(__file__).resolve().parents[3] /
+        "f1tenth_localization/config/sensor_odometry.yaml",
+        help="deployed sensor-odometry YAML used by the C++ node")
     parser.add_argument("--cpp-replay", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     packets = reconstruct_packets(args.csv)
-    python_result = replay_python(packets)
-    report = {"csv": str(args.csv), "coherence": packets.attrs["coherence"]}
+    python_result = replay_python(packets, args.params)
+    report = {"csv": str(args.csv), "params": str(args.params),
+              "coherence": packets.attrs["coherence"]}
     report["metrics"] = score(python_result, packets)
 
     if args.cpp_replay:

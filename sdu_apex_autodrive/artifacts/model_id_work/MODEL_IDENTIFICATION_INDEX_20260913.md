@@ -787,7 +787,8 @@ wheel model. Both models use the measured source `dt`; neither consumes
 future ground truth during recursive rollout. The same choice is represented
 in the Python reference plant and native `vehicle_plant.c`, including the
 offline hybrid zero-throttle hard-brake force fit. The open/track fit estimated
-`18.718 N` hard-brake force from `13` qualifying transitions. Native/Python
+`18.9627 N` hard-brake force from the current v6 fit (`82` qualifying
+transitions). Native/Python
 parity remains clean: the v6 fixture report is below `8.3e-7` maximum absolute
 error, and the fixed-inertia lateral replay parity report is below `1.7e-6`
 against a `3.0e-5` tolerance.
@@ -843,3 +844,73 @@ the parity evidence is
 offline-only and does not modify simulator physics, runtime odometry, MPC
 weights, or the simulator data path. Focused Humble tests pass `44` tests
 with `3` non-fatal dependency warnings.
+
+## 2026-09-15 residual-driven plant consistency implementation
+
+The structured offline plant and its native C mirror now use the same current
+offline candidate defaults: corrected Unity body-Y inertia
+`0.0961908 kg m^2`, mass `3.47 kg`, measured contact geometry, continuous
+wheel dynamics, tanh lateral forces, the v6 wheel/brake fit, and the fixed-
+inertia damped Y2 lateral fit. The recorded pose point is propagated with the
+measured `-0.155320086 m` rear-position/COM-velocity lever arm. The lever arm
+changes pose propagation only; it does not change body `u`, `v`, or `r`.
+
+Unity Rigidbody drag and angular drag are represented explicitly in the
+offline plant as `0.273 /s` and `0.1 /s`, with the fitted longitudinal drag
+force term set to zero in the measured-damping profile so it is not counted
+twice. A legacy fitted-drag profile remains selectable for A/B comparison.
+This is offline model code only: production MPC, runtime odometry, simulator
+physics, scene geometry, and simulator data inputs are unchanged.
+
+On the available clean runs 92 and 103, the lever-arm A/B reduced aggregate
+0.50 s position p95 from `0.1887 m` to `0.0558 m` without changing body-state
+errors. The measured-damping profile then reduced aggregate 0.50 s position
+p95 to `0.0533 m`, yaw-rate p95 to `0.1611 rad/s`, and longitudinal-speed
+bias to `0.0196 m/s`; both individual runs improved or held their primary
+metrics. Adding measured linear drag on top of the fitted drag was rejected
+because it over-damped speed.
+
+Native/Python parity now also checks the default parameter structure, not only
+fixture propagation. The damped fixed-inertia parity report passes with a
+maximum propagation difference of `8.1e-7` and default-parameter difference
+of `7.5e-9`, against tolerances of `3e-5` and `2e-4`.
+
+The residual attribution tool is
+`tools/model_id/analyze_native_plant_residuals.py`. Its 92/103 report is
+`model_fits_v2/native_residual_analysis_damped_92_103_20260915.json` with the
+transition table in
+`model_fits_v2/native_residuals_damped_92_103_20260915.csv`. Leave-one-run-out
+regression identifies `v`/`r` as the strongest held-out yaw residual terms and
+rear slip as the strongest lateral-acceleration residual term. No residual
+regression term has been inserted into the plant; the next change must first
+be tested as a physical mechanism on independent runs.
+
+The odometry reference replay was also corrected to load the deployed
+`f1tenth_localization/config/sensor_odometry.yaml` instead of silently using
+its separate constructor defaults. The standalone C++ replay now uses the
+same deployment profile, including the speed table, coherent pose packet,
+bounded turn correction, and bounded sideslip. On the available 980-packet
+source replay from run 20, Python/C++ outputs matched to below `4e-15` in
+position and velocity, with zero flag mismatches. This changes offline replay
+consistency only; the sensor node still receives its active values from the
+same YAML file.
+
+The node's parameter-declaration fallbacks and the direct Python
+`ReferenceObserver()` defaults are now sourced from the same deployment
+profile as the active YAML values. This removes the remaining stale fallback
+copies (including the old disabled coherent-pose and sideslip settings). The
+Humble build and native tests pass after this change; the complete Python
+suite passes `130` tests.
+
+The residual diagnostic was then expanded from the two clean replay runs to
+`33` dynamic accepted runs and `58,709` transitions. The full composed native
+replay of the fixed-inertia damped Y2 plus continuous-wheel candidate gives a
+0.50 s position p95 of `0.1358 m`, heading p95 `0.0698 rad`, yaw-rate p95
+`0.1776 rad/s`, and body-speed p95 `0.2170 m/s`. These are archive-wide
+offline scores, not a live-racing acceptance claim. Leave-one-run-out
+regressions do not improve yaw residuals consistently across the archive;
+therefore no residual correction term has been forced into the physical plant.
+The full reports are
+`model_fits_v2/native_replay_Y2_fixed_iz_damped_wheel_continuous_all_dynamic_20260915.json`,
+`model_fits_v2/native_residual_analysis_damped_all_dynamic_20260915.json`, and
+`model_fits_v2/native_residuals_damped_all_dynamic_20260915.csv`.

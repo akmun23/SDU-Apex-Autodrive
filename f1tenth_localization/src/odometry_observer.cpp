@@ -8,6 +8,62 @@
 namespace f1tenth_localization
 {
 
+OdometryObserverConfig deployment_observer_config()
+{
+  OdometryObserverConfig config;
+  config.wheel_radius_m = 0.059;
+  config.wheel_speed_scale = 0.968;
+  config.wheel_speed_scale_speeds_mps = {
+    0.0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0, 8.0,
+    10.0, 12.0, 14.0};
+  config.wheel_speed_scale_values = {
+    1.0, 0.998, 0.994, 0.992, 0.990, 0.9815,
+    0.9735, 0.9658, 0.9587, 0.9520, 0.9445};
+  config.reset_encoder_jump_rad = 50.0;
+  config.wheel_speed_window_s = 0.10;
+  config.normal_packet_dt_max_s = 0.035;
+  config.degraded_packet_dt_max_s = 0.050;
+  config.max_integratable_gap_s = 0.250;
+  config.decel_detect_ax_mps2 = -0.5;
+  config.decel_ax_scale = 1.005;
+  config.decel_ax_offset_mps2 = 0.020;
+  config.wheel_update_ax_abs_max_mps2 = 6.5;
+  config.wheel_freeze_speed_mps = 0.15;
+  config.wheel_innovation_max_mps = 1.50;
+  config.wheel_recovery_launch_speed_mps = 2.0;
+  config.wheel_recovery_launch_innovation_mps = 2.0;
+  config.wheel_recovery_launch_wheel_speed_mps = 4.0;
+  config.wheel_burst_disagreement_mps = 1.0;
+  config.allow_turn_current_packet_recovery = true;
+  config.turn_current_packet_max_increase_mps = 0.20;
+  config.use_turn_speed_bias_model = true;
+  config.turn_speed_bias_constant_mps = -0.03;
+  config.turn_speed_bias_max_mps = 0.03;
+  config.use_coherent_packet_velocity_for_pose = true;
+  config.coherent_packet_pose_blend = 1.0;
+  config.wheel_speed_slew_limit_mps2 = 40.0;
+  config.wheel_update_beta = 0.85;
+  config.stationary_speed_threshold_mps = 0.03;
+  config.stationary_hold_s = 0.10;
+  config.stationary_ax_abs_max_mps2 = 0.25;
+  config.stationary_ay_abs_max_mps2 = 0.75;
+  config.stationary_yaw_rate_abs_max_radps = 0.15;
+  config.turn_enter_yaw_rate_radps = 0.6;
+  config.turn_enter_abs_ay_mps2 = 6.0;
+  config.turn_exit_yaw_rate_radps = 0.1;
+  config.turn_exit_abs_ay_mps2 = 0.5;
+  config.turn_exit_hold_s = 0.5;
+  config.turn_wheel_braking_ax_mps2 = -1.0;
+  config.integrate_lateral_acceleration_in_turn = false;
+  config.use_kinematic_lateral_slip_model = true;
+  config.lateral_slip_ratio = 0.012;
+  config.lateral_slip_yaw_rate_scale_radps = 0.15;
+  config.lateral_slip_max_mps = 0.30;
+  config.max_imu_ax_abs_mps2 = 30.0;
+  config.imu_x_offset_m = 0.08;
+  return config;
+}
+
 OdometryObserver::OdometryObserver(OdometryObserverConfig config)
 : config_(config)
 {

@@ -12,17 +12,20 @@
 #define PLANT_DEFAULT_LF_M 0.174679914f
 #define PLANT_DEFAULT_LR_M 0.155320086f
 #define PLANT_DEFAULT_IZ_KGM2 0.0961908f /* Corrected Unity body-Y inertia projection. */
+#define PLANT_DEFAULT_POSITION_OFFSET_X_M -0.155320086f /* rear pose vs COM velocity point */
 #define PLANT_DEFAULT_MAX_STEERING_RAD 0.5236f
 #define PLANT_DEFAULT_STEERING_RATE_RADPS 3.2f
 #define PLANT_DEFAULT_MAX_SPEED_MPS 22.88f
-#define PLANT_DEFAULT_FORCE_MAX_N 17.7166f
-#define PLANT_DEFAULT_HARD_BRAKE_FORCE_N 17.7166f /* Provisional friction-limited brake force. */
-#define PLANT_DEFAULT_SLIP_GAIN_PER_MPS 2.2574f
-#define PLANT_DEFAULT_DRAG_N_PER_MPS 0.8910f
-#define PLANT_DEFAULT_CF_N_PER_RAD 30.007231f
-#define PLANT_DEFAULT_CR_N_PER_RAD 45.511254f
-#define PLANT_DEFAULT_DF_N 11.50f
-#define PLANT_DEFAULT_DR_N 10.60f
+#define PLANT_DEFAULT_LINEAR_DAMPING_PER_S 0.273f /* Unity Rigidbody.drag [1/s]. */
+#define PLANT_DEFAULT_ANGULAR_DAMPING_PER_S 0.1f /* Unity Rigidbody.angularDrag [1/s]. */
+#define PLANT_DEFAULT_FORCE_MAX_N 18.4075037f
+#define PLANT_DEFAULT_HARD_BRAKE_FORCE_N 18.9627038f /* Latest causal fit; offline only. */
+#define PLANT_DEFAULT_SLIP_GAIN_PER_MPS 3.3656066f
+#define PLANT_DEFAULT_DRAG_N_PER_MPS 0.0f /* Explicit Rigidbody drag prevents double counting. */
+#define PLANT_DEFAULT_CF_N_PER_RAD 2869.4211f
+#define PLANT_DEFAULT_CR_N_PER_RAD 4964.7012f
+#define PLANT_DEFAULT_DF_N 13.1631691f
+#define PLANT_DEFAULT_DR_N 14.7715213f
 #define PLANT_MIN_SLIP_SPEED_MPS 0.5f
 #define PLANT_INTEGRATION_SUBSTEP_S 0.002f
 
@@ -48,9 +51,12 @@ VehiclePlantParameters_t vehicle_plant_default_parameters(void)
         .lf_m = PLANT_DEFAULT_LF_M,
         .lr_m = PLANT_DEFAULT_LR_M,
         .iz_kgm2 = PLANT_DEFAULT_IZ_KGM2,
+        .position_offset_from_velocity_point_x_m = PLANT_DEFAULT_POSITION_OFFSET_X_M,
         .max_steering_rad = PLANT_DEFAULT_MAX_STEERING_RAD,
         .steering_rate_radps = PLANT_DEFAULT_STEERING_RATE_RADPS,
         .max_speed_mps = PLANT_DEFAULT_MAX_SPEED_MPS,
+        .linear_damping_per_s = PLANT_DEFAULT_LINEAR_DAMPING_PER_S,
+        .angular_damping_per_s = PLANT_DEFAULT_ANGULAR_DAMPING_PER_S,
         .force_max_n = PLANT_DEFAULT_FORCE_MAX_N,
         .hard_brake_force_n = PLANT_DEFAULT_HARD_BRAKE_FORCE_N,
         .slip_gain_per_mps = PLANT_DEFAULT_SLIP_GAIN_PER_MPS,
@@ -59,11 +65,11 @@ VehiclePlantParameters_t vehicle_plant_default_parameters(void)
         .cr_n_per_rad = PLANT_DEFAULT_CR_N_PER_RAD,
         .df_n = PLANT_DEFAULT_DF_N,
         .dr_n = PLANT_DEFAULT_DR_N,
-        .tire_model = VEHICLE_PLANT_TIRE_LINEAR_SATURATED,
-        .wheel_dynamics_model = VEHICLE_PLANT_WHEEL_DYNAMICS_DISCRETE,
+        .tire_model = VEHICLE_PLANT_TIRE_TANH,
+        .wheel_dynamics_model = VEHICLE_PLANT_WHEEL_DYNAMICS_CONTINUOUS,
         .wheel_coefficients = {
-            -0.0003516271f, 0.0419576436f, 23.9652144f,
-            0.0251136087f, -0.4763574048f, 0.0006345492f,
+            -0.12427204f, -37.842430f, 954.15636f,
+            5.4744243f, -159.15294f, 0.07234303f,
         },
     };
     return parameters;
@@ -162,13 +168,20 @@ void vehicle_plant_step(
                             parameters->mass_kg - r * u;
         const float r_dot = (parameters->lf_m * front_force * cosf(delta) -
                              parameters->lr_m * rear_force) /
-                            parameters->iz_kgm2;
-        x += sub_dt * (u * cosf(yaw) - v * sinf(yaw));
-        y += sub_dt * (u * sinf(yaw) + v * cosf(yaw));
+                            parameters->iz_kgm2 -
+                            parameters->angular_damping_per_s * r;
+        const float pose_v = v +
+            parameters->position_offset_from_velocity_point_x_m * r;
+        x += sub_dt * (u * cosf(yaw) - pose_v * sinf(yaw));
+        y += sub_dt * (u * sinf(yaw) + pose_v * cosf(yaw));
         yaw += sub_dt * r;
-        u = clampf_local(u + sub_dt * u_dot, 0.0f,
+        const float damped_u_dot = u_dot -
+            parameters->linear_damping_per_s * u;
+        const float damped_v_dot = v_dot -
+            parameters->linear_damping_per_s * v;
+        u = clampf_local(u + sub_dt * damped_u_dot, 0.0f,
                          parameters->max_speed_mps);
-        v += sub_dt * v_dot;
+        v += sub_dt * damped_v_dot;
         r += sub_dt * r_dot;
     }
     next->x_m = x;

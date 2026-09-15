@@ -36,9 +36,15 @@ typedef struct
     float lf_m;
     float lr_m;
     float iz_kgm2;
+    /* Recorded pose point relative to the body-velocity point [m]. */
+    float position_offset_from_velocity_point_x_m;
     float max_steering_rad;
     float steering_rate_radps;
     float max_speed_mps;
+    /* Optional measured rigid-body damping terms [1/s].  These are kept
+     * explicit so an offline A/B test cannot hide damping in tire forces. */
+    float linear_damping_per_s;
+    float angular_damping_per_s;
     float force_max_n;
     float hard_brake_force_n;
     float slip_gain_per_mps;

@@ -19,7 +19,8 @@ int main(int argc, char ** argv)
     return 2;
   }
 
-  f1tenth_localization::OdometryObserver observer;
+  f1tenth_localization::OdometryObserver observer(
+    f1tenth_localization::deployment_observer_config());
   output << "stamp_s,speed_pred_mps,speed_mps,body_u_mps,body_v_mps,x_m,y_m"
     ",wheel_update_used,turn_mode,reset_epoch,timing_degraded\n";
   std::string line;

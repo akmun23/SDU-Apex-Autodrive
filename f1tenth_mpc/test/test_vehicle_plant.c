@@ -49,6 +49,20 @@ static void test_default_parameters_use_unity_structural_anchors(void)
                 "plant uses measured rear contact geometry");
     check_close(parameters.iz_kgm2, 0.0961908f, 1.0e-7f,
                 "plant uses corrected Unity body-Y inertia");
+    check_close(parameters.position_offset_from_velocity_point_x_m,
+                -0.155320086f, 1.0e-7f,
+                "plant uses measured pose/velocity lever arm");
+    check_close(parameters.linear_damping_per_s, 0.273f, 1.0e-7f,
+                "plant uses measured Unity linear damping");
+    check_close(parameters.angular_damping_per_s, 0.1f, 1.0e-7f,
+                "plant uses measured Unity angular damping");
+    check_close(parameters.hard_brake_force_n, 18.9627038f, 1.0e-5f,
+                "plant uses latest identified hard-brake force");
+    check_true(parameters.tire_model == VEHICLE_PLANT_TIRE_TANH,
+               "plant default uses the current tanh tire candidate");
+    check_true(parameters.wheel_dynamics_model ==
+                 VEHICLE_PLANT_WHEEL_DYNAMICS_CONTINUOUS,
+               "plant default uses the current continuous wheel candidate");
 }
 
 static void test_actuator_limits_and_forward_motion(void)
@@ -78,6 +92,27 @@ static void test_zero_throttle_is_active_braking(void)
     vehicle_plant_step(&state, &input, 0.025f, &parameters, &next);
     check_true(next.u_mps < state.u_mps,
                "zero throttle applies active braking to moving state");
+}
+
+static void test_pose_reference_lever_arm_only_affects_pose(void)
+{
+    VehiclePlantParameters_t parameters = vehicle_plant_default_parameters();
+    const VehiclePlantState_t state = {0.0f, 0.0f, 0.0f, 4.0f, 0.0f, 1.0f,
+                                       0.0f, 4.0f};
+    const VehiclePlantInput_t input = {0.0f, 1.0f};
+    VehiclePlantState_t corrected = {0};
+    VehiclePlantState_t same_point = {0};
+    vehicle_plant_step(&state, &input, 0.025f, &parameters, &corrected);
+    parameters.position_offset_from_velocity_point_x_m = 0.0f;
+    vehicle_plant_step(&state, &input, 0.025f, &parameters, &same_point);
+    check_true(corrected.y_m < same_point.y_m,
+               "rear-position lever arm changes only propagated pose");
+    check_close(corrected.u_mps, same_point.u_mps, 1.0e-6f,
+                "pose lever arm does not change body longitudinal speed");
+    check_close(corrected.v_mps, same_point.v_mps, 1.0e-6f,
+                "pose lever arm does not change body lateral speed");
+    check_close(corrected.r_radps, same_point.r_radps, 1.0e-6f,
+                "pose lever arm does not change body yaw rate");
 }
 
 static void test_continuous_wheel_dynamics_uses_dt(void)
@@ -110,6 +145,7 @@ int main(void)
     test_zero_input_is_identity();
     test_actuator_limits_and_forward_motion();
     test_zero_throttle_is_active_braking();
+    test_pose_reference_lever_arm_only_affects_pose();
     test_continuous_wheel_dynamics_uses_dt();
     if (failures != 0) {
         fprintf(stderr, "%d vehicle-plant test(s) failed\n", failures);

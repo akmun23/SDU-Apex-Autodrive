@@ -26,6 +26,7 @@ MASS_KG = 3.470
 LF_M = 0.174679914
 LR_M = 0.155320086
 IZ_KGM2 = 0.0961908
+POSITION_OFFSET_FROM_VELOCITY_POINT_X_M = -0.155320086
 MAX_STEERING_RAD = 0.5236
 STEERING_RATE_RADPS = 3.2
 WHEEL_RADIUS_M = 0.059
@@ -33,6 +34,8 @@ GRAVITY_MPS2 = 9.81
 MAX_SPEED_MPS = 22.88
 MIN_SLIP_SPEED_MPS = 0.5
 INTEGRATION_SUBSTEP_S = 0.002
+UNITY_RIGID_BODY_DRAG_PER_S = 0.273
+UNITY_RIGID_BODY_ANGULAR_DRAG_PER_S = 0.1
 
 
 @dataclass(frozen=True)
@@ -43,26 +46,31 @@ class PlantParameters:
     lf_m: float = LF_M
     lr_m: float = LR_M
     iz_kgm2: float = IZ_KGM2
+    position_offset_from_velocity_point_x_m: float = POSITION_OFFSET_FROM_VELOCITY_POINT_X_M
     max_steering_rad: float = MAX_STEERING_RAD
     steering_rate_radps: float = STEERING_RATE_RADPS
     max_speed_mps: float = MAX_SPEED_MPS
-    force_max_n: float = 17.7166
-    hard_brake_force_n: float = 17.7166
-    slip_gain_per_mps: float = 2.2574
-    coast_speed_drag_n_per_mps: float = 0.8910
-    cf_n_per_rad: float = 51.40
-    cr_n_per_rad: float = 43.10
-    df_n: float = 11.50
-    dr_n: float = 10.60
+    linear_damping_per_s: float = UNITY_RIGID_BODY_DRAG_PER_S
+    angular_damping_per_s: float = UNITY_RIGID_BODY_ANGULAR_DRAG_PER_S
+    force_max_n: float = 18.407503725928773
+    hard_brake_force_n: float = 18.96270376592838
+    slip_gain_per_mps: float = 3.36560656684216
+    # The measured Unity Rigidbody drag is represented explicitly above.
+    # Keeping this fitted force term at zero avoids counting the same drag
+    # twice.  A legacy fitted-drag profile remains available to replay tools.
+    coast_speed_drag_n_per_mps: float = 0.0
+    cf_n_per_rad: float = 2869.421191890062
+    cr_n_per_rad: float = 4964.701282400581
+    df_n: float = 13.163169127313191
+    dr_n: float = 14.771521250280383
     wheel_coefficients: tuple[float, ...] = (
-        -0.0003516271, 0.0419576436, 23.9652144, 0.0251136087,
-        -0.4763574048, 0.0006345492,
+        -0.12427203538208229, -37.842429963557315, 954.156360232286,
+        5.474424347708826, -159.15293630223576, 0.07234303243295123,
     )
-    # The discrete candidate maps one source transition directly to the next
-    # wheel speed.  The continuous candidate maps wheel-speed derivative and
-    # multiplies it by the measured transition dt.  Keep the former as the
-    # default until blind full-vehicle validation selects otherwise.
-    wheel_dynamics_kind: str = "discrete"
+    # The continuous candidate maps wheel-speed derivative and multiplies it
+    # by the measured transition dt.  This is the current offline candidate;
+    # it is not production-MPC approval.
+    wheel_dynamics_kind: str = "continuous"
     tire_model: str = "tanh"
 
     @classmethod
@@ -166,7 +174,10 @@ def _body_derivative(u: float, v: float, r: float, delta: float,
     v_dot = ((front_force * math.cos(delta) + rear_force) /
              parameters.mass_kg - r * u)
     r_dot = ((parameters.lf_m * front_force * math.cos(delta) -
-              parameters.lr_m * rear_force) / parameters.iz_kgm2)
+              parameters.lr_m * rear_force) / parameters.iz_kgm2 -
+             parameters.angular_damping_per_s * r)
+    u_dot -= parameters.linear_damping_per_s * u
+    v_dot -= parameters.linear_damping_per_s * v
     return u_dot, v_dot, r_dot
 
 
@@ -222,8 +233,9 @@ def step(state: np.ndarray, steering_target_norm: float,
         u_dot, v_dot, r_dot = _body_derivative(
             u, v, r, delta_mid, wheel_mid, parameters,
             throttle=throttle)
-        x += sub_dt * (u * math.cos(yaw) - v * math.sin(yaw))
-        y += sub_dt * (u * math.sin(yaw) + v * math.cos(yaw))
+        pose_v = v + parameters.position_offset_from_velocity_point_x_m * r
+        x += sub_dt * (u * math.cos(yaw) - pose_v * math.sin(yaw))
+        y += sub_dt * (u * math.sin(yaw) + pose_v * math.cos(yaw))
         yaw += sub_dt * r
         u = max(0.0, min(parameters.max_speed_mps, u + sub_dt * u_dot))
         v += sub_dt * v_dot

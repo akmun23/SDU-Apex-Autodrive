@@ -78,6 +78,22 @@ def test_reference_replay_updates_deterministically() -> None:
     assert update.body_v_mps == 0.0
 
 
+def test_reference_observer_loads_deployed_parameter_contract() -> None:
+    params = (Path(__file__).resolve().parents[2] /
+              "f1tenth_localization/config/sensor_odometry.yaml")
+    observer = ReferenceObserver.from_yaml(params)
+
+    assert observer.wheel_radius_m == pytest.approx(0.059)
+    assert observer.wheel_speed_scale_speeds_mps[-1] == pytest.approx(14.0)
+    assert observer.wheel_speed_scale_values[-1] == pytest.approx(0.9445)
+    assert observer.use_coherent_packet_velocity_for_pose
+    assert observer.use_kinematic_lateral_slip_model
+    assert observer.lateral_slip_ratio == pytest.approx(0.012)
+    assert observer.turn_speed_bias_constant_mps == pytest.approx(-0.03)
+    assert observer.max_integratable_gap_s == pytest.approx(0.250)
+    assert observer.wheel_update_ax_abs_max_mps2 == pytest.approx(6.5)
+
+
 def test_reconstruction_zeroes_absolute_imu_yaw_for_observer_replay(tmp_path: Path) -> None:
     rows = []
     for stamp, yaw in ((1.0, -1.57), (1.05, -1.52)):

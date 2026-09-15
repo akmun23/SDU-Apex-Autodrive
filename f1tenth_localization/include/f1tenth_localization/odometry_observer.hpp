@@ -135,6 +135,11 @@ struct OdometryObserverConfig
   double max_imu_ax_abs_mps2{30.0};
 };
 
+/* Configuration used by offline replay and as the node's pre-YAML baseline.
+ * Keep this profile aligned with config/sensor_odometry.yaml so a replay
+ * cannot silently evaluate a different estimator than the deployed node. */
+OdometryObserverConfig deployment_observer_config();
+
 struct OdometryObservation
 {
   double stamp_s{0.0};
