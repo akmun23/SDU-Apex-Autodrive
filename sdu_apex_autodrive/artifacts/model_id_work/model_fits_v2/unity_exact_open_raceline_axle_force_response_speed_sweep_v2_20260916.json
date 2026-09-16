@@ -1,0 +1,1152 @@
+{
+  "acceptance": {
+    "cornering_stiffness_identified": false,
+    "friction_coefficient_identified": false,
+    "promotion": false,
+    "runtime_use": false,
+    "tire_peak_changed": false
+  },
+  "chronological_holdout": {
+    "front": {
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.2487842523178749,
+        "mean": -0.012833729526184825,
+        "p05": -0.8123487119888688,
+        "p50": 0.027646305104358282,
+        "p95": 0.7793691428658605,
+        "rmse": 0.42122531153629256
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "train_coefficients": [
+        0.6655635558050388
+      ],
+      "train_rows": 12204
+    },
+    "rear": {
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.5410595865793275,
+        "mean": -0.2510418335294672,
+        "p05": -1.3134838896827106,
+        "p50": -0.33698750557138624,
+        "p95": 0.6780856393094578,
+        "rmse": 0.7286793648434493
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "train_coefficients": [
+        0.5771498611371497
+      ],
+      "train_rows": 12204
+    }
+  },
+  "curve_contact_load_proxy_n": {
+    "front": {
+      "count": 24408,
+      "mae": 6.30507889072635,
+      "mean": 3.2915814666595624,
+      "p05": -7.957891388757,
+      "p50": 5.979420749999999,
+      "p95": 9.22853963537311,
+      "rmse": 6.618681667900221
+    },
+    "rear": {
+      "count": 24408,
+      "mae": 11.306663884906927,
+      "mean": 6.095648255000003,
+      "p05": -14.116360332958374,
+      "p50": 10.9864148725,
+      "p95": 14.902387061532771,
+      "rmse": 11.66892693811841
+    }
+  },
+  "dependence_screens": {
+    "absolute_applied_steering_rad": {
+      "0.02_0.04": {
+        "front": {
+          "holdout_error": {
+            "count": 4102,
+            "mae": 0.11388861379922433,
+            "mean": 0.027978643548766117,
+            "p05": -0.27610387316838314,
+            "p50": -0.009732362106226411,
+            "p95": 0.9297362707093705,
+            "rmse": 0.2579547626845726
+          },
+          "holdout_rows": 4102,
+          "identified": true,
+          "train_coefficients": [
+            0.6779589714230824
+          ],
+          "train_rows": 4101
+        },
+        "range": [
+          0.02,
+          0.04
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4102,
+            "mae": 0.33300810396308006,
+            "mean": -0.33300810396308006,
+            "p05": -0.7998388270436332,
+            "p50": -0.30885593760766694,
+            "p95": -0.2512134402298724,
+            "rmse": 0.35774993337904515
+          },
+          "holdout_rows": 4102,
+          "identified": true,
+          "train_coefficients": [
+            0.5732487157646465
+          ],
+          "train_rows": 4101
+        },
+        "rows": 8203
+      },
+      "0.04_0.08": {
+        "front": {
+          "holdout_error": {
+            "count": 6993,
+            "mae": 0.33998471128660074,
+            "mean": -0.0578099772701348,
+            "p05": -0.8524288722925677,
+            "p50": 0.010055168215457044,
+            "p95": 1.0310346685148868,
+            "rmse": 0.5311909726955347
+          },
+          "holdout_rows": 6993,
+          "identified": true,
+          "train_coefficients": [
+            0.6731635800021258
+          ],
+          "train_rows": 6992
+        },
+        "range": [
+          0.04,
+          0.08
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 6993,
+            "mae": 0.6760850564254907,
+            "mean": -0.15781055105850458,
+            "p05": -1.4693556565024457,
+            "p50": -0.3335643781821487,
+            "p95": 1.3421545038419556,
+            "rmse": 0.9050372883069453
+          },
+          "holdout_rows": 6993,
+          "identified": true,
+          "train_coefficients": [
+            0.5781977561229495
+          ],
+          "train_rows": 6992
+        },
+        "rows": 13985
+      },
+      "0.08_0.2": {
+        "front": {
+          "holdout_error": {
+            "count": 1110,
+            "mae": 0.515048836840562,
+            "mean": -0.23775484482513126,
+            "p05": -1.5757227222322416,
+            "p50": -0.14029088420966107,
+            "p95": 0.9324281252121113,
+            "rmse": 0.7346919563222566
+          },
+          "holdout_rows": 1110,
+          "identified": true,
+          "train_coefficients": [
+            0.6603138197456526
+          ],
+          "train_rows": 1110
+        },
+        "range": [
+          0.08,
+          0.2
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 1110,
+            "mae": 1.1505203940601745,
+            "mean": -0.9056274501203809,
+            "p05": -2.6787768012108457,
+            "p50": -0.9073269155319728,
+            "p95": 1.1683394074275806,
+            "rmse": 1.346674488451708
+          },
+          "holdout_rows": 1110,
+          "identified": true,
+          "train_coefficients": [
+            0.613525459798522
+          ],
+          "train_rows": 1110
+        },
+        "rows": 2220
+      }
+    },
+    "front_axle_contact_load_n_tertiles": {
+      "10.3045_11.97": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.27879169246129604,
+            "mean": -0.2334903551659349,
+            "p05": -0.6393642700410407,
+            "p50": -0.1960868456956022,
+            "p95": 0.1843288166622428,
+            "rmse": 0.32970235955575844
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.709793447749595
+          ],
+          "train_rows": 4067
+        },
+        "range": [
+          10.304507580000003,
+          11.969989293333336
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.4859681015034637,
+            "mean": -0.4627985487715561,
+            "p05": -0.9037294601163681,
+            "p50": -0.4615614509096648,
+            "p95": -0.13775593302703976,
+            "rmse": 0.516543447269397
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5860600759990946
+          ],
+          "train_rows": 4067
+        },
+        "rows": 8135
+      },
+      "11.97_12.0829": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.14514807947571615,
+            "mean": -0.07361100986297958,
+            "p05": -0.817651547811995,
+            "p50": -0.025989597826546085,
+            "p95": 0.19878897869917744,
+            "rmse": 0.28838601048665474
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6835574122800918
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          11.969989293333336,
+          12.082869875333335
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.4840417426660405,
+            "mean": -0.31647927146030475,
+            "p05": -1.5005463963983778,
+            "p50": -0.38859992715151614,
+            "p95": 0.39895720858993644,
+            "rmse": 0.5730754981470049
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5803061909643747
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      },
+      "12.0829_14.8189": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.43434739469992506,
+            "mean": -0.11268237802749483,
+            "p05": -1.0182477401811478,
+            "p50": -0.16037857671972455,
+            "p95": 0.881984854554623,
+            "rmse": 0.5579324559768979
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6371341661044182
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          12.082869875333335,
+          14.818933390000003
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.7426647362383713,
+            "mean": -0.11565103386507837,
+            "p05": -1.500316419220054,
+            "p50": 0.2003542991266838,
+            "p95": 1.7028910595800708,
+            "rmse": 1.036473039794719
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5718857063561095
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      }
+    },
+    "maximum_absolute_forward_slip_tertiles": {
+      "0.0660913_0.406623": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.38346669015664026,
+            "mean": 0.01355719074389878,
+            "p05": -0.6833281828084001,
+            "p50": -0.032229609857979735,
+            "p95": 0.7905042136198221,
+            "rmse": 0.4716792693447544
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6171949902549005
+          ],
+          "train_rows": 4067
+        },
+        "range": [
+          0.06609133000000002,
+          0.4066226486666667
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.4092909622479772,
+            "mean": -0.10535264779818311,
+            "p05": -1.2972435097752364,
+            "p50": -0.033449472929123925,
+            "p95": 1.1645511483713167,
+            "rmse": 0.8103868464762126
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5454531787334251
+          ],
+          "train_rows": 4067
+        },
+        "rows": 8135
+      },
+      "0.406623_0.540091": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.295760237786656,
+            "mean": -0.22470427903823703,
+            "p05": -0.5584816329056883,
+            "p50": -0.24503981357838445,
+            "p95": 0.31250977937185953,
+            "rmse": 0.3146890333302425
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.7205846806983984
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          0.4066226486666667,
+          0.5400909
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.7808068508545118,
+            "mean": -0.6158038676259822,
+            "p05": -1.140864018459966,
+            "p50": -0.7343911331147512,
+            "p95": 0.7137115019278117,
+            "rmse": 0.7920498316665349
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6093725676860455
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      },
+      "0.540091_0.771074": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.3270928255670268,
+            "mean": -0.1693218359387404,
+            "p05": -0.7179315784577355,
+            "p50": -0.21105122185150682,
+            "p95": 0.30833231995373966,
+            "rmse": 0.36324376735507785
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.7013644416499765
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          0.5400909,
+          0.7710743550000001
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.399740449501537,
+            "mean": -0.2374993886872906,
+            "p05": -0.8846395601152788,
+            "p50": -0.33600352518736143,
+            "p95": 0.4182737586890158,
+            "rmse": 0.45180081632821417
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.587000627409284
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      }
+    },
+    "maximum_absolute_sideways_slip_tertiles": {
+      "0.00160064_0.117673": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.7003657309257846,
+            "mean": -0.08060039653516338,
+            "p05": -1.0495495908752512,
+            "p50": -0.1596509960014636,
+            "p95": 1.159046645932609,
+            "rmse": 0.7948267282972475
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6535608139514693
+          ],
+          "train_rows": 4067
+        },
+        "range": [
+          0.0016006422200000002,
+          0.11767273366666667
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 1.1131908127522199,
+            "mean": -0.1938121730319469,
+            "p05": -1.3515943351108413,
+            "p50": -0.6086975744450589,
+            "p95": 2.2024771087441857,
+            "rmse": 1.3276642291262635
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5965825900507497
+          ],
+          "train_rows": 4067
+        },
+        "rows": 8135
+      },
+      "0.117673_0.411416": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.06940359415274047,
+            "mean": 0.031215691418935338,
+            "p05": -0.0929513658971762,
+            "p50": 0.039153418769895865,
+            "p95": 0.12313244409005822,
+            "rmse": 0.08937522393706361
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6631706588367897
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          0.11767273366666667,
+          0.4114163333333332
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.15590418230500538,
+            "mean": -0.0998315993900143,
+            "p05": -0.22257433304399804,
+            "p50": -0.14382187620431441,
+            "p95": 0.18436365034327362,
+            "rmse": 0.16166290525139151
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5620534743014799
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      },
+      "0.411416_0.998141": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.07146684560530293,
+            "mean": -0.012167098168802853,
+            "p05": -0.4172569312493063,
+            "p50": -0.009129792035933004,
+            "p95": 0.1384382328823958,
+            "rmse": 0.12515457383528356
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6860779850759541
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          0.4114163333333332,
+          0.9981413000000001
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.20456009310980677,
+            "mean": -0.10860203258850969,
+            "p05": -0.3842301183189031,
+            "p50": -0.19644002965499796,
+            "p95": 0.19891516701912604,
+            "rmse": 0.21470170270820219
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.561249595594287
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      }
+    },
+    "rear_axle_contact_load_n_tertiles": {
+      "19.2392_21.9176": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.6143974767821997,
+            "mean": 0.06928870280677274,
+            "p05": -0.9153759685736138,
+            "p50": 0.36638647522884815,
+            "p95": 0.8352923024708583,
+            "rmse": 0.6671524458815536
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6332196372443722
+          ],
+          "train_rows": 4067
+        },
+        "range": [
+          19.239207010000005,
+          21.91762209666667
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.7528876576457618,
+            "mean": -0.0487765731169889,
+            "p05": -1.2811094754177823,
+            "p50": 0.24879122524703634,
+            "p95": 1.5900988552956996,
+            "rmse": 0.9773558442834774
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5688425414676822
+          ],
+          "train_rows": 4067
+        },
+        "rows": 8135
+      },
+      "21.9176_22.042": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.3365318780996951,
+            "mean": -0.08562233324512829,
+            "p05": -0.663516855173484,
+            "p50": -0.13581028019381014,
+            "p95": 0.3665365175691267,
+            "rmse": 0.40617397712933223
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.7071642601532464
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          21.91762209666667,
+          22.042047780000004
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.6627509512397979,
+            "mean": -0.09064318654914624,
+            "p05": -1.2962042736280097,
+            "p50": -0.4165092574015907,
+            "p95": 0.6083032716574557,
+            "rmse": 0.7461910654353423
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5975286182132225
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      },
+      "22.042_23.4849": {
+        "front": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.19362363135432262,
+            "mean": 0.17796627344321542,
+            "p05": -0.04570809668987645,
+            "p50": 0.1833618883045598,
+            "p95": 0.23408334844989875,
+            "rmse": 0.23272817806387622
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.6503154047269512
+          ],
+          "train_rows": 4068
+        },
+        "range": [
+          22.042047780000004,
+          23.484946800000003
+        ],
+        "rear": {
+          "holdout_error": {
+            "count": 4068,
+            "mae": 0.061873828374986915,
+            "mean": -0.05163238412563739,
+            "p05": -0.09875366097935627,
+            "p50": -0.0535487488299351,
+            "p95": 0.005174416925054087,
+            "rmse": 0.13662204332796388
+          },
+          "holdout_rows": 4068,
+          "identified": true,
+          "train_coefficients": [
+            0.5472492924648729
+          ],
+          "train_rows": 4068
+        },
+        "rows": 8136
+      }
+    }
+  },
+  "explicit_combined_slip_screen": {
+    "basis": [
+      "curve_contact_load_proxy",
+      "curve_contact_load_proxy * maximum_absolute_forward_slip",
+      "curve_contact_load_proxy * maximum_absolute_sideways_slip",
+      "curve_contact_load_proxy * ((speed_mps - 8) / 8)"
+    ],
+    "front": {
+      "coefficients": [
+        0.571297680054005,
+        0.21084559945672407,
+        -0.02499429941205343,
+        -0.04350952637954504
+      ],
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.2762296835265872,
+        "mean": -0.06625800617927755,
+        "p05": -0.7166664517470888,
+        "p50": -0.024846374838815688,
+        "p95": 0.3874125046978124,
+        "rmse": 0.388244902498922
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "rank": 4,
+      "singular_values": [
+        817.7199495798336,
+        205.71329080307643,
+        131.95151634902336,
+        75.16645311062747
+      ],
+      "train_rows": 12204
+    },
+    "promotion": false,
+    "rear": {
+      "coefficients": [
+        0.551061581873176,
+        0.0608638684862448,
+        -0.09292400832511072,
+        -0.13984705760449745
+      ],
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.3880596817453879,
+        "mean": -0.16803525168075517,
+        "p05": -1.1888353510412348,
+        "p50": -0.06780177538354204,
+        "p95": 0.36198486290084014,
+        "rmse": 0.7181175170690876
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "rank": 4,
+      "singular_values": [
+        1466.9796580549805,
+        369.53029999744734,
+        244.80661304170536,
+        114.88731795750647
+      ],
+      "train_rows": 12204
+    }
+  },
+  "ground_truth_use": "diagnostic_trace_only",
+  "load_power_screen": {
+    "basis": "gain * 10 N * signed Unity sideways curve * (wheel_load / 10 N)^p",
+    "front": {
+      "direct_proxy_p_equals_1": {
+        "gain": 0.6655635558050388,
+        "holdout_error": {
+          "count": 12204,
+          "mae": 0.2487842523178749,
+          "mean": -0.012833729526184825,
+          "p05": -0.8123487119888688,
+          "p50": 0.027646305104358282,
+          "p95": 0.7793691428658605,
+          "rmse": 0.42122531153629256
+        },
+        "train_rmse": 0.5848554316822945
+      },
+      "gain": 0.4596426691589916,
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.1872529079358004,
+        "mean": -0.10597187127023994,
+        "p05": -0.7487944655898662,
+        "p50": -0.056530778095317924,
+        "p95": 0.19185270277890895,
+        "rmse": 0.309903117450801
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "load_exponent_p": 0.1665518126045623,
+      "normalized_load_reference_n": 10.0,
+      "optimization_objective": "chronological training RMSE",
+      "promotion": false,
+      "train_rmse": 0.43926652408967304,
+      "train_rows": 12204
+    },
+    "promotion": false,
+    "rear": {
+      "direct_proxy_p_equals_1": {
+        "gain": 0.5771498611371497,
+        "holdout_error": {
+          "count": 12204,
+          "mae": 0.5410595865793275,
+          "mean": -0.25104183352946724,
+          "p05": -1.3134838896827106,
+          "p50": -0.3369875055713858,
+          "p95": 0.6780856393094576,
+          "rmse": 0.7286793648434493
+        },
+        "train_rmse": 0.8191955942015962
+      },
+      "gain": 0.6217618791632387,
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.5039890828629919,
+        "mean": -0.2296111297889225,
+        "p05": -1.3005908621521343,
+        "p50": -0.3042510037031647,
+        "p95": 0.5667839499172435,
+        "rmse": 0.7061176322768925
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "load_exponent_p": 0.2991933889065143,
+      "normalized_load_reference_n": 10.0,
+      "optimization_objective": "chronological training RMSE",
+      "promotion": false,
+      "train_rmse": 0.7652827001772057,
+      "train_rows": 12204
+    }
+  },
+  "production_mpc_modified": false,
+  "recovered_lateral_force_n": {
+    "front": {
+      "count": 24408,
+      "mae": 4.2980650589647835,
+      "mean": 2.2537280235106896,
+      "p05": -5.799858360294098,
+      "p50": 4.001265111457946,
+      "p95": 6.17990932836842,
+      "rmse": 4.421737134782881
+    },
+    "rear": {
+      "count": 24408,
+      "mae": 6.500019548542925,
+      "mean": 3.456204306242164,
+      "p05": -9.050365582050436,
+      "p50": 6.035948291324621,
+      "p95": 9.426227385202067,
+      "rmse": 6.654797259084434
+    }
+  },
+  "row_diagnostics": {
+    "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_axle_force_response_speed_sweep_rows_v2_20260916.csv",
+    "promotion": false,
+    "purpose": "cross-schedule mechanism screen only",
+    "rows": 24408
+  },
+  "schema_version": 1,
+  "selection": {
+    "body_contact_rows_excluded": 27829,
+    "determinant_abs_p05_p50_p95": [
+      1.3078187870929439,
+      1.3148838061345174,
+      1.3170138967825402
+    ],
+    "minimum_absolute_steering_rad": 0.005,
+    "speed_mps": [
+      4.000006994249627,
+      15.220078774065456
+    ],
+    "steering_abs_rad": [
+      0.020943949,
+      0.104719758
+    ],
+    "usable_rows": 24408
+  },
+  "serialized_curve_demand_screen": {
+    "basis": [
+      "curve_contact_load_proxy",
+      "proxy * weighted_abs_forward_curve_demand",
+      "proxy * weighted_abs_forward_curve_demand^2",
+      "proxy * weighted_abs_sideways_curve_demand",
+      "proxy * weighted_combined_curve_demand"
+    ],
+    "front": {
+      "coefficients": [
+        0.8004948226630034,
+        0.5188311501698567,
+        -1.082411314361738,
+        -0.5578131545903715,
+        0.2734877085897691
+      ],
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.26905008868341823,
+        "mean": -0.1337258456632292,
+        "p05": -0.5062012057159063,
+        "p50": -0.20669742941409464,
+        "p95": 0.3218000607227909,
+        "rmse": 0.30296722499014633
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "rank": 5,
+      "singular_values": [
+        1102.426937484488,
+        149.46223092634565,
+        57.429380026687554,
+        9.958523124256505,
+        3.49034631802332
+      ],
+      "train_rows": 12204
+    },
+    "promotion": false,
+    "rear": {
+      "coefficients": [
+        0.9117429396923126,
+        -0.46186589598689703,
+        -0.17293740227403187,
+        -0.365818126727137,
+        0.18596459952235417
+      ],
+      "holdout_error": {
+        "count": 12204,
+        "mae": 0.6270036609559153,
+        "mean": -0.35700033910092926,
+        "p05": -1.0372570215867238,
+        "p50": -0.6079941592389662,
+        "p95": 0.6609387233195122,
+        "rmse": 0.7138768053765746
+      },
+      "holdout_rows": 12204,
+      "identified": true,
+      "rank": 5,
+      "singular_values": [
+        1925.1724503185355,
+        236.84109480286477,
+        77.0631317015256,
+        8.827493096455143,
+        6.97939359592608
+      ],
+      "train_rows": 12204
+    }
+  },
+  "simulator_modified": false,
+  "source": {
+    "body_angular_wrench": "full runtime inertia Euler equation with explicit angular drag model 'inertia_scaled'",
+    "body_wrench": "measured Unity body acceleration plus explicit Rigidbody drag compensation",
+    "collision_split": "diagnostic only; chassis callbacks are excluded when supplied",
+    "duration_s": 90.038,
+    "effective_wheel_inertia_kgm2": [
+      0.000366,
+      0.000441,
+      0.000436
+    ],
+    "forward_force": "wheel torque balance using explicit prior effective Unity solver state",
+    "inertia_source": "per-fixed-step Unity principal inertia and tensor rotation; serialized snapshot fallback for old traces",
+    "lateral_load_source": "wheel_hit_force",
+    "normal_force_wrench": "explicit model 'measured_contact_normal'; WheelHit.force times recorded contact normal is subtracted from the contact wrench",
+    "rows": 90039,
+    "static_snapshot": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_speed_sweep_v1_20260916_clean/simulator_parameters.json",
+    "trace": [
+      "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_speed_sweep_v1_20260916_clean/wheel_contact_trace_part01.csv",
+      "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_speed_sweep_v1_20260916_clean/wheel_contact_trace_part02.csv",
+      "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_speed_sweep_v1_20260916_clean/wheel_contact_trace_part03.csv"
+    ],
+    "wheel_damping_nms": 0.25
+  },
+  "speed_bins": {
+    "10_12mps": {
+      "front": {
+        "holdout_error": {
+          "count": 581,
+          "mae": 0.08399293915027745,
+          "mean": 0.018016232266171116,
+          "p05": -0.06976837986104911,
+          "p50": -0.03452225010977017,
+          "p95": 0.33496847933135676,
+          "rmse": 0.12581180166925954
+        },
+        "holdout_rows": 581,
+        "identified": true,
+        "train_coefficients": [
+          0.6658668222123505
+        ],
+        "train_rows": 581
+      },
+      "rear": {
+        "holdout_error": {
+          "count": 581,
+          "mae": 0.06511016285916564,
+          "mean": 0.039821600437983856,
+          "p05": -0.04936365918360952,
+          "p50": 0.0038223113915147877,
+          "p95": 0.37701308751545515,
+          "rmse": 0.12702475007948263
+        },
+        "holdout_rows": 581,
+        "identified": true,
+        "train_coefficients": [
+          0.5464460827828101
+        ],
+        "train_rows": 581
+      },
+      "rows": 1162
+    },
+    "12_16mps": {
+      "front": {
+        "holdout_error": {
+          "count": 135,
+          "mae": 0.007970644937223822,
+          "mean": 0.0037890494854198784,
+          "p05": -0.010979108456638898,
+          "p50": 0.004333744693962416,
+          "p95": 0.018553173151785878,
+          "rmse": 0.010034004437066505
+        },
+        "holdout_rows": 135,
+        "identified": true,
+        "train_coefficients": [
+          0.6034237853745843
+        ],
+        "train_rows": 134
+      },
+      "rear": {
+        "holdout_error": {
+          "count": 135,
+          "mae": 0.010662066633265058,
+          "mean": -0.009172879445000065,
+          "p05": -0.0233513648977846,
+          "p50": -0.008746972686097365,
+          "p95": 0.005910513747246959,
+          "rmse": 0.012978435938727132
+        },
+        "holdout_rows": 135,
+        "identified": true,
+        "train_coefficients": [
+          0.6249357531717282
+        ],
+        "train_rows": 134
+      },
+      "rows": 269
+    },
+    "4_6mps": {
+      "front": {
+        "holdout_error": {
+          "count": 3807,
+          "mae": 0.36739643625441265,
+          "mean": -0.22901392415738506,
+          "p05": -0.6093974791276111,
+          "p50": -0.38639133437313866,
+          "p95": 0.2860638525757761,
+          "rmse": 0.3880927213685564
+        },
+        "holdout_rows": 3807,
+        "identified": true,
+        "train_coefficients": [
+          0.7171100760144606
+        ],
+        "train_rows": 3806
+      },
+      "rear": {
+        "holdout_error": {
+          "count": 3807,
+          "mae": 0.6090483091539828,
+          "mean": -0.4414778471909901,
+          "p05": -0.844755982420715,
+          "p50": -0.5923749457609846,
+          "p95": 0.8953269242498338,
+          "rmse": 0.6563101320278396
+        },
+        "holdout_rows": 3807,
+        "identified": true,
+        "train_coefficients": [
+          0.6343422637299736
+        ],
+        "train_rows": 3806
+      },
+      "rows": 7613
+    },
+    "6_8mps": {
+      "front": {
+        "holdout_error": {
+          "count": 4614,
+          "mae": 0.3657076288646671,
+          "mean": 0.03839862272850719,
+          "p05": -1.090549283285839,
+          "p50": 0.17153283038538314,
+          "p95": 0.7163736548006662,
+          "rmse": 0.5031293815241294
+        },
+        "holdout_rows": 4614,
+        "identified": true,
+        "train_coefficients": [
+          0.6413339800366906
+        ],
+        "train_rows": 4614
+      },
+      "rear": {
+        "holdout_error": {
+          "count": 4614,
+          "mae": 0.4372857213242141,
+          "mean": -0.23533587434246975,
+          "p05": -1.7358126283262012,
+          "p50": -0.16237961938769363,
+          "p95": 0.8209605780518155,
+          "rmse": 0.7108170620656514
+        },
+        "holdout_rows": 4614,
+        "identified": true,
+        "train_coefficients": [
+          0.5605530592050827
+        ],
+        "train_rows": 4614
+      },
+      "rows": 9228
+    },
+    "8_10mps": {
+      "front": {
+        "holdout_error": {
+          "count": 3068,
+          "mae": 0.21081252156868444,
+          "mean": 0.09722393875272974,
+          "p05": -0.27393458958034267,
+          "p50": 0.09607198299509112,
+          "p95": 0.7222990478524297,
+          "rmse": 0.3464504080797281
+        },
+        "holdout_rows": 3068,
+        "identified": true,
+        "train_coefficients": [
+          0.6597701163935982
+        ],
+        "train_rows": 3068
+      },
+      "rear": {
+        "holdout_error": {
+          "count": 3068,
+          "mae": 0.26592250596856987,
+          "mean": -0.021064340810938015,
+          "p05": -0.40328585477010986,
+          "p50": -0.06562672817310045,
+          "p95": 0.8370310918257476,
+          "rmse": 0.708595113817581
+        },
+        "holdout_rows": 3068,
+        "identified": true,
+        "train_coefficients": [
+          0.5521903484951434
+        ],
+        "train_rows": 3068
+      },
+      "rows": 6136
+    }
+  },
+  "status": "offline_unity_axle_force_response_inversion"
+}

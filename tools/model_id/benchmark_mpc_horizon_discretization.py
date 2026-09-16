@@ -10,8 +10,14 @@ grid:
 * N=30, dt=0.025 s (one stage per 40 Hz control sample); and
 * N=50, dt=0.015 s (resolution diagnostic).
 
-The ``internal_substep_s`` value is varied independently so a finer stage
-grid is not confused with a better integrator.
+The ``internal_substep_s`` value is varied independently so a finer internal
+integrator is not confused with a different command grid. The active stage
+grid stays N=30 in every comparison:
+
+* one 25 ms internal step;
+* two 12.5 ms internal steps;
+* four 6.25 ms internal steps; and
+* the 2 ms offline reference.
 """
 
 from __future__ import annotations
@@ -27,11 +33,14 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import structured_vehicle_plant as plant  # noqa: E402
+from n30_stage_map import f25  # noqa: E402
 from fit_speed_regime_vehicle_model import (  # noqa: E402
-    _raceline_envelope_ok,
+    _raceline_context,
     _read_run,
     _stats,
+    _steering_command,
 )
+from score_raceline_model import frenet_error, operating_class  # noqa: E402
 
 
 PHYSICAL_HORIZON_S = 0.75
@@ -42,17 +51,21 @@ def _score_variant(runs: Sequence[list[dict[str, float]]],
                    parameters: plant.PlantParameters,
                    stage_count: int, stage_dt_s: float,
                    internal_substep_s: float,
-                   origin_stride: int = 8) -> dict[str, Any]:
+                   origin_stride: int = 8,
+                   context: dict[str, Any] | None = None) -> dict[str, Any]:
     if abs(stage_count * stage_dt_s - PHYSICAL_HORIZON_S) > 1.0e-9:
         raise ValueError("stage grid must represent exactly 0.75 s")
-    fields = ("position_m", "heading_rad", "u_mps", "v_mps", "r_radps")
+    fields = ("position_m", "e_cross_m", "e_along_m", "heading_rad",
+              "e_heading_rad", "u_mps", "v_mps", "r_radps")
+    context = context or _raceline_context()
     errors = {field: [] for field in fields}
+    class_errors = {
+        "core": {field: [] for field in fields},
+        "guard": {field: [] for field in fields},
+    }
     attempted = 0
     skipped = 0
-    previous_substep = plant.INTEGRATION_SUBSTEP_S
-    plant.INTEGRATION_SUBSTEP_S = internal_substep_s
-    try:
-        for rows in runs:
+    for rows in runs:
             # Source transition times are accumulated from dt_sim_s.  A
             # stage holds the command active at its start; no future state is
             # read or interpolated into the prediction.
@@ -61,9 +74,15 @@ def _score_variant(runs: Sequence[list[dict[str, float]]],
                 source_times[index + 1] = source_times[index] + row["dt_sim_s"]
             for origin in range(0, len(rows), origin_stride):
                 first = rows[origin]
+                first_class = operating_class(
+                    first["x_k_m"], first["y_k_m"], first["u_k_mps"],
+                    context["raceline"], context["core_bins"],
+                    context["guard_bins"],
+                    context["speed_bin_width_mps"],
+                    context["curvature_bin_width_radpm"], MAX_SPEED_MPS)
                 if (not np.isfinite(first["wheel_k_mps"]) or
                         not np.isfinite(first["delta_k_rad"]) or
-                        not _raceline_envelope_ok(first) or
+                        first_class == "stress" or
                         not (0.0 <= first["u_k_mps"] <= MAX_SPEED_MPS)):
                     continue
                 attempted += 1
@@ -85,15 +104,21 @@ def _score_variant(runs: Sequence[list[dict[str, float]]],
                         break
                     row = rows[source_index]
                     if (int(row["segment_id"]) != int(first["segment_id"]) or
-                            not _raceline_envelope_ok(row) or
+                            operating_class(
+                                row["x_k_m"], row["y_k_m"], row["u_k_mps"],
+                                context["raceline"], context["core_bins"],
+                                context["guard_bins"],
+                                context["speed_bin_width_mps"],
+                                context["curvature_bin_width_radpm"],
+                                MAX_SPEED_MPS) == "stress" or
                             not (0.0 <= row["u_k_mps"] <= MAX_SPEED_MPS) or
                             not (0.0 <= row["u_k1_mps"] <= MAX_SPEED_MPS)):
                         invalid = True
                         break
-                    state = plant.step(
-                        state, row["commanded_steering_norm_k1"],
-                        row["applied_throttle_norm_k1"], stage_dt_s,
-                        parameters)
+                    state = f25(
+                        state, _steering_command(row),
+                        row["applied_throttle_norm_k1"], parameters,
+                        internal_substep_s=internal_substep_s)
                 if invalid:
                     skipped += 1
                     continue
@@ -103,19 +128,31 @@ def _score_variant(runs: Sequence[list[dict[str, float]]],
                     skipped += 1
                     continue
                 truth = rows[truth_index]
-                heading = ((state[2] - truth["yaw_k1_rad"] + np.pi) %
-                           (2.0 * np.pi) - np.pi)
-                errors["position_m"].append(float(np.hypot(
-                    state[0] - truth["x_k1_m"], state[1] - truth["y_k1_m"])))
-                errors["heading_rad"].append(float(heading))
-                errors["u_mps"].append(float(state[3] - truth["u_k1_mps"]))
-                errors["v_mps"].append(float(state[4] - truth["v_k1_mps"]))
-                errors["r_radps"].append(float(state[5] - truth["r_k1_radps"]))
-    finally:
-        plant.INTEGRATION_SUBSTEP_S = previous_substep
+                frenet = frenet_error(
+                    state[0], state[1], state[2], truth["x_k1_m"],
+                    truth["y_k1_m"], truth["yaw_k1_rad"], context["raceline"])
+                values = {
+                    "position_m": float(frenet["position_m"]),
+                    "e_cross_m": float(frenet["e_cross_m"]),
+                    "e_along_m": float(frenet["e_along_m"]),
+                    "heading_rad": float(frenet["e_heading_rad"]),
+                    "e_heading_rad": float(frenet["e_heading_rad"]),
+                    "u_mps": float(state[3] - truth["u_k1_mps"]),
+                    "v_mps": float(state[4] - truth["v_k1_mps"]),
+                    "r_radps": float(state[5] - truth["r_k1_radps"]),
+                }
+                for field, value in values.items():
+                    errors[field].append(value)
+                    class_errors[first_class][field].append(value)
     return {
         field: _stats(values) for field, values in errors.items()
     } | {
+        "core": {
+            field: _stats(values) for field, values in class_errors["core"].items()
+        },
+        "guard": {
+            field: _stats(values) for field, values in class_errors["guard"].items()
+        },
         "evaluation": {
             "attempted_origins": attempted,
             "valid_origins": len(errors["position_m"]),
@@ -133,6 +170,8 @@ def run(run_specs: Sequence[str], candidate_json: Path,
     report = json.loads(candidate_json.read_text(encoding="utf-8"))
     base = plant.PlantParameters.from_manifest()
     parameters = base
+    envelope_path = report.get("operating_envelope", {}).get("raceline_file")
+    context = _raceline_context(Path(envelope_path)) if envelope_path else _raceline_context()
     if "candidate_parameters" in report:
         values = report["candidate_parameters"]
         parameters = plant.PlantParameters(
@@ -165,14 +204,13 @@ def run(run_specs: Sequence[str], candidate_json: Path,
             })
     runs = [_read_run(spec) for spec in run_specs]
     grids = {
-        "N25_dt030_internal030": (25, 0.030, 0.030),
-        "N25_dt030_internal015": (25, 0.030, 0.015),
         "N30_dt025_internal025": (30, 0.025, 0.025),
         "N30_dt025_internal0125": (30, 0.025, 0.0125),
-        "N50_dt015_internal015": (50, 0.015, 0.015),
+        "N30_dt025_internal00625": (30, 0.025, 0.00625),
+        "N30_dt025_internal002_reference": (30, 0.025, 0.002),
     }
     scores = {
-        name: _score_variant(runs, parameters, *grid, origin_stride)
+        name: _score_variant(runs, parameters, *grid, origin_stride, context)
         for name, grid in grids.items()
     }
     result = {
@@ -186,6 +224,7 @@ def run(run_specs: Sequence[str], candidate_json: Path,
         "scores": scores,
         "interpretation": {
             "same_horizon_comparison": True,
+            "same_N30_stage_grid": True,
             "stage_grid_and_internal_substep_separated": True,
             "controls_are_zero_order_held_at_stage_start": True,
             "primary_mpc_horizon": "0.75s",

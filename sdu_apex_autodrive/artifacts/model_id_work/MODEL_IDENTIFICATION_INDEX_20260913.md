@@ -1,10 +1,184 @@
 # Model-identification data index
 
-Only accepted or directly useful model-identification runs remain in this
-directory. Legacy raw CSV files are kept inside `accepted/`; the current
-2026-09-15 high-speed set is under `accepted_20260915/`. Rejected captures
-remain recoverable under `failed_20260915/`; comparison plots and reports are
-inside `reports/`.
+## Active 2026-09-15 freeze path
+
+The current implementation follows the 0.75 s handoff: N=30 commands at
+0.025 s, with 16 m/s as the hard project ceiling. The active model-selection
+artifacts are:
+
+- `raceline_operating_envelope_v1.json` and `.csv` — coupled production
+  raceline CORE/GUARD/STRESS occupancy;
+- `model_fits_v2/speed_regime_vehicle_candidate_core_guard_075_20260915.json`
+  — canonical-lateral candidate;
+- `model_fits_v2/speed_regime_vehicle_candidate_core_guard_fitted_075_20260915.json`
+  — fitted-lateral candidate;
+- `model_fits_v2/speed_regime_vehicle_candidate_first_order_fitted_075_20260915.json`
+  — current first-order-steering fitted-lateral candidate;
+- `model_fits_v2/speed_regime_vehicle_candidate_first_order_residual_fitted_075_20260915.json`
+  — rejected first-order steering-transition-residual experiment;
+- `model_fits_v2/speed_regime_vehicle_candidate_delayed_steering_raceline_fitted_075_20260916.json`
+  — current causally corrected, raceline-filtered fitted-lateral candidate;
+- `model_fits_v2/tire_peak_bound_diagnostic_20260916.md`, plus the `peak120`
+  and `peak240` reports — tire-peak capacity-bound diagnostics; not approved
+  candidates;
+- `model_fits_v2/raceline_residual_diagnostic_first_order_fitted_075_20260916.json`
+  — CORE/GUARD one-step residual attribution;
+- `model_fits_v2/ablation_A0_A5_first_order_core_guard_075_20260915.json`,
+  `model_fits_v2/ablation_A0_A6_first_order_core_guard_075_20260915.json`,
+  and `model_fits_v2/ablation_A0_A6_first_order_residual_core_guard_075_20260915.json`
+  — first-order A0–A6 attribution, conditional one-parameter A6 result, and
+  the nonzero steering-residual attribution;
+- `steering_semantics_v2_train_validation_20260916.json` — command/applied/
+  feedback semantics over the union of train and validation runs;
+- `model_fits_v2/runtime_control_state_live_20260915.json` — live state score;
+- `model_fits_v2/speed_command_pipeline_live_20260915.json` — live command
+  pipeline evidence.
+
+These are offline or diagnostic candidates only. No candidate coefficients
+have been migrated into production MPC. Historical reports below remain for
+audit provenance and are not active promotion gates; in particular, old 2 s
+and >16 m/s results must not be used to select the current model.
+
+### 2026-09-16 causal timing and tire-peak update
+
+The assembled transition rows now use the previous packet's steering command
+(`steering_target_norm_k`) as the command consumed by the transition; the raw
+`commanded_steering_norm_k1` field remains available for provenance but is not
+used as the transition input. The corrected raceline-filtered candidate passes
+the provisional 0.75 s CORE numerical gates: p95 `e_cross=0.0327 m`,
+`heading=0.0406 rad`, `u=0.135 m/s`, `v=0.0127 m/s`, and `r=0.0966 rad/s`.
+It is still offline-only pending blind validation, native parity, and live
+acceptance.
+
+The low-regime rear tire peak reached the former 60 N optimizer ceiling. A
+120 N sweep moved it to 114.3 N with negligible CORE improvement and a small
+GUARD yaw improvement; a 240 N sweep failed to converge, and an effectively
+unbounded 1000 N diagnostic moved it to 179.8 N while worsening holdout
+GUARD errors. The peak is therefore weakly identifiable with the current
+model/data combination. The 60 N value remains a conservative offline
+regularizer, not a claimed simulator physics parameter. Full details are in
+`model_fits_v2/tire_peak_bound_diagnostic_20260916.md`.
+
+### 2026-09-16 exact Unity value capture
+
+The disposable diagnostic player was built from the exact competition scene
+in batchmode with `-batchmode` and without `-nographics`; Unity physics and
+scene behavior were not changed. The stationary capture contains 2,003
+1-kHz rows and the combined excitation contains 12,000 1-kHz rows, with no
+fixed-step gaps. Both captures include the new read-only `GetWorldPose`
+columns.
+
+The exact runtime yaw inertia is `I_z = 0.0961907506 kg m^2` (`body_y`),
+matching the canonical manifest value `0.0961908`; the old `0.0276976` value
+was the rejected wrong-axis projection. Exact runtime sprung masses are
+`[0.8171950, 0.8160194, 0.9189917, 0.9177940] kg`, corresponding to static
+wheel loads `[8.01668, 8.00515, 9.01531, 9.00356] N`.
+
+The stationary pose/load audit reproduces the configured suspension closely
+(descriptive front screens about `531 N/m`, `107 N s/m`; rear about `589 N/m`,
+`112 N s/m`, versus configured `500 N/m`, `100 N s/m`). The combined-run
+screen has low explanatory power because wheel contact load changes with
+acceleration, steering, contact geometry, and wheel rotational state. No
+dynamic load-transfer coefficient or slip scale has been promoted. See
+`model_fits_v2/unity_exact_competition_static_suspension_audit_20260916.json`,
+`model_fits_v2/unity_exact_competition_combined_suspension_audit_20260916.json`,
+and `tools/model_id/UNITY_MODEL_REQUIRED_VALUES_20260916.md`.
+
+A delayed post-settling runtime snapshot was added to check for hidden
+WheelCollider rewrites. It matches the serialized `500/100/.05` suspension
+and zero force-app-point values; the optional repository `Suspension.cs` is
+not attached to the F1TENTH competition prefab.
+
+The exact open-plane drive excitation reached `15.36 m/s` and retained all
+111,266 fixed-step rows in three CSV parts, each below 100 MB. The recorded
+forward slip is reproduced by the simulator-specific coordinate
+`(wheel_surface_speed-ground_speed)/max(abs(wheel_surface_speed),abs(ground_speed))`,
+using collider radius `0.059 m` and saturation at `+-1`. Settled positive-drive
+plateaus have at most about `0.0008` slip-unit reconstruction error per wheel.
+Large post-command transient differences remain and are explicitly attributed
+to wheel rotational state; they are not hidden in the forward friction curve.
+See `model_fits_v2/unity_exact_open_drive_wheel_drive_audit_20260916.json` and
+the trace README in
+`model_fits_v2/unity_exact_open_drive_excitation_20260916/`.
+
+The explicit forward-curve recursion was screened against the same complete
+0.75 s set and rejected: CORE cross-track p95 `0.0486 m` and longitudinal
+speed p95 `0.214 m/s`, versus `0.0431 m` and `0.135 m/s` for the identified
+force screen. The direct curve and forward-slip coordinate are retained, but
+the wheel rotational and dynamic-load states are not yet sufficient for
+recursive prediction.
+
+The repeated powered-drive trace is
+`model_fits_v2/unity_exact_open_powered_drive_repeat_wheel_drive_audit_20260916.json`;
+its source CSV is in
+`model_fits_v2/unity_exact_open_powered_drive_repeat_20260916/` and is 57 MB.
+The explicit torque-balance screen separates positive-drive transitions from
+the zero-throttle CAWB brake lock. It identifies effective wheel-state
+coefficients of approximately `I=0.000366 kg m^2` below `6 m/s`,
+`I=0.000441 kg m^2` at `6--12 m/s`, and `I=0.000436 kg m^2` at `12--16 m/s`,
+with `c=0.250 N m s`. Per-regime held-out balance error is approximately
+`0.11--0.14 N m`. The speed dependence is retained as an explicit Unity
+solver-response diagnostic; no single inertia has been promoted and no
+wheel-state behavior has been hidden inside tire force.
+
+### Latest PR1/PR2/PR3/PR4/PR5/PR6 evidence
+
+- The complete first-order stride-1 ablation is in
+  `model_fits_v2/ablation_A0_A5_first_order_core_guard_075_20260915.json`.
+  At 0.75 s, A2 first-order gives CORE cross-track/heading/yaw-rate p95 of
+  `0.0404 m / 0.0439 rad / 0.1328 rad/s`; A4/A5 give
+  `0.0403 m / 0.0393 rad / 0.1290 rad/s`. A4 improves both substantial
+  held-out track runs in lateral/yaw error, so the handoff's A6 condition was
+  met. The conditional one-parameter result is in
+  `ablation_A0_A6_first_order_core_guard_075_20260915.json`; it fits a gain
+  of `0.4261` but is worse than A4 on CORE heading, lateral velocity, and
+  yaw-rate, so it is rejected. No candidate passes the complete provisional
+  CORE gate and nothing is frozen or migrated. All variants have zero
+  nonfinite or unstable-state failures; the 233 rejected origins are 175
+  envelope-crossing transitions plus 58 incomplete end-of-run windows.
+- The explicit first-order residual attribution is in
+  `ablation_A0_A6_first_order_residual_core_guard_075_20260915.json`. The
+  fitted transition gains (`-0.6966 N/(rad/s)`, `0.0210 Nm/(rad/s)`) do not
+  improve the held-out candidate: A5 reaches CORE yaw-rate p95 `0.1294`
+  rad/s versus `0.1290` rad/s for no-residual A4. The residual is therefore
+  retained as rejected evidence only.
+- The active residual diagnostic contains 5,613 CORE/GUARD one-step
+  transitions. The two long track holdouts dominate the remaining yaw error
+  (`r` one-step p95 `0.126` and `0.103` rad/s respectively), while the
+  isolated 14--16 m/s experiments are effectively zero in this score. This
+  points to a track-run/state/actuator-semantic issue to resolve before
+  adding another tire coefficient; no one-step feature has been promoted as a
+  runtime correction.
+- `model_fits_v2/mpc_N30_discrete_stage_map_core_guard_20260915.json` compares
+  only the active N30/25 ms grid. The 2 ms reference has 0.0456 m overall
+  cross-track p95, 4x6.25 ms has 0.0477 m, 2x12.5 ms has 0.0524 m, and one
+  25 ms step has 0.0833 m. This is an offline map-resolution result, not a
+  simulator-physics change.
+- `model_fits_v2/n30_stage_map_validation_20260915.json` passes finite,
+  bounded, finite-difference-Jacobian, and scalar Python/native parity
+  checks; maximum native reference error is 3.1e-6.
+- `steering_semantics_v2_train_validation_20260916.json` scores 36,162 causal
+  steering transitions, including the decisive track holdouts. First-order
+  remains best overall (`0.00278 rad` p95 versus `0.00733 rad` for both
+  rate-limited and instantaneous), and is also best on holdouts 86 (`0.00477`
+  rad) and 103 (`0.00543` rad). This still is not a promotion decision until
+  command/applied/feedback angle semantics are reviewed explicitly.
+- `model_fits_v2/runtime_control_state_live_20260915.json` reports current
+  map pose cross-track p95 about 0.024 m for `/current_map_pose` and marks
+  future-horizon state data unavailable. Raw `/odom` is therefore not used
+  as a global-pose acceptance metric.
+- `model_fits_v2/speed_command_pipeline_live_20260915.json` finds a measured
+  speed peak of 8.441 m/s but no timestamped PP target/raceline/curvature or
+  acceleration-limiter fields in the retained capture, so limiter attribution
+  is correctly unavailable rather than guessed.
+
+The active candidate-selection path is the artifact list above. Older raw
+CSV files, fit reports, and comparison outputs remain in their existing
+locations for reproducibility; they are audit evidence only and must not be
+used as a current model input. Legacy raw CSV files are kept inside
+`accepted/`; the current 2026-09-15 high-speed set is under
+`accepted_20260915/`. Rejected captures remain recoverable under
+`failed_20260915/`; comparison plots and reports are inside `reports/`.
 
 ## Project speed envelope
 
@@ -1396,3 +1570,176 @@ The run demonstrates repeatable collision-free driving and clean timing, but
 does not demonstrate 16 m/s operation or MPC acceptance. Odom velocity is
 approximately `0.152 m/s` p95 longitudinal and `0.311 m/s` p95 at the
 GPS/pose point laterally (`0.063 m/s` p95 against the COM diagnostic).
+
+## 2026-09-16 direct Unity WheelCollider model screen
+
+The offline plant now includes a separate direct Unity lateral-law path using
+the F1TENTH WheelCollider sideways curve, four-wheel geometry, and the
+VehicleController Ackermann equations. The first screen exposed and fixed a
+left/right Ackermann sign reversal. The corrected full holdout artifact is
+`model_fits_v2/direct_unity_wheel_collider_benchmark_075_ackermann_fix_20260916.json`;
+its 0.75 s CORE p95 is `0.0431 m` cross-track, `0.0528 rad` heading,
+`0.0100 m/s` lateral velocity, and `0.1098 rad/s` yaw rate. It remains
+offline-only and is not an MPC candidate.
+
+The companion
+`model_fits_v2/unity_wheel_contact_trace_audit_20260916.json` finds that
+state-reconstructed `sidewaysSlip` agrees with recorded Unity wheel slip,
+while per-wheel contact loads vary materially from static sprung-mass loads.
+An instantaneous load-transfer screen was unstable in recursive replay and
+is rejected. The next model-identification action is a fresh exact
+competition-scene wheel-contact trace with a causal load/suspension state;
+no tire peak is to be inflated to hide this mechanism.
+
+## 2026-09-16 exact Unity value contract and collision mechanism
+
+The required virtual-car values are consolidated in
+`tools/model_id/UNITY_MODEL_REQUIRED_VALUES_20260916.md`. This contract keeps
+serialized Unity values, runtime values, and diagnostic-only effective values
+separate. Important exact inputs include mass `3.47 kg`, serialized COM
+`(-0.00008,0.06434,-0.00468) m`, WheelCollider radius `0.059 m`, wheel mass
+`0.109 kg`, suspension `500/100/0.5/0.05`, the serialized Unity friction
+curves, wheelbase/track `0.324/0.236 m`, active scene controller
+`CAWD/CAWB/FrontWheelSteer`, scene-overridden motor torque `428 Nm`, and the
+project physics/timing values `fixedDeltaTime=.001 s`, gravity `-9.81 m/s^2`,
+solver `6/1`, contact offset `.01 m`, and maximum angular speed `7 rad/s`.
+The operational speed ceiling remains `16 m/s`.
+
+The disposable exact open-plane runtime-state capture is
+`model_fits_v2/unity_exact_open_combined_slip_runtime_state_v2_20260916/`.
+It records 70,028 fixed-step rows with per-step inertia and sprung mass plus
+290,569 collision callbacks. Runtime body-y inertia ranges
+`0.09557827--0.09619075 kg m^2`; this must not be replaced by a single static
+`I_z`. The unchanged compound vehicle colliders also produce `10,231` stable
+`Chassis-1-solid1`--`Floor` contact callbacks. The full contact audit found
+positive separation and zero solver impulse for all chassis callbacks, so the
+lower residual obtained after excluding those rows is a data-regime effect,
+not proof of a chassis-force channel or a reason to tune a tire peak. No
+simulator physics or production MPC behavior was changed.
+
+### 2026-09-16 WheelCollider force API boundary audit
+
+The disposable open-plane `combined_slip_matrix_v1` was repeated with only
+read-only `Rigidbody.GetAccumulatedForce(Time.fixedDeltaTime)` and
+`GetAccumulatedTorque(Time.fixedDeltaTime)` fields added to the diagnostic
+trace. The 70,028-row batchmode run completed with normal graphics and no
+`-nographics`; all six accumulator components were exactly zero on every
+row. This is an API boundary result: the active `VehicleController` does not
+call `Rigidbody.AddForce`, while the WheelCollider contact solver applies its
+forces internally during the physics step. The result is stored in
+`model_fits_v2/unity_exact_open_combined_slip_accumulated_force_v4_20260916/`
+and is not used as a model input.
+
+The required force quantity is therefore the causal internal WheelCollider
+response, reconstructed only from the already available body acceleration,
+WheelHit slip/contact state, wheel RPM, motor/brake torque, steering angle,
+runtime sprung mass, and runtime inertia. The front/rear grouped gains from
+the previous screen vary with speed and are retained only as an observability
+diagnostic; they are not promoted as tire parameters or used to hide a missing
+solver mechanism. No Unity physics, vehicle behavior, or production MPC was
+changed.
+
+The next diagnostic is now reproducible as
+`tools/model_id/identify_unity_axle_force_response.py`. It removes forward
+force using the explicit previously identified wheel rotational state, then
+solves body lateral force and yaw moment for front/rear axle forces. Two
+independent captures of the same unchanged schedule gave front/rear proxy
+gains `0.6489 / 0.6869` with chronological holdout RMSE `0.179 / 0.195 N`,
+repeating to below `1e-4`. The reports are
+`model_fits_v2/unity_exact_open_axle_force_response_v1_20260916.json` and
+`model_fits_v2/unity_exact_open_axle_force_response_v1_repeat_20260916.json`.
+These are explicit Unity-solver observability results only; no friction,
+cornering-stiffness, or MPC parameter was created or promoted.
+
+A fresh `raceline_relevant_holdout_v1` was then run in the disposable player.
+It reached `15.36 m/s` with applied steering limited to `+-3.6 deg`; the
+selected turning rows covered `5.94--15.31 m/s` after lowering the offline
+minimum-steering screen to `0.005 rad`, including high-speed small-steering
+raceline conditions. Its axle inversion gave front/rear proxy gains
+`0.7932/0.6781` and chronological holdout RMSE `0.234/0.183 N`, unlike the
+previous `0.6489/0.6869` pair. This falsifies a
+universal front/rear gain and confirms that the response must be split by an
+observable Unity state or regime. The trace is stored in two sub-100 MB CSV
+parts under
+`model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/`;
+the report is
+`model_fits_v2/unity_exact_open_raceline_axle_force_response_v1_20260916.json`.
+
+### 2026-09-16 cross-schedule mechanism screen
+
+The axle inversion now exports compact selected-row tables through the
+optional `--rows-output` argument. The new
+`tools/model_id/screen_unity_axle_force_cross_schedule.py` fits only explicit
+Unity-trace quantities on one complete experiment and validates on the other
+complete experiment in both directions. The tested bases are the direct
+curve/contact-load proxy, proxy plus speed, proxy plus measured slip, proxy
+plus serialized curve demand, and an explicit load-power hypothesis.
+
+The independent old combined-slip and raceline-relevant schedules do not
+support one universal gain or any of those added terms: the best cross-
+schedule test RMSE remains approximately `1.01--1.08 N` for the front axle
+and `0.17--0.27 N` for the rear axle for the simple candidates, while the
+slip and load-power terms extrapolate substantially worse. The report is
+`model_fits_v2/unity_exact_axle_force_cross_schedule_screen_v1_20260916.json`;
+the compact row tables have matching
+`cross_schedule_*_rows_v1_20260916.csv` names. No term is promoted.
+
+A second disposable, normal-graphics batchmode speed-aware sweep was also
+completed for the raceline-relevant envelope. It recorded `90,039` fixed
+steps over `90.038 s` with no timing gaps, a maximum speed of `15.22 m/s`,
+and maximum applied steering of `6 deg`; the project ceiling was not
+exceeded. The lower-speed steering plateaus produced normalized sideways
+slips up to `0.998`, and the recovered axle forces showed large transient/
+schedule dependence. That result is retained as a rejection artifact, not a
+vehicle parameter fit. Its trace is split into three sub-100 MB CSV parts
+under `model_fits_v2/unity_exact_open_raceline_relevant_speed_sweep_v1_20260916_clean/`;
+the force-response report is
+`model_fits_v2/unity_exact_open_raceline_axle_force_response_speed_sweep_v1_20260916.json`.
+The incomplete first attempt is outside the repository under `/tmp` and is
+not part of the accepted dataset.
+
+The current required-value conclusion is unchanged: serialized Unity values
+and per-step runtime states are required inputs, while the internal
+WheelCollider tangent-force response is still the unidentified mechanism.
+The next useful run must use a lower-acceleration, non-spinning raceline
+holdout and must be accepted only if the same explicit mapping predicts both
+the existing small-steering holdout and the new holdout without a schedule-
+specific gain.
+
+### 2026-09-16 exact-value use and mechanical load-transfer screen
+
+The captured values now have an explicit usage boundary in
+`tools/model_id/UNITY_MODEL_REQUIRED_VALUES_20260916.md`: source/scene values
+are direct plant inputs; per-step Unity observations identify missing causal
+states; simulator truth is an offline scoring reference for odometry and is
+not a legal runtime `/odom`/EKF/AMCL input. This prevents a diagnostic value
+from silently becoming an odometry correction or a fitted tire parameter.
+
+A separate physics-derived load-transfer screen was benchmarked using only
+Unity mass `3.47 kg`, COM height `0.06434 m`, measured contact wheelbase
+`0.33000004 m`, and track width `0.236 m`. It conserved total supported load
+and introduced no fitted coefficient. On the identical blind direct benchmark
+it improved 0.75 s CORE p95 cross-track from `0.043080` to `0.042580 m`,
+heading from `0.052810` to `0.051882 rad`, and yaw rate from `0.109821` to
+`0.108606 rad/s`; longitudinal p95 was unchanged. The improvement is small
+and does not prove that suspension/contact state has been identified, so the
+screen remains diagnostic and static measured sprung masses remain canonical.
+
+The data can therefore be used immediately for three concrete purposes:
+exact offline plant replay, causal wheel/suspension mechanism identification,
+and offline calibration/scoring of the sensor-only odometry observer. The
+remaining required model values are the four-wheel rotational transitions,
+causal suspension/contact transitions, and the WheelCollider local-slip to
+wrench mapping. Those must be validated on a non-spinning raceline holdout
+before any model or odometry candidate is promoted.
+
+The v2 compact row exports now preserve per-wheel angular speed and
+derivative, actual wheel steering angle, sprung mass, and `GetWorldPose`
+vertical position. The explicit runtime-state cross-schedule basis is recorded
+in `model_fits_v2/unity_exact_axle_force_cross_schedule_screen_v2_20260916.json`.
+It failed to generalize—the front old-high-steering-to-raceline direction
+became numerically poor, and the reverse/front and rear tests did not beat the
+stable simpler bases. This does not make the fields useless; it shows that
+they must enter through a causal wheel/suspension transition model, with
+deflection relative to a settled reference, rather than as another fitted
+force gain. No model or odometry value was promoted.

@@ -1,0 +1,916 @@
+{
+  "acceptance": {
+    "forward_curve_refit": false,
+    "requires_transient_holdout": true,
+    "runtime_use": false,
+    "wheel_inertia_identified": false
+  },
+  "body_force_screen": {
+    "inferred_longitudinal_contact_force_n": {
+      "count": 6851,
+      "max": 14.617071385846884,
+      "mean": 6.61858101057907,
+      "min": 3.498235751056774,
+      "p05": 3.507173603687475,
+      "p50": 3.5141400278550226,
+      "p95": 14.563974901068052
+    },
+    "method": "mass * longitudinal_acceleration + mass * Unity drag * speed",
+    "tire_curve_comparison_is_diagnostic_only": true
+  },
+  "ground_truth_use": "diagnostic_trace_only",
+  "per_wheel": [
+    {
+      "all_rows_forward_slip_transient_screen": {
+        "error": {
+          "count": 83902,
+          "max": 0.182418362647584,
+          "mean": -0.0007496966798824878,
+          "min": -0.4804673562763353,
+          "p05": -0.021966870375491356,
+          "p50": -0.001058236499770205,
+          "p95": 0.019084436750930293
+        },
+        "reconstructed": {
+          "count": 84036,
+          "max": 1.0,
+          "mean": 0.06538526468075102,
+          "min": -0.25352970079409687,
+          "p05": 0.01777770114734968,
+          "p50": 0.04878518817758751,
+          "p95": 0.19177648838221845
+        },
+        "recorded": {
+          "count": 83902,
+          "max": 0.9958843,
+          "mean": 0.06315583369512417,
+          "min": -0.2506125,
+          "p05": 0.0132991225,
+          "p50": 0.0526247436,
+          "p95": 0.1886645660499999
+        }
+      },
+      "brake_torque_nm": {
+        "count": 84036,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "p05": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "interpretation": "steady plateaus test collider-radius slip mapping; transient mismatch is retained as wheel rotational-state evidence, not absorbed into a force or tire parameter",
+      "motor_torque_nm": {
+        "count": 84036,
+        "max": 69.5499954,
+        "mean": 47.387950356249696,
+        "min": 16.0500011,
+        "p05": 16.0500011,
+        "p50": 48.1499977,
+        "p95": 69.5499954
+      },
+      "steady_forward_slip_from_collider_radius_and_rpm": {
+        "count": 6851,
+        "max": 0.06202104134204063,
+        "mean": 0.030129995324373274,
+        "min": 0.01729832302259587,
+        "p05": 0.017599989581742293,
+        "p50": 0.017778148471511986,
+        "p95": 0.06182051802491616
+      },
+      "steady_forward_slip_recorded": {
+        "count": 6851,
+        "max": 0.06158909,
+        "mean": 0.029266983574222742,
+        "min": 0.0166614968,
+        "p05": 0.0166961653,
+        "p50": 0.01671971,
+        "p95": 0.061380699250000004
+      },
+      "steady_inferred_body_force_n": {
+        "count": 6851,
+        "max": 14.617071385846884,
+        "mean": 6.61858101057907,
+        "min": 3.498235751056774,
+        "p05": 3.507173603687475,
+        "p50": 3.5141400278550226,
+        "p95": 14.563974901068052
+      },
+      "steady_recorded_curve_force_screen_n": {
+        "count": 6851,
+        "max": 10.063371615595129,
+        "mean": 4.782089356652648,
+        "min": 2.722411290221192,
+        "p05": 2.728075962306057,
+        "p50": 2.731923057070368,
+        "p95": 10.029321533697466
+      },
+      "steady_recorded_minus_reconstructed_slip": {
+        "count": 6851,
+        "max": -0.00034051859751412644,
+        "mean": -0.000863011750150531,
+        "min": -0.0010601283898960048,
+        "p05": -0.0010590804872213817,
+        "p50": -0.0010577156600380597,
+        "p95": -0.00043858117960500487
+      },
+      "wheel": 0,
+      "wheel_rotational_balance_screen": {
+        "configured_reference": {
+          "mass_times_radius_squared_kgm2": 0.00037942900459980966,
+          "solid_disk_inertia_kgm2": 0.00018971450229990483,
+          "wheel_damping_rate": 0.25,
+          "wheel_mass_kg": 0.109,
+          "wheel_radius_m": 0.05900000035762787
+        },
+        "equation": "I * d(angular_velocity)/dt + c * angular_velocity = motor_torque - sign(angular_velocity)*brake_torque - collider_radius * WheelHit.forward_curve_force",
+        "events": [
+          {
+            "body_speed_mps": 6.078523,
+            "kind": "positive_drive_train",
+            "local_balance_fit": {
+              "design_singular_values": [
+                107617.49113886998,
+                706.2354929111384
+              ],
+              "effective_inertia_kgm2": 0.00044061162304402635,
+              "identified": true,
+              "mae_torque_balance_nm": 0.04818969748623658,
+              "residual_p05_p50_p95_nm": [
+                -0.06444538591046296,
+                -0.017172124280151024,
+                0.12868561566415332
+              ],
+              "rmse_torque_balance_nm": 0.07740222957829049,
+              "rotational_damping_nms": 0.25007639106598933,
+              "samples": 9
+            },
+            "new_throttle": 0.65,
+            "old_throttle": 0.25,
+            "samples": 9,
+            "time_s": 66.026,
+            "used_for_fit": true
+          }
+        ],
+        "fixed_dt_s": 0.0009999299999998712,
+        "forward_force_screen": {
+          "normal_load_source": "recorded WheelHit.force",
+          "not_a_fitted_tire_parameter": true,
+          "serialized_curve_used": true,
+          "slip_source": "recorded WheelHit.forwardSlip"
+        },
+        "holdout_prediction_using_training_fit": {
+          "identified_from_training": true,
+          "predicted_holdout_mae_torque_balance_nm": null,
+          "predicted_holdout_rmse_torque_balance_nm": null,
+          "samples": 0
+        },
+        "holdout_window_fit_diagnostic": {
+          "identified": false,
+          "samples": 0
+        },
+        "interpretation": "positive-drive transitions identify a mechanical wheel-state screen; zero-throttle CAWB braking and positive throttle downsteps are retained as hybrid/downstep diagnostics. No value is promoted to the runtime plant.",
+        "runtime_promoted": false,
+        "speed_regime_fits": [
+          {
+            "events": 0,
+            "identified": false
+          },
+          {
+            "events": 1,
+            "holdout_event_speed_mps": 6.078523,
+            "holdout_prediction": {
+              "event_body_speed_mps": 6.078523,
+              "predicted_mae_torque_balance_nm": null,
+              "predicted_rmse_torque_balance_nm": null,
+              "samples": 9
+            },
+            "speed_interval_mps": [
+              6.0,
+              12.0
+            ],
+            "training_event_speeds_mps": [],
+            "training_fit": {
+              "identified": false,
+              "samples": 0
+            }
+          },
+          {
+            "events": 0,
+            "identified": false
+          }
+        ],
+        "status": "offline_wheel_rotational_balance_screen",
+        "training_fit": {
+          "design_singular_values": [
+            107617.49113886998,
+            706.2354929111384
+          ],
+          "effective_inertia_kgm2": 0.00044061162304402635,
+          "identified": true,
+          "mae_torque_balance_nm": 0.04818969748623658,
+          "residual_p05_p50_p95_nm": [
+            -0.06444538591046296,
+            -0.017172124280151024,
+            0.12868561566415332
+          ],
+          "rmse_torque_balance_nm": 0.07740222957829049,
+          "rotational_damping_nms": 0.25007639106598933,
+          "samples": 9
+        }
+      },
+      "wheel_rpm": {
+        "count": 84036,
+        "max": 2653.74121,
+        "mean": 1805.4459591030513,
+        "min": 0.0,
+        "p05": 611.2697,
+        "p50": 1835.25549,
+        "p95": 2653.715
+      }
+    },
+    {
+      "all_rows_forward_slip_transient_screen": {
+        "error": {
+          "count": 83902,
+          "max": 0.18241747182421836,
+          "mean": -0.0006976807855530377,
+          "min": -0.44058990058123043,
+          "p05": -0.02199348727637841,
+          "p50": -0.0010584531136839138,
+          "p95": 0.019108238076043102
+        },
+        "reconstructed": {
+          "count": 84036,
+          "max": 1.0,
+          "mean": 0.06522121438282891,
+          "min": -0.252614474135376,
+          "p05": 0.01778122173572703,
+          "p50": 0.048792708770531296,
+          "p95": 0.1886139501349181
+        },
+        "recorded": {
+          "count": 83902,
+          "max": 0.9958854,
+          "mean": 0.0630435372865743,
+          "min": -0.2515083,
+          "p05": 0.01327543,
+          "p50": 0.0526619852,
+          "p95": 0.17524056644999958
+        }
+      },
+      "brake_torque_nm": {
+        "count": 84036,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "p05": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "interpretation": "steady plateaus test collider-radius slip mapping; transient mismatch is retained as wheel rotational-state evidence, not absorbed into a force or tire parameter",
+      "motor_torque_nm": {
+        "count": 84036,
+        "max": 69.5499954,
+        "mean": 47.387950356249696,
+        "min": 16.0500011,
+        "p05": 16.0500011,
+        "p50": 48.1499977,
+        "p95": 69.5499954
+      },
+      "steady_forward_slip_from_collider_radius_and_rpm": {
+        "count": 6851,
+        "max": 0.062024411112942206,
+        "mean": 0.030133652072082216,
+        "min": 0.01730209932047794,
+        "p05": 0.017603713299747213,
+        "p50": 0.017781805362127878,
+        "p95": 0.06182410386710717
+      },
+      "steady_forward_slip_recorded": {
+        "count": 6851,
+        "max": 0.0615925,
+        "mean": 0.029270432300525468,
+        "min": 0.0166650023,
+        "p05": 0.01669974345,
+        "p50": 0.0167231075,
+        "p95": 0.0613841079
+      },
+      "steady_inferred_body_force_n": {
+        "count": 6851,
+        "max": 14.617071385846884,
+        "mean": 6.61858101057907,
+        "min": 3.498235751056774,
+        "p05": 3.507173603687475,
+        "p50": 3.5141400278550226,
+        "p95": 14.563974901068052
+      },
+      "steady_recorded_curve_force_screen_n": {
+        "count": 6851,
+        "max": 10.063928793777324,
+        "mean": 4.7826528625330695,
+        "min": 2.722984072660394,
+        "p05": 2.7286606154182618,
+        "p50": 2.7324781928105457,
+        "p95": 10.029878491295921
+      },
+      "steady_recorded_minus_reconstructed_slip": {
+        "count": 6851,
+        "max": -0.0003408751822369452,
+        "mean": -0.0008632197715567455,
+        "min": -0.0010601433080099816,
+        "p05": -0.0010592718979326923,
+        "p50": -0.0010579161871448334,
+        "p95": -0.00043878087363711724
+      },
+      "wheel": 1,
+      "wheel_rotational_balance_screen": {
+        "configured_reference": {
+          "mass_times_radius_squared_kgm2": 0.00037942900459980966,
+          "solid_disk_inertia_kgm2": 0.00018971450229990483,
+          "wheel_damping_rate": 0.25,
+          "wheel_mass_kg": 0.109,
+          "wheel_radius_m": 0.05900000035762787
+        },
+        "equation": "I * d(angular_velocity)/dt + c * angular_velocity = motor_torque - sign(angular_velocity)*brake_torque - collider_radius * WheelHit.forward_curve_force",
+        "events": [
+          {
+            "body_speed_mps": 6.078523,
+            "kind": "positive_drive_train",
+            "local_balance_fit": {
+              "design_singular_values": [
+                107809.36410194861,
+                706.9379971344382
+              ],
+              "effective_inertia_kgm2": 0.0004403259031339084,
+              "identified": true,
+              "mae_torque_balance_nm": 0.020181075526548083,
+              "residual_p05_p50_p95_nm": [
+                -0.022252042316657138,
+                -0.011544994428902555,
+                0.04663782415042873
+              ],
+              "rmse_torque_balance_nm": 0.025289795067147385,
+              "rotational_damping_nms": 0.2501419329288519,
+              "samples": 9
+            },
+            "new_throttle": 0.65,
+            "old_throttle": 0.25,
+            "samples": 9,
+            "time_s": 66.026,
+            "used_for_fit": true
+          }
+        ],
+        "fixed_dt_s": 0.0009999299999998712,
+        "forward_force_screen": {
+          "normal_load_source": "recorded WheelHit.force",
+          "not_a_fitted_tire_parameter": true,
+          "serialized_curve_used": true,
+          "slip_source": "recorded WheelHit.forwardSlip"
+        },
+        "holdout_prediction_using_training_fit": {
+          "identified_from_training": true,
+          "predicted_holdout_mae_torque_balance_nm": null,
+          "predicted_holdout_rmse_torque_balance_nm": null,
+          "samples": 0
+        },
+        "holdout_window_fit_diagnostic": {
+          "identified": false,
+          "samples": 0
+        },
+        "interpretation": "positive-drive transitions identify a mechanical wheel-state screen; zero-throttle CAWB braking and positive throttle downsteps are retained as hybrid/downstep diagnostics. No value is promoted to the runtime plant.",
+        "runtime_promoted": false,
+        "speed_regime_fits": [
+          {
+            "events": 0,
+            "identified": false
+          },
+          {
+            "events": 1,
+            "holdout_event_speed_mps": 6.078523,
+            "holdout_prediction": {
+              "event_body_speed_mps": 6.078523,
+              "predicted_mae_torque_balance_nm": null,
+              "predicted_rmse_torque_balance_nm": null,
+              "samples": 9
+            },
+            "speed_interval_mps": [
+              6.0,
+              12.0
+            ],
+            "training_event_speeds_mps": [],
+            "training_fit": {
+              "identified": false,
+              "samples": 0
+            }
+          },
+          {
+            "events": 0,
+            "identified": false
+          }
+        ],
+        "status": "offline_wheel_rotational_balance_screen",
+        "training_fit": {
+          "design_singular_values": [
+            107809.36410194861,
+            706.9379971344382
+          ],
+          "effective_inertia_kgm2": 0.0004403259031339084,
+          "identified": true,
+          "mae_torque_balance_nm": 0.020181075526548083,
+          "residual_p05_p50_p95_nm": [
+            -0.022252042316657138,
+            -0.011544994428902555,
+            0.04663782415042873
+          ],
+          "rmse_torque_balance_nm": 0.025289795067147385,
+          "rotational_damping_nms": 0.2501419329288519,
+          "samples": 9
+        }
+      },
+      "wheel_rpm": {
+        "count": 84036,
+        "max": 2653.75269,
+        "mean": 1805.1431894931459,
+        "min": 0.0,
+        "p05": 611.272,
+        "p50": 1835.25586,
+        "p95": 2653.73315
+      }
+    },
+    {
+      "all_rows_forward_slip_transient_screen": {
+        "error": {
+          "count": 83910,
+          "max": 0.18256332093183403,
+          "mean": -0.00042066892914068655,
+          "min": -0.4811894300535331,
+          "p05": -0.020888016080192945,
+          "p50": -0.0010465881733513031,
+          "p95": 0.02104932214778191
+        },
+        "reconstructed": {
+          "count": 84036,
+          "max": 1.0,
+          "mean": 0.06432590223175362,
+          "min": -0.25267074358439506,
+          "p05": 0.017340672459284785,
+          "p50": 0.0480303178696473,
+          "p95": 0.18846475332711948
+        },
+        "recorded": {
+          "count": 83910,
+          "max": 1.00418842,
+          "mean": 0.06251213431525567,
+          "min": -0.249664679,
+          "p05": 0.0139668779,
+          "p50": 0.053286267799999995,
+          "p95": 0.18617365285000015
+        }
+      },
+      "brake_torque_nm": {
+        "count": 84036,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "p05": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "interpretation": "steady plateaus test collider-radius slip mapping; transient mismatch is retained as wheel rotational-state evidence, not absorbed into a force or tire parameter",
+      "motor_torque_nm": {
+        "count": 84036,
+        "max": 69.5499954,
+        "mean": 47.387950356249696,
+        "min": 16.0500011,
+        "p05": 16.0500011,
+        "p50": 48.1499977,
+        "p95": 69.5499954
+      },
+      "steady_forward_slip_from_collider_radius_and_rpm": {
+        "count": 6851,
+        "max": 0.060942949116717465,
+        "mean": 0.029514976629998493,
+        "min": 0.01685806372457837,
+        "p05": 0.017164465461948487,
+        "p50": 0.01734119988650792,
+        "p95": 0.06074950408967232
+      },
+      "steady_forward_slip_recorded": {
+        "count": 6851,
+        "max": 0.06051713,
+        "mean": 0.028662007698846883,
+        "min": 0.0162383337,
+        "p05": 0.0162717877,
+        "p50": 0.0162943341,
+        "p95": 0.06031573005
+      },
+      "steady_inferred_body_force_n": {
+        "count": 6851,
+        "max": 14.617071385846884,
+        "mean": 6.61858101057907,
+        "min": 3.498235751056774,
+        "p05": 3.507173603687475,
+        "p50": 3.5141400278550226,
+        "p95": 14.563974901068052
+      },
+      "steady_recorded_curve_force_screen_n": {
+        "count": 6851,
+        "max": 9.888218324045386,
+        "mean": 4.683239104889273,
+        "min": 2.6532684025878908,
+        "p05": 2.6587346310064,
+        "p50": 2.6624186081814782,
+        "p95": 9.855310506439828
+      },
+      "steady_recorded_minus_reconstructed_slip": {
+        "count": 6851,
+        "max": -0.00032818316595224425,
+        "mean": -0.000852968931151609,
+        "min": -0.0010484494478731135,
+        "p05": -0.0010473677058940607,
+        "p50": -0.0010461376986901812,
+        "p95": -0.00043244627834525956
+      },
+      "wheel": 2,
+      "wheel_rotational_balance_screen": {
+        "configured_reference": {
+          "mass_times_radius_squared_kgm2": 0.00037942900459980966,
+          "solid_disk_inertia_kgm2": 0.00018971450229990483,
+          "wheel_damping_rate": 0.25,
+          "wheel_mass_kg": 0.109,
+          "wheel_radius_m": 0.05900000035762787
+        },
+        "equation": "I * d(angular_velocity)/dt + c * angular_velocity = motor_torque - sign(angular_velocity)*brake_torque - collider_radius * WheelHit.forward_curve_force",
+        "events": [
+          {
+            "body_speed_mps": 6.078523,
+            "kind": "positive_drive_train",
+            "local_balance_fit": {
+              "design_singular_values": [
+                107553.13814134707,
+                705.627838241314
+              ],
+              "effective_inertia_kgm2": 0.000440586175402952,
+              "identified": true,
+              "mae_torque_balance_nm": 0.05641765658704085,
+              "residual_p05_p50_p95_nm": [
+                -0.07489564150993999,
+                -0.02089788119916136,
+                0.15170589231131534
+              ],
+              "rmse_torque_balance_nm": 0.09221890642711066,
+              "rotational_damping_nms": 0.2502088553985299,
+              "samples": 9
+            },
+            "new_throttle": 0.65,
+            "old_throttle": 0.25,
+            "samples": 9,
+            "time_s": 66.026,
+            "used_for_fit": true
+          }
+        ],
+        "fixed_dt_s": 0.0009999299999998712,
+        "forward_force_screen": {
+          "normal_load_source": "recorded WheelHit.force",
+          "not_a_fitted_tire_parameter": true,
+          "serialized_curve_used": true,
+          "slip_source": "recorded WheelHit.forwardSlip"
+        },
+        "holdout_prediction_using_training_fit": {
+          "identified_from_training": true,
+          "predicted_holdout_mae_torque_balance_nm": null,
+          "predicted_holdout_rmse_torque_balance_nm": null,
+          "samples": 0
+        },
+        "holdout_window_fit_diagnostic": {
+          "identified": false,
+          "samples": 0
+        },
+        "interpretation": "positive-drive transitions identify a mechanical wheel-state screen; zero-throttle CAWB braking and positive throttle downsteps are retained as hybrid/downstep diagnostics. No value is promoted to the runtime plant.",
+        "runtime_promoted": false,
+        "speed_regime_fits": [
+          {
+            "events": 0,
+            "identified": false
+          },
+          {
+            "events": 1,
+            "holdout_event_speed_mps": 6.078523,
+            "holdout_prediction": {
+              "event_body_speed_mps": 6.078523,
+              "predicted_mae_torque_balance_nm": null,
+              "predicted_rmse_torque_balance_nm": null,
+              "samples": 9
+            },
+            "speed_interval_mps": [
+              6.0,
+              12.0
+            ],
+            "training_event_speeds_mps": [],
+            "training_fit": {
+              "identified": false,
+              "samples": 0
+            }
+          },
+          {
+            "events": 0,
+            "identified": false
+          }
+        ],
+        "status": "offline_wheel_rotational_balance_screen",
+        "training_fit": {
+          "design_singular_values": [
+            107553.13814134707,
+            705.627838241314
+          ],
+          "effective_inertia_kgm2": 0.000440586175402952,
+          "identified": true,
+          "mae_torque_balance_nm": 0.05641765658704085,
+          "residual_p05_p50_p95_nm": [
+            -0.07489564150993999,
+            -0.02089788119916136,
+            0.15170589231131534
+          ],
+          "rmse_torque_balance_nm": 0.09221890642711066,
+          "rotational_damping_nms": 0.2502088553985299,
+          "samples": 9
+        }
+      },
+      "wheel_rpm": {
+        "count": 84036,
+        "max": 2650.09326,
+        "mean": 1803.2543512603766,
+        "min": 0.0,
+        "p05": 610.997864,
+        "p50": 1832.075015,
+        "p95": 2650.04028
+      }
+    },
+    {
+      "all_rows_forward_slip_transient_screen": {
+        "error": {
+          "count": 83910,
+          "max": 0.18256231294012645,
+          "mean": -0.0003703974945995131,
+          "min": -0.4411206078795411,
+          "p05": -0.020914750798586467,
+          "p50": -0.0010468335960790408,
+          "p95": 0.021072982796513026
+        },
+        "reconstructed": {
+          "count": 84036,
+          "max": 1.0,
+          "mean": 0.06415442845824104,
+          "min": -0.2514816326641947,
+          "p05": 0.017344172938100533,
+          "p50": 0.04803966008374359,
+          "p95": 0.18525436460647618
+        },
+        "recorded": {
+          "count": 83910,
+          "max": 1.0042218,
+          "mean": 0.06239067448974556,
+          "min": -0.250512183,
+          "p05": 0.0139438352,
+          "p50": 0.0533224123,
+          "p95": 0.1720789939000002
+        }
+      },
+      "brake_torque_nm": {
+        "count": 84036,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "p05": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "interpretation": "steady plateaus test collider-radius slip mapping; transient mismatch is retained as wheel rotational-state evidence, not absorbed into a force or tire parameter",
+      "motor_torque_nm": {
+        "count": 84036,
+        "max": 69.5499954,
+        "mean": 47.387950356249696,
+        "min": 16.0500011,
+        "p05": 16.0500011,
+        "p50": 48.1499977,
+        "p95": 69.5499954
+      },
+      "steady_forward_slip_from_collider_radius_and_rpm": {
+        "count": 6851,
+        "max": 0.0609461527959056,
+        "mean": 0.029518542421600753,
+        "min": 0.016861603741170548,
+        "p05": 0.017168203742154383,
+        "p50": 0.01734471786756321,
+        "p95": 0.060752897308680914
+      },
+      "steady_forward_slip_recorded": {
+        "count": 6851,
+        "max": 0.060520716,
+        "mean": 0.02866535330427675,
+        "min": 0.0162414815,
+        "p05": 0.016274915799999998,
+        "p50": 0.0162976552,
+        "p95": 0.060318885350000004
+      },
+      "steady_inferred_body_force_n": {
+        "count": 6851,
+        "max": 14.617071385846884,
+        "mean": 6.61858101057907,
+        "min": 3.498235751056774,
+        "p05": 3.507173603687475,
+        "p50": 3.5141400278550226,
+        "p95": 14.563974901068052
+      },
+      "steady_recorded_curve_force_screen_n": {
+        "count": 6851,
+        "max": 9.888804259811177,
+        "mean": 4.68378576129741,
+        "min": 2.6537827385063393,
+        "p05": 2.6592457480362306,
+        "p50": 2.662961260516049,
+        "p95": 9.855826067823488
+      },
+      "steady_recorded_minus_reconstructed_slip": {
+        "count": 6851,
+        "max": -0.00032840152078957713,
+        "mean": -0.0008531891173240053,
+        "min": -0.0010484985497678338,
+        "p05": -0.0010475925791528923,
+        "p50": -0.001046372546203822,
+        "p95": -0.000432654583655951
+      },
+      "wheel": 3,
+      "wheel_rotational_balance_screen": {
+        "configured_reference": {
+          "mass_times_radius_squared_kgm2": 0.00037942900459980966,
+          "solid_disk_inertia_kgm2": 0.00018971450229990483,
+          "wheel_damping_rate": 0.25,
+          "wheel_mass_kg": 0.109,
+          "wheel_radius_m": 0.05900000035762787
+        },
+        "equation": "I * d(angular_velocity)/dt + c * angular_velocity = motor_torque - sign(angular_velocity)*brake_torque - collider_radius * WheelHit.forward_curve_force",
+        "events": [
+          {
+            "body_speed_mps": 6.078523,
+            "kind": "positive_drive_train",
+            "local_balance_fit": {
+              "design_singular_values": [
+                107779.4111577703,
+                649.9058743706256
+              ],
+              "effective_inertia_kgm2": 0.0004403109917727869,
+              "identified": true,
+              "mae_torque_balance_nm": 0.02414575078133474,
+              "residual_p05_p50_p95_nm": [
+                -0.026194703130973097,
+                -0.015038350438864256,
+                0.05458383086021852
+              ],
+              "rmse_torque_balance_nm": 0.030695399124811135,
+              "rotational_damping_nms": 0.2502463578318173,
+              "samples": 8
+            },
+            "new_throttle": 0.65,
+            "old_throttle": 0.25,
+            "samples": 8,
+            "time_s": 66.026,
+            "used_for_fit": true
+          }
+        ],
+        "fixed_dt_s": 0.0009999299999998712,
+        "forward_force_screen": {
+          "normal_load_source": "recorded WheelHit.force",
+          "not_a_fitted_tire_parameter": true,
+          "serialized_curve_used": true,
+          "slip_source": "recorded WheelHit.forwardSlip"
+        },
+        "holdout_prediction_using_training_fit": {
+          "identified_from_training": true,
+          "predicted_holdout_mae_torque_balance_nm": null,
+          "predicted_holdout_rmse_torque_balance_nm": null,
+          "samples": 0
+        },
+        "holdout_window_fit_diagnostic": {
+          "identified": false,
+          "samples": 0
+        },
+        "interpretation": "positive-drive transitions identify a mechanical wheel-state screen; zero-throttle CAWB braking and positive throttle downsteps are retained as hybrid/downstep diagnostics. No value is promoted to the runtime plant.",
+        "runtime_promoted": false,
+        "speed_regime_fits": [
+          {
+            "events": 0,
+            "identified": false
+          },
+          {
+            "events": 1,
+            "holdout_event_speed_mps": 6.078523,
+            "holdout_prediction": {
+              "event_body_speed_mps": 6.078523,
+              "predicted_mae_torque_balance_nm": null,
+              "predicted_rmse_torque_balance_nm": null,
+              "samples": 8
+            },
+            "speed_interval_mps": [
+              6.0,
+              12.0
+            ],
+            "training_event_speeds_mps": [],
+            "training_fit": {
+              "identified": false,
+              "samples": 0
+            }
+          },
+          {
+            "events": 0,
+            "identified": false
+          }
+        ],
+        "status": "offline_wheel_rotational_balance_screen",
+        "training_fit": {
+          "design_singular_values": [
+            107779.4111577703,
+            649.9058743706256
+          ],
+          "effective_inertia_kgm2": 0.0004403109917727869,
+          "identified": true,
+          "mae_torque_balance_nm": 0.02414575078133474,
+          "residual_p05_p50_p95_nm": [
+            -0.026194703130973097,
+            -0.015038350438864256,
+            0.05458383086021852
+          ],
+          "rmse_torque_balance_nm": 0.030695399124811135,
+          "rotational_damping_nms": 0.2502463578318173,
+          "samples": 8
+        }
+      },
+      "wheel_rpm": {
+        "count": 84036,
+        "max": 2650.103,
+        "mean": 1802.934965288507,
+        "min": 0.0,
+        "p05": 611.000061,
+        "p50": 1833.3260850000001,
+        "p95": 2650.08545
+      }
+    }
+  ],
+  "production_mpc_modified": false,
+  "schema_version": 1,
+  "selection": {
+    "conditions": [
+      "0.5 < body_velocity_z <= 16 m/s",
+      "abs(body_velocity_x) < 0.01 m/s",
+      "zero applied steering",
+      "positive throttle and zero-brake drive plateaus",
+      "abs(smoothed longitudinal acceleration) < 0.02 m/s^2"
+    ],
+    "straight_steady_rows": 6851
+  },
+  "simulator_modified": false,
+  "source": {
+    "scene": "__AutoDRIVE_ModelIdentification_Temp",
+    "static_snapshot": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/simulator_parameters.json",
+    "trace_build_tag": "e5-raceline-relevant-holdout-v1-20260916",
+    "trace_columns": 160,
+    "trace_rows": 84036,
+    "traces": [
+      "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/wheel_contact_trace_part01.csv",
+      "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/wheel_contact_trace_part02.csv"
+    ]
+  },
+  "status": "offline_unity_wheel_drive_observability_audit",
+  "unity_required_values": {
+    "body_drag": 0.27300000190734863,
+    "body_mass_kg": 3.4700000286102295,
+    "controller_wheel_radius_m": 0.032499998807907104,
+    "forward_curve": {
+      "asymptote_slip": 0.25,
+      "asymptote_value": 0.58,
+      "extremum_slip": 0.15,
+      "extremum_value": 0.9,
+      "stiffness": 0.8
+    },
+    "total_static_sprung_load_n": 34.04070028066635,
+    "wheel_collider_radius_m": [
+      0.05900000035762787,
+      0.05900000035762787,
+      0.05900000035762787,
+      0.05900000035762787
+    ],
+    "wheel_damping_rate": [
+      0.25,
+      0.25,
+      0.25,
+      0.25
+    ],
+    "wheel_mass_kg": [
+      0.10899999737739563,
+      0.10899999737739563,
+      0.10899999737739563,
+      0.10899999737739563
+    ]
+  }
+}

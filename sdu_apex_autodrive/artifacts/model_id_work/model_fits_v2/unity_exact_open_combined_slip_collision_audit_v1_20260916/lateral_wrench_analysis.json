@@ -1,0 +1,2483 @@
+{
+  "ground_truth_use": "diagnostic_trace_only",
+  "interpretation": {
+    "coefficient_role": "explicit diagnostic observability gain, not a tire parameter",
+    "next_decision": "compare holdout gains and residuals against fresh raceline-relevant runs before adding any causal state",
+    "promotion": false
+  },
+  "models": {
+    "static_sprung_load_side_sign_+1_forward_sign_+1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 34.730051174191985,
+          "force_z_n": 1.3315530093564476,
+          "yaw_moment_nm": 0.1944434317602775
+        },
+        "wrench_rmse": {
+          "force_x_n": 38.663732750643746,
+          "force_z_n": 1.5755166043203803,
+          "yaw_moment_nm": 0.2505185869489011
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 2.4606436052185727,
+          "force_z_n": 0.41880794876848376,
+          "yaw_moment_nm": 0.1762396230746912
+        },
+        "wrench_rmse": {
+          "force_x_n": 3.890807639124511,
+          "force_z_n": 0.7599255939702252,
+          "yaw_moment_nm": 0.28400811417101973
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 3.401268662626549,
+          "wheel0_sideways_gain": -3.4236849532237312,
+          "wheel1_forward_gain": 3.1392804241179824,
+          "wheel1_sideways_gain": 1.1032985146827652,
+          "wheel2_forward_gain": -0.6679444285215764,
+          "wheel2_sideways_gain": -21.0672109721792,
+          "wheel3_forward_gain": -0.3434724996405814,
+          "wheel3_sideways_gain": 18.57745422790324
+        },
+        "design_singular_values": [
+          1497.689441087378,
+          876.6583395156476,
+          256.5592398060675,
+          129.59758410738328,
+          44.9012527429193,
+          17.798712094923232,
+          9.870654442050435,
+          4.429434553014421
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.5475914591922599,
+        "wrench_mae": {
+          "force_x_n": 0.3653562852845236,
+          "force_z_n": 0.42400789303056374,
+          "yaw_moment_nm": 0.27957415576089195
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.5401807871734008,
+          "force_z_n": 0.6741157038157817,
+          "yaw_moment_nm": 0.3915890110544524
+        }
+      },
+      "forward_force_sign": 1.0,
+      "load_mode": "static_sprung_load",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": 1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "static_sprung_load_side_sign_+1_forward_sign_-1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 35.79338334016275,
+          "force_z_n": 19.432033180282037,
+          "yaw_moment_nm": 0.09565129437501053
+        },
+        "wrench_rmse": {
+          "force_x_n": 39.73063056090118,
+          "force_z_n": 20.717068252773224,
+          "yaw_moment_nm": 0.12569365569699248
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 2.4606436052185727,
+          "force_z_n": 0.41880794876848376,
+          "yaw_moment_nm": 0.1762396230746912
+        },
+        "wrench_rmse": {
+          "force_x_n": 3.890807639124511,
+          "force_z_n": 0.7599255939702252,
+          "yaw_moment_nm": 0.28400811417101973
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": -3.401268662626549,
+          "wheel0_sideways_gain": -3.4236849532237312,
+          "wheel1_forward_gain": -3.1392804241179824,
+          "wheel1_sideways_gain": 1.1032985146827652,
+          "wheel2_forward_gain": 0.6679444285215764,
+          "wheel2_sideways_gain": -21.0672109721792,
+          "wheel3_forward_gain": 0.3434724996405814,
+          "wheel3_sideways_gain": 18.57745422790324
+        },
+        "design_singular_values": [
+          1497.689441087378,
+          876.6583395156476,
+          256.5592398060675,
+          129.59758410738328,
+          44.9012527429193,
+          17.798712094923232,
+          9.870654442050435,
+          4.429434553014421
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.5475914591922599,
+        "wrench_mae": {
+          "force_x_n": 0.3653562852845236,
+          "force_z_n": 0.42400789303056374,
+          "yaw_moment_nm": 0.27957415576089195
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.5401807871734008,
+          "force_z_n": 0.6741157038157817,
+          "yaw_moment_nm": 0.3915890110544524
+        }
+      },
+      "forward_force_sign": -1.0,
+      "load_mode": "static_sprung_load",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": 1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "static_sprung_load_side_sign_-1_forward_sign_+1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 5.2095515559254135,
+          "force_z_n": 2.939904069478817,
+          "yaw_moment_nm": 0.0935675338310915
+        },
+        "wrench_rmse": {
+          "force_x_n": 5.910908979134731,
+          "force_z_n": 3.274843077250049,
+          "yaw_moment_nm": 0.12386050675032806
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 2.4606436052185727,
+          "force_z_n": 0.41880794876848376,
+          "yaw_moment_nm": 0.1762396230746912
+        },
+        "wrench_rmse": {
+          "force_x_n": 3.890807639124511,
+          "force_z_n": 0.7599255939702252,
+          "yaw_moment_nm": 0.28400811417101973
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 3.401268662626549,
+          "wheel0_sideways_gain": 3.4236849532237312,
+          "wheel1_forward_gain": 3.1392804241179824,
+          "wheel1_sideways_gain": -1.1032985146827652,
+          "wheel2_forward_gain": -0.6679444285215764,
+          "wheel2_sideways_gain": 21.0672109721792,
+          "wheel3_forward_gain": -0.3434724996405814,
+          "wheel3_sideways_gain": -18.57745422790324
+        },
+        "design_singular_values": [
+          1497.689441087378,
+          876.6583395156476,
+          256.5592398060675,
+          129.59758410738328,
+          44.9012527429193,
+          17.798712094923232,
+          9.870654442050435,
+          4.429434553014421
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.5475914591922599,
+        "wrench_mae": {
+          "force_x_n": 0.3653562852845236,
+          "force_z_n": 0.42400789303056374,
+          "yaw_moment_nm": 0.27957415576089195
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.5401807871734008,
+          "force_z_n": 0.6741157038157817,
+          "yaw_moment_nm": 0.3915890110544524
+        }
+      },
+      "forward_force_sign": 1.0,
+      "load_mode": "static_sprung_load",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": -1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "static_sprung_load_side_sign_-1_forward_sign_-1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 6.272683741852223,
+          "force_z_n": 21.062526203493295,
+          "yaw_moment_nm": 0.1886060119785012
+        },
+        "wrench_rmse": {
+          "force_x_n": 6.968044758349065,
+          "force_z_n": 22.550060501751638,
+          "yaw_moment_nm": 0.24333530889021415
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 2.4606436052185727,
+          "force_z_n": 0.41880794876848376,
+          "yaw_moment_nm": 0.1762396230746912
+        },
+        "wrench_rmse": {
+          "force_x_n": 3.890807639124511,
+          "force_z_n": 0.7599255939702252,
+          "yaw_moment_nm": 0.28400811417101973
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": -3.401268662626549,
+          "wheel0_sideways_gain": 3.4236849532237312,
+          "wheel1_forward_gain": -3.1392804241179824,
+          "wheel1_sideways_gain": -1.1032985146827652,
+          "wheel2_forward_gain": 0.6679444285215764,
+          "wheel2_sideways_gain": 21.0672109721792,
+          "wheel3_forward_gain": 0.3434724996405814,
+          "wheel3_sideways_gain": -18.57745422790324
+        },
+        "design_singular_values": [
+          1497.689441087378,
+          876.6583395156476,
+          256.5592398060675,
+          129.59758410738328,
+          44.9012527429193,
+          17.798712094923232,
+          9.870654442050435,
+          4.429434553014421
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.5475914591922599,
+        "wrench_mae": {
+          "force_x_n": 0.3653562852845236,
+          "force_z_n": 0.42400789303056374,
+          "yaw_moment_nm": 0.27957415576089195
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.5401807871734008,
+          "force_z_n": 0.6741157038157817,
+          "yaw_moment_nm": 0.3915890110544524
+        }
+      },
+      "forward_force_sign": -1.0,
+      "load_mode": "static_sprung_load",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": -1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "wheel_hit_force_side_sign_+1_forward_sign_+1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 34.64896552923375,
+          "force_z_n": 2.0477919427951434,
+          "yaw_moment_nm": 0.7642240995401248
+        },
+        "wrench_rmse": {
+          "force_x_n": 38.55446986290481,
+          "force_z_n": 2.197826547066733,
+          "yaw_moment_nm": 0.934562063806185
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 1.042420043130964,
+          "force_z_n": 0.6586246538376667,
+          "yaw_moment_nm": 0.49935106774481797
+        },
+        "wrench_rmse": {
+          "force_x_n": 1.8874000978003331,
+          "force_z_n": 1.5863860799477154,
+          "yaw_moment_nm": 0.6007450796264843
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 3.626011976278823,
+          "wheel0_sideways_gain": -1.5747218155707008,
+          "wheel1_forward_gain": 0.9424819558942493,
+          "wheel1_sideways_gain": -1.006463239818057,
+          "wheel2_forward_gain": -0.647049042243369,
+          "wheel2_sideways_gain": -0.7760079039686816,
+          "wheel3_forward_gain": 2.436162457802645,
+          "wheel3_sideways_gain": -1.9233293144631807
+        },
+        "design_singular_values": [
+          1588.7174138273658,
+          841.4410943666419,
+          517.2418926660264,
+          295.8764027531392,
+          251.72765394417812,
+          87.25998121729,
+          56.50158014506526,
+          20.867401298338702
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.6415619526591618,
+        "wrench_mae": {
+          "force_x_n": 0.5916612552614369,
+          "force_z_n": 0.22052875769743083,
+          "yaw_moment_nm": 0.29075012726300803
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.7809182005980035,
+          "force_z_n": 0.6920521030189479,
+          "yaw_moment_nm": 0.38214639600726047
+        }
+      },
+      "forward_force_sign": 1.0,
+      "load_mode": "wheel_hit_force",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": 1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "wheel_hit_force_side_sign_+1_forward_sign_-1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 35.43877708154369,
+          "force_z_n": 19.033753922334732,
+          "yaw_moment_nm": 0.09124538863852817
+        },
+        "wrench_rmse": {
+          "force_x_n": 39.346301408507074,
+          "force_z_n": 20.440781656848102,
+          "yaw_moment_nm": 0.14414508530664097
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 1.042420043130964,
+          "force_z_n": 0.6586246538376667,
+          "yaw_moment_nm": 0.49935106774481797
+        },
+        "wrench_rmse": {
+          "force_x_n": 1.8874000978003331,
+          "force_z_n": 1.5863860799477154,
+          "yaw_moment_nm": 0.6007450796264843
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": -3.626011976278823,
+          "wheel0_sideways_gain": -1.5747218155707008,
+          "wheel1_forward_gain": -0.9424819558942493,
+          "wheel1_sideways_gain": -1.006463239818057,
+          "wheel2_forward_gain": 0.647049042243369,
+          "wheel2_sideways_gain": -0.7760079039686816,
+          "wheel3_forward_gain": -2.436162457802645,
+          "wheel3_sideways_gain": -1.9233293144631807
+        },
+        "design_singular_values": [
+          1588.7174138273658,
+          841.4410943666419,
+          517.2418926660264,
+          295.8764027531392,
+          251.72765394417812,
+          87.25998121729,
+          56.50158014506526,
+          20.867401298338702
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.6415619526591618,
+        "wrench_mae": {
+          "force_x_n": 0.5916612552614369,
+          "force_z_n": 0.22052875769743083,
+          "yaw_moment_nm": 0.29075012726300803
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.7809182005980035,
+          "force_z_n": 0.6920521030189479,
+          "yaw_moment_nm": 0.38214639600726047
+        }
+      },
+      "forward_force_sign": -1.0,
+      "load_mode": "wheel_hit_force",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": 1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "wheel_hit_force_side_sign_-1_forward_sign_+1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 5.563836304903294,
+          "force_z_n": 3.3338352638738717,
+          "yaw_moment_nm": 0.09036026823982818
+        },
+        "wrench_rmse": {
+          "force_x_n": 6.28794507998249,
+          "force_z_n": 3.5754900735305752,
+          "yaw_moment_nm": 0.14099710807281662
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 1.042420043130964,
+          "force_z_n": 0.6586246538376667,
+          "yaw_moment_nm": 0.49935106774481797
+        },
+        "wrench_rmse": {
+          "force_x_n": 1.8874000978003331,
+          "force_z_n": 1.5863860799477154,
+          "yaw_moment_nm": 0.6007450796264843
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 3.626011976278823,
+          "wheel0_sideways_gain": 1.5747218155707008,
+          "wheel1_forward_gain": 0.9424819558942493,
+          "wheel1_sideways_gain": 1.006463239818057,
+          "wheel2_forward_gain": -0.647049042243369,
+          "wheel2_sideways_gain": 0.7760079039686816,
+          "wheel3_forward_gain": 2.436162457802645,
+          "wheel3_sideways_gain": 1.9233293144631807
+        },
+        "design_singular_values": [
+          1588.7174138273658,
+          841.4410943666419,
+          517.2418926660264,
+          295.8764027531392,
+          251.72765394417812,
+          87.25998121729,
+          56.50158014506526,
+          20.867401298338702
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.6415619526591618,
+        "wrench_mae": {
+          "force_x_n": 0.5916612552614369,
+          "force_z_n": 0.22052875769743083,
+          "yaw_moment_nm": 0.29075012726300803
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.7809182005980035,
+          "force_z_n": 0.6920521030189479,
+          "yaw_moment_nm": 0.38214639600726047
+        }
+      },
+      "forward_force_sign": 1.0,
+      "load_mode": "wheel_hit_force",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": -1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    },
+    "wheel_hit_force_side_sign_-1_forward_sign_-1": {
+      "direct_unit_gain": {
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 6.353523768906909,
+          "force_z_n": 20.33566308862236,
+          "yaw_moment_nm": 0.7705681339316052
+        },
+        "wrench_rmse": {
+          "force_x_n": 7.068441563933475,
+          "force_z_n": 21.8777308278635,
+          "yaw_moment_nm": 0.937235087428337
+        }
+      },
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 31968,
+        "wrench_mae": {
+          "force_x_n": 1.042420043130964,
+          "force_z_n": 0.6586246538376667,
+          "yaw_moment_nm": 0.49935106774481797
+        },
+        "wrench_rmse": {
+          "force_x_n": 1.8874000978003331,
+          "force_z_n": 1.5863860799477154,
+          "yaw_moment_nm": 0.6007450796264843
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": -3.626011976278823,
+          "wheel0_sideways_gain": 1.5747218155707008,
+          "wheel1_forward_gain": -0.9424819558942493,
+          "wheel1_sideways_gain": 1.006463239818057,
+          "wheel2_forward_gain": 0.647049042243369,
+          "wheel2_sideways_gain": 0.7760079039686816,
+          "wheel3_forward_gain": -2.436162457802645,
+          "wheel3_sideways_gain": 1.9233293144631807
+        },
+        "design_singular_values": [
+          1588.7174138273658,
+          841.4410943666419,
+          517.2418926660264,
+          295.8764027531392,
+          251.72765394417812,
+          87.25998121729,
+          56.50158014506526,
+          20.867401298338702
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 31968,
+        "stacked_rmse": 0.6415619526591618,
+        "wrench_mae": {
+          "force_x_n": 0.5916612552614369,
+          "force_z_n": 0.22052875769743083,
+          "yaw_moment_nm": 0.29075012726300803
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.7809182005980035,
+          "force_z_n": 0.6920521030189479,
+          "yaw_moment_nm": 0.38214639600726047
+        }
+      },
+      "forward_force_sign": -1.0,
+      "load_mode": "wheel_hit_force",
+      "selection": {
+        "holdout_rows": 31968,
+        "speed_mps": [
+          1.000610926702957,
+          15.32487461243896
+        ],
+        "steering_abs_rad": [
+          0.0,
+          0.167551592
+        ],
+        "train_rows": 31968,
+        "usable_rows": 63936
+      },
+      "sideways_force_sign": -1.0,
+      "static_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ]
+    }
+  },
+  "models_by_selection": {
+    "all": {
+      "static_sprung_load_side_sign_+1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 34.730051174191985,
+            "force_z_n": 1.3315530093564476,
+            "yaw_moment_nm": 0.1944434317602775
+          },
+          "wrench_rmse": {
+            "force_x_n": 38.663732750643746,
+            "force_z_n": 1.5755166043203803,
+            "yaw_moment_nm": 0.2505185869489011
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 2.4606436052185727,
+            "force_z_n": 0.41880794876848376,
+            "yaw_moment_nm": 0.1762396230746912
+          },
+          "wrench_rmse": {
+            "force_x_n": 3.890807639124511,
+            "force_z_n": 0.7599255939702252,
+            "yaw_moment_nm": 0.28400811417101973
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 3.401268662626549,
+            "wheel0_sideways_gain": -3.4236849532237312,
+            "wheel1_forward_gain": 3.1392804241179824,
+            "wheel1_sideways_gain": 1.1032985146827652,
+            "wheel2_forward_gain": -0.6679444285215764,
+            "wheel2_sideways_gain": -21.0672109721792,
+            "wheel3_forward_gain": -0.3434724996405814,
+            "wheel3_sideways_gain": 18.57745422790324
+          },
+          "design_singular_values": [
+            1497.689441087378,
+            876.6583395156476,
+            256.5592398060675,
+            129.59758410738328,
+            44.9012527429193,
+            17.798712094923232,
+            9.870654442050435,
+            4.429434553014421
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.5475914591922599,
+          "wrench_mae": {
+            "force_x_n": 0.3653562852845236,
+            "force_z_n": 0.42400789303056374,
+            "yaw_moment_nm": 0.27957415576089195
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.5401807871734008,
+            "force_z_n": 0.6741157038157817,
+            "yaw_moment_nm": 0.3915890110544524
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "static_sprung_load_side_sign_+1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 35.79338334016275,
+            "force_z_n": 19.432033180282037,
+            "yaw_moment_nm": 0.09565129437501053
+          },
+          "wrench_rmse": {
+            "force_x_n": 39.73063056090118,
+            "force_z_n": 20.717068252773224,
+            "yaw_moment_nm": 0.12569365569699248
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 2.4606436052185727,
+            "force_z_n": 0.41880794876848376,
+            "yaw_moment_nm": 0.1762396230746912
+          },
+          "wrench_rmse": {
+            "force_x_n": 3.890807639124511,
+            "force_z_n": 0.7599255939702252,
+            "yaw_moment_nm": 0.28400811417101973
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -3.401268662626549,
+            "wheel0_sideways_gain": -3.4236849532237312,
+            "wheel1_forward_gain": -3.1392804241179824,
+            "wheel1_sideways_gain": 1.1032985146827652,
+            "wheel2_forward_gain": 0.6679444285215764,
+            "wheel2_sideways_gain": -21.0672109721792,
+            "wheel3_forward_gain": 0.3434724996405814,
+            "wheel3_sideways_gain": 18.57745422790324
+          },
+          "design_singular_values": [
+            1497.689441087378,
+            876.6583395156476,
+            256.5592398060675,
+            129.59758410738328,
+            44.9012527429193,
+            17.798712094923232,
+            9.870654442050435,
+            4.429434553014421
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.5475914591922599,
+          "wrench_mae": {
+            "force_x_n": 0.3653562852845236,
+            "force_z_n": 0.42400789303056374,
+            "yaw_moment_nm": 0.27957415576089195
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.5401807871734008,
+            "force_z_n": 0.6741157038157817,
+            "yaw_moment_nm": 0.3915890110544524
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "static_sprung_load_side_sign_-1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 5.2095515559254135,
+            "force_z_n": 2.939904069478817,
+            "yaw_moment_nm": 0.0935675338310915
+          },
+          "wrench_rmse": {
+            "force_x_n": 5.910908979134731,
+            "force_z_n": 3.274843077250049,
+            "yaw_moment_nm": 0.12386050675032806
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 2.4606436052185727,
+            "force_z_n": 0.41880794876848376,
+            "yaw_moment_nm": 0.1762396230746912
+          },
+          "wrench_rmse": {
+            "force_x_n": 3.890807639124511,
+            "force_z_n": 0.7599255939702252,
+            "yaw_moment_nm": 0.28400811417101973
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 3.401268662626549,
+            "wheel0_sideways_gain": 3.4236849532237312,
+            "wheel1_forward_gain": 3.1392804241179824,
+            "wheel1_sideways_gain": -1.1032985146827652,
+            "wheel2_forward_gain": -0.6679444285215764,
+            "wheel2_sideways_gain": 21.0672109721792,
+            "wheel3_forward_gain": -0.3434724996405814,
+            "wheel3_sideways_gain": -18.57745422790324
+          },
+          "design_singular_values": [
+            1497.689441087378,
+            876.6583395156476,
+            256.5592398060675,
+            129.59758410738328,
+            44.9012527429193,
+            17.798712094923232,
+            9.870654442050435,
+            4.429434553014421
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.5475914591922599,
+          "wrench_mae": {
+            "force_x_n": 0.3653562852845236,
+            "force_z_n": 0.42400789303056374,
+            "yaw_moment_nm": 0.27957415576089195
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.5401807871734008,
+            "force_z_n": 0.6741157038157817,
+            "yaw_moment_nm": 0.3915890110544524
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "static_sprung_load_side_sign_-1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 6.272683741852223,
+            "force_z_n": 21.062526203493295,
+            "yaw_moment_nm": 0.1886060119785012
+          },
+          "wrench_rmse": {
+            "force_x_n": 6.968044758349065,
+            "force_z_n": 22.550060501751638,
+            "yaw_moment_nm": 0.24333530889021415
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 2.4606436052185727,
+            "force_z_n": 0.41880794876848376,
+            "yaw_moment_nm": 0.1762396230746912
+          },
+          "wrench_rmse": {
+            "force_x_n": 3.890807639124511,
+            "force_z_n": 0.7599255939702252,
+            "yaw_moment_nm": 0.28400811417101973
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -3.401268662626549,
+            "wheel0_sideways_gain": 3.4236849532237312,
+            "wheel1_forward_gain": -3.1392804241179824,
+            "wheel1_sideways_gain": -1.1032985146827652,
+            "wheel2_forward_gain": 0.6679444285215764,
+            "wheel2_sideways_gain": 21.0672109721792,
+            "wheel3_forward_gain": 0.3434724996405814,
+            "wheel3_sideways_gain": -18.57745422790324
+          },
+          "design_singular_values": [
+            1497.689441087378,
+            876.6583395156476,
+            256.5592398060675,
+            129.59758410738328,
+            44.9012527429193,
+            17.798712094923232,
+            9.870654442050435,
+            4.429434553014421
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.5475914591922599,
+          "wrench_mae": {
+            "force_x_n": 0.3653562852845236,
+            "force_z_n": 0.42400789303056374,
+            "yaw_moment_nm": 0.27957415576089195
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.5401807871734008,
+            "force_z_n": 0.6741157038157817,
+            "yaw_moment_nm": 0.3915890110544524
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_+1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 34.64896552923375,
+            "force_z_n": 2.0477919427951434,
+            "yaw_moment_nm": 0.7642240995401248
+          },
+          "wrench_rmse": {
+            "force_x_n": 38.55446986290481,
+            "force_z_n": 2.197826547066733,
+            "yaw_moment_nm": 0.934562063806185
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 1.042420043130964,
+            "force_z_n": 0.6586246538376667,
+            "yaw_moment_nm": 0.49935106774481797
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.8874000978003331,
+            "force_z_n": 1.5863860799477154,
+            "yaw_moment_nm": 0.6007450796264843
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 3.626011976278823,
+            "wheel0_sideways_gain": -1.5747218155707008,
+            "wheel1_forward_gain": 0.9424819558942493,
+            "wheel1_sideways_gain": -1.006463239818057,
+            "wheel2_forward_gain": -0.647049042243369,
+            "wheel2_sideways_gain": -0.7760079039686816,
+            "wheel3_forward_gain": 2.436162457802645,
+            "wheel3_sideways_gain": -1.9233293144631807
+          },
+          "design_singular_values": [
+            1588.7174138273658,
+            841.4410943666419,
+            517.2418926660264,
+            295.8764027531392,
+            251.72765394417812,
+            87.25998121729,
+            56.50158014506526,
+            20.867401298338702
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.6415619526591618,
+          "wrench_mae": {
+            "force_x_n": 0.5916612552614369,
+            "force_z_n": 0.22052875769743083,
+            "yaw_moment_nm": 0.29075012726300803
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.7809182005980035,
+            "force_z_n": 0.6920521030189479,
+            "yaw_moment_nm": 0.38214639600726047
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_+1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 35.43877708154369,
+            "force_z_n": 19.033753922334732,
+            "yaw_moment_nm": 0.09124538863852817
+          },
+          "wrench_rmse": {
+            "force_x_n": 39.346301408507074,
+            "force_z_n": 20.440781656848102,
+            "yaw_moment_nm": 0.14414508530664097
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 1.042420043130964,
+            "force_z_n": 0.6586246538376667,
+            "yaw_moment_nm": 0.49935106774481797
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.8874000978003331,
+            "force_z_n": 1.5863860799477154,
+            "yaw_moment_nm": 0.6007450796264843
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -3.626011976278823,
+            "wheel0_sideways_gain": -1.5747218155707008,
+            "wheel1_forward_gain": -0.9424819558942493,
+            "wheel1_sideways_gain": -1.006463239818057,
+            "wheel2_forward_gain": 0.647049042243369,
+            "wheel2_sideways_gain": -0.7760079039686816,
+            "wheel3_forward_gain": -2.436162457802645,
+            "wheel3_sideways_gain": -1.9233293144631807
+          },
+          "design_singular_values": [
+            1588.7174138273658,
+            841.4410943666419,
+            517.2418926660264,
+            295.8764027531392,
+            251.72765394417812,
+            87.25998121729,
+            56.50158014506526,
+            20.867401298338702
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.6415619526591618,
+          "wrench_mae": {
+            "force_x_n": 0.5916612552614369,
+            "force_z_n": 0.22052875769743083,
+            "yaw_moment_nm": 0.29075012726300803
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.7809182005980035,
+            "force_z_n": 0.6920521030189479,
+            "yaw_moment_nm": 0.38214639600726047
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_-1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 5.563836304903294,
+            "force_z_n": 3.3338352638738717,
+            "yaw_moment_nm": 0.09036026823982818
+          },
+          "wrench_rmse": {
+            "force_x_n": 6.28794507998249,
+            "force_z_n": 3.5754900735305752,
+            "yaw_moment_nm": 0.14099710807281662
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 1.042420043130964,
+            "force_z_n": 0.6586246538376667,
+            "yaw_moment_nm": 0.49935106774481797
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.8874000978003331,
+            "force_z_n": 1.5863860799477154,
+            "yaw_moment_nm": 0.6007450796264843
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 3.626011976278823,
+            "wheel0_sideways_gain": 1.5747218155707008,
+            "wheel1_forward_gain": 0.9424819558942493,
+            "wheel1_sideways_gain": 1.006463239818057,
+            "wheel2_forward_gain": -0.647049042243369,
+            "wheel2_sideways_gain": 0.7760079039686816,
+            "wheel3_forward_gain": 2.436162457802645,
+            "wheel3_sideways_gain": 1.9233293144631807
+          },
+          "design_singular_values": [
+            1588.7174138273658,
+            841.4410943666419,
+            517.2418926660264,
+            295.8764027531392,
+            251.72765394417812,
+            87.25998121729,
+            56.50158014506526,
+            20.867401298338702
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.6415619526591618,
+          "wrench_mae": {
+            "force_x_n": 0.5916612552614369,
+            "force_z_n": 0.22052875769743083,
+            "yaw_moment_nm": 0.29075012726300803
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.7809182005980035,
+            "force_z_n": 0.6920521030189479,
+            "yaw_moment_nm": 0.38214639600726047
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_-1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 6.353523768906909,
+            "force_z_n": 20.33566308862236,
+            "yaw_moment_nm": 0.7705681339316052
+          },
+          "wrench_rmse": {
+            "force_x_n": 7.068441563933475,
+            "force_z_n": 21.8777308278635,
+            "yaw_moment_nm": 0.937235087428337
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 31968,
+          "wrench_mae": {
+            "force_x_n": 1.042420043130964,
+            "force_z_n": 0.6586246538376667,
+            "yaw_moment_nm": 0.49935106774481797
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.8874000978003331,
+            "force_z_n": 1.5863860799477154,
+            "yaw_moment_nm": 0.6007450796264843
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -3.626011976278823,
+            "wheel0_sideways_gain": 1.5747218155707008,
+            "wheel1_forward_gain": -0.9424819558942493,
+            "wheel1_sideways_gain": 1.006463239818057,
+            "wheel2_forward_gain": 0.647049042243369,
+            "wheel2_sideways_gain": 0.7760079039686816,
+            "wheel3_forward_gain": -2.436162457802645,
+            "wheel3_sideways_gain": 1.9233293144631807
+          },
+          "design_singular_values": [
+            1588.7174138273658,
+            841.4410943666419,
+            517.2418926660264,
+            295.8764027531392,
+            251.72765394417812,
+            87.25998121729,
+            56.50158014506526,
+            20.867401298338702
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 31968,
+          "stacked_rmse": 0.6415619526591618,
+          "wrench_mae": {
+            "force_x_n": 0.5916612552614369,
+            "force_z_n": 0.22052875769743083,
+            "yaw_moment_nm": 0.29075012726300803
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.7809182005980035,
+            "force_z_n": 0.6920521030189479,
+            "yaw_moment_nm": 0.38214639600726047
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 31968,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 31968,
+          "usable_rows": 63936
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      }
+    },
+    "no_chassis_contact": {
+      "static_sprung_load_side_sign_+1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 31.296471879922844,
+            "force_z_n": 1.5425443180612004,
+            "yaw_moment_nm": 0.16500344083483215
+          },
+          "wrench_rmse": {
+            "force_x_n": 35.40476014131658,
+            "force_z_n": 1.7117770362553386,
+            "yaw_moment_nm": 0.22869532216857402
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 1.001270932450543,
+            "force_z_n": 0.3572623592966709,
+            "yaw_moment_nm": 0.18575682305488603
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.477157751789927,
+            "force_z_n": 0.7303304241091079,
+            "yaw_moment_nm": 0.2171007675676534
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 2.16691758289925,
+            "wheel0_sideways_gain": -1.6621089570721048,
+            "wheel1_forward_gain": 4.344791730395087,
+            "wheel1_sideways_gain": -0.6246926029343761,
+            "wheel2_forward_gain": 0.636430471134936,
+            "wheel2_sideways_gain": -16.89050512875512,
+            "wheel3_forward_gain": -1.6139171093121876,
+            "wheel3_sideways_gain": 14.354578695898109
+          },
+          "design_singular_values": [
+            1301.4106637941711,
+            836.7024498394375,
+            223.62838451825723,
+            108.82168798368166,
+            38.58028739341007,
+            12.649789171891552,
+            8.253214290176153,
+            3.16044882767829
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.47338852599400677,
+          "wrench_mae": {
+            "force_x_n": 0.231750888922824,
+            "force_z_n": 0.28879259672928154,
+            "yaw_moment_nm": 0.14512561834889695
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.46407213308588957,
+            "force_z_n": 0.6454011202592306,
+            "yaw_moment_nm": 0.20095904779227539
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "static_sprung_load_side_sign_+1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 32.52620024752284,
+            "force_z_n": 20.543980671187228,
+            "yaw_moment_nm": 0.07950923388916299
+          },
+          "wrench_rmse": {
+            "force_x_n": 36.72590773605788,
+            "force_z_n": 21.82522482946911,
+            "yaw_moment_nm": 0.10724769568105437
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 1.001270932450543,
+            "force_z_n": 0.3572623592966709,
+            "yaw_moment_nm": 0.18575682305488603
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.477157751789927,
+            "force_z_n": 0.7303304241091079,
+            "yaw_moment_nm": 0.2171007675676534
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -2.16691758289925,
+            "wheel0_sideways_gain": -1.6621089570721048,
+            "wheel1_forward_gain": -4.344791730395087,
+            "wheel1_sideways_gain": -0.6246926029343761,
+            "wheel2_forward_gain": -0.636430471134936,
+            "wheel2_sideways_gain": -16.89050512875512,
+            "wheel3_forward_gain": 1.6139171093121876,
+            "wheel3_sideways_gain": 14.354578695898109
+          },
+          "design_singular_values": [
+            1301.4106637941711,
+            836.7024498394375,
+            223.62838451825723,
+            108.82168798368166,
+            38.58028739341007,
+            12.649789171891552,
+            8.253214290176153,
+            3.16044882767829
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.47338852599400677,
+          "wrench_mae": {
+            "force_x_n": 0.231750888922824,
+            "force_z_n": 0.28879259672928154,
+            "yaw_moment_nm": 0.14512561834889695
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.46407213308588957,
+            "force_z_n": 0.6454011202592306,
+            "yaw_moment_nm": 0.20095904779227539
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "static_sprung_load_side_sign_-1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 4.377870517722437,
+            "force_z_n": 3.330832191857439,
+            "yaw_moment_nm": 0.07346912791317893
+          },
+          "wrench_rmse": {
+            "force_x_n": 4.936308169936699,
+            "force_z_n": 3.5636842212653064,
+            "yaw_moment_nm": 0.10197883505374532
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 1.001270932450543,
+            "force_z_n": 0.3572623592966709,
+            "yaw_moment_nm": 0.18575682305488603
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.477157751789927,
+            "force_z_n": 0.7303304241091079,
+            "yaw_moment_nm": 0.2171007675676534
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 2.16691758289925,
+            "wheel0_sideways_gain": 1.6621089570721048,
+            "wheel1_forward_gain": 4.344791730395087,
+            "wheel1_sideways_gain": 0.6246926029343761,
+            "wheel2_forward_gain": 0.636430471134936,
+            "wheel2_sideways_gain": 16.89050512875512,
+            "wheel3_forward_gain": -1.6139171093121876,
+            "wheel3_sideways_gain": -14.354578695898109
+          },
+          "design_singular_values": [
+            1301.4106637941711,
+            836.7024498394375,
+            223.62838451825723,
+            108.82168798368166,
+            38.58028739341007,
+            12.649789171891552,
+            8.253214290176153,
+            3.16044882767829
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.47338852599400677,
+          "wrench_mae": {
+            "force_x_n": 0.231750888922824,
+            "force_z_n": 0.28879259672928154,
+            "yaw_moment_nm": 0.14512561834889695
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.46407213308588957,
+            "force_z_n": 0.6454011202592306,
+            "yaw_moment_nm": 0.20095904779227539
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "static_sprung_load_side_sign_-1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 5.6075979692389035,
+            "force_z_n": 22.355045534555146,
+            "yaw_moment_nm": 0.16097118713142408
+          },
+          "wrench_rmse": {
+            "force_x_n": 6.30611927017468,
+            "force_z_n": 23.820146043265403,
+            "yaw_moment_nm": 0.22142132077849083
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 1.001270932450543,
+            "force_z_n": 0.3572623592966709,
+            "yaw_moment_nm": 0.18575682305488603
+          },
+          "wrench_rmse": {
+            "force_x_n": 1.477157751789927,
+            "force_z_n": 0.7303304241091079,
+            "yaw_moment_nm": 0.2171007675676534
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -2.16691758289925,
+            "wheel0_sideways_gain": 1.6621089570721048,
+            "wheel1_forward_gain": -4.344791730395087,
+            "wheel1_sideways_gain": 0.6246926029343761,
+            "wheel2_forward_gain": -0.636430471134936,
+            "wheel2_sideways_gain": 16.89050512875512,
+            "wheel3_forward_gain": 1.6139171093121876,
+            "wheel3_sideways_gain": -14.354578695898109
+          },
+          "design_singular_values": [
+            1301.4106637941711,
+            836.7024498394375,
+            223.62838451825723,
+            108.82168798368166,
+            38.58028739341007,
+            12.649789171891552,
+            8.253214290176153,
+            3.16044882767829
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.47338852599400677,
+          "wrench_mae": {
+            "force_x_n": 0.231750888922824,
+            "force_z_n": 0.28879259672928154,
+            "yaw_moment_nm": 0.14512561834889695
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.46407213308588957,
+            "force_z_n": 0.6454011202592306,
+            "yaw_moment_nm": 0.20095904779227539
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "static_sprung_load",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_+1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 31.268533214385222,
+            "force_z_n": 2.1024873711732193,
+            "yaw_moment_nm": 0.816641511660028
+          },
+          "wrench_rmse": {
+            "force_x_n": 35.36317972233524,
+            "force_z_n": 2.2680248932066194,
+            "yaw_moment_nm": 0.996981971988846
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 0.31046573066274713,
+            "force_z_n": 0.565307786941682,
+            "yaw_moment_nm": 0.12025667441886327
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.6219653779499001,
+            "force_z_n": 1.2295582489240195,
+            "yaw_moment_nm": 0.16266133049778084
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 2.372355386204313,
+            "wheel0_sideways_gain": -1.1793655714087623,
+            "wheel1_forward_gain": 2.531807271894635,
+            "wheel1_sideways_gain": -1.1708941773759511,
+            "wheel2_forward_gain": 0.8636033907979549,
+            "wheel2_sideways_gain": -1.366866327607728,
+            "wheel3_forward_gain": 0.6657629881893075,
+            "wheel3_sideways_gain": -1.465806423846823
+          },
+          "design_singular_values": [
+            1352.7037086673947,
+            812.523526138384,
+            480.37352425770916,
+            283.41810573861864,
+            222.1875367721888,
+            78.89191755824238,
+            54.85825201609989,
+            16.667120420941313
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.46331666895660867,
+          "wrench_mae": {
+            "force_x_n": 0.1792758450997162,
+            "force_z_n": 0.19618641630289457,
+            "yaw_moment_nm": 0.050463750988123564
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.4798664445020361,
+            "force_z_n": 0.6377462199445438,
+            "yaw_moment_nm": 0.08363588695388456
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_+1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 32.186243064903344,
+            "force_z_n": 20.352464120778194,
+            "yaw_moment_nm": 0.1073093351876365
+          },
+          "wrench_rmse": {
+            "force_x_n": 36.349069858012975,
+            "force_z_n": 21.68707029743856,
+            "yaw_moment_nm": 0.15356610902481324
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 0.31046573066274713,
+            "force_z_n": 0.565307786941682,
+            "yaw_moment_nm": 0.12025667441886327
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.6219653779499001,
+            "force_z_n": 1.2295582489240195,
+            "yaw_moment_nm": 0.16266133049778084
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -2.372355386204313,
+            "wheel0_sideways_gain": -1.1793655714087623,
+            "wheel1_forward_gain": -2.531807271894635,
+            "wheel1_sideways_gain": -1.1708941773759511,
+            "wheel2_forward_gain": -0.8636033907979549,
+            "wheel2_sideways_gain": -1.366866327607728,
+            "wheel3_forward_gain": -0.6657629881893075,
+            "wheel3_sideways_gain": -1.465806423846823
+          },
+          "design_singular_values": [
+            1352.7037086673947,
+            812.523526138384,
+            480.37352425770916,
+            283.41810573861864,
+            222.1875367721888,
+            78.89191755824238,
+            54.85825201609989,
+            16.667120420941313
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.46331666895660867,
+          "wrench_mae": {
+            "force_x_n": 0.1792758450997162,
+            "force_z_n": 0.19618641630289457,
+            "yaw_moment_nm": 0.050463750988123564
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.4798664445020361,
+            "force_z_n": 0.6377462199445438,
+            "yaw_moment_nm": 0.08363588695388456
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": 1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_-1_forward_sign_+1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 4.7178287936510275,
+            "force_z_n": 3.520439990977296,
+            "yaw_moment_nm": 0.1022113638357819
+          },
+          "wrench_rmse": {
+            "force_x_n": 5.3143274242982494,
+            "force_z_n": 3.7666593867128837,
+            "yaw_moment_nm": 0.14980858435962066
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 0.31046573066274713,
+            "force_z_n": 0.565307786941682,
+            "yaw_moment_nm": 0.12025667441886327
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.6219653779499001,
+            "force_z_n": 1.2295582489240195,
+            "yaw_moment_nm": 0.16266133049778084
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": 2.372355386204313,
+            "wheel0_sideways_gain": 1.1793655714087623,
+            "wheel1_forward_gain": 2.531807271894635,
+            "wheel1_sideways_gain": 1.1708941773759511,
+            "wheel2_forward_gain": 0.8636033907979549,
+            "wheel2_sideways_gain": 1.366866327607728,
+            "wheel3_forward_gain": 0.6657629881893075,
+            "wheel3_sideways_gain": 1.465806423846823
+          },
+          "design_singular_values": [
+            1352.7037086673947,
+            812.523526138384,
+            480.37352425770916,
+            283.41810573861864,
+            222.1875367721888,
+            78.89191755824238,
+            54.85825201609989,
+            16.667120420941313
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.46331666895660867,
+          "wrench_mae": {
+            "force_x_n": 0.1792758450997162,
+            "force_z_n": 0.19618641630289457,
+            "yaw_moment_nm": 0.050463750988123564
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.4798664445020361,
+            "force_z_n": 0.6377462199445438,
+            "yaw_moment_nm": 0.08363588695388456
+          }
+        },
+        "forward_force_sign": 1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      },
+      "wheel_hit_force_side_sign_-1_forward_sign_-1": {
+        "direct_unit_gain": {
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 5.635537708378498,
+            "force_z_n": 21.78781400054119,
+            "yaw_moment_nm": 0.8217394909447583
+          },
+          "wrench_rmse": {
+            "force_x_n": 6.332922075011422,
+            "force_z_n": 23.24047922342438,
+            "yaw_moment_nm": 0.9992934635143071
+          }
+        },
+        "fit_holdout": {
+          "identified_from_training": true,
+          "samples": 26853,
+          "wrench_mae": {
+            "force_x_n": 0.31046573066274713,
+            "force_z_n": 0.565307786941682,
+            "yaw_moment_nm": 0.12025667441886327
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.6219653779499001,
+            "force_z_n": 1.2295582489240195,
+            "yaw_moment_nm": 0.16266133049778084
+          }
+        },
+        "fit_train": {
+          "coefficients": {
+            "wheel0_forward_gain": -2.372355386204313,
+            "wheel0_sideways_gain": 1.1793655714087623,
+            "wheel1_forward_gain": -2.531807271894635,
+            "wheel1_sideways_gain": 1.1708941773759511,
+            "wheel2_forward_gain": -0.8636033907979549,
+            "wheel2_sideways_gain": 1.366866327607728,
+            "wheel3_forward_gain": -0.6657629881893075,
+            "wheel3_sideways_gain": 1.465806423846823
+          },
+          "design_singular_values": [
+            1352.7037086673947,
+            812.523526138384,
+            480.37352425770916,
+            283.41810573861864,
+            222.1875367721888,
+            78.89191755824238,
+            54.85825201609989,
+            16.667120420941313
+          ],
+          "identified": true,
+          "rank": 8,
+          "samples": 26852,
+          "stacked_rmse": 0.46331666895660867,
+          "wrench_mae": {
+            "force_x_n": 0.1792758450997162,
+            "force_z_n": 0.19618641630289457,
+            "yaw_moment_nm": 0.050463750988123564
+          },
+          "wrench_rmse": {
+            "force_x_n": 0.4798664445020361,
+            "force_z_n": 0.6377462199445438,
+            "yaw_moment_nm": 0.08363588695388456
+          }
+        },
+        "forward_force_sign": -1.0,
+        "load_mode": "wheel_hit_force",
+        "selection": {
+          "holdout_rows": 26853,
+          "speed_mps": [
+            1.000610926702957,
+            15.32487461243896
+          ],
+          "steering_abs_rad": [
+            0.0,
+            0.167551592
+          ],
+          "train_rows": 26852,
+          "usable_rows": 53705
+        },
+        "sideways_force_sign": -1.0,
+        "static_loads_n": [
+          8.016682932972909,
+          8.005149884819986,
+          9.015308429002761,
+          9.003559033870697
+        ]
+      }
+    }
+  },
+  "production_mpc_modified": false,
+  "schema_version": 1,
+  "selection": {
+    "rows_all": 70028,
+    "rows_excluded_as_actuator_transient": 5823,
+    "rows_usable": 63936,
+    "rows_usable_without_chassis_contact": 53705,
+    "rows_with_chassis_contact": 10231,
+    "speed_mps": [
+      1.000610926702957,
+      15.32487461243896
+    ]
+  },
+  "simulator_modified": false,
+  "source": {
+    "derivative": "Savitzky-Golay order2 window101 over world velocity",
+    "drag_compensation": "explicit measured Rigidbody drag; audit only",
+    "duration_s": 70.027,
+    "rows": 70028,
+    "scene": "__AutoDRIVE_ModelIdentification_Temp",
+    "static_snapshot": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_combined_slip_collision_audit_v1_20260916/simulator_parameters.json",
+    "trace": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_combined_slip_collision_audit_v1_20260916/wheel_contact_trace.csv",
+    "trace_build_tag": "exact_open_collision_audit_v1_full_20260916",
+    "unity_version": "2022.3.52f1"
+  },
+  "speed_bins": {
+    "10_12mps": {
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 5993,
+        "wrench_mae": {
+          "force_x_n": 0.04331269972258646,
+          "force_z_n": 0.8757720550701414,
+          "yaw_moment_nm": 0.12856971063853667
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.07123461400144648,
+          "force_z_n": 1.9693853782796074,
+          "yaw_moment_nm": 0.20813510003350186
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 2.1277739640260465,
+          "wheel0_sideways_gain": 1.25446070720588,
+          "wheel1_forward_gain": 1.3538520210064635,
+          "wheel1_sideways_gain": 1.141958930462395,
+          "wheel2_forward_gain": 0.7818277287846095,
+          "wheel2_sideways_gain": 1.345714196258395,
+          "wheel3_forward_gain": 1.7583067630729765,
+          "wheel3_sideways_gain": 1.525560220854398
+        },
+        "design_singular_values": [
+          894.6728812952738,
+          330.9017878640661,
+          229.61967073325903,
+          147.81868806581892,
+          62.326219015431455,
+          36.718727042518495,
+          12.0905791763962,
+          2.5337705801075923
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 5993,
+        "stacked_rmse": 0.1636025442201321,
+        "wrench_mae": {
+          "force_x_n": 0.04714812328598084,
+          "force_z_n": 0.06985722538590608,
+          "yaw_moment_nm": 0.011783440426498233
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.1404726330701366,
+          "force_z_n": 0.24364352791456304,
+          "yaw_moment_nm": 0.034679216969089086
+        }
+      },
+      "selection": {
+        "holdout_rows": 5993,
+        "rows": 11986,
+        "train_rows": 5993
+      }
+    },
+    "12_16mps": {
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 15453,
+        "wrench_mae": {
+          "force_x_n": 0.14783281112637375,
+          "force_z_n": 0.490944916462904,
+          "yaw_moment_nm": 0.028053913962563053
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.5390315408301788,
+          "force_z_n": 1.6845837900124299,
+          "yaw_moment_nm": 0.05465053686682174
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 1.3806816935889863,
+          "wheel0_sideways_gain": 1.1872846244669688,
+          "wheel1_forward_gain": 2.0354008030054005,
+          "wheel1_sideways_gain": 1.3227078783552082,
+          "wheel2_forward_gain": 1.7149494518070805,
+          "wheel2_sideways_gain": 1.5226517713162286,
+          "wheel3_forward_gain": 0.9329160927753299,
+          "wheel3_sideways_gain": 1.2906818013518695
+        },
+        "design_singular_values": [
+          973.96701468557,
+          662.5673455540847,
+          367.87285506930004,
+          237.46997954266052,
+          153.3959303033406,
+          61.13866828806331,
+          20.576394187311685,
+          3.1509718864435703
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 15453,
+        "stacked_rmse": 0.0904166318263303,
+        "wrench_mae": {
+          "force_x_n": 0.028278004531053478,
+          "force_z_n": 0.058282890205561405,
+          "yaw_moment_nm": 0.017221606662958428
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.04346617901217086,
+          "force_z_n": 0.14893027922592922,
+          "yaw_moment_nm": 0.02135334035281484
+        }
+      },
+      "selection": {
+        "holdout_rows": 15453,
+        "rows": 30906,
+        "train_rows": 15453
+      }
+    },
+    "1_4mps": {
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 314,
+        "wrench_mae": {
+          "force_x_n": 0.0003391750420155458,
+          "force_z_n": 0.3711604670487144,
+          "yaw_moment_nm": 0.0012128156448402325
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.0004730181010604454,
+          "force_z_n": 1.036621213072524,
+          "yaw_moment_nm": 0.001658924994196217
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": -3.030136235238331,
+          "wheel0_sideways_gain": 892.8184608284372,
+          "wheel1_forward_gain": -2.966235345271408,
+          "wheel1_sideways_gain": -896.9090076266981,
+          "wheel2_forward_gain": 3.5537954381137107,
+          "wheel2_sideways_gain": -235.23643239239064,
+          "wheel3_forward_gain": 3.5195609104895533,
+          "wheel3_sideways_gain": 236.37267233491946
+        },
+        "design_singular_values": [
+          134.30873651193284,
+          15.78666351597651,
+          0.0803347961734073,
+          0.03274080758390139,
+          0.0070719930604752875,
+          0.0019011550609028718,
+          1.903006972300181e-06,
+          1.5321244020684105e-06
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 314,
+        "stacked_rmse": 0.008525143384254426,
+        "wrench_mae": {
+          "force_x_n": 9.870709716910447e-05,
+          "force_z_n": 0.011676730000665917,
+          "yaw_moment_nm": 0.0010099159220213815
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.00013231670435444619,
+          "force_z_n": 0.014706489737831806,
+          "yaw_moment_nm": 0.00131752079569484
+        }
+      },
+      "selection": {
+        "holdout_rows": 314,
+        "rows": 628,
+        "train_rows": 314
+      }
+    },
+    "4_6mps": {
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 1552,
+        "wrench_mae": {
+          "force_x_n": 0.07773296724333788,
+          "force_z_n": 0.31455550372328617,
+          "yaw_moment_nm": 0.013013891392398093
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.5743731083723881,
+          "force_z_n": 0.5504558388042198,
+          "yaw_moment_nm": 0.08109410380034297
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 2.0936157523490735,
+          "wheel0_sideways_gain": -179.88159009526314,
+          "wheel1_forward_gain": 2.144589693597614,
+          "wheel1_sideways_gain": 181.26004359689048,
+          "wheel2_forward_gain": 1.1066348450189085,
+          "wheel2_sideways_gain": 218.14354664977617,
+          "wheel3_forward_gain": 1.0819493719544067,
+          "wheel3_sideways_gain": -218.72776806673764
+        },
+        "design_singular_values": [
+          118.8366224812813,
+          15.255761470007029,
+          13.966952151237768,
+          1.7742234136754984,
+          0.02158227157552347,
+          0.007797013541362237,
+          6.352149779190685e-06,
+          4.834683571596035e-06
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 1552,
+        "stacked_rmse": 0.4011396751329069,
+        "wrench_mae": {
+          "force_x_n": 0.00034384620294148266,
+          "force_z_n": 0.4187193644593403,
+          "yaw_moment_nm": 0.0017606123253021404
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.0004496224782091607,
+          "force_z_n": 0.6947915170547634,
+          "yaw_moment_nm": 0.0019137830518626082
+        }
+      },
+      "selection": {
+        "holdout_rows": 1552,
+        "rows": 3104,
+        "train_rows": 1552
+      }
+    },
+    "6_8mps": {
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 2899,
+        "wrench_mae": {
+          "force_x_n": 0.13100950469755307,
+          "force_z_n": 0.05431695569565882,
+          "yaw_moment_nm": 0.046956700718504184
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.8018433672343196,
+          "force_z_n": 0.35081353576527596,
+          "yaw_moment_nm": 0.2629238945358284
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 0.584838418405486,
+          "wheel0_sideways_gain": 11.502809555436519,
+          "wheel1_forward_gain": 5.3257470860096285,
+          "wheel1_sideways_gain": 0.043496533109426805,
+          "wheel2_forward_gain": 1.965894684570034,
+          "wheel2_sideways_gain": -4.920773732412195,
+          "wheel3_forward_gain": -1.8325638546384642,
+          "wheel3_sideways_gain": 3.984026808634536
+        },
+        "design_singular_values": [
+          207.36422797058142,
+          169.92992020551398,
+          46.253105954678546,
+          27.035101009215992,
+          8.255692621679543,
+          4.905983148542535,
+          3.932258107358887,
+          0.8866718940351621
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 2899,
+        "stacked_rmse": 0.3633751528529739,
+        "wrench_mae": {
+          "force_x_n": 0.1051060135206138,
+          "force_z_n": 0.14013991975339007,
+          "yaw_moment_nm": 0.045883712046075276
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.37676330651078427,
+          "force_z_n": 0.4836857134789112,
+          "yaw_moment_nm": 0.14220424246914634
+        }
+      },
+      "selection": {
+        "holdout_rows": 2899,
+        "rows": 5798,
+        "train_rows": 2899
+      }
+    },
+    "8_10mps": {
+      "fit_holdout": {
+        "identified_from_training": true,
+        "samples": 5757,
+        "wrench_mae": {
+          "force_x_n": 0.3167957818554679,
+          "force_z_n": 0.6929841160882851,
+          "yaw_moment_nm": 0.09875204996188927
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.9286966823162227,
+          "force_z_n": 1.834094393227382,
+          "yaw_moment_nm": 0.23491002616095308
+        }
+      },
+      "fit_train": {
+        "coefficients": {
+          "wheel0_forward_gain": 1.60078892063073,
+          "wheel0_sideways_gain": 1.4867346662878034,
+          "wheel1_forward_gain": 1.3332759954721631,
+          "wheel1_sideways_gain": 1.4616890427226346,
+          "wheel2_forward_gain": 1.294389257825425,
+          "wheel2_sideways_gain": 1.440622783238342,
+          "wheel3_forward_gain": 1.6874608660483794,
+          "wheel3_sideways_gain": 1.4761642667848678
+        },
+        "design_singular_values": [
+          890.4273116878163,
+          249.50527719619336,
+          231.30845104066003,
+          145.567112558235,
+          43.38030881827018,
+          38.23497972048601,
+          5.933479071780757,
+          1.9693062224054538
+        ],
+        "identified": true,
+        "rank": 8,
+        "samples": 5757,
+        "stacked_rmse": 0.1153547414906232,
+        "wrench_mae": {
+          "force_x_n": 0.03708986381860411,
+          "force_z_n": 0.035945519830804344,
+          "yaw_moment_nm": 0.003942806209337875
+        },
+        "wrench_rmse": {
+          "force_x_n": 0.057327687604358364,
+          "force_z_n": 0.1912014676880148,
+          "yaw_moment_nm": 0.008699663268865026
+        }
+      },
+      "selection": {
+        "holdout_rows": 5757,
+        "rows": 11514,
+        "train_rows": 5757
+      }
+    }
+  },
+  "status": "offline_unity_lateral_wrench_identification",
+  "target_wrench": {
+    "components": [
+      "body_force_x_n",
+      "body_force_z_n",
+      "body_yaw_moment_y_nm"
+    ],
+    "reference": "rigid-body acceleration plus explicit drag compensation",
+    "wheel_contact_arm": "measured contact point relative to runtime COM"
+  }
+}

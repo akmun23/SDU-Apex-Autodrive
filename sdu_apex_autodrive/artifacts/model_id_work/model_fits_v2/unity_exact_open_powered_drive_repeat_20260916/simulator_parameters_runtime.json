@@ -1,0 +1,286 @@
+{
+    "schemaVersion": "autodrive.simulator_diagnostics.v2",
+    "diagnosticOnly": true,
+    "runtimeControlInput": false,
+    "simulatorPhysicsUnmodified": true,
+    "simulatorBuildTag": "unspecified",
+    "productName": "AutoDRIVE Simulator",
+    "applicationVersion": "0.3.0",
+    "unityVersion": "2022.3.52f1",
+    "platform": "LinuxPlayer",
+    "sceneName": "__AutoDRIVE_ModelIdentification_Temp",
+    "fixedDeltaTime": 0.0010000000474974514,
+    "maximumAllowedTimestep": 0.10000000149011612,
+    "timeScale": 1.0,
+    "gravity": {
+        "x": 0.0,
+        "y": -9.8100004196167,
+        "z": 0.0
+    },
+    "defaultSolverIterations": 6,
+    "defaultSolverVelocityIterations": 1,
+    "defaultContactOffset": 0.009999999776482582,
+    "defaultMaxDepenetrationVelocity": 10.0,
+    "defaultMaxAngularSpeed": 7.0,
+    "vSyncCount": 1,
+    "targetFrameRate": -1,
+    "experiment": "drive_excitation_v1",
+    "experimentInitialSpeedMps": 0.0,
+    "experimentThrottleNorm": 0.0,
+    "experimentWarmupSeconds": 0.5,
+    "experimentWarmupThrottleNorm": 0.6499999761581421,
+    "experimentMeasurementSeconds": 1.5,
+    "experimentDurationSeconds": 3.0,
+    "vehicle": {
+        "objectName": "Roboracer",
+        "rootLocalPosition": {
+            "x": -1.5550671815872193,
+            "y": 0.004337742924690247,
+            "z": 0.8011068105697632
+        },
+        "rootLocalRotation": {
+            "x": 0.00968820508569479,
+            "y": 0.7070339322090149,
+            "z": -0.009687040001153946,
+            "w": 0.7070469260215759
+        },
+        "wheelbaseM": 0.3240000009536743,
+        "trackWidthM": 0.23600001633167268,
+        "wheelRadiusControllerM": 0.032499998807907107,
+        "steeringLimitRad": 0.5235987901687622,
+        "steeringRateRadPerSecond": 3.199991226196289,
+        "motorTorqueNm": 428.0,
+        "driveType": "CAWD",
+        "steerType": "FrontWheelSteer",
+        "rigidBody": {
+            "mass": 3.4700000286102297,
+            "centerOfMass": {
+                "x": -0.00007999999797903001,
+                "y": 0.0643400028347969,
+                "z": -0.004679999779909849
+            },
+            "worldCenterOfMass": {
+                "x": -1.5579826831817628,
+                "y": 0.06878190487623215,
+                "z": 0.8011868596076965
+            },
+            "inertiaTensor": {
+                "x": 0.09346762299537659,
+                "y": 0.10020306706428528,
+                "z": 0.022745909169316293
+            },
+            "inertiaTensorRotation": {
+                "x": 0.12147776037454605,
+                "y": -0.004704057704657316,
+                "z": 0.01704852469265461,
+                "w": 0.9924365878105164
+            },
+            "bodyInertiaX": 0.09347394853830338,
+            "bodyInertiaY": 0.09568668901920319,
+            "bodyInertiaZ": 0.027255963534116746,
+            "yawAxis": "body_y",
+            "yawInertiaBodyFrame": 0.09568668901920319,
+            "drag": 0.27300000190734866,
+            "angularDrag": 0.10000000149011612,
+            "maxAngularVelocity": 7.0
+        },
+        "wheels": [
+            {
+                "name": "Front Left Wheel Collider",
+                "positionVehicleFrame": {
+                    "x": -0.11800004541873932,
+                    "y": 0.06000000238418579,
+                    "z": 0.17000004649162293
+                },
+                "localPosition": {
+                    "x": -0.11800000071525574,
+                    "y": 0.05999999865889549,
+                    "z": 0.17000000178813935
+                },
+                "localRotation": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": -0.04361940547823906,
+                    "w": 0.9990482926368713
+                },
+                "colliderCenter": {
+                    "x": 0.0,
+                    "y": 0.02500000037252903,
+                    "z": 0.0
+                },
+                "radius": 0.05900000035762787,
+                "mass": 0.10899999737739563,
+                "sprungMass": 0.8171946406364441,
+                "suspensionDistance": 0.05000000074505806,
+                "wheelDampingRate": 0.25,
+                "forceAppPointDistance": 0.0,
+                "suspensionSpring": {
+                    "spring": 500.0,
+                    "damper": 100.0,
+                    "targetPosition": 0.5
+                },
+                "forwardFriction": {
+                    "extremumSlip": 0.15000000596046449,
+                    "extremumValue": 0.8999999761581421,
+                    "asymptoteSlip": 0.25,
+                    "asymptoteValue": 0.5799999833106995,
+                    "stiffness": 0.800000011920929
+                },
+                "sidewaysFriction": {
+                    "extremumSlip": 0.009999999776482582,
+                    "extremumValue": 1.0,
+                    "asymptoteSlip": 0.10000000149011612,
+                    "asymptoteValue": 0.5,
+                    "stiffness": 1.0
+                }
+            },
+            {
+                "name": "Front Right Wheel Collider",
+                "positionVehicleFrame": {
+                    "x": 0.11800004541873932,
+                    "y": 0.059999994933605197,
+                    "z": 0.16999998688697816
+                },
+                "localPosition": {
+                    "x": 0.11800000071525574,
+                    "y": 0.05999999865889549,
+                    "z": 0.17000000178813935
+                },
+                "localRotation": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.04361940547823906,
+                    "w": 0.9990482926368713
+                },
+                "colliderCenter": {
+                    "x": 0.0,
+                    "y": 0.02500000037252903,
+                    "z": 0.0
+                },
+                "radius": 0.05900000035762787,
+                "mass": 0.10899999737739563,
+                "sprungMass": 0.8160186409950256,
+                "suspensionDistance": 0.05000000074505806,
+                "wheelDampingRate": 0.25,
+                "forceAppPointDistance": 0.0,
+                "suspensionSpring": {
+                    "spring": 500.0,
+                    "damper": 100.0,
+                    "targetPosition": 0.5
+                },
+                "forwardFriction": {
+                    "extremumSlip": 0.15000000596046449,
+                    "extremumValue": 0.8999999761581421,
+                    "asymptoteSlip": 0.25,
+                    "asymptoteValue": 0.5799999833106995,
+                    "stiffness": 0.800000011920929
+                },
+                "sidewaysFriction": {
+                    "extremumSlip": 0.009999999776482582,
+                    "extremumValue": 1.0,
+                    "asymptoteSlip": 0.10000000149011612,
+                    "asymptoteValue": 0.5,
+                    "stiffness": 1.0
+                }
+            },
+            {
+                "name": "Rear Left Wheel Collider",
+                "positionVehicleFrame": {
+                    "x": -0.11800001561641693,
+                    "y": 0.05000000447034836,
+                    "z": -0.1600000113248825
+                },
+                "localPosition": {
+                    "x": -0.11800000071525574,
+                    "y": 0.05000000074505806,
+                    "z": -0.1599999964237213
+                },
+                "localRotation": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "w": 1.0
+                },
+                "colliderCenter": {
+                    "x": 0.0,
+                    "y": 0.02500000037252903,
+                    "z": 0.0
+                },
+                "radius": 0.05900000035762787,
+                "mass": 0.10899999737739563,
+                "sprungMass": 0.9189924001693726,
+                "suspensionDistance": 0.05000000074505806,
+                "wheelDampingRate": 0.25,
+                "forceAppPointDistance": 0.0,
+                "suspensionSpring": {
+                    "spring": 500.0,
+                    "damper": 100.0,
+                    "targetPosition": 0.5
+                },
+                "forwardFriction": {
+                    "extremumSlip": 0.15000000596046449,
+                    "extremumValue": 0.8999999761581421,
+                    "asymptoteSlip": 0.25,
+                    "asymptoteValue": 0.5799999833106995,
+                    "stiffness": 0.800000011920929
+                },
+                "sidewaysFriction": {
+                    "extremumSlip": 0.009999999776482582,
+                    "extremumValue": 1.0,
+                    "asymptoteSlip": 0.10000000149011612,
+                    "asymptoteValue": 0.5,
+                    "stiffness": 1.0
+                }
+            },
+            {
+                "name": "Rear Right Wheel Collider",
+                "positionVehicleFrame": {
+                    "x": 0.11800001561641693,
+                    "y": 0.04999999701976776,
+                    "z": -0.1600000560283661
+                },
+                "localPosition": {
+                    "x": 0.11800000071525574,
+                    "y": 0.05000000074505806,
+                    "z": -0.1599999964237213
+                },
+                "localRotation": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "w": 1.0
+                },
+                "colliderCenter": {
+                    "x": 0.0,
+                    "y": 0.02500000037252903,
+                    "z": 0.0
+                },
+                "radius": 0.05900000035762787,
+                "mass": 0.10899999737739563,
+                "sprungMass": 0.9177942872047424,
+                "suspensionDistance": 0.05000000074505806,
+                "wheelDampingRate": 0.25,
+                "forceAppPointDistance": 0.0,
+                "suspensionSpring": {
+                    "spring": 500.0,
+                    "damper": 100.0,
+                    "targetPosition": 0.5
+                },
+                "forwardFriction": {
+                    "extremumSlip": 0.15000000596046449,
+                    "extremumValue": 0.8999999761581421,
+                    "asymptoteSlip": 0.25,
+                    "asymptoteValue": 0.5799999833106995,
+                    "stiffness": 0.800000011920929
+                },
+                "sidewaysFriction": {
+                    "extremumSlip": 0.009999999776482582,
+                    "extremumValue": 1.0,
+                    "asymptoteSlip": 0.10000000149011612,
+                    "asymptoteValue": 0.5,
+                    "stiffness": 1.0
+                }
+            }
+        ]
+    }
+}

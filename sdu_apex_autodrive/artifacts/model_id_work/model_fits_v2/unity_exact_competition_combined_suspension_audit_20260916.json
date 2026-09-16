@@ -1,0 +1,415 @@
+{
+  "acceptance": {
+    "load_state_promoted": false,
+    "requires_blind_holdout": true,
+    "runtime_use": false,
+    "slip_coordinate_promoted": false
+  },
+  "ground_truth_use": "diagnostic_trace_only",
+  "per_wheel": [
+    {
+      "body_frame_wheel_y_m": {
+        "count": 11999,
+        "max": 0.0591103709932549,
+        "mean": 0.05538020237627028,
+        "min": 0.04899809900694396,
+        "p05": 0.052997644887552244,
+        "p50": 0.05504262024944143,
+        "p95": 0.059105179951641364
+      },
+      "compression_from_early_settled_reference_m": {
+        "count": 11999,
+        "max": -0.0010129145019809327,
+        "mean": -0.004743083118965546,
+        "min": -0.011125186488291867,
+        "p05": -0.0071256406076835865,
+        "p50": -0.005080665245794397,
+        "p95": -0.0010181055435944635
+      },
+      "compression_rate_mps": {
+        "count": 11999,
+        "max": 0.9610704263119576,
+        "mean": 0.0003793611203061249,
+        "min": -4.576423524727801,
+        "p05": -0.0072645394718019235,
+        "p50": 4.603451794960023e-05,
+        "p95": 0.013554705810218207
+      },
+      "configured_damper_n_per_mps": 100.0,
+      "configured_spring_n_per_m": 500.0,
+      "descriptive_load_screen_projected_force": {
+        "coefficients": {
+          "damper_n_per_mps": 2.1090415347924947,
+          "offset_n": 5.430807312079208,
+          "spring_n_per_m": -1.7966628181369098
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54118717154229,
+          11.609054901051426,
+          0.1978053604334932
+        ],
+        "identified": true,
+        "mae_n": 1.1973043732750428,
+        "r2": 0.0038805152237920693,
+        "rmse_n": 3.5819339145516707,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "descriptive_load_screen_raw_force": {
+        "coefficients": {
+          "damper_n_per_mps": 2.1090415347924947,
+          "offset_n": 5.430807312079208,
+          "spring_n_per_m": -1.7966628181369098
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54118717154229,
+          11.609054901051426,
+          0.1978053604334932
+        ],
+        "identified": true,
+        "mae_n": 1.1973043732750428,
+        "r2": 0.0038805152237920693,
+        "rmse_n": 3.5819339145516707,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "early_settled_reference_body_y_m": 0.06012328549523583,
+      "samples": 11999,
+      "wheel": 0,
+      "wheel_hit_force_n": {
+        "count": 11999,
+        "max": 117.616051,
+        "mean": 5.440129121521793,
+        "min": 2.228015,
+        "p05": 3.756804233,
+        "p50": 5.01959229,
+        "p95": 6.821318199999999
+      },
+      "wheel_hit_force_times_contact_normal_y_n": {
+        "count": 11999,
+        "max": 117.616051,
+        "mean": 5.440129121521793,
+        "min": 2.228015,
+        "p05": 3.756804233,
+        "p50": 5.01959229,
+        "p95": 6.821318199999999
+      }
+    },
+    {
+      "body_frame_wheel_y_m": {
+        "count": 11999,
+        "max": 0.05973469897357449,
+        "mean": 0.05721402604090477,
+        "min": 0.048998083881279506,
+        "p05": 0.05535712657551937,
+        "p50": 0.05717659196134746,
+        "p95": 0.05910777398120482
+      },
+      "compression_from_early_settled_reference_m": {
+        "count": 11999,
+        "max": -0.0003886123029731639,
+        "mean": -0.0029092852356428825,
+        "min": -0.011125227395268146,
+        "p05": -0.0047661847010282855,
+        "p50": -0.0029467193152001928,
+        "p95": -0.0010155372953428298
+      },
+      "compression_rate_mps": {
+        "count": 11999,
+        "max": 1.1912175156695346,
+        "mean": 0.000794049918923165,
+        "min": -4.693043066614793,
+        "p05": -0.006337733472838824,
+        "p50": 0.001026924438887411,
+        "p95": 0.010549607663291934
+      },
+      "configured_damper_n_per_mps": 100.0,
+      "configured_spring_n_per_m": 500.0,
+      "descriptive_load_screen_projected_force": {
+        "coefficients": {
+          "damper_n_per_mps": -1.7659271320907806,
+          "offset_n": 3.572127642796043,
+          "spring_n_per_m": -1098.061290155886
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54044620637553,
+          18.830366167208926,
+          0.1473900871400163
+        ],
+        "identified": true,
+        "mae_n": 2.323872944735555,
+        "r2": 0.04629016502535943,
+        "rmse_n": 6.830931505161511,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "descriptive_load_screen_raw_force": {
+        "coefficients": {
+          "damper_n_per_mps": -1.7659271320907806,
+          "offset_n": 3.572127642796043,
+          "spring_n_per_m": -1098.061290155886
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54044620637553,
+          18.830366167208926,
+          0.1473900871400163
+        ],
+        "identified": true,
+        "mae_n": 2.323872944735555,
+        "r2": 0.04629016502535943,
+        "rmse_n": 6.830931505161511,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "early_settled_reference_body_y_m": 0.06012331127654765,
+      "samples": 11999,
+      "wheel": 1,
+      "wheel_hit_force_n": {
+        "count": 11999,
+        "max": 159.1836,
+        "mean": 6.7652989077814825,
+        "min": 2.22392559,
+        "p05": 5.256711816,
+        "p50": 5.902282,
+        "p95": 7.640227028000001
+      },
+      "wheel_hit_force_times_contact_normal_y_n": {
+        "count": 11999,
+        "max": 159.1836,
+        "mean": 6.7652989077814825,
+        "min": 2.22392559,
+        "p05": 5.256711816,
+        "p50": 5.902282,
+        "p95": 7.640227028000001
+      }
+    },
+    {
+      "body_frame_wheel_y_m": {
+        "count": 11999,
+        "max": 0.0544916843999067,
+        "mean": 0.05246952641882707,
+        "min": 0.04852234162733604,
+        "p05": 0.050790377376474856,
+        "p50": 0.052694549162143854,
+        "p95": 0.05378129616969421
+      },
+      "compression_from_early_settled_reference_m": {
+        "count": 11999,
+        "max": 0.004716092006756496,
+        "mean": 0.0026939340256768624,
+        "min": -0.0012532507658141595,
+        "p05": 0.0010147849833246584,
+        "p50": 0.002918956768993654,
+        "p95": 0.00400570377654401
+      },
+      "compression_rate_mps": {
+        "count": 11999,
+        "max": 0.23078117603983436,
+        "mean": 0.00019456862580282026,
+        "min": -1.4311362624492283,
+        "p05": -0.008121302751926207,
+        "p50": -0.0003522731249518962,
+        "p95": 0.012987176305301766
+      },
+      "configured_damper_n_per_mps": 100.0,
+      "configured_spring_n_per_m": 500.0,
+      "descriptive_load_screen_projected_force": {
+        "coefficients": {
+          "damper_n_per_mps": 11.802247971848452,
+          "offset_n": 9.487007856712879,
+          "spring_n_per_m": 69.28657003071464
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54034661111352,
+          5.720537655227627,
+          0.11236904623588699
+        ],
+        "identified": true,
+        "mae_n": 0.7438107128914618,
+        "r2": 0.10823957708333454,
+        "rmse_n": 1.779158301317438,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "descriptive_load_screen_raw_force": {
+        "coefficients": {
+          "damper_n_per_mps": 11.802247971848452,
+          "offset_n": 9.487007856712879,
+          "spring_n_per_m": 69.28657003071464
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54034661111352,
+          5.720537655227627,
+          0.11236904623588699
+        ],
+        "identified": true,
+        "mae_n": 0.7438107128914618,
+        "r2": 0.10823957708333454,
+        "rmse_n": 1.779158301317438,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "early_settled_reference_body_y_m": 0.0497755923931502,
+      "samples": 11999,
+      "wheel": 2,
+      "wheel_hit_force_n": {
+        "count": 11999,
+        "max": 30.9929733,
+        "mean": 9.675957652410201,
+        "min": -20.750948,
+        "p05": 8.5426284,
+        "p50": 9.588175,
+        "p95": 10.75702036
+      },
+      "wheel_hit_force_times_contact_normal_y_n": {
+        "count": 11999,
+        "max": 30.9929733,
+        "mean": 9.675957652410201,
+        "min": -20.750948,
+        "p05": 8.5426284,
+        "p50": 9.588175,
+        "p95": 10.75702036
+      }
+    },
+    {
+      "body_frame_wheel_y_m": {
+        "count": 11999,
+        "max": 0.057898195146162214,
+        "mean": 0.05433784915689664,
+        "min": 0.048996411187127255,
+        "p05": 0.05079207985711626,
+        "p50": 0.05486914377805667,
+        "p95": 0.056444717945371425
+      },
+      "compression_from_early_settled_reference_m": {
+        "count": 11999,
+        "max": 0.008122572257897677,
+        "mean": 0.004562226268632108,
+        "min": -0.000779211701137282,
+        "p05": 0.0010164569688517213,
+        "p50": 0.005093520889792133,
+        "p95": 0.006669095057106887
+      },
+      "compression_rate_mps": {
+        "count": 11999,
+        "max": 0.9556881974519177,
+        "mean": 0.0006170563902105425,
+        "min": -3.753056340405456,
+        "p05": -0.009388653531944157,
+        "p50": 0.000474198767006051,
+        "p95": 0.013978109760793637
+      },
+      "configured_damper_n_per_mps": 100.0,
+      "configured_spring_n_per_m": 500.0,
+      "descriptive_load_screen_projected_force": {
+        "coefficients": {
+          "damper_n_per_mps": -0.7668577226670692,
+          "offset_n": 10.146193820371963,
+          "spring_n_per_m": 192.96017330553153
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54110821140036,
+          13.702526767176181,
+          0.19779907988164502
+        ],
+        "identified": true,
+        "mae_n": 1.3660024682263505,
+        "r2": 0.00452381680302627,
+        "rmse_n": 5.367242824784985,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "descriptive_load_screen_raw_force": {
+        "coefficients": {
+          "damper_n_per_mps": -0.7668577226670692,
+          "offset_n": 10.146193820371963,
+          "spring_n_per_m": 192.96017330553153
+        },
+        "design_rank": 3,
+        "design_singular_values": [
+          109.54110821140036,
+          13.702526767176181,
+          0.19779907988164502
+        ],
+        "identified": true,
+        "mae_n": 1.3660024682263505,
+        "r2": 0.00452381680302627,
+        "rmse_n": 5.367242824784985,
+        "runtime_promoted": false,
+        "samples": 11999
+      },
+      "early_settled_reference_body_y_m": 0.04977562288826454,
+      "samples": 11999,
+      "wheel": 3,
+      "wheel_hit_force_n": {
+        "count": 11999,
+        "max": 135.507217,
+        "mean": 11.026048597368115,
+        "min": 7.883357,
+        "p05": 8.5972075,
+        "p50": 10.465291,
+        "p95": 12.656779100000001
+      },
+      "wheel_hit_force_times_contact_normal_y_n": {
+        "count": 11999,
+        "max": 135.507217,
+        "mean": 11.026048597368115,
+        "min": 7.883357,
+        "p05": 8.5972075,
+        "p50": 10.465291,
+        "p95": 12.656779100000001
+      }
+    }
+  ],
+  "production_mpc_modified": false,
+  "schema_version": 1,
+  "selection": {
+    "all_four_wheels_grounded": true,
+    "minimum_body_forward_speed_mps": 0.0,
+    "rows_with_complete_pose_and_load": 11999
+  },
+  "simulator_modified": false,
+  "source": {
+    "metadata": {
+      "body_inertia_projection_kgm2": {
+        "x": 0.09352723509073257,
+        "y": 0.09619075059890747,
+        "z": 0.027697643265128136
+      },
+      "exact_competition_scene_capture": true,
+      "fixed_delta_time_s": 0.0010000000474974513,
+      "scene": "__AutoDRIVE_ModelIdentification_Competition_Temp",
+      "sprung_loads_n": [
+        8.016682932972909,
+        8.005149884819986,
+        9.015308429002761,
+        9.003559033870697
+      ],
+      "sprung_masses_kg": [
+        0.8171949982643127,
+        0.8160193562507629,
+        0.9189916849136353,
+        0.9177939891815186
+      ],
+      "trace_build_tag": "exact_competition_combined_20260916",
+      "unity_version": "2022.3.52f1",
+      "wheel_pose_columns_present": true,
+      "yaw_axis": "body_y",
+      "yaw_inertia_body_frame_kgm2": 0.09619075059890747
+    },
+    "pose_columns_present": true,
+    "settled_reference_trace": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_static_capture_20260916/wheel_contact_trace.csv",
+    "static_snapshot": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_excitation_20260916/simulator_parameters.json",
+    "trace": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_excitation_20260916/wheel_contact_trace.csv",
+    "trace_columns": 142,
+    "trace_rows": 12000
+  },
+  "status": "offline_unity_suspension_contact_audit"
+}

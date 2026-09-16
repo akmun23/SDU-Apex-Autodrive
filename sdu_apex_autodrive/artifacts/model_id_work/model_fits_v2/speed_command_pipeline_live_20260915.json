@@ -1,0 +1,150 @@
+{
+  "combined": {
+    "attribution_status": "unavailable_from_input_columns",
+    "available_fields": {
+      "applied_acceleration": false,
+      "commanded_acceleration": false,
+      "cte": false,
+      "curvature": false,
+      "measured_speed": true,
+      "raceline_speed": false,
+      "target_speed": false,
+      "throttle": true
+    },
+    "limiter_evidence_row_counts": {
+      "accel_slew": 0,
+      "actuator_feedforward": 0,
+      "cte": 0,
+      "curvature": 0,
+      "max_speed": 0,
+      "overspeed_brake": 0,
+      "raceline": 0,
+      "startup": 0
+    },
+    "measured_speed_mps": {
+      "max": 8.441075,
+      "samples": 17587
+    },
+    "missing_fields_for_attribution": [
+      "target_speed",
+      "raceline_speed",
+      "curvature",
+      "cte",
+      "commanded_acceleration",
+      "applied_acceleration"
+    ],
+    "row_count": 26385,
+    "rows_with_limiter_evidence": 0,
+    "target_speed_mps": {
+      "max": null,
+      "samples": 0
+    }
+  },
+  "inputs": [
+    "sdu_apex_autodrive/artifacts/model_id_work/run_live/live_odom_ekf_amcl_pp_16mps_positive_burst_guard_20260915/ground_truth_amcl.csv",
+    "sdu_apex_autodrive/artifacts/model_id_work/run_live/live_odom_ekf_amcl_pp_16mps_positive_burst_guard_20260915/bridge_requests.csv"
+  ],
+  "interpretation": {
+    "do_not_retune_speed_controller_from_ground_truth_only": true,
+    "limiter_evidence_is_not_available_without_command_and_state_alignment": true,
+    "required_for_decision": [
+      "target speed timestamped against measured speed",
+      "raceline/curvature speed before each limiter",
+      "CTE/startup/acceleration-slew diagnostics",
+      "commanded and applied throttle"
+    ]
+  },
+  "max_speed_ceiling_mps": 16.0,
+  "per_input": [
+    {
+      "attribution_status": "unavailable_from_input_columns",
+      "available_fields": {
+        "applied_acceleration": false,
+        "commanded_acceleration": false,
+        "cte": false,
+        "curvature": false,
+        "measured_speed": true,
+        "raceline_speed": false,
+        "target_speed": false,
+        "throttle": false
+      },
+      "input_csv": "sdu_apex_autodrive/artifacts/model_id_work/run_live/live_odom_ekf_amcl_pp_16mps_positive_burst_guard_20260915/ground_truth_amcl.csv",
+      "limiter_evidence_row_counts": {
+        "accel_slew": 0,
+        "actuator_feedforward": 0,
+        "cte": 0,
+        "curvature": 0,
+        "max_speed": 0,
+        "overspeed_brake": 0,
+        "raceline": 0,
+        "startup": 0
+      },
+      "measured_speed_mps": {
+        "max": 8.441075,
+        "samples": 17587
+      },
+      "missing_fields_for_attribution": [
+        "target_speed",
+        "raceline_speed",
+        "curvature",
+        "cte",
+        "commanded_acceleration",
+        "applied_acceleration",
+        "throttle"
+      ],
+      "row_count": 17587,
+      "rows_with_limiter_evidence": 0,
+      "target_speed_mps": {
+        "max": null,
+        "samples": 0
+      }
+    },
+    {
+      "attribution_status": "unavailable_from_input_columns",
+      "available_fields": {
+        "applied_acceleration": false,
+        "commanded_acceleration": false,
+        "cte": false,
+        "curvature": false,
+        "measured_speed": false,
+        "raceline_speed": false,
+        "target_speed": false,
+        "throttle": true
+      },
+      "input_csv": "sdu_apex_autodrive/artifacts/model_id_work/run_live/live_odom_ekf_amcl_pp_16mps_positive_burst_guard_20260915/bridge_requests.csv",
+      "limiter_evidence_row_counts": {
+        "accel_slew": 0,
+        "actuator_feedforward": 0,
+        "cte": 0,
+        "curvature": 0,
+        "max_speed": 0,
+        "overspeed_brake": 0,
+        "raceline": 0,
+        "startup": 0
+      },
+      "measured_speed_mps": {
+        "max": null,
+        "samples": 0
+      },
+      "missing_fields_for_attribution": [
+        "target_speed",
+        "raceline_speed",
+        "curvature",
+        "cte",
+        "measured_speed",
+        "commanded_acceleration",
+        "applied_acceleration"
+      ],
+      "row_count": 8798,
+      "rows_with_limiter_evidence": 0,
+      "target_speed_mps": {
+        "max": null,
+        "samples": 0
+      }
+    }
+  ],
+  "production_speed_controller_modified": false,
+  "schema_version": 1,
+  "simulator_modified": false,
+  "status": "offline_speed_command_pipeline_analysis"
+}

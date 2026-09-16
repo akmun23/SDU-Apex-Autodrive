@@ -1,0 +1,30 @@
+{
+  "finite_bounded_gate": {
+    "bounded_failures": 0,
+    "fixture_count": 4
+  },
+  "jacobian_gate": {
+    "finite": true,
+    "input_step": 1e-05,
+    "max_abs_jacobian": 23.232362714509232,
+    "state_step": 1e-05
+  },
+  "production_mpc_modified": false,
+  "python_c_scalar_reference_parity": {
+    "fitted_profile_supported": false,
+    "fixture_count": 4,
+    "max_abs_error": 3.071732280091055e-06,
+    "reference": "scalar baseline at 2 ms internal integration",
+    "tolerance": 3e-05
+  },
+  "schema_version": 1,
+  "simulator_modified": false,
+  "stage_contract": {
+    "command_dt_s": 0.025,
+    "commands": 30,
+    "native_parity_reference_substep_s": 0.002,
+    "physical_horizon_s": 0.75,
+    "selected_internal_substep_s": 0.0125
+  },
+  "status": "pass"
+}
