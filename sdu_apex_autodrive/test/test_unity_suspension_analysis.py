@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from tools.model_id.analyze_unity_suspension_response import (
     _derivative,
@@ -10,6 +11,9 @@ from tools.model_id.identify_unity_axle_force_response import (
     _derivative as _axle_derivative,
     _reset_boundaries as _axle_reset_boundaries,
     _reset_exclusion_mask as _axle_reset_exclusion_mask,
+)
+from tools.model_id.analyze_unity_wheel_contact_trace import (
+    _wheel_forward_slip_candidates,
 )
 
 
@@ -59,3 +63,38 @@ def test_axle_force_inversion_segments_reset_derivatives():
     assert np.isnan(derivative[2])
     assert _axle_reset_exclusion_mask(boundaries, radius=1).tolist() == [
         False, True, True, True]
+
+
+def test_forward_slip_candidate_uses_recorded_direction_and_wheel_radius():
+    radius = 0.059
+    surface_speed = 3.3
+    row = {
+        "world_velocity_x_mps": "0",
+        "world_velocity_y_mps": "0",
+        "world_velocity_z_mps": "3",
+        "world_angular_velocity_x_radps": "0",
+        "world_angular_velocity_y_radps": "0",
+        "world_angular_velocity_z_radps": "0",
+        "world_com_x_m": "0",
+        "world_com_y_m": "0",
+        "world_com_z_m": "0",
+        "wheel0_world_pose_x_m": "0.17",
+        "wheel0_world_pose_y_m": "0",
+        "wheel0_world_pose_z_m": "0",
+        "wheel0_contact_point_x_m": "0.17",
+        "wheel0_contact_point_y_m": "-0.059",
+        "wheel0_contact_point_z_m": "0",
+        "wheel0_forward_dir_x": "0",
+        "wheel0_forward_dir_y": "0",
+        "wheel0_forward_dir_z": "1",
+        "wheel0_rpm": str(surface_speed / radius * 60.0 / (2.0 * np.pi)),
+        "wheel0_forward_slip": "0.1",
+    }
+    recorded, candidates = _wheel_forward_slip_candidates(row, 0, radius)
+    assert recorded == pytest.approx(0.1)
+    assert candidates[
+        "wheel_center_wheel_minus_ground_abs_ground_floor_0p25"] == pytest.approx(
+            0.1)
+    assert candidates[
+        "wheel_center_ground_minus_wheel_abs_ground_floor_0p25"] == pytest.approx(
+            -0.1)

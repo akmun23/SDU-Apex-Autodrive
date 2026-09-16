@@ -1,0 +1,150 @@
+{
+  "causal_timing": "fixed-step state joined to its consumed bridge-command sequence; no interpolation across reset, time reversal, or gaps",
+  "dirty_tree": true,
+  "dirty_tree_status": "M sdu_apex_autodrive/test/test_model_id_steering_input_contract.py\n M sdu_apex_autodrive/test/test_simulator_native_model.py\n M sdu_apex_autodrive/test/test_unity_suspension_analysis.py\n M tools/model_id/analyze_unity_wheel_contact_trace.py\n M tools/model_id/benchmark_unity_native_wheel_model.py\n?? sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/direct_unity_wheel_collider_benchmark_075_exact_unity_curve_20260916.json\n?? sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_forward_slip_reconstruction_audit_20260916.json\n?? sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_forward_slip_reconstruction_audit_20260916.json\n?? sdu_apex_autodrive/artifacts/model_id_work/model_fits_v3/",
+  "findings": [
+    "The 1 kHz Unity traces record exact body/contact/wheel data but their applied_command_sequence is constant zero and they do not contain the matching 40 Hz packet source index.",
+    "Accepted track recordings contain the allowed odom/EKF/map-pose/controller topics, but are not synchronized to any of the 1 kHz Unity wheel/contact traces.",
+    "The exact competition trace reaches only 5.76 m/s; the high-speed raceline-relevant trace is from the open diagnostic scene, not the competition track.",
+    "Selected v5 axle-force rows support force-mechanism analysis but do not provide continuous causal N30 rollouts."
+  ],
+  "input_definition": "causal applied 40 Hz command/source sequence; runtime estimator later restricted to legal odom/EKF/AMCL and controller outputs",
+  "model_variant": "no_model_behavior_change",
+  "phase": "01_data_inventory",
+  "phase1_gate": {
+    "action": "collect synchronized diagnostic-only runs before oracle-initialization ablation",
+    "representative_combined_track_with_all_four_wheel_and_suspension_truth": false,
+    "representative_straight_with_all_four_wheel_and_suspension_truth": false,
+    "synchronized_40hz_source_command_stream": false
+  },
+  "pinned_commit_match": true,
+  "promotion": {
+    "production_mpc": false,
+    "reason": "the exact-state and legal 40 Hz input channels do not currently coexist in one run",
+    "runtime": false
+  },
+  "repository_commit": "44421c3a8678658df98b73f015b8ba35b0d73d3c",
+  "required_fields_csv": "01_data_inventory/existing_field_inventory.csv",
+  "runtime_input_contract": [
+    "/odom",
+    "/ekf_odom",
+    "/current_map_pose",
+    "/cmd/speed"
+  ],
+  "schema_version": 1,
+  "source_hashes": {
+    "accepted_track_103_pr5": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/accepted/103_pr5_pose_packet_live_20260914/events.csv",
+        "sha256": "08a97b802056a8c1d0d8bf7151c923b2b9c5f018a448cb54b4ee08e514f8ab4f",
+        "size_bytes": 9962625
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/accepted/103_pr5_pose_packet_live_20260914/runtime_state.csv",
+        "sha256": "34ad30835ed9abd0067ba54acf05860e05103bb1bddca350a1a8c7272a9ced58",
+        "size_bytes": 1613013
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/accepted/103_pr5_pose_packet_live_20260914/simulator_packets.csv",
+        "sha256": "06a06562cc99ee401338d29a0840763520797e6c0e14d922af53375faca515d2",
+        "size_bytes": 636446
+      }
+    ],
+    "accepted_track_86_e7": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/accepted/86_e7_lidar_cache_repeat2_track_40hz_20260914/events.csv",
+        "sha256": "5640c9890856d961db9f2e83c4c6b46b880796d38b4d1c559bc646ff6ec6f4d9",
+        "size_bytes": 17594344
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/accepted/86_e7_lidar_cache_repeat2_track_40hz_20260914/runtime_state.csv",
+        "sha256": "13eb2eb93b7fdefb84448dfa0a1ee5aec156936dbe90696bb3810357a103d651",
+        "size_bytes": 2776107
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/accepted/86_e7_lidar_cache_repeat2_track_40hz_20260914/simulator_packets.csv",
+        "sha256": "9e82328796533109629b6254e5cf4a6fd359332c31c4a6e04d81cb7b02817d52",
+        "size_bytes": 1177180
+      }
+    ],
+    "competition_combined_excitation": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_excitation_20260916/wheel_contact_trace.csv",
+        "sha256": "226fdee6a6871acda76609eeda342e34e8d578ea05cc6257186fdcbd7742c885",
+        "size_bytes": 14579049
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_excitation_20260916/simulator_parameters.json",
+        "sha256": "ee613900cc22dc6e7c31405152c2c1834146c5688871a123347fdd0dda90f6fa",
+        "size_bytes": 10749
+      }
+    ],
+    "competition_combined_full": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_full_20260916/wheel_contact_trace.csv",
+        "sha256": "1c2ead9ca26536821a4ef23e55cc76fde02574455afb72329b11bb11b57b9aa1",
+        "size_bytes": 86518512
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_full_20260916/simulator_parameters.json",
+        "sha256": "2e90c12ccd88457238a2bb02994bf0e4a159bec708f7b10f0ea2390beffb4c79",
+        "size_bytes": 10754
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_static_capture_20260916/wheel_contact_trace.csv",
+        "sha256": "fd2b599172480a53c9fb1cfd830a46694074dd22aa0db5e01ac8b1f470716901",
+        "size_bytes": 2134204
+      }
+    ],
+    "old_cross_schedule_rows_v5": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_old_rows_v5_20260916.csv.gz",
+        "sha256": "6e1be41ddaa5df9fb449c10f8e565576d6f657999bf979ec3abd666a13cf6875",
+        "size_bytes": 31642003
+      }
+    ],
+    "open_powered_drive_repeat": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_powered_drive_repeat_20260916/wheel_contact_trace.csv",
+        "sha256": "20da8b9551be5a8746b6e5a53e1ba4ecb9a28c6fa50e18a076f2b320b7faa90f",
+        "size_bytes": 58911710
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_powered_drive_repeat_20260916/simulator_parameters.json",
+        "sha256": "d34d1e42b830292f75a43663fee07f5a8708e0a78687421d5f010414aaa256ce",
+        "size_bytes": 10711
+      }
+    ],
+    "open_raceline_relevant_holdout": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/wheel_contact_trace_part01.csv",
+        "sha256": "4cb5fe88ce6b50d3a8af8ca9d939b389b2d06111df4d14708b424e42cf5f2420",
+        "size_bytes": 89998916
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/wheel_contact_trace_part02.csv",
+        "sha256": "9eab0880a3969b6f39d2dfc99c6e5de6837ecedd5ce5eb1cc2b596d7b2bd0396",
+        "size_bytes": 26169102
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/simulator_parameters.json",
+        "sha256": "d82e5764b081d19dadf3cc81fe416cca4a02db483b8a55fa52ae7a8f7fd9a567",
+        "size_bytes": 10830
+      },
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/collision_contacts.csv",
+        "sha256": "5bad653cfc74595f98bdbd5728985e015e1f3dafdd35f6fd092461ecfd661090",
+        "size_bytes": 70892724
+      }
+    ],
+    "raceline_cross_schedule_rows_v5": [
+      {
+        "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_raceline_rows_v5_20260916.csv.gz",
+        "sha256": "dafbe3d43cf7d5a291d2179ad3d82ccd8330f6aef1eb0183cceff135642d2523",
+        "size_bytes": 38204167
+      }
+    ]
+  },
+  "state_definition": "offline teacher needs body [x,y,yaw,u,v,r], effective steering, four wheel rates and six suspension coordinates",
+  "status": "gate_not_passed_synchronized_trace_required"
+}

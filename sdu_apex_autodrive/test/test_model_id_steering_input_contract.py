@@ -16,9 +16,9 @@ def test_transition_uses_previous_packet_command_when_available():
     assert _steering_command(row) == -0.2
 
 
-def test_synthetic_rows_keep_current_command_fallback():
+def test_missing_transition_command_does_not_leak_current_packet_command():
     row = {
         "commanded_steering_norm_k1": 0.8,
         "steering_target_norm_k": math.nan,
     }
-    assert _steering_command(row) == 0.8
+    assert math.isnan(_steering_command(row))

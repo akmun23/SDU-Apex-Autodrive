@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "phase": 0,
+  "status": "current_native_baseline_exactly_reproduced",
+  "repository_commit": "44421c3a8678658df98b73f015b8ba35b0d73d3c",
+  "model_implementation": {
+    "benchmark": "tools/model_id/benchmark_unity_native_wheel_model.py",
+    "benchmark_sha256": "032a36cf61c295666676928eb2c95e0c9df0f54bf99d83666676b3c2637a4312",
+    "plant": "tools/model_id/simulator_native_model.py",
+    "plant_sha256": "75e01247e4d9a9129c2da23f63a60492871ba7829419ff235c0c7c221141d56c",
+    "friction_curve": "tools/model_id/wheel_friction_curve.py",
+    "friction_curve_sha256": "ad0843e858fcc8858339294e3cec9c2b58c14635269dd201b4a37839362736ce"
+  },
+  "parameter_dump": {
+    "path": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_open_raceline_relevant_holdout_v1_20260916/simulator_parameters.json",
+    "sha256": "d82e5764b081d19dadf3cc81fe416cca4a02db483b8a55fa52ae7a8f7fd9a567"
+  },
+  "source_transition_tables": {
+    "16_86_e7_lidar_cache_repeat2_track_40hz_20260914_9b0efeb8": "c570d7fd00621d586116ae010f33b49547609220979d7e5c8c07f220c4505e63",
+    "17_103_pr5_pose_packet_live_20260914_b86897f1": "5ca4f7ba255aef60432ac564836ea52da092b1a4738cfb9eb04defc2f5b5e698",
+    "18_20_combined_throttle_steering_run05_40hz_20260913_b392010f": "c980fe2ed143d4862b961a01068be9a06be08b7392b9aa2a6621fbd2d9271111",
+    "19_lateral_speed_bands_2_12_repeat_20260915_066b619d": "a108c393ba9a569e82b6451404f88050801add62c0f8892ac3ca518f91207210",
+    "15_high_speed_lateral_14mps_nolidar_40hz_20260915_b9c4cac5": "fe31c2a50b58d9b328cfb5ab94ba22fc6c6a0c87ab15455cb4031af74c1752d7",
+    "20_high_speed_constant_075_repeat2_nolidar_40hz_20260915_65e48d9a": "a3e3df33c37539cd0a844d397adfa0f8161ea17f18038d0611bb165fd5344ba3",
+    "21_high_speed_braking_16mps_nolidar_40hz_20260915_5c57bb71": "f44a2cf0a6065a13744b92acb0ec591652af63d6ef9252580b754f997d1b68fa"
+  },
+  "replay": {
+    "report_path": "/tmp/sdu-apex-phase0-current-replay.json",
+    "report_sha256": "acee49f6eaa97c0b15b6e82c1898ae37c1f67e5d8a2e055ec739767837195c1a",
+    "reference_artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/direct_unity_wheel_collider_benchmark_075_exact_unity_curve_20260916.json",
+    "reference_artifact_sha256": "12b3331cc61778884019eaa56c7c589d5ef292e3ea2d6c1250c4d4c4e82c2d4b",
+    "run_count": 7,
+    "origins": 11145,
+    "compared_horizons": [0.025, 0.05, 0.1, 0.25, 0.5, 0.75],
+    "compared_primary_states": ["position_m", "heading_rad", "u_mps", "v_mps", "r_radps"],
+    "max_absolute_p95_delta": 0.0,
+    "n30_p95": {
+      "position_m": 0.4834725407924577,
+      "heading_rad": 0.07345342204723407,
+      "u_mps": 0.9280962319287509,
+      "v_mps": 0.029593877554707926,
+      "r_radps": 0.15642494643011368
+    }
+  },
+  "historical_report_resolution": {
+    "artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/direct_unity_wheel_collider_benchmark_075_corrected_source_20260916.json",
+    "sha256": "85281d12592394a61701323fb47b1a7b25049ed4bd1f5a5ee12ea8125dceffdf",
+    "artifact_timestamp": "2026-09-16 17:58 +0200",
+    "pinned_model_commit_timestamp": "2026-09-16 18:38 +0200",
+    "resolution": "The old report predates the commit that introduced the explicit Unity-wheel model/scorer. It contains no benchmark, plant, transition-table, or parameter hashes, so it is retained as a historical pre-commit result and is not an accuracy-improvement comparison.",
+    "improvement_claim": false
+  }
+}

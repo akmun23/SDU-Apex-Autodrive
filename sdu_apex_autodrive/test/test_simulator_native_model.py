@@ -38,6 +38,10 @@ from tools.model_id.simulator_native_model import (
     _unity_wheel_friction_value,
     unity_wheel_collider_ackermann_angles,
 )
+from tools.model_id.benchmark_unity_native_wheel_model import (
+    _parameters_with_drag_interpretation,
+    _score_runs,
+)
 from tools.model_id.analyze_simulator_diagnostics import analyze as analyze_diagnostics
 from tools.model_id.wheel_friction_curve import friction_derivative, friction_value
 
@@ -50,6 +54,23 @@ def test_documented_curve_is_odd_bounded_and_c1_at_breakpoints():
     assert friction_derivative(curve.extremum_slip, curve) == pytest.approx(0.0, abs=1e-8)
     assert friction_derivative(curve.asymptote_slip, curve) == pytest.approx(0.0, abs=1e-8)
     assert friction_value(100.0, curve) == pytest.approx(0.5)
+
+
+def test_unity_drag_rate_candidate_maps_acceleration_units_without_default_change():
+    source_value = 0.273
+    parameters = replace(
+        NativeModelParameters(mass_kg=3.47),
+        rigid_body_drag_per_s=source_value)
+    baseline = _parameters_with_drag_interpretation(
+        parameters, "serialized_force_coefficient")
+    candidate = _parameters_with_drag_interpretation(
+        parameters, "unity_velocity_decay_rate")
+
+    assert baseline.rigid_body_drag_per_s == pytest.approx(source_value)
+    assert candidate.rigid_body_drag_per_s == pytest.approx(
+        source_value * 3.47)
+    assert candidate.rigid_body_drag_per_s / parameters.mass_kg == pytest.approx(
+        source_value)
 
 
 def test_ackermann_has_inner_wheel_larger_for_positive_turn():
@@ -259,6 +280,40 @@ def test_unity_cawb_brake_holds_a_locked_wheel_without_sign_flip():
     next_state = step_unity_wheel_collider(
         state, 0.0, 0.0, 0.025, parameters)
     assert next_state[7:] == pytest.approx((0.0,) * 4, abs=1.0e-8)
+
+
+def test_native_benchmark_reports_only_true_within_16mps_horizons():
+    parameters = parameters_from_dump(Path(
+        "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/"
+        "unity_exact_open_raceline_relevant_holdout_v1_20260916/"
+        "simulator_parameters.json"))
+
+    def stationary_rows(speed: float) -> list[dict[str, float]]:
+        return [{
+            "dt_sim_s": 0.025,
+            "x_k_m": 0.0, "y_k_m": 0.0, "yaw_k_rad": 0.0,
+            "u_k_mps": speed, "v_k_mps": 0.0, "r_k_radps": 0.0,
+            "delta_k_rad": 0.0,
+            "wheel_k_mps": speed,
+            "wheel_left_k_mps": speed,
+            "wheel_right_k_mps": speed,
+            "transition_steering_norm_k": 0.0,
+            "transition_throttle_norm_k": 0.0,
+            "segment_id": 1.0,
+            "x_k1_m": 0.0, "y_k1_m": 0.0, "yaw_k1_rad": 0.0,
+            "u_k1_mps": speed, "v_k1_mps": 0.0, "r_k1_radps": 0.0,
+        } for _ in range(31)]
+
+    scores = _score_runs({
+        "inside": stationary_rows(15.0),
+        "outside": stationary_rows(16.1),
+    }, parameters, max_origins_per_run=1, suspension_state=False)
+    assert scores["0.75s"]["position_m"]["count"] == 2
+    assert scores["within_16mps"]["0.75s"]["position_m"]["count"] == 1
+    assert scores["within_16mps_per_run"]["outside"]["0.75s"][
+        "position_m"]["count"] == 0
+    assert scores["within_16mps_by_origin_speed_band"]["12_16mps"][
+        "aggregate"]["0.75s"]["position_m"]["count"] == 1
 
 
 def test_mechanical_longitudinal_load_screen_is_explicit_and_conservative():

@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "phase": 0,
+  "status": "baseline_reproduced_historical_native_report_retired",
+  "repository": {
+    "expected_commit": "44421c3a8678658df98b73f015b8ba35b0d73d3c",
+    "actual_commit": "44421c3a8678658df98b73f015b8ba35b0d73d3c",
+    "worktree_clean": false,
+    "model_or_scoring_files_modified": [
+      "tools/model_id/benchmark_unity_native_wheel_model.py",
+      "tools/model_id/analyze_unity_wheel_contact_trace.py"
+    ],
+    "production_mpc_modified": false,
+    "unity_vehicle_physics_modified": false
+  },
+  "contract": {
+    "mps_ceiling": 16.0,
+    "commands_per_horizon": 30,
+    "command_rate_hz": 40.0,
+    "dt_s": 0.025,
+    "horizon_s": 0.75
+  },
+  "tests": {
+    "command": "pytest -q sdu_apex_autodrive/test/test_model_id_assembler.py sdu_apex_autodrive/test/test_simulator_native_model.py sdu_apex_autodrive/test/test_model_id_recursive_causality.py sdu_apex_autodrive/test/test_unity_suspension_analysis.py sdu_apex_autodrive/test/test_model_id_steering_input_contract.py",
+    "passed": 67,
+    "failed": 0,
+    "status": "pass"
+  },
+  "unity_controller_candidate": {
+    "artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/speed_regime_vehicle_candidate_unity_controller_source_075_20260916.json",
+    "artifact_sha256": "029541886686510ebd2c9d5f5616619986803cd1eb4a93406d22e887c08f49ba",
+    "validation_run_count": 7,
+    "origin_stride": 1,
+    "reproduction": {
+      "status": "exact_for_compared_p95_fields",
+      "compared_horizons_s": [0.1, 0.25, 0.5, 0.75],
+      "compared_fields": ["e_cross_m", "e_heading_rad", "u_mps", "v_mps", "r_radps", "position_m"],
+      "max_absolute_delta": 0.0
+    },
+    "validation_profile_core_0_75s_p95": {
+      "e_cross_m": 0.041352114053922064,
+      "e_heading_rad": 0.04020393046143161,
+      "u_mps": 0.13666235517270536,
+      "v_mps": 0.010303797257440598,
+      "r_radps": 0.09187438521419874,
+      "position_m": 0.08019463856507345,
+      "e_along_m": 0.07833742249987655
+    },
+    "canonical_scalar_baseline_core_0_75s_p95": {
+      "e_cross_m": 0.027459132440507295,
+      "e_heading_rad": 0.03434843750694121,
+      "u_mps": 0.5268725341556888,
+      "v_mps": 0.012411795752640384,
+      "r_radps": 0.08979672025591104,
+      "position_m": 0.2790387353054441,
+      "e_along_m": 0.2784854493118062
+    },
+    "handoff_interpretation": "The handoff §1.2 table reproduces validation_canonical_scalar_baseline, not validation_profile. Do not treat that row as the latest fitted profile."
+  },
+  "native_wheel_static_initialization": {
+    "current_artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/direct_unity_wheel_collider_benchmark_075_exact_unity_curve_20260916.json",
+    "current_artifact_sha256": "12b3331cc61778884019eaa56c7c589d5ef292e3ea2d6c1250c4d4c4e82c2d4b",
+    "regenerated_summary": "00_environment/native_wheel_static_075.json",
+    "source_run_count": 7,
+    "origins": 11145,
+    "current_0_75s_p95": {
+      "position_m": 0.4834725407924577,
+      "heading_rad": 0.07345342204723407,
+      "u_mps": 0.9280962319287509,
+      "v_mps": 0.029593877554707926,
+      "r_radps": 0.15642494643011368
+    },
+    "previous_reviewed_artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/direct_unity_wheel_collider_benchmark_075_corrected_source_20260916.json",
+    "previous_reviewed_artifact_sha256": "85281d12592394a61701323fb47b1a7b25049ed4bd1f5a5ee12ea8125dceffdf",
+    "previous_reviewed_0_75s_p95": {
+      "position_m": 0.6397756156395629,
+      "heading_rad": 0.09447054074665039,
+      "u_mps": 1.12798934642828,
+      "v_mps": 0.019790431985206462,
+      "r_radps": 0.17017837075435777
+    },
+    "reproduction_status": "current pinned-code replay exactly matches the exact-curve artifact at all six horizons and five primary states. The older corrected-source report predates commit 44421c3, which introduced the explicit Unity-wheel model and scorer; it is not a comparable run of the current implementation.",
+    "historical_report_status": "artifact_only_precommit_model_version_no_improvement_claim",
+    "improvement_claim_allowed": false,
+    "required_resolution": "none for the current baseline; retain the pre-commit report as historical and do not attribute its score difference to an improvement"
+  },
+  "live_n30_acceptance_screen": {
+    "artifact": "01_data_inventory/live_legal_n30_screen_20260916_stride5.json",
+    "input_contract": "legal /current_map_pose, /ekf_odom, encoders, and causal /cmd/speed; simulator truth is endpoint scoring only",
+    "core_origins": 321,
+    "n30_horizon_s": 0.75,
+    "core_p95": {
+      "e_cross_m": 0.08307,
+      "u_mps": 0.12912
+    },
+    "oracle_initialization_core_u_p95_mps": 0.13061,
+    "user_u_acceptance_threshold_mps": 0.1,
+    "u_threshold_met": false,
+    "cross_track_assessment": "8.3 cm p95 is low in this run; no formal numeric CTE acceptance threshold was specified",
+    "measured_max_speed_mps": 8.4077,
+    "covers_12_to_16_mps": false,
+    "production_model_changed": false
+  },
+  "suspension_benchmark": {
+    "artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/direct_unity_wheel_collider_benchmark_075_corrected_source_suspension_20260916.json",
+    "artifact_sha256": "d42c464b348639e1c2da5d3a493c9299ac44c187f558d90f764cdee7416d8344",
+    "status": "artifact_only_not_regenerated_as_valid_oracle_ablation",
+    "reason": "existing assembled rows lack synchronized exact six-state suspension initialization; zero initialization is not a valid exact-suspension comparison",
+    "reported_0_75s_p95": {
+      "position_m": 0.638012487010492,
+      "heading_rad": 0.08702525800244182,
+      "u_mps": 1.1269859191358818,
+      "v_mps": 0.019281542237267687,
+      "r_radps": 0.15117396450750673
+    }
+  },
+  "cross_schedule_force_screen": {
+    "pinned_artifact": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_axle_force_cross_schedule_screen_v4_20260916.json",
+    "pinned_artifact_sha256": "2a7899a7891f8faf54f940e072b6ffdf96bc5a586cbc225da36bdb8f97bfa91c",
+    "regenerated_artifact": "00_environment/axle_force_cross_schedule_v4_reproduced.json",
+    "status": "exact_summary_match",
+    "open_to_raceline_simple_proxy_rmse_n": {"front": 0.9538997475, "rear": 0.2327685205},
+    "raceline_to_open_simple_proxy_rmse_n": {"front": 0.9952856877, "rear": 0.1854882780},
+    "promotion": "no universal axle-force gain supported"
+  },
+  "live_timing_pilot": {
+    "run_name": "pilot_pp_synchronized_20260916_01",
+    "status": "rejected_for_modeling_after_later_bridge_timing_fault",
+    "recorded_prefix": {
+      "bridge_packets": 1116,
+      "source_time_s": [0.08800001, 27.9620018],
+      "source_interval_s": {"min": 0.0179992, "median": 0.025, "max": 0.0320006},
+      "request_sequence_gaps": 0,
+      "applied_command_sequence_lag": 1,
+      "source_gaps_over_30ms": 2
+    },
+    "subsequent_unrecorded_fault": {
+      "source_interval_s": 0.010004,
+      "previous_source_time_s": 62.414,
+      "current_source_time_s": 62.4240036,
+      "previous_physics_step": 62415,
+      "current_physics_step": 62425,
+      "action": "bridge latched neutral and stopped publishing; both Unity and ROS processes were stopped"
+    },
+    "raw_trace_status": "temporary_unbuffered_capture_not_accepted_or_copied_into_repository"
+  },
+  "diagnostic_logger_optimization": {
+    "unity_checkout_commit": "bb0c5018b48b888faea405a0b0342729b5841dc9",
+    "file": "Assets/Scripts/ModelIdentificationDiagnostics.cs",
+    "changes": [
+      "1 Mi-character trace writer buffer for 1 kHz wheel/body CSV",
+      "64 Ki-character collision writer buffer",
+      "collision stay rows sampled every 100 physics steps; enter/exit remain exact"
+    ],
+    "vehicle_physics_or_commands_changed": false,
+    "diagnostic_player": "/tmp/sdu-apex-model-id-comp-20260916/AutoDRIVE-ModelIdentification-competition-buffered.x86_64",
+    "build_mode": "-batchmode, no -no-graphics",
+    "build_status": "succeeded"
+  },
+  "source_hashes": {
+    "unity_parameter_dump": "d82e5764b0819d19dadf3cc81fe416cca4a02db483b8a55fa52ae7a8f7fd9a567",
+    "validation_transition_tables_sha256": {
+      "16_86_e7_lidar_cache_repeat2_track_40hz_20260914_9b0efeb8": "c570d7fd00621d586116ae010f33b49547609220979d7e5c8c07f220c4505e63",
+      "17_103_pr5_pose_packet_live_20260914_b86897f1": "5ca4f7ba255aef60432ac564836ea52da092b1a4738cfb9eb04defc2f5b5e698",
+      "18_20_combined_throttle_steering_run05_40hz_20260913_b392010f": "c980fe2ed143d4862b961a01068be9a06be08b7392b9aa2a6621fbd2d9271111",
+      "19_lateral_speed_bands_2_12_repeat_20260915_066b619d": "a108c393ba9a569e82b6451404f88050801add62c0f8892ac3ca518f91207210",
+      "15_high_speed_lateral_14mps_nolidar_40hz_20260915_b9c4cac5": "fe31c2a50b58d9b328cfb5ab94ba22fc6c6a0c87ab15455cb4031af74c1752d7",
+      "20_high_speed_constant_075_repeat2_nolidar_40hz_20260915_65e48d9a": "a3e3df33c37539cd0a844d397adfa0f8161ea17f18038d0611bb165fd5344ba3",
+      "21_high_speed_braking_16mps_nolidar_40hz_20260915_5c57bb71": "f44a2cf0a6065a13744b92acb0ec591652af63d6ef9252580b754f997d1b68fa"
+    }
+  },
+  "phase0_gate": {
+    "relevant_tests_pass": true,
+    "candidate_score_reproduced": true,
+    "native_static_score_provenance_resolved": false,
+    "suspension_result_regenerated": false,
+    "passed": false,
+    "block_reason": "the two native-wheel reports disagree without a reconciled model/data/version difference"
+  },
+  "promotion": {"runtime_use": false, "production_mpc_use": false}
+}
