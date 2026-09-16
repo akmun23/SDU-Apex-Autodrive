@@ -1743,3 +1743,90 @@ stable simpler bases. This does not make the fields useless; it shows that
 they must enter through a causal wheel/suspension transition model, with
 deflection relative to a settled reference, rather than as another fitted
 force gain. No model or odometry value was promoted.
+
+The captured values are now wired into an explicit offline four-wheel Unity
+plant through `tools/model_id/simulator_native_model.py`, with benchmark entry
+point `tools/model_id/benchmark_unity_native_wheel_model.py`. The 11-state
+model keeps body pose/twist and all four wheel angular rates separate and
+consumes the exact dumped body-Y inertia, sprung masses, wheel geometry and
+radius, serialized friction curves, rigid-body drag, and CAWD/CAWB torque
+branch. The first benchmark exposed and fixed a hybrid-brake sign-flip bug;
+the resulting combined straight/turn screen reduced 0.75 s position p95 from
+`1.433 m` to `0.644 m`, but this remains a diagnostic candidate. Long-horizon
+error still identifies an unresolved WheelCollider contact/torque transition,
+so no gain or model is promoted into MPC or odometry. The reports are
+`model_fits_v2/unity_native_wheel_model_benchmark_initial_20260916.json` and
+`model_fits_v2/unity_native_wheel_model_benchmark_brake_lock_20260916.json`.
+
+The v4 compact force-response exports additionally retain target body
+force/moment and the separate wheel-torque longitudinal force/moment. Both
+CSV files remain below 100 MB and are the input for the next direct
+longitudinal/contact split; position drift will not be used as an opaque
+tuning target.
+
+### 2026-09-16 native suspension travel result
+
+The suspension audit was corrected after finding that fixed Euler-angle
+extraction aliased raceline yaw into body pitch/roll. The primary coordinate
+now reconstructs each native `WheelCollider` travel directly from the
+recorded `WheelHit.point`, wheel-collider local pose, radius, and serialized
+`suspensionDistance`; non-flat contact, braking, and non-upright rows are
+excluded. The body-pose-only result remains only as a secondary diagnostic.
+
+The reusable source-derived load mechanism is
+`Fz=max(0,sprungMass*g-spring*distance*travel-damper*distance*travel_rate)`.
+It is implemented by `unity_wheel_travel_loads()` and used by the offline
+heave/pitch/roll plant. On the raceline-relevant chronological holdout, the
+serialized law gives `0.9987--0.9989` correlation and `0.082--0.090 N` MAE
+(`0.117--0.156 N` p95) per wheel. Identified normalized coefficients remain
+near `-25 N/travel` and `-5 N s/travel`, exactly the serialized `500/100`
+values multiplied by the `0.05 m` suspension distance. This is evidence for
+the native mechanism, not a new hidden gain.
+
+The audits are
+`model_fits_v2/unity_exact_open_suspension_pose_load_audit_20260916.json` and
+`model_fits_v2/unity_exact_raceline_suspension_pose_load_audit_20260916.json`.
+The full plant is still offline-only: the next gate is causal initialization
+and propagation of hidden heave/pitch/roll state over the active 30-step,
+40 Hz horizon. Nothing has been migrated to MPC, `/odom`, EKF, or AMCL.
+
+### 2026-09-16 reset-safe competition audit
+
+The competition diagnostic schedules reset the vehicle while preserving the
+trace clock and fixed-step counter. The suspension analyzer now detects the
+large teleport to the stationary start pose, differentiates each segment
+independently, and excludes ten rows on either side of each boundary. It
+detected 10 reset boundaries in the 12,000-row excitation and 76 in the
+70,028-row longer trace. The corrected serialized travel/load law achieved
+`0.9886--0.9953` correlation with `0.048--0.062 N` chronological holdout MAE
+on the short excitation, and `0.9989--0.9991` correlation with
+`0.020--0.023 N` holdout MAE on the longer trace. The earlier extreme travel
+rates were reset artifacts and are not model parameters. Both corrected
+reports remain diagnostic-only and no simulator, odometry, or MPC behavior
+was changed.
+
+### 2026-09-16 force-response inversion and data-to-model gate
+
+Reset-safe segmentation is now also applied to the offline axle-force
+inversion. Body, yaw, wheel-speed, and wheel-pose derivatives are never
+computed across a diagnostic teleport. Neither the open combined-slip trace
+nor the raceline holdout contained such boundaries, so their remaining force
+residuals are genuine schedule/force-reconstruction evidence rather than
+reset contamination.
+
+The direct serialized sideways-curve proxy gave apparent front/rear gains
+`0.678/0.692` on the open-excitation holdout (MAE `0.356/0.125 N`) and
+`0.792/0.681` on the raceline holdout (MAE `0.132/0.137 N`). The new
+cross-schedule screen found no clean universal gain, speed/slip correction,
+load-power law, or uninitialized runtime-state regression. The latter is
+numerically unstable across schedules and is rejected as a hidden absorber.
+
+The reports are
+`model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_old_v5_20260916.json`,
+`model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_raceline_v5_20260916.json`,
+and
+`model_fits_v2/unity_exact_axle_force_cross_schedule_screen_v4_20260916.json`.
+Both selected-row tables are compressed as
+`...old_rows_v5_20260916.csv.gz` and `...raceline_rows_v5_20260916.csv.gz`
+to remain under 100 MB. These remain offline model-identification artifacts only; no simulator, odometry, EKF,
+AMCL, or MPC behavior was changed or promoted.

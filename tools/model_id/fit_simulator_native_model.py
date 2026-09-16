@@ -123,8 +123,11 @@ def _stats(values: Iterable[float]) -> dict[str, float | int | None]:
 def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, float]]]:
     required = {
         "dt_sim_s", "x_k_m", "y_k_m", "yaw_k_rad", "u_k_mps",
-        "v_k_mps", "r_k_radps", "applied_throttle_norm_k1",
-        "applied_steering_rad_k1", "simulator_feedback_steering_rad_k1",
+        "v_k_mps", "r_k_radps", "transition_throttle_norm_k",
+        "transition_steering_norm_k", "steering_state_rad_k",
+        "applied_throttle_norm_k1", "applied_steering_rad_k1",
+        "simulator_feedback_steering_rad_k1",
+        "commanded_throttle_norm_k1", "commanded_steering_norm_k1",
         "wheel_speed_mps_k1", "segment_id", "x_k1_m", "y_k1_m",
         "yaw_k1_rad", "u_k1_mps", "v_k1_mps", "r_k1_radps",
         "encoder_left_rad_k1", "encoder_right_rad_k1",
@@ -144,7 +147,6 @@ def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, flo
             previous_right_speed = math.nan
             previous_left_angle = math.nan
             previous_right_angle = math.nan
-            previous_feedback = math.nan
             for raw in reader:
                 row = {field: float(raw[field]) for field in required}
                 if not all(math.isfinite(value) for value in row.values()):
@@ -180,8 +182,16 @@ def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, flo
                     row["wheel_left_speed_mps_k1"] = row["wheel_speed_mps_k1"]
                 if not math.isfinite(row["wheel_right_speed_mps_k1"]):
                     row["wheel_right_speed_mps_k1"] = row["wheel_speed_mps_k1"]
-                row["delta_k_rad"] = (
-                    previous_feedback if previous_segment == segment else math.nan)
+                # The assembler resolves the bridge/FixedUpdate alignment.
+                # The explicit transition fields are authoritative: the
+                # transition command is the previous packet command and the
+                # effective state is the previous packet post-controller
+                # steering value.
+                row["delta_k_rad"] = row["steering_state_rad_k"]
+                row["steering_target_norm_k"] = row[
+                    "transition_steering_norm_k"]
+                row["throttle_target_norm_k"] = row[
+                    "transition_throttle_norm_k"]
                 rows.append(row)
                 previous_segment = segment
                 previous_wheel = row["wheel_speed_mps_k1"]
@@ -189,7 +199,6 @@ def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, flo
                 previous_right_speed = row["wheel_right_speed_mps_k1"]
                 previous_left_angle = row["encoder_left_rad_k1"]
                 previous_right_angle = row["encoder_right_rad_k1"]
-                previous_feedback = row["simulator_feedback_steering_rad_k1"]
         result[name] = rows
     return result
 
@@ -225,7 +234,7 @@ def _fit_examples(runs: dict[str, list[dict[str, float]]],
             state_mid[4] = 0.5 * (row["v_k_mps"] + row["v_k1_mps"])
             state_mid[5] = 0.5 * (row["r_k_radps"] + row["r_k1_radps"])
             state_mid[6] = 0.5 * (row["delta_k_rad"] +
-                                   row["simulator_feedback_steering_rad_k1"])
+                                   row["applied_steering_rad_k1"])
             state_mid[7] = 0.5 * (
                 row["wheel_left_k_mps"] + row["wheel_left_speed_mps_k1"])
             state_mid[8] = 0.5 * (
@@ -598,8 +607,8 @@ def _mixed_fit_residual(
         state = _state_from_row(first)
         one_step = step(
             state,
-            first["applied_steering_rad_k1"] / parameters.steering_limit_rad,
-            first["applied_throttle_norm_k1"], first["dt_sim_s"], parameters)
+            first["steering_target_norm_k"],
+            first["throttle_target_norm_k"], first["dt_sim_s"], parameters)
         one_step_heading = ((one_step[2] - first["yaw_k1_rad"] + math.pi) %
                             (2.0 * math.pi) - math.pi)
         one_step_values = np.asarray((
@@ -624,9 +633,8 @@ def _mixed_fit_residual(
                 break
             state = step(
                 state,
-                row["applied_steering_rad_k1"] /
-                parameters.steering_limit_rad,
-                row["applied_throttle_norm_k1"], row["dt_sim_s"], parameters)
+                row["steering_target_norm_k"],
+                row["throttle_target_norm_k"], row["dt_sim_s"], parameters)
             elapsed += row["dt_sim_s"]
             index += 1
             while (horizon_index < len(MIXED_FIT_HORIZONS_S) and
@@ -738,7 +746,7 @@ def _error_vector(predicted: np.ndarray, row: dict[str, float]) -> dict[str, flo
         "v_mps": predicted[4] - row["v_k1_mps"],
         "r_radps": predicted[5] - row["r_k1_radps"],
         "steering_rad": (predicted[6] -
-                          row["simulator_feedback_steering_rad_k1"]),
+                          row["applied_steering_rad_k1"]),
         "wheel_mps": (0.5 * (predicted[7] + predicted[8]) -
                       row["wheel_speed_mps_k1"]),
         "wheel_left_mps": predicted[7] - row["wheel_left_speed_mps_k1"],
@@ -755,8 +763,8 @@ def _one_step_scores(runs: dict[str, list[dict[str, float]]],
                 continue
             predicted = step(
                 _state_from_row(row),
-                row["applied_steering_rad_k1"] / parameters.steering_limit_rad,
-                row["applied_throttle_norm_k1"], row["dt_sim_s"], parameters)
+                row["steering_target_norm_k"],
+                row["throttle_target_norm_k"], row["dt_sim_s"], parameters)
             for field, value in _error_vector(predicted, row).items():
                 errors[field].append(value)
     return {field: _stats(values) for field, values in errors.items()}
@@ -801,9 +809,8 @@ def _recursive_scores(runs: dict[str, list[dict[str, float]]],
                     break
                 state = step(
                     state,
-                    row["applied_steering_rad_k1"] /
-                    parameters.steering_limit_rad,
-                    row["applied_throttle_norm_k1"], row["dt_sim_s"],
+                    row["steering_target_norm_k"],
+                    row["throttle_target_norm_k"], row["dt_sim_s"],
                     parameters)
                 elapsed += row["dt_sim_s"]
                 index += 1
@@ -932,7 +939,11 @@ def score_existing_report(
             "wheel surface speeds, already equal to wheel_radius_m times "
             "angular rate; slip code must not multiply them by wheel_radius_m "
             "again. wheel_speed_mps is their recorded mean."),
-        "input_definition": ["applied_steering_rad", "applied_throttle_norm"],
+        "input_definition": ["transition_steering_norm_k",
+                              "transition_throttle_norm_k"],
+        "input_alignment": (
+            "previous packet command consumed by previous-to-current source "
+            "transition; steering_state_rad_k is the effective state at k"),
         "documented_slip_definition": parent["documented_slip_definition"],
         "parameter_policy": parent["parameter_policy"],
         "candidate_comparison": candidates,
@@ -1015,7 +1026,11 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
             "wheel surface speeds, already equal to wheel_radius_m times "
             "angular rate; slip code must not multiply them by wheel_radius_m "
             "again. wheel_speed_mps is their recorded mean."),
-        "input_definition": ["applied_steering_rad", "applied_throttle_norm"],
+        "input_definition": ["transition_steering_norm_k",
+                              "transition_throttle_norm_k"],
+        "input_alignment": (
+            "previous packet command consumed by previous-to-current source "
+            "transition; steering_state_rad_k is the effective state at k"),
         "documented_slip_definition": {
             "longitudinal": "(rw*omega-vx)/max(abs(vx),0.25)",
             "lateral": "vy/abs(vx), represented by tire-frame contact velocity",

@@ -1,9 +1,12 @@
 """Offline four-wheel simulator-native candidate.
 
-This candidate follows the current strategy: dimensionless longitudinal slip,
-``Sy = vy/abs(vx)`` lateral slip, Ackermann wheel angles, and the documented
-two-piece friction curves.  It is not imported by runtime ROS nodes and is not
-the production MPC model until true open-loop and blind acceptance passes.
+The compatibility plant retains the historical dimensionless slip guide, but
+the explicit Unity-wheel path uses the coordinates reconstructed from the
+diagnostic traces: forward slip is based on wheel-surface and ground speed,
+sideways slip is ``-wheel_lateral_velocity / max(abs(wheel_forward_velocity),
+0.5 m/s)``, and the serialized WheelFrictionCurve is evaluated piecewise
+linearly.  This module is not imported by runtime ROS nodes and is not the
+production MPC model until true open-loop and blind acceptance passes.
 """
 
 from __future__ import annotations
@@ -34,9 +37,28 @@ except ModuleNotFoundError:
 
 GRAVITY_MPS2 = 9.81
 MIN_SLIP_SPEED_MPS = 0.25
+# The exact Unity WheelCollider diagnostics identify different denominator
+# guards for the two slip coordinates.  Keep these separate from the older
+# guide-model floor above; using one generic floor would silently change the
+# Unity contact law.
+UNITY_LATERAL_SLIP_SPEED_FLOOR_MPS = 0.5
 INTEGRATION_SUBSTEP_S = 0.002
 STEERING_RATE_RADPS = 3.2
 MAX_STEERING_RAD = 0.5236
+
+# These are not WheelCollider.mass-derived inertias.  They are the three
+# effective rotational-response values recovered from the exact Unity
+# diagnostic trace.  Keeping them named and separate prevents the wheel
+# rotational solver response from being hidden inside a tire or longitudinal
+# gain.  They are only used by the explicit Unity-wheel offline plant below.
+UNITY_EFFECTIVE_WHEEL_INERTIA_REGIMES_KGM2 = (
+    0.000366, 0.000441, 0.000436)
+UNITY_EFFECTIVE_WHEEL_INERTIA_BREAKPOINTS_MPS = (6.0, 12.0)
+UNITY_WHEEL_DAMPING_NMS = 0.25
+UNITY_ACTIVE_MOTOR_TORQUE_NM = 428.0
+UNITY_ACTIVE_BRAKE_TORQUE_NM = 428.0
+UNITY_COM_HEIGHT_M = 0.06434
+UNITY_STEERING_SOURCE_FIXED_DT_S = 0.001
 
 
 def _prefab_curve(
@@ -86,6 +108,61 @@ class DriveStateParameters:
 
 
 @dataclass(frozen=True)
+class UnityWheelDynamicsParameters:
+    """Explicit offline reconstruction of the active Unity wheel branch.
+
+    ``effective_inertia_regimes_kgm2`` is deliberately not called a physical
+    wheel inertia.  Unity's WheelCollider solver does not serialize the
+    rotational inertia used by the observed response; these values are a
+    separately identified effective state transition from the exact trace.
+    Every other value in this record is a source-side controller or
+    WheelCollider value.
+    """
+
+    motor_torque_nm: float = UNITY_ACTIVE_MOTOR_TORQUE_NM
+    brake_torque_nm: float = UNITY_ACTIVE_BRAKE_TORQUE_NM
+    throttle_limit: float = 1.0
+    wheel_damping_nms: tuple[float, ...] = (UNITY_WHEEL_DAMPING_NMS,) * 4
+    effective_inertia_regimes_kgm2: tuple[float, ...] = (
+        *UNITY_EFFECTIVE_WHEEL_INERTIA_REGIMES_KGM2,)
+    inertia_breakpoints_mps: tuple[float, ...] = (
+        *UNITY_EFFECTIVE_WHEEL_INERTIA_BREAKPOINTS_MPS,)
+    drive_torque_fractions: tuple[float, ...] = (0.25,) * 4
+    brake_torque_fractions: tuple[float, ...] = (1.0,) * 4
+    provenance: str = (
+        "unity_vehiclecontroller:CAWD_CAWB_motor_torque_428Nm;"
+        "unity_wheelcollider:radius_and_damping;"
+        "exact_trace:effective_rotational_inertia_regimes")
+
+    def __post_init__(self) -> None:
+        if len(self.wheel_damping_nms) != 4:
+            raise ValueError("Unity wheel damping must contain four values")
+        if len(self.drive_torque_fractions) != 4:
+            raise ValueError("Unity drive fractions must contain four values")
+        if len(self.brake_torque_fractions) != 4:
+            raise ValueError("Unity brake fractions must contain four values")
+        if len(self.effective_inertia_regimes_kgm2) != (
+                len(self.inertia_breakpoints_mps) + 1):
+            raise ValueError(
+                "Unity inertia regimes must have one more value than breakpoints")
+        if any(value <= 0.0 or not math.isfinite(value)
+               for value in self.effective_inertia_regimes_kgm2):
+            raise ValueError("Unity effective wheel inertias must be positive")
+        if any(value < 0.0 or not math.isfinite(value)
+               for value in self.inertia_breakpoints_mps):
+            raise ValueError("Unity inertia breakpoints must be non-negative")
+        if tuple(sorted(self.inertia_breakpoints_mps)) != self.inertia_breakpoints_mps:
+            raise ValueError("Unity inertia breakpoints must be sorted")
+
+    def inertia_for_speed(self, speed_mps: float) -> float:
+        """Return the identified effective rotational inertia regime."""
+        index = int(np.searchsorted(self.inertia_breakpoints_mps,
+                                    max(0.0, abs(float(speed_mps))),
+                                    side="right"))
+        return float(self.effective_inertia_regimes_kgm2[index])
+
+
+@dataclass(frozen=True)
 class NativeModelParameters:
     """Structural parameters with provenance kept outside the flat fit vector."""
 
@@ -116,6 +193,10 @@ class NativeModelParameters:
     drive_type: str | None = None
     steering_limit_rad: float = MAX_STEERING_RAD
     steering_rate_radps: float = STEERING_RATE_RADPS
+    # VehicleController.Steer() is evaluated in Unity's FixedUpdate loop.
+    # Keep its measured source cadence explicit instead of approximating the
+    # controller with one 25 ms MoveTowards step.
+    steering_source_fixed_dt_s: float = UNITY_STEERING_SOURCE_FIXED_DT_S
     # Keep the effective API-frame to model-frame conversion explicit. The
     # raw Unity WheelCollider sign is recorded separately by the diagnostic
     # experiment; it is not interchangeable with the API-frame replay sign.
@@ -129,6 +210,23 @@ class NativeModelParameters:
     wheel_radii_m: tuple[float, ...] | None = None
     wheel_masses_kg: tuple[float, ...] | None = None
     wheel_sprung_masses_kg: tuple[float, ...] | None = None
+    # The Unity Rigidbody COM height is kept as a structural load-transfer
+    # input.  It is not a fitted tire/load coefficient.  The default is None
+    # so a model loaded from a dump must explicitly opt in to the mechanical
+    # load path rather than silently inventing a suspension state.
+    unity_com_height_m: float | None = None
+    # ``static_sprung_mass`` is the canonical current plant.  The optional
+    # ``mechanical_longitudinal_cg_transfer`` and
+    # ``mechanical_cg_transfer`` paths apply exact rigid-body CG moment
+    # balance to the predicted tire wrench.  They are offline screens only;
+    # they are not substitutes for the still-missing WheelCollider
+    # suspension/roll state and do not alter the production MPC model.
+    unity_normal_load_mode: str = "static_sprung_mass"
+    # Unity's body-frame pitch/roll inertias are separate from the required
+    # body-y yaw inertia.  They are required only by the offline suspension
+    # state path; leaving them unset prevents a guessed vertical model.
+    pitch_inertia_kgm2: float | None = None
+    roll_inertia_kgm2: float | None = None
     suspension_distances_m: tuple[float, ...] | None = None
     suspension_spring_rates_n_per_m: tuple[float, ...] | None = None
     suspension_damper_rates_ns_per_m: tuple[float, ...] | None = None
@@ -138,6 +236,10 @@ class NativeModelParameters:
     rigid_body_drag_per_s: float | None = None
     rigid_body_angular_drag_per_s: float | None = None
     rigid_body_max_angular_velocity_radps: float | None = None
+    # Optional explicit wheel-rotational branch.  It is kept separate from
+    # the legacy 8/9-state candidates so adding this diagnostic model cannot
+    # silently alter their fitted behavior.
+    unity_wheel_dynamics: UnityWheelDynamicsParameters | None = None
     drive_state: DriveStateParameters = DriveStateParameters()
     longitudinal_gain: float = 1.0
     lateral_gain: float = 1.0
@@ -276,6 +378,8 @@ def f1tenth_prefab_parameters(
         longitudinal_curve=longitudinal,
         lateral_curve=lateral,
         wheel_masses_kg=(0.109,) * 4,
+        unity_com_height_m=UNITY_COM_HEIGHT_M,
+        unity_normal_load_mode="static_sprung_mass",
         parameter_provenance=(
             "unity_prefab:F1TENTH.prefab;"
             "inertia=not_serialized;"
@@ -441,8 +545,9 @@ def position_point_body_velocity(
     This is an offline reference-point correction; it does not change the
     runtime odometry frame.
     """
-    if state.shape not in ((8,), (9,)):
-        raise ValueError(f"expected state shape (8,) or (9,), got {state.shape}")
+    if state.shape not in ((8,), (9,), (11,)):
+        raise ValueError(
+            f"expected state shape (8,), (9,), or (11,), got {state.shape}")
     u = float(state[3])
     v = float(state[4])
     r = float(state[5])
@@ -455,8 +560,706 @@ def static_normal_loads(parameters: NativeModelParameters) -> tuple[float, ...]:
     return front_axle / 2.0, front_axle / 2.0, rear_axle / 2.0, rear_axle / 2.0
 
 
+def unity_normal_loads(parameters: NativeModelParameters) -> tuple[float, ...]:
+    """Return the explicit support-load source used by the Unity plant.
+
+    A diagnostic dump's ``WheelHit.sprungMass`` is a per-contact runtime
+    quantity.  It is used directly when present; the geometry-derived static
+    load is only the fallback for a prefab/reference profile.  Dynamic
+    suspension load transfer is intentionally not synthesized here.
+    """
+    if parameters.wheel_sprung_masses_kg is not None:
+        if len(parameters.wheel_sprung_masses_kg) != 4:
+            raise ValueError("Unity sprung-mass data must contain four values")
+        return tuple(
+            float(mass) * GRAVITY_MPS2
+            for mass in parameters.wheel_sprung_masses_kg)
+    return static_normal_loads(parameters)
+
+
+def unity_normal_loads_from_acceleration(
+        parameters: NativeModelParameters, longitudinal_accel_mps2: float,
+        lateral_accel_mps2: float) -> tuple[float, ...]:
+    """Return structural per-wheel loads for an explicit CG-transfer screen.
+
+    The transfer is derived from the measured Unity body mass, COM height,
+    contact wheelbase, and track width.  Positive body acceleration transfers
+    support rearward/rightward in the ``x-forward, y-left`` model frame.  The
+    base sprung masses are retained as the static distribution; the transfer
+    conserves their total load.  This is intentionally an algebraic rigid
+    body screen, not a claim that it reproduces the WheelCollider's spring,
+    damper, and contact solver transitions.
+    """
+    if parameters.unity_normal_load_mode == "static_sprung_mass":
+        return unity_normal_loads(parameters)
+    if parameters.unity_normal_load_mode not in {
+            "mechanical_longitudinal_cg_transfer", "mechanical_cg_transfer"}:
+        raise ValueError(
+            "unsupported Unity normal-load mode: "
+            f"{parameters.unity_normal_load_mode}")
+    height = parameters.unity_com_height_m
+    if height is None or not math.isfinite(height) or height <= 0.0:
+        raise ValueError(
+            "mechanical Unity load transfer requires dumped COM height")
+    values = (longitudinal_accel_mps2, lateral_accel_mps2)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Unity load-transfer acceleration must be finite")
+    if parameters.wheelbase_m <= 0.0 or parameters.track_m <= 0.0:
+        raise ValueError("Unity contact wheelbase and track must be positive")
+    if parameters.wheel_sprung_masses_kg is not None:
+        if len(parameters.wheel_sprung_masses_kg) != 4:
+            raise ValueError("Unity sprung-mass data must contain four values")
+        base = np.asarray(tuple(
+            float(mass) * GRAVITY_MPS2
+            for mass in parameters.wheel_sprung_masses_kg), dtype=float)
+    else:
+        base = np.asarray(static_normal_loads(parameters), dtype=float)
+    # The front/rear axle shift is m*h/L*ax.  It is added to each front wheel
+    # as half of the axle shift and subtracted from each rear wheel.  The
+    # left/right shift is distributed in the same way across the two axles.
+    front_shift_per_wheel = (
+        -parameters.mass_kg * height / parameters.wheelbase_m *
+        longitudinal_accel_mps2 / 2.0)
+    left_shift_per_wheel = 0.0
+    if parameters.unity_normal_load_mode == "mechanical_cg_transfer":
+        left_shift_per_wheel = (
+            -parameters.mass_kg * height / parameters.track_m *
+            lateral_accel_mps2 / 2.0)
+    loads = base + np.asarray((
+        front_shift_per_wheel + left_shift_per_wheel,
+        front_shift_per_wheel - left_shift_per_wheel,
+        -front_shift_per_wheel + left_shift_per_wheel,
+        -front_shift_per_wheel - left_shift_per_wheel,
+    ), dtype=float)
+    if np.any(loads < 0.0):
+        # The planar operating envelope should normally remain four-wheel
+        # grounded.  Keep the unilateral contact boundary explicit instead
+        # of allowing a negative normal load to become a hidden tire gain.
+        loads = np.maximum(loads, 0.0)
+    return tuple(float(value) for value in loads)
+
+
+def unity_wheel_travel_loads(
+        parameters: NativeModelParameters,
+        wheel_travel: tuple[float, ...] | list[float] | np.ndarray,
+        wheel_travel_rates: tuple[float, ...] | list[float] | np.ndarray
+        ) -> tuple[float, ...]:
+    """Evaluate the measured native WheelCollider travel/load law.
+
+    Unity's serialized spring and damper are expressed in N/m and N s/m,
+    while ``WheelCollider`` travel is normalized by ``suspensionDistance``.
+    The exact contact-point audit therefore uses
+
+        ``Fz = max(0, sprungMass*g - spring*distance*travel
+                         - damper*distance*travel_rate)``.
+
+    ``targetPosition`` remains a source configuration value, but it is not a
+    free force coefficient and is not inserted into this measured local
+    travel law.  This function is deliberately separate so the source-side
+    mechanism cannot be replaced by an optimizer gain.
+    """
+    if parameters.wheel_sprung_masses_kg is None:
+        raise ValueError("Unity travel loads require captured sprung masses")
+    if (parameters.suspension_distances_m is None or
+            parameters.suspension_spring_rates_n_per_m is None or
+            parameters.suspension_damper_rates_ns_per_m is None):
+        raise ValueError(
+            "Unity travel loads require captured distance/spring/damper values")
+    arrays = (
+        parameters.wheel_sprung_masses_kg,
+        parameters.suspension_distances_m,
+        parameters.suspension_spring_rates_n_per_m,
+        parameters.suspension_damper_rates_ns_per_m,
+        tuple(float(value) for value in wheel_travel),
+        tuple(float(value) for value in wheel_travel_rates),
+    )
+    if any(len(values) != 4 for values in arrays):
+        raise ValueError("Unity travel-load arrays must contain four values")
+    if not all(math.isfinite(value) for values in arrays for value in values):
+        raise ValueError("Unity travel-load values must be finite")
+    loads: list[float] = []
+    for mass, distance, spring, damper, travel, travel_rate in zip(*arrays):
+        if mass < 0.0 or distance <= 0.0 or spring < 0.0 or damper < 0.0:
+            raise ValueError("Unity travel-load source values are invalid")
+        load = (mass * GRAVITY_MPS2 - spring * distance * travel -
+                damper * distance * travel_rate)
+        loads.append(max(0.0, float(load)))
+    return tuple(loads)
+
+
+def unity_suspension_loads(
+        parameters: NativeModelParameters, heave_m: float,
+        pitch_rad: float, roll_rad: float, heave_rate_mps: float,
+        pitch_rate_radps: float, roll_rate_radps: float
+        ) -> tuple[float, ...]:
+    """Evaluate the explicit four-WheelCollider spring/damper load state.
+
+    The suspension coordinates are deviations from the settled, four-wheel
+    grounded configuration.  For wheel ``i`` the body-side vertical
+    displacement is ``heave - pitch*x_i + roll*y_i`` in the model frame.  A
+    positive upward displacement unloads that wheel, so the serialized Unity
+    spring and damper produce ``Fz = Fz_static - k*q - c*q_dot``.  The static
+    ``Fz`` is taken from the captured runtime ``sprungMass`` rather than a
+    fitted load or tire parameter.
+
+    This is the vertical suspension submodel used by the offline plant.  It
+    does not use simulator truth during rollout and it treats negative load as
+    an explicit unilateral-contact boundary rather than allowing a negative
+    tire force.
+    """
+    values = (heave_m, pitch_rad, roll_rad, heave_rate_mps,
+              pitch_rate_radps, roll_rate_radps)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Unity suspension state must be finite")
+    if parameters.wheel_sprung_masses_kg is None:
+        raise ValueError("Unity suspension requires captured sprung masses")
+    if (parameters.suspension_spring_rates_n_per_m is None or
+            parameters.suspension_damper_rates_ns_per_m is None):
+        raise ValueError("Unity suspension requires captured spring/damper rates")
+    if (len(parameters.wheel_sprung_masses_kg) != 4 or
+            len(parameters.suspension_spring_rates_n_per_m) != 4 or
+            len(parameters.suspension_damper_rates_ns_per_m) != 4):
+        raise ValueError("Unity suspension arrays must contain four values")
+    if parameters.suspension_distances_m is None:
+        raise ValueError("Unity suspension requires captured distances")
+    travel: list[float] = []
+    travel_rate: list[float] = []
+    for index, wheel in enumerate(parameters.wheels):
+        displacement = (heave_m - pitch_rad * wheel.x_m +
+                        roll_rad * wheel.y_m)
+        velocity = (heave_rate_mps - pitch_rate_radps * wheel.x_m +
+                    roll_rate_radps * wheel.y_m)
+        distance = float(parameters.suspension_distances_m[index])
+        travel.append(displacement / distance)
+        travel_rate.append(velocity / distance)
+    return unity_wheel_travel_loads(parameters, travel, travel_rate)
+
+
+def unity_contact_kinematics(
+        state: np.ndarray, steering_angle: float,
+        parameters: NativeModelParameters) -> list[dict[str, float]]:
+    """Return four WheelCollider contact velocities from wheel angular state.
+
+    The state is ``[X, Y, yaw, u, v, r, steering, omega_FL, omega_FR,
+    omega_RL, omega_RR]``.  Unlike the compatibility path, the wheel state is
+    angular rate and the physical WheelCollider radius is applied exactly
+    once when forming the contact-patch surface speed.
+    """
+    if state.shape != (11,):
+        raise ValueError(
+            f"expected Unity wheel state shape (11,), got {state.shape}")
+    radii = (parameters.wheel_radii_m
+             if parameters.wheel_radii_m is not None
+             else (parameters.wheel_radius_m,) * 4)
+    if len(radii) != 4:
+        raise ValueError("Unity wheel radii must contain four values")
+    _, _, _, u, v, r, _ = (float(value) for value in state[:7])
+    angles = ackermann_angles(
+        steering_angle * parameters.steering_to_wheel_angle_sign,
+        (parameters.steering_geometry_wheelbase_m
+         if parameters.steering_geometry_wheelbase_m is not None
+         else parameters.wheelbase_m),
+        parameters.track_m)
+    output: list[dict[str, float]] = []
+    for index, (geometry, angle) in enumerate(zip(parameters.wheels, angles)):
+        vx_body = u - r * geometry.y_m
+        vy_body = v + r * geometry.x_m
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        vx_tire = cosine * vx_body + sine * vy_body
+        vy_tire = -sine * vx_body + cosine * vy_body
+        omega = float(state[7 + index])
+        surface_speed = radii[index] * omega
+        # These are the simulator coordinates, not real-vehicle slip
+        # definitions.  Forward slip uses the larger of wheel-surface and
+        # ground speed and saturates at +/-1.  The exact trace reconstructs
+        # WheelHit.sidewaysSlip as the negative wheel-frame lateral velocity
+        # over the forward-speed floor.
+        forward_denominator = max(
+            abs(surface_speed), abs(vx_tire), MIN_SLIP_SPEED_MPS)
+        lateral_denominator = max(
+            abs(vx_tire), UNITY_LATERAL_SLIP_SPEED_FLOOR_MPS)
+        forward_slip = max(-1.0, min(1.0, (
+            (surface_speed - vx_tire) / forward_denominator)))
+        sideways_slip = -vy_tire / lateral_denominator
+        output.append({
+            "x_m": geometry.x_m,
+            "y_m": geometry.y_m,
+            "steering_rad": angle,
+            "vx_body_mps": vx_body,
+            "vy_body_mps": vy_body,
+            "vx_tire_mps": vx_tire,
+            "vy_tire_mps": vy_tire,
+            "omega_radps": omega,
+            "wheel_surface_speed_mps": surface_speed,
+            "sx": forward_slip,
+            "sy": sideways_slip,
+        })
+    return output
+
+
+def _unity_wheel_torques(
+        throttle_norm: float, parameters: NativeModelParameters
+        ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Reproduce the active VehicleController CAWD/CAWB torque branch."""
+    dynamics = parameters.unity_wheel_dynamics
+    if dynamics is None:
+        raise ValueError("Unity wheel dynamics are required for this plant")
+    throttle = max(-1.0, min(1.0, float(throttle_norm)))
+    drive_torque = dynamics.throttle_limit * throttle * dynamics.motor_torque_nm
+    if abs(drive_torque) <= 1.0e-12:
+        motor = (0.0,) * 4
+        brake = tuple(
+            dynamics.brake_torque_nm * fraction
+            for fraction in dynamics.brake_torque_fractions)
+    else:
+        motor = tuple(
+            drive_torque * fraction
+            for fraction in dynamics.drive_torque_fractions)
+        brake = (0.0,) * 4
+    return motor, brake
+
+
+def _unity_contact_force_components(
+        state: np.ndarray, steering_angle: float,
+        parameters: NativeModelParameters,
+        normal_loads: tuple[float, ...]
+        ) -> tuple[tuple[float, float, float], ...]:
+    """Return per-wheel ``(Fx_body, Fy_body, Fx_tire)`` contact forces."""
+    if len(normal_loads) != 4 or not all(
+            math.isfinite(float(load)) and float(load) >= 0.0
+            for load in normal_loads):
+        raise ValueError("Unity normal loads must contain four finite values")
+    contacts = unity_contact_kinematics(state, steering_angle, parameters)
+    components: list[tuple[float, float, float]] = []
+    for index, (contact, normal_load) in enumerate(
+            zip(contacts, normal_loads)):
+        # Unity's serialized WheelFrictionCurve is piecewise linear between
+        # the origin, extremum, and asymptote, then constant.  The generic
+        # cubic Hermite guide surrogate is intentionally not used here.
+        fx_tire = normal_load * _unity_wheel_friction_value(
+            contact["sx"], parameters.longitudinal_curve_for_wheel(index))
+        # ``sy`` is the exact Unity sideways-slip sign, so the contact force
+        # is positive in the corresponding body-left direction.
+        fy_tire = normal_load * _unity_wheel_friction_value(
+            contact["sy"], parameters.lateral_curve_for_wheel(index))
+        cosine = math.cos(contact["steering_rad"])
+        sine = math.sin(contact["steering_rad"])
+        components.append((
+            cosine * fx_tire - sine * fy_tire,
+            sine * fx_tire + cosine * fy_tire,
+            fx_tire,
+        ))
+    return tuple(components)
+
+
+def _unity_wheel_friction_value(
+        slip: float, curve: TireCurveParameters) -> float:
+    """Evaluate a dumped Unity WheelFrictionCurve without a fitted shape.
+
+    Unity exposes the three curve points and stiffness, not a real-tire law.
+    The native WheelCollider model uses the simulator's documented linear
+    segments: origin to extremum, extremum to asymptote, then the asymptote
+    plateau.  This function is deliberately separate from ``friction_value``
+    because the latter is the historical cubic guide surrogate used by the
+    older effective candidates.
+    """
+    if not math.isfinite(slip):
+        raise ValueError("Unity slip must be finite")
+    magnitude = abs(slip)
+    if magnitude <= curve.extremum_slip:
+        value = curve.extremum_value * magnitude / curve.extremum_slip
+    elif magnitude <= curve.asymptote_slip:
+        fraction = ((magnitude - curve.extremum_slip) /
+                    (curve.asymptote_slip - curve.extremum_slip))
+        value = curve.extremum_value + fraction * (
+            curve.asymptote_value - curve.extremum_value)
+    else:
+        value = curve.asymptote_value
+    signed = math.copysign(curve.stiffness * value, slip) if slip else 0.0
+    return float(signed)
+
+
+def _unity_contact_wrench(
+        state: np.ndarray, steering_angle: float,
+        throttle_norm: float, parameters: NativeModelParameters,
+        normal_loads: tuple[float, ...] | None = None
+        ) -> tuple[float, float, float, tuple[float, ...]]:
+    """Return body wrench and each wheel's tire-frame longitudinal force."""
+    dynamics = parameters.unity_wheel_dynamics
+    if dynamics is None:
+        raise ValueError("Unity wheel dynamics are required for this plant")
+    loads = (unity_normal_loads(parameters)
+             if normal_loads is None else normal_loads)
+    if len(loads) != 4 or not all(
+            math.isfinite(float(load)) and float(load) >= 0.0
+            for load in loads):
+        raise ValueError("Unity normal loads must contain four finite values")
+    motor_torques, brake_torques = _unity_wheel_torques(
+        throttle_norm, parameters)
+    components = _unity_contact_force_components(
+        state, steering_angle, parameters, loads)
+    force_x = sum(component[0] for component in components)
+    force_y = sum(component[1] for component in components)
+    moment_z = sum(
+        wheel.x_m * component[1] - wheel.y_m * component[0]
+        for wheel, component in zip(parameters.wheels, components))
+    tire_longitudinal_forces = tuple(component[2] for component in components)
+
+    # Rigidbody drag is a body-force coefficient, not a fitted tire term.
+    if parameters.rigid_body_drag_per_s is not None:
+        force_x -= parameters.rigid_body_drag_per_s * float(state[3])
+        force_y -= parameters.rigid_body_drag_per_s * float(state[4])
+    if (parameters.rigid_body_angular_drag_per_s is not None and
+            parameters.yaw_inertia_kgm2 is not None):
+        moment_z -= (parameters.rigid_body_angular_drag_per_s *
+                     parameters.yaw_inertia_kgm2 * float(state[5]))
+    return force_x, force_y, moment_z, tire_longitudinal_forces
+
+
+def step_unity_wheel_collider(
+        state: np.ndarray, steering_target_norm: float,
+        throttle_norm: float, dt: float,
+        parameters: NativeModelParameters) -> np.ndarray:
+    """Advance the explicit Unity WheelCollider offline reconstruction.
+
+    This path is intentionally separate from :func:`step`.  It is a
+    diagnostic/replay model only: it uses the checked-in Unity structure and
+    exact diagnostic snapshot, but it does not receive simulator truth at
+    runtime and is not imported by ROS or production MPC code.
+    """
+    if state.shape != (11,):
+        raise ValueError(
+            f"expected Unity wheel state shape (11,), got {state.shape}")
+    if parameters.unity_wheel_dynamics is None:
+        raise ValueError("step_unity_wheel_collider requires Unity wheel dynamics")
+    if parameters.yaw_inertia_kgm2 is None:
+        raise ValueError(
+            "step_unity_wheel_collider requires dumped body yaw inertia")
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be positive and finite")
+    target = (max(-1.0, min(1.0, float(steering_target_norm))) *
+              parameters.steering_limit_rad)
+    x, y, yaw, u, v, r, steering = (
+        float(value) for value in state[:7])
+    wheel_omegas = [float(value) for value in state[7:11]]
+    steering_segments = _unity_vehicle_controller_steering_segments(
+        steering, steering_target_norm, dt, parameters)
+    for segment_dt, segment_start, segment_end in steering_segments:
+        count = max(1, int(math.ceil(segment_dt / INTEGRATION_SUBSTEP_S)))
+        sub_dt = segment_dt / count
+        for sub_index in range(count):
+            fraction = (sub_index + 0.5) / count
+            delta = segment_start + fraction * (segment_end - segment_start)
+            local_state = np.asarray(
+                [x, y, yaw, u, v, r, delta, *wheel_omegas], dtype=float)
+            normal_loads = unity_normal_loads(parameters)
+        # The dynamic path is deliberately a short fixed-point solve.  Tire
+        # force is linear in the supplied normal loads, while the CG transfer
+        # is derived from the resulting contact acceleration.  Two iterations
+        # are enough to remove the load/force circularity at this model's
+        # substep scale without introducing a fitted relaxation constant.
+            iterations = (3 if parameters.unity_normal_load_mode in {
+                "mechanical_longitudinal_cg_transfer", "mechanical_cg_transfer"
+            } else 1)
+            force_x = force_y = moment_z = 0.0
+            tire_forces: tuple[float, ...] = (0.0,) * 4
+            for _ in range(iterations):
+                force_x, force_y, moment_z, tire_forces = _unity_contact_wrench(
+                    local_state, delta, throttle_norm, parameters,
+                    normal_loads=normal_loads)
+                if parameters.unity_normal_load_mode not in {
+                        "mechanical_longitudinal_cg_transfer",
+                        "mechanical_cg_transfer"}:
+                    break
+                # Rigidbody drag acts at the body COM and therefore does not
+                # create the wheel-support transfer being identified here.
+                drag_x = ((parameters.rigid_body_drag_per_s or 0.0) * float(u))
+                drag_y = ((parameters.rigid_body_drag_per_s or 0.0) * float(v))
+                tire_ax = (force_x + drag_x) / parameters.mass_kg + r * v
+                tire_ay = (force_y + drag_y) / parameters.mass_kg - r * u
+                normal_loads = unity_normal_loads_from_acceleration(
+                    parameters, tire_ax, tire_ay)
+            motor_torques, brake_torques = _unity_wheel_torques(
+                throttle_norm, parameters)
+            speed = abs(u)
+            dynamics = parameters.unity_wheel_dynamics
+            wheel_damping = dynamics.wheel_damping_nms
+            omega_dot = []
+            for index, omega in enumerate(wheel_omegas):
+                radius = (parameters.wheel_radii_m[index]
+                          if parameters.wheel_radii_m is not None
+                          else parameters.wheel_radius_m)
+                unbraked_torque = (
+                    motor_torques[index] - tire_forces[index] * radius -
+                    wheel_damping[index] * omega)
+                brake = brake_torques[index]
+                if brake > 0.0:
+                    # A Coulomb brake must not be integrated through zero with
+                    # an explicit Euler sign flip.  When the brake can hold the
+                    # wheel, use the static-brake solution; otherwise oppose
+                    # the current/free-motion direction and stop exactly at
+                    # zero if the next substep would cross it.
+                    if abs(omega) <= 1.0e-9 and abs(unbraked_torque) <= brake:
+                        wheel_torque = 0.0
+                    else:
+                        direction = (math.copysign(1.0, omega)
+                                     if abs(omega) > 1.0e-9 else
+                                     math.copysign(1.0, unbraked_torque))
+                        wheel_torque = unbraked_torque - direction * brake
+                        inertia = dynamics.inertia_for_speed(speed)
+                        if (abs(omega) > 1.0e-9 and
+                                omega * (omega + sub_dt * wheel_torque / inertia)
+                                < 0.0):
+                            wheel_torque = -omega * inertia / sub_dt
+                else:
+                    wheel_torque = unbraked_torque
+                omega_dot.append(
+                    wheel_torque / dynamics.inertia_for_speed(speed))
+            u_dot = force_x / parameters.mass_kg + r * v
+            v_dot = force_y / parameters.mass_kg - r * u
+            r_dot = moment_z / parameters.yaw_inertia_kgm2
+            pose_u, pose_v = position_point_body_velocity(
+                local_state, parameters)
+            x += sub_dt * (pose_u * math.cos(yaw) - pose_v * math.sin(yaw))
+            y += sub_dt * (pose_u * math.sin(yaw) + pose_v * math.cos(yaw))
+            yaw += sub_dt * r
+            u += sub_dt * u_dot
+            v += sub_dt * v_dot
+            r += sub_dt * r_dot
+            wheel_omegas = [omega + sub_dt * derivative
+                            for omega, derivative in zip(wheel_omegas, omega_dot)]
+            wheel_omegas = [0.0 if abs(omega) < 1.0e-9 else omega
+                            for omega in wheel_omegas]
+    steering_end = steering_segments[-1][2]
+    return np.asarray([x, y, yaw, u, v, r, steering_end, *wheel_omegas],
+                      dtype=float)
+
+
+def step_unity_wheel_collider_with_suspension(
+        state: np.ndarray, steering_target_norm: float,
+        throttle_norm: float, dt: float,
+        parameters: NativeModelParameters) -> np.ndarray:
+    """Advance the offline Unity plant with explicit sprung-body states.
+
+    The state extends the 11-state wheel plant with six deviations from the
+    settled grounded pose: heave, heave rate, pitch, pitch rate, roll, and
+    roll rate.  Each wheel load is generated by the captured WheelCollider
+    spring/damper values, while horizontal tire forces use the serialized
+    Unity curves.  Horizontal contact forces act below the exact COM and
+    therefore excite the explicit pitch/roll states.
+
+    This is a diagnostic model path.  It does not consume simulator truth
+    during rollout, does not change Unity, and is not connected to ROS,
+    odometry, or production MPC.
+    """
+    if state.shape != (17,):
+        raise ValueError(
+            f"expected Unity suspension state shape (17,), got {state.shape}")
+    if parameters.unity_wheel_dynamics is None:
+        raise ValueError(
+            "step_unity_wheel_collider_with_suspension requires Unity wheel dynamics")
+    if parameters.yaw_inertia_kgm2 is None:
+        raise ValueError("Unity suspension plant requires dumped yaw inertia")
+    if parameters.pitch_inertia_kgm2 is None:
+        raise ValueError("Unity suspension plant requires dumped pitch inertia")
+    if parameters.roll_inertia_kgm2 is None:
+        raise ValueError("Unity suspension plant requires dumped roll inertia")
+    if parameters.unity_com_height_m is None:
+        raise ValueError("Unity suspension plant requires dumped COM height")
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be positive and finite")
+    target = (max(-1.0, min(1.0, float(steering_target_norm))) *
+              parameters.steering_limit_rad)
+    x, y, yaw, u, v, r, steering = (
+        float(value) for value in state[:7])
+    wheel_omegas = [float(value) for value in state[7:11]]
+    heave, heave_rate, pitch, pitch_rate, roll, roll_rate = (
+        float(value) for value in state[11:17])
+    steering_segments = _unity_vehicle_controller_steering_segments(
+        steering, steering_target_norm, dt, parameters)
+    base_loads = unity_normal_loads(parameters)
+    base_load_sum = sum(base_loads)
+    base_pitch_moment = sum(
+        -wheel.x_m * load
+        for wheel, load in zip(parameters.wheels, base_loads))
+    base_roll_moment = sum(
+        wheel.y_m * load
+        for wheel, load in zip(parameters.wheels, base_loads))
+    dynamics = parameters.unity_wheel_dynamics
+    wheel_damping = dynamics.wheel_damping_nms
+    com_height = float(parameters.unity_com_height_m)
+
+    for segment_dt, segment_start, segment_end in steering_segments:
+        count = max(1, int(math.ceil(
+            segment_dt / (INTEGRATION_SUBSTEP_S / 2.0))))
+        sub_dt = segment_dt / count
+        for sub_index in range(count):
+            fraction = (sub_index + 0.5) / count
+            delta = segment_start + fraction * (segment_end - segment_start)
+            local_state = np.asarray(
+                [x, y, yaw, u, v, r, delta, *wheel_omegas], dtype=float)
+            loads = unity_suspension_loads(
+                parameters, heave, pitch, roll, heave_rate, pitch_rate,
+                roll_rate)
+            components = _unity_contact_force_components(
+                local_state, delta, parameters, loads)
+            force_x = sum(component[0] for component in components)
+            force_y = sum(component[1] for component in components)
+            moment_z = sum(
+                wheel.x_m * component[1] - wheel.y_m * component[0]
+                for wheel, component in zip(parameters.wheels, components))
+            if parameters.rigid_body_drag_per_s is not None:
+                force_x -= parameters.rigid_body_drag_per_s * u
+                force_y -= parameters.rigid_body_drag_per_s * v
+            if parameters.rigid_body_angular_drag_per_s is not None:
+                moment_z -= (parameters.rigid_body_angular_drag_per_s *
+                             parameters.yaw_inertia_kgm2 * r)
+
+            # WheelCollider contact forces act at the ground below the COM.
+            # The vertical support forces also act at measured wheel points.
+            pitch_moment = sum(
+                -com_height * component[0] - wheel.x_m * load
+                for wheel, component, load in zip(
+                    parameters.wheels, components, loads))
+            pitch_moment -= base_pitch_moment
+            roll_moment = sum(
+                wheel.y_m * load + com_height * component[1]
+                for wheel, component, load in zip(
+                    parameters.wheels, components, loads))
+            roll_moment -= base_roll_moment
+            heave_accel = (sum(loads) - base_load_sum) / parameters.mass_kg
+            pitch_accel = pitch_moment / parameters.pitch_inertia_kgm2
+            roll_accel = roll_moment / parameters.roll_inertia_kgm2
+            if parameters.rigid_body_angular_drag_per_s is not None:
+                pitch_accel -= (parameters.rigid_body_angular_drag_per_s *
+                                pitch_rate)
+                roll_accel -= (parameters.rigid_body_angular_drag_per_s *
+                               roll_rate)
+
+            motor_torques, brake_torques = _unity_wheel_torques(
+                throttle_norm, parameters)
+            omega_dot = []
+            for index, omega in enumerate(wheel_omegas):
+                radius = (parameters.wheel_radii_m[index]
+                          if parameters.wheel_radii_m is not None
+                          else parameters.wheel_radius_m)
+                unbraked_torque = (
+                    motor_torques[index] - components[index][2] * radius -
+                    wheel_damping[index] * omega)
+                brake = brake_torques[index]
+                if brake > 0.0:
+                    if abs(omega) <= 1.0e-9 and abs(unbraked_torque) <= brake:
+                        wheel_torque = 0.0
+                    else:
+                        direction = (math.copysign(1.0, omega)
+                                     if abs(omega) > 1.0e-9 else
+                                     math.copysign(1.0, unbraked_torque))
+                        wheel_torque = unbraked_torque - direction * brake
+                        inertia = dynamics.inertia_for_speed(abs(u))
+                        if (abs(omega) > 1.0e-9 and
+                                omega * (omega + sub_dt * wheel_torque / inertia)
+                                < 0.0):
+                            wheel_torque = -omega * inertia / sub_dt
+                else:
+                    wheel_torque = unbraked_torque
+                omega_dot.append(
+                    wheel_torque / dynamics.inertia_for_speed(abs(u)))
+
+            u_dot = force_x / parameters.mass_kg + r * v
+            v_dot = force_y / parameters.mass_kg - r * u
+            r_dot = moment_z / parameters.yaw_inertia_kgm2
+            pose_u, pose_v = position_point_body_velocity(
+                local_state, parameters)
+            x += sub_dt * (pose_u * math.cos(yaw) - pose_v * math.sin(yaw))
+            y += sub_dt * (pose_u * math.sin(yaw) + pose_v * math.cos(yaw))
+            yaw += sub_dt * r
+            u += sub_dt * u_dot
+            v += sub_dt * v_dot
+            r += sub_dt * r_dot
+            heave_rate += sub_dt * heave_accel
+            heave += sub_dt * heave_rate
+            pitch_rate += sub_dt * pitch_accel
+            pitch += sub_dt * pitch_rate
+            roll_rate += sub_dt * roll_accel
+            roll += sub_dt * roll_rate
+            wheel_omegas = [omega + sub_dt * derivative
+                            for omega, derivative in zip(wheel_omegas, omega_dot)]
+            wheel_omegas = [0.0 if abs(omega) < 1.0e-9 else omega
+                            for omega in wheel_omegas]
+    steering_end = steering_segments[-1][2]
+    return np.asarray([
+        x, y, yaw, u, v, r, steering_end, *wheel_omegas,
+        heave, heave_rate, pitch, pitch_rate, roll, roll_rate,
+    ], dtype=float)
+
+
 def _move_towards(current: float, target: float, maximum_delta: float) -> float:
     return current + max(-maximum_delta, min(maximum_delta, target - current))
+
+
+def _unity_vehicle_controller_source_step(
+        current_delta: float, target_norm: float, dt: float,
+        parameters: NativeModelParameters) -> float:
+    """Replay one Unity ``VehicleController.Steer`` source update.
+
+    Unity stores its internal ``SteeringAngle`` with the opposite sign to the
+    API-positive effective steering state.  The comparison and asymmetric
+    clamp below mirror the source branch in that internal convention.
+    """
+    if not all(math.isfinite(value) for value in (
+            current_delta, target_norm, dt)) or dt <= 0.0:
+        raise ValueError("Unity steering source inputs must be finite and positive")
+    command = max(-1.0, min(1.0, target_norm))
+    internal_angle = -current_delta
+    target_internal_angle = -command * parameters.steering_limit_rad
+    if command > internal_angle / parameters.steering_limit_rad:
+        internal_angle -= parameters.steering_rate_radps * dt
+        if internal_angle <= target_internal_angle:
+            internal_angle = target_internal_angle
+    else:
+        internal_angle += parameters.steering_rate_radps * dt
+        if internal_angle >= target_internal_angle:
+            internal_angle = target_internal_angle
+    return -internal_angle
+
+
+def _unity_vehicle_controller_steering_next(
+        current_delta: float, target_norm: float, dt: float,
+        parameters: NativeModelParameters) -> float:
+    source_dt = parameters.steering_source_fixed_dt_s
+    if not math.isfinite(source_dt) or source_dt <= 0.0:
+        raise ValueError("Unity steering source timestep must be positive")
+    count = max(1, int(round(dt / source_dt)))
+    steering = current_delta
+    elapsed = 0.0
+    for index in range(count):
+        duration = dt - elapsed if index == count - 1 else source_dt
+        steering = _unity_vehicle_controller_source_step(
+            steering, target_norm, max(duration, np.finfo(float).eps), parameters)
+        elapsed += duration
+    return steering
+
+
+def _unity_vehicle_controller_steering_segments(
+        current_delta: float, target_norm: float, dt: float,
+        parameters: NativeModelParameters
+        ) -> list[tuple[float, float, float]]:
+    """Return ``(duration, start, end)`` segments at Unity source cadence."""
+    source_dt = parameters.steering_source_fixed_dt_s
+    count = max(1, int(round(dt / source_dt)))
+    segments: list[tuple[float, float, float]] = []
+    steering = current_delta
+    elapsed = 0.0
+    for index in range(count):
+        duration = dt - elapsed if index == count - 1 else source_dt
+        duration = max(duration, np.finfo(float).eps)
+        next_steering = _unity_vehicle_controller_source_step(
+            steering, target_norm, duration, parameters)
+        segments.append((duration, steering, next_steering))
+        steering = next_steering
+        elapsed += duration
+    return segments
 
 
 def _contact_forces(state: np.ndarray, steering_angle: float,
@@ -726,6 +1529,10 @@ def step(state: np.ndarray, steering_target_norm: float,
 def parameters_from_dump(path: Path) -> NativeModelParameters:
     """Load fixed structure from the Unity diagnostic JSON with provenance."""
     payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    source_fixed_dt = float(payload.get(
+        "fixedDeltaTime", UNITY_STEERING_SOURCE_FIXED_DT_S))
+    if not math.isfinite(source_fixed_dt) or source_fixed_dt <= 0.0:
+        raise ValueError("diagnostic fixedDeltaTime must be positive and finite")
     vehicle = payload["vehicle"]
     rigid_body = vehicle["rigidBody"]
     yaw_axis = rigid_body.get("yawAxis")
@@ -821,9 +1628,33 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
                 "diagnostic yawInertiaBodyFrame disagrees with body-Y inertia "
                 f"projection: derived={derived_yaw_inertia} reported={reported}")
     com_x_from_rear_axle = -sum(position[0] for position in rear) / 2.0
+    unity_wheel_dynamics = None
+    if "motorTorqueNm" in vehicle:
+        drive_type = str(vehicle.get("driveType", ""))
+        brake_type = str(vehicle.get("brakeType", ""))
+        drive_fractions = ((0.25,) * 4 if drive_type == "CAWD" else
+                           (0.0,) * 4)
+        brake_fractions = ((1.0,) * 4 if brake_type == "CAWB" else
+                           (0.0,) * 4)
+        unity_wheel_dynamics = UnityWheelDynamicsParameters(
+            motor_torque_nm=float(vehicle["motorTorqueNm"]),
+            # VehicleController sets BrakeTorque = MotorTorque.
+            brake_torque_nm=float(vehicle["motorTorqueNm"]),
+            throttle_limit=float(vehicle.get("throttleLimit", 1.0)),
+            wheel_damping_nms=tuple(
+                float(wheel["wheelDampingRate"]) for wheel in wheels),
+            drive_torque_fractions=drive_fractions,
+            brake_torque_fractions=brake_fractions,
+            provenance=(
+                f"unity_diagnostic_dump:{path};"
+                "vehiclecontroller:active_drive_and_brake_branch;"
+                "exact_trace:effective_rotational_inertia_regimes"))
     return NativeModelParameters(
         mass_kg=rigidbody_mass,
         yaw_inertia_kgm2=derived_yaw_inertia,
+        # API-frame pitch is Unity body-x; API-frame roll is Unity body-z.
+        pitch_inertia_kgm2=body_inertias["x"],
+        roll_inertia_kgm2=body_inertias["z"],
         com_x_from_rear_axle_m=com_x_from_rear_axle,
         position_offset_from_velocity_point_x_m=-com_x_from_rear_axle,
         wheelbase_m=wheelbase,
@@ -838,6 +1669,11 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
                     if vehicle.get("driveType") is not None else None),
         steering_limit_rad=float(vehicle["steeringLimitRad"]),
         steering_rate_radps=float(vehicle["steeringRateRadPerSecond"]),
+        steering_source_fixed_dt_s=source_fixed_dt,
+        # The source controller stores SteeringAngle = -AppliedSteering in
+        # Unity's x-right frame.  The x-right -> y-left model-frame
+        # conversion reverses that axis as well, so the effective model
+        # wheel angle is positive for positive AppliedSteering.
         steering_to_wheel_angle_sign=1.0,
         longitudinal_curve=longitudinal_curve,
         lateral_curve=lateral_curve,
@@ -846,6 +1682,8 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
         wheel_radii_m=tuple(float(wheel["radius"]) for wheel in wheels),
         wheel_masses_kg=tuple(float(wheel["mass"]) for wheel in wheels),
         wheel_sprung_masses_kg=sprung_masses,
+        unity_com_height_m=float(com["y"]),
+        unity_normal_load_mode="static_sprung_mass",
         suspension_distances_m=tuple(
             float(wheel["suspensionDistance"]) for wheel in wheels),
         suspension_spring_rates_n_per_m=suspension_springs,
@@ -861,5 +1699,6 @@ def parameters_from_dump(path: Path) -> NativeModelParameters:
         rigid_body_max_angular_velocity_radps=(
             float(rigid_body["maxAngularVelocity"])
             if "maxAngularVelocity" in rigid_body else None),
+        unity_wheel_dynamics=unity_wheel_dynamics,
         parameter_provenance="unity_diagnostic_dump:" + str(path),
     )

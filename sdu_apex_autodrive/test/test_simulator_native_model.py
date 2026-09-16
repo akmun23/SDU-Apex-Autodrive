@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.model_id.simulator_native_model import (
     GUIDE_LATERAL_CURVE,
     NativeModelParameters,
+    UnityWheelDynamicsParameters,
     ackermann_angles,
     body_axis_inertia,
     body_frame_inertias,
@@ -24,6 +25,17 @@ from tools.model_id.simulator_native_model import (
     _split_moment_basis_coordinates,
     step,
     static_normal_loads,
+    step_unity_wheel_collider,
+    step_unity_wheel_collider_with_suspension,
+    unity_suspension_loads,
+    unity_wheel_travel_loads,
+    unity_contact_kinematics,
+    unity_normal_loads,
+    unity_normal_loads_from_acceleration,
+    _unity_wheel_torques,
+    _unity_vehicle_controller_source_step,
+    _unity_vehicle_controller_steering_segments,
+    _unity_wheel_friction_value,
     unity_wheel_collider_ackermann_angles,
 )
 from tools.model_id.analyze_simulator_diagnostics import analyze as analyze_diagnostics
@@ -100,6 +112,16 @@ def test_prefab_keeps_api_frame_steering_sign_explicit():
     assert parameters.steering_to_wheel_angle_sign == pytest.approx(1.0)
 
 
+def test_exact_dump_profile_maps_applied_steering_to_model_frame():
+    parameters = parameters_from_dump(Path(
+        "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/"
+        "unity_exact_open_raceline_relevant_holdout_v1_20260916/"
+        "simulator_parameters.json"))
+    # Unity writes the opposite sign internally, and the lateral frame
+    # conversion reverses it once more.  The effective model angle is +1.
+    assert parameters.steering_to_wheel_angle_sign == pytest.approx(1.0)
+
+
 def test_contact_slips_use_four_wheel_geometry_and_dimensionless_ratio():
     parameters = NativeModelParameters(yaw_inertia_kgm2=0.04)
     state = np.asarray([0.0, 0.0, 0.0, 2.0, 0.1, 0.2, 0.0, 2.0])
@@ -126,6 +148,176 @@ def test_four_wheel_contacts_use_causal_left_and_right_wheel_states():
     assert contacts[1]["wheel_surface_speed_mps"] == pytest.approx(1.8)
     assert contacts[2]["wheel_surface_speed_mps"] == pytest.approx(2.2)
     assert contacts[3]["wheel_surface_speed_mps"] == pytest.approx(1.8)
+
+
+def test_unity_wheel_contacts_apply_radius_once_to_angular_state():
+    parameters = replace(
+        NativeModelParameters(yaw_inertia_kgm2=0.096),
+        wheel_radii_m=(0.059,) * 4,
+        unity_wheel_dynamics=UnityWheelDynamicsParameters())
+    state = np.asarray([
+        0.0, 0.0, 0.0, 5.9, 0.0, 0.0, 0.0, 100.0, 100.0, 100.0,
+        100.0,
+    ])
+    contacts = unity_contact_kinematics(state, 0.0, parameters)
+    assert [contact["wheel_surface_speed_mps"] for contact in contacts] == \
+        pytest.approx([5.9] * 4)
+    assert [contact["sx"] for contact in contacts] == pytest.approx([0.0] * 4)
+
+
+def test_unity_friction_curve_is_piecewise_linear_at_serialized_knots():
+    curve = GUIDE_LATERAL_CURVE
+    assert _unity_wheel_friction_value(0.0, curve) == pytest.approx(0.0)
+    assert _unity_wheel_friction_value(
+        curve.extremum_slip, curve) == pytest.approx(curve.extremum_value)
+    assert _unity_wheel_friction_value(
+        curve.asymptote_slip, curve) == pytest.approx(curve.asymptote_value)
+    midpoint = (curve.extremum_slip + curve.asymptote_slip) / 2.0
+    assert _unity_wheel_friction_value(midpoint, curve) == pytest.approx(0.75)
+    assert _unity_wheel_friction_value(2.0, curve) == pytest.approx(
+        curve.asymptote_value)
+    assert _unity_wheel_friction_value(-midpoint, curve) == pytest.approx(-0.75)
+
+
+def test_unity_contact_slip_uses_source_denominators_and_signs():
+    parameters = replace(
+        NativeModelParameters(yaw_inertia_kgm2=0.096),
+        wheel_radii_m=(0.059,) * 4)
+    state = np.asarray([
+        0.0, 0.0, 0.0, 4.0, 1.0, 0.0, 0.0,
+        2.0 / 0.059, 2.0 / 0.059, 2.0 / 0.059, 2.0 / 0.059,
+    ])
+    contacts = unity_contact_kinematics(state, 0.0, parameters)
+    # With zero steering, surface speed is 2 m/s and ground-forward speed is
+    # 4 m/s: the exact forward denominator is 4 m/s, not the generic floor.
+    assert [contact["sx"] for contact in contacts] == pytest.approx([-0.5] * 4)
+    # Source WheelHit.sidewaysSlip has the negative wheel-frame lateral sign;
+    # at 4 m/s its denominator is the wheel-forward velocity.
+    assert [contact["sy"] for contact in contacts] == pytest.approx([-0.25] * 4)
+    low_speed_state = state.copy()
+    low_speed_state[3] = 0.2
+    low_speed_state[7:] = 0.2 / 0.059
+    low_speed_contacts = unity_contact_kinematics(
+        low_speed_state, 0.0, parameters)
+    # Below 0.5 m/s the source floor is active: -1/0.5 = -2.
+    assert [contact["sy"] for contact in low_speed_contacts] == pytest.approx(
+        [-2.0] * 4)
+
+
+def test_unity_active_cawd_cawb_torque_branch_is_explicit():
+    dynamics = UnityWheelDynamicsParameters()
+    parameters = replace(
+        NativeModelParameters(), unity_wheel_dynamics=dynamics)
+    motor, brake = _unity_wheel_torques(1.0, parameters)
+    assert motor == pytest.approx((107.0,) * 4)
+    assert brake == pytest.approx((0.0,) * 4)
+    motor, brake = _unity_wheel_torques(0.0, parameters)
+    assert motor == pytest.approx((0.0,) * 4)
+    assert brake == pytest.approx((428.0,) * 4)
+
+
+def test_unity_native_steering_replays_source_cadence_and_clamp():
+    parameters = replace(
+        NativeModelParameters(), steering_source_fixed_dt_s=0.001)
+    current = 0.1 * parameters.steering_limit_rad
+    segments = _unity_vehicle_controller_steering_segments(
+        current, -0.1, 0.025, parameters)
+    assert len(segments) == 25
+    assert segments[-1][2] == pytest.approx(-0.02764, abs=1e-12)
+    # A source update from the exact effective state reverses only one 1 ms
+    # rate step at a time; the source clamp is not a 25 ms MoveTowards.
+    assert _unity_vehicle_controller_source_step(
+        current, -0.1, 0.001, parameters) > 0.0
+
+
+def test_unity_wheel_plant_uses_dumped_yaw_inertia_and_is_finite():
+    parameters = replace(
+        NativeModelParameters(yaw_inertia_kgm2=0.096),
+        wheel_radii_m=(0.059,) * 4,
+        wheel_sprung_masses_kg=(0.817, 0.816, 0.919, 0.918),
+        unity_wheel_dynamics=UnityWheelDynamicsParameters())
+    state = np.asarray([
+        0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 84.0, 84.0, 84.0, 84.0,
+    ])
+    assert sum(unity_normal_loads(parameters)) == pytest.approx(
+        parameters.mass_kg * 9.81, rel=2.0e-3)
+    next_state = step_unity_wheel_collider(
+        state, 0.15, 0.5, 0.025, parameters)
+    assert next_state.shape == (11,)
+    assert np.isfinite(next_state).all()
+    assert next_state[7] != pytest.approx(state[7])
+
+
+def test_unity_cawb_brake_holds_a_locked_wheel_without_sign_flip():
+    parameters = replace(
+        NativeModelParameters(yaw_inertia_kgm2=0.096),
+        wheel_radii_m=(0.059,) * 4,
+        unity_wheel_dynamics=UnityWheelDynamicsParameters())
+    state = np.asarray([
+        0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ])
+    next_state = step_unity_wheel_collider(
+        state, 0.0, 0.0, 0.025, parameters)
+    assert next_state[7:] == pytest.approx((0.0,) * 4, abs=1.0e-8)
+
+
+def test_mechanical_longitudinal_load_screen_is_explicit_and_conservative():
+    parameters = replace(
+        NativeModelParameters(
+            wheel_sprung_masses_kg=(0.817, 0.816, 0.919, 0.918),
+            unity_com_height_m=0.06434),
+        unity_normal_load_mode="mechanical_longitudinal_cg_transfer")
+    base = np.asarray(unity_normal_loads(parameters), dtype=float)
+    loads = np.asarray(unity_normal_loads_from_acceleration(
+        parameters, longitudinal_accel_mps2=-5.0, lateral_accel_mps2=4.0))
+    assert loads[0] > base[0]
+    assert loads[1] > base[1]
+    assert loads[2] < base[2]
+    assert loads[3] < base[3]
+    assert loads[0] - loads[1] == pytest.approx(base[0] - base[1])
+    assert loads[2] - loads[3] == pytest.approx(base[2] - base[3])
+    assert loads.sum() == pytest.approx(base.sum())
+
+
+def test_explicit_suspension_loads_use_serialized_spring_and_damper():
+    parameters = parameters_from_dump(Path(
+        "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/"
+        "unity_exact_open_raceline_relevant_holdout_v1_20260916/"
+        "simulator_parameters.json"))
+    base = np.asarray(unity_normal_loads(parameters), dtype=float)
+    heave = np.asarray(unity_suspension_loads(
+        parameters, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0))
+    assert heave == pytest.approx(base - 0.5)
+    assert heave.sum() < base.sum()
+
+
+def test_wheel_travel_load_law_uses_serialized_distance_without_hidden_gain():
+    parameters = parameters_from_dump(Path(
+        "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/"
+        "unity_exact_open_raceline_relevant_holdout_v1_20260916/"
+        "simulator_parameters.json"))
+    loads = np.asarray(unity_wheel_travel_loads(
+        parameters, (0.1, 0.1, -0.1, -0.1), (0.0,) * 4))
+    base = np.asarray(unity_normal_loads(parameters))
+    expected_delta = np.asarray((2.5, 2.5, -2.5, -2.5))
+    assert loads == pytest.approx(base - expected_delta)
+
+
+def test_explicit_suspension_plant_is_finite_and_keeps_state_separate():
+    parameters = parameters_from_dump(Path(
+        "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/"
+        "unity_exact_open_raceline_relevant_holdout_v1_20260916/"
+        "simulator_parameters.json"))
+    state = np.asarray([
+        0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0,
+        84.0, 84.0, 84.0, 84.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ])
+    next_state = step_unity_wheel_collider_with_suspension(
+        state, 0.15, 0.5, 0.025, parameters)
+    assert next_state.shape == (17,)
+    assert np.isfinite(next_state).all()
+    assert next_state[11:] != pytest.approx(state[11:])
 
 
 def test_moment_basis_rotates_all_four_contacts_and_builds_yaw_moment():
@@ -246,6 +438,10 @@ def test_parameters_from_dump_preserves_dump_provenance(tmp_path: Path):
             "wheelbaseM": 0.324,
             "trackWidthM": 0.236,
             "wheelRadiusControllerM": 0.059,
+            "throttleLimit": 1.0,
+            "motorTorqueNm": 428.0,
+            "driveType": "CAWD",
+            "brakeType": "CAWB",
             "steeringLimitRad": 0.5236,
             "steeringRateRadPerSecond": 3.2,
             "rigidBody": {
@@ -315,6 +511,12 @@ def test_parameters_from_dump_preserves_dump_provenance(tmp_path: Path):
     assert parameters.rigid_body_drag_per_s == pytest.approx(0.27)
     assert parameters.rigid_body_angular_drag_per_s == pytest.approx(0.10)
     assert parameters.rigid_body_max_angular_velocity_radps == pytest.approx(7.0)
+    assert parameters.unity_wheel_dynamics is not None
+    assert parameters.unity_wheel_dynamics.motor_torque_nm == pytest.approx(428.0)
+    assert parameters.unity_wheel_dynamics.drive_torque_fractions == pytest.approx(
+        (0.25,) * 4)
+    assert parameters.unity_wheel_dynamics.brake_torque_fractions == pytest.approx(
+        (1.0,) * 4)
     diagnostic_report = analyze_diagnostics(path)
     assert diagnostic_report["status"] == "diagnostic_dump_analyzed"
     assert len(diagnostic_report["friction_curve_guide_crosscheck"]) == 4

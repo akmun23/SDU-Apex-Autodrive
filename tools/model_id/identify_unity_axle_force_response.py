@@ -28,7 +28,12 @@ import pandas as pd
 from scipy.signal import savgol_filter
 from scipy.optimize import minimize_scalar
 
-from structured_vehicle_plant import unity_wheel_friction_value
+try:
+    # Direct command-line execution puts this directory on sys.path.
+    from structured_vehicle_plant import unity_wheel_friction_value
+except ModuleNotFoundError:
+    # Package import is used by the regression tests and notebook tooling.
+    from tools.model_id.structured_vehicle_plant import unity_wheel_friction_value
 
 
 GRAVITY_MPS2 = 9.81
@@ -55,13 +60,75 @@ def _rotation_matrix(quaternion: np.ndarray) -> np.ndarray:
     return result
 
 
-def _derivative(values: np.ndarray, times: np.ndarray) -> np.ndarray:
-    dt = float(np.median(np.diff(times)))
+def _derivative_segment(values: np.ndarray, times: np.ndarray) -> np.ndarray:
+    """Differentiate one continuous, fixed-step trace segment."""
+    dt = np.diff(times)
+    positive = dt[dt > 0.0]
+    if not positive.size:
+        return np.gradient(values, times)
+    median_dt = float(np.median(positive))
     window = min(101, len(values) if len(values) % 2 else len(values) - 1)
-    if window >= 7:
-        return savgol_filter(values, window, 2, deriv=1, delta=dt,
+    if window >= 7 and np.max(dt) <= 3.0 * median_dt:
+        return savgol_filter(values, window, 2, deriv=1, delta=median_dt,
                              mode="interp")
     return np.gradient(values, times)
+
+
+def _derivative(values: np.ndarray, times: np.ndarray,
+                breakpoints: np.ndarray | None = None) -> np.ndarray:
+    """Differentiate trace segments without crossing a simulator reset."""
+    values = np.asarray(values, dtype=float)
+    times = np.asarray(times, dtype=float)
+    if breakpoints is None or not np.any(breakpoints):
+        return _derivative_segment(values, times)
+    starts = [0] + [int(index) for index in np.flatnonzero(breakpoints)]
+    ends = starts[1:] + [len(values)]
+    output = np.full_like(values, np.nan, dtype=float)
+    for start, end in zip(starts, ends):
+        if end > start:
+            output[start:end] = _derivative_segment(
+                values[start:end], times[start:end])
+    # No derivative is valid across the discontinuity. The selector also
+    # removes a short neighbourhood because the reset can affect several
+    # diagnostic samples even though the state itself is only discontinuous
+    # at the boundary.
+    output[breakpoints] = np.nan
+    return output
+
+
+def _reset_boundaries(frame: pd.DataFrame) -> np.ndarray:
+    """Detect teleports produced by a diagnostic experiment reset.
+
+    The resetter preserves fixed-step and timestamp counters. Consequently a
+    timestamp-gap test cannot identify it. A boundary is a large COM jump
+    followed by a near-stationary body, with a substantial speed drop. The
+    test is deliberately conservative so ordinary 1 kHz motion is retained.
+    """
+    position = frame[[
+        "world_com_x_m", "world_com_y_m", "world_com_z_m",
+    ]].to_numpy(float)
+    velocity = frame[[
+        "world_velocity_x_mps", "world_velocity_y_mps",
+        "world_velocity_z_mps",
+    ]].to_numpy(float)
+    if len(frame) < 2:
+        return np.zeros(len(frame), dtype=bool)
+    position_jump = np.linalg.norm(np.diff(position, axis=0), axis=1)
+    previous_speed = np.linalg.norm(velocity[:-1], axis=1)
+    current_speed = np.linalg.norm(velocity[1:], axis=1)
+    return np.r_[False, (position_jump > 0.2) &
+                 (current_speed < 0.5) &
+                 ((previous_speed - current_speed) > 1.0)]
+
+
+def _reset_exclusion_mask(boundaries: np.ndarray,
+                           radius: int = 10) -> np.ndarray:
+    """Remove derivative-contaminated rows around reset edges."""
+    excluded = np.zeros(len(boundaries), dtype=bool)
+    for boundary in np.flatnonzero(boundaries):
+        excluded[max(0, int(boundary) - radius):
+                 min(len(boundaries), int(boundary) + radius + 1)] = True
+    return excluded
 
 
 def _inertia_matrix(frame: pd.DataFrame,
@@ -173,7 +240,8 @@ def _trace_columns() -> list[str]:
 
 def _body_wrench(frame: pd.DataFrame, metadata: dict[str, Any],
                  angular_drag_model: str,
-                 normal_force_model: str) -> tuple[
+                 normal_force_model: str,
+                 reset_boundaries: np.ndarray | None = None) -> tuple[
         np.ndarray, np.ndarray, np.ndarray]:
     times = frame.fixed_time_s.to_numpy(float)
     rotations = _rotation_matrix(frame[[
@@ -191,14 +259,15 @@ def _body_wrench(frame: pd.DataFrame, metadata: dict[str, Any],
     velocity_body = np.einsum(
         "nij,nj->ni", rotations.transpose(0, 2, 1), world_velocity)
     acceleration_world = np.column_stack([
-        _derivative(world_velocity[:, axis], times) for axis in range(3)
+        _derivative(world_velocity[:, axis], times, reset_boundaries)
+        for axis in range(3)
     ])
     acceleration_body = np.einsum(
         "nij,nj->ni", rotations.transpose(0, 2, 1), acceleration_world)
     angular_velocity_body = np.einsum(
         "nij,nj->ni", rotations.transpose(0, 2, 1), world_angular_velocity)
     angular_acceleration_world = np.column_stack([
-        _derivative(world_angular_velocity[:, axis], times)
+        _derivative(world_angular_velocity[:, axis], times, reset_boundaries)
         for axis in range(3)
     ])
     angular_acceleration_body = np.einsum(
@@ -397,14 +466,19 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
             path, usecols=[field for field in requested_columns
                            if field in available]))
     frame = pd.concat(frames, ignore_index=True, sort=False)
+    times = frame.fixed_time_s.to_numpy(float)
+    reset_boundaries = _reset_boundaries(frame)
+    reset_excluded = _reset_exclusion_mask(reset_boundaries)
     if load_mode == "runtime_sprung_load" and any(
             f"wheel{wheel}_sprung_mass_kg" not in frame.columns
             for wheel in range(4)):
         raise ValueError("runtime_sprung_load requires runtime sprung-mass fields")
     rotations, velocity_body, target = _body_wrench(
-        frame, metadata, angular_drag_model, normal_force_model)
+        frame, metadata, angular_drag_model, normal_force_model,
+        reset_boundaries)
     count = len(frame)
     forward_wrench = np.zeros((count, 2), dtype=float)
+    forward_force_body_z = np.zeros(count, dtype=float)
     side_matrix = np.zeros((count, 2, 2), dtype=float)
     proxy = np.zeros((count, 2), dtype=float)
     curve_values = np.zeros((count, 4), dtype=float)
@@ -434,7 +508,7 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
             wheel_pose_world - world_com)
         wheel_pose_body_from_com[:, wheel, :] = wheel_pose_body
         wheel_pose_body_y_rate[:, wheel] = _derivative(
-            wheel_pose_body[:, 1], frame.fixed_time_s.to_numpy(float))
+            wheel_pose_body[:, 1], times, reset_boundaries)
         forward_direction = np.einsum(
             "nij,nj->ni", rotations.transpose(0, 2, 1), frame[[
                 f"wheel{wheel}_forward_dir_{axis}" for axis in "xyz"
@@ -463,7 +537,7 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
             np.where(velocity_body[:, 2] < 12.0,
                      effective_inertia_values[1], effective_inertia_values[2]))
         domega = _derivative(wheel_omega[:, wheel],
-                             frame.fixed_time_s.to_numpy(float))
+                             times, reset_boundaries)
         wheel_angular_acceleration[:, wheel] = domega
         sign = np.sign(wheel_omega[:, wheel])
         sign[sign == 0.0] = 1.0
@@ -476,6 +550,7 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
         wheel_forward_force[:, wheel] = forward_force
         forward_vector = forward_direction[:, [0, 2]] * forward_force[:, None]
         forward_wrench[:, 0] += forward_vector[:, 0]
+        forward_force_body_z += forward_vector[:, 1]
         forward_wrench[:, 1] += (
             contact_arm[:, 2] * forward_vector[:, 0] -
             contact_arm[:, 0] * forward_vector[:, 1])
@@ -523,7 +598,6 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
     recovered[finite_matrix] = np.linalg.solve(
         side_matrix[finite_matrix], right_hand_side[finite_matrix])
 
-    times = frame.fixed_time_s.to_numpy(float)
     steering = frame.applied_steering_rad.to_numpy(float)
     throttle = frame.applied_throttle_norm.to_numpy(float)
     transition = np.flatnonzero(
@@ -550,7 +624,7 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
         np.all(np.isfinite(recovered), axis=1) &
         np.all(np.isfinite(proxy), axis=1)
     )
-    usable = base_usable & ~body_contact
+    usable = base_usable & ~body_contact & ~reset_excluded
     selected = np.flatnonzero(usable)
 
     def screen_bins(values: np.ndarray, edges: np.ndarray) -> dict[str, Any]:
@@ -646,6 +720,18 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
             "wheel_damping_nms": WHEEL_DAMPING_NMS,
             "lateral_load_source": load_mode,
             "collision_split": "diagnostic only; chassis callbacks are excluded when supplied",
+            "reset_segmentation": {
+                "method": (
+                    "COM position jump > 0.2 m, current speed < 0.5 m/s, "
+                    "and speed drop > 1 m/s; derivative is segmented at "
+                    "each boundary"),
+                "detected_boundaries": int(np.count_nonzero(reset_boundaries)),
+                "boundary_times_s": [
+                    float(times[index]) for index in
+                    np.flatnonzero(reset_boundaries)],
+                "excluded_rows": int(np.count_nonzero(reset_excluded)),
+                "exclusion_radius_rows": 10,
+            },
         },
         "selection": {
             "usable_rows": int(selected.size),
@@ -751,7 +837,7 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
                 return frame[name].to_numpy(float)[selected]
             return np.full(selected.size, np.nan, dtype=float)
 
-        rows = pd.DataFrame({
+        row_data: dict[str, np.ndarray] = {
             "fixed_step": frame.fixed_step.to_numpy()[selected],
             "fixed_time_s": times[selected],
             "speed_mps": velocity_body[selected, 2],
@@ -775,49 +861,61 @@ def analyze(trace: Path | list[Path], static: Path, output: Path,
             "rear_combined_curve_demand": combined_curve_demand[selected, 1],
             "runtime_body_yaw_inertia_kgm2": optional_column(
                 "runtime_body_yaw_inertia_kgm2"),
-        })
+            # target[:, 0] is Unity body-x force (the lateral axis for this
+            # source vehicle), target[:, 1] is Unity body-z longitudinal
+            # force, and target[:, 2] is the body-y yaw moment. Keep the
+            # longitudinal channel explicit instead of folding it into the
+            # lateral inversion or an effective drive gain.
+            "target_body_x_force_n": target[selected, 0],
+            "target_body_z_force_n": target[selected, 1],
+            "target_body_y_moment_nm": target[selected, 2],
+            "forward_torque_force_body_x_n": forward_wrench[selected, 0],
+            "forward_torque_force_body_z_n": forward_force_body_z[selected],
+            "forward_torque_moment_nm": forward_wrench[selected, 1],
+        }
         for wheel in range(4):
-            rows[f"wheel{wheel}_load_n"] = contact_loads[selected, wheel]
-            rows[f"wheel{wheel}_sideways_slip"] = sideways_slips[selected, wheel]
-            rows[f"wheel{wheel}_forward_slip"] = forward_slips[selected, wheel]
-            rows[f"wheel{wheel}_sideways_curve"] = curve_values[selected, wheel]
-            rows[f"wheel{wheel}_forward_curve"] = forward_curve_values[selected, wheel]
-            rows[f"wheel{wheel}_omega_radps"] = wheel_omega[selected, wheel]
-            rows[f"wheel{wheel}_domega_radps2"] = wheel_angular_acceleration[
+            row_data[f"wheel{wheel}_load_n"] = contact_loads[selected, wheel]
+            row_data[f"wheel{wheel}_sideways_slip"] = sideways_slips[selected, wheel]
+            row_data[f"wheel{wheel}_forward_slip"] = forward_slips[selected, wheel]
+            row_data[f"wheel{wheel}_sideways_curve"] = curve_values[selected, wheel]
+            row_data[f"wheel{wheel}_forward_curve"] = forward_curve_values[selected, wheel]
+            row_data[f"wheel{wheel}_omega_radps"] = wheel_omega[selected, wheel]
+            row_data[f"wheel{wheel}_domega_radps2"] = wheel_angular_acceleration[
                 selected, wheel]
-            rows[f"wheel{wheel}_effective_inertia_kgm2"] = effective_inertia[
+            row_data[f"wheel{wheel}_effective_inertia_kgm2"] = effective_inertia[
                 selected, wheel]
-            rows[f"wheel{wheel}_forward_force_from_torque_n"] = wheel_forward_force[
+            row_data[f"wheel{wheel}_forward_force_from_torque_n"] = wheel_forward_force[
                 selected, wheel]
-            rows[f"wheel{wheel}_motor_torque_nm"] = optional_column(
+            row_data[f"wheel{wheel}_motor_torque_nm"] = optional_column(
                 f"wheel{wheel}_motor_torque_nm")
-            rows[f"wheel{wheel}_brake_torque_nm"] = optional_column(
+            row_data[f"wheel{wheel}_brake_torque_nm"] = optional_column(
                 f"wheel{wheel}_brake_torque_nm")
-            rows[f"wheel{wheel}_steer_angle_deg"] = optional_column(
+            row_data[f"wheel{wheel}_steer_angle_deg"] = optional_column(
                 f"wheel{wheel}_steer_angle_deg")
-            rows[f"wheel{wheel}_sprung_mass_kg"] = optional_column(
+            row_data[f"wheel{wheel}_sprung_mass_kg"] = optional_column(
                 f"wheel{wheel}_sprung_mass_kg")
-            rows[f"wheel{wheel}_world_pose_y_m"] = optional_column(
+            row_data[f"wheel{wheel}_world_pose_y_m"] = optional_column(
                 f"wheel{wheel}_world_pose_y_m")
-            rows[f"wheel{wheel}_pose_body_from_com_x_m"] = (
+            row_data[f"wheel{wheel}_pose_body_from_com_x_m"] = (
                 wheel_pose_body_from_com[selected, wheel, 0])
-            rows[f"wheel{wheel}_pose_body_from_com_y_m"] = (
+            row_data[f"wheel{wheel}_pose_body_from_com_y_m"] = (
                 wheel_pose_body_from_com[selected, wheel, 1])
-            rows[f"wheel{wheel}_pose_body_from_com_z_m"] = (
+            row_data[f"wheel{wheel}_pose_body_from_com_z_m"] = (
                 wheel_pose_body_from_com[selected, wheel, 2])
-            rows[f"wheel{wheel}_pose_body_y_rate_mps"] = (
+            row_data[f"wheel{wheel}_pose_body_y_rate_mps"] = (
                 wheel_pose_body_y_rate[selected, wheel])
-            rows[f"wheel{wheel}_contact_force_n"] = optional_column(
+            row_data[f"wheel{wheel}_contact_force_n"] = optional_column(
                 f"wheel{wheel}_contact_force_n")
             for axis_index, axis in enumerate("xyz"):
-                rows[f"wheel{wheel}_contact_arm_{axis}_m"] = contact_arms_body[
+                row_data[f"wheel{wheel}_contact_arm_{axis}_m"] = contact_arms_body[
                     selected, wheel, axis_index]
-                rows[f"wheel{wheel}_contact_normal_body_{axis}"] = (
+                row_data[f"wheel{wheel}_contact_normal_body_{axis}"] = (
                     contact_normals_body[selected, wheel, axis_index])
-                rows[f"wheel{wheel}_forward_dir_body_{axis}"] = (
+                row_data[f"wheel{wheel}_forward_dir_body_{axis}"] = (
                     forward_dirs_body[selected, wheel, axis_index])
-                rows[f"wheel{wheel}_sideways_dir_body_{axis}"] = (
+                row_data[f"wheel{wheel}_sideways_dir_body_{axis}"] = (
                     sideways_dirs_body[selected, wheel, axis_index])
+        rows = pd.DataFrame(row_data)
         rows_output.parent.mkdir(parents=True, exist_ok=True)
         rows.to_csv(rows_output, index=False, float_format="%.10g")
         result["row_diagnostics"] = {

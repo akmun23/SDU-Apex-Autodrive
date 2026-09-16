@@ -1,0 +1,701 @@
+{
+  "acceptance": {
+    "requires_cross_schedule_holdout": true,
+    "requires_initial_suspension_state": true,
+    "runtime_use": false,
+    "suspension_parameters_promoted": false
+  },
+  "ground_truth_use": "diagnostic_trace_only",
+  "known_model": {
+    "body_com_local_y_m": 0.0643400028347969,
+    "body_inertia_pitch_kgm2": 0.09352723509073257,
+    "body_inertia_roll_kgm2": 0.027697643265128136,
+    "body_mass_kg": 3.4700000286102295,
+    "pose_coordinates": "q_i = root_position_y - pitch * wheel_forward_x + roll * wheel_lateral_y; force = static_load - k*q - c*q_dot"
+  },
+  "per_wheel": [
+    {
+      "body_pose_only_load_screen": {
+        "prediction": {
+          "bias": 8.276194090771844,
+          "count": 10141,
+          "mae": 8.276194090771844,
+          "max": 10.154282465820923,
+          "min": 6.327348066712086,
+          "p50": 8.20274140164256,
+          "p95": 9.322158906103722,
+          "rmse": 8.304196069280907
+        },
+        "residual": {
+          "bias": -3.2158522480512066,
+          "count": 10141,
+          "mae": 3.2158522480512066,
+          "max": -2.131999915999997,
+          "min": -7.510640275820924,
+          "p50": 2.8242446208049232,
+          "p95": 5.5680432126170984,
+          "rmse": 3.4200669794318723
+        }
+      },
+      "identified_travel_load_screen": {
+        "chronological_holdout": {
+          "predicted_residual": {
+            "bias": -0.04385119632072884,
+            "count": 2536,
+            "mae": 0.05804027536900671,
+            "max": 0.17446975705814083,
+            "min": -0.4407633584474606,
+            "p50": 0.05542684784638885,
+            "p95": 0.11230413473342071,
+            "rmse": 0.06999828953973265
+          },
+          "samples": 2536
+        },
+        "not_a_runtime_parameter": true,
+        "training": {
+          "identified": true,
+          "intercept_n": 7.131786228020243,
+          "residual": {
+            "bias": 1.797612391324698e-15,
+            "count": 7605,
+            "mae": 0.05394309107618824,
+            "max": 2.868854601568868,
+            "min": -0.4550912730940464,
+            "p50": 0.03563022202988009,
+            "p95": 0.13254325831741054,
+            "rmse": 0.10930132715085711
+          },
+          "samples": 7605,
+          "travel_coefficient_n_per_normalized_travel": -25.747088830757324,
+          "travel_rate_coefficient_ns_per_normalized_travel": -4.400582080457299
+        }
+      },
+      "known_serialized_spring_damper": {
+        "load_prediction_correlation": 0.9941316593205778,
+        "prediction": {
+          "bias": 6.009168823033954,
+          "count": 10141,
+          "mae": 6.009168823033954,
+          "max": 7.724928225562672,
+          "min": 3.6397946023805376,
+          "p50": 5.898863236455234,
+          "p95": 7.721561156754253,
+          "rmse": 6.089887678444627
+        },
+        "residual": {
+          "bias": -0.9488269803133148,
+          "count": 10141,
+          "mae": 0.9492643641042132,
+          "max": 2.217754511750501,
+          "min": -1.2610240061110125,
+          "p50": 0.9701091086517586,
+          "p95": 1.000095775661416,
+          "rmse": 0.9549844072467862
+        }
+      },
+      "measured_load": {
+        "bias": 5.060341842720638,
+        "count": 10141,
+        "mae": 5.060341842720638,
+        "max": 6.83713865,
+        "min": 2.64135981,
+        "p50": 4.92444324,
+        "p95": 6.819456,
+        "rmse": 5.158122957482121
+      },
+      "pose_reconstruction": {
+        "displacement": {
+          "bias": -0.000161289266482316,
+          "count": 10141,
+          "mae": 0.0008643128207352027,
+          "max": 0.003874418704168372,
+          "min": -0.002544382961950034,
+          "p50": 0.0005025772352722079,
+          "p95": 0.0020310631858377324,
+          "rmse": 0.001129751646490405
+        },
+        "forward_x_relative_to_com_m": 0.17467986745759845,
+        "lateral_y_relative_to_com_m": 0.11799999326467514,
+        "velocity": {
+          "bias": -0.0017886652455777865,
+          "count": 10141,
+          "mae": 0.0029911704100823925,
+          "max": 0.009611983252675649,
+          "min": -0.01863463078100328,
+          "p50": 0.0023238115047772103,
+          "p95": 0.008853131488846044,
+          "rmse": 0.004104909820470949
+        }
+      },
+      "selection": {
+        "flat_contact_normal_y_min": 0.98,
+        "speed_min_mps": 1.0,
+        "total_rows": 12000,
+        "upright_cosine_min": 0.9,
+        "valid_rows": 10141,
+        "zero_brake_only": true
+      },
+      "source_values": {
+        "damper_ns_per_m": 100.0,
+        "spring_n_per_m": 500.0,
+        "sprung_mass_kg": 0.8171949982643127,
+        "static_load_n": 8.016682932972909,
+        "suspension_distance_m": 0.05000000074505806,
+        "target_position": 0.5
+      },
+      "wheel": 0,
+      "wheel_pose_travel_reconstruction": {
+        "law_coordinates": "WheelCollider travel from Transform.InverseTransformPoint(WheelHit.point), radius, and suspensionDistance",
+        "travel": {
+          "bias": 0.07842367861273304,
+          "count": 10141,
+          "mae": 0.07842367861273304,
+          "max": 0.14159256983004986,
+          "min": 0.011819278906331302,
+          "p50": 0.08828232680300992,
+          "p95": 0.11384125052759136,
+          "rmse": 0.0847342929657484
+        },
+        "travel_rate": {
+          "bias": 0.009384422941267708,
+          "count": 10141,
+          "mae": 0.061804645034068385,
+          "max": 0.4719449452720458,
+          "min": -0.2768086483748038,
+          "p50": 0.049005114161519536,
+          "p95": 0.17858224873632678,
+          "rmse": 0.08675501784100732
+        }
+      }
+    },
+    {
+      "body_pose_only_load_screen": {
+        "prediction": {
+          "bias": 8.227806624899273,
+          "count": 10141,
+          "mae": 8.227806624899273,
+          "max": 10.042226858537024,
+          "min": 5.779322566092214,
+          "p50": 8.098994271313863,
+          "p95": 10.038857748363434,
+          "rmse": 8.29293210746822
+        },
+        "residual": {
+          "bias": -2.142620434360865,
+          "count": 10141,
+          "mae": 2.28890956415085,
+          "max": 2.4262577810284585,
+          "min": -3.257025296645292,
+          "p50": 2.5489281467273406,
+          "p95": 3.2359835638032832,
+          "rmse": 2.4750445245354804
+        }
+      },
+      "identified_travel_load_screen": {
+        "chronological_holdout": {
+          "predicted_residual": {
+            "bias": -0.04869907393952402,
+            "count": 2536,
+            "mae": 0.0590727564136298,
+            "max": 0.14984105399886172,
+            "min": -0.3035493873795527,
+            "p50": 0.04397087555949675,
+            "p95": 0.15801151560797688,
+            "rmse": 0.07732635989221497
+          },
+          "samples": 2536
+        },
+        "not_a_runtime_parameter": true,
+        "training": {
+          "identified": true,
+          "intercept_n": 7.143881053474758,
+          "residual": {
+            "bias": -7.199792665045802e-15,
+            "count": 7605,
+            "mae": 0.046486460216609155,
+            "max": 0.9529838497512975,
+            "min": -0.2748977514931523,
+            "p50": 0.02798420502414878,
+            "p95": 0.08388911586449069,
+            "rmse": 0.1033581355759855
+          },
+          "samples": 7605,
+          "travel_coefficient_n_per_normalized_travel": -26.761475656973737,
+          "travel_rate_coefficient_ns_per_normalized_travel": -5.672776308476884
+        }
+      },
+      "known_serialized_spring_damper": {
+        "load_prediction_correlation": 0.9905454028356888,
+        "prediction": {
+          "bias": 7.017349369696293,
+          "count": 10141,
+          "mae": 7.017349369696293,
+          "max": 8.855958719250323,
+          "min": 5.161950738175651,
+          "p50": 6.953478845918495,
+          "p95": 8.040850092598108,
+          "rmse": 7.047297020368001
+        },
+        "residual": {
+          "bias": -0.9321631791578838,
+          "count": 10141,
+          "mae": 0.9322074260470328,
+          "max": 0.22435385142925135,
+          "min": -1.217801929738707,
+          "p50": 0.9502032103950055,
+          "p95": 0.9754816849992851,
+          "rmse": 0.9379537508305729
+        }
+      },
+      "measured_load": {
+        "bias": 6.085186190538409,
+        "count": 10141,
+        "mae": 6.085186190538409,
+        "max": 8.702408,
+        "min": 4.14743757,
+        "p50": 6.002597,
+        "p95": 7.128838,
+        "rmse": 6.124943497768636
+      },
+      "pose_reconstruction": {
+        "displacement": {
+          "bias": -0.0005371420763879479,
+          "count": 10141,
+          "mae": 0.0011546888501401244,
+          "max": 0.002735844461870728,
+          "min": -0.004066666438397699,
+          "p50": 0.0006095119787066501,
+          "p95": 0.004062863106847856,
+          "rmse": 0.0017759266573053518
+        },
+        "forward_x_relative_to_com_m": 0.17468004627153277,
+        "lateral_y_relative_to_com_m": -0.11799999326467514,
+        "velocity": {
+          "bias": 0.0004591429811468627,
+          "count": 10141,
+          "mae": 0.0031901492474644484,
+          "max": 0.02453759751341445,
+          "min": -0.013981661120376857,
+          "p50": 0.0025138846615944963,
+          "p95": 0.009428810234608663,
+          "rmse": 0.00449112355801135
+        }
+      },
+      "selection": {
+        "flat_contact_normal_y_min": 0.98,
+        "speed_min_mps": 1.0,
+        "total_rows": 12000,
+        "upright_cosine_min": 0.9,
+        "valid_rows": 10141,
+        "zero_brake_only": true
+      },
+      "source_values": {
+        "damper_ns_per_m": 100.0,
+        "spring_n_per_m": 500.0,
+        "sprung_mass_kg": 0.8160193562507629,
+        "static_load_n": 8.005149884819986,
+        "suspension_distance_m": 0.05000000074505806,
+        "target_position": 0.5
+      },
+      "wheel": 1,
+      "wheel_pose_travel_reconstruction": {
+        "law_coordinates": "WheelCollider travel from Transform.InverseTransformPoint(WheelHit.point), radius, and suspensionDistance",
+        "travel": {
+          "bias": 0.046303975235266026,
+          "count": 10141,
+          "mae": 0.046304049528770465,
+          "max": 0.12511081767056595,
+          "min": -0.0002744318095222893,
+          "p50": 0.04948285507013718,
+          "p95": 0.08095037268889825,
+          "rmse": 0.05091270860756878
+        },
+        "travel_rate": {
+          "bias": -0.03395977609546638,
+          "count": 10141,
+          "mae": 0.05785431814881244,
+          "max": 0.1822095423112733,
+          "min": -0.3563330525365057,
+          "p50": 0.04515457045983429,
+          "p95": 0.17083999878506484,
+          "rmse": 0.07921050260768854
+        }
+      }
+    },
+    {
+      "body_pose_only_load_screen": {
+        "prediction": {
+          "bias": 8.788691725051223,
+          "count": 10141,
+          "mae": 8.788691725051223,
+          "max": 11.220045455133977,
+          "min": 7.046345749066308,
+          "p50": 8.896191750362489,
+          "p95": 10.383028861700357,
+          "rmse": 8.846158879765127
+        },
+        "residual": {
+          "bias": 0.5568651124401482,
+          "count": 10141,
+          "mae": 1.142753862271596,
+          "max": 1.6782493942840127,
+          "min": -3.7752567066933773,
+          "p50": 1.199128746137939,
+          "p95": 1.822302046957418,
+          "rmse": 1.3000722330846786
+        }
+      },
+      "identified_travel_load_screen": {
+        "chronological_holdout": {
+          "predicted_residual": {
+            "bias": -0.05624350715484103,
+            "count": 2536,
+            "mae": 0.061758975662356566,
+            "max": 0.23001680430386529,
+            "min": -0.4371656671289088,
+            "p50": 0.04873860524297324,
+            "p95": 0.15796290395380952,
+            "rmse": 0.08078320408490815
+          },
+          "samples": 2536
+        },
+        "not_a_runtime_parameter": true,
+        "training": {
+          "identified": true,
+          "intercept_n": 8.3094458610933,
+          "residual": {
+            "bias": -2.4665783332106043e-16,
+            "count": 7605,
+            "mae": 0.04654728671705571,
+            "max": 2.4518085527302773,
+            "min": -0.3484383302673013,
+            "p50": 0.02623509137580804,
+            "p95": 0.08407593648022277,
+            "rmse": 0.10799403877092682
+          },
+          "samples": 7605,
+          "travel_coefficient_n_per_normalized_travel": -23.71372556753842,
+          "travel_rate_coefficient_ns_per_normalized_travel": -4.438577078199232
+        }
+      },
+      "known_serialized_spring_damper": {
+        "load_prediction_correlation": 0.9885985085295013,
+        "prediction": {
+          "bias": 10.112118069446284,
+          "count": 10141,
+          "mae": 10.112118069446284,
+          "max": 12.053950554719522,
+          "min": 8.225642386814126,
+          "p50": 10.185520415731004,
+          "p95": 10.968115579435628,
+          "rmse": 10.135376518579235
+        },
+        "residual": {
+          "bias": -0.7665612319549117,
+          "count": 10141,
+          "mae": 0.7676615124704743,
+          "max": 1.8766075064335546,
+          "min": -1.0685123637519656,
+          "p50": 0.7860374648098514,
+          "p95": 0.8082501010239511,
+          "rmse": 0.7737015977750824
+        }
+      },
+      "measured_load": {
+        "bias": 9.34555683749137,
+        "count": 10141,
+        "mae": 9.34555683749137,
+        "max": 11.2719069,
+        "min": 7.428596,
+        "p50": 9.396893,
+        "p95": 10.1794758,
+        "rmse": 9.368868716205931
+      },
+      "pose_reconstruction": {
+        "displacement": {
+          "bias": 0.0005912462967776774,
+          "count": 10141,
+          "mae": 0.0011973397742869045,
+          "max": 0.003932545469643408,
+          "min": -0.002702644514553906,
+          "p50": 0.0006999500433361701,
+          "p95": 0.003929288843272318,
+          "rmse": 0.0017635724680309022
+        },
+        "forward_x_relative_to_com_m": -0.15532005624845624,
+        "lateral_y_relative_to_com_m": 0.11799999326467514,
+        "velocity": {
+          "bias": -0.0006900644443730082,
+          "count": 10141,
+          "mae": 0.0031509954727372454,
+          "max": 0.009840996195750008,
+          "min": -0.023848170551878524,
+          "p50": 0.0025174205786846053,
+          "p95": 0.008802865576271869,
+          "rmse": 0.004384699264062165
+        }
+      },
+      "selection": {
+        "flat_contact_normal_y_min": 0.98,
+        "speed_min_mps": 1.0,
+        "total_rows": 12000,
+        "upright_cosine_min": 0.9,
+        "valid_rows": 10141,
+        "zero_brake_only": true
+      },
+      "source_values": {
+        "damper_ns_per_m": 100.0,
+        "spring_n_per_m": 500.0,
+        "sprung_mass_kg": 0.9189916849136353,
+        "static_load_n": 9.015308429002761,
+        "suspension_distance_m": 0.05000000074505806,
+        "target_position": 0.5
+      },
+      "wheel": 2,
+      "wheel_pose_travel_reconstruction": {
+        "law_coordinates": "WheelCollider travel from Transform.InverseTransformPoint(WheelHit.point), radius, and suspensionDistance",
+        "travel": {
+          "bias": -0.050315084151534295,
+          "count": 10141,
+          "mae": 0.050315084151534295,
+          "max": -0.003420737836650627,
+          "min": -0.08966091206915479,
+          "p50": 0.05504066100162256,
+          "p95": 0.07562215534222329,
+          "rmse": 0.054269787188270656
+        },
+        "travel_rate": {
+          "bias": 0.03221349593771446,
+          "count": 10141,
+          "mae": 0.05673386833632649,
+          "max": 0.38080396270349537,
+          "min": -0.19859071829477676,
+          "p50": 0.04237368756963433,
+          "p95": 0.1724958186277607,
+          "rmse": 0.0789546469746999
+        }
+      }
+    },
+    {
+      "body_pose_only_load_screen": {
+        "prediction": {
+          "bias": 8.751755835124275,
+          "count": 10141,
+          "mae": 8.751755835124275,
+          "max": 10.621006819574326,
+          "min": 6.856537531074435,
+          "p50": 8.81006900491668,
+          "p95": 9.586665477051309,
+          "rmse": 8.776854626792952
+        },
+        "residual": {
+          "bias": 1.6378081923099055,
+          "count": 10141,
+          "mae": 1.6378081923099055,
+          "max": 6.2788050265694535,
+          "min": 0.5093731812645235,
+          "p50": 1.2309940691844794,
+          "p95": 4.307505274837876,
+          "rmse": 2.0605158221348927
+        }
+      },
+      "identified_travel_load_screen": {
+        "chronological_holdout": {
+          "predicted_residual": {
+            "bias": -0.02698991206104541,
+            "count": 2536,
+            "mae": 0.04836115977535295,
+            "max": 0.1450298607774645,
+            "min": -0.3194713035596415,
+            "p50": 0.04652263187248895,
+            "p95": 0.09663623396348076,
+            "rmse": 0.057378845461792685
+          },
+          "samples": 2536
+        },
+        "not_a_runtime_parameter": true,
+        "training": {
+          "identified": true,
+          "intercept_n": 8.272557490669694,
+          "residual": {
+            "bias": -7.398800689657112e-15,
+            "count": 7605,
+            "mae": 0.052494578356388134,
+            "max": 0.876089903305342,
+            "min": -1.0092117614718994,
+            "p50": 0.03498900163753049,
+            "p95": 0.1387789948993202,
+            "rmse": 0.10288946266447371
+          },
+          "samples": 7605,
+          "travel_coefficient_n_per_normalized_travel": -24.579698022860452,
+          "travel_rate_coefficient_ns_per_normalized_travel": -5.634545205674949
+        }
+      },
+      "known_serialized_spring_damper": {
+        "load_prediction_correlation": 0.995254457183886,
+        "prediction": {
+          "bias": 11.154321587226944,
+          "count": 10141,
+          "mae": 11.154321587226944,
+          "max": 13.596339848420252,
+          "min": 9.335621929974064,
+          "p50": 11.283412426617401,
+          "p95": 12.761714993050907,
+          "rmse": 11.202458230036687
+        },
+        "residual": {
+          "bias": -0.7647575597927653,
+          "count": 10141,
+          "mae": 0.7655467498477466,
+          "max": 0.4125454752891784,
+          "min": -1.4696495501380333,
+          "p50": 0.7827108485636742,
+          "p95": 0.8051295335863884,
+          "rmse": 0.7715953367261673
+        }
+      },
+      "measured_load": {
+        "bias": 10.38956402743418,
+        "count": 10141,
+        "mae": 10.38956402743418,
+        "max": 13.4395266,
+        "min": 8.577005,
+        "p50": 10.49377,
+        "p95": 11.9827642,
+        "rmse": 10.442510046819974
+      },
+      "pose_reconstruction": {
+        "displacement": {
+          "bias": 0.00019205748227895235,
+          "count": 10141,
+          "mae": 0.0007768221814174192,
+          "max": 0.002554246246640415,
+          "min": -0.00172049623056603,
+          "p50": 0.0005672354518485197,
+          "p95": 0.001873002289903238,
+          "rmse": 0.0009808459192386762
+        },
+        "forward_x_relative_to_com_m": -0.15532011585310102,
+        "lateral_y_relative_to_com_m": -0.11799999326467514,
+        "velocity": {
+          "bias": 0.0015577445760694842,
+          "count": 10141,
+          "mae": 0.0027908752099387135,
+          "max": 0.019144621069396735,
+          "min": -0.010018028390186711,
+          "p50": 0.0020843987703228002,
+          "p95": 0.00848135971746136,
+          "rmse": 0.0038728572141392627
+        }
+      },
+      "selection": {
+        "flat_contact_normal_y_min": 0.98,
+        "speed_min_mps": 1.0,
+        "total_rows": 12000,
+        "upright_cosine_min": 0.9,
+        "valid_rows": 10141,
+        "zero_brake_only": true
+      },
+      "source_values": {
+        "damper_ns_per_m": 100.0,
+        "spring_n_per_m": 500.0,
+        "sprung_mass_kg": 0.9177939891815186,
+        "static_load_n": 9.003559033870697,
+        "suspension_distance_m": 0.05000000074505806,
+        "target_position": 0.5
+      },
+      "wheel": 3,
+      "wheel_pose_travel_reconstruction": {
+        "law_coordinates": "WheelCollider travel from Transform.InverseTransformPoint(WheelHit.point), radius, and suspensionDistance",
+        "travel": {
+          "bias": -0.08348326794477014,
+          "count": 10141,
+          "mae": 0.08348326794477014,
+          "max": -0.013391688048289475,
+          "min": -0.14972890517823956,
+          "p50": 0.09596350955999236,
+          "p95": 0.12192883736559271,
+          "rmse": 0.09032464497992825
+        },
+        "travel_rate": {
+          "bias": -0.012736164537626687,
+          "count": 10141,
+          "mae": 0.06376249727616828,
+          "max": 0.20658951755413857,
+          "min": -0.4790086990696013,
+          "p50": 0.050453135995636056,
+          "p95": 0.18278302728769136,
+          "rmse": 0.08905328566213705
+        }
+      }
+    }
+  ],
+  "production_mpc_modified": false,
+  "schema_version": 1,
+  "simulator_modified": false,
+  "source": {
+    "fixed_dt_median_s": 0.0009999870000000355,
+    "reset_segmentation": {
+      "boundary_times_s": [
+        2.927,
+        4.20000029,
+        5.09400034,
+        5.986,
+        6.87800026,
+        7.77000046,
+        8.662001,
+        9.554001,
+        10.43,
+        11.295
+      ],
+      "detected_boundaries": 10,
+      "excluded_rows": 210,
+      "exclusion_radius_rows": 10,
+      "method": "root-position jump > 0.2 m, landing body speed < 0.5 m/s, and speed drop > 1 m/s"
+    },
+    "scene": "__AutoDRIVE_ModelIdentification_Competition_Temp",
+    "static_snapshot": "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_excitation_20260916/simulator_parameters.json",
+    "trace_build_tag": "exact_competition_combined_20260916",
+    "trace_columns": 142,
+    "trace_rows": 12000,
+    "traces": [
+      "sdu_apex_autodrive/artifacts/model_id_work/model_fits_v2/unity_exact_competition_combined_excitation_20260916/wheel_contact_trace.csv"
+    ]
+  },
+  "status": "offline_unity_suspension_pose_load_audit",
+  "total_load_screen": {
+    "front_minus_rear_load": {
+      "bias": -8.589592831666502,
+      "count": 10141,
+      "mae": 8.589592831666502,
+      "max": -3.559284,
+      "min": -14.19205775,
+      "p50": 9.752537960000002,
+      "p95": 9.7991888,
+      "rmse": 8.941844191841035
+    },
+    "left_minus_right_load": {
+      "bias": -2.0688515377605756,
+      "count": 10141,
+      "mae": 2.0857107671048216,
+      "max": 0.05314595999999838,
+      "min": -10.674923580000002,
+      "p50": 1.2659280000000006,
+      "p95": 7.352708249999998,
+      "rmse": 3.1685609482394916
+    },
+    "measured_total_load": {
+      "bias": -3.1600513824817527,
+      "count": 10141,
+      "mae": 3.1610808065196228,
+      "max": 1.739129079333651,
+      "min": -3.3537547306663456,
+      "p50": 3.210057980666349,
+      "p95": 3.286765790666351,
+      "rmse": 3.1852290867147963
+    },
+    "static_sprung_load_n": 34.04070028066635,
+    "total_load_deviation_definition": "sum(WheelHit.force * contact_normal_y) - static sprung load"
+  }
+}

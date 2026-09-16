@@ -3,8 +3,8 @@
 
 The fitter compares a kinematic baseline, a saturated linear dynamic bicycle,
 and a low-parameter tanh tire model.  Steering follows the explicitly selected
-measured transition contract (rate-limited or instantaneous).  All recursive
-rollouts use only the initialized state, recorded commands, and source ``dt``;
+measured transition contract, including the source-faithful Unity controller.
+All recursive rollouts use only the initialized state, recorded commands, and source ``dt``;
 simulator truth is used only for offline fitting and final error scoring.
 """
 
@@ -50,8 +50,9 @@ def _horizon_key(horizon: float) -> str:
 def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, float]]]:
     required = {
         "dt_sim_s", "x_k_m", "y_k_m", "yaw_k_rad", "u_k_mps",
-        "v_k_mps", "r_k_radps", "applied_throttle_norm_k1",
-        "applied_steering_rad_k1", "simulator_feedback_steering_rad_k1",
+        "v_k_mps", "r_k_radps", "transition_throttle_norm_k",
+        "transition_steering_norm_k", "steering_state_rad_k",
+        "applied_steering_rad_k1",
         "wheel_speed_mps_k1", "segment_id", "x_k1_m", "y_k1_m",
         "yaw_k1_rad", "u_k1_mps", "v_k1_mps", "r_k1_radps",
     }
@@ -66,7 +67,6 @@ def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, flo
             rows: list[dict[str, float]] = []
             previous_segment: int | None = None
             previous_wheel = math.nan
-            previous_feedback = math.nan
             for raw in reader:
                 row = {
                     field: float(raw[field]) for field in required
@@ -80,13 +80,23 @@ def _read_runs(root: Path, names: Sequence[str]) -> dict[str, list[dict[str, flo
                 row["wheel_k_mps"] = (
                     previous_wheel if previous_segment == row["segment_id"] else math.nan)
                 row["delta_k_rad"] = (
-                    previous_feedback if previous_segment == row["segment_id"] else math.nan)
+                    row["steering_state_rad_k"]
+                    if previous_segment == row["segment_id"] else math.nan)
+                row["steering_target_norm_k"] = row["transition_steering_norm_k"]
                 rows.append(row)
                 previous_segment = int(row["segment_id"])
                 previous_wheel = row["wheel_speed_mps_k1"]
-                previous_feedback = row["simulator_feedback_steering_rad_k1"]
         result[name] = rows
     return result
+
+
+def _steering_target_rad(row: dict[str, float]) -> float:
+    """Return the command consumed by this assembled transition."""
+    return row["steering_target_norm_k"] * MAX_STEERING_RAD
+
+
+def _transition_throttle(row: dict[str, float]) -> float:
+    return max(0.0, min(1.0, row["transition_throttle_norm_k"]))
 
 
 def _examples(runs: dict[str, list[dict[str, float]]]) -> list[dict[str, float]]:
@@ -139,9 +149,9 @@ def _predict_lateral(row: dict[str, float], values: np.ndarray,
         parameters, steering_dynamics_kind=steering_dynamics_kind)
     return lateral_body_step(
         row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
-        row["delta_k_rad"], row["applied_steering_rad_k1"],
+        row["delta_k_rad"], _steering_target_rad(row),
         row["dt_sim_s"], parameters, wheel=row["wheel_k_mps"],
-        throttle=row["applied_throttle_norm_k1"])
+        throttle=_transition_throttle(row))
 
 
 def _recursive_lateral_windows(
@@ -180,7 +190,7 @@ def _recursive_lateral_windows(
             if any(
                     int(row["segment_id"]) != int(first["segment_id"]) or
                     not (min_speed_mps <= row["u_k_mps"] <= max_speed_mps) or
-                    abs(row["applied_steering_rad_k1"]) > max_abs_steering_rad or
+                    abs(row["steering_state_rad_k"]) > max_abs_steering_rad or
                     abs(row["u_k_mps"] * row["r_k_radps"]) >
                     max_abs_lateral_accel_mps2 or
                     not math.isfinite(row["wheel_k_mps"])
@@ -214,11 +224,11 @@ def _recursive_lateral_errors(
         for row in rows:
             current_v, current_r = lateral_body_step(
                 row["u_k_mps"], current_v, current_r, current_delta,
-                row["applied_steering_rad_k1"], row["dt_sim_s"],
+                _steering_target_rad(row), row["dt_sim_s"],
                 parameters, wheel=row["wheel_k_mps"],
-                throttle=row["applied_throttle_norm_k1"])
+                throttle=_transition_throttle(row))
             current_delta = _steering_next(
-                current_delta, row["applied_steering_rad_k1"],
+                current_delta, _steering_target_rad(row),
                 row["dt_sim_s"], parameters)
             elapsed += row["dt_sim_s"]
             while (horizon_index < len(RECURSIVE_LATERAL_HORIZONS_S) and
@@ -390,7 +400,7 @@ def _error_vector(predicted: np.ndarray, row: dict[str, float]) -> dict[str, flo
         "u_mps": predicted[3] - row["u_k1_mps"],
         "v_mps": predicted[4] - row["v_k1_mps"],
         "r_radps": predicted[5] - row["r_k1_radps"],
-        "steering_rad": predicted[6] - row["simulator_feedback_steering_rad_k1"],
+        "steering_rad": predicted[6] - row["applied_steering_rad_k1"],
         "wheel_mps": predicted[7] - row["wheel_speed_mps_k1"],
     }
 
@@ -420,16 +430,16 @@ def _recursive_scores(runs: dict[str, list[dict[str, float]]],
                     row = rows[index]
                     if int(row["segment_id"]) != segment:
                         break
-                    steering_norm = row["applied_steering_rad_k1"] / MAX_STEERING_RAD
+                    steering_norm = row["steering_target_norm_k"]
                     if kinematic:
                         state = _kinematic_step(
                             state, steering_norm,
-                            row["applied_throttle_norm_k1"], row["dt_sim_s"],
+                            _transition_throttle(row), row["dt_sim_s"],
                             parameters)
                     else:
                         state = step(
                             state, steering_norm,
-                            row["applied_throttle_norm_k1"], row["dt_sim_s"],
+                            _transition_throttle(row), row["dt_sim_s"],
                             parameters)
                     elapsed += row["dt_sim_s"]
                     index += 1
@@ -446,10 +456,10 @@ def _recursive_scores(runs: dict[str, list[dict[str, float]]],
 
 def _regime(row: dict[str, float]) -> str:
     speed = abs(row["u_k_mps"])
-    steering = abs(row["applied_steering_rad_k1"])
+    steering = abs(row["steering_state_rad_k"])
     if speed < 0.5:
         return "low_speed"
-    if steering < 0.01 and abs(row["applied_throttle_norm_k1"]) < 0.01:
+    if steering < 0.01 and abs(row["transition_throttle_norm_k"]) < 0.01:
         return "straight_coast"
     if steering < 0.01:
         return "straight_acceleration"
@@ -474,7 +484,7 @@ def _write_regime_csv(path: Path, rows: Sequence[dict[str, float]],
             writer.writerow({
                 "regime": _regime(row),
                 "speed_mps": f"{row['u_k_mps']:.9g}",
-                "steering_rad": f"{row['applied_steering_rad_k1']:.9g}",
+                "steering_rad": f"{row['steering_state_rad_k']:.9g}",
                 "v_error_mps": f"{predicted_v - row['v_k1_mps']:.9g}",
                 "r_error_radps": f"{predicted_r - row['r_k1_radps']:.9g}",
             })
@@ -493,7 +503,8 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
         recursive_max_speed_mps: float = 16.0,
         recursive_max_abs_steering_rad: float = 0.45,
         recursive_max_abs_lateral_accel_mps2: float = 14.0) -> dict[str, Any]:
-    if steering_dynamics_kind not in {"rate_limited", "instantaneous"}:
+    if steering_dynamics_kind not in {
+            "rate_limited", "instantaneous", "unity_vehicle_controller"}:
         raise ValueError(
             f"unsupported steering dynamics: {steering_dynamics_kind}")
     if fit_objective not in {"one_step", "recursive_raceline"}:
@@ -603,10 +614,14 @@ def fit(root: Path, train_names: Sequence[str], validation_names: Sequence[str],
                               "r_radps", "steering_rad", "wheel_speed_mps"],
         "input_definition": ["steering_target_norm", "throttle_norm"],
         "steering_integration": {
-            "rate_radps": 3.2 if steering_dynamics_kind == "rate_limited" else None,
+            "rate_radps": 3.2 if steering_dynamics_kind in {
+                "rate_limited", "unity_vehicle_controller"} else None,
             "dynamics_kind": steering_dynamics_kind,
+            "source_fixed_dt_s": PlantParameters().steering_source_fixed_dt_s,
             "substep_s": 0.002,
-            "endpoint_target_semantics": "applied_physical_steering_rad",
+            "endpoint_target_semantics": "previous_packet_command",
+            "state_field": "steering_state_rad_k",
+            "feedback_field_not_used": "steering_feedback_rad_k",
         },
         "longitudinal_source_report": str(longitudinal_model),
         "longitudinal_source_model_key": longitudinal_model_key,
@@ -670,7 +685,8 @@ def main() -> None:
         "--fixed-iz-kgm2", type=float, default=None,
         help="keep yaw inertia fixed during fitting instead of optimizing it")
     parser.add_argument(
-        "--steering-dynamics", choices=("rate_limited", "instantaneous"),
+        "--steering-dynamics", choices=(
+            "unity_vehicle_controller", "rate_limited", "instantaneous"),
         default="rate_limited",
         help="identified applied-steering transition used by the offline plant")
     parser.add_argument(

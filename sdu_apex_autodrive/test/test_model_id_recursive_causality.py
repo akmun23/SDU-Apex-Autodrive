@@ -133,6 +133,49 @@ def test_first_order_effective_steering_is_causal_and_bounded():
     assert start < end < 0.4
 
 
+def test_non_first_order_steering_rejects_dead_lag_parameter():
+    with pytest.raises(ValueError, match="only active for first_order"):
+        _PLANT.PlantParameters(
+            steering_dynamics_kind="instantaneous",
+            steering_lag_time_constant_s=0.050)
+
+
+def test_unity_vehicle_controller_replays_source_step_and_release_clamp():
+    parameters = _PLANT.PlantParameters(
+        steering_dynamics_kind="unity_vehicle_controller",
+        steering_source_fixed_dt_s=0.001,
+        steering_rate_radps=3.2,
+    )
+
+    # VehicleController.Steer() clamps a positive effective angle directly to
+    # zero on a zero-command update because of its sign-inverted branch.  This
+    # is a source behaviour that a generic symmetric rate limiter cannot
+    # reproduce.
+    assert _PLANT._unity_vehicle_controller_steering_next(
+        0.1309, 0.0, 0.001, parameters) == pytest.approx(0.0)
+
+    # A reversal is still source-rate-limited.  At 40 Hz the endpoint after
+    # 25 source physics steps matches the recorded applied steering transition
+    # (about +0.0524 -> -0.0276 for a -0.1 command).
+    segments = _PLANT._steering_segments(
+        0.1 * parameters.max_steering_rad,
+        -0.1 * parameters.max_steering_rad, 0.025, parameters)
+    assert len(segments) == 25
+    assert segments[-1][2] == pytest.approx(-0.0276, abs=2.0e-4)
+
+
+def test_unity_vehicle_controller_is_explicitly_not_generic_rate_limited():
+    source = _PLANT.PlantParameters(
+        steering_dynamics_kind="unity_vehicle_controller")
+    generic = _PLANT.PlantParameters(steering_dynamics_kind="rate_limited")
+    source_end = _PLANT._steering_next(
+        0.1309, 0.0, 0.025, source)
+    generic_end = _PLANT._steering_next(
+        0.1309, 0.0, 0.025, generic)
+    assert source_end == pytest.approx(0.0)
+    assert generic_end > 0.0
+
+
 def test_regime_profile_is_continuous_at_speed_boundaries():
     values = (1.0, 2.0, 3.0)
     left = _PLANT._speed_regime_value(values, 7.999, 2.0)

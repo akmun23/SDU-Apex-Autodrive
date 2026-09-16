@@ -104,6 +104,10 @@ def test_assembler_uses_declared_body_frame_and_passes_known_fixture(tmp_path):
         -0.09 * _ASSEMBLER.MAX_STEERING_RAD)
     assert float(rows[0]["simulator_feedback_steering_rad_k1"]) == pytest.approx(
         -0.09 * _ASSEMBLER.MAX_STEERING_RAD)
+    assert float(rows[0]["transition_throttle_norm_k"]) == pytest.approx(0.2)
+    assert float(rows[0]["transition_steering_norm_k"]) == pytest.approx(-0.1)
+    assert float(rows[0]["steering_state_rad_k"]) == pytest.approx(
+        -0.1 * _ASSEMBLER.MAX_STEERING_RAD)
     assert int(float(rows[0]["applied_command_sequence_k1"])) == 1
     assert int(float(rows[0]["segment_id"])) == 0
     assert float(rows[0]["wheel_speed_mps_k1"]) == pytest.approx(

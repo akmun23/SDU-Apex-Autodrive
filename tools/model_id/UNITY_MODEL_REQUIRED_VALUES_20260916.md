@@ -28,11 +28,27 @@ From `Assets/Prefabs/F1TENTH/F1TENTH.prefab` and
 | Braking/input limits | throttle limit | `1.0` |
 | Input semantics | applied steering sign | `AppliedSteering = -SteeringAngle` |
 
+The active `VehicleController.Steer()` actuator is now represented as an
+explicit offline contract named `unity_vehicle_controller`. It executes the
+serialized `SteeringRate=3.2 rad/s` update at the captured
+`fixedDeltaTime=0.001 s`, in the source's sign-inverted internal angle, and
+retains the source comparison/clamp branch. It is not interchangeable with a
+generic symmetric `rate_limited` update or a fitted first-order lag. The
+transition state is the post-controller `AppliedSteering` value; `V1 Steering`
+is the pre-update getter and remains diagnostic only.
+
 The measured Unity forward-slip coordinate is
 `(wheel_surface_speed - ground_speed) /
 max(abs(wheel_surface_speed), abs(ground_speed), 0.5 m/s)`, clipped to
 `[-1, 1]`. Here `wheel_surface_speed = RPM * 2*pi/60 * 0.059 m`. This is the
 simulator's normalized coordinate, not a real-vehicle slip-ratio definition.
+
+The exact diagnostic-dump replay profile uses `AppliedSteering` as its input.
+Unity internally writes `SteeringAngle = -AppliedSteering` in its x-right
+frame, while the replay model maps that frame to x-forward/y-left; the two
+sign changes cancel, so the effective model Ackermann angle is positive for a
+positive `AppliedSteering`. This conversion is explicit in the dump loader and
+must not be confused with the raw Unity `WheelCollider.steerAngle` field.
 
 The controller’s `WheelRadius=0.0325 m` is not the WheelCollider radius and
 is not used by the CAWD torque branch. It must not replace the `0.059 m`
@@ -327,3 +343,145 @@ direction, while the reverse direction and rear axle also failed to beat a
 stable universal basis. This is evidence that the raw fields need a causal
 transition model and proper deflection/reference-state construction; they must
 not be collapsed into a new gain.
+
+The v4 compact exports additionally retain the reconstructed target body
+force/moment and the wheel-torque longitudinal force/moment in separate
+columns. They are stored in
+`model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_old_rows_v4_20260916.csv`
+and
+`model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_raceline_rows_v4_20260916.csv`;
+both are below the 100 MB repository limit. These channels make it possible
+to test longitudinal contact response directly against the Unity curve and
+torque balance, instead of using position drift to tune an opaque parameter.
+
+### 2026-09-16 explicit four-wheel plant screen
+
+The captured values are now consumed by a separate offline plant in
+`tools/model_id/simulator_native_model.py` and scored by
+`tools/model_id/benchmark_unity_native_wheel_model.py`. Its state is the
+body pose/twist plus four wheel angular rates. It uses the dumped body-Y
+inertia, per-wheel sprung masses, exact wheel radii, serialized forward and
+sideways curves, Ackermann geometry, rigid-body drag, and the active
+VehicleController CAWD/CAWB torque branch. The effective wheel rotational
+inertia regimes from the exact trace remain explicitly labelled identified
+solver-response values; they are not source `WheelCollider.mass` inertias.
+
+The first causal replay found a brake-lock integration defect in the new
+diagnostic model. That was fixed with a static-brake/no-sign-flip transition,
+not by changing Unity or a tire value. On the combined straight/turn screen,
+0.75 s position p95 changed from `1.433 m` to `0.644 m`; the remaining error
+is still too large for promotion. The one-step and short-horizon behavior is
+substantially better, but the long-horizon longitudinal and turning residuals
+show that the Unity WheelCollider's internal contact/torque transition is
+still not fully identified. The benchmark artifacts are
+`model_fits_v2/unity_native_wheel_model_benchmark_initial_20260916.json` and
+`model_fits_v2/unity_native_wheel_model_benchmark_brake_lock_20260916.json`.
+
+This is the first point at which the captured values form an executable,
+auditable model rather than only regression screens. It remains offline-only;
+no production MPC, `/odom`, EKF, AMCL, simulator physics, or simulator
+timing was changed. The next model-identification work is to split the
+remaining longitudinal WheelCollider contact response from the hybrid
+brake-lock transition and then identify causal suspension/load-transfer state
+on a clean, non-spinning raceline holdout. Odometry tuning can use the same
+runs only as offline truth-scored sensor replay and must remain a separate
+acceptance step.
+
+### 2026-09-16 native suspension travel audit
+
+The first body-pose-only suspension screen was not a valid raceline model:
+fixed Euler-angle extraction mixed accumulated yaw into pitch/roll. The audit
+was corrected to use the actual `WheelCollider` contact geometry, equivalent
+to the source `Transform.InverseTransformPoint(WheelHit.point)` calculation
+with each wheel's local position, local rotation, radius, and suspension
+distance. Rows with non-flat contact, braking, or non-upright body pose are
+excluded from identification.
+
+The corrected law is explicit and source-derived:
+
+```
+Fz_i = max(0, sprungMass_i * g
+             - spring_i * suspensionDistance_i * travel_i
+             - damper_i * suspensionDistance_i * travelRate_i)
+```
+
+It is implemented as `unity_wheel_travel_loads()` in
+`tools/model_id/simulator_native_model.py`. `targetPosition` remains recorded
+as a Unity configuration value; it is not treated as a free force gain. The
+offline suspension plant uses the same law through its heave/pitch/roll
+deviation state.
+
+On the exact raceline-relevant holdout, the serialized law has correlation
+`0.9987--0.9989`; chronological holdout load MAE is `0.082--0.090 N` and p95
+is `0.117--0.156 N` across the four wheels. The chronological open-drive
+holdout is noisier (`0.372--0.397 N` MAE, `0.476--0.513 N` p95), but the
+identified normalized travel coefficients remain close to the source values:
+approximately `-25 N/travel` and `-5 N s/travel`. These results identify the
+native local travel/load mechanism; they do not introduce an arbitrary fitted
+parameter.
+
+The complete audits are
+`model_fits_v2/unity_exact_open_suspension_pose_load_audit_20260916.json` and
+`model_fits_v2/unity_exact_raceline_suspension_pose_load_audit_20260916.json`.
+They are diagnostic only. The remaining model task is to initialize and
+propagate the hidden heave/pitch/roll state causally from legal runtime
+signals, then re-score the full 30-step/40 Hz prediction horizon. No value
+has been migrated into MPC, `/odom`, EKF, or AMCL.
+
+### 2026-09-16 reset-safe competition audit
+
+The exact competition excitation traces preserve monotonically increasing
+timestamps across experiment resets. A reset therefore cannot be detected by
+an ordinary timing-gap test: it appears as a large root-position jump to the
+stationary start pose. The suspension analyzer now segments such boundaries
+and excludes a documented 10-row neighbourhood from derivative-based load
+identification, while retaining all valid motion between resets.
+
+The corrected competition excitation audit detected 10 boundaries and the
+longer competition trace detected 76. After segmentation, the serialized
+travel/load law reached `0.9886--0.9953` correlation and chronological holdout
+MAE `0.048--0.062 N` on the 10-segment excitation; on the longer trace it
+reached `0.9989--0.9991` correlation and holdout MAE `0.020--0.023 N`. The
+previous impossible derivative spikes were reset artifacts, not evidence for
+a new suspension or tire parameter. The corrected reports are
+`model_fits_v2/unity_exact_competition_combined_excitation_suspension_pose_load_audit_20260916.json`
+and
+`model_fits_v2/unity_exact_competition_combined_full_suspension_pose_load_audit_20260916.json`.
+
+### 2026-09-16 force-response inversion and data-to-model gate
+
+The same reset-safe segmentation is now applied to
+`tools/model_id/identify_unity_axle_force_response.py`. Body acceleration,
+angular acceleration, wheel angular acceleration, and wheel-pose derivatives
+are computed independently within each continuous trace segment. The open
+combined-slip and raceline holdouts contained no detected reset boundaries;
+their remaining force residuals are therefore not caused by the reset
+artifact found in the competition traces.
+
+The direct serialized sideways-curve proxy remains schedule-dependent. On
+the open excitation holdout, the apparent front/rear proxy gains are
+`0.678/0.692` with force MAE `0.356/0.125 N`. On the raceline-relevant
+holdout they are `0.792/0.681` with MAE `0.132/0.137 N`. The compact
+cross-schedule screen found no clean universal gain, speed/slip correction,
+load-power law, or uninitialized wheel runtime-state regression. The latter
+is numerically unstable across schedules and is rejected as a hidden
+absorber, not promoted as a model term.
+
+This is actionable model evidence: serialized wheel geometry, curve shape,
+sprung-mass/suspension law, body mass, drag, and dumped inertia remain direct
+source inputs, while the unresolved front/rear discrepancy must be split
+through a causal WheelCollider contact/force transition or a better
+source-derived slip/force reconstruction. The outputs are
+`model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_old_v5_20260916.json`,
+`model_fits_v2/unity_exact_open_axle_force_response_cross_schedule_raceline_v5_20260916.json`,
+and
+`model_fits_v2/unity_exact_axle_force_cross_schedule_screen_v4_20260916.json`.
+The selected rows remain below the 100 MB limit; both tables are stored as
+pandas-compatible gzip CSVs: `...old_rows_v5_20260916.csv.gz` and
+`...raceline_rows_v5_20260916.csv.gz`.
+
+These results can now be used to build and score the next causal model and to
+replay-test odometry, but they do not justify changing `/odom`, EKF, AMCL, or
+production MPC yet. The promotion gate remains a blind 30-step/40 Hz causal
+replay using only legal runtime state, followed by fresh live sensor-only
+odometry validation.

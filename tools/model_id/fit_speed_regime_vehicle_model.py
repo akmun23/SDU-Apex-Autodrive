@@ -7,16 +7,19 @@ simulator ground truth on the identification/scoring side of the boundary.
 
 The candidate contains:
 
-* an explicit effective-steering state with a fitted first-order lag;
+* an explicit effective-steering state with a selectable source-faithful
+  Unity controller contract or an offline comparison contract;
 * smoothly blended low/mid/high lateral tire parameters;
 * a combined-slip lateral force term using wheel/body longitudinal slip;
 * smoothly blended longitudinal drive-force and slip-gain profiles; and
 * the measured Unity linear damping exactly once, with no fitted drag term.
 
 The transition loader also preserves the packet timing contract: the raw
-``commanded_steering_norm_k1`` value belongs to the post-step packet, so the
-steering command consumed by the preceding transition is exposed as
-``steering_target_norm_k`` and used for causal replay.
+``commanded_steering_norm_k1`` value belongs to the post-step packet, while
+the preceding packet's command is the input consumed by the transition.  The
+effective steering state is seeded from the post-controller
+``applied_steering_rad_k1`` field; the GUI feedback field is retained as a
+separate pre-update diagnostic.
 
 The three profile bands are 2--8, 8--12, and 12--16 m/s.  Samples outside
 the 16 m/s project limit, unrealistic steering, or excessive lateral demand
@@ -129,7 +132,9 @@ def _stats(values: Iterable[float]) -> dict[str, float | int | None]:
     }
 
 
-def _raceline_envelope_ok(row: dict[str, float]) -> bool:
+def _raceline_envelope_ok(
+        row: dict[str, float],
+        steering_dynamics_kind: str = "rate_limited") -> bool:
     """Return whether a source transition belongs to the usable envelope."""
     speed = abs(row["u_k_mps"])
     target_delta = _steering_command(row) * MAX_STEERING_RAD
@@ -141,7 +146,11 @@ def _raceline_envelope_ok(row: dict[str, float]) -> bool:
         return False
     if abs(speed * row["r_k_radps"]) > MAX_ABS_LATERAL_ACCEL_MPS2:
         return False
-    if math.isfinite(row.get("delta_k_rad", math.nan)):
+    # Unity has a source-observed clamp on some command reversals (notably
+    # release-to-zero), so a net target-minus-state rate is not a valid gate
+    # for the explicit source controller contract.
+    if (steering_dynamics_kind != "unity_vehicle_controller" and
+            math.isfinite(row.get("delta_k_rad", math.nan))):
         steering_rate = abs(
             (target_delta - row["delta_k_rad"]) / row["dt_sim_s"])
         if steering_rate > MAX_STEERING_RATE_RADPS + 1.0e-9:
@@ -171,7 +180,9 @@ def _read_run(spec: str) -> list[dict[str, float]]:
     csv_path = path / "assembled" / "model_transition_v4.csv"
     required = {
         "dt_sim_s", "x_k_m", "y_k_m", "yaw_k_rad", "u_k_mps",
-        "v_k_mps", "r_k_radps", "commanded_steering_norm_k1",
+        "v_k_mps", "r_k_radps", "transition_throttle_norm_k",
+        "transition_steering_norm_k", "steering_state_rad_k",
+        "commanded_steering_norm_k1",
         "applied_steering_rad_k1", "applied_throttle_norm_k1",
         "simulator_feedback_steering_rad_k1",
         "wheel_speed_mps_k1", "x_k1_m", "y_k1_m", "yaw_k1_rad",
@@ -185,31 +196,26 @@ def _read_run(spec: str) -> list[dict[str, float]]:
         rows: list[dict[str, float]] = []
         previous_segment: int | None = None
         previous_wheel = math.nan
-        previous_feedback = math.nan
-        previous_commanded_steering = math.nan
         for raw in reader:
             row = {
                 field: float(raw[field]) for field in required
                 if field != "segment_id"
             }
             row["segment_id"] = int(round(float(raw["segment_id"])))
-            # The packet is sampled after the simulator step.  Its command is
-            # the command issued for the next transition; the previous
-            # packet's command was consumed by the transition represented by
-            # this row.  Keep the raw k1 command untouched and expose the
-            # consumed command explicitly for causal replay.
+            # The assembler has already resolved the packet/FixedUpdate
+            # alignment.  Consume its explicit transition fields instead of
+            # reconstructing command alignment from row order here.
             row["steering_target_norm_k"] = (
-                previous_commanded_steering
+                row["transition_steering_norm_k"]
                 if previous_segment == row["segment_id"] else math.nan)
             row["wheel_k_mps"] = (
                 previous_wheel if previous_segment == row["segment_id"] else math.nan)
             row["delta_k_rad"] = (
-                previous_feedback if previous_segment == row["segment_id"] else math.nan)
+                row["steering_state_rad_k"]
+                if previous_segment == row["segment_id"] else math.nan)
             rows.append(row)
             previous_segment = row["segment_id"]
             previous_wheel = row["wheel_speed_mps_k1"]
-            previous_feedback = row["simulator_feedback_steering_rad_k1"]
-            previous_commanded_steering = row["commanded_steering_norm_k1"]
     if start is not None:
         rows = rows[start:end]
     if len(rows) < 20:
@@ -226,15 +232,10 @@ def _load_runs(specs: Sequence[str]) -> dict[str, list[dict[str, float]]]:
 def _steering_command(row: dict[str, float]) -> float:
     """Return the command consumed by the source transition.
 
-    ``commanded_steering_norm_k1`` is retained for provenance, but is the
-    command present in the post-step packet.  New assembled runs provide the
-    derived previous-packet command; synthetic/unit-test rows may not, so
-    they retain the historical current-command fallback.
+    ``commanded_steering_norm_k1`` is retained for provenance only.  The
+    assembled transition's explicit previous-packet command is the input.
     """
-    consumed = row.get("steering_target_norm_k", math.nan)
-    if math.isfinite(consumed):
-        return consumed
-    return row["commanded_steering_norm_k1"]
+    return row["steering_target_norm_k"]
 
 
 def _fit_steering_lag(rows: Sequence[dict[str, float]]) -> dict[str, Any]:
@@ -255,7 +256,7 @@ def _fit_steering_lag(rows: Sequence[dict[str, float]]) -> dict[str, Any]:
                 MAX_STEERING_RAD
             alpha = 1.0 - math.exp(-row["dt_sim_s"] / tau)
             prediction = row["delta_k_rad"] + alpha * (target - row["delta_k_rad"])
-            errors.append(prediction - row["simulator_feedback_steering_rad_k1"])
+            errors.append(prediction - row["applied_steering_rad_k1"])
         return np.asarray(errors, dtype=float)
 
     result = least_squares(
@@ -268,6 +269,9 @@ def _fit_steering_lag(rows: Sequence[dict[str, float]]) -> dict[str, Any]:
         "time_constant_s": float(result.x[0]),
         "samples": len(selected),
         "residual_rad": _stats(errors),
+        "state_field": "applied_steering_rad_k1",
+        "feedback_field_retained_for_diagnostic":
+            "simulator_feedback_steering_rad_k1",
         "optimizer": {
             "success": bool(result.success),
             "message": str(result.message),
@@ -299,7 +303,8 @@ def _fit_steering_rate_residual(
         if (not math.isfinite(row["delta_k_rad"]) or
                 not math.isfinite(row["wheel_k_mps"]) or
                 not (2.0 <= row["u_k_mps"] <= MAX_SPEED_MPS) or
-                not _raceline_envelope_ok(row) or
+                not _raceline_envelope_ok(
+                    row, parameters.steering_dynamics_kind) or
                 not _lateral_excited(row)):
             continue
         target = (max(-1.0, min(1.0, _steering_command(row))) *
@@ -313,7 +318,7 @@ def _fit_steering_rate_residual(
             row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
             row["delta_k_rad"], target, row["dt_sim_s"],
             zero_gain_parameters, wheel=row["wheel_k_mps"],
-            throttle=row["applied_throttle_norm_k1"])
+            throttle=row["transition_throttle_norm_k"])
         selected.append((
             row,
             (row["v_k1_mps"] - predicted_v),
@@ -363,7 +368,9 @@ def _fit_steering_rate_residual(
 
 def _lateral_rows(rows: Sequence[dict[str, float]], low: float,
                   high: float,
-                  context: dict[str, Any] | None = None) -> list[dict[str, float]]:
+                  context: dict[str, Any] | None = None,
+                  steering_dynamics_kind: str = "rate_limited"
+                  ) -> list[dict[str, float]]:
     selected = []
     for row in rows:
         speed = row["u_k_mps"]
@@ -372,7 +379,7 @@ def _lateral_rows(rows: Sequence[dict[str, float]], low: float,
             continue
         if (not math.isfinite(row["wheel_k_mps"]) or
                 not math.isfinite(row["delta_k_rad"]) or
-                not _raceline_envelope_ok(row) or
+                not _raceline_envelope_ok(row, steering_dynamics_kind) or
                 not _lateral_excited(row)):
             continue
         if (context is not None and operating_class(
@@ -389,7 +396,8 @@ def _lateral_rows(rows: Sequence[dict[str, float]], low: float,
 def _lateral_windows(runs: dict[str, list[dict[str, float]]],
                      low: float, high: float,
                      maximum_windows: int = 160,
-                     context: dict[str, Any] | None = None
+                     context: dict[str, Any] | None = None,
+                     steering_dynamics_kind: str = "rate_limited"
                      ) -> list[list[dict[str, float]]]:
     """Select contiguous causal turn windows for the MPC-relevant fit."""
     windows: list[list[dict[str, float]]] = []
@@ -409,7 +417,8 @@ def _lateral_windows(runs: dict[str, list[dict[str, float]]],
                 if (int(row["segment_id"]) != segment or
                         not (low <= row["u_k_mps"] <= high) or
                         not math.isfinite(row["wheel_k_mps"]) or
-                        not _raceline_envelope_ok(row)):
+                        not _raceline_envelope_ok(
+                            row, steering_dynamics_kind)):
                     window = []
                     break
                 if (context is not None and operating_class(
@@ -435,11 +444,12 @@ def _lateral_windows(runs: dict[str, list[dict[str, float]]],
 def _lateral_parameters(base: PlantParameters, values: np.ndarray,
                         steering_dynamics_kind: str,
                         tau_s: float) -> PlantParameters:
+    active_tau_s = tau_s if steering_dynamics_kind == "first_order" else 0.0
     return PlantParameters(
         **{
             **base.__dict__,
             "steering_dynamics_kind": steering_dynamics_kind,
-            "steering_lag_time_constant_s": float(tau_s),
+            "steering_lag_time_constant_s": float(active_tau_s),
             "cf_n_per_rad": float(values[0]),
             "cr_n_per_rad": float(values[1]),
             "df_n": float(values[2]),
@@ -461,11 +471,14 @@ def _fit_lateral_regime(rows: Sequence[dict[str, float]],
         raise ValueError(
             "lateral_peak_upper_n must be finite and greater than 2 N; "
             "use a large finite value for an effectively unbounded diagnostic")
-    selected = _lateral_rows(rows, low, high, context)
+    selected = _lateral_rows(
+        rows, low, high, context, steering_dynamics_kind)
     if len(selected) < 80:
         raise ValueError(
             f"insufficient lateral rows in {low:g}--{high:g} m/s: {len(selected)}")
-    windows = _lateral_windows(runs, low, high, context=context)
+    windows = _lateral_windows(
+        runs, low, high, context=context,
+        steering_dynamics_kind=steering_dynamics_kind)
     if len(windows) < 8:
         raise ValueError(
             f"insufficient contiguous lateral windows in {low:g}--{high:g} m/s: "
@@ -496,7 +509,7 @@ def _fit_lateral_regime(rows: Sequence[dict[str, float]],
                     _steering_command(row) * MAX_STEERING_RAD,
                     row["dt_sim_s"], parameters,
                     wheel=row["wheel_k_mps"],
-                    throttle=row["applied_throttle_norm_k1"])
+                    throttle=row["transition_throttle_norm_k"])
                 current_yaw += 0.5 * (previous_r + current_r) * row["dt_sim_s"]
                 current_delta = _steering_next(
                     current_delta,
@@ -525,7 +538,7 @@ def _fit_lateral_regime(rows: Sequence[dict[str, float]],
                 _steering_command(row) * MAX_STEERING_RAD,
                 row["dt_sim_s"], parameters,
                 wheel=row["wheel_k_mps"],
-                throttle=row["applied_throttle_norm_k1"])
+                throttle=row["transition_throttle_norm_k"])
             output.extend([
                 0.25 * (predicted_v - row["v_k1_mps"]) / 0.05,
                 0.25 * (predicted_r - row["r_k1_radps"]) / 0.10,
@@ -550,7 +563,7 @@ def _fit_lateral_regime(rows: Sequence[dict[str, float]],
             _steering_command(row) * MAX_STEERING_RAD,
             row["dt_sim_s"], parameters,
             wheel=row["wheel_k_mps"],
-            throttle=row["applied_throttle_norm_k1"])
+            throttle=row["transition_throttle_norm_k"])
         one_step_v.append(predicted_v - row["v_k1_mps"])
         one_step_r.append(predicted_r - row["r_k1_radps"])
     return {
@@ -599,7 +612,7 @@ def _longitudinal_rows(rows: Sequence[dict[str, float]]) -> list[dict[str, float
         if not (0.5 <= speed <= MAX_SPEED_MPS):
             continue
         if (abs(row["applied_steering_rad_k1"]) > 0.01 or
-                row["applied_throttle_norm_k1"] <= 0.005 or
+                row["transition_throttle_norm_k"] <= 0.005 or
                 not math.isfinite(row["wheel_k_mps"])):
             continue
         selected.append(row)
@@ -682,7 +695,7 @@ def _coast_diagnostic(rows: Sequence[dict[str, float]],
     speeds: list[float] = []
     for row in rows:
         if (abs(row["applied_steering_rad_k1"]) > 0.01 or
-                row["applied_throttle_norm_k1"] > 0.005 or
+                row["transition_throttle_norm_k"] > 0.005 or
                 not (1.0 <= row["u_k_mps"] <= MAX_SPEED_MPS)):
             continue
         observed_force = MASS_KG * (
@@ -707,11 +720,13 @@ def _profile_parameters(base: PlantParameters,
                         steering_rate_residual: dict[str, Any] | None = None
                         ) -> PlantParameters:
     lateral_parameters = [entry["parameters"] for entry in lateral]
+    active_tau_s = (steering_tau_s
+                    if steering_dynamics_kind == "first_order" else 0.0)
     return PlantParameters(
         **{
             **base.__dict__,
             "steering_dynamics_kind": steering_dynamics_kind,
-            "steering_lag_time_constant_s": steering_tau_s,
+            "steering_lag_time_constant_s": active_tau_s,
             "tire_model": "regime_speed_combined_tanh",
             "lateral_cf_regimes_n_per_rad": tuple(
                 float(entry["cf_n_per_rad"]) for entry in lateral_parameters),
@@ -813,7 +828,7 @@ def _score(runs: dict[str, list[dict[str, float]]],
                         break
                     state = step(
                         state, _steering_command(row),
-                        row["applied_throttle_norm_k1"], row["dt_sim_s"],
+                        row["transition_throttle_norm_k"], row["dt_sim_s"],
                         parameters)
                     if not np.all(np.isfinite(state)):
                         invalid = True
@@ -890,14 +905,20 @@ def _score(runs: dict[str, list[dict[str, float]]],
 
 
 def fit(train_specs: Sequence[str], validation_specs: Sequence[str],
-        output: Path, steering_dynamics_kind: str = "instantaneous",
+        output: Path, steering_dynamics_kind: str | None = None,
         lateral_specs: dict[str, Sequence[str]] | None = None,
         score_origin_stride: int = 1,
         lateral_profile_kind: str = "fitted",
         fit_steering_rate_residual: bool = False,
         raceline_path: Path = DEFAULT_RACELINE,
         lateral_peak_upper_n: float = DEFAULT_LATERAL_PEAK_UPPER_N) -> dict[str, Any]:
-    if steering_dynamics_kind not in {"instantaneous", "first_order", "rate_limited"}:
+    if steering_dynamics_kind is None:
+        raise ValueError(
+            "steering_dynamics_kind is required; choose unity_vehicle_controller, "
+            "instantaneous, first_order, or rate_limited explicitly")
+    if steering_dynamics_kind not in {
+            "instantaneous", "first_order", "rate_limited",
+            "unity_vehicle_controller"}:
         raise ValueError(f"unsupported steering dynamics: {steering_dynamics_kind}")
     if lateral_profile_kind not in {"fitted", "canonical"}:
         raise ValueError(
@@ -907,7 +928,25 @@ def fit(train_specs: Sequence[str], validation_specs: Sequence[str],
     envelope_context = _raceline_context(raceline_path)
     train_rows = [row for rows in train_runs.values() for row in rows]
     base = PlantParameters.from_manifest()
-    steering = _fit_steering_lag(train_rows)
+    if steering_dynamics_kind == "unity_vehicle_controller":
+        # The actuator is fixed by the Unity source contract.  Fitting a
+        # first-order tau here would only report a surrogate next to the
+        # executable source replay and could invite accidental promotion.
+        steering = {
+            "kind": "unity_vehicle_controller_source_replay",
+            "time_constant_s": 0.0,
+            "samples": 0,
+            "residual_rad": {
+                "count": 0, "mae": 0.0, "p50": 0.0, "p95": 0.0,
+                "p99": 0.0, "max": 0.0, "bias": 0.0, "rmse": 0.0,
+            },
+            "source_fixed_dt_s": base.steering_source_fixed_dt_s,
+            "state_field": "steering_state_rad_k",
+            "feedback_field_retained_for_diagnostic":
+                "steering_feedback_rad_k",
+        }
+    else:
+        steering = _fit_steering_lag(train_rows)
     tau_s = float(steering["time_constant_s"])
     if lateral_specs is None:
         lateral_specs = {name: tuple(train_specs) for name in REGIME_NAMES}
@@ -985,6 +1024,10 @@ def fit(train_specs: Sequence[str], validation_specs: Sequence[str],
             "transition_input_field": "steering_target_norm_k",
             "transition_input_definition": "previous_packet_command",
             "post_step_raw_field_is_not_used_as_transition_input": True,
+            "effective_state_field": "steering_state_rad_k",
+            "pre_update_feedback_field": "steering_feedback_rad_k",
+            "unity_vehicle_controller_source_dt_s": (
+                base.steering_source_fixed_dt_s),
         },
         "operating_envelope": {
             "raceline_file": envelope_context["path"],
@@ -1026,6 +1069,7 @@ def fit(train_specs: Sequence[str], validation_specs: Sequence[str],
         },
         "candidate_parameters": {
             "steering_dynamics_kind": steering_dynamics_kind,
+            "steering_source_fixed_dt_s": profile.steering_source_fixed_dt_s,
             "steering_lag_time_constant_s": profile.steering_lag_time_constant_s,
             "lateral_cf_regimes_n_per_rad": profile.lateral_cf_regimes_n_per_rad,
             "lateral_cr_regimes_n_per_rad": profile.lateral_cr_regimes_n_per_rad,
@@ -1087,11 +1131,13 @@ def main() -> None:
     parser.add_argument("--raceline", type=Path, default=DEFAULT_RACELINE,
                         help="production raceline used for CORE/GUARD scoring")
     parser.add_argument(
-        "--steering-dynamics", choices=("instantaneous", "first_order", "rate_limited"),
-        default="instantaneous",
-        help=("effective-steering state used in the causal rollout; the lag "
-              "fit is always reported, but instantaneous is the default when "
-              "the source does not identify a lag robustly"))
+        "--steering-dynamics", choices=(
+            "unity_vehicle_controller", "instantaneous", "first_order",
+            "rate_limited"),
+        required=True,
+        help=("effective-steering state used in the causal rollout; choose "
+              "explicitly because each mode has a different executable "
+              "contract"))
     parser.add_argument(
         "--lateral-run", action="append", default=[],
         help=("regime-specific lateral training spec in the form "

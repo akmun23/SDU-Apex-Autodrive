@@ -3,11 +3,12 @@
 
 This report is an offline actuator-semantics check.  It does not change the
 simulator or MPC.  Each transition is evaluated causally from the previous
-feedback angle and the command target available at that transition.  The
-three candidate one-step laws are:
+post-controller applied angle and the command target consumed by that
+transition.  The GUI ``V1 Steering`` field is retained as a separate
+pre-update feedback diagnostic.  The three candidate one-step laws are:
 
-* rate limited: ``move(previous_feedback, target, 3.2 * dt)``;
-* first order: ``previous + (1-exp(-dt/tau)) * (target-previous)``;
+* rate limited: ``move(previous_applied, target, 3.2 * dt)``;
+* first order: ``previous_applied + (1-exp(-dt/tau)) * (target-previous_applied)``;
 * instantaneous: ``target``.
 
 The report keeps command target, applied angle, feedback angle, one-step
@@ -60,6 +61,8 @@ def _read_run(spec: str) -> list[dict[str, float]]:
             raise ValueError(f"{csv_path} is missing fields: {missing}")
         rows: list[dict[str, float]] = []
         previous_feedback = math.nan
+        previous_applied = math.nan
+        previous_commanded = math.nan
         previous_segment: int | None = None
         for raw in reader:
             segment = int(round(float(raw["segment_id"])))
@@ -74,9 +77,15 @@ def _read_run(spec: str) -> list[dict[str, float]]:
                 "simulator_feedback_steering_rad_k1": feedback,
                 "previous_feedback_rad": (
                     previous_feedback if previous_segment == segment else math.nan),
+                "previous_applied_rad": (
+                    previous_applied if previous_segment == segment else math.nan),
+                "transition_commanded_norm": (
+                    previous_commanded if previous_segment == segment else math.nan),
             }
             rows.append(row)
             previous_feedback = feedback
+            previous_applied = float(raw["applied_steering_rad_k1"])
+            previous_commanded = float(raw["commanded_steering_norm_k1"])
             previous_segment = segment
     if start is not None:
         rows = rows[start:end]
@@ -101,9 +110,9 @@ def _stats_or_empty(values: Sequence[float]) -> dict[str, Any]:
 def _score_rows(rows: Sequence[dict[str, float]], tau_s: float) -> dict[str, Any]:
     selected = [
         row for row in rows
-        if (math.isfinite(row["previous_feedback_rad"]) and
-            math.isfinite(row["simulator_feedback_steering_rad_k1"]) and
-            math.isfinite(row["commanded_steering_norm_k1"]) and
+        if (math.isfinite(row["previous_applied_rad"]) and
+            math.isfinite(row["applied_steering_rad_k1"]) and
+            math.isfinite(row["transition_commanded_norm"]) and
             0.015 <= row["dt_sim_s"] <= 0.035)
     ]
     target_deltas: list[float] = []
@@ -115,10 +124,15 @@ def _score_rows(rows: Sequence[dict[str, float]], tau_s: float) -> dict[str, Any
         "first_order": [],
         "instantaneous": [],
     }
+    feedback_residuals = {
+        "rate_limited": [],
+        "first_order": [],
+        "instantaneous": [],
+    }
     for row in selected:
-        previous = row["previous_feedback_rad"]
+        previous = row["previous_applied_rad"]
         target = max(-1.0, min(1.0,
-                               row["commanded_steering_norm_k1"])) * MAX_STEERING_RAD
+                               row["transition_commanded_norm"])) * MAX_STEERING_RAD
         applied = row["applied_steering_rad_k1"]
         feedback = row["simulator_feedback_steering_rad_k1"]
         dt = row["dt_sim_s"]
@@ -132,18 +146,23 @@ def _score_rows(rows: Sequence[dict[str, float]], tau_s: float) -> dict[str, Any
             "instantaneous": target,
         }
         for name, prediction in predictions.items():
-            residuals[name].append(prediction - feedback)
+            residuals[name].append(prediction - applied)
+            feedback_residuals[name].append(prediction - feedback)
     return {
         "sample_count": len(selected),
         "one_step_deltas": {
-            "target_minus_previous_feedback_rad": _stats_or_empty(target_deltas),
-            "applied_minus_previous_feedback_rad": _stats_or_empty(applied_deltas),
-            "feedback_minus_previous_feedback_rad": _stats_or_empty(feedback_deltas),
+            "target_minus_previous_applied_rad": _stats_or_empty(target_deltas),
+            "applied_minus_previous_applied_rad": _stats_or_empty(applied_deltas),
+            "feedback_minus_previous_applied_rad": _stats_or_empty(feedback_deltas),
             "applied_minus_feedback_rad": _stats_or_empty(applied_feedback_gaps),
         },
         "semantics": {
             name: {"residual_rad": _stats_or_empty(values)}
             for name, values in residuals.items()
+        },
+        "gui_feedback_semantics": {
+            name: {"residual_rad": _stats_or_empty(values)}
+            for name, values in feedback_residuals.items()
         },
     }
 
@@ -169,10 +188,11 @@ def score(run_specs: Sequence[str], output: Path,
         "production_mpc_modified": False,
         "run_specs": list(run_specs),
         "input_contract": {
-            "command_target": "commanded_steering_norm_k1 * max_steering_rad",
-            "applied_field": "applied_steering_rad_k1",
-            "feedback_field": "simulator_feedback_steering_rad_k1",
-            "previous_state": "previous feedback within the same segment",
+            "command_target": "previous_packet.commanded_steering_norm_k1 * max_steering_rad",
+            "applied_field": "applied_steering_rad_k1 (post-controller state)",
+            "feedback_field": "simulator_feedback_steering_rad_k1 (pre-update GUI getter)",
+            "previous_state": "previous packet applied_steering_rad_k1 within the same segment",
+            "transition_input": "previous packet commanded_steering_norm_k1",
             "dt_field": "dt_sim_s",
             "max_steering_rad": MAX_STEERING_RAD,
             "steering_rate_radps": STEERING_RATE_RADPS,

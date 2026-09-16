@@ -7,9 +7,11 @@ bridge observations of one simulator state are collapsed, not counted as
 extra samples.  Source gaps are retained in the output and reported.
 
 The simulator telemetry is emitted after the fixed-step update. Therefore the
-applied command recorded in the current packet is the command that generated
-the transition from the previous packet state to the current packet state.
-The assembler preserves that causal alignment explicitly; it does not mix
+``applied_command_sequence`` recorded in the current packet identifies the
+command that generated the transition from the previous packet state to the
+current packet state.  The current packet's ``commanded_*`` fields are the
+new command received at the packet boundary and are consumed by the next
+transition.  The assembler preserves both facts explicitly; it does not mix
 controls from adjacent packets.
 
 The tool intentionally refuses to fit a model when the measured source rate
@@ -418,6 +420,8 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str,
         u1, v1 = _body_velocity(current, twist_frame)
         applied_command_sequence = current["applied_command_sequence"]
         if (applied_command_sequence is None or
+                previous["commanded_throttle"] is None or
+                previous["commanded_steering"] is None or
                 current["commanded_throttle"] is None or
                 current["commanded_steering"] is None or
                 current["feedback_steering"] is None):
@@ -435,16 +439,23 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str,
             "x_k_m": previous["x"], "y_k_m": previous["y"],
             "yaw_k_rad": previous["yaw_unwrapped"],
             "u_k_mps": u0, "v_k_mps": v0, "r_k_radps": previous["yaw_rate"],
-            # The current packet is the post-step state and carries the
-            # command consumed for previous -> current. The applied and
-            # feedback steering fields are already physical radians in the
-            # source contract despite their historical ``_norm`` names.
+            # ``commanded_*_k1`` is retained as the raw post-step command
+            # for provenance.  The preceding packet command is the command
+            # consumed by the fixed-step interval represented by this row.
+            # ``applied_steering_rad_k1`` is the post-controller effective
+            # angle in the current packet; it is the correct state endpoint.
+            # The feedback field is retained separately because the source
+            # GUI getter is sampled before the controller's steering update.
             "applied_command_sequence_k1": float(applied_command_sequence),
+            "transition_throttle_norm_k": previous["commanded_throttle"],
+            "transition_steering_norm_k": previous["commanded_steering"],
             "commanded_throttle_norm_k1": current["commanded_throttle"],
             "commanded_steering_norm_k1": current["commanded_steering"],
             "applied_throttle_norm_k1": current["throttle"],
             "applied_steering_rad_k1": current["steering"],
             "simulator_feedback_steering_rad_k1": current["feedback_steering"],
+            "steering_state_rad_k": previous["steering"],
+            "steering_feedback_rad_k": previous["feedback_steering"],
             "wheel_speed_mps_k1": current["wheel_speed_mps"],
             "encoder_left_rad_k1": current["encoder_left"],
             "encoder_right_rad_k1": current["encoder_right"],
@@ -640,11 +651,15 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
             "file": "model_transition_v4.csv",
             "version": 4,
             "fields": [
+                "transition_throttle_norm_k",
+                "transition_steering_norm_k",
                 "commanded_throttle_norm_k1",
                 "commanded_steering_norm_k1",
                 "applied_throttle_norm_k1",
                 "applied_steering_rad_k1",
                 "simulator_feedback_steering_rad_k1",
+                "steering_state_rad_k",
+                "steering_feedback_rad_k",
                 "wheel_speed_mps_k1",
                 "reset_epoch",
                 "segment_id",
@@ -656,8 +671,16 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
                 "radians copied from the source packet"
             ),
             "control_alignment": (
-                "current_packet_applied_command_generates_previous_to_current"
+                "current_packet_applied_command_generates_previous_to_current; "
+                "previous_packet_command_is_the_transition_input"
             ),
+            "transition_input_fields": {
+                "steering": "transition_steering_norm_k",
+                "throttle": "transition_throttle_norm_k",
+                "steering_state_k": "steering_state_rad_k",
+                "steering_state_k1": "applied_steering_rad_k1",
+                "pre_update_feedback_k": "steering_feedback_rad_k",
+            },
             "required_control_field": "applied_command_sequence_k1",
             "ambiguous_transitions_discarded": False,
             "discarded_transition_count": (

@@ -31,7 +31,14 @@ IZ_KGM2 = 0.0961908
 POSITION_OFFSET_FROM_VELOCITY_POINT_X_M = -0.155320086
 MAX_STEERING_RAD = 0.5236
 STEERING_RATE_RADPS = 3.2
-STEERING_DYNAMICS_KINDS = ("rate_limited", "instantaneous", "first_order")
+# ``unity_vehicle_controller`` is an explicit replay of the active Unity
+# VehicleController.Steer() branch.  It is deliberately separate from the
+# generic rate-limited option because the source compares the command against
+# the controller's sign-inverted internal angle and has a source-step clamp
+# behaviour that is not equivalent to a symmetric MoveTowards().
+STEERING_DYNAMICS_KINDS = (
+    "rate_limited", "instantaneous", "first_order", "unity_vehicle_controller")
+UNITY_STEERING_SOURCE_FIXED_DT_S = 0.001
 REGIME_SPEEDS_MPS = (5.0, 10.0, 14.0)
 REGIME_TRANSITION_WIDTH_MPS = 2.0
 WHEEL_RADIUS_M = 0.059
@@ -96,6 +103,10 @@ class PlantParameters:
     max_steering_rad: float = MAX_STEERING_RAD
     steering_rate_radps: float = STEERING_RATE_RADPS
     steering_dynamics_kind: str = "rate_limited"
+    # VehicleController.Steer() is executed from FixedUpdate.  The active
+    # competition capture reports this exact source timestep; it is a source
+    # fact, not a fitted actuator time constant.
+    steering_source_fixed_dt_s: float = UNITY_STEERING_SOURCE_FIXED_DT_S
     # The steering state is the effective wheel angle used by the tire model.
     # ``first_order`` is an offline-identification option; it is not enabled
     # by the production MPC profile unless a causal holdout accepts it.
@@ -168,6 +179,34 @@ class PlantParameters:
     unity_left_right_load_transfer_bias_n: float = 0.0
     unity_left_right_load_transfer_gain_n_per_mps2: float = 0.0
 
+    def __post_init__(self) -> None:
+        """Reject steering parameters that cannot affect the selected model.
+
+        A fitted lag next to an instantaneous or rate-limited state is a
+        silent dead parameter: it can appear in a report while having no
+        influence on the rollout.  Keeping that combination invalid makes the
+        identification artifact and the executable plant describe the same
+        steering contract.
+        """
+        if self.steering_dynamics_kind not in STEERING_DYNAMICS_KINDS:
+            raise ValueError(
+                "unsupported steering dynamics: "
+                f"{self.steering_dynamics_kind}")
+        if (not math.isfinite(self.steering_lag_time_constant_s) or
+                self.steering_lag_time_constant_s < 0.0):
+            raise ValueError("steering lag time constant must be finite and non-negative")
+        if (not math.isfinite(self.steering_source_fixed_dt_s) or
+                self.steering_source_fixed_dt_s <= 0.0):
+            raise ValueError("steering source fixed timestep must be positive and finite")
+        if self.steering_dynamics_kind == "first_order":
+            if self.steering_lag_time_constant_s <= 0.0:
+                raise ValueError(
+                    "first_order steering requires a positive lag time constant")
+        elif self.steering_lag_time_constant_s != 0.0:
+            raise ValueError(
+                "steering lag time constant is only active for first_order "
+                "steering")
+
     @classmethod
     def from_manifest(cls, manifest_path: Path | None = None) -> "PlantParameters":
         """Resolve the canonical offline candidate from the model manifest.
@@ -204,6 +243,8 @@ class PlantParameters:
             steering_rate_radps=float(values["steering_rate_radps"]),
             steering_dynamics_kind=str(values.get(
                 "steering_dynamics_kind", "rate_limited")),
+            steering_source_fixed_dt_s=float(values.get(
+                "steering_source_fixed_dt_s", UNITY_STEERING_SOURCE_FIXED_DT_S)),
             steering_lag_time_constant_s=float(values.get(
                 "steering_lag_time_constant_s", 0.0)),
             max_speed_mps=float(values["max_speed_mps"]),
@@ -342,6 +383,55 @@ def _move_towards(current: float, target: float, maximum_delta: float) -> float:
     return current + max(-maximum_delta, min(maximum_delta, difference))
 
 
+def _unity_vehicle_controller_source_step(
+        current_delta: float, target_norm: float, dt: float,
+        parameters: PlantParameters) -> float:
+    """Replay one active Unity ``VehicleController.Steer`` update.
+
+    Unity stores ``SteeringAngle`` with the opposite sign to the published
+    applied steering state.  The source branch is reproduced verbatim in
+    that internal sign convention, including its asymmetric clamp condition.
+    This is an exact source model, not a fitted first-order approximation.
+    """
+    if not math.isfinite(current_delta) or not math.isfinite(target_norm):
+        raise ValueError("Unity steering inputs must be finite")
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("Unity steering dt must be positive and finite")
+    command = max(-1.0, min(1.0, target_norm))
+    limit = parameters.max_steering_rad
+    internal_angle = -current_delta
+    target_internal_angle = -command * limit
+    # This is VehicleController.Steer(), in radians instead of degrees:
+    # if (AutonomousSteering > lastSteeringAngle / SteeringLimit) the source
+    # decrements SteeringAngle; otherwise it increments it.
+    if command > internal_angle / limit:
+        internal_angle -= parameters.steering_rate_radps * dt
+        if internal_angle <= target_internal_angle:
+            internal_angle = target_internal_angle
+    else:
+        internal_angle += parameters.steering_rate_radps * dt
+        if internal_angle >= target_internal_angle:
+            internal_angle = target_internal_angle
+    return -internal_angle
+
+
+def _unity_vehicle_controller_steering_next(
+        current_delta: float, target_norm: float, dt: float,
+        parameters: PlantParameters) -> float:
+    """Advance the Unity steering controller over a source-time interval."""
+    source_dt = parameters.steering_source_fixed_dt_s
+    count = max(1, int(round(dt / source_dt)))
+    steering = current_delta
+    elapsed = 0.0
+    for index in range(count):
+        duration = (dt - elapsed if index == count - 1 else source_dt)
+        duration = max(duration, np.finfo(float).eps)
+        steering = _unity_vehicle_controller_source_step(
+            steering, target_norm, duration, parameters)
+        elapsed += duration
+    return steering
+
+
 def _steering_next(current: float, target: float, dt: float,
                    parameters: PlantParameters) -> float:
     """Advance the identified steering state using an explicit contract."""
@@ -358,9 +448,47 @@ def _steering_next(current: float, target: float, dt: float,
         alpha = 1.0 - math.exp(
             -dt / parameters.steering_lag_time_constant_s)
         return current + alpha * (target - current)
+    if parameters.steering_dynamics_kind == "unity_vehicle_controller":
+        return _unity_vehicle_controller_steering_next(
+            current, target / parameters.max_steering_rad, dt, parameters)
     raise ValueError(
         "unsupported steering dynamics: "
         f"{parameters.steering_dynamics_kind}")
+
+
+def _steering_segments(current: float, target: float, dt: float,
+                       parameters: PlantParameters
+                       ) -> list[tuple[float, float, float, float]]:
+    """Return causal steering subsegments for force integration.
+
+    Each tuple is ``(duration, delta_start, delta_end, delta_rate)``.  The
+    Unity controller runs at the measured 1 kHz source step, so retaining its
+    individual steps prevents a 25 ms endpoint ramp from hiding the source
+    clamp and from applying the wrong steering angle to intermediate tire
+    forces.  Other steering contracts retain the historical single segment.
+    """
+    if parameters.steering_dynamics_kind != "unity_vehicle_controller":
+        end = _steering_next(current, target, dt, parameters)
+        return [(dt, current, end, (end - current) / dt)]
+
+    source_dt = parameters.steering_source_fixed_dt_s
+    count = max(1, int(round(dt / source_dt)))
+    segments: list[tuple[float, float, float, float]] = []
+    steering = current
+    target_norm = target / parameters.max_steering_rad
+    elapsed = 0.0
+    for index in range(count):
+        # Keep the physical integration interval exactly equal to the measured
+        # transition while retaining the source 1 kHz step everywhere else.
+        duration = (dt - elapsed if index == count - 1 else source_dt)
+        duration = max(duration, np.finfo(float).eps)
+        next_steering = _unity_vehicle_controller_source_step(
+            steering, target_norm, duration, parameters)
+        segments.append((duration, steering, next_steering,
+                         (next_steering - steering) / duration))
+        steering = next_steering
+        elapsed += duration
+    return segments
 
 
 def _speed_regime_value(values: tuple[float, ...] | None, speed_mps: float,
@@ -832,20 +960,21 @@ def lateral_body_step(u: float, v: float, r: float, delta_start: float,
     """
     if dt <= 0.0 or not math.isfinite(dt):
         raise ValueError("dt must be positive and finite")
-    delta_end = _steering_next(
+    steering_segments = _steering_segments(
         delta_start, delta_target, dt, parameters)
-    count = max(1, int(math.ceil(dt / INTEGRATION_SUBSTEP_S)))
-    sub_dt = dt / count
     current_v, current_r = v, r
-    for index in range(count):
-        fraction = (index + 0.5) / count
-        delta = delta_start + fraction * (delta_end - delta_start)
-        _, v_dot, r_dot = _body_derivative(
-            u, current_v, current_r, delta, wheel, parameters,
-            throttle=throttle, include_longitudinal=False,
-            steering_rate_radps=(delta_end - delta_start) / dt)
-        current_v += sub_dt * v_dot
-        current_r += sub_dt * r_dot
+    for segment_dt, segment_start, segment_end, steering_rate in steering_segments:
+        count = max(1, int(math.ceil(segment_dt / INTEGRATION_SUBSTEP_S)))
+        sub_dt = segment_dt / count
+        for index in range(count):
+            fraction = (index + 0.5) / count
+            delta = segment_start + fraction * (segment_end - segment_start)
+            _, v_dot, r_dot = _body_derivative(
+                u, current_v, current_r, delta, wheel, parameters,
+                throttle=throttle, include_longitudinal=False,
+                steering_rate_radps=steering_rate)
+            current_v += sub_dt * v_dot
+            current_r += sub_dt * r_dot
     return current_v, current_r
 
 
@@ -861,31 +990,36 @@ def step(state: np.ndarray, steering_target_norm: float,
     steering_target = max(-1.0, min(1.0, steering_target_norm)) * parameters.max_steering_rad
     throttle = max(0.0, min(1.0, throttle_norm))
     x, y, yaw, u, v, r, delta, wheel = (float(value) for value in state)
-    delta_end = _steering_next(delta, steering_target, dt, parameters)
     wheel_end = _wheel_next(u, wheel, throttle, dt, parameters)
     integration_substep = (INTEGRATION_SUBSTEP_S if internal_substep_s is None
                             else internal_substep_s)
     if (not math.isfinite(integration_substep) or
             integration_substep <= 0.0):
         raise ValueError("internal_substep_s must be positive and finite")
-    count = max(1, int(math.ceil(dt / integration_substep)))
-    sub_dt = dt / count
+    steering_segments = _steering_segments(
+        delta, steering_target, dt, parameters)
+    elapsed = 0.0
     start_delta, start_wheel = delta, wheel
-    for index in range(count):
-        fraction = (index + 0.5) / count
-        delta_mid = start_delta + fraction * (delta_end - start_delta)
-        wheel_mid = start_wheel + fraction * (wheel_end - start_wheel)
-        u_dot, v_dot, r_dot = _body_derivative(
-            u, v, r, delta_mid, wheel_mid, parameters,
-            throttle=throttle,
-            steering_rate_radps=(delta_end - delta) / dt)
-        pose_v = v + parameters.position_offset_from_velocity_point_x_m * r
-        x += sub_dt * (u * math.cos(yaw) - pose_v * math.sin(yaw))
-        y += sub_dt * (u * math.sin(yaw) + pose_v * math.cos(yaw))
-        yaw += sub_dt * r
-        u = max(0.0, min(parameters.max_speed_mps, u + sub_dt * u_dot))
-        v += sub_dt * v_dot
-        r += sub_dt * r_dot
+    for segment_dt, segment_start, segment_end, steering_rate in steering_segments:
+        count = max(1, int(math.ceil(segment_dt / integration_substep)))
+        sub_dt = segment_dt / count
+        for index in range(count):
+            fraction = (index + 0.5) / count
+            delta_mid = segment_start + fraction * (segment_end - segment_start)
+            wheel_fraction = (elapsed + (index + 0.5) * sub_dt) / dt
+            wheel_mid = start_wheel + wheel_fraction * (wheel_end - start_wheel)
+            u_dot, v_dot, r_dot = _body_derivative(
+                u, v, r, delta_mid, wheel_mid, parameters,
+                throttle=throttle, steering_rate_radps=steering_rate)
+            pose_v = v + parameters.position_offset_from_velocity_point_x_m * r
+            x += sub_dt * (u * math.cos(yaw) - pose_v * math.sin(yaw))
+            y += sub_dt * (u * math.sin(yaw) + pose_v * math.cos(yaw))
+            yaw += sub_dt * r
+            u = max(0.0, min(parameters.max_speed_mps, u + sub_dt * u_dot))
+            v += sub_dt * v_dot
+            r += sub_dt * r_dot
+        elapsed += segment_dt
+    delta_end = steering_segments[-1][2]
     return np.asarray([x, y, yaw, u, v, r, delta_end, wheel_end], dtype=float)
 
 

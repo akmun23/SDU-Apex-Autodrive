@@ -35,7 +35,8 @@ from structured_vehicle_plant import (  # noqa: E402
 STATE_FIELDS = ("u", "v", "r", "wheel", "steering")
 REQUIRED_FIELDS = {
     "simulation_time_k_s", "dt_sim_s", "u_k_mps", "v_k_mps", "r_k_radps", "x_k_m",
-    "y_k_m", "yaw_k_rad", "applied_throttle_norm_k1",
+    "y_k_m", "yaw_k_rad", "transition_throttle_norm_k",
+    "transition_steering_norm_k", "steering_state_rad_k",
     "applied_steering_rad_k1", "simulator_feedback_steering_rad_k1",
     "wheel_speed_mps_k1", "segment_id", "u_k1_mps", "v_k1_mps",
     "r_k1_radps",
@@ -127,13 +128,23 @@ def _residual_rows(run_name: str, rows: list[dict[str, float]],
             previous = row
             continue
         wheel = previous["wheel_speed_mps_k1"]
-        steering = previous["simulator_feedback_steering_rad_k1"]
-        throttle = max(0.0, min(1.0, row["applied_throttle_norm_k1"]))
+        # The assembled transition contains the post-controller state at k
+        # and the previous-packet command consumed by k->k+1.  The GUI
+        # feedback and current packet command are on the wrong side of the
+        # Unity FixedUpdate boundary for this transition.
+        steering = previous.get(
+            "steering_state_rad_k",
+            previous["simulator_feedback_steering_rad_k1"])
+        throttle = max(0.0, min(1.0, row.get(
+            "transition_throttle_norm_k", row["applied_throttle_norm_k1"])))
         if not all(math.isfinite(value) for value in (wheel, steering, throttle)):
             previous = row
             continue
 
-        steering_target = row["applied_steering_rad_k1"]
+        transition_command = row.get(
+            "transition_steering_norm_k",
+            row["applied_steering_rad_k1"] / MAX_STEERING_RAD)
+        steering_target = transition_command * MAX_STEERING_RAD
         steering_next = _steering_next(
             steering, steering_target, dt, parameters)
         wheel_next = _wheel_next(
@@ -151,7 +162,7 @@ def _residual_rows(run_name: str, rows: list[dict[str, float]],
                 row["u_k_mps"], row["v_k_mps"], row["r_k_radps"],
                 steering, wheel,
             ], dtype=float),
-            steering_target / MAX_STEERING_RAD,
+            transition_command,
             throttle,
             dt,
             parameters,
@@ -167,7 +178,7 @@ def _residual_rows(run_name: str, rows: list[dict[str, float]],
             "dr_radps2": (row["r_k1_radps"] - row["r_k_radps"]) / dt,
             "wheel_dot_mps2": (row["wheel_speed_mps_k1"] - wheel) / dt,
             "steering_dot_radps": (
-                row["simulator_feedback_steering_rad_k1"] - steering) / dt,
+                row["applied_steering_rad_k1"] - steering) / dt,
         }
         safe_u = math.copysign(
             max(abs(row["u_k_mps"]), MIN_SLIP_SPEED_MPS),
