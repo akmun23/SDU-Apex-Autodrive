@@ -98,11 +98,11 @@ class SpeedControllerConfig:
     max_acceleration_mps2: float = 5.5
     max_acceleration_speed_mps: tuple[float, ...] = (
         0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
-        16.0, 18.0, 20.0, 22.0, 23.0,
+        16.0,
     )
     max_acceleration_envelope_mps2: tuple[float, ...] = (
         5.5, 4.4, 4.4, 3.568, 3.175, 2.562, 2.043, 1.565,
-        0.956, 0.529, 0.529, 0.529, 0.086,
+        0.956,
     )
     max_deceleration_mps2: float = 8.0
     # Native acceleration is a diagnostic signal only by default. The
@@ -117,7 +117,7 @@ class SpeedControllerConfig:
     acceleration_throttle_rise_rate_per_sec: float | None = None
     acceleration_throttle_fall_rate_per_sec: float | None = None
     acceleration_speed_mps: tuple[float, ...] = (
-        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 23.0,
+        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0,
     )
     # Throttle added per requested m/s^2.  It rises with speed because the
     # open-ground measurements show a progressively smaller acceleration
@@ -128,7 +128,7 @@ class SpeedControllerConfig:
     # the capability envelope still bounds the result at high speed.
     acceleration_throttle_per_mps2: tuple[float, ...] = (
         0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
-        0.066, 0.068, 0.070, 0.072, 0.074, 0.078,
+        0.066, 0.068, 0.070,
     )
 
     def validate(self) -> None:

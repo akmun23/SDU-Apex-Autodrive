@@ -12,6 +12,10 @@
 #include "vehicle_model.h"
 #include "util_math.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*===========================================================================
  * Configuration Helpers
  *===========================================================================*/
@@ -142,5 +146,9 @@ void mpc_set_previous_command_with_dt(
 int mpc_debug_copy_last_plan(
     float x_out[PREDICTION_HORIZON + 1][RICCATI_MAX_NX],
     float u_out[PREDICTION_HORIZON][RICCATI_MAX_NU]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MPC_H */

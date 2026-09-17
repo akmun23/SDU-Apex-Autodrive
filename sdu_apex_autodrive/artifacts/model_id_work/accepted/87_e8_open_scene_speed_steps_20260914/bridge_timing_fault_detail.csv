@@ -1,2 +1,0 @@
-event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
-1205,26692715285033,/autodrive/roboracer_1/bridge_timing_fault_detail,String,,,"{""value"":""simulator telemetry sequence gap: previous=71 current=73""}"

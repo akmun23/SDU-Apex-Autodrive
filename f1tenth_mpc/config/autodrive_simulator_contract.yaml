@@ -1,0 +1,82 @@
+# Current-source contract for the simulated object controlled by this package.
+#
+# This is deliberately not a physical-car parameter sheet.  It records only
+# source anchors and semantic facts that have been verified in the current
+# Unity checkout.  Values overridden by the selected scene must be captured
+# from that scene/binary before a fitted stage map is promoted.
+
+schema_version: 1
+status: source_anchors_verified_stage_response_pending
+runtime_ground_truth_inputs: false
+unity_is_read_only_for_model_work: true
+project_command_speed_ceiling_mps: 16.0
+prediction:
+  sample_rate_hz: 40.0
+  horizon_commands: 30
+  horizon_seconds: 0.75
+
+source_files:
+  vehicle_controller: /home/akselmo/Documents/GitHub/AutoDRIVE/Assets/Scripts/VehicleController.cs
+  f1tenth_prefab: /home/akselmo/Documents/GitHub/AutoDRIVE/Assets/Prefabs/F1TENTH/F1TENTH.prefab
+
+command_semantics:
+  steering_input: AutonomousSteering
+  throttle_input: AutonomousThrottle
+  source_update: FixedUpdate
+  steering_target_rad: "-clamp(AutonomousSteering, -1, 1) * SteeringLimit"
+  steering_update: "move_towards(previous_steering, steering_target, SteeringRate * fixed_dt)"
+  steering_limit_rad: 0.5235987756
+  steering_rate_radps: 3.2
+  drive_type: common_all_wheel_drive
+  drive_torque: "ThrottleLimit * AutonomousThrottle * MotorTorque"
+  torque_distribution: "DriveTorque / 4 to each wheel"
+  zero_throttle: "motor torque zero; configured automatic brake path"
+  note: "The selected scene determines MotorTorque, brake type and autonomous mode; do not infer them from a different scene or a historical report."
+
+prefab_structural_anchors:
+  rigidbody_mass_kg: 3.47
+  rigidbody_drag: 0.273
+  rigidbody_angular_drag: 0.1
+  steering_geometry_wheelbase_m: 0.324
+  steering_geometry_track_m: 0.236
+  wheelcollider_radius_m: 0.059
+  wheelcollider:
+    suspension_spring_npm: 500.0
+    suspension_damper_ns_per_m: 100.0
+    suspension_distance_m: 0.05
+    wheel_mass_kg: 0.109
+    wheel_damping_rate: 0.25
+    forward_curve:
+      extremum: [0.15, 0.9]
+      asymptote: [0.25, 0.58]
+      stiffness: 0.8
+    sideways_curve:
+      extremum: [0.01, 1.0]
+      asymptote: [0.10, 0.50]
+      stiffness: 1.0
+
+online_observability:
+  allowed_initial_state:
+    - lidar_map_pose
+    - rear_left_encoder
+    - rear_right_encoder
+    - imu_acceleration_and_gyro
+    - own_command_history
+  offline_teacher_only:
+    - simulator_pose
+    - wheelcollider_rpm_and_contact
+    - suspension_and_contact_load
+    - collision_and_lap_state
+
+prohibited_nominal_terms:
+  - fitted_real_car_cornering_stiffness
+  - generic_friction_coefficient
+  - pacejka_shape_factor
+  - guessed_cg_height_or_load_transfer
+  - direct_acceleration_as_simulator_actuator_input
+
+promotion_gate:
+  - verify_selected_scene_overrides
+  - fit_an_observable_source_command_stage_map
+  - blind_legal_state_recursive_score_at_100_250_500_750_ms
+  - batchmode_collision_free_controller_lap

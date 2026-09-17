@@ -442,9 +442,9 @@ class Calibration(Node):
             [0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.0])
         self.declare_parameter("grid_steering_enabled", False)
         self.declare_parameter(
-            "grid_steering_speed_sequence_mps", [3.0, 9.0, 16.0, 20.0])
+            "grid_steering_speed_sequence_mps", [3.0, 9.0, 16.0])
         self.declare_parameter(
-            "grid_steering_base_throttle_sequence", [0.08, 0.25, 0.50, 0.65])
+            "grid_steering_base_throttle_sequence", [0.08, 0.25, 0.50])
         self.declare_parameter(
             "grid_steering_sequence", [0.0, -0.25, 0.25, -0.50, 0.50])
         self.declare_parameter("grid_steering_hold_sec", 2.0)

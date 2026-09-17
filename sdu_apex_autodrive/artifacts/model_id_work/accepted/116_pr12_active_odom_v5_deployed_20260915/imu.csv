@@ -1,2 +1,0 @@
-event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
-805,52931964282527,/autodrive/roboracer_1/imu,Imu,1789423982702761949,,"{""angular_velocity_x_radps"":0.0,""angular_velocity_y_radps"":0.0,""ax_mps2"":0.0,""ay_mps2"":-0.0002,""az_mps2"":0.0032,""orientation_w"":0.707,""orientation_x"":0.0111,""orientation_y"":0.0111,""orientation_z"":-0.707,""yaw_rate_radps"":0.0}"

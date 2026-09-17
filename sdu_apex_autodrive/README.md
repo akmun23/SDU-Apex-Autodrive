@@ -104,7 +104,7 @@ recorded file with `score_localization_run`; use `scan_match_benchmark` only on
 scans from the recorded run. Do not use a synthetic offline plant as evidence
 for runtime acceptance. These outputs are intentionally ignored by Git.
 
-## First model-identification run
+## First simulator-trace run
 
 The first MPC milestone is a causal timing artifact, not a controller swap.
 The development-only launch uses the existing bounded calibration excitation
@@ -114,8 +114,8 @@ IMU, encoder, LiDAR, odometry, AMCL-health, and actuator-feedback events:
 ```bash
 ros2 launch sdu_apex_autodrive model_identification.launch.py \
   mode:=identification_grid \
-  output_dir:=/workspace/src/sdu_apex_autodrive/artifacts/model_id \
-  run_name:=model_id_timing_test_current \
+  output_dir:=/workspace/src/sdu_apex_autodrive/artifacts/simulator_trace \
+  run_name:=simulator_trace_current \
   duration_sec:=120
 ```
 

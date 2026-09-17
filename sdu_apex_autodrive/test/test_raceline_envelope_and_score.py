@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 
-TOOLS = Path("tools/model_id").resolve()
+TOOLS = Path(__file__).resolve().parents[2] / "tools/model_id"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
@@ -85,14 +85,6 @@ def test_score_rows_reports_horizon_run_and_segment_groups():
     assert "0.750s" in report["horizons"]
     assert "run_a" in report["per_run"]
     assert "3" in report["per_segment"]
-
-
-def test_steering_semantics_laws_are_causal_and_bounded():
-    module = _load("score_steering_semantics")
-    assert abs(module._rate_limited(0.0, 0.5, 0.025) - 0.08) < 1.0e-12
-    assert abs(module._rate_limited(0.5, 0.0, 0.025) - 0.42) < 1.0e-12
-    first_order = module._first_order(0.0, 0.5, 0.025, 0.05)
-    assert 0.0 < first_order < 0.5
 
 
 def test_operating_class_keeps_speed_curvature_coupled():

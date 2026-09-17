@@ -30,12 +30,12 @@
 #define IDX_DELTA_COMMAND 5                              /* Position of commanded front-wheel steering angle. */
 #define IDX_DELTA_EFFECTIVE 6                            /* Position of steering angle acting on the vehicle model. */
 #define IDX_DRATE_PREV 7                                 /* Position of previous steering-rate state in the augmented vector. */
-#define IDX_ACCEL_PREV 8                                 /* Position of previous acceleration state in the augmented vector. */
+#define IDX_TARGET_SPEED_RATE_PREV 8                  /* Previous target-speed slew in the augmented vector. */
 #define IDX_SPARSE_B_FIRST_ROW 2                         /* First augmented-state row with non-zero dense B coupling in Riccati sparse products. */
 #define NX_DENSE 7                                       /* Dense A-block width before sparse previous-control tail states. */
-#define NU 2                                             /* Control vector width for steering-rate and longitudinal acceleration. */
+#define NU 2                                             /* Control vector width: steering-rate and target-speed slew. */
 #define RICCATI_MAX_NX  9                                /* Maximum Riccati state dimension (augmented Frenet model). */
-#define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and acceleration). */
+#define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and speed slew). */
 
 /* Math and timing */
 #define TWO_PI (2.0 * M_PI)                              /* Full-angle constant used for heading wrap operations. */
@@ -52,9 +52,9 @@
 #define WEIGHT_LAT_VEL 5.0f                             /* Penalizes lateral velocity to suppress side-slip growth. */
 #define WEIGHT_YAW_RATE 1.5f                            /* Penalizes yaw-rate mismatch against reference curvature dynamics. */
 #define WEIGHT_STEER_EFFORT 2.0f                        /* Penalizes steering-rate effort to limit aggressive steering actuation. */
-#define WEIGHT_ACCEL_EFFORT 0.5f                       /* Penalizes longitudinal acceleration effort to smooth throttle/brake usage. */
+#define WEIGHT_TARGET_SPEED_RATE_EFFORT 0.5f           /* Penalizes target-speed slew magnitude. */
 #define WEIGHT_STEER_RATE 5.0f                         /* Penalizes steering-rate change to reduce steering jerk. */
-#define WEIGHT_ACCEL_RATE 5.0f                         /* Penalizes acceleration change to reduce longitudinal jerk. */
+#define WEIGHT_TARGET_SPEED_RATE_CHANGE 5.0f           /* Penalizes target-speed slew change between calls. */
 #define WEIGHT_EFFECTIVE_STEERING 1.0f                /* Penalizes effective-steering bias away from curvature feedforward. */
 
 /* Other swept MPC defaults */
@@ -71,56 +71,25 @@
 #define STEERING_RATE_LIMIT 3.2f                         /* Unity-measured steering-rate limit [rad/s]. */
 #define STEERING_FEEDFORWARD_CLAMP_FACTOR 1.0f           /* Limits feedforward steering around linearization operating point. */
 #define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
-#define MIN_LINEARIZATION_VELOCITY 0.5f                  /* Lower velocity clamp aligned with slip-angle floor for low-speed recovery. */
+#define MIN_LINEARIZATION_VELOCITY 0.5f                  /* Lower numeric velocity clamp for low-speed recovery. */
 #define STABILITY_LIMIT 0.95f                            /* Clamp on selected discrete self-coupling to preserve numerical stability. */
-#define V_SWITCH 7.319f                                  /* Transition speed for constant-power acceleration limiting. */
-#define MIN_SLIP_VELOCITY 0.5f                           /* Lower velocity clamp used in slip-angle calculations. */
 /* CPU warm-start / cold-start policy. */
 #define MPC_WS_CURVATURE_THRESH 0.25f                    /* Curvature jump that forces a cold start. */
 #define MPC_WS_BOUND_THRESH 0.05f                        /* Slack on ey box before a stale warm start is treated as bound-incompatible. */
-#define MPC_MODEL_SIGNATURE 3                            /* Bumped when the CPU augmented model changes. */
+#define MPC_MODEL_SIGNATURE 4                            /* Source-command stage-model transition. */
 
 /* Default MPC configuration values */
 #define TRAJECTORY_MAXIMUM_WAYPOINTS 4000                /* Maximum trajectory samples accepted by MPC reference buffers. */
-#define TRAJECTORY_MAXIMUM_VELOCITY 20.0f                /* Cap on reference velocity accepted from trajectory input. */
+#define TRAJECTORY_MAXIMUM_VELOCITY 16.0f                /* Project command ceiling accepted from trajectory input. */
 #define MIN_TRAJECTORY_SPEED_MPS 0.5f                    /* Lower bound used when trajectory speed is missing or too small. */
 
-/* Hardware/sim calibration defaults */
-#define TRAJECTORY_SPEED_GAIN 1.0f                       /* Global multiplier applied to reference speed profile. */
-#define STEERING_TO_SERVO_GAIN -0.7284f                  /* Linear gain mapping steering angle to servo command domain. */
-#define STEERING_TO_SERVO_OFFSET 0.55f                   /* Bias term for steering-angle to servo-command conversion. */
-#define STEERING_CORRECTION_C2 0.589566f                 /* Quadratic term in empirical steering-command correction model. */
-#define STEERING_CORRECTION_C1 0.918061f                 /* Linear term in empirical steering-command correction model. */
-#define STEERING_CORRECTION_C0 0.001490f                 /* Constant term in empirical steering-command correction model. */
-
-/* Vehicle parameter defaults and derived constants */
-#define VP_MAX_STEERING_RAD 0.5235987756f               /* Unity steering limit: 30 degrees [rad]. */
-#define VP_MAX_VELOCITY_MPS 20.0f                        /* Upper velocity limit used by vehicle model clamping logic. */
-#define VP_MIN_VELOCITY_MPS 0.5f                         /* Lower velocity limit used by vehicle model clamping logic. */
-#define VP_CG_TO_FRONT_AXLE_M 0.174679914f               /* Contact front axle distance from measured COM [m]. */
-#define VP_CG_TO_REAR_AXLE_M 0.155320086f                /* Contact rear axle distance from measured COM [m]. */
-#define VP_WHEELBASE_M (VP_CG_TO_FRONT_AXLE_M + VP_CG_TO_REAR_AXLE_M) /* Distance between front and rear axle centers. */
-#define VP_MASS_KG 3.470f                                /* Unity Rigidbody mass; wheel masses remain separate accounting. */
-#define VP_YAW_INERTIA_KGM2 0.0961908f                   /* Corrected Unity body-Y inertia projection used by the yaw model. */
-#define VP_CG_HEIGHT_M 0.0f                              /* Unknown physical CG-to-contact height; do not use the Unity-local COM coordinate for load transfer. */
-#define VP_FRICTION_COEFF 0.72f                         /* Effective tire-road friction coefficient for force limits. */
-#define GRAVITY_MPS2 9.82f                               /* Gravitational acceleration constant used in vehicle load equations. */
-#define VP_MASS_TIMES_GRAVITY_N (VP_MASS_KG * GRAVITY_MPS2) /* Vehicle weight magnitude used by normal-load equations. */
-#define VP_INV_MASS_1_PER_KG (1.0f / VP_MASS_KG)         /* Reciprocal vehicle mass used in acceleration-state Jacobians. */
-#define VP_INV_YAW_INERTIA_1_PER_KGM2 (1.0f / VP_YAW_INERTIA_KGM2) /* Reciprocal yaw inertia used in yaw-rate Jacobians. */
-#define VP_MAX_ACCEL_MPS2 (VP_FRICTION_COEFF * GRAVITY_MPS2) /* Friction-limited forward acceleration; matches the bag run (no 1.4x over-drive). */
-#define VP_MIN_ACCEL_MPS2 (-VP_MAX_ACCEL_MPS2)           /* Braking bound mirrored from the friction-limited acceleration envelope. */
-#define VP_C_ALPHA_F 51.40f                              /* Front tire lateral-force scale used by the nonlinear tire model. */
-#define VP_C_ALPHA_R 43.10f                              /* Rear tire lateral-force scale used by the nonlinear tire model. */
-#define VP_NORM_LOAD_F (VP_MASS_TIMES_GRAVITY_N * VP_CG_TO_REAR_AXLE_M / VP_WHEELBASE_M) /* Front normal load from static axle-load distribution. */
-#define VP_NORM_LOAD_R (VP_MASS_TIMES_GRAVITY_N * VP_CG_TO_FRONT_AXLE_M / VP_WHEELBASE_M) /* Rear normal load from static axle-load distribution. */
-#define VP_D_FRONT (VP_FRICTION_COEFF * VP_NORM_LOAD_F) /* Front lateral force scale from friction and normal-load estimate. */
-#define VP_D_REAR (VP_FRICTION_COEFF * VP_NORM_LOAD_R)  /* Rear lateral force scale from friction and normal-load estimate. */
-#define VP_C_SHAPE 1.9f                                  /* Tire-model shape factor governing force saturation transition. */
-#define VP_INV_C_SHAPE (1.0f / VP_C_SHAPE)               /* Reciprocal tire shape factor for local-slope calculations. */
-#define MIN_STIFF_SCALE 0.1f                             /* Lower bound on stiffness scaling to avoid low-speed singularities. */
-#define VP_FRONT_CORNERING_STIFFNESS (VP_C_ALPHA_F / VP_D_FRONT) /* Front normalized cornering stiffness used in slip-force mapping. */
-#define VP_REAR_CORNERING_STIFFNESS (VP_C_ALPHA_R / VP_D_REAR)   /* Rear normalized cornering stiffness used in slip-force mapping. */
+/* Current Unity source anchors and controller output policy. */
+#define SOURCE_MAX_STEERING_RAD 0.5235987756f            /* VehicleController SteeringLimit: 30 deg. */
+#define SOURCE_STEERING_RATE_RADPS 3.2f                  /* Prefab SteeringRate: 183.346 deg/s. */
+#define SOURCE_STEERING_WHEELBASE_M 0.324f               /* VehicleController Wheelbase: 324 mm. */
+#define MPC_MAX_COMMAND_SPEED_MPS 16.0f                  /* Project command envelope, not simulator physics. */
+#define MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2 3.0f   /* Output target-speed increase policy. */
+#define MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2 8.0f  /* Output target-speed reduction policy. */
 
 /*===========================================================================
  * Structs
@@ -168,15 +137,16 @@ typedef struct
 
 /**
  * @brief Control command issued to the vehicle model/controller.
- * @details Represents the actuator-level command pair used throughout MPC
- *          rollouts and solver outputs.
+ * @details Represents the command pair produced by MPC.  The longitudinal
+ *          field is converted to an Ackermann target-speed update by the ROS
+ *          adapter; it is not a direct Unity acceleration actuator.
  * @param steer_ang Front wheel steering angle command [radians].
- * @param long_acc Longitudinal acceleration command [m/s^2].
+ * @param target_speed_rate Requested target-speed change [m/s^2].
  */
 typedef struct
 {
     float steer_ang;            /* Front wheel steering angle [radians]. */
-    float long_acc;             /* Longitudinal acceleration command [m/s^2]. */
+    float target_speed_rate;      /* Requested target-speed change [m/s^2]. */
 } ControlInput_t;
 
 /**
@@ -209,69 +179,18 @@ typedef struct
 } TrajectoryWaypoint_t;
 
 /**
- * @brief Shared slip-angle intermediate terms for bicycle tire dynamics.
- * @details Caches safe longitudinal velocity terms, slip numerators/ratios,
- *          and resulting front/rear slip angles so prediction and
- *          linearization paths reuse the same heavy trigonometric state.
- * @param vx_safe Longitudinal velocity with low-speed floor [meters per second].
- * @param inv_vx_safe Reciprocal of vx_safe [seconds per meter].
- * @param front_num Front slip numerator (v_y + l_f*omega) [meters per second].
- * @param rear_num Rear slip numerator (v_y - l_r*omega) [meters per second].
- * @param front_ratio Front slip ratio front_num / vx_safe [dimensionless].
- * @param rear_ratio Rear slip ratio rear_num / vx_safe [dimensionless].
- * @param alpha_front Front slip angle [radians].
- * @param alpha_rear Rear slip angle [radians].
+ * @brief Current-source anchors and MPC output constraints.
+ * @details These are only the Unity command-wrapper quantities exercised by
+ *          the current source-command baseline.
  */
 typedef struct
 {
-    float vx_safe;
-    float inv_vx_safe;
-    float front_num;
-    float rear_num;
-    float front_ratio;
-    float rear_ratio;
-    float alpha_front;
-    float alpha_rear;
-} SlipTerms_t;
-
-/**
-  @brief Physical vehicle parameters used by the model and controller.
-  @details This structure holds all physical parameters of the vehicle
-  @param wheelbase_meters Distance between front and rear axle centers [meters].
-  @param distance_cg_to_front_axle Distance from center of gravity to front axle [meters].
-  @param distance_cg_to_rear_axle Distance from center of gravity to rear axle [meters].
-  @param height_cg_to_ground Height from center of gravity to ground [meters].
-  @param vehicle_mass Vehicle mass used in dynamic equations and load calculations [kg].
-  @param yaw_moment_of_inertia Yaw moment of inertia governing rotational response to tire moments [kg*m^2].
-  @param front_cornering_stiffness Front tire cornering stiffness [1/rad].
-  @param rear_cornering_stiffness Rear tire cornering stiffness [1/rad].
-  @param max_steering_angle Maximum steering angle magnitude [radians].
-  @param max_velocity Maximum forward velocity [meters per second].
-  @param min_velocity Minimum velocity [meters per second].
-  @param max_acceleration Maximum longitudinal acceleration [m/s^2].
-  @param min_acceleration Minimum longitudinal acceleration (braking) [m/s^2].
-*/
-typedef struct
-{
-    float wheelbase_meters;              /* Wheelbase [meters]. */
-    float distance_cg_to_front_axle;     /* Distance from center of gravity to front axle [meters]. */
-    float distance_cg_to_rear_axle;      /* Distance from center of gravity to rear axle [meters]. */
-    float height_cg_to_ground;           /* Height from center of gravity to ground [meters]. */
-    float vehicle_mass;                  /* Vehicle mass [kg]. */
-    float yaw_moment_of_inertia;         /* Yaw moment of inertia [kg*m^2]. */
-    float front_cornering_stiffness;     /* Front tire cornering stiffness [1/rad]. */
-    float rear_cornering_stiffness;      /* Rear tire cornering stiffness [1/rad]. */
-    float max_steering_angle;            /* Maximum steering angle magnitude [radians]. */
-    float max_velocity;                  /* Maximum forward velocity [meters per second]. */
-    float min_velocity;                  /* Minimum velocity [meters per second]. */
-    float max_acceleration;              /* Maximum longitudinal acceleration [m/s^2]. */
-    float min_acceleration;              /* Minimum longitudinal acceleration (braking) [m/s^2]. */
-    float friction_coefficient;           /* Effective tire-road friction coefficient. */
-    float gravity_mps2;                  /* Gravitational acceleration [m/s^2]. */
-    float tire_shape_factor;              /* Shape factor for the lateral-force law. */
-    float minimum_slip_velocity;          /* Denominator regularization [m/s]. */
-    float minimum_stiffness_scale;        /* Jacobian stiffness floor fraction. */
-    float steering_time_constant_seconds; /* Identified effective-steering pole [s]. */
+    float steering_wheelbase_m;           /* Unity VehicleController geometry. */
+    float max_steering_angle;             /* Unity steering limit. */
+    float steering_rate_radps;            /* Unity physical steering rate. */
+    float maximum_command_speed_mps;      /* Project command ceiling. */
+    float maximum_target_speed_rate_increase_mps2; /* Controller output policy. */
+    float maximum_target_speed_rate_reduction_mps2;/* Controller output policy. */
 } VehicleParameters_t;
 
 /**
@@ -286,9 +205,9 @@ typedef struct
  * @param weight_lateral_velocity Weight on lateral velocity tracking error.
  * @param weight_yaw_rate Weight on yaw-rate tracking error.
  * @param weight_steering_effort Weight on steering effort command magnitude.
- * @param weight_acceleration_effort Weight on acceleration effort command magnitude.
+ * @param weight_target_speed_rate_effort Weight on target-speed slew magnitude.
  * @param weight_steering_rate Weight on steering-rate change.
- * @param weight_acceleration_rate Weight on acceleration-rate change.
+ * @param weight_target_speed_rate_change Weight on target-speed slew change.
  * @param weight_effective_steering Weight on effective-steering centering term.
  * @param cross_call_rate_scale Scale factor for first-step cross-call penalties.
  * @param wall_margin Effective lateral wall margin [meters] used in e_y constraints.
@@ -304,9 +223,9 @@ typedef struct
     float weight_lateral_velocity;       /* Weight for lateral velocity tracking error. */
     float weight_yaw_rate;               /* Weight for yaw-rate tracking error. */
     float weight_steering_effort;        /* Weight for steering effort. */
-    float weight_acceleration_effort;    /* Weight for acceleration effort. */
+    float weight_target_speed_rate_effort;    /* Weight for target-speed slew. */
     float weight_steering_rate;          /* Weight for steering jerk/rate change. */
-    float weight_acceleration_rate;      /* Weight for acceleration rate change. */
+    float weight_target_speed_rate_change;      /* Weight for target-speed slew change. */
     float weight_effective_steering;     /* Weight for effective-steering centering. */
     float cross_call_rate_scale;         /* First-step cross-call rate penalty scale factor. */
     float wall_margin;                   /* Effective wall margin for lateral corridor bounds [m]. */

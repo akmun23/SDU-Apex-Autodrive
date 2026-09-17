@@ -1,51 +1,33 @@
-# BachelorProject MPC
+# BachelorProject MPC for the AutoDRIVE simulator
 
-This package contains the BachelorProject Riccati-ADMM MPC core in its native
-C layout. The only additional source is the source-time MPC observer
-prototype, which is a legal-measurement API and is not connected to actuator
-authority. There is no C++ adapter, shadow controller, track-model wrapper,
-replay wrapper, or simulator-specific physics code here.
+This directory contains one MPC core: the BachelorProject Riccati-ADMM solver
+and its one AutoDRIVE prediction-model interface. It does not contain an
+alternate replay plant, a shadow controller, a historic fit manifest, or a
+second controller implementation.
 
-```text
-f1tenth_mpc/
-├── include/
-│   ├── mpc.h
-│   ├── mpc_types.h
-│   ├── riccati_solver.h
-│   ├── util_math.h
-│   └── vehicle_model.h
-└── src/
-    ├── mpc.c
-    ├── mpc_observer.c
-    ├── riccati_solver.c
-    ├── util_math.c
-    └── vehicle_model.c
-```
+The object to model is the current Unity AutoDRIVE vehicle, not a physical
+race car. `config/autodrive_simulator_contract.yaml` is the sole nominal
+source contract. It records the current Unity command semantics and serialized
+WheelCollider/Rigidbody anchors, and explicitly prohibits treating generic
+cornering stiffness, friction coefficient, Pacejka shape, guessed load
+transfer, or a direct Unity-acceleration channel as simulator facts.
 
-The native model remains the BachelorProject dynamic bicycle model. The timing
-contract is 40 Hz: runtime calls may provide the measured source `dt`
-(nominally 25 ms), and the default MPC horizon is 30 stages, or 0.75 s.
+The MPC is fixed at 30 prediction commands at 40 Hz (0.75 s) and is limited to
+a 16 m/s project command ceiling. Simulator truth and hidden WheelCollider
+state are offline diagnostics only. A controller model may be enabled only
+after an observable stage map is fitted and passes the legal-state recursive
+acceptance checks in `docs/SIMULATOR_NATIVE_MODEL_WORKLIST.md`.
 
-The observer state is `[u, v, r, delta, q_drive]`. It consumes odometry speed,
-IMU gyro/lateral acceleration, source-associated steering/applied-command
-feedback, applied throttle, and a source-epoch timestamp. Simulator truth is
-never an observer input; it is used only by offline replay scoring. The current
-lateral-state coefficients are a held-out-track prototype and are not
-production MPC parameters.
+Current cleanup status:
 
-The active model contract is checked by
-`tools/model_id/check_vehicle_model_manifest.py`. The production MPC baseline
-and the offline identified plant are intentionally separate profiles: the
-identified plant is not promoted until its architecture is migrated and
-accepted. Canonical offline replay resolves its defaults from
-`config/vehicle_model_manifest_v1.json` only when `--use-manifest` is passed;
-report-driven replay is explicit for offline A/B comparisons. Python/C default
-parity is part of the MPC package test suite.
-
-The current project operating ceiling is 16 m/s. New identification and
-controller validation must stay within that envelope; older 18/20 m/s runs
-remain historical offline evidence only. This is a dev-side command and data
-scope decision and does not modify simulator physics.
+- [x] Removed the historic alternate `vehicle_plant` from the MPC package.
+- [x] Removed report/artefact-pinned model manifests from the build.
+- [x] Documented excluded SynPF and Cartographer work.
+- [x] Replaced the legacy bicycle implementation with an explicitly limited
+      source-command baseline; it contains no real-car tire or force law.
+- [x] Added the minimal `controller:=mpc` ROS adapter and source-timing
+      watchdog. Its command authority is inhibited by default.
+- [ ] Fit and validate the observable stage map before enabling MPC commands.
 
 Build from the Humble workspace container:
 

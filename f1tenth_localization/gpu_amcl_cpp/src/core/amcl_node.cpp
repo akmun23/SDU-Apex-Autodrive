@@ -1011,19 +1011,29 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     if (pf_cfg.global_initialization && explicit_start_anchor) {
         // The scan model remains in global-initialization mode, but the saved
         // map's measured start pose supplies the finite prior needed to avoid
-        // a symmetric opposite-direction corridor alias. This is still
-        // scan-supported localization; no simulator truth enters the filter.
+        // a symmetric opposite-direction corridor alias. Since this is a
+        // measured competition-start prior (not an arbitrary global pose),
+        // seed it with the same covariance used by local tracking. The generic
+        // half-metre global covariance leaves too much probability mass in
+        // closed-track aliases for startup scan confirmation to publish a
+        // provisional pose. The scan, stability, and travel gates still decide
+        // when the controller may use it; no simulator truth enters the filter.
+        const double anchor_xy_covariance =
+            local_tracking_cloud_covariance_xy_;
+        const double anchor_yaw_covariance =
+            local_tracking_cloud_covariance_yaw_;
         pf_.reinitialize(
             global_start_anchor_x_m_, global_start_anchor_y_m_,
             global_start_anchor_yaw_rad_,
-            pf_cfg.init_cov_xx, pf_cfg.init_cov_yy, pf_cfg.init_cov_aa);
+            anchor_xy_covariance, anchor_xy_covariance,
+            anchor_yaw_covariance);
         RCLCPP_INFO(
             get_logger(),
             "Global AMCL startup prior centred at saved map start "
             "(%.3f, %.3f, %.3f) with covariance (%.3f, %.3f, %.3f).",
             global_start_anchor_x_m_, global_start_anchor_y_m_,
-            global_start_anchor_yaw_rad_, pf_cfg.init_cov_xx,
-            pf_cfg.init_cov_yy, pf_cfg.init_cov_aa);
+            global_start_anchor_yaw_rad_, anchor_xy_covariance,
+            anchor_xy_covariance, anchor_yaw_covariance);
     } else if (!pf_cfg.global_initialization) {
         // The competition launch knows the deterministic simulator start.
         // Keep the broad covariance for deliberate global-recovery tests, but

@@ -1,10 +1,14 @@
 import csv
 import importlib.util
+from pathlib import Path
 
 import pytest
 
 
-_ASSEMBLER_PATH = "tools/model_id/assemble_transitions.py"
+_ASSEMBLER_PATH = (
+    Path(__file__).resolve().parents[2] /
+    "tools/model_id/assemble_transitions.py"
+)
 _SPEC = importlib.util.spec_from_file_location("assemble_transitions", _ASSEMBLER_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _ASSEMBLER = importlib.util.module_from_spec(_SPEC)
@@ -87,7 +91,7 @@ def test_assembler_uses_declared_body_frame_and_passes_known_fixture(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv")
-    report = _ASSEMBLER.assemble(run_dir, "auto", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "auto", False, 0.75)
     assert report["twist_frame_selected"] == "body"
     assert report["quality_gate_pass"] is True
     assert report["kinematic_consistency"]["yaw_rate_source"] == \
@@ -118,7 +122,7 @@ def test_assembler_rejects_source_order_violation(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv", reverse_index=6)
-    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
     assert report["source_order"]["pass"] is False
     assert report["status"] == "rejected_source_order"
     assert report["quality_gate_pass"] is False
@@ -129,7 +133,7 @@ def test_assembler_rejects_long_source_time_gap(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv", time_gap_index=6)
-    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
     assert report["status"] == "rejected_non_target_source_rate"
     assert report["quality_gate_pass"] is False
     assert report["source_dt_gap_count"] == 1
@@ -142,7 +146,7 @@ def test_assembler_rejects_ten_hz_source_cadence(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv", time_step_s=0.1)
-    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
     assert report["quality_gate_pass"] is False
     assert report["source_dt_cadence_violation_count"] == 11
     assert "source_cadence" in report["quality_gate_failures"]
@@ -152,7 +156,7 @@ def test_assembler_marks_reset_as_hard_rollout_boundary(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv", reset_index=6)
-    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
     assert report["quality_gate_pass"] is True
     assert report["segments"]["boundary_count"] == 1
     assert report["segments"]["boundaries"][0]["reason"] == \
@@ -171,7 +175,7 @@ def test_assembler_marks_pose_discontinuity_as_hard_rollout_boundary(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv", position_jump_index=6)
-    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
     assert report["segments"]["boundary_count"] == 1
     assert report["segments"]["boundaries"][0]["reason"] == \
         "position_discontinuity"
@@ -181,7 +185,7 @@ def test_assembler_rejects_cadence_valid_capture_after_leaving_plane(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_packets(run_dir / "simulator_packets.csv", off_plane_index=6)
-    report = _ASSEMBLER.assemble(run_dir, "body", False, False, 0.75)
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
     assert report["scene_validity"]["pass"] is False
     assert report["status"] == "rejected_off_plane_motion"
     assert report["quality_gate_pass"] is False

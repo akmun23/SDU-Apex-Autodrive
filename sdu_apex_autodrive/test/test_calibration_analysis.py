@@ -405,7 +405,7 @@ def test_throttle_table_does_not_use_moving_coast_as_feedforward():
         ))
     for index, speed in enumerate((15.0, 14.6, 14.0, 13.4), start=10):
         rows.append(_row(
-            phase="grid_throttle_0.100_at_20.00",
+            phase="grid_throttle_0.100_at_16.00",
             gt_odom_stamp_s=100.0 + index * 0.1,
             gt_speed_mps=speed,
         ))
@@ -494,21 +494,21 @@ def test_relative_error_metrics_splits_speed_by_motion_category():
     assert acceleration["relative_samples"] == acceleration["samples"]
 
 
-def test_relative_error_metrics_does_not_leak_lower_speeds_into_high_bin():
+def test_relative_error_metrics_does_not_leak_lower_speeds_into_limit_bin():
     rows = [
         _row(phase="grid_throttle_1.000", stamp_s=300.0,
              gt_odom_event_count=1, gt_speed_mps=5.0, speed_mps=4.0),
         _row(phase="grid_throttle_1.000", stamp_s=300.1,
-             gt_odom_stamp_s=300.1, gt_odom_event_count=2,
-             gt_speed_mps=21.0, speed_mps=20.0),
+            gt_odom_stamp_s=300.1, gt_odom_event_count=2,
+            gt_speed_mps=15.5, speed_mps=15.0),
     ]
 
     metrics = relative_error_metrics(rows)
     by_key = {(row["metric"], row["bin"]): row for row in metrics}
 
-    high_speed = by_key[("odom_speed_vs_truth", "20-23_mps")]
+    high_speed = by_key[("odom_speed_vs_truth", "15-16_mps")]
     assert high_speed["samples"] == 1
-    assert abs(float(high_speed["reference_median"]) - 21.0) < 1.0e-12
+    assert abs(float(high_speed["reference_median"]) - 15.5) < 1.0e-12
 
 
 def test_relative_error_metrics_uses_stable_controller_tail_and_distance_epoch():
@@ -517,8 +517,8 @@ def test_relative_error_metrics_uses_stable_controller_tail_and_distance_epoch()
         gt_odom_event_count=1, gt_odom_x_m=0.0, gt_odom_y_m=0.0,
         x_odom_m=0.0, y_odom_m=0.0)]
     for index, (truth_speed, odom_speed, truth_x) in enumerate(
-            ((1.0, 0.0, 1.0), (4.0, 3.0, 4.0), (3.5, 3.5, 7.0),
-             (3.5, 3.5, 10.0), (3.5, 3.5, 13.0)), start=2):
+            ((1.0, 0.0, 1.0), (4.0, 3.0, 2.5), (3.5, 3.5, 4.0),
+             (3.5, 3.5, 5.5), (3.5, 3.5, 7.0)), start=2):
         rows.append(_row(
             phase="speed_4.00", stamp_s=200.0 + index * 0.1,
             gt_odom_stamp_s=200.0 + index * 0.1, gt_odom_event_count=index,
@@ -535,5 +535,5 @@ def test_relative_error_metrics_uses_stable_controller_tail_and_distance_epoch()
     assert abs(float(target["relative_error_median_pct"]) - 12.5) < 1.0e-12
 
     endpoint = by_key[("odom_position_endpoint", "epoch_1")]
-    assert abs(float(endpoint["reference_max"]) - 12.0) < 1.0e-12
-    assert abs(float(endpoint["relative_error_median_pct"]) - (0.5 / 12.0 * 100.0)) < 1.0e-12
+    assert abs(float(endpoint["reference_max"]) - 6.0) < 1.0e-12
+    assert abs(float(endpoint["relative_error_median_pct"]) - (0.5 / 6.0 * 100.0)) < 1.0e-12

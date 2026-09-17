@@ -95,6 +95,7 @@ def _setup(context):
                     "allow_raw_throttle_override": True,
                     "allow_raw_steering_override": True,
                     "collision_reset_enabled": False,
+                    "collision_terminal_stop": False,
                     "external_stop_topic": "/autodrive/roboracer_1/bridge_timing_fault",
                 },
             ],
@@ -132,7 +133,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "output_dir",
-            default_value="/workspace/src/sdu_apex_autodrive/artifacts/model_id",
+            default_value="/workspace/src/sdu_apex_autodrive/artifacts/simulator_trace",
         ),
         DeclareLaunchArgument(
             "run_name",

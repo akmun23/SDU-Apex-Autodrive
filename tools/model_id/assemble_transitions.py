@@ -479,45 +479,8 @@ def _write_csv(path: Path, rows: list[dict[str, float]]) -> None:
         writer.writerows(rows)
 
 
-def _fit_exploratory_longitudinal(rows: list[dict[str, float]]) -> dict[str, object]:
-    """Fit a direct-throttle acceleration surface for exploration only."""
-    features = np.asarray([
-        [1.0, r["u_k_mps"], r["u_k_mps"] ** 2,
-         r["applied_throttle_norm_k1"],
-         r["u_k_mps"] * r["applied_throttle_norm_k1"],
-         r["applied_throttle_norm_k1"] ** 2,
-         r["applied_steering_rad_k1"] ** 2]
-        for r in rows
-    ])
-    target = np.asarray([
-        (r["u_k1_mps"] - r["u_k_mps"]) / r["dt_sim_s"] for r in rows
-    ])
-    if len(rows) < features.shape[1] + 2 or np.linalg.matrix_rank(features) < features.shape[1]:
-        raise ValueError("exploratory fit is rank deficient; collect richer excitation")
-    # Small ridge penalty limits ill-conditioned extrapolation without hiding
-    # the fact that this is a candidate model.
-    regularization = 1e-6 * np.eye(features.shape[1])
-    coefficients = np.linalg.solve(
-        features.T @ features + regularization, features.T @ target)
-    prediction = features @ coefficients
-    errors = np.abs(prediction - target)
-    return {
-        "schema_version": 1,
-        "status": "exploratory_candidate_not_runtime_validated",
-        "boundary": "applied_throttle_to_body_u",
-        "feature_names": [
-            "bias", "u", "u_squared", "throttle", "u_times_throttle",
-            "throttle_squared", "steering_squared",
-        ],
-        "coefficients": [float(value) for value in coefficients],
-        "samples": len(rows),
-        "one_step_acceleration_mae_mps2": float(np.mean(errors)),
-        "one_step_acceleration_p95_mps2": float(np.percentile(errors, 95)),
-    }
-
-
 def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
-             fit_exploratory: bool, max_kinematic_error_mps: float,
+             max_kinematic_error_mps: float,
              max_yaw_rate_error_radps: float = 0.75) -> dict[str, object]:
     packets = _read_packets(run_dir / "simulator_packets.csv")
     unique, counts = _deduplicate(packets)
@@ -688,22 +651,6 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
         },
         "ground_truth_use": "offline_transition_target_only",
     }
-    if fit_exploratory:
-        if not timing_pass and not allow_non_target_rate:
-            raise ValueError(
-                "refusing exploratory fit because timing gate failed; "
-                "pass --allow-non-target-rate to label it explicitly")
-        if not source_order_pass:
-            raise ValueError("refusing fit because source packet order is invalid")
-        if not kinematics_pass:
-            raise ValueError(
-                "refusing fit because position and body-velocity fields are "
-                "kinematically inconsistent")
-        model = _fit_exploratory_longitudinal(transitions)
-        model["timing_report"] = report
-        (output_dir / "longitudinal_model_candidate.json").write_text(
-            json.dumps(model, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        report["fit_status"] = model["status"]
     (output_dir / "timing_quality_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
@@ -714,7 +661,6 @@ def main() -> None:
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--twist-frame", choices=("auto", "body", "world"), default="body")
     parser.add_argument("--allow-non-target-rate", action="store_true")
-    parser.add_argument("--fit-exploratory", action="store_true")
     parser.add_argument(
         "--max-kinematic-error-mps", type=float, default=0.75,
         help="maximum median position/velocity consistency error for a fit gate")
@@ -724,7 +670,7 @@ def main() -> None:
     args = parser.parse_args()
     print(json.dumps(assemble(
         args.run_dir, args.twist_frame, args.allow_non_target_rate,
-        args.fit_exploratory, args.max_kinematic_error_mps,
+        args.max_kinematic_error_mps,
         args.max_yaw_rate_error_radps), indent=2, sort_keys=True))
 
 

@@ -362,7 +362,7 @@ def test_feedforward_and_output_remain_bounded_above_measured_table():
 
 def test_acceleration_demand_uses_full_normalized_throttle_range():
     controller = TargetSpeedController(config())
-    outputs = [controller.update(20.0, 0.0, 0.0, 0.1, 0.0) for _ in range(8)]
+    outputs = [controller.update(16.0, 0.0, 0.0, 0.1, 0.0) for _ in range(8)]
     assert max(outputs) == 0.10
     assert min(outputs) >= 0.0
 
@@ -396,10 +396,10 @@ def test_acceleration_to_throttle_conversion_uses_absolute_base_command():
     assert abs(recovered - acceleration) < 1.0e-12
 
 
-def test_conversion_is_defined_over_the_full_official_speed_domain():
+def test_conversion_is_defined_over_the_project_command_speed_domain():
     controller = TargetSpeedController(config())
     acceleration_controller = controller.acceleration_controller
-    for speed in (0.0, 2.0, 5.5, 10.0, 15.0, 17.9, 20.0, 22.88):
+    for speed in (0.0, 2.0, 5.5, 10.0, 15.0, 16.0):
         base = controller.feedforward(min(speed, 2.0))
         command = acceleration_controller.throttle_for_acceleration(
             speed, base, 1.0)

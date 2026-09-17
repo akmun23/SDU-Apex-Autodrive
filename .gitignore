@@ -45,9 +45,7 @@ sdu_apex_autodrive/artifacts/calibration/derived/**
 !sdu_apex_autodrive/artifacts/calibration/derived/**/wheel_speed_map.csv
 !sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml
 sdu_apex_autodrive/artifacts/calibration/derived/**/sensor_fusion_model*.hpp
-sdu_apex_autodrive/artifacts/model_id/**
-# The legacy calibration summary repeats the full wide runtime state and can
-# exceed GitHub's 100 MB per-file limit. The canonical recorder partitions in
-# model_id_work remain the source data for identification.
-sdu_apex_autodrive/artifacts/model_id_work/**/identification_grid_*.csv
+# Fresh simulator traces are local evidence. Keep only their small logical
+# manifest/provenance in a handoff when needed; never commit raw recordings.
+sdu_apex_autodrive/artifacts/simulator_trace/**
 sensor_record_*

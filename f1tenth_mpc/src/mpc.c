@@ -27,8 +27,9 @@
 #include <stdlib.h>
 #include <math.h>
 
-/* The BachelorProject steering-pole helper is kept local to the native MPC
- * translation unit so this package contains only the core MPC files. */
+/* Unity's VehicleController rate-limits the physical steering angle.  MPC
+ * keeps its target changes within that same rate, so the source reaches each
+ * target without adding a fitted lag or a second steering model. */
 typedef struct
 {
     float retention;
@@ -40,23 +41,17 @@ typedef struct
 } SteeringDynamicsCoefficients_t;
 
 static inline SteeringDynamicsCoefficients_t
-steering_dynamics_coefficients(float dt_seconds, float tau)
+steering_dynamics_coefficients(float dt_seconds)
 {
-    const float retention = expf(-dt_seconds / tau);
-    const float command_gain = 1.0f - retention;
-    SteeringDynamicsCoefficients_t coefficients;
-
-    coefficients.retention = retention;
-    coefficients.command_gain = command_gain;
-    coefficients.rate_gain_seconds = dt_seconds - tau * command_gain;
-    coefficients.average_effective_gain = tau * command_gain / dt_seconds;
-    coefficients.average_command_gain =
-        1.0f - coefficients.average_effective_gain;
-    coefficients.average_rate_gain_seconds =
-        0.5f * dt_seconds - tau +
-        (tau * tau * command_gain / dt_seconds);
-
-    return coefficients;
+    (void)dt_seconds;
+    return (SteeringDynamicsCoefficients_t){
+        .retention = 0.0f,
+        .command_gain = 1.0f,
+        .rate_gain_seconds = 0.0f,
+        .average_effective_gain = 0.0f,
+        .average_command_gain = 1.0f,
+        .average_rate_gain_seconds = 0.0f,
+    };
 }
 
 static inline float steering_dynamics_next_effective(
@@ -202,13 +197,10 @@ static int warm_start_prev_model_signature = MPC_MODEL_SIGNATURE;
 
 static void refresh_steering_dynamics(void)
 {
-    const VehicleParameters_t parameters = vehicle_model_get_parameters();
     control_steering_dynamics =
-        steering_dynamics_coefficients(
-            control_dt_seconds, parameters.steering_time_constant_seconds);
+        steering_dynamics_coefficients(control_dt_seconds);
     prediction_steering_dynamics =
-        steering_dynamics_coefficients(
-            config.time_step, parameters.steering_time_constant_seconds);
+        steering_dynamics_coefficients(config.time_step);
 }
 
 static void reset_steering_state(void)
@@ -251,11 +243,11 @@ MpcConfiguration_t get_default_configuration(void)
 
     /* Control effort weights */
     .weight_steering_effort      = WEIGHT_STEER_EFFORT,
-    .weight_acceleration_effort  = WEIGHT_ACCEL_EFFORT,
+    .weight_target_speed_rate_effort  = WEIGHT_TARGET_SPEED_RATE_EFFORT,
 
-    /* Control rate weights (W_JERK, W_ACCEL_RATE) */
+    /* Control-change weights. */
     .weight_steering_rate        = WEIGHT_STEER_RATE,
-    .weight_acceleration_rate    = WEIGHT_ACCEL_RATE,
+    .weight_target_speed_rate_change    = WEIGHT_TARGET_SPEED_RATE_CHANGE,
     .weight_effective_steering   = WEIGHT_EFFECTIVE_STEERING,
 
     /* Cross-call rate scale computed from control and prediction periods. */
@@ -276,10 +268,10 @@ MpcConfiguration_t get_default_configuration(void)
     cfg.weight_yaw_rate         = get_env_float("MPC_W_YAW_RATE", cfg.weight_yaw_rate);
 
     cfg.weight_steering_effort     = get_env_float("MPC_W_STEER_EFFORT", cfg.weight_steering_effort);
-    cfg.weight_acceleration_effort = get_env_float("MPC_W_ACCEL_EFFORT", cfg.weight_acceleration_effort);
+    cfg.weight_target_speed_rate_effort = get_env_float("MPC_W_TARGET_SPEED_RATE_EFFORT", cfg.weight_target_speed_rate_effort);
 
     cfg.weight_steering_rate     = get_env_float("MPC_W_STEER_RATE", cfg.weight_steering_rate);
-    cfg.weight_acceleration_rate = get_env_float("MPC_W_ACCEL_RATE", cfg.weight_acceleration_rate);
+    cfg.weight_target_speed_rate_change = get_env_float("MPC_W_TARGET_SPEED_RATE_CHANGE", cfg.weight_target_speed_rate_change);
     cfg.weight_effective_steering = get_env_float(
         "MPC_W_EFFECTIVE_STEERING", cfg.weight_effective_steering);
 
@@ -315,7 +307,7 @@ void mpc_initialize(void)
     config = get_default_configuration();
     control_dt_seconds = CONTROL_DT_SECONDS;
     prev_control.steer_ang = 0.0f;
-    prev_control.long_acc = 0.0f;
+    prev_control.target_speed_rate = 0.0f;
     reset_steering_state();
     refresh_steering_dynamics();
     riccati_admm_state_init(&admm_state);
@@ -335,7 +327,7 @@ void mpc_initialize_with_configuration(const MpcConfiguration_t *cfg)
         config.wall_margin = WALL_MARGIN;
     control_dt_seconds = CONTROL_DT_SECONDS;
     prev_control.steer_ang = 0.0f;
-    prev_control.long_acc = 0.0f;
+    prev_control.target_speed_rate = 0.0f;
     reset_steering_state();
     refresh_steering_dynamics();
     riccati_admm_state_init(&admm_state);
@@ -349,7 +341,7 @@ void mpc_initialize_with_configuration(const MpcConfiguration_t *cfg)
 void mpc_reset(void)
 {
     prev_control.steer_ang = 0.0f;
-    prev_control.long_acc = 0.0f;
+    prev_control.target_speed_rate = 0.0f;
     reset_steering_state();
     control_dt_seconds = CONTROL_DT_SECONDS;
     refresh_steering_dynamics();
@@ -393,9 +385,7 @@ void mpc_set_previous_command_with_dt(
         control_dt_seconds = CONTROL_DT_SECONDS;
     }
     control_steering_dynamics =
-        steering_dynamics_coefficients(
-            control_dt_seconds,
-            vehicle_model_get_parameters().steering_time_constant_seconds);
+        steering_dynamics_coefficients(control_dt_seconds);
 
     if (has_measured_steering && isfinite(measured_steering_rad)) {
         const VehicleParameters_t parameters = vehicle_model_get_parameters();
@@ -426,19 +416,19 @@ void mpc_set_previous_command_with_dt(
         } else {
             float steer_rate =
                 (new_command - commanded_steering_angle) / control_dt_seconds;
-            if (steer_rate > STEERING_RATE_LIMIT)
-                steer_rate = STEERING_RATE_LIMIT;
-            if (steer_rate < -STEERING_RATE_LIMIT)
-                steer_rate = -STEERING_RATE_LIMIT;
+            if (steer_rate > parameters.steering_rate_radps)
+                steer_rate = parameters.steering_rate_radps;
+            if (steer_rate < -parameters.steering_rate_radps)
+                steer_rate = -parameters.steering_rate_radps;
             prev_control.steer_ang = steer_rate;
             commanded_steering_angle = new_command;
         }
 
-        if (isfinite(command->long_acc)) {
-            prev_control.long_acc = util_clamp(
-                command->long_acc,
-                parameters.min_acceleration,
-                parameters.max_acceleration);
+        if (isfinite(command->target_speed_rate)) {
+            prev_control.target_speed_rate = util_clamp(
+                command->target_speed_rate,
+                -parameters.maximum_target_speed_rate_reduction_mps2,
+                parameters.maximum_target_speed_rate_increase_mps2);
         }
     }
 }
@@ -535,20 +525,20 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             sd->A[IDX_DELTA_COMMAND][i] = 0;
             sd->A[IDX_DELTA_EFFECTIVE][i] = 0;
             sd->A[IDX_DRATE_PREV][i] = 0;
-            sd->A[IDX_ACCEL_PREV][i] = 0;
+            sd->A[IDX_TARGET_SPEED_RATE_PREV][i] = 0;
 
             sd->N[i][0] = 0;
             sd->N[i][1] = 0;
 
             if (i < NX_DENSE) {
                 sd->A[i][IDX_DRATE_PREV] = 0;
-                sd->A[i][IDX_ACCEL_PREV] = 0;
+                sd->A[i][IDX_TARGET_SPEED_RATE_PREV] = 0;
             }
         }
-        sd->B[IDX_DELTA_COMMAND][1] = 0;  /* Steering command integrator is not affected by accel. */
-        sd->B[IDX_DELTA_EFFECTIVE][1] = 0; /* Effective-steering pole is not affected by accel. */
-        sd->B[IDX_DRATE_PREV][1] = 0;    /* δ̇_prev not affected by accel */
-        sd->B[IDX_ACCEL_PREV][0] = 0;    /* a_prev not affected by δ̇ */
+        sd->B[IDX_DELTA_COMMAND][1] = 0;  /* Target-speed slew does not affect steering. */
+        sd->B[IDX_DELTA_EFFECTIVE][1] = 0;/* Target-speed slew does not affect steering. */
+        sd->B[IDX_DRATE_PREV][1] = 0;     /* Previous steering rate has no speed-slew input. */
+        sd->B[IDX_TARGET_SPEED_RATE_PREV][0] = 0; /* Previous speed slew has no steering input. */
 
         /* --- End sparse zeroing --- */
 
@@ -556,12 +546,12 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         float v_state_for_limits = lin_state.flong_vel;
 
         ControlInput_t lin_control;
-        lin_control.steer_ang = atanf(vehicle_parameters.wheelbase_meters * kappa_k);
+        lin_control.steer_ang = atanf(vehicle_parameters.steering_wheelbase_m * kappa_k);
         if (lin_control.steer_ang > delta_clamp)
             lin_control.steer_ang = delta_clamp;
         if (lin_control.steer_ang < -delta_clamp)
             lin_control.steer_ang = -delta_clamp;
-        lin_control.long_acc = prev_control.long_acc;
+        lin_control.target_speed_rate = prev_control.target_speed_rate;
 
         float A_step[5][5];
         float B_step[5][2];
@@ -634,7 +624,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
                 lin_pred += A_step[i][j] * xbar[j];
             }
             lin_pred += B_step[i][0] * lin_control.steer_ang;
-            lin_pred += B_step[i][1] * lin_control.long_acc;
+            lin_pred += B_step[i][1] * lin_control.target_speed_rate;
             sd->d[i] = affine_scale * (xbar_next[i] - lin_pred);
         }
 
@@ -649,7 +639,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         /* === Augmented B matrix (9x2) === */
 
-        /* Rows 0-4, col 1: acceleration effect on dynamics */
+        /* Rows 0-4, col 1: target-speed slew effect on stage prediction. */
         for (int i = 0; i < 5; i++)
             sd->B[i][1] = B_step[i][1];
 
@@ -663,8 +653,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* Previous steering-rate state. */
         sd->B[IDX_DRATE_PREV][0] = 1.0f;
 
-        /* Previous acceleration state. */
-        sd->B[IDX_ACCEL_PREV][1] = 1.0f;
+        /* Previous target-speed slew state. */
+        sd->B[IDX_TARGET_SPEED_RATE_PREV][1] = 1.0f;
 
         /* === Q_diag (9 elements): state tracking weights === */
         sd->Q_diag[0] = RICCATI_COST_FACTOR * config.weight_lateral_error;
@@ -676,12 +666,12 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         sd->Q_diag[IDX_DELTA_EFFECTIVE] =
             RICCATI_COST_FACTOR * config.weight_effective_steering;
         sd->Q_diag[IDX_DRATE_PREV] = RICCATI_COST_FACTOR * config.weight_steering_rate;
-        sd->Q_diag[IDX_ACCEL_PREV] = RICCATI_COST_FACTOR * config.weight_acceleration_rate;
+        sd->Q_diag[IDX_TARGET_SPEED_RATE_PREV] = RICCATI_COST_FACTOR * config.weight_target_speed_rate_change;
 
         /* Apply cross-call scaling for step 0 (jerk/rate penalties) */
         if (k == 0) {
             sd->Q_diag[IDX_DRATE_PREV] = RICCATI_COST_FACTOR * (config.weight_steering_rate * config.cross_call_rate_scale);
-            sd->Q_diag[IDX_ACCEL_PREV] = RICCATI_COST_FACTOR * (config.weight_acceleration_rate * config.cross_call_rate_scale);
+            sd->Q_diag[IDX_TARGET_SPEED_RATE_PREV] = RICCATI_COST_FACTOR * (config.weight_target_speed_rate_change * config.cross_call_rate_scale);
         }
 
         float wall_x_lb = -BIG_BOUND;
@@ -742,7 +732,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         /* Effective-steering reference: delta_ff = atan(L*kappa). */
         {
-            float delta_ff_k = atanf(vehicle_parameters.wheelbase_meters * kappa_k);
+            float delta_ff_k = atanf(vehicle_parameters.steering_wheelbase_m * kappa_k);
             if (delta_ff_k > vehicle_parameters.max_steering_angle)
                 delta_ff_k = vehicle_parameters.max_steering_angle;
             if (delta_ff_k < -vehicle_parameters.max_steering_angle)
@@ -751,17 +741,17 @@ MpcSolverStatus_t mpc_compute_optimal_control(
                 -(sd->Q_diag[IDX_DELTA_EFFECTIVE] * delta_ff_k);
         }
         sd->q[IDX_DRATE_PREV] = 0;  /* No tracking ref for δ̇_prev */
-        sd->q[IDX_ACCEL_PREV] = 0;  /* No tracking ref for a_prev */
+        sd->q[IDX_TARGET_SPEED_RATE_PREV] = 0;  /* No tracking ref for prior slew. */
 
         /* === R_diag (2 elements): control cost === */
         /* R[0]: weight on |δ̇|² = effort + jerk penalty */
         sd->R_diag[0] = RICCATI_COST_FACTOR * (config.weight_steering_effort + config.weight_steering_rate);
-        /* R[1]: weight on |a|² = effort + rate penalty */
-        sd->R_diag[1] = RICCATI_COST_FACTOR * (config.weight_acceleration_effort + config.weight_acceleration_rate);
+        /* R[1]: target-speed slew effort and change penalty. */
+        sd->R_diag[1] = RICCATI_COST_FACTOR * (config.weight_target_speed_rate_effort + config.weight_target_speed_rate_change);
 
         if (k == 0) {
             sd->R_diag[0] = RICCATI_COST_FACTOR * (config.weight_steering_effort + (config.weight_steering_rate * config.cross_call_rate_scale));
-            sd->R_diag[1] = RICCATI_COST_FACTOR * (config.weight_acceleration_effort + (config.weight_acceleration_rate * config.cross_call_rate_scale));
+            sd->R_diag[1] = RICCATI_COST_FACTOR * (config.weight_target_speed_rate_effort + (config.weight_target_speed_rate_change * config.cross_call_rate_scale));
         }
 
         /* r: no constant control bias */
@@ -771,12 +761,12 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* === Cross-cost N (9x2) === */
         /* Couple previous and current steering rates for the jerk cost. */
         sd->N[IDX_DRATE_PREV][0] = -(RICCATI_COST_FACTOR * config.weight_steering_rate);
-        /* Couple previous and current acceleration for the rate cost. */
-        sd->N[IDX_ACCEL_PREV][1] = -(RICCATI_COST_FACTOR * config.weight_acceleration_rate);
+        /* Couple previous and current target-speed slews for the change cost. */
+        sd->N[IDX_TARGET_SPEED_RATE_PREV][1] = -(RICCATI_COST_FACTOR * config.weight_target_speed_rate_change);
 
         if (k == 0) {
             sd->N[IDX_DRATE_PREV][0] = -(RICCATI_COST_FACTOR * (config.weight_steering_rate * config.cross_call_rate_scale));
-            sd->N[IDX_ACCEL_PREV][1] = -(RICCATI_COST_FACTOR * (config.weight_acceleration_rate * config.cross_call_rate_scale));
+            sd->N[IDX_TARGET_SPEED_RATE_PREV][1] = -(RICCATI_COST_FACTOR * (config.weight_target_speed_rate_change * config.cross_call_rate_scale));
         }
 
         /* === State bounds (9 elements) === */
@@ -803,42 +793,19 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* Previous controls are unconstrained states. */
         sd->x_lb[IDX_DRATE_PREV] = -BIG_BOUND;
         sd->x_ub[IDX_DRATE_PREV] = BIG_BOUND;
-        sd->x_lb[IDX_ACCEL_PREV] = -BIG_BOUND;
-        sd->x_ub[IDX_ACCEL_PREV] = BIG_BOUND;
+        sd->x_lb[IDX_TARGET_SPEED_RATE_PREV] = -BIG_BOUND;
+        sd->x_ub[IDX_TARGET_SPEED_RATE_PREV] = BIG_BOUND;
 
         /* === Control bounds === */
         /* u[0] = δ̇: steering RATE limit */
-        sd->u_lb[0] = -STEERING_RATE_LIMIT;
-        sd->u_ub[0] = STEERING_RATE_LIMIT;
+        sd->u_lb[0] = -vehicle_parameters.steering_rate_radps;
+        sd->u_ub[0] = vehicle_parameters.steering_rate_radps;
 
-        /* u[1] acceleration bound follows a constant-power region model. */
-        {
-            float v_ref_k = reference_trajectory[k].reference_velocity;
-            float v_model_k = v_state_for_limits;
-            float v_for_limit;
-            float a_max = vehicle_parameters.max_acceleration;
-            float a_min = vehicle_parameters.min_acceleration;
-
-            /* Keep a physical zero speed. Only this reciprocal-like limit
-             * calculation uses a numeric floor, never the state itself. */
-            if (v_model_k < 0.1f)
-                v_model_k = 0.1f;
-
-            /* Blend model speed with reference speed so under-speed states are not
-             * over-limited by an aggressive reference profile. */
-            v_for_limit = 0.7f * v_model_k + 0.3f * v_ref_k;
-            if (v_for_limit < 0.1f)
-                v_for_limit = 0.1f;
-
-            if (v_for_limit > V_SWITCH) {
-                float scale = V_SWITCH / v_for_limit;
-                sd->u_ub[1] = a_max * scale;
-                sd->u_lb[1] = a_min;
-            } else {
-                sd->u_ub[1] = a_max;
-                sd->u_lb[1] = a_min;
-            }
-        }
+        /* u[1] changes the outgoing target speed.  Its bounds are a command
+         * policy, not a fictional constant-power or friction envelope. */
+        (void)v_state_for_limits;
+        sd->u_lb[1] = -vehicle_parameters.maximum_target_speed_rate_reduction_mps2;
+        sd->u_ub[1] = vehicle_parameters.maximum_target_speed_rate_increase_mps2;
 
         lin_state = lin_state_next;
     }
@@ -876,7 +843,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* Effective steering tracks terminal curvature feedforward. */
         {
             float kappa_N = reference_trajectory[N-1].path_curvature;
-            float delta_ff_N = atanf(vehicle_parameters.wheelbase_meters * kappa_N);
+            float delta_ff_N = atanf(vehicle_parameters.steering_wheelbase_m * kappa_N);
             if (delta_ff_N > vehicle_parameters.max_steering_angle)
                 delta_ff_N = vehicle_parameters.max_steering_angle;
             if (delta_ff_N < -vehicle_parameters.max_steering_angle)
@@ -941,8 +908,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         terminal_x_ub[IDX_DELTA_EFFECTIVE] = BIG_BOUND;
         terminal_x_lb[IDX_DRATE_PREV] = -BIG_BOUND;
         terminal_x_ub[IDX_DRATE_PREV] = BIG_BOUND;
-        terminal_x_lb[IDX_ACCEL_PREV] = -BIG_BOUND;
-        terminal_x_ub[IDX_ACCEL_PREV] = BIG_BOUND;
+        terminal_x_lb[IDX_TARGET_SPEED_RATE_PREV] = -BIG_BOUND;
+        terminal_x_ub[IDX_TARGET_SPEED_RATE_PREV] = BIG_BOUND;
     }
 
     /* ---------------------------------------------------------------
@@ -958,7 +925,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     x0[IDX_DELTA_COMMAND] = commanded_steering_angle;
     x0[IDX_DELTA_EFFECTIVE] = effective_steering_angle;
     x0[IDX_DRATE_PREV] = prev_control.steer_ang;  /* Previous delta-rate command */
-    x0[IDX_ACCEL_PREV] = prev_control.long_acc;
+    x0[IDX_TARGET_SPEED_RATE_PREV] = prev_control.target_speed_rate;
 
     /* ---------------------------------------------------------------
      * Step 4: Solve via Riccati-ADMM
@@ -1039,9 +1006,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
     if (rstatus != RICCATI_STATUS_OPTIMAL && rstatus != RICCATI_STATUS_MAX_ITERATIONS) {
         result->optimal_control.steer_ang = commanded_steering_angle;
-        /* Avoid "dead stop" behavior on transient solver failures by holding the
-         * previous acceleration command. */
-        result->optimal_control.long_acc = prev_control.long_acc;
+        /* Hold the prior target-speed slew on a transient solver failure. */
+        result->optimal_control.target_speed_rate = prev_control.target_speed_rate;
         result->iterations_used = (uint16_t)riccati_sol.iterations;
         result->primal_residual = riccati_sol.primal_residual;
         result->dual_residual = riccati_sol.dual_residual;
@@ -1049,9 +1015,9 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         return result->solver_status;
     }
 
-    /* Step 6: map solver output [delta_rate, accel] to actuator command. */
+    /* Step 6: map solver output [steering rate, target-speed slew]. */
     float delta_rate = admm_state.z_u[0][0];
-    float accel = admm_state.z_u[0][1];
+    float target_speed_rate = admm_state.z_u[0][1];
 
     /* Convert the optimized steering-rate input to the next steering target
      * over the configured prediction interval. The outer runtime update
@@ -1067,7 +1033,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
     ControlInput_t raw_control;
     raw_control.steer_ang = delta_cmd;
-    raw_control.long_acc = accel;
+    raw_control.target_speed_rate = target_speed_rate;
 
     ControlInput_t saturated = vehicle_model_saturate_control(&raw_control);
 
@@ -1088,9 +1054,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         break;
     }
 
-    /* Save previous control for rate-of-rate penalty.
-     * Store the steering rate (δ̇) as the "steering" value, and accel as-is. */
+    /* Store the two prior decision variables for their change penalties. */
     prev_control.steer_ang = delta_rate;
-    prev_control.long_acc = saturated.long_acc;
+    prev_control.target_speed_rate = saturated.target_speed_rate;
     return result->solver_status;
 }

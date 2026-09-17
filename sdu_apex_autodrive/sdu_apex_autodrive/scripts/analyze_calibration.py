@@ -734,7 +734,7 @@ def acceleration_envelope(
     max_throttle: float = 1.0,
     speed_knots: tuple[float, ...] = (
         0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
-        16.0, 18.0, 20.0, 22.0, 23.0,
+        16.0,
     ),
 ) -> list[tuple[float, float, float, int]]:
     """Fit the positive-drive acceleration ceiling as a function of speed.
@@ -1626,7 +1626,7 @@ RELATIVE_ERROR_FIELDS = (
 
 RELATIVE_SPEED_BINS = (
     (0.0, 1.0), (1.0, 3.0), (3.0, 5.0), (5.0, 10.0),
-    (10.0, 15.0), (15.0, 20.0), (20.0, 23.0),
+    (10.0, 15.0), (15.0, 16.0),
 )
 
 SPEED_TRACKING_CATEGORIES = ("acceleration", "steady-state", "deceleration")
@@ -1901,7 +1901,7 @@ def relative_error_metrics(
             continue
         for lower, upper in RELATIVE_SPEED_BINS:
             if lower <= truth < upper or (
-                    upper == 23.0 and lower <= truth <= upper):
+                    upper == RELATIVE_SPEED_BINS[-1][1] and lower <= truth <= upper):
                 errors, references = speed_groups[f"{lower:g}-{upper:g}_mps"]
                 errors.append(abs(truth - odom))
                 # Below 1 m/s, the percentage is dominated by native source
@@ -1944,7 +1944,7 @@ def relative_error_metrics(
         all_references.append(truth if truth >= 1.0 else math.nan)
         for lower, upper in RELATIVE_SPEED_BINS:
             if lower <= truth < upper or (
-                    upper == 23.0 and lower <= truth <= upper):
+                    upper == RELATIVE_SPEED_BINS[-1][1] and lower <= truth <= upper):
                 errors, references = category_groups[category][
                     f"{lower:g}-{upper:g}_mps"]
                 errors.append(error)

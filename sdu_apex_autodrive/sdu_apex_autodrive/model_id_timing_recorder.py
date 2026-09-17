@@ -167,7 +167,7 @@ class ModelIdTimingRecorder(Node):
 
         output_dir = str(self.get_parameter("output_dir").value).strip()
         if not output_dir:
-            output_dir = "/workspace/src/sdu_apex_autodrive/artifacts/model_id"
+            output_dir = "/workspace/src/sdu_apex_autodrive/artifacts/simulator_trace"
         run_name = str(self.get_parameter("run_name").value).strip()
         if not run_name:
             run_name = time.strftime("model_id_timing_test_%Y%m%d_%H%M%S")

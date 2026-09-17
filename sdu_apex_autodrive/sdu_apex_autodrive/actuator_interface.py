@@ -214,7 +214,7 @@ class ActuatorInterface(Node):
         self.declare_parameter("collision_reset_pulse_sec", 0.5)
         # Collision stopping is terminal. Reset handling is a separate opt-in
         # hook and is not required for collision monitoring.
-        self.declare_parameter("collision_terminal_stop", True)
+        self.declare_parameter("collision_terminal_stop", False)
         # The official counter is cumulative and can be published as zero
         # before the bridge delivers the simulator's existing count. Require a
         # stable observation before treating a later increment as this run's
@@ -270,11 +270,11 @@ class ActuatorInterface(Node):
         self.declare_parameter(
             "max_acceleration_speed_mps",
             [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0,
-             18.0, 20.0, 22.0, 23.0])
+            ])
         self.declare_parameter(
             "max_acceleration_envelope_mps2",
             [5.5, 4.4, 4.4, 3.568, 3.175, 2.562, 2.043, 1.565,
-             0.956, 0.529, 0.529, 0.529, 0.086])
+             0.956])
         self.declare_parameter("max_deceleration_mps2", 8.0)
         # The simulator's acceleration derivative contains alternating sign
         # bursts even while calibrated speed is increasing. Do not close the
@@ -286,22 +286,21 @@ class ActuatorInterface(Node):
         self.declare_parameter("acceleration_integral_limit", 2.0)
         self.declare_parameter(
             "acceleration_speed_mps",
-            [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0,
-             20.0, 23.0])
+            [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0])
         self.declare_parameter(
             "acceleration_throttle_per_mps2",
             [0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
-             0.066, 0.068, 0.070, 0.072, 0.074, 0.078])
+             0.066, 0.068, 0.070])
         self.declare_parameter("acceleration_throttle_rise_rate_per_sec", 2.0)
         self.declare_parameter("acceleration_throttle_fall_rate_per_sec", 4.0)
         self.declare_parameter(
             "feedforward_speed_mps",
             [0.0, 0.7537, 1.5008, 2.4883, 3.7113, 4.9226,
-             7.3138, 9.6633, 11.9725, 15.3610, 18.6554, 22.8834])
+             7.3138, 9.6633, 11.9725, 15.3610])
         self.declare_parameter(
             "feedforward_throttle",
             [0.0, 0.030, 0.060, 0.100, 0.150, 0.200,
-             0.300, 0.400, 0.500, 0.650, 0.800, 1.000])
+             0.300, 0.400, 0.500, 0.650])
 
     def _speed_config(self) -> SpeedControllerConfig:
         return SpeedControllerConfig(

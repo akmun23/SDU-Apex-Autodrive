@@ -130,13 +130,14 @@ gpu_amcl_cpp:
     # Associate local scan clusters with the causal odometry-predicted pose;
     # repeated corridor aliases outside this radius are not controller input.
     local_cluster_association_max_distance_m: 0.80
-    # Moderate cluster weights are usable once the innovation gate above has
-    # passed. Very weak modes remain rejected before they can affect the map
-    # pose.
-    # The live acceptance traces separated stable local matches (typically
-    # >=0.92) from the ambiguous upper-hairpin modes (0.73-0.90). Reject the
-    # latter and continue from causal odometry until scan support improves.
-    local_cluster_min_weight: 0.90
+    # Candidate threshold based on the 2026-09-17 batchmode baseline: with 0.90, all
+    # 7,325 local scan updates were rejected. The strongest cluster weights
+    # were 0.750-0.812 (median 0.783), while the filter remained within the
+    # 0.80 m causal association radius. Use 0.70 for the validation run so
+    # those scan-supported local corrections can be tested; association and
+    # pose-jump gates remain active. This is not promoted unless offline
+    # truth-scored position error improves on a separate run.
+    local_cluster_min_weight: 0.70
     local_tracking_recovery_after_rejected_scans: 3
     local_tracking_recovery_confirm_scans: 3
     local_tracking_recovery_min_cluster_weight: 0.80

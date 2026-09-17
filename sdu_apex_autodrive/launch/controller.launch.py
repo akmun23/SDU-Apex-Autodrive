@@ -79,10 +79,9 @@ def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
 
 def _setup(context):
     controller = LaunchConfiguration("controller").perform(context).lower()
-    if controller not in ("ftg", "pure_pursuit"):
+    if controller not in ("ftg", "pure_pursuit", "mpc"):
         raise RuntimeError(
-            "controller must be ftg or pure_pursuit; MPC integration is not "
-            "available until the native-core ROS adapter is installed")
+            "controller must be ftg, pure_pursuit, or mpc")
 
     map_path = LaunchConfiguration("map").perform(context)
     trajectory = LaunchConfiguration("trajectory").perform(context)
@@ -327,7 +326,7 @@ def _setup(context):
             composable_node_descriptions=[component],
             output="screen",
         ))
-    else:
+    elif controller == "pure_pursuit":
         component = ComposableNode(
             package="f1tenth_control",
             plugin="f1tenth_control::PurePursuitNode",
@@ -338,6 +337,40 @@ def _setup(context):
                     "trajectory_file": trajectory,
                     "max_speed": LaunchConfiguration("controller_max_speed"),
                 },
+            ],
+        )
+        actions.append(ComposableNodeContainer(
+            name="controller_container",
+            namespace="",
+            package="rclcpp_components",
+            executable="component_container",
+            composable_node_descriptions=[component],
+            output="screen",
+        ))
+    else:
+        # The MPC adapter remains command-inhibited unless the explicit launch
+        # argument is set. This keeps a source-command baseline from silently
+        # becoming actuator authority before its legal-state N30 acceptance.
+        component = ComposableNode(
+            package="f1tenth_mpc",
+            plugin="f1tenth_mpc::MpcControllerNode",
+            name="mpc_controller_node",
+            parameters=[
+                LaunchConfiguration("mpc_params"),
+                {
+                    "trajectory_file": trajectory,
+                    "max_speed_mps": ParameterValue(
+                        LaunchConfiguration("controller_max_speed"),
+                        value_type=float,
+                    ),
+                    "enabled": ParameterValue(
+                        LaunchConfiguration("mpc_enabled"), value_type=bool),
+                },
+            ],
+            remappings=[
+                ("odom", "/odom"),
+                ("pose", "/current_map_pose"),
+                ("drive", "/cmd/speed"),
             ],
         )
         actions.append(ComposableNodeContainer(
@@ -360,6 +393,7 @@ def _setup(context):
             {
                 "input_topic": "/cmd/speed",
                 "collision_reset_enabled": with_collision_safety,
+                "collision_terminal_stop": with_collision_safety,
                 "external_stop_topic": "/autodrive/roboracer_1/bridge_timing_fault",
             },
         ],
@@ -389,14 +423,14 @@ def generate_launch_description():
     integration = get_package_share_directory("sdu_apex_autodrive")
     localization = get_package_share_directory("f1tenth_localization")
     control = get_package_share_directory("f1tenth_control")
+    mpc = get_package_share_directory("f1tenth_mpc")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "controller",
             default_value="pure_pursuit",
             description=(
-                "Controller to run: FTG or Pure Pursuit. MPC will be exposed "
-                "after its separate native-core ROS adapter is validated."
+                "Controller to run: FTG, Pure Pursuit, or MPC."
             ),
         ),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
@@ -426,7 +460,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "model_id_output_dir",
-            default_value="/workspace/src/sdu_apex_autodrive/artifacts/model_id",
+            default_value="/workspace/src/sdu_apex_autodrive/artifacts/simulator_trace",
         ),
         DeclareLaunchArgument(
             "model_id_run_name",
@@ -522,8 +556,21 @@ def generate_launch_description():
             "controller_max_speed",
             default_value="16.0",
             description=(
-                "Normal Pure Pursuit maximum speed [m/s]. The project "
+                "Maximum controller target speed [m/s]. The project "
                 "operating ceiling is 16 m/s; this does not alter simulator physics."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "mpc_params",
+            default_value=os.path.join(mpc, "config", "mpc_autodrive.yaml"),
+            description="Source-command MPC adapter configuration",
+        ),
+        DeclareLaunchArgument(
+            "mpc_enabled",
+            default_value="false",
+            description=(
+                "Allow MPC commands. Keep false until the source-command "
+                "stage map passes legal-state N30 validation."
             ),
         ),
         DeclareLaunchArgument(

@@ -1,4 +1,0 @@
-event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
-0,6674337067172,/amcl_particle_count,Int32,,,"{""value"":2500}"
-1,6700097027130,/autodrive/roboracer_1/bridge_timing_fault,Bool,,,"{""value"":true}"
-2,6940177737654,/amcl_particle_count,Int32,,,"{""value"":2500}"

@@ -8,20 +8,11 @@
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <build_depend>rcl</build_depend>
-  <exec_depend>rcl</exec_depend>
-  <build_depend>rclc</build_depend>
-  <exec_depend>rclc</exec_depend>
-  <build_depend>nav_msgs</build_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <build_depend>ackermann_msgs</build_depend>
-  <exec_depend>ackermann_msgs</exec_depend>
-  <build_depend>std_msgs</build_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <build_depend>geometry_msgs</build_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <build_depend>rcutils</build_depend>
-  <exec_depend>rcutils</exec_depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>nav_msgs</depend>
+  <depend>ackermann_msgs</depend>
+  <depend>geometry_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

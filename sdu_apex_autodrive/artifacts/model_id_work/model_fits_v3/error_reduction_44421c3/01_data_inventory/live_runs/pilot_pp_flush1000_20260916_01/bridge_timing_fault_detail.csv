@@ -1,2 +1,0 @@
-event_index,arrival_monotonic_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
-12932,49009702910372,/autodrive/roboracer_1/bridge_timing_fault_detail,String,,,"{""value"":""simulator source cadence 0.010000s is outside the 40 Hz window [0.015, 0.035]s; previous_source_time=17.625000000 current_source_time=17.635000000 previous_physics_step=17626 current_physics_step=17636 previous_telemetry_sequence=707 current_telemetry_sequence=708""}"

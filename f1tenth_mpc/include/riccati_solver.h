@@ -68,11 +68,11 @@ typedef struct
     float rho;
     float rho_u;
     float u0_steer;
-    float u0_accel;
+    float u0_target_speed_rate;
     float z0_steer;
-    float z0_accel;
+    float z0_target_speed_rate;
     float y0_steer;
-    float y0_accel;
+    float y0_target_speed_rate;
     int scale_rho;
     int scale_rho_u;
 } RiccatiDebugIterSample_t;

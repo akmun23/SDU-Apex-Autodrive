@@ -191,13 +191,13 @@ void riccati_solver_pass(
             /* Iterate the dense prefix [IDX_SPARSE_B_FIRST_ROW, IDX_DRATE_PREV);
              * rows 0 and 1 are structural zeros and are skipped.
              * The two previous-control tail rows are handled explicitly below
-             * via +P[IDX_DRATE_PREV][j] and +P[IDX_ACCEL_PREV][j]. */
+             * via +P[IDX_DRATE_PREV][j] and +P[IDX_TARGET_SPEED_RATE_PREV][j]. */
             for (int s = IDX_SPARSE_B_FIRST_ROW; s < IDX_DRATE_PREV; s++) {
                 s0 += sd->B[s][0] * P[s][j];
                 s1 += sd->B[s][1] * P[s][j];
             }
             M[0][j] = s0 + P[IDX_DRATE_PREV][j];
-            M[1][j] = s1 + P[IDX_ACCEL_PREV][j];
+            M[1][j] = s1 + P[IDX_TARGET_SPEED_RATE_PREV][j];
         }
 
         /* Step 2: S = R_aug + M*B (nu x nu) */
@@ -214,9 +214,9 @@ void riccati_solver_pass(
         }
         // Add identity-channel contributions from rows 6 and 7 (if any)
         S[0][0] += M[0][IDX_DRATE_PREV];
-        S[0][1] += M[0][IDX_ACCEL_PREV];
+        S[0][1] += M[0][IDX_TARGET_SPEED_RATE_PREV];
         S[1][0] += M[1][IDX_DRATE_PREV];
-        S[1][1] += M[1][IDX_ACCEL_PREV];
+        S[1][1] += M[1][IDX_TARGET_SPEED_RATE_PREV];
 
         /* Step 3: Invert S (2x2) */
         float Si[2][2];
@@ -242,7 +242,7 @@ void riccati_solver_pass(
                 G[a][j] = sum;
             }
             G[a][IDX_DRATE_PREV] = sd->N[IDX_DRATE_PREV][a];
-            G[a][IDX_ACCEL_PREV] = sd->N[IDX_ACCEL_PREV][a];
+            G[a][IDX_TARGET_SPEED_RATE_PREV] = sd->N[IDX_TARGET_SPEED_RATE_PREV][a];
         }
 
         /* Step 5: K = -S^{-1} G (nu x nx) */
@@ -274,7 +274,7 @@ void riccati_solver_pass(
                 bp1 += sd->B[s][1] * p_shift[s];
             }
             Bp[0] = bp0 + p_shift[IDX_DRATE_PREV];
-            Bp[1] = bp1 + p_shift[IDX_ACCEL_PREV];
+            Bp[1] = bp1 + p_shift[IDX_TARGET_SPEED_RATE_PREV];
 
         }
 
@@ -297,7 +297,7 @@ void riccati_solver_pass(
                 PA[i][j] = sum;
             }
             PA[i][IDX_DRATE_PREV] = 0.0f;
-            PA[i][IDX_ACCEL_PREV] = 0.0f;
+            PA[i][IDX_TARGET_SPEED_RATE_PREV] = 0.0f;
         }
 
         /* Fused: P = Q_diag + A^T*PA + G^T*K */
@@ -389,7 +389,7 @@ void riccati_solver_pass(
         }
         /* Previous-control tail states copy the current inputs. */
         x_out[k + 1][IDX_DRATE_PREV] = u_out[k][0] + sd->d[IDX_DRATE_PREV];
-        x_out[k + 1][IDX_ACCEL_PREV] = u_out[k][1] + sd->d[IDX_ACCEL_PREV];
+        x_out[k + 1][IDX_TARGET_SPEED_RATE_PREV] = u_out[k][1] + sd->d[IDX_TARGET_SPEED_RATE_PREV];
     }
 }
 
@@ -553,11 +553,11 @@ RiccatiStatus_t riccati_admm_solve(
             sample->rho = 0.0f;
             sample->rho_u = 0.0f;
             sample->u0_steer = solution->u[0][0];
-            sample->u0_accel = solution->u[0][1];
+            sample->u0_target_speed_rate = solution->u[0][1];
             sample->z0_steer = z_u[0][0];
-            sample->z0_accel = z_u[0][1];
+            sample->z0_target_speed_rate = z_u[0][1];
             sample->y0_steer = y_u[0][0];
-            sample->y0_accel = y_u[0][1];
+            sample->y0_target_speed_rate = y_u[0][1];
         }
     }
 
@@ -688,11 +688,11 @@ RiccatiStatus_t riccati_admm_solve(
             sample->rho = rho;
             sample->rho_u = rho_u;
             sample->u0_steer = solution->u[0][0];
-            sample->u0_accel = solution->u[0][1];
+            sample->u0_target_speed_rate = solution->u[0][1];
             sample->z0_steer = z_u[0][0];
-            sample->z0_accel = z_u[0][1];
+            sample->z0_target_speed_rate = z_u[0][1];
             sample->y0_steer = y_u[0][0];
-            sample->y0_accel = y_u[0][1];
+            sample->y0_target_speed_rate = y_u[0][1];
             sample->scale_rho = 0;
             sample->scale_rho_u = 0;
         }
