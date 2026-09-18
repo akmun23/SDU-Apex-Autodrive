@@ -62,7 +62,7 @@ public:
             "pose_topic", "/current_map_pose");
         command_topic_ = declare_parameter<std::string>("command_topic", "/cmd/speed");
         diagnostics_topic_ = declare_parameter<std::string>(
-            "diagnostics_topic", "/mpc_shadow/diagnostics");
+            "diagnostics_topic", "/mpc/diagnostics");
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
         command_frame_ = declare_parameter<std::string>("command_frame", "base_link");
         trajectory_file_ = declare_parameter<std::string>("trajectory_file", "");
@@ -115,9 +115,11 @@ public:
             command_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
                 command_topic_, rclcpp::QoS(10));
         }
-        if (shadow_mode_) {
+        if (shadow_mode_ || enabled_) {
             diagnostics_pub_ = create_publisher<std_msgs::msg::String>(
                 diagnostics_topic_, rclcpp::QoS(rclcpp::KeepLast(2)));
+        }
+        if (shadow_mode_) {
             observed_command_sub_ =
                 create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
                     command_topic_, rclcpp::QoS(rclcpp::KeepLast(1)),
@@ -168,6 +170,10 @@ public:
             declare_parameter<double>("max_target_speed_rate_reduction_mps2", 8.0));
         rti_config_.model.corridor_margin_m = static_cast<float>(
             declare_parameter<double>("corridor_margin_m", 0.05));
+        rti_config_.model.first_prediction_corridor_margin_m =
+            static_cast<float>(declare_parameter<double>(
+                "first_prediction_corridor_margin_m",
+                rti_config_.model.corridor_margin_m));
         rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
@@ -175,7 +181,7 @@ public:
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", 100);
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
-            std::clamp(configured_iterations, 1, 1000));
+            std::clamp(configured_iterations, 1, 100));
         rti_config_.solver.rho = static_cast<float>(
             declare_parameter<double>("admm_rho", 7.0));
         rti_config_.solver.rho_u = static_cast<float>(
@@ -187,6 +193,38 @@ public:
         rti_config_.solver.shared_rho = 0;
         rti_config_.solver.use_prefactorization = declare_parameter<bool>(
             "use_riccati_prefactorization", true) ? 1 : 0;
+        const std::string refinement_mode = declare_parameter<std::string>(
+            "rti_refinement_mode", "r1");
+        if (refinement_mode == "r1") {
+            rti_config_.refinement_mode = MPC_RTI_REFINEMENT_R1;
+        } else if (refinement_mode == "r2") {
+            rti_config_.refinement_mode = MPC_RTI_REFINEMENT_R2;
+        } else if (refinement_mode == "adaptive" || refinement_mode == "ra") {
+            rti_config_.refinement_mode = MPC_RTI_REFINEMENT_ADAPTIVE;
+        } else {
+            throw std::runtime_error(
+                "rti_refinement_mode must be r1, r2, or adaptive");
+        }
+        rti_config_.rti2_progress_error_trigger_m = static_cast<float>(
+            declare_parameter<double>("rti2_progress_error_trigger_m", 0.10));
+        rti_config_.rti2_curvature_error_trigger_per_m = static_cast<float>(
+            declare_parameter<double>("rti2_curvature_error_trigger_per_m", 0.02));
+        rti_config_.rti2_bound_error_trigger_m = static_cast<float>(
+            declare_parameter<double>("rti2_bound_error_trigger_m", 0.05));
+        rti_config_.rti2_min_corridor_slack_trigger_m = static_cast<float>(
+            declare_parameter<double>("rti2_min_corridor_slack_trigger_m", 0.25));
+        rti_config_.rti2_steering_rate_correction_trigger_radps =
+            static_cast<float>(declare_parameter<double>(
+                "rti2_steering_rate_correction_trigger_radps", 0.50));
+        rti_config_.rti2_target_speed_rate_correction_trigger_mps2 =
+            static_cast<float>(declare_parameter<double>(
+                "rti2_target_speed_rate_correction_trigger_mps2", 1.0));
+        rti_config_.rti2_residual_imbalance_trigger = static_cast<float>(
+            declare_parameter<double>("rti2_residual_imbalance_trigger", 8.0));
+        rti_config_.rti2_lateral_load_trigger_mps2 = static_cast<float>(
+            declare_parameter<double>("rti2_lateral_load_trigger_mps2", 3.0));
+        rti_config_.rti2_nonsmooth_columns_trigger = declare_parameter<int>(
+            "rti2_nonsmooth_columns_trigger", 50);
         rti_config_.degraded_residual_limit = static_cast<float>(
             declare_parameter<double>("solver_degraded_tolerance", 0.05));
         rti_config_.maximum_regularization = static_cast<float>(
@@ -341,7 +379,7 @@ private:
         } else if (shadow_mode_) {
             target_speed_initialized_ = false;
         }
-        if (shadow_mode_ && emit_shadow_diagnostic)
+        if (diagnostics_pub_ && emit_shadow_diagnostic)
             publish_shadow_failure(reason);
     }
 
@@ -414,6 +452,25 @@ private:
         return "unknown";
     }
 
+    static const char * cycle_status_name_code(int status)
+    {
+        if (status < 0) return "not_run";
+        return cycle_status_name(static_cast<MpcRtiCycleStatus_t>(status));
+    }
+
+    static const char * nonlinear_failure_reason_name(int reason)
+    {
+        switch (reason) {
+        case MPC_RTI_ROLLOUT_OK: return "none";
+        case MPC_RTI_ROLLOUT_INVALID_INPUT: return "invalid_input";
+        case MPC_RTI_ROLLOUT_INVALID_MODEL: return "invalid_model";
+        case MPC_RTI_ROLLOUT_COMMAND_LIMIT: return "command_limit";
+        case MPC_RTI_ROLLOUT_STATE_LIMIT: return "state_limit";
+        case MPC_RTI_ROLLOUT_CORRIDOR: return "corridor";
+        default: return "not_applicable";
+        }
+    }
+
     void publish_shadow_result(const MpcRtiState_t &state,
         const MpcSynchronizedState &synchronized,
         const MpcControlTimePrediction &control_prediction,
@@ -438,9 +495,35 @@ private:
             observed_target_speed_rate_mps2 = observed_target_speed_rate_mps2_;
         }
         std::ostringstream json;
+        const auto json_number = [&json](double value) {
+            if (std::isfinite(value)) json << value;
+            else json << "null";
+        };
+        MpcTrajectorySample_t current_path_sample{};
+        const bool current_path_sample_valid = mpc_trajectory_sample(
+            trajectory_.data(), trajectory_.size(), track_length_m_, progress,
+            &current_path_sample);
         json << std::setprecision(9)
             << "{\"status\":\"" << cycle_status_name(result.status)
-            << "\",\"source_stamp_ns\":" << synchronized.source_stamp_ns
+            << "\",\"nonlinear_failure_stage\":"
+            << result.nonlinear_failure_stage
+            << ",\"nonlinear_failure_reason\":\""
+            << nonlinear_failure_reason_name(result.nonlinear_failure_reason)
+            << "\",\"r1_nonlinear_failure_stage\":"
+            << result.r1_nonlinear_failure_stage
+            << ",\"r1_nonlinear_failure_reason\":\""
+            << nonlinear_failure_reason_name(
+                result.r1_nonlinear_failure_reason)
+            << "\",\"r2_nonlinear_failure_stage\":"
+            << result.r2_nonlinear_failure_stage
+            << ",\"r2_nonlinear_failure_reason\":\""
+            << nonlinear_failure_reason_name(
+                result.r2_nonlinear_failure_reason) << '"'
+            << ",\"source_stamp_ns\":" << synchronized.source_stamp_ns
+            << ",\"odom_source_stamp_ns\":"
+            << synchronized.odom_source_stamp_ns
+            << ",\"map_pose_source_stamp_ns\":"
+            << synchronized.map_pose_source_stamp_ns
             << ",\"control_ros_stamp_ns\":" << control_ros_stamp_ns
             << ",\"source_age_s\":" << synchronized.source_age_s
             << ",\"source_dt_s\":" << source_dt_s
@@ -450,6 +533,13 @@ private:
             << control_prediction.age_s << ",\"elapsed_us\":"
             << control_prediction_us << ",\"command_changes_used\":"
             << control_prediction.command_changes_used
+            << ",\"command_event_stamps_ns\":[";
+        for (std::size_t i = 0;
+             i < control_prediction.command_event_stamp_count; ++i) {
+            if (i > 0) json << ',';
+            json << control_prediction.command_event_stamps_ns[i];
+        }
+        json << "]"
             << ",\"command_fallback\":"
             << (control_prediction.used_command_fallback ? "true" : "false")
             << ",\"time_fallback\":"
@@ -477,7 +567,10 @@ private:
             << observed_steering_rate_radps << ",\"target_speed_rate_mps2\":"
             << observed_target_speed_rate_mps2 << '}'
             << ",\"progress_m\":" << progress
-            << ",\"state\":[" << state.plant.e_y << ','
+            << ",\"path_curvature_per_m\":";
+        json_number(current_path_sample_valid ? current_path_sample.curvature :
+            std::numeric_limits<double>::quiet_NaN());
+        json << ",\"state\":[" << state.plant.e_y << ','
             << state.plant.e_psi << ',' << state.plant.u << ','
             << state.plant.v << ',' << state.plant.r << ','
             << state.plant.target_speed << ',' << state.plant.steering_command
@@ -491,13 +584,79 @@ private:
             << ",\"regularization_count\":" << result.regularization_count
             << ",\"nonsmooth_columns\":"
             << result.nonsmooth_jacobian_columns
+            << ",\"rho_start\":" << result.rho_start
+            << ",\"rho_u_start\":" << result.rho_u_start
+            << ",\"rho_final\":" << result.rho_final
+            << ",\"rho_u_final\":" << result.rho_u_final
+            << ",\"rho_change_count\":" << result.rho_change_count
+            << ",\"factorization_count\":" << result.factorization_count
+            << ",\"factorization_time_ns\":" << result.factorization_time_ns
             << ",\"solve_us\":" << solve_us << '}'
             << ",\"first_action\":["
             << result.published_steering_command << ','
             << result.published_target_speed << ','
             << result.first_control.steering_rate << ','
             << result.first_control.target_speed_rate << ']'
-            << ",\"predictions\":[";
+            << ",\"rti_iterations_used\":" << result.rti_iterations_used
+            << ",\"rti2_triggered\":"
+            << (result.rti2_triggered ? "true" : "false")
+            << ",\"rti2_trigger_reason_mask\":"
+            << result.rti2_trigger_reason_mask
+            << ",\"rti2_budget_skipped\":"
+            << (result.rti2_budget_skipped ? "true" : "false")
+            << ",\"r1_status\":\""
+            << cycle_status_name_code(result.r1_status) << '\"'
+            << ",\"r2_status\":\""
+            << cycle_status_name_code(result.r2_status) << '\"'
+            << ",\"r1_nonlinear_objective\":";
+        json_number(result.r1_nonlinear_objective);
+        json << ",\"r2_nonlinear_objective\":";
+        json_number(result.r2_nonlinear_objective);
+        json << ",\"r1_min_corridor_slack\":";
+        json_number(result.r1_min_corridor_slack);
+        json << ",\"r2_min_corridor_slack\":";
+        json_number(result.r2_min_corridor_slack);
+        json << ",\"r1_first_action\":["
+             << result.r1_first_action.steering_rate << ','
+             << result.r1_first_action.target_speed_rate << ']'
+             << ",\"r2_first_action\":["
+             << result.r2_first_action.steering_rate << ','
+             << result.r2_first_action.target_speed_rate << ']'
+             << ",\"r1_solver_iterations\":"
+             << result.r1_solver_iterations
+             << ",\"r2_solver_iterations\":"
+             << result.r2_solver_iterations
+             << ",\"r1_solve_us\":" << result.r1_solve_us
+             << ",\"r2_solve_us\":" << result.r2_solve_us
+             << ",\"total_rti_us\":" << result.total_rti_us
+             << ",\"selected_candidate\":\""
+             << (result.selected_candidate == 2 ? "R2" :
+                 result.selected_candidate == 1 ? "R1" : "none") << '\"'
+             << ",\"nominal_vs_candidate_progress_error_max_m\":";
+        json_number(result.max_candidate_progress_error_m);
+        json << ",\"nominal_vs_candidate_curvature_error_max_per_m\":";
+        json_number(result.max_candidate_curvature_error_per_m);
+        json << ",\"nominal_vs_candidate_left_bound_error_max_m\":";
+        json_number(result.max_candidate_left_bound_error_m);
+        json << ",\"nominal_vs_candidate_right_bound_error_max_m\":";
+        json_number(result.max_candidate_right_bound_error_m);
+        json << ",\"minimum_predicted_corridor_slack_m\":";
+        json_number(result.minimum_predicted_corridor_slack_m);
+        json << ",\"corridor_margin_m\":"
+             << rti_config_.model.corridor_margin_m
+             << ",\"first_prediction_corridor_margin_m\":"
+             << rti_config_.model.first_prediction_corridor_margin_m;
+        json << ",\"lateral_accel_proxy_mps2\":";
+        json_number(result.lateral_accel_proxy_mps2);
+        json << ",\"lateral_accel_proxy_stage\":"
+             << result.lateral_accel_proxy_stage
+             << ",\"lateral_accel_proxy_by_stage_mps2\":[";
+        for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+            if (k > 0) json << ',';
+            json_number(result.lateral_accel_proxy_by_stage_mps2[k]);
+        }
+        json << ']';
+        json << ",\"predictions\":[";
 
         if (result.status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
             result.status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
@@ -748,28 +907,29 @@ private:
                 result.maximum_regularization, result.regularization_count,
                 result.nonsmooth_jacobian_columns,
                 result.nonlinear_failure_stage);
-            if (shadow_mode_)
+            if (diagnostics_pub_)
                 publish_shadow_result(state, coherent_state,
                     control_time_prediction, control_prediction_us,
                     last_projected_s_, source_dt, result, solve_us,
                     control_ros_time.nanoseconds(), callback_steady_ns,
                     synchronize_steady_ns);
             publish_stop("MPC RTI cycle rejected its candidate",
-                         !shadow_mode_);
+                         false);
             return;
         }
 
+        if (diagnostics_pub_)
+            publish_shadow_result(state, coherent_state,
+                control_time_prediction, control_prediction_us,
+                last_projected_s_, source_dt, result, solve_us,
+                control_ros_time.nanoseconds(), callback_steady_ns,
+                synchronize_steady_ns);
         if (enabled_) {
             target_speed_mps_ = result.published_target_speed;
             last_steering_command_rad_ = result.published_steering_command;
             last_steering_rate_radps_ = result.first_control.steering_rate;
             last_target_speed_rate_mps2_ = result.first_control.target_speed_rate;
             publish_command(last_steering_command_rad_, target_speed_mps_);
-        } else {
-            publish_shadow_result(state, coherent_state, control_time_prediction,
-                control_prediction_us, last_projected_s_, source_dt, result,
-                solve_us, control_ros_time.nanoseconds(), callback_steady_ns,
-                synchronize_steady_ns);
         }
     }
 

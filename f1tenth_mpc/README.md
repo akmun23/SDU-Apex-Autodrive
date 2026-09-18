@@ -16,6 +16,13 @@ length. The ROS adapter synchronizes legal `/current_map_pose` and `/odom`
 data and uses controller command history; simulator truth and hidden Unity
 state are not runtime inputs.
 
+The MPC corridor has a hard configured inset for predicted states. The measured
+state `x0` is not corridor-gated because it is immutable for the current solve.
+`first_prediction_corridor_margin_m` applies only to `x1`; it defaults to the
+normal `corridor_margin_m` and must be no larger. Any reduction is an explicit
+controller-policy change and must be checked on captured simulator runs before
+use; it does not change the track geometry or simulator behavior.
+
 The old `mpc_compute_optimal_control` implementation is now isolated in a
 `BUILD_TESTING`-only compatibility library. It is linked only by its historical
 regression test/benchmark, is not linked into `mpc_core` or the ROS component,

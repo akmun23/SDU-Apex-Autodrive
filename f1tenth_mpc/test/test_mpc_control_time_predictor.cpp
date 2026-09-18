@@ -205,6 +205,9 @@ void test_history_order_wrap_and_future_causality()
     CHECK(with_future.previous_target_speed_rate_mps2 ==
         without_future.previous_target_speed_rate_mps2);
     CHECK(with_future.command_changes_used == 0);
+    CHECK(with_future.command_event_stamp_count == 1);
+    CHECK(with_future.command_event_stamps_ns[0] ==
+        kSourceStampNs - 100000000LL);
 }
 
 void test_model_prediction_and_zero_history_fallback()
@@ -218,6 +221,11 @@ void test_model_prediction_and_zero_history_fallback()
         MpcControlTimeMode::kAcceptedModelCommandHistory, make_source(),
         kSourceStampNs + 50000000LL, history, trajectory, lap_length);
     CHECK(command_change.command_changes_used == 1);
+    CHECK(command_change.command_event_stamp_count == 2);
+    CHECK(command_change.command_event_stamps_ns[0] ==
+        kSourceStampNs - 100000000LL);
+    CHECK(command_change.command_event_stamps_ns[1] ==
+        kSourceStampNs + 25000000LL);
     CHECK(command_change.state.u > 2.0);
     CHECK(command_change.progress_m > command_change.projection.s - 1.0e-6);
 

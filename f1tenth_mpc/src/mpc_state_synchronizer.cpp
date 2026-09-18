@@ -129,6 +129,8 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
         kNsToSeconds;
 
     state->source_stamp_ns = fused_stamp_ns;
+    state->odom_source_stamp_ns = latest.stamp_ns;
+    state->map_pose_source_stamp_ns = map_pose_.stamp_ns;
     state->map_x = map_pose_.x + c_map * relative_x - s_map * relative_y;
     state->map_y = map_pose_.y + s_map * relative_x + c_map * relative_y;
     state->map_yaw = wrap_angle(map_pose_.yaw +

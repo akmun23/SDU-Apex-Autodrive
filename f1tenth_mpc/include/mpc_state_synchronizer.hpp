@@ -26,6 +26,8 @@ struct MpcMapPoseAnchor {
 
 struct MpcSynchronizedState {
     int64_t source_stamp_ns{};
+    int64_t odom_source_stamp_ns{};
+    int64_t map_pose_source_stamp_ns{};
     double map_x{};
     double map_y{};
     double map_yaw{};

@@ -75,6 +75,10 @@ static void test_se2_anchor_catchup_and_interpolation()
                "synchronized state carries newest legal odometry velocity");
     check_near(state.source_age_s, 0.05, 1.0e-12,
                "state age is measured from source time to command time");
+    check(state.odom_source_stamp_ns == 1100000000LL,
+          "retain the odometry source timestamp used for synchronization");
+    check(state.map_pose_source_stamp_ns == 1050000000LL,
+          "retain the independent map-pose source timestamp");
     check_near(state.pose_odom_skew_s, 0.05, 1.0e-12,
                "pose-to-odometry skew is reported separately");
 }

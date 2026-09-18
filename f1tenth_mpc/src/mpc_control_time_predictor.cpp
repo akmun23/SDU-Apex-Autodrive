@@ -195,6 +195,17 @@ MpcControlTimeStatus predict_to_control_time(
     result.state = source_state;
     result.age_s = age_s;
     result.state.source_age_s = age_s;
+    const auto record_command_event = [&result](
+        const MpcCommandHistoryEntry &entry) {
+        if (entry.stamp_ns <= 0 ||
+            result.command_event_stamp_count >=
+                result.command_event_stamps_ns.size()) return;
+        if (result.command_event_stamp_count > 0 &&
+            result.command_event_stamps_ns[
+                result.command_event_stamp_count - 1] == entry.stamp_ns) return;
+        result.command_event_stamps_ns[
+            result.command_event_stamp_count++] = entry.stamp_ns;
+    };
     MpcCommandHistoryEntry command_at_target{};
     if (command_history.latest_at_or_before(target_stamp_ns,
             &command_at_target)) {
@@ -249,6 +260,7 @@ MpcControlTimeStatus predict_to_control_time(
             result.target_speed_mps = command_at_target.target_speed_mps;
             result.steering_command_rad =
                 command_at_target.steering_command_rad;
+            record_command_event(command_at_target);
         } else {
             result.target_speed_mps = std::clamp(source_state.u, 0.0,
                 config.maximum_command_speed_mps);
@@ -280,6 +292,7 @@ MpcControlTimeStatus predict_to_control_time(
         MpcCommandHistoryEntry active_command{};
         if (command_history.latest_at_or_before(source_state.source_stamp_ns,
                 &active_command)) {
+            record_command_event(active_command);
             plant.target_speed = static_cast<float>(active_command.target_speed_mps);
             plant.steering_command =
                 static_cast<float>(active_command.steering_command_rad);
@@ -305,6 +318,7 @@ MpcControlTimeStatus predict_to_control_time(
                 return MpcControlTimeStatus::kInvalidModelStep;
             cursor_ns = segment_end_ns;
             if (has_next) {
+                record_command_event(next_command);
                 plant.target_speed = static_cast<float>(std::clamp(
                     next_command.target_speed_mps, 0.0,
                     config.maximum_command_speed_mps));

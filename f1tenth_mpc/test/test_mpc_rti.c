@@ -42,6 +42,7 @@ static MpcRtiConfiguration_t test_configuration(void)
         .max_target_speed_rate_increase_mps2 = 3.0f,
         .max_target_speed_rate_reduction_mps2 = 8.0f,
         .corridor_margin_m = 0.05f,
+        .first_prediction_corridor_margin_m = 0.05f,
         .corridor_preview_halfwidth_m = 0.0f,
         .nonlinear_corridor_tolerance_m = 0.0f,
     };
@@ -406,6 +407,23 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     check_true(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
         cold_references, horizon, 0.025f, &config, &problem),
         "two-pass nominal builds a complete 9-state LTV QP");
+    MpcRtiConfiguration_t first_step_relaxed = config;
+    first_step_relaxed.first_prediction_corridor_margin_m = 0.0f;
+    MpcRtiProblem_t first_step_relaxed_problem;
+    check_true(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
+        cold_references, horizon, 0.025f, &first_step_relaxed,
+        &first_step_relaxed_problem),
+        "first-prediction corridor envelope can be evaluated independently");
+    check_close(first_step_relaxed_problem.steps[1].x_lb[MPC_RTI_IDX_EY],
+        -cold_references[1].right_bound, 1.0e-7f,
+        "first predicted state uses its configured corridor margin");
+    check_close(first_step_relaxed_problem.steps[1].x_ub[MPC_RTI_IDX_EY],
+        cold_references[1].left_bound, 1.0e-7f,
+        "first predicted upper bound uses its configured corridor margin");
+    check_close(first_step_relaxed_problem.steps[2].x_lb[MPC_RTI_IDX_EY],
+        config.corridor_margin_m - cold_references[2].right_bound,
+        1.0e-7f,
+        "normal hard corridor margin remains active after the first prediction");
     RiccatiAdmmConfig_t solver_config = {
         .rho = 7.0f, .rho_u = 7.0f, .tolerance = 1.0e-4f,
         .max_iterations = 500, .adaptive_rho = 0, .shared_rho = 0};
@@ -453,12 +471,28 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     MpcRtiState_t outside = current;
     outside.plant.e_y = 0.60f;
     MpcRtiState_t rejected_states[PREDICTION_HORIZON + 1];
-    int failure_stage = 0;
+    int failure_stage = -2;
     check_true(mpc_rti_rollout_candidate(&outside, 0.0, nominal.controls,
         trajectory, trajectory_count, lap_length, NULL, NULL, NULL, horizon,
         0.025f, &config, rejected_states, NULL, &failure_stage) ==
             MPC_RTI_ROLLOUT_CORRIDOR,
-        "nonlinear candidate outside hard corridor is rejected");
+        "predicted state outside hard corridor is rejected");
+    check_true(failure_stage >= 0,
+        "measured x0 is not mistaken for a controllable predicted corridor state");
+
+    MpcRtiState_t near_edge = current;
+    near_edge.plant.e_y = 0.56f;
+    MpcModelControl_t zero_control[PREDICTION_HORIZON] = {{0}};
+    check_true(mpc_rti_rollout_candidate(&near_edge, 0.0, zero_control,
+        trajectory, trajectory_count, lap_length, NULL, NULL, NULL, 1,
+        0.025f, &config, rejected_states, NULL, &failure_stage) ==
+            MPC_RTI_ROLLOUT_CORRIDOR,
+        "default inset rejects a first prediction closer than its margin");
+    check_true(mpc_rti_rollout_candidate(&near_edge, 0.0, zero_control,
+        trajectory, trajectory_count, lap_length, NULL, NULL, NULL, 1,
+        0.025f, &first_step_relaxed, rejected_states, NULL, &failure_stage) ==
+            MPC_RTI_ROLLOUT_OK,
+        "diagnostic first-step margin permits safe raw-bound clearance only at x1");
 
     MpcRtiCycleConfiguration_t cycle_config = {
         .model = config,
@@ -487,6 +521,88 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
         check_close(cycle_result.published_target_speed,
                     first_command_step.next.target_speed, 1.0e-7f,
                     "published target speed is exactly the model's first-stage command");
+        check_true(cycle_result.rti_iterations_used == 1 &&
+                   !cycle_result.rti2_triggered &&
+                   cycle_result.selected_candidate == 1,
+                   "R1 mode remains a single-pass baseline by default");
+
+        MpcRtiCycleConfiguration_t forced_r2_config = cycle_config;
+        forced_r2_config.refinement_mode = MPC_RTI_REFINEMENT_R2;
+        MpcRtiMemory_t forced_r2_memory = {0};
+        MpcRtiCycleResult_t forced_r2_result;
+        const MpcRtiCycleStatus_t forced_r2_status = mpc_rti_solve_cycle(
+            &current, 0.0, trajectory, trajectory_count, lap_length, 0.025f,
+            horizon, &forced_r2_config, &forced_r2_memory,
+            &forced_r2_result);
+        if (forced_r2_status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+            forced_r2_status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            fprintf(stderr,
+                "R2 debug: cycle=%d R1=%d R2=%d passes=%d iter=%d "
+                "primal=%g dual=%g failure_stage=%d\n",
+                forced_r2_status, forced_r2_result.r1_status,
+                forced_r2_result.r2_status,
+                forced_r2_result.rti_iterations_used,
+                forced_r2_result.r2_solver_iterations,
+                forced_r2_result.primal_residual,
+                forced_r2_result.dual_residual,
+                forced_r2_result.nonlinear_failure_stage);
+        }
+        check_true(forced_r2_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                   forced_r2_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED,
+                   "forced R2 cycle retains a valid feasible output");
+        if (forced_r2_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+            forced_r2_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            check_true(forced_r2_result.rti_iterations_used == 2 &&
+                       forced_r2_result.rti2_triggered &&
+                       (forced_r2_result.r2_status ==
+                            MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                        forced_r2_result.r2_status ==
+                            MPC_RTI_CYCLE_ACCEPTED_DEGRADED),
+                       "forced R2 executes a second accepted pass in the same cycle");
+            check_true(forced_r2_result.rti2_trigger_reason_mask ==
+                           (1u << 31),
+                       "forced R2 is distinguishable from adaptive trigger reasons");
+            check_true(forced_r2_result.selected_candidate == 1 ||
+                       forced_r2_result.selected_candidate == 2,
+                       "R1/R2 selector reports exactly one feasible candidate");
+            check_close((float)forced_r2_memory.nominal.progress[0], 0.0f,
+                        1.0e-8f,
+                        "same-sample R2 does not shift the cycle start progress");
+            check_close(forced_r2_result.published_steering_command,
+                forced_r2_memory.nominal.states[1].plant.steering_command,
+                1.0e-7f,
+                "published command matches the selected R1/R2 nominal");
+        }
+
+        MpcRtiCycleConfiguration_t adaptive_config = cycle_config;
+        adaptive_config.refinement_mode = MPC_RTI_REFINEMENT_ADAPTIVE;
+        adaptive_config.rti2_progress_error_trigger_m = 1.0e6f;
+        adaptive_config.rti2_curvature_error_trigger_per_m = 1.0e6f;
+        adaptive_config.rti2_bound_error_trigger_m = 1.0e6f;
+        adaptive_config.rti2_min_corridor_slack_trigger_m = 0.0f;
+        adaptive_config.rti2_steering_rate_correction_trigger_radps = 1.0e6f;
+        adaptive_config.rti2_target_speed_rate_correction_trigger_mps2 = 1.0e6f;
+        adaptive_config.rti2_residual_imbalance_trigger = 1.0e6f;
+        adaptive_config.rti2_lateral_load_trigger_mps2 = 0.0f;
+        adaptive_config.rti2_nonsmooth_columns_trigger = 1000000;
+        MpcRtiMemory_t adaptive_memory = {0};
+        MpcRtiCycleResult_t adaptive_result;
+        const MpcRtiCycleStatus_t adaptive_status = mpc_rti_solve_cycle(
+            &current, 0.0, trajectory, trajectory_count, lap_length,
+            0.025f, horizon, &adaptive_config, &adaptive_memory,
+            &adaptive_result);
+        check_true(adaptive_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                   adaptive_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED,
+                   "adaptive RTI cycle returns a feasible output");
+        if (adaptive_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+            adaptive_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            check_true(adaptive_result.rti_iterations_used == 2 &&
+                       adaptive_result.rti2_triggered,
+                       "adaptive mode runs R2 when a configured trigger fires");
+            check_true((adaptive_result.rti2_trigger_reason_mask &
+                           MPC_RTI2_TRIGGER_LATERAL_LOAD) != 0,
+                       "adaptive trigger telemetry identifies lateral load");
+        }
     }
     mpc_rti_memory_reset(&memory);
     check_true(!memory.nominal.valid && !memory.solver_state.initialized,

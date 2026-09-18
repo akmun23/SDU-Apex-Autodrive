@@ -173,6 +173,7 @@ int main(int argc, char **argv)
         .max_target_speed_rate_increase_mps2 = 3.0f,
         .max_target_speed_rate_reduction_mps2 = 8.0f,
         .corridor_margin_m = 0.05f,
+        .first_prediction_corridor_margin_m = 0.05f,
         .corridor_preview_halfwidth_m = 0.10f,
         .nonlinear_corridor_tolerance_m = 0.001f,
         .use_fd_jacobian_oracle = use_fd_jacobian};

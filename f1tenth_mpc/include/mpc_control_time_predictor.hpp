@@ -69,6 +69,9 @@ struct MpcControlTimePrediction {
     double previous_steering_rate_radps{};
     double previous_target_speed_rate_mps2{};
     std::size_t command_changes_used{};
+    std::array<int64_t, kMpcCommandHistoryCapacity + 1>
+        command_event_stamps_ns{};
+    std::size_t command_event_stamp_count{};
     bool used_command_fallback{};
     bool used_time_fallback{};
 };

@@ -65,6 +65,8 @@ typedef struct
     float max_target_speed_rate_increase_mps2;
     float max_target_speed_rate_reduction_mps2;
     float corridor_margin_m;
+    /* Optional first predicted sample margin; default equals corridor_margin_m. */
+    float first_prediction_corridor_margin_m;
     float corridor_preview_halfwidth_m;
     float nonlinear_corridor_tolerance_m;
     /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */
@@ -130,7 +132,8 @@ enum
     MPC_RTI2_TRIGGER_DEGRADED_SOLVE = 1u << 7,
     MPC_RTI2_TRIGGER_RESIDUAL_IMBALANCE = 1u << 8,
     MPC_RTI2_TRIGGER_STEERING_REVERSAL = 1u << 9,
-    MPC_RTI2_TRIGGER_LATERAL_LOAD = 1u << 10
+    MPC_RTI2_TRIGGER_LATERAL_LOAD = 1u << 10,
+    MPC_RTI2_TRIGGER_R1_CORRIDOR_REPAIR = 1u << 11
 };
 
 typedef struct
@@ -191,6 +194,11 @@ typedef struct
     int rti2_budget_skipped;
     int r1_status;
     int r2_status;
+    int nonlinear_failure_reason;
+    int r1_nonlinear_failure_reason;
+    int r2_nonlinear_failure_reason;
+    int r1_nonlinear_failure_stage;
+    int r2_nonlinear_failure_stage;
     float r1_nonlinear_objective;
     float r2_nonlinear_objective;
     float r1_min_corridor_slack;
@@ -216,6 +224,8 @@ typedef struct
     float max_candidate_right_bound_error_m;
     float minimum_predicted_corridor_slack_m;
     float lateral_accel_proxy_mps2;
+    int lateral_accel_proxy_stage;
+    float lateral_accel_proxy_by_stage_mps2[PREDICTION_HORIZON + 1];
 } MpcRtiCycleResult_t;
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */

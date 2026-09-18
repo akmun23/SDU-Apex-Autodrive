@@ -1,0 +1,16 @@
+{
+  "accepted": 11742,
+  "accepted_status_count": 11742,
+  "cycles": 13036,
+  "input_trace": "sdu_apex_autodrive/artifacts/mpc_next_685ccca/11_shadow/pp_mpc_shadow_icra_20260918/controller_trace.csv",
+  "malformed_diagnostic_events": 0,
+  "meets_95pct_classification_gate": true,
+  "rejected": 1294,
+  "rejection_categories": {
+    "missing_synchronized_state": 6,
+    "solver_residual": 1288
+  },
+  "rejection_classification_coverage_pct": 100.0,
+  "trajectory_path": "f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv",
+  "trajectory_sha256": "16553b479a9ec358422eeb89b5029ba68fde46bc0328be3b34822b41aca74057"
+}

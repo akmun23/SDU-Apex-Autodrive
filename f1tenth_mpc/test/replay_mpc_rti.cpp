@@ -72,6 +72,10 @@ struct ReplayMetrics {
     std::size_t residual_limit_rejections{};
     std::size_t degraded_streak_rejections{};
     std::size_t quadratic_factorizations{};
+    std::size_t rti2_triggers{};
+    std::size_t rti2_selected{};
+    std::size_t rti2_fallbacks{};
+    std::size_t rti2_reason_counts[11]{};
 };
 
 void fail(const std::string &message)
@@ -166,10 +170,14 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
                                                 bool use_prefactorization,
                                                 bool use_scaling,
                                                 bool adaptive_rho,
+                                                MpcRtiRefinementMode_t refinement_mode,
                                                 float rho,
                                                 float rho_u,
                                                 float degraded_residual_limit,
-                                                int max_degraded_solves)
+                                                int max_degraded_solves,
+                                                float corridor_margin_m,
+                                                float first_prediction_corridor_margin_m,
+                                                float corridor_preview_halfwidth_m)
 {
     MpcRtiConfiguration_t model{};
     model.weight_e_y = 1500.0f;
@@ -189,8 +197,10 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     model.max_steering_rate_radps = SOURCE_STEERING_RATE_RADPS;
     model.max_target_speed_rate_increase_mps2 = 3.0f;
     model.max_target_speed_rate_reduction_mps2 = 8.0f;
-    model.corridor_margin_m = 0.05f;
-    model.corridor_preview_halfwidth_m = 0.10f;
+    model.corridor_margin_m = corridor_margin_m;
+    model.first_prediction_corridor_margin_m =
+        first_prediction_corridor_margin_m;
+    model.corridor_preview_halfwidth_m = corridor_preview_halfwidth_m;
     model.nonlinear_corridor_tolerance_m = 0.001f;
     model.use_fd_jacobian_oracle = use_fd_jacobian ? 1 : 0;
 
@@ -213,6 +223,16 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
         std::copy(input_scale, input_scale + MPC_RTI_NU,
                   configuration.solver.input_scale);
     }
+    configuration.refinement_mode = refinement_mode;
+    configuration.rti2_progress_error_trigger_m = 0.10f;
+    configuration.rti2_curvature_error_trigger_per_m = 0.02f;
+    configuration.rti2_bound_error_trigger_m = 0.05f;
+    configuration.rti2_min_corridor_slack_trigger_m = 0.25f;
+    configuration.rti2_steering_rate_correction_trigger_radps = 0.50f;
+    configuration.rti2_target_speed_rate_correction_trigger_mps2 = 1.0f;
+    configuration.rti2_residual_imbalance_trigger = 8.0f;
+    configuration.rti2_lateral_load_trigger_mps2 = 3.0f;
+    configuration.rti2_nonsmooth_columns_trigger = 50;
     configuration.degraded_residual_limit = degraded_residual_limit;
     configuration.maximum_regularization = 1.0e-2f;
     configuration.max_consecutive_degraded_solves = max_degraded_solves;
@@ -227,9 +247,13 @@ bool replay_events(const std::string &events_path, int max_iterations,
                    float tolerance, bool use_fd_jacobian,
                    bool use_prefactorization,
                    bool use_scaling, bool adaptive_rho,
+                   MpcRtiRefinementMode_t refinement_mode,
                    float rho, float rho_u,
                    float degraded_residual_limit,
                    int max_degraded_solves,
+                   float corridor_margin_m,
+                   float first_prediction_corridor_margin_m,
+                   float corridor_preview_halfwidth_m,
                    bool diagnostic_relaxed_residual_gate,
                    const std::string &actions_path,
                    const std::string &trajectory_path,
@@ -245,7 +269,35 @@ bool replay_events(const std::string &events_path, int max_iterations,
             fail("cannot open action output: " + actions_path);
         action_output << "event_index,source_stamp_ns,status,steering_rate_radps,"
                          "target_speed_rate_mps2,steering_command_rad,"
-                         "target_speed_mps,iterations,primal_residual,dual_residual\n";
+                         "target_speed_mps,iterations,primal_residual,dual_residual,"
+                         "rti_iterations_used,rti2_triggered,rti2_trigger_reason_mask,"
+                         "rti2_budget_skipped,"
+                         "r1_status,r2_status,r1_objective,r2_objective,"
+                         "r1_slack_m,r2_slack_m,selected_candidate,r1_iterations,"
+                         "r2_iterations,r1_steering_rate_radps,"
+                         "r1_target_speed_rate_mps2,r1_next_progress_m,"
+                         "r1_next_e_y_m,r1_next_raw_bound_clearance_m,"
+                         "r1_next_first_step_clearance_m,"
+                         "r2_steering_rate_radps,r2_target_speed_rate_mps2,"
+                         "r2_next_progress_m,r2_next_e_y_m,"
+                         "r2_next_raw_bound_clearance_m,"
+                         "r2_next_first_step_clearance_m,"
+                         "r1_solve_us,r2_solve_us,total_rti_us,"
+                         "rho_start,rho_final,rho_u_start,rho_u_final,"
+                         "rho_change_count,factorization_count,"
+                         "progress_m,e_y_m,e_psi_rad,u_mps,v_mps,r_radps,"
+                         "target_speed_state_mps,steering_state_rad,state_age_s,"
+                         "path_curvature_per_m,raw_left_bound_m,"
+                         "raw_right_bound_m,current_raw_bound_clearance_m,"
+                         "current_inset_corridor_clearance_m,"
+                         "first_prediction_corridor_margin_m,"
+                         "lateral_accel_proxy_mps2,"
+                         "minimum_predicted_corridor_slack_m,"
+                         "candidate_progress_error_max_m,"
+                         "candidate_curvature_error_max_per_m,"
+                         "candidate_left_bound_error_max_m,"
+                         "candidate_right_bound_error_max_m,"
+                         "nonlinear_failure_stage,nonlinear_failure_reason\n";
         action_output << std::setprecision(10);
     }
     std::ofstream trajectory_output;
@@ -270,8 +322,11 @@ bool replay_events(const std::string &events_path, int max_iterations,
     const MpcRtiCycleConfiguration_t configuration =
         replay_configuration(max_iterations, tolerance, use_fd_jacobian,
                              use_prefactorization, use_scaling, adaptive_rho,
+                             refinement_mode,
                              rho, rho_u, degraded_residual_limit,
-                             max_degraded_solves);
+                             max_degraded_solves, corridor_margin_m,
+                             first_prediction_corridor_margin_m,
+                             corridor_preview_halfwidth_m);
     MpcRtiMemory_t memory{};
     mpc_rti_memory_reset(&memory);
     ReplayMetrics metrics;
@@ -446,6 +501,15 @@ bool replay_events(const std::string &events_path, int max_iterations,
             std::max(0, solver_debug.quadratic_factorization_count));
         metrics.final_rho.push_back(solver_debug.rho);
         metrics.final_rho_u.push_back(solver_debug.rho_u);
+        if (result.rti2_triggered) ++metrics.rti2_triggers;
+        if (result.selected_candidate == 2) ++metrics.rti2_selected;
+        if (result.rti2_triggered && result.selected_candidate == 1 &&
+            result.r2_status >= MPC_RTI_CYCLE_REJECTED_INPUT)
+            ++metrics.rti2_fallbacks;
+        for (unsigned int bit = 0; bit < 11; ++bit) {
+            if ((result.rti2_trigger_reason_mask & (1u << bit)) != 0u)
+                ++metrics.rti2_reason_counts[bit];
+        }
         const bool original_residual_reject =
             std::max(result.primal_residual, result.dual_residual) > 0.05f ||
             degraded_streak_before + 1 > 3;
@@ -462,6 +526,61 @@ bool replay_events(const std::string &events_path, int max_iterations,
         const double solve_ms = std::chrono::duration<double, std::milli>(
             finish - start).count();
         if (action_output.good()) {
+            MpcTrajectorySample_t current_sample{};
+            const bool current_sample_valid = mpc_trajectory_sample(
+                trajectory.data(), trajectory.size(), lap_length, progress,
+                &current_sample) != 0;
+            const auto pass_has_action = [](int pass_status) {
+                return pass_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                    pass_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED ||
+                    pass_status == MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+            };
+            double r1_next_progress = NAN;
+            double r1_next_e_y = NAN;
+            double r1_next_raw_clearance = NAN;
+            double r2_next_progress = NAN;
+            double r2_next_e_y = NAN;
+            double r2_next_raw_clearance = NAN;
+            if (current_sample_valid && pass_has_action(result.r1_status)) {
+                const MpcStageResult_t step = mpc_vehicle_model_step(
+                    &state.plant, &result.r1_first_action, 0.025f,
+                    static_cast<float>(current_sample.curvature));
+                if (step.valid) {
+                    r1_next_progress = progress + step.delta_s_m;
+                    r1_next_e_y = step.next.e_y;
+                    MpcTrajectorySample_t next_sample{};
+                    if (mpc_trajectory_sample(trajectory.data(),
+                            trajectory.size(), lap_length, r1_next_progress,
+                            &next_sample))
+                        r1_next_raw_clearance = std::min(
+                            next_sample.left_bound - step.next.e_y,
+                            next_sample.right_bound + step.next.e_y);
+                }
+            }
+            if (current_sample_valid && pass_has_action(result.r2_status)) {
+                const MpcStageResult_t step = mpc_vehicle_model_step(
+                    &state.plant, &result.r2_first_action, 0.025f,
+                    static_cast<float>(current_sample.curvature));
+                if (step.valid) {
+                    r2_next_progress = progress + step.delta_s_m;
+                    r2_next_e_y = step.next.e_y;
+                    MpcTrajectorySample_t next_sample{};
+                    if (mpc_trajectory_sample(trajectory.data(),
+                            trajectory.size(), lap_length, r2_next_progress,
+                            &next_sample))
+                        r2_next_raw_clearance = std::min(
+                            next_sample.left_bound - step.next.e_y,
+                            next_sample.right_bound + step.next.e_y);
+                }
+            }
+            const double current_raw_clearance = current_sample_valid
+                ? std::min(current_sample.left_bound - state.plant.e_y,
+                           current_sample.right_bound + state.plant.e_y)
+                : NAN;
+            const double current_inset_clearance = current_sample_valid
+                ? current_raw_clearance -
+                    configuration.model.corridor_margin_m
+                : NAN;
             action_output << fields[0] << ',' << source_stamp_ns << ','
                 << static_cast<int>(status) << ','
                 << result.first_control.steering_rate << ','
@@ -469,7 +588,59 @@ bool replay_events(const std::string &events_path, int max_iterations,
                 << result.published_steering_command << ','
                 << result.published_target_speed << ','
                 << result.solver_iterations << ',' << result.primal_residual
-                << ',' << result.dual_residual << '\n';
+                << ',' << result.dual_residual << ','
+                << result.rti_iterations_used << ','
+                << (result.rti2_triggered ? 1 : 0) << ','
+                << result.rti2_trigger_reason_mask << ','
+                << (result.rti2_budget_skipped ? 1 : 0) << ','
+                << result.r1_status << ',' << result.r2_status << ','
+                << result.r1_nonlinear_objective << ','
+                << result.r2_nonlinear_objective << ','
+                << result.r1_min_corridor_slack << ','
+                << result.r2_min_corridor_slack << ','
+                << (result.selected_candidate == 2 ? "R2" :
+                    result.selected_candidate == 1 ? "R1" : "none") << ','
+                << result.r1_solver_iterations << ','
+                << result.r2_solver_iterations << ','
+                << (pass_has_action(result.r1_status)
+                        ? result.r1_first_action.steering_rate : NAN) << ','
+                << (pass_has_action(result.r1_status)
+                        ? result.r1_first_action.target_speed_rate : NAN) << ','
+                << r1_next_progress << ',' << r1_next_e_y << ','
+                << r1_next_raw_clearance << ','
+                << r1_next_raw_clearance -
+                    configuration.model.first_prediction_corridor_margin_m << ','
+                << (pass_has_action(result.r2_status)
+                        ? result.r2_first_action.steering_rate : NAN) << ','
+                << (pass_has_action(result.r2_status)
+                        ? result.r2_first_action.target_speed_rate : NAN) << ','
+                << r2_next_progress << ',' << r2_next_e_y << ','
+                << r2_next_raw_clearance << ','
+                << r2_next_raw_clearance -
+                    configuration.model.first_prediction_corridor_margin_m << ','
+                << result.r1_solve_us << ',' << result.r2_solve_us << ','
+                << result.total_rti_us << ',' << result.rho_start << ','
+                << result.rho_final << ',' << result.rho_u_start << ','
+                << result.rho_u_final << ',' << result.rho_change_count << ','
+                << result.factorization_count << ',' << progress << ','
+                << state.plant.e_y << ',' << state.plant.e_psi << ','
+                << state.plant.u << ',' << state.plant.v << ','
+                << state.plant.r << ',' << state.plant.target_speed << ','
+                << state.plant.steering_command << ','
+                << synchronized.source_age_s << ','
+                << (current_sample_valid ? current_sample.curvature : NAN) << ','
+                << (current_sample_valid ? current_sample.left_bound : NAN) << ','
+                << (current_sample_valid ? current_sample.right_bound : NAN) << ','
+                << current_raw_clearance << ',' << current_inset_clearance << ','
+                << configuration.model.first_prediction_corridor_margin_m << ','
+                << result.lateral_accel_proxy_mps2 << ','
+                << result.minimum_predicted_corridor_slack_m << ','
+                << result.max_candidate_progress_error_m << ','
+                << result.max_candidate_curvature_error_per_m << ','
+                << result.max_candidate_left_bound_error_m << ','
+                << result.max_candidate_right_bound_error_m << ','
+                << result.nonlinear_failure_stage << ','
+                << result.nonlinear_failure_reason << '\n';
         }
         metrics.solve_ms.push_back(solve_ms);
         ++metrics.solves;
@@ -554,12 +725,17 @@ bool replay_events(const std::string &events_path, int max_iterations,
             if (!mpc_trajectory_sample(trajectory.data(), trajectory.size(),
                     lap_length, memory.nominal.progress[k], &sample))
                 fail("cannot sample trajectory at accepted predicted progress");
-            const double lower = configuration.model.corridor_margin_m -
-                sample.right_bound;
-            const double upper = sample.left_bound -
-                configuration.model.corridor_margin_m;
-            metrics.minimum_clearance_m.push_back(std::min(
-                predicted.plant.e_y - lower, upper - predicted.plant.e_y));
+            /* x0 is measured and not constrained by the QP. Report future
+             * predicted clearance only, consistent with candidate acceptance. */
+            if (k > 0) {
+                const double lower = configuration.model.corridor_margin_m -
+                    sample.right_bound;
+                const double upper = sample.left_bound -
+                    configuration.model.corridor_margin_m;
+                metrics.minimum_clearance_m.push_back(std::min(
+                    predicted.plant.e_y - lower,
+                    upper - predicted.plant.e_y));
+            }
         }
         for (int k = 0; k < PREDICTION_HORIZON; ++k) {
             metrics.maximum_steering_rate = std::max<double>(
@@ -611,7 +787,28 @@ bool replay_events(const std::string &events_path, int max_iterations,
         << metrics.diagnostic_not_reached << '\n'
         << "admm_penalties[rho,rho_u]=" << configuration.solver.rho << ','
         << configuration.solver.rho_u << '\n'
+        << "corridor[margin_m,first_prediction_margin_m,preview_halfwidth_m]="
+        << configuration.model.corridor_margin_m << ','
+        << configuration.model.first_prediction_corridor_margin_m << ','
+        << configuration.model.corridor_preview_halfwidth_m << '\n'
         << "adaptive_rho=" << configuration.solver.adaptive_rho << '\n'
+        << "rti_refinement_mode="
+        << (configuration.refinement_mode == MPC_RTI_REFINEMENT_R2 ? "R2" :
+            configuration.refinement_mode == MPC_RTI_REFINEMENT_ADAPTIVE ?
+                "adaptive" : "R1")
+        << " rti2_triggered=" << metrics.rti2_triggers
+        << " selected_r2=" << metrics.rti2_selected
+        << " r2_fallback_to_r1=" << metrics.rti2_fallbacks
+        << " trigger_rate=" << (metrics.solves > 0
+            ? static_cast<double>(metrics.rti2_triggers) / metrics.solves
+            : 0.0) << '\n'
+        << "rti2_reason_counts[progress,curvature,left_bound,right_bound,"
+           "low_slack,nonsmooth,action_correction,degraded,residual_imbalance,"
+           "steering_reversal,lateral_load]=";
+    for (std::size_t index = 0; index < 11; ++index)
+        std::cout << (index == 0 ? "" : ",")
+                  << metrics.rti2_reason_counts[index];
+    std::cout << '\n'
         << "quadratic_factorizations=" << metrics.quadratic_factorizations
         << " factor_per_solve=" << (metrics.solves > 0
             ? static_cast<double>(metrics.quadratic_factorizations) /
@@ -704,6 +901,10 @@ int main(int argc, char **argv)
                      "[--prefactorized] [--scaled] [--rho VALUE] "
                      "[--rho-u VALUE] [--adaptive-rho] "
                      "[--diagnostic-residual-limit VALUE] "
+                     "[--rti-mode r1|r2|adaptive] "
+                     "[--corridor-margin METERS] "
+                     "[--first-prediction-corridor-margin METERS] "
+                     "[--corridor-preview METERS] "
                      "[--actions OUTPUT_CSV] "
                      "[--trajectory OUTPUT_CSV]\n";
         return 2;
@@ -715,10 +916,14 @@ int main(int argc, char **argv)
     bool use_prefactorization = false;
     bool use_scaling = false;
     bool adaptive_rho = false;
+    MpcRtiRefinementMode_t refinement_mode = MPC_RTI_REFINEMENT_R1;
     bool diagnostic_relaxed_residual_gate = false;
     float rho = 7.0f;
     float rho_u = 7.0f;
     float degraded_residual_limit = 0.05f;
+    float corridor_margin_m = 0.05f;
+    float first_prediction_corridor_margin_m = 0.05f;
+    float corridor_preview_halfwidth_m = 0.10f;
     std::string actions_path;
     std::string trajectory_path;
     for (int index = 2; index < argc; ++index) {
@@ -731,10 +936,27 @@ int main(int argc, char **argv)
             use_scaling = true;
         } else if (option == "--adaptive-rho") {
             adaptive_rho = true;
+        } else if (option == "--rti-mode" && index + 1 < argc) {
+            const std::string mode(argv[++index]);
+            if (mode == "r1") refinement_mode = MPC_RTI_REFINEMENT_R1;
+            else if (mode == "r2") refinement_mode = MPC_RTI_REFINEMENT_R2;
+            else if (mode == "adaptive" || mode == "ra")
+                refinement_mode = MPC_RTI_REFINEMENT_ADAPTIVE;
+            else {
+                std::cerr << "rti mode must be r1, r2, or adaptive\n";
+                return 2;
+            }
         } else if (option == "--diagnostic-residual-limit" &&
                    index + 1 < argc) {
             degraded_residual_limit = std::stof(argv[++index]);
             diagnostic_relaxed_residual_gate = true;
+        } else if (option == "--corridor-margin" && index + 1 < argc) {
+            corridor_margin_m = std::stof(argv[++index]);
+        } else if (option == "--first-prediction-corridor-margin" &&
+                   index + 1 < argc) {
+            first_prediction_corridor_margin_m = std::stof(argv[++index]);
+        } else if (option == "--corridor-preview" && index + 1 < argc) {
+            corridor_preview_halfwidth_m = std::stof(argv[++index]);
         } else if (option == "--rho" && index + 1 < argc) {
             rho = std::stof(argv[++index]);
         } else if (option == "--rho-u" && index + 1 < argc) {
@@ -757,6 +979,16 @@ int main(int argc, char **argv)
         std::cerr << "rho and rho-u must lie in [1, 127]\n";
         return 2;
     }
+    if (!std::isfinite(corridor_margin_m) || corridor_margin_m < 0.0f ||
+        !std::isfinite(first_prediction_corridor_margin_m) ||
+        first_prediction_corridor_margin_m < 0.0f ||
+        first_prediction_corridor_margin_m > corridor_margin_m ||
+        !std::isfinite(corridor_preview_halfwidth_m) ||
+        corridor_preview_halfwidth_m < 0.0f) {
+        std::cerr << "corridor margins and preview must be finite, nonnegative, "
+                     "and first-step margin <= horizon margin\n";
+        return 2;
+    }
     if (!std::isfinite(degraded_residual_limit) ||
         degraded_residual_limit < 0.05f ||
         degraded_residual_limit > 1000.0f) {
@@ -771,7 +1003,10 @@ int main(int argc, char **argv)
         fail("cannot load the accepted raceline CSV");
     return replay_events(argv[1], max_iterations, tolerance,
         use_fd_jacobian, use_prefactorization, use_scaling, adaptive_rho,
+        refinement_mode,
         rho, rho_u, degraded_residual_limit, max_degraded_solves,
+        corridor_margin_m, first_prediction_corridor_margin_m,
+        corridor_preview_halfwidth_m,
         diagnostic_relaxed_residual_gate,
         actions_path, trajectory_path,
         trajectory, lap_length) ? 0 : 1;
