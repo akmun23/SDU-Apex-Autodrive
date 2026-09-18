@@ -45,14 +45,9 @@ sensor_odometry:
     # adds avoidable launch/braking lag; 100 ms preserves burst rejection
     # while responding faster to real motion.
     wheel_speed_window_s: 0.10
-    # The bridge requests at 40 Hz but preserves each Unity source timestamp;
-    # it accepts measured intervals through 250 ms. Normal observer timing is
-    # <=35 ms; larger accepted intervals are marked degraded, not retimed.
+    # This threshold affects diagnostics only. Delayed samples are kept and
+    # integrated using their measured interval.
     normal_packet_dt_max_s: 0.035
-    degraded_packet_dt_max_s: 0.050
-    # Retain encoder displacement across short source gaps. Longer gaps are
-    # rebaselined because an endpoint delta is no longer a safe motion sample.
-    max_integratable_gap_s: 0.250
     decel_detect_ax_mps2: -0.5
     # Repeated encoder dropouts can coincide with genuine hard braking. The
     # calibrated IMU contribution is retained until a fresh wheel packet
@@ -171,7 +166,6 @@ sensor_odometry:
     max_imu_ax_abs_mps2: 30.0
     imu_orientation_correction_gain: 1.0
     max_imu_orientation_step_rad: 0.30
-    max_pending_packets: 8
 
     pose_xy_variance: 0.01
     # A timing gap is handled by the EKF's source-time process term. Do not

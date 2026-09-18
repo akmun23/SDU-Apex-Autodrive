@@ -58,7 +58,6 @@ public:
   SensorOdometryNode()
   : Node("sensor_odometry"),
     observer_(default_observer_config()),
-    packet_assembler_(8),
     tf_broadcaster_(std::make_unique<tf2_ros::TransformBroadcaster>(*this)),
     static_tf_broadcaster_(
       std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this))
@@ -87,7 +86,6 @@ public:
     declare_parameter("imu_z_m", 0.055);
     declare_parameter("imu_orientation_correction_gain", 1.0);
     declare_parameter("max_imu_orientation_step_rad", 0.30);
-    declare_parameter("max_pending_packets", 8);
     declare_parameter("pose_xy_variance", 0.01);
     // An isolated bridge gap is diagnostic evidence, not a permanent loss of
     // localization. Keep its covariance conservative but below the controller
@@ -106,8 +104,6 @@ public:
     declare_parameter("reset_encoder_jump_rad", observer_defaults.reset_encoder_jump_rad);
     declare_parameter("wheel_speed_window_s", observer_defaults.wheel_speed_window_s);
     declare_parameter("normal_packet_dt_max_s", observer_defaults.normal_packet_dt_max_s);
-    declare_parameter("degraded_packet_dt_max_s", observer_defaults.degraded_packet_dt_max_s);
-    declare_parameter("max_integratable_gap_s", observer_defaults.max_integratable_gap_s);
     declare_parameter("decel_detect_ax_mps2", observer_defaults.decel_detect_ax_mps2);
     declare_parameter("decel_ax_scale", observer_defaults.decel_ax_scale);
     declare_parameter("decel_ax_offset_mps2", observer_defaults.decel_ax_offset_mps2);
@@ -207,9 +203,6 @@ public:
       get_parameter("imu_orientation_correction_gain").as_double(), 0.0, 1.0);
     max_imu_orientation_step_rad_ = std::max(
       0.05, get_parameter("max_imu_orientation_step_rad").as_double());
-    max_pending_packets_ = static_cast<std::size_t>(std::clamp<int64_t>(
-      get_parameter("max_pending_packets").as_int(), 2, 32));
-    packet_assembler_.set_max_pending_packets(max_pending_packets_);
     packet_assembler_.set_packet_callback(
       [this](const f1tenth_localization::SensorPacket & packet) {
         process_packet(packet);
@@ -258,7 +251,7 @@ public:
     publish_static_transforms();
     RCLCPP_INFO(
       get_logger(),
-      "Deterministic odometry observer: exact timestamp packets, encoders + IMU only");
+      "Deterministic odometry observer: timestamp-paired encoders + IMU; jitter accepted");
   }
 
 private:
@@ -281,8 +274,6 @@ private:
     config.wheel_speed_window_s = std::max(
       0.0, get_parameter("wheel_speed_window_s").as_double());
     config.normal_packet_dt_max_s = get_parameter("normal_packet_dt_max_s").as_double();
-    config.degraded_packet_dt_max_s = get_parameter("degraded_packet_dt_max_s").as_double();
-    config.max_integratable_gap_s = get_parameter("max_integratable_gap_s").as_double();
     config.decel_detect_ax_mps2 = get_parameter("decel_detect_ax_mps2").as_double();
     config.decel_ax_scale = get_parameter("decel_ax_scale").as_double();
     config.decel_ax_offset_mps2 = get_parameter("decel_ax_offset_mps2").as_double();
@@ -461,22 +452,29 @@ private:
 
   void process_packet(const f1tenth_localization::SensorPacket & packet)
   {
-    if (packet.stamp_ns <= last_processed_stamp_ns_) {
-      return;
+    auto processed_packet = packet;
+    if (processed_packet.stamp_ns <= last_processed_stamp_ns_) {
+      // Source-time reversals are delivered at callback time rather than
+      // discarded. Keep the original sensor values and use a strictly newer
+      // local ROS stamp only to define the next causal integration interval.
+      int64_t receive_stamp_ns = now().nanoseconds();
+      if (receive_stamp_ns <= last_processed_stamp_ns_)
+        receive_stamp_ns = last_processed_stamp_ns_ + 1;
+      processed_packet.stamp_ns = receive_stamp_ns;
     }
-    last_processed_stamp_ns_ = packet.stamp_ns;
+    last_processed_stamp_ns_ = processed_packet.stamp_ns;
 
     f1tenth_localization::OdometryObservation observation;
-    observation.stamp_s = static_cast<double>(packet.stamp_ns) * 1.0e-9;
-    observation.left_angle_rad = packet.left_angle_rad;
-    observation.right_angle_rad = packet.right_angle_rad;
-    observation.ax_mps2 = packet.ax_mps2;
-    observation.ay_mps2 = packet.ay_mps2;
-    observation.yaw_rate_radps = packet.yaw_rate_radps;
-    observation.yaw_rad = continuous_yaw(packet);
+    observation.stamp_s = static_cast<double>(processed_packet.stamp_ns) * 1.0e-9;
+    observation.left_angle_rad = processed_packet.left_angle_rad;
+    observation.right_angle_rad = processed_packet.right_angle_rad;
+    observation.ax_mps2 = processed_packet.ax_mps2;
+    observation.ay_mps2 = processed_packet.ay_mps2;
+    observation.yaw_rate_radps = processed_packet.yaw_rate_radps;
+    observation.yaw_rad = continuous_yaw(processed_packet);
 
     const auto estimate = observer_.update(observation);
-    publish_estimate(estimate, packet.stamp_ns);
+    publish_estimate(estimate, processed_packet.stamp_ns);
   }
 
   void publish_estimate(
@@ -569,7 +567,6 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
 
   std::mutex mutex_;
-  std::size_t max_pending_packets_{8};
   int64_t last_processed_stamp_ns_{0};
 
   bool yaw_initialized_{false};

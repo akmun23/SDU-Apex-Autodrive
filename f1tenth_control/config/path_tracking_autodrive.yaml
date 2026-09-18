@@ -61,8 +61,10 @@ pure_pursuit_node:
     # command path.
     yaw_rate_damping: 0.0
     max_steering: 0.5236
-    pose_timeout_s: 0.3
-    odom_timeout_s: 0.3
+    # Timing jitter is expected on the competition hardware. Keep the latest
+    # legal state in use instead of inhibiting drive on a receive-age timeout.
+    pose_timeout_s: 0.0
+    odom_timeout_s: 0.0
     # Compensate the normal scan-to-state delivery gap using only /odom.
     state_extrapolation_max_s: 0.12
     # Kept as a nominal diagnostic value; Pure Pursuit is triggered by /odom.

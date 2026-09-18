@@ -34,9 +34,7 @@ class SensorPacketAssembler final
 public:
   using PacketCallback = std::function<void(const SensorPacket &)>;
 
-  explicit SensorPacketAssembler(std::size_t max_pending_packets = 8);
-
-  void set_max_pending_packets(std::size_t max_pending_packets);
+  SensorPacketAssembler() = default;
   void set_packet_callback(PacketCallback callback);
 
   void add_encoder_sample(int64_t source_stamp_ns, double angle, bool left);
@@ -48,7 +46,6 @@ public:
   std::uint64_t packet_coherence_fault_count() const noexcept;
 
 private:
-  void discard_incomplete_before(int64_t source_stamp_ns);
   void process_ready_packets();
   void process_packet(const SensorPacket & packet);
 
@@ -56,8 +53,6 @@ private:
   void update_packet(int64_t source_stamp_ns, Update && update);
 
   std::map<int64_t, SensorPacket> pending_;
-  std::size_t max_pending_packets_{8};
-  int64_t newest_source_stamp_ns_{0};
   // Subscription startup can observe one sensor before the other two. Those
   // partial packets are expected until the first complete synchronized
   // packet; faults after that point are real stream-integrity failures.

@@ -207,8 +207,8 @@ void PurePursuitNode::loadParameters() {
     config_.wheelbase = std::max(1e-3, get_parameter("wheelbase").as_double());
     
     pose_topic_ = get_parameter("pose_topic").as_string();
-    pose_timeout_s_ = std::max(0.01, get_parameter("pose_timeout_s").as_double());
-    odom_timeout_s_ = std::max(0.01, get_parameter("odom_timeout_s").as_double());
+    pose_timeout_s_ = std::max(0.0, get_parameter("pose_timeout_s").as_double());
+    odom_timeout_s_ = std::max(0.0, get_parameter("odom_timeout_s").as_double());
     state_extrapolation_max_s_ = std::clamp(
         get_parameter("state_extrapolation_max_s").as_double(), 0.0, 0.5);
     control_rate_hz_ = std::max(1.0, get_parameter("control_rate_hz").as_double());
@@ -456,12 +456,12 @@ rcl_interfaces::msg::SetParametersResult PurePursuitNode::parametersCallback(
         result.reason = "wheelbase must be finite and > 0";
         return result;
     }
-    if (!finite(candidate_pose_timeout) || candidate_pose_timeout <= 0.0) {
-        result.reason = "pose_timeout_s must be finite and > 0";
+    if (!finite(candidate_pose_timeout) || candidate_pose_timeout < 0.0) {
+        result.reason = "pose_timeout_s must be finite and >= 0";
         return result;
     }
-    if (!finite(candidate_odom_timeout) || candidate_odom_timeout <= 0.0) {
-        result.reason = "odom_timeout_s must be finite and > 0";
+    if (!finite(candidate_odom_timeout) || candidate_odom_timeout < 0.0) {
+        result.reason = "odom_timeout_s must be finite and >= 0";
         return result;
     }
     if (!finite(candidate_state_extrapolation) ||
@@ -708,21 +708,17 @@ void PurePursuitNode::controlLoop(const rclcpp::Time & event_stamp) {
     }
 
     const double pose_age = (now() - last_pose_time).seconds();
-    if (pose_age > pose_timeout_s) {
+    if (pose_timeout_s > 0.0 && pose_age > pose_timeout_s) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                             "Pose timeout %.3fs > %.3fs; issuing stop for fail-safe",
+                             "Pose age %.3fs > %.3fs; continuing with latest pose",
                              pose_age, pose_timeout_s);
-        publishDriveCommand(0.0, 0.0);
-        return;
     }
 
     const double odom_age = (now() - last_odom_time).seconds();
-    if (odom_age > odom_timeout_s) {
+    if (odom_timeout_s > 0.0 && odom_age > odom_timeout_s) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                             "Odom timeout %.3fs > %.3fs; issuing stop for fail-safe",
+                             "Odom age %.3fs > %.3fs; continuing with latest odometry",
                              odom_age, odom_timeout_s);
-        publishDriveCommand(0.0, 0.0);
-        return;
     }
 
     VehicleState state;

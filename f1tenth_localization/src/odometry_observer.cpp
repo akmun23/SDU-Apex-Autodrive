@@ -22,8 +22,6 @@ OdometryObserverConfig deployment_observer_config()
   config.reset_encoder_jump_rad = 50.0;
   config.wheel_speed_window_s = 0.10;
   config.normal_packet_dt_max_s = 0.035;
-  config.degraded_packet_dt_max_s = 0.050;
-  config.max_integratable_gap_s = 0.250;
   config.decel_detect_ax_mps2 = -0.5;
   config.decel_ax_scale = 1.005;
   config.decel_ax_offset_mps2 = 0.020;
@@ -297,6 +295,17 @@ OdometryEstimate OdometryObserver::update(
 
   const double dt_s = observation.stamp_s - previous_stamp_s_;
   if (dt_s <= 0.0) {
+    // There is no causal interval to integrate, but the newest sample still
+    // becomes the observer baseline so a source-clock reversal cannot freeze
+    // all future updates.
+    previous_stamp_s_ = observation.stamp_s;
+    previous_left_angle_rad_ = observation.left_angle_rad;
+    previous_right_angle_rad_ = observation.right_angle_rad;
+    previous_yaw_rad_ = observation.yaw_rad;
+    previous_yaw_rate_radps_ = observation.yaw_rate_radps;
+    encoder_history_.clear();
+    encoder_history_.push_back({
+      observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
     auto output = estimate(observation);
     output.dt_s = dt_s;
     output.timing_degraded = true;
@@ -455,38 +464,8 @@ OdometryEstimate OdometryObserver::update(
            config_.wheel_recovery_launch_innovation_mps;
   };
 
-  // A degraded packet is not necessarily a missing-motion packet. The
-  // synchronized encoder endpoints still describe the average displacement
-  // across a short gap. The old early return deleted that displacement and
-  // created a repeatable odometry error on the track. Rebaseline only for a
-  // genuinely long gap; short gaps continue through the normal wheel gate.
-  if (dt_s > config_.degraded_packet_dt_max_s &&
-    dt_s > config_.max_integratable_gap_s)
-  {
-    previous_stamp_s_ = observation.stamp_s;
-    previous_left_angle_rad_ = observation.left_angle_rad;
-    previous_right_angle_rad_ = observation.right_angle_rad;
-    previous_yaw_rad_ = observation.yaw_rad;
-    previous_yaw_rate_radps_ = observation.yaw_rate_radps;
-    encoder_history_.clear();
-    encoder_history_.push_back({
-      observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
-    last_speed_pred_mps_ = speed_mps_;
-    previous_pose_body_u_mps_ = body_u_mps_;
-    previous_pose_body_v_mps_ = body_v_mps_;
-    stationary_time_s_ = 0.0;
-    wheel_dropout_active_ = false;
-    wheel_burst_rejected_ = false;
-    wheel_burst_recovery_pending_ = false;
-    auto output = estimate(observation);
-    output.dt_s = dt_s;
-    output.timing_degraded = true;
-    return output;
-  }
-
   const auto wheel_speed_is_valid = [&](double predicted_speed) {
-    if ((dt_s > config_.normal_packet_dt_max_s &&
-      dt_s > config_.max_integratable_gap_s) || !finite(wheel_mapped)) {
+    if (!finite(wheel_mapped)) {
       return false;
     }
     if (launch_wheel_spin(predicted_speed)) {
@@ -782,11 +761,9 @@ OdometryEstimate OdometryObserver::update(
     }
     speed_pred = std::max(0.0, speed_mps_ + ax_effective * dt_s);
     speed_mps_ = speed_pred;
-    // A source interval above the nominal 35 ms contract is degraded for
-    // diagnostics, but its synchronized encoder endpoints are still useful
-    // while the gap remains inside the integratable horizon.
-    if (dt_s <= config_.max_integratable_gap_s) {
-      const bool wheel_recovery = wheel_dropout_active_ &&
+    // Timing degradation is diagnostic only. Use the paired encoder sample
+    // regardless of the source interval; no packet-age horizon discards it.
+    const bool wheel_recovery = wheel_dropout_active_ &&
         !wheel_burst_rejected_ &&
         !launch_wheel_spin(speed_pred) &&
         wheel_packet >= config_.wheel_freeze_speed_mps &&
@@ -811,23 +788,22 @@ OdometryEstimate OdometryObserver::update(
         config_.wheel_burst_disagreement_mps > 0.0 &&
         std::abs(wheel_packet_mapped - wheel_mapped) <=
         config_.wheel_burst_disagreement_mps)) : wheel_recovery);
-      if (wheel_ok) {
-        if (wheel_recovery) {
-          speed_mps_ = wheel_packet_mapped;
-          wheel_dropout_active_ = false;
-          wheel_burst_recovery_pending_ = false;
-          // Discard the repeated-angle sample from the rolling window. The
-          // recovered current packet is the new causal encoder baseline.
-          encoder_history_.clear();
-          encoder_history_.push_back({
-            observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
-        } else {
-          speed_mps_ = speed_pred < config_.wheel_freeze_speed_mps ? wheel_mapped :
-            (1.0 - config_.wheel_update_beta) * speed_pred +
-            config_.wheel_update_beta * wheel_mapped;
-        }
-        wheel_update_used = true;
+    if (wheel_ok) {
+      if (wheel_recovery) {
+        speed_mps_ = wheel_packet_mapped;
+        wheel_dropout_active_ = false;
+        wheel_burst_recovery_pending_ = false;
+        // Discard the repeated-angle sample from the rolling window. The
+        // recovered current packet is the new causal encoder baseline.
+        encoder_history_.clear();
+        encoder_history_.push_back({
+          observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
+      } else {
+        speed_mps_ = speed_pred < config_.wheel_freeze_speed_mps ? wheel_mapped :
+          (1.0 - config_.wheel_update_beta) * speed_pred +
+          config_.wheel_update_beta * wheel_mapped;
       }
+      wheel_update_used = true;
     }
     body_u_mps_ = speed_mps_;
     body_v_mps_ = 0.0;

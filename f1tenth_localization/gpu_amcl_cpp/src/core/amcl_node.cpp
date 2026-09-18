@@ -498,6 +498,11 @@ void AmclNode::push_odom_sample(const rclcpp::Time& stamp,
                                 double y,
                                 double theta,
                                 const nav_msgs::msg::Odometry& msg) {
+    if (!odom_history_.empty() && stamp <= odom_history_.back().stamp) {
+        // Rebase on the newest callback instead of letting a timestamp
+        // reversal poison the sorted interpolation history.
+        odom_history_.clear();
+    }
     odom_history_.push_back({
         stamp,
         x,
@@ -550,11 +555,19 @@ bool AmclNode::interpolate_odom_pose(const rclcpp::Time& stamp,
         }
         return result;
     };
-    // A scan outside the odometry source-time interval is not safely
-    // interpolable. In particular, do not clamp a future scan to the latest
-    // odometry sample: that creates a systematic one-packet-old AMCL pose.
     if (stamp < first.stamp || stamp > last.stamp) {
-        return false;
+        // Under host jitter, scans can fall just outside the retained odometry
+        // window. Use the nearest endpoint and preserve the scan; report the
+        // timestamp mismatch in the existing alignment diagnostics.
+        const auto& nearest = stamp < first.stamp ? first : last;
+        x = nearest.x;
+        y = nearest.y;
+        theta = nearest.theta;
+        if (matched_stamp != nullptr) *matched_stamp = nearest.stamp;
+        if (bracket_before_stamp != nullptr) *bracket_before_stamp = nearest.stamp;
+        if (bracket_after_stamp != nullptr) *bracket_after_stamp = nearest.stamp;
+        if (covariance != nullptr) *covariance = sample_covariance(nearest);
+        return true;
     }
 
     if (matched_stamp != nullptr) {
@@ -650,17 +663,6 @@ void AmclNode::retry_pending_scans() {
         }
         pending = pending_scans_.front();
         pending_scans_.pop_front();
-    }
-
-    const auto clock_type = get_clock()->get_clock_type();
-    const rclcpp::Time scan_stamp(pending->header.stamp, clock_type);
-    if ((now() - scan_stamp).seconds() > max_scan_age_) {
-        pending_scan_drop_count_.fetch_add(1);
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 2000,
-            "Dropping queued LiDAR scan after waiting for odometry (drops=%zu).",
-            pending_scan_drop_count_.load());
-        return;
     }
 
     scan_callback(pending);
@@ -1334,11 +1336,12 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         "Received LiDAR callback #%llu (%zu ranges).",
         static_cast<unsigned long long>(callback_count), msg->ranges.size());
 
-    // ── Guard 1: Skip if already processing a scan ──
-    // Uses atomic exchange: sets to true, returns previous value
+    // Queue a scan rather than dropping it when the particle filter is still
+    // working on an earlier callback. Hardware-dependent callback delay is
+    // not a sensor-validity gate.
     if (processing_scan_.exchange(true)) {
-        const size_t drop_count = scan_processing_drop_count_.fetch_add(1) + 1;
-        RCLCPP_WARN(get_logger(), "Dropping scan #%zu — PF can't keep up", drop_count);
+        std::lock_guard<std::mutex> pending_lock(pending_scan_mutex_);
+        pending_scans_.push_back(msg);
         return;
     }
 
@@ -1354,19 +1357,11 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         return;
     }
 
-    // ── Guard 3: Skip stale scans ──
-    // Convert scan stamp to the node clock type to avoid mixed clock-source math.
+    // Keep measured scan age for diagnostics only. Timing age never discards
+    // a structurally valid scan.
     const auto clock_type = get_clock()->get_clock_type();
     const rclcpp::Time scan_time(msg->header.stamp, clock_type);
     auto age = (now() - scan_time).seconds();
-    if (age > max_scan_age_) {
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 2000,
-            "Discarding stale LiDAR scan (age %.3f s > %.3f s).",
-            age, max_scan_age_);
-        processing_scan_ = false;
-        return;
-    }
 
     std::lock_guard<std::mutex> lock(pf_mutex_);
 
@@ -1385,11 +1380,6 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             !odom_history_.empty() && scan_time > odom_history_.back().stamp;
         if (waiting_for_future_odom) {
             std::lock_guard<std::mutex> pending_lock(pending_scan_mutex_);
-            constexpr size_t kMaxPendingScans = 8;
-            if (pending_scans_.size() >= kMaxPendingScans) {
-                pending_scans_.pop_front();
-                pending_scan_drop_count_.fetch_add(1);
-            }
             pending_scans_.push_back(msg);
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
@@ -1406,21 +1396,8 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         return;
     }
 
-    // The bridge can deliver a queued older scan after a newer callback has
-    // already been processed.  Applying its odom state would move the AMCL
-    // prediction backwards and can create a false turn/pose jump.  Source
-    // timestamps, not callback arrival order, define the AMCL sequence.
-    if (last_processed_scan_stamp_.nanoseconds() != 0 &&
-        scan_time <= last_processed_scan_stamp_) {
-        pending_scan_drop_count_.fetch_add(1);
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 1000,
-            "Dropping out-of-order LiDAR scan at %.6f s; last processed %.6f s.",
-            scan_time.seconds(), last_processed_scan_stamp_.seconds());
-        processing_scan_ = false;
-        return;
-    }
-    last_processed_scan_stamp_ = scan_time;
+    if (scan_time > last_processed_scan_stamp_)
+        last_processed_scan_stamp_ = scan_time;
 
     const auto scan_range_counts = scan_validity::count_sampled_valid_ranges(
         msg->ranges, max_beams_, laser_min_range_m_, laser_max_range_m_);

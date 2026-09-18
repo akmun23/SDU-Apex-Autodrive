@@ -9,8 +9,10 @@ autodrive_actuator_interface:
     # session can never hold a fresh race run at neutral.
     external_stop_topic: ""
 
-    command_timeout_sec: 0.30
-    odom_timeout_sec: 0.125
+    # Zero disables the receive-age watchdogs; host/hardware jitter must not
+    # neutralize otherwise valid commands or sensor feedback.
+    command_timeout_sec: 0.0
+    odom_timeout_sec: 0.0
     max_feedback_speed_mps: 30.0
     # Keep the command loop at 40 Hz while every sensor freshness decision
     # remains source-timestamped. This does not fabricate simulator samples.

@@ -94,7 +94,8 @@ def test_reference_observer_loads_deployed_parameter_contract() -> None:
     assert observer.lateral_velocity_reference_forward_offset_m == pytest.approx(0.15532)
     assert observer.imu_acceleration_reference_x_m == pytest.approx(0.15532)
     assert observer.turn_speed_bias_constant_mps == pytest.approx(-0.03)
-    assert observer.max_integratable_gap_s == pytest.approx(0.250)
+    assert observer.normal_packet_dt_max_s == pytest.approx(0.035)
+    assert not hasattr(observer, "max_integratable_gap_s")
     assert observer.wheel_update_ax_abs_max_mps2 == pytest.approx(6.5)
     assert not observer.use_yaw_direction_encoder_side
 

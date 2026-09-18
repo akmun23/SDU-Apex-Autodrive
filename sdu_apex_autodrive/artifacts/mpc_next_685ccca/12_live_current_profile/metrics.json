@@ -1,0 +1,84 @@
+{
+  "status": "blocked_not_accepted",
+  "reason": "MPC authority emitted only zero commands; simulator response stream stopped after 490 packets with a 150 ms bridge timeout; live RTI rejection disagrees with offline replay.",
+  "repository": {
+    "sha_at_run": "f668731e7b9e08d2d4fcfe85ca67d2082d866867",
+    "dirty_at_run": true,
+    "trajectory": "f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv",
+    "trajectory_sha256": "16553b479a9ec358422eeb89b5029ba68fde46bc0328be3b34822b41aca74057",
+    "events_sha256": "615c6ca5e8a28589c2b4a23065c024e49141a30ca4c43e6d0d66f94b3f74ca28"
+  },
+  "platform": {
+    "cpu": "AMD Ryzen 9 5900HS with Radeon Graphics",
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "compiler": "GCC 11.4.0",
+    "build_type": "Release",
+    "simulator_image": "autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete",
+    "simulator_image_id": "sha256:80ccb37b90172553ed3b3ca2582bd26acd523eab56ee199e6f8961f5772d2ab57"
+  },
+  "controller": {
+    "authority": true,
+    "shadow": false,
+    "max_speed_mps": 4.0,
+    "startup_speed_mps": 1.5,
+    "startup_ramp_laps": 1.0,
+    "plant_states": 7,
+    "qp_states": 9,
+    "inputs": 2,
+    "horizon_steps": 30,
+    "dt_s": 0.025,
+    "horizon_s": 0.75,
+    "max_solver_iterations": 100,
+    "adaptive_rho": true,
+    "riccati_prefactorization": true,
+    "rti_passes_per_callback": 1
+  },
+  "simulator_stream": {
+    "sequential_unique_packets": 490,
+    "first_sequence": 1,
+    "last_sequence": 490,
+    "duplicate_or_reverse_count": 0,
+    "unique_selected_quantized_imu_pose_tuples": 273,
+    "simulator_source_frame_or_timestamp_available": false,
+    "all_490_responses_received": true,
+    "arrival_interval_ms": {
+      "median": 25.071,
+      "p95": 26.672,
+      "maximum": 96.460
+    },
+    "fatal_fault": "no simulator response within 0.150s",
+    "stream_stopped_after_final_response": true,
+    "sustained_40_hz_gate_passed": false
+  },
+  "live_authority": {
+    "raceline_loaded_points": 2586,
+    "raceline_length_m": 51.72,
+    "cmd_speed_messages": 490,
+    "nonzero_speed_commands": 0,
+    "maximum_command_speed_mps": 0.0,
+    "nonzero_steering_commands": 0,
+    "initial_handoff_rejection": "missing_map_pose",
+    "subsequent_log": "MPC RTI cycle rejected its candidate",
+    "car_start_xy_m": [0.8, 3.1594],
+    "car_end_xy_m": [0.8004, 3.1583],
+    "maximum_xy_deviation_from_start_m_offline_only": 0.0012,
+    "maximum_observed_speed_mps_offline_only": 0.0208,
+    "collision_count_max_offline_only": 0,
+    "motion_or_lap_acceptance": false
+  },
+  "offline_replay_same_trace": {
+    "adaptive_rho": true,
+    "max_iterations": 100,
+    "prefactorized": true,
+    "solves": 484,
+    "accepted": 484,
+    "rejected": 0,
+    "solve_ms": {
+      "p50": 0.475,
+      "p95": 0.518,
+      "p99": 0.716,
+      "max": 1.112
+    },
+    "interpretation": "Does not establish live acceptance; it conflicts with the live node's repeated rejection and requires diagnosis."
+  }
+}

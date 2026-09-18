@@ -28,14 +28,8 @@ struct OdometryObserverConfig
   // packets.  The recorded run comparison showed that 150 ms adds avoidable
   // launch/braking lag; retain only two native samples for the rolling rate.
   double wheel_speed_window_s{0.10};
-  // The bridge requests at 40 Hz but preserves actual source timestamps and
-  // accepts intervals through max_integratable_gap_s. Keep the normal observer
-  // path explicit: intervals above 35 ms are marked degraded, not retimed.
+  // This nominal interval affects diagnostics only; delayed samples are kept.
   double normal_packet_dt_max_s{0.035};
-  double degraded_packet_dt_max_s{0.050};
-  // Short gaps still have valid encoder endpoints and can be integrated as an
-  // average displacement. Longer gaps are rebaselined conservatively.
-  double max_integratable_gap_s{0.250};
   double decel_detect_ax_mps2{-0.5};
   // The repeated-encoder dropout can coincide with genuine hard braking. Use
   // the calibrated IMU deceleration until a fresh wheel packet returns; a

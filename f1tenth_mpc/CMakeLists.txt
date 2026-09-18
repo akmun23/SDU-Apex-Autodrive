@@ -29,12 +29,12 @@ add_library(mpc_core STATIC
   src/vehicle_model.c
   src/mpc_linearization.c
   src/mpc_rti.c
-  src/riccati_solver.c
-  src/mpc.c)
+  src/riccati_solver.c)
 target_include_directories(mpc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(mpc_core PUBLIC m)
+target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(mpc_state_sync STATIC src/mpc_state_synchronizer.cpp)
@@ -70,8 +70,17 @@ rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcController
 include(CTest)
 if(BUILD_TESTING)
   target_compile_definitions(mpc_core PRIVATE
-    MPC_ENABLE_FD_ORACLE
-    MPC_ENABLE_RICCATI_PROFILE)
+    MPC_ENABLE_FD_ORACLE)
+
+  # Compatibility-only implementation of the old 10-state controller. Keep
+  # it available to its regression test, but never link it into the exported
+  # production MPC library or ROS component.
+  add_library(mpc_legacy_compat STATIC src/mpc.c)
+  target_include_directories(mpc_legacy_compat PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(mpc_legacy_compat PUBLIC mpc_core m)
+  set_target_properties(mpc_legacy_compat PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
 
   add_executable(vehicle_model_test test/test_vehicle_model.c)
   target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
@@ -86,7 +95,7 @@ if(BUILD_TESTING)
   add_test(NAME mpc_rti_test COMMAND mpc_rti_test)
 
   add_executable(mpc_core_test test/test_mpc.c)
-  target_link_libraries(mpc_core_test PRIVATE mpc_core m)
+  target_link_libraries(mpc_core_test PRIVATE mpc_legacy_compat mpc_core m)
   add_test(NAME mpc_core_test COMMAND mpc_core_test)
 
   add_executable(riccati_solver_test test/test_riccati_solver.c)
@@ -115,7 +124,7 @@ if(BUILD_TESTING)
   add_test(NAME mpc_replay_metrics_test COMMAND mpc_replay_metrics_test)
 
   add_executable(mpc_core_benchmark test/benchmark_mpc_core.c)
-  target_link_libraries(mpc_core_benchmark PRIVATE mpc_core m)
+  target_link_libraries(mpc_core_benchmark PRIVATE mpc_legacy_compat mpc_core m)
 
   add_executable(mpc_rti_benchmark test/benchmark_mpc_rti.c)
   target_link_libraries(mpc_rti_benchmark PRIVATE mpc_core m)
@@ -145,7 +154,10 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY include/ DESTINATION include)
+# mpc.h exposes the superseded 10-state compatibility API. It stays in the
+# source tree for its opt-in regression test but is intentionally not installed.
+install(DIRECTORY include/ DESTINATION include
+  PATTERN "mpc.h" EXCLUDE)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)

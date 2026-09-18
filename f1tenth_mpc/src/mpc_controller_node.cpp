@@ -348,11 +348,12 @@ private:
     void command_callback(
         const ackermann_msgs::msg::AckermannDriveStamped::SharedPtr message)
     {
-        const int64_t stamp_ns = rclcpp::Time(
+        int64_t stamp_ns = rclcpp::Time(
             message->header.stamp, get_clock()->get_clock_type()).nanoseconds();
+        if (stamp_ns <= 0) stamp_ns = now().nanoseconds();
         const double speed = message->drive.speed;
         const double steering = message->drive.steering_angle;
-        if (stamp_ns <= 0 || !std::isfinite(speed) || speed < 0.0 ||
+        if (!std::isfinite(speed) || speed < 0.0 ||
             speed > max_speed_mps_ || !std::isfinite(steering) ||
             std::abs(steering) > rti_config_.model.max_steering_rad) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -362,16 +363,18 @@ private:
         std::lock_guard<std::mutex> lock(command_history_mutex_);
         if (observed_command_stamp_ns_ > 0) {
             const int64_t delta_ns = stamp_ns - observed_command_stamp_ns_;
-            if (delta_ns <= 0) {
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                    "MPC shadow rejected out-of-order /cmd/speed history");
-                return;
+            if (delta_ns > 0) {
+                const double dt = static_cast<double>(delta_ns) * 1.0e-9;
+                observed_steering_rate_radps_ =
+                    (steering - observed_steering_command_rad_) / dt;
+                observed_target_speed_rate_mps2_ =
+                    (speed - observed_target_speed_mps_) / dt;
+            } else {
+                // Keep the newest delivered command through timestamp
+                // reversals; a derivative is undefined for this pair.
+                observed_steering_rate_radps_ = 0.0;
+                observed_target_speed_rate_mps2_ = 0.0;
             }
-            const double dt = static_cast<double>(delta_ns) * 1.0e-9;
-            observed_steering_rate_radps_ =
-                (steering - observed_steering_command_rad_) / dt;
-            observed_target_speed_rate_mps2_ =
-                (speed - observed_target_speed_mps_) / dt;
         }
         if (!command_history_.push({stamp_ns, steering, speed})) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -449,6 +452,8 @@ private:
             << control_prediction.command_changes_used
             << ",\"command_fallback\":"
             << (control_prediction.used_command_fallback ? "true" : "false")
+            << ",\"time_fallback\":"
+            << (control_prediction.used_time_fallback ? "true" : "false")
             << ",\"source_map_pose\":[" << synchronized.map_x << ','
             << synchronized.map_y << ',' << synchronized.map_yaw
             << "],\"predicted_map_pose\":["
@@ -563,8 +568,8 @@ private:
             !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw)) {
             return;
         }
-        const rclcpp::Time stamp(
-            message->header.stamp, get_clock()->get_clock_type());
+        rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
+        if (stamp.nanoseconds() <= 0) stamp = now();
         std::lock_guard<std::mutex> lock(state_mutex_);
         const auto status = state_synchronizer_.set_map_pose({
             stamp.nanoseconds(), message->pose.pose.position.x,
@@ -584,10 +589,9 @@ private:
         const double odom_yaw = std::atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-        const rclcpp::Time odom_stamp(
+        rclcpp::Time odom_stamp(
             message->header.stamp, get_clock()->get_clock_type());
-        if (odom_stamp.nanoseconds() <= 0 ||
-            !std::isfinite(odom_pose.position.x) ||
+        if (!std::isfinite(odom_pose.position.x) ||
             !std::isfinite(odom_pose.position.y) || !std::isfinite(odom_yaw) ||
             !std::isfinite(message->twist.twist.linear.x) ||
             !std::isfinite(message->twist.twist.linear.y) ||
@@ -595,6 +599,7 @@ private:
             publish_stop("MPC rejected zero-stamped or invalid odometry");
             return;
         }
+        if (odom_stamp.nanoseconds() <= 0) odom_stamp = now();
 
         if (!enabled_ && !shadow_mode_) return;
         if (!trajectory_loaded_) {
@@ -613,20 +618,6 @@ private:
                 message->twist.twist.angular.z});
         }
 
-        if (odom_status == MpcSyncStatus::kTimestampOrderFault ||
-            odom_status == MpcSyncStatus::kSourceGapFault) {
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                state_synchronizer_.reset();
-            }
-            mpc_rti_memory_reset(&rti_memory_);
-            target_speed_initialized_ = false;
-            last_source_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-            publish_stop(odom_status == MpcSyncStatus::kTimestampOrderFault ?
-                "MPC odometry source ordering fault; synchronizer reset" :
-                "MPC odometry source gap fault; synchronizer reset");
-            return;
-        }
         if (odom_status != MpcSyncStatus::kOk) {
             publish_stop("MPC rejected invalid legal odometry sample");
             return;
@@ -643,9 +634,11 @@ private:
         }
         if (sync_status != MpcSyncStatus::kOk) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC source-time handoff rejected state: %s",
+                "MPC waiting for legal state input: %s",
                 MpcStateSynchronizer::status_name(sync_status));
-            publish_stop("MPC coherent control-time state unavailable");
+            // Startup can deliver odometry before AMCL's first pose. Do not
+            // publish a timing/missing-input stop that overwrites the last
+            // usable command; resume as soon as both legal inputs exist.
             return;
         }
 
@@ -746,6 +739,15 @@ private:
             solve_finish - solve_start).count();
         if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
             status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC RTI rejected: %s iterations=%d residual=(%.6g,%.6g) "
+                "regularization=(%.6g,%d) nonsmooth_columns=%d "
+                "nonlinear_failure_stage=%d",
+                cycle_status_name(status), result.solver_iterations,
+                result.primal_residual, result.dual_residual,
+                result.maximum_regularization, result.regularization_count,
+                result.nonsmooth_jacobian_columns,
+                result.nonlinear_failure_stage);
             if (shadow_mode_)
                 publish_shadow_result(state, coherent_state,
                     control_time_prediction, control_prediction_us,

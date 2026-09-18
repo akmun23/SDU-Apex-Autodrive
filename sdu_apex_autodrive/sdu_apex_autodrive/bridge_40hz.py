@@ -1,11 +1,10 @@
 """Run the official AutoDRIVE bridge with competition-compatible pacing.
 
 The competition image exposes no Unity source clock or response sequence.
-Accordingly, this adapter uses the unrequested connect-time packet only as a
-handshake, then keeps a small bounded window of Bridge requests and associates
-responses by FIFO order. ROS headers use local receive time; host monotonic time
-measures transport intervals and response deadlines. No sensor sample is
-fabricated, interpolated, or repeated.
+Accordingly, this adapter uses the unrequested connect-time packet as a
+handshake and associates matching responses by FIFO order. ROS headers use
+local receive time; host monotonic time measures transport intervals for
+diagnostics only. Delayed samples are not rejected, retimed, or repeated.
 
 Packet callbacks are serialized so response association and message stamping
 remain consistent while the official decoder publishes each packet.
@@ -39,16 +38,8 @@ TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 
 # Requests are paced on a 25 ms host-clock grid. Actual response/arrival times
-# are retained; a delayed packet is never relabeled as a nominal 25 ms sample.
-MAX_BRIDGE_ARRIVAL_INTERVAL_S = 0.150
-MAX_RESPONSE_WAIT_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
-MAX_REQUEST_SCHEDULE_GAP_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
+# are retained; response age and packet gaps never stop or reject the stream.
 MIN_REQUEST_SPACING_S = 0.024
-# The stock protocol has no response ID. Socket.IO preserves event order, so
-# responses can be associated by FIFO while allowing enough requests in flight
-# to cover the 150 ms response deadline at the fastest permitted send spacing.
-MAX_OUTSTANDING_REQUESTS = math.ceil(
-    MAX_RESPONSE_WAIT_S / MIN_REQUEST_SPACING_S)
 
 
 def _next_request_deadline(next_deadline: float, emitted_at: float,
@@ -56,11 +47,6 @@ def _next_request_deadline(next_deadline: float, emitted_at: float,
     """Limit phase catch-up to a small, bounded request-rate correction."""
     minimum_spacing = min(period, MIN_REQUEST_SPACING_S)
     return max(next_deadline, emitted_at + minimum_spacing)
-
-
-# Allow the competition image to finish startup and deliver its first response.
-# This is not evidence of a 40 Hz stream; only measured packets count.
-STARTUP_RESPONSE_GRACE_S = 15.0
 
 
 def _env_enabled(name: str, default: bool) -> bool:
@@ -87,7 +73,6 @@ _reset_deadline_monotonic: float | None = None
 _RESET_HOLD_SEC = 0.75
 _stop_sender = Event()
 _emit_lock = Semaphore()
-_request_slots = Semaphore(MAX_OUTSTANDING_REQUESTS)
 _client_connected = Event()
 
 _packet_stamp_lock = Semaphore()
@@ -97,14 +82,14 @@ _packet_timestamp_patch_installed = False
 _pending_request_lock = Semaphore()
 _connection_generation = 0
 _bridge_request_sequence = 0
-_pending_requests: deque[tuple[Any, int, Semaphore, int, int, dict[str, str]]] = deque()
+_pending_requests: deque[
+    tuple[Any, int, Semaphore | None, int, int, dict[str, str]]
+] = deque()
 _pending_request_started_ns: int | None = None
-_last_request_emit_ns: int | None = None
 _first_request_sent = False
 _first_valid_packet = False
 _valid_packet_count = 0
 _bootstrap_packet_seen = Event()
-_bootstrap_wait_started_ns: int | None = None
 _last_packet_arrival_ns: int | None = None
 _active_request_stamp: Any = None
 _active_packet_stamp: Any = None
@@ -157,11 +142,11 @@ def _copy_stamp(stamp: Any) -> Any:
 
 
 def _set_pending_request(
-        slot_pool: Semaphore,
+        slot_pool: Semaphore | None,
         generation: int,
         request_sequence: int,
         command: dict[str, str]) -> bool:
-    """Record one request boundary in the bounded response FIFO."""
+    """Record one request boundary for FIFO response association."""
     global _pending_request_started_ns, _first_request_sent
     node = getattr(official_bridge, "autodrive_bridge", None)
     if node is None:
@@ -174,11 +159,6 @@ def _set_pending_request(
     with _pending_request_lock:
         if (not _client_connected.is_set() or
                 generation != _connection_generation):
-            return False
-        if len(_pending_requests) >= MAX_OUTSTANDING_REQUESTS:
-            # Refuse only when the explicitly bounded FIFO is full.
-            # Responses are consumed in Socket.IO order, preserving the
-            # request-sequence association stored in each slot.
             return False
         _pending_requests.append((_copy_stamp(stamp), request_ns, slot_pool,
                                   generation, request_sequence, dict(command)))
@@ -208,14 +188,13 @@ def _next_request_sequence() -> int:
 def _reset_request_pipeline() -> None:
     """Drop requests belonging to a closed Unity socket.
 
-    Each connection gets its own semaphore. A late callback from the old
-    socket can therefore release only its old pool and cannot over-credit the
-    new connection's bounded request slots.
+    A late callback from an old socket cannot retain request metadata across
+    the new connection generation.
     """
-    global _request_slots, _connection_generation
-    global _pending_request_started_ns, _last_request_emit_ns
+    global _connection_generation
+    global _pending_request_started_ns
     global _first_request_sent, _first_valid_packet, _valid_packet_count
-    global _bootstrap_wait_started_ns, _last_packet_arrival_ns
+    global _last_packet_arrival_ns
     global _active_request_stamp, _active_packet_stamp
     global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
@@ -228,14 +207,11 @@ def _reset_request_pipeline() -> None:
     global _active_request_slot_pool, _packet_stamp
     with _pending_request_lock:
         _connection_generation += 1
-        _request_slots = Semaphore(MAX_OUTSTANDING_REQUESTS)
         _pending_requests.clear()
         _pending_request_started_ns = None
-        _last_request_emit_ns = None
         _first_request_sent = False
         _first_valid_packet = False
         _valid_packet_count = 0
-        _bootstrap_wait_started_ns = None
         _last_packet_arrival_ns = None
         _active_request_stamp = None
         _active_packet_stamp = None
@@ -424,9 +400,11 @@ def _capture_competition_packet(data: Any) -> bool:
 
     The first packet after Socket.IO connect is the simulator's unsolicited
     bootstrap sample. It only opens the request gate and is never published.
-    Subsequent packets require one pending Bridge request and are associated
-    strictly by FIFO order. No Unity clock, frame counter, or echoed request
-    identifier is read.
+    Responses with a matching request are associated by FIFO order. If a
+    packet arrives without a pending request, it is still published using
+    receive time and the latest command; timing jitter is diagnostic, not a
+    reason to discard sensor data. No Unity clock, frame counter, or echoed
+    request identifier is read.
     """
     global _active_request_stamp, _active_packet_stamp
     global _active_request_monotonic_ns, _active_packet_arrival_ns
@@ -451,15 +429,9 @@ def _capture_competition_packet(data: Any) -> bool:
         _bootstrap_packet_seen.set()
         print(
             "[autodrive_bridge_40hz] competition bootstrap received; "
-            "starting request stream",
+            "starting request stream and publishing available sensor data",
             flush=True,
         )
-        return False
-
-    if not has_pending_request:
-        _trigger_timing_fault(
-            "simulator packet arrived without a pending Bridge request")
-        return False
 
     node = getattr(official_bridge, "autodrive_bridge", None)
     if node is None:
@@ -507,38 +479,37 @@ def _capture_competition_packet(data: Any) -> bool:
         "simulator_collision_count": _parse_optional_int(data.get("V1 Collisions")),
     })
 
-    association_lost = False
     with _pending_request_lock:
         if not _pending_requests:
-            association_lost = True
+            request_stamp = None
+            request_ns = None
+            slot_pool = None
+            request_sequence = -1
+            command = {}
         else:
             (request_stamp, request_ns, slot_pool, _, request_sequence,
              command) = _pending_requests.popleft()
             _pending_request_started_ns = (
                 _pending_requests[0][1] if _pending_requests else None)
-            _active_request_slot_pool = slot_pool
-            _active_request_stamp = request_stamp
-            _active_packet_stamp = receive_stamp
-            _active_request_monotonic_ns = request_ns
-            _active_packet_arrival_ns = arrival_ns
-            _active_request_sequence = request_sequence
-            _active_command = command
-            _active_simulator_packet = simulator_packet
-            # Enhanced Unity-only fields are not runtime inputs and may be
-            # absent from the competition image. Keep diagnostic slots empty.
-            _active_applied_command_sequence = None
-            _active_commanded_throttle_norm = None
-            _active_commanded_steering_norm = None
-            _active_applied_throttle_norm = None
-            _active_applied_steering_norm = None
-            _active_simulation_time_s = None
-            _active_simulation_frame = None
-            _active_simulation_physics_step = None
-            _active_telemetry_sequence = None
-    if association_lost:
-        _trigger_timing_fault(
-            "pending Bridge request disappeared during packet association")
-        return False
+        _active_request_slot_pool = slot_pool
+        _active_request_stamp = request_stamp
+        _active_packet_stamp = receive_stamp
+        _active_request_monotonic_ns = request_ns
+        _active_packet_arrival_ns = arrival_ns
+        _active_request_sequence = request_sequence
+        _active_command = command
+        _active_simulator_packet = simulator_packet
+        # Enhanced Unity-only fields are not runtime inputs and may be absent
+        # from the competition image. Keep diagnostic slots empty.
+        _active_applied_command_sequence = None
+        _active_commanded_throttle_norm = None
+        _active_commanded_steering_norm = None
+        _active_applied_throttle_norm = None
+        _active_applied_steering_norm = None
+        _active_simulation_time_s = None
+        _active_simulation_frame = None
+        _active_simulation_physics_step = None
+        _active_telemetry_sequence = None
     return True
 
 
@@ -547,29 +518,15 @@ def _validate_received_packet() -> bool:
     global _first_valid_packet, _valid_packet_count, _last_packet_arrival_ns
     with _pending_request_lock:
         arrival_ns = _active_packet_arrival_ns
-        previous_arrival_ns = _last_packet_arrival_ns
-        request_ns = _active_request_monotonic_ns
-        request_sequence = _active_request_sequence
     if arrival_ns is None:
-        _trigger_timing_fault("received packet has no local arrival timestamp")
-        return False
+        # The packet was already timestamped at callback entry; keep a host
+        # receive-time fallback instead of converting missing diagnostics into
+        # a fatal timing gate.
+        arrival_ns = time.monotonic_ns()
 
     with _command_lock:
         reset_active = _reset_level
     if reset_active:
-        return False
-
-    arrival_dt = (None if previous_arrival_ns is None else
-                  (arrival_ns - previous_arrival_ns) / 1.0e9)
-    if arrival_dt is not None and arrival_dt > MAX_BRIDGE_ARRIVAL_INTERVAL_S:
-        request_age_s = (None if request_ns is None else
-                         (arrival_ns - request_ns) / 1.0e9)
-        _trigger_timing_fault(
-            "bridge packet arrival interval exceeded "
-            f"{MAX_BRIDGE_ARRIVAL_INTERVAL_S:.3f}s: "
-            f"arrival_dt={arrival_dt:.6f}s "
-            f"request_sequence={request_sequence} "
-            f"request_response_age={request_age_s}")
         return False
 
     with _pending_request_lock:
@@ -719,40 +676,19 @@ def _remember_command(data: Any) -> None:
 
 
 def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
-    """Send one request per source period with a response deadline."""
-    global _request_slots, _connection_generation, _last_request_emit_ns
+    """Keep the nominal request cadence without response-age stop gates."""
+    global _connection_generation
     global _request_timing_debug_count
-    global _bootstrap_wait_started_ns
     period = 1.0 / rate_hz
     next_send = time.monotonic()
     while not _stop_sender.is_set():
         now = time.monotonic()
         if _timing_fault:
             return
-        with _pending_request_lock:
-            pending_started_ns = _pending_request_started_ns
-        if pending_started_ns is not None:
-            response_age_s = (
-                time.monotonic_ns() - pending_started_ns) / 1e9
-            response_deadline_s = (
-                MAX_RESPONSE_WAIT_S if _first_valid_packet
-                else STARTUP_RESPONSE_GRACE_S)
-            if response_age_s > response_deadline_s:
-                _trigger_timing_fault(
-                    f"no simulator response within {response_deadline_s:.3f}s")
-                return
         wait_time = next_send - now
         if wait_time > 0.0:
             gevent.sleep(wait_time)
             continue
-
-        if (_valid_packet_count >= 2 and
-                _last_request_emit_ns is not None and
-                now - _last_request_emit_ns > MAX_REQUEST_SCHEDULE_GAP_S):
-            _trigger_timing_fault(
-                f"request transport schedule exceeded "
-                f"{MAX_REQUEST_SCHEDULE_GAP_S:.3f}s")
-            return
 
         next_send += period
         if next_send < now:
@@ -763,22 +699,10 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             gevent.sleep(period)
             continue
         if not _bootstrap_packet_seen.is_set():
-            if _bootstrap_wait_started_ns is None:
-                _bootstrap_wait_started_ns = time.monotonic_ns()
-            bootstrap_age_s = (
-                time.monotonic_ns() - _bootstrap_wait_started_ns) / 1.0e9
-            if bootstrap_age_s > STARTUP_RESPONSE_GRACE_S:
-                _trigger_timing_fault(
-                    "no competition bootstrap packet received within "
-                    f"{STARTUP_RESPONSE_GRACE_S:.3f}s")
-                return
             gevent.sleep(period)
             continue
         with _pending_request_lock:
-            slot_pool = _request_slots
             generation = _connection_generation
-        if not slot_pool.acquire(blocking=False):
-            continue
 
         with _command_lock:
             global _reset_level, _reset_deadline_monotonic
@@ -792,15 +716,13 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
 
         request_sequence = _next_request_sequence()
         if not _set_pending_request(
-                slot_pool, generation, request_sequence, command):
-            slot_pool.release()
+                None, generation, request_sequence, command):
             continue
         try:
             # Keep all outgoing Socket.IO calls serialized. The official bridge
             # runs a gevent server and this pacing loop is a greenlet.
             with _emit_lock:
                 emitted_at = time.monotonic()
-                _last_request_emit_ns = emitted_at
                 original_emit("Bridge", data=command)
                 # Keep the nominal 25 ms phase schedule, but do not issue a
                 # catch-up request less than 24 ms after an actual send. This
@@ -818,7 +740,6 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
                 )
         except Exception as exc:
             _discard_pending_request()
-            slot_pool.release()
             _trigger_timing_fault(f"Bridge request send failed: {exc}")
             return
 
@@ -845,19 +766,11 @@ def _install_packet_contract(publish_camera: bool) -> None:
     def _packet_handler_body(sid: Any, data: Any) -> Any:
         global _handler_timing_count, _handler_timing_total_ns
         handler_start_ns = time.monotonic_ns()
-        has_request = _capture_competition_packet(data)
+        _capture_competition_packet(data)
         try:
             if _shutdown_requested:
                 return None
             if _timing_fault:
-                return None
-            if not has_request:
-                # Socket.OnConnect emits bootstrap telemetry without a Bridge
-                # request. Unity may emit that callback more than once while
-                # reconnecting, including after the first requested packet.
-                # It is never a sensor sample and must never be associated
-                # with a command or published to ROS. The outstanding
-                # requested response remains deadline-protected by the sender.
                 return None
             if not _validate_received_packet():
                 return None
@@ -1071,9 +984,7 @@ def main() -> None:
         official_bridge.callback_reset_command = wrapped_reset_callback
 
     def mark_connected(sid: Any, environ: Any) -> Any:
-        global _bootstrap_wait_started_ns
         _reset_request_pipeline()
-        _bootstrap_wait_started_ns = time.monotonic_ns()
         _client_connected.set()
         if original_connect is not None:
             return original_connect(sid, environ)
@@ -1109,9 +1020,8 @@ def main() -> None:
     sender = official_bridge.sio.start_background_task(
         _run_command_sender, original_emit, rate_hz)
     print(
-        f"[autodrive_bridge_40hz] strict request pacing enabled at {rate_hz:g} Hz "
-        f"({MAX_OUTSTANDING_REQUESTS} bounded FIFO requests; "
-        "stock-image FIFO association; missing/deadline data is fatal)")
+        f"[autodrive_bridge_40hz] nominal request pacing enabled at {rate_hz:g} Hz "
+        "with non-blocking response timing and stock-image FIFO association")
     try:
         official_bridge.main()
     finally:

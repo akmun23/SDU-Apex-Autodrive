@@ -10,7 +10,6 @@ namespace f1tenth_mpc {
 namespace {
 
 constexpr double kNsToSeconds = 1.0e-9;
-constexpr double kAgeToleranceSeconds = 1.0e-9;
 
 double wrap_angle(double angle)
 {
@@ -94,8 +93,12 @@ bool MpcCommandHistory::push(const MpcCommandHistoryEntry &entry)
         return false;
     if (size_ > 0) {
         MpcCommandHistoryEntry newest{};
-        if (!at(size_ - 1, &newest) || entry.stamp_ns <= newest.stamp_ns)
-            return false;
+        if (!at(size_ - 1, &newest)) return false;
+        if (entry.stamp_ns == newest.stamp_ns) {
+            entries_[(oldest_index_ + size_ - 1) % entries_.size()] = entry;
+            return true;
+        }
+        if (entry.stamp_ns < newest.stamp_ns) clear();
     }
 
     if (size_ < entries_.size()) {
@@ -185,13 +188,8 @@ MpcControlTimeStatus predict_to_control_time(
         config.maximum_command_speed_mps <= 0.0 ||
         config.maximum_command_speed_mps > MPC_MAX_COMMAND_SPEED_MPS)
         return MpcControlTimeStatus::kInvalidInput;
-    if (target_stamp_ns < source_state.source_stamp_ns)
-        return MpcControlTimeStatus::kTargetBeforeSource;
-
     const double age_s = static_cast<double>(target_stamp_ns -
         source_state.source_stamp_ns) * kNsToSeconds;
-    if (age_s > config.maximum_state_age_s + kAgeToleranceSeconds)
-        return MpcControlTimeStatus::kStateTooOld;
 
     MpcControlTimePrediction result{};
     result.state = source_state;
@@ -239,6 +237,26 @@ MpcControlTimeStatus predict_to_control_time(
         return MpcControlTimeStatus::kProjectionFailed;
     }
     result.progress_m = result.projection.s;
+
+    if (age_s < 0.0 || age_s > config.maximum_state_age_s) {
+        // Do not turn source/arrival jitter into a command inhibit. For a
+        // state outside the predictor's validated support, retain the newest
+        // legal state without extrapolating it; the measured age remains in
+        // diagnostics and the MPC still receives a usable state.
+        result.used_time_fallback = true;
+        if (command_history.latest_at_or_before(target_stamp_ns,
+                &command_at_target)) {
+            result.target_speed_mps = command_at_target.target_speed_mps;
+            result.steering_command_rad =
+                command_at_target.steering_command_rad;
+        } else {
+            result.target_speed_mps = std::clamp(source_state.u, 0.0,
+                config.maximum_command_speed_mps);
+            result.used_command_fallback = true;
+        }
+        *prediction = result;
+        return MpcControlTimeStatus::kOk;
+    }
 
     if (mode == MpcControlTimeMode::kConstantBodyTwist && age_s > 0.0) {
         const double midpoint_yaw = source_state.map_yaw +

@@ -70,6 +70,7 @@ struct MpcControlTimePrediction {
     double previous_target_speed_rate_mps2{};
     std::size_t command_changes_used{};
     bool used_command_fallback{};
+    bool used_time_fallback{};
 };
 
 MpcControlTimeStatus predict_to_control_time(

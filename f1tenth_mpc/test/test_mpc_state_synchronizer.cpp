@@ -79,7 +79,7 @@ static void test_se2_anchor_catchup_and_interpolation()
                "pose-to-odometry skew is reported separately");
 }
 
-static void test_faults_reset_and_no_future_access()
+static void test_timing_jitter_is_accepted_and_reset_clears_state()
 {
     MpcStateSynchronizer sync;
     sync.push_odometry(odom(1000000000, 0.0, 0.0, 0.0));
@@ -87,11 +87,14 @@ static void test_faults_reset_and_no_future_access()
     sync.set_map_pose({1050000000, 0.0, 0.0, 0.0});
     MpcSynchronizedState state;
 
-    check(sync.synchronize(1040000000, &state) ==
-          MpcSyncStatus::kCommandTimeBeforeState,
-          "never consume odometry newer than command time");
-    check(sync.synchronize(1180000000, &state) == MpcSyncStatus::kStateTooOld,
-          "reject source state beyond configured age support");
+    check(sync.synchronize(1040000000, &state) == MpcSyncStatus::kOk,
+          "accept a command timestamp earlier than the newest received state");
+    check_near(state.source_age_s, -0.01, 1.0e-12,
+               "retain signed timestamp offset as a diagnostic");
+    check(sync.synchronize(1180000000, &state) == MpcSyncStatus::kOk,
+          "accept source state beyond configured age support");
+    check_near(state.source_age_s, 0.13, 1.0e-12,
+               "retain measured source age without a timing rejection");
 
     sync.reset();
     check(sync.synchronize(1100000000, &state) == MpcSyncStatus::kMissingOdom,
@@ -99,19 +102,20 @@ static void test_faults_reset_and_no_future_access()
     sync.push_odometry(odom(2000000000, 0.0, 0.0, 0.0));
     sync.push_odometry(odom(2050000000, 0.0, 0.0, 0.0));
     sync.set_map_pose({2100000000, 0.0, 0.0, 0.0});
-    check(sync.synchronize(2150000000, &state) ==
-          MpcSyncStatus::kMapPoseFutureOfOdom,
-          "reject a map anchor newer than the newest odometry sample");
+    check(sync.synchronize(2150000000, &state) == MpcSyncStatus::kOk,
+          "accept a map anchor newer than the newest odometry sample");
+    check_near(state.map_x, 0.0, 1.0e-12,
+               "future map anchor remains the best available position");
 
     sync.reset();
     sync.push_odometry(odom(3000000000, 0.0, 0.0, 0.0));
     check(sync.push_odometry(odom(2990000000, 0.0, 0.0, 0.0)) ==
-          MpcSyncStatus::kTimestampOrderFault,
-          "timestamp reversal latches an explicit source-order fault");
+          MpcSyncStatus::kOk,
+          "timestamp reversal rebases the window without latching a fault");
     sync.reset();
     check(sync.push_odometry(odom(4000000000, 0.0, 0.0, 0.0)) ==
           MpcSyncStatus::kOk,
-          "explicit reset clears the ordering-fault latch");
+          "synchronizer continues accepting source samples");
 }
 
 static std::vector<std::string> split_csv(const std::string &line)
@@ -235,7 +239,7 @@ static void test_failed_run_replay_uses_only_legal_runtime_topics()
     check(order_faults == 0,
           "recorded odometry and map-pose source order remains monotonic");
     check(source_gap_faults == 0,
-          "recorded source intervals remain within the declared 1-250 ms contract");
+          "recorded source interval jitter never creates a gap rejection");
     check(accepted_count > odom_count * 9 / 10,
           "ordinary delayed states are synchronizable without the old 75 ms gate");
     if (!accepted_ages.empty()) {
@@ -256,7 +260,7 @@ static void test_failed_run_replay_uses_only_legal_runtime_topics()
 int main()
 {
     test_se2_anchor_catchup_and_interpolation();
-    test_faults_reset_and_no_future_access();
+    test_timing_jitter_is_accepted_and_reset_clears_state();
     test_failed_run_replay_uses_only_legal_runtime_topics();
     if (failures != 0) {
         std::cerr << failures << " MPC state synchronizer test(s) failed\n";

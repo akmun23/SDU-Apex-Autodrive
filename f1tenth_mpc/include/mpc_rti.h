@@ -111,10 +111,42 @@ typedef struct
     float right_bound_error_m[PREDICTION_HORIZON + 1];
 } MpcRtiCandidatePathDelta_t;
 
+typedef enum
+{
+    MPC_RTI_REFINEMENT_R1 = 0,
+    MPC_RTI_REFINEMENT_R2 = 1,
+    MPC_RTI_REFINEMENT_ADAPTIVE = 2
+} MpcRtiRefinementMode_t;
+
+enum
+{
+    MPC_RTI2_TRIGGER_PROGRESS = 1u << 0,
+    MPC_RTI2_TRIGGER_CURVATURE = 1u << 1,
+    MPC_RTI2_TRIGGER_LEFT_BOUND = 1u << 2,
+    MPC_RTI2_TRIGGER_RIGHT_BOUND = 1u << 3,
+    MPC_RTI2_TRIGGER_LOW_SLACK = 1u << 4,
+    MPC_RTI2_TRIGGER_NONSMOOTH = 1u << 5,
+    MPC_RTI2_TRIGGER_ACTION_CORRECTION = 1u << 6,
+    MPC_RTI2_TRIGGER_DEGRADED_SOLVE = 1u << 7,
+    MPC_RTI2_TRIGGER_RESIDUAL_IMBALANCE = 1u << 8,
+    MPC_RTI2_TRIGGER_STEERING_REVERSAL = 1u << 9,
+    MPC_RTI2_TRIGGER_LATERAL_LOAD = 1u << 10
+};
+
 typedef struct
 {
     MpcRtiConfiguration_t model;
     RiccatiAdmmConfig_t solver;
+    MpcRtiRefinementMode_t refinement_mode;
+    float rti2_progress_error_trigger_m;
+    float rti2_curvature_error_trigger_per_m;
+    float rti2_bound_error_trigger_m;
+    float rti2_min_corridor_slack_trigger_m;
+    float rti2_steering_rate_correction_trigger_radps;
+    float rti2_target_speed_rate_correction_trigger_mps2;
+    float rti2_residual_imbalance_trigger;
+    float rti2_lateral_load_trigger_mps2;
+    int rti2_nonsmooth_columns_trigger;
     float degraded_residual_limit;
     float maximum_regularization;
     int max_consecutive_degraded_solves;
@@ -153,6 +185,37 @@ typedef struct
     int regularization_count;
     int nonsmooth_jacobian_columns;
     int nonlinear_failure_stage;
+    int rti_iterations_used;
+    int rti2_triggered;
+    unsigned int rti2_trigger_reason_mask;
+    int rti2_budget_skipped;
+    int r1_status;
+    int r2_status;
+    float r1_nonlinear_objective;
+    float r2_nonlinear_objective;
+    float r1_min_corridor_slack;
+    float r2_min_corridor_slack;
+    MpcModelControl_t r1_first_action;
+    MpcModelControl_t r2_first_action;
+    int r1_solver_iterations;
+    int r2_solver_iterations;
+    double r1_solve_us;
+    double r2_solve_us;
+    double total_rti_us;
+    int selected_candidate; /* 1=R1, 2=R2. */
+    float rho_start;
+    float rho_u_start;
+    float rho_final;
+    float rho_u_final;
+    int rho_change_count;
+    int factorization_count;
+    uint64_t factorization_time_ns;
+    float max_candidate_progress_error_m;
+    float max_candidate_curvature_error_per_m;
+    float max_candidate_left_bound_error_m;
+    float max_candidate_right_bound_error_m;
+    float minimum_predicted_corridor_slack_m;
+    float lateral_accel_proxy_mps2;
 } MpcRtiCycleResult_t;
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */

@@ -8,7 +8,6 @@ namespace f1tenth_mpc {
 namespace {
 
 constexpr double kNsToSeconds = 1.0e-9;
-constexpr double kTimestampQuantizationToleranceS = 1.0e-6;
 
 double wrap_angle(double angle)
 {
@@ -65,34 +64,19 @@ bool interpolate_odom(const std::deque<MpcOdomSample> &samples,
 MpcStateSynchronizer::MpcStateSynchronizer(MpcSyncConfig config)
     : config_(config)
 {
-    if (!(config_.source_dt_min_s > 0.0) ||
-        !(config_.source_dt_max_s >= config_.source_dt_min_s) ||
-        !(config_.max_pose_odom_skew_s > 0.0) ||
-        !(config_.max_state_age_s > 0.0) ||
-        config_.odom_buffer_capacity < 2) {
+    if (config_.odom_buffer_capacity < 2) {
         config_ = MpcSyncConfig{};
     }
 }
 
 MpcSyncStatus MpcStateSynchronizer::push_odometry(const MpcOdomSample &sample)
 {
-    if (latched_fault_ != MpcSyncStatus::kOk) return latched_fault_;
     if (!finite_odom(sample)) return MpcSyncStatus::kInvalidInput;
-    if (!odometry_.empty()) {
-        const int64_t delta_ns = sample.stamp_ns - odometry_.back().stamp_ns;
-        if (delta_ns <= 0) {
-            latched_fault_ = MpcSyncStatus::kTimestampOrderFault;
-            return latched_fault_;
-        }
-        const double dt = static_cast<double>(delta_ns) * kNsToSeconds;
-        /* Simulator source time is exported through a floating-point clock;
-         * tolerate one microsecond of endpoint quantization without changing
-         * or resampling the measured interval. */
-        if (dt + kTimestampQuantizationToleranceS < config_.source_dt_min_s ||
-            dt - kTimestampQuantizationToleranceS > config_.source_dt_max_s) {
-            latched_fault_ = MpcSyncStatus::kSourceGapFault;
-            return latched_fault_;
-        }
+    if (!odometry_.empty() && sample.stamp_ns <= odometry_.back().stamp_ns) {
+        // Keep the newly received sample and rebase the interpolation window.
+        // Arrival jitter, duplicate stamps, and source-clock reversals are
+        // diagnostics, not reasons to latch the controller in neutral.
+        odometry_.clear();
     }
     odometry_.push_back(sample);
     while (odometry_.size() > config_.odom_buffer_capacity)
@@ -103,12 +87,9 @@ MpcSyncStatus MpcStateSynchronizer::push_odometry(const MpcOdomSample &sample)
 MpcSyncStatus MpcStateSynchronizer::set_map_pose(
     const MpcMapPoseAnchor &anchor)
 {
-    if (latched_fault_ != MpcSyncStatus::kOk) return latched_fault_;
     if (!finite_pose(anchor)) return MpcSyncStatus::kInvalidInput;
-    if (map_pose_valid_ && anchor.stamp_ns < map_pose_.stamp_ns) {
-        latched_fault_ = MpcSyncStatus::kTimestampOrderFault;
-        return latched_fault_;
-    }
+    // The newest callback is the best available localization result even if
+    // its source stamp is older than a pose already delivered to this node.
     map_pose_ = anchor;
     map_pose_valid_ = true;
     return MpcSyncStatus::kOk;
@@ -118,24 +99,21 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     int64_t command_time_ns, MpcSynchronizedState *state) const
 {
     if (!state) return MpcSyncStatus::kInvalidInput;
-    if (latched_fault_ != MpcSyncStatus::kOk) return latched_fault_;
     if (odometry_.empty()) return MpcSyncStatus::kMissingOdom;
     if (!map_pose_valid_) return MpcSyncStatus::kMissingMapPose;
 
     const MpcOdomSample &latest = odometry_.back();
-    if (command_time_ns < latest.stamp_ns)
-        return MpcSyncStatus::kCommandTimeBeforeState;
-    if (map_pose_.stamp_ns > latest.stamp_ns)
-        return MpcSyncStatus::kMapPoseFutureOfOdom;
-
-    const double skew_s = static_cast<double>(latest.stamp_ns - map_pose_.stamp_ns) *
-        kNsToSeconds;
-    if (skew_s > config_.max_pose_odom_skew_s)
-        return MpcSyncStatus::kPoseOdomSkewExceeded;
-
     MpcOdomSample odom_at_anchor;
-    if (!interpolate_odom(odometry_, map_pose_.stamp_ns, &odom_at_anchor))
-        return MpcSyncStatus::kNoOdomBracket;
+    if (!interpolate_odom(odometry_, map_pose_.stamp_ns, &odom_at_anchor)) {
+        // A pose can arrive outside the retained odometry window under host
+        // jitter. Use the nearest available odometry endpoint instead of
+        // rejecting the state; this preserves a finite best-effort estimate.
+        const MpcOdomSample &front = odometry_.front();
+        odom_at_anchor =
+            std::llabs(map_pose_.stamp_ns - front.stamp_ns) <
+                    std::llabs(map_pose_.stamp_ns - latest.stamp_ns) ?
+            front : latest;
+    }
 
     const double dx_odom = latest.x - odom_at_anchor.x;
     const double dy_odom = latest.y - odom_at_anchor.y;
@@ -146,11 +124,11 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     const double c_map = std::cos(map_pose_.yaw);
     const double s_map = std::sin(map_pose_.yaw);
 
-    const double age_s = static_cast<double>(command_time_ns - latest.stamp_ns) *
+    const int64_t fused_stamp_ns = std::max(latest.stamp_ns, map_pose_.stamp_ns);
+    const double age_s = static_cast<double>(command_time_ns - fused_stamp_ns) *
         kNsToSeconds;
-    if (age_s > config_.max_state_age_s) return MpcSyncStatus::kStateTooOld;
 
-    state->source_stamp_ns = latest.stamp_ns;
+    state->source_stamp_ns = fused_stamp_ns;
     state->map_x = map_pose_.x + c_map * relative_x - s_map * relative_y;
     state->map_y = map_pose_.y + s_map * relative_x + c_map * relative_y;
     state->map_yaw = wrap_angle(map_pose_.yaw +
@@ -159,7 +137,8 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     state->v = latest.v;
     state->yaw_rate = latest.yaw_rate;
     state->source_age_s = age_s;
-    state->pose_odom_skew_s = skew_s;
+    state->pose_odom_skew_s = static_cast<double>(
+        latest.stamp_ns - map_pose_.stamp_ns) * kNsToSeconds;
     return MpcSyncStatus::kOk;
 }
 

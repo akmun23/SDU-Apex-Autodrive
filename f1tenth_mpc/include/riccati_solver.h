@@ -55,8 +55,11 @@ int riccati_invert_2x2(
 
 typedef struct
 {
+    float rho_start;
+    float rho_u_start;
     float rho;
     float rho_u;
+    int rho_change_count;
     float primal_residual;
     float dual_residual;
     float last_invert_det;

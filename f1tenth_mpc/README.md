@@ -16,12 +16,11 @@ length. The ROS adapter synchronizes legal `/current_map_pose` and `/odom`
 data and uses controller command history; simulator truth and hidden Unity
 state are not runtime inputs.
 
-One conformance/cleanup item remains: the old `mpc_compute_optimal_control`
-compatibility implementation and its 10-state types/tests are still in the
-package build for regression coverage. The ROS component does not call that
-API; it calls the 9-state RTI path. Do not treat the legacy API as an alternate
-production controller, and retire or consolidate it before calling the full
-rewrite finished.
+The old `mpc_compute_optimal_control` implementation is now isolated in a
+`BUILD_TESTING`-only compatibility library. It is linked only by its historical
+regression test/benchmark, is not linked into `mpc_core` or the ROS component,
+and its `mpc.h` API is not installed. The production solver path is the 9-state
+RTI implementation described above.
 
 ## Runtime modes
 
@@ -30,8 +29,10 @@ rewrite finished.
 - Shadow (`controller:=pure_pursuit with_mpc_shadow:=true`): runs beside Pure
   Pursuit, subscribes to its `/cmd/speed`, publishes diagnostics on
   `/mpc_shadow/diagnostics`, and has no `/cmd/speed` publisher.
-- Command authority (`controller:=mpc mpc_enabled:=true`): intentionally not
-  accepted yet. Keep MPC disabled until the shadow and staged live gates pass.
+- Command authority (`controller:=mpc mpc_enabled:=true`): available for
+  controlled validation, but not yet declared driving-ready. By default, the
+  launch waits 2 seconds after AMCL starts before creating the MPC container;
+  adjust with `mpc_start_delay_sec:=...` or set it to zero to disable.
 
 Use batchmode for simulator testing and do not add `-no-graphics`. A passing
 unit test or offline replay is not a live-driving acceptance result. The

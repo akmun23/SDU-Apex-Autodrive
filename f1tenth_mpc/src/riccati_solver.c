@@ -803,6 +803,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
         }
         rho_u = rho;
     }
+    g_riccati_debug_last.rho_start = rho;
+    g_riccati_debug_last.rho_u_start = rho_u;
     int max_iter = cfg_max_iter;
 
     /* ADMM variables (persistent buffers for warm-start reuse). */
@@ -1046,6 +1048,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
 
         /*--- Adaptive rho (aligned with FPGA HLS solver) ---*/
         if (adaptive_rho && iter > 0) {
+            const float rho_before_adaptation = rho;
+            const float rho_u_before_adaptation = rho_u;
             const float adapt_ratio_state = 2.0f;
             const float adapt_ratio_ctrl = 2.0f;
             const float adapt_ratio_shared = 5.0f;
@@ -1133,6 +1137,10 @@ static RiccatiStatus_t riccati_admm_solve_core(
                         y_u[k][a] *= y_u_scale;
                     }
                 }
+            }
+            if (rho != rho_before_adaptation ||
+                rho_u != rho_u_before_adaptation) {
+                ++g_riccati_debug_last.rho_change_count;
             }
         }
     }

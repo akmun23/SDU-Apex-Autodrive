@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "mpc_rti.h"
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 static int finite_nonnegative(float value)
 {
@@ -684,7 +687,25 @@ void mpc_rti_memory_reset(MpcRtiMemory_t *memory)
 static int valid_cycle_configuration(
     const MpcRtiCycleConfiguration_t *configuration)
 {
+    const int valid_refinement_mode = configuration &&
+        (configuration->refinement_mode == MPC_RTI_REFINEMENT_R1 ||
+         configuration->refinement_mode == MPC_RTI_REFINEMENT_R2 ||
+         configuration->refinement_mode == MPC_RTI_REFINEMENT_ADAPTIVE);
     return configuration && valid_configuration(&configuration->model) &&
+        valid_refinement_mode &&
+        finite_nonnegative(configuration->rti2_progress_error_trigger_m) &&
+        finite_nonnegative(configuration->rti2_curvature_error_trigger_per_m) &&
+        finite_nonnegative(configuration->rti2_bound_error_trigger_m) &&
+        finite_nonnegative(configuration->rti2_min_corridor_slack_trigger_m) &&
+        finite_nonnegative(
+            configuration->rti2_steering_rate_correction_trigger_radps) &&
+        finite_nonnegative(
+            configuration->rti2_target_speed_rate_correction_trigger_mps2) &&
+        (configuration->refinement_mode == MPC_RTI_REFINEMENT_R1 ||
+         (isfinite(configuration->rti2_residual_imbalance_trigger) &&
+          configuration->rti2_residual_imbalance_trigger >= 1.0f)) &&
+        finite_nonnegative(configuration->rti2_lateral_load_trigger_mps2) &&
+        configuration->rti2_nonsmooth_columns_trigger >= 0 &&
         isfinite(configuration->solver.rho) &&
         configuration->solver.rho > 0.0f &&
         isfinite(configuration->solver.rho_u) &&
@@ -696,6 +717,308 @@ static int valid_cycle_configuration(
         finite_nonnegative(configuration->maximum_regularization) &&
         configuration->maximum_regularization <= 1.0e-2f &&
         configuration->max_consecutive_degraded_solves >= 0;
+}
+
+typedef struct
+{
+    MpcRtiCycleStatus_t status;
+    MpcRtiNominal_t candidate;
+    MpcRtiCandidatePathDelta_t path_delta;
+    MpcModelControl_t first_action;
+    int iterations;
+    float primal_residual;
+    float dual_residual;
+    float maximum_regularization;
+    int regularization_count;
+    int nonsmooth_columns;
+    int nonlinear_failure_stage;
+    float nonlinear_objective;
+    float minimum_corridor_slack;
+    float lateral_accel_proxy;
+    float rho_start;
+    float rho_u_start;
+    float rho_final;
+    float rho_u_final;
+    int rho_change_count;
+    int factorization_count;
+    uint64_t factorization_time_ns;
+    double solve_us;
+} MpcRtiPassResult_t;
+
+static double monotonic_microseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0.0;
+    return (double)now.tv_sec * 1.0e6 + (double)now.tv_nsec * 1.0e-3;
+}
+
+static int evaluate_nonlinear_candidate(
+    const MpcRtiNominal_t *candidate,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    const MpcRtiCycleConfiguration_t *configuration,
+    float *objective,
+    float *minimum_corridor_slack,
+    float *lateral_accel_proxy)
+{
+    if (!candidate || !trajectory || !configuration || !objective ||
+        !minimum_corridor_slack || !lateral_accel_proxy ||
+        !candidate->valid || candidate->horizon < 1 ||
+        candidate->horizon > PREDICTION_HORIZON) return 0;
+
+    double cost = 0.0;
+    float min_slack = INFINITY;
+    float max_lateral_accel = 0.0f;
+    const MpcRtiConfiguration_t *model = &configuration->model;
+    for (int k = 0; k <= candidate->horizon; ++k) {
+        MpcRtiReference_t reference;
+        if (!reference_at_progress(trajectory, trajectory_count, lap_length,
+                candidate->progress[k], model, &reference) ||
+            !corridor_contains(&candidate->states[k], &reference, model))
+            return 0;
+        const MpcModelState_t *state = &candidate->states[k].plant;
+        const double terminal_scale = k == candidate->horizon
+            ? model->terminal_multiplier : 1.0;
+        const double errors[] = {
+            state->e_y - reference.e_y,
+            state->e_psi - reference.e_psi,
+            state->u - reference.u,
+            state->v - reference.v,
+            state->r - reference.r,
+            state->steering_command - reference.steering_command};
+        const double weights[] = {
+            model->weight_e_y, model->weight_e_psi, model->weight_u,
+            model->weight_v, model->weight_r,
+            model->weight_steering_command};
+        for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i)
+            cost += terminal_scale * weights[i] * errors[i] * errors[i];
+
+        const float left_slack = reference.left_bound -
+            model->corridor_margin_m - state->e_y;
+        const float right_slack = reference.right_bound -
+            model->corridor_margin_m + state->e_y;
+        min_slack = fminf(min_slack, fminf(left_slack, right_slack));
+        max_lateral_accel = fmaxf(max_lateral_accel,
+            fabsf(state->u * state->r));
+        if (k == candidate->horizon) continue;
+
+        const MpcModelControl_t *control = &candidate->controls[k];
+        const MpcRtiState_t *previous_state = &candidate->states[k];
+        const double steer_change = control->steering_rate -
+            previous_state->previous_steering_rate;
+        const double speed_change = control->target_speed_rate -
+            previous_state->previous_target_speed_rate;
+        cost += model->weight_steering_rate *
+                control->steering_rate * control->steering_rate +
+            model->weight_target_speed_rate *
+                control->target_speed_rate * control->target_speed_rate +
+            model->weight_steering_rate_change * steer_change * steer_change +
+            model->weight_target_speed_rate_change * speed_change * speed_change;
+    }
+    if (!isfinite(cost) || !isfinite(min_slack) ||
+        !isfinite(max_lateral_accel)) return 0;
+    *objective = (float)cost;
+    *minimum_corridor_slack = min_slack;
+    *lateral_accel_proxy = max_lateral_accel;
+    return 1;
+}
+
+static MpcRtiCycleStatus_t solve_rti_pass(
+    const MpcRtiState_t *current_state,
+    double current_progress,
+    const MpcRtiNominal_t *nominal,
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    int horizon,
+    const MpcRtiCycleConfiguration_t *configuration,
+    MpcRtiMemory_t *memory,
+    MpcRtiPassResult_t *pass)
+{
+    memset(pass, 0, sizeof(*pass));
+    pass->status = MPC_RTI_CYCLE_REJECTED_INPUT;
+    pass->nonlinear_failure_stage = -1;
+    pass->nonlinear_objective = INFINITY;
+    pass->minimum_corridor_slack = -INFINITY;
+    const double start_us = monotonic_microseconds();
+    MpcRtiProblem_t problem;
+    if (!mpc_rti_build_ltv_qp(nominal->states, nominal->controls, references,
+            horizon, prediction_dt, &configuration->model, &problem)) {
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+    pass->nonsmooth_columns = problem.nonsmooth_jacobian_columns;
+
+    RiccatiSolution_t solution = {0};
+    const float previous_rho = memory->solver_state.initialized
+        ? memory->solver_state.rho : configuration->solver.rho;
+    const float previous_rho_u = memory->solver_state.initialized
+        ? memory->solver_state.rho_u : configuration->solver.rho_u;
+    const RiccatiStatus_t solver_status = riccati_admm_solve(
+        problem.steps, problem.terminal_Q, problem.terminal_q,
+        problem.terminal_x_lb, problem.terminal_x_ub, problem.x0,
+        MPC_RTI_NX, MPC_RTI_NU, horizon, &configuration->solver,
+        &memory->solver_state, &solution);
+    pass->iterations = solution.iterations;
+    pass->primal_residual = solution.primal_residual;
+    pass->dual_residual = solution.dual_residual;
+    RiccatiDebugInfo_t debug = {0};
+    riccati_debug_get_last(&debug);
+    pass->maximum_regularization = debug.max_control_hessian_regularization;
+    pass->regularization_count = debug.control_hessian_regularization_count;
+    pass->rho_start = previous_rho;
+    pass->rho_u_start = previous_rho_u;
+    pass->rho_final = debug.rho;
+    pass->rho_u_final = debug.rho_u;
+    pass->rho_change_count = debug.rho_change_count;
+    pass->factorization_count = debug.quadratic_factorization_count;
+    pass->factorization_time_ns = debug.quadratic_factorization_time_ns;
+    if (!isfinite(solution.primal_residual) ||
+        !isfinite(solution.dual_residual) || solver_status == RICCATI_STATUS_ERROR) {
+        pass->status = MPC_RTI_CYCLE_REJECTED_SOLVER;
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+    if (!isfinite(pass->maximum_regularization) ||
+        pass->maximum_regularization > configuration->maximum_regularization) {
+        pass->status = MPC_RTI_CYCLE_REJECTED_REGULARIZATION;
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+
+    int accepted_degraded = 0;
+    if (solver_status == RICCATI_STATUS_MAX_ITERATIONS) {
+        const float max_residual = fmaxf(pass->primal_residual,
+                                          pass->dual_residual);
+        if (max_residual > configuration->degraded_residual_limit ||
+            memory->consecutive_degraded_solves + 1 >
+                configuration->max_consecutive_degraded_solves) {
+            pass->status = MPC_RTI_CYCLE_REJECTED_RESIDUAL;
+            pass->solve_us = monotonic_microseconds() - start_us;
+            return pass->status;
+        }
+        accepted_degraded = 1;
+    } else if (solver_status != RICCATI_STATUS_OPTIMAL) {
+        pass->status = MPC_RTI_CYCLE_REJECTED_SOLVER;
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+
+    MpcModelControl_t candidate_controls[PREDICTION_HORIZON] = {0};
+    for (int k = 0; k < horizon; ++k) {
+        candidate_controls[k].steering_rate = solution.u[k][0];
+        candidate_controls[k].target_speed_rate = solution.u[k][1];
+    }
+    MpcRtiState_t candidate_states[PREDICTION_HORIZON + 1];
+    double candidate_progress[PREDICTION_HORIZON + 1];
+    const MpcRtiRolloutStatus_t rollout_status = mpc_rti_rollout_candidate(
+        current_state, current_progress, candidate_controls, trajectory,
+        trajectory_count, lap_length, references, nominal->progress,
+        &pass->path_delta, horizon, prediction_dt, &configuration->model,
+        candidate_states, candidate_progress, &pass->nonlinear_failure_stage);
+    if (rollout_status != MPC_RTI_ROLLOUT_OK) {
+        pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+
+    pass->candidate.valid = 1;
+    pass->candidate.horizon = horizon;
+    memcpy(pass->candidate.states, candidate_states,
+           (size_t)(horizon + 1) * sizeof(candidate_states[0]));
+    memcpy(pass->candidate.controls, candidate_controls,
+           (size_t)horizon * sizeof(candidate_controls[0]));
+    memcpy(pass->candidate.progress, candidate_progress,
+           (size_t)(horizon + 1) * sizeof(candidate_progress[0]));
+    pass->first_action = candidate_controls[0];
+    if (!evaluate_nonlinear_candidate(&pass->candidate, trajectory,
+            trajectory_count, lap_length, configuration,
+            &pass->nonlinear_objective, &pass->minimum_corridor_slack,
+            &pass->lateral_accel_proxy)) {
+        pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+    pass->status = accepted_degraded
+        ? MPC_RTI_CYCLE_ACCEPTED_DEGRADED
+        : MPC_RTI_CYCLE_ACCEPTED_OPTIMAL;
+    pass->solve_us = monotonic_microseconds() - start_us;
+    return pass->status;
+}
+
+static float max_path_delta_double(
+    const double values[PREDICTION_HORIZON + 1], int count)
+{
+    float result = 0.0f;
+    for (int i = 0; i < count; ++i)
+        result = fmaxf(result, (float)fabs(values[i]));
+    return result;
+}
+
+static float max_path_delta_float(
+    const float values[PREDICTION_HORIZON + 1], int count)
+{
+    float result = 0.0f;
+    for (int i = 0; i < count; ++i)
+        result = fmaxf(result, fabsf(values[i]));
+    return result;
+}
+
+static unsigned int adaptive_rti2_trigger_mask(
+    const MpcRtiCycleConfiguration_t *configuration,
+    const MpcRtiNominal_t *nominal,
+    const MpcRtiPassResult_t *r1)
+{
+    const int count = r1->path_delta.sample_count;
+    const float progress_error = max_path_delta_double(
+        r1->path_delta.progress_error_m, count);
+    const float curvature_error = max_path_delta_float(
+        r1->path_delta.curvature_error_per_m, count);
+    const float left_error = max_path_delta_float(
+        r1->path_delta.left_bound_error_m, count);
+    const float right_error = max_path_delta_float(
+        r1->path_delta.right_bound_error_m, count);
+    unsigned int mask = 0;
+    if (progress_error >= configuration->rti2_progress_error_trigger_m)
+        mask |= MPC_RTI2_TRIGGER_PROGRESS;
+    if (curvature_error >= configuration->rti2_curvature_error_trigger_per_m)
+        mask |= MPC_RTI2_TRIGGER_CURVATURE;
+    if (left_error >= configuration->rti2_bound_error_trigger_m)
+        mask |= MPC_RTI2_TRIGGER_LEFT_BOUND;
+    if (right_error >= configuration->rti2_bound_error_trigger_m)
+        mask |= MPC_RTI2_TRIGGER_RIGHT_BOUND;
+    if (r1->minimum_corridor_slack <=
+        configuration->rti2_min_corridor_slack_trigger_m)
+        mask |= MPC_RTI2_TRIGGER_LOW_SLACK;
+    if (r1->nonsmooth_columns >=
+        configuration->rti2_nonsmooth_columns_trigger)
+        mask |= MPC_RTI2_TRIGGER_NONSMOOTH;
+    if (fabsf(r1->first_action.steering_rate -
+              nominal->controls[0].steering_rate) >=
+            configuration->rti2_steering_rate_correction_trigger_radps ||
+        fabsf(r1->first_action.target_speed_rate -
+              nominal->controls[0].target_speed_rate) >=
+            configuration->rti2_target_speed_rate_correction_trigger_mps2)
+        mask |= MPC_RTI2_TRIGGER_ACTION_CORRECTION;
+    if (r1->status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED)
+        mask |= MPC_RTI2_TRIGGER_DEGRADED_SOLVE;
+    const float residual_min = fminf(r1->primal_residual, r1->dual_residual);
+    const float residual_max = fmaxf(r1->primal_residual, r1->dual_residual);
+    if (residual_max / fmaxf(residual_min, 1.0e-6f) >=
+        configuration->rti2_residual_imbalance_trigger)
+        mask |= MPC_RTI2_TRIGGER_RESIDUAL_IMBALANCE;
+    if (nominal->controls[0].steering_rate *
+            r1->first_action.steering_rate < 0.0f &&
+        fabsf(nominal->controls[0].steering_rate) > 0.1f &&
+        fabsf(r1->first_action.steering_rate) > 0.1f)
+        mask |= MPC_RTI2_TRIGGER_STEERING_REVERSAL;
+    if (r1->lateral_accel_proxy >=
+        configuration->rti2_lateral_load_trigger_mps2)
+        mask |= MPC_RTI2_TRIGGER_LATERAL_LOAD;
+    return mask;
 }
 
 static MpcRtiCycleStatus_t reject_cycle(

@@ -109,8 +109,8 @@ void test_epoch_and_timing()
   OdometryObserver observer;
   observer.update(observation(0.0, 0.0, 0.0));
   auto regression = observer.update(observation(-0.01, 1.0, 1.0));
-  require(regression.timing_degraded, "time regression is rejected");
-  auto epoch = observer.update(observation(0.025, 51.0, 0.0));
+  require(regression.timing_degraded, "time regression is accepted as a new baseline");
+  auto epoch = observer.update(observation(0.025, 52.0, 0.0));
   require(epoch.reset_epoch, "large encoder jump resets epoch");
   require(epoch.speed_mps == 0.0, "epoch reset rebaselines speed");
   auto gap = observer.update(observation(0.40, 51.0, 0.0));

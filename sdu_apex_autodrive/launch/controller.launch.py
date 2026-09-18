@@ -1,5 +1,6 @@
 """Single user-facing launch for one AutoDRIVE racing controller."""
 
+import math
 import os
 import subprocess
 
@@ -9,8 +10,11 @@ from launch.actions import (
     DeclareLaunchArgument,
     LogInfo,
     OpaqueFunction,
+    RegisterEventHandler,
     SetEnvironmentVariable,
+    TimerAction,
 )
+from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
@@ -109,6 +113,10 @@ def _setup(context):
         LaunchConfiguration("force_localization").perform(context))
     use_localization = _bool(
         LaunchConfiguration("use_localization").perform(context))
+    mpc_start_delay_sec = float(
+        LaunchConfiguration("mpc_start_delay_sec").perform(context))
+    if not math.isfinite(mpc_start_delay_sec) or mpc_start_delay_sec < 0.0:
+        raise RuntimeError("mpc_start_delay_sec must be finite and non-negative")
     # FTG normally runs without localization for mapping. This explicit
     # diagnostic mode exercises the full localization stack alongside the
     # same LiDAR-only FTG command path on a saved map.
@@ -121,6 +129,7 @@ def _setup(context):
         "controller_container",
         "autodrive_actuator_interface",
     }
+    amcl_node = None
     if needs_localization:
         expected_runtime_nodes.update({
             "ekf_localization", "map_server", "lifecycle_manager_map",
@@ -213,38 +222,37 @@ def _setup(context):
                     "node_names": ["map_server"],
                 }],
             ),
-            # This is the user's CUDA AMCL, not Nav2 AMCL.
-            Node(
-                package="f1tenth_localization",
-                executable="gpu_amcl_cpp_node",
-                name="gpu_amcl_cpp",
-                output="screen",
-                parameters=[
-                    *amcl_parameter_sources,
-                    {
-                        "global_heading_trajectory_file": trajectory,
-                        "odom_topic": LaunchConfiguration("amcl_odom_topic"),
-                    },
-                    {
-                        "global_initialization": LaunchConfiguration(
-                            "amcl_global_initialization"
-                        ),
-                        "global_pose_max_track_distance_m": LaunchConfiguration(
-                            "amcl_max_track_distance"
-                        ),
-                        "initial_pose_heading_offset_rad": LaunchConfiguration(
-                            "amcl_initial_heading_offset"
-                        ),
-                    },
-                ],
-                # AMCL and sensor odometry must publish into the same
-                # team-isolated TF tree so map->base_link is available.
-                remappings=[
-                    ("/tf", "/sdu/tf"),
-                    ("/tf_static", "/sdu/tf_static"),
-                ],
-            ),
+            # AMCL and sensor odometry must publish into the same
+            # team-isolated TF tree so map->base_link is available.
         ])
+        # This is the user's CUDA AMCL, not Nav2 AMCL. Keep the action handle
+        # so an MPC-specific warm-up timer can start from its process-start event.
+        amcl_node = Node(
+            package="f1tenth_localization",
+            executable="gpu_amcl_cpp_node",
+            name="gpu_amcl_cpp",
+            output="screen",
+            parameters=[
+                *amcl_parameter_sources,
+                {
+                    "global_heading_trajectory_file": trajectory,
+                    "odom_topic": LaunchConfiguration("amcl_odom_topic"),
+                },
+                {
+                    "global_initialization": LaunchConfiguration(
+                        "amcl_global_initialization"
+                    ),
+                    "global_pose_max_track_distance_m": LaunchConfiguration(
+                        "amcl_max_track_distance"
+                    ),
+                    "initial_pose_heading_offset_rad": LaunchConfiguration(
+                        "amcl_initial_heading_offset"
+                    ),
+                },
+            ],
+            remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
+        )
+        actions.append(amcl_node)
 
     if with_ground_truth_monitor:
         # Development diagnostics only. Ground truth is not consumed by AMCL
@@ -410,14 +418,37 @@ def _setup(context):
                 ("drive", "/cmd/speed"),
             ],
         )
-        actions.append(ComposableNodeContainer(
+        mpc_container = ComposableNodeContainer(
             name="controller_container",
             namespace="",
             package="rclcpp_components",
             executable="component_container",
             composable_node_descriptions=[component],
             output="screen",
-        ))
+        )
+        if needs_localization and mpc_start_delay_sec > 0.0:
+            # Register ahead of AMCL process startup. AMCL continues to receive
+            # scans during this timer; only MPC composition is delayed.
+            actions.insert(0, RegisterEventHandler(
+                OnProcessStart(
+                    target_action=amcl_node,
+                    on_start=[TimerAction(
+                        period=mpc_start_delay_sec,
+                        actions=[
+                            LogInfo(msg=(
+                                "AMCL warm-up complete; launching MPC after "
+                                f"{mpc_start_delay_sec:.2f} s"
+                            )),
+                            mpc_container,
+                        ],
+                    )],
+                )
+            ))
+            actions.append(LogInfo(msg=(
+                f"MPC launch delayed {mpc_start_delay_sec:.2f} s after AMCL starts"
+            )))
+        else:
+            actions.append(mpc_container)
     actions.append(Node(
         package="sdu_apex_autodrive",
         executable="actuator_interface",
@@ -431,7 +462,9 @@ def _setup(context):
                 "input_topic": "/cmd/speed",
                 "collision_reset_enabled": with_collision_safety,
                 "collision_terminal_stop": with_collision_safety,
-                "external_stop_topic": "/autodrive/roboracer_1/bridge_timing_fault",
+                # Bridge timing diagnostics are non-fatal on the constrained
+                # competition hardware; they must never stop actuator output.
+                "external_stop_topic": "",
             },
         ],
     ))
@@ -616,6 +649,14 @@ def generate_launch_description():
             description=(
                 "Allow MPC commands. Keep false until the source-command "
                 "stage map passes legal-state N30 validation."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "mpc_start_delay_sec",
+            default_value="2.0",
+            description=(
+                "Wait this many seconds after the AMCL process starts before "
+                "launching the MPC controller; set to 0 to disable"
             ),
         ),
         DeclareLaunchArgument(

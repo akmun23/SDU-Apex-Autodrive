@@ -1,0 +1,56 @@
+{
+  "input_events": "mpc_authority_4mps_attempt2_20260918/events.csv",
+  "input_sha256": "615c6ca5e8a28589c2b4a23065c024e49141a30ca4c43e6d0d66f94b3f74ca28",
+  "runtime_inputs_only": [
+    "/odom",
+    "/current_map_pose",
+    "/cmd/speed",
+    "accepted raceline"
+  ],
+  "profile": {
+    "max_iterations": 100,
+    "tolerance": 0.01,
+    "adaptive_rho": true,
+    "initial_rho": 7.0,
+    "initial_rho_input": 7.0,
+    "riccati_prefactorization": true,
+    "horizon_steps": 30,
+    "dt_s": 0.025
+  },
+  "synchronization": {
+    "odom_samples": 490,
+    "synchronized_samples": 484,
+    "solves": 484,
+    "accepted": 484,
+    "degraded": 0,
+    "rejected": 0,
+    "projection_rejections": 0,
+    "startup_path_rejections": 0,
+    "source_order_faults": 0,
+    "source_gap_faults": 0
+  },
+  "timing_ms": {
+    "solve_p50": 0.474812,
+    "solve_p95": 0.518024,
+    "solve_p99": 0.715976,
+    "solve_max": 1.112410,
+    "state_age_p50": 4.034082,
+    "state_age_p95": 6.127586,
+    "state_age_max": 14.704976,
+    "source_dt_p50": 25.051141,
+    "source_dt_p95": 26.230206,
+    "source_dt_max": 91.887582
+  },
+  "solver": {
+    "iterations_p50": 27,
+    "iterations_p95": 27,
+    "iterations_p99": 27,
+    "quadratic_factorizations": 1470,
+    "factorizations_per_solve": 3.03719,
+    "final_rho_p50_p95_max": [1.0, 1.0, 1.0],
+    "final_rho_input_p50_p95_max": [14.0, 14.0, 14.0],
+    "residual_p95_primal": 0.009103,
+    "residual_p95_dual": 0.007055
+  },
+  "interpretation": "Offline replay accepts the captured legal states, but cannot override the live component's zero-command/rejection evidence. Treat this as an unresolved runtime/replay mismatch, not acceptance."
+}

@@ -1,0 +1,9 @@
+Run began at HEAD f668731e7b9e08d2d4fcfe85ca67d2082d866867.
+
+Existing user worktree change observed before this test and left untouched:
+ D f1tenth_planning/trajectories/autodrive_mintime_exact_v13.zip
+
+The rejection-detail logging change in f1tenth_mpc/src/mpc_controller_node.cpp
+was added after this run to expose status/residual/regularization details; it
+did not affect the recorded run. The run artifacts are new files under this
+phase directory. No simulator source, physics, scene, or behavior was edited.

@@ -67,12 +67,17 @@ def _prepare_pending_packet(monkeypatch, faults):
     return pool
 
 
-def test_stock_protocol_uses_bounded_fifo_window_without_response_ids():
-    assert bridge_40hz.MAX_OUTSTANDING_REQUESTS == 7
-    assert bridge_40hz.MAX_RESPONSE_WAIT_S == 0.150
-    assert (bridge_40hz.MAX_OUTSTANDING_REQUESTS *
-            bridge_40hz.MIN_REQUEST_SPACING_S >=
-            bridge_40hz.MAX_RESPONSE_WAIT_S)
+def test_stock_protocol_fifo_context_has_no_response_window_cap(monkeypatch):
+    bridge_40hz._reset_request_pipeline()
+    monkeypatch.setattr(
+        bridge_40hz.official_bridge, "autodrive_bridge", FakeNode(), raising=False)
+    bridge_40hz._client_connected.set()
+    bridge_40hz._bootstrap_packet_seen.set()
+    generation = bridge_40hz._connection_generation
+    for sequence in range(1, 20):
+        assert bridge_40hz._set_pending_request(
+            None, generation, sequence, {"V1 Throttle": "0.0"})
+    assert len(bridge_40hz._pending_requests) == 19
 
 
 def test_multiple_stock_responses_keep_request_fifo_association(monkeypatch):
@@ -109,17 +114,23 @@ def test_multiple_stock_responses_keep_request_fifo_association(monkeypatch):
     assert not faults
 
 
-def test_connect_bootstrap_opens_request_gate_without_becoming_a_sample(monkeypatch):
+def test_connect_bootstrap_opens_request_gate_and_gets_receive_stamp(monkeypatch):
     faults = []
     bridge_40hz._reset_request_pipeline()
     monkeypatch.setattr(bridge_40hz, "_timing_fault", False)
     monkeypatch.setattr(bridge_40hz, "_trigger_timing_fault", faults.append)
+    monkeypatch.setattr(
+        bridge_40hz.official_bridge, "autodrive_bridge", FakeNode(), raising=False)
     bridge_40hz._client_connected.set()
 
-    assert not bridge_40hz._capture_competition_packet({"bootstrap": "only"})
+    assert bridge_40hz._capture_competition_packet({"bootstrap": "only"})
     assert bridge_40hz._bootstrap_packet_seen.is_set()
     assert not bridge_40hz._pending_requests
+    assert bridge_40hz._active_request_sequence == -1
+    assert bridge_40hz._active_packet_stamp is not None
+    assert bridge_40hz._active_request_monotonic_ns is None
     assert not faults
+    bridge_40hz._finish_packet()
 
 
 def test_stock_packet_needs_no_unity_clock_and_uses_receive_stamp(monkeypatch):
@@ -176,16 +187,21 @@ def test_stock_packet_needs_no_unity_clock_and_uses_receive_stamp(monkeypatch):
     assert pool.acquire(blocking=False)
 
 
-def test_unsolicited_packet_after_bootstrap_fails_closed(monkeypatch):
+def test_unsolicited_packet_after_bootstrap_is_still_published(monkeypatch):
     faults = []
     bridge_40hz._reset_request_pipeline()
     monkeypatch.setattr(bridge_40hz, "_timing_fault", False)
     monkeypatch.setattr(bridge_40hz, "_trigger_timing_fault", faults.append)
+    monkeypatch.setattr(
+        bridge_40hz.official_bridge, "autodrive_bridge", FakeNode(), raising=False)
     bridge_40hz._client_connected.set()
     bridge_40hz._bootstrap_packet_seen.set()
 
-    assert not bridge_40hz._capture_competition_packet({"unexpected": "packet"})
-    assert faults == ["simulator packet arrived without a pending Bridge request"]
+    assert bridge_40hz._capture_competition_packet({"new": "sensor sample"})
+    assert bridge_40hz._active_request_sequence == -1
+    assert bridge_40hz._active_packet_stamp is not None
+    assert not faults
+    bridge_40hz._finish_packet()
 
 
 def test_delayed_packet_is_measured_not_retimed_to_nominal_25ms(monkeypatch):
@@ -199,12 +215,12 @@ def test_delayed_packet_is_measured_not_retimed_to_nominal_25ms(monkeypatch):
     assert not faults
 
 
-def test_packet_gap_over_transport_limit_faults(monkeypatch):
+def test_packet_gap_over_legacy_transport_limit_is_not_rejected(monkeypatch):
     faults = []
     _prepare_pending_packet(monkeypatch, faults)
     monkeypatch.setattr(bridge_40hz, "_last_packet_arrival_ns", 1_000_000_000)
     monkeypatch.setattr(bridge_40hz, "_active_packet_arrival_ns", 1_151_000_000)
 
-    assert not bridge_40hz._validate_received_packet()
-    assert len(faults) == 1
-    assert "arrival interval exceeded 0.150s" in faults[0]
+    assert bridge_40hz._validate_received_packet()
+    assert bridge_40hz._last_packet_arrival_ns == 1_151_000_000
+    assert not faults

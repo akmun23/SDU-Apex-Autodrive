@@ -52,10 +52,10 @@ class ActuatorInterface(Node):
             self.get_parameter("max_feedback_speed_mps").value)
         rate = float(self.get_parameter("publish_rate_hz").value)
         if min(
-            self.max_steering, self.max_target_speed, self.command_timeout,
-            self.odom_timeout, self.max_feedback_speed, rate,
-        ) <= 0.0:
-            raise ValueError("actuator limits, timeouts and rate must be > 0")
+            self.max_steering, self.max_target_speed,
+            self.max_feedback_speed, rate,
+        ) <= 0.0 or self.command_timeout < 0.0 or self.odom_timeout < 0.0:
+            raise ValueError("actuator limits and rate must be > 0; timeouts must be >= 0")
         if self.max_feedback_speed < self.max_target_speed:
             raise ValueError("max_feedback_speed_mps must cover max_target_speed_mps")
 
@@ -597,8 +597,9 @@ class ActuatorInterface(Node):
             return
         if (self.raw_steering_override is not None and
                 self.raw_steering_override_time is not None and
-                (now - self.raw_steering_override_time).nanoseconds / 1e9
-                <= self.command_timeout):
+                (self.command_timeout <= 0.0 or
+                 (now - self.raw_steering_override_time).nanoseconds / 1e9
+                 <= self.command_timeout)):
             # Calibration owns both normalized actuator channels only while
             # explicit diagnostics overrides are fresh. This prevents the
             # ordinary Ackermann path from overwriting a steering step.
@@ -608,8 +609,9 @@ class ActuatorInterface(Node):
                 self.raw_throttle_override
                 if (self.raw_throttle_override is not None and
                     self.raw_throttle_override_time is not None and
-                    (now - self.raw_throttle_override_time).nanoseconds / 1e9
-                    <= self.command_timeout)
+                    (self.command_timeout <= 0.0 or
+                     (now - self.raw_throttle_override_time).nanoseconds / 1e9
+                     <= self.command_timeout))
                 else 0.0)
             self._publish(self.raw_steering_override, throttle)
             self.last_longitudinal_mode = (
@@ -623,9 +625,11 @@ class ActuatorInterface(Node):
             return self._neutral("no odometry")
         if self.raw_speed is None:
             return self._neutral("invalid odometry")
-        if (now - self.command_time).nanoseconds / 1e9 > self.command_timeout:
+        if (self.command_timeout > 0.0 and
+                (now - self.command_time).nanoseconds / 1e9 > self.command_timeout):
             return self._neutral("command timeout")
-        if (now - self.odom_arrival_time).nanoseconds / 1e9 > self.odom_timeout:
+        if (self.odom_timeout > 0.0 and
+                (now - self.odom_arrival_time).nanoseconds / 1e9 > self.odom_timeout):
             return self._neutral("odometry timeout")
 
         dt = self.nominal_dt

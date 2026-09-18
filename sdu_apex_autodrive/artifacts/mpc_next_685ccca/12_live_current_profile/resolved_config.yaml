@@ -1,0 +1,40 @@
+repository_sha_at_run: f668731e7b9e08d2d4fcfe85ca67d2082d866867
+worktree_dirty_at_run: true
+simulator:
+  image: autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete
+  mode: batchmode
+  no_graphics_flag: false
+  physics_or_behavior_edits: false
+  endpoint: 127.0.0.1:4567
+controller:
+  selected: mpc
+  command_authority: true
+  shadow_mode: false
+  speed_cap_mps: 4.0
+  first_lap_startup_speed_mps: 1.5
+  startup_ramp_laps: 1.0
+  runtime_inputs: [/odom, /current_map_pose, current_and_past_/cmd/speed, raceline]
+  plant_state_dimension: 7
+  qp_state_dimension: 9
+  input_dimension: 2
+  horizon_steps: 30
+  dt_s: 0.025
+  horizon_s: 0.75
+solver:
+  algorithm: Riccati-ADMM RTI
+  rti_sqp_passes_per_callback: 1
+  max_admm_iterations: 100
+  adaptive_rho: true
+  initial_rho: 7.0
+  initial_rho_input: 7.0
+  tolerance: 0.01
+  degraded_residual_limit: 0.05
+  riccati_prefactorization: true
+  scaling: physical
+trajectory:
+  path: f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+  sha256: 16553b479a9ec358422eeb89b5029ba68fde46bc0328be3b34822b41aca74057
+results:
+  authority_trial: no_motion_zero_commands
+  sustained_40_hz_gate: failed_bridge_timeout
+  production_acceptance: false

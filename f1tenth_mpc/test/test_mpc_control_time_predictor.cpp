@@ -140,7 +140,7 @@ void test_constant_twist_yaw_and_symmetry()
         1.0e-8);
 }
 
-void test_ct0_and_time_rejections()
+void test_ct0_and_timing_fallback()
 {
     const auto trajectory = make_circle(10.0);
     const double lap_length = 2.0 * kPi * 10.0;
@@ -152,25 +152,29 @@ void test_ct0_and_time_rejections()
     CHECK(unchanged.state.map_y == source.map_y);
     CHECK(unchanged.state.map_yaw == source.map_yaw);
 
-    MpcControlTimePrediction rejected{};
+    MpcControlTimePrediction fallback{};
     MpcControlTimePredictorConfig config;
     CHECK(predict_to_control_time(MpcControlTimeMode::kNoExtrapolation,
         source, kSourceStampNs - 1, history, trajectory.data(),
         trajectory.size(), lap_length,
-        std::numeric_limits<std::size_t>::max(), nullptr, config, &rejected) ==
-        MpcControlTimeStatus::kTargetBeforeSource);
+        std::numeric_limits<std::size_t>::max(), nullptr, config, &fallback) ==
+        MpcControlTimeStatus::kOk);
+    CHECK(fallback.used_time_fallback);
+    CHECK(fallback.state.map_x == source.map_x);
     CHECK(predict_to_control_time(MpcControlTimeMode::kNoExtrapolation,
         source, kSourceStampNs + 120000001LL, history, trajectory.data(),
         trajectory.size(), lap_length,
-        std::numeric_limits<std::size_t>::max(), nullptr, config, &rejected) ==
-        MpcControlTimeStatus::kStateTooOld);
+        std::numeric_limits<std::size_t>::max(), nullptr, config, &fallback) ==
+        MpcControlTimeStatus::kOk);
+    CHECK(fallback.used_time_fallback);
+    CHECK(fallback.age_s > config.maximum_state_age_s);
 }
 
 void test_history_order_wrap_and_future_causality()
 {
     MpcCommandHistory history;
     CHECK(history.push({kSourceStampNs - 100000000LL, 0.0, 2.0}));
-    CHECK(!history.push({kSourceStampNs - 100000000LL, 0.1, 3.0}));
+    CHECK(history.push({kSourceStampNs - 100000000LL, 0.1, 3.0}));
     for (int i = 1; i <= 20; ++i) {
         CHECK(history.push({kSourceStampNs + i * 1000000LL,
             0.001 * i, 2.0 + 0.1 * i}));
@@ -236,7 +240,7 @@ int main()
 {
     test_constant_twist_25_50_100_ms();
     test_constant_twist_yaw_and_symmetry();
-    test_ct0_and_time_rejections();
+    test_ct0_and_timing_fallback();
     test_history_order_wrap_and_future_causality();
     test_model_prediction_and_zero_history_fallback();
     std::cout << "MPC control-time predictor tests passed\n";

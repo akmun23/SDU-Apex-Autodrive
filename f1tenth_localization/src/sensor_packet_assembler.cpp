@@ -1,19 +1,7 @@
 #include "f1tenth_localization/sensor_packet_assembler.hpp"
 
-#include <algorithm>
-
 namespace f1tenth_localization
 {
-
-SensorPacketAssembler::SensorPacketAssembler(std::size_t max_pending_packets)
-{
-  set_max_pending_packets(max_pending_packets);
-}
-
-void SensorPacketAssembler::set_max_pending_packets(std::size_t max_pending_packets)
-{
-  max_pending_packets_ = std::clamp<std::size_t>(max_pending_packets, 2, 32);
-}
 
 void SensorPacketAssembler::set_packet_callback(PacketCallback callback)
 {
@@ -23,7 +11,6 @@ void SensorPacketAssembler::set_packet_callback(PacketCallback callback)
 void SensorPacketAssembler::reset()
 {
   pending_.clear();
-  newest_source_stamp_ns_ = 0;
   has_processed_packet_ = false;
   packet_drop_count_ = 0;
   packet_coherence_fault_count_ = 0;
@@ -39,56 +26,17 @@ std::uint64_t SensorPacketAssembler::packet_coherence_fault_count() const noexce
   return packet_coherence_fault_count_;
 }
 
-void SensorPacketAssembler::discard_incomplete_before(int64_t source_stamp_ns)
-{
-  auto end = pending_.lower_bound(source_stamp_ns);
-  for (auto it = pending_.begin(); it != end;) {
-    if (!it->second.complete()) {
-      if (has_processed_packet_) {
-        ++packet_coherence_fault_count_;
-        ++packet_drop_count_;
-      }
-      it = pending_.erase(it);
-    } else {
-      ++it;
-    }
-  }
-}
-
 template<typename Update>
 void SensorPacketAssembler::update_packet(int64_t source_stamp_ns, Update && update)
 {
   if (source_stamp_ns <= 0) {
     return;
   }
-  if (newest_source_stamp_ns_ > 0 && source_stamp_ns < newest_source_stamp_ns_) {
-    if (has_processed_packet_) {
-      ++packet_coherence_fault_count_;
-      ++packet_drop_count_;
-    }
-    return;
-  }
-  discard_incomplete_before(source_stamp_ns);
-  newest_source_stamp_ns_ = std::max(newest_source_stamp_ns_, source_stamp_ns);
   auto & packet = pending_[source_stamp_ns];
   packet.stamp_ns = source_stamp_ns;
   update(packet);
 
   process_ready_packets();
-  while (pending_.size() > max_pending_packets_) {
-    auto it = pending_.begin();
-    if (it->second.complete()) {
-      const SensorPacket packet_copy = it->second;
-      pending_.erase(it);
-      process_packet(packet_copy);
-    } else {
-      if (has_processed_packet_) {
-        ++packet_coherence_fault_count_;
-        ++packet_drop_count_;
-      }
-      pending_.erase(it);
-    }
-  }
 }
 
 void SensorPacketAssembler::add_encoder_sample(
@@ -119,9 +67,13 @@ void SensorPacketAssembler::add_imu_sample(
 
 void SensorPacketAssembler::process_ready_packets()
 {
-  while (!pending_.empty() && pending_.begin()->second.complete()) {
-    const SensorPacket packet = pending_.begin()->second;
-    pending_.erase(pending_.begin());
+  for (auto it = pending_.begin(); it != pending_.end();) {
+    if (!it->second.complete()) {
+      ++it;
+      continue;
+    }
+    const SensorPacket packet = it->second;
+    it = pending_.erase(it);
     process_packet(packet);
   }
 }
