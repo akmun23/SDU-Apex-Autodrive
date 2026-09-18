@@ -28,10 +28,9 @@ struct OdometryObserverConfig
   // packets.  The recorded run comparison showed that 150 ms adds avoidable
   // launch/braking lag; retain only two native samples for the rolling rate.
   double wheel_speed_window_s{0.10};
-  // The bridge accepts source intervals in the 15--35 ms contract. Keep the
-  // normal observer path aligned with that contract: a 30 ms packet is still
-  // valid jitter, while a real >35 ms source interval is observable as
-  // degraded instead of being silently treated as nominal.
+  // The bridge requests at 40 Hz but preserves actual source timestamps and
+  // accepts intervals through max_integratable_gap_s. Keep the normal observer
+  // path explicit: intervals above 35 ms are marked degraded, not retimed.
   double normal_packet_dt_max_s{0.035};
   double degraded_packet_dt_max_s{0.050};
   // Short gaps still have valid encoder endpoints and can be integrated as an
@@ -112,7 +111,11 @@ struct OdometryObserverConfig
   // normal innovation gate.  A valid nonzero wheel packet is still useful in
   // that case; isolated zero packets remain protected by wheel_freeze_speed.
   double turn_wheel_braking_ax_mps2{-1.0};
-  double imu_x_offset_m{0.08};
+  // Longitudinal location of the point whose velocity is differentiated by
+  // the Unity IMU script, relative to base_link/rear axle. This is not the
+  // IMU Transform offset used for TF (imu_x_m): Unity differentiates the
+  // vehicle Rigidbody velocity at its configured COM.
+  double imu_acceleration_reference_x_m{0.15532};
   // The simulator's lateral IMU acceleration contains enough bias/noise to
   // create a persistent pose error when integrated at native 20 Hz.  The
   // default car model therefore uses wheel speed plus IMU yaw only (a
@@ -121,16 +124,19 @@ struct OdometryObserverConfig
   // dropout interval; this flag remains available for offline comparison and
   // vehicles with a separately validated slip model.
   bool integrate_lateral_acceleration_in_turn{false};
-  // Optional bounded body-lateral-velocity model using only causal wheel
-  // speed and yaw rate. It is separate from integrating lateral acceleration,
-  // which can drift at the native sensor rate. The gains are identified from
-  // held-out sensor-packet replays; simulator truth is never a runtime input.
+  // Optional bounded COM lateral-velocity model using causal wheel speed and
+  // yaw rate. Its output is translated to base_link with the configured point
+  // offset; it is separate from integrating lateral acceleration.
   bool use_kinematic_lateral_slip_model{false};
-  // v = yaw_rate * (lateral_velocity_yaw_rate_gain_m +
-  //                  lateral_velocity_speed_yaw_rate_gain_s * u)
+  // COM model: v_com = yaw_rate * (gain_m + gain_s * u), before its bound.
   double lateral_velocity_yaw_rate_gain_m{0.167};
   double lateral_velocity_speed_yaw_rate_gain_s{-0.0063};
+  // Bound applied to the estimated COM lateral velocity, before point shift.
   double lateral_velocity_max_mps{0.35};
+  // The kinematic lateral-velocity model estimates velocity at the Rigidbody
+  // COM. Translate it to the odometry base point, which is behind the COM:
+  // v_base = v_reference - yaw_rate * reference_forward_offset.
+  double lateral_velocity_reference_forward_offset_m{0.0};
   // A single impossible longitudinal IMU sample must not be integrated into
   // odometry.  The competition vehicle's lateral acceleration can be large
   // in a tight turn, so this guard is intentionally only for ax.
@@ -203,7 +209,7 @@ private:
   double wheel_scale_for_speed(double raw_speed_mps) const noexcept;
   double turn_speed_bias_mps(
     double wheel_mapped_mps, double yaw_rate_radps) const noexcept;
-  double kinematic_lateral_velocity(
+  double kinematic_base_lateral_velocity(
     double yaw_rate_radps, double longitudinal_speed_mps) const noexcept;
 
   OdometryEstimate estimate(const OdometryObservation & observation) const noexcept;

@@ -3,11 +3,11 @@
  * @brief Source-command baseline for the current AutoDRIVE Unity object.
  *
  * Unity owns the actual Rigidbody/WheelCollider contact solve.  This module
- * intentionally does not invent a real-car tire law for it.  It carries only
- * the verified steering geometry and the MPC target-speed command policy.
- * The resulting stage map is conservative plumbing for the controller and is
- * explicitly replaced by a measured observable response map before racing
- * promotion (see config/autodrive_simulator_contract.yaml).
+ * intentionally does not invent a real-car tire law for it. It combines
+ * verified command geometry with the held-out AutoDRIVE yaw-rate response
+ * identified from clean 40 Hz raceline captures. Speed/braking response
+ * remains a separate model gap before racing promotion (see
+ * config/autodrive_simulator_contract.yaml).
  */
 
 #include "vehicle_model.h"
@@ -91,12 +91,44 @@ ControlInput_t vehicle_model_saturate_control(const ControlInput_t *raw_control)
     return result;
 }
 
-static float geometric_yaw_rate(float speed_mps, float steering_rad)
+static float yaw_rate_response(
+    float speed_mps, float steering_rad, float yaw_rate_radps, float time_step)
 {
-    /* This is the only nominal lateral relation: Unity's serialized Ackermann
-     * geometry. It is deliberately not a tire-force or inertia surrogate. */
-    return speed_mps * tanf(steering_rad) /
-        active_parameters.steering_wheelbase_m;
+    /* Exact zero-order-hold update of the identified first-order response:
+     * r_dot = (-r + gain * u * tan(delta)) / tau. The gain is fitted from
+     * AutoDRIVE data and is intentionally separate from Unity's 0.324 m
+     * steering-geometry parameter. */
+    const float steady_yaw_rate = speed_mps * tanf(steering_rad) *
+        MPC_YAW_RATE_STEERING_GAIN_PER_M;
+    const float retention = expf(
+        -time_step / MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS);
+    return retention * yaw_rate_radps +
+        (1.0f - retention) * steady_yaw_rate;
+}
+
+static float longitudinal_speed_response(
+    float speed_mps,
+    float target_speed_mps,
+    float target_speed_rate_mps2,
+    float time_step)
+{
+    const float target_next = clampf_local(
+        target_speed_mps + target_speed_rate_mps2 * time_step,
+        0.0f, active_parameters.maximum_command_speed_mps);
+    const float target_mid = 0.5f * (target_speed_mps + target_next);
+    float acceleration =
+        MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
+        MPC_LONGITUDINAL_SPEED_COEFF_PER_S * speed_mps +
+        MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S * (target_mid - speed_mps) +
+        MPC_LONGITUDINAL_TARGET_RATE_COEFF * target_speed_rate_mps2;
+    const float braking_limit =
+        MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 +
+        MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV * speed_mps;
+    acceleration = clampf_local(
+        acceleration, -braking_limit, MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2);
+    return clampf_local(
+        speed_mps + acceleration * time_step,
+        0.0f, active_parameters.maximum_command_speed_mps);
 }
 
 VehicleState_t vehicle_model_predict_next_state(
@@ -113,14 +145,20 @@ VehicleState_t vehicle_model_predict_next_state(
     const float u0 = clampf_local(
         fmaxf(0.0f, current_state->long_vel),
         0.0f, active_parameters.maximum_command_speed_mps);
-    const float u1 = clampf_local(
-        u0 + time_step * control.target_speed_rate,
+    const float target_speed0 = clampf_local(
+        current_state->target_speed_mps,
         0.0f, active_parameters.maximum_command_speed_mps);
+    const float target_speed1 = clampf_local(
+        target_speed0 + time_step * control.target_speed_rate,
+        0.0f, active_parameters.maximum_command_speed_mps);
+    const float u1 = longitudinal_speed_response(
+        u0, target_speed0, control.target_speed_rate, time_step);
     const float r0 = current_state->yaw_rate;
-    const float r1 = geometric_yaw_rate(u1, control.steer_ang);
+    const float u_mid = 0.5f * (u0 + u1);
+    const float r1 = yaw_rate_response(
+        u_mid, control.steer_ang, r0, time_step);
     const float r_mid = 0.5f * (r0 + r1);
     const float psi_mid = current_state->heading + 0.5f * time_step * r_mid;
-    const float u_mid = 0.5f * (u0 + u1);
     const float v = current_state->lat_vel;
 
     VehicleState_t next = *current_state;
@@ -133,6 +171,7 @@ VehicleState_t vehicle_model_predict_next_state(
     /* A legal-state response map, not this baseline, owns lateral velocity. */
     next.lat_vel = v;
     next.yaw_rate = r1;
+    next.target_speed_mps = target_speed1;
     return next;
 }
 
@@ -151,11 +190,17 @@ FrenetState_t vehicle_model_predict_next_frenet_state(
     const float u0 = clampf_local(
         fmaxf(0.0f, state->flong_vel),
         0.0f, active_parameters.maximum_command_speed_mps);
-    const float u1 = clampf_local(
-        u0 + time_step * control.target_speed_rate,
+    const float target_speed0 = clampf_local(
+        state->ftarget_speed_mps,
         0.0f, active_parameters.maximum_command_speed_mps);
-    const float r1 = geometric_yaw_rate(u1, control.steer_ang);
+    const float target_speed1 = clampf_local(
+        target_speed0 + time_step * control.target_speed_rate,
+        0.0f, active_parameters.maximum_command_speed_mps);
+    const float u1 = longitudinal_speed_response(
+        u0, target_speed0, control.target_speed_rate, time_step);
     const float u_mid = 0.5f * (u0 + u1);
+    const float r1 = yaw_rate_response(
+        u_mid, control.steer_ang, state->fyaw_rate, time_step);
     const float r_mid = 0.5f * (state->fyaw_rate + r1);
     const float heading_mid = state->fhead_error + 0.5f * time_step * r_mid;
     float denominator = 1.0f - path_curvature * state->flat_error;
@@ -173,6 +218,7 @@ FrenetState_t vehicle_model_predict_next_frenet_state(
         cosf(state->fhead_error + time_step * (r_mid - path_curvature * path_progress)));
     next.flong_vel = u1;
     next.fyaw_rate = r1;
+    next.ftarget_speed_mps = target_speed1;
     return next;
 }
 
@@ -201,6 +247,7 @@ static void state_to_array(const FrenetState_t *state, float values[NX_FRENET])
     values[2] = state->flong_vel;
     values[3] = state->flat_vel;
     values[4] = state->fyaw_rate;
+    values[5] = state->ftarget_speed_mps;
 }
 
 static FrenetState_t array_to_state(const float values[NX_FRENET])
@@ -211,6 +258,7 @@ static FrenetState_t array_to_state(const float values[NX_FRENET])
         .flong_vel = values[2],
         .flat_vel = values[3],
         .fyaw_rate = values[4],
+        .ftarget_speed_mps = values[5],
     };
 }
 
@@ -230,7 +278,7 @@ void vehicle_model_compute_frenet_linearization(
     }
 
     const float state_epsilon[NX_FRENET] = {
-        1.0e-4f, 1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f};
+        1.0e-4f, 1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f};
     const float input_epsilon[NU] = {1.0e-4f, 1.0e-3f};
     float base_values[NX_FRENET];
     state_to_array(frenet_state, base_values);

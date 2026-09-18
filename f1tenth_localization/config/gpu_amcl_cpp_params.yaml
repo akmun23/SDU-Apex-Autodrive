@@ -73,11 +73,12 @@ gpu_amcl_cpp:
     # active before a pose is published to the controller.
     cluster_publish_min_weight: 0.20
 
-    # Keep the normal locked cloud local. Global AMCL handles startup
-    # localization; after lock, do not inject map-wide recovery particles into
-    # a closed track, because a visually similar corridor can move the racing
-    # pose several metres away from the causal odometry prediction.
-    enable_recovery_injection: false
+    # Keep the normal locked cloud local. After repeated local-cluster
+    # rejection, allow a bounded map/raceline recovery search; acceptance still
+    # requires a strong cluster stable across scans and the pose-jump gates.
+    # This is specifically to recover after the simulator's automatic
+    # checkpoint respawn, which has no runtime reset message.
+    enable_recovery_injection: true
     recovery_injection_ratio: 0.10
     enable_local_roughening: true
     local_roughening_ratio: 0.20
@@ -164,6 +165,9 @@ gpu_amcl_cpp:
     # correction conservative until a heading-observability campaign justifies
     # a larger value.
     local_scan_correction_yaw_gain: 0.0
+    # Experimental independent 1-D scan-likelihood correction. Production
+    # remains disabled until its matched live AMCL/Pure Pursuit A/B passes.
+    scan_likelihood_along_track_gain: 0.0
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small
     # matching bias is integrated again at every scan update.

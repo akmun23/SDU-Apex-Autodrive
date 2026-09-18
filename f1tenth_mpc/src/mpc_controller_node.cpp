@@ -51,7 +51,7 @@ struct PoseState {
     double x{};
     double y{};
     double yaw{};
-    rclcpp::Time received{0, 0, RCL_ROS_TIME};
+    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
     bool valid{false};
 };
 
@@ -83,12 +83,12 @@ public:
             declare_parameter<double>("startup_speed_mps", 1.5), 0.0, max_speed_mps_);
         startup_ramp_laps_ = std::max(
             0.0, declare_parameter<double>("startup_ramp_laps", 1.0));
-        pose_timeout_s_ = std::max(
-            0.01, declare_parameter<double>("pose_timeout_s", 0.30));
+        input_timeout_s_ = std::max(
+            0.025, declare_parameter<double>("input_timeout_s", 0.075));
         source_dt_min_s_ = std::max(
-            0.001, declare_parameter<double>("source_dt_min_s", 0.015));
+            0.001, declare_parameter<double>("source_dt_min_s", 0.001));
         source_dt_max_s_ = std::max(
-            source_dt_min_s_, declare_parameter<double>("source_dt_max_s", 0.035));
+            source_dt_min_s_, declare_parameter<double>("source_dt_max_s", 0.250));
         startup_path_max_distance_m_ = std::max(
             0.0, declare_parameter<double>("startup_path_max_distance_m", 0.80));
         startup_path_heading_tolerance_rad_ = std::max(
@@ -96,11 +96,14 @@ public:
 
         command_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             command_topic_, rclcpp::QoS(10));
+        // Control must consume the newest state, not replay a queue of stale
+        // 40 Hz samples after an executor/DDS scheduling pause.
+        const auto latest_state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-            pose_topic_, rclcpp::QoS(10),
+            pose_topic_, latest_state_qos,
             std::bind(&MpcControllerNode::pose_callback, this, std::placeholders::_1));
         odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-            odom_topic_, rclcpp::QoS(20),
+            odom_topic_, latest_state_qos,
             std::bind(&MpcControllerNode::odom_callback, this, std::placeholders::_1));
 
         mpc_initialize();
@@ -305,6 +308,9 @@ private:
     void publish_stop(const char * reason)
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
+        target_speed_mps_ = 0.0;
+        target_speed_initialized_ = true;
+        last_control_ = ControlInput_t{};
         publish_command(0.0, 0.0);
     }
 
@@ -327,7 +333,11 @@ private:
         pose_.x = message->pose.pose.position.x;
         pose_.y = message->pose.pose.position.y;
         pose_.yaw = yaw;
-        pose_.received = now();
+        pose_.stamp = rclcpp::Time(
+            message->header.stamp, get_clock()->get_clock_type());
+        if (pose_.stamp.nanoseconds() == 0) {
+            pose_.stamp = now();
+        }
         pose_.valid = true;
     }
 
@@ -358,8 +368,15 @@ private:
             publish_stop("MPC requires valid trajectory, map pose and odometry");
             return;
         }
-        if ((now() - pose.received).seconds() > pose_timeout_s_) {
-            publish_stop("MPC map pose is stale");
+        const auto current_time = now();
+        const double odom_age_s = (current_time - motion.stamp).seconds();
+        const double pose_age_s = (current_time - pose.stamp).seconds();
+        if (odom_age_s > input_timeout_s_ || pose_age_s > input_timeout_s_) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC rejected stale source-stamped state "
+                "(odom age %.3f s, map-pose age %.3f s)",
+                odom_age_s, pose_age_s);
+            publish_command(0.0, 0.0);
             return;
         }
         if (last_source_stamp_.nanoseconds() != 0) {
@@ -391,6 +408,11 @@ private:
         const double speed_ceiling = active_speed_ceiling();
         TrajectoryReferencePoint_t reference[PREDICTION_HORIZON];
         make_reference(closest, speed_ceiling, reference);
+        const double race_speed = clamp(point.speed, 0.0, speed_ceiling);
+        if (!target_speed_initialized_) {
+            target_speed_mps_ = clamp(std::max(0.0, motion.u), 0.0, race_speed);
+            target_speed_initialized_ = true;
+        }
 
         const double dx = pose.x - point.x;
         const double dy = pose.y - point.y;
@@ -401,6 +423,7 @@ private:
         state.flong_vel = static_cast<float>(std::max(0.0, motion.u));
         state.flat_vel = static_cast<float>(motion.v);
         state.fyaw_rate = static_cast<float>(motion.yaw_rate);
+        state.ftarget_speed_mps = static_cast<float>(target_speed_mps_);
         mpc_set_previous_command_with_dt(
             &last_control_, static_cast<float>(source_dt), 0.0f, 0);
         MpcSolverResult_t result{};
@@ -411,11 +434,6 @@ private:
             return;
         }
 
-        const double race_speed = clamp(point.speed, 0.0, speed_ceiling);
-        if (!target_speed_initialized_) {
-            target_speed_mps_ = clamp(std::max(0.0, motion.u), 0.0, race_speed);
-            target_speed_initialized_ = true;
-        }
         target_speed_mps_ = clamp(
             target_speed_mps_ + result.optimal_control.target_speed_rate * source_dt,
             0.0, race_speed);
@@ -437,7 +455,7 @@ private:
     double max_speed_mps_{};
     double startup_speed_mps_{};
     double startup_ramp_laps_{};
-    double pose_timeout_s_{};
+    double input_timeout_s_{};
     double source_dt_min_s_{};
     double source_dt_max_s_{};
     double startup_path_max_distance_m_{};

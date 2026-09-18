@@ -12,9 +12,10 @@ the local track reference.  For each estimator it reports:
 * yaw error, source-time speed, and raceline curvature;
 * summaries by estimator, track segment, speed, and curvature.
 
-AMCL health and scan-alignment diagnostics are summarized separately.  Those
-Float64MultiArray messages do not carry source headers, so they are never
-pretended to be exactly aligned to an individual estimator sample.
+AMCL health and scan-alignment diagnostics are source-stamped inside their
+Float64MultiArray payloads and joined to estimator samples within 1 ms. An
+along-track gain counterfactual measures the immediate effect of changing the
+latest applied scan correction; it is explicitly not a recurrent AMCL replay.
 """
 
 from __future__ import annotations
@@ -56,6 +57,11 @@ SCAN_FIELDS = (
     "bracket_before_stamp_s",
     "bracket_after_stamp_s",
     "processing_dropped",
+    "valid_sampled_beams",
+    "sampled_beams",
+    "likelihood_offset_m",
+    "likelihood_score_gain",
+    "likelihood_applied_m",
 )
 
 
@@ -287,16 +293,27 @@ def _source_stamped_health(
     events: dict[str, list[dict[str, str]]],
 ) -> tuple[list[int], dict[int, float]]:
     """Return AMCL health source stamps and correction ages from schema v2."""
-    samples: list[tuple[int, float]] = []
+    stamps, values = _source_stamped_health_data(events)
+    ages = {
+        stamp: age for stamp, data in values.items()
+        if (age := _finite(data[0])) is not None
+    }
+    return stamps, ages
+
+
+def _source_stamped_health_data(
+    events: dict[str, list[dict[str, str]]],
+) -> tuple[list[int], dict[int, list[object]]]:
+    """Return source-time keyed health payloads (field 15 is the source stamp)."""
+    samples: list[tuple[int, list[object]]] = []
     for event in events.get("/amcl_localization_health", []):
         data = _payload(event).get("data")
         if not isinstance(data, list) or len(data) < 15:
             continue
         source_stamp_s = _finite(data[14])
-        correction_age_s = _finite(data[0])
-        if source_stamp_s is None or correction_age_s is None:
+        if source_stamp_s is None:
             continue
-        samples.append((int(round(source_stamp_s * 1.0e9)), correction_age_s))
+        samples.append((int(round(source_stamp_s * 1.0e9)), data))
     samples.sort()
     return [stamp for stamp, _ in samples], dict(samples)
 
@@ -314,7 +331,84 @@ def _nearest_stamped_value(
     if index:
         candidates.append(stamps[index - 1])
     match = min(candidates, key=lambda stamp: abs(stamp - target_ns))
+    return values.get(match) if abs(match - target_ns) <= tolerance_ns else None
+
+
+def _nearest_stamped_row(
+    stamps: list[int], values: dict[int, list[object]], target_ns: int,
+    tolerance_ns: int = 1_000_000,
+) -> list[object] | None:
+    if not stamps:
+        return None
+    index = bisect.bisect_left(stamps, target_ns)
+    candidates = []
+    if index < len(stamps):
+        candidates.append(stamps[index])
+    if index:
+        candidates.append(stamps[index - 1])
+    match = min(candidates, key=lambda stamp: abs(stamp - target_ns))
     return values[match] if abs(match - target_ns) <= tolerance_ns else None
+
+
+def _amcl_along_track_gain_counterfactual(
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
+    """Score an immediate 2x/0x along-track correction, not a replay."""
+    accepted: list[dict[str, float]] = []
+    for row in rows:
+        if row.get("topic") != "/current_map_pose":
+            continue
+        values = {
+            "error": _finite(row.get("along_track_error_m")),
+            "applied": _finite(row.get("amcl_applied_along_track_m")),
+            "accepted": _finite(row.get("amcl_correction_accepted")),
+            "distance": _finite(row.get("amcl_scan_correction_distance_m")),
+            "speed": _finite(row.get("speed_mps")),
+        }
+        if any(value is None for value in values.values()):
+            continue
+        if values["accepted"] < 0.5 or values["distance"] > 1.0:
+            continue
+        if abs(values["applied"]) < 1.0e-5:
+            continue
+        accepted.append({key: float(value) for key, value in values.items()})
+
+    groups = {
+        "all_accepted_local_scans": accepted,
+        "speed_at_least_3_mps": [row for row in accepted if row["speed"] >= 3.0],
+    }
+    result: dict[str, object] = {}
+    for name, samples in groups.items():
+        actual = [row["error"] for row in samples]
+        no_along_correction = [
+            row["error"] - row["applied"] for row in samples]
+        double_along_correction = [
+            row["error"] + row["applied"] for row in samples]
+        result[name] = {
+            "samples": len(samples),
+            "actual_along_track_error_m": _summary(actual, absolute=True),
+            "zero_along_correction_counterfactual_m": _summary(
+                no_along_correction, absolute=True),
+            "double_applied_along_correction_counterfactual_m": _summary(
+                double_along_correction, absolute=True),
+            "double_increment_improves_fraction": (
+                sum(abs(error + correction) < abs(error)
+                    for error, correction in zip(actual,
+                                                 [row["applied"] for row in samples])) /
+                len(samples) if samples else None),
+        }
+    return {
+        "offline_only": True,
+        "method": (
+            "For each accepted local scan, add or remove the already-applied "
+            "along-track correction from the current error. No later AMCL "
+            "state or scan is replayed, so this cannot qualify a gain change."),
+        "current_config_effective_gain": (
+            "approximately xy_gain * along_track_gain = 0.5 * 0.25 = 0.125 "
+            "outside full-pose recovery"),
+        "candidate_double_increment": "effective gain approximately 0.25",
+        "groups": result,
+    }
 
 
 def build_report(
@@ -379,6 +473,7 @@ def build_report(
             "topic": topic,
             "source_stamp_ns": stamp,
             "truth_track_s_m": ss[truth_index],
+            "truth_track_heading_rad": psis[truth_index],
             "truth_track_kappa_radpm": kappas[truth_index],
             "truth_raceline_distance_m": math.sqrt(truth_distance_sq),
             "speed_mps": source_speed,
@@ -428,7 +523,11 @@ def build_report(
     source_dts = [b - a for a, b in zip(source_times, source_times[1:]) if b > a]
     health = _diagnostic_summary(events, "/amcl_localization_health", HEALTH_FIELDS)
     scan_alignment = _diagnostic_summary(events, "/amcl_scan_alignment", SCAN_FIELDS)
-    health_stamps, health_age_by_stamp = _source_stamped_health(events)
+    health_stamps, health_by_stamp = _source_stamped_health_data(events)
+    health_age_by_stamp = {
+        stamp: age for stamp, data in health_by_stamp.items()
+        if (age := (_finite(data[0]) if data else None)) is not None
+    }
     if health_stamps:
         for row in rows:
             try:
@@ -439,13 +538,38 @@ def build_report(
                 health_stamps, health_age_by_stamp, target_stamp_ns)
             if age is not None:
                 row["amcl_correction_age_s"] = age
+            if row.get("topic") != "/current_map_pose":
+                continue
+            health_data = _nearest_stamped_row(
+                health_stamps, health_by_stamp, target_stamp_ns)
+            if health_data is None:
+                continue
+            accepted = _finite(health_data[1]) if len(health_data) > 1 else None
+            correction_distance = (
+                _finite(health_data[6]) if len(health_data) > 6 else None)
+            raw_x = _finite(health_data[10]) if len(health_data) > 10 else None
+            raw_y = _finite(health_data[11]) if len(health_data) > 11 else None
+            applied_x = _finite(health_data[12]) if len(health_data) > 12 else None
+            applied_y = _finite(health_data[13]) if len(health_data) > 13 else None
+            track_heading = _finite(row.get("truth_track_heading_rad"))
+            if (track_heading is None or raw_x is None or raw_y is None or
+                    applied_x is None or applied_y is None):
+                continue
+            tangent_x = math.cos(track_heading)
+            tangent_y = math.sin(track_heading)
+            row["amcl_correction_accepted"] = accepted
+            row["amcl_scan_correction_distance_m"] = correction_distance
+            row["amcl_raw_along_track_innovation_m"] = (
+                raw_x * tangent_x + raw_y * tangent_y)
+            row["amcl_applied_along_track_m"] = (
+                applied_x * tangent_x + applied_y * tangent_y)
     scan_rows = []
     for event in events.get("/amcl_scan_alignment", []):
         data = _payload(event).get("data")
         if isinstance(data, list):
             scan_rows.append(data)
     report_out: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_dir": str(root),
         "source_report_csv": str(report_csv),
         "raceline_csv": str(raceline_csv),
@@ -469,6 +593,8 @@ def build_report(
             "sequence_header_available": False,
         },
         "metrics": by_topic,
+        "amcl_along_track_gain_counterfactual":
+            _amcl_along_track_gain_counterfactual(rows),
         "amcl_diagnostics": {
             "health": health,
             "scan_alignment": scan_alignment,
@@ -489,7 +615,8 @@ def build_report(
         "acceptance": {
             "all_requested_topics_present": all(any(row["topic"] == topic for row in rows) for topic in TOPICS),
             "decomposition_complete": bool(rows),
-            "state_age_exactly_joined": False,
+            "state_age_exactly_joined": any(
+                "amcl_correction_age_s" in row for row in rows),
         },
     }
 

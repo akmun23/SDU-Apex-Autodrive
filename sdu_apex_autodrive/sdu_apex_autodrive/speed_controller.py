@@ -58,6 +58,7 @@ class SpeedControllerConfig:
     throttle_rise_rate_per_sec: float
     throttle_fall_rate_per_sec: float
     stop_speed_threshold_mps: float
+    # Legacy field name; crossing this threshold commands active full braking.
     overspeed_coast_threshold_mps: float
     feedforward_speed_mps: tuple[float, ...]
     feedforward_throttle: tuple[float, ...]
@@ -716,7 +717,7 @@ class TargetSpeedController:
             self.integral = 0.0
             self.acceleration_controller.reset()
             self._overspeed_elapsed = 0.0
-            # A target reduction needs a coast/catch phase only when the
+            # A target reduction needs a full-brake/catch phase only when the
             # vehicle is already above the new request.  During a low-speed
             # launch or a tight-corner recovery the measured speed can be
             # below both targets; entering the downshift guard there starves
@@ -750,7 +751,7 @@ class TargetSpeedController:
                 # inside the target band can therefore skip past the target
                 # by several metres per second. Start the new target's
                 # calibrated hold throttle when the allowed IMU acceleration
-                # predicts that the next coast interval would cross the band.
+                # predicts that the next full-brake interval would cross the band.
                 predicted_speed = measured + min(
                     0.0, measured_accel_mps2) * self.config.speed_hold_prediction_horizon_sec
                 if (measured_accel_mps2 < 0.0 and

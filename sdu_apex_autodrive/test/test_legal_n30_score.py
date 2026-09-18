@@ -21,7 +21,7 @@ FIELDS = (
 
 def _write(path: Path, mutate=None) -> None:
     rows = []
-    for steps in (4, 10, 20, 30):
+    for steps in (4, 5, 10, 20, 30):
         row = {
             "origin_id": f"origin-{steps}",
             "origin_input_mode": "sensor_legal",
@@ -42,13 +42,35 @@ def _write(path: Path, mutate=None) -> None:
         writer.writerows(rows)
 
 
-def test_legal_n30_score_requires_the_four_controller_horizons(tmp_path):
+def test_legal_n30_score_prioritizes_five_steps_and_keeps_full_horizon(tmp_path):
     path = tmp_path / "predictions.csv"
     _write(path)
     report = _MODULE.score(path)
     assert report["origin_contract"] == "sensor_legal"
+    assert report["primary_horizon_steps"] == 5
+    assert report["horizon_contract"]["priority_steps"] == [5, 4, 10, 20, 30]
+    assert report["horizons"]["0.125s"]["steps"] == 5
     assert report["horizons"]["0.75s"]["steps"] == 30
-    assert report["horizons"]["0.10s"]["position_m"]["p95"] == pytest.approx(0.1)
+    assert report["horizons"]["0.10s"][
+        "position_euclidean_m_secondary"]["p95"] == pytest.approx(0.1)
+
+
+def test_prediction_position_error_is_split_in_truth_heading_frame(tmp_path):
+    path = tmp_path / "predictions.csv"
+
+    def set_rotated_reference(row, steps):
+        if steps == 5:
+            return {**row, "truth_yaw_rad": 1.5707963267948966}
+        return row
+
+    _write(path, set_rotated_reference)
+    report = _MODULE.score(path)
+    components = report["horizons"]["0.125s"][
+        "position_error_components_truth_frame_m"]
+    assert components["frame"] == "simulator_truth_yaw"
+    # A +0.1 m world-x prediction error is lateral at 90 degrees.
+    assert components["longitudinal_abs_m"]["p95"] == pytest.approx(0.0, abs=1e-12)
+    assert components["lateral_abs_m"]["p95"] == pytest.approx(0.1)
 
 
 def test_legal_n30_score_rejects_nonlegal_origin(tmp_path):

@@ -17,7 +17,8 @@ _SPEC.loader.exec_module(_ASSEMBLER)
 
 def _write_packets(path, count=12, reverse_index=None, time_gap_index=None,
                    time_step_s=0.025, reset_index=None, position_jump_index=None,
-                   off_plane_index=None):
+                   off_plane_index=None, boundary_interval_index=None,
+                   boundary_interval_s=0.035):
     fields = [
         "simulation_time_s", "simulation_physics_step", "simulation_render_frame",
         "simulator_position_x", "simulator_position_y", "simulator_position_z",
@@ -42,6 +43,8 @@ def _write_packets(path, count=12, reverse_index=None, time_gap_index=None,
         else:
             step = index
         source_time = index * time_step_s
+        if boundary_interval_index is not None and index >= boundary_interval_index:
+            source_time += boundary_interval_s - time_step_s
         if time_gap_index is not None and index > time_gap_index:
             source_time += 1.0
         steering_command = -0.1 + 0.01 * index
@@ -150,6 +153,36 @@ def test_assembler_rejects_ten_hz_source_cadence(tmp_path):
     assert report["quality_gate_pass"] is False
     assert report["source_dt_cadence_violation_count"] == 11
     assert "source_cadence" in report["quality_gate_failures"]
+
+
+def test_assembler_accepts_nanosecond_rounding_at_35ms_boundary(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_packets(
+        run_dir / "simulator_packets.csv", boundary_interval_index=6,
+        boundary_interval_s=0.035)
+
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
+
+    assert report["quality_gate_pass"] is True
+    assert report["source_dt_cadence_violation_count"] == 0
+    assert report["source_dt_gap_count"] == 0
+    assert report["transition_count"] == 11
+
+
+def test_assembler_still_rejects_real_interval_over_35ms(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_packets(
+        run_dir / "simulator_packets.csv", boundary_interval_index=6,
+        boundary_interval_s=0.0350001)
+
+    report = _ASSEMBLER.assemble(run_dir, "body", False, 0.75)
+
+    assert report["quality_gate_pass"] is False
+    assert report["source_dt_cadence_violation_count"] == 1
+    assert report["source_dt_gap_count"] == 1
+    assert report["transition_count"] == 10
 
 
 def test_assembler_marks_reset_as_hard_rollout_boundary(tmp_path):

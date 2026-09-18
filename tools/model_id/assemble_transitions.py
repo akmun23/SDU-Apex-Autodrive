@@ -61,6 +61,10 @@ MAX_STEERING_RAD = 0.5236
 # rejected rather than hidden by a median-rate calculation.
 MIN_SOURCE_TRANSITION_DT_S = 0.015
 MAX_SOURCE_TRANSITION_DT_S = 0.035
+# Source timestamps are serialized at nanosecond precision. Subtracting two
+# valid boundary stamps can exceed a bound by a few floating-point ulps; accept
+# only that timestamp-quantization noise without changing the measured dt.
+SOURCE_DT_BOUNDARY_TOLERANCE_S = 1.0e-9
 POSITION_DISCONTINUITY_THRESHOLD_M = 1.5
 YAW_DISCONTINUITY_THRESHOLD_RAD = 1.0
 ENCODER_WHEEL_RADIUS_M = 0.059
@@ -68,6 +72,11 @@ ENCODER_WHEEL_RADIUS_M = 0.059
 # plane can still produce perfectly regular source packets, so cadence and
 # kinematic checks alone are not sufficient to accept its falling tail.
 MAX_OFF_PLANE_Z_DEVIATION_M = 1.0
+
+
+def _within_source_cadence(dt_s: float, maximum_dt_s: float) -> bool:
+    return (MIN_SOURCE_TRANSITION_DT_S - SOURCE_DT_BOUNDARY_TOLERANCE_S <= dt_s <=
+            maximum_dt_s + SOURCE_DT_BOUNDARY_TOLERANCE_S)
 
 
 def _read_packets(path: Path) -> list[dict[str, str]]:
@@ -252,7 +261,7 @@ def _derive_wheel_speeds(rows: list[dict[str, float]]) -> None:
         row["wheel_speed_mps"] = None
         if previous is not None and previous["segment_id"] == row["segment_id"]:
             dt = row["time"] - previous["time"]
-            if (MIN_SOURCE_TRANSITION_DT_S <= dt <= MAX_SOURCE_TRANSITION_DT_S and
+            if (_within_source_cadence(dt, MAX_SOURCE_TRANSITION_DT_S) and
                     row["encoder_left"] is not None and
                     row["encoder_right"] is not None and
                     previous["encoder_left"] is not None and
@@ -408,7 +417,7 @@ def _transitions(rows: list[dict[str, float]], twist_frame: str,
         current["yaw_unwrapped"] = _unwrap(previous["yaw_unwrapped"], current["yaw"])
         dt = current["time"] - previous["time"]
         step_delta = int(round(current["physics_step"] - previous["physics_step"]))
-        if not (MIN_SOURCE_TRANSITION_DT_S <= dt <= max_transition_dt_s and
+        if not (_within_source_cadence(dt, max_transition_dt_s) and
                 step_delta > 0):
             continue
         # A reset/teleport is a hard rollout boundary. Retain the packet on
@@ -491,10 +500,10 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
     dt = np.diff([row["time"] for row in unique])
     positive_dt = dt[dt > 1e-6]
     source_dt_gap_count = int(np.count_nonzero(
-        positive_dt > MAX_SOURCE_TRANSITION_DT_S))
+        positive_dt > MAX_SOURCE_TRANSITION_DT_S + SOURCE_DT_BOUNDARY_TOLERANCE_S))
     source_dt_cadence_violation_count = int(np.count_nonzero(
-        (positive_dt < MIN_SOURCE_TRANSITION_DT_S) |
-        (positive_dt > MAX_SOURCE_TRANSITION_DT_S)))
+        (positive_dt < MIN_SOURCE_TRANSITION_DT_S - SOURCE_DT_BOUNDARY_TOLERANCE_S) |
+        (positive_dt > MAX_SOURCE_TRANSITION_DT_S + SOURCE_DT_BOUNDARY_TOLERANCE_S)))
     source_dt_max = float(np.max(positive_dt)) if len(positive_dt) else None
     source_hz = 1.0 / float(np.median(positive_dt)) if len(positive_dt) else 0.0
     frame_errors = {frame: _frame_error(unique, frame) for frame in ("body", "world")}
@@ -603,6 +612,8 @@ def assemble(run_dir: Path, twist_frame: str, allow_non_target_rate: bool,
             "pass": timing_pass,
             "allow_non_target_rate": allow_non_target_rate,
             "raw_rows_are_never_upsampled": True,
+            "boundary_tolerance_s": SOURCE_DT_BOUNDARY_TOLERANCE_S,
+            "boundary_tolerance_only_absorbs_timestamp_quantization": True,
             "source_cadence_window_s": [
                 MIN_SOURCE_TRANSITION_DT_S, MAX_SOURCE_TRANSITION_DT_S],
             "source_cadence_violations_rejected": True,

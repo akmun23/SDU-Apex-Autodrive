@@ -208,6 +208,7 @@ void test_bounded_kinematic_lateral_slip_model()
   config.lateral_velocity_yaw_rate_gain_m = 0.167;
   config.lateral_velocity_speed_yaw_rate_gain_s = -0.0063;
   config.lateral_velocity_max_mps = 0.35;
+  config.lateral_velocity_reference_forward_offset_m = 0.15532;
   OdometryObserver observer(config);
   observer.update(observation(0.0, 0.0, 0.0));
   // Stay below the launch wheel-spin guard so this test exercises the
@@ -217,9 +218,13 @@ void test_bounded_kinematic_lateral_slip_model()
   const auto left_turn = observer.update(observation(
     0.050, delta, delta, 0.0, 0.0, 0.8));
   require(left_turn.turn_mode, "sideslip model enters turn mode");
-  require(left_turn.body_v_mps > 0.0, "positive yaw turn has the identified sign");
+  const double expected_com_velocity = 0.8 * (0.167 - 0.0063 * speed);
+  const double expected_rear_axle_velocity =
+    expected_com_velocity - 0.8 * config.lateral_velocity_reference_forward_offset_m;
+  require(std::abs(left_turn.body_v_mps - expected_rear_axle_velocity) < 1.0e-12,
+    "COM lateral velocity is translated to the rear-axle base point");
   require(std::abs(left_turn.body_v_mps) < 0.35,
-    "sideslip model is bounded");
+    "translated lateral velocity remains bounded in this test case");
 
   const auto straight = observer.update(observation(
     0.100, 2.0 * delta, 2.0 * delta, 0.0, 0.0, 0.0));
@@ -392,7 +397,7 @@ void test_turn_dropout_does_not_integrate_braking_twice()
 {
   OdometryObserverConfig config;
   config.wheel_speed_scale = 1.0;
-  config.imu_x_offset_m = 0.0;
+  config.imu_acceleration_reference_x_m = 0.0;
   OdometryObserver observer(config);
   observer.update(observation(0.0, 0.0, 0.0));
   const double speed_delta = 4.0 * 0.050 / config.wheel_radius_m;
@@ -416,7 +421,7 @@ void test_turn_dropout_uses_calibrated_braking_acceleration()
 {
   OdometryObserverConfig config;
   config.wheel_speed_scale = 1.0;
-  config.imu_x_offset_m = 0.0;
+  config.imu_acceleration_reference_x_m = 0.0;
   config.decel_ax_scale = 0.5;
   config.decel_ax_offset_mps2 = 0.0;
   OdometryObserver observer(config);
@@ -444,7 +449,7 @@ void test_turn_recovery_reanchors_after_dynamic_update()
 {
   OdometryObserverConfig config;
   config.wheel_speed_scale = 1.0;
-  config.imu_x_offset_m = 0.0;
+  config.imu_acceleration_reference_x_m = 0.0;
   OdometryObserver observer(config);
   observer.update(observation(0.0, 0.0, 0.0));
   const double speed_delta = 4.0 * 0.050 / config.wheel_radius_m;
@@ -795,7 +800,7 @@ void test_established_straight_rejects_positive_burst_recovery()
 void test_lever_arm_and_rk2_reference()
 {
   OdometryObserverConfig config;
-  config.imu_x_offset_m = 0.08;
+  config.imu_acceleration_reference_x_m = 0.15532;
   config.max_imu_ax_abs_mps2 = 300.0;
   OdometryObserver observer(config);
   observer.update(observation(0.0, 0.0, 0.0));

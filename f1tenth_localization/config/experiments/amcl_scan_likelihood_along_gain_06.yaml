@@ -1,0 +1,6 @@
+# One-factor live A/B for the held-out scan-likelihood correction candidate.
+# Fit from the first half of amcl_scan_observability_track_3mps_20260918;
+# production remains at gain 0 until this matched track run passes.
+gpu_amcl_cpp:
+  ros__parameters:
+    scan_likelihood_along_track_gain: 0.60

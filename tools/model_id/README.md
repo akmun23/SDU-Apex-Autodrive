@@ -17,8 +17,9 @@ odometry, localization, Pure Pursuit, or MPC.
   already-causal prediction or runtime estimate offline. Simulator truth is a
   score target only.
 - `score_legal_n30.py` is the required acceptance scorer for a future model:
-  it accepts only legal sensor-state origins and exactly N4/N10/N20/N30
-  predictions at verified 40 Hz cadence.
+  it accepts only legal sensor-state origins and requires N4/N5/N10/N20/N30
+  predictions at verified 40 Hz cadence. N5 (125 ms) is primary; N30 (750 ms)
+  remains the full-horizon diagnostic.
 
 The discarded utilities included four-wheel/tire/suspension surrogates,
 polynomial throttle fits, artifact-pinned candidates, and diagnostic Unity
@@ -35,3 +36,24 @@ New work must use a new accepted 40 Hz trace to identify an observable,
 source-command stage map for the 30-stage / 0.75 s horizon. It must not
 reintroduce generic friction, cornering-stiffness, Pacejka, load-transfer, or
 direct-acceleration terms.
+
+## AMCL scan observability decision test
+
+When a run specifically needs scan geometry, enable the recorder's optional
+raw-range sidecar with `with_model_id_recorder:=true` and
+`model_id_record_lidar_ranges:=true`. The opt-in data is consumed by:
+
+```sh
+python3 tools/model_id/analyze_amcl_scan_observability.py \
+  sdu_apex_autodrive/artifacts/simulator_trace/<run-name>
+```
+
+Run it from the repo root in the Humble dev environment (NumPy, PyYAML, Pillow,
+and SciPy are required). The tool joins scans, `/current_map_pose`, and packet
+truth by exact source stamp; truth remains an offline score target. It reproduces the configured
+AMCL likelihood-field using the production map, fits a bounded along-heading
+correction on the first chronological half, and scores it unchanged on the
+second half. It writes per-scan `amcl_scan_observability.csv` and a JSON
+decision report. Only a held-out reduction of at least 5% in along-error p95,
+with cross and yaw p95 regressions limited to 5%, warrants a matched live AMCL
+A/B. Otherwise reject the correction and do not repeat the same capture.

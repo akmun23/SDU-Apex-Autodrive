@@ -7,8 +7,8 @@
  * 1. No Hessian condensing — state variables remain explicit decision
  *    variables, enabling O(N) per-iteration cost via Riccati recursion.
  *
- * 2. State augmentation: the Frenet state [e_y, e_psi, vx, vy, omega]
- *    is augmented with commanded/effective steering and previous controls.
+ * 2. State augmentation: the Frenet state [e_y, e_psi, vx, vy, omega,
+ *    actuator speed target] is augmented with steering and previous controls.
  *
  * 3. Wall constraints are direct box constraints on x_k[0] (=e_y),
  *    handled naturally by ADMM's projection step.
@@ -553,8 +553,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             lin_control.steer_ang = -delta_clamp;
         lin_control.target_speed_rate = prev_control.target_speed_rate;
 
-        float A_step[5][5];
-        float B_step[5][2];
+        float A_step[NX_FRENET][NX_FRENET];
+        float B_step[NX_FRENET][NU];
 
         vehicle_model_compute_frenet_linearization(
             &lin_state, &lin_control,
@@ -577,11 +577,11 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             &lin_state, &lin_control, config.time_step, kappa_k,
             reference_trajectory[k].reference_velocity);
 
-        /* === Augmented A matrix (9x9) === */
+        /* === Augmented A matrix (10x10) === */
 
-        /* Top-left 5×5: per-step Frenet A (e_y, e_psi, vx, vy, omega) */
-        for (int i = 0; i < 5; i++)
-            for (int j = 0; j < 5; j++)
+        /* Top-left 6×6: Frenet A including the carried actuator speed target. */
+        for (int i = 0; i < NX_FRENET; i++)
+            for (int j = 0; j < NX_FRENET; j++)
             sd->A[i][j] = A_step[i][j];
 
         /* The discrete vehicle Jacobian assumes constant steering over the
@@ -609,6 +609,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             lin_state.flong_vel,
             lin_state.flat_vel,
             lin_state.fyaw_rate,
+            lin_state.ftarget_speed_mps,
         };
         const float xbar_next[NX_FRENET] = {
             lin_state_next.flat_error,
@@ -616,6 +617,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             lin_state_next.flong_vel,
             lin_state_next.flat_vel,
             lin_state_next.fyaw_rate,
+            lin_state_next.ftarget_speed_mps,
         };
 
         for (int i = 0; i < NX_FRENET; i++) {
@@ -637,10 +639,10 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         /* Previous-control tail rows and columns were zeroed above. */
 
-        /* === Augmented B matrix (9x2) === */
+        /* === Augmented B matrix (10x2) === */
 
-        /* Rows 0-4, col 1: target-speed slew effect on stage prediction. */
-        for (int i = 0; i < 5; i++)
+        /* Target-speed slew affects the response and advances the target state. */
+        for (int i = 0; i < NX_FRENET; i++)
             sd->B[i][1] = B_step[i][1];
 
         /* Command angle integrates the optimized steering rate. */
@@ -662,6 +664,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         sd->Q_diag[2] = RICCATI_COST_FACTOR * config.weight_velocity;
         sd->Q_diag[3] = RICCATI_COST_FACTOR * config.weight_lateral_velocity;
         sd->Q_diag[4] = RICCATI_COST_FACTOR * config.weight_yaw_rate;
+        sd->Q_diag[IDX_TARGET_SPEED_STATE] = 0.0f;
         sd->Q_diag[IDX_DELTA_COMMAND] = 0.0f;
         sd->Q_diag[IDX_DELTA_EFFECTIVE] =
             RICCATI_COST_FACTOR * config.weight_effective_steering;
@@ -727,6 +730,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         sd->q[3] = -(sd->Q_diag[3] * reference_trajectory[k].reference_lateral_velocity);
         sd->q[4] = -(sd->Q_diag[4] * reference_trajectory[k].reference_yaw_rate);
+        sd->q[IDX_TARGET_SPEED_STATE] = 0.0f;
 
         sd->q[IDX_DELTA_COMMAND] = 0.0f;
 
@@ -780,6 +784,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             sd->x_lb[s] = -BIG_BOUND;
             sd->x_ub[s] = BIG_BOUND;
         }
+        sd->x_lb[IDX_TARGET_SPEED_STATE] = 0.0f;
+        sd->x_ub[IDX_TARGET_SPEED_STATE] = vehicle_parameters.maximum_command_speed_mps;
 
         /* The issued command carries the hard steering-angle constraint. */
         sd->x_lb[IDX_DELTA_COMMAND] = -vehicle_parameters.max_steering_angle;
@@ -902,6 +908,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             terminal_x_lb[s] = -BIG_BOUND;
             terminal_x_ub[s] = BIG_BOUND;
         }
+        terminal_x_lb[IDX_TARGET_SPEED_STATE] = 0.0f;
+        terminal_x_ub[IDX_TARGET_SPEED_STATE] = vehicle_parameters.maximum_command_speed_mps;
         terminal_x_lb[IDX_DELTA_COMMAND] = -vehicle_parameters.max_steering_angle;
         terminal_x_ub[IDX_DELTA_COMMAND] = vehicle_parameters.max_steering_angle;
         terminal_x_lb[IDX_DELTA_EFFECTIVE] = -BIG_BOUND;
@@ -913,7 +921,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     }
 
     /* ---------------------------------------------------------------
-     * Step 3: Build augmented initial state (9 elements)
+     * Step 3: Build augmented initial state (10 elements)
      * --------------------------------------------------------------- */
     float x0[RICCATI_MAX_NX];
     memset(x0, 0, sizeof(x0));
@@ -922,6 +930,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     x0[2] = frenet->flong_vel;
     x0[3] = frenet->flat_vel;
     x0[4] = frenet->fyaw_rate;
+    x0[IDX_TARGET_SPEED_STATE] = frenet->ftarget_speed_mps;
     x0[IDX_DELTA_COMMAND] = commanded_steering_angle;
     x0[IDX_DELTA_EFFECTIVE] = effective_steering_angle;
     x0[IDX_DRATE_PREV] = prev_control.steer_ang;  /* Previous delta-rate command */

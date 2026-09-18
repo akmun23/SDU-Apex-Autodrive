@@ -32,6 +32,7 @@ int main(void)
         .flong_vel = 3.5f,
         .flat_vel = 0.0f,
         .fyaw_rate = 0.0f,
+        .ftarget_speed_mps = 3.5f,
     };
     MpcSolverResult_t result = {0};
     const MpcSolverStatus_t status = mpc_compute_optimal_control(

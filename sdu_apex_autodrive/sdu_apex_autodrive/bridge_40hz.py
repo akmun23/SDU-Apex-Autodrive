@@ -5,10 +5,11 @@ official bridge requests the next packet from inside the previous packet's
 callback, so simulator image capture, image decoding, and ROS publication can
 create a request backlog. This wrapper keeps the official decoder and topic
 contract, but sends requests from an independent 40 Hz clock with a bounded
-two-entry FIFO. Socket.IO preserves response order, and each entry retains its
-request sequence, making request/response association explicit. A missing
-response is a transport fault: the bridge raises a fault and stops the stream
-instead of repeating, interpolating, or misassociating data.
+FIFO sized to the response deadline. Socket.IO preserves response order, and
+each entry retains its request sequence, making request/response association
+explicit. A missing response is a transport fault: the bridge raises a fault
+and stops the stream instead of repeating, interpolating, or misassociating
+data.
 
 Packet callbacks are serialized before source-sequence validation. The
 Socket.IO server may dispatch callbacks concurrently; without this gate a
@@ -50,60 +51,159 @@ PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 
-# The source cadence is 40 Hz (25 ms). This is the hard data contract: source
-# time, physics step, and telemetry sequence must advance inside this 15--35
-# ms window. Render-frame metadata is retained for diagnostics but is not a
-# source identity: in batchmode Unity may execute multiple FixedUpdate steps
-# without advancing its render-frame counter. Bridge arrival is measured
-# separately because host scheduling and socket buffering can deliver two
-# distinct, source-valid packets less than 15 ms apart. There is deliberately
-# no positive minimum on host arrival spacing: a scheduler/socket burst is
-# not a source-rate violation. A 75 ms transport deadline still fails a
-# stalled/10 Hz response; no sample is held,
-# interpolated, or fabricated.
-MIN_SOURCE_INTERVAL_S = 0.015
-# Unity serializes its source time as decimal seconds.  A source interval at
-# the exact lower boundary can therefore arrive as 0.014999... after the
-# JSON/float conversion even though the physics-step delta is exactly the
-# configured 15 ms boundary.  This epsilon is only for boundary comparison;
-# it is far smaller than a meaningful cadence fault and does not accept a
-# 10 Hz/stalled stream.
+# Bridge requests target 40 Hz (25 ms), but Unity stamps each response with
+# the source state time at which it was assembled. That source interval can
+# differ from both 25 ms and host arrival spacing. Preserve its measured value
+# rather than assuming or fabricating a nominal interval. The odometry
+# observer can integrate source gaps through 250 ms; intervals above its
+# normal 35 ms threshold are separately marked degraded. Render-frame metadata
+# is diagnostic only because batchmode may execute multiple physics steps per
+# rendered frame. Host arrival has no positive minimum (socket bursts are
+# allowed), while the independent 150 ms response deadline still detects a
+# stalled transport. No sample is held, interpolated, or fabricated.
+# Unity's current fixed timestep is 1 ms and source time is Time.fixedTimeAsDouble.
+# Accept any interval representing at least one physics step; 40 Hz is the
+# request target, not a fabricated source period. Monotonic time, physics-step
+# identity, telemetry sequence, and transport deadlines remain independent
+# integrity checks. The observer integrates variable source intervals through
+# MAX_SOURCE_INTERVAL_S and marks intervals above 35 ms degraded.
+MIN_SOURCE_INTERVAL_S = 0.001
+# Unity serializes source time as decimal seconds. Allow only a 1 us comparison
+# tolerance at the fixed-step lower bound and observer integration upper bound.
 SOURCE_INTERVAL_COMPARISON_EPSILON_S = 1.0e-6
 # Keep an explicit lower bound for the startup check and diagnostics, but set
 # it to zero because host arrival may bunch valid source packets. Source
 # cadence remains guarded independently by MIN_SOURCE_INTERVAL_S.
 MIN_BRIDGE_ARRIVAL_INTERVAL_S = 0.0
-MAX_SOURCE_INTERVAL_S = 0.035
-MAX_BRIDGE_ARRIVAL_INTERVAL_S = 0.075
+# Keep host transport and simulator source-time limits independent. The 150 ms
+# transport window tolerates short arrival stalls; source-time gaps remain
+# bounded by the observer's 250 ms integration limit and are never rewritten.
+MAX_SOURCE_INTERVAL_S = 0.250
+MAX_BRIDGE_ARRIVAL_INTERVAL_S = 0.150
 MAX_RESPONSE_WAIT_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
 MAX_REQUEST_SCHEDULE_GAP_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
-# Unity's competition-track socket round trip is about 50 ms even though the
-# simulator builds each response in about 1 ms. Two bounded FIFO slots keep
-# the wire cadence at 40 Hz without allowing an unbounded request backlog.
-# Socket.IO preserves event order, and request_sequence is retained in every
-# slot so command/response association remains explicit.
-MAX_OUTSTANDING_REQUESTS = 2
+MIN_REQUEST_SPACING_S = 0.024
+# Keep enough bounded requests in flight to cover the response deadline even
+# at the minimum permitted request spacing. Late ordered responses are accepted
+# only while their source time and sequence metadata remain valid.
+MAX_OUTSTANDING_REQUESTS = math.ceil(
+    MAX_RESPONSE_WAIT_S / MIN_REQUEST_SPACING_S)
+
+
+def _next_request_deadline(next_deadline: float, emitted_at: float,
+                           period: float) -> float:
+    """Limit phase catch-up to a small, bounded request-rate correction."""
+    minimum_spacing = min(period, MIN_REQUEST_SPACING_S)
+    return max(next_deadline, emitted_at + minimum_spacing)
+
+
 # Unity may need several seconds to finish loading the scene and accept the
 # first Bridge request.  This is a startup transport allowance only.  The
 # first few source packets can also straddle Unity's connection/bootstrap
 # work and have a non-representative interval.  Those packets are discarded
-# before ROS publication; the normal 15--35 ms response/cadence contract is
-# enforced after a short consecutive stable-source handshake.  A stream that
-# never establishes that contract still fails within this same grace period.
+# before ROS publication; a short consecutive monotonic-source handshake is
+# required before publication. Variable source intervals up to the observer's
+# integration bound are allowed, while transport response timing is checked
+# independently. A stream that never establishes this still fails within the
+# same grace period.
 STARTUP_RESPONSE_GRACE_S = 15.0
 SOURCE_STARTUP_STABLE_INTERVALS = 3
 
 
 def _source_interval_is_valid(source_dt: float) -> bool:
-    """Return whether a source interval satisfies the 40 Hz contract.
+    """Return whether a source interval is within the observer's time bounds.
 
-    The tolerance compensates for decimal serialization at the exact 15/35 ms
-    boundaries.  It is deliberately not applied to ordering or sequence
-    checks, and it is too small to mask a substantive cadence failure.
+    The request scheduler targets 40 Hz, but source intervals are not forced
+    to equal 25 ms. The tolerance only compensates for decimal serialization
+    at the 1 ms and 250 ms boundaries; ordering and sequence are validated
+    separately.
     """
     return (
         MIN_SOURCE_INTERVAL_S - SOURCE_INTERVAL_COMPARISON_EPSILON_S <= source_dt <=
         MAX_SOURCE_INTERVAL_S + SOURCE_INTERVAL_COMPARISON_EPSILON_S)
+
+
+def _format_source_cadence_fault_detail(
+        *,
+        source_dt: float,
+        arrival_dt: float | None,
+        previous_source_time: float | None,
+        source_time: float,
+        previous_source_step: int | None,
+        source_step: int,
+        previous_source_frame: int | None,
+        source_frame: int,
+        previous_telemetry_sequence: int | None,
+        telemetry_sequence: int,
+        request_sequence: int | None,
+        request_response_age_s: float | None) -> str:
+    """Describe both source cadence and host-side timing at a source fault."""
+
+    def fmt_time(value: float | None) -> str:
+        return "unavailable" if value is None else f"{value:.9f}"
+
+    def delta(current: int, previous: int | None) -> str:
+        return "unavailable" if previous is None else str(current - previous)
+
+    def fmt_duration(value: float | None) -> str:
+        return "unavailable" if value is None else f"{value:.6f}s"
+
+    request_sequence_text = (
+        "unavailable" if request_sequence is None else str(request_sequence))
+    previous_step_text = (
+        "unavailable" if previous_source_step is None else
+        str(previous_source_step))
+    previous_telemetry_text = (
+        "unavailable" if previous_telemetry_sequence is None else
+        str(previous_telemetry_sequence))
+    return (
+        f"simulator source sample interval {source_dt:.6f}s is outside the "
+        f"supported range [{MIN_SOURCE_INTERVAL_S:.3f}, "
+        f"{MAX_SOURCE_INTERVAL_S:.3f}]s; "
+        f"bridge_arrival_dt={fmt_duration(arrival_dt)} "
+        f"request_sequence={request_sequence_text} "
+        f"request_response_age={fmt_duration(request_response_age_s)} "
+        f"previous_source_time={fmt_time(previous_source_time)} "
+        f"current_source_time={source_time:.9f} "
+        f"physics_step_delta={delta(source_step, previous_source_step)} "
+        f"previous_physics_step={previous_step_text} "
+        f"current_physics_step={source_step} "
+        f"render_frame_delta={delta(source_frame, previous_source_frame)} "
+        f"telemetry_sequence_delta={delta(telemetry_sequence, previous_telemetry_sequence)} "
+        f"previous_telemetry_sequence={previous_telemetry_text} "
+        f"current_telemetry_sequence={telemetry_sequence}"
+    )
+
+
+def _format_bridge_arrival_fault_detail(
+        *, arrival_dt: float, source_dt: float | None,
+        previous_source_time: float | None, source_time: float,
+        previous_source_step: int | None, source_step: int,
+        previous_source_frame: int | None, source_frame: int,
+        previous_telemetry_sequence: int | None, telemetry_sequence: int,
+        request_sequence: int | None,
+        request_response_age_s: float | None) -> str:
+    """Describe host delay alongside the associated Unity source evidence."""
+
+    def fmt(value: float | None, precision: int = 6) -> str:
+        return "unavailable" if value is None else f"{value:.{precision}f}"
+
+    def delta(current: int, previous: int | None) -> str:
+        return "unavailable" if previous is None else str(current - previous)
+
+    request_text = (
+        "unavailable" if request_sequence is None else str(request_sequence))
+    return (
+        f"bridge transport interval {arrival_dt:.6f}s is outside the "
+        f"transport window [{MIN_BRIDGE_ARRIVAL_INTERVAL_S:.3f}, "
+        f"{MAX_BRIDGE_ARRIVAL_INTERVAL_S:.3f}]s; "
+        f"source_interval={fmt(source_dt)}s "
+        f"request_sequence={request_text} "
+        f"request_response_age={fmt(request_response_age_s)}s "
+        f"source_time={fmt(previous_source_time, 9)}->{source_time:.9f} "
+        f"physics_step_delta={delta(source_step, previous_source_step)} "
+        f"render_frame_delta={delta(source_frame, previous_source_frame)} "
+        f"telemetry_sequence={previous_telemetry_sequence}->{telemetry_sequence}")
 
 
 def _env_enabled(name: str, default: bool) -> bool:
@@ -174,7 +274,7 @@ _active_simulation_time_s: float | None = None
 _active_simulation_frame: int | None = None
 _active_simulation_physics_step: int | None = None
 _active_telemetry_sequence: int | None = None
-_active_simulator_packet: dict[str, float | None] = {}
+_active_simulator_packet: dict[str, float | int | None] = {}
 _active_request_slot_pool: Semaphore | None = None
 
 _packet_timing_lock = Semaphore()
@@ -189,6 +289,7 @@ _handler_timing_count = 0
 _handler_timing_total_ns = 0
 _publication_diagnostic_enabled = False
 _publication_diagnostic_count = 0
+_source_lidar_diagnostic_count = 0
 _timing_fault = False
 _timing_fault_reason = ""
 _shutdown_requested = False
@@ -562,7 +663,7 @@ def _capture_simulation_metadata(data: Any) -> bool:
         return [values[index] if index < len(values) else None
                 for index in range(size)]
 
-    simulator_packet: dict[str, float | None] = {}
+    simulator_packet: dict[str, float | int | None] = {}
     vector_fields = (
         ("simulator_position", "V1 Position", ("x", "y", "z")),
         ("simulator_orientation_quaternion", "V1 Orientation Quaternion",
@@ -580,6 +681,10 @@ def _capture_simulation_metadata(data: Any) -> bool:
     simulator_packet.update({
         "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
         "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
+        # This simulator-only label is retained in offline diagnostics; it is
+        # not published as a runtime input to odometry, AMCL, or control.
+        "simulator_collision_count": _parse_optional_int(
+            data.get("V1 Collisions")),
     })
 
     # Unity's GUI path can emit an unsolicited telemetry packet from its
@@ -789,7 +894,7 @@ def _validate_source_packet(data: Any) -> bool:
         _first_valid_source_packet = True
         _valid_source_packet_count = 1
         print(
-            "[autodrive_bridge_40hz] source 40 Hz contract established "
+            "[autodrive_bridge_40hz] monotonic source timing established "
             f"after {SOURCE_STARTUP_STABLE_INTERVALS} stable intervals",
             flush=True,
         )
@@ -814,23 +919,47 @@ def _validate_source_packet(data: Any) -> bool:
 
     if arrival_dt is not None:
         if not MIN_BRIDGE_ARRIVAL_INTERVAL_S <= arrival_dt <= MAX_BRIDGE_ARRIVAL_INTERVAL_S:
+            with _pending_request_lock:
+                request_ns = _active_request_monotonic_ns
+                request_sequence = _active_request_sequence
+            request_response_age_s = (
+                None if request_ns is None else (now_ns - request_ns) / 1.0e9)
             _trigger_timing_fault(
-                f"bridge transport interval {arrival_dt:.6f}s is outside the "
-                f"transport window [{MIN_BRIDGE_ARRIVAL_INTERVAL_S:.3f}, "
-                f"{MAX_BRIDGE_ARRIVAL_INTERVAL_S:.3f}]s")
+                _format_bridge_arrival_fault_detail(
+                    arrival_dt=arrival_dt,
+                    source_dt=source_dt,
+                    previous_source_time=previous_source_time,
+                    source_time=source_time,
+                    previous_source_step=previous_source_step,
+                    source_step=source_step,
+                    previous_source_frame=previous_source_frame,
+                    source_frame=source_frame,
+                    previous_telemetry_sequence=previous_telemetry_sequence,
+                    telemetry_sequence=telemetry_sequence,
+                    request_sequence=request_sequence,
+                    request_response_age_s=request_response_age_s))
             return False
     if source_dt is not None:
         if not _source_interval_is_valid(source_dt):
+            with _pending_request_lock:
+                request_ns = _active_request_monotonic_ns
+                request_sequence = _active_request_sequence
+            request_response_age_s = (
+                None if request_ns is None else (now_ns - request_ns) / 1.0e9)
             _trigger_timing_fault(
-                f"simulator source cadence {source_dt:.6f}s is outside the "
-                f"40 Hz window [{MIN_SOURCE_INTERVAL_S:.3f}, "
-                f"{MAX_SOURCE_INTERVAL_S:.3f}]s; "
-                f"previous_source_time={previous_source_time:.9f} "
-                f"current_source_time={source_time:.9f} "
-                f"previous_physics_step={previous_source_step} "
-                f"current_physics_step={source_step} "
-                f"previous_telemetry_sequence={previous_telemetry_sequence} "
-                f"current_telemetry_sequence={telemetry_sequence}")
+                _format_source_cadence_fault_detail(
+                    source_dt=source_dt,
+                    arrival_dt=arrival_dt,
+                    previous_source_time=previous_source_time,
+                    source_time=source_time,
+                    previous_source_step=previous_source_step,
+                    source_step=source_step,
+                    previous_source_frame=previous_source_frame,
+                    source_frame=source_frame,
+                    previous_telemetry_sequence=previous_telemetry_sequence,
+                    telemetry_sequence=telemetry_sequence,
+                    request_sequence=request_sequence,
+                    request_response_age_s=request_response_age_s))
             return False
     _first_valid_source_packet = True
     _valid_source_packet_count += 1
@@ -841,6 +970,13 @@ def _parse_command_float(command: dict[str, str], key: str) -> float | None:
     try:
         return float(command[key])
     except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    try:
+        return None if value in (None, "") else int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -1041,8 +1177,15 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             # Keep all outgoing Socket.IO calls serialized. The official bridge
             # runs a gevent server and this pacing loop is a greenlet.
             with _emit_lock:
-                _last_request_emit_ns = time.monotonic()
+                emitted_at = time.monotonic()
+                _last_request_emit_ns = emitted_at
                 original_emit("Bridge", data=command)
+                # Keep the nominal 25 ms phase schedule, but do not issue a
+                # catch-up request less than 24 ms after an actual send. This
+                # avoids the observed 16--20 ms bursts without accumulating
+                # timer oversleep into a permanently slower cadence.
+                next_send = _next_request_deadline(
+                    next_send, emitted_at, period)
             if (_env_enabled("AUTODRIVE_TIMING_DEBUG", False) and
                     _request_timing_debug_count < 20):
                 _request_timing_debug_count += 1
@@ -1104,6 +1247,8 @@ def _install_packet_contract(publish_camera: bool) -> None:
                 # legacy image field before base64/PIL work can happen.
                 data = dict(data)
                 data["V1 Front Camera Image"] = ""
+            if _publication_diagnostic_enabled and isinstance(data, dict):
+                _log_source_lidar_payload(data)
             if (_env_enabled("AUTODRIVE_ALLOW_MISSING_LIDAR", False) and
                     isinstance(data, dict)):
                 _inject_empty_lidar_packet(data)
@@ -1166,6 +1311,37 @@ def _inject_empty_lidar_packet(data: dict[str, Any]) -> None:
     data.setdefault("V1 Collisions", "0")
 
 
+def _log_source_lidar_payload(data: dict[str, Any]) -> None:
+    """Compare source-packet ranges with the decoded ROS scan, only on request."""
+    global _source_lidar_diagnostic_count
+    _source_lidar_diagnostic_count += 1
+    if _source_lidar_diagnostic_count % 40 != 0:
+        return
+
+    encoded = data.get("V1 LIDAR Range Array")
+    payload_chars = len(encoded) if isinstance(encoded, (str, bytes)) else -1
+    try:
+        decoded = gzip.decompress(base64.b64decode(encoded))
+        values = official_bridge.np.fromstring(
+            decoded.decode("utf-8"), dtype=float, sep="\n")
+        finite_count = int(official_bridge.np.isfinite(values).sum())
+        print(
+            "[autodrive_bridge_40hz] source lidar payload: "
+            f"packet={_source_lidar_diagnostic_count} "
+            f"key_present={encoded is not None} payload_chars={payload_chars} "
+            f"decoded_ranges={len(values)} finite_ranges={finite_count}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            "[autodrive_bridge_40hz] source lidar payload: "
+            f"packet={_source_lidar_diagnostic_count} "
+            f"key_present={encoded is not None} payload_chars={payload_chars} "
+            f"decode_error={type(exc).__name__}",
+            flush=True,
+        )
+
+
 def _install_publication_diagnostic() -> None:
     """Optionally report whether decoded LaserScan messages reach DDS."""
     global _publication_diagnostic_count
@@ -1176,6 +1352,15 @@ def _install_publication_diagnostic() -> None:
         _publication_diagnostic_count += 1
         result = original_publish_lidar_scan(*args, **kwargs)
         if _publication_diagnostic_count % 40 == 0:
+            ranges = (args[1] if len(args) > 1 else
+                      kwargs.get("lidar_range_array", ()))
+            try:
+                range_count = len(ranges)
+                finite_count = sum(
+                    math.isfinite(float(value)) for value in ranges)
+            except (TypeError, ValueError):
+                range_count = -1
+                finite_count = -1
             node = getattr(official_bridge, "autodrive_bridge", None)
             publisher_count = "unknown"
             publisher_qos = "unknown"
@@ -1189,6 +1374,7 @@ def _install_publication_diagnostic() -> None:
             print(
                 "[autodrive_bridge_40hz] lidar publication diagnostic: "
                 f"calls={_publication_diagnostic_count} subscribers={publisher_count} "
+                f"decoded_finite_ranges={finite_count}/{range_count} "
                 f"qos={publisher_qos}",
                 flush=True,
             )

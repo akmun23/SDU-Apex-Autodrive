@@ -95,6 +95,11 @@ def _setup(context):
         LaunchConfiguration("with_telemetry_recorder").perform(context))
     with_model_id_recorder = _bool(
         LaunchConfiguration("with_model_id_recorder").perform(context))
+    model_id_record_lidar_ranges = _bool(
+        LaunchConfiguration("model_id_record_lidar_ranges").perform(context))
+    if model_id_record_lidar_ranges and not with_model_id_recorder:
+        raise RuntimeError(
+            "model_id_record_lidar_ranges requires with_model_id_recorder:=true")
     force_localization = _bool(
         LaunchConfiguration("force_localization").perform(context))
     use_localization = _bool(
@@ -298,6 +303,7 @@ def _setup(context):
                 "output_dir": LaunchConfiguration("model_id_output_dir"),
                 "run_name": LaunchConfiguration("model_id_run_name"),
                 "experiment_mode": "track_validation",
+                "record_lidar_ranges": model_id_record_lidar_ranges,
                 "duration_sec": ParameterValue(
                     LaunchConfiguration("model_id_duration_sec"), value_type=float),
             }],
@@ -456,6 +462,14 @@ def generate_launch_description():
             description=(
                 "Record immutable causal bridge/packet/sensor tables for offline "
                 "model validation; no simulator truth enters runtime control"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "model_id_record_lidar_ranges",
+            default_value="false",
+            description=(
+                "Optional full LiDAR range sidecar for offline AMCL scan-"
+                "observability analysis; requires the model-ID recorder"
             ),
         ),
         DeclareLaunchArgument(

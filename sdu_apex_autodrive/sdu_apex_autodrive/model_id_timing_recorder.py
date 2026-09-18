@@ -1,10 +1,10 @@
 """Record causal model-identification events without feeding simulator truth back.
 
 The recorder keeps bridge/Unity timing diagnostics in the same event stream as
-the allowed sensor and actuator-feedback messages, but never subscribes to
-simulator pose, collision, lap, or other ground-truth topics.  It is intended
-to be the first reproducible MPC/odometry experiment artifact while the
-current speed-target actuator path is still being identified.
+the allowed sensor, actuator-command, and actuator-feedback messages, but
+never subscribes to simulator pose, collision, lap, or other ground-truth
+topics. It is intended to produce reproducible MPC/odometry experiment
+artifacts while the current speed-target actuator path is being identified.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import json
 import math
 from pathlib import Path
 import statistics
+import struct
 import time
 from typing import Any, Iterable
 
@@ -32,8 +33,8 @@ BRIDGE_TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 BRIDGE_TIMING_FAULT_DETAIL_TOPIC = \
     "/autodrive/roboracer_1/bridge_timing_fault_detail"
 EVENT_FIELDS = (
-    "event_index", "arrival_monotonic_ns", "topic", "message_type",
-    "header_stamp_ns", "simulation_time_s", "payload_json",
+    "event_index", "arrival_monotonic_ns", "arrival_epoch_ns", "topic",
+    "message_type", "header_stamp_ns", "simulation_time_s", "payload_json",
 )
 SOURCE_SENSOR_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST,
@@ -56,6 +57,13 @@ EVENT_FILE_NAMES = {
         "/autodrive/roboracer_1/steering",
         "/autodrive/roboracer_1/throttle",
     ),
+    "actuator_commands.csv": (
+        "/autodrive/roboracer_1/steering_command",
+        "/autodrive/roboracer_1/throttle_command",
+    ),
+    "controller_trace.csv": (
+        "/cmd/speed", "/pure_pursuit/diagnostics",
+    ),
     "runtime_state.csv": (
         "/odom", "/ekf_odom", "/amcl_pose", "/current_map_pose",
     ),
@@ -73,6 +81,44 @@ def _header_stamp_ns(message: Any) -> int | None:
 def _finite_payload(values: dict[str, Any]) -> dict[str, Any]:
     """Keep JSON output deterministic and avoid serializing ROS objects."""
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _pose_with_covariance_payload(message: PoseWithCovarianceStamped) -> dict[str, Any]:
+    """Serialize pose and the exact covariance consumed by Pure Pursuit."""
+    q = message.pose.pose.orientation
+    yaw = math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    covariance = [
+        float(value) if math.isfinite(float(value)) else None
+        for value in message.pose.covariance
+    ]
+    return _finite_payload({
+        "x_m": float(message.pose.pose.position.x),
+        "y_m": float(message.pose.pose.position.y),
+        "yaw_rad": yaw,
+        "covariance_xx_m2": covariance[0],
+        "covariance_yy_m2": covariance[7],
+        "covariance_yawyaw_rad2": covariance[35],
+        "covariance_6x6": covariance,
+    })
+
+
+def _flush_if_due(stream: Any, now_ns: int, last_flush_ns: int,
+                  interval_ns: int) -> int:
+    """Flush the event stream periodically, not once per ROS callback."""
+    if interval_ns <= 0 or now_ns - last_flush_ns >= interval_ns:
+        stream.flush()
+        return now_ns
+    return last_flush_ns
+
+
+def _pack_lidar_ranges(ranges: Iterable[float]) -> bytes:
+    """Pack one complete LaserScan range vector as little-endian float32."""
+    values = tuple(float(value) for value in ranges)
+    if not values:
+        return b""
+    return struct.pack(f"<{len(values)}f", *values)
 
 
 def _timing_report(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -164,6 +210,8 @@ class ModelIdTimingRecorder(Node):
         self.declare_parameter("experiment_mode", "")
         self.declare_parameter("duration_sec", 0.0)
         self.declare_parameter("qos_depth", 200)
+        self.declare_parameter("event_flush_interval_sec", 0.5)
+        self.declare_parameter("record_lidar_ranges", False)
 
         output_dir = str(self.get_parameter("output_dir").value).strip()
         if not output_dir:
@@ -175,15 +223,45 @@ class ModelIdTimingRecorder(Node):
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.experiment_mode = str(
             self.get_parameter("experiment_mode").value).strip()
+        self.record_lidar_ranges = bool(
+            self.get_parameter("record_lidar_ranges").value)
         self.duration_sec = max(0.0, float(self.get_parameter("duration_sec").value))
+        flush_interval_sec = float(
+            self.get_parameter("event_flush_interval_sec").value)
+        if not math.isfinite(flush_interval_sec):
+            flush_interval_sec = 0.5
+        self.event_flush_interval_ns = int(max(0.05, flush_interval_sec) * 1.0e9)
         depth = max(10, int(self.get_parameter("qos_depth").value))
         self.start_monotonic_ns = time.monotonic_ns()
+        self.last_flush_monotonic_ns = self.start_monotonic_ns
         self.event_index = 0
-        self.rows: list[dict[str, Any]] = []
+        self.event_count = 0
+        # Keep only the comparatively small bridge stream in memory. Topic
+        # partitions are reconstructed from events.csv at shutdown so long
+        # runs do not retain every sensor/AMCL payload as Python objects.
+        self.timing_events: list[dict[str, Any]] = []
         self.stream = (self.run_dir / "events.csv").open(
             "w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.stream, fieldnames=EVENT_FIELDS)
         self.writer.writeheader()
+        self.lidar_ranges_stream = None
+        self.lidar_index_stream = None
+        self.lidar_index_writer = None
+        self.lidar_ranges_byte_count = 0
+        if self.record_lidar_ranges:
+            self.lidar_ranges_stream = (self.run_dir / "lidar_scan_ranges.f32le").open("wb")
+            self.lidar_index_stream = (self.run_dir / "lidar_scan_index.csv").open(
+                "w", newline="", encoding="utf-8")
+            self.lidar_index_writer = csv.DictWriter(
+                self.lidar_index_stream,
+                fieldnames=(
+                    "event_index", "header_stamp_ns", "file_offset_bytes",
+                    "byte_length", "range_count", "angle_min_rad",
+                    "angle_increment_rad", "time_increment_s", "scan_time_s",
+                    "range_min_m", "range_max_m",
+                ),
+            )
+            self.lidar_index_writer.writeheader()
 
         sensor_qos = SOURCE_SENSOR_QOS
         self.create_subscription(
@@ -224,6 +302,14 @@ class ModelIdTimingRecorder(Node):
             Float32, "/autodrive/roboracer_1/throttle",
             lambda message: self._record_ros("/autodrive/roboracer_1/throttle", message), depth)
         self.create_subscription(
+            Float32, "/autodrive/roboracer_1/steering_command",
+            lambda message: self._record_ros(
+                "/autodrive/roboracer_1/steering_command", message), depth)
+        self.create_subscription(
+            Float32, "/autodrive/roboracer_1/throttle_command",
+            lambda message: self._record_ros(
+                "/autodrive/roboracer_1/throttle_command", message), depth)
+        self.create_subscription(
             AckermannDriveStamped, "/cmd/speed",
             lambda message: self._record_ros("/cmd/speed", message), depth)
         self.create_subscription(
@@ -232,7 +318,7 @@ class ModelIdTimingRecorder(Node):
         for topic in (
                 "/odom/diagnostics", "/amcl_localization_health",
                 "/amcl_scan_alignment", "/amcl_gpu_timing",
-                "/amcl_kld_diagnostics"):
+                "/amcl_kld_diagnostics", "/pure_pursuit/diagnostics"):
             self.create_subscription(
                 Float64MultiArray, topic,
                 lambda message, topic=topic: self._record_ros(topic, message), depth)
@@ -258,6 +344,8 @@ class ModelIdTimingRecorder(Node):
                 *EVENT_FILE_NAMES,
                 "gt_odom.csv",
                 "experiment_schedule.csv",
+                *(["lidar_scan_index.csv", "lidar_scan_ranges.f32le"]
+                  if self.record_lidar_ranges else []),
             ],
             "ground_truth_file_status": (
                 "packet_embedded_offline_diagnostic; no ground-truth ROS topic "
@@ -269,6 +357,18 @@ class ModelIdTimingRecorder(Node):
                 "advance by simulator source-time deltas; host arrival remains a "
                 "watchdog timestamp. bridge simulation_time_s is retained separately."
             ),
+            "event_flush_interval_sec": self.event_flush_interval_ns / 1.0e9,
+            "event_retention_policy": (
+                "events.csv is periodically flushed; only bridge timing rows are held "
+                "in memory, and topic partitions are streamed from events.csv at close"
+            ),
+            "lidar_range_capture": {
+                "enabled": self.record_lidar_ranges,
+                "index_file": "lidar_scan_index.csv" if self.record_lidar_ranges else None,
+                "range_file": "lidar_scan_ranges.f32le" if self.record_lidar_ranges else None,
+                "encoding": "little-endian float32, contiguous per indexed scan",
+                "runtime_use": "offline scan-observability analysis only",
+            },
         }
         (self.run_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -316,15 +416,7 @@ class ModelIdTimingRecorder(Node):
                 "lateral_speed_mps": float(message.twist.twist.linear.y),
             })
         elif isinstance(message, PoseWithCovarianceStamped):
-            q = message.pose.pose.orientation
-            yaw = math.atan2(
-                2.0 * (q.w * q.z + q.x * q.y),
-                1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-            payload = _finite_payload({
-                "x_m": float(message.pose.pose.position.x),
-                "y_m": float(message.pose.pose.position.y),
-                "yaw_rad": yaw,
-            })
+            payload = _pose_with_covariance_payload(message)
         elif isinstance(message, Float32):
             payload = {"value": float(message.data)}
         elif isinstance(message, AckermannDriveStamped):
@@ -334,6 +426,8 @@ class ModelIdTimingRecorder(Node):
                 "acceleration_mps2": float(message.drive.acceleration),
             })
         elif isinstance(message, LaserScan):
+            if self.lidar_index_writer is not None:
+                self._record_lidar_ranges(message)
             finite_ranges = [
                 float(value) for value in message.ranges
                 if value == value and value not in (float("inf"), float("-inf"))
@@ -367,9 +461,15 @@ class ModelIdTimingRecorder(Node):
             header_stamp_ns: int | None,
             simulation_time_s: float | None,
             payload: dict[str, Any]) -> None:
+        arrival_monotonic_ns = time.monotonic_ns()
+        arrival_epoch_ns = time.time_ns()
         row = {
             "event_index": self.event_index,
-            "arrival_monotonic_ns": time.monotonic_ns(),
+            "arrival_monotonic_ns": arrival_monotonic_ns,
+            # ROS header stamps in this stack use the system epoch clock.
+            # Preserve a same-clock callback time so offline analysis can
+            # measure source-stamp age separately from callback spacing.
+            "arrival_epoch_ns": arrival_epoch_ns,
             "topic": topic,
             "message_type": message_type,
             "header_stamp_ns": header_stamp_ns,
@@ -377,9 +477,45 @@ class ModelIdTimingRecorder(Node):
             "payload_json": json.dumps(payload, sort_keys=True, separators=(",", ":")),
         }
         self.event_index += 1
-        self.rows.append(row)
+        self.event_count += 1
+        if topic == BRIDGE_TIMING_TOPIC:
+            self.timing_events.append(row)
         self.writer.writerow(row)
-        self.stream.flush()
+        now_ns = time.monotonic_ns()
+        previous_flush_ns = self.last_flush_monotonic_ns
+        self.last_flush_monotonic_ns = _flush_if_due(
+            self.stream, now_ns, self.last_flush_monotonic_ns,
+            self.event_flush_interval_ns)
+        if self.last_flush_monotonic_ns != previous_flush_ns:
+            self._flush_lidar_streams()
+
+    def _record_lidar_ranges(self, message: LaserScan) -> None:
+        """Keep raw scans in a compact sidecar, indexed by the event/source stamp."""
+        if self.lidar_index_writer is None or self.lidar_ranges_stream is None:
+            return
+        packed = _pack_lidar_ranges(message.ranges)
+        offset = self.lidar_ranges_byte_count
+        self.lidar_ranges_stream.write(packed)
+        self.lidar_index_writer.writerow({
+            "event_index": self.event_index,
+            "header_stamp_ns": _header_stamp_ns(message) or "",
+            "file_offset_bytes": offset,
+            "byte_length": len(packed),
+            "range_count": len(message.ranges),
+            "angle_min_rad": float(message.angle_min),
+            "angle_increment_rad": float(message.angle_increment),
+            "time_increment_s": float(message.time_increment),
+            "scan_time_s": float(message.scan_time),
+            "range_min_m": float(message.range_min),
+            "range_max_m": float(message.range_max),
+        })
+        self.lidar_ranges_byte_count += len(packed)
+
+    def _flush_lidar_streams(self) -> None:
+        if self.lidar_ranges_stream is not None:
+            self.lidar_ranges_stream.flush()
+        if self.lidar_index_stream is not None:
+            self.lidar_index_stream.flush()
 
     def _check_duration(self) -> None:
         if self.duration_sec > 0.0 and (
@@ -388,14 +524,20 @@ class ModelIdTimingRecorder(Node):
             rclpy.shutdown()
 
     def close(self) -> None:
+        self.stream.flush()
+        self._flush_lidar_streams()
         self._write_dataset_files()
-        report = _timing_report(self.rows)
-        report["event_count"] = len(self.rows)
+        report = _timing_report(self.timing_events)
+        report["event_count"] = self.event_count
         report["duration_wall_s"] = (
             time.monotonic_ns() - self.start_monotonic_ns) / 1e9
         (self.run_dir / "timing_report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         self.stream.close()
+        if self.lidar_ranges_stream is not None:
+            self.lidar_ranges_stream.close()
+        if self.lidar_index_stream is not None:
+            self.lidar_index_stream.close()
 
     def _write_dataset_files(self) -> None:
         """Materialize the handoff's analysis files from the event log.
@@ -410,12 +552,7 @@ class ModelIdTimingRecorder(Node):
         self._write_timing_rows(self.run_dir / "bridge_requests.csv", timing_rows)
         self._write_timing_rows(self.run_dir / "simulator_packets.csv", timing_rows)
         self._write_ground_truth_rows(self.run_dir / "gt_odom.csv", timing_rows)
-
-        for file_name, topics in EVENT_FILE_NAMES.items():
-            if file_name in {"bridge_requests.csv", "simulator_packets.csv"}:
-                continue
-            rows = [row for row in self.rows if row["topic"] in topics]
-            self._write_rows(self.run_dir / file_name, rows)
+        self._write_event_partitions(self.run_dir / "events.csv", self.run_dir)
         self._write_rows(
             self.run_dir / "experiment_schedule.csv",
             [{
@@ -429,6 +566,36 @@ class ModelIdTimingRecorder(Node):
         )
 
     @staticmethod
+    def _write_event_partitions(event_path: Path, output_dir: Path) -> None:
+        """Stream the small topic CSVs from the canonical event file."""
+        excluded = {"bridge_requests.csv", "simulator_packets.csv"}
+        topic_to_file: dict[str, str] = {}
+        streams: dict[str, Any] = {}
+        writers: dict[str, csv.DictWriter] = {}
+        try:
+            for file_name, topics in EVENT_FILE_NAMES.items():
+                if file_name in excluded:
+                    continue
+                stream = (output_dir / file_name).open(
+                    "w", newline="", encoding="utf-8")
+                streams[file_name] = stream
+                writer = csv.DictWriter(
+                    stream, fieldnames=EVENT_FIELDS, extrasaction="ignore")
+                writer.writeheader()
+                writers[file_name] = writer
+                for topic in topics:
+                    topic_to_file[topic] = file_name
+
+            with event_path.open(newline="", encoding="utf-8") as source:
+                for row in csv.DictReader(source):
+                    file_name = topic_to_file.get(row.get("topic", ""))
+                    if file_name is not None:
+                        writers[file_name].writerow(row)
+        finally:
+            for stream in streams.values():
+                stream.close()
+
+    @staticmethod
     def _write_rows(
             path: Path,
             rows: list[dict[str, Any]],
@@ -440,9 +607,7 @@ class ModelIdTimingRecorder(Node):
 
     def _timing_rows(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for event in self.rows:
-            if event["topic"] != BRIDGE_TIMING_TOPIC:
-                continue
+        for event in self.timing_events:
             try:
                 payload = json.loads(event["payload_json"])
             except (TypeError, ValueError, json.JSONDecodeError):

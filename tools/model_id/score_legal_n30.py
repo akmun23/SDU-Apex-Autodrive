@@ -21,7 +21,8 @@ from typing import Any
 
 SOURCE_DT_MIN_S = 0.015
 SOURCE_DT_MAX_S = 0.035
-HORIZON_STEPS = (4, 10, 20, 30)
+HORIZON_STEPS = (4, 5, 10, 20, 30)
+PRIMARY_HORIZON_STEPS = 5
 HORIZON_SECONDS = {steps: steps * 0.025 for steps in HORIZON_STEPS}
 REQUIRED_FIELDS = {
     "origin_id",
@@ -75,6 +76,12 @@ def _stats(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
+def _horizon_label(steps: int) -> str:
+    seconds = HORIZON_SECONDS[steps]
+    precision = 3 if steps == PRIMARY_HORIZON_STEPS else 2
+    return f"{seconds:.{precision}f}s"
+
+
 def _reject_nonlegal_columns(fields: set[str]) -> None:
     forbidden = sorted(
         field for field in fields
@@ -102,7 +109,12 @@ def score(path: Path) -> dict[str, Any]:
 
     seen: set[tuple[str, int]] = set()
     by_horizon: dict[int, dict[str, list[float]]] = defaultdict(
-        lambda: {"position_m": [], "yaw_rad": []})
+        lambda: {
+            "position_euclidean_m": [],
+            "longitudinal_signed_m": [],
+            "lateral_signed_m": [],
+            "yaw_rad": [],
+        })
     for row_number, row in enumerate(rows, start=2):
         if row.get("origin_input_mode", "").strip() != "sensor_legal":
             raise ValueError(
@@ -135,30 +147,55 @@ def score(path: Path) -> dict[str, Any]:
             row, "truth_x_m", row_number)
         dy = _number(row, "pred_y_m", row_number) - _number(
             row, "truth_y_m", row_number)
-        dyaw = _wrap(_number(row, "pred_yaw_rad", row_number) - _number(
-            row, "truth_yaw_rad", row_number))
-        by_horizon[steps]["position_m"].append(math.hypot(dx, dy))
+        truth_yaw = _number(row, "truth_yaw_rad", row_number)
+        dyaw = _wrap(_number(row, "pred_yaw_rad", row_number) - truth_yaw)
+        longitudinal = dx * math.cos(truth_yaw) + dy * math.sin(truth_yaw)
+        lateral = -dx * math.sin(truth_yaw) + dy * math.cos(truth_yaw)
+        by_horizon[steps]["position_euclidean_m"].append(math.hypot(dx, dy))
+        by_horizon[steps]["longitudinal_signed_m"].append(longitudinal)
+        by_horizon[steps]["lateral_signed_m"].append(lateral)
         by_horizon[steps]["yaw_rad"].append(abs(dyaw))
 
     missing_horizons = [steps for steps in HORIZON_STEPS if steps not in by_horizon]
     if missing_horizons:
         raise ValueError(f"prediction table is missing required horizons: {missing_horizons}")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "score_only_not_a_model_promotion",
         "origin_contract": "sensor_legal",
         "source_cadence_window_s": [SOURCE_DT_MIN_S, SOURCE_DT_MAX_S],
+        "primary_horizon_steps": PRIMARY_HORIZON_STEPS,
+        "evaluation_priority": (
+            "N5 (0.125 s) is the primary control-relevant score; "
+            "N4/N10/N20/N30 remain required diagnostics, with N30 retained "
+            "as the full 0.75 s horizon check."
+        ),
         "horizon_contract": {
             "sample_rate_hz": 40.0,
             "steps": list(HORIZON_STEPS),
             "seconds": [HORIZON_SECONDS[steps] for steps in HORIZON_STEPS],
+            "priority_steps": [PRIMARY_HORIZON_STEPS, 4, 10, 20, 30],
         },
         "ground_truth_use": "offline_endpoint_scoring_only",
         "rows": len(rows),
         "horizons": {
-            f"{HORIZON_SECONDS[steps]:.2f}s": {
+            _horizon_label(steps): {
                 "steps": steps,
-                "position_m": _stats(by_horizon[steps]["position_m"]),
+                "position_euclidean_m_secondary": _stats(
+                    by_horizon[steps]["position_euclidean_m"]),
+                "position_error_components_truth_frame_m": {
+                    "frame": "simulator_truth_yaw",
+                    "longitudinal_abs_m": _stats([
+                        abs(value) for value in
+                        by_horizon[steps]["longitudinal_signed_m"]]),
+                    "longitudinal_signed_m": _stats(
+                        by_horizon[steps]["longitudinal_signed_m"]),
+                    "lateral_abs_m": _stats([
+                        abs(value) for value in
+                        by_horizon[steps]["lateral_signed_m"]]),
+                    "lateral_signed_m": _stats(
+                        by_horizon[steps]["lateral_signed_m"]),
+                },
                 "yaw_rad": _stats(by_horizon[steps]["yaw_rad"]),
             }
             for steps in HORIZON_STEPS

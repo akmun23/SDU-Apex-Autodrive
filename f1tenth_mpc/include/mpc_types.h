@@ -19,22 +19,23 @@
  *===========================================================================*/
 
 /* Global dimensions */
-#define NX_GLOBAL 6                                      /* Global/body model state size used by nonlinear prediction and linearization. */
-#define NX_FRENET 5                                      /* Frenet state size used by linearized MPC dynamics. */
-#define NX_AUG 9                                         /* Augmented state size including commanded/effective steering and prior controls. */
+#define NX_GLOBAL 7                                      /* Global/body state plus commanded speed target. */
+#define NX_FRENET 6                                      /* Frenet state plus actuator speed setpoint. */
+#define NX_AUG 10                                        /* Frenet, steering state, and previous-control state. */
 #define IDX_EY 0                                         /* Position of lateral error (ey) in the augmented vector. */
 #define IDX_EPSI 1                                       /* Position of heading error in the augmented vector. */
 #define IDX_LONG_VEL 2                                   /* Position of body longitudinal velocity in the augmented vector. */
 #define IDX_LAT_VEL 3                                    /* Position of body lateral velocity in the augmented vector. */
 #define IDX_YAW_RATE 4                                   /* Position of yaw rate in the augmented vector. */
-#define IDX_DELTA_COMMAND 5                              /* Position of commanded front-wheel steering angle. */
-#define IDX_DELTA_EFFECTIVE 6                            /* Position of steering angle acting on the vehicle model. */
-#define IDX_DRATE_PREV 7                                 /* Position of previous steering-rate state in the augmented vector. */
-#define IDX_TARGET_SPEED_RATE_PREV 8                  /* Previous target-speed slew in the augmented vector. */
+#define IDX_TARGET_SPEED_STATE 5                         /* Actuator target carried through horizon stages. */
+#define IDX_DELTA_COMMAND 6                              /* Position of commanded front-wheel steering angle. */
+#define IDX_DELTA_EFFECTIVE 7                            /* Position of steering angle acting on the vehicle model. */
+#define IDX_DRATE_PREV 8                                 /* Previous steering-rate state in the augmented vector. */
+#define IDX_TARGET_SPEED_RATE_PREV 9                     /* Previous target-speed slew in the augmented vector. */
 #define IDX_SPARSE_B_FIRST_ROW 2                         /* First augmented-state row with non-zero dense B coupling in Riccati sparse products. */
-#define NX_DENSE 7                                       /* Dense A-block width before sparse previous-control tail states. */
+#define NX_DENSE 8                                       /* Dense state block before sparse previous-control tail states. */
 #define NU 2                                             /* Control vector width: steering-rate and target-speed slew. */
-#define RICCATI_MAX_NX  9                                /* Maximum Riccati state dimension (augmented Frenet model). */
+#define RICCATI_MAX_NX  10                               /* Maximum Riccati state dimension (augmented Frenet model). */
 #define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and speed slew). */
 
 /* Math and timing */
@@ -76,7 +77,7 @@
 /* CPU warm-start / cold-start policy. */
 #define MPC_WS_CURVATURE_THRESH 0.25f                    /* Curvature jump that forces a cold start. */
 #define MPC_WS_BOUND_THRESH 0.05f                        /* Slack on ey box before a stale warm start is treated as bound-incompatible. */
-#define MPC_MODEL_SIGNATURE 4                            /* Source-command stage-model transition. */
+#define MPC_MODEL_SIGNATURE 6                            /* Identified yaw and speed response with carried setpoint. */
 
 /* Default MPC configuration values */
 #define TRAJECTORY_MAXIMUM_WAYPOINTS 4000                /* Maximum trajectory samples accepted by MPC reference buffers. */
@@ -87,6 +88,15 @@
 #define SOURCE_MAX_STEERING_RAD 0.5235987756f            /* VehicleController SteeringLimit: 30 deg. */
 #define SOURCE_STEERING_RATE_RADPS 3.2f                  /* Prefab SteeringRate: 183.346 deg/s. */
 #define SOURCE_STEERING_WHEELBASE_M 0.324f               /* VehicleController Wheelbase: 324 mm. */
+#define MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS 0.087735f /* Held-out AutoDRIVE yaw response fit, not a real-car tire constant. */
+#define MPC_YAW_RATE_STEERING_GAIN_PER_M 3.011897f       /* Held-out gain per u*tan(delta), distinct from source wheelbase. */
+#define MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 (-0.37356440f) /* PP development-trace fit; truth used offline as target only. */
+#define MPC_LONGITUDINAL_SPEED_COEFF_PER_S (-0.06389858f) /* Coefficient on predicted body speed. */
+#define MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S 9.11426915f /* Coefficient on target minus body speed. */
+#define MPC_LONGITUDINAL_TARGET_RATE_COEFF (-0.06687204f) /* Coefficient on commanded speed slew. */
+#define MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2 6.0f           /* Recursive replay saturation, not a Unity force. */
+#define MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 5.36267417f /* 12/14 m/s fit; independent 15.3 m/s holdout. */
+#define MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV 0.27655518f /* Measured full-brake envelope per current speed. */
 #define MPC_MAX_COMMAND_SPEED_MPS 16.0f                  /* Project command envelope, not simulator physics. */
 #define MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2 3.0f   /* Output target-speed increase policy. */
 #define MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2 8.0f  /* Output target-speed reduction policy. */
@@ -114,6 +124,7 @@ typedef struct
     float long_vel;             /* Longitudinal velocity in body frame [meters per second]. */
     float lat_vel;              /* Lateral velocity in body frame [meters per second]. */
     float yaw_rate;             /* Yaw rate [radians per second]. */
+    float target_speed_mps;     /* Actuator target carried through MPC prediction. */
 } VehicleState_t;
 
 /**
@@ -133,6 +144,7 @@ typedef struct
     float flong_vel;            /* Longitudinal velocity [meters per second]. */
     float flat_vel;             /* Lateral velocity [meters per second]. */
     float fyaw_rate;            /* Yaw rate [radians per second]. */
+    float ftarget_speed_mps;    /* Actuator target speed [meters per second]. */
 } FrenetState_t;
 
 /**

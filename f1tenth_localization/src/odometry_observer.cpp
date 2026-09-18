@@ -63,9 +63,10 @@ OdometryObserverConfig deployment_observer_config()
   config.use_kinematic_lateral_slip_model = true;
   config.lateral_velocity_yaw_rate_gain_m = 0.167;
   config.lateral_velocity_speed_yaw_rate_gain_s = -0.0063;
+  config.lateral_velocity_reference_forward_offset_m = 0.15532;
   config.lateral_velocity_max_mps = 0.35;
   config.max_imu_ax_abs_mps2 = 30.0;
-  config.imu_x_offset_m = 0.08;
+  config.imu_acceleration_reference_x_m = 0.15532;
   return config;
 }
 
@@ -168,7 +169,7 @@ double OdometryObserver::turn_speed_bias_mps(
     bias, -config_.turn_speed_bias_max_mps, config_.turn_speed_bias_max_mps);
 }
 
-double OdometryObserver::kinematic_lateral_velocity(
+double OdometryObserver::kinematic_base_lateral_velocity(
   double yaw_rate_radps, double longitudinal_speed_mps) const noexcept
 {
   if (!config_.use_kinematic_lateral_slip_model ||
@@ -183,9 +184,13 @@ double OdometryObserver::kinematic_lateral_velocity(
   const double forward_speed = std::max(0.0, longitudinal_speed_mps);
   const double speed_gain = config_.lateral_velocity_yaw_rate_gain_m +
     config_.lateral_velocity_speed_yaw_rate_gain_s * forward_speed;
-  return std::clamp(
+  const double velocity_at_reference = std::clamp(
     yaw_rate_radps * speed_gain,
     -config_.lateral_velocity_max_mps, config_.lateral_velocity_max_mps);
+  const double reference_forward_offset = finite(
+    config_.lateral_velocity_reference_forward_offset_m) ?
+    config_.lateral_velocity_reference_forward_offset_m : 0.0;
+  return velocity_at_reference - yaw_rate_radps * reference_forward_offset;
 }
 
 OdometryEstimate OdometryObserver::estimate(
@@ -564,9 +569,13 @@ OdometryEstimate OdometryObserver::update(
   }
 
   const double yaw_alpha = (observation.yaw_rate_radps - previous_yaw_rate_radps_) / dt_s;
+  const double imu_acceleration_reference_x = finite(
+    config_.imu_acceleration_reference_x_m) ?
+    config_.imu_acceleration_reference_x_m : 0.0;
   const double ax_origin = observation.ax_mps2 +
-    observation.yaw_rate_radps * observation.yaw_rate_radps * config_.imu_x_offset_m;
-  const double ay_origin = observation.ay_mps2 - yaw_alpha * config_.imu_x_offset_m;
+    observation.yaw_rate_radps * observation.yaw_rate_radps *
+    imu_acceleration_reference_x;
+  const double ay_origin = observation.ay_mps2 - yaw_alpha * imu_acceleration_reference_x;
 
   if (!turn_mode_ &&
     (std::abs(observation.yaw_rate_radps) >= config_.turn_enter_yaw_rate_radps ||
@@ -671,7 +680,7 @@ OdometryEstimate OdometryObserver::update(
           config_.decel_ax_offset_mps2;
       }
       braking_ax += observation.yaw_rate_radps * observation.yaw_rate_radps *
-        config_.imu_x_offset_m;
+        imu_acceleration_reference_x;
       // Positive ax is ambiguous while wheel slip is active because the
       // unobserved r*v term can have either sign. Apply only deceleration and
       // hold through positive acceleration until a causal wheel sample returns.
@@ -696,7 +705,7 @@ OdometryEstimate OdometryObserver::update(
           config_.decel_ax_offset_mps2;
       }
       braking_ax += observation.yaw_rate_radps * observation.yaw_rate_radps *
-        config_.imu_x_offset_m;
+        imu_acceleration_reference_x;
       if (braking_ax < 0.0) {
         body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
       }
@@ -712,7 +721,7 @@ OdometryEstimate OdometryObserver::update(
         turn_ax_origin = config_.decel_ax_scale * observation.ax_mps2 +
           config_.decel_ax_offset_mps2 +
           observation.yaw_rate_radps * observation.yaw_rate_radps *
-          config_.imu_x_offset_m;
+          imu_acceleration_reference_x;
       }
       update_turn(turn_ax_origin, ay_origin, observation.yaw_rate_radps, dt_s);
       if (wheel_ok || wheel_recovery) {
@@ -729,7 +738,7 @@ OdometryEstimate OdometryObserver::update(
       // source-time replay showed that this creates false lateral displacement
       // in the first corner. A separately identified, bounded sideslip model
       // is allowed here because it uses only causal wheel speed and yaw rate.
-      body_v_mps_ = kinematic_lateral_velocity(
+      body_v_mps_ = kinematic_base_lateral_velocity(
         observation.yaw_rate_radps, body_u_mps_);
     }
     const bool coherent_current_packet =

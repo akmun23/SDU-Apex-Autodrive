@@ -27,7 +27,10 @@ Current cleanup status:
       source-command baseline; it contains no real-car tire or force law.
 - [x] Added the minimal `controller:=mpc` ROS adapter and source-timing
       watchdog. Its command authority is inhibited by default.
-- [ ] Fit and validate the observable stage map before enabling MPC commands.
+- [x] Added an identified target-speed/body-speed response state and checked
+      its recursive prediction against a separate PP holdout.
+- [ ] Validate the updated controller in a closed-loop batchmode run before
+      enabling MPC outside an explicitly authorized experiment.
 
 Build from the Humble workspace container:
 

@@ -232,9 +232,9 @@ class ActuatorInterface(Node):
         self.declare_parameter("throttle_fall_rate_per_sec", 4.0)
         self.declare_parameter("stop_speed_threshold_mps", 0.02)
         # Small overshoots must be corrected with the calibrated throttle
-        # feedback.  A hard coast at 0.25 m/s causes large oscillations at
-        # low speed because passive simulator deceleration is steep.  Reserve
-        # forced coasting for a materially large overspeed.
+        # feedback.  Zero throttle is active braking in this simulator, so
+        # applying it at a small overspeed causes a large speed drop. Reserve
+        # forced full braking for a materially large overspeed.
         self.declare_parameter("overspeed_coast_threshold_mps", 1.0)
         # Once target speed and acceleration are settled, hold the calibrated
         # feed-forward throttle until either deadband is left.

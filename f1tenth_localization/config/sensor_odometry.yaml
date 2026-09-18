@@ -15,9 +15,15 @@ sensor_odometry:
     lidar_x_m: 0.2733
     lidar_y_m: 0.0
     lidar_z_m: 0.096
+    # IMU Transform position relative to rear-axle base_link; used for TF only.
     imu_x_m: 0.08
     imu_y_m: 0.0
     imu_z_m: 0.055
+    # Unity IMU acceleration is derived from Rigidbody velocity, so the
+    # acceleration reference is the Rigidbody COM, not the IMU Transform.
+    # The active F1TENTH prefab places the COM at -0.00468 m and rear axle at
+    # -0.16000 m in root coordinates: +0.15532 m from base_link.
+    imu_acceleration_reference_x_m: 0.15532
 
     # Frozen deterministic observer constants from
     # VALIDATED_ODOMETRY_IMPLEMENTATION_HANDOFF.md.
@@ -39,8 +45,9 @@ sensor_odometry:
     # adds avoidable launch/braking lag; 100 ms preserves burst rejection
     # while responding faster to real motion.
     wheel_speed_window_s: 0.10
-    # The bridge source contract is 15--35 ms. A 30 ms packet is valid source
-    # jitter; intervals above 35 ms are marked degraded for diagnostics.
+    # The bridge requests at 40 Hz but preserves each Unity source timestamp;
+    # it accepts measured intervals through 250 ms. Normal observer timing is
+    # <=35 ms; larger accepted intervals are marked degraded, not retimed.
     normal_packet_dt_max_s: 0.035
     degraded_packet_dt_max_s: 0.050
     # Retain encoder displacement across short source gaps. Longer gaps are
@@ -143,17 +150,21 @@ sensor_odometry:
     # automatically enables the validated dynamic propagation during an
     # explicitly rejected wheel-slip/dropout interval.
     integrate_lateral_acceleration_in_turn: false
-    # Clean track replays show a repeatable body-lateral velocity in turns.
-    # This bounded sensor-only model uses only causal mapped wheel speed and
-    # IMU yaw rate; simulator truth is used offline for identification only.
+    # This bounded sensor-only model estimates COM lateral velocity from
+    # causal mapped wheel speed and IMU yaw rate. The result is transformed
+    # geometrically to base_link (the Unity GPS/rear-axle reference point).
     use_kinematic_lateral_slip_model: true
-    # Identified from four prior clean track replays plus the fresh
-    # 2026-09-15 baseline, with leave-one-run-out validation. The model is:
-    # v = yaw_rate * (0.167 - 0.0063 * mapped_wheel_speed), bounded to 0.35.
-    # It changes only /odom and does not alter simulator physics.
+    # Retained COM-velocity model: v_com = yaw_rate *
+    # (0.167 - 0.0063 * mapped_wheel_speed), bounded to 0.35 m/s.
     lateral_velocity_yaw_rate_gain_m: 0.167
     lateral_velocity_speed_yaw_rate_gain_s: -0.0063
     lateral_velocity_max_mps: 0.35
+    # Source geometry, not a fit: the active F1TENTH prefab places its COM at
+    # local z=-0.00468 m and GPS "Rear Axle Center" at z=-0.16000 m. Its lidar
+    # at root z=0.1133 m is 0.2733 m ahead of that axle, matching this package's
+    # base_link->lidar transform. Convert v_com to rear-axle base_link by
+    # v_base = v_com - yaw_rate * 0.15532 m.
+    lateral_velocity_reference_forward_offset_m: 0.15532
     # Reject impossible longitudinal IMU spikes before they can be integrated
     # into odometry. Lateral acceleration remains unconstrained here because
     # it is physically large in the tight track turns.

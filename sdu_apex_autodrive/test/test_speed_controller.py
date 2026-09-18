@@ -80,7 +80,7 @@ def test_output_never_exceeds_limit():
     assert 0.0 <= output <= 0.10
 
 
-def test_material_overspeed_coasts_and_clears_integral():
+def test_material_overspeed_brakes_and_clears_integral():
     controller = TargetSpeedController(replace(
         config(), speed_hold_error_deadband_mps=0.0))
     # Keep the first demand below this deliberately small test actuator's
@@ -244,7 +244,7 @@ def test_speed_controller_downshift_waits_for_fresh_stable_odom():
     ))
     controller.update(5.0, 4.9, 0.0, 0.1)
 
-    # A lower target must immediately coast while the old speed is still
+    # A lower target must immediately full-brake while the old speed is still
     # above the new band.
     assert controller.update(2.0, 5.0, 0.0, 0.1) == 0.0
     assert controller._downshift_guard
@@ -275,13 +275,13 @@ def test_low_speed_downshift_does_not_starve_stationary_launch():
 
     # FTG may lower its request while the car is stationary in a tight
     # corner. There is no overspeed to catch, so the new request must still
-    # produce forward throttle instead of entering a coast-only guard.
+    # produce forward throttle instead of entering a brake-only guard.
     output = controller.update(0.08, 0.0, 0.0, 0.1)
     assert output > 0.0
     assert not controller._downshift_guard
 
 
-def test_downshift_restarts_after_passive_coast_crosses_target():
+def test_downshift_restarts_after_full_braking_crosses_target():
     controller = TargetSpeedController(replace(
         config(),
         throttle_max_forward=1.0,
@@ -292,14 +292,14 @@ def test_downshift_restarts_after_passive_coast_crosses_target():
     ))
     controller.update(1.0, 0.9, 0.0, 0.1)
 
-    # The vehicle coasts below the new target while the downshift guard is
+    # The vehicle brakes below the new target while the downshift guard is
     # active. It must resume forward demand instead of remaining neutral.
     output = controller.update(0.35, 0.0, 0.0, 0.1)
     assert output > 0.0
     assert not controller._downshift_guard
 
 
-def test_speed_controller_catches_predicted_downshift_coast():
+def test_speed_controller_catches_predicted_downshift_braking():
     controller = TargetSpeedController(replace(
         config(),
         throttle_max_forward=1.0,
@@ -312,7 +312,7 @@ def test_speed_controller_catches_predicted_downshift_coast():
     controller.update(10.0, 9.9, 0.0, 0.1)
 
     # The car is still above the 2 m/s target, but the allowed IMU signal
-    # predicts that passive coast would cross the target before the next
+        # predicts that full braking would cross the target before the next
     # control update. Start the new target hold throttle immediately.
     output = controller.update(4.0, 5.0, 0.0, 0.1, measured_accel_mps2=-6.0)
     assert controller._downshift_catch

@@ -1416,7 +1416,8 @@ def throttle_table(
 
     The identification grid deliberately starts several throttle probes from
     an already-moving operating point. Pooling all rows by throttle therefore
-    makes a coast at 15 m/s look like the steady speed for a small throttle.
+    makes full-brake deceleration from 15 m/s look like the steady speed for
+    a small throttle.
     Keep phase-local tails instead, reject phases whose tail is materially
     below their initial speed, and select the fastest non-decelerating phase
     for each command. This preserves the useful full-range envelope while
@@ -1450,13 +1451,13 @@ def throttle_table(
         initial = statistics.median(values[:max(1, len(values) // 5)])
         tail = stable_tail(values)
         tail_speed = statistics.median(tail) if tail else values[-1]
-        # A target below the current operating point is a braking/coast
-        # response, not evidence for the target's steady-speed feed-forward.
+            # A target below the current operating point is a deceleration
+            # response, not evidence for the target's steady-speed feed-forward.
         if tail_speed < initial - 0.25:
             continue
-        # The zero-throttle grid has intentional coast phases at every high
-        # nominal band. Only the from-rest zero-throttle phase is a valid
-        # neutral feed-forward point.
+        # The zero-throttle grid has full-brake phases at every high nominal
+        # band. Only the from-rest zero-throttle phase is a valid neutral
+        # feed-forward point.
         if (throttle <= 1.0e-9 and phase.startswith("grid_throttle_") and
                 not phase.endswith("_at_0.00")):
             continue
@@ -1508,6 +1509,26 @@ def classify_motion_regime(
     if speed is None:
         return "unknown"
 
+    throttle = finite(row.get("throttle_feedback"))
+    if throttle is None:
+        throttle = finite(row.get("throttle_command"))
+    if throttle is None:
+        # Calibration phases provide a causal fallback when no feedback sample
+        # was recorded on the exact analysis row. Zero throttle is the active
+        # full-brake branch in this simulator, never passive coast-down.
+        if (phase in {"zero", "zero_throttle_decel", "final_zero",
+                      "boundary_brake"} or phase.startswith("grid_brake_")):
+            throttle = 0.0
+        elif phase.startswith(("throttle_", "grid_throttle_")):
+            throttle = phase_command(phase)
+    power_mode = (
+        "full_brake" if throttle is not None and abs(throttle) <= 1.0e-4
+        else "powered" if throttle is not None else None
+    )
+
+    def with_power_mode(regime: str) -> str:
+        return f"{regime}_{power_mode}" if power_mode is not None else regime
+
     left = finite(row.get("left_encoder_rad"))
     right = finite(row.get("right_encoder_rad"))
     has_encoder_fields = "left_encoder_rad" in row or "right_encoder_rad" in row
@@ -1549,21 +1570,25 @@ def classify_motion_regime(
         if vx is not None and abs(vx) > 0.5 and math.isfinite(wheel_speed):
             slip_ratio = (abs(wheel_speed) - abs(vx)) / abs(vx)
             if slip_ratio > 0.15:
-                return "high_longitudinal_slip"
+                return with_power_mode("high_longitudinal_slip")
 
     if speed < 0.10:
         return "stationary"
     if lateral_accel >= 2.0:
-        return "high_lateral_acceleration"
+        return with_power_mode("high_lateral_acceleration")
     if curvature >= 0.15:
-        return "high_curvature_turn"
+        return with_power_mode("high_curvature_turn")
     if curvature >= 0.03:
-        return "low_curvature_turn"
+        return with_power_mode("low_curvature_turn")
     if acceleration >= 0.50:
-        return "straight_accelerating"
+        return with_power_mode("straight_accelerating")
     if acceleration <= -0.50:
-        return "straight_coasting"
-    return "straight_steady"
+        if power_mode == "full_brake":
+            return "straight_full_brake"
+        if power_mode == "powered":
+            return "straight_powered_decelerating"
+        return "straight_decelerating"
+    return with_power_mode("straight_steady")
 
 
 def motion_regime_metrics(

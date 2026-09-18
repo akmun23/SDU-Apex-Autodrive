@@ -79,7 +79,10 @@ public:
     declare_parameter("lidar_x_m", 0.2733);
     declare_parameter("lidar_y_m", 0.0);
     declare_parameter("lidar_z_m", 0.096);
-    declare_parameter("imu_x_m", observer_defaults.imu_x_offset_m);
+    declare_parameter("imu_x_m", 0.08);
+    declare_parameter(
+      "imu_acceleration_reference_x_m",
+      observer_defaults.imu_acceleration_reference_x_m);
     declare_parameter("imu_y_m", 0.0);
     declare_parameter("imu_z_m", 0.055);
     declare_parameter("imu_orientation_correction_gain", 1.0);
@@ -183,6 +186,9 @@ public:
       observer_defaults.lateral_velocity_speed_yaw_rate_gain_s);
     declare_parameter(
       "lateral_velocity_max_mps", observer_defaults.lateral_velocity_max_mps);
+    declare_parameter(
+      "lateral_velocity_reference_forward_offset_m",
+      observer_defaults.lateral_velocity_reference_forward_offset_m);
     declare_parameter("max_imu_ax_abs_mps2", observer_defaults.max_imu_ax_abs_mps2);
 
     observer_config_ = load_observer_config();
@@ -350,7 +356,10 @@ private:
       "lateral_velocity_speed_yaw_rate_gain_s").as_double();
     config.lateral_velocity_max_mps = std::max(
       0.0, get_parameter("lateral_velocity_max_mps").as_double());
-    config.imu_x_offset_m = get_parameter("imu_x_m").as_double();
+    config.lateral_velocity_reference_forward_offset_m = get_parameter(
+      "lateral_velocity_reference_forward_offset_m").as_double();
+    config.imu_acceleration_reference_x_m = get_parameter(
+      "imu_acceleration_reference_x_m").as_double();
     config.max_imu_ax_abs_mps2 = get_parameter("max_imu_ax_abs_mps2").as_double();
     return config;
   }

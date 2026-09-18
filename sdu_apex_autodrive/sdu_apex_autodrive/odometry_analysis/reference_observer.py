@@ -64,16 +64,18 @@ class ReferenceObserver:
                  turn_speed_bias_yaw_rate_squared_mps: float = 0.0,
                  turn_speed_bias_speed_yaw_rate_abs_mps: float = 0.0,
                  turn_speed_bias_max_mps: float = 0.03,
+                 use_yaw_direction_encoder_side: bool = False,
                  use_coherent_packet_velocity_for_pose: bool = True,
                  coherent_packet_pose_blend: float = 1.0,
                  use_kinematic_lateral_slip_model: bool = True,
                  lateral_velocity_yaw_rate_gain_m: float = 0.167,
                  lateral_velocity_speed_yaw_rate_gain_s: float = -0.0063,
                  lateral_velocity_max_mps: float = 0.35,
+                 lateral_velocity_reference_forward_offset_m: float = 0.15532,
                  decel_detect_ax_mps2: float = -0.5,
                  decel_ax_scale: float = 1.005,
                  decel_ax_offset_mps2: float = 0.020,
-                 imu_x_offset_m: float = 0.08,
+                 imu_acceleration_reference_x_m: float = 0.15532,
                  wheel_update_ax_abs_max_mps2: float = 6.5,
                  wheel_freeze_speed_mps: float = 0.15,
                  wheel_innovation_max_mps: float = 1.50,
@@ -120,6 +122,8 @@ class ReferenceObserver:
         self.turn_speed_bias_speed_yaw_rate_abs_mps = float(
             turn_speed_bias_speed_yaw_rate_abs_mps)
         self.turn_speed_bias_max_mps = max(0.0, float(turn_speed_bias_max_mps))
+        self.use_yaw_direction_encoder_side = bool(
+            use_yaw_direction_encoder_side)
         self.use_coherent_packet_velocity_for_pose = bool(
             use_coherent_packet_velocity_for_pose)
         self.coherent_packet_pose_blend = float(np.clip(
@@ -132,10 +136,13 @@ class ReferenceObserver:
             lateral_velocity_speed_yaw_rate_gain_s)
         self.lateral_velocity_max_mps = max(
             0.0, float(lateral_velocity_max_mps))
+        self.lateral_velocity_reference_forward_offset_m = float(
+            lateral_velocity_reference_forward_offset_m)
         self.decel_detect_ax_mps2 = float(decel_detect_ax_mps2)
         self.decel_ax_scale = float(decel_ax_scale)
         self.decel_ax_offset_mps2 = float(decel_ax_offset_mps2)
-        self.imu_x_offset_m = max(0.0, float(imu_x_offset_m))
+        self.imu_acceleration_reference_x_m = max(
+            0.0, float(imu_acceleration_reference_x_m))
         # Keep the offline replay numerically aligned with the deployed
         # observer.  A stale replay gate can make a valid runtime change look
         # ineffective during offline validation.
@@ -188,8 +195,10 @@ class ReferenceObserver:
             "lateral_velocity_yaw_rate_gain_m",
             "lateral_velocity_speed_yaw_rate_gain_s",
             "lateral_velocity_max_mps",
+            "lateral_velocity_reference_forward_offset_m",
             "decel_detect_ax_mps2", "decel_ax_scale", "decel_ax_offset_mps2",
-            "imu_x_m", "wheel_update_ax_abs_max_mps2", "wheel_freeze_speed_mps",
+            "imu_x_m", "imu_acceleration_reference_x_m",
+            "wheel_update_ax_abs_max_mps2", "wheel_freeze_speed_mps",
             "wheel_innovation_max_mps", "wheel_recovery_launch_speed_mps",
             "wheel_recovery_launch_innovation_mps", "wheel_recovery_launch_wheel_speed_mps",
             "stationary_speed_threshold_mps", "wheel_update_beta", "stationary_hold_s",
@@ -208,12 +217,14 @@ class ReferenceObserver:
             values.get("wheel_speed_scale_values", ()))
         values["stationary_yaw_rate_abs_radps"] = values.pop(
             "stationary_yaw_rate_abs_max_radps")
-        values["imu_x_offset_m"] = values.pop("imu_x_m")
         constructor_keys = (required - {
             "stationary_yaw_rate_abs_max_radps", "imu_x_m"}) | {
-            "stationary_yaw_rate_abs_radps", "imu_x_offset_m",
+            "stationary_yaw_rate_abs_radps",
+            "use_yaw_direction_encoder_side",
             "wheel_speed_scale_speeds_mps", "wheel_speed_scale_values",
         }
+        values["use_yaw_direction_encoder_side"] = bool(
+            parameters.get("use_yaw_direction_encoder_side", False))
         return cls(**{key: values[key] for key in constructor_keys})
 
     def reset(self) -> None:
@@ -296,9 +307,11 @@ class ReferenceObserver:
         speed = max(0.0, longitudinal_speed_mps)
         speed_gain = (self.lateral_velocity_yaw_rate_gain_m +
                       self.lateral_velocity_speed_yaw_rate_gain_s * speed)
-        return float(np.clip(
+        velocity_at_reference = float(np.clip(
             yaw_rate_radps * speed_gain,
             -self.lateral_velocity_max_mps, self.lateral_velocity_max_mps))
+        return (velocity_at_reference - yaw_rate_radps *
+                self.lateral_velocity_reference_forward_offset_m)
 
     def _result(self, row: pd.Series, dt: float = 0.0) -> Estimate:
         return Estimate(
@@ -383,8 +396,15 @@ class ReferenceObserver:
             wheel_stamp, wheel_left, wheel_right = (
                 self.previous_stamp, self.previous_left, self.previous_right)
         wheel_dt = stamp - wheel_stamp
-        raw = (abs(self.wheel_radius_m * 0.5 * ((left - wheel_left) + (right - wheel_right)) /
-                   wheel_dt) if wheel_dt > 0.0 else 0.0)
+        left_raw = (self.wheel_radius_m * (left - wheel_left) / wheel_dt
+                    if wheel_dt > 0.0 else 0.0)
+        right_raw = (self.wheel_radius_m * (right - wheel_right) / wheel_dt
+                     if wheel_dt > 0.0 else 0.0)
+        if (self.use_yaw_direction_encoder_side and abs(yaw_rate) >= 0.1):
+            selected_raw = left_raw if yaw_rate > 0.0 else right_raw
+            raw = abs(selected_raw)
+        else:
+            raw = abs(0.5 * (left_raw + right_raw))
         packet = abs(self.wheel_radius_m * 0.5 * (dl + dr) / dt)
         mapped = self.map_wheel(raw)
         packet_mapped = packet * self.wheel_scale_for_speed(packet)
@@ -457,8 +477,8 @@ class ReferenceObserver:
             self.previous_pose_v = self.v
             return self._result(row, dt)
         yaw_alpha = (yaw_rate - self.previous_yaw_rate) / dt
-        ax_origin = ax + yaw_rate * yaw_rate * self.imu_x_offset_m
-        ay_origin = ay - yaw_alpha * self.imu_x_offset_m
+        ax_origin = ax + yaw_rate * yaw_rate * self.imu_acceleration_reference_x_m
+        ay_origin = ay - yaw_alpha * self.imu_acceleration_reference_x_m
         def launch_wheel_spin(predicted: float) -> bool:
             return (predicted < self.wheel_recovery_launch_speed_mps and
                     packet_mapped > self.wheel_recovery_launch_wheel_speed_mps and
@@ -552,7 +572,7 @@ class ReferenceObserver:
                 if ax < self.decel_detect_ax_mps2:
                     braking_ax = (self.decel_ax_scale * ax +
                                   self.decel_ax_offset_mps2)
-                braking_ax += yaw_rate * yaw_rate * self.imu_x_offset_m
+                braking_ax += yaw_rate * yaw_rate * self.imu_acceleration_reference_x_m
                 if braking_ax < 0.0:
                     self.u = max(0.0, self.u + braking_ax * dt)
             elif (not integrate_lateral_dynamics and
@@ -562,7 +582,7 @@ class ReferenceObserver:
                 if ax < self.decel_detect_ax_mps2:
                     braking_ax = (self.decel_ax_scale * ax +
                                   self.decel_ax_offset_mps2)
-                braking_ax += yaw_rate * yaw_rate * self.imu_x_offset_m
+                braking_ax += yaw_rate * yaw_rate * self.imu_acceleration_reference_x_m
                 if braking_ax < 0.0:
                     self.u = max(0.0, self.u + braking_ax * dt)
             if integrate_lateral_dynamics:
@@ -574,7 +594,7 @@ class ReferenceObserver:
                 if self.wheel_dropout_active and ax < self.decel_detect_ax_mps2:
                     turn_ax_origin = (
                         self.decel_ax_scale * ax + self.decel_ax_offset_mps2 +
-                        yaw_rate * yaw_rate * self.imu_x_offset_m)
+                        yaw_rate * yaw_rate * self.imu_acceleration_reference_x_m)
                 du = turn_ax_origin + yaw_rate * self.v
                 dv = ay_origin - yaw_rate * self.u
                 u_mid = self.u + 0.5 * dt * du

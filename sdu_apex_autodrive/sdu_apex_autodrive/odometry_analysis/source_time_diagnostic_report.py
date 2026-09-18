@@ -77,9 +77,12 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "amcl_scan_alignment": (
         "amcl_scan_stamp_s", "amcl_scan_matched_odom_stamp_s",
         "amcl_scan_source_error_ms", "amcl_scan_accepted",
-        "amcl_scan_queued", "amcl_scan_dropped",
-        "amcl_scan_bracket_before_stamp_s",
-        "amcl_scan_bracket_after_stamp_s", "amcl_scan_processing_dropped",
+    "amcl_scan_queued", "amcl_scan_dropped",
+    "amcl_scan_bracket_before_stamp_s",
+    "amcl_scan_bracket_after_stamp_s", "amcl_scan_processing_dropped",
+    "amcl_scan_valid_sampled_beams", "amcl_scan_sampled_beams",
+    "amcl_scan_likelihood_offset_m", "amcl_scan_likelihood_score_gain",
+    "amcl_scan_likelihood_applied_m",
     ),
     "amcl_localization_health": (
         "amcl_health_correction_age_s", "amcl_health_correction_accepted",

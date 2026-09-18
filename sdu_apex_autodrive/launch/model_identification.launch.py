@@ -7,6 +7,7 @@ allowed sensor/feedback events. Simulator ground truth is not subscribed to
 by the recorder or used for runtime control.
 """
 
+import math
 import os
 import time
 
@@ -30,33 +31,59 @@ def _setup(context):
     artifact_dir = os.path.join(output_dir, run_name)
     mode = LaunchConfiguration("mode").perform(context)
     duration = float(LaunchConfiguration("duration_sec").perform(context))
+    speed_sequence_text = LaunchConfiguration("speed_sequence_mps").perform(
+        context).strip()
+    reset_setting = LaunchConfiguration("reset_between_steps").perform(
+        context).strip().lower()
+    if reset_setting == "auto":
+        reset_between_steps = mode == "identification_grid"
+    elif reset_setting in {"true", "false"}:
+        reset_between_steps = reset_setting == "true"
+    else:
+        raise ValueError("reset_between_steps must be auto, true, or false")
+
+    calibration_parameters = {
+        "mode": mode,
+        "output_dir": artifact_dir,
+        "duration_sec": ParameterValue(duration, value_type=float),
+        # The timing recorder below is the canonical 40 Hz source stream.
+        # Keep this wide phase/state CSV supplemental and bounded.
+        "capture_source_events": False,
+        "calibration_record_rate_hz": 10.0,
+        "capture_source_event_names": [
+            "gt_odom", "imu", "left_encoder", "right_encoder",
+            "odom_diagnostics",
+        ],
+        # Grid profiles reset by default. Speed-step profiles can be run as
+        # short fresh-player trials; opt into repeated teleports explicitly.
+        "reset_between_steps": reset_between_steps,
+        "ground_truth_boundary_distance_m": ParameterValue(
+            LaunchConfiguration("ground_truth_boundary_distance_m"),
+            value_type=float,
+        ),
+    }
+    if speed_sequence_text:
+        speed_sequence_parts = [
+            value.strip() for value in speed_sequence_text.split(",")]
+        if any(not value for value in speed_sequence_parts):
+            raise ValueError("speed_sequence_mps must be comma-separated numbers")
+        speed_sequence = [float(value) for value in speed_sequence_parts]
+        if not all(math.isfinite(value) for value in speed_sequence):
+            raise ValueError("speed_sequence_mps values must be finite")
+        calibration_parameters["speed_sequence_mps"] = speed_sequence
+
     calibration_node = Node(
         package="sdu_apex_autodrive",
         executable="calibration",
-        name="model_id_excitation",
+        # calibration.yaml is scoped to the ROS node name `calibration`.
+        # Keep this name aligned so model-ID sequences are loaded instead of
+        # Calibration's low-speed defaults. High-speed runs can override the
+        # YAML sequence explicitly through the launch argument below.
+        name="calibration",
         output="screen",
         parameters=[
             LaunchConfiguration("calibration_params"),
-            {
-                "mode": mode,
-                "output_dir": artifact_dir,
-                "duration_sec": ParameterValue(duration, value_type=float),
-                # The timing recorder below is the canonical 40 Hz source
-                # stream. Keep this wide phase/state CSV supplemental and
-                # bounded; storing every callback snapshot here duplicates
-                # the recorder and can exceed the repository file limit.
-                "capture_source_events": False,
-                "calibration_record_rate_hz": 10.0,
-                "capture_source_event_names": [
-                    "gt_odom", "imu", "left_encoder", "right_encoder",
-                    "odom_diagnostics",
-                ],
-                # The identification grid has explicit teleport epochs. The
-                # continuous throttle/speed sweeps deliberately keep one
-                # plant trajectory so their recursive transitions remain
-                # causal; reset is enabled only for the grid profile.
-                "reset_between_steps": mode == "identification_grid",
-            },
+            calibration_parameters,
         ],
     )
     bridge_node = Node(
@@ -146,6 +173,26 @@ def generate_launch_description():
             description="Existing calibration excitation mode",
         ),
         DeclareLaunchArgument("duration_sec", default_value="0.0"),
+        DeclareLaunchArgument(
+            "speed_sequence_mps",
+            default_value="",
+            description=(
+                "Optional comma-separated speed-steps override; empty uses "
+                "calibration.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "reset_between_steps",
+            default_value="auto",
+            description=(
+                "auto resets only identification_grid; otherwise true or false"),
+        ),
+        DeclareLaunchArgument(
+            "ground_truth_boundary_distance_m",
+            default_value="450.0",
+            description=(
+                "Diagnostic world-origin boundary guard; lower for finite "
+                "open-ground model-ID runs"),
+        ),
         DeclareLaunchArgument(
             "sensor_odom_params",
             default_value=os.path.join(

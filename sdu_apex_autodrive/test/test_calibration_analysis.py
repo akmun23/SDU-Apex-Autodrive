@@ -295,9 +295,42 @@ def test_motion_regime_metrics_reports_unique_event_speed_errors():
     by_name = {result["regime"]: result for result in regimes}
 
     assert classify_motion_regime(rows[0], None) == "stationary"
-    assert by_name["high_longitudinal_slip"]["events"] == 1
-    assert abs(by_name["high_longitudinal_slip"]["odom_speed_mae_mps"] - 0.2) < 1.0e-12
-    assert by_name["high_lateral_acceleration"]["events"] == 1
+    assert by_name["high_longitudinal_slip_powered"]["events"] == 1
+    assert abs(
+        by_name["high_longitudinal_slip_powered"]["odom_speed_mae_mps"] -
+        0.2) < 1.0e-12
+    assert by_name["high_lateral_acceleration_powered"]["events"] == 1
+
+
+def test_motion_regime_distinguishes_full_brake_from_powered_deceleration():
+    previous = _row(
+        phase="speed_4.00", stamp_s=100.0,
+        gt_speed_mps=4.0, gt_vx_mps=4.0,
+    )
+    full_brake = _row(
+        phase="grid_brake_speed_4.00", stamp_s=100.1,
+        gt_speed_mps=3.5, gt_vx_mps=3.5,
+        throttle_feedback=0.0,
+    )
+    powered_deceleration = _row(
+        phase="speed_4.00", stamp_s=100.1,
+        gt_speed_mps=3.5, gt_vx_mps=3.5,
+        throttle_feedback=0.2,
+    )
+    unknown_mode = _row(
+        phase="speed_4.00", stamp_s=100.1,
+        gt_speed_mps=3.5, gt_vx_mps=3.5,
+    )
+
+    assert classify_motion_regime(full_brake, previous) == "straight_full_brake"
+    assert classify_motion_regime(
+        powered_deceleration, previous) == "straight_powered_decelerating"
+    assert classify_motion_regime(unknown_mode, previous) == "straight_decelerating"
+
+    # An explicit full-brake phase remains identifiable if this analysis row
+    # has no contemporaneous throttle feedback sample.
+    full_brake.pop("throttle_feedback")
+    assert classify_motion_regime(full_brake, previous) == "straight_full_brake"
 
 
 def test_slip_model_uses_signed_body_longitudinal_velocity_and_keeps_braking():
@@ -395,7 +428,7 @@ def test_acceleration_envelope_is_monotonic_and_uses_full_throttle_data():
     assert limits[1] == limits[2]
 
 
-def test_throttle_table_does_not_use_moving_coast_as_feedforward():
+def test_throttle_table_does_not_use_moving_deceleration_as_feedforward():
     rows = []
     for index, speed in enumerate((0.2, 0.8, 1.4, 1.9), start=1):
         rows.append(_row(

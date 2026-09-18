@@ -82,7 +82,7 @@ FIELDS = (
     "odom_observer_left_angle_rad", "odom_observer_right_angle_rad",
     "odom_observer_imu_yaw_rad", "odom_observer_packet_wheel_speed_mps",
     "odom_observer_wheel_burst_rejected", "odom_observer_turn_speed_bias_mps",
-    # Brake/coast completion diagnostics. A reset is permitted only after
+    # Full-brake completion diagnostics. A reset is permitted only after
     # fresh encoder, IMU, and local-odom evidence has remained stopped.
     "brake_encoder_stopped", "brake_imu_stopped", "brake_odom_stopped",
     "brake_gt_stopped",
@@ -118,7 +118,8 @@ FIELDS = (
     "amcl_scan_source_error_ms", "amcl_scan_accepted",
     "amcl_scan_queued", "amcl_scan_dropped",
     "amcl_scan_bracket_before_stamp_s", "amcl_scan_bracket_after_stamp_s",
-    "amcl_scan_processing_dropped",
+    "amcl_scan_processing_dropped", "amcl_scan_valid_sampled_beams",
+    "amcl_scan_sampled_beams",
     "amcl_health_correction_age_s", "amcl_health_correction_accepted",
     "amcl_health_rejected_scans", "amcl_health_degraded",
     "amcl_health_xy_variance", "amcl_health_yaw_variance",
@@ -300,7 +301,7 @@ class Calibration(Node):
             AckermannDriveStamped, "/cmd/speed", 10)
         # Only diagnostic test launches consume this topic. It prevents a
         # production acceleration=0 hold request from fighting the recorder's
-        # raw zero-throttle brake/coast phase.
+        # raw zero-throttle full-brake phase.
         self.raw_throttle_override_pub = self.create_publisher(
             Float32, "/autodrive/roboracer_1/raw_throttle_override", 10)
         self.raw_steering_override_pub = self.create_publisher(
@@ -567,7 +568,7 @@ class Calibration(Node):
                             "grid_brake_timeout_sec").value))))
             if (sequence and not bool(self.get_parameter(
                     "speed_steps_brake_between_targets").value)):
-                # The final zero target normally already coasts to rest, but
+                # The final zero target normally already brakes to rest, but
                 # retain the independent stop confirmation so this continuous
                 # transition test cannot finish while the car is sliding.
                 phases.append((
@@ -644,7 +645,7 @@ class Calibration(Node):
                     # point is therefore an independent experiment: reset,
                     # settle, accelerate to its operating regime, apply one
                     # throttle value, then record a full zero-throttle
-                    # brake/coast response. The brake is data, never a reset
+                    # braking response. The brake is data, never a reset
                     # condition even when the encoder freezes while truth
                     # continues moving.
                     point = f"{nominal_speed:.2f}_throttle_{throttle:.3f}"
@@ -1248,7 +1249,10 @@ class Calibration(Node):
             "amcl_scan_queued", "amcl_scan_dropped",
             "amcl_scan_bracket_before_stamp_s",
             "amcl_scan_bracket_after_stamp_s",
-            "amcl_scan_processing_dropped",
+            "amcl_scan_processing_dropped", "amcl_scan_valid_sampled_beams",
+            "amcl_scan_sampled_beams", "amcl_scan_likelihood_offset_m",
+            "amcl_scan_likelihood_score_gain",
+            "amcl_scan_likelihood_applied_m",
         )
         self._record_event("amcl_scan_alignment")
         for name, value in zip(names, values[:len(names)]):

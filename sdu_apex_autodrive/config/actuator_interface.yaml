@@ -52,6 +52,7 @@ autodrive_actuator_interface:
     stop_speed_threshold_mps: 0.02
     # Use calibrated feedback for small overshoots; active braking is reserved
     # for a materially large error so low-speed control does not oscillate.
+    # Legacy parameter name: this threshold issues zero-throttle full braking.
     overspeed_coast_threshold_mps: 1.0
     # Accelerate with speed feedback outside the deadband. The mapped throttle
     # is held through small speed crossings.
@@ -73,8 +74,8 @@ autodrive_actuator_interface:
     # restoring the target-speed feed-forward throttle.
     speed_downshift_stable_sec: 0.20
     speed_downshift_band_mps: 0.10
-    # Require a persistent relative overspeed before coasting; one native
-    # odometry sample can still spike.
+    # Require a persistent relative overspeed before active full braking; one
+    # native odometry sample can still spike.
     speed_overspeed_confirmation_sec: 0.05
     # Immediate active brake when raw allowed odometry is materially above the
     # requested speed. This prevents the filtered loop or throttle slew from
@@ -94,7 +95,7 @@ autodrive_actuator_interface:
     odom_correction_gain: 0.25
     # Control-side conditioning only. /odom remains the published calibrated
     # sensor-fusion stream; this alpha prevents one odom sample from toggling
-    # the speed loop between hold and coast.
+    # the speed loop between hold and active braking.
     speed_measurement_filter_alpha: 0.75
     # Do not add an acceleration term to a speed command.  The calibrated
     # feed-forward value is the stable operating point; adding acceleration
@@ -129,7 +130,7 @@ autodrive_actuator_interface:
     acceleration_throttle_fall_rate_per_sec: 4.0
 
     # Monotonic response points from the completed open-ground grid. The
-    # analyzer rejects moving-coast tails before producing this table; linear
+    # analyzer rejects moving full-brake tails before producing this table; linear
     # interpolation supplies commands between the measured throttle points.
     # Keep only operating-range measurements. The command ceiling above
     # remains the final safety boundary; this table does not extrapolate.

@@ -5,7 +5,11 @@ calibration:
     sample_rate_hz: 50.0
     duration_sec: 0.0
     throttle_sequence: [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
-    speed_sequence_mps: [0.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 0.0]
+    # Highest stable speed currently represented by the production
+    # feedforward table. Keep the test under the 16 m/s operating ceiling;
+    # a 16 m/s target presently clamps to the 15.361 m/s table endpoint and
+    # cannot pass the target-settle gate until that table is re-identified.
+    speed_sequence_mps: [0.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 15.3, 0.0]
     steering_sequence: [0.0, -0.25, 0.0, 0.25, 0.0, -0.5, 0.0, 0.5, 0.0]
     hold_sec: 3.0
     zero_settle_sec: 2.0

@@ -16,6 +16,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <mutex>
 #include <atomic>
+#include <cstddef>
 #include <deque>
 #include <limits>
 #include <Eigen/Core>
@@ -51,7 +52,12 @@ private:
                                            const rclcpp::Time& bracket_before_stamp,
                                            const rclcpp::Time& bracket_after_stamp,
                                            double matched_odom_error_ms,
-                                           bool accepted);
+                                           bool accepted,
+                                           std::size_t sampled_valid_beams,
+                                           std::size_t sampled_beams,
+                                           double likelihood_offset_m,
+                                           double likelihood_score_gain,
+                                           double likelihood_applied_m);
     void retry_pending_scans();
 
     // ── Helpers ────────────────────────────────────────────────────
@@ -116,6 +122,9 @@ private:
     double update_min_d_ = 0.001;
     double update_min_a_ = 0.001;
     double max_scan_age_ = 0.05;
+    int max_beams_ = 270;
+    double laser_min_range_m_ = 0.06;
+    double laser_max_range_m_ = 10.0;
     double cloud_publish_rate_ = 2.0;
     rclcpp::Time last_cloud_publish_time_;
     bool debug_pre_resample_particles_ = false;
@@ -225,6 +234,9 @@ private:
     double local_scan_correction_fast_speed_threshold_mps_ = 3.0;
     double local_scan_correction_fast_along_track_gain_ = 0.25;
     double local_scan_correction_yaw_gain_ = 0.0;
+    // Experimental scan-likelihood translation; production remains disabled
+    // until the matched live AMCL/Pure Pursuit holdout passes.
+    double scan_likelihood_along_track_gain_ = 0.0;
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
     double local_tracking_cloud_covariance_yaw_ = 0.01;

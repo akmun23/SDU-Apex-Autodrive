@@ -1,6 +1,8 @@
 #include "gpu_amcl_cpp/core/amcl_node.hpp"
 #include "gpu_amcl_cpp/helpers/math_utils.hpp"
 #include "gpu_amcl_cpp/helpers/localization_math.hpp"
+#include "gpu_amcl_cpp/helpers/scan_likelihood_along_track.hpp"
+#include "gpu_amcl_cpp/helpers/scan_validity.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -243,6 +245,7 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("local_scan_correction_fast_speed_threshold_mps", 3.0);
     declare_parameter<double>("local_scan_correction_fast_along_track_gain", 0.25);
     declare_parameter<double>("local_scan_correction_yaw_gain", 0.0);
+    declare_parameter<double>("scan_likelihood_along_track_gain", 0.0);
     declare_parameter<bool>("local_tracking_reinitialize_cloud", true);
     declare_parameter<double>("local_tracking_cloud_covariance_xy", 0.01);
     declare_parameter<double>("local_tracking_cloud_covariance_yaw", 0.01);
@@ -365,6 +368,8 @@ void AmclNode::load_parameters() {
         get_parameter("local_scan_correction_fast_along_track_gain").as_double(), 0.0, 1.0);
     local_scan_correction_yaw_gain_ = std::clamp(
       get_parameter("local_scan_correction_yaw_gain").as_double(), 0.0, 1.0);
+    scan_likelihood_along_track_gain_ = std::clamp(
+        get_parameter("scan_likelihood_along_track_gain").as_double(), 0.0, 1.0);
     local_tracking_reinitialize_cloud_ = get_parameter(
         "local_tracking_reinitialize_cloud").as_bool();
     local_tracking_cloud_covariance_xy_ = std::max(
@@ -389,7 +394,7 @@ void AmclNode::load_parameters() {
         "debug_pre_resample=%s, slip_threshold=%.2f rad/s, initial_raceline_heading=%s, "
         "local_correction_gate=%.2fm/%.2frad xy_gain=%.3f cross_track_only=%s "
         "along_track_gain=%.3f fast_speed=%.2fmps fast_along_gain=%.3f yaw_gain=%.3f "
-        "association=%.2fm recenter_cloud=%s",
+        "scan_likelihood_along_gain=%.3f association=%.2fm recenter_cloud=%s",
         update_min_d_, update_min_a_, max_scan_age_, odom_history_duration_s_,
         cloud_publish_rate_, debug_pre_resample_particles_ ? "true" : "false",
         slip_angular_threshold_,
@@ -401,6 +406,7 @@ void AmclNode::load_parameters() {
         local_scan_correction_fast_speed_threshold_mps_,
         local_scan_correction_fast_along_track_gain_,
         local_scan_correction_yaw_gain_,
+        scan_likelihood_along_track_gain_,
         local_cluster_association_max_distance_m_,
         local_tracking_reinitialize_cloud_ ? "true" : "false");
 }
@@ -666,7 +672,12 @@ void AmclNode::publish_scan_alignment_diagnostic(
     const rclcpp::Time& bracket_before_stamp,
     const rclcpp::Time& bracket_after_stamp,
     double matched_odom_error_ms,
-    bool accepted) {
+    bool accepted,
+    std::size_t sampled_valid_beams,
+    std::size_t sampled_beams,
+    double likelihood_offset_m,
+    double likelihood_score_gain,
+    double likelihood_applied_m) {
     if (scan_alignment_pub_->get_subscription_count() == 0) {
         return;
     }
@@ -676,7 +687,9 @@ void AmclNode::publish_scan_alignment_diagnostic(
         queued_scans = pending_scans_.size();
     }
     // [scan source stamp, matched odom stamp, source-time error ms, accepted,
-    //  queued scans, dropped scans, bracket-before stamp, bracket-after stamp].
+    //  queued scans, dropped scans, bracket-before stamp, bracket-after stamp,
+    //  processing drops, sampled valid/total beams, likelihood offset/score
+    //  gain/applied translation]. Existing fields 1-11 retain their layout.
     std_msgs::msg::Float64MultiArray msg;
     msg.data = {
         scan_stamp.seconds(),
@@ -691,6 +704,11 @@ void AmclNode::publish_scan_alignment_diagnostic(
         bracket_after_stamp.nanoseconds() == 0 ?
             std::numeric_limits<double>::quiet_NaN() : bracket_after_stamp.seconds(),
         static_cast<double>(scan_processing_drop_count_.load()),
+        static_cast<double>(sampled_valid_beams),
+        static_cast<double>(sampled_beams),
+        likelihood_offset_m,
+        likelihood_score_gain,
+        likelihood_applied_m,
     };
     scan_alignment_pub_->publish(msg);
 }
@@ -995,6 +1013,9 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     sm_cfg.sigma_hit       = get_parameter("sigma_hit").as_double();
     sm_cfg.laser_min_range = get_parameter("laser_min_range").as_double();
     sm_cfg.laser_max_range = get_parameter("laser_max_range").as_double();
+    max_beams_ = sm_cfg.max_beams;
+    laser_min_range_m_ = sm_cfg.laser_min_range;
+    laser_max_range_m_ = sm_cfg.laser_max_range;
     sm_cfg.laser_offset_x  = get_parameter("laser_offset_x").as_double();
     sm_cfg.laser_offset_y  = get_parameter("laser_offset_y").as_double();
     sm_cfg.normalize_likelihood_by_beams =
@@ -1302,6 +1323,11 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     auto t_callback_start = std::chrono::high_resolution_clock::now();
     static std::atomic<uint64_t> scan_callback_count{0};
     const uint64_t callback_count = ++scan_callback_count;
+    double scan_likelihood_offset_m =
+        std::numeric_limits<double>::quiet_NaN();
+    double scan_likelihood_score_gain =
+        std::numeric_limits<double>::quiet_NaN();
+    double scan_likelihood_applied_m = 0.0;
 
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 5000,
@@ -1395,6 +1421,31 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         return;
     }
     last_processed_scan_stamp_ = scan_time;
+
+    const auto scan_range_counts = scan_validity::count_sampled_valid_ranges(
+        msg->ranges, max_beams_, laser_min_range_m_, laser_max_range_m_);
+    if (scan_range_counts.valid == 0) {
+        // With no usable returns, the sensor model assigns every particle the
+        // same weight. Running clustering/resampling after that prediction can
+        // look like a successful map correction even though this scan carried
+        // no map evidence. Preserve the particle state and odometry baseline;
+        // the next valid scan will propagate the full accumulated odom delta.
+        last_scan_correction_accepted_ = false;
+        ++consecutive_rejected_scans_;
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "LiDAR scan has no usable sampled returns (%zu/%zu); "
+            "not refreshing AMCL map-correction health.",
+            scan_range_counts.valid, scan_range_counts.sampled);
+        publish_scan_alignment_diagnostic(
+            scan_time, matched_odom_stamp, bracket_before_stamp,
+            bracket_after_stamp, 0.0, false,
+            scan_range_counts.valid, scan_range_counts.sampled,
+            scan_likelihood_offset_m, scan_likelihood_score_gain,
+            scan_likelihood_applied_m);
+        processing_scan_ = false;
+        return;
+    }
 
     // ── Baseline initialization ──
     // For the first scan after startup/reinit, just seed the odom baseline
@@ -1853,6 +1904,61 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 est.theta = math_utils::normalize_angle(
                     odom_prediction.theta + yaw_gain * math_utils::angle_diff(
                         est.theta, odom_prediction.theta));
+
+                // This independent 1-D map-likelihood score was fit around the
+                // fused current map pose using only legal pose/scan inputs and
+                // a chronological held-out split. Search around this same
+                // fused estimate (not odom_prediction), so runtime and offline
+                // fitting share the correction reference. Keep it disabled in
+                // production until its matched live A/B passes. Apply only to
+                // an accepted local scan (never during global bootstrap,
+                // recovery, or a rejected cluster).
+                if (scan_likelihood_along_track_gain_ > 0.0 &&
+                    !global_sensor_bootstrap &&
+                    !local_tracking_recovery_confirmed) {
+                    const auto& sensor_cfg = pf_.sensor_model().config();
+                    const scan_likelihood::LikelihoodFieldConfig score_cfg{
+                        sensor_cfg.max_beams,
+                        sensor_cfg.z_hit,
+                        sensor_cfg.z_rand,
+                        sensor_cfg.sigma_hit,
+                        sensor_cfg.laser_min_range,
+                        sensor_cfg.laser_max_range,
+                        sensor_cfg.laser_offset_x,
+                        sensor_cfg.laser_offset_y,
+                        sensor_cfg.normalize_likelihood_by_beams,
+                        sensor_cfg.likelihood_scale,
+                    };
+                    const auto score = scan_likelihood::estimate_along_track_offset(
+                        msg->ranges,
+                        msg->angle_min,
+                        msg->angle_increment,
+                        est.x,
+                        est.y,
+                        est.theta,
+                        map_.width(),
+                        map_.height(),
+                        map_.resolution(),
+                        map_.origin_x(),
+                        map_.origin_y(),
+                        map_.distance_field(),
+                        score_cfg);
+                    if (score.valid && std::isfinite(score.offset_m) &&
+                        std::isfinite(score.score_gain)) {
+                        scan_likelihood_offset_m = score.offset_m;
+                        scan_likelihood_score_gain = score.score_gain;
+                        scan_likelihood_applied_m =
+                            scan_likelihood_along_track_gain_ * score.offset_m;
+                        est.x += scan_likelihood_applied_m * std::cos(est.theta);
+                        est.y += scan_likelihood_applied_m * std::sin(est.theta);
+                        RCLCPP_INFO_THROTTLE(
+                            get_logger(), *get_clock(), 1000,
+                            "AMCL along scan likelihood: offset=%.3fm "
+                            "applied=%.3fm score_gain=%.4f gain=%.2f",
+                            score.offset_m, scan_likelihood_applied_m,
+                            score.score_gain, scan_likelihood_along_track_gain_);
+                    }
+                }
 
                 last_scan_applied_xy_correction_m_ = std::hypot(
                     est.x - odom_prediction.x, est.y - odom_prediction.y);
@@ -2319,7 +2425,12 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         bracket_before_stamp,
         bracket_after_stamp,
         0.0,
-        pose_published && last_scan_correction_accepted_);
+        pose_published && last_scan_correction_accepted_,
+        scan_range_counts.valid,
+        scan_range_counts.sampled,
+        scan_likelihood_offset_m,
+        scan_likelihood_score_gain,
+        scan_likelihood_applied_m);
 
     processing_scan_ = false; // Allow next scan
     } catch (const std::exception& e) {
