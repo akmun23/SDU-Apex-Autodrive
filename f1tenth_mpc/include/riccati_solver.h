@@ -27,11 +27,16 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 #define RICCATI_RESTRICT __restrict
 #else
 #define RICCATI_RESTRICT restrict
+#endif
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 /**
@@ -60,6 +65,11 @@ typedef struct
     int invert_fallback_count;
     float max_control_hessian_regularization;
     int control_hessian_regularization_count;
+    int quadratic_factorization_count;
+    uint64_t quadratic_factorization_time_ns;
+    uint64_t quadratic_rhs_time_ns;
+    uint64_t refactor_pass_time_ns;
+    uint64_t projection_residual_time_ns;
 } RiccatiDebugInfo_t;
 
 #define RICCATI_DEBUG_TRACE_MAX 256
@@ -119,6 +129,51 @@ int riccati_solver_pass(
     int nx, int nu, int N,
     float rho,
     float rho_u,
+    const float z_x[][RICCATI_MAX_NX],
+    const float y_x[][RICCATI_MAX_NX],
+    const float z_u[][RICCATI_MAX_NU],
+    const float y_u[][RICCATI_MAX_NU],
+    float x_out[][RICCATI_MAX_NX],
+    float u_out[][RICCATI_MAX_NU]);
+
+/** Cached quadratic Riccati terms for repeated ADMM linear-RHS updates. */
+typedef struct
+{
+    float P[PREDICTION_HORIZON + 1][RICCATI_MAX_NX][RICCATI_MAX_NX];
+    float K[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
+    float S_inv[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NU];
+    float G[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
+    uint8_t x_is_constrained[PREDICTION_HORIZON + 1][RICCATI_MAX_NX];
+    float rho;
+    float rho_u;
+    int nx;
+    int nu;
+    int horizon;
+    int valid;
+} RiccatiFactorization_t;
+
+int riccati_solver_factorize(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    int nx,
+    int nu,
+    int horizon,
+    float rho,
+    float rho_u,
+    RiccatiFactorization_t *factorization);
+
+int riccati_solver_pass_factored(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    int nx,
+    int nu,
+    int horizon,
+    const RiccatiFactorization_t *factorization,
     const float z_x[][RICCATI_MAX_NX],
     const float y_x[][RICCATI_MAX_NX],
     const float z_u[][RICCATI_MAX_NU],
@@ -205,5 +260,9 @@ void riccati_debug_set_trace_enabled(int enabled);
 
 /** Debug flag: set to 1 to print ADMM iteration details */
 extern int riccati_admm_debug;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RICCATI_SOLVER_H */

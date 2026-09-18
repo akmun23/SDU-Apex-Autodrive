@@ -3,6 +3,7 @@
 // established Pure Pursuit controller.  Unity truth/contact data is absent.
 
 #include "mpc_rti.h"
+#include "mpc_control_time_predictor.hpp"
 #include "mpc_state_synchronizer.hpp"
 
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
@@ -73,6 +74,25 @@ public:
         state_extrapolation_max_s_ = std::clamp(
             declare_parameter<double>("state_extrapolation_max_s", 0.12),
             0.0, 0.5);
+        control_time_mode_name_ = declare_parameter<std::string>(
+            "control_time_predictor_mode", "ct2");
+        if (control_time_mode_name_ == "ct0") {
+            control_time_mode_ = MpcControlTimeMode::kNoExtrapolation;
+        } else if (control_time_mode_name_ == "ct1") {
+            control_time_mode_ = MpcControlTimeMode::kConstantBodyTwist;
+        } else if (control_time_mode_name_ == "ct2") {
+            control_time_mode_ =
+                MpcControlTimeMode::kAcceptedModelCommandHistory;
+        } else {
+            throw std::runtime_error(
+                "control_time_predictor_mode must be ct0, ct1, or ct2");
+        }
+        control_time_predictor_config_.maximum_state_age_s =
+            state_extrapolation_max_s_;
+        control_time_predictor_config_.model_integration_step_s =
+            TIME_STEP_SECONDS;
+        control_time_predictor_config_.maximum_command_speed_mps =
+            max_speed_mps_;
         pose_odom_max_skew_s_ = std::clamp(
             declare_parameter<double>("pose_odom_max_skew_s", 0.12),
             0.0, 0.5);
@@ -162,8 +182,11 @@ public:
             declare_parameter<double>("admm_rho_input", 7.0));
         rti_config_.solver.tolerance = static_cast<float>(
             declare_parameter<double>("solver_tolerance", 0.01));
-        rti_config_.solver.adaptive_rho = 0;
+        rti_config_.solver.adaptive_rho = declare_parameter<bool>(
+            "adaptive_rho", true) ? 1 : 0;
         rti_config_.solver.shared_rho = 0;
+        rti_config_.solver.use_prefactorization = declare_parameter<bool>(
+            "use_riccati_prefactorization", true) ? 1 : 0;
         rti_config_.degraded_residual_limit = static_cast<float>(
             declare_parameter<double>("solver_degraded_tolerance", 0.05));
         rti_config_.maximum_regularization = static_cast<float>(
@@ -290,12 +313,17 @@ private:
     {
         if (!command_pub_) return;
         auto command = ackermann_msgs::msg::AckermannDriveStamped();
-        command.header.stamp = now();
+        const rclcpp::Time command_time = now();
+        command.header.stamp = command_time;
         command.header.frame_id = command_frame_;
         command.drive.steering_angle = static_cast<float>(steering);
         command.drive.speed = static_cast<float>(speed);
         // The actuator interface owns the safe speed-to-throttle conversion.
         command.drive.acceleration = 0.0f;
+        {
+            std::lock_guard<std::mutex> lock(command_history_mutex_);
+            command_history_.push({command_time.nanoseconds(), steering, speed});
+        }
         command_pub_->publish(command);
     }
 
@@ -331,6 +359,7 @@ private:
                 "MPC shadow ignored invalid/out-of-envelope command history");
             return;
         }
+        std::lock_guard<std::mutex> lock(command_history_mutex_);
         if (observed_command_stamp_ns_ > 0) {
             const int64_t delta_ns = stamp_ns - observed_command_stamp_ns_;
             if (delta_ns <= 0) {
@@ -343,6 +372,11 @@ private:
                 (steering - observed_steering_command_rad_) / dt;
             observed_target_speed_rate_mps2_ =
                 (speed - observed_target_speed_mps_) / dt;
+        }
+        if (!command_history_.push({stamp_ns, steering, speed})) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC shadow rejected command history outside its causal envelope");
+            return;
         }
         observed_command_stamp_ns_ = stamp_ns;
         observed_target_speed_mps_ = speed;
@@ -378,13 +412,28 @@ private:
     }
 
     void publish_shadow_result(const MpcRtiState_t &state,
-        const MpcSynchronizedState &synchronized, double progress,
+        const MpcSynchronizedState &synchronized,
+        const MpcControlTimePrediction &control_prediction,
+        double control_prediction_us, double progress,
         double source_dt_s, const MpcRtiCycleResult_t &result,
         double solve_us, int64_t control_ros_stamp_ns,
         int64_t callback_steady_ns, int64_t synchronize_steady_ns)
     {
         if (!diagnostics_pub_) return;
         const int steps[] = {1, 5, 10, 20, 30};
+        int64_t observed_command_stamp_ns = 0;
+        double observed_target_speed_mps = 0.0;
+        double observed_steering_command_rad = 0.0;
+        double observed_steering_rate_radps = 0.0;
+        double observed_target_speed_rate_mps2 = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(command_history_mutex_);
+            observed_command_stamp_ns = observed_command_stamp_ns_;
+            observed_target_speed_mps = observed_target_speed_mps_;
+            observed_steering_command_rad = observed_steering_command_rad_;
+            observed_steering_rate_radps = observed_steering_rate_radps_;
+            observed_target_speed_rate_mps2 = observed_target_speed_rate_mps2_;
+        }
         std::ostringstream json;
         json << std::setprecision(9)
             << "{\"status\":\"" << cycle_status_name(result.status)
@@ -393,15 +442,35 @@ private:
             << ",\"source_age_s\":" << synchronized.source_age_s
             << ",\"source_dt_s\":" << source_dt_s
             << ",\"pose_odom_skew_s\":" << synchronized.pose_odom_skew_s
+            << ",\"control_time_prediction\":{\"mode\":\""
+            << control_time_mode_name_ << "\",\"age_s\":"
+            << control_prediction.age_s << ",\"elapsed_us\":"
+            << control_prediction_us << ",\"command_changes_used\":"
+            << control_prediction.command_changes_used
+            << ",\"command_fallback\":"
+            << (control_prediction.used_command_fallback ? "true" : "false")
+            << ",\"source_map_pose\":[" << synchronized.map_x << ','
+            << synchronized.map_y << ',' << synchronized.map_yaw
+            << "],\"predicted_map_pose\":["
+            << control_prediction.state.map_x << ','
+            << control_prediction.state.map_y << ','
+            << control_prediction.state.map_yaw << ']'
+            << ",\"predicted_speed_state\":["
+            << control_prediction.state.u << ',' << control_prediction.state.v
+            << ',' << control_prediction.state.yaw_rate << ']'
+            << ",\"prediction_previous_command_rate\":["
+            << control_prediction.previous_steering_rate_radps << ','
+            << control_prediction.previous_target_speed_rate_mps2 << ']'
+            << "}"
             << ",\"host_timing_ns\":{" << "\"callback\":"
             << callback_steady_ns << ",\"synchronize\":"
             << synchronize_steady_ns << '}'
             << ",\"observed_command\":{" << "\"stamp_ns\":"
-            << observed_command_stamp_ns_ << ",\"target_speed_mps\":"
-            << observed_target_speed_mps_ << ",\"steering_rad\":"
-            << observed_steering_command_rad_ << ",\"steering_rate_radps\":"
-            << observed_steering_rate_radps_ << ",\"target_speed_rate_mps2\":"
-            << observed_target_speed_rate_mps2_ << '}'
+            << observed_command_stamp_ns << ",\"target_speed_mps\":"
+            << observed_target_speed_mps << ",\"steering_rad\":"
+            << observed_steering_command_rad << ",\"steering_rate_radps\":"
+            << observed_steering_rate_radps << ",\"target_speed_rate_mps2\":"
+            << observed_target_speed_rate_mps2 << '}'
             << ",\"progress_m\":" << progress
             << ",\"state\":[" << state.plant.e_y << ','
             << state.plant.e_psi << ',' << state.plant.u << ','
@@ -603,7 +672,34 @@ private:
             }
             startup_path_validated_ = true;
         }
-        update_progress(projection);
+        MpcCommandHistory command_history_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(command_history_mutex_);
+            command_history_snapshot = command_history_;
+        }
+        MpcControlTimePrediction control_time_prediction{};
+        const auto prediction_start = std::chrono::steady_clock::now();
+        const MpcControlTimeStatus prediction_status = predict_to_control_time(
+            control_time_mode_, coherent_state, control_ros_time.nanoseconds(),
+            command_history_snapshot, trajectory_.data(), trajectory_.size(),
+            track_length_m_, projection.segment, &projection,
+            control_time_predictor_config_, &control_time_prediction);
+        const auto prediction_finish = std::chrono::steady_clock::now();
+        const double control_prediction_us =
+            std::chrono::duration<double, std::micro>(
+                prediction_finish - prediction_start).count();
+        if (prediction_status != MpcControlTimeStatus::kOk) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC command-time prediction rejected state: %s",
+                control_time_status_name(prediction_status));
+            publish_stop("MPC command-time state prediction failed");
+            return;
+        }
+        const MpcSynchronizedState &command_time_state =
+            control_time_prediction.state;
+        const MpcPathProjection_t &command_time_projection =
+            control_time_prediction.projection;
+        update_progress(command_time_projection);
         /* Shadow compares against the running controller's actual profile; it
          * must not apply the MPC-only first-lap ramp to its inputs. */
         const double speed_ceiling = shadow_mode_ ?
@@ -612,30 +708,27 @@ private:
         rti_config_.model.active_speed_ceiling_mps =
             static_cast<float>(speed_ceiling);
 
-        double commanded_speed = target_speed_mps_;
-        double commanded_steering = last_steering_command_rad_;
-        double previous_steering_rate = last_steering_rate_radps_;
-        double previous_target_speed_rate = last_target_speed_rate_mps2_;
-        if (shadow_mode_ && observed_command_stamp_ns_ > 0) {
-            commanded_speed = observed_target_speed_mps_;
-            commanded_steering = observed_steering_command_rad_;
-            previous_steering_rate = observed_steering_rate_radps_;
-            previous_target_speed_rate = observed_target_speed_rate_mps2_;
-        }
+        double commanded_speed = control_time_prediction.target_speed_mps;
+        double commanded_steering =
+            control_time_prediction.steering_command_rad;
+        double previous_steering_rate =
+            control_time_prediction.previous_steering_rate_radps;
+        double previous_target_speed_rate =
+            control_time_prediction.previous_target_speed_rate_mps2;
         if (!target_speed_initialized_) {
-            if (!shadow_mode_ || observed_command_stamp_ns_ == 0)
+            if (!shadow_mode_ || command_history_snapshot.size() == 0)
                 commanded_speed = clamp(
-                    std::max(0.0, coherent_state.u), 0.0, speed_ceiling);
+                    std::max(0.0, command_time_state.u), 0.0, speed_ceiling);
             if (enabled_) target_speed_mps_ = commanded_speed;
             target_speed_initialized_ = true;
         }
 
         MpcRtiState_t state{};
-        state.plant.e_y = static_cast<float>(projection.lateral_error);
-        state.plant.e_psi = static_cast<float>(projection.heading_error);
-        state.plant.u = static_cast<float>(std::max(0.0, coherent_state.u));
-        state.plant.v = static_cast<float>(coherent_state.v);
-        state.plant.r = static_cast<float>(coherent_state.yaw_rate);
+        state.plant.e_y = static_cast<float>(command_time_projection.lateral_error);
+        state.plant.e_psi = static_cast<float>(command_time_projection.heading_error);
+        state.plant.u = static_cast<float>(std::max(0.0, command_time_state.u));
+        state.plant.v = static_cast<float>(command_time_state.v);
+        state.plant.r = static_cast<float>(command_time_state.yaw_rate);
         state.plant.target_speed = static_cast<float>(commanded_speed);
         state.plant.steering_command = static_cast<float>(commanded_steering);
         state.previous_steering_rate = static_cast<float>(previous_steering_rate);
@@ -654,9 +747,11 @@ private:
         if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
             status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
             if (shadow_mode_)
-                publish_shadow_result(state, coherent_state, last_projected_s_,
-                    source_dt, result, solve_us, control_ros_time.nanoseconds(),
-                    callback_steady_ns, synchronize_steady_ns);
+                publish_shadow_result(state, coherent_state,
+                    control_time_prediction, control_prediction_us,
+                    last_projected_s_, source_dt, result, solve_us,
+                    control_ros_time.nanoseconds(), callback_steady_ns,
+                    synchronize_steady_ns);
             publish_stop("MPC RTI cycle rejected its candidate",
                          !shadow_mode_);
             return;
@@ -669,9 +764,10 @@ private:
             last_target_speed_rate_mps2_ = result.first_control.target_speed_rate;
             publish_command(last_steering_command_rad_, target_speed_mps_);
         } else {
-            publish_shadow_result(state, coherent_state, last_projected_s_,
-                source_dt, result, solve_us, control_ros_time.nanoseconds(),
-                callback_steady_ns, synchronize_steady_ns);
+            publish_shadow_result(state, coherent_state, control_time_prediction,
+                control_prediction_us, last_projected_s_, source_dt, result,
+                solve_us, control_ros_time.nanoseconds(), callback_steady_ns,
+                synchronize_steady_ns);
         }
     }
 
@@ -688,6 +784,10 @@ private:
     std::string path_frame_;
     std::string command_frame_;
     std::string trajectory_file_;
+    std::string control_time_mode_name_;
+    MpcControlTimeMode control_time_mode_{
+        MpcControlTimeMode::kAcceptedModelCommandHistory};
+    MpcControlTimePredictorConfig control_time_predictor_config_{};
     double max_speed_mps_{};
     double startup_speed_mps_{};
     double startup_ramp_laps_{};
@@ -715,7 +815,9 @@ private:
     MpcRtiMemory_t rti_memory_{};
     std::vector<Waypoint> trajectory_;
     MpcStateSynchronizer state_synchronizer_;
+    MpcCommandHistory command_history_;
     std::mutex state_mutex_;
+    std::mutex command_history_mutex_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr command_pub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

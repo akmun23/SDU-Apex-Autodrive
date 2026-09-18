@@ -367,6 +367,22 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     check_true(preview_references[0].left_bound <= 0.2001f,
         "corridor preview uses the narrow bound inside its physical window");
 
+    MpcRtiNominal_t broad_nominal;
+    MpcRtiReference_t broad_references[PREDICTION_HORIZON + 1];
+    check_true(mpc_rti_build_nominal(&current, 0.0, NULL,
+        preview_trajectory, preview_count, preview_lap_length, 0.025f,
+        horizon, &preview_config, &broad_nominal, broad_references),
+        "broad-path nominal is built for candidate-progress regression");
+    MpcRtiState_t shifted_candidate = current;
+    shifted_candidate.plant.e_y = 0.30f;
+    MpcModelControl_t zero_candidate_controls[PREDICTION_HORIZON] = {{0}};
+    MpcRtiState_t shifted_candidate_states[PREDICTION_HORIZON + 1];
+    check_true(mpc_rti_rollout_candidate(&shifted_candidate, preview_s,
+        zero_candidate_controls, preview_trajectory, preview_count,
+        preview_lap_length, NULL, NULL, NULL, 1, 0.025f, &preview_config,
+        shifted_candidate_states, NULL, NULL) == MPC_RTI_ROLLOUT_CORRIDOR,
+        "candidate rollout checks corridor at its own progress, not nominal schedule");
+
     MpcRtiNominal_t warm_seed = nominal;
     for (int k = 0; k <= horizon; ++k)
         warm_seed.progress[k] = (double)k * 0.10;
@@ -411,14 +427,20 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
         }
         MpcRtiState_t candidate_states[PREDICTION_HORIZON + 1];
         double candidate_progress[PREDICTION_HORIZON + 1];
+        MpcRtiCandidatePathDelta_t candidate_path_delta;
         int failure_stage = -1;
         const MpcRtiRolloutStatus_t rollout_status =
             mpc_rti_rollout_candidate(&current, 0.0, candidate_controls,
-                cold_references, horizon, 0.025f, &config, candidate_states,
-                candidate_progress, &failure_stage);
+                trajectory, trajectory_count, lap_length, cold_references,
+                nominal.progress, &candidate_path_delta, horizon, 0.025f,
+                &config, candidate_states, candidate_progress, &failure_stage);
         check_true(rollout_status == MPC_RTI_ROLLOUT_OK,
                    "QP controls pass exact nonlinear rollout and corridor gate");
         if (rollout_status == MPC_RTI_ROLLOUT_OK) {
+            check_true(candidate_path_delta.sample_count == horizon + 1,
+                       "candidate-vs-nominal path diagnostics cover the horizon");
+            check_true(candidate_path_delta.progress_error_m[0] < 1.0e-9,
+                       "candidate and nominal begin at the same progress");
             const MpcStageResult_t expected_step = mpc_vehicle_model_step(
                 &current.plant, &candidate_controls[0], 0.025f,
                 cold_references[0].path_curvature);
@@ -433,8 +455,9 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     MpcRtiState_t rejected_states[PREDICTION_HORIZON + 1];
     int failure_stage = 0;
     check_true(mpc_rti_rollout_candidate(&outside, 0.0, nominal.controls,
-        cold_references, horizon, 0.025f, &config, rejected_states, NULL,
-        &failure_stage) == MPC_RTI_ROLLOUT_CORRIDOR,
+        trajectory, trajectory_count, lap_length, NULL, NULL, NULL, horizon,
+        0.025f, &config, rejected_states, NULL, &failure_stage) ==
+            MPC_RTI_ROLLOUT_CORRIDOR,
         "nonlinear candidate outside hard corridor is rejected");
 
     MpcRtiCycleConfiguration_t cycle_config = {

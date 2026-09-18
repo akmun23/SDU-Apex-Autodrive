@@ -6,10 +6,12 @@
 #define MPC_MODEL_NX 7
 #define MPC_MODEL_NU 2
 
+#ifdef MPC_ENABLE_FD_ORACLE
 static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f, 1.0e-5f};
-static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-3f};
+    1.0e-3f, 1.0e-3f, 1.0e-3f};
+static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
+#endif
 
 static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
 {
@@ -22,6 +24,7 @@ static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
     x[6] = state->steering_command;
 }
 
+#ifdef MPC_ENABLE_FD_ORACLE
 static MpcModelState_t array_to_state(const float x[MPC_MODEL_NX])
 {
     MpcModelState_t state;
@@ -34,6 +37,7 @@ static MpcModelState_t array_to_state(const float x[MPC_MODEL_NX])
     state.steering_command = x[6];
     return state;
 }
+#endif
 
 static void control_to_array(const MpcModelControl_t *control,
                              float u[MPC_MODEL_NU])
@@ -42,6 +46,7 @@ static void control_to_array(const MpcModelControl_t *control,
     u[1] = control->target_speed_rate;
 }
 
+#ifdef MPC_ENABLE_FD_ORACLE
 static MpcModelControl_t array_to_control(const float u[MPC_MODEL_NU])
 {
     MpcModelControl_t control;
@@ -49,6 +54,7 @@ static MpcModelControl_t array_to_control(const float u[MPC_MODEL_NU])
     control.target_speed_rate = u[1];
     return control;
 }
+#endif
 
 static void stage_to_array(const MpcStageResult_t *stage,
                            float next[MPC_MODEL_NX])
@@ -56,6 +62,7 @@ static void stage_to_array(const MpcStageResult_t *stage,
     state_to_array(&stage->next, next);
 }
 
+#ifdef MPC_ENABLE_FD_ORACLE
 static float output_difference(int row, float plus, float minus)
 {
     if (row == 1) return remainderf(plus - minus, 6.2831853071795864769f);
@@ -116,8 +123,10 @@ static float choose_derivative(
     }
     return NAN;
 }
+#endif
 
-int mpc_model_linearize(
+#ifdef MPC_ENABLE_FD_ORACLE
+int mpc_model_linearize_fd_oracle(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
     float dt,
@@ -198,5 +207,38 @@ int mpc_model_linearize(
         if (!isfinite(affine)) return 0;
     }
     linearization->valid = 1;
+    return 1;
+}
+#endif
+
+int mpc_model_linearize(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    MpcStageLinearization_t *linearization)
+{
+    if (state == NULL || control == NULL || linearization == NULL) return 0;
+    MpcStageResult_t stage;
+    if (!mpc_vehicle_model_step_with_jacobian(
+            state, control, dt, path_curvature, &stage, linearization)) {
+        return 0;
+    }
+
+    float x[MPC_MODEL_NX];
+    float u[MPC_MODEL_NU];
+    float f[MPC_MODEL_NX];
+    state_to_array(state, x);
+    control_to_array(control, u);
+    stage_to_array(&stage, f);
+    for (int row = 0; row < MPC_MODEL_NX; ++row) {
+        float affine = f[row];
+        for (int column = 0; column < MPC_MODEL_NX; ++column)
+            affine -= linearization->A[row][column] * x[column];
+        for (int input = 0; input < MPC_MODEL_NU; ++input)
+            affine -= linearization->B[row][input] * u[input];
+        if (!isfinite(affine)) return 0;
+        linearization->d[row] = affine;
+    }
     return 1;
 }

@@ -20,6 +20,9 @@
     # Source-time synchronization: retain measured source dt; never synthesize
     # nominal intervals. These are age/skew bounds, not timestamp corrections.
     state_extrapolation_max_s: 0.12
+    # Promoted offline against the untouched PP holdout; only legal ROS state
+    # and past/current /cmd/speed commands are consumed at runtime.
+    control_time_predictor_mode: ct2
     pose_odom_max_skew_s: 0.12
     source_dt_min_s: 0.001
     source_dt_max_s: 0.250
@@ -48,12 +51,18 @@
     corridor_preview_halfwidth_m: 0.10
     nonlinear_corridor_tolerance_m: 0.001
 
-    # Phase-9 validated core profile. ROS/shadow deadline is not yet accepted.
+    # Fixed rho reuses the quadratic Riccati factorization once per QP.
+    # Adaptive rho is enabled at the existing 100-iteration cap. Penalty
+    # changes refactor the QP; verify end-to-end timing against the 25 ms period.
     admm_rho: 7.0
     admm_rho_input: 7.0
+    adaptive_rho: true
     # Absolute max raw primal/dual residual; not a relative, state-scaled test.
     solver_tolerance: 0.01
     solver_degraded_tolerance: 0.05
     max_solver_iterations: 100
     solver_max_regularization: 0.01
     max_consecutive_degraded_solves: 3
+    # Enabled after exact development/holdout replay parity and >2x Riccati
+    # solver p95 improvement against the reference implementation.
+    use_riccati_prefactorization: true

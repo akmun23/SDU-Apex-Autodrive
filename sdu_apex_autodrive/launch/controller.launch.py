@@ -147,7 +147,6 @@ def _setup(context):
         amcl_parameter_sources.append(amcl_override_path)
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
         # Pace commands independently of the official telemetry decoder so
         # the simulator is not throttled by camera/LIDAR ROS publication.
         Node(

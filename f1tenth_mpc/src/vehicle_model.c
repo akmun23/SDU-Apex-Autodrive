@@ -11,9 +11,11 @@
  */
 
 #include "vehicle_model.h"
+#include "mpc_linearization.h"
 
 #include <math.h>
 #include <stddef.h>
+#include <string.h>
 
 static VehicleParameters_t active_parameters = {
     .steering_wheelbase_m = SOURCE_STEERING_WHEELBASE_M,
@@ -138,113 +140,385 @@ static int finite_mpc_state(const MpcModelState_t *state)
         isfinite(state->target_speed) && isfinite(state->steering_command);
 }
 
+enum { MPC_JET_DERIVATIVES = 9 };
+
+typedef struct
+{
+    float value;
+    float derivative[MPC_JET_DERIVATIVES];
+    int differentiated;
+} MpcJet_t;
+
+static MpcJet_t jet_constant(float value)
+{
+    MpcJet_t result = {0};
+    result.value = value;
+    return result;
+}
+
+static MpcJet_t jet_variable(float value, int index, int differentiate)
+{
+    MpcJet_t result = jet_constant(value);
+    if (differentiate) {
+        result.derivative[index] = 1.0f;
+        result.differentiated = 1;
+    }
+    return result;
+}
+
+static MpcJet_t jet_add(MpcJet_t lhs, MpcJet_t rhs)
+{
+    MpcJet_t result = jet_constant(lhs.value + rhs.value);
+    result.differentiated = lhs.differentiated || rhs.differentiated;
+    if (result.differentiated) {
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            result.derivative[i] = lhs.derivative[i] + rhs.derivative[i];
+    }
+    return result;
+}
+
+static MpcJet_t jet_subtract(MpcJet_t lhs, MpcJet_t rhs)
+{
+    MpcJet_t result = jet_constant(lhs.value - rhs.value);
+    result.differentiated = lhs.differentiated || rhs.differentiated;
+    if (result.differentiated) {
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            result.derivative[i] = lhs.derivative[i] - rhs.derivative[i];
+    }
+    return result;
+}
+
+static MpcJet_t jet_multiply(MpcJet_t lhs, MpcJet_t rhs)
+{
+    MpcJet_t result = jet_constant(lhs.value * rhs.value);
+    result.differentiated = lhs.differentiated || rhs.differentiated;
+    if (result.differentiated) {
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
+            result.derivative[i] = lhs.derivative[i] * rhs.value +
+                lhs.value * rhs.derivative[i];
+        }
+    }
+    return result;
+}
+
+static MpcJet_t jet_divide(MpcJet_t numerator, MpcJet_t denominator)
+{
+    MpcJet_t result = jet_constant(numerator.value / denominator.value);
+    result.differentiated = numerator.differentiated || denominator.differentiated;
+    if (result.differentiated) {
+        const float denominator_squared = denominator.value * denominator.value;
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
+            result.derivative[i] =
+                (numerator.derivative[i] * denominator.value -
+                 numerator.value * denominator.derivative[i]) /
+                denominator_squared;
+        }
+    }
+    return result;
+}
+
+static MpcJet_t jet_sine(MpcJet_t input)
+{
+    MpcJet_t result = jet_constant(sinf(input.value));
+    result.differentiated = input.differentiated;
+    if (input.differentiated) {
+        const float scale = cosf(input.value);
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            result.derivative[i] = scale * input.derivative[i];
+    }
+    return result;
+}
+
+static MpcJet_t jet_cosine(MpcJet_t input)
+{
+    MpcJet_t result = jet_constant(cosf(input.value));
+    result.differentiated = input.differentiated;
+    if (input.differentiated) {
+        const float scale = -sinf(input.value);
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            result.derivative[i] = scale * input.derivative[i];
+    }
+    return result;
+}
+
+static MpcJet_t jet_tangent(MpcJet_t input)
+{
+    MpcJet_t result = jet_constant(tanf(input.value));
+    result.differentiated = input.differentiated;
+    if (input.differentiated) {
+        const float scale = 1.0f + result.value * result.value;
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            result.derivative[i] = scale * input.derivative[i];
+    }
+    return result;
+}
+
+static void mark_nonsmooth_crossing(
+    MpcJet_t boundary_difference,
+    float boundary_scale,
+    MpcStageLinearization_t *linearization)
+{
+    if (linearization == NULL || !boundary_difference.differentiated) return;
+
+    /* Match the perturbation sizes used by the retained FD oracle. A bit is
+     * set only when that column's oracle probe could cross this branch. */
+    static const float probe_epsilon[MPC_JET_DERIVATIVES] = {
+        1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
+        1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-2f};
+    const float roundoff = 2.0e-7f * fmaxf(1.0f, fabsf(boundary_scale));
+    for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
+        const float reach = probe_epsilon[i] *
+            fabsf(boundary_difference.derivative[i]);
+        if (fabsf(boundary_difference.value) <= reach + roundoff)
+            linearization->nonsmooth_column_mask |= (uint16_t)(1u << i);
+    }
+}
+
+static MpcJet_t jet_clip(
+    MpcJet_t input,
+    MpcJet_t lower,
+    MpcJet_t upper,
+    unsigned int clipped_flag,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization)
+{
+    mark_nonsmooth_crossing(
+        jet_subtract(input, lower), lower.value, linearization);
+    mark_nonsmooth_crossing(
+        jet_subtract(input, upper), upper.value, linearization);
+    if (input.value < lower.value) {
+        stage->branch_flags |= clipped_flag;
+        return lower;
+    }
+    if (input.value > upper.value) {
+        stage->branch_flags |= clipped_flag;
+        return upper;
+    }
+    return input;
+}
+
+static unsigned int mask_popcount(uint16_t mask)
+{
+    unsigned int count = 0;
+    while (mask != 0u) {
+        count += mask & 1u;
+        mask >>= 1u;
+    }
+    return count;
+}
+
+static int vehicle_model_step_impl(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization,
+    int differentiate)
+{
+    if (stage == NULL || (differentiate && linearization == NULL)) return 0;
+    *stage = (MpcStageResult_t){0};
+    if (linearization != NULL)
+        memset(linearization, 0, sizeof(*linearization));
+    if (!finite_mpc_state(state) || !control ||
+        !isfinite(control->steering_rate) ||
+        !isfinite(control->target_speed_rate) ||
+        !(dt > 0.0f) || !isfinite(dt) || !isfinite(path_curvature)) {
+        return 0;
+    }
+
+    const VehicleParameters_t parameters = vehicle_model_get_parameters();
+    MpcJet_t x[7] = {
+        jet_variable(state->e_y, 0, differentiate),
+        jet_variable(state->e_psi, 1, differentiate),
+        jet_variable(state->u, 2, differentiate),
+        jet_variable(state->v, 3, differentiate),
+        jet_variable(state->r, 4, differentiate),
+        jet_variable(state->target_speed, 5, differentiate),
+        jet_variable(state->steering_command, 6, differentiate)};
+    MpcJet_t w[2] = {
+        jet_variable(control->steering_rate, 7, differentiate),
+        jet_variable(control->target_speed_rate, 8, differentiate)};
+
+    MpcJet_t q_delta = jet_clip(w[0],
+        jet_constant(-SOURCE_STEERING_RATE_RADPS),
+        jet_constant(SOURCE_STEERING_RATE_RADPS),
+        MPC_STAGE_CLIPPED_STEERING_RATE, stage, linearization);
+    MpcJet_t q_speed = jet_clip(w[1],
+        jet_constant(-parameters.maximum_target_speed_rate_reduction_mps2),
+        jet_constant(parameters.maximum_target_speed_rate_increase_mps2),
+        MPC_STAGE_CLIPPED_SPEED_RATE, stage, linearization);
+
+    MpcJet_t delta_raw = jet_add(x[6], jet_multiply(jet_constant(dt), q_delta));
+    MpcJet_t delta_next = jet_clip(delta_raw,
+        jet_constant(-parameters.max_steering_angle),
+        jet_constant(parameters.max_steering_angle),
+        MPC_STAGE_CLIPPED_STEERING_COMMAND, stage, linearization);
+
+    MpcJet_t target_raw = jet_add(x[5],
+        jet_multiply(jet_constant(dt), q_speed));
+    MpcJet_t target_next = jet_clip(target_raw, jet_constant(0.0f),
+        jet_constant(parameters.maximum_command_speed_mps),
+        MPC_STAGE_CLIPPED_TARGET_SPEED, stage, linearization);
+    MpcJet_t target_mid = jet_multiply(jet_constant(0.5f),
+        jet_add(x[5], target_next));
+
+    MpcJet_t u0 = jet_clip(x[2], jet_constant(0.0f),
+        jet_constant(parameters.maximum_command_speed_mps),
+        0u, stage, linearization);
+    MpcJet_t acceleration = jet_add(
+        jet_constant(MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2),
+        jet_multiply(jet_constant(MPC_LONGITUDINAL_SPEED_COEFF_PER_S), u0));
+    acceleration = jet_add(acceleration, jet_multiply(
+        jet_constant(MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S),
+        jet_subtract(target_mid, u0)));
+    acceleration = jet_add(acceleration, jet_multiply(
+        jet_constant(MPC_LONGITUDINAL_TARGET_RATE_COEFF), q_speed));
+    MpcJet_t brake_limit = jet_add(
+        jet_constant(MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2),
+        jet_multiply(
+            jet_constant(MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV), u0));
+    acceleration = jet_clip(acceleration,
+        jet_multiply(jet_constant(-1.0f), brake_limit),
+        jet_constant(MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2),
+        MPC_STAGE_CLIPPED_ACCELERATION, stage, linearization);
+
+    MpcJet_t u_raw = jet_add(u0, jet_multiply(jet_constant(dt), acceleration));
+    MpcJet_t u_next = jet_clip(u_raw, jet_constant(0.0f),
+        jet_constant(parameters.maximum_command_speed_mps),
+        MPC_STAGE_CLIPPED_BODY_SPEED, stage, linearization);
+    MpcJet_t u_mid = jet_multiply(jet_constant(0.5f), jet_add(u0, u_next));
+
+    const float yaw_retention = expf(
+        -dt / MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS);
+    MpcJet_t yaw_steady = jet_multiply(
+        jet_multiply(
+            jet_constant(MPC_YAW_RATE_STEERING_GAIN_PER_M), u_mid),
+        jet_tangent(delta_next));
+    MpcJet_t r_next = jet_add(
+        jet_multiply(jet_constant(yaw_retention), x[4]),
+        jet_multiply(jet_constant(1.0f - yaw_retention), yaw_steady));
+    MpcJet_t r_mid = jet_multiply(jet_constant(0.5f), jet_add(x[4], r_next));
+
+    MpcJet_t denominator0 = jet_subtract(jet_constant(1.0f),
+        jet_multiply(jet_constant(path_curvature), x[0]));
+    mark_nonsmooth_crossing(
+        jet_subtract(denominator0, jet_constant(0.05f)), 0.05f,
+        linearization);
+    mark_nonsmooth_crossing(
+        jet_add(denominator0, jet_constant(0.05f)), 0.05f,
+        linearization);
+    if (fabsf(denominator0.value) < 0.05f) return 0;
+    MpcJet_t s_dot0 = jet_divide(
+        jet_subtract(
+            jet_multiply(u0, jet_cosine(x[1])),
+            jet_multiply(x[3], jet_sine(x[1]))),
+        denominator0);
+    MpcJet_t ey_dot0 = jet_add(
+        jet_multiply(u0, jet_sine(x[1])),
+        jet_multiply(x[3], jet_cosine(x[1])));
+    MpcJet_t epsi_dot0 = jet_subtract(x[4],
+        jet_multiply(jet_constant(path_curvature), s_dot0));
+    MpcJet_t ey_mid = jet_add(x[0],
+        jet_multiply(jet_constant(0.5f * dt), ey_dot0));
+    MpcJet_t epsi_mid = jet_add(x[1],
+        jet_multiply(jet_constant(0.5f * dt), epsi_dot0));
+    MpcJet_t denominator_mid = jet_subtract(jet_constant(1.0f),
+        jet_multiply(jet_constant(path_curvature), ey_mid));
+    mark_nonsmooth_crossing(
+        jet_subtract(denominator_mid, jet_constant(0.05f)), 0.05f,
+        linearization);
+    mark_nonsmooth_crossing(
+        jet_add(denominator_mid, jet_constant(0.05f)), 0.05f,
+        linearization);
+    if (fabsf(denominator_mid.value) < 0.05f) return 0;
+
+    MpcJet_t s_dot_mid = jet_divide(
+        jet_subtract(
+            jet_multiply(u_mid, jet_cosine(epsi_mid)),
+            jet_multiply(x[3], jet_sine(epsi_mid))),
+        denominator_mid);
+    MpcJet_t ey_dot_mid = jet_add(
+        jet_multiply(u_mid, jet_sine(epsi_mid)),
+        jet_multiply(x[3], jet_cosine(epsi_mid)));
+    MpcJet_t epsi_dot_mid = jet_subtract(r_mid,
+        jet_multiply(jet_constant(path_curvature), s_dot_mid));
+
+    MpcJet_t e_y_next = jet_add(x[0],
+        jet_multiply(jet_constant(dt), ey_dot_mid));
+    MpcJet_t e_psi_unwrapped = jet_add(x[1],
+        jet_multiply(jet_constant(dt), epsi_dot_mid));
+    MpcJet_t next[7] = {
+        e_y_next,
+        jet_constant(atan2f(sinf(e_psi_unwrapped.value),
+                            cosf(e_psi_unwrapped.value))),
+        u_next,
+        x[3],
+        r_next,
+        target_next,
+        delta_next};
+    /* Wrapping changes the coordinate value, not its local derivative. */
+    next[1].differentiated = e_psi_unwrapped.differentiated;
+    if (next[1].differentiated) {
+        memcpy(next[1].derivative, e_psi_unwrapped.derivative,
+               sizeof(next[1].derivative));
+    }
+
+    stage->next = (MpcModelState_t){
+        .e_y = next[0].value,
+        .e_psi = next[1].value,
+        .u = next[2].value,
+        .v = next[3].value,
+        .r = next[4].value,
+        .target_speed = next[5].value,
+        .steering_command = next[6].value};
+    stage->delta_s_m = dt * s_dot_mid.value;
+    stage->body_accel_mps2 = acceleration.value;
+    stage->valid = finite_mpc_state(&stage->next) &&
+        isfinite(stage->delta_s_m) && isfinite(stage->body_accel_mps2);
+    if (!stage->valid) return 0;
+
+    if (linearization != NULL) {
+        for (int row = 0; row < 7; ++row) {
+            for (int column = 0; column < 7; ++column)
+                linearization->A[row][column] = next[row].derivative[column];
+            for (int input = 0; input < 2; ++input)
+                linearization->B[row][input] = next[row].derivative[7 + input];
+        }
+        linearization->nominal_branch_flags = stage->branch_flags;
+        linearization->nonsmooth_column_count =
+            (int)mask_popcount(linearization->nonsmooth_column_mask);
+        linearization->valid = 1;
+    }
+    return 1;
+}
+
+int mpc_vehicle_model_step_with_jacobian(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization)
+{
+    return vehicle_model_step_impl(
+        state, control, dt, path_curvature, stage, linearization, 1);
+}
+
 MpcStageResult_t mpc_vehicle_model_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
     float dt,
     float path_curvature)
 {
-    MpcStageResult_t result = {0};
-    if (!finite_mpc_state(state) || !control ||
-        !isfinite(control->steering_rate) ||
-        !isfinite(control->target_speed_rate) ||
-        !(dt > 0.0f) || !isfinite(dt) || !isfinite(path_curvature)) {
-        return result;
+    MpcStageResult_t stage = {0};
+    /* The fused map is authoritative. Nonlinear rollouts use the same
+     * intermediate expressions but skip derivative propagation. */
+    if (!vehicle_model_step_impl(
+            state, control, dt, path_curvature, &stage, NULL, 0)) {
+        stage.valid = 0;
     }
-
-    const VehicleParameters_t parameters = vehicle_model_get_parameters();
-    float q_delta = control->steering_rate;
-    float q_speed = control->target_speed_rate;
-    if (q_delta < -SOURCE_STEERING_RATE_RADPS ||
-        q_delta > SOURCE_STEERING_RATE_RADPS) {
-        q_delta = clampf_local(q_delta, -SOURCE_STEERING_RATE_RADPS,
-                               SOURCE_STEERING_RATE_RADPS);
-        result.branch_flags |= MPC_STAGE_CLIPPED_STEERING_RATE;
-    }
-    if (q_speed < -parameters.maximum_target_speed_rate_reduction_mps2 ||
-        q_speed > parameters.maximum_target_speed_rate_increase_mps2) {
-        q_speed = clampf_local(q_speed,
-            -parameters.maximum_target_speed_rate_reduction_mps2,
-            parameters.maximum_target_speed_rate_increase_mps2);
-        result.branch_flags |= MPC_STAGE_CLIPPED_SPEED_RATE;
-    }
-
-    const float delta_raw = state->steering_command + dt * q_delta;
-    const float delta_next = clampf_local(delta_raw,
-        -parameters.max_steering_angle, parameters.max_steering_angle);
-    if (delta_next != delta_raw)
-        result.branch_flags |= MPC_STAGE_CLIPPED_STEERING_COMMAND;
-
-    const float target_raw = state->target_speed + dt * q_speed;
-    const float target_next = clampf_local(
-        target_raw, 0.0f, parameters.maximum_command_speed_mps);
-    if (target_next != target_raw)
-        result.branch_flags |= MPC_STAGE_CLIPPED_TARGET_SPEED;
-    const float target_mid = 0.5f * (state->target_speed + target_next);
-
-    const float u0 = clampf_local(state->u, 0.0f,
-                                  parameters.maximum_command_speed_mps);
-    float acceleration =
-        MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
-        MPC_LONGITUDINAL_SPEED_COEFF_PER_S * u0 +
-        MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S * (target_mid - u0) +
-        MPC_LONGITUDINAL_TARGET_RATE_COEFF * q_speed;
-    const float brake_limit =
-        MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 +
-        MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV * u0;
-    const float clipped_acceleration = clampf_local(
-        acceleration, -brake_limit, MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2);
-    if (clipped_acceleration != acceleration)
-        result.branch_flags |= MPC_STAGE_CLIPPED_ACCELERATION;
-    acceleration = clipped_acceleration;
-
-    const float u_raw = u0 + dt * acceleration;
-    const float u_next = clampf_local(
-        u_raw, 0.0f, parameters.maximum_command_speed_mps);
-    if (u_next != u_raw) result.branch_flags |= MPC_STAGE_CLIPPED_BODY_SPEED;
-    const float u_mid = 0.5f * (u0 + u_next);
-
-    const float yaw_retention = expf(
-        -dt / MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS);
-    const float yaw_steady = MPC_YAW_RATE_STEERING_GAIN_PER_M * u_mid *
-        tanf(delta_next);
-    const float r_next = yaw_retention * state->r +
-        (1.0f - yaw_retention) * yaw_steady;
-    const float r_mid = 0.5f * (state->r + r_next);
-
-    const float denominator0 = 1.0f - path_curvature * state->e_y;
-    if (fabsf(denominator0) < 0.05f) return result;
-    const float s_dot0 =
-        (u0 * cosf(state->e_psi) - state->v * sinf(state->e_psi)) /
-        denominator0;
-    const float ey_dot0 =
-        u0 * sinf(state->e_psi) + state->v * cosf(state->e_psi);
-    const float epsi_dot0 = state->r - path_curvature * s_dot0;
-    const float ey_mid = state->e_y + 0.5f * dt * ey_dot0;
-    const float epsi_mid = state->e_psi + 0.5f * dt * epsi_dot0;
-    const float denominator_mid = 1.0f - path_curvature * ey_mid;
-    if (fabsf(denominator_mid) < 0.05f) return result;
-
-    const float s_dot_mid =
-        (u_mid * cosf(epsi_mid) - state->v * sinf(epsi_mid)) /
-        denominator_mid;
-    const float ey_dot_mid =
-        u_mid * sinf(epsi_mid) + state->v * cosf(epsi_mid);
-    const float epsi_dot_mid = r_mid - path_curvature * s_dot_mid;
-
-    result.next.e_y = state->e_y + dt * ey_dot_mid;
-    const float epsi_next = state->e_psi + dt * epsi_dot_mid;
-    result.next.e_psi = atan2f(sinf(epsi_next), cosf(epsi_next));
-    result.next.u = u_next;
-    result.next.v = state->v;
-    result.next.r = r_next;
-    result.next.target_speed = target_next;
-    result.next.steering_command = delta_next;
-    result.delta_s_m = dt * s_dot_mid;
-    result.body_accel_mps2 = acceleration;
-    result.valid = finite_mpc_state(&result.next) &&
-        isfinite(result.delta_s_m) && isfinite(result.body_accel_mps2);
-    return result;
+    return stage;
 }
 
 VehicleState_t vehicle_model_predict_next_state(

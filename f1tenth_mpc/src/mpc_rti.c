@@ -33,6 +33,11 @@ static int finite_reference(const MpcRtiReference_t *reference)
 static int valid_configuration(const MpcRtiConfiguration_t *configuration)
 {
     if (!configuration) return 0;
+    if (configuration->use_fd_jacobian_oracle != 0 &&
+        configuration->use_fd_jacobian_oracle != 1) return 0;
+#ifndef MPC_ENABLE_FD_ORACLE
+    if (configuration->use_fd_jacobian_oracle) return 0;
+#endif
     const VehicleParameters_t vehicle = vehicle_model_get_parameters();
     const float weights[] = {
         configuration->weight_e_y,
@@ -96,6 +101,28 @@ static float clampf_rti(float value, float lower, float upper)
     return fmaxf(lower, fminf(upper, value));
 }
 
+static void include_bound_knots(
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lower_s,
+    double upper_s,
+    float *left_bound,
+    float *right_bound)
+{
+    size_t lower = 0;
+    size_t upper = trajectory_count;
+    while (lower < upper) {
+        const size_t middle = lower + (upper - lower) / 2;
+        if (trajectory[middle].s < lower_s) lower = middle + 1;
+        else upper = middle;
+    }
+    for (size_t i = lower; i < trajectory_count &&
+            trajectory[i].s <= upper_s; ++i) {
+        *left_bound = fminf(*left_bound, (float)trajectory[i].left_bound);
+        *right_bound = fminf(*right_bound, (float)trajectory[i].right_bound);
+    }
+}
+
 static int reference_at_progress(
     const MpcTrajectorySample_t *trajectory,
     size_t trajectory_count,
@@ -130,21 +157,29 @@ static int reference_at_progress(
         right_bound = fminf(right_bound, (float)endpoint.right_bound);
 
         /* Piecewise-linear bounds attain their interval minimum at an
-         * endpoint or a trajectory knot. Include every knot in the periodic
-         * meter window so a narrow corridor cannot fall between grid probes. */
+         * endpoint or a trajectory knot. Binary-search only the exact meter
+         * window; scanning the full closed trajectory per reference dominated
+         * the N30 callback without adding information. */
         double center = fmod(progress - trajectory[0].s, lap_length);
         if (center < 0.0) center += lap_length;
         center += trajectory[0].s;
-        for (size_t i = 0; i < trajectory_count; ++i) {
-            double offset = trajectory[i].s - center;
-            if (offset > 0.5 * lap_length) offset -= lap_length;
-            else if (offset < -0.5 * lap_length) offset += lap_length;
-            if (fabs(offset) <= halfwidth) {
-                left_bound = fminf(left_bound,
-                    (float)trajectory[i].left_bound);
-                right_bound = fminf(right_bound,
-                    (float)trajectory[i].right_bound);
-            }
+        const double lap_end = trajectory[0].s + lap_length;
+        const double window_start = center - halfwidth;
+        const double window_end = center + halfwidth;
+        if (window_start < trajectory[0].s) {
+            include_bound_knots(trajectory, trajectory_count,
+                window_start + lap_length, lap_end, &left_bound, &right_bound);
+            include_bound_knots(trajectory, trajectory_count,
+                trajectory[0].s, window_end, &left_bound, &right_bound);
+        } else if (window_end >= lap_end) {
+            include_bound_knots(trajectory, trajectory_count,
+                window_start, lap_end, &left_bound, &right_bound);
+            include_bound_knots(trajectory, trajectory_count,
+                trajectory[0].s, window_end - lap_length,
+                &left_bound, &right_bound);
+        } else {
+            include_bound_knots(trajectory, trajectory_count,
+                window_start, window_end, &left_bound, &right_bound);
         }
     }
     *reference = (MpcRtiReference_t){
@@ -333,9 +368,20 @@ int mpc_rti_build_ltv_qp(
     for (int k = 0; k < horizon; ++k) {
         RiccatiStepData_t *stage = &problem->steps[k];
         MpcStageLinearization_t plant_linearization;
-        if (!mpc_model_linearize(&nominal_states[k].plant,
+#ifdef MPC_ENABLE_FD_ORACLE
+        const int linearized = configuration->use_fd_jacobian_oracle
+            ? mpc_model_linearize_fd_oracle(&nominal_states[k].plant,
                 &nominal_controls[k], prediction_dt,
-                references[k].path_curvature, &plant_linearization)) {
+                references[k].path_curvature, &plant_linearization)
+            : mpc_model_linearize(&nominal_states[k].plant,
+                &nominal_controls[k], prediction_dt,
+                references[k].path_curvature, &plant_linearization);
+#else
+        const int linearized = mpc_model_linearize(&nominal_states[k].plant,
+            &nominal_controls[k], prediction_dt,
+            references[k].path_curvature, &plant_linearization);
+#endif
+        if (!linearized) {
             return 0;
         }
         problem->nonsmooth_jacobian_columns +=
@@ -503,7 +549,12 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
     const MpcRtiState_t *initial_state,
     double initial_progress,
     const MpcModelControl_t controls[PREDICTION_HORIZON],
-    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    const MpcRtiReference_t nominal_references[PREDICTION_HORIZON + 1],
+    const double nominal_progress[PREDICTION_HORIZON + 1],
+    MpcRtiCandidatePathDelta_t *path_delta,
     int horizon,
     float prediction_dt,
     const MpcRtiConfiguration_t *configuration,
@@ -512,23 +563,46 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
     int *failure_stage)
 {
     if (failure_stage) *failure_stage = -1;
+    if (path_delta) memset(path_delta, 0, sizeof(*path_delta));
     if (!finite_rti_state(initial_state) || !isfinite(initial_progress) ||
-        !controls || !references ||
+        !controls || !trajectory || trajectory_count < 3 ||
+        !isfinite(lap_length) || !(lap_length > 0.0) ||
+        ((nominal_references == NULL) != (nominal_progress == NULL)) ||
+        (path_delta && (!nominal_references || !nominal_progress)) ||
         !states || !valid_configuration(configuration) || horizon < 1 ||
         horizon > PREDICTION_HORIZON || !isfinite(prediction_dt) ||
         prediction_dt <= 0.0f) return MPC_RTI_ROLLOUT_INVALID_INPUT;
     states[0] = *initial_state;
-    if (!finite_reference(&references[0]) ||
-        !state_inside_command_envelope(&states[0], configuration))
+    if (!state_inside_command_envelope(&states[0], configuration))
         return MPC_RTI_ROLLOUT_INVALID_INPUT;
-    if (!corridor_contains(&states[0], &references[0], configuration))
+    double candidate_progress[PREDICTION_HORIZON + 1] = {0.0};
+    candidate_progress[0] = initial_progress;
+    MpcRtiReference_t candidate_reference = {0};
+    if (!reference_at_progress(trajectory, trajectory_count, lap_length,
+            candidate_progress[0], configuration, &candidate_reference))
+        return MPC_RTI_ROLLOUT_INVALID_INPUT;
+    if (!corridor_contains(&states[0], &candidate_reference, configuration))
         return MPC_RTI_ROLLOUT_CORRIDOR;
+    if (path_delta) {
+        if (!finite_reference(&nominal_references[0]) ||
+            !isfinite(nominal_progress[0]))
+            return MPC_RTI_ROLLOUT_INVALID_INPUT;
+        path_delta->progress_error_m[0] =
+            fabs(candidate_progress[0] - nominal_progress[0]);
+        path_delta->curvature_error_per_m[0] = fabsf(
+            candidate_reference.path_curvature -
+            nominal_references[0].path_curvature);
+        path_delta->left_bound_error_m[0] = fabsf(
+            candidate_reference.left_bound - nominal_references[0].left_bound);
+        path_delta->right_bound_error_m[0] = fabsf(
+            candidate_reference.right_bound - nominal_references[0].right_bound);
+        path_delta->sample_count = 1;
+    }
     if (progress) progress[0] = initial_progress;
 
     for (int k = 0; k < horizon; ++k) {
         const MpcModelControl_t *control = &controls[k];
-        if (!finite_reference(&references[k + 1]) ||
-            !isfinite(control->steering_rate) ||
+        if (!isfinite(control->steering_rate) ||
             !isfinite(control->target_speed_rate)) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_INVALID_INPUT;
@@ -544,9 +618,14 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_COMMAND_LIMIT;
         }
+        if (!reference_at_progress(trajectory, trajectory_count, lap_length,
+                candidate_progress[k], configuration, &candidate_reference)) {
+            if (failure_stage) *failure_stage = k;
+            return MPC_RTI_ROLLOUT_INVALID_INPUT;
+        }
         const MpcStageResult_t step = mpc_vehicle_model_step(
             &states[k].plant, control, prediction_dt,
-            references[k].path_curvature);
+            candidate_reference.path_curvature);
         if (!step.valid) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_INVALID_MODEL;
@@ -555,17 +634,42 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
         states[k + 1].previous_steering_rate = control->steering_rate;
         states[k + 1].previous_target_speed_rate =
             control->target_speed_rate;
+        candidate_progress[k + 1] = candidate_progress[k] + step.delta_s_m;
+        if (progress) progress[k + 1] = candidate_progress[k + 1];
         if (!state_inside_command_envelope(&states[k + 1], configuration)) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_STATE_LIMIT;
         }
-        if (!corridor_contains(&states[k + 1], &references[k + 1],
+        if (!reference_at_progress(trajectory, trajectory_count, lap_length,
+                candidate_progress[k + 1], configuration, &candidate_reference) ||
+            !finite_reference(&candidate_reference)) {
+            if (failure_stage) *failure_stage = k;
+            return MPC_RTI_ROLLOUT_INVALID_INPUT;
+        }
+        if (path_delta) {
+            if (!finite_reference(&nominal_references[k + 1]) ||
+                !isfinite(nominal_progress[k + 1])) {
+                if (failure_stage) *failure_stage = k;
+                return MPC_RTI_ROLLOUT_INVALID_INPUT;
+            }
+            path_delta->progress_error_m[k + 1] = fabs(
+                candidate_progress[k + 1] - nominal_progress[k + 1]);
+            path_delta->curvature_error_per_m[k + 1] = fabsf(
+                candidate_reference.path_curvature -
+                nominal_references[k + 1].path_curvature);
+            path_delta->left_bound_error_m[k + 1] = fabsf(
+                candidate_reference.left_bound -
+                nominal_references[k + 1].left_bound);
+            path_delta->right_bound_error_m[k + 1] = fabsf(
+                candidate_reference.right_bound -
+                nominal_references[k + 1].right_bound);
+            path_delta->sample_count = k + 2;
+        }
+        if (!corridor_contains(&states[k + 1], &candidate_reference,
                                configuration)) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_CORRIDOR;
         }
-        if (progress)
-            progress[k + 1] = progress[k] + step.delta_s_m;
     }
     return MPC_RTI_ROLLOUT_OK;
 }
@@ -637,6 +741,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             references)) {
         return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
     }
+    result->nominal_first_control = nominal.controls[0];
 
     MpcRtiProblem_t problem;
     if (!mpc_rti_build_ltv_qp(nominal.states, nominal.controls, references,
@@ -695,9 +800,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     double candidate_progress[PREDICTION_HORIZON + 1];
     int nonlinear_failure_stage = -1;
     const MpcRtiRolloutStatus_t rollout_status = mpc_rti_rollout_candidate(
-        current_state, current_progress, candidate_controls, references,
-        horizon, prediction_dt, &configuration->model, candidate_states,
-        candidate_progress, &nonlinear_failure_stage);
+        current_state, current_progress, candidate_controls, trajectory,
+        trajectory_count, lap_length, references, nominal.progress,
+        &result->candidate_path_delta, horizon, prediction_dt,
+        &configuration->model, candidate_states, candidate_progress,
+        &nonlinear_failure_stage);
     result->nonlinear_failure_stage = nonlinear_failure_stage;
     if (rollout_status != MPC_RTI_ROLLOUT_OK) {
         return reject_cycle(memory, result,

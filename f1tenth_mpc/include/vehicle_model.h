@@ -51,6 +51,10 @@ typedef struct
     int valid;
 } MpcStageResult_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Authoritative 7-state accepted AutoDRIVE model stage. The control-rate
  * decisions update command states before this same interval's response. */
 MpcStageResult_t mpc_vehicle_model_step(
@@ -94,5 +98,9 @@ void vehicle_model_compute_frenet_linearization(
     float reference_velocity,
     float state_matrix_A[NX_FRENET][NX_FRENET],
     float input_matrix_B[NX_FRENET][NU]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VEHICLE_MODEL_H */

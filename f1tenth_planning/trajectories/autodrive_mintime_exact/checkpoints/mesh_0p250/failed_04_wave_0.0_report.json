@@ -1,0 +1,49 @@
+{
+  "solver": {
+    "return_status": "Maximum_Iterations_Exceeded",
+    "success": false,
+    "unified_return_status": "SOLVER_RET_LIMITED",
+    "iter_count": 3000,
+    "final_inf_pr": 38.55295987270256,
+    "final_inf_du": 0.24879817464124473,
+    "final_mu": 0.014595576380340517,
+    "final_objective": 12.648387578747885,
+    "t_wall_total_s": 90.387987617
+  },
+  "lap_time_s": 12.619287236417756,
+  "objective": 12.619367914528416,
+  "converged": false,
+  "max_abs_scaled_collocation_defect": 0.003407364373433447,
+  "scaled_collocation_defect_by_state_max": {
+    "ey": 0.001051001953253139,
+    "epsi": 0.003407364373433447,
+    "u": 0.00037137427643734453,
+    "r": 0.0006387694478120598,
+    "target": 0.0005913537964237769,
+    "delta": 0.0014445031327078132
+  },
+  "raw_collocation_defect_by_state_max": {
+    "ey": 0.0005255009766265695,
+    "epsi": 0.0017036821867167234,
+    "u": 0.0037137427643734455,
+    "r": 0.006387694478120598,
+    "target": 0.0059135379642377695,
+    "delta": 0.0007222515663539066
+  },
+  "minimum_slacks": {
+    "frenet_denominator": 0.6363160288455928,
+    "progress_mps": 1.0886193187500681,
+    "lateral_accel_mps2": 0.48853547343951753,
+    "accel_upper_mps2": 3.4679807233412054,
+    "brake_lower_mps2": 1.5990742988870288,
+    "left_body_clearance_m": 0.38160085762475826,
+    "right_body_clearance_m": 0.4737502071635214,
+    "heading_error_rad": 0.3937215258286956,
+    "steering_rad": 0.11337667989434103,
+    "steering_rate_radps": 2.186888666602396,
+    "target_rate_increase_mps2": 0.4148006280937322,
+    "target_rate_reduction_mps2": 3.1755228541205254
+  },
+  "solution_label": "wave:0.0",
+  "nodes_file": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/trajectories/autodrive_mintime_exact/checkpoints/mesh_0p250/failed_04_wave_0.0_nodes.csv"
+}

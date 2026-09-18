@@ -1,0 +1,37 @@
+repository_head: 685ccca0f549468669ac36aa68fcfc24e503d458
+worktree: dirty; see git_status.txt
+runtime_boundary:
+  inputs: [/odom, /current_map_pose, /cmd/speed, accepted_raceline]
+  simulator_truth_or_unity_timestamps: forbidden
+prediction:
+  horizon_steps: 30
+  dt_s: 0.025
+  horizon_s: 0.75
+  plant_states: 7
+  qp_states: 9
+  inputs: 2
+model_constants:
+  wheelbase_geometry_m: 0.324
+  yaw_rate_gain_per_m: 3.011897
+  yaw_response_tau_s: 0.087735
+  longitudinal_bias_mps2: -0.37356440
+  longitudinal_speed_coeff_per_s: -0.06389858
+  longitudinal_target_error_gain_per_s: 9.11426915
+  longitudinal_target_rate_coeff: -0.06687204
+  brake_decel_intercept_mps2: 5.36267417
+  brake_decel_speed_slope_s_inv: 0.27655518
+  project_command_ceiling_mps: 16.0
+solver:
+  rho: 7.0
+  rho_u: 7.0
+  tolerance: 0.01
+  max_iterations_replay: 100
+  max_iterations_benchmark: 100
+  adaptive_rho: false
+  shared_rho: false
+trajectory: f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+development_trace: sdu_apex_autodrive/artifacts/simulator_trace/pp_amcl_recovery_24ms_20260917/events.csv
+holdout_trace: sdu_apex_autodrive/artifacts/simulator_trace/pp_timing_repeat_20260917/events.csv
+compiler: GCC 11.4.0, CMake 3.22.1, ROS 2 Humble
+compiler_flags_c: -O3 -DNDEBUG -fPIC -Wall -Wextra -Wpedantic -O3 -std=gnu99
+cpu: AMD Ryzen 9 5900HS with Radeon Graphics

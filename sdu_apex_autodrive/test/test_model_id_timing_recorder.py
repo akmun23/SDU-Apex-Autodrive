@@ -106,6 +106,11 @@ def test_event_partitions_are_streamed_from_canonical_event_csv(tmp_path):
          "/autodrive/roboracer_1/steering_command", "message_type": "Float32",
          "header_stamp_ns": "", "simulation_time_s": "",
          "payload_json": '{"value":0.25}'},
+        {"event_index": "7", "arrival_monotonic_ns": "170",
+         "arrival_epoch_ns": "1070", "topic":
+         "/mpc_shadow/diagnostics", "message_type": "String",
+         "header_stamp_ns": "", "simulation_time_s": "",
+         "payload_json": '{"value":"{\\"status\\":\\"accepted_optimal\\"}"}'},
     ]
     with event_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=EVENT_FIELDS)
@@ -130,5 +135,5 @@ def test_event_partitions_are_streamed_from_canonical_event_csv(tmp_path):
     assert [row["event_index"] for row in imu_rows] == ["0"]
     assert [row["event_index"] for row in encoder_rows] == ["1"]
     assert [row["event_index"] for row in state_rows] == ["2"]
-    assert [row["event_index"] for row in controller_rows] == ["3", "4"]
+    assert [row["event_index"] for row in controller_rows] == ["3", "4", "7"]
     assert [row["event_index"] for row in actuator_command_rows] == ["5", "6"]

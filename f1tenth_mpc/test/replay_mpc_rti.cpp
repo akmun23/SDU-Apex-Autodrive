@@ -1,7 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "mpc_rti.h"
+#include "riccati_solver.h"
 #include "mpc_state_synchronizer.hpp"
+#include "replay_metrics.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -42,10 +44,18 @@ struct ReplayMetrics {
     std::size_t source_gap_faults{};
     std::vector<double> solve_ms;
     std::vector<double> iterations;
+    std::vector<double> final_rho;
+    std::vector<double> final_rho_u;
     std::vector<double> primal_residual;
     std::vector<double> dual_residual;
     std::vector<double> state_age_ms;
     std::vector<double> minimum_clearance_m;
+    std::vector<double> candidate_progress_error_m;
+    std::vector<double> candidate_curvature_error_per_m;
+    std::vector<double> candidate_left_bound_error_m;
+    std::vector<double> candidate_right_bound_error_m;
+    std::vector<double> first_action_steering_rate_delta;
+    std::vector<double> first_action_target_rate_delta;
     double maximum_steering_rate{};
     double maximum_target_speed_rate{};
     double minimum_target_speed{std::numeric_limits<double>::infinity()};
@@ -54,9 +64,14 @@ struct ReplayMetrics {
     double maximum_regularization{};
     std::size_t regularization_count{};
     std::size_t nonlinear_rollout_stages{};
+    std::size_t diagnostic_original_residual_rejections{};
+    std::size_t diagnostic_nonlinear_feasible{};
+    std::size_t diagnostic_nonlinear_rejections{};
+    std::size_t diagnostic_not_reached{};
     std::vector<double> source_dt_ms;
     std::size_t residual_limit_rejections{};
     std::size_t degraded_streak_rejections{};
+    std::size_t quadratic_factorizations{};
 };
 
 void fail(const std::string &message)
@@ -146,7 +161,15 @@ bool load_trajectory(std::vector<MpcTrajectorySample_t> *points,
 }
 
 MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
-                                                float tolerance)
+                                                float tolerance,
+                                                bool use_fd_jacobian,
+                                                bool use_prefactorization,
+                                                bool use_scaling,
+                                                bool adaptive_rho,
+                                                float rho,
+                                                float rho_u,
+                                                float degraded_residual_limit,
+                                                int max_degraded_solves)
 {
     MpcRtiConfiguration_t model{};
     model.weight_e_y = 1500.0f;
@@ -169,37 +192,74 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     model.corridor_margin_m = 0.05f;
     model.corridor_preview_halfwidth_m = 0.10f;
     model.nonlinear_corridor_tolerance_m = 0.001f;
+    model.use_fd_jacobian_oracle = use_fd_jacobian ? 1 : 0;
 
     MpcRtiCycleConfiguration_t configuration{};
     configuration.model = model;
-    configuration.solver.rho = 7.0f;
-    configuration.solver.rho_u = 7.0f;
+    configuration.solver.rho = rho;
+    configuration.solver.rho_u = rho_u;
     configuration.solver.tolerance = tolerance;
     configuration.solver.max_iterations = max_iterations;
-    configuration.solver.adaptive_rho = 0;
+    configuration.solver.adaptive_rho = adaptive_rho ? 1 : 0;
     configuration.solver.shared_rho = 0;
-    configuration.degraded_residual_limit = 0.05f;
+    configuration.solver.use_prefactorization = use_prefactorization ? 1 : 0;
+    configuration.solver.use_scaling = use_scaling ? 1 : 0;
+    if (use_scaling) {
+        const float state_scale[MPC_RTI_NX] = {
+            0.10f, 0.25f, 10.0f, 0.25f, 3.2f, 10.0f, 0.5f, 1.2f, 8.0f};
+        const float input_scale[MPC_RTI_NU] = {1.2f, 8.0f};
+        std::copy(state_scale, state_scale + MPC_RTI_NX,
+                  configuration.solver.state_scale);
+        std::copy(input_scale, input_scale + MPC_RTI_NU,
+                  configuration.solver.input_scale);
+    }
+    configuration.degraded_residual_limit = degraded_residual_limit;
     configuration.maximum_regularization = 1.0e-2f;
-    configuration.max_consecutive_degraded_solves = 3;
+    configuration.max_consecutive_degraded_solves = max_degraded_solves;
     return configuration;
 }
 
-double percentile(std::vector<double> values, double fraction)
-{
-    if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
-    std::sort(values.begin(), values.end());
-    const std::size_t index = static_cast<std::size_t>(
-        std::ceil(fraction * static_cast<double>(values.size())) - 1.0);
-    return values[std::min(index, values.size() - 1)];
-}
+using f1tenth_mpc::replay_metrics::maximum;
+using f1tenth_mpc::replay_metrics::minimum;
+using f1tenth_mpc::replay_metrics::percentile;
 
 bool replay_events(const std::string &events_path, int max_iterations,
-                   float tolerance,
+                   float tolerance, bool use_fd_jacobian,
+                   bool use_prefactorization,
+                   bool use_scaling, bool adaptive_rho,
+                   float rho, float rho_u,
+                   float degraded_residual_limit,
+                   int max_degraded_solves,
+                   bool diagnostic_relaxed_residual_gate,
+                   const std::string &actions_path,
+                   const std::string &trajectory_path,
                    const std::vector<MpcTrajectorySample_t> &trajectory,
                    double lap_length)
 {
     std::ifstream input(events_path);
     if (!input.good()) fail("cannot open event stream: " + events_path);
+    std::ofstream action_output;
+    if (!actions_path.empty()) {
+        action_output.open(actions_path);
+        if (!action_output.good())
+            fail("cannot open action output: " + actions_path);
+        action_output << "event_index,source_stamp_ns,status,steering_rate_radps,"
+                         "target_speed_rate_mps2,steering_command_rad,"
+                         "target_speed_mps,iterations,primal_residual,dual_residual\n";
+        action_output << std::setprecision(10);
+    }
+    std::ofstream trajectory_output;
+    if (!trajectory_path.empty()) {
+        trajectory_output.open(trajectory_path);
+        if (!trajectory_output.good())
+            fail("cannot open trajectory output: " + trajectory_path);
+        trajectory_output << "event_index,source_stamp_ns,stage,progress_m,e_y_m,"
+                             "e_psi_rad,u_mps,v_mps,r_radps,target_speed_mps,"
+                             "steering_command_rad,previous_steering_rate_radps,"
+                             "previous_target_speed_rate_mps2,steering_rate_radps,"
+                             "target_speed_rate_mps2\n";
+        trajectory_output << std::setprecision(10);
+    }
 
     MpcSyncConfig sync_config;
     sync_config.source_dt_min_s = 0.001;
@@ -208,7 +268,10 @@ bool replay_events(const std::string &events_path, int max_iterations,
     sync_config.max_state_age_s = 0.120;
     MpcStateSynchronizer synchronizer(sync_config);
     const MpcRtiCycleConfiguration_t configuration =
-        replay_configuration(max_iterations, tolerance);
+        replay_configuration(max_iterations, tolerance, use_fd_jacobian,
+                             use_prefactorization, use_scaling, adaptive_rho,
+                             rho, rho_u, degraded_residual_limit,
+                             max_degraded_solves);
     MpcRtiMemory_t memory{};
     mpc_rti_memory_reset(&memory);
     ReplayMetrics metrics;
@@ -377,8 +440,37 @@ bool replay_events(const std::string &events_path, int max_iterations,
             &state, progress, trajectory.data(), trajectory.size(), lap_length,
             0.025f, PREDICTION_HORIZON, &configuration, &memory, &result);
         const auto finish = std::chrono::steady_clock::now();
+        RiccatiDebugInfo_t solver_debug{};
+        riccati_debug_get_last(&solver_debug);
+        metrics.quadratic_factorizations += static_cast<std::size_t>(
+            std::max(0, solver_debug.quadratic_factorization_count));
+        metrics.final_rho.push_back(solver_debug.rho);
+        metrics.final_rho_u.push_back(solver_debug.rho_u);
+        const bool original_residual_reject =
+            std::max(result.primal_residual, result.dual_residual) > 0.05f ||
+            degraded_streak_before + 1 > 3;
+        if (diagnostic_relaxed_residual_gate && original_residual_reject) {
+            ++metrics.diagnostic_original_residual_rejections;
+            if (status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+                ++metrics.diagnostic_nonlinear_feasible;
+            } else if (status == MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT) {
+                ++metrics.diagnostic_nonlinear_rejections;
+            } else {
+                ++metrics.diagnostic_not_reached;
+            }
+        }
         const double solve_ms = std::chrono::duration<double, std::milli>(
             finish - start).count();
+        if (action_output.good()) {
+            action_output << fields[0] << ',' << source_stamp_ns << ','
+                << static_cast<int>(status) << ','
+                << result.first_control.steering_rate << ','
+                << result.first_control.target_speed_rate << ','
+                << result.published_steering_command << ','
+                << result.published_target_speed << ','
+                << result.solver_iterations << ',' << result.primal_residual
+                << ',' << result.dual_residual << '\n';
+        }
         metrics.solve_ms.push_back(solve_ms);
         ++metrics.solves;
         ++metrics.status_counts[static_cast<int>(status)];
@@ -399,6 +491,48 @@ bool replay_events(const std::string &events_path, int max_iterations,
 
         if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
             status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) continue;
+
+        if (trajectory_output.good()) {
+            for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+                const MpcRtiState_t &predicted = memory.nominal.states[k];
+                trajectory_output << fields[0] << ',' << source_stamp_ns << ','
+                    << k << ',' << memory.nominal.progress[k] << ','
+                    << predicted.plant.e_y << ','
+                    << predicted.plant.e_psi << ',' << predicted.plant.u << ','
+                    << predicted.plant.v << ',' << predicted.plant.r << ','
+                    << predicted.plant.target_speed << ','
+                    << predicted.plant.steering_command << ','
+                    << predicted.previous_steering_rate << ','
+                    << predicted.previous_target_speed_rate << ',';
+                if (k < PREDICTION_HORIZON) {
+                    trajectory_output
+                        << memory.nominal.controls[k].steering_rate << ','
+                        << memory.nominal.controls[k].target_speed_rate;
+                } else {
+                    trajectory_output << ',';
+                }
+                trajectory_output << '\n';
+            }
+        }
+
+        if (result.candidate_path_delta.sample_count != PREDICTION_HORIZON + 1)
+            fail("accepted candidate lacks full path-schedule mismatch diagnostics");
+        for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+            metrics.candidate_progress_error_m.push_back(
+                result.candidate_path_delta.progress_error_m[k]);
+            metrics.candidate_curvature_error_per_m.push_back(
+                result.candidate_path_delta.curvature_error_per_m[k]);
+            metrics.candidate_left_bound_error_m.push_back(
+                result.candidate_path_delta.left_bound_error_m[k]);
+            metrics.candidate_right_bound_error_m.push_back(
+                result.candidate_path_delta.right_bound_error_m[k]);
+        }
+        metrics.first_action_steering_rate_delta.push_back(std::abs(
+            result.first_control.steering_rate -
+            result.nominal_first_control.steering_rate));
+        metrics.first_action_target_rate_delta.push_back(std::abs(
+            result.first_control.target_speed_rate -
+            result.nominal_first_control.target_speed_rate));
 
         metrics.nonlinear_rollout_stages += PREDICTION_HORIZON;
         for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
@@ -435,6 +569,11 @@ bool replay_events(const std::string &events_path, int max_iterations,
                 metrics.maximum_target_speed_rate,
                 std::abs(memory.nominal.controls[k].target_speed_rate));
         }
+        /* This override is an offline diagnostic only.  Reset after each
+         * candidate which the production 0.05 residual gate would reject so
+         * subsequent warm starts follow the production replay sequence. */
+        if (diagnostic_relaxed_residual_gate && original_residual_reject)
+            mpc_rti_memory_reset(&memory);
     }
 
     const std::size_t accepted = metrics.status_counts[
@@ -462,6 +601,34 @@ bool replay_events(const std::string &events_path, int max_iterations,
         << configuration.solver.max_iterations << ','
         << configuration.solver.tolerance << ','
         << configuration.degraded_residual_limit << '\n'
+        << "diagnostic_relaxed_residual_gate="
+        << (diagnostic_relaxed_residual_gate ? "true" : "false") << '\n'
+        << "diagnostic_residual_candidates[original_reject,nonlinear_feasible,"
+           "nonlinear_reject,not_reached]="
+        << metrics.diagnostic_original_residual_rejections << ','
+        << metrics.diagnostic_nonlinear_feasible << ','
+        << metrics.diagnostic_nonlinear_rejections << ','
+        << metrics.diagnostic_not_reached << '\n'
+        << "admm_penalties[rho,rho_u]=" << configuration.solver.rho << ','
+        << configuration.solver.rho_u << '\n'
+        << "adaptive_rho=" << configuration.solver.adaptive_rho << '\n'
+        << "quadratic_factorizations=" << metrics.quadratic_factorizations
+        << " factor_per_solve=" << (metrics.solves > 0
+            ? static_cast<double>(metrics.quadratic_factorizations) /
+                  static_cast<double>(metrics.solves)
+            : 0.0) << '\n'
+        << "final_rho[rho,rho_u] p50/p95/max="
+        << percentile(metrics.final_rho, 0.50) << '/'
+        << percentile(metrics.final_rho, 0.95) << '/'
+        << maximum(metrics.final_rho) << ','
+        << percentile(metrics.final_rho_u, 0.50) << '/'
+        << percentile(metrics.final_rho_u, 0.95) << '/'
+        << maximum(metrics.final_rho_u) << '\n'
+        << "jacobian=" << (use_fd_jacobian ? "fd_oracle" : "analytic")
+        << '\n'
+        << "riccati=" << (use_prefactorization ? "prefactorized" : "reference")
+        << '\n'
+        << "scaling=" << (use_scaling ? "dimensionless" : "physical") << '\n'
         << "prediction[horizon_steps,dt_s]=" << PREDICTION_HORIZON
         << ",0.025000\n"
         << "state_age_ms[p50,p95,max]="
@@ -487,7 +654,27 @@ bool replay_events(const std::string &events_path, int max_iterations,
         << "regularization[max,sum]=" << metrics.maximum_regularization << ','
         << metrics.regularization_count << '\n'
         << "predicted_min_corridor_clearance_m="
-        << percentile(metrics.minimum_clearance_m, 0.0) << '\n'
+        << minimum(metrics.minimum_clearance_m) << '\n'
+        << "predicted_max_corridor_clearance_m="
+        << maximum(metrics.minimum_clearance_m) << '\n'
+        << "candidate_vs_nominal_progress_error_m[p95,max]="
+        << percentile(metrics.candidate_progress_error_m, 0.95) << ','
+        << maximum(metrics.candidate_progress_error_m) << '\n'
+        << "candidate_vs_nominal_curvature_error_per_m[p95,max]="
+        << percentile(metrics.candidate_curvature_error_per_m, 0.95) << ','
+        << maximum(metrics.candidate_curvature_error_per_m) << '\n'
+        << "candidate_vs_nominal_left_bound_delta_m[p95,max]="
+        << percentile(metrics.candidate_left_bound_error_m, 0.95) << ','
+        << maximum(metrics.candidate_left_bound_error_m) << '\n'
+        << "candidate_vs_nominal_right_bound_delta_m[p95,max]="
+        << percentile(metrics.candidate_right_bound_error_m, 0.95) << ','
+        << maximum(metrics.candidate_right_bound_error_m) << '\n'
+        << "first_action_delta[abs_steering_rate_p95,max,"
+           "abs_target_rate_p95,max]="
+        << percentile(metrics.first_action_steering_rate_delta, 0.95) << ','
+        << maximum(metrics.first_action_steering_rate_delta) << ','
+        << percentile(metrics.first_action_target_rate_delta, 0.95) << ','
+        << maximum(metrics.first_action_target_rate_delta) << '\n'
         << "predicted_command_envelope[max_abs_qdelta,max_abs_qv,"
            "max_abs_delta,target_speed_min,max]="
         << metrics.maximum_steering_rate << ','
@@ -511,17 +698,81 @@ bool replay_events(const std::string &events_path, int max_iterations,
 
 int main(int argc, char **argv)
 {
-    if (argc != 2 && argc != 4) {
+    if (argc < 2) {
         std::cerr << "usage: mpc_rti_offline_replay EVENTS_CSV "
-                     "[MAX_ITERATIONS TOLERANCE]\n";
+                     "[MAX_ITERATIONS TOLERANCE] [--fd-jacobian] "
+                     "[--prefactorized] [--scaled] [--rho VALUE] "
+                     "[--rho-u VALUE] [--adaptive-rho] "
+                     "[--diagnostic-residual-limit VALUE] "
+                     "[--actions OUTPUT_CSV] "
+                     "[--trajectory OUTPUT_CSV]\n";
         return 2;
     }
-    const int max_iterations = argc == 4 ? std::stoi(argv[2]) : 50;
-    const float tolerance = argc == 4 ? std::stof(argv[3]) : 0.01f;
+    int max_iterations = 50;
+    float tolerance = 0.01f;
+    bool numeric_settings_seen = false;
+    bool use_fd_jacobian = false;
+    bool use_prefactorization = false;
+    bool use_scaling = false;
+    bool adaptive_rho = false;
+    bool diagnostic_relaxed_residual_gate = false;
+    float rho = 7.0f;
+    float rho_u = 7.0f;
+    float degraded_residual_limit = 0.05f;
+    std::string actions_path;
+    std::string trajectory_path;
+    for (int index = 2; index < argc; ++index) {
+        const std::string option(argv[index]);
+        if (option == "--fd-jacobian") {
+            use_fd_jacobian = true;
+        } else if (option == "--prefactorized") {
+            use_prefactorization = true;
+        } else if (option == "--scaled") {
+            use_scaling = true;
+        } else if (option == "--adaptive-rho") {
+            adaptive_rho = true;
+        } else if (option == "--diagnostic-residual-limit" &&
+                   index + 1 < argc) {
+            degraded_residual_limit = std::stof(argv[++index]);
+            diagnostic_relaxed_residual_gate = true;
+        } else if (option == "--rho" && index + 1 < argc) {
+            rho = std::stof(argv[++index]);
+        } else if (option == "--rho-u" && index + 1 < argc) {
+            rho_u = std::stof(argv[++index]);
+        } else if (option == "--actions" && index + 1 < argc) {
+            actions_path = argv[++index];
+        } else if (option == "--trajectory" && index + 1 < argc) {
+            trajectory_path = argv[++index];
+        } else if (!numeric_settings_seen && index + 1 < argc) {
+            max_iterations = std::stoi(argv[index]);
+            tolerance = std::stof(argv[++index]);
+            numeric_settings_seen = true;
+        } else {
+            std::cerr << "invalid replay option: " << option << '\n';
+            return 2;
+        }
+    }
+    if (!std::isfinite(rho) || !std::isfinite(rho_u) ||
+        rho < 1.0f || rho > 127.0f || rho_u < 1.0f || rho_u > 127.0f) {
+        std::cerr << "rho and rho-u must lie in [1, 127]\n";
+        return 2;
+    }
+    if (!std::isfinite(degraded_residual_limit) ||
+        degraded_residual_limit < 0.05f ||
+        degraded_residual_limit > 1000.0f) {
+        std::cerr << "diagnostic residual limit must lie in [0.05, 1000]\n";
+        return 2;
+    }
+    const int max_degraded_solves = diagnostic_relaxed_residual_gate
+        ? std::numeric_limits<int>::max() : 3;
     std::vector<MpcTrajectorySample_t> trajectory;
     double lap_length = 0.0;
     if (!load_trajectory(&trajectory, &lap_length))
         fail("cannot load the accepted raceline CSV");
     return replay_events(argv[1], max_iterations, tolerance,
+        use_fd_jacobian, use_prefactorization, use_scaling, adaptive_rho,
+        rho, rho_u, degraded_residual_limit, max_degraded_solves,
+        diagnostic_relaxed_residual_gate,
+        actions_path, trajectory_path,
         trajectory, lap_length) ? 0 : 1;
 }

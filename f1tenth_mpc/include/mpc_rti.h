@@ -67,6 +67,8 @@ typedef struct
     float corridor_margin_m;
     float corridor_preview_halfwidth_m;
     float nonlinear_corridor_tolerance_m;
+    /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */
+    int use_fd_jacobian_oracle;
 } MpcRtiConfiguration_t;
 
 typedef struct
@@ -102,6 +104,15 @@ typedef struct
 
 typedef struct
 {
+    int sample_count;
+    double progress_error_m[PREDICTION_HORIZON + 1];
+    float curvature_error_per_m[PREDICTION_HORIZON + 1];
+    float left_bound_error_m[PREDICTION_HORIZON + 1];
+    float right_bound_error_m[PREDICTION_HORIZON + 1];
+} MpcRtiCandidatePathDelta_t;
+
+typedef struct
+{
     MpcRtiConfiguration_t model;
     RiccatiAdmmConfig_t solver;
     float degraded_residual_limit;
@@ -131,6 +142,8 @@ typedef struct
 {
     MpcRtiCycleStatus_t status;
     MpcModelControl_t first_control;
+    MpcModelControl_t nominal_first_control;
+    MpcRtiCandidatePathDelta_t candidate_path_delta;
     float published_steering_command;
     float published_target_speed;
     int solver_iterations;
@@ -167,13 +180,19 @@ int mpc_rti_build_nominal(
     MpcRtiNominal_t *nominal,
     MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
 
-/* Recursively score a candidate with the exact nonlinear stage and reject
- * invalid dynamics, command/state bounds, or hard-corridor violations. */
+/* Recursively score a candidate at candidate progress, sampling its exact
+ * nonlinear curvature and corridor instead of reusing the nominal schedule. */
 MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
     const MpcRtiState_t *initial_state,
     double initial_progress,
     const MpcModelControl_t controls[PREDICTION_HORIZON],
-    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    /* Optional QP schedule used only to report path-schedule mismatch. */
+    const MpcRtiReference_t nominal_references[PREDICTION_HORIZON + 1],
+    const double nominal_progress[PREDICTION_HORIZON + 1],
+    MpcRtiCandidatePathDelta_t *path_delta,
     int horizon,
     float prediction_dt,
     const MpcRtiConfiguration_t *configuration,

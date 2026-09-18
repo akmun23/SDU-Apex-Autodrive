@@ -30,12 +30,26 @@
 
 #include "riccati_solver.h"
 
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+#include <time.h>
+#endif
+
 /* Debug flag: set to 1 from tests to print ADMM iteration details */
 int riccati_admm_debug = 0;
 static RiccatiDebugInfo_t g_riccati_debug_last;
 static RiccatiDebugIterSample_t g_riccati_debug_trace[RICCATI_DEBUG_TRACE_MAX];
 static int g_riccati_debug_trace_count = 0;
 static int g_riccati_debug_trace_enabled = 0;
+
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+static uint64_t riccati_profile_now_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+        (uint64_t)now.tv_nsec;
+}
+#endif
 
 void riccati_debug_get_last(RiccatiDebugInfo_t *out)
 {
@@ -423,11 +437,291 @@ int riccati_solver_pass(
     return 1;
 }
 
+int riccati_solver_factorize(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    int nx,
+    int nu,
+    int N,
+    float rho,
+    float rho_u,
+    RiccatiFactorization_t *factor)
+{
+    if (!step_data || !terminal_Q || !terminal_x_lb || !terminal_x_ub ||
+        !factor || nx <= 0 || nx > RICCATI_MAX_NX || nu <= 0 ||
+        nu > RICCATI_MAX_NU || N <= 0 || N > PREDICTION_HORIZON ||
+        !isfinite(rho) || rho < 0.0f || !isfinite(rho_u) || rho_u < 0.0f) {
+        return 0;
+    }
+
+    memset(factor, 0, sizeof(*factor));
+    factor->nx = nx;
+    factor->nu = nu;
+    factor->horizon = N;
+    factor->rho = rho;
+    factor->rho_u = rho_u;
+
+    for (int i = 0; i < nx; ++i) {
+        factor->x_is_constrained[N][i] =
+            terminal_x_ub[i] < BIG_BOUND || terminal_x_lb[i] > -BIG_BOUND;
+        factor->P[N][i][i] = terminal_Q[i] +
+            (factor->x_is_constrained[N][i] ? rho : 0.0f);
+        if (!isfinite(factor->P[N][i][i])) return 0;
+    }
+
+    for (int k = N - 1; k >= 0; --k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        float q_aug_diag[RICCATI_MAX_NX] = {0};
+        float r_aug_diag[RICCATI_MAX_NU] = {0};
+        float M[RICCATI_MAX_NU][RICCATI_MAX_NX] = {{0}};
+        float S[2][2] = {{0}};
+        float P_A[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+
+        for (int i = 0; i < nx; ++i) {
+            const int constrained = k > 0 &&
+                (sd->x_ub[i] < BIG_BOUND || sd->x_lb[i] > -BIG_BOUND);
+            factor->x_is_constrained[k][i] = (uint8_t)constrained;
+            q_aug_diag[i] = sd->Q_diag[i] + (constrained ? rho : 0.0f);
+            if (!isfinite(q_aug_diag[i])) return 0;
+        }
+        for (int a = 0; a < nu; ++a) {
+            r_aug_diag[a] = sd->R_diag[a] + rho_u;
+            if (!isfinite(r_aug_diag[a])) return 0;
+        }
+
+        for (int a = 0; a < nu; ++a) {
+            for (int j = 0; j < nx; ++j) {
+                for (int s = 0; s < nx; ++s)
+                    M[a][j] += sd->B[s][a] * factor->P[k + 1][s][j];
+            }
+        }
+        for (int a = 0; a < nu; ++a) {
+            for (int b = 0; b < nu; ++b) {
+                S[a][b] = a == b ? r_aug_diag[a] : 0.0f;
+                for (int s = 0; s < nx; ++s)
+                    S[a][b] += M[a][s] * sd->B[s][b];
+            }
+            for (int j = 0; j < nx; ++j) {
+                factor->G[k][a][j] = sd->N[j][a];
+                for (int s = 0; s < nx; ++s)
+                    factor->G[k][a][j] += M[a][s] * sd->A[s][j];
+            }
+        }
+        if (!invert_regularized_control_hessian(
+                S, nu, factor->S_inv[k])) return 0;
+
+        for (int a = 0; a < nu; ++a) {
+            for (int j = 0; j < nx; ++j) {
+                for (int b = 0; b < nu; ++b) {
+                    factor->K[k][a][j] -=
+                        factor->S_inv[k][a][b] * factor->G[k][b][j];
+                }
+            }
+        }
+
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < nx; ++j) {
+                for (int s = 0; s < nx; ++s)
+                    P_A[i][j] += factor->P[k + 1][i][s] * sd->A[s][j];
+            }
+        }
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < nx; ++j) {
+                factor->P[k][i][j] = i == j ? q_aug_diag[i] : 0.0f;
+                for (int s = 0; s < nx; ++s)
+                    factor->P[k][i][j] += sd->A[s][i] * P_A[s][j];
+                for (int a = 0; a < nu; ++a)
+                    factor->P[k][i][j] +=
+                        factor->G[k][a][i] * factor->K[k][a][j];
+            }
+        }
+        for (int i = 0; i < nx; ++i) {
+            for (int j = i + 1; j < nx; ++j) {
+                const float symmetric =
+                    0.5f * (factor->P[k][i][j] + factor->P[k][j][i]);
+                factor->P[k][i][j] = symmetric;
+                factor->P[k][j][i] = symmetric;
+            }
+        }
+        for (int i = 0; i < nx; ++i)
+            for (int j = 0; j < nx; ++j)
+                if (!isfinite(factor->P[k][i][j])) return 0;
+    }
+
+    factor->valid = 1;
+    ++g_riccati_debug_last.quadratic_factorization_count;
+    return 1;
+}
+
+int riccati_solver_pass_factored(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    int nx,
+    int nu,
+    int N,
+    const RiccatiFactorization_t *factor,
+    const float z_x[][RICCATI_MAX_NX],
+    const float y_x[][RICCATI_MAX_NX],
+    const float z_u[][RICCATI_MAX_NU],
+    const float y_u[][RICCATI_MAX_NU],
+    float x_out[][RICCATI_MAX_NX],
+    float u_out[][RICCATI_MAX_NU])
+{
+    if (!step_data || !terminal_q || !terminal_x_lb || !terminal_x_ub ||
+        !x0 || !factor || !factor->valid || !z_x || !y_x || !z_u || !y_u ||
+        !x_out || !u_out || nx != factor->nx || nu != factor->nu ||
+        N != factor->horizon || nx <= 0 || nx > RICCATI_MAX_NX ||
+        nu <= 0 || nu > RICCATI_MAX_NU || N <= 0 ||
+        N > PREDICTION_HORIZON) {
+        return 0;
+    }
+
+    float p[PREDICTION_HORIZON + 1][RICCATI_MAX_NX] = {{0}};
+    float kk[PREDICTION_HORIZON][RICCATI_MAX_NU] = {{0}};
+    for (int i = 0; i < nx; ++i) {
+        p[N][i] = terminal_q[i] -
+            (factor->x_is_constrained[N][i]
+                ? factor->rho * (z_x[N][i] - y_x[N][i]) : 0.0f);
+        if (!isfinite(p[N][i])) return 0;
+    }
+
+    for (int k = N - 1; k >= 0; --k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        float p_shift[RICCATI_MAX_NX] = {0};
+        float q_aug_linear[RICCATI_MAX_NX] = {0};
+        float r_aug_linear[RICCATI_MAX_NU] = {0};
+        float btp[RICCATI_MAX_NU] = {0};
+
+        for (int i = 0; i < nx; ++i) {
+            p_shift[i] = p[k + 1][i];
+            for (int s = 0; s < nx; ++s)
+                p_shift[i] += factor->P[k + 1][i][s] * sd->d[s];
+            q_aug_linear[i] = sd->q[i] -
+                (factor->x_is_constrained[k][i]
+                    ? factor->rho * (z_x[k][i] - y_x[k][i]) : 0.0f);
+            if (!isfinite(p_shift[i]) || !isfinite(q_aug_linear[i])) return 0;
+        }
+        for (int a = 0; a < nu; ++a) {
+            r_aug_linear[a] = sd->r[a] -
+                factor->rho_u * (z_u[k][a] - y_u[k][a]);
+            for (int s = 0; s < nx; ++s)
+                btp[a] += sd->B[s][a] * p_shift[s];
+            if (!isfinite(r_aug_linear[a]) || !isfinite(btp[a])) return 0;
+        }
+        for (int a = 0; a < nu; ++a) {
+            for (int b = 0; b < nu; ++b)
+                kk[k][a] -= factor->S_inv[k][a][b] *
+                    (r_aug_linear[b] + btp[b]);
+            if (!isfinite(kk[k][a])) return 0;
+        }
+        for (int i = 0; i < nx; ++i) {
+            p[k][i] = q_aug_linear[i];
+            for (int s = 0; s < nx; ++s)
+                p[k][i] += sd->A[s][i] * p_shift[s];
+            for (int a = 0; a < nu; ++a)
+                p[k][i] += factor->G[k][a][i] * kk[k][a];
+            if (!isfinite(p[k][i])) return 0;
+        }
+    }
+
+    for (int i = 0; i < nx; ++i) x_out[0][i] = x0[i];
+    for (int k = 0; k < N; ++k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        for (int a = 0; a < nu; ++a) {
+            u_out[k][a] = kk[k][a];
+            for (int s = 0; s < nx; ++s)
+                u_out[k][a] += factor->K[k][a][s] * x_out[k][s];
+            if (!isfinite(u_out[k][a])) return 0;
+        }
+        for (int i = 0; i < nx; ++i) {
+            x_out[k + 1][i] = sd->d[i];
+            for (int s = 0; s < nx; ++s)
+                x_out[k + 1][i] += sd->A[i][s] * x_out[k][s];
+            for (int a = 0; a < nu; ++a)
+                x_out[k + 1][i] += sd->B[i][a] * u_out[k][a];
+            if (!isfinite(x_out[k + 1][i])) return 0;
+        }
+    }
+    return 1;
+}
+
+static int riccati_solver_primal_pass(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    int nx,
+    int nu,
+    int N,
+    float rho,
+    float rho_u,
+    const float z_x[][RICCATI_MAX_NX],
+    const float y_x[][RICCATI_MAX_NX],
+    const float z_u[][RICCATI_MAX_NU],
+    const float y_u[][RICCATI_MAX_NU],
+    float x_out[][RICCATI_MAX_NX],
+    float u_out[][RICCATI_MAX_NU],
+    int use_prefactorization,
+    RiccatiFactorization_t *factorization)
+{
+    if (!use_prefactorization) {
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t start_ns = riccati_profile_now_ns();
+#endif
+        const int solved = riccati_solver_pass(
+            step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub,
+            x0, nx, nu, N, rho, rho_u, z_x, y_x, z_u, y_u, x_out, u_out);
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t finish_ns = riccati_profile_now_ns();
+        if (finish_ns >= start_ns)
+            g_riccati_debug_last.refactor_pass_time_ns += finish_ns - start_ns;
+#endif
+        return solved;
+    }
+    if (!factorization) return 0;
+    if (!factorization->valid || factorization->nx != nx ||
+        factorization->nu != nu || factorization->horizon != N ||
+        factorization->rho != rho || factorization->rho_u != rho_u) {
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t start_ns = riccati_profile_now_ns();
+#endif
+        if (!riccati_solver_factorize(step_data, terminal_Q,
+                terminal_x_lb, terminal_x_ub, nx, nu, N, rho, rho_u,
+                factorization)) return 0;
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t finish_ns = riccati_profile_now_ns();
+        if (finish_ns >= start_ns)
+            g_riccati_debug_last.quadratic_factorization_time_ns +=
+                finish_ns - start_ns;
+#endif
+    }
+ #ifdef MPC_ENABLE_RICCATI_PROFILE
+    const uint64_t rhs_start_ns = riccati_profile_now_ns();
+#endif
+    const int solved = riccati_solver_pass_factored(
+        step_data, terminal_q, terminal_x_lb, terminal_x_ub, x0,
+        nx, nu, N, factorization, z_x, y_x, z_u, y_u, x_out, u_out);
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+    const uint64_t rhs_finish_ns = riccati_profile_now_ns();
+    if (rhs_finish_ns >= rhs_start_ns)
+        g_riccati_debug_last.quadratic_rhs_time_ns +=
+            rhs_finish_ns - rhs_start_ns;
+#endif
+    return solved;
+}
+
 /*===========================================================================
  * Main Solver: Riccati-ADMM
  *===========================================================================*/
 
-RiccatiStatus_t riccati_admm_solve(
+static RiccatiStatus_t riccati_admm_solve_core(
     const RiccatiStepData_t *step_data,
     const float *terminal_Q,
     const float *terminal_q,
@@ -448,6 +742,11 @@ RiccatiStatus_t riccati_admm_solve(
 
     if (nx <= 0 || nx > RICCATI_MAX_NX || nu <= 0 || nu > RICCATI_MAX_NU ||
         N <= 0 || N > PREDICTION_HORIZON) {
+        solution->status = RICCATI_STATUS_ERROR;
+        return RICCATI_STATUS_ERROR;
+    }
+    if (config && config->use_prefactorization != 0 &&
+        config->use_prefactorization != 1) {
         solution->status = RICCATI_STATUS_ERROR;
         return RICCATI_STATUS_ERROR;
     }
@@ -474,9 +773,12 @@ RiccatiStatus_t riccati_admm_solve(
     const float residual_tolerance = (tolerance > 1e-6f) ? tolerance : 1e-6f;
     const int adaptive_rho = config ? config->adaptive_rho : 1;
     const int shared_rho = config ? config->shared_rho : 0;
+    const int use_prefactorization =
+        config ? config->use_prefactorization : 0;
 
     memset(&g_riccati_debug_last, 0, sizeof(g_riccati_debug_last));
     g_riccati_debug_trace_count = 0;
+    RiccatiFactorization_t factorization = {0};
 
     float rho = (admm_state->initialized && admm_state->rho > 0.0f)
                     ? admm_state->rho : cfg_rho;
@@ -543,14 +845,14 @@ RiccatiStatus_t riccati_admm_solve(
         memset(y_x, 0, sizeof(admm_state->y_x));
         memset(y_u, 0, sizeof(admm_state->y_u));
 
-        if (!riccati_solver_pass(
+        if (!riccati_solver_primal_pass(
             step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub, x0,
             nx, nu, N, 0.0f, 0.0f,
             (const float (*)[RICCATI_MAX_NX])z_x,
             (const float (*)[RICCATI_MAX_NX])y_x,
             (const float (*)[RICCATI_MAX_NU])z_u,
             (const float (*)[RICCATI_MAX_NU])y_u,
-            solution->x, solution->u)) {
+            solution->x, solution->u, 0, NULL)) {
             solution->status = RICCATI_STATUS_ERROR;
             solution->iterations = 0;
             solution->primal_residual = INFINITY;
@@ -608,14 +910,15 @@ RiccatiStatus_t riccati_admm_solve(
     for (int iter = 0; iter < max_iter; iter++) {
 
         /*--- Primal update: Riccati pass with augmented costs ---*/
-        if (!riccati_solver_pass(
+        if (!riccati_solver_primal_pass(
             step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub, x0,
             nx, nu, N, rho, rho_u,
             (const float (*)[RICCATI_MAX_NX])z_x,
             (const float (*)[RICCATI_MAX_NX])y_x,
             (const float (*)[RICCATI_MAX_NU])z_u,
             (const float (*)[RICCATI_MAX_NU])y_u,
-            solution->x, solution->u)) {
+            solution->x, solution->u, use_prefactorization,
+            &factorization)) {
             riccati_admm_state_init(admm_state);
             solution->status = RICCATI_STATUS_ERROR;
             solution->iterations = (uint16_t)iter;
@@ -627,6 +930,9 @@ RiccatiStatus_t riccati_admm_solve(
         /*--- Fused z-update, y-update, and residual computation ---*/
         float state_primal = 0.0f, state_dual = 0.0f;
         float ctrl_primal = 0.0f, ctrl_dual = 0.0f;
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t projection_start_ns = riccati_profile_now_ns();
+#endif
 
         /* State loop */
         for (int k = 0; k <= N; k++) {
@@ -691,6 +997,12 @@ RiccatiStatus_t riccati_admm_solve(
         solution->iterations = iter + 1;
         solution->primal_residual = primal_res;
         solution->dual_residual = dual_res;
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t projection_finish_ns = riccati_profile_now_ns();
+        if (projection_finish_ns >= projection_start_ns)
+            g_riccati_debug_last.projection_residual_time_ns +=
+                projection_finish_ns - projection_start_ns;
+#endif
 
         /* Debug output */
         if (riccati_admm_debug && (iter < 5 || iter % 50 == 0 || iter == max_iter - 1)) {
@@ -844,5 +1156,151 @@ RiccatiStatus_t riccati_admm_solve(
     memcpy(solution->u, z_u, sizeof(admm_state->z_u));
 
     solution->status = status;
+    return status;
+}
+
+static int riccati_scaling_signature_matches(
+    const RiccatiAdmmState_t *state,
+    const RiccatiAdmmConfig_t *config,
+    int nx,
+    int nu)
+{
+    if (!state || !config || !state->initialized ||
+        !state->scaling_enabled || state->nx != nx || state->nu != nu)
+        return 0;
+    for (int i = 0; i < nx; ++i)
+        if (state->state_scale[i] != config->state_scale[i]) return 0;
+    for (int a = 0; a < nu; ++a)
+        if (state->input_scale[a] != config->input_scale[a]) return 0;
+    return 1;
+}
+
+RiccatiStatus_t riccati_admm_solve(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    int nx, int nu, int N,
+    const RiccatiAdmmConfig_t *config,
+    RiccatiAdmmState_t *admm_state,
+    RiccatiSolution_t *solution)
+{
+    if (!admm_state || !solution) {
+        if (solution) solution->status = RICCATI_STATUS_ERROR;
+        return RICCATI_STATUS_ERROR;
+    }
+
+    const int use_scaling = config ? config->use_scaling : 0;
+    if (use_scaling != 0 && use_scaling != 1) {
+        solution->status = RICCATI_STATUS_ERROR;
+        return RICCATI_STATUS_ERROR;
+    }
+    if (!use_scaling) {
+        if (admm_state->initialized && admm_state->scaling_enabled)
+            riccati_admm_state_init(admm_state);
+        return riccati_admm_solve_core(
+            step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub,
+            x0, nx, nu, N, config, admm_state, solution);
+    }
+
+    if (!step_data || !terminal_Q || !terminal_q || !terminal_x_lb ||
+        !terminal_x_ub || !x0 || nx <= 0 || nx > RICCATI_MAX_NX ||
+        nu <= 0 || nu > RICCATI_MAX_NU || N <= 0 ||
+        N > PREDICTION_HORIZON) {
+        solution->status = RICCATI_STATUS_ERROR;
+        return RICCATI_STATUS_ERROR;
+    }
+    for (int i = 0; i < nx; ++i) {
+        if (!isfinite(config->state_scale[i]) ||
+            config->state_scale[i] <= 0.0f) {
+            solution->status = RICCATI_STATUS_ERROR;
+            return RICCATI_STATUS_ERROR;
+        }
+    }
+    for (int a = 0; a < nu; ++a) {
+        if (!isfinite(config->input_scale[a]) ||
+            config->input_scale[a] <= 0.0f) {
+            solution->status = RICCATI_STATUS_ERROR;
+            return RICCATI_STATUS_ERROR;
+        }
+    }
+
+    if (admm_state->initialized &&
+        !riccati_scaling_signature_matches(admm_state, config, nx, nu))
+        riccati_admm_state_init(admm_state);
+
+    /* x = Dx*xhat and u = Du*uhat.  Scale dynamics, all diagonal and
+     * cross-cost terms, affine costs, and hard bounds consistently. */
+    RiccatiStepData_t scaled_steps[PREDICTION_HORIZON] = {0};
+    float scaled_terminal_Q[RICCATI_MAX_NX] = {0};
+    float scaled_terminal_q[RICCATI_MAX_NX] = {0};
+    float scaled_terminal_lb[RICCATI_MAX_NX] = {0};
+    float scaled_terminal_ub[RICCATI_MAX_NX] = {0};
+    float scaled_x0[RICCATI_MAX_NX] = {0};
+    for (int i = 0; i < nx; ++i) {
+        const float scale = config->state_scale[i];
+        scaled_terminal_Q[i] = terminal_Q[i] * scale * scale;
+        scaled_terminal_q[i] = terminal_q[i] * scale;
+        scaled_terminal_lb[i] = terminal_x_lb[i] / scale;
+        scaled_terminal_ub[i] = terminal_x_ub[i] / scale;
+        scaled_x0[i] = x0[i] / scale;
+    }
+    memcpy(scaled_steps, step_data, (size_t)N * sizeof(scaled_steps[0]));
+    for (int k = 0; k < N; ++k) {
+        RiccatiStepData_t *scaled = &scaled_steps[k];
+        const RiccatiStepData_t *physical = &step_data[k];
+        for (int i = 0; i < nx; ++i) {
+            const float state_scale = config->state_scale[i];
+            scaled->d[i] = physical->d[i] / state_scale;
+            scaled->Q_diag[i] = physical->Q_diag[i] *
+                state_scale * state_scale;
+            scaled->q[i] = physical->q[i] * state_scale;
+            scaled->x_lb[i] = physical->x_lb[i] / state_scale;
+            scaled->x_ub[i] = physical->x_ub[i] / state_scale;
+            for (int j = 0; j < nx; ++j) {
+                scaled->A[i][j] = physical->A[i][j] *
+                    config->state_scale[j] / state_scale;
+            }
+            for (int a = 0; a < nu; ++a) {
+                scaled->B[i][a] = physical->B[i][a] *
+                    config->input_scale[a] / state_scale;
+                scaled->N[i][a] = physical->N[i][a] *
+                    state_scale * config->input_scale[a];
+            }
+        }
+        for (int a = 0; a < nu; ++a) {
+            const float input_scale = config->input_scale[a];
+            scaled->R_diag[a] = physical->R_diag[a] *
+                input_scale * input_scale;
+            scaled->r[a] = physical->r[a] * input_scale;
+            scaled->u_lb[a] = physical->u_lb[a] / input_scale;
+            scaled->u_ub[a] = physical->u_ub[a] / input_scale;
+        }
+    }
+
+    RiccatiAdmmConfig_t scaled_config = *config;
+    scaled_config.use_scaling = 0;
+    RiccatiSolution_t scaled_solution = {0};
+    const RiccatiStatus_t status = riccati_admm_solve_core(
+        scaled_steps, scaled_terminal_Q, scaled_terminal_q,
+        scaled_terminal_lb, scaled_terminal_ub, scaled_x0,
+        nx, nu, N, &scaled_config, admm_state, &scaled_solution);
+    *solution = scaled_solution;
+    for (int k = 0; k <= N; ++k)
+        for (int i = 0; i < nx; ++i)
+            solution->x[k][i] *= config->state_scale[i];
+    for (int k = 0; k < N; ++k)
+        for (int a = 0; a < nu; ++a)
+            solution->u[k][a] *= config->input_scale[a];
+
+    if (admm_state->initialized) {
+        admm_state->scaling_enabled = 1;
+        memcpy(admm_state->state_scale, config->state_scale,
+               (size_t)nx * sizeof(config->state_scale[0]));
+        memcpy(admm_state->input_scale, config->input_scale,
+               (size_t)nu * sizeof(config->input_scale[0]));
+    }
     return status;
 }

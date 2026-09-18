@@ -352,6 +352,10 @@ typedef struct
     int max_iterations;
     int adaptive_rho;
     int shared_rho;
+    int use_prefactorization;
+    int use_scaling;
+    float state_scale[RICCATI_MAX_NX];
+    float input_scale[RICCATI_MAX_NU];
 } RiccatiAdmmConfig_t;
 
 /**
@@ -398,6 +402,9 @@ typedef struct
     int nu;
     int horizon;
     int initialized;
+    int scaling_enabled;
+    float state_scale[RICCATI_MAX_NX];
+    float input_scale[RICCATI_MAX_NU];
 } RiccatiAdmmState_t;
 
 #endif /* MPC_TYPES_H */

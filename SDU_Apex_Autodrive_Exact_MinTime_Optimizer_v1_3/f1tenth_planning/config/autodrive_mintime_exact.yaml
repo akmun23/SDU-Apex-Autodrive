@@ -1,0 +1,89 @@
+# AutoDRIVE exact-car minimum-time optimizer v1.3
+#
+# IMPORTANT: vehicle values are intentionally NOT duplicated here.
+# Runtime sources are read directly from the checked-out repository:
+#   - identified dynamics: f1tenth_mpc/include/mpc_types.h
+#   - geometry + planning footprint + 0.15 m wall clearance:
+#       f1tenth_planning/config/autodrive_sim_vehicle.yaml
+#   - validated runtime lateral envelope:
+#       f1tenth_control/config/path_tracking_autodrive.yaml
+#
+# This optimizer does not use TUM/Pacejka/real-car dynamics.
+
+limits:
+  # Purely numerical lower bound so ds/dt stays well-conditioned.
+  min_body_speed_mps: 0.8
+  max_heading_error_rad: 0.75
+
+track:
+  prep_smoothing_s: 6.0
+  # Extra clearance beyond the repo's existing mintime.wall_clearance_m=0.15.
+  # Keep zero to match optimize_trajectory.py exactly; increase only if desired.
+  extra_wall_clearance_m: 0.0
+  # Never use a footprint narrower than optimizer_width_m=0.30. When the car
+  # is angled, also account for the true 0.510 x 0.273 m rectangular body.
+  heading_aware_physical_footprint: true
+  # Controller output is the actual optimizer-node path. No 0.02 m spline
+  # densification is used because it created artificial curvature spikes.
+  export_optimizer_nodes: true
+
+lateral_envelope:
+  # 1.0 means use path_tracking_autodrive.yaml:max_lateral_accel exactly.
+  scale: 1.0
+
+combined_acceleration:
+  # Keep disabled until repository data identifies a coupled ax/ay envelope.
+  enabled: false
+  exponent: 2.0
+
+solver:
+  mesh_schedule_m: [0.25, 0.18, 0.14, 0.11, 0.08]
+
+  # User's real run established that wave:pi/2 reaches the same coarse optimum
+  # as the successful right-biased start but converges in ~49 iterations versus
+  # ~1041. Try it first and stop after the first converged coarse candidate.
+  coarse_multistart:
+    - "wave:1.57079632679"
+    - right
+    - warm
+    - center
+  stop_after_first_coarse_success: true
+
+  # On 0.18/0.14/0.11 the existing production raceline converged in 91/85/57
+  # iterations. The previous repaired/raw continuation starts repeatedly burned
+  # 3000 iterations, so they are no longer tried first.
+  refinement_starts:
+    - warm
+    - previous
+    - center
+  stop_after_first_refinement_success: true
+
+  allow_best_coarse_fallback: true
+  coarse_max_iter: 1400
+  refinement_max_iter: 1000
+  tol: 1.0e-7
+  acceptable_tol: 1.0e-5
+  acceptable_iter: 15
+  print_level: 5
+  expand: true
+  mu_strategy: adaptive
+  linear_solver: mumps
+
+scaling:
+  ey_m: 0.5
+  epsi_rad: 0.5
+  u_mps: 10.0
+  r_radps: 10.0
+  target_mps: 10.0
+  delta_rad: 0.5
+  qdelta_radps: 3.2
+  qv_mps2: 8.0
+
+regularization:
+  steering_rate: 1.0e-5
+  target_speed_rate: 1.0e-6
+  heading_error: 1.0e-6
+
+numerics:
+  min_progress_mps: 0.30
+  min_frenet_denominator: 0.25

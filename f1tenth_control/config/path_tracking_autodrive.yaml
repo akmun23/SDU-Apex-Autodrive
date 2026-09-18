@@ -28,7 +28,7 @@ pure_pursuit_node:
     # they do not stop PP when CTE briefly grows.
     cte_speed_factor: 1.50
     cte_speed_floor_ratio: 0.55
-    max_lateral_accel: 6.50
+    max_lateral_accel: 8.0
     speed_preview_distance: 4.0
     speed_profile_braking_decel: 1.50
     corridor_half_width_ref: 0.35

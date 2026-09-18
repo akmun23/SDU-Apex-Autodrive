@@ -1,0 +1,20 @@
+Captured before creating this phase artifact tree; repository HEAD was
+685ccca0f549468669ac36aa68fcfc24e503d458.
+
+ M f1tenth_mpc/CMakeLists.txt
+ M f1tenth_mpc/test/benchmark_mpc_rti.c
+ M f1tenth_mpc/test/replay_mpc_rti.cpp
+ M f1tenth_mpc/test/test_riccati_solver.c
+ M sdu_apex_autodrive/launch/controller.launch.py
+ M sdu_apex_autodrive/launch/localization.launch.py
+ M sdu_apex_autodrive/launch/mapping.launch.py
+ M sdu_apex_autodrive/launch/model_identification.launch.py
+ M sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py
+ M sdu_apex_autodrive/sdu_apex_autodrive/model_id_timing_recorder.py
+ M sdu_apex_autodrive/test/test_bridge_40hz.py
+?? MPC_REWRITE_BASELINE_DIFF.md
+?? f1tenth_mpc/test/replay_metrics.hpp
+?? f1tenth_mpc/test/test_replay_metrics.cpp
+
+The pre-existing changes above are retained. In particular, no launch, bridge,
+localization, recorder, or Unity/simulator source was edited for this MPC work.

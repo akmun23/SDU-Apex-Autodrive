@@ -16,12 +16,31 @@ typedef struct
     int valid;
 } MpcStageLinearization_t;
 
-/* Branch-aware numerical Jacobian of the authoritative discrete stage map. */
+/* Production branch-aware analytic Jacobian fused with the authoritative
+ * discrete stage map. */
 int mpc_model_linearize(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
     float dt,
     float path_curvature,
+    MpcStageLinearization_t *linearization);
+
+/* Finite-difference oracle retained for tests and offline parity checks. */
+int mpc_model_linearize_fd_oracle(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    MpcStageLinearization_t *linearization);
+
+/* Shared-model implementation that returns the nonlinear stage and its
+ * branch-aware sensitivities from the same intermediate calculations. */
+int mpc_vehicle_model_step_with_jacobian(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    MpcStageResult_t *stage,
     MpcStageLinearization_t *linearization);
 
 #endif

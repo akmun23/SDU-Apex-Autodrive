@@ -158,7 +158,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
         DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
         DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
         DeclareLaunchArgument("start_bridge", default_value="false"),

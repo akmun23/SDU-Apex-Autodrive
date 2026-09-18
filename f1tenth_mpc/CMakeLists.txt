@@ -43,11 +43,18 @@ target_include_directories(mpc_state_sync PUBLIC
   $<INSTALL_INTERFACE:include>)
 set_target_properties(mpc_state_sync PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+add_library(mpc_control_time STATIC src/mpc_control_time_predictor.cpp)
+target_include_directories(mpc_control_time PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(mpc_control_time PUBLIC mpc_core mpc_state_sync)
+set_target_properties(mpc_control_time PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # The only ROS layer in this package.  It converts the BachelorProject core's
 # target-speed command into the existing Ackermann command contract; it does
 # not add a second controller or consume simulator-only state.
 add_library(mpc_controller_node SHARED src/mpc_controller_node.cpp)
-target_link_libraries(mpc_controller_node mpc_core mpc_state_sync)
+target_link_libraries(mpc_controller_node mpc_core mpc_state_sync mpc_control_time)
 ament_target_dependencies(mpc_controller_node
   rclcpp
   rclcpp_components
@@ -62,6 +69,10 @@ rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcController
 
 include(CTest)
 if(BUILD_TESTING)
+  target_compile_definitions(mpc_core PRIVATE
+    MPC_ENABLE_FD_ORACLE
+    MPC_ENABLE_RICCATI_PROFILE)
+
   add_executable(vehicle_model_test test/test_vehicle_model.c)
   target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
   add_test(NAME vehicle_model_test COMMAND vehicle_model_test)
@@ -94,6 +105,15 @@ if(BUILD_TESTING)
     MPC_SYNC_TEST_EVENTS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/artifacts/simulator_trace/mpc_target_response_candidate_4mps_20260918/events.csv")
   add_test(NAME mpc_state_synchronizer_test COMMAND mpc_state_synchronizer_test)
 
+  add_executable(mpc_control_time_predictor_test
+    test/test_mpc_control_time_predictor.cpp)
+  target_link_libraries(mpc_control_time_predictor_test PRIVATE mpc_control_time)
+  add_test(NAME mpc_control_time_predictor_test
+    COMMAND mpc_control_time_predictor_test)
+
+  add_executable(mpc_replay_metrics_test test/test_replay_metrics.cpp)
+  add_test(NAME mpc_replay_metrics_test COMMAND mpc_replay_metrics_test)
+
   add_executable(mpc_core_benchmark test/benchmark_mpc_core.c)
   target_link_libraries(mpc_core_benchmark PRIVATE mpc_core m)
 
@@ -107,9 +127,21 @@ if(BUILD_TESTING)
     mpc_core mpc_state_sync m)
   target_compile_definitions(mpc_rti_offline_replay PRIVATE
     MPC_RTI_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+
+  add_executable(mpc_prediction_accuracy_replay
+    test/replay_mpc_prediction_accuracy.cpp)
+  target_link_libraries(mpc_prediction_accuracy_replay PRIVATE mpc_control_time)
+  target_compile_definitions(mpc_prediction_accuracy_replay PRIVATE
+    MPC_PREDICTION_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+
+  add_executable(mpc_applied_command_replay
+    test/replay_mpc_applied_command.cpp)
+  target_link_libraries(mpc_applied_command_replay PRIVATE mpc_control_time)
+  target_compile_definitions(mpc_applied_command_replay PRIVATE
+    MPC_APPLIED_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
 endif()
 
-install(TARGETS mpc_core mpc_state_sync mpc_controller_node
+install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

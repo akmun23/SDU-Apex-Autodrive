@@ -1,0 +1,21 @@
+repository_head: 685ccca0f549468669ac36aa68fcfc24e503d458
+worktree: dirty; phase artifacts are part of this worktree
+metric_definition:
+  percentile: nearest_rank
+  p0: sorted_minimum
+  p1: sorted_maximum
+  clearance_minimum: direct_minimum
+  clearance_maximum: direct_maximum
+replay:
+  horizon_steps: 30
+  dt_s: 0.025
+  rho: 7.0
+  rho_u: 7.0
+  tolerance: 0.01
+  max_iterations: 100
+  trajectory: f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+development_trace: sdu_apex_autodrive/artifacts/simulator_trace/pp_amcl_recovery_24ms_20260917/events.csv
+holdout_trace: sdu_apex_autodrive/artifacts/simulator_trace/pp_timing_repeat_20260917/events.csv
+compiler: GCC 11.4.0, ROS 2 Humble
+compiler_flags_c: -O3 -DNDEBUG -fPIC -Wall -Wextra -Wpedantic -O3 -std=gnu99
+cpu: AMD Ryzen 9 5900HS with Radeon Graphics

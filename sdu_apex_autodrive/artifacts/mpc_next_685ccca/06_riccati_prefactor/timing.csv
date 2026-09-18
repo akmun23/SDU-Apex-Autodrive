@@ -1,0 +1,10 @@
+variant,cycles,measure,p50_ms,p95_ms,p99_ms,max_ms
+reference,10000,whole_rti_solve,0.531,0.541,0.557,1.088
+prefactorized,10000,whole_rti_solve,0.270,0.278,0.402,0.513
+reference,10000,riccati_core_including_projection,0.4045,0.4125,0.4260,
+prefactorized,10000,riccati_core_including_projection,0.1452,0.1516,0.2285,
+reference,10000,refactor_passes,0.3817,0.3894,0.4027,
+prefactorized,10000,quadratic_factorization,0.0157,0.0170,0.0274,
+prefactorized,10000,factored_rhs_passes,0.1073,0.1124,0.1731,
+reference,10000,projection_residual,0.0227,0.0232,0.0267,
+prefactorized,10000,projection_residual,0.0222,0.0229,0.0337,

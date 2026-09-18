@@ -94,7 +94,6 @@ def _setup(context):
     )
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        SetEnvironmentVariable("AUTODRIVE_REQUIRE_SOURCE_TIMING", "1"),
         SetEnvironmentVariable("AUTODRIVE_ALLOW_MISSING_LIDAR", "1"),
         bridge_node,
         Node(

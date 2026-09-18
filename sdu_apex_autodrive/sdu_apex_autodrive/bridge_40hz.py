@@ -1,27 +1,14 @@
-"""Run the official AutoDRIVE bridge with bounded 40 Hz request pacing.
+"""Run the official AutoDRIVE bridge with competition-compatible pacing.
 
-The simulator returns one telemetry packet after each ``Bridge`` request. The
-official bridge requests the next packet from inside the previous packet's
-callback, so simulator image capture, image decoding, and ROS publication can
-create a request backlog. This wrapper keeps the official decoder and topic
-contract, but sends requests from an independent 40 Hz clock with a bounded
-FIFO sized to the response deadline. Socket.IO preserves response order, and
-each entry retains its request sequence, making request/response association
-explicit. A missing response is a transport fault: the bridge raises a fault
-and stops the stream instead of repeating, interpolating, or misassociating
-data.
+The competition image exposes no Unity source clock or response sequence.
+Accordingly, this adapter uses the unrequested connect-time packet only as a
+handshake, then keeps a small bounded window of Bridge requests and associates
+responses by FIFO order. ROS headers use local receive time; host monotonic time
+measures transport intervals and response deadlines. No sensor sample is
+fabricated, interpolated, or repeated.
 
-Packet callbacks are serialized before source-sequence validation. The
-Socket.IO server may dispatch callbacks concurrently; without this gate a
-slow LiDAR decode/publication callback can let the next callback update shared
-sequence state first and create a false packet-gap fault.
-
-No ROS sensor sample is fabricated, interpolated, or repeated. The bridge also
-publishes a diagnostic packet-arrival event containing monotonic bridge-side
-timestamps. That diagnostic stream is not a sensor input and is used only by
-the timing gate. Camera decoding and ROS publication are disabled by default;
-the API accepts both the patched source packet without a camera field and the
-legacy packet that still contains one.
+Packet callbacks are serialized so response association and message stamping
+remain consistent while the official decoder publishes each packet.
 """
 
 from __future__ import annotations
@@ -51,41 +38,15 @@ PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 
-# Bridge requests target 40 Hz (25 ms), but Unity stamps each response with
-# the source state time at which it was assembled. That source interval can
-# differ from both 25 ms and host arrival spacing. Preserve its measured value
-# rather than assuming or fabricating a nominal interval. The odometry
-# observer can integrate source gaps through 250 ms; intervals above its
-# normal 35 ms threshold are separately marked degraded. Render-frame metadata
-# is diagnostic only because batchmode may execute multiple physics steps per
-# rendered frame. Host arrival has no positive minimum (socket bursts are
-# allowed), while the independent 150 ms response deadline still detects a
-# stalled transport. No sample is held, interpolated, or fabricated.
-# Unity's current fixed timestep is 1 ms and source time is Time.fixedTimeAsDouble.
-# Accept any interval representing at least one physics step; 40 Hz is the
-# request target, not a fabricated source period. Monotonic time, physics-step
-# identity, telemetry sequence, and transport deadlines remain independent
-# integrity checks. The observer integrates variable source intervals through
-# MAX_SOURCE_INTERVAL_S and marks intervals above 35 ms degraded.
-MIN_SOURCE_INTERVAL_S = 0.001
-# Unity serializes source time as decimal seconds. Allow only a 1 us comparison
-# tolerance at the fixed-step lower bound and observer integration upper bound.
-SOURCE_INTERVAL_COMPARISON_EPSILON_S = 1.0e-6
-# Keep an explicit lower bound for the startup check and diagnostics, but set
-# it to zero because host arrival may bunch valid source packets. Source
-# cadence remains guarded independently by MIN_SOURCE_INTERVAL_S.
-MIN_BRIDGE_ARRIVAL_INTERVAL_S = 0.0
-# Keep host transport and simulator source-time limits independent. The 150 ms
-# transport window tolerates short arrival stalls; source-time gaps remain
-# bounded by the observer's 250 ms integration limit and are never rewritten.
-MAX_SOURCE_INTERVAL_S = 0.250
+# Requests are paced on a 25 ms host-clock grid. Actual response/arrival times
+# are retained; a delayed packet is never relabeled as a nominal 25 ms sample.
 MAX_BRIDGE_ARRIVAL_INTERVAL_S = 0.150
 MAX_RESPONSE_WAIT_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
 MAX_REQUEST_SCHEDULE_GAP_S = MAX_BRIDGE_ARRIVAL_INTERVAL_S
 MIN_REQUEST_SPACING_S = 0.024
-# Keep enough bounded requests in flight to cover the response deadline even
-# at the minimum permitted request spacing. Late ordered responses are accepted
-# only while their source time and sequence metadata remain valid.
+# The stock protocol has no response ID. Socket.IO preserves event order, so
+# responses can be associated by FIFO while allowing enough requests in flight
+# to cover the 150 ms response deadline at the fastest permitted send spacing.
 MAX_OUTSTANDING_REQUESTS = math.ceil(
     MAX_RESPONSE_WAIT_S / MIN_REQUEST_SPACING_S)
 
@@ -97,113 +58,9 @@ def _next_request_deadline(next_deadline: float, emitted_at: float,
     return max(next_deadline, emitted_at + minimum_spacing)
 
 
-# Unity may need several seconds to finish loading the scene and accept the
-# first Bridge request.  This is a startup transport allowance only.  The
-# first few source packets can also straddle Unity's connection/bootstrap
-# work and have a non-representative interval.  Those packets are discarded
-# before ROS publication; a short consecutive monotonic-source handshake is
-# required before publication. Variable source intervals up to the observer's
-# integration bound are allowed, while transport response timing is checked
-# independently. A stream that never establishes this still fails within the
-# same grace period.
+# Allow the competition image to finish startup and deliver its first response.
+# This is not evidence of a 40 Hz stream; only measured packets count.
 STARTUP_RESPONSE_GRACE_S = 15.0
-SOURCE_STARTUP_STABLE_INTERVALS = 3
-
-
-def _source_interval_is_valid(source_dt: float) -> bool:
-    """Return whether a source interval is within the observer's time bounds.
-
-    The request scheduler targets 40 Hz, but source intervals are not forced
-    to equal 25 ms. The tolerance only compensates for decimal serialization
-    at the 1 ms and 250 ms boundaries; ordering and sequence are validated
-    separately.
-    """
-    return (
-        MIN_SOURCE_INTERVAL_S - SOURCE_INTERVAL_COMPARISON_EPSILON_S <= source_dt <=
-        MAX_SOURCE_INTERVAL_S + SOURCE_INTERVAL_COMPARISON_EPSILON_S)
-
-
-def _format_source_cadence_fault_detail(
-        *,
-        source_dt: float,
-        arrival_dt: float | None,
-        previous_source_time: float | None,
-        source_time: float,
-        previous_source_step: int | None,
-        source_step: int,
-        previous_source_frame: int | None,
-        source_frame: int,
-        previous_telemetry_sequence: int | None,
-        telemetry_sequence: int,
-        request_sequence: int | None,
-        request_response_age_s: float | None) -> str:
-    """Describe both source cadence and host-side timing at a source fault."""
-
-    def fmt_time(value: float | None) -> str:
-        return "unavailable" if value is None else f"{value:.9f}"
-
-    def delta(current: int, previous: int | None) -> str:
-        return "unavailable" if previous is None else str(current - previous)
-
-    def fmt_duration(value: float | None) -> str:
-        return "unavailable" if value is None else f"{value:.6f}s"
-
-    request_sequence_text = (
-        "unavailable" if request_sequence is None else str(request_sequence))
-    previous_step_text = (
-        "unavailable" if previous_source_step is None else
-        str(previous_source_step))
-    previous_telemetry_text = (
-        "unavailable" if previous_telemetry_sequence is None else
-        str(previous_telemetry_sequence))
-    return (
-        f"simulator source sample interval {source_dt:.6f}s is outside the "
-        f"supported range [{MIN_SOURCE_INTERVAL_S:.3f}, "
-        f"{MAX_SOURCE_INTERVAL_S:.3f}]s; "
-        f"bridge_arrival_dt={fmt_duration(arrival_dt)} "
-        f"request_sequence={request_sequence_text} "
-        f"request_response_age={fmt_duration(request_response_age_s)} "
-        f"previous_source_time={fmt_time(previous_source_time)} "
-        f"current_source_time={source_time:.9f} "
-        f"physics_step_delta={delta(source_step, previous_source_step)} "
-        f"previous_physics_step={previous_step_text} "
-        f"current_physics_step={source_step} "
-        f"render_frame_delta={delta(source_frame, previous_source_frame)} "
-        f"telemetry_sequence_delta={delta(telemetry_sequence, previous_telemetry_sequence)} "
-        f"previous_telemetry_sequence={previous_telemetry_text} "
-        f"current_telemetry_sequence={telemetry_sequence}"
-    )
-
-
-def _format_bridge_arrival_fault_detail(
-        *, arrival_dt: float, source_dt: float | None,
-        previous_source_time: float | None, source_time: float,
-        previous_source_step: int | None, source_step: int,
-        previous_source_frame: int | None, source_frame: int,
-        previous_telemetry_sequence: int | None, telemetry_sequence: int,
-        request_sequence: int | None,
-        request_response_age_s: float | None) -> str:
-    """Describe host delay alongside the associated Unity source evidence."""
-
-    def fmt(value: float | None, precision: int = 6) -> str:
-        return "unavailable" if value is None else f"{value:.{precision}f}"
-
-    def delta(current: int, previous: int | None) -> str:
-        return "unavailable" if previous is None else str(current - previous)
-
-    request_text = (
-        "unavailable" if request_sequence is None else str(request_sequence))
-    return (
-        f"bridge transport interval {arrival_dt:.6f}s is outside the "
-        f"transport window [{MIN_BRIDGE_ARRIVAL_INTERVAL_S:.3f}, "
-        f"{MAX_BRIDGE_ARRIVAL_INTERVAL_S:.3f}]s; "
-        f"source_interval={fmt(source_dt)}s "
-        f"request_sequence={request_text} "
-        f"request_response_age={fmt(request_response_age_s)}s "
-        f"source_time={fmt(previous_source_time, 9)}->{source_time:.9f} "
-        f"physics_step_delta={delta(source_step, previous_source_step)} "
-        f"render_frame_delta={delta(source_frame, previous_source_frame)} "
-        f"telemetry_sequence={previous_telemetry_sequence}->{telemetry_sequence}")
 
 
 def _env_enabled(name: str, default: bool) -> bool:
@@ -212,11 +69,6 @@ def _env_enabled(name: str, default: bool) -> bool:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
-
-# There is deliberately no runtime bypass. Every bridge process uses the
-# source identity/cadence contract; launch files also set the environment
-# explicitly so an operator can see the intended mode in the process setup.
-REQUIRE_SOURCE_TIMING = True
 
 _command_lock = Semaphore()
 _latest_command: dict[str, str] = {
@@ -249,20 +101,15 @@ _pending_requests: deque[tuple[Any, int, Semaphore, int, int, dict[str, str]]] =
 _pending_request_started_ns: int | None = None
 _last_request_emit_ns: int | None = None
 _first_request_sent = False
-_first_valid_source_packet = False
-_valid_source_packet_count = 0
+_first_valid_packet = False
+_valid_packet_count = 0
+_bootstrap_packet_seen = Event()
+_bootstrap_wait_started_ns: int | None = None
 _last_packet_arrival_ns: int | None = None
-_last_source_time_s: float | None = None
-_last_source_physics_step: int | None = None
-_last_source_frame: int | None = None
-_last_source_telemetry_sequence: int | None = None
-_source_startup_stable_intervals = 0
-_source_startup_started_ns: int | None = None
-_source_time_origin_s: float | None = None
-_source_ros_origin_ns: int | None = None
 _active_request_stamp: Any = None
-_active_source_stamp: Any = None
+_active_packet_stamp: Any = None
 _active_request_monotonic_ns: int | None = None
+_active_packet_arrival_ns: int | None = None
 _active_request_sequence: int | None = None
 _active_command: dict[str, str] = {}
 _active_applied_command_sequence: int | None = None
@@ -367,14 +214,10 @@ def _reset_request_pipeline() -> None:
     """
     global _request_slots, _connection_generation
     global _pending_request_started_ns, _last_request_emit_ns
-    global _first_request_sent, _first_valid_source_packet
-    global _valid_source_packet_count
-    global _last_packet_arrival_ns
-    global _last_source_time_s, _last_source_physics_step
-    global _last_source_frame, _last_source_telemetry_sequence
-    global _source_startup_stable_intervals, _source_startup_started_ns
-    global _source_time_origin_s, _source_ros_origin_ns
-    global _active_request_stamp, _active_source_stamp, _active_request_monotonic_ns
+    global _first_request_sent, _first_valid_packet, _valid_packet_count
+    global _bootstrap_wait_started_ns, _last_packet_arrival_ns
+    global _active_request_stamp, _active_packet_stamp
+    global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
     global _active_applied_command_sequence
     global _active_commanded_throttle_norm, _active_commanded_steering_norm
@@ -390,20 +233,14 @@ def _reset_request_pipeline() -> None:
         _pending_request_started_ns = None
         _last_request_emit_ns = None
         _first_request_sent = False
-        _first_valid_source_packet = False
-        _valid_source_packet_count = 0
+        _first_valid_packet = False
+        _valid_packet_count = 0
+        _bootstrap_wait_started_ns = None
         _last_packet_arrival_ns = None
-        _last_source_time_s = None
-        _last_source_physics_step = None
-        _last_source_frame = None
-        _last_source_telemetry_sequence = None
-        _source_startup_stable_intervals = 0
-        _source_startup_started_ns = None
-        _source_time_origin_s = None
-        _source_ros_origin_ns = None
         _active_request_stamp = None
-        _active_source_stamp = None
+        _active_packet_stamp = None
         _active_request_monotonic_ns = None
+        _active_packet_arrival_ns = None
         _active_request_sequence = None
         _active_command = {}
         _active_applied_command_sequence = None
@@ -417,13 +254,15 @@ def _reset_request_pipeline() -> None:
         _active_telemetry_sequence = None
         _active_simulator_packet = {}
         _active_request_slot_pool = None
+    _bootstrap_packet_seen.clear()
     with _packet_stamp_lock:
         _packet_stamp = None
 
 
 def _finish_packet() -> None:
     """Clear packet state and return the response's bounded pipeline slot."""
-    global _packet_stamp, _active_request_stamp, _active_request_monotonic_ns
+    global _packet_stamp, _active_request_stamp, _active_packet_stamp
+    global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
     global _active_applied_command_sequence
     global _active_commanded_throttle_norm, _active_commanded_steering_norm
@@ -437,7 +276,9 @@ def _finish_packet() -> None:
     with _pending_request_lock:
         slot_pool = _active_request_slot_pool
         _active_request_stamp = None
+        _active_packet_stamp = None
         _active_request_monotonic_ns = None
+        _active_packet_arrival_ns = None
         _active_request_sequence = None
         _active_command = {}
         _active_applied_command_sequence = None
@@ -555,8 +396,7 @@ def _on_reset_command(message: Bool) -> None:
     still releases it immediately.
     """
     global _reset_level, _reset_deadline_monotonic
-    global _first_valid_source_packet, _source_startup_stable_intervals
-    global _source_startup_started_ns
+    global _first_valid_packet, _last_packet_arrival_ns, _valid_packet_count
     next_level = bool(message.data)
     with _command_lock:
         changed = next_level != _reset_level
@@ -565,15 +405,13 @@ def _on_reset_command(message: Bool) -> None:
             time.monotonic() + _RESET_HOLD_SEC if _reset_level else None)
         _latest_command["V1 Reset"] = "True" if _reset_level else "False"
     if changed and next_level:
-        # A diagnostics reset is an epoch boundary. Unity can spend one
-        # source interval processing the teleport; do not turn that expected
-        # transient into a fatal racing-stream fault. Source metadata still
-        # advances while packets are discarded, and normal publication is
-        # re-enabled only after the post-reset 40 Hz handshake below.
+        # Do not publish packets while reset is asserted. The first packet
+        # after release uses its actual bridge receive time; no simulator
+        # source-time epoch is needed.
         with _pending_request_lock:
-            _first_valid_source_packet = False
-            _source_startup_stable_intervals = 0
-            _source_startup_started_ns = None
+            _first_valid_packet = False
+            _last_packet_arrival_ns = None
+            _valid_packet_count = 0
     if changed:
         print(
             f"[autodrive_bridge_40hz] reset ROS callback: {next_level}",
@@ -581,74 +419,59 @@ def _on_reset_command(message: Bool) -> None:
         )
 
 
-def _capture_simulation_metadata(data: Any) -> bool:
-    """Capture optional Unity physics metadata before official decoding.
+def _capture_competition_packet(data: Any) -> bool:
+    """Pair a stock-image telemetry packet with the oldest pending request.
 
-    The patched simulator sends these values in the same packet as the
-    sensors. They are captured before official decoding; the validated source
-    time is mapped to a ROS epoch immediately before publication.
+    The first packet after Socket.IO connect is the simulator's unsolicited
+    bootstrap sample. It only opens the request gate and is never published.
+    Subsequent packets require one pending Bridge request and are associated
+    strictly by FIFO order. No Unity clock, frame counter, or echoed request
+    identifier is read.
     """
-    global _active_request_stamp, _active_source_stamp, _active_request_monotonic_ns
+    global _active_request_stamp, _active_packet_stamp
+    global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
-    global _active_applied_command_sequence
-    global _active_commanded_throttle_norm, _active_commanded_steering_norm
-    global _active_applied_throttle_norm, _active_applied_steering_norm
-    global _active_simulation_time_s, _active_simulation_frame
-    global _active_simulation_physics_step, _active_telemetry_sequence
-    global _active_simulator_packet
-    global _active_request_slot_pool
+    global _active_simulator_packet, _active_request_slot_pool
     global _pending_request_started_ns
-    global _last_source_time_s, _last_source_physics_step
-    global _last_source_frame, _last_source_telemetry_sequence
-    request_stamp = None
-    request_ns = None
-    slot_pool = None
-    request_sequence = None
-    command: dict[str, str] = {}
+
     if not isinstance(data, dict):
+        _trigger_timing_fault("non-dictionary simulator packet")
         return False
-    time_value = data.get("Simulation Time")
-    frame_value = data.get("Simulation Frame")
-    physics_step_value = data.get(
-        "V1 Physics Step", data.get("Physics Step"))
-    telemetry_sequence_value = data.get("Telemetry Sequence")
-    response_request_sequence_value = data.get("V1 Bridge Request Sequence")
-    applied_sequence_value = data.get("V1 Applied Command Sequence")
-    commanded_throttle_value = data.get("V1 Commanded Throttle")
-    commanded_steering_value = data.get("V1 Commanded Steering")
-    applied_throttle_value = data.get("V1 Applied Throttle")
-    applied_steering_value = data.get("V1 Applied Steering")
+
+    with _pending_request_lock:
+        has_pending_request = bool(_pending_requests)
+        bootstrap_already_seen = _bootstrap_packet_seen.is_set()
+        connected = _client_connected.is_set()
+        if not has_pending_request and connected and not bootstrap_already_seen:
+            bootstrap_packet = True
+        else:
+            bootstrap_packet = False
+
+    if bootstrap_packet:
+        _bootstrap_packet_seen.set()
+        print(
+            "[autodrive_bridge_40hz] competition bootstrap received; "
+            "starting request stream",
+            flush=True,
+        )
+        return False
+
+    if not has_pending_request:
+        _trigger_timing_fault(
+            "simulator packet arrived without a pending Bridge request")
+        return False
+
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        _trigger_timing_fault("cannot timestamp packet: official ROS node unavailable")
+        return False
     try:
-        simulation_time_s = None if time_value in (None, "") else float(time_value)
-    except (TypeError, ValueError):
-        simulation_time_s = None
-    try:
-        simulation_frame = None if frame_value in (None, "") else int(frame_value)
-    except (TypeError, ValueError):
-        simulation_frame = None
-    try:
-        simulation_physics_step = (
-            None if physics_step_value in (None, "") else int(physics_step_value))
-    except (TypeError, ValueError):
-        simulation_physics_step = None
-    try:
-        telemetry_sequence = (
-            None if telemetry_sequence_value in (None, "")
-            else int(telemetry_sequence_value))
-    except (TypeError, ValueError):
-        telemetry_sequence = None
-    try:
-        response_request_sequence = (
-            None if response_request_sequence_value in (None, "")
-            else int(response_request_sequence_value))
-    except (TypeError, ValueError):
-        response_request_sequence = None
-    try:
-        applied_command_sequence = (
-            None if applied_sequence_value in (None, "")
-            else int(applied_sequence_value))
-    except (TypeError, ValueError):
-        applied_command_sequence = None
+        receive_stamp = node.get_clock().now().to_msg()
+    except Exception as exc:
+        _trigger_timing_fault(f"cannot timestamp received packet: {exc}")
+        return False
+    arrival_ns = time.monotonic_ns()
+
     def parse_float(value: Any) -> float | None:
         try:
             return None if value in (None, "") else float(value)
@@ -681,55 +504,12 @@ def _capture_simulation_metadata(data: Any) -> bool:
     simulator_packet.update({
         "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
         "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
-        # This simulator-only label is retained in offline diagnostics; it is
-        # not published as a runtime input to odometry, AMCL, or control.
-        "simulator_collision_count": _parse_optional_int(
-            data.get("V1 Collisions")),
+        "simulator_collision_count": _parse_optional_int(data.get("V1 Collisions")),
     })
 
-    # Unity's GUI path can emit an unsolicited telemetry packet from its
-    # connect callback. It is not a sensor sample associated with a Bridge
-    # request, but its source metadata is still useful as the continuity
-    # predecessor for the next requested packet. Do not consume a pending
-    # request slot for it and do not publish it to ROS.
-    if response_request_sequence is None:
-        if (simulation_time_s is not None and simulation_physics_step is not None and
-                simulation_frame is not None and telemetry_sequence is not None):
-            with _pending_request_lock:
-                previous_sequence = _last_source_telemetry_sequence
-                if (previous_sequence is None or
-                        telemetry_sequence > previous_sequence):
-                    _last_source_time_s = simulation_time_s
-                    _last_source_physics_step = simulation_physics_step
-                    _last_source_frame = simulation_frame
-                    _last_source_telemetry_sequence = telemetry_sequence
-        return False
-
-    # Requested responses must match the oldest outstanding Bridge request.
-    # This makes response identity explicit and prevents a reconnect/bootstrap
-    # packet from being associated with a real command merely because a FIFO
-    # slot happens to be waiting.
-    with _pending_request_lock:
-        expected_request_sequence = (
-            _pending_requests[0][4] if _pending_requests else None)
-    if expected_request_sequence is None:
-        _trigger_timing_fault(
-            "simulator response has no outstanding Bridge request: "
-            f"request_sequence={response_request_sequence}")
-        return False
-    if response_request_sequence != expected_request_sequence:
-        _trigger_timing_fault(
-            "simulator response Bridge request sequence out of order: "
-            f"expected={expected_request_sequence} "
-            f"current={response_request_sequence}")
-        return False
     association_lost = False
     with _pending_request_lock:
-        # The pending FIFO cannot be changed by another packet callback while
-        # the packet handler lock is held, but re-check the identity before
-        # consuming it so this remains safe if the transport is changed later.
-        if (not _pending_requests or
-                _pending_requests[0][4] != response_request_sequence):
+        if not _pending_requests:
             association_lost = True
         else:
             (request_stamp, request_ns, slot_pool, _, request_sequence,
@@ -737,232 +517,65 @@ def _capture_simulation_metadata(data: Any) -> bool:
             _pending_request_started_ns = (
                 _pending_requests[0][1] if _pending_requests else None)
             _active_request_slot_pool = slot_pool
+            _active_request_stamp = request_stamp
+            _active_packet_stamp = receive_stamp
+            _active_request_monotonic_ns = request_ns
+            _active_packet_arrival_ns = arrival_ns
+            _active_request_sequence = request_sequence
+            _active_command = command
+            _active_simulator_packet = simulator_packet
+            # Enhanced Unity-only fields are not runtime inputs and may be
+            # absent from the competition image. Keep diagnostic slots empty.
+            _active_applied_command_sequence = None
+            _active_commanded_throttle_norm = None
+            _active_commanded_steering_norm = None
+            _active_applied_throttle_norm = None
+            _active_applied_steering_norm = None
+            _active_simulation_time_s = None
+            _active_simulation_frame = None
+            _active_simulation_physics_step = None
+            _active_telemetry_sequence = None
     if association_lost:
         _trigger_timing_fault(
-            "simulator response Bridge request disappeared before "
-            f"association: request_sequence={response_request_sequence}")
+            "pending Bridge request disappeared during packet association")
         return False
+    return True
+
+
+def _validate_received_packet() -> bool:
+    """Validate local transport cadence without requiring simulator metadata."""
+    global _first_valid_packet, _valid_packet_count, _last_packet_arrival_ns
     with _pending_request_lock:
-        _active_request_stamp = request_stamp
-        _active_source_stamp = None
-        _active_request_monotonic_ns = request_ns
-        _active_request_sequence = request_sequence
-        _active_command = command
-        _active_applied_command_sequence = applied_command_sequence
-        _active_commanded_throttle_norm = parse_float(commanded_throttle_value)
-        _active_commanded_steering_norm = parse_float(commanded_steering_value)
-        _active_applied_throttle_norm = parse_float(applied_throttle_value)
-        _active_applied_steering_norm = parse_float(applied_steering_value)
-        _active_simulation_time_s = simulation_time_s
-        _active_simulation_frame = simulation_frame
-        _active_simulation_physics_step = simulation_physics_step
-        _active_telemetry_sequence = telemetry_sequence
-        _active_simulator_packet = simulator_packet
-    return request_sequence is not None
-
-
-def _set_source_ros_stamp() -> None:
-    """Map relative Unity source time onto one ROS time epoch per connection.
-
-    Unity's ``Simulation Time`` starts at zero for a player session, so it
-    cannot be copied directly into a ROS header consumed by map/TF nodes. The
-    first validated source packet anchors the relative source epoch to its
-    request-boundary ROS stamp; later headers advance only by simulator
-    source-time deltas. Host arrival remains a separate watchdog clock.
-    """
-    global _source_time_origin_s, _source_ros_origin_ns, _active_source_stamp
-    with _pending_request_lock:
-        source_time_s = _active_simulation_time_s
-        request_stamp = _active_request_stamp
-        if source_time_s is None or request_stamp is None:
-            _active_source_stamp = None
-            return
-        request_ns = (
-            int(request_stamp.sec) * 1_000_000_000 +
-            int(request_stamp.nanosec))
-        if _source_time_origin_s is None or _source_ros_origin_ns is None:
-            _source_time_origin_s = source_time_s
-            _source_ros_origin_ns = request_ns
-        source_ns = _source_ros_origin_ns + int(round(
-            (source_time_s - _source_time_origin_s) * 1.0e9))
-        stamp = copy(request_stamp)
-        stamp.sec = int(source_ns // 1_000_000_000)
-        stamp.nanosec = int(source_ns % 1_000_000_000)
-        _active_source_stamp = stamp
-
-
-def _parse_required_float(data: dict[str, Any], key: str) -> float | None:
-    try:
-        value = float(data[key])
-    except (KeyError, TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _parse_required_int(data: dict[str, Any], key: str) -> int | None:
-    try:
-        return int(data[key])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _validate_source_packet(data: Any) -> bool:
-    """Validate source identity/timing before publishing any ROS sensor data."""
-    global _first_valid_source_packet, _valid_source_packet_count
-    global _last_packet_arrival_ns, _last_source_time_s
-    global _last_source_physics_step, _last_source_frame
-    global _last_source_telemetry_sequence
-    global _source_startup_stable_intervals, _source_startup_started_ns
-    global _timing_debug_count
-    if not REQUIRE_SOURCE_TIMING:
-        return True
-    if not isinstance(data, dict):
-        _trigger_timing_fault("non-dictionary simulator packet")
-        return False
-    source_time = _parse_required_float(data, "Simulation Time")
-    source_step = _parse_required_int(
-        data, "V1 Physics Step" if "V1 Physics Step" in data else "Physics Step")
-    source_frame = _parse_required_int(data, "Simulation Frame")
-    telemetry_sequence = _parse_required_int(data, "Telemetry Sequence")
-    if None in (source_time, source_step, source_frame, telemetry_sequence):
-        _trigger_timing_fault(
-            "simulator packet missing finite source time/frame/sequence metadata")
-        return False
-
-    now_ns = time.monotonic_ns()
-    with _pending_request_lock:
+        arrival_ns = _active_packet_arrival_ns
         previous_arrival_ns = _last_packet_arrival_ns
-        previous_source_time = _last_source_time_s
-        previous_source_step = _last_source_physics_step
-        previous_source_frame = _last_source_frame
-        previous_telemetry_sequence = _last_source_telemetry_sequence
-        _last_packet_arrival_ns = now_ns
-        _last_source_time_s = source_time
-        _last_source_physics_step = source_step
-        _last_source_frame = source_frame
-        _last_source_telemetry_sequence = telemetry_sequence
+        request_ns = _active_request_monotonic_ns
+        request_sequence = _active_request_sequence
+    if arrival_ns is None:
+        _trigger_timing_fault("received packet has no local arrival timestamp")
+        return False
 
-    # Reset/teleport packets are diagnostics-only and must never reach the
-    # official decoder as sensor data. Keep their source metadata for ordering,
-    # then require three stable post-reset intervals before publication.
     with _command_lock:
         reset_active = _reset_level
     if reset_active:
         return False
 
-    arrival_dt = None if previous_arrival_ns is None else (
-        (now_ns - previous_arrival_ns) / 1e9)
-    source_dt = None if previous_source_time is None else (
-        source_time - previous_source_time)
-    if not _first_valid_source_packet:
-        # Establish the contract on consecutive source packets, not on the
-        # first packet that happens to arrive while Unity is still connecting.
-        # No packet in this handshake reaches the official decoder or ROS.
-        if _source_startup_started_ns is None:
-            _source_startup_started_ns = now_ns
-        ordering_is_stable = (
-            (previous_source_time is None or source_time > previous_source_time) and
-            (previous_source_step is None or source_step > previous_source_step) and
-            (previous_telemetry_sequence is None or
-             telemetry_sequence > previous_telemetry_sequence))
-        interval_is_stable = (
-            arrival_dt is not None and source_dt is not None and
-            ordering_is_stable and
-            MIN_BRIDGE_ARRIVAL_INTERVAL_S <= arrival_dt <= MAX_BRIDGE_ARRIVAL_INTERVAL_S and
-            _source_interval_is_valid(source_dt))
-        if _env_enabled("AUTODRIVE_TIMING_DEBUG", False) and _timing_debug_count < 20:
-            _timing_debug_count += 1
-            print(
-                "[autodrive_bridge_40hz] startup timing candidate: "
-                f"source={source_time:.9f} source_dt={source_dt!r} "
-                f"arrival_dt={arrival_dt!r} step={source_step} "
-                f"frame={source_frame} telemetry={telemetry_sequence} "
-                f"ordering={ordering_is_stable} stable={interval_is_stable}",
-                flush=True,
-            )
-        if interval_is_stable:
-            _source_startup_stable_intervals += 1
-        else:
-            _source_startup_stable_intervals = 0
-        startup_age_s = (now_ns - _source_startup_started_ns) / 1e9
-        if _source_startup_stable_intervals < SOURCE_STARTUP_STABLE_INTERVALS:
-            if startup_age_s > STARTUP_RESPONSE_GRACE_S:
-                _trigger_timing_fault(
-                    "simulator source timing contract was not established "
-                    f"within {STARTUP_RESPONSE_GRACE_S:.3f}s")
-            return False
-        _first_valid_source_packet = True
-        _valid_source_packet_count = 1
-        print(
-            "[autodrive_bridge_40hz] monotonic source timing established "
-            f"after {SOURCE_STARTUP_STABLE_INTERVALS} stable intervals",
-            flush=True,
-        )
-        return True
-
-    if (previous_source_time is not None and source_time <= previous_source_time):
-        _trigger_timing_fault("simulator source time reversed or duplicated")
-        return False
-    if (previous_source_step is not None and source_step <= previous_source_step):
-        _trigger_timing_fault("simulator physics-step sequence reversed or duplicated")
-        return False
-    if (previous_telemetry_sequence is not None and
-            telemetry_sequence <= previous_telemetry_sequence):
-        _trigger_timing_fault("simulator telemetry sequence reversed or duplicated")
-        return False
-    if (previous_telemetry_sequence is not None and
-            telemetry_sequence != previous_telemetry_sequence + 1):
+    arrival_dt = (None if previous_arrival_ns is None else
+                  (arrival_ns - previous_arrival_ns) / 1.0e9)
+    if arrival_dt is not None and arrival_dt > MAX_BRIDGE_ARRIVAL_INTERVAL_S:
+        request_age_s = (None if request_ns is None else
+                         (arrival_ns - request_ns) / 1.0e9)
         _trigger_timing_fault(
-            "simulator telemetry sequence gap: "
-            f"previous={previous_telemetry_sequence} current={telemetry_sequence}")
+            "bridge packet arrival interval exceeded "
+            f"{MAX_BRIDGE_ARRIVAL_INTERVAL_S:.3f}s: "
+            f"arrival_dt={arrival_dt:.6f}s "
+            f"request_sequence={request_sequence} "
+            f"request_response_age={request_age_s}")
         return False
 
-    if arrival_dt is not None:
-        if not MIN_BRIDGE_ARRIVAL_INTERVAL_S <= arrival_dt <= MAX_BRIDGE_ARRIVAL_INTERVAL_S:
-            with _pending_request_lock:
-                request_ns = _active_request_monotonic_ns
-                request_sequence = _active_request_sequence
-            request_response_age_s = (
-                None if request_ns is None else (now_ns - request_ns) / 1.0e9)
-            _trigger_timing_fault(
-                _format_bridge_arrival_fault_detail(
-                    arrival_dt=arrival_dt,
-                    source_dt=source_dt,
-                    previous_source_time=previous_source_time,
-                    source_time=source_time,
-                    previous_source_step=previous_source_step,
-                    source_step=source_step,
-                    previous_source_frame=previous_source_frame,
-                    source_frame=source_frame,
-                    previous_telemetry_sequence=previous_telemetry_sequence,
-                    telemetry_sequence=telemetry_sequence,
-                    request_sequence=request_sequence,
-                    request_response_age_s=request_response_age_s))
-            return False
-    if source_dt is not None:
-        if not _source_interval_is_valid(source_dt):
-            with _pending_request_lock:
-                request_ns = _active_request_monotonic_ns
-                request_sequence = _active_request_sequence
-            request_response_age_s = (
-                None if request_ns is None else (now_ns - request_ns) / 1.0e9)
-            _trigger_timing_fault(
-                _format_source_cadence_fault_detail(
-                    source_dt=source_dt,
-                    arrival_dt=arrival_dt,
-                    previous_source_time=previous_source_time,
-                    source_time=source_time,
-                    previous_source_step=previous_source_step,
-                    source_step=source_step,
-                    previous_source_frame=previous_source_frame,
-                    source_frame=source_frame,
-                    previous_telemetry_sequence=previous_telemetry_sequence,
-                    telemetry_sequence=telemetry_sequence,
-                    request_sequence=request_sequence,
-                    request_response_age_s=request_response_age_s))
-            return False
-    _first_valid_source_packet = True
-    _valid_source_packet_count += 1
+    with _pending_request_lock:
+        _last_packet_arrival_ns = arrival_ns
+        _first_valid_packet = True
+        _valid_packet_count += 1
     return True
 
 
@@ -983,7 +596,7 @@ def _parse_optional_int(value: Any) -> int | None:
 def _record_packet_arrival() -> None:
     """Publish one diagnostic event at the start of each decoded packet."""
     global _packet_sequence
-    arrival_ns = time.monotonic_ns()
+    arrival_ns = _active_packet_arrival_ns or time.monotonic_ns()
     with _pending_request_lock:
         request_ns = _active_request_monotonic_ns
         request_sequence = _active_request_sequence
@@ -999,6 +612,7 @@ def _record_packet_arrival() -> None:
         telemetry_sequence = _active_telemetry_sequence
         simulator_packet = dict(_active_simulator_packet)
         connection_generation = _connection_generation
+        receive_stamp = _active_packet_stamp
     with _packet_timing_lock:
         _packet_sequence += 1
         sequence = _packet_sequence
@@ -1007,9 +621,12 @@ def _record_packet_arrival() -> None:
         return
     message = String()
     message.data = json.dumps({
-        "schema_version": 2,
+        "schema_version": 3,
         "packet_sequence": sequence,
         "bridge_arrival_monotonic_ns": arrival_ns,
+        "bridge_receive_ros_stamp_ns": (
+            None if receive_stamp is None else
+            int(receive_stamp.sec) * 1_000_000_000 + int(receive_stamp.nanosec)),
         "request_monotonic_ns": request_ns,
         "request_sequence": request_sequence,
         "connection_generation": connection_generation,
@@ -1021,11 +638,11 @@ def _record_packet_arrival() -> None:
         "commanded_steering_norm": commanded_steering_norm,
         "applied_throttle_norm": applied_throttle_norm,
         "applied_steering_norm": applied_steering_norm,
-        "simulation_time_s": simulation_time_s,
-        "simulation_frame": simulation_frame,
-        "simulation_render_frame": simulation_frame,
-        "simulation_physics_step": simulation_physics_step,
-        "telemetry_sequence": telemetry_sequence,
+        "simulation_time_s": None,
+        "simulation_frame": None,
+        "simulation_render_frame": None,
+        "simulation_physics_step": None,
+        "telemetry_sequence": None,
         **simulator_packet,
     }, separators=(",", ":"))
     try:
@@ -1035,13 +652,7 @@ def _record_packet_arrival() -> None:
 
 
 def _install_packet_timestamp_patch() -> None:
-    """Give every ROS message from one packet one source-epoch stamp.
-
-    The source-epoch stamp is anchored to the first request-boundary ROS stamp
-    for the connection and then advanced by simulator source time. The FIFO
-    request context remains the fallback for legacy/bootstrap packets and
-    keeps response association explicit when requests overlap.
-    """
+    """Stamp every ROS message from a packet with its local receive time."""
     global _packet_timestamp_patch_installed
     if _packet_timestamp_patch_installed:
         return
@@ -1055,8 +666,7 @@ def _install_packet_timestamp_patch() -> None:
             with _packet_stamp_lock:
                 if _packet_stamp is None:
                     with _pending_request_lock:
-                        pending = (_active_source_stamp if _active_source_stamp is not None
-                                   else _active_request_stamp)
+                        pending = _active_packet_stamp
                     _packet_stamp = _copy_stamp(
                         pending if pending is not None else message.header.stamp)
                 message.header.stamp = _copy_stamp(_packet_stamp)
@@ -1112,6 +722,7 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
     """Send one request per source period with a response deadline."""
     global _request_slots, _connection_generation, _last_request_emit_ns
     global _request_timing_debug_count
+    global _bootstrap_wait_started_ns
     period = 1.0 / rate_hz
     next_send = time.monotonic()
     while not _stop_sender.is_set():
@@ -1124,7 +735,7 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             response_age_s = (
                 time.monotonic_ns() - pending_started_ns) / 1e9
             response_deadline_s = (
-                MAX_RESPONSE_WAIT_S if _first_valid_source_packet
+                MAX_RESPONSE_WAIT_S if _first_valid_packet
                 else STARTUP_RESPONSE_GRACE_S)
             if response_age_s > response_deadline_s:
                 _trigger_timing_fault(
@@ -1135,7 +746,7 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             gevent.sleep(wait_time)
             continue
 
-        if (_valid_source_packet_count >= 2 and
+        if (_valid_packet_count >= 2 and
                 _last_request_emit_ns is not None and
                 now - _last_request_emit_ns > MAX_REQUEST_SCHEDULE_GAP_S):
             _trigger_timing_fault(
@@ -1149,6 +760,18 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             next_send += missed * period
 
         if not _client_connected.is_set():
+            gevent.sleep(period)
+            continue
+        if not _bootstrap_packet_seen.is_set():
+            if _bootstrap_wait_started_ns is None:
+                _bootstrap_wait_started_ns = time.monotonic_ns()
+            bootstrap_age_s = (
+                time.monotonic_ns() - _bootstrap_wait_started_ns) / 1.0e9
+            if bootstrap_age_s > STARTUP_RESPONSE_GRACE_S:
+                _trigger_timing_fault(
+                    "no competition bootstrap packet received within "
+                    f"{STARTUP_RESPONSE_GRACE_S:.3f}s")
+                return
             gevent.sleep(period)
             continue
         with _pending_request_lock:
@@ -1168,7 +791,6 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             command["V1 Reset"] = "True" if _reset_level else "False"
 
         request_sequence = _next_request_sequence()
-        command["V1 Bridge Request Sequence"] = str(request_sequence)
         if not _set_pending_request(
                 slot_pool, generation, request_sequence, command):
             slot_pool.release()
@@ -1223,7 +845,7 @@ def _install_packet_contract(publish_camera: bool) -> None:
     def _packet_handler_body(sid: Any, data: Any) -> Any:
         global _handler_timing_count, _handler_timing_total_ns
         handler_start_ns = time.monotonic_ns()
-        has_request = _capture_simulation_metadata(data)
+        has_request = _capture_competition_packet(data)
         try:
             if _shutdown_requested:
                 return None
@@ -1237,9 +859,8 @@ def _install_packet_contract(publish_camera: bool) -> None:
                 # with a command or published to ROS. The outstanding
                 # requested response remains deadline-protected by the sender.
                 return None
-            if not _validate_source_packet(data):
+            if not _validate_received_packet():
                 return None
-            _set_source_ros_stamp()
             if not publish_camera and isinstance(data, dict):
                 # The official bridge accesses this key unconditionally.
                 # Injecting an empty placeholder keeps its numeric decoder
@@ -1450,7 +1071,9 @@ def main() -> None:
         official_bridge.callback_reset_command = wrapped_reset_callback
 
     def mark_connected(sid: Any, environ: Any) -> Any:
+        global _bootstrap_wait_started_ns
         _reset_request_pipeline()
+        _bootstrap_wait_started_ns = time.monotonic_ns()
         _client_connected.set()
         if original_connect is not None:
             return original_connect(sid, environ)
@@ -1487,8 +1110,8 @@ def main() -> None:
         _run_command_sender, original_emit, rate_hz)
     print(
         f"[autodrive_bridge_40hz] strict request pacing enabled at {rate_hz:g} Hz "
-        f"({MAX_OUTSTANDING_REQUESTS} bounded outstanding requests; "
-        "missing/deadline data is a fatal fault)")
+        f"({MAX_OUTSTANDING_REQUESTS} bounded FIFO requests; "
+        "stock-image FIFO association; missing/deadline data is fatal)")
     try:
         official_bridge.main()
     finally:

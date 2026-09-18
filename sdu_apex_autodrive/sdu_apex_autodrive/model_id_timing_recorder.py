@@ -63,6 +63,7 @@ EVENT_FILE_NAMES = {
     ),
     "controller_trace.csv": (
         "/cmd/speed", "/pure_pursuit/diagnostics",
+        "/mpc_shadow/diagnostics",
     ),
     "runtime_state.csv": (
         "/odom", "/ekf_odom", "/amcl_pose", "/current_map_pose",
@@ -323,6 +324,10 @@ class ModelIdTimingRecorder(Node):
                 Float64MultiArray, topic,
                 lambda message, topic=topic: self._record_ros(topic, message), depth)
         self.create_subscription(
+            String, "/mpc_shadow/diagnostics",
+            lambda message: self._record_ros("/mpc_shadow/diagnostics", message),
+            depth)
+        self.create_subscription(
             Float64, "/amcl_timing",
             lambda message: self._record_ros("/amcl_timing", message), depth)
         self.create_subscription(
@@ -352,10 +357,10 @@ class ModelIdTimingRecorder(Node):
                 "subscription and no runtime controller consumer"
             ),
             "source_time_policy": (
-                "ROS sensor headers are source-epoch mapped by the bridge: the first "
-                "validated simulator time anchors one ROS epoch and later headers "
-                "advance by simulator source-time deltas; host arrival remains a "
-                "watchdog timestamp. bridge simulation_time_s is retained separately."
+                "ROS sensor headers use the bridge host's ROS receive clock; packet "
+                "arrival and request intervals use host monotonic time. No Unity "
+                "simulation timestamp, frame, or physics-step field is required "
+                "or consumed by runtime nodes. Such diagnostic fields remain null."
             ),
             "event_flush_interval_sec": self.event_flush_interval_ns / 1.0e9,
             "event_retention_policy": (
