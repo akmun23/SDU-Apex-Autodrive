@@ -1,0 +1,197 @@
+{
+  "captured_date": "2026-09-18",
+  "repository": {
+    "head_sha": "845e621989daaf1e9fbe041723f7e6066a6f01d2",
+    "matches_handoff_pinned_sha": true,
+    "dirty": true,
+    "dirty_files_record": "git_status.txt",
+    "baseline_scope": "current dirty worktree before handoff rewrite; not pristine pinned commit"
+  },
+  "build_and_tests": {
+    "environment": "ROS 2 Humble workspace container sdu_apex_autodrive",
+    "compiler": "GCC 11.4.0",
+    "build_testing": true,
+    "build_command": "source /opt/ros/humble/setup.bash && source /workspace/src/install/setup.bash && colcon build --merge-install --packages-select f1tenth_mpc --cmake-args -DBUILD_TESTING=ON",
+    "test_command": "colcon test --merge-install --packages-select f1tenth_mpc --event-handlers console_direct+",
+    "tests_passed": 3,
+    "tests_failed": 0,
+    "test_names": [
+      "vehicle_model_test",
+      "mpc_core_test",
+      "riccati_solver_test"
+    ],
+    "scope_note": "C/C++ package tests only; no ROS runtime, simulator, or closed-loop lap"
+  },
+  "mpc_configuration": {
+    "current_plant_states": 6,
+    "current_augmented_qp_states": 10,
+    "current_inputs": 2,
+    "state_order": [
+      "e_y",
+      "e_psi",
+      "u",
+      "v",
+      "r",
+      "target_speed",
+      "commanded_steering",
+      "effective_steering",
+      "previous_steering_rate",
+      "previous_target_speed_rate"
+    ],
+    "input_order": ["steering_rate", "target_speed_rate"],
+    "horizon_steps": 30,
+    "prediction_dt_s": 0.025,
+    "horizon_s": 0.75,
+    "command_speed_ceiling_mps": 16.0,
+    "weights": {
+      "e_y": 1500.0,
+      "e_psi": 50.0,
+      "u": 200.0,
+      "v": 5.0,
+      "r": 1.5,
+      "target_speed": 20.0,
+      "commanded_steering": 1.0,
+      "effective_steering": 1.0,
+      "previous_steering_rate": 5.0,
+      "previous_target_speed_rate": 5.0,
+      "steering_rate_effort": 2.0,
+      "target_speed_rate_effort": 0.5
+    },
+    "solver": {
+      "name": "Riccati-ADMM",
+      "max_iterations": 50,
+      "convergence_tolerance": 0.01,
+      "cold_core_benchmark_samples": 500,
+      "core_time_ms_no_ros": {
+        "p50": 0.075,
+        "p95": 0.107,
+        "p99": 0.115,
+        "max": 0.148
+      },
+      "max_iterations_used_in_benchmark": 8,
+      "max_iteration_status_count": 0,
+      "note": "microbenchmark of current dirty 10-state core only"
+    }
+  },
+  "accepted_model_constants": {
+    "yaw_time_constant_s": 0.087735,
+    "yaw_steering_gain_per_m": 3.011897,
+    "longitudinal_bias_mps2": -0.3735644,
+    "longitudinal_speed_coefficient_per_s": -0.06389858,
+    "longitudinal_target_error_gain_per_s": 9.11426915,
+    "longitudinal_target_rate_coefficient": -0.06687204,
+    "brake_deceleration_intercept_mps2": 5.36267417,
+    "brake_deceleration_speed_slope_per_s": 0.27655518,
+    "lateral_velocity_transition": "v_next = v; rejected fitted v dynamics are not used"
+  },
+  "accepted_holdout_replay": {
+    "source_report": "f1tenth_mpc/docs/SIMULATOR_NATIVE_MODEL_WORKLIST.md",
+    "yaw_model": {
+      "N5_all_origins": {
+        "along_p95_m_baseline": 0.1340,
+        "along_p95_m_candidate": 0.1340,
+        "cross_p95_m_baseline": 0.0303,
+        "cross_p95_m_candidate": 0.0293,
+        "yaw_abs_p95_deg_baseline": 1.774,
+        "yaw_abs_p95_deg_candidate": 0.917
+      },
+      "N30_all_origins": {
+        "along_p95_m_baseline": 0.9714,
+        "along_p95_m_candidate": 0.9680,
+        "cross_p95_m_baseline": 0.1750,
+        "cross_p95_m_candidate": 0.0816,
+        "yaw_abs_p95_deg_baseline": 26.497,
+        "yaw_abs_p95_deg_candidate": 15.613
+      },
+      "interpretation": "held-out open-loop PP-command replay; not closed-loop MPC validation"
+    },
+    "longitudinal_model": {
+      "N5_holdout": {
+        "body_speed_mae_mps_baseline": 0.1250,
+        "body_speed_mae_mps_candidate": 0.0731,
+        "along_mae_m_baseline": 0.0634,
+        "along_mae_m_candidate": 0.0630,
+        "cross_mae_m_baseline": 0.0123,
+        "cross_mae_m_candidate": 0.0122,
+        "yaw_mae_rad_baseline": 0.01084,
+        "yaw_mae_rad_candidate": 0.01074,
+        "euclidean_position_mae_m_baseline": 0.0669,
+        "euclidean_position_mae_m_candidate": 0.0667
+      },
+      "N30_holdout": {
+        "body_speed_mae_mps_baseline": 0.2221,
+        "body_speed_mae_mps_candidate": 0.0818,
+        "along_mae_m_baseline": 0.1266,
+        "along_mae_m_candidate": 0.0783,
+        "cross_mae_m_baseline": 0.0345,
+        "cross_mae_m_candidate": 0.0323,
+        "yaw_mae_rad_baseline": 0.0407,
+        "yaw_mae_rad_candidate": 0.0263,
+        "euclidean_position_mae_m_baseline": 0.1388,
+        "euclidean_position_mae_m_candidate": 0.0926
+      },
+      "interpretation": "held-out open-loop PP-command replay; truth was offline scoring only"
+    }
+  },
+  "trajectory": {
+    "path": "f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv",
+    "sha256": "16553b479a9ec358422eeb89b5029ba68fde46bc0328be3b34822b41aca74057",
+    "rows_including_duplicate_endpoint": 2587,
+    "unique_points": 2586,
+    "approx_spacing_m": 0.0199914,
+    "lap_length_m": 51.7,
+    "speed_mps": {
+      "min": 2.231232,
+      "median": 5.749041,
+      "p95": 9.651801,
+      "max": 10.248878,
+      "mean_pointwise": 5.904,
+      "distance_weighted_mean": 4.986
+    },
+    "nominal_lap_time_s": 10.373,
+    "curvature_abs_inv_m": {
+      "median": 0.128575,
+      "p90": 0.679532,
+      "p95": 0.96754,
+      "p99": 1.56189,
+      "max": 1.749235
+    },
+    "minimum_bounds_m": {
+      "left": 0.2875,
+      "right": 0.275
+    },
+    "note": "current raceline does not request the 16 m/s ceiling"
+  },
+  "latest_failed_mpc_run": {
+    "path": "sdu_apex_autodrive/artifacts/simulator_trace/mpc_target_response_candidate_4mps_20260918",
+    "closed_loop_acceptance": false,
+    "packets": 2306,
+    "sequence_gaps": 0,
+    "source_dt_ms": {
+      "median": 25.0,
+      "p95": 29.0,
+      "max": 52.0
+    },
+    "odom_header_age_ms": {
+      "median": 78.1,
+      "p95": 85.4,
+      "max": 207.1
+    },
+    "map_pose_header_age_ms": {
+      "median": 80.4,
+      "p95": 88.1,
+      "max": 208.0
+    },
+    "configured_input_timeout_s": 0.075,
+    "result": "zero target speed; car did not move; valid cadence was rejected by absolute source-age gate",
+    "simulator_action": "batchmode diagnostic already recorded before this rewrite; no simulator launched in Phase 0"
+  },
+  "handoff_target": {
+    "model_states": ["e_y", "e_psi", "u", "v", "r", "target_speed", "steering_command"],
+    "augmented_qp_states": 9,
+    "inputs": ["steering_rate", "target_speed_rate"],
+    "horizon_steps": 30,
+    "prediction_dt_s": 0.025,
+    "horizon_s": 0.75
+  }
+}

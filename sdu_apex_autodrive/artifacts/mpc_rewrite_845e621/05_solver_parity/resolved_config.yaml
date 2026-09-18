@@ -1,0 +1,11 @@
+solver:
+  active_state_dimension: 9
+  active_control_dimension: 2
+  horizon_steps: 30
+  max_static_state_dimension: 10
+  max_static_control_dimension: 2
+  control_hessian:
+    symmetrize: true
+    initial_regularization_relative: 1.0e-7
+    maximum_regularization_relative: 1.0e-2
+    preserve_off_diagonal: true

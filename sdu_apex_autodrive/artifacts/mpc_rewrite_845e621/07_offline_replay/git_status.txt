@@ -1,0 +1,4 @@
+Implementation baseline HEAD: 845e621989daaf1e9fbe041723f7e6066a6f01d2
+Worktree: dirty; existing and current task changes are not committed.
+Phase 9 replay completed in the Humble workspace container on 2026-09-18.
+The replay is offline numerical evidence only; no simulator was started.

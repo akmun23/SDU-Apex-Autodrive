@@ -1,0 +1,36 @@
+{
+  "phase": "continuous_reference_geometry",
+  "status": "implemented_and_unit_tested",
+  "trajectory": {
+    "path": "f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv",
+    "sha256": "16553b479a9ec358422eeb89b5029ba68fde46bc0328be3b34822b41aca74057",
+    "input_rows": 2587,
+    "unique_points_after_prepare": 2586,
+    "closed_loop_length_m": 51.7,
+    "arc_length_spacing_m": 0.0199914
+  },
+  "geometry_tests": {
+    "periodic_wrap": true,
+    "unwrapped_heading_interpolation_through_pi": true,
+    "continuous_curvature_speed_and_bounds_interpolation": true,
+    "signed_cross_track_projection": true,
+    "opposite_direction_alias_rejected": true,
+    "deterministic_actual_track_projection_samples": 1000,
+    "max_projection_oracle_error_bound_m": 0.002
+  },
+  "reference_seed": {
+    "state_reference_count": 31,
+    "dynamics_stages": 30,
+    "dt_s": 0.025,
+    "low_speed_example_mps": 2.231232,
+    "physical_n30_span_m": 1.673424,
+    "legacy_fixed_floor_n30_span_m": 7.79664,
+    "legacy_to_physical_span_ratio": 4.659
+  },
+  "validation": {
+    "test": "mpc_reference_test",
+    "result": "passed",
+    "full_package_tests_at_capture": "5 passed, 0 failed",
+    "simulator_started": false
+  }
+}

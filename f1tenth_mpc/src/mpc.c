@@ -195,6 +195,33 @@ static RiccatiAdmmState_t admm_state;
 static float warm_start_prev_curvature = 0;
 static int warm_start_prev_model_signature = MPC_MODEL_SIGNATURE;
 
+static float valid_weight(float value, float fallback)
+{
+    return isfinite(value) && value >= 0.0f ? value : fallback;
+}
+
+static void sanitize_weights(MpcConfiguration_t *cfg)
+{
+    cfg->weight_lateral_error = valid_weight(cfg->weight_lateral_error, WEIGHT_LAT_ERROR);
+    cfg->weight_heading_error = valid_weight(cfg->weight_heading_error, WEIGHT_HEADING);
+    cfg->weight_velocity = valid_weight(cfg->weight_velocity, WEIGHT_VELOCITY);
+    cfg->weight_lateral_velocity = valid_weight(cfg->weight_lateral_velocity, WEIGHT_LAT_VEL);
+    cfg->weight_yaw_rate = valid_weight(cfg->weight_yaw_rate, WEIGHT_YAW_RATE);
+    cfg->weight_target_speed_state = valid_weight(
+        cfg->weight_target_speed_state, WEIGHT_TARGET_SPEED_STATE);
+    cfg->weight_commanded_steering = valid_weight(
+        cfg->weight_commanded_steering, WEIGHT_COMMAND_STEERING);
+    cfg->weight_effective_steering = valid_weight(
+        cfg->weight_effective_steering, WEIGHT_EFFECTIVE_STEERING);
+    cfg->weight_steering_rate = valid_weight(cfg->weight_steering_rate, WEIGHT_STEER_RATE);
+    cfg->weight_target_speed_rate_change = valid_weight(
+        cfg->weight_target_speed_rate_change, WEIGHT_TARGET_SPEED_RATE_CHANGE);
+    cfg->weight_steering_effort = valid_weight(
+        cfg->weight_steering_effort, WEIGHT_STEER_EFFORT);
+    cfg->weight_target_speed_rate_effort = valid_weight(
+        cfg->weight_target_speed_rate_effort, WEIGHT_TARGET_SPEED_RATE_EFFORT);
+}
+
 static void refresh_steering_dynamics(void)
 {
     control_steering_dynamics =
@@ -240,6 +267,8 @@ MpcConfiguration_t get_default_configuration(void)
     .weight_velocity         = WEIGHT_VELOCITY,
     .weight_lateral_velocity = WEIGHT_LAT_VEL,
     .weight_yaw_rate         = WEIGHT_YAW_RATE,
+    .weight_target_speed_state = WEIGHT_TARGET_SPEED_STATE,
+    .weight_commanded_steering = WEIGHT_COMMAND_STEERING,
 
     /* Control effort weights */
     .weight_steering_effort      = WEIGHT_STEER_EFFORT,
@@ -266,6 +295,10 @@ MpcConfiguration_t get_default_configuration(void)
     cfg.weight_velocity         = get_env_float("MPC_W_VELOCITY", cfg.weight_velocity);
     cfg.weight_lateral_velocity = get_env_float("MPC_W_LAT_VEL", cfg.weight_lateral_velocity);
     cfg.weight_yaw_rate         = get_env_float("MPC_W_YAW_RATE", cfg.weight_yaw_rate);
+    cfg.weight_target_speed_state = get_env_float(
+        "MPC_W_TARGET_SPEED_STATE", cfg.weight_target_speed_state);
+    cfg.weight_commanded_steering = get_env_float(
+        "MPC_W_COMMAND_STEERING", cfg.weight_commanded_steering);
 
     cfg.weight_steering_effort     = get_env_float("MPC_W_STEER_EFFORT", cfg.weight_steering_effort);
     cfg.weight_target_speed_rate_effort = get_env_float("MPC_W_TARGET_SPEED_RATE_EFFORT", cfg.weight_target_speed_rate_effort);
@@ -274,6 +307,7 @@ MpcConfiguration_t get_default_configuration(void)
     cfg.weight_target_speed_rate_change = get_env_float("MPC_W_TARGET_SPEED_RATE_CHANGE", cfg.weight_target_speed_rate_change);
     cfg.weight_effective_steering = get_env_float(
         "MPC_W_EFFECTIVE_STEERING", cfg.weight_effective_steering);
+    sanitize_weights(&cfg);
 
     cfg.cross_call_rate_scale = get_env_float("MPC_CROSS_CALL_SCALE", cfg.cross_call_rate_scale);
     cfg.wall_margin = get_env_float("WALL_MARGIN", cfg.wall_margin);
@@ -321,6 +355,7 @@ void mpc_initialize(void)
 void mpc_initialize_with_configuration(const MpcConfiguration_t *cfg)
 {
     config = cfg ? *cfg : get_default_configuration();
+    sanitize_weights(&config);
     if (!(config.time_step > 0.0f) || !isfinite(config.time_step))
         config.time_step = TIME_STEP_SECONDS;
     if (!(config.wall_margin >= 0.0f) || !isfinite(config.wall_margin))
@@ -359,6 +394,7 @@ void mpc_set_configuration(const MpcConfiguration_t *configuration)
 {
     if (configuration) {
         config = *configuration;
+        sanitize_weights(&config);
         if (config.time_step <= 0.0f)
             config.time_step = TIME_STEP_SECONDS;
         if (!(config.wall_margin >= 0.0f) || !isfinite(config.wall_margin))
@@ -520,33 +556,17 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     for (int k = 0; k < N; k++) {
         RiccatiStepData_t *sd = &step_data[k];
 
-        /* --- Sparse zeroing (replaces memset) --- */
-        for (int i = 0; i < NX_AUG; i++) {
-            sd->A[IDX_DELTA_COMMAND][i] = 0;
-            sd->A[IDX_DELTA_EFFECTIVE][i] = 0;
-            sd->A[IDX_DRATE_PREV][i] = 0;
-            sd->A[IDX_TARGET_SPEED_RATE_PREV][i] = 0;
-
-            sd->N[i][0] = 0;
-            sd->N[i][1] = 0;
-
-            if (i < NX_DENSE) {
-                sd->A[i][IDX_DRATE_PREV] = 0;
-                sd->A[i][IDX_TARGET_SPEED_RATE_PREV] = 0;
-            }
-        }
-        sd->B[IDX_DELTA_COMMAND][1] = 0;  /* Target-speed slew does not affect steering. */
-        sd->B[IDX_DELTA_EFFECTIVE][1] = 0;/* Target-speed slew does not affect steering. */
-        sd->B[IDX_DRATE_PREV][1] = 0;     /* Previous steering rate has no speed-slew input. */
-        sd->B[IDX_TARGET_SPEED_RATE_PREV][0] = 0; /* Previous speed slew has no steering input. */
-
-        /* --- End sparse zeroing --- */
+        /* Clear the complete 10-state/2-input stage.  Every matrix entry has
+         * a defined value before assembly, so extending the model cannot
+         * accidentally feed an uninitialized sparse entry to Riccati. */
+        memset(sd, 0, sizeof(*sd));
 
         float kappa_k = reference_trajectory[k].path_curvature;
         float v_state_for_limits = lin_state.flong_vel;
 
         ControlInput_t lin_control;
-        lin_control.steer_ang = atanf(vehicle_parameters.steering_wheelbase_m * kappa_k);
+        lin_control.steer_ang = atanf(
+            kappa_k / MPC_YAW_RATE_STEERING_GAIN_PER_M);
         if (lin_control.steer_ang > delta_clamp)
             lin_control.steer_ang = delta_clamp;
         if (lin_control.steer_ang < -delta_clamp)
@@ -565,7 +585,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         /* Stabilize fast dynamics (omega row = 4) per stage. */
         {
-            int row = 4;  /* Yaw-rate row (omega) in the 5-state Frenet model */
+            int row = IDX_YAW_RATE;
             float abs_aii = fabsf(A_step[row][row]);
             if (abs_aii > STABILITY_LIMIT) {
                 A_step[row][row] = (A_step[row][row] < 0)
@@ -658,14 +678,16 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         /* Previous target-speed slew state. */
         sd->B[IDX_TARGET_SPEED_RATE_PREV][1] = 1.0f;
 
-        /* === Q_diag (9 elements): state tracking weights === */
+        /* === Q_diag: explicit costs for all ten augmented states. === */
         sd->Q_diag[0] = RICCATI_COST_FACTOR * config.weight_lateral_error;
         sd->Q_diag[1] = RICCATI_COST_FACTOR * config.weight_heading_error;
         sd->Q_diag[2] = RICCATI_COST_FACTOR * config.weight_velocity;
         sd->Q_diag[3] = RICCATI_COST_FACTOR * config.weight_lateral_velocity;
         sd->Q_diag[4] = RICCATI_COST_FACTOR * config.weight_yaw_rate;
-        sd->Q_diag[IDX_TARGET_SPEED_STATE] = 0.0f;
-        sd->Q_diag[IDX_DELTA_COMMAND] = 0.0f;
+        sd->Q_diag[IDX_TARGET_SPEED_STATE] =
+            RICCATI_COST_FACTOR * config.weight_target_speed_state;
+        sd->Q_diag[IDX_DELTA_COMMAND] =
+            RICCATI_COST_FACTOR * config.weight_commanded_steering;
         sd->Q_diag[IDX_DELTA_EFFECTIVE] =
             RICCATI_COST_FACTOR * config.weight_effective_steering;
         sd->Q_diag[IDX_DRATE_PREV] = RICCATI_COST_FACTOR * config.weight_steering_rate;
@@ -714,7 +736,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             }
         }
 
-        /* === q (9 elements): linear state cost (tracking references) === */
+        /* === q: linear state cost for all tracked augmented states. === */
         {
             float ey_ref_k = reference_trajectory[k].reference_lateral_error;
             ey_ref_k = compute_wall_biased_ey_ref(ey_ref_k, wall_x_lb_con, wall_x_ub_con,
@@ -730,17 +752,20 @@ MpcSolverStatus_t mpc_compute_optimal_control(
 
         sd->q[3] = -(sd->Q_diag[3] * reference_trajectory[k].reference_lateral_velocity);
         sd->q[4] = -(sd->Q_diag[4] * reference_trajectory[k].reference_yaw_rate);
-        sd->q[IDX_TARGET_SPEED_STATE] = 0.0f;
+        sd->q[IDX_TARGET_SPEED_STATE] =
+            -(sd->Q_diag[IDX_TARGET_SPEED_STATE] *
+              reference_trajectory[k].reference_velocity);
 
-        sd->q[IDX_DELTA_COMMAND] = 0.0f;
-
-        /* Effective-steering reference: delta_ff = atan(L*kappa). */
+        /* Feedforward inverts the accepted command-to-yaw steady response. */
         {
-            float delta_ff_k = atanf(vehicle_parameters.steering_wheelbase_m * kappa_k);
+            float delta_ff_k = atanf(
+                kappa_k / MPC_YAW_RATE_STEERING_GAIN_PER_M);
             if (delta_ff_k > vehicle_parameters.max_steering_angle)
                 delta_ff_k = vehicle_parameters.max_steering_angle;
             if (delta_ff_k < -vehicle_parameters.max_steering_angle)
                 delta_ff_k = -vehicle_parameters.max_steering_angle;
+            sd->q[IDX_DELTA_COMMAND] =
+                -(sd->Q_diag[IDX_DELTA_COMMAND] * delta_ff_k);
             sd->q[IDX_DELTA_EFFECTIVE] =
                 -(sd->Q_diag[IDX_DELTA_EFFECTIVE] * delta_ff_k);
         }
@@ -773,7 +798,7 @@ MpcSolverStatus_t mpc_compute_optimal_control(
             sd->N[IDX_TARGET_SPEED_RATE_PREV][1] = -(RICCATI_COST_FACTOR * (config.weight_target_speed_rate_change * config.cross_call_rate_scale));
         }
 
-        /* === State bounds (9 elements) === */
+        /* === State bounds for all ten augmented states. === */
 
         /* e_y wall bounds active from the first stage. */
         sd->x_lb[0] = wall_x_lb_con;
@@ -826,14 +851,21 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     memset(terminal_x_lb, 0, sizeof(terminal_x_lb));
     memset(terminal_x_ub, 0, sizeof(terminal_x_ub));
 
-    terminal_Q[0] = RICCATI_COST_FACTOR * config.weight_lateral_error;
-    terminal_Q[1] = RICCATI_COST_FACTOR * config.weight_heading_error;
-    terminal_Q[2] = RICCATI_COST_FACTOR * config.weight_velocity;
-    terminal_Q[3] = RICCATI_COST_FACTOR * config.weight_lateral_velocity;
-    terminal_Q[4] = RICCATI_COST_FACTOR * config.weight_yaw_rate;
-    terminal_Q[IDX_DELTA_EFFECTIVE] =
-        RICCATI_COST_FACTOR * config.weight_effective_steering;
-    /* Command and previous-control terminal weights remain zero. */
+        terminal_Q[0] = RICCATI_COST_FACTOR * config.weight_lateral_error;
+        terminal_Q[1] = RICCATI_COST_FACTOR * config.weight_heading_error;
+        terminal_Q[2] = RICCATI_COST_FACTOR * config.weight_velocity;
+        terminal_Q[3] = RICCATI_COST_FACTOR * config.weight_lateral_velocity;
+        terminal_Q[4] = RICCATI_COST_FACTOR * config.weight_yaw_rate;
+        terminal_Q[IDX_TARGET_SPEED_STATE] =
+            RICCATI_COST_FACTOR * config.weight_target_speed_state;
+        terminal_Q[IDX_DELTA_COMMAND] =
+            RICCATI_COST_FACTOR * config.weight_commanded_steering;
+        terminal_Q[IDX_DELTA_EFFECTIVE] =
+            RICCATI_COST_FACTOR * config.weight_effective_steering;
+        terminal_Q[IDX_DRATE_PREV] =
+            RICCATI_COST_FACTOR * config.weight_steering_rate;
+        terminal_Q[IDX_TARGET_SPEED_RATE_PREV] =
+            RICCATI_COST_FACTOR * config.weight_target_speed_rate_change;
 
 
     /* Terminal q: tracking at last reference */
@@ -843,6 +875,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
         {
             float v_ref_terminal = reference_trajectory[N-1].reference_velocity;
             terminal_q[2] = -(terminal_Q[2] * v_ref_terminal);
+            terminal_q[IDX_TARGET_SPEED_STATE] =
+                -(terminal_Q[IDX_TARGET_SPEED_STATE] * v_ref_terminal);
         }
         terminal_q[3] = -(terminal_Q[3] * reference_trajectory[N-1].reference_lateral_velocity);
         terminal_q[4] = -(terminal_Q[4] * reference_trajectory[N-1].reference_yaw_rate);
@@ -854,6 +888,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
                 delta_ff_N = vehicle_parameters.max_steering_angle;
             if (delta_ff_N < -vehicle_parameters.max_steering_angle)
                 delta_ff_N = -vehicle_parameters.max_steering_angle;
+            terminal_q[IDX_DELTA_COMMAND] =
+                -(terminal_Q[IDX_DELTA_COMMAND] * delta_ff_N);
             terminal_q[IDX_DELTA_EFFECTIVE] =
                 -(terminal_Q[IDX_DELTA_EFFECTIVE] * delta_ff_N);
         }
@@ -1028,9 +1064,8 @@ MpcSolverStatus_t mpc_compute_optimal_control(
     float delta_rate = admm_state.z_u[0][0];
     float target_speed_rate = admm_state.z_u[0][1];
 
-    /* Convert the optimized steering-rate input to the next steering target
-     * over the configured prediction interval. The outer runtime update
-     * interval is handled by mpc_set_previous_command_with_dt(). */
+    /* The optimized rate is an action over the same nominal interval used by
+     * its first QP stage.  Measured source dt is for state reconstruction only. */
     float delta_cmd =
         commanded_steering_angle + config.time_step * delta_rate;
 

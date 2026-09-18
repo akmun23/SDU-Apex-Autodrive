@@ -1,0 +1,4 @@
+HEAD: 845e621989daaf1e9fbe041723f7e6066a6f01d2
+Worktree: dirty; existing local changes preserved.
+Phase files: f1tenth_mpc/include/riccati_solver.h, f1tenth_mpc/src/riccati_solver.c, f1tenth_mpc/include/mpc_types.h, f1tenth_mpc/test/test_riccati_solver.c.
+No Unity, scene, simulator timing, or vehicle-behavior files changed.

@@ -21,7 +21,7 @@
 /* Global dimensions */
 #define NX_GLOBAL 7                                      /* Global/body state plus commanded speed target. */
 #define NX_FRENET 6                                      /* Frenet state plus actuator speed setpoint. */
-#define NX_AUG 10                                        /* Frenet, steering state, and previous-control state. */
+#define NX_AUG 10                                        /* Six vehicle states, two steering states, two previous-input states. */
 #define IDX_EY 0                                         /* Position of lateral error (ey) in the augmented vector. */
 #define IDX_EPSI 1                                       /* Position of heading error in the augmented vector. */
 #define IDX_LONG_VEL 2                                   /* Position of body longitudinal velocity in the augmented vector. */
@@ -32,8 +32,6 @@
 #define IDX_DELTA_EFFECTIVE 7                            /* Position of steering angle acting on the vehicle model. */
 #define IDX_DRATE_PREV 8                                 /* Previous steering-rate state in the augmented vector. */
 #define IDX_TARGET_SPEED_RATE_PREV 9                     /* Previous target-speed slew in the augmented vector. */
-#define IDX_SPARSE_B_FIRST_ROW 2                         /* First augmented-state row with non-zero dense B coupling in Riccati sparse products. */
-#define NX_DENSE 8                                       /* Dense state block before sparse previous-control tail states. */
 #define NU 2                                             /* Control vector width: steering-rate and target-speed slew. */
 #define RICCATI_MAX_NX  10                               /* Maximum Riccati state dimension (augmented Frenet model). */
 #define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and speed slew). */
@@ -52,6 +50,8 @@
 #define WEIGHT_VELOCITY 200.0f                           /* Penalizes deviation from target longitudinal speed profile. */
 #define WEIGHT_LAT_VEL 5.0f                             /* Penalizes lateral velocity to suppress side-slip growth. */
 #define WEIGHT_YAW_RATE 1.5f                            /* Penalizes yaw-rate mismatch against reference curvature dynamics. */
+#define WEIGHT_TARGET_SPEED_STATE 20.0f                  /* Tracks actuator target speed to the raceline profile. */
+#define WEIGHT_COMMAND_STEERING 1.0f                     /* Tracks commanded steering to curvature feedforward. */
 #define WEIGHT_STEER_EFFORT 2.0f                        /* Penalizes steering-rate effort to limit aggressive steering actuation. */
 #define WEIGHT_TARGET_SPEED_RATE_EFFORT 0.5f           /* Penalizes target-speed slew magnitude. */
 #define WEIGHT_STEER_RATE 5.0f                         /* Penalizes steering-rate change to reduce steering jerk. */
@@ -216,6 +216,8 @@ typedef struct
  * @param weight_velocity Weight on longitudinal velocity tracking error.
  * @param weight_lateral_velocity Weight on lateral velocity tracking error.
  * @param weight_yaw_rate Weight on yaw-rate tracking error.
+ * @param weight_target_speed_state Weight on actuator target-speed tracking.
+ * @param weight_commanded_steering Weight on steering-command tracking.
  * @param weight_steering_effort Weight on steering effort command magnitude.
  * @param weight_target_speed_rate_effort Weight on target-speed slew magnitude.
  * @param weight_steering_rate Weight on steering-rate change.
@@ -234,6 +236,8 @@ typedef struct
     float weight_velocity;               /* Weight for longitudinal velocity tracking error. */
     float weight_lateral_velocity;       /* Weight for lateral velocity tracking error. */
     float weight_yaw_rate;               /* Weight for yaw-rate tracking error. */
+    float weight_target_speed_state;     /* Weight for actuator target-speed state. */
+    float weight_commanded_steering;     /* Weight for commanded steering angle. */
     float weight_steering_effort;        /* Weight for steering effort. */
     float weight_target_speed_rate_effort;    /* Weight for target-speed slew. */
     float weight_steering_rate;          /* Weight for steering jerk/rate change. */
@@ -320,7 +324,7 @@ typedef struct
 {
     float A[RICCATI_MAX_NX][RICCATI_MAX_NX];
     float B[RICCATI_MAX_NX][RICCATI_MAX_NU];
-    float d[NX_AUG]; 
+    float d[RICCATI_MAX_NX];
     float Q_diag[RICCATI_MAX_NX];
     float q[RICCATI_MAX_NX];
     float R_diag[RICCATI_MAX_NU];
@@ -335,7 +339,10 @@ typedef struct
 /**
  * @brief ADMM configuration parameters for the Riccati solver.
  * @details Controls augmented-Lagrangian penalties, convergence criteria,
- *          iteration budget, and optional adaptive-rho logic.
+ *          iteration budget, and optional adaptive-rho logic. `tolerance` is
+ *          the absolute maximum allowed raw primal and dual residual; it is
+ *          not scaled by unrelated state magnitudes because MPC channels have
+ *          different physical units.
  */
 typedef struct
 {
@@ -387,6 +394,9 @@ typedef struct
     float y_u[PREDICTION_HORIZON][RICCATI_MAX_NU];
     float rho;
     float rho_u;
+    int nx;
+    int nu;
+    int horizon;
     int initialized;
 } RiccatiAdmmState_t;
 

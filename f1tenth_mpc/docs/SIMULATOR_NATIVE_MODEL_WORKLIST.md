@@ -61,8 +61,10 @@ is valid, while a source gap above 250 ms or a host gap/response above 150 ms
 still fails closed. The 40 Hz figure is the request target, not a guarantee for
 every sample: report source-time and arrival-time distributions separately.
 Earlier 15–35 ms bridge rejection notes below are historical and superseded.
-The disabled MPC node still has a separate 15–35 ms stop gate that must be
-reconciled before MPC is enabled.
+The MPC node has a separate 75 ms source-header-age stop gate. The latest
+batchmode attempt delivered regular 40 Hz messages but their headers appeared
+about 78–80 ms old to the node; reconcile that clock/transport offset before a
+live MPC acceptance run rather than weakening the gate without evidence.
 
 ## Reviewed suggestions
 
@@ -76,7 +78,7 @@ reconciled before MPC is enabled.
 | Preserve left and right rear encoders separately | **Recorded; offline side ablation now available** | `tools/model_id/analyze_encoder_sides.py` compares left-only, right-only and paired-mean speed with the deployed radius/window/speed calibration. It reports per-side freshness and brake/turn strata. No runtime split is promoted until a matched holdout shows repeatable benefit without turn-direction bias. |
 | Stratify observer error by powered drive versus full braking | **Offline observer replay complete; no brake calibration promoted** | The 11,921-packet track trace has 1,157 moving zero-throttle/full-brake samples (160 straight, 997 turning). Direct COM body-forward speed is a cleaner speed reference than finite-differencing the GPS point: full-brake p95 error is 0.158/0.130 m/s (straight/turn) against COM, versus 0.242/0.218 m/s against pose differencing. A chronological 60/40 replay split found no transferable improvement: the best training candidate (`decel_ax_scale=0.95`, `offset=-0.15`) lowered training p95 from 0.154 to 0.123 m/s but worsened held-out p95 from 0.116 to 0.155 m/s. The independent short trace moved slightly in the candidate's favor, but only 68 brake samples were available and MAE changed by just 0.001 m/s. Keep the deployed 1.005/0.020 coefficients; obtain an isolated speed-stratified brake holdout before adding a brake mode. |
 | Gate odometry drive/brake response with causal controller history | **Planned; candidate data support a focused test** | The sensor observer currently consumes encoders and IMU only. Any mode input must come from legal controller/actuator command history, be aligned to the observed one-packet lag, and be scored on held-out live data; never use simulator state or bridge truth at runtime. |
-| Fit source-command longitudinal speed response for MPC | **Fitted; recursively validated offline on a held-out PP trace 2026-09-18; live MPC test is next** | The MPC carries its actuator target as a state and predicts body-speed response from legal target-speed history. Keep command authority disabled by default until a batchmode closed-loop run passes. |
+| Fit source-command longitudinal speed response for MPC | **Fitted; recursively validated offline on a held-out PP trace 2026-09-18; live MPC remains unverified** | The MPC carries its actuator target as a state and predicts body-speed response from legal target-speed history. A capped batchmode attempt was stopped at zero command because valid 40 Hz source messages failed the 75 ms age gate; keep command authority disabled until the timestamp handoff is reconciled and a closed-loop run passes. |
 | Add an IMU-derived longitudinal-motion state | **Planned ablation** | Retain only if blind N5 longitudinal error improves across held-out track data without an unacceptable N30 regression. |
 | Add a causal drivetrain-memory state | **Planned ablation** | Test after the longitudinal-motion state; it must improve multi-step results, not one-step fit alone. |
 | Add lateral/yaw residual states | **Planned ablation** | Start with zero/one state at a time. Retain only with reproducible held-out N5 benefit and no unacceptable N30 regression. |
@@ -93,7 +95,7 @@ reconciled before MPC is enabled.
 | Cartographer localization | **Rejected by project direction** | Do not investigate or implement. |
 | Full four-wheel/suspension/RPM reconstruction as online MPC state | **Rejected for runtime** | Useful only to diagnose residual mechanisms offline; front-wheel and suspension states are not causal runtime measurements. |
 
-## Next live experiment sequence
+## Earlier live experiment sequence (superseded by the MPC rewrite)
 
 The straight open-scene braking sweep at 12, 14, and 15.3 m/s is complete; do
 not repeat those points without a new coefficient decision to test. The AMCL
@@ -104,13 +106,12 @@ regressed. Do not repeat that A/B unchanged.
 The planned recursive speed-response score on the two accepted captures is
 complete; see **MPC speed-response replay and focus transition — 2026-09-18**
 below. Do not recollect those traces or repeat the completed AMCL gain A/B.
-Localization/observer tuning is now frozen unless a new live MPC failure
-specifically implicates pose, yaw, or velocity estimation. The next experiment
-is an MPC-specific delayed-state/source-age handoff, followed by a repeat of
-the 4 m/s batchmode acceptance check. Production MPC remains disabled by
-default until it completes a collision-free lap. Keep simulator truth
-offline-only and do not edit Unity physics, scene geometry, sensor behavior,
-or timing.
+This experiment order was current before the full MPC rewrite and is now
+superseded by the ordered phases in the 2026-09-18 handoff. The active next
+gate is a non-commanding MPC shadow run alongside Pure Pursuit, in batchmode;
+do not enable MPC authority or change localization/model parameters for that
+run. Keep simulator truth offline-only and do not edit Unity physics, scene
+geometry, sensor behavior, or timing.
 
 ## Cleanup acceptance checklist
 
@@ -130,6 +131,63 @@ or timing.
 - [x] Remove obsolete generated fitting artefacts and old high-speed campaigns.
       Fresh 16 m/s-or-lower source-valid captures are required for every future
       ablation; historical reports are not input evidence.
+
+## Provisional ten-state Riccati and actuator-path recode — 2026-09-18
+
+This records the existing implementation snapshot only. The later
+`SDU_Apex_Autodrive_MPC_Full_Rewrite_Coding_Handoff_2026-09-18.md` replaces
+the ten-state design as the target; the old path remains in code until the
+nine-state rewrite passes its gates.
+
+The production core uses `NX_FRENET=6`, `NX_AUG=10`, `NU=2`, and a fixed
+30-stage/25 ms horizon. The augmented state order is
+`[e_y, e_psi, v_x, v_y, yaw_rate, target_speed, commanded_steering,
+effective_steering, previous_steering_rate, previous_target_speed_rate]`.
+The two optimizer inputs are steering rate and target-speed slew.
+
+The Riccati backward/forward pass now evaluates full matrices for every active
+dimension, without the former hard-coded dense-eight/two-tail row assumption.
+With affine dynamics `x+ = A x + B u + d`, diagonal state/control quadratics
+`Q/R`, linear terms `q/r`, and cross-cost `N`, each backward step uses
+`M=B'P`, `S=R+B'PB`, `G=B'PA+N'`, `K=-S^-1G`, and the affine gradient shift
+`p_bar=p+Pd`. The value updates are `P=Q+A'PA+G'K` and
+`p=q+A'p_bar+G'k`; the forward rollout applies every row and column of `A`,
+`B`, and `d`. The 2x2 control Hessian must be positive definite; singular or
+indefinite cases now fail explicitly instead of silently dropping
+off-diagonal terms.
+
+All ten augmented states have explicit nonzero default costs at stage and
+terminal nodes. This includes the target-speed and commanded-steering states,
+which previously had zero cost. The state and control-effort weights are
+declared as ROS parameters in `config/mpc_autodrive.yaml`; these are initial
+tuning values and still need driving validation.
+
+Validation in the Humble workspace container:
+
+- `riccati_solver_test` compares a dense 10-state, 2-input affine/cross-cost
+  problem against an independently condensed QP solved by pivoted Gaussian
+  elimination. Optimized controls and propagated states agree within
+  `2e-4`.
+- The same test exercises state-box and control-box ADMM projections for the
+  10-state problem and reaches the configured residual tolerance.
+- `mpc_core_test` verifies all ten state weights are positive by default,
+  verifies the target-speed-state weight changes the optimized slew, and
+  checks that steering-rate output is integrated over measured control dt.
+- All three package tests pass. A 500-sample N30 core benchmark (no ROS/DDS)
+  measured p50/p95/p99/max of `0.110/0.155/0.163/0.165 ms`; none of the solves
+  hit the iteration limit (maximum 8 of 50 iterations).
+- The ROS adapter emits steering angle plus target speed in
+  `AckermannDriveStamped`; it integrates MPC's speed-slew output using measured
+  source dt and records the actually applied, ceiling-clamped slew for the next
+  solve. It leaves direct throttle/brake to the established actuator
+  interface, which ignores the zero acceleration metadata.
+
+This is core/math and message-contract validation, not track acceptance. MPC
+remains disabled by default. The last capped batchmode run did not move because
+the source-age check rejected delayed headers despite regular packet cadence.
+Also, lateral velocity is an explicit state but is still held constant by the
+current vehicle model; this recode does not claim its lateral dynamics are
+solved.
 
 ## Latest validation snapshot — 2026-09-17
 
@@ -172,6 +230,99 @@ Run `sdu_apex_autodrive/artifacts/simulator_trace/pp_local_cluster070_sensor_onl
 The earlier same-day `pp_local_cluster070_4mps_20260917` run is excluded from
 this evidence because its actuator still subscribed to collision telemetry;
 the launch/config inconsistency found there has since been fixed.
+
+## Full MPC rewrite handoff progress — 2026-09-18
+
+The latest coding handoff is
+`SDU_Apex_Autodrive_MPC_Full_Rewrite_Coding_Handoff_2026-09-18.md`. It
+supersedes the provisional ten-state design above as the target architecture.
+The target is seven nonlinear plant states `[e_y, e_psi, u, v, r, v_c,
+delta_c]` plus the two previous rate inputs, for nine QP states total; there
+is no effective-steering dummy state. Unity physics, scenes, timing, and
+vehicle behavior remain read-only. The ROS node now calls
+`mpc_rti_solve_cycle`; MPC command authority remains disabled by default.
+
+Completed and recorded in `artifacts/mpc_rewrite_845e621/`:
+
+- Phase 0 baseline and Phase 1 regression reproduction.
+- Phase 2 continuous raceline geometry/projection and N+1 references.
+- Phase 3 legal `/odom` + `/current_map_pose` source-time synchronization and
+  replay; command-time forward prediction is still pending.
+- Phase 4 seven-state nonlinear stage and Phase 5 branch-aware Jacobians.
+  Directional-derivative relative error is `0.000342212` maximum across the
+  straight, corner, and braking cases; the heading-wrap Jacobian error is
+  `0.000165939` at the tested ±π boundary.
+- Phase 6 solver parity: generic active-dimension Riccati calculations match
+  an independent dense condensed-QP oracle for 9 states to maximum control/
+  state errors `5.59e-9` / `7.45e-9`. Nine-state constrained ADMM is also
+  covered. Bounded control-Hessian regularization is diagnosed and rejects
+  material indefiniteness.
+- Phase 7/8 core: the absolute-value 9-state QP cost/bounds builder now encodes
+  the exact previous-input change penalty Q/R/N expansion. It also produces a
+  shifted warm nominal, deterministic two-pass progress/reference schedule,
+  and exact nonlinear candidate rollout with a hard-corridor gate. A
+  synthetic steady-circle test builds and solves an N=4 QP, then accepts its
+  nonlinear rollout; separate tests cover warm-shift indices and scalar/matrix
+  cost equivalence.
+
+The Humble container build and all seven package tests pass. Phase 9 numerical
+replay and N=30 core timing are complete; see
+`artifacts/mpc_rewrite_845e621/07_offline_replay/README.md` for full results.
+The PP development trace and untouched holdout produced 2,630/2,630 accepted
+optimal cycles with the solver iteration cap raised from 50 to 100; no model
+equations or cost weights were changed. N=30 core p99 was 0.783 ms on the
+synthetic-state raceline timing benchmark. Phase 10's ROS adapter and launch
+path are now integrated: shadow mode is mutually exclusive with command
+authority, subscribes to Pure Pursuit `/cmd/speed`, and creates only the
+`/mpc_shadow/diagnostics` publisher. A ROS-only component probe confirmed the
+shadow node has no `/cmd/speed` publisher. Launch Python and YAML parse checks,
+the Humble build, and seven package tests pass. These remain static/offline
+results: no live shadow trace has been collected, so prediction alignment,
+runtime timing, and the Phase 10 gate are not yet accepted. A Phase 10
+batchmode startup was attempted on 2026-09-18 and is blocked before telemetry;
+details follow. No Unity source, scene, physics, timing, or build artifact was
+edited.
+
+### Phase 10 batchmode startup attempt — blocked, 2026-09-18
+
+The Humble ROS stack launched Pure Pursuit capped at 4 m/s and loaded the MPC
+shadow component. The component reported shadow mode with command authority
+disabled. A rosbag recorder subscribed to `/odom`, `/current_map_pose`,
+`/cmd/speed`, and `/mpc_shadow/diagnostics`.
+
+The local competition player was started in batchmode, without
+`-no-graphics`:
+
+```text
+/home/akselmo/Documents/GitHub/AutoDRIVE/Builds/AutoDRIVE-Simulator.x86_64
+  -batchmode -ip 127.0.0.1 -port 4567
+  -logFile /tmp/mpc_shadow_batchmode_4mps_20260918.log
+```
+
+It exited immediately. `strace` and GDB both confirmed `SIGSEGV` in
+`GameAssembly.so` during `il2cpp_init()`; the Unity log remained empty and the
+bag contains zero messages. This is a simulator-startup failure, not an MPC,
+controller, or timing result. The Unity checkout has pre-existing user edits
+to vehicle/controller scripts and the competition scene, so rebuilding it
+from that dirty source could change vehicle behavior. The shared local
+`GameAssembly.so` is newer than the competition player data, but this date
+mismatch is only a candidate explanation, not a proven root cause. The older
+May simulator image was deliberately not substituted because it is not the
+same verified competition build.
+
+Phase 10 live prediction alignment therefore remains untested. Resume only
+with a verified matching competition player/data/`GameAssembly.so` bundle, or
+after explicit approval to build an isolated player from the current dirty
+Unity checkout with physics/behavior equivalence checked. MPC authority stays
+disabled.
+
+One handoff-conformance item remains independent of the simulator blocker:
+the production ROS node calls the 9-state `mpc_rti_solve_cycle`, but the old
+`mpc_compute_optimal_control`/10-state `mpc_types.h` path remains compiled for
+legacy regression tests. It is not used by the ROS component, but the handoff
+file map calls for consolidation into `mpc.c` and removal of obsolete
+effective-steering/environment-override code. Resolve that before declaring
+the full rewrite complete or enabling production MPC.
 
 ## Timing and sensor-reference audit — 2026-09-17
 

@@ -1,0 +1,19 @@
+{
+  "phase": "shadow_mpc",
+  "status": "blocked_simulator_startup",
+  "simulator_started": false,
+  "batchmode_requested": true,
+  "no_graphics_flag_used": false,
+  "ros_launch_started": true,
+  "pure_pursuit_component_loaded": true,
+  "mpc_shadow_component_loaded": true,
+  "mpc_command_authority": false,
+  "bag_message_count": 0,
+  "player_exit_code": 139,
+  "player_signal": "SIGSEGV",
+  "crash_module": "GameAssembly.so",
+  "crash_phase": "il2cpp_init",
+  "player_log_bytes": 0,
+  "unity_source_or_build_modified": false,
+  "live_prediction_metrics": null
+}

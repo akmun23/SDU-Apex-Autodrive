@@ -1,0 +1,36 @@
+{
+  "phase": "seven_state_nonlinear_stage",
+  "status": "implemented_unit_tested_not_live_validated",
+  "state_order": ["e_y", "e_psi", "u", "v", "r", "target_speed", "steering_command"],
+  "inputs": ["steering_rate", "target_speed_rate"],
+  "prediction_dt_s": 0.025,
+  "command_same_stage_timing": true,
+  "yaw_response": {
+    "time_constant_s": 0.087735,
+    "gain_per_m": 3.011897
+  },
+  "speed_response": {
+    "bias_mps2": -0.3735644,
+    "speed_coefficient_per_s": -0.06389858,
+    "target_error_gain_per_s": 9.11426915,
+    "target_rate_coefficient": -0.06687204,
+    "positive_acceleration_clip_mps2": 6.0,
+    "brake_deceleration_intercept_mps2": 5.36267417,
+    "brake_deceleration_slope_s_inv": 0.27655518
+  },
+  "command_envelope": {
+    "max_speed_mps": 16.0,
+    "steering_rate_radps": 3.2,
+    "target_speed_rate_min_mps2": -8.0,
+    "target_speed_rate_max_mps2": 3.0
+  },
+  "lateral_velocity_model": "held_constant_unidentified",
+  "validation": {
+    "unit_test": "vehicle_model_test",
+    "cases": ["same_stage_yaw", "target_speed_integration", "braking_envelope", "perfect_turn_invariance", "frenet_domain_rejection"],
+    "result": "passed",
+    "recursive_live_validation": false,
+    "simulator_started": false
+  },
+  "physics_or_behavior_edits": false
+}

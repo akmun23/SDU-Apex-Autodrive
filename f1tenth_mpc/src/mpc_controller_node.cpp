@@ -2,21 +2,28 @@
 // the same legal pose/odometry and Ackermann target-speed boundary as the
 // established Pure Pursuit controller.  Unity truth/contact data is absent.
 
-#include "mpc.h"
+#include "mpc_rti.h"
+#include "mpc_state_synchronizer.hpp"
 
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,44 +31,18 @@
 namespace f1tenth_mpc {
 namespace {
 
-constexpr double kPi = 3.14159265358979323846;
-
-double normalize_angle(double angle)
-{
-    return std::atan2(std::sin(angle), std::cos(angle));
-}
-
 double clamp(double value, double lower, double upper)
 {
     return std::min(std::max(value, lower), upper);
 }
 
-struct Waypoint {
-    double s{};
-    double x{};
-    double y{};
-    double heading{};
-    double curvature{};
-    double speed{};
-    double left_bound{1.0};
-    double right_bound{1.0};
-};
+using Waypoint = MpcTrajectorySample_t;
 
-struct PoseState {
-    double x{};
-    double y{};
-    double yaw{};
-    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
-    bool valid{false};
-};
-
-struct MotionState {
-    double u{};
-    double v{};
-    double yaw_rate{};
-    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
-    bool valid{false};
-};
+int64_t steady_time_ns()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 }  // namespace
 
@@ -71,10 +52,16 @@ public:
         : Node("mpc_controller_node", options)
     {
         enabled_ = declare_parameter<bool>("enabled", false);
+        shadow_mode_ = declare_parameter<bool>("shadow_mode", false);
+        if (enabled_ && shadow_mode_)
+            throw std::runtime_error(
+                "MPC cannot have command authority and shadow mode simultaneously");
         odom_topic_ = declare_parameter<std::string>("odom_topic", "/odom");
         pose_topic_ = declare_parameter<std::string>(
             "pose_topic", "/current_map_pose");
         command_topic_ = declare_parameter<std::string>("command_topic", "/cmd/speed");
+        diagnostics_topic_ = declare_parameter<std::string>(
+            "diagnostics_topic", "/mpc_shadow/diagnostics");
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
         command_frame_ = declare_parameter<std::string>("command_frame", "base_link");
         trajectory_file_ = declare_parameter<std::string>("trajectory_file", "");
@@ -83,19 +70,40 @@ public:
             declare_parameter<double>("startup_speed_mps", 1.5), 0.0, max_speed_mps_);
         startup_ramp_laps_ = std::max(
             0.0, declare_parameter<double>("startup_ramp_laps", 1.0));
-        input_timeout_s_ = std::max(
-            0.025, declare_parameter<double>("input_timeout_s", 0.075));
+        state_extrapolation_max_s_ = std::clamp(
+            declare_parameter<double>("state_extrapolation_max_s", 0.12),
+            0.0, 0.5);
+        pose_odom_max_skew_s_ = std::clamp(
+            declare_parameter<double>("pose_odom_max_skew_s", 0.12),
+            0.0, 0.5);
         source_dt_min_s_ = std::max(
             0.001, declare_parameter<double>("source_dt_min_s", 0.001));
         source_dt_max_s_ = std::max(
             source_dt_min_s_, declare_parameter<double>("source_dt_max_s", 0.250));
+        MpcSyncConfig sync_config;
+        sync_config.source_dt_min_s = source_dt_min_s_;
+        sync_config.source_dt_max_s = source_dt_max_s_;
+        sync_config.max_pose_odom_skew_s = pose_odom_max_skew_s_;
+        sync_config.max_state_age_s = state_extrapolation_max_s_;
+        state_synchronizer_ = MpcStateSynchronizer(sync_config);
         startup_path_max_distance_m_ = std::max(
             0.0, declare_parameter<double>("startup_path_max_distance_m", 0.80));
         startup_path_heading_tolerance_rad_ = std::max(
             0.0, declare_parameter<double>("startup_path_heading_tolerance_rad", 0.75));
 
-        command_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
-            command_topic_, rclcpp::QoS(10));
+        if (enabled_) {
+            command_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
+                command_topic_, rclcpp::QoS(10));
+        }
+        if (shadow_mode_) {
+            diagnostics_pub_ = create_publisher<std_msgs::msg::String>(
+                diagnostics_topic_, rclcpp::QoS(rclcpp::KeepLast(2)));
+            observed_command_sub_ =
+                create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
+                    command_topic_, rclcpp::QoS(rclcpp::KeepLast(1)),
+                    std::bind(&MpcControllerNode::command_callback, this,
+                              std::placeholders::_1));
+        }
         // Control must consume the newest state, not replay a queue of stale
         // 40 Hz samples after an executor/DDS scheduling pause.
         const auto latest_state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
@@ -106,15 +114,74 @@ public:
             odom_topic_, latest_state_qos,
             std::bind(&MpcControllerNode::odom_callback, this, std::placeholders::_1));
 
-        mpc_initialize();
+        auto declare_weight = [this](const char * name, float fallback) {
+            return static_cast<float>(declare_parameter<double>(name, fallback));
+        };
+        rti_config_.model.weight_e_y = declare_weight("weight_e_y", 1500.0f);
+        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 50.0f);
+        rti_config_.model.weight_u = declare_weight("weight_u", 200.0f);
+        rti_config_.model.weight_v = declare_weight("weight_v", 0.0f);
+        rti_config_.model.weight_r = declare_weight("weight_r", 1.5f);
+        rti_config_.model.weight_steering_command = declare_weight(
+            "weight_steering_command", 1.0f);
+        rti_config_.model.weight_steering_rate = declare_weight(
+            "weight_steering_rate", 2.0f);
+        rti_config_.model.weight_target_speed_rate = declare_weight(
+            "weight_target_speed_rate", 0.5f);
+        rti_config_.model.weight_steering_rate_change = declare_weight(
+            "weight_steering_rate_change", 5.0f);
+        rti_config_.model.weight_target_speed_rate_change = declare_weight(
+            "weight_target_speed_rate_change", 5.0f);
+        rti_config_.model.terminal_multiplier = declare_weight(
+            "terminal_multiplier", 3.0f);
+        rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
+        rti_config_.model.active_speed_ceiling_mps =
+            static_cast<float>(max_speed_mps_);
+        rti_config_.model.max_steering_rad = static_cast<float>(
+            declare_parameter<double>("max_steering_rad", SOURCE_MAX_STEERING_RAD));
+        rti_config_.model.max_steering_rate_radps = static_cast<float>(
+            declare_parameter<double>("max_steering_rate_radps",
+                                      SOURCE_STEERING_RATE_RADPS));
+        rti_config_.model.max_target_speed_rate_increase_mps2 = static_cast<float>(
+            declare_parameter<double>("max_target_speed_rate_increase_mps2", 3.0));
+        rti_config_.model.max_target_speed_rate_reduction_mps2 = static_cast<float>(
+            declare_parameter<double>("max_target_speed_rate_reduction_mps2", 8.0));
+        rti_config_.model.corridor_margin_m = static_cast<float>(
+            declare_parameter<double>("corridor_margin_m", 0.05));
+        rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
+            declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
+        rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
+            declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.001));
+        const int configured_iterations = declare_parameter<int>(
+            "max_solver_iterations", 100);
+        rti_config_.solver.max_iterations = static_cast<uint16_t>(
+            std::clamp(configured_iterations, 1, 1000));
+        rti_config_.solver.rho = static_cast<float>(
+            declare_parameter<double>("admm_rho", 7.0));
+        rti_config_.solver.rho_u = static_cast<float>(
+            declare_parameter<double>("admm_rho_input", 7.0));
+        rti_config_.solver.tolerance = static_cast<float>(
+            declare_parameter<double>("solver_tolerance", 0.01));
+        rti_config_.solver.adaptive_rho = 0;
+        rti_config_.solver.shared_rho = 0;
+        rti_config_.degraded_residual_limit = static_cast<float>(
+            declare_parameter<double>("solver_degraded_tolerance", 0.05));
+        rti_config_.maximum_regularization = static_cast<float>(
+            declare_parameter<double>("solver_max_regularization", 0.01));
+        rti_config_.max_consecutive_degraded_solves =
+            declare_parameter<int>("max_consecutive_degraded_solves", 3);
+        mpc_rti_memory_reset(&rti_memory_);
         trajectory_loaded_ = load_trajectory(trajectory_file_);
         if (!trajectory_loaded_) {
             RCLCPP_ERROR(get_logger(),
-                "MPC has no valid trajectory; it will publish only safe stops");
+                "MPC has no valid trajectory; controller remains inhibited");
         }
-        if (!enabled_) {
+        if (!enabled_ && !shadow_mode_) {
             RCLCPP_WARN(get_logger(),
-                "MPC command output is inhibited until the source-command stage-map gate is approved");
+                "MPC is inactive; no command publisher is created");
+        } else if (shadow_mode_) {
+            RCLCPP_WARN(get_logger(),
+                "MPC shadow active: subscribing to legal inputs; command authority is disabled");
         }
     }
 
@@ -175,87 +242,38 @@ private:
             }
             parsed.push_back(point);
         }
-        if (parsed.size() > 2) {
-            const auto & first = parsed.front();
-            const auto & last = parsed.back();
-            if (std::hypot(first.x - last.x, first.y - last.y) < 1.0e-4) {
-                parsed.pop_back();
-            }
-        }
-        if (parsed.size() < 3) {
-            return false;
-        }
         trajectory_ = std::move(parsed);
-        track_length_m_ = trajectory_.back().s;
-        if (!(track_length_m_ > 1.0e-3)) {
+        std::size_t point_count = trajectory_.size();
+        if (!mpc_trajectory_prepare(
+                trajectory_.data(), &point_count, &track_length_m_)) {
+            trajectory_.clear();
             track_length_m_ = 0.0;
-            for (std::size_t index = 0; index < trajectory_.size(); ++index) {
-                const auto & a = trajectory_[index];
-                const auto & b = trajectory_[(index + 1) % trajectory_.size()];
-                track_length_m_ += std::hypot(a.x - b.x, a.y - b.y);
-            }
-        }
-        mean_waypoint_spacing_m_ = track_length_m_ /
-            static_cast<double>(trajectory_.size());
-        if (!(mean_waypoint_spacing_m_ > 1.0e-5)) {
             return false;
         }
+        trajectory_.resize(point_count);
         RCLCPP_INFO(get_logger(), "Loaded MPC trajectory with %zu points (%.2f m)",
                     trajectory_.size(), track_length_m_);
         return true;
     }
 
-    std::size_t nearest_index(const PoseState & pose)
-    {
-        const std::size_t count = trajectory_.size();
-        const std::size_t search = progress_initialized_ ?
-            std::min(count, std::size_t{160}) : count;
-        const std::size_t start = progress_initialized_ ?
-            (last_closest_index_ + count - std::min(count - 1, std::size_t{24})) % count : 0;
-        double best_distance = std::numeric_limits<double>::infinity();
-        std::size_t best = last_closest_index_;
-        for (std::size_t offset = 0; offset < search; ++offset) {
-            const std::size_t index = (start + offset) % count;
-            const auto & point = trajectory_[index];
-            const double heading_error = std::abs(normalize_angle(point.heading - pose.yaw));
-            if (heading_error > 0.5 * kPi) {
-                continue;
-            }
-            const double distance = std::hypot(point.x - pose.x, point.y - pose.y);
-            if (distance < best_distance) {
-                best_distance = distance;
-                best = index;
-            }
-        }
-        if (!std::isfinite(best_distance)) {
-            for (std::size_t index = 0; index < count; ++index) {
-                const auto & point = trajectory_[index];
-                const double distance = std::hypot(point.x - pose.x, point.y - pose.y);
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    best = index;
-                }
-            }
-        }
-        closest_distance_m_ = best_distance;
-        return best;
-    }
-
-    void update_progress(std::size_t closest)
+    void update_progress(const MpcPathProjection_t & projection)
     {
         if (!progress_initialized_) {
             progress_initialized_ = true;
-            last_closest_index_ = closest;
+            last_closest_index_ = projection.segment;
+            last_projected_s_ = projection.s;
             return;
         }
-        double delta = trajectory_[closest].s - trajectory_[last_closest_index_].s;
-        if (delta < -0.5 * track_length_m_) {
-            delta += track_length_m_;
-        }
-        if (delta > 0.0 && delta < 0.5 * track_length_m_) {
+        double unwrapped_s = projection.s;
+        while (unwrapped_s - last_projected_s_ < -0.5 * track_length_m_)
+            unwrapped_s += track_length_m_;
+        while (unwrapped_s - last_projected_s_ > 0.5 * track_length_m_)
+            unwrapped_s -= track_length_m_;
+        const double delta = unwrapped_s - last_projected_s_;
+        if (delta > 0.0 && delta < 0.5 * track_length_m_)
             startup_progress_m_ += delta;
-        }
-        last_closest_index_ = closest;
+        last_projected_s_ = unwrapped_s;
+        last_closest_index_ = projection.segment;
     }
 
     double active_speed_ceiling() const
@@ -268,33 +286,9 @@ private:
         return startup_speed_mps_ + (max_speed_mps_ - startup_speed_mps_) * fraction;
     }
 
-    void make_reference(std::size_t closest, double speed_ceiling,
-                        TrajectoryReferencePoint_t reference[PREDICTION_HORIZON]) const
-    {
-        std::size_t index = closest;
-        for (int stage = 0; stage < PREDICTION_HORIZON; ++stage) {
-            const auto & point = trajectory_[index];
-            const double speed = clamp(point.speed, 0.0, speed_ceiling);
-            TrajectoryReferencePoint_t stage_reference{};
-            stage_reference.reference_lateral_error = 0.0f;
-            stage_reference.reference_heading_error = 0.0f;
-            stage_reference.reference_velocity = static_cast<float>(speed);
-            stage_reference.reference_lateral_velocity = 0.0f;
-            stage_reference.reference_yaw_rate =
-                static_cast<float>(point.curvature * speed);
-            stage_reference.path_curvature = static_cast<float>(point.curvature);
-            stage_reference.left_wall_bound = static_cast<float>(point.left_bound);
-            stage_reference.right_wall_bound = static_cast<float>(point.right_bound);
-            reference[stage] = stage_reference;
-            const auto advance_m = std::max(0.25, speed * TIME_STEP_SECONDS);
-            const auto advance_count = static_cast<std::size_t>(std::max(
-                1.0, std::round(advance_m / mean_waypoint_spacing_m_)));
-            index = (index + advance_count) % trajectory_.size();
-        }
-    }
-
     void publish_command(double steering, double speed)
     {
+        if (!command_pub_) return;
         auto command = ackermann_msgs::msg::AckermannDriveStamped();
         command.header.stamp = now();
         command.header.frame_id = command_frame_;
@@ -305,13 +299,184 @@ private:
         command_pub_->publish(command);
     }
 
-    void publish_stop(const char * reason)
+    void publish_stop(const char * reason, bool emit_shadow_diagnostic = true)
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
-        target_speed_mps_ = 0.0;
-        target_speed_initialized_ = true;
-        last_control_ = ControlInput_t{};
-        publish_command(0.0, 0.0);
+        mpc_rti_memory_reset(&rti_memory_);
+        if (enabled_) {
+            target_speed_mps_ = 0.0;
+            target_speed_initialized_ = true;
+            last_steering_command_rad_ = 0.0;
+            last_steering_rate_radps_ = 0.0;
+            last_target_speed_rate_mps2_ = 0.0;
+            publish_command(0.0, 0.0);
+        } else if (shadow_mode_) {
+            target_speed_initialized_ = false;
+        }
+        if (shadow_mode_ && emit_shadow_diagnostic)
+            publish_shadow_failure(reason);
+    }
+
+    void command_callback(
+        const ackermann_msgs::msg::AckermannDriveStamped::SharedPtr message)
+    {
+        const int64_t stamp_ns = rclcpp::Time(
+            message->header.stamp, get_clock()->get_clock_type()).nanoseconds();
+        const double speed = message->drive.speed;
+        const double steering = message->drive.steering_angle;
+        if (stamp_ns <= 0 || !std::isfinite(speed) || speed < 0.0 ||
+            speed > max_speed_mps_ || !std::isfinite(steering) ||
+            std::abs(steering) > rti_config_.model.max_steering_rad) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC shadow ignored invalid/out-of-envelope command history");
+            return;
+        }
+        if (observed_command_stamp_ns_ > 0) {
+            const int64_t delta_ns = stamp_ns - observed_command_stamp_ns_;
+            if (delta_ns <= 0) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                    "MPC shadow rejected out-of-order /cmd/speed history");
+                return;
+            }
+            const double dt = static_cast<double>(delta_ns) * 1.0e-9;
+            observed_steering_rate_radps_ =
+                (steering - observed_steering_command_rad_) / dt;
+            observed_target_speed_rate_mps2_ =
+                (speed - observed_target_speed_mps_) / dt;
+        }
+        observed_command_stamp_ns_ = stamp_ns;
+        observed_target_speed_mps_ = speed;
+        observed_steering_command_rad_ = steering;
+    }
+
+    void publish_shadow_failure(const char * reason)
+    {
+        if (!diagnostics_pub_) return;
+        std_msgs::msg::String message;
+        std::ostringstream json;
+        json << "{\"status\":\"rejected\",\"reason\":\"" << reason
+             << "\",\"source_stamp_ns\":" << last_source_stamp_.nanoseconds()
+             << '}';
+        message.data = json.str();
+        diagnostics_pub_->publish(message);
+    }
+
+    static const char * cycle_status_name(MpcRtiCycleStatus_t status)
+    {
+        switch (status) {
+        case MPC_RTI_CYCLE_ACCEPTED_OPTIMAL: return "accepted_optimal";
+        case MPC_RTI_CYCLE_ACCEPTED_DEGRADED: return "accepted_degraded";
+        case MPC_RTI_CYCLE_REJECTED_INPUT: return "rejected_input";
+        case MPC_RTI_CYCLE_REJECTED_SOLVER: return "rejected_solver";
+        case MPC_RTI_CYCLE_REJECTED_RESIDUAL: return "rejected_residual";
+        case MPC_RTI_CYCLE_REJECTED_REGULARIZATION:
+            return "rejected_regularization";
+        case MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT:
+            return "rejected_nonlinear_rollout";
+        }
+        return "unknown";
+    }
+
+    void publish_shadow_result(const MpcRtiState_t &state,
+        const MpcSynchronizedState &synchronized, double progress,
+        double source_dt_s, const MpcRtiCycleResult_t &result,
+        double solve_us, int64_t control_ros_stamp_ns,
+        int64_t callback_steady_ns, int64_t synchronize_steady_ns)
+    {
+        if (!diagnostics_pub_) return;
+        const int steps[] = {1, 5, 10, 20, 30};
+        std::ostringstream json;
+        json << std::setprecision(9)
+            << "{\"status\":\"" << cycle_status_name(result.status)
+            << "\",\"source_stamp_ns\":" << synchronized.source_stamp_ns
+            << ",\"control_ros_stamp_ns\":" << control_ros_stamp_ns
+            << ",\"source_age_s\":" << synchronized.source_age_s
+            << ",\"source_dt_s\":" << source_dt_s
+            << ",\"pose_odom_skew_s\":" << synchronized.pose_odom_skew_s
+            << ",\"host_timing_ns\":{" << "\"callback\":"
+            << callback_steady_ns << ",\"synchronize\":"
+            << synchronize_steady_ns << '}'
+            << ",\"observed_command\":{" << "\"stamp_ns\":"
+            << observed_command_stamp_ns_ << ",\"target_speed_mps\":"
+            << observed_target_speed_mps_ << ",\"steering_rad\":"
+            << observed_steering_command_rad_ << ",\"steering_rate_radps\":"
+            << observed_steering_rate_radps_ << ",\"target_speed_rate_mps2\":"
+            << observed_target_speed_rate_mps2_ << '}'
+            << ",\"progress_m\":" << progress
+            << ",\"state\":[" << state.plant.e_y << ','
+            << state.plant.e_psi << ',' << state.plant.u << ','
+            << state.plant.v << ',' << state.plant.r << ','
+            << state.plant.target_speed << ',' << state.plant.steering_command
+            << ',' << state.previous_steering_rate << ','
+            << state.previous_target_speed_rate << ']'
+            << ",\"solver\":{\"iterations\":" << result.solver_iterations
+            << ",\"primal_residual\":" << result.primal_residual
+            << ",\"dual_residual\":" << result.dual_residual
+            << ",\"max_regularization\":"
+            << result.maximum_regularization
+            << ",\"regularization_count\":" << result.regularization_count
+            << ",\"nonsmooth_columns\":"
+            << result.nonsmooth_jacobian_columns
+            << ",\"solve_us\":" << solve_us << '}'
+            << ",\"first_action\":["
+            << result.published_steering_command << ','
+            << result.published_target_speed << ','
+            << result.first_control.steering_rate << ','
+            << result.first_control.target_speed_rate << ']'
+            << ",\"predictions\":[";
+
+        if (result.status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+            result.status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            json << "],\"diagnostic_publish_steady_ns\":"
+                 << steady_time_ns() << '}';
+            std_msgs::msg::String message;
+            message.data = json.str();
+            diagnostics_pub_->publish(message);
+            return;
+        }
+
+        bool first = true;
+        for (const int step : steps) {
+            if (!first) json << ',';
+            first = false;
+            const MpcRtiState_t &predicted = rti_memory_.nominal.states[step];
+            MpcTrajectorySample_t sample{};
+            const double predicted_s = rti_memory_.nominal.progress[step];
+            if (!mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
+                    track_length_m_, predicted_s, &sample)) {
+                publish_shadow_failure("prediction_reference_unavailable");
+                return;
+            }
+            const double reference_speed = std::min(
+                sample.speed,
+                static_cast<double>(
+                    rti_config_.model.active_speed_ceiling_mps));
+            const double feedforward = clamp(
+                std::atan(sample.curvature /
+                    MPC_YAW_RATE_STEERING_GAIN_PER_M),
+                -rti_config_.model.max_steering_rad,
+                rti_config_.model.max_steering_rad);
+            const MpcModelControl_t &control =
+                rti_memory_.nominal.controls[step - 1];
+            json << "{\"n\":" << step << ",\"s_m\":" << predicted_s
+                << ",\"state\":[" << predicted.plant.e_y << ','
+                << predicted.plant.e_psi << ',' << predicted.plant.u << ','
+                << predicted.plant.v << ',' << predicted.plant.r << ','
+                << predicted.plant.target_speed << ','
+                << predicted.plant.steering_command << ']'
+                << ",\"reference\":[0,0," << reference_speed
+                << ",0," << sample.curvature * reference_speed << ','
+                << feedforward << ']'
+                << ",\"input\":[" << control.steering_rate << ','
+                << control.target_speed_rate << ']'
+                << ",\"corridor\":[" << sample.left_bound << ','
+                << sample.right_bound << "]}";
+        }
+        json << "],\"diagnostic_publish_steady_ns\":"
+             << steady_time_ns() << '}';
+        std_msgs::msg::String message;
+        message.data = json.str();
+        diagnostics_pub_->publish(message);
     }
 
     void pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message)
@@ -329,119 +494,189 @@ private:
             !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw)) {
             return;
         }
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        pose_.x = message->pose.pose.position.x;
-        pose_.y = message->pose.pose.position.y;
-        pose_.yaw = yaw;
-        pose_.stamp = rclcpp::Time(
+        const rclcpp::Time stamp(
             message->header.stamp, get_clock()->get_clock_type());
-        if (pose_.stamp.nanoseconds() == 0) {
-            pose_.stamp = now();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const auto status = state_synchronizer_.set_map_pose({
+            stamp.nanoseconds(), message->pose.pose.position.x,
+            message->pose.pose.position.y, yaw});
+        if (status != MpcSyncStatus::kOk) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC map-pose handoff rejected: %s",
+                MpcStateSynchronizer::status_name(status));
         }
-        pose_.valid = true;
     }
 
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
     {
-        PoseState pose;
-        MotionState motion;
+        const int64_t callback_steady_ns = steady_time_ns();
+        const auto & odom_pose = message->pose.pose;
+        const auto & q = odom_pose.orientation;
+        const double odom_yaw = std::atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        const rclcpp::Time odom_stamp(
+            message->header.stamp, get_clock()->get_clock_type());
+        if (odom_stamp.nanoseconds() <= 0 ||
+            !std::isfinite(odom_pose.position.x) ||
+            !std::isfinite(odom_pose.position.y) || !std::isfinite(odom_yaw) ||
+            !std::isfinite(message->twist.twist.linear.x) ||
+            !std::isfinite(message->twist.twist.linear.y) ||
+            !std::isfinite(message->twist.twist.angular.z)) {
+            publish_stop("MPC rejected zero-stamped or invalid odometry");
+            return;
+        }
+
+        if (!enabled_ && !shadow_mode_) return;
+        if (!trajectory_loaded_) {
+            publish_stop("MPC requires a valid trajectory");
+            return;
+        }
+
+        MpcSyncStatus odom_status;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            motion_.u = message->twist.twist.linear.x;
-            motion_.v = message->twist.twist.linear.y;
-            motion_.yaw_rate = message->twist.twist.angular.z;
-            motion_.stamp = rclcpp::Time(message->header.stamp, get_clock()->get_clock_type());
-            if (motion_.stamp.nanoseconds() == 0) {
-                motion_.stamp = now();
-            }
-            motion_.valid = std::isfinite(motion_.u) && std::isfinite(motion_.v) &&
-                std::isfinite(motion_.yaw_rate);
-            pose = pose_;
-            motion = motion_;
+            odom_status = state_synchronizer_.push_odometry({
+                odom_stamp.nanoseconds(), odom_pose.position.x,
+                odom_pose.position.y, odom_yaw,
+                message->twist.twist.linear.x,
+                message->twist.twist.linear.y,
+                message->twist.twist.angular.z});
         }
 
-        if (!enabled_) {
-            publish_stop("MPC is command-inhibited pending stage-map acceptance");
+        if (odom_status == MpcSyncStatus::kTimestampOrderFault ||
+            odom_status == MpcSyncStatus::kSourceGapFault) {
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                state_synchronizer_.reset();
+            }
+            mpc_rti_memory_reset(&rti_memory_);
+            target_speed_initialized_ = false;
+            last_source_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+            publish_stop(odom_status == MpcSyncStatus::kTimestampOrderFault ?
+                "MPC odometry source ordering fault; synchronizer reset" :
+                "MPC odometry source gap fault; synchronizer reset");
             return;
         }
-        if (!trajectory_loaded_ || !pose.valid || !motion.valid) {
-            publish_stop("MPC requires valid trajectory, map pose and odometry");
+        if (odom_status != MpcSyncStatus::kOk) {
+            publish_stop("MPC rejected invalid legal odometry sample");
             return;
         }
-        const auto current_time = now();
-        const double odom_age_s = (current_time - motion.stamp).seconds();
-        const double pose_age_s = (current_time - pose.stamp).seconds();
-        if (odom_age_s > input_timeout_s_ || pose_age_s > input_timeout_s_) {
+
+        MpcSynchronizedState coherent_state;
+        MpcSyncStatus sync_status;
+        const rclcpp::Time control_ros_time = now();
+        const int64_t synchronize_steady_ns = steady_time_ns();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            sync_status = state_synchronizer_.synchronize(
+                control_ros_time.nanoseconds(), &coherent_state);
+        }
+        if (sync_status != MpcSyncStatus::kOk) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC rejected stale source-stamped state "
-                "(odom age %.3f s, map-pose age %.3f s)",
-                odom_age_s, pose_age_s);
-            publish_command(0.0, 0.0);
+                "MPC source-time handoff rejected state: %s",
+                MpcStateSynchronizer::status_name(sync_status));
+            publish_stop("MPC coherent control-time state unavailable");
             return;
         }
-        if (last_source_stamp_.nanoseconds() != 0) {
-            const double source_dt = (motion.stamp - last_source_stamp_).seconds();
-            if (source_dt < source_dt_min_s_ || source_dt > source_dt_max_s_) {
-                mpc_reset();
-                target_speed_initialized_ = false;
-                last_source_stamp_ = motion.stamp;
-                publish_stop("MPC source timing fault; state was reset");
-                return;
-            }
-        }
-        const double source_dt = last_source_stamp_.nanoseconds() == 0 ?
-            TIME_STEP_SECONDS : (motion.stamp - last_source_stamp_).seconds();
-        last_source_stamp_ = motion.stamp;
 
-        const std::size_t closest = nearest_index(pose);
-        const auto & point = trajectory_[closest];
-        const double heading_error = normalize_angle(pose.yaw - point.heading);
+        const rclcpp::Time state_stamp(
+            coherent_state.source_stamp_ns, get_clock()->get_clock_type());
+        const double source_dt = last_source_stamp_.nanoseconds() == 0 ?
+            0.0 : (state_stamp - last_source_stamp_).seconds();
+        last_source_stamp_ = state_stamp;
+
+        MpcPathProjection_t projection{};
+        const std::size_t previous_segment = progress_initialized_ ?
+            last_closest_index_ : std::numeric_limits<std::size_t>::max();
+        if (!mpc_trajectory_project(trajectory_.data(), trajectory_.size(),
+                track_length_m_, coherent_state.map_x, coherent_state.map_y,
+                coherent_state.map_yaw, previous_segment, 160, &projection)) {
+            publish_stop("MPC could not project pose onto raceline");
+            return;
+        }
         if (!startup_path_validated_) {
-            if (closest_distance_m_ > startup_path_max_distance_m_ ||
-                std::abs(heading_error) > startup_path_heading_tolerance_rad_) {
+            if (projection.distance > startup_path_max_distance_m_ ||
+                std::abs(projection.heading_error) > startup_path_heading_tolerance_rad_) {
                 publish_stop("MPC startup path gate rejected pose");
                 return;
             }
             startup_path_validated_ = true;
         }
-        update_progress(closest);
-        const double speed_ceiling = active_speed_ceiling();
-        TrajectoryReferencePoint_t reference[PREDICTION_HORIZON];
-        make_reference(closest, speed_ceiling, reference);
-        const double race_speed = clamp(point.speed, 0.0, speed_ceiling);
+        update_progress(projection);
+        /* Shadow compares against the running controller's actual profile; it
+         * must not apply the MPC-only first-lap ramp to its inputs. */
+        const double speed_ceiling = shadow_mode_ ?
+            max_speed_mps_ : active_speed_ceiling();
+        rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
+        rti_config_.model.active_speed_ceiling_mps =
+            static_cast<float>(speed_ceiling);
+
+        double commanded_speed = target_speed_mps_;
+        double commanded_steering = last_steering_command_rad_;
+        double previous_steering_rate = last_steering_rate_radps_;
+        double previous_target_speed_rate = last_target_speed_rate_mps2_;
+        if (shadow_mode_ && observed_command_stamp_ns_ > 0) {
+            commanded_speed = observed_target_speed_mps_;
+            commanded_steering = observed_steering_command_rad_;
+            previous_steering_rate = observed_steering_rate_radps_;
+            previous_target_speed_rate = observed_target_speed_rate_mps2_;
+        }
         if (!target_speed_initialized_) {
-            target_speed_mps_ = clamp(std::max(0.0, motion.u), 0.0, race_speed);
+            if (!shadow_mode_ || observed_command_stamp_ns_ == 0)
+                commanded_speed = clamp(
+                    std::max(0.0, coherent_state.u), 0.0, speed_ceiling);
+            if (enabled_) target_speed_mps_ = commanded_speed;
             target_speed_initialized_ = true;
         }
 
-        const double dx = pose.x - point.x;
-        const double dy = pose.y - point.y;
-        FrenetState_t state{};
-        state.flat_error = static_cast<float>(
-            -std::sin(point.heading) * dx + std::cos(point.heading) * dy);
-        state.fhead_error = static_cast<float>(heading_error);
-        state.flong_vel = static_cast<float>(std::max(0.0, motion.u));
-        state.flat_vel = static_cast<float>(motion.v);
-        state.fyaw_rate = static_cast<float>(motion.yaw_rate);
-        state.ftarget_speed_mps = static_cast<float>(target_speed_mps_);
-        mpc_set_previous_command_with_dt(
-            &last_control_, static_cast<float>(source_dt), 0.0f, 0);
-        MpcSolverResult_t result{};
-        const MpcSolverStatus_t status = mpc_compute_optimal_control(
-            &state, reference, &result);
-        if (status != MPC_STATUS_SUCCESS && status != MPC_STATUS_MAXIMUM_ITERATIONS_REACHED) {
-            publish_stop("MPC solver did not produce a usable command");
+        MpcRtiState_t state{};
+        state.plant.e_y = static_cast<float>(projection.lateral_error);
+        state.plant.e_psi = static_cast<float>(projection.heading_error);
+        state.plant.u = static_cast<float>(std::max(0.0, coherent_state.u));
+        state.plant.v = static_cast<float>(coherent_state.v);
+        state.plant.r = static_cast<float>(coherent_state.yaw_rate);
+        state.plant.target_speed = static_cast<float>(commanded_speed);
+        state.plant.steering_command = static_cast<float>(commanded_steering);
+        state.previous_steering_rate = static_cast<float>(previous_steering_rate);
+        state.previous_target_speed_rate =
+            static_cast<float>(previous_target_speed_rate);
+
+        MpcRtiCycleResult_t result{};
+        const auto solve_start = std::chrono::steady_clock::now();
+        const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
+            &state, last_projected_s_, trajectory_.data(), trajectory_.size(),
+            track_length_m_, TIME_STEP_SECONDS, PREDICTION_HORIZON,
+            &rti_config_, &rti_memory_, &result);
+        const auto solve_finish = std::chrono::steady_clock::now();
+        const double solve_us = std::chrono::duration<double, std::micro>(
+            solve_finish - solve_start).count();
+        if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+            status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            if (shadow_mode_)
+                publish_shadow_result(state, coherent_state, last_projected_s_,
+                    source_dt, result, solve_us, control_ros_time.nanoseconds(),
+                    callback_steady_ns, synchronize_steady_ns);
+            publish_stop("MPC RTI cycle rejected its candidate",
+                         !shadow_mode_);
             return;
         }
 
-        target_speed_mps_ = clamp(
-            target_speed_mps_ + result.optimal_control.target_speed_rate * source_dt,
-            0.0, race_speed);
-        last_control_ = result.optimal_control;
-        publish_command(last_control_.steer_ang, target_speed_mps_);
+        if (enabled_) {
+            target_speed_mps_ = result.published_target_speed;
+            last_steering_command_rad_ = result.published_steering_command;
+            last_steering_rate_radps_ = result.first_control.steering_rate;
+            last_target_speed_rate_mps2_ = result.first_control.target_speed_rate;
+            publish_command(last_steering_command_rad_, target_speed_mps_);
+        } else {
+            publish_shadow_result(state, coherent_state, last_projected_s_,
+                source_dt, result, solve_us, control_ros_time.nanoseconds(),
+                callback_steady_ns, synchronize_steady_ns);
+        }
     }
 
     bool enabled_{};
+    bool shadow_mode_{};
     bool trajectory_loaded_{};
     bool startup_path_validated_{};
     bool progress_initialized_{};
@@ -449,32 +684,44 @@ private:
     std::string odom_topic_;
     std::string pose_topic_;
     std::string command_topic_;
+    std::string diagnostics_topic_;
     std::string path_frame_;
     std::string command_frame_;
     std::string trajectory_file_;
     double max_speed_mps_{};
     double startup_speed_mps_{};
     double startup_ramp_laps_{};
-    double input_timeout_s_{};
+    double state_extrapolation_max_s_{};
+    double pose_odom_max_skew_s_{};
     double source_dt_min_s_{};
     double source_dt_max_s_{};
     double startup_path_max_distance_m_{};
     double startup_path_heading_tolerance_rad_{};
     double track_length_m_{};
-    double mean_waypoint_spacing_m_{};
     double startup_progress_m_{};
-    double closest_distance_m_{};
+    double last_projected_s_{};
     double target_speed_mps_{};
+    double last_steering_command_rad_{};
+    double last_steering_rate_radps_{};
+    double last_target_speed_rate_mps2_{};
+    double observed_target_speed_mps_{};
+    double observed_steering_command_rad_{};
+    double observed_steering_rate_radps_{};
+    double observed_target_speed_rate_mps2_{};
+    int64_t observed_command_stamp_ns_{};
     std::size_t last_closest_index_{};
     rclcpp::Time last_source_stamp_{0, 0, RCL_ROS_TIME};
-    ControlInput_t last_control_{};
+    MpcRtiCycleConfiguration_t rti_config_{};
+    MpcRtiMemory_t rti_memory_{};
     std::vector<Waypoint> trajectory_;
-    PoseState pose_;
-    MotionState motion_;
+    MpcStateSynchronizer state_synchronizer_;
     std::mutex state_mutex_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr command_pub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
+        observed_command_sub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
 };
 
 }  // namespace f1tenth_mpc

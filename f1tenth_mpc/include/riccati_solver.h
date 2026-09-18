@@ -28,6 +28,12 @@
 #include <stdio.h>
 #include <math.h>
 
+#ifdef __cplusplus
+#define RICCATI_RESTRICT __restrict
+#else
+#define RICCATI_RESTRICT restrict
+#endif
+
 /**
  * @brief Compute the analytical inverse of a 2x2 matrix.
  * @details Inputs: S is a 2x2 matrix in row-major layout.
@@ -52,6 +58,8 @@ typedef struct
     float last_fallback_s00;
     float last_fallback_s11;
     int invert_fallback_count;
+    float max_control_hessian_regularization;
+    int control_hessian_regularization_count;
 } RiccatiDebugInfo_t;
 
 #define RICCATI_DEBUG_TRACE_MAX 256
@@ -99,15 +107,15 @@ typedef struct
  * @param y_u ADMM dual control variables.
  * @param x_out Output state trajectory.
  * @param u_out Output control trajectory.
- * @return None.
+ * @return 1 when the complete pass is finite and valid; otherwise 0.
  */
-void riccati_solver_pass(
-    const RiccatiStepData_t * restrict step_data,
-    const float * restrict terminal_Q,
-    const float * restrict terminal_q,
-    const float * restrict terminal_x_lb,
-    const float * restrict terminal_x_ub,
-    const float * restrict x0,
+int riccati_solver_pass(
+    const RiccatiStepData_t * RICCATI_RESTRICT step_data,
+    const float * RICCATI_RESTRICT terminal_Q,
+    const float * RICCATI_RESTRICT terminal_q,
+    const float * RICCATI_RESTRICT terminal_x_lb,
+    const float * RICCATI_RESTRICT terminal_x_ub,
+    const float * RICCATI_RESTRICT x0,
     int nx, int nu, int N,
     float rho,
     float rho_u,
@@ -117,6 +125,8 @@ void riccati_solver_pass(
     const float y_u[][RICCATI_MAX_NU],
     float x_out[][RICCATI_MAX_NX],
     float u_out[][RICCATI_MAX_NU]);
+
+#undef RICCATI_RESTRICT
 
 /**
  * @brief Zero all ADMM warm-start buffers and mark the state as uninitialized.
@@ -132,6 +142,14 @@ void riccati_solver_pass(
  * @return None.
  */
 void riccati_admm_state_init(RiccatiAdmmState_t *state);
+
+/** Shift a valid ADMM warm-start one stage toward the present. */
+void riccati_admm_shift_warm_start(
+    RiccatiAdmmState_t *state,
+    int nx,
+    int nu,
+    int horizon,
+    const float *new_x0);
 
 /**
  * @brief Solve constrained LQR over a finite horizon using Riccati-ADMM.
@@ -150,9 +168,9 @@ void riccati_admm_state_init(RiccatiAdmmState_t *state);
  * 2. Riccati forward pass: roll out x_k, u_k from x0
  * 3. z-update: project (x + y, u + y) onto box constraints
  * 4. y-update: dual variable update
- * 5. Convergence check on primal/dual residuals
+ * 5. Convergence check against the configured absolute maximum residual
  *
- * Complexity: O(N × nx³) per iteration (dominated by 5×5 matrix ops)
+ * Complexity: O(N × (nx³ + nu·nx²)); the MPC rewrite uses nx=9, nu=2.
  *
  * @param step_data   Per-step dynamics and cost data (array of N elements)
  * @param terminal_Q  Terminal state cost (diagonal weights, length nx)

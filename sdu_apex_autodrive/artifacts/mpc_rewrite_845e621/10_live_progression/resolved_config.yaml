@@ -1,0 +1,6 @@
+status: not_run
+simulator_mode: batchmode
+no_graphics_flag: false
+progression_mps: [4.0, 8.0, 12.0, 14.0]
+require_reference_to_request_speed: true
+production_mpc_enabled: false

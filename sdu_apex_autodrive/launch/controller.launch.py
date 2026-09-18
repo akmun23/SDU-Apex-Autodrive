@@ -82,6 +82,11 @@ def _setup(context):
     if controller not in ("ftg", "pure_pursuit", "mpc"):
         raise RuntimeError(
             "controller must be ftg, pure_pursuit, or mpc")
+    with_mpc_shadow = _bool(
+        LaunchConfiguration("with_mpc_shadow").perform(context))
+    if with_mpc_shadow and controller != "pure_pursuit":
+        raise RuntimeError(
+            "with_mpc_shadow:=true is supported only alongside Pure Pursuit")
 
     map_path = LaunchConfiguration("map").perform(context)
     trajectory = LaunchConfiguration("trajectory").perform(context)
@@ -125,6 +130,8 @@ def _setup(context):
         expected_runtime_nodes.add("ground_truth_amcl_monitor")
     if with_model_id_recorder:
         expected_runtime_nodes.add("model_id_timing_recorder")
+    if with_mpc_shadow:
+        expected_runtime_nodes.add("mpc_shadow_node")
     _reject_existing_runtime_nodes(expected_runtime_nodes)
 
     if needs_localization and not os.path.isfile(map_path):
@@ -345,12 +352,37 @@ def _setup(context):
                 },
             ],
         )
+        components = [component]
+        if with_mpc_shadow:
+            if not os.path.isfile(trajectory):
+                raise RuntimeError(
+                    f"MPC shadow requires a valid raceline: {trajectory}")
+            shadow_component = ComposableNode(
+                package="f1tenth_mpc",
+                plugin="f1tenth_mpc::MpcControllerNode",
+                name="mpc_shadow_node",
+                parameters=[
+                    LaunchConfiguration("mpc_params"),
+                    {
+                        "enabled": False,
+                        "shadow_mode": True,
+                        "trajectory_file": trajectory,
+                        "max_speed_mps": ParameterValue(
+                            LaunchConfiguration("controller_max_speed"),
+                            value_type=float,
+                        ),
+                        "command_topic": "/cmd/speed",
+                        "diagnostics_topic": "/mpc_shadow/diagnostics",
+                    },
+                ],
+            )
+            components.append(shadow_component)
         actions.append(ComposableNodeContainer(
             name="controller_container",
             namespace="",
             package="rclcpp_components",
             executable="component_container",
-            composable_node_descriptions=[component],
+            composable_node_descriptions=components,
             output="screen",
         ))
     else:
@@ -420,7 +452,7 @@ def _setup(context):
 
     actions.append(LogInfo(msg=(
         f"controller={controller} custom_amcl={needs_localization} "
-        f"rviz={with_rviz}"
+        f"mpc_shadow={with_mpc_shadow} rviz={with_rviz}"
     )))
     return actions
 
@@ -585,6 +617,14 @@ def generate_launch_description():
             description=(
                 "Allow MPC commands. Keep false until the source-command "
                 "stage map passes legal-state N30 validation."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "with_mpc_shadow",
+            default_value="false",
+            description=(
+                "Run the 9-state MPC beside Pure Pursuit without /cmd/speed "
+                "authority; record /mpc_shadow/diagnostics for Phase 10."
             ),
         ),
         DeclareLaunchArgument(

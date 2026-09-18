@@ -1,0 +1,32 @@
+mpc_controller_node:
+  ros__parameters:
+    enabled: false
+    odom_topic: /odom
+    pose_topic: /current_map_pose
+    command_topic: /cmd/speed
+    path_frame: map
+    command_frame: base_link
+    trajectory_file: ""
+    max_speed_mps: 16.0
+    startup_speed_mps: 1.5
+    startup_ramp_laps: 1.0
+    state_extrapolation_max_s: 0.12
+    pose_odom_max_skew_s: 0.12
+    source_dt_min_s: 0.001
+    source_dt_max_s: 0.250
+    startup_path_max_distance_m: 0.80
+    startup_path_heading_tolerance_rad: 0.75
+    weight_lateral_error: 1500.0
+    weight_heading_error: 50.0
+    weight_velocity: 200.0
+    weight_lateral_velocity: 5.0
+    weight_yaw_rate: 1.5
+    weight_target_speed_state: 20.0
+    weight_commanded_steering: 1.0
+    weight_effective_steering: 1.0
+    weight_steering_rate: 5.0
+    weight_target_speed_rate_change: 5.0
+    weight_steering_effort: 2.0
+    weight_target_speed_rate_effort: 0.5
+    max_solver_iterations: 50
+    solver_convergence_tolerance: 0.01

@@ -1,0 +1,23 @@
+HEAD: 845e621989daaf1e9fbe041723f7e6066a6f01d2
+Worktree was dirty; current changes are part of the handoff-driven MPC development.
+
+ M f1tenth_mpc/CMakeLists.txt
+ M f1tenth_mpc/README.md
+ M f1tenth_mpc/config/mpc_autodrive.yaml
+ M f1tenth_mpc/docs/SIMULATOR_NATIVE_MODEL_WORKLIST.md
+ M f1tenth_mpc/include/mpc_types.h
+ M f1tenth_mpc/include/riccati_solver.h
+ M f1tenth_mpc/src/mpc.c
+ M f1tenth_mpc/src/mpc_controller_node.cpp
+ M f1tenth_mpc/src/riccati_solver.c
+ M f1tenth_mpc/src/vehicle_model.c
+ M f1tenth_mpc/test/test_mpc.c
+ M f1tenth_mpc/test/test_vehicle_model.c
+?? f1tenth_mpc/include/mpc_reference.h
+?? f1tenth_mpc/include/mpc_state_synchronizer.hpp
+?? f1tenth_mpc/src/mpc_reference.c
+?? f1tenth_mpc/src/mpc_state_synchronizer.cpp
+?? f1tenth_mpc/test/benchmark_mpc_core.c
+?? f1tenth_mpc/test/test_mpc_reference.c
+?? f1tenth_mpc/test/test_mpc_state_synchronizer.cpp
+?? f1tenth_mpc/test/test_riccati_solver.c

@@ -129,6 +129,138 @@ static void test_shared_stage_and_numerical_linearization(void)
                "speed slew advances the carried actuator target state");
 }
 
+static void test_perfect_turn_frenet_invariance(void)
+{
+    const float curvature = 0.96754f;
+    const float speed = 5.749041f;
+    const float steady_target = speed -
+        (MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
+         MPC_LONGITUDINAL_SPEED_COEFF_PER_S * speed) /
+            MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S;
+    const FrenetState_t state = {
+        .flat_error = 0.0f,
+        .fhead_error = 0.0f,
+        .flong_vel = speed,
+        .flat_vel = 0.0f,
+        .fyaw_rate = curvature * speed,
+        .ftarget_speed_mps = steady_target,
+    };
+    const ControlInput_t command = {
+        .steer_ang = atanf(curvature / MPC_YAW_RATE_STEERING_GAIN_PER_M),
+        .target_speed_rate = 0.0f,
+    };
+    const FrenetState_t next = vehicle_model_predict_next_frenet_state(
+        &state, &command, TIME_STEP_SECONDS, curvature);
+
+    check_close(next.flat_error, 0.0f, 1.0e-5f,
+                "ideal constant-curvature tracking creates no lateral drift");
+    check_close(next.fhead_error, 0.0f, 1.0e-5f,
+                "ideal constant-curvature tracking preserves zero heading error");
+}
+
+static void test_authoritative_seven_state_stage(void)
+{
+    const float dt = TIME_STEP_SECONDS;
+    const float speed = 4.0f;
+    const float target = speed -
+        (MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
+         MPC_LONGITUDINAL_SPEED_COEFF_PER_S * speed) /
+            MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S;
+    const MpcModelState_t state = {
+        .e_y = 0.0f,
+        .e_psi = 0.0f,
+        .u = speed,
+        .v = 0.0f,
+        .r = 0.2f,
+        .target_speed = target,
+        .steering_command = 0.0f,
+    };
+    const MpcModelControl_t control = {
+        .steering_rate = 1.0f,
+        .target_speed_rate = 0.0f,
+    };
+    const MpcStageResult_t stage = mpc_vehicle_model_step(
+        &state, &control, dt, 0.0f);
+    check_true(stage.valid, "authoritative seven-state stage is valid");
+    check_close(stage.next.steering_command, dt, 1.0e-7f,
+                "steering command integrates q_delta over the prediction dt");
+    check_close(stage.next.v, state.v, 1.0e-7f,
+                "unidentified lateral velocity remains held constant");
+
+    const float alpha = expf(-dt / MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS);
+    const float u_mid = 0.5f * (state.u + stage.next.u);
+    const float yaw_steady = MPC_YAW_RATE_STEERING_GAIN_PER_M * u_mid *
+        tanf(stage.next.steering_command);
+    check_close(stage.next.r,
+        alpha * state.r + (1.0f - alpha) * yaw_steady, 1.0e-6f,
+        "same-interval yaw response uses the newly published steering command");
+
+    MpcModelState_t speed_state = state;
+    speed_state.target_speed = 4.0f;
+    const MpcModelControl_t speed_control = {0.0f, 1.0f};
+    const MpcStageResult_t speed_stage = mpc_vehicle_model_step(
+        &speed_state, &speed_control, dt, 0.0f);
+    check_close(speed_stage.next.target_speed, 4.025f, 1.0e-7f,
+                "target-speed state integrates q_v over the prediction dt");
+
+    MpcModelState_t clipped_state = state;
+    clipped_state.steering_command = 0.52f;
+    clipped_state.target_speed = 15.99f;
+    const MpcModelControl_t clipped_control = {3.2f, 3.0f};
+    const MpcStageResult_t clipped = mpc_vehicle_model_step(
+        &clipped_state, &clipped_control, dt, 0.0f);
+    check_close(clipped.next.steering_command, SOURCE_MAX_STEERING_RAD,
+                1.0e-6f, "steering command respects the source steering limit");
+    check_close(clipped.next.target_speed, 16.0f, 1.0e-6f,
+                "target speed respects the project command ceiling");
+    check_true((clipped.branch_flags & MPC_STAGE_CLIPPED_STEERING_COMMAND) &&
+               (clipped.branch_flags & MPC_STAGE_CLIPPED_TARGET_SPEED),
+        "stage reports nonsmooth steering and target-speed saturation branches");
+
+    MpcModelState_t brake_state = state;
+    brake_state.u = 6.0f;
+    brake_state.target_speed = 0.0f;
+    const MpcModelControl_t hold_brake = {0.0f, 0.0f};
+    const MpcStageResult_t braking = mpc_vehicle_model_step(
+        &brake_state, &hold_brake, dt, 0.0f);
+    const float brake_limit = MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 +
+        MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV * brake_state.u;
+    check_close(braking.body_accel_mps2, -brake_limit, 1.0e-5f,
+                "full-brake stage uses the measured speed-dependent envelope");
+    check_close(braking.next.u, brake_state.u - dt * brake_limit, 1.0e-5f,
+                "braking response integrates the accepted longitudinal model");
+
+    const float curvature = 0.8f;
+    const float turn_delta = atanf(
+        curvature / MPC_YAW_RATE_STEERING_GAIN_PER_M);
+    MpcModelState_t turn = {
+        .e_y = 0.0f,
+        .e_psi = 0.0f,
+        .u = speed,
+        .v = 0.0f,
+        .r = curvature * speed,
+        .target_speed = target,
+        .steering_command = turn_delta,
+    };
+    const MpcModelControl_t hold = {0.0f, 0.0f};
+    const MpcStageResult_t turn_stage = mpc_vehicle_model_step(
+        &turn, &hold, dt, curvature);
+    check_true(turn_stage.valid,
+               "ideal constant-curvature stage remains inside Frenet domain");
+    check_close(turn_stage.next.e_y, 0.0f, 1.0e-5f,
+                "perfect turn preserves zero cross-track error");
+    check_close(turn_stage.next.e_psi, 0.0f, 1.0e-5f,
+                "perfect turn preserves zero heading error");
+    check_close(turn_stage.delta_s_m, dt * speed, 1.0e-5f,
+                "stage progress agrees with speed times dt at equilibrium");
+
+    turn.e_y = 0.096f;
+    const MpcStageResult_t invalid_frenet = mpc_vehicle_model_step(
+        &turn, &hold, dt, 10.0f);
+    check_true(!invalid_frenet.valid,
+               "Frenet denominator near zero is reported as invalid");
+}
+
 static void test_identified_longitudinal_response_and_braking_envelope(void)
 {
     FrenetState_t state = {
@@ -166,6 +298,8 @@ int main(void)
     test_source_geometry_and_command_policy();
     test_identified_yaw_response_and_target_speed_bound();
     test_shared_stage_and_numerical_linearization();
+    test_perfect_turn_frenet_invariance();
+    test_authoritative_seven_state_stage();
     test_identified_longitudinal_response_and_braking_envelope();
     if (failures != 0) {
         fprintf(stderr, "%d vehicle-model test(s) failed\n", failures);

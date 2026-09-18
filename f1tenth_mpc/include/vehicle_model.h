@@ -15,6 +15,50 @@
 
 #include "mpc_types.h"
 
+typedef struct
+{
+    float e_y;
+    float e_psi;
+    float u;
+    float v;
+    float r;
+    float target_speed;
+    float steering_command;
+} MpcModelState_t;
+
+typedef struct
+{
+    float steering_rate;
+    float target_speed_rate;
+} MpcModelControl_t;
+
+enum
+{
+    MPC_STAGE_CLIPPED_STEERING_RATE = 1u << 0,
+    MPC_STAGE_CLIPPED_SPEED_RATE = 1u << 1,
+    MPC_STAGE_CLIPPED_STEERING_COMMAND = 1u << 2,
+    MPC_STAGE_CLIPPED_TARGET_SPEED = 1u << 3,
+    MPC_STAGE_CLIPPED_ACCELERATION = 1u << 4,
+    MPC_STAGE_CLIPPED_BODY_SPEED = 1u << 5,
+};
+
+typedef struct
+{
+    MpcModelState_t next;
+    float delta_s_m;
+    float body_accel_mps2;
+    unsigned int branch_flags;
+    int valid;
+} MpcStageResult_t;
+
+/* Authoritative 7-state accepted AutoDRIVE model stage. The control-rate
+ * decisions update command states before this same interval's response. */
+MpcStageResult_t mpc_vehicle_model_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature);
+
 VehicleParameters_t vehicle_model_default_parameters(void);
 VehicleParameters_t vehicle_model_get_parameters(void);
 int vehicle_model_set_parameters(const VehicleParameters_t *parameters);

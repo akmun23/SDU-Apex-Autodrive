@@ -131,6 +131,122 @@ static float longitudinal_speed_response(
         0.0f, active_parameters.maximum_command_speed_mps);
 }
 
+static int finite_mpc_state(const MpcModelState_t *state)
+{
+    return state && isfinite(state->e_y) && isfinite(state->e_psi) &&
+        isfinite(state->u) && isfinite(state->v) && isfinite(state->r) &&
+        isfinite(state->target_speed) && isfinite(state->steering_command);
+}
+
+MpcStageResult_t mpc_vehicle_model_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature)
+{
+    MpcStageResult_t result = {0};
+    if (!finite_mpc_state(state) || !control ||
+        !isfinite(control->steering_rate) ||
+        !isfinite(control->target_speed_rate) ||
+        !(dt > 0.0f) || !isfinite(dt) || !isfinite(path_curvature)) {
+        return result;
+    }
+
+    const VehicleParameters_t parameters = vehicle_model_get_parameters();
+    float q_delta = control->steering_rate;
+    float q_speed = control->target_speed_rate;
+    if (q_delta < -SOURCE_STEERING_RATE_RADPS ||
+        q_delta > SOURCE_STEERING_RATE_RADPS) {
+        q_delta = clampf_local(q_delta, -SOURCE_STEERING_RATE_RADPS,
+                               SOURCE_STEERING_RATE_RADPS);
+        result.branch_flags |= MPC_STAGE_CLIPPED_STEERING_RATE;
+    }
+    if (q_speed < -parameters.maximum_target_speed_rate_reduction_mps2 ||
+        q_speed > parameters.maximum_target_speed_rate_increase_mps2) {
+        q_speed = clampf_local(q_speed,
+            -parameters.maximum_target_speed_rate_reduction_mps2,
+            parameters.maximum_target_speed_rate_increase_mps2);
+        result.branch_flags |= MPC_STAGE_CLIPPED_SPEED_RATE;
+    }
+
+    const float delta_raw = state->steering_command + dt * q_delta;
+    const float delta_next = clampf_local(delta_raw,
+        -parameters.max_steering_angle, parameters.max_steering_angle);
+    if (delta_next != delta_raw)
+        result.branch_flags |= MPC_STAGE_CLIPPED_STEERING_COMMAND;
+
+    const float target_raw = state->target_speed + dt * q_speed;
+    const float target_next = clampf_local(
+        target_raw, 0.0f, parameters.maximum_command_speed_mps);
+    if (target_next != target_raw)
+        result.branch_flags |= MPC_STAGE_CLIPPED_TARGET_SPEED;
+    const float target_mid = 0.5f * (state->target_speed + target_next);
+
+    const float u0 = clampf_local(state->u, 0.0f,
+                                  parameters.maximum_command_speed_mps);
+    float acceleration =
+        MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
+        MPC_LONGITUDINAL_SPEED_COEFF_PER_S * u0 +
+        MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S * (target_mid - u0) +
+        MPC_LONGITUDINAL_TARGET_RATE_COEFF * q_speed;
+    const float brake_limit =
+        MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 +
+        MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV * u0;
+    const float clipped_acceleration = clampf_local(
+        acceleration, -brake_limit, MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2);
+    if (clipped_acceleration != acceleration)
+        result.branch_flags |= MPC_STAGE_CLIPPED_ACCELERATION;
+    acceleration = clipped_acceleration;
+
+    const float u_raw = u0 + dt * acceleration;
+    const float u_next = clampf_local(
+        u_raw, 0.0f, parameters.maximum_command_speed_mps);
+    if (u_next != u_raw) result.branch_flags |= MPC_STAGE_CLIPPED_BODY_SPEED;
+    const float u_mid = 0.5f * (u0 + u_next);
+
+    const float yaw_retention = expf(
+        -dt / MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS);
+    const float yaw_steady = MPC_YAW_RATE_STEERING_GAIN_PER_M * u_mid *
+        tanf(delta_next);
+    const float r_next = yaw_retention * state->r +
+        (1.0f - yaw_retention) * yaw_steady;
+    const float r_mid = 0.5f * (state->r + r_next);
+
+    const float denominator0 = 1.0f - path_curvature * state->e_y;
+    if (fabsf(denominator0) < 0.05f) return result;
+    const float s_dot0 =
+        (u0 * cosf(state->e_psi) - state->v * sinf(state->e_psi)) /
+        denominator0;
+    const float ey_dot0 =
+        u0 * sinf(state->e_psi) + state->v * cosf(state->e_psi);
+    const float epsi_dot0 = state->r - path_curvature * s_dot0;
+    const float ey_mid = state->e_y + 0.5f * dt * ey_dot0;
+    const float epsi_mid = state->e_psi + 0.5f * dt * epsi_dot0;
+    const float denominator_mid = 1.0f - path_curvature * ey_mid;
+    if (fabsf(denominator_mid) < 0.05f) return result;
+
+    const float s_dot_mid =
+        (u_mid * cosf(epsi_mid) - state->v * sinf(epsi_mid)) /
+        denominator_mid;
+    const float ey_dot_mid =
+        u_mid * sinf(epsi_mid) + state->v * cosf(epsi_mid);
+    const float epsi_dot_mid = r_mid - path_curvature * s_dot_mid;
+
+    result.next.e_y = state->e_y + dt * ey_dot_mid;
+    const float epsi_next = state->e_psi + dt * epsi_dot_mid;
+    result.next.e_psi = atan2f(sinf(epsi_next), cosf(epsi_next));
+    result.next.u = u_next;
+    result.next.v = state->v;
+    result.next.r = r_next;
+    result.next.target_speed = target_next;
+    result.next.steering_command = delta_next;
+    result.delta_s_m = dt * s_dot_mid;
+    result.body_accel_mps2 = acceleration;
+    result.valid = finite_mpc_state(&result.next) &&
+        isfinite(result.delta_s_m) && isfinite(result.body_accel_mps2);
+    return result;
+}
+
 VehicleState_t vehicle_model_predict_next_state(
     const VehicleState_t *current_state,
     const ControlInput_t *control_input,
@@ -202,20 +318,37 @@ FrenetState_t vehicle_model_predict_next_frenet_state(
     const float r1 = yaw_rate_response(
         u_mid, control.steer_ang, state->fyaw_rate, time_step);
     const float r_mid = 0.5f * (state->fyaw_rate + r1);
-    const float heading_mid = state->fhead_error + 0.5f * time_step * r_mid;
-    float denominator = 1.0f - path_curvature * state->flat_error;
-    if (fabsf(denominator) < 0.05f)
-        denominator = denominator < 0.0f ? -0.05f : 0.05f;
+    const float v = state->flat_vel;
+    const float denominator0 = 1.0f - path_curvature * state->flat_error;
+    float safe_denominator0 = denominator0;
+    if (fabsf(safe_denominator0) < 0.05f)
+        safe_denominator0 = safe_denominator0 < 0.0f ? -0.05f : 0.05f;
 
-    const float path_progress =
-        (u_mid * cosf(heading_mid) - state->flat_vel * sinf(heading_mid)) /
-        denominator;
+    /* Midpoint/RK2 Frenet kinematics.  The initial heading-error derivative
+     * must include path-frame rotation (r - kappa*s_dot); omitting it creates
+     * artificial lateral motion even for ideal constant-curvature following. */
+    const float s_dot0 =
+        (u0 * cosf(state->fhead_error) - v * sinf(state->fhead_error)) /
+        safe_denominator0;
+    const float ey_dot0 =
+        u0 * sinf(state->fhead_error) + v * cosf(state->fhead_error);
+    const float epsi_dot0 = state->fyaw_rate - path_curvature * s_dot0;
+    const float ey_mid = state->flat_error + 0.5f * time_step * ey_dot0;
+    const float epsi_mid = state->fhead_error + 0.5f * time_step * epsi_dot0;
+    const float denominator_mid = 1.0f - path_curvature * ey_mid;
+    float safe_denominator_mid = denominator_mid;
+    if (fabsf(safe_denominator_mid) < 0.05f)
+        safe_denominator_mid = safe_denominator_mid < 0.0f ? -0.05f : 0.05f;
+    const float s_dot_mid =
+        (u_mid * cosf(epsi_mid) - v * sinf(epsi_mid)) / safe_denominator_mid;
+    const float ey_dot_mid =
+        u_mid * sinf(epsi_mid) + v * cosf(epsi_mid);
+    const float epsi_dot_mid = r_mid - path_curvature * s_dot_mid;
     FrenetState_t next = *state;
-    next.flat_error += time_step * (
-        u_mid * sinf(heading_mid) + state->flat_vel * cosf(heading_mid));
+    next.flat_error += time_step * ey_dot_mid;
     next.fhead_error = atan2f(
-        sinf(state->fhead_error + time_step * (r_mid - path_curvature * path_progress)),
-        cosf(state->fhead_error + time_step * (r_mid - path_curvature * path_progress)));
+        sinf(state->fhead_error + time_step * epsi_dot_mid),
+        cosf(state->fhead_error + time_step * epsi_dot_mid));
     next.flong_vel = u1;
     next.fyaw_rate = r1;
     next.ftarget_speed_mps = target_speed1;

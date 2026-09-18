@@ -1,0 +1,35 @@
+{
+  "phase": "source_time_state_synchronizer",
+  "status": "implemented_and_replayed; command_time_prediction_pending",
+  "trace": "sdu_apex_autodrive/artifacts/simulator_trace/mpc_target_response_candidate_4mps_20260918/events.csv",
+  "runtime_inputs_consumed": ["/odom", "/current_map_pose"],
+  "offline_only_inputs_consumed": [],
+  "replay": {
+    "odom_events": 2306,
+    "synchronized_events": 2255,
+    "synchronized_fraction": 0.97788465,
+    "accepted_source_age_ms_p95": 85.0517,
+    "accepted_source_age_ms_max": 118.111,
+    "timestamp_order_faults": 0,
+    "source_gap_faults": 0,
+    "other_rejections": 20,
+    "source_dt_contract_s": [0.001, 0.25],
+    "source_timestamp_quantization_tolerance_us": 1.0,
+    "configured_max_pose_odom_skew_s": 0.12,
+    "configured_max_source_state_age_s": 0.12
+  },
+  "behavior": {
+    "map_pose_caught_up_to_latest_odom": true,
+    "uses_se2_delta": true,
+    "uses_future_sensor_sample_after_command_time": false,
+    "zero_header_stamp_replaced_with_now": false,
+    "forward_prediction_to_command_application_time": false,
+    "old_75ms_absolute_age_gate_removed_from_active_node": true
+  },
+  "validation": {
+    "unit_and_recorded_replay_test": "mpc_state_synchronizer_test",
+    "result": "passed",
+    "full_package_tests_at_capture": "5 passed, 0 failed",
+    "simulator_started": false
+  }
+}

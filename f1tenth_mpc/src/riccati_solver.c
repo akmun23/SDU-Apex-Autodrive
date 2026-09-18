@@ -79,6 +79,50 @@ void riccati_admm_state_init(RiccatiAdmmState_t *state)
     state->initialized = 0;
 }
 
+void riccati_admm_shift_warm_start(
+    RiccatiAdmmState_t *state,
+    int nx,
+    int nu,
+    int horizon,
+    const float *new_x0)
+{
+    if (!state || !state->initialized || !new_x0 ||
+        nx <= 0 || nx > RICCATI_MAX_NX ||
+        nu <= 0 || nu > RICCATI_MAX_NU ||
+        horizon <= 0 || horizon > PREDICTION_HORIZON) {
+        return;
+    }
+
+    for (int k = 0; k < horizon; ++k) {
+        const int source = (k + 1 <= horizon) ? k + 1 : horizon;
+        for (int i = 0; i < nx; ++i) {
+            state->z_x[k][i] = state->z_x[source][i];
+            state->y_x[k][i] = state->y_x[source][i];
+        }
+    }
+    /* Hold the prior terminal prediction at the new horizon endpoint. */
+    for (int i = 0; i < nx; ++i) {
+        state->z_x[horizon][i] = state->z_x[horizon - 1][i];
+        state->y_x[horizon][i] = state->y_x[horizon - 1][i];
+    }
+    for (int k = 0; k < horizon - 1; ++k) {
+        for (int a = 0; a < nu; ++a) {
+            state->z_u[k][a] = state->z_u[k + 1][a];
+            state->y_u[k][a] = state->y_u[k + 1][a];
+        }
+    }
+    if (horizon > 1) {
+        for (int a = 0; a < nu; ++a) {
+            state->z_u[horizon - 1][a] = state->z_u[horizon - 2][a];
+            state->y_u[horizon - 1][a] = state->y_u[horizon - 2][a];
+        }
+    }
+    for (int i = 0; i < nx; ++i) {
+        state->z_x[0][i] = new_x0[i];
+        state->y_x[0][i] = 0.0f;
+    }
+}
+
 /*===========================================================================
  * 2x2 Matrix Inverse (for S = R + B^T P B)
  *===========================================================================*/
@@ -105,11 +149,76 @@ int riccati_invert_2x2(
     return 0;
 }
 
+/* Symmetrize and, only when necessary, add bounded diagonal regularization
+ * before inverting the active 1x1 or 2x2 control Hessian. */
+static int invert_regularized_control_hessian(
+    float S[2][2], int nu, float Si[2][2])
+{
+    if (nu < 1 || nu > 2) return 0;
+    if (nu == 2) {
+        const float off_diagonal = 0.5f * (S[0][1] + S[1][0]);
+        S[0][1] = off_diagonal;
+        S[1][0] = off_diagonal;
+    }
+
+    const float scale = fmaxf(1.0f, fmaxf(fabsf(S[0][0]),
+        nu == 2 ? fmaxf(fabsf(S[1][1]), fabsf(S[0][1])) : 0.0f));
+    const float max_lambda = 1.0e-2f * scale;
+    float lambda = 0.0f;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const float s00 = S[0][0] + lambda;
+        const float s11 = nu == 2 ? S[1][1] + lambda : 1.0f;
+        const float determinant = nu == 2
+            ? s00 * s11 - S[0][1] * S[0][1]
+            : s00;
+        const float threshold = 1.0e-10f * scale *
+            (nu == 2 ? scale : 1.0f);
+        const int positive_definite = isfinite(s00) && isfinite(determinant) &&
+            s00 > 1.0e-10f * scale &&
+            (nu == 1 || (isfinite(s11) && s11 > 1.0e-10f * scale &&
+                         determinant > threshold));
+        if (positive_definite) {
+            if (nu == 1) {
+                Si[0][0] = 1.0f / s00;
+            } else {
+                const float inverse_determinant = 1.0f / determinant;
+                Si[0][0] = s11 * inverse_determinant;
+                Si[0][1] = -S[0][1] * inverse_determinant;
+                Si[1][0] = Si[0][1];
+                Si[1][1] = s00 * inverse_determinant;
+            }
+            if (lambda > 0.0f) {
+                ++g_riccati_debug_last.control_hessian_regularization_count;
+                if (lambda >
+                    g_riccati_debug_last.max_control_hessian_regularization) {
+                    g_riccati_debug_last.max_control_hessian_regularization =
+                        lambda;
+                }
+            }
+            return isfinite(Si[0][0]) && isfinite(Si[0][1]) &&
+                (nu == 1 || (isfinite(Si[1][0]) && isfinite(Si[1][1])));
+        }
+        if (lambda >= max_lambda) break;
+        lambda = lambda == 0.0f ? 1.0e-7f * scale : 10.0f * lambda;
+        if (lambda > max_lambda) lambda = max_lambda;
+    }
+
+    g_riccati_debug_last.last_fallback_s00 = S[0][0] + lambda;
+    g_riccati_debug_last.last_fallback_s11 = nu == 2
+        ? S[1][1] + lambda : 0.0f;
+    g_riccati_debug_last.last_invert_det = nu == 2
+        ? g_riccati_debug_last.last_fallback_s00 *
+              g_riccati_debug_last.last_fallback_s11 - S[0][1] * S[0][1]
+        : g_riccati_debug_last.last_fallback_s00;
+    ++g_riccati_debug_last.invert_fallback_count;
+    return 0;
+}
+
 /*===========================================================================
  * Riccati Backward + Forward Pass
  *===========================================================================*/
 
-void riccati_solver_pass(
+int riccati_solver_pass(
     const RiccatiStepData_t * restrict step_data,
     const float * restrict terminal_Q,
     const float * restrict terminal_q,
@@ -126,271 +235,192 @@ void riccati_solver_pass(
     float x_out[][RICCATI_MAX_NX],
     float u_out[][RICCATI_MAX_NU])
 {
-    /* Gains stored for forward pass */
-    float K[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
-    float kk[PREDICTION_HORIZON][RICCATI_MAX_NU];
+    /* Every active state/input entry participates in the Riccati recursion;
+     * no sparse state-index layout is assumed. */
+    float K[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX] = {{{0}}};
+    float kk[PREDICTION_HORIZON][RICCATI_MAX_NU] = {{0}};
+    float P[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+    float p[RICCATI_MAX_NX] = {0};
 
-    /* Value function: P (nx x nx symmetric), p (nx x 1) */
-    float P[RICCATI_MAX_NX][RICCATI_MAX_NX];
-    float p[RICCATI_MAX_NX];
-
-    /* Initialize terminal cost */
-    memset(P, 0, sizeof(P));
-    memset(p, 0, sizeof(p));
-    {
-        // Add ADMM penalty to terminal cost for constrained state channels
-        for (int s = 0; s < nx; s++) {
-            int is_constrained = (terminal_x_ub[s] < BIG_BOUND ||
-                                  terminal_x_lb[s] > -BIG_BOUND);
-            if (is_constrained) {
-                P[s][s] = terminal_Q[s] + rho;
-                p[s] = terminal_q[s] - rho * (z_x[N][s] - y_x[N][s]);
-            } else {
-                P[s][s] = terminal_Q[s];
-                p[s] = terminal_q[s];
-            }
-        }
+    if (!step_data || !terminal_Q || !terminal_q || !terminal_x_lb ||
+        !terminal_x_ub || !x0 || !z_x || !y_x || !z_u || !y_u ||
+        !x_out || !u_out || nx <= 0 || nx > RICCATI_MAX_NX ||
+        nu <= 0 || nu > RICCATI_MAX_NU || N <= 0 ||
+        N > PREDICTION_HORIZON) {
+        return 0;
     }
 
-    /* Backward pass: k = N-1 down to 0 */
-    for (int k = N - 1; k >= 0; k--) {
+    for (int i = 0; i < nx; ++i) {
+        const int constrained = terminal_x_ub[i] < BIG_BOUND ||
+                                terminal_x_lb[i] > -BIG_BOUND;
+        P[i][i] = terminal_Q[i] + (constrained ? rho : 0.0f);
+        p[i] = terminal_q[i] - (constrained ?
+            rho * (z_x[N][i] - y_x[N][i]) : 0.0f);
+    }
+
+    for (int k = N - 1; k >= 0; --k) {
         const RiccatiStepData_t *sd = &step_data[k];
+        float q_aug_diag[RICCATI_MAX_NX] = {0};
+        float q_aug_linear[RICCATI_MAX_NX] = {0};
+        float r_aug_diag[RICCATI_MAX_NU] = {0};
+        float r_aug_linear[RICCATI_MAX_NU] = {0};
+        float M[RICCATI_MAX_NU][RICCATI_MAX_NX] = {{0}};
+        float S[2][2] = {{0}};
+        float Si[2][2] = {{0}};
+        float G[RICCATI_MAX_NU][RICCATI_MAX_NX] = {{0}};
+        float p_shift[RICCATI_MAX_NX] = {0};
+        float P_A[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+        float P_next[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+        float p_next[RICCATI_MAX_NX] = {0};
+        float btp[RICCATI_MAX_NU] = {0};
 
-        /* Augmented costs */
-        float q_aug_diag[RICCATI_MAX_NX];
-        float q_aug_linear[RICCATI_MAX_NX];
-        float r_aug_diag[RICCATI_MAX_NU];
-        float r_aug_linear[RICCATI_MAX_NU];
-
-        // Add ADMM penalty to stage cost for constrained state channels
-        for (int s = 0; s < nx; s++) {
-            /* x_0 is fixed by the caller, not an optimization variable.  Its
-             * box violation must therefore not enter the ADMM residuals (or
-             * the augmented objective).  Bounds become actionable at x_1. */
-            int is_constrained = k > 0 &&
-                                 (sd->x_ub[s] < BIG_BOUND ||
-                                  sd->x_lb[s] > -BIG_BOUND);
-            if (is_constrained) {
-                q_aug_diag[s] = sd->Q_diag[s] + rho;
-                q_aug_linear[s] = sd->q[s] - rho * (z_x[k][s] - y_x[k][s]);
-            } else {
-                q_aug_diag[s] = sd->Q_diag[s];
-                q_aug_linear[s] = sd->q[s];
+        /* Stage cost plus ADMM's state-box quadratic. x_0 is fixed and is
+         * excluded from the split penalty; its ordinary stage cost remains. */
+        for (int i = 0; i < nx; ++i) {
+            const int constrained = k > 0 &&
+                (sd->x_ub[i] < BIG_BOUND || sd->x_lb[i] > -BIG_BOUND);
+            q_aug_diag[i] = sd->Q_diag[i] + (constrained ? rho : 0.0f);
+            q_aug_linear[i] = sd->q[i] - (constrained ?
+                rho * (z_x[k][i] - y_x[k][i]) : 0.0f);
+            if (!isfinite(q_aug_diag[i]) || !isfinite(q_aug_linear[i])) {
+                return 0;
             }
         }
-        // Add ADMM penalty to control cost for all control channels
-        for (int a = 0; a < nu; a++) {
+        for (int a = 0; a < nu; ++a) {
             r_aug_diag[a] = sd->R_diag[a] + rho_u;
             r_aug_linear[a] = sd->r[a] - rho_u * (z_u[k][a] - y_u[k][a]);
-        }
-
-        /* Step 1: M = B^T P (nu x nx) */
-        float M[RICCATI_MAX_NU][RICCATI_MAX_NX];
-        for (int j = 0; j < nx; j++) {
-            float s0 = 0.0f, s1 = 0.0f;
-            /* Iterate the dense prefix [IDX_SPARSE_B_FIRST_ROW, IDX_DRATE_PREV);
-             * rows 0 and 1 are structural zeros and are skipped.
-             * The two previous-control tail rows are handled explicitly below
-             * via +P[IDX_DRATE_PREV][j] and +P[IDX_TARGET_SPEED_RATE_PREV][j]. */
-            for (int s = IDX_SPARSE_B_FIRST_ROW; s < IDX_DRATE_PREV; s++) {
-                s0 += sd->B[s][0] * P[s][j];
-                s1 += sd->B[s][1] * P[s][j];
+            if (!isfinite(r_aug_diag[a]) || !isfinite(r_aug_linear[a])) {
+                return 0;
             }
-            M[0][j] = s0 + P[IDX_DRATE_PREV][j];
-            M[1][j] = s1 + P[IDX_TARGET_SPEED_RATE_PREV][j];
         }
 
-        /* Step 2: S = R_aug + M*B (nu x nu) */
-        float S[2][2];
-        S[0][0] = r_aug_diag[0]; S[0][1] = 0.0f; S[1][0] = 0.0f; S[1][1] = r_aug_diag[1];
-        /* Same pattern as above across
-         * [IDX_SPARSE_B_FIRST_ROW, IDX_DRATE_PREV),
-         * with identity-channel terms injected below for rows 8 and 9. */
-        for (int s = IDX_SPARSE_B_FIRST_ROW; s < IDX_DRATE_PREV; s++) {
-            S[0][0] += M[0][s] * sd->B[s][0];
-            S[0][1] += M[0][s] * sd->B[s][1];
-            S[1][0] += M[1][s] * sd->B[s][0];
-            S[1][1] += M[1][s] * sd->B[s][1];
-        }
-        // Add identity-channel contributions from the two previous-control rows.
-        S[0][0] += M[0][IDX_DRATE_PREV];
-        S[0][1] += M[0][IDX_TARGET_SPEED_RATE_PREV];
-        S[1][0] += M[1][IDX_DRATE_PREV];
-        S[1][1] += M[1][IDX_TARGET_SPEED_RATE_PREV];
-
-        /* Step 3: Invert S (2x2) */
-        float Si[2][2];
-        if (riccati_invert_2x2(S, Si) < 0) {
-            g_riccati_debug_last.last_fallback_s00 = S[0][0];
-            g_riccati_debug_last.last_fallback_s11 = S[1][1];
-            Si[0][0] = S[0][0] != 0.0f ? 1.0f / S[0][0] : 0.0f;
-            Si[0][1] = 0.0f;
-            Si[1][0] = 0.0f;
-            Si[1][1] = S[1][1] != 0.0f ? 1.0f / S[1][1] : 0.0f;
-        }
-
-        /* Step 4: G = M*A + N^T (nu x nx) */
-        float G[RICCATI_MAX_NU][RICCATI_MAX_NX];
-        for (int a = 0; a < nu; a++) {
-            /* A has a dense leading block and two zero tail columns.
-             * The final two G columns therefore come only from N^T. */
-            for (int j = 0; j < NX_DENSE; j++) {
-                float sum = sd->N[j][a];  /* N^T[a][j] = N[j][a] */
-                for (int s = 0; s < NX_DENSE; s++) {
-                    sum += M[a][s] * sd->A[s][j];
+        /* M = B'P; S = R + B'PB; G = B'PA + N'. */
+        for (int a = 0; a < nu; ++a) {
+            for (int j = 0; j < nx; ++j) {
+                for (int s = 0; s < nx; ++s) {
+                    M[a][j] += sd->B[s][a] * P[s][j];
                 }
-                G[a][j] = sum;
             }
-            G[a][IDX_DRATE_PREV] = sd->N[IDX_DRATE_PREV][a];
-            G[a][IDX_TARGET_SPEED_RATE_PREV] = sd->N[IDX_TARGET_SPEED_RATE_PREV][a];
         }
-
-        /* Step 5: K = -S^{-1} G (nu x nx) */
-        for (int a = 0; a < nu; a++) {
-            for (int j = 0; j < nx; j++) {
-                float val = 0.0f;
-                for (int b = 0; b < nu; b++) {
-                    val += Si[a][b] * G[b][j];
+        for (int a = 0; a < nu; ++a) {
+            for (int b = 0; b < nu; ++b) {
+                S[a][b] = (a == b) ? r_aug_diag[a] : 0.0f;
+                for (int s = 0; s < nx; ++s) {
+                    S[a][b] += M[a][s] * sd->B[s][b];
                 }
-                K[k][a][j] = -val;
             }
-        }
-
-        /* Shift p by affine dynamics bias: p_shift = p + P*d */
-        float p_shift[RICCATI_MAX_NX];
-        for (int i = 0; i < nx; i++) {
-            float sum = p[i];
-            for (int s = 0; s < NX_DENSE; s++) {
-                sum += P[i][s] * sd->d[s];
-            }
-            p_shift[i] = sum;
-        }
-        /* Step 6: kk = -S^{-1} (r_aug_linear + B^T p) (nu x 1) */
-        float Bp[RICCATI_MAX_NU];
-        {
-            float bp0 = 0.0f, bp1 = 0.0f;
-            for (int s = IDX_SPARSE_B_FIRST_ROW; s < IDX_DRATE_PREV; s++) {
-                bp0 += sd->B[s][0] * p_shift[s];
-                bp1 += sd->B[s][1] * p_shift[s];
-            }
-            Bp[0] = bp0 + p_shift[IDX_DRATE_PREV];
-            Bp[1] = bp1 + p_shift[IDX_TARGET_SPEED_RATE_PREV];
-
-        }
-
-        for (int a = 0; a < nu; a++) {
-            float val = 0.0f;
-            for (int b = 0; b < nu; b++) {
-                val += Si[a][b] * (r_aug_linear[b] + Bp[b]);
-            }
-            kk[k][a] = -val;
-        }
-        /* Step 7: P_k = Q_aug_diag + A^T*P*A + G^T*K (nx x nx) */
-        /* PA = P * A: only the leading NX_DENSE block is non-zero. */
-        float PA[RICCATI_MAX_NX][RICCATI_MAX_NX];
-        for (int i = 0; i < nx; i++) {
-            for (int j = 0; j < NX_DENSE; j++) {
-                float sum = 0.0f;
-                for (int s = 0; s < NX_DENSE; s++) {
-                    sum += P[i][s] * sd->A[s][j];
+            for (int j = 0; j < nx; ++j) {
+                G[a][j] = sd->N[j][a];
+                for (int s = 0; s < nx; ++s) {
+                    G[a][j] += M[a][s] * sd->A[s][j];
                 }
-                PA[i][j] = sum;
-            }
-            PA[i][IDX_DRATE_PREV] = 0.0f;
-            PA[i][IDX_TARGET_SPEED_RATE_PREV] = 0.0f;
-        }
-
-        /* Fused: P = Q_diag + A^T*PA + G^T*K */
-        /* Dense block: rows 0..5, cols 0..5 */
-        for (int i = 0; i < NX_DENSE; i++) {
-            for (int j = 0; j < NX_DENSE; j++) {
-                float sum = (i == j) ? q_aug_diag[i] : 0.0f;
-                for (int s = 0; s < NX_DENSE; s++) {
-                    sum += sd->A[s][i] * PA[s][j];
-                }
-                for (int a = 0; a < nu; a++) {
-                    sum += G[a][i] * K[k][a][j];
-                }
-                P[i][j] = sum;
-            }
-            for (int j = IDX_DRATE_PREV; j < nx; j++) {
-                float sum = 0.0f;
-                for (int a = 0; a < nu; a++) {
-                    sum += G[a][i] * K[k][a][j];
-                }
-                P[i][j] = sum;
-            }
-        }
-        /* Previous-control tail rows have zero A^T rows. */
-        for (int i = IDX_DRATE_PREV; i < nx; i++) {
-            for (int j = 0; j < nx; j++) {
-                float sum = (i == j) ? q_aug_diag[i] : 0.0f;
-                for (int a = 0; a < nu; a++) {
-                    sum += G[a][i] * K[k][a][j];
-                }
-                P[i][j] = sum;
             }
         }
 
-        /* Step 8: p_k = q_aug_linear + A^T p_{k+1} + G^T kk (nx x 1) */
-        float Atp_vec[NX_DENSE];
-        for (int i = 0; i < NX_DENSE; i++) {
-            float Atp = 0.0f;
-            for (int s = 0; s < NX_DENSE; s++) {
-                Atp += sd->A[s][i] * p_shift[s];
+        /* Preserve coupling while allowing a bounded SPD repair for tiny
+         * round-off/conditioning defects.  Large indefiniteness still fails. */
+        if (!invert_regularized_control_hessian(S, nu, Si)) return 0;
+
+        /* Affine dynamics shift the next value gradient: p_bar = p + P d. */
+        for (int i = 0; i < nx; ++i) {
+            p_shift[i] = p[i];
+            for (int s = 0; s < nx; ++s) {
+                p_shift[i] += P[i][s] * sd->d[s];
             }
-            Atp_vec[i] = Atp;
         }
-        for (int i = 0; i < NX_DENSE; i++) {
-            float Gtk = 0.0f;
-            for (int a = 0; a < nu; a++) {
-                Gtk += G[a][i] * kk[k][a];
+
+        /* K = -S^-1 G; kk = -S^-1(r + B'p_bar). */
+        for (int a = 0; a < nu; ++a) {
+            for (int s = 0; s < nx; ++s) {
+                btp[a] += sd->B[s][a] * p_shift[s];
             }
-            p[i] = q_aug_linear[i] + Atp_vec[i] + Gtk;
         }
-        for (int i = IDX_DRATE_PREV; i < nx; i++) {
-            float Gtk = 0.0f;
-            for (int a = 0; a < nu; a++) {
-                Gtk += G[a][i] * kk[k][a];
+        for (int a = 0; a < nu; ++a) {
+            for (int j = 0; j < nx; ++j) {
+                for (int b = 0; b < nu; ++b) {
+                    K[k][a][j] -= Si[a][b] * G[b][j];
+                }
             }
-            p[i] = q_aug_linear[i] + Gtk;
+            for (int b = 0; b < nu; ++b) {
+                kk[k][a] -= Si[a][b] * (r_aug_linear[b] + btp[b]);
+            }
         }
+
+        /* P_A = P A; P_k = Q + A' P A + G'K.  Symmetrize round-off so the
+         * next control Hessian remains numerically symmetric. */
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < nx; ++j) {
+                for (int s = 0; s < nx; ++s) {
+                    P_A[i][j] += P[i][s] * sd->A[s][j];
+                }
+            }
+        }
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < nx; ++j) {
+                P_next[i][j] = (i == j) ? q_aug_diag[i] : 0.0f;
+                for (int s = 0; s < nx; ++s) {
+                    P_next[i][j] += sd->A[s][i] * P_A[s][j];
+                }
+                for (int a = 0; a < nu; ++a) {
+                    P_next[i][j] += G[a][i] * K[k][a][j];
+                }
+            }
+        }
+        for (int i = 0; i < nx; ++i) {
+            for (int j = i + 1; j < nx; ++j) {
+                const float symmetric = 0.5f * (P_next[i][j] + P_next[j][i]);
+                P_next[i][j] = symmetric;
+                P_next[j][i] = symmetric;
+            }
+        }
+
+        /* p_k = q + A'(p + P d) + G'kk. */
+        for (int i = 0; i < nx; ++i) {
+            p_next[i] = q_aug_linear[i];
+            for (int s = 0; s < nx; ++s) {
+                p_next[i] += sd->A[s][i] * p_shift[s];
+            }
+            for (int a = 0; a < nu; ++a) {
+                p_next[i] += G[a][i] * kk[k][a];
+            }
+            if (!isfinite(p_next[i])) {
+                return 0;
+            }
+        }
+        memcpy(P, P_next, sizeof(P));
+        memcpy(p, p_next, sizeof(p));
     }
 
-    /*-------------------------------------------------------------------
-     * Forward pass: roll out x, u from x0 using gains K, kk
-     *-------------------------------------------------------------------*/
-    for (int s = 0; s < nx; s++) {
-        x_out[0][s] = x0[s];
+    /* Forward rollout uses every state row/column, input channel and affine
+     * offset.  This is the same model supplied to the backward recursion. */
+    for (int i = 0; i < nx; ++i) {
+        x_out[0][i] = x0[i];
     }
-
-    for (int k = 0; k < N; k++) {
+    for (int k = 0; k < N; ++k) {
         const RiccatiStepData_t *sd = &step_data[k];
-
-        /* u_k = K_k x_k + kk_k */
-        for (int a = 0; a < nu; a++) {
-            float sum = kk[k][a];
-            for (int s = 0; s < nx; s++) {
-                sum += K[k][a][s] * x_out[k][s];
+        for (int a = 0; a < nu; ++a) {
+            u_out[k][a] = kk[k][a];
+            for (int s = 0; s < nx; ++s) {
+                u_out[k][a] += K[k][a][s] * x_out[k][s];
             }
-            u_out[k][a] = sum;
+            if (!isfinite(u_out[k][a])) {
+                return 0;
+            }
         }
-
-        /* x_{k+1} = A_k x_k + B_k u_k + d_k */
-        for (int i = 0; i < NX_DENSE; i++) {
-            float sum = sd->d[i];
-            for (int s = 0; s < NX_DENSE; s++) {
-                sum += sd->A[i][s] * x_out[k][s];
+        for (int i = 0; i < nx; ++i) {
+            x_out[k + 1][i] = sd->d[i];
+            for (int s = 0; s < nx; ++s) {
+                x_out[k + 1][i] += sd->A[i][s] * x_out[k][s];
             }
-            for (int a = 0; a < nu; a++) {
-                sum += sd->B[i][a] * u_out[k][a];
+            for (int a = 0; a < nu; ++a) {
+                x_out[k + 1][i] += sd->B[i][a] * u_out[k][a];
             }
-            x_out[k + 1][i] = sum;
+            if (!isfinite(x_out[k + 1][i])) {
+                return 0;
+            }
         }
-        /* Previous-control tail states copy the current inputs. */
-        x_out[k + 1][IDX_DRATE_PREV] = u_out[k][0] + sd->d[IDX_DRATE_PREV];
-        x_out[k + 1][IDX_TARGET_SPEED_RATE_PREV] = u_out[k][1] + sd->d[IDX_TARGET_SPEED_RATE_PREV];
     }
+    return 1;
 }
 
 /*===========================================================================
@@ -422,6 +452,12 @@ RiccatiStatus_t riccati_admm_solve(
         return RICCATI_STATUS_ERROR;
     }
 
+    if (admm_state->initialized &&
+        (admm_state->nx != nx || admm_state->nu != nu ||
+         admm_state->horizon != N)) {
+        riccati_admm_state_init(admm_state);
+    }
+
     const float cfg_rho = (config && config->rho > 0.0f) ? config->rho : ADMM_RHO;
     const float cfg_rho_u = (config && config->rho_u > 0.0f) ? config->rho_u : ADMM_RHO_U;
     const int cfg_max_iter = (config && config->max_iterations > 0)
@@ -430,8 +466,12 @@ RiccatiStatus_t riccati_admm_solve(
     const float tolerance = (config && config->tolerance > 0.0f)
                                 ? config->tolerance
                                 : CONVERGENCE_TOLERANCE;
-    const float abs_tolerance = (tolerance > 1e-6f) ? tolerance : 1e-6f;
-    const float rel_tolerance = 0.02f;
+    /* State and input channels use different physical units (m, rad, m/s,
+     * rad/s, m/s^2). A single relative scale based on the largest raw state
+     * lets a large speed or dual value silently loosen the corridor/control
+     * residual gate. Treat the configured tolerance as an absolute maximum
+     * residual instead; the RTI layer has a separate, explicit degraded gate. */
+    const float residual_tolerance = (tolerance > 1e-6f) ? tolerance : 1e-6f;
     const int adaptive_rho = config ? config->adaptive_rho : 1;
     const int shared_rho = config ? config->shared_rho : 0;
 
@@ -469,6 +509,10 @@ RiccatiStatus_t riccati_admm_solve(
     float (*y_x)[RICCATI_MAX_NX] = admm_state->y_x;
     float (*y_u)[RICCATI_MAX_NU] = admm_state->y_u;
 
+    if (admm_state->initialized) {
+        riccati_admm_shift_warm_start(admm_state, nx, nu, N, x0);
+    }
+
     /* Precompute constrained flags */
     uint8_t x_is_constrained[PREDICTION_HORIZON + 1][RICCATI_MAX_NX];
     memset(x_is_constrained, 0, sizeof(x_is_constrained));
@@ -499,14 +543,20 @@ RiccatiStatus_t riccati_admm_solve(
         memset(y_x, 0, sizeof(admm_state->y_x));
         memset(y_u, 0, sizeof(admm_state->y_u));
 
-        riccati_solver_pass(
+        if (!riccati_solver_pass(
             step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub, x0,
             nx, nu, N, 0.0f, 0.0f,
             (const float (*)[RICCATI_MAX_NX])z_x,
             (const float (*)[RICCATI_MAX_NX])y_x,
             (const float (*)[RICCATI_MAX_NU])z_u,
             (const float (*)[RICCATI_MAX_NU])y_u,
-            solution->x, solution->u);
+            solution->x, solution->u)) {
+            solution->status = RICCATI_STATUS_ERROR;
+            solution->iterations = 0;
+            solution->primal_residual = INFINITY;
+            solution->dual_residual = INFINITY;
+            return RICCATI_STATUS_ERROR;
+        }
 
         /* Initialize z from projection of unconstrained solution */
         for (int k = 0; k <= N; k++) {
@@ -530,19 +580,11 @@ RiccatiStatus_t riccati_admm_solve(
             }
         }
 
-        /* Initialize y (dual) from constraint violation */
-        for (int k = 0; k <= N; k++) {
-            for (int s = 0; s < nx; s++) {
-                if (x_is_constrained[k][s]) {
-                    y_x[k][s] = solution->x[k][s] - z_x[k][s];
-                }
-            }
-        }
-        for (int k = 0; k < N; k++) {
-            for (int a = 0; a < nu; a++) {
-                y_u[k][a] = solution->u[k][a] - z_u[k][a];
-            }
-        }
+        /* Start scaled duals at zero.  The projected primal warm seed already
+         * supplies a useful feasible initialization; copying x-z into y would
+         * inject an arbitrary nonzero multiplier on every cold start. */
+        memset(y_x, 0, sizeof(admm_state->y_x));
+        memset(y_u, 0, sizeof(admm_state->y_u));
 
         if (g_riccati_debug_trace_enabled &&
             g_riccati_debug_trace_count < RICCATI_DEBUG_TRACE_MAX) {
@@ -566,32 +608,25 @@ RiccatiStatus_t riccati_admm_solve(
     for (int iter = 0; iter < max_iter; iter++) {
 
         /*--- Primal update: Riccati pass with augmented costs ---*/
-        riccati_solver_pass(
+        if (!riccati_solver_pass(
             step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub, x0,
             nx, nu, N, rho, rho_u,
             (const float (*)[RICCATI_MAX_NX])z_x,
             (const float (*)[RICCATI_MAX_NX])y_x,
             (const float (*)[RICCATI_MAX_NU])z_u,
             (const float (*)[RICCATI_MAX_NU])y_u,
-            solution->x, solution->u);
-
-        float x_norm = 0.0f;
-        float u_norm = 0.0f;
-        for (int k = 0; k <= N; k++) {
-            for (int s = 0; s < nx; s++) {
-                x_norm = fmaxf(x_norm, fabsf(solution->x[k][s]));
-            }
-        }
-        for (int k = 0; k < N; k++) {
-            for (int a = 0; a < nu; a++) {
-                u_norm = fmaxf(u_norm, fabsf(solution->u[k][a]));
-            }
+            solution->x, solution->u)) {
+            riccati_admm_state_init(admm_state);
+            solution->status = RICCATI_STATUS_ERROR;
+            solution->iterations = (uint16_t)iter;
+            solution->primal_residual = INFINITY;
+            solution->dual_residual = INFINITY;
+            return RICCATI_STATUS_ERROR;
         }
 
         /*--- Fused z-update, y-update, and residual computation ---*/
         float state_primal = 0.0f, state_dual = 0.0f;
         float ctrl_primal = 0.0f, ctrl_dual = 0.0f;
-        float z_norm = 0.0f, lambda_norm = 0.0f;
 
         /* State loop */
         for (int k = 0; k <= N; k++) {
@@ -617,8 +652,6 @@ RiccatiStatus_t riccati_admm_solve(
                     /* Primal residual */
                     float pd = fabsf(x_hat - z_new);
                     state_primal = fmaxf(state_primal, pd);
-                    z_norm = fmaxf(z_norm, fabsf(z_new));
-                    lambda_norm = fmaxf(lambda_norm, fabsf(rho * y_x[k][s]));
                     z_x[k][s] = z_new;
                 } else {
                     z_x[k][s] = solution->x[k][s];
@@ -646,17 +679,14 @@ RiccatiStatus_t riccati_admm_solve(
                 /* Primal residual */
                 float pd = fabsf(u_hat - z_new);
                 ctrl_primal = fmaxf(ctrl_primal, pd);
-                z_norm = fmaxf(z_norm, fabsf(z_new));
-                lambda_norm = fmaxf(lambda_norm, fabsf(rho_u * y_u[k][a]));
                 z_u[k][a] = z_new;
             }
         }
 
         float primal_res = state_primal > ctrl_primal ? state_primal : ctrl_primal;
         float dual_res = state_dual > ctrl_dual ? state_dual : ctrl_dual;
-        float primal_scale = fmaxf(fmaxf(x_norm, u_norm), z_norm);
-        float eps_primal = abs_tolerance + rel_tolerance * primal_scale;
-        float eps_dual = abs_tolerance + rel_tolerance * lambda_norm;
+        const float eps_primal = residual_tolerance;
+        const float eps_dual = residual_tolerance;
 
         solution->iterations = iter + 1;
         solution->primal_residual = primal_res;
@@ -798,6 +828,9 @@ RiccatiStatus_t riccati_admm_solve(
     /* Save scalar warm-start metadata. Buffers are already updated in-place. */
     admm_state->rho = rho;
     admm_state->rho_u = shared_rho ? rho : rho_u;
+    admm_state->nx = nx;
+    admm_state->nu = nu;
+    admm_state->horizon = N;
     admm_state->initialized = 1;
 
     g_riccati_debug_last.rho = rho;
