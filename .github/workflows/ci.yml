@@ -58,7 +58,26 @@ jobs:
           source /opt/ros/humble/setup.bash
           build/f1tenth_mpc/mpc_rti_offline_replay \
             <(gzip -dc sdu_apex_autodrive/artifacts/mpc_next_685ccca/11_shadow/pp_mpc_shadow_icra_20260918/events.csv.gz) \
-            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive \
+            --actions /tmp/mpc_rti_baseline.csv
+      - name: A/B selective adaptive-R2 triggers
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          build/f1tenth_mpc/mpc_rti_offline_replay \
+            <(gzip -dc sdu_apex_autodrive/artifacts/mpc_next_685ccca/11_shadow/pp_mpc_shadow_icra_20260918/events.csv.gz) \
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive \
+            --rti2-curvature-trigger 0.10 \
+            --rti2-bound-trigger 0.10 \
+            --rti2-min-slack-trigger 0.15 \
+            --rti2-nonsmooth-trigger 1000 \
+            --rti2-lateral-load-trigger 6.5 \
+            --actions /tmp/mpc_rti_selective.csv
+          python3 tools/mpc/compare_rti_replays.py \
+            /tmp/mpc_rti_baseline.csv /tmp/mpc_rti_selective.csv \
+            --max-steering-delta-rad 0.003 \
+            --max-speed-delta-mps 0.03 \
+            --max-trigger-ratio 0.40
 
   python:
     name: Python analysis and controller tests
