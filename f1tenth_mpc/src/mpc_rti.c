@@ -1016,17 +1016,31 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
             path_delta->sample_count = k + 2;
         }
         int in_corridor = 0;
-        if (schedule && schedule->recovery_active &&
-            schedule->horizon == horizon) {
-            const float lower = schedule->active_lower[k + 1];
-            const float upper = schedule->active_upper[k + 1];
+        if (schedule && schedule->horizon == horizon) {
+            float lower = schedule->active_lower[k + 1];
+            float upper = schedule->active_upper[k + 1];
+            /* Temporary recovery stages may start outside the normal physical
+             * envelope, but once the schedule has re-entered, validate the
+             * exact candidate with its own heading-aware body footprint rather
+             * than the seed's footprint. */
+            if (!schedule->recovery_stage[k + 1]) {
+                const float exact_margin = heading_aware_corridor_margin(
+                    configuration, states[k + 1].plant.e_psi, k + 1);
+                lower = fmaxf(lower,
+                    exact_margin - candidate_reference.right_bound -
+                    configuration->nonlinear_corridor_tolerance_m);
+                upper = fminf(upper,
+                    candidate_reference.left_bound - exact_margin +
+                    configuration->nonlinear_corridor_tolerance_m);
+            }
             in_corridor = isfinite(lower) && isfinite(upper) &&
                 lower <= upper && states[k + 1].plant.e_y >= lower &&
                 states[k + 1].plant.e_y <= upper;
         } else {
             in_corridor = corridor_contains(&states[k + 1],
                 &candidate_reference, configuration,
-                corridor_margin_at_prediction(configuration, k + 1));
+                heading_aware_corridor_margin(
+                    configuration, states[k + 1].plant.e_psi, k + 1));
         }
         if (!in_corridor) {
             if (failure_stage) *failure_stage = k;
