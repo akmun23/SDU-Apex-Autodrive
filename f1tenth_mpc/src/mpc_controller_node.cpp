@@ -455,37 +455,23 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
             "using bounded decelerating recovery command", reason);
         if (enabled_) {
+            (void)observed_speed_mps;
+            (void)requested_speed_mps;
             const double speed_ceiling = active_speed_ceiling();
-            const double local_cap = std::min(
-                speed_ceiling, local_raceline_speed_cap());
-            double recovery_speed = 0.0;
-            if (target_speed_initialized_) {
-                const double previous_command =
-                    clamp(target_speed_mps_, 0.0, local_cap);
-                const double finite_requested =
-                    std::isfinite(requested_speed_mps) &&
-                    requested_speed_mps > 1.0e-6
-                    ? clamp(requested_speed_mps, 0.0, local_cap)
-                    : previous_command;
-                const double finite_observed =
-                    std::isfinite(observed_speed_mps) &&
-                    observed_speed_mps > 1.0e-6
-                    ? clamp(observed_speed_mps, 0.0, local_cap)
-                    : previous_command;
-                const double bounded_start = std::min({
-                    previous_command, finite_requested, finite_observed,
-                    local_cap});
-                const double reduction =
-                    rti_config_.model.max_target_speed_rate_reduction_mps2 *
-                    TIME_STEP_SECONDS;
-                recovery_speed = std::max(0.0, bounded_start - reduction);
-            }
+            const double previous_target = target_speed_initialized_
+                ? clamp(target_speed_mps_, 0.0, speed_ceiling) : 0.0;
+            const double reduction =
+                rti_config_.model.max_target_speed_rate_reduction_mps2 *
+                TIME_STEP_SECONDS;
+            const double recovery_speed = target_speed_initialized_
+                ? std::max(0.0, previous_target - reduction) : 0.0;
 
-            double recovery_steering = clamp(
+            const double previous_steering = clamp(
                 std::isfinite(last_steering_command_rad_)
                     ? last_steering_command_rad_ : 0.0,
                 -rti_config_.model.max_steering_rad,
                 rti_config_.model.max_steering_rad);
+            double recovery_steering = previous_steering;
             if (path_projection && trajectory_loaded_) {
                 MpcTrajectorySample_t sample{};
                 if (mpc_trajectory_sample(
@@ -510,10 +496,9 @@ private:
             }
 
             last_steering_rate_radps_ =
-                (recovery_steering - last_steering_command_rad_) /
-                TIME_STEP_SECONDS;
+                (recovery_steering - previous_steering) / TIME_STEP_SECONDS;
             last_target_speed_rate_mps2_ =
-                (recovery_speed - target_speed_mps_) / TIME_STEP_SECONDS;
+                (recovery_speed - previous_target) / TIME_STEP_SECONDS;
             last_steering_command_rad_ = recovery_steering;
             target_speed_mps_ = recovery_speed;
             target_speed_initialized_ = true;
