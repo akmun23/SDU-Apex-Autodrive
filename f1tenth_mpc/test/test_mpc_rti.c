@@ -546,6 +546,33 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
                    cycle_result.selected_candidate == 1,
                    "R1 mode remains a single-pass baseline by default");
 
+        const MpcRtiMemory_t accepted_memory = memory;
+        MpcRtiCycleConfiguration_t forced_reject_config = cycle_config;
+        forced_reject_config.solver.max_iterations = 1;
+        forced_reject_config.solver.tolerance = 1.0e-12f;
+        forced_reject_config.degraded_residual_limit = 1.0e-12f;
+        forced_reject_config.rti2_residual_recovery_limit = 0.0f;
+        MpcRtiCycleResult_t forced_reject_result;
+        const MpcRtiCycleStatus_t forced_reject_status = mpc_rti_solve_cycle(
+            &current, 0.0, trajectory, trajectory_count, lap_length, 0.025f,
+            horizon, &forced_reject_config, &memory, &forced_reject_result);
+        check_true(forced_reject_status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+                   forced_reject_status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED,
+                   "forced one-iteration RTI cycle is rejected");
+        check_true(memory.nominal.valid == accepted_memory.nominal.valid &&
+                   memory.nominal.horizon == accepted_memory.nominal.horizon,
+                   "rejected cycle preserves the last accepted nominal");
+        check_close((float)memory.nominal.progress[1],
+                    (float)accepted_memory.nominal.progress[1], 1.0e-8f,
+                    "rejected cycle restores accepted progress warm start");
+        check_close(memory.nominal.controls[0].steering_rate,
+                    accepted_memory.nominal.controls[0].steering_rate,
+                    1.0e-8f,
+                    "rejected cycle restores accepted control warm start");
+        check_true(memory.solver_state.initialized ==
+                       accepted_memory.solver_state.initialized,
+                   "rejected cycle restores accepted ADMM initialization state");
+
         MpcRtiCycleConfiguration_t forced_r2_config = cycle_config;
         forced_r2_config.refinement_mode = MPC_RTI_REFINEMENT_R2;
         MpcRtiMemory_t forced_r2_memory = {0};
