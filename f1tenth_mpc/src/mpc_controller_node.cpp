@@ -541,11 +541,43 @@ private:
     void publish_shadow_failure(const char * reason)
     {
         if (!diagnostics_pub_) return;
+        bool localization_ready = false;
+        int localization_good_updates = 0;
+        bool steering_feedback_received = false;
+        double steering_feedback_angle = 0.0;
+        double steering_feedback_age_s =
+            std::numeric_limits<double>::quiet_NaN();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+            localization_good_updates = localization_good_updates_;
+            steering_feedback_received = steering_feedback_received_;
+            steering_feedback_angle = steering_feedback_angle_rad_;
+            if (steering_feedback_received) {
+                steering_feedback_age_s =
+                    (now() - last_steering_feedback_time_).seconds();
+            }
+        }
         std_msgs::msg::String message;
         std::ostringstream json;
-        json << "{\"status\":\"rejected\",\"reason\":\"" << reason
+        json << std::setprecision(9)
+             << "{\"status\":\"rejected\",\"reason\":\"" << reason
              << "\",\"source_stamp_ns\":" << last_source_stamp_.nanoseconds()
-             << '}';
+             << ",\"authority_command_established\":"
+             << (has_accepted_command_ ? "true" : "false")
+             << ",\"localization\":{\"ready\":"
+             << (localization_ready ? "true" : "false")
+             << ",\"good_updates\":" << localization_good_updates
+             << ",\"required_updates\":" << localization_required_updates_
+             << "},\"steering_feedback\":{\"received\":"
+             << (steering_feedback_received ? "true" : "false")
+             << ",\"angle_rad\":" << steering_feedback_angle
+             << ",\"age_s\":";
+        if (std::isfinite(steering_feedback_age_s))
+            json << steering_feedback_age_s;
+        else
+            json << "null";
+        json << "}}";
         message.data = json.str();
         diagnostics_pub_->publish(message);
     }
@@ -600,6 +632,29 @@ private:
         double observed_steering_command_rad = 0.0;
         double observed_steering_rate_radps = 0.0;
         double observed_target_speed_rate_mps2 = 0.0;
+        bool localization_ready = false;
+        int localization_good_updates = 0;
+        bool steering_feedback_received = false;
+        bool steering_feedback_fresh = false;
+        double steering_feedback_angle = 0.0;
+        double steering_feedback_age_s =
+            std::numeric_limits<double>::quiet_NaN();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+            localization_good_updates = localization_good_updates_;
+            steering_feedback_received = steering_feedback_received_;
+            steering_feedback_angle = steering_feedback_angle_rad_;
+            if (steering_feedback_received) {
+                steering_feedback_age_s =
+                    static_cast<double>(
+                        control_ros_stamp_ns -
+                        last_steering_feedback_time_.nanoseconds()) * 1.0e-9;
+                steering_feedback_fresh =
+                    steering_feedback_age_s >= 0.0 &&
+                    steering_feedback_age_s <= steering_feedback_timeout_s_;
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(command_history_mutex_);
             observed_command_stamp_ns = observed_command_stamp_ns_;
@@ -680,6 +735,21 @@ private:
             << observed_steering_command_rad << ",\"steering_rate_radps\":"
             << observed_steering_rate_radps << ",\"target_speed_rate_mps2\":"
             << observed_target_speed_rate_mps2 << '}'
+            << ",\"authority_command_established\":"
+            << (has_accepted_command_ ? "true" : "false")
+            << ",\"localization\":{\"ready\":"
+            << (localization_ready ? "true" : "false")
+            << ",\"good_updates\":" << localization_good_updates
+            << ",\"required_updates\":" << localization_required_updates_
+            << "}"
+            << ",\"steering_feedback\":{\"received\":"
+            << (steering_feedback_received ? "true" : "false")
+            << ",\"fresh\":"
+            << (steering_feedback_fresh ? "true" : "false")
+            << ",\"angle_rad\":" << steering_feedback_angle
+            << ",\"age_s\":";
+        json_number(steering_feedback_age_s);
+        json << "}"
             << ",\"progress_m\":" << progress
             << ",\"path_curvature_per_m\":";
         json_number(current_path_sample_valid ? current_path_sample.curvature :
