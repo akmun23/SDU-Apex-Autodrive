@@ -967,6 +967,7 @@ private:
             std::lock_guard<std::mutex> lock(state_mutex_);
             localization_good_updates_ = 0;
             localization_ready_ = false;
+            startup_path_validated_ = false;
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 1000,
                 "MPC waiting for qualified map pose: covariance xy=%.6g yaw=%.6g",
