@@ -141,10 +141,10 @@ static void test_absolute_nine_state_affine_ltv_build(void)
     check_close(problem.x0[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE], -0.8f,
                 1.0e-7f, "QP x0 carries prior target-speed rate");
 
-    check_close(problem.steps[0].x_lb[MPC_RTI_IDX_EY], -0.35f, 1.0e-7f,
-                "right corridor and robust margin form e_y lower bound");
-    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_EY], 0.40f, 1.0e-7f,
-                "left corridor and robust margin form e_y upper bound");
+    check_close(problem.steps[0].x_lb[MPC_RTI_IDX_EY], -0.10f, 1.0e-7f,
+                "right corridor and physical center clearance form e_y lower bound");
+    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_EY], 0.15f, 1.0e-7f,
+                "left corridor and physical center clearance form e_y upper bound");
     check_close(problem.steps[0].x_ub[MPC_RTI_IDX_U], 16.0f, 1.0e-7f,
                 "body-speed state has project maximum bound");
     check_close(problem.steps[0].x_ub[MPC_RTI_IDX_TARGET_SPEED], 8.0f,
