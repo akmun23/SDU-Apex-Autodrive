@@ -433,11 +433,15 @@ private:
     void publish_driving_fallback(const char *reason,
                                   double observed_speed_mps,
                                   double requested_speed_mps,
-                                  bool emit_shadow_diagnostic = true)
+                                  bool emit_shadow_diagnostic = true,
+                                  bool steer_to_raceline = false,
+                                  bool reset_rti_memory = true)
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
             "holding bounded driving command while localization recovers", reason);
-        mpc_rti_memory_reset(&rti_memory_);
+        if (reset_rti_memory) {
+            mpc_rti_memory_reset(&rti_memory_);
+        }
         if (enabled_) {
             const double speed_ceiling = active_speed_ceiling();
             const double finite_observed = std::isfinite(observed_speed_mps) &&
@@ -457,11 +461,34 @@ private:
                 std::min({observed_cap, requested_cap,
                     previous_command, local_cap}),
                 0.0, speed_ceiling);
-            last_steering_command_rad_ = clamp(
+            const double previous_steering = clamp(
                 std::isfinite(last_steering_command_rad_)
                     ? last_steering_command_rad_ : 0.0,
                 -rti_config_.model.max_steering_rad,
                 rti_config_.model.max_steering_rad);
+            double fallback_steering = previous_steering;
+            if (steer_to_raceline && trajectory_loaded_ &&
+                progress_initialized_ && !trajectory_.empty()) {
+                MpcTrajectorySample_t sample{};
+                if (mpc_trajectory_sample(
+                        trajectory_.data(), trajectory_.size(),
+                        track_length_m_, last_projected_s_, &sample)) {
+                    const double feedforward = clamp(
+                        std::atan(sample.curvature /
+                            MPC_YAW_RATE_STEERING_GAIN_PER_M),
+                        -rti_config_.model.max_steering_rad,
+                        rti_config_.model.max_steering_rad);
+                    const double max_step =
+                        rti_config_.model.max_steering_rate_radps *
+                        TIME_STEP_SECONDS;
+                    fallback_steering = previous_steering + clamp(
+                        feedforward - previous_steering, -max_step, max_step);
+                    last_steering_rate_radps_ =
+                        (fallback_steering - previous_steering) /
+                        TIME_STEP_SECONDS;
+                }
+            }
+            last_steering_command_rad_ = fallback_steering;
             target_speed_initialized_ = true;
             publish_command(last_steering_command_rad_, target_speed_mps_);
         } else if (shadow_mode_) {
@@ -1037,6 +1064,7 @@ private:
             static_cast<float>(previous_target_speed_rate);
 
         MpcRtiCycleResult_t result{};
+        const MpcRtiMemory_t memory_before_solve = rti_memory_;
         const auto solve_start = std::chrono::steady_clock::now();
         const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
             &state, last_projected_s_, trajectory_.data(), trajectory_.size(),
@@ -1062,8 +1090,17 @@ private:
                     last_projected_s_, source_dt, result, solve_us,
                     control_ros_time.nanoseconds(), callback_steady_ns,
                     synchronize_steady_ns);
+            // Keep the last feasible RTI horizon across a numerical or
+            // nonlinear rejection. Resetting it here turns one difficult
+            // corner sample into repeated cold starts, exactly where the
+            // recorded shadow data clusters residual failures.
+            rti_memory_ = memory_before_solve;
+            // A rejected optimization must also not leave the vehicle driving
+            // straight into the corner. Move the bounded fallback steering
+            // toward the local raceline feedforward at the physical steering
+            // rate limit while preserving the last feasible RTI warm start.
             publish_driving_fallback("MPC RTI cycle rejected its candidate",
-                command_time_state.u, commanded_speed, false);
+                command_time_state.u, commanded_speed, false, true, false);
             return;
         }
 
