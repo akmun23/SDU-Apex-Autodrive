@@ -33,6 +33,14 @@ jobs:
           colcon test --merge-install --packages-select f1tenth_mpc f1tenth_localization \
             --event-handlers console_direct+
           colcon test-result --verbose
+      - name: Replay exact-raceline PP holdout through MPC
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
+          build/f1tenth_mpc/mpc_rti_offline_replay \
+            <(gzip -dc sdu_apex_autodrive/artifacts/external_mpc_analysis_20260919/02_pp_exact_baseline/pp_exact_events.csv.gz) \
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive
 
   python:
     name: Python analysis and controller tests
