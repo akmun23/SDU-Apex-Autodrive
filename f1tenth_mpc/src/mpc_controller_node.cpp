@@ -115,7 +115,8 @@ public:
         localization_covariance_yaw_max_ = std::max(
             0.0, declare_parameter<double>("localization_covariance_yaw_max", 0.12));
         localization_required_updates_ = std::max(
-            1, declare_parameter<int>("localization_required_updates", 5));
+            1, static_cast<int>(
+                declare_parameter<int>("localization_required_updates", 5)));
         projection_search_distance_m_ = std::clamp(
             declare_parameter<double>("projection_search_distance_m", 3.0),
             0.25, 6.0);
