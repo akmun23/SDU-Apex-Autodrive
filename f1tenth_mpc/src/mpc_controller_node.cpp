@@ -117,7 +117,8 @@ public:
         localization_covariance_yaw_max_ = std::max(
             0.0, declare_parameter<double>("localization_covariance_yaw_max", 0.12));
         localization_required_updates_ = std::max(
-            1, declare_parameter<int>("localization_required_updates", 5));
+            1, static_cast<int>(
+                declare_parameter<int64_t>("localization_required_updates", 5)));
         steering_feedback_topic_ = declare_parameter<std::string>(
             "steering_feedback_topic", "/autodrive/roboracer_1/steering");
         steering_feedback_timeout_s_ = std::max(
