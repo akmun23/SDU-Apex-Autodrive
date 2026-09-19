@@ -123,6 +123,10 @@ if(BUILD_TESTING)
   add_executable(mpc_replay_metrics_test test/test_replay_metrics.cpp)
   add_test(NAME mpc_replay_metrics_test COMMAND mpc_replay_metrics_test)
 
+  add_executable(mpc_authority_policy_test test/test_mpc_authority_policy.cpp)
+  target_link_libraries(mpc_authority_policy_test PRIVATE mpc_core)
+  add_test(NAME mpc_authority_policy_test COMMAND mpc_authority_policy_test)
+
   add_executable(mpc_core_benchmark test/benchmark_mpc_core.c)
   target_link_libraries(mpc_core_benchmark PRIVATE mpc_legacy_compat mpc_core m)
 
