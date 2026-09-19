@@ -664,9 +664,14 @@ static void test_directional_corridor_schedule(void)
     make_circle_trajectory(trajectory, &trajectory_count, &lap_length);
     MpcRtiConfiguration_t config = test_configuration();
     config.corridor_preview_halfwidth_m = 0.0f;
+    /* Give recovery 5 cm of controller conservatism to relax while the
+     * physical 0.30 m center-to-wall envelope remains hard. With 0.60 m raw
+     * bounds, normal e_y is +/-0.25 and physical e_y is +/-0.30. */
+    config.corridor_margin_m = 0.35f;
+    config.first_prediction_corridor_margin_m = 0.35f;
 
     const MpcRtiState_t current = {
-        .plant = {.e_y = 0.60f, .e_psi = 0.0f, .u = 4.0f, .v = 0.0f,
+        .plant = {.e_y = 0.30f, .e_psi = 0.0f, .u = 4.0f, .v = 0.0f,
                   .r = 0.4f, .target_speed = 3.9f,
                   .steering_command = atanf(0.1f /
                       MPC_YAW_RATE_STEERING_GAIN_PER_M)},
@@ -681,9 +686,9 @@ static void test_directional_corridor_schedule(void)
     /* Isolate the schedule policy from model fitting: this is a deterministic
      * bounded seed that is outside the inset for one stage and re-enters at
      * the next stage. */
-    nominal.states[0].plant.e_y = 0.60f;
-    nominal.states[1].plant.e_y = 0.58f;
-    nominal.states[2].plant.e_y = 0.54f;
+    nominal.states[0].plant.e_y = 0.30f;
+    nominal.states[1].plant.e_y = 0.28f;
+    nominal.states[2].plant.e_y = 0.24f;
     nominal.states[3].plant.e_y = 0.20f;
     nominal.states[4].plant.e_y = 0.10f;
     for (int k = 0; k <= 4; ++k) nominal.progress[k] = 0.10 * k;
@@ -706,6 +711,19 @@ static void test_directional_corridor_schedule(void)
     check_true(schedule.active_upper[1] >= schedule.seed_e_y[1] &&
                schedule.active_lower[1] <= schedule.seed_e_y[1],
         "temporary envelope contains the bounded recovery seed");
+
+    MpcRtiNominal_t physically_unsafe_nominal = nominal;
+    physically_unsafe_nominal.states[1].plant.e_y = 0.34f;
+    MpcRtiCorridorSchedule_t hard_wall_schedule;
+    check_true(mpc_rti_build_corridor_schedule(&current,
+        &physically_unsafe_nominal, trajectory, trajectory_count, lap_length,
+        0.025f, &config, &hard_wall_schedule),
+        "physical-wall recovery schedule builds");
+    check_true(hard_wall_schedule.active_upper[1] <= 0.300001f,
+        "recovery never widens beyond the hard 0.30 m physical envelope");
+    check_true(hard_wall_schedule.active_upper[1] <
+                   hard_wall_schedule.seed_e_y[1],
+        "physically wall-overlapping seed is not legalized by recovery");
 
     MpcRtiConfiguration_t feedback_config = config;
     feedback_config.recovery_seed_policy =
