@@ -740,6 +740,31 @@ private:
         json << ",\"target_speed_mps\":";
         json_number(current_target_feedforward);
         json << "}";
+        const double current_physical_half_extent =
+            std::max(
+                static_cast<double>(rti_config_.model.planning_half_width_m),
+                static_cast<double>(rti_config_.model.vehicle_half_width_m) *
+                    std::abs(std::cos(state.plant.e_psi)) +
+                static_cast<double>(
+                    rti_config_.model.vehicle_longitudinal_extent_m) *
+                    std::abs(std::sin(state.plant.e_psi)));
+        const double current_required_wall_margin = std::max(
+            static_cast<double>(rti_config_.model.corridor_margin_m),
+            static_cast<double>(rti_config_.model.wall_clearance_m) +
+                current_physical_half_extent);
+        const double current_raw_wall_clearance = current_path_sample_valid
+            ? std::min(
+                current_path_sample.left_bound - state.plant.e_y,
+                current_path_sample.right_bound + state.plant.e_y)
+            : std::numeric_limits<double>::quiet_NaN();
+        json << ",\"footprint_required_wall_margin_m\":";
+        json_number(current_required_wall_margin);
+        json << ",\"current_raw_wall_clearance_m\":";
+        json_number(current_raw_wall_clearance);
+        json << ",\"current_physical_wall_slack_m\":";
+        json_number(current_path_sample_valid
+            ? current_raw_wall_clearance - current_required_wall_margin
+            : std::numeric_limits<double>::quiet_NaN());
         json << ",\"state\":[" << state.plant.e_y << ','
             << state.plant.e_psi << ',' << state.plant.u << ','
             << state.plant.v << ',' << state.plant.r << ','
