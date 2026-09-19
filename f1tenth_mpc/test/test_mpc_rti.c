@@ -42,8 +42,12 @@ static MpcRtiConfiguration_t test_configuration(void)
         .max_steering_rate_radps = SOURCE_STEERING_RATE_RADPS,
         .max_target_speed_rate_increase_mps2 = 3.0f,
         .max_target_speed_rate_reduction_mps2 = 8.0f,
-        .corridor_margin_m = 0.05f,
-        .first_prediction_corridor_margin_m = 0.05f,
+        .corridor_margin_m = 0.30f,
+        .first_prediction_corridor_margin_m = 0.30f,
+        .planning_half_width_m = 0.15f,
+        .vehicle_half_width_m = 0.1365f,
+        .vehicle_longitudinal_extent_m = 0.43f,
+        .wall_clearance_m = 0.15f,
         .corridor_preview_halfwidth_m = 0.0f,
         .nonlinear_corridor_tolerance_m = 0.0f,
     };
@@ -137,10 +141,10 @@ static void test_absolute_nine_state_affine_ltv_build(void)
     check_close(problem.x0[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE], -0.8f,
                 1.0e-7f, "QP x0 carries prior target-speed rate");
 
-    check_close(problem.steps[0].x_lb[MPC_RTI_IDX_EY], -0.35f, 1.0e-7f,
-                "right corridor and robust margin form e_y lower bound");
-    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_EY], 0.40f, 1.0e-7f,
-                "left corridor and robust margin form e_y upper bound");
+    check_close(problem.steps[0].x_lb[MPC_RTI_IDX_EY], -0.10f, 1.0e-7f,
+                "right corridor and physical center clearance form e_y lower bound");
+    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_EY], 0.15f, 1.0e-7f,
+                "left corridor and physical center clearance form e_y upper bound");
     check_close(problem.steps[0].x_ub[MPC_RTI_IDX_U], 16.0f, 1.0e-7f,
                 "body-speed state has project maximum bound");
     check_close(problem.steps[0].x_ub[MPC_RTI_IDX_TARGET_SPEED], 8.0f,
@@ -506,8 +510,8 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     check_true(mpc_rti_rollout_candidate(&near_edge, 0.0, zero_control,
         trajectory, trajectory_count, lap_length, NULL, NULL, NULL, 1,
         0.025f, &first_step_relaxed, rejected_states, NULL, &failure_stage) ==
-            MPC_RTI_ROLLOUT_OK,
-        "diagnostic first-step margin permits safe raw-bound clearance only at x1");
+            MPC_RTI_ROLLOUT_CORRIDOR,
+        "diagnostic first-step inset cannot relax the physical wall envelope");
 
     MpcRtiCycleConfiguration_t cycle_config = {
         .model = config,
@@ -541,6 +545,33 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
                    !cycle_result.rti2_triggered &&
                    cycle_result.selected_candidate == 1,
                    "R1 mode remains a single-pass baseline by default");
+
+        const MpcRtiMemory_t accepted_memory = memory;
+        MpcRtiCycleConfiguration_t forced_reject_config = cycle_config;
+        forced_reject_config.solver.max_iterations = 1;
+        forced_reject_config.solver.tolerance = 1.0e-12f;
+        forced_reject_config.degraded_residual_limit = 1.0e-12f;
+        forced_reject_config.rti2_residual_recovery_limit = 0.0f;
+        MpcRtiCycleResult_t forced_reject_result;
+        const MpcRtiCycleStatus_t forced_reject_status = mpc_rti_solve_cycle(
+            &current, 0.0, trajectory, trajectory_count, lap_length, 0.025f,
+            horizon, &forced_reject_config, &memory, &forced_reject_result);
+        check_true(forced_reject_status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+                   forced_reject_status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED,
+                   "forced one-iteration RTI cycle is rejected");
+        check_true(memory.nominal.valid == accepted_memory.nominal.valid &&
+                   memory.nominal.horizon == accepted_memory.nominal.horizon,
+                   "rejected cycle preserves the last accepted nominal");
+        check_close((float)memory.nominal.progress[1],
+                    (float)accepted_memory.nominal.progress[1], 1.0e-8f,
+                    "rejected cycle restores accepted progress warm start");
+        check_close(memory.nominal.controls[0].steering_rate,
+                    accepted_memory.nominal.controls[0].steering_rate,
+                    1.0e-8f,
+                    "rejected cycle restores accepted control warm start");
+        check_true(memory.solver_state.initialized ==
+                       accepted_memory.solver_state.initialized,
+                   "rejected cycle restores accepted ADMM initialization state");
 
         MpcRtiCycleConfiguration_t forced_r2_config = cycle_config;
         forced_r2_config.refinement_mode = MPC_RTI_REFINEMENT_R2;
@@ -633,9 +664,14 @@ static void test_directional_corridor_schedule(void)
     make_circle_trajectory(trajectory, &trajectory_count, &lap_length);
     MpcRtiConfiguration_t config = test_configuration();
     config.corridor_preview_halfwidth_m = 0.0f;
+    /* Give recovery 5 cm of controller conservatism to relax while the
+     * physical 0.30 m center-to-wall envelope remains hard. With 0.60 m raw
+     * bounds, normal e_y is +/-0.25 and physical e_y is +/-0.30. */
+    config.corridor_margin_m = 0.35f;
+    config.first_prediction_corridor_margin_m = 0.35f;
 
     const MpcRtiState_t current = {
-        .plant = {.e_y = 0.60f, .e_psi = 0.0f, .u = 4.0f, .v = 0.0f,
+        .plant = {.e_y = 0.30f, .e_psi = 0.0f, .u = 4.0f, .v = 0.0f,
                   .r = 0.4f, .target_speed = 3.9f,
                   .steering_command = atanf(0.1f /
                       MPC_YAW_RATE_STEERING_GAIN_PER_M)},
@@ -650,9 +686,9 @@ static void test_directional_corridor_schedule(void)
     /* Isolate the schedule policy from model fitting: this is a deterministic
      * bounded seed that is outside the inset for one stage and re-enters at
      * the next stage. */
-    nominal.states[0].plant.e_y = 0.60f;
-    nominal.states[1].plant.e_y = 0.58f;
-    nominal.states[2].plant.e_y = 0.54f;
+    nominal.states[0].plant.e_y = 0.30f;
+    nominal.states[1].plant.e_y = 0.28f;
+    nominal.states[2].plant.e_y = 0.24f;
     nominal.states[3].plant.e_y = 0.20f;
     nominal.states[4].plant.e_y = 0.10f;
     for (int k = 0; k <= 4; ++k) nominal.progress[k] = 0.10 * k;
@@ -675,6 +711,19 @@ static void test_directional_corridor_schedule(void)
     check_true(schedule.active_upper[1] >= schedule.seed_e_y[1] &&
                schedule.active_lower[1] <= schedule.seed_e_y[1],
         "temporary envelope contains the bounded recovery seed");
+
+    MpcRtiNominal_t physically_unsafe_nominal = nominal;
+    physically_unsafe_nominal.states[1].plant.e_y = 0.34f;
+    MpcRtiCorridorSchedule_t hard_wall_schedule;
+    check_true(mpc_rti_build_corridor_schedule(&current,
+        &physically_unsafe_nominal, trajectory, trajectory_count, lap_length,
+        0.025f, &config, &hard_wall_schedule),
+        "physical-wall recovery schedule builds");
+    check_true(hard_wall_schedule.active_upper[1] <= 0.300001f,
+        "recovery never widens beyond the hard 0.30 m physical envelope");
+    check_true(hard_wall_schedule.active_upper[1] <
+                   hard_wall_schedule.seed_e_y[1],
+        "physically wall-overlapping seed is not legalized by recovery");
 
     MpcRtiConfiguration_t feedback_config = config;
     feedback_config.recovery_seed_policy =

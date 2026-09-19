@@ -4,41 +4,101 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: cpu-validation-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
-  odometry-cpu:
-    name: ROS 2 Humble CPU odometry
+  ros-cpu:
+    name: ROS 2 Humble MPC + odometry
     runs-on: ubuntu-22.04
     container: ros:humble-ros-base
     steps:
       - uses: actions/checkout@v4
-      - name: Build without CUDA AMCL
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake libeigen3-dev \
+            ros-humble-ackermann-msgs
+      - name: Build MPC and localization without CUDA AMCL
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential cmake libeigen3-dev
           colcon build --merge-install \
-            --packages-select f1tenth_localization \
-            --cmake-args -DBUILD_GPU_AMCL=OFF
-      - name: Run C++ tests
+            --packages-select f1tenth_mpc f1tenth_localization \
+            --cmake-args -DBUILD_GPU_AMCL=OFF -DBUILD_TESTING=ON
+      - name: Run C/C++ package tests
         shell: bash
         run: |
-          ctest --test-dir build/f1tenth_localization --output-on-failure
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
+          colcon test --merge-install --packages-select f1tenth_mpc f1tenth_localization \
+            --event-handlers console_direct+
+          colcon test-result --verbose
+      - name: Replay exact-raceline PP holdout through MPC
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
+          set +e
+          build/f1tenth_mpc/mpc_rti_offline_replay \
+            <(gzip -dc sdu_apex_autodrive/artifacts/external_mpc_analysis_20260919/02_pp_exact_baseline/pp_exact_events.csv.gz) \
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive \
+            --actions /tmp/pp_exact_actions.csv
+          replay_status=$?
+          set -e
+          python3 - <<'PY'
+          import csv
+          from collections import Counter
+          path = "/tmp/pp_exact_actions.csv"
+          rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
+          print("exact-raceline replay stratification:")
+          for lo, hi in ((0, 0.5), (0.5, 2), (2, 4), (4, 6), (6, 8), (8, 100)):
+              subset = [r for r in rows
+                        if r.get("u_mps") not in ("", None)
+                        and lo <= float(r["u_mps"]) < hi]
+              statuses = Counter(r["status"] for r in subset)
+              accepted = sum(v for k, v in statuses.items()
+                             if k in ("0", "1", "accepted_optimal", "accepted_degraded"))
+              print(f"  speed[{lo},{hi}): n={len(subset)} accepted={accepted} "
+                    f"rejected={len(subset)-accepted} statuses={dict(statuses)}")
+          moving = [r for r in rows
+                    if r.get("u_mps") not in ("", None) and float(r["u_mps"]) >= 2.0]
+          moving_statuses = Counter(r["status"] for r in moving)
+          print("  moving>=2mps:", len(moving), dict(moving_statuses))
+          PY
+          exit $replay_status
 
   python:
     name: Python analysis and controller tests
     runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
+        shell: bash
         run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3-pip \
+            ros-humble-rclpy ros-humble-std-msgs ros-humble-geometry-msgs \
+            ros-humble-nav-msgs ros-humble-sensor-msgs ros-humble-ackermann-msgs
           python3 -m pip install --upgrade pip
-          python3 -m pip install numpy pandas pytest
+          python3 -m pip install \
+            numpy pandas scipy pillow gevent pyyaml pytest
       - name: Run Python tests
+        shell: bash
         run: |
-          PYTHONPATH=sdu_apex_autodrive pytest -q sdu_apex_autodrive/test
+          source /opt/ros/humble/setup.bash
+          # bridge_40hz imports the vendor AutoDRIVE API package supplied by
+          # the project runtime image, not the generic ROS CPU image.
+          PYTHONPATH=sdu_apex_autodrive:${PYTHONPATH} python3 -m pytest -q \
+            sdu_apex_autodrive/test \
+            --ignore=sdu_apex_autodrive/test/test_bridge_40hz.py
       - name: Check whitespace and syntax
+        shell: bash
         run: |
           git diff --check
           python3 -m compileall -q sdu_apex_autodrive/sdu_apex_autodrive

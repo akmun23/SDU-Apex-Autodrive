@@ -67,9 +67,15 @@ typedef struct
     float max_steering_rate_radps;
     float max_target_speed_rate_increase_mps2;
     float max_target_speed_rate_reduction_mps2;
+    /* Minimum rear-axle-center to wall clearance. The runtime corridor
+     * also expands this using the heading-aware virtual-car footprint below. */
     float corridor_margin_m;
-    /* Optional first predicted sample margin; default equals corridor_margin_m. */
+    /* Optional first predicted sample margin; never reduces footprint clearance. */
     float first_prediction_corridor_margin_m;
+    float planning_half_width_m;
+    float vehicle_half_width_m;
+    float vehicle_longitudinal_extent_m;
+    float wall_clearance_m;
     float corridor_preview_halfwidth_m;
     float nonlinear_corridor_tolerance_m;
     /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */

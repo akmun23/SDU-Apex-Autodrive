@@ -63,6 +63,16 @@ int mpc_trajectory_project(
     size_t local_search_radius,
     MpcPathProjection_t *projection);
 
+/* Convert a metric local-association window into a segment radius for the
+ * current trajectory sampling. This keeps projection behavior invariant when
+ * the same raceline is exported at a different point density. */
+size_t mpc_trajectory_search_radius_for_distance(
+    const MpcTrajectorySample_t *points,
+    size_t point_count,
+    double lap_length,
+    size_t previous_segment,
+    double search_distance_m);
+
 /* Cold-start reference seed. The output has horizon+1 state references and
  * progress values; each next sample advances by v_ref(s_k)*dt, never a fixed
  * waypoint count or minimum distance. */

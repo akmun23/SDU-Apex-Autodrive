@@ -110,6 +110,16 @@ public:
             0.0, declare_parameter<double>("startup_path_max_distance_m", 0.80));
         startup_path_heading_tolerance_rad_ = std::max(
             0.0, declare_parameter<double>("startup_path_heading_tolerance_rad", 0.75));
+        localization_covariance_xy_max_ = std::max(
+            0.0, declare_parameter<double>("localization_covariance_xy_max", 0.25));
+        localization_covariance_yaw_max_ = std::max(
+            0.0, declare_parameter<double>("localization_covariance_yaw_max", 0.12));
+        localization_required_updates_ = std::max(
+            1, static_cast<int>(
+                declare_parameter<int>("localization_required_updates", 5)));
+        projection_search_distance_m_ = std::clamp(
+            declare_parameter<double>("projection_search_distance_m", 3.0),
+            0.25, 6.0);
 
         if (enabled_) {
             command_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
@@ -171,11 +181,22 @@ public:
         rti_config_.model.max_target_speed_rate_reduction_mps2 = static_cast<float>(
             declare_parameter<double>("max_target_speed_rate_reduction_mps2", 8.0));
         rti_config_.model.corridor_margin_m = static_cast<float>(
-            declare_parameter<double>("corridor_margin_m", 0.05));
+            declare_parameter<double>("corridor_margin_m", 0.30));
         rti_config_.model.first_prediction_corridor_margin_m =
             static_cast<float>(declare_parameter<double>(
                 "first_prediction_corridor_margin_m",
                 rti_config_.model.corridor_margin_m));
+        /* Match the exact min-time planner's AutoDRIVE footprint contract:
+         * 0.30 m minimum planning width, 0.273 m physical width, 0.43 m from
+         * rear axle to front bumper, and 0.15 m wall clearance. */
+        rti_config_.model.planning_half_width_m = static_cast<float>(
+            declare_parameter<double>("planning_half_width_m", 0.15));
+        rti_config_.model.vehicle_half_width_m = static_cast<float>(
+            declare_parameter<double>("vehicle_half_width_m", 0.1365));
+        rti_config_.model.vehicle_longitudinal_extent_m = static_cast<float>(
+            declare_parameter<double>("vehicle_longitudinal_extent_m", 0.43));
+        rti_config_.model.wall_clearance_m = static_cast<float>(
+            declare_parameter<double>("wall_clearance_m", 0.15));
         rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
@@ -411,6 +432,7 @@ private:
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
         mpc_rti_memory_reset(&rti_memory_);
+        accepted_command_established_ = false;
         if (enabled_) {
             target_speed_mps_ = 0.0;
             target_speed_initialized_ = true;
@@ -425,43 +447,83 @@ private:
             publish_shadow_failure(reason);
     }
 
-    /* A localization/model feasibility rejection is not a reason to command
-     * an emergency stop. Hold the last bounded steering command and keep the
-     * current/requested speed so AMCL can converge again on subsequent legal
-     * measurements. This is deliberately separate from publish_stop(), which
-     * remains reserved for invalid actuator/input safety conditions. */
+    /* A transient estimator/RTI failure should not freeze a stale cornering
+     * command. Preserve the last accepted RTI warm start, reduce target speed
+     * at the source-valid braking slew, and—when a legal path projection is
+     * available—rate-limit steering toward the local raceline feedforward.
+     * Before the first legal state, remain stopped; AMCL publishes a
+     * provisional pose specifically so the controller can then perform the
+     * slow startup travel required for global lock. */
     void publish_driving_fallback(const char *reason,
                                   double observed_speed_mps,
                                   double requested_speed_mps,
-                                  bool emit_shadow_diagnostic = true)
+                                  bool emit_shadow_diagnostic = true,
+                                  const MpcPathProjection_t *path_projection = nullptr)
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
-            "holding bounded driving command while localization recovers", reason);
-        mpc_rti_memory_reset(&rti_memory_);
+            "using bounded decelerating recovery command", reason);
         if (enabled_) {
+            (void)observed_speed_mps;
+            (void)requested_speed_mps;
+            if (!accepted_command_established_) {
+                // Before the first accepted MPC solution there is no safe
+                // steering command to hold. Match the proven Pure Pursuit
+                // startup contract: stay neutral until localization is
+                // qualified and RTI has produced one legal command.
+                target_speed_mps_ = 0.0;
+                target_speed_initialized_ = true;
+                last_steering_command_rad_ = 0.0;
+                last_steering_rate_radps_ = 0.0;
+                last_target_speed_rate_mps2_ = 0.0;
+                publish_command(0.0, 0.0);
+                if (diagnostics_pub_ && emit_shadow_diagnostic)
+                    publish_shadow_failure(reason);
+                return;
+            }
             const double speed_ceiling = active_speed_ceiling();
-            const double finite_observed = std::isfinite(observed_speed_mps) &&
-                    observed_speed_mps > 1.0e-6
-                ? std::max(0.0, observed_speed_mps) : 0.0;
-            const double finite_requested = std::isfinite(requested_speed_mps)
-                ? std::max(0.0, requested_speed_mps) : 0.0;
-            const double local_cap = std::min(
-                speed_ceiling, local_raceline_speed_cap());
-            const double previous_command = target_speed_initialized_
-                ? clamp(target_speed_mps_, 0.0, local_cap) : local_cap;
-            const double observed_cap = finite_observed > 0.0
-                ? finite_observed : local_cap;
-            const double requested_cap = finite_requested > 1.0e-6
-                ? finite_requested : local_cap;
-            target_speed_mps_ = clamp(
-                std::min({observed_cap, requested_cap,
-                    previous_command, local_cap}),
-                0.0, speed_ceiling);
-            last_steering_command_rad_ = clamp(
+            const double previous_target = target_speed_initialized_
+                ? clamp(target_speed_mps_, 0.0, speed_ceiling) : 0.0;
+            const double reduction =
+                rti_config_.model.max_target_speed_rate_reduction_mps2 *
+                TIME_STEP_SECONDS;
+            const double recovery_speed = target_speed_initialized_
+                ? std::max(0.0, previous_target - reduction) : 0.0;
+
+            const double previous_steering = clamp(
                 std::isfinite(last_steering_command_rad_)
                     ? last_steering_command_rad_ : 0.0,
                 -rti_config_.model.max_steering_rad,
                 rti_config_.model.max_steering_rad);
+            double recovery_steering = previous_steering;
+            if (path_projection && trajectory_loaded_) {
+                MpcTrajectorySample_t sample{};
+                if (mpc_trajectory_sample(
+                        trajectory_.data(), trajectory_.size(), track_length_m_,
+                        path_projection->s, &sample)) {
+                    double desired = std::atan(
+                        sample.curvature / MPC_YAW_RATE_STEERING_GAIN_PER_M);
+                    desired -= rti_config_.model.recovery_steering_k_e_y *
+                        path_projection->lateral_error;
+                    desired -= rti_config_.model.recovery_steering_k_e_psi *
+                        path_projection->heading_error;
+                    desired = clamp(
+                        desired, -rti_config_.model.max_steering_rad,
+                        rti_config_.model.max_steering_rad);
+                    const double max_step =
+                        rti_config_.model.max_steering_rate_radps *
+                        TIME_STEP_SECONDS;
+                    recovery_steering = clamp(
+                        desired, recovery_steering - max_step,
+                        recovery_steering + max_step);
+                }
+            }
+
+            last_steering_rate_radps_ =
+                (recovery_steering - previous_steering) / TIME_STEP_SECONDS;
+            last_target_speed_rate_mps2_ =
+                (recovery_speed - previous_target) / TIME_STEP_SECONDS;
+            last_steering_command_rad_ = recovery_steering;
+            target_speed_mps_ = recovery_speed;
             target_speed_initialized_ = true;
             publish_command(last_steering_command_rad_, target_speed_mps_);
         } else if (shadow_mode_) {
@@ -686,6 +748,31 @@ private:
         json << ",\"target_speed_mps\":";
         json_number(current_target_feedforward);
         json << "}";
+        const double current_physical_half_extent =
+            std::max(
+                static_cast<double>(rti_config_.model.planning_half_width_m),
+                static_cast<double>(rti_config_.model.vehicle_half_width_m) *
+                    std::abs(std::cos(state.plant.e_psi)) +
+                static_cast<double>(
+                    rti_config_.model.vehicle_longitudinal_extent_m) *
+                    std::abs(std::sin(state.plant.e_psi)));
+        const double current_required_wall_margin = std::max(
+            static_cast<double>(rti_config_.model.corridor_margin_m),
+            static_cast<double>(rti_config_.model.wall_clearance_m) +
+                current_physical_half_extent);
+        const double current_raw_wall_clearance = current_path_sample_valid
+            ? std::min(
+                current_path_sample.left_bound - state.plant.e_y,
+                current_path_sample.right_bound + state.plant.e_y)
+            : std::numeric_limits<double>::quiet_NaN();
+        json << ",\"footprint_required_wall_margin_m\":";
+        json_number(current_required_wall_margin);
+        json << ",\"current_raw_wall_clearance_m\":";
+        json_number(current_raw_wall_clearance);
+        json << ",\"current_physical_wall_slack_m\":";
+        json_number(current_path_sample_valid
+            ? current_raw_wall_clearance - current_required_wall_margin
+            : std::numeric_limits<double>::quiet_NaN());
         json << ",\"state\":[" << state.plant.e_y << ','
             << state.plant.e_psi << ',' << state.plant.u << ','
             << state.plant.v << ',' << state.plant.r << ','
@@ -863,8 +950,28 @@ private:
         const auto & q = message->pose.pose.orientation;
         const double yaw = std::atan2(
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        const double covariance_x = message->pose.covariance[0];
+        const double covariance_y = message->pose.covariance[7];
+        const double covariance_yaw = message->pose.covariance[35];
+        const double covariance_xy = std::max(covariance_x, covariance_y);
+        const bool covariance_good =
+            std::isfinite(covariance_x) && std::isfinite(covariance_y) &&
+            std::isfinite(covariance_yaw) &&
+            covariance_x >= 0.0 && covariance_y >= 0.0 &&
+            covariance_yaw >= 0.0 &&
+            covariance_xy <= localization_covariance_xy_max_ &&
+            covariance_yaw <= localization_covariance_yaw_max_;
         if (!std::isfinite(message->pose.pose.position.x) ||
-            !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw)) {
+            !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw) ||
+            !covariance_good) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_good_updates_ = 0;
+            localization_ready_ = false;
+            startup_path_validated_ = false;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "MPC waiting for qualified map pose: covariance xy=%.6g yaw=%.6g",
+                covariance_xy, covariance_yaw);
             return;
         }
         rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
@@ -877,7 +984,12 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC map-pose handoff rejected: %s",
                 MpcStateSynchronizer::status_name(status));
+            return;
         }
+        localization_good_updates_ =
+            std::min(localization_good_updates_ + 1, localization_required_updates_);
+        localization_ready_ =
+            localization_good_updates_ >= localization_required_updates_;
     }
 
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
@@ -925,6 +1037,18 @@ private:
             return;
         }
 
+        bool localization_ready = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+        }
+        if (!localization_ready) {
+            publish_driving_fallback(
+                "MPC waiting for qualified localization", 0.0,
+                target_speed_mps_);
+            return;
+        }
+
         MpcSynchronizedState coherent_state;
         MpcSyncStatus sync_status;
         const rclcpp::Time control_ros_time = now();
@@ -956,9 +1080,16 @@ private:
         MpcPathProjection_t projection{};
         const std::size_t previous_segment = progress_initialized_ ?
             last_closest_index_ : std::numeric_limits<std::size_t>::max();
+        const std::size_t projection_radius =
+            previous_segment < trajectory_.size()
+            ? mpc_trajectory_search_radius_for_distance(
+                  trajectory_.data(), trajectory_.size(), track_length_m_,
+                  previous_segment, projection_search_distance_m_)
+            : 0;
         if (!mpc_trajectory_project(trajectory_.data(), trajectory_.size(),
                 track_length_m_, coherent_state.map_x, coherent_state.map_y,
-                coherent_state.map_yaw, previous_segment, 160, &projection)) {
+                coherent_state.map_yaw, previous_segment, projection_radius,
+                &projection)) {
             publish_driving_fallback("MPC could not project uncertain pose",
                 coherent_state.u, target_speed_mps_);
             return;
@@ -992,8 +1123,9 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC command-time prediction rejected state: %s",
                 control_time_status_name(prediction_status));
-            publish_driving_fallback("MPC command-time state prediction is uncertain",
-                coherent_state.u, target_speed_mps_);
+            publish_driving_fallback(
+                "MPC command-time state prediction is uncertain",
+                coherent_state.u, target_speed_mps_, true, &projection);
             return;
         }
         const MpcSynchronizedState &command_time_state =
@@ -1062,8 +1194,10 @@ private:
                     last_projected_s_, source_dt, result, solve_us,
                     control_ros_time.nanoseconds(), callback_steady_ns,
                     synchronize_steady_ns);
-            publish_driving_fallback("MPC RTI cycle rejected its candidate",
-                command_time_state.u, commanded_speed, false);
+            publish_driving_fallback(
+                "MPC RTI cycle rejected its candidate",
+                command_time_state.u, commanded_speed, false,
+                &command_time_projection);
             return;
         }
 
@@ -1074,6 +1208,7 @@ private:
                 control_ros_time.nanoseconds(), callback_steady_ns,
                 synchronize_steady_ns);
         if (enabled_) {
+            accepted_command_established_ = true;
             target_speed_mps_ = result.published_target_speed;
             last_steering_command_rad_ = result.published_steering_command;
             last_steering_rate_radps_ = result.first_control.steering_rate;
@@ -1088,6 +1223,8 @@ private:
     bool startup_path_validated_{};
     bool progress_initialized_{};
     bool target_speed_initialized_{};
+    bool accepted_command_established_{};
+    bool localization_ready_{};
     std::string odom_topic_;
     std::string pose_topic_;
     std::string command_topic_;
@@ -1108,6 +1245,11 @@ private:
     double source_dt_max_s_{};
     double startup_path_max_distance_m_{};
     double startup_path_heading_tolerance_rad_{};
+    double localization_covariance_xy_max_{};
+    double localization_covariance_yaw_max_{};
+    int localization_required_updates_{5};
+    int localization_good_updates_{};
+    double projection_search_distance_m_{};
     double track_length_m_{};
     double startup_progress_m_{};
     double last_projected_s_{};

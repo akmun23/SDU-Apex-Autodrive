@@ -28,6 +28,17 @@
     source_dt_max_s: 0.250
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
+    # Match the Pure Pursuit startup contract: require several consecutive
+    # low-covariance /current_map_pose updates before MPC can establish its
+    # first authority command. This avoids driving on a provisional/unstable
+    # map pose while still allowing AMCL's anchored startup pose to begin the
+    # slow travel needed for global lock.
+    localization_covariance_xy_max: 0.25
+    localization_covariance_yaw_max: 0.12
+    localization_required_updates: 5
+    # Arc-length-local path association. The old 160-point radius covered
+    # almost the entire 313-point exact raceline and could snap hairpin legs.
+    projection_search_distance_m: 3.0
 
     # 9-state RTI objective; these are initial, not live-tuned weights.
     weight_e_y: 1500.0
@@ -48,8 +59,15 @@
     max_steering_rate_radps: 3.2
     max_target_speed_rate_increase_mps2: 3.0
     max_target_speed_rate_reduction_mps2: 8.0
-    corridor_margin_m: 0.05
-    first_prediction_corridor_margin_m: 0.05
+    # d_left/d_right are raw rear-axle-center-to-wall distances. Match the
+    # exact min-time planner's virtual-car envelope instead of treating a
+    # 5 cm point-mass inset as collision clearance.
+    corridor_margin_m: 0.30
+    first_prediction_corridor_margin_m: 0.30
+    planning_half_width_m: 0.15
+    vehicle_half_width_m: 0.1365
+    vehicle_longitudinal_extent_m: 0.43
+    wall_clearance_m: 0.15
     corridor_preview_halfwidth_m: 0.10
     nonlinear_corridor_tolerance_m: 0.001
 

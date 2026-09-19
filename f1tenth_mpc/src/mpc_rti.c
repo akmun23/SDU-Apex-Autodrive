@@ -66,6 +66,10 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->terminal_multiplier,
         configuration->corridor_margin_m,
         configuration->first_prediction_corridor_margin_m,
+        configuration->planning_half_width_m,
+        configuration->vehicle_half_width_m,
+        configuration->vehicle_longitudinal_extent_m,
+        configuration->wall_clearance_m,
         configuration->corridor_preview_halfwidth_m,
         configuration->nonlinear_corridor_tolerance_m};
     for (unsigned int i = 0; i < sizeof(weights) / sizeof(weights[0]); ++i)
@@ -95,7 +99,11 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->max_target_speed_rate_reduction_mps2 <=
             vehicle.maximum_target_speed_rate_reduction_mps2 &&
         configuration->first_prediction_corridor_margin_m <=
-            configuration->corridor_margin_m;
+            configuration->corridor_margin_m &&
+        configuration->planning_half_width_m > 0.0f &&
+        configuration->vehicle_half_width_m > 0.0f &&
+        configuration->vehicle_longitudinal_extent_m > 0.0f &&
+        configuration->wall_clearance_m >= 0.0f;
 }
 
 static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
@@ -291,6 +299,29 @@ static float corridor_margin_at_prediction(
     return prediction_index == 1
         ? configuration->first_prediction_corridor_margin_m
         : configuration->corridor_margin_m;
+}
+
+static float physical_wall_margin(
+    const MpcRtiConfiguration_t *configuration,
+    float e_psi)
+{
+    if (!configuration || !isfinite(e_psi)) return INFINITY;
+    const float physical_half_extent =
+        configuration->vehicle_half_width_m * fabsf(cosf(e_psi)) +
+        configuration->vehicle_longitudinal_extent_m * fabsf(sinf(e_psi));
+    const float lateral_extent = fmaxf(
+        configuration->planning_half_width_m, physical_half_extent);
+    return configuration->wall_clearance_m + lateral_extent;
+}
+
+static float heading_aware_corridor_margin(
+    const MpcRtiConfiguration_t *configuration,
+    float e_psi,
+    int prediction_index)
+{
+    return fmaxf(
+        corridor_margin_at_prediction(configuration, prediction_index),
+        physical_wall_margin(configuration, e_psi));
 }
 
 static int state_inside_command_envelope(
@@ -508,8 +539,7 @@ int mpc_rti_build_ltv_qp_with_schedule(
         stage->N[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE][1] =
             -2.0f * configuration->weight_target_speed_rate_change;
 
-        if (schedule && schedule->recovery_active &&
-            schedule->horizon == horizon) {
+        if (schedule && schedule->horizon == horizon) {
             if (!set_state_bounds_with_ey(stage->x_lb, stage->x_ub,
                     configuration,
                     schedule->active_lower[k], schedule->active_upper[k]))
@@ -526,7 +556,7 @@ int mpc_rti_build_ltv_qp_with_schedule(
     add_tracking_cost(problem->terminal_Q, problem->terminal_q,
                       &references[horizon], configuration,
                       configuration->terminal_multiplier);
-    if (schedule && schedule->recovery_active && schedule->horizon == horizon) {
+    if (schedule && schedule->horizon == horizon) {
         if (!set_state_bounds_with_ey(problem->terminal_x_lb,
                 problem->terminal_x_ub, configuration,
                 schedule->active_lower[horizon],
@@ -692,14 +722,24 @@ static int fill_corridor_schedule_for_seed(
     schedule->first_normal_feasible_stage = -1;
     schedule->initial_normal_violation = 0.0f;
     schedule->max_seed_violation = 0.0f;
+    float hard_physical_lower[PREDICTION_HORIZON + 1] = {0};
+    float hard_physical_upper[PREDICTION_HORIZON + 1] = {0};
     for (int k = 0; k <= seed->horizon; ++k) {
         MpcRtiReference_t reference;
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 seed->progress[k], configuration, &reference)) return 0;
-        const float margin = corridor_margin_at_prediction(configuration, k);
+        const float hard_margin = physical_wall_margin(
+            configuration, seed->states[k].plant.e_psi);
+        const float margin = fmaxf(
+            corridor_margin_at_prediction(configuration, k), hard_margin);
+        hard_physical_lower[k] = hard_margin - reference.right_bound;
+        hard_physical_upper[k] = reference.left_bound - hard_margin;
         schedule->normal_lower[k] = margin - reference.right_bound;
         schedule->normal_upper[k] = reference.left_bound - margin;
-        if (!isfinite(schedule->normal_lower[k]) ||
+        if (!isfinite(hard_physical_lower[k]) ||
+            !isfinite(hard_physical_upper[k]) ||
+            hard_physical_lower[k] > hard_physical_upper[k] ||
+            !isfinite(schedule->normal_lower[k]) ||
             !isfinite(schedule->normal_upper[k]) ||
             schedule->normal_lower[k] > schedule->normal_upper[k]) return 0;
         schedule->seed_e_y[k] = seed->states[k].plant.e_y;
@@ -734,12 +774,20 @@ static int fill_corridor_schedule_for_seed(
         schedule->recovery_stage[k] = temporary ? 1 : 0;
         if (!temporary) continue;
         if (schedule->seed_e_y[k] < schedule->normal_lower[k]) {
-            schedule->active_lower[k] = schedule->seed_e_y[k] - epsilon;
+            schedule->active_lower[k] = fmaxf(
+                schedule->seed_e_y[k] - epsilon, hard_physical_lower[k]);
             schedule->active_upper[k] = schedule->normal_upper[k];
         } else if (schedule->seed_e_y[k] > schedule->normal_upper[k]) {
             schedule->active_lower[k] = schedule->normal_lower[k];
-            schedule->active_upper[k] = schedule->seed_e_y[k] + epsilon;
+            schedule->active_upper[k] = fminf(
+                schedule->seed_e_y[k] + epsilon, hard_physical_upper[k]);
         }
+        /* Recovery may relax an extra controller inset, but the physical
+         * virtual-car envelope is never recoverable/soft. */
+        schedule->active_lower[k] = fmaxf(
+            schedule->active_lower[k], hard_physical_lower[k]);
+        schedule->active_upper[k] = fminf(
+            schedule->active_upper[k], hard_physical_upper[k]);
         if (!isfinite(schedule->active_lower[k]) ||
             !isfinite(schedule->active_upper[k]) ||
             schedule->active_lower[k] > schedule->active_upper[k]) return 0;
@@ -990,17 +1038,37 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
             path_delta->sample_count = k + 2;
         }
         int in_corridor = 0;
-        if (schedule && schedule->recovery_active &&
-            schedule->horizon == horizon) {
-            const float lower = schedule->active_lower[k + 1];
-            const float upper = schedule->active_upper[k + 1];
+        if (schedule && schedule->horizon == horizon) {
+            float lower = schedule->active_lower[k + 1];
+            float upper = schedule->active_upper[k + 1];
+            /* The virtual-car body envelope is hard even during recovery.
+             * Recovery may relax only additional controller margin. */
+            const float hard_margin = physical_wall_margin(
+                configuration, states[k + 1].plant.e_psi);
+            lower = fmaxf(lower,
+                hard_margin - candidate_reference.right_bound -
+                configuration->nonlinear_corridor_tolerance_m);
+            upper = fminf(upper,
+                candidate_reference.left_bound - hard_margin +
+                configuration->nonlinear_corridor_tolerance_m);
+            if (!schedule->recovery_stage[k + 1]) {
+                const float exact_margin = heading_aware_corridor_margin(
+                    configuration, states[k + 1].plant.e_psi, k + 1);
+                lower = fmaxf(lower,
+                    exact_margin - candidate_reference.right_bound -
+                    configuration->nonlinear_corridor_tolerance_m);
+                upper = fminf(upper,
+                    candidate_reference.left_bound - exact_margin +
+                    configuration->nonlinear_corridor_tolerance_m);
+            }
             in_corridor = isfinite(lower) && isfinite(upper) &&
                 lower <= upper && states[k + 1].plant.e_y >= lower &&
                 states[k + 1].plant.e_y <= upper;
         } else {
             in_corridor = corridor_contains(&states[k + 1],
                 &candidate_reference, configuration,
-                corridor_margin_at_prediction(configuration, k + 1));
+                heading_aware_corridor_margin(
+                    configuration, states[k + 1].plant.e_psi, k + 1));
         }
         if (!in_corridor) {
             if (failure_stage) *failure_stage = k;
@@ -1508,10 +1576,16 @@ static unsigned int adaptive_rti2_trigger_mask(
 
 static MpcRtiCycleStatus_t reject_cycle(
     MpcRtiMemory_t *memory,
+    const MpcRtiMemory_t *entry_memory,
     MpcRtiCycleResult_t *result,
     MpcRtiCycleStatus_t status)
 {
-    if (memory) mpc_rti_memory_reset(memory);
+    /* A rejected same-sample candidate must not erase the last accepted RTI
+     * trajectory. mpc_rti_build_nominal() re-anchors that trajectory to the
+     * next measured x0, so restoring the entry snapshot is both causal and a
+     * better warm start than forcing every transient reject into a cold solve.
+     * Solver mutations from the failed cycle are rolled back as well. */
+    if (memory && entry_memory) *memory = *entry_memory;
     if (result) result->status = status;
     return status;
 }
@@ -1557,9 +1631,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         !isfinite(lap_length) || !valid_cycle_configuration(configuration) ||
         horizon < 1 || horizon > PREDICTION_HORIZON ||
         !isfinite(prediction_dt) || prediction_dt <= 0.0f) {
-        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+        return reject_cycle(
+            memory, NULL, result, MPC_RTI_CYCLE_REJECTED_INPUT);
     }
 
+    const MpcRtiMemory_t cycle_entry_memory = *memory;
     const double cycle_start_us = monotonic_microseconds();
     MpcRtiNominal_t nominal;
     MpcRtiReference_t references[PREDICTION_HORIZON + 1];
@@ -1569,7 +1645,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             references)) {
         result->r1_status = MPC_RTI_CYCLE_REJECTED_INPUT;
         result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+        return reject_cycle(memory, &cycle_entry_memory, result,
+            MPC_RTI_CYCLE_REJECTED_INPUT);
     }
     result->nominal_first_control = nominal.controls[0];
     MpcRtiCorridorSchedule_t corridor_schedule;
@@ -1578,7 +1655,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             &corridor_schedule)) {
         result->r1_status = MPC_RTI_CYCLE_REJECTED_INPUT;
         result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+        return reject_cycle(memory, &cycle_entry_memory, result,
+            MPC_RTI_CYCLE_REJECTED_INPUT);
     }
     result->recovery_active = corridor_schedule.recovery_active;
     result->recovery_not_found = corridor_schedule.recovery_not_found;
@@ -1644,7 +1722,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->nonlinear_failure_stage = r1.nonlinear_failure_stage;
         result->nonlinear_failure_reason = r1.nonlinear_failure_reason;
         result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-        return reject_cycle(memory, result, r1_status);
+        return reject_cycle(memory, &cycle_entry_memory, result, r1_status);
     }
 
     MpcRtiPassResult_t selected = r1;
@@ -1697,7 +1775,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                     r1.nonlinear_failure_reason;
                 result->total_rti_us =
                     monotonic_microseconds() - cycle_start_us;
-                return reject_cycle(memory, result, r1_status);
+                return reject_cycle(memory, &cycle_entry_memory, result, r1_status);
             }
         }
         MpcRtiReference_t r2_references[PREDICTION_HORIZON + 1];
@@ -1773,7 +1851,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             result->nonlinear_failure_stage = r2.nonlinear_failure_stage;
             result->nonlinear_failure_reason = r2.nonlinear_failure_reason;
             result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-            return reject_cycle(memory, result,
+            return reject_cycle(memory, &cycle_entry_memory, result,
                 (MpcRtiCycleStatus_t)result->r2_status);
         }
     }

@@ -18,9 +18,13 @@ state are not runtime inputs.
 
 The MPC corridor has a hard configured inset for predicted states. The measured
 state `x0` is not corridor-gated because it is immutable for the current solve.
-`first_prediction_corridor_margin_m` applies only to `x1`; it defaults to the
-normal `corridor_margin_m` and must be no larger. Any reduction is an explicit
-controller-policy change and must be checked on captured simulator runs before
+`corridor_margin_m` is the minimum rear-axle-center-to-wall clearance and is
+0.30 m in production, matching the exact min-time planner's aligned 0.15 m
+planning half-width plus 0.15 m wall clearance. The runtime schedule expands
+that clearance with the virtual car's heading-aware rectangular footprint.
+`first_prediction_corridor_margin_m` applies only as an additional minimum at
+`x1`; it cannot reduce the physical footprint clearance. Any reduction is an
+explicit controller-policy change and must be checked on captured simulator runs before
 use; it does not change the track geometry or simulator behavior.
 
 When adaptive/R2 mode is enabled, a finite R1 that reaches the iteration cap

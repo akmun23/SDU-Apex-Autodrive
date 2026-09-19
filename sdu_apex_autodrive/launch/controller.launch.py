@@ -653,10 +653,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "mpc_start_delay_sec",
-            default_value="2.0",
+            default_value="0.0",
             description=(
-                "Wait this many seconds after the AMCL process starts before "
-                "launching the MPC controller; set to 0 to disable"
+                "Optional MPC process-start delay after AMCL. Default zero: "
+                "AMCL intentionally publishes a stable provisional pose so the "
+                "controller can perform the slow 0.75 m startup travel required "
+                "for global lock; a stationary fixed delay does not satisfy that gate."
             ),
         ),
         DeclareLaunchArgument(

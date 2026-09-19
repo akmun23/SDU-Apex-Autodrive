@@ -164,7 +164,7 @@ static bool json_number(const std::string &json, const char *key, double *value)
 static void test_failed_run_replay_uses_only_legal_runtime_topics()
 {
     std::ifstream input(MPC_SYNC_TEST_EVENTS_PATH);
-    check(input.good(), "open failed 4 m/s event trace for legal-input replay");
+    check(input.good(), "open curated authority event trace for legal-input replay");
     if (!input.good()) return;
 
     MpcSyncConfig config;
@@ -238,8 +238,8 @@ static void test_failed_run_replay_uses_only_legal_runtime_topics()
         }
     }
 
-    check(odom_count >= 2000,
-          "replay consumes the recorded consecutive legal odometry stream");
+    check(odom_count >= 400,
+          "replay consumes the curated authority odometry stream");
     check(order_faults == 0,
           "recorded odometry and map-pose source order remains monotonic");
     check(source_gap_faults == 0,
@@ -251,7 +251,7 @@ static void test_failed_run_replay_uses_only_legal_runtime_topics()
         const double p95 = accepted_ages[
             static_cast<std::size_t>(0.95 * (accepted_ages.size() - 1))];
         const double maximum = accepted_ages.back();
-        std::cout << "4 m/s legal-state replay: accepted " << accepted_count << "/"
+        std::cout << "curated authority legal-state replay: accepted " << accepted_count << "/"
                   << odom_count << ", source age p95=" << p95 * 1000.0
                   << " ms max=" << maximum * 1000.0 << " ms; order faults="
                   << order_faults << " gap faults=" << source_gap_faults

@@ -209,6 +209,10 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     model.corridor_margin_m = corridor_margin_m;
     model.first_prediction_corridor_margin_m =
         first_prediction_corridor_margin_m;
+    model.planning_half_width_m = 0.15f;
+    model.vehicle_half_width_m = 0.1365f;
+    model.vehicle_longitudinal_extent_m = 0.43f;
+    model.wall_clearance_m = 0.15f;
     model.corridor_preview_halfwidth_m = corridor_preview_halfwidth_m;
     model.nonlinear_corridor_tolerance_m = 0.001f;
     model.use_fd_jacobian_oracle = use_fd_jacobian ? 1 : 0;
@@ -472,9 +476,16 @@ bool replay_events(const std::string &events_path, int max_iterations,
         }
 
         MpcPathProjection_t projection{};
+        const std::size_t local_projection_radius =
+            previous_segment < trajectory.size()
+            ? mpc_trajectory_search_radius_for_distance(
+                  trajectory.data(), trajectory.size(), lap_length,
+                  previous_segment, 3.0)
+            : 0;
         if (!mpc_trajectory_project(trajectory.data(), trajectory.size(),
                 lap_length, synchronized.map_x, synchronized.map_y,
-                synchronized.map_yaw, previous_segment, 160, &projection)) {
+                synchronized.map_yaw, previous_segment,
+                local_projection_radius, &projection)) {
             ++metrics.projection_rejections;
             mpc_rti_memory_reset(&memory);
             previous_odom_stamp_ns = source_stamp_ns;
@@ -995,8 +1006,8 @@ int main(int argc, char **argv)
     float rho = 7.0f;
     float rho_u = 7.0f;
     float degraded_residual_limit = 0.05f;
-    float corridor_margin_m = 0.05f;
-    float first_prediction_corridor_margin_m = 0.05f;
+    float corridor_margin_m = 0.30f;
+    float first_prediction_corridor_margin_m = 0.30f;
     float corridor_preview_halfwidth_m = 0.10f;
     int recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
     float recovery_steering_k_e_y = 0.0f;
