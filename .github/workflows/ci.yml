@@ -53,7 +53,9 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            python3-pip
+            python3-pip \
+            ros-humble-rclpy ros-humble-std-msgs ros-humble-geometry-msgs \
+            ros-humble-nav-msgs ros-humble-sensor-msgs ros-humble-ackermann-msgs
           python3 -m pip install --upgrade pip
           python3 -m pip install \
             numpy pandas scipy pillow gevent pyyaml pytest
