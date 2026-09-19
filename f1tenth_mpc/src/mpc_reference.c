@@ -137,6 +137,61 @@ static size_t wrapped_index(long long index, size_t count)
     return (size_t)value;
 }
 
+static double segment_arc_length(
+    const MpcTrajectorySample_t *points,
+    size_t count,
+    double lap_length,
+    size_t segment)
+{
+    if (!points || count < 2 || segment >= count) return 0.0;
+    const size_t next = (segment + 1) % count;
+    const double s0 = points[segment].s;
+    const double s1 = next == 0 ? points[0].s + lap_length : points[next].s;
+    const double ds = s1 - s0;
+    return isfinite(ds) && ds > 0.0 ? ds : 0.0;
+}
+
+size_t mpc_trajectory_search_radius_for_distance(
+    const MpcTrajectorySample_t *points,
+    size_t point_count,
+    double lap_length,
+    size_t previous_segment,
+    double search_distance_m)
+{
+    if (!valid_path(points, point_count, lap_length) ||
+        previous_segment >= point_count || !isfinite(search_distance_m) ||
+        search_distance_m <= 0.0) return 0;
+
+    double forward_m = 0.0;
+    double backward_m = 0.0;
+    size_t radius = 0;
+    while (radius + 1 < point_count &&
+           (forward_m < search_distance_m ||
+            backward_m < search_distance_m)) {
+        const size_t next_radius = radius + 1;
+        if (forward_m < search_distance_m) {
+            const size_t segment = wrapped_index(
+                (long long)previous_segment + (long long)radius,
+                point_count);
+            const double ds = segment_arc_length(
+                points, point_count, lap_length, segment);
+            if (!(ds > 0.0)) return 0;
+            forward_m += ds;
+        }
+        if (backward_m < search_distance_m) {
+            const size_t segment = wrapped_index(
+                (long long)previous_segment - (long long)next_radius,
+                point_count);
+            const double ds = segment_arc_length(
+                points, point_count, lap_length, segment);
+            if (!(ds > 0.0)) return 0;
+            backward_m += ds;
+        }
+        radius = next_radius;
+    }
+    return radius;
+}
+
 static void consider_segment(
     const MpcTrajectorySample_t *points,
     size_t count,
@@ -217,13 +272,10 @@ int mpc_trajectory_project(
         }
     }
 
-    if (!found && previous_segment < point_count) {
-        best_distance_squared = INFINITY;
-        for (size_t i = 0; i < point_count; ++i) {
-            consider_segment(points, point_count, lap_length, x, y, heading, i,
-                &found, &best_distance_squared, &best);
-        }
-    }
+    /* Once progress is initialized, never reacquire from the full closed
+     * track. A global nearest-segment fallback can jump to a parallel hairpin
+     * branch after a transient localization/control error. Returning failure
+     * lets the controller enter its bounded recovery path instead. */
     if (!found) return 0;
     *projection = best;
     return 1;
