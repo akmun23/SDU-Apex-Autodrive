@@ -110,6 +110,12 @@ public:
             0.0, declare_parameter<double>("startup_path_max_distance_m", 0.80));
         startup_path_heading_tolerance_rad_ = std::max(
             0.0, declare_parameter<double>("startup_path_heading_tolerance_rad", 0.75));
+        localization_covariance_xy_max_ = std::max(
+            0.0, declare_parameter<double>("localization_covariance_xy_max", 0.25));
+        localization_covariance_yaw_max_ = std::max(
+            0.0, declare_parameter<double>("localization_covariance_yaw_max", 0.12));
+        localization_required_updates_ = std::max(
+            1, declare_parameter<int>("localization_required_updates", 5));
         projection_search_distance_m_ = std::clamp(
             declare_parameter<double>("projection_search_distance_m", 3.0),
             0.25, 6.0);
@@ -425,6 +431,7 @@ private:
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
         mpc_rti_memory_reset(&rti_memory_);
+        accepted_command_established_ = false;
         if (enabled_) {
             target_speed_mps_ = 0.0;
             target_speed_initialized_ = true;
@@ -457,6 +464,21 @@ private:
         if (enabled_) {
             (void)observed_speed_mps;
             (void)requested_speed_mps;
+            if (!accepted_command_established_) {
+                // Before the first accepted MPC solution there is no safe
+                // steering command to hold. Match the proven Pure Pursuit
+                // startup contract: stay neutral until localization is
+                // qualified and RTI has produced one legal command.
+                target_speed_mps_ = 0.0;
+                target_speed_initialized_ = true;
+                last_steering_command_rad_ = 0.0;
+                last_steering_rate_radps_ = 0.0;
+                last_target_speed_rate_mps2_ = 0.0;
+                publish_command(0.0, 0.0);
+                if (diagnostics_pub_ && emit_shadow_diagnostic)
+                    publish_shadow_failure(reason);
+                return;
+            }
             const double speed_ceiling = active_speed_ceiling();
             const double previous_target = target_speed_initialized_
                 ? clamp(target_speed_mps_, 0.0, speed_ceiling) : 0.0;
@@ -927,8 +949,27 @@ private:
         const auto & q = message->pose.pose.orientation;
         const double yaw = std::atan2(
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        const double covariance_x = message->pose.covariance[0];
+        const double covariance_y = message->pose.covariance[7];
+        const double covariance_yaw = message->pose.covariance[35];
+        const double covariance_xy = std::max(covariance_x, covariance_y);
+        const bool covariance_good =
+            std::isfinite(covariance_x) && std::isfinite(covariance_y) &&
+            std::isfinite(covariance_yaw) &&
+            covariance_x >= 0.0 && covariance_y >= 0.0 &&
+            covariance_yaw >= 0.0 &&
+            covariance_xy <= localization_covariance_xy_max_ &&
+            covariance_yaw <= localization_covariance_yaw_max_;
         if (!std::isfinite(message->pose.pose.position.x) ||
-            !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw)) {
+            !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw) ||
+            !covariance_good) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_good_updates_ = 0;
+            localization_ready_ = false;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "MPC waiting for qualified map pose: covariance xy=%.6g yaw=%.6g",
+                covariance_xy, covariance_yaw);
             return;
         }
         rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
@@ -941,7 +982,12 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC map-pose handoff rejected: %s",
                 MpcStateSynchronizer::status_name(status));
+            return;
         }
+        localization_good_updates_ =
+            std::min(localization_good_updates_ + 1, localization_required_updates_);
+        localization_ready_ =
+            localization_good_updates_ >= localization_required_updates_;
     }
 
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
@@ -985,6 +1031,18 @@ private:
         if (odom_status != MpcSyncStatus::kOk) {
             publish_driving_fallback(
                 "MPC rejected uncertain legal odometry sample", 0.0,
+                target_speed_mps_);
+            return;
+        }
+
+        bool localization_ready = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+        }
+        if (!localization_ready) {
+            publish_driving_fallback(
+                "MPC waiting for qualified localization", 0.0,
                 target_speed_mps_);
             return;
         }
@@ -1148,6 +1206,7 @@ private:
                 control_ros_time.nanoseconds(), callback_steady_ns,
                 synchronize_steady_ns);
         if (enabled_) {
+            accepted_command_established_ = true;
             target_speed_mps_ = result.published_target_speed;
             last_steering_command_rad_ = result.published_steering_command;
             last_steering_rate_radps_ = result.first_control.steering_rate;
@@ -1162,6 +1221,8 @@ private:
     bool startup_path_validated_{};
     bool progress_initialized_{};
     bool target_speed_initialized_{};
+    bool accepted_command_established_{};
+    bool localization_ready_{};
     std::string odom_topic_;
     std::string pose_topic_;
     std::string command_topic_;
@@ -1182,6 +1243,10 @@ private:
     double source_dt_max_s_{};
     double startup_path_max_distance_m_{};
     double startup_path_heading_tolerance_rad_{};
+    double localization_covariance_xy_max_{};
+    double localization_covariance_yaw_max_{};
+    int localization_required_updates_{5};
+    int localization_good_updates_{};
     double projection_search_distance_m_{};
     double track_length_m_{};
     double startup_progress_m_{};
