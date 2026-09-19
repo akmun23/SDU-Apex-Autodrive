@@ -52,6 +52,14 @@ jobs:
         run: |
           ctest --test-dir build/f1tenth_mpc --output-on-failure
 
+      - name: Replay clean PP-shadow MPC holdout
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          build/f1tenth_mpc/mpc_rti_offline_replay \
+            <(gzip -dc sdu_apex_autodrive/artifacts/mpc_next_685ccca/11_shadow/pp_mpc_shadow_icra_20260918/events.csv.gz) \
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive
+
   python:
     name: Python analysis and controller tests
     runs-on: ubuntu-22.04
