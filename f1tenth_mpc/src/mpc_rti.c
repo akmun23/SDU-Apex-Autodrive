@@ -66,6 +66,10 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->terminal_multiplier,
         configuration->corridor_margin_m,
         configuration->first_prediction_corridor_margin_m,
+        configuration->planning_half_width_m,
+        configuration->vehicle_half_width_m,
+        configuration->vehicle_longitudinal_extent_m,
+        configuration->wall_clearance_m,
         configuration->corridor_preview_halfwidth_m,
         configuration->nonlinear_corridor_tolerance_m};
     for (unsigned int i = 0; i < sizeof(weights) / sizeof(weights[0]); ++i)
@@ -95,7 +99,11 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->max_target_speed_rate_reduction_mps2 <=
             vehicle.maximum_target_speed_rate_reduction_mps2 &&
         configuration->first_prediction_corridor_margin_m <=
-            configuration->corridor_margin_m;
+            configuration->corridor_margin_m &&
+        configuration->planning_half_width_m > 0.0f &&
+        configuration->vehicle_half_width_m > 0.0f &&
+        configuration->vehicle_longitudinal_extent_m > 0.0f &&
+        configuration->wall_clearance_m >= 0.0f;
 }
 
 static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
@@ -291,6 +299,24 @@ static float corridor_margin_at_prediction(
     return prediction_index == 1
         ? configuration->first_prediction_corridor_margin_m
         : configuration->corridor_margin_m;
+}
+
+static float heading_aware_corridor_margin(
+    const MpcRtiConfiguration_t *configuration,
+    float e_psi,
+    int prediction_index)
+{
+    if (!configuration || !isfinite(e_psi)) return INFINITY;
+    const float physical_half_extent =
+        configuration->vehicle_half_width_m * fabsf(cosf(e_psi)) +
+        configuration->vehicle_longitudinal_extent_m * fabsf(sinf(e_psi));
+    const float lateral_extent = fmaxf(
+        configuration->planning_half_width_m, physical_half_extent);
+    const float footprint_margin =
+        configuration->wall_clearance_m + lateral_extent;
+    return fmaxf(
+        corridor_margin_at_prediction(configuration, prediction_index),
+        footprint_margin);
 }
 
 static int state_inside_command_envelope(
@@ -508,8 +534,7 @@ int mpc_rti_build_ltv_qp_with_schedule(
         stage->N[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE][1] =
             -2.0f * configuration->weight_target_speed_rate_change;
 
-        if (schedule && schedule->recovery_active &&
-            schedule->horizon == horizon) {
+        if (schedule && schedule->horizon == horizon) {
             if (!set_state_bounds_with_ey(stage->x_lb, stage->x_ub,
                     configuration,
                     schedule->active_lower[k], schedule->active_upper[k]))
@@ -526,7 +551,7 @@ int mpc_rti_build_ltv_qp_with_schedule(
     add_tracking_cost(problem->terminal_Q, problem->terminal_q,
                       &references[horizon], configuration,
                       configuration->terminal_multiplier);
-    if (schedule && schedule->recovery_active && schedule->horizon == horizon) {
+    if (schedule && schedule->horizon == horizon) {
         if (!set_state_bounds_with_ey(problem->terminal_x_lb,
                 problem->terminal_x_ub, configuration,
                 schedule->active_lower[horizon],
@@ -696,7 +721,8 @@ static int fill_corridor_schedule_for_seed(
         MpcRtiReference_t reference;
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 seed->progress[k], configuration, &reference)) return 0;
-        const float margin = corridor_margin_at_prediction(configuration, k);
+        const float margin = heading_aware_corridor_margin(
+            configuration, seed->states[k].plant.e_psi, k);
         schedule->normal_lower[k] = margin - reference.right_bound;
         schedule->normal_upper[k] = reference.left_bound - margin;
         if (!isfinite(schedule->normal_lower[k]) ||
