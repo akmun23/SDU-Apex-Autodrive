@@ -26,6 +26,32 @@ jobs:
         run: |
           ctest --test-dir build/f1tenth_localization --output-on-failure
 
+  mpc-cpu:
+    name: ROS 2 Humble CPU MPC
+    runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPC dependencies
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake \
+            ros-humble-ackermann-msgs ros-humble-rclcpp-components
+      - name: Build MPC
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build --merge-install \
+            --packages-select f1tenth_mpc \
+            --cmake-args -DBUILD_TESTING=ON
+      - name: Run MPC tests
+        shell: bash
+        run: |
+          ctest --test-dir build/f1tenth_mpc --output-on-failure
+
   python:
     name: Python analysis and controller tests
     runs-on: ubuntu-22.04
