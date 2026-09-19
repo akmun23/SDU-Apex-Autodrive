@@ -91,14 +91,13 @@ jobs:
           source /opt/ros/humble/setup.bash
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            python3-pip
-          python3 -m pip install --upgrade pip
-          python3 -m pip install numpy pandas pytest pillow gevent
+            python3-numpy python3-pandas python3-pytest python3-pil \
+            python3-gevent python3-scipy
       - name: Run Python tests
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
-          PYTHONPATH=sdu_apex_autodrive python3 -m pytest -q sdu_apex_autodrive/test
+          PYTHONPATH=sdu_apex_autodrive:${PYTHONPATH:-} python3 -m pytest -q sdu_apex_autodrive/test
       - name: Check whitespace and syntax
         shell: bash
         run: |
