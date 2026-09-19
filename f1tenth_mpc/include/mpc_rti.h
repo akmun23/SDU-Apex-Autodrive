@@ -40,6 +40,8 @@ typedef struct
     float v;
     float r;
     float steering_command;
+    float target_speed;
+    float target_speed_rate;
     float path_curvature;
     float left_bound;
     float right_bound;
@@ -50,6 +52,7 @@ typedef struct
     float weight_e_y;
     float weight_e_psi;
     float weight_u;
+    float weight_target_speed_state;
     float weight_v;
     float weight_r;
     float weight_steering_command;

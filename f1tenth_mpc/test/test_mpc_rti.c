@@ -27,6 +27,7 @@ static MpcRtiConfiguration_t test_configuration(void)
         .weight_e_y = 1500.0f,
         .weight_e_psi = 50.0f,
         .weight_u = 200.0f,
+        .weight_target_speed_state = 20.0f,
         .weight_v = 0.0f,
         .weight_r = 1.5f,
         .weight_steering_command = 1.0f,
@@ -70,6 +71,7 @@ static void make_nominal(
         .e_y = 0.0f, .e_psi = 0.0f, .u = 5.4f, .v = 0.0f,
         .r = 0.216f, .steering_command = atanf(0.04f /
             MPC_YAW_RATE_STEERING_GAIN_PER_M),
+        .target_speed = 5.1f, .target_speed_rate = 0.0f,
         .path_curvature = 0.04f, .left_bound = 0.45f,
         .right_bound = 0.40f};
     refs[1] = refs[0];
@@ -223,10 +225,12 @@ static void test_previous_control_penalty_matrix_algebra(void)
     check_close(problem.steps[0].N[MPC_RTI_IDX_PREVIOUS_STEERING_RATE][0],
                 -2.0f * config.weight_steering_rate_change, 1.0e-7f,
                 "rate-change penalty contributes N_pu = -2w");
-    check_close(problem.steps[0].Q_diag[MPC_RTI_IDX_TARGET_SPEED], 0.0f,
-                1.0e-7f, "target-speed state has no direct tracking weight");
-    check_close(problem.steps[0].q[MPC_RTI_IDX_TARGET_SPEED], 0.0f,
-                1.0e-7f, "target-speed state has no direct linear cost");
+    check_close(problem.steps[0].Q_diag[MPC_RTI_IDX_TARGET_SPEED],
+                2.0f * config.weight_target_speed_state, 1.0e-7f,
+                "target-speed state has a direct tracking weight");
+    check_close(problem.steps[0].q[MPC_RTI_IDX_TARGET_SPEED],
+                -2.0f * config.weight_target_speed_state * refs[0].target_speed,
+                1.0e-5f, "target-speed state has a direct linear cost");
 
     MpcRtiConfiguration_t zero_config = config;
     zero_config.weight_v = 4.0f;
@@ -250,9 +254,9 @@ static void test_previous_control_penalty_matrix_algebra(void)
     check_true(mpc_rti_build_ltv_qp(zero_nominal,
         zero_nominal_controls, zero_refs, 1, 0.025f, &zero_config,
         &problem), "QP tolerates target-speed state away from reference");
-    check_close(problem.steps[0].Q_diag[MPC_RTI_IDX_TARGET_SPEED], 0.0f,
-                1.0e-7f,
-                "target-speed state is not strongly tracked to body reference");
+    check_close(problem.steps[0].Q_diag[MPC_RTI_IDX_TARGET_SPEED],
+                2.0f * zero_config.weight_target_speed_state, 1.0e-7f,
+                "target-speed state is directly tracked to its reference");
 }
 
 static void test_invalid_problem_rejected(void)
@@ -294,7 +298,8 @@ static void make_circle_trajectory(
                  MPC_LONGITUDINAL_SPEED_COEFF_PER_S * 4.0f) /
                     MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S,
             .left_bound = 0.60,
-            .right_bound = 0.60};
+            .right_bound = 0.60,
+            .acceleration = 1.5};
     }
     *count = n;
     (void)mpc_trajectory_prepare(points, count, lap_length);
@@ -334,6 +339,16 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
                "cold nominal retains N+1 states and N controls");
     check_true(nominal.progress[1] > 0.0 && nominal.progress[1] < 0.2,
                "nominal progress follows model delta_s, not a fixed waypoint jump");
+    const float reference_speed = (float)trajectory[0].speed;
+    const float expected_target_speed = reference_speed +
+        (1.5f - MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 -
+         MPC_LONGITUDINAL_SPEED_COEFF_PER_S * reference_speed -
+         MPC_LONGITUDINAL_TARGET_RATE_COEFF * 1.5f) /
+        MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S - 0.5f * 1.5f * 0.025f;
+    check_close(cold_references[0].target_speed, expected_target_speed,
+                1.0e-5f, "target-speed reference inverts raceline acceleration");
+    check_close(cold_references[0].target_speed_rate, 1.5f, 1.0e-7f,
+                "target-speed reference carries raceline acceleration");
     check_close((float)nominal.progress[1], 0.025f * speed, 2.0e-4f,
                 "steady constant-curvature nominal advances approximately u*dt");
 

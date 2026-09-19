@@ -33,6 +33,7 @@
     weight_e_y: 1500.0
     weight_e_psi: 50.0
     weight_u: 200.0
+    weight_target_speed_state: 20.0
     weight_v: 0.0
     weight_r: 1.5
     weight_steering_command: 1.0

@@ -142,6 +142,8 @@ public:
         rti_config_.model.weight_e_y = declare_weight("weight_e_y", 1500.0f);
         rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 50.0f);
         rti_config_.model.weight_u = declare_weight("weight_u", 200.0f);
+        rti_config_.model.weight_target_speed_state = declare_weight(
+            "weight_target_speed_state", 20.0f);
         rti_config_.model.weight_v = declare_weight("weight_v", 0.0f);
         rti_config_.model.weight_r = declare_weight("weight_r", 1.5f);
         rti_config_.model.weight_steering_command = declare_weight(
@@ -310,13 +312,15 @@ private:
             point.heading = values[3];
             point.curvature = values[4];
             point.speed = values[5];
+            point.acceleration = values.size() >= 7 ? values[6] : 0.0;
             if (values.size() >= 9) {
                 point.left_bound = values[7];
                 point.right_bound = values[8];
             }
             if (!std::isfinite(point.s) || !std::isfinite(point.x) ||
                 !std::isfinite(point.y) || !std::isfinite(point.heading) ||
-                !std::isfinite(point.curvature) || !std::isfinite(point.speed)) {
+                !std::isfinite(point.curvature) || !std::isfinite(point.speed) ||
+                !std::isfinite(point.acceleration)) {
                 continue;
             }
             if (!std::isfinite(point.left_bound) || point.left_bound <= 0.0) {
@@ -371,6 +375,20 @@ private:
         return startup_speed_mps_ + (max_speed_mps_ - startup_speed_mps_) * fraction;
     }
 
+    double local_raceline_speed_cap() const
+    {
+        if (!trajectory_loaded_ || trajectory_.empty() ||
+            !progress_initialized_) {
+            return std::min(startup_speed_mps_, max_speed_mps_);
+        }
+        MpcTrajectorySample_t sample{};
+        if (!mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
+                track_length_m_, last_projected_s_, &sample)) {
+            return std::min(startup_speed_mps_, max_speed_mps_);
+        }
+        return clamp(sample.speed, 0.0, max_speed_mps_);
+    }
+
     void publish_command(double steering, double speed)
     {
         if (!command_pub_) return;
@@ -422,12 +440,22 @@ private:
         mpc_rti_memory_reset(&rti_memory_);
         if (enabled_) {
             const double speed_ceiling = active_speed_ceiling();
-            const double finite_observed = std::isfinite(observed_speed_mps)
+            const double finite_observed = std::isfinite(observed_speed_mps) &&
+                    observed_speed_mps > 1.0e-6
                 ? std::max(0.0, observed_speed_mps) : 0.0;
             const double finite_requested = std::isfinite(requested_speed_mps)
                 ? std::max(0.0, requested_speed_mps) : 0.0;
+            const double local_cap = std::min(
+                speed_ceiling, local_raceline_speed_cap());
+            const double previous_command = target_speed_initialized_
+                ? clamp(target_speed_mps_, 0.0, local_cap) : local_cap;
+            const double observed_cap = finite_observed > 0.0
+                ? finite_observed : local_cap;
+            const double requested_cap = finite_requested > 1.0e-6
+                ? finite_requested : local_cap;
             target_speed_mps_ = clamp(
-                std::max(finite_observed, finite_requested),
+                std::min({observed_cap, requested_cap,
+                    previous_command, local_cap}),
                 0.0, speed_ceiling);
             last_steering_command_rad_ = clamp(
                 std::isfinite(last_steering_command_rad_)
@@ -630,6 +658,34 @@ private:
             << ",\"path_curvature_per_m\":";
         json_number(current_path_sample_valid ? current_path_sample.curvature :
             std::numeric_limits<double>::quiet_NaN());
+        json << ",\"reference\":{\"acceleration_mps2\":";
+        json_number(current_path_sample_valid ? current_path_sample.acceleration :
+            std::numeric_limits<double>::quiet_NaN());
+        const double current_reference_speed = current_path_sample_valid
+            ? std::min(current_path_sample.speed,
+                static_cast<double>(rti_config_.model.active_speed_ceiling_mps))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double current_reference_rate = current_path_sample_valid
+            ? clamp(current_path_sample.acceleration,
+                -rti_config_.model.max_target_speed_rate_reduction_mps2,
+                rti_config_.model.max_target_speed_rate_increase_mps2)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double current_target_feedforward = current_path_sample_valid
+            ? clamp(current_reference_speed +
+                (current_reference_rate - MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 -
+                 MPC_LONGITUDINAL_SPEED_COEFF_PER_S * current_reference_speed -
+                 MPC_LONGITUDINAL_TARGET_RATE_COEFF * current_reference_rate) /
+                MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S -
+                0.5 * current_reference_rate * TIME_STEP_SECONDS,
+                0.0, rti_config_.model.active_speed_ceiling_mps)
+            : std::numeric_limits<double>::quiet_NaN();
+        json << ",\"speed_mps\":";
+        json_number(current_reference_speed);
+        json << ",\"speed_rate_mps2\":";
+        json_number(current_reference_rate);
+        json << ",\"target_speed_mps\":";
+        json_number(current_target_feedforward);
+        json << "}";
         json << ",\"state\":[" << state.plant.e_y << ','
             << state.plant.e_psi << ',' << state.plant.u << ','
             << state.plant.v << ',' << state.plant.r << ','
@@ -756,6 +812,17 @@ private:
                 sample.speed,
                 static_cast<double>(
                     rti_config_.model.active_speed_ceiling_mps));
+            const double reference_rate = clamp(
+                sample.acceleration,
+                -rti_config_.model.max_target_speed_rate_reduction_mps2,
+                rti_config_.model.max_target_speed_rate_increase_mps2);
+            const double target_speed_reference = clamp(reference_speed +
+                (reference_rate - MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 -
+                 MPC_LONGITUDINAL_SPEED_COEFF_PER_S * reference_speed -
+                 MPC_LONGITUDINAL_TARGET_RATE_COEFF * reference_rate) /
+                MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S -
+                0.5 * reference_rate * TIME_STEP_SECONDS,
+                0.0, rti_config_.model.active_speed_ceiling_mps);
             const double feedforward = clamp(
                 std::atan(sample.curvature /
                     MPC_YAW_RATE_STEERING_GAIN_PER_M),
@@ -771,7 +838,8 @@ private:
                 << predicted.plant.steering_command << ']'
                 << ",\"reference\":[0,0," << reference_speed
                 << ",0," << sample.curvature * reference_speed << ','
-                << feedforward << ']'
+                << feedforward << "," << target_speed_reference << ','
+                << reference_rate << ']'
                 << ",\"input\":[" << control.steering_rate << ','
                 << control.target_speed_rate << ']'
                 << ",\"corridor\":[" << sample.left_bound << ','

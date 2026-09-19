@@ -20,6 +20,7 @@ static int finite_sample(const MpcTrajectorySample_t *point)
         isfinite(point->y) && isfinite(point->heading) &&
         isfinite(point->curvature) && isfinite(point->speed) &&
         isfinite(point->left_bound) && isfinite(point->right_bound) &&
+        isfinite(point->acceleration) &&
         point->speed >= 0.0 && point->left_bound > 0.0 &&
         point->right_bound > 0.0;
 }
@@ -122,6 +123,8 @@ int mpc_trajectory_sample(
         .speed = a->speed + t * (b->speed - a->speed),
         .left_bound = a->left_bound + t * (b->left_bound - a->left_bound),
         .right_bound = a->right_bound + t * (b->right_bound - a->right_bound),
+        .acceleration = a->acceleration +
+            t * (b->acceleration - a->acceleration),
     };
     return 1;
 }

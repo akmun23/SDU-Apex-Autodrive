@@ -1,0 +1,4 @@
+run_id,date,controller,trajectory,speed_cap_mps,observed_command_speed_mps,command_rate_hz,laps,collisions,best_lap_time_s,raw_cycle_csv_available,result,notes
+mpc_authority_exact_cap16,2026-09-19,mpc,autodrive_mintime_exact,16.0,5.2965,,0,14,,no,failed,"No 16 m/s runaway observed; failed in MPC authority with solver/corridor/recovery events. Live metrics from ROS queries/logs."
+mpc_authority_exact_cap3,2026-09-19,mpc,autodrive_mintime_exact,3.0,2.2811,39.94,0,20,,no,failed,"Command remained near the local raceline target; no high-speed command, but authority did not complete a lap. Live metrics from ROS queries/logs."
+pp_authority_exact_cap3,2026-09-19,pure_pursuit,autodrive_mintime_exact,3.0,,,1,0,20.0196,no,passed,"Same exact raceline and simulator setup; clean baseline confirmation. Live metrics from ROS queries/logs."

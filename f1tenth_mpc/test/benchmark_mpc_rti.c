@@ -63,7 +63,8 @@ static int load_trajectory(MpcTrajectorySample_t *points, size_t *count,
             .heading = values[3], .curvature = values[4],
             .speed = values[5],
             .left_bound = value_count >= 9 ? values[7] : 1.0,
-            .right_bound = value_count >= 9 ? values[8] : 1.0};
+            .right_bound = value_count >= 9 ? values[8] : 1.0,
+            .acceleration = value_count >= 7 ? values[6] : 0.0};
         points[(*count)++] = point;
     }
     fclose(input);
@@ -161,7 +162,8 @@ int main(int argc, char **argv)
         .previous_target_speed_rate = 0.0f};
     const MpcRtiConfiguration_t model = {
         .weight_e_y = 1500.0f, .weight_e_psi = 50.0f,
-        .weight_u = 200.0f, .weight_v = 0.0f, .weight_r = 1.5f,
+        .weight_u = 200.0f, .weight_target_speed_state = 20.0f,
+        .weight_v = 0.0f, .weight_r = 1.5f,
         .weight_steering_command = 1.0f, .weight_steering_rate = 2.0f,
         .weight_target_speed_rate = 0.5f,
         .weight_steering_rate_change = 5.0f,

@@ -155,6 +155,7 @@ bool load_trajectory(std::vector<MpcTrajectorySample_t> *points,
         point.heading = values[3];
         point.curvature = values[4];
         point.speed = values[5];
+        point.acceleration = count >= 7 ? values[6] : 0.0;
         point.left_bound = count >= 9 ? values[7] : 1.0;
         point.right_bound = count >= 9 ? values[8] : 1.0;
         points->push_back(point);
@@ -190,6 +191,7 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     model.weight_e_y = 1500.0f;
     model.weight_e_psi = 50.0f;
     model.weight_u = 200.0f;
+    model.weight_target_speed_state = 20.0f;
     model.weight_v = 0.0f;
     model.weight_r = 1.5f;
     model.weight_steering_command = 1.0f;

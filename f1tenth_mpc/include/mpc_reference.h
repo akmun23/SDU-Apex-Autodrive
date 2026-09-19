@@ -19,6 +19,7 @@ typedef struct
     double speed;
     double left_bound;
     double right_bound;
+    double acceleration;
 } MpcTrajectorySample_t;
 
 typedef struct

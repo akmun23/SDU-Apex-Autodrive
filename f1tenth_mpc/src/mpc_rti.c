@@ -28,6 +28,8 @@ static int finite_reference(const MpcRtiReference_t *reference)
         isfinite(reference->e_psi) && isfinite(reference->u) &&
         isfinite(reference->v) && isfinite(reference->r) &&
         isfinite(reference->steering_command) &&
+        isfinite(reference->target_speed) &&
+        isfinite(reference->target_speed_rate) &&
         isfinite(reference->path_curvature) &&
         isfinite(reference->left_bound) && reference->left_bound > 0.0f &&
         isfinite(reference->right_bound) && reference->right_bound > 0.0f;
@@ -53,6 +55,7 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->weight_e_y,
         configuration->weight_e_psi,
         configuration->weight_u,
+        configuration->weight_target_speed_state,
         configuration->weight_v,
         configuration->weight_r,
         configuration->weight_steering_command,
@@ -112,6 +115,31 @@ static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
 static float clampf_rti(float value, float lower, float upper)
 {
     return fmaxf(lower, fminf(upper, value));
+}
+
+static float target_speed_feedforward(
+    const MpcTrajectorySample_t *sample,
+    const MpcRtiConfiguration_t *configuration,
+    float prediction_dt)
+{
+    /* The Unity adapter consumes a target speed, while the identified plant
+     * responds to target-speed error and target-speed slew.  Invert that
+     * source-command model locally instead of allowing the target state to
+     * float toward the global command ceiling. */
+    const float reference_speed = (float)fmin(
+        sample->speed, configuration->active_speed_ceiling_mps);
+    const float reference_rate = clampf_rti(
+        (float)sample->acceleration,
+        -configuration->max_target_speed_rate_reduction_mps2,
+        configuration->max_target_speed_rate_increase_mps2);
+    const float target_speed = reference_speed +
+        (reference_rate - MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 -
+         MPC_LONGITUDINAL_SPEED_COEFF_PER_S * reference_speed -
+         MPC_LONGITUDINAL_TARGET_RATE_COEFF * reference_rate) /
+        MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S -
+        0.5f * reference_rate * prediction_dt;
+    return clampf_rti(target_speed, 0.0f,
+        configuration->active_speed_ceiling_mps);
 }
 
 static void include_bound_knots(
@@ -202,6 +230,12 @@ static int reference_at_progress(
         .v = 0.0f,
         .r = (float)sample.curvature * speed,
         .steering_command = feedforward,
+        .target_speed = target_speed_feedforward(
+            &sample, configuration, PREDICTION_DT_SECONDS),
+        .target_speed_rate = clampf_rti(
+            (float)sample.acceleration,
+            -configuration->max_target_speed_rate_reduction_mps2,
+            configuration->max_target_speed_rate_increase_mps2),
         .path_curvature = (float)sample.curvature,
         .left_bound = left_bound,
         .right_bound = right_bound};
@@ -374,17 +408,22 @@ static void add_tracking_cost(
     const float targets[] = {
         reference->e_y, reference->e_psi, reference->u,
         reference->v, reference->r, reference->steering_command};
+    const float target_speed = reference->target_speed;
     const float weights[] = {
         configuration->weight_e_y, configuration->weight_e_psi,
         configuration->weight_u, configuration->weight_v,
-        configuration->weight_r, configuration->weight_steering_command};
+        configuration->weight_r, configuration->weight_steering_command,
+    };
     for (int i = 0; i < 6; ++i) {
         const int index = indices[i];
         const float scaled_weight = multiplier * weights[i];
         Q[index] += 2.0f * scaled_weight;
         q[index] -= 2.0f * scaled_weight * targets[i];
     }
-    /* Intentionally no direct target-speed-state tracking cost. */
+    const float target_speed_weight =
+        multiplier * configuration->weight_target_speed_state;
+    Q[MPC_RTI_IDX_TARGET_SPEED] += 2.0f * target_speed_weight;
+    q[MPC_RTI_IDX_TARGET_SPEED] -= 2.0f * target_speed_weight * target_speed;
 }
 
 int mpc_rti_build_ltv_qp_with_schedule(
@@ -585,7 +624,7 @@ int mpc_rti_build_nominal(
         MpcModelState_t plant = current_state->plant;
         for (int k = 0; k < horizon; ++k) {
             const float desired_delta = references[k + 1].steering_command;
-            const float desired_target = references[k + 1].u;
+            const float desired_target = references[k + 1].target_speed;
             nominal->controls[k].steering_rate = clampf_rti(
                 (desired_delta - plant.steering_command) / prediction_dt,
                 -configuration->max_steering_rate_radps,
@@ -1821,6 +1860,7 @@ float mpc_rti_scalar_stage_cost(
     const float eu = state->plant.u - reference->u;
     const float ev = state->plant.v - reference->v;
     const float er = state->plant.r - reference->r;
+    const float etarget = state->plant.target_speed - reference->target_speed;
     const float edelta = state->plant.steering_command -
         reference->steering_command;
     const float dq_delta = control->steering_rate -
@@ -1830,6 +1870,7 @@ float mpc_rti_scalar_stage_cost(
     return configuration->weight_e_y * ey * ey +
         configuration->weight_e_psi * epsi * epsi +
         configuration->weight_u * eu * eu +
+        configuration->weight_target_speed_state * etarget * etarget +
         configuration->weight_v * ev * ev +
         configuration->weight_r * er * er +
         configuration->weight_steering_command * edelta * edelta +

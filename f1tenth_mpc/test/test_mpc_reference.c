@@ -39,10 +39,10 @@ static void check_near(double actual, double expected, double tolerance,
 
 static size_t make_rectangle(MpcTrajectorySample_t points[4])
 {
-    points[0] = (MpcTrajectorySample_t){0.0, 0.0, 0.0, 0.0, 0.0, 2.231232, 1.0, 1.0};
-    points[1] = (MpcTrajectorySample_t){2.0, 2.0, 0.0, 0.0, 0.0, 2.231232, 1.0, 1.0};
-    points[2] = (MpcTrajectorySample_t){2.1, 2.0, 0.1, 1.57079632679, 0.0, 2.231232, 1.0, 1.0};
-    points[3] = (MpcTrajectorySample_t){4.1, 0.0, 0.1, 3.14159265359, 0.0, 2.231232, 1.0, 1.0};
+    points[0] = (MpcTrajectorySample_t){0.0, 0.0, 0.0, 0.0, 0.0, 2.231232, 1.0, 1.0, 0.0};
+    points[1] = (MpcTrajectorySample_t){2.0, 2.0, 0.0, 0.0, 0.0, 2.231232, 1.0, 1.0, 0.0};
+    points[2] = (MpcTrajectorySample_t){2.1, 2.0, 0.1, 1.57079632679, 0.0, 2.231232, 1.0, 1.0, 0.0};
+    points[3] = (MpcTrajectorySample_t){4.1, 0.0, 0.1, 3.14159265359, 0.0, 2.231232, 1.0, 1.0, 0.0};
     return 4;
 }
 
@@ -70,6 +70,7 @@ static void test_current_raceline_loads_and_wraps(void)
             .s = value[0], .x = value[1], .y = value[2], .heading = value[3],
             .curvature = value[4], .speed = value[5],
             .left_bound = value[7], .right_bound = value[8],
+            .acceleration = value[6],
         };
     }
     fclose(input);
@@ -123,10 +124,10 @@ static void test_current_raceline_loads_and_wraps(void)
 static void test_continuous_interpolation_and_heading_wrap(void)
 {
     MpcTrajectorySample_t points[4] = {
-        {0.0, 0.0, 0.0, 3.10, 0.1, 2.0, 0.8, 0.7},
-        {1.0, 1.0, 0.0, -3.10, 0.3, 4.0, 0.6, 0.5},
-        {2.0, 1.0, 1.0, -1.57, 0.5, 3.0, 0.7, 0.6},
-        {3.0, 0.0, 1.0, 0.0, 0.2, 2.0, 0.8, 0.7},
+        {0.0, 0.0, 0.0, 3.10, 0.1, 2.0, 0.8, 0.7, 0.0},
+        {1.0, 1.0, 0.0, -3.10, 0.3, 4.0, 0.6, 0.5, 0.0},
+        {2.0, 1.0, 1.0, -1.57, 0.5, 3.0, 0.7, 0.6, 0.0},
+        {3.0, 0.0, 1.0, 0.0, 0.2, 2.0, 0.8, 0.7, 0.0},
     };
     size_t count = 4;
     double lap_length = 0.0;
@@ -143,6 +144,8 @@ static void test_continuous_interpolation_and_heading_wrap(void)
                "curvature is interpolated rather than nearest-neighbor sampled");
     check_near(midpoint.speed, 3.0, 1.0e-12,
                "speed is interpolated rather than nearest-neighbor sampled");
+    check_near(midpoint.acceleration, 0.0, 1.0e-12,
+               "acceleration is interpolated rather than nearest-neighbor sampled");
     check_near(midpoint.left_bound, 0.7, 1.0e-12,
                "left corridor bound is interpolated");
 }

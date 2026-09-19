@@ -1,0 +1,2 @@
+event_index,arrival_monotonic_ns,arrival_epoch_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
+182959,99175568287698,1789741023551301493,/autodrive/roboracer_1/bridge_timing_fault_detail,String,,,"{""value"":""simulator Socket.IO connection lost""}"
