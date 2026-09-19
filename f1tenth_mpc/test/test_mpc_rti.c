@@ -510,8 +510,8 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     check_true(mpc_rti_rollout_candidate(&near_edge, 0.0, zero_control,
         trajectory, trajectory_count, lap_length, NULL, NULL, NULL, 1,
         0.025f, &first_step_relaxed, rejected_states, NULL, &failure_stage) ==
-            MPC_RTI_ROLLOUT_OK,
-        "diagnostic first-step margin permits safe raw-bound clearance only at x1");
+            MPC_RTI_ROLLOUT_CORRIDOR,
+        "diagnostic first-step inset cannot relax the physical wall envelope");
 
     MpcRtiCycleConfiguration_t cycle_config = {
         .model = config,
