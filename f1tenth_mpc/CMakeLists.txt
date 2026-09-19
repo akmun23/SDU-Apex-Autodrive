@@ -111,7 +111,7 @@ if(BUILD_TESTING)
   add_executable(mpc_state_synchronizer_test test/test_mpc_state_synchronizer.cpp)
   target_link_libraries(mpc_state_synchronizer_test PRIVATE mpc_state_sync)
   target_compile_definitions(mpc_state_synchronizer_test PRIVATE
-    MPC_SYNC_TEST_EVENTS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/artifacts/simulator_trace/mpc_target_response_candidate_4mps_20260918/events.csv")
+    MPC_SYNC_TEST_EVENTS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/artifacts/external_mpc_analysis_20260919/04_mpc_authority_partial/mpc_authority_4mps_partial_events.csv")
   add_test(NAME mpc_state_synchronizer_test COMMAND mpc_state_synchronizer_test)
 
   add_executable(mpc_control_time_predictor_test
