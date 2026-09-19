@@ -42,9 +42,34 @@ jobs:
         run: |
           source /opt/ros/humble/setup.bash
           source install/setup.bash
+          set +e
           build/f1tenth_mpc/mpc_rti_offline_replay \
             <(gzip -dc sdu_apex_autodrive/artifacts/external_mpc_analysis_20260919/02_pp_exact_baseline/pp_exact_events.csv.gz) \
-            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive \
+            --actions /tmp/pp_exact_actions.csv
+          replay_status=$?
+          set -e
+          python3 - <<'PY'
+          import csv
+          from collections import Counter
+          path = "/tmp/pp_exact_actions.csv"
+          rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
+          print("exact-raceline replay stratification:")
+          for lo, hi in ((0, 0.5), (0.5, 2), (2, 4), (4, 6), (6, 8), (8, 100)):
+              subset = [r for r in rows
+                        if r.get("u_mps") not in ("", None)
+                        and lo <= float(r["u_mps"]) < hi]
+              statuses = Counter(r["status"] for r in subset)
+              accepted = sum(v for k, v in statuses.items()
+                             if k in ("0", "1", "accepted_optimal", "accepted_degraded"))
+              print(f"  speed[{lo},{hi}): n={len(subset)} accepted={accepted} "
+                    f"rejected={len(subset)-accepted} statuses={dict(statuses)}")
+          moving = [r for r in rows
+                    if r.get("u_mps") not in ("", None) and float(r["u_mps"]) >= 2.0]
+          moving_statuses = Counter(r["status"] for r in moving)
+          print("  moving>=2mps:", len(moving), dict(moving_statuses))
+          PY
+          exit $replay_status
 
   python:
     name: Python analysis and controller tests
