@@ -71,7 +71,20 @@ typedef struct
     float nonlinear_corridor_tolerance_m;
     /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */
     int use_fd_jacobian_oracle;
+    /* Recovery-seed policy is used only when the nominal seed violates the
+     * normal corridor.  Policy zero preserves exact normal-operation parity. */
+    int recovery_seed_policy;
+    float recovery_steering_k_e_y;
+    float recovery_steering_k_e_psi;
+    float recovery_steering_k_r;
 } MpcRtiConfiguration_t;
+
+enum
+{
+    MPC_RTI_RECOVERY_SEED_NOMINAL = 0,
+    MPC_RTI_RECOVERY_SEED_HEADING_FEEDBACK = 1,
+    MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK = 2
+};
 
 typedef struct
 {
@@ -81,6 +94,27 @@ typedef struct
     int horizon;
     int valid;
 } MpcRtiNominal_t;
+
+/* A single corridor schedule shared by the QP and the exact nonlinear
+ * rollout.  The normal bounds are never modified.  Active bounds may be
+ * directionally extended only before the deterministic bounded seed has
+ * re-entered the normal corridor. */
+typedef struct
+{
+    float normal_lower[PREDICTION_HORIZON + 1];
+    float normal_upper[PREDICTION_HORIZON + 1];
+    float active_lower[PREDICTION_HORIZON + 1];
+    float active_upper[PREDICTION_HORIZON + 1];
+    float seed_e_y[PREDICTION_HORIZON + 1];
+    float seed_violation[PREDICTION_HORIZON + 1];
+    int recovery_stage[PREDICTION_HORIZON + 1];
+    int horizon;
+    int recovery_active;
+    int recovery_not_found;
+    int first_normal_feasible_stage;
+    float initial_normal_violation;
+    float max_seed_violation;
+} MpcRtiCorridorSchedule_t;
 
 typedef enum
 {
@@ -133,7 +167,8 @@ enum
     MPC_RTI2_TRIGGER_RESIDUAL_IMBALANCE = 1u << 8,
     MPC_RTI2_TRIGGER_STEERING_REVERSAL = 1u << 9,
     MPC_RTI2_TRIGGER_LATERAL_LOAD = 1u << 10,
-    MPC_RTI2_TRIGGER_R1_CORRIDOR_REPAIR = 1u << 11
+    MPC_RTI2_TRIGGER_R1_CORRIDOR_REPAIR = 1u << 11,
+    MPC_RTI2_TRIGGER_R1_RESIDUAL_RECOVERY = 1u << 12
 };
 
 typedef struct
@@ -150,6 +185,10 @@ typedef struct
     float rti2_residual_imbalance_trigger;
     float rti2_lateral_load_trigger_mps2;
     int rti2_nonsmooth_columns_trigger;
+    /* A finite nonlinear-feasible R1 may be used only as an R2 seed when
+     * its residual is above the normal degraded gate but below this bound.
+     * Zero disables this recovery path. */
+    float rti2_residual_recovery_limit;
     float degraded_residual_limit;
     float maximum_regularization;
     int max_consecutive_degraded_solves;
@@ -226,6 +265,18 @@ typedef struct
     float lateral_accel_proxy_mps2;
     int lateral_accel_proxy_stage;
     float lateral_accel_proxy_by_stage_mps2[PREDICTION_HORIZON + 1];
+    int recovery_active;
+    int recovery_not_found;
+    int recovery_reentry_stage;
+    float recovery_initial_normal_violation_m;
+    float recovery_max_seed_violation_m;
+    float recovery_normal_lower_m[PREDICTION_HORIZON + 1];
+    float recovery_normal_upper_m[PREDICTION_HORIZON + 1];
+    float recovery_active_lower_m[PREDICTION_HORIZON + 1];
+    float recovery_active_upper_m[PREDICTION_HORIZON + 1];
+    float recovery_seed_e_y_m[PREDICTION_HORIZON + 1];
+    float recovery_seed_violation_m[PREDICTION_HORIZON + 1];
+    int recovery_stage[PREDICTION_HORIZON + 1];
 } MpcRtiCycleResult_t;
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */
@@ -236,6 +287,18 @@ int mpc_rti_build_ltv_qp(
     int horizon,
     float prediction_dt,
     const MpcRtiConfiguration_t *configuration,
+    MpcRtiProblem_t *problem);
+
+/* Scheduled variant used by the RTI cycle and its deterministic regression
+ * tests.  Passing NULL is equivalent to the normal hard corridor. */
+int mpc_rti_build_ltv_qp_with_schedule(
+    const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
+    const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    int horizon,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *configuration,
+    const MpcRtiCorridorSchedule_t *schedule,
     MpcRtiProblem_t *problem);
 
 /* Shift (or cold-seed) controls and construct a deterministic two-pass
@@ -253,6 +316,16 @@ int mpc_rti_build_nominal(
     MpcRtiNominal_t *nominal,
     MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
 
+int mpc_rti_build_corridor_schedule(
+    const MpcRtiState_t *current_state,
+    const MpcRtiNominal_t *nominal,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *configuration,
+    MpcRtiCorridorSchedule_t *schedule);
+
 /* Recursively score a candidate at candidate progress, sampling its exact
  * nonlinear curvature and corridor instead of reusing the nominal schedule. */
 MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
@@ -269,6 +342,24 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
     int horizon,
     float prediction_dt,
     const MpcRtiConfiguration_t *configuration,
+    MpcRtiState_t states[PREDICTION_HORIZON + 1],
+    double progress[PREDICTION_HORIZON + 1],
+    int *failure_stage);
+
+MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
+    const MpcRtiState_t *initial_state,
+    double initial_progress,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    const MpcRtiReference_t nominal_references[PREDICTION_HORIZON + 1],
+    const double nominal_progress[PREDICTION_HORIZON + 1],
+    MpcRtiCandidatePathDelta_t *path_delta,
+    int horizon,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *configuration,
+    const MpcRtiCorridorSchedule_t *schedule,
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1],
     int *failure_stage);

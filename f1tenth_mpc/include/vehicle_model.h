@@ -67,6 +67,12 @@ VehicleParameters_t vehicle_model_default_parameters(void);
 VehicleParameters_t vehicle_model_get_parameters(void);
 int vehicle_model_set_parameters(const VehicleParameters_t *parameters);
 
+/* Apply the controller's temporary target-speed ceiling to every nonlinear
+ * and linearized model step.  This is a command-policy limit, not a change to
+ * the Unity vehicle physics or the project-wide 16 m/s model envelope. */
+float vehicle_model_get_active_target_speed_ceiling(void);
+int vehicle_model_set_active_target_speed_ceiling(float ceiling_mps);
+
 /* Clamp MPC command-space output to the source steering and project limits. */
 ControlInput_t vehicle_model_saturate_control(const ControlInput_t *raw_control);
 

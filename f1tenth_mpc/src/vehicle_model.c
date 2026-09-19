@@ -25,6 +25,7 @@ static VehicleParameters_t active_parameters = {
     .maximum_target_speed_rate_increase_mps2 = MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2,
     .maximum_target_speed_rate_reduction_mps2 = MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2,
 };
+static float active_target_speed_ceiling_mps = MPC_MAX_COMMAND_SPEED_MPS;
 
 static float clampf_local(float value, float lower, float upper)
 {
@@ -69,6 +70,23 @@ int vehicle_model_set_parameters(const VehicleParameters_t *parameters)
         return 0;
     }
     active_parameters = *parameters;
+    if (active_target_speed_ceiling_mps > active_parameters.maximum_command_speed_mps)
+        active_target_speed_ceiling_mps = active_parameters.maximum_command_speed_mps;
+    return 1;
+}
+
+float vehicle_model_get_active_target_speed_ceiling(void)
+{
+    return active_target_speed_ceiling_mps;
+}
+
+int vehicle_model_set_active_target_speed_ceiling(float ceiling_mps)
+{
+    if (!isfinite(ceiling_mps) || ceiling_mps <= 0.0f ||
+        ceiling_mps > active_parameters.maximum_command_speed_mps) {
+        return 0;
+    }
+    active_target_speed_ceiling_mps = ceiling_mps;
     return 1;
 }
 
@@ -116,7 +134,7 @@ static float longitudinal_speed_response(
 {
     const float target_next = clampf_local(
         target_speed_mps + target_speed_rate_mps2 * time_step,
-        0.0f, active_parameters.maximum_command_speed_mps);
+        0.0f, active_target_speed_ceiling_mps);
     const float target_mid = 0.5f * (target_speed_mps + target_next);
     float acceleration =
         MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
@@ -358,7 +376,7 @@ static int vehicle_model_step_impl(
     MpcJet_t target_raw = jet_add(x[5],
         jet_multiply(jet_constant(dt), q_speed));
     MpcJet_t target_next = jet_clip(target_raw, jet_constant(0.0f),
-        jet_constant(parameters.maximum_command_speed_mps),
+        jet_constant(active_target_speed_ceiling_mps),
         MPC_STAGE_CLIPPED_TARGET_SPEED, stage, linearization);
     MpcJet_t target_mid = jet_multiply(jet_constant(0.5f),
         jet_add(x[5], target_next));
@@ -537,10 +555,10 @@ VehicleState_t vehicle_model_predict_next_state(
         0.0f, active_parameters.maximum_command_speed_mps);
     const float target_speed0 = clampf_local(
         current_state->target_speed_mps,
-        0.0f, active_parameters.maximum_command_speed_mps);
+        0.0f, active_target_speed_ceiling_mps);
     const float target_speed1 = clampf_local(
         target_speed0 + time_step * control.target_speed_rate,
-        0.0f, active_parameters.maximum_command_speed_mps);
+        0.0f, active_target_speed_ceiling_mps);
     const float u1 = longitudinal_speed_response(
         u0, target_speed0, control.target_speed_rate, time_step);
     const float r0 = current_state->yaw_rate;
@@ -582,10 +600,10 @@ FrenetState_t vehicle_model_predict_next_frenet_state(
         0.0f, active_parameters.maximum_command_speed_mps);
     const float target_speed0 = clampf_local(
         state->ftarget_speed_mps,
-        0.0f, active_parameters.maximum_command_speed_mps);
+        0.0f, active_target_speed_ceiling_mps);
     const float target_speed1 = clampf_local(
         target_speed0 + time_step * control.target_speed_rate,
-        0.0f, active_parameters.maximum_command_speed_mps);
+        0.0f, active_target_speed_ceiling_mps);
     const float u1 = longitudinal_speed_response(
         u0, target_speed0, control.target_speed_rate, time_step);
     const float u_mid = 0.5f * (u0 + u1);

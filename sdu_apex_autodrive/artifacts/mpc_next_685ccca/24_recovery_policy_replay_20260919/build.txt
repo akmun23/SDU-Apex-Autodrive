@@ -1,0 +1,6 @@
+container: sdu_apex_autodrive
+ros_distribution: humble
+command: colcon build --merge-install --packages-select f1tenth_mpc f1tenth_localization --cmake-args -DBUILD_TESTING=ON
+result: PASS
+packages: f1tenth_localization, f1tenth_mpc
+unity_source_or_physics_changed: false

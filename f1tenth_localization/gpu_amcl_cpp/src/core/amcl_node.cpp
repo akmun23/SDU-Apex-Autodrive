@@ -210,6 +210,8 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("global_pose_covariance_yaw_max", 0.12);
     declare_parameter<double>("global_pose_max_track_distance_m", 0.45);
     declare_parameter<double>("global_pose_max_track_heading_error_rad", 0.45);
+    declare_parameter<double>("local_tracking_max_raceline_distance_m", 0.65);
+    declare_parameter<double>("local_tracking_max_raceline_heading_error_rad", 1.20);
     declare_parameter<bool>("global_start_anchor_enabled", false);
     declare_parameter<double>("global_start_anchor_radius_m", 0.90);
     declare_parameter<double>(
@@ -265,6 +267,9 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("odom_history_duration_s", 0.2);
     declare_parameter<double>("odom_reset_distance_m", 2.0);
     declare_parameter<double>("odom_reset_yaw_rad", 1.5);
+    declare_parameter<double>("local_large_correction_phase_distance_m", 51.7);
+    declare_parameter<double>("local_post_phase_correction_max_distance_m", 0.20);
+    declare_parameter<double>("local_post_phase_correction_max_yaw_rad", 0.12);
     declare_parameter<double>("current_map_pose_process_xy_m2_per_s", 0.002);
     declare_parameter<double>("current_map_pose_process_yaw2_per_s", 0.0005);
     declare_parameter<double>("localization_degraded_after_s", 0.30);
@@ -298,6 +303,12 @@ void AmclNode::load_parameters() {
         0.0, get_parameter("odom_reset_distance_m").as_double());
     odom_reset_yaw_rad_ = std::max(
         0.0, get_parameter("odom_reset_yaw_rad").as_double());
+    local_large_correction_phase_distance_m_ = std::max(
+        0.0, get_parameter("local_large_correction_phase_distance_m").as_double());
+    local_post_phase_correction_max_distance_m_ = std::max(
+        0.0, get_parameter("local_post_phase_correction_max_distance_m").as_double());
+    local_post_phase_correction_max_yaw_rad_ = std::max(
+        0.0, get_parameter("local_post_phase_correction_max_yaw_rad").as_double());
     current_map_pose_process_xy_m2_per_s_ = std::max(
         0.0, get_parameter("current_map_pose_process_xy_m2_per_s").as_double());
     current_map_pose_process_yaw2_per_s_ = std::max(
@@ -312,6 +323,11 @@ void AmclNode::load_parameters() {
         0.0, get_parameter("global_pose_max_track_distance_m").as_double());
     global_pose_max_track_heading_error_rad_ = std::max(
         0.0, get_parameter("global_pose_max_track_heading_error_rad").as_double());
+    local_tracking_max_raceline_distance_m_ = std::max(
+        0.0, get_parameter("local_tracking_max_raceline_distance_m").as_double());
+    local_tracking_max_raceline_heading_error_rad_ = std::max(
+        0.0, get_parameter(
+            "local_tracking_max_raceline_heading_error_rad").as_double());
     global_start_anchor_enabled_ = get_parameter("global_start_anchor_enabled").as_bool();
     global_start_anchor_radius_m_ = std::max(
         0.0, get_parameter("global_start_anchor_radius_m").as_double());
@@ -409,6 +425,12 @@ void AmclNode::load_parameters() {
         scan_likelihood_along_track_gain_,
         local_cluster_association_max_distance_m_,
         local_tracking_reinitialize_cloud_ ? "true" : "false");
+    RCLCPP_INFO(get_logger(),
+        "[AMCL] local correction phase: large-correction travel limit=%.2fm, "
+        "post-phase max step=%.3fm/%.3frad",
+        local_large_correction_phase_distance_m_,
+        local_post_phase_correction_max_distance_m_,
+        local_post_phase_correction_max_yaw_rad_);
 }
 
 void AmclNode::reset_pose_jump_gate() {
@@ -1106,6 +1128,7 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     global_start_odom_x_ = 0.0;
     global_start_odom_y_ = 0.0;
     global_start_odom_theta_ = 0.0;
+    accumulated_odom_travel_m_ = 0.0;
     reset_pose_jump_gate();
     RCLCPP_INFO(get_logger(), "Particle filter initialised with %d particles (%s)",
                 pf_cfg.num_particles,
@@ -1201,6 +1224,7 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         global_start_odom_x_ = 0.0;
         global_start_odom_y_ = 0.0;
         global_start_odom_theta_ = 0.0;
+        accumulated_odom_travel_m_ = 0.0;
         last_scan_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         last_processed_scan_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         reset_pose_jump_gate();
@@ -1297,6 +1321,9 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         }
     }
 
+    if (!first_odom && !odom_reset) {
+        accumulated_odom_travel_m_ += std::hypot(x - prev_x_, y - prev_y_);
+    }
     odom_received_ = true;
 
     // Update member variables
@@ -1808,19 +1835,33 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 est.x, est.y, est.theta, correction_distance, correction_yaw,
                 cluster_weight, publish_cluster ? "true" : "false");
 
+            const bool post_startup_phase =
+                local_large_correction_phase_distance_m_ > 0.0 &&
+                accumulated_odom_travel_m_ >=
+                    local_large_correction_phase_distance_m_;
+            const double correction_distance_limit = post_startup_phase
+                ? local_post_phase_correction_max_distance_m_
+                : local_scan_correction_max_distance_m_;
+            const double correction_yaw_limit = post_startup_phase
+                ? local_post_phase_correction_max_yaw_rad_
+                : local_scan_correction_max_yaw_rad_;
             const bool correction_within_nominal_gate =
-                (local_scan_correction_max_distance_m_ <= 0.0 ||
-                 correction_distance <= local_scan_correction_max_distance_m_) &&
-                (local_scan_correction_max_yaw_rad_ <= 0.0 ||
-                 correction_yaw <= local_scan_correction_max_yaw_rad_);
+                (correction_distance_limit <= 0.0 ||
+                 correction_distance <= correction_distance_limit) &&
+                (correction_yaw_limit <= 0.0 ||
+                 correction_yaw <= correction_yaw_limit);
             if (!correction_within_nominal_gate) {
                 local_scan_correction_rejected = true;
                 est = odom_prediction;
                 est.covariance = causal_odom_covariance();
                 RCLCPP_WARN_THROTTLE(
                     get_logger(), *get_clock(), 1000,
-                    "Rejected large local AMCL scan correction; "
-                    "restarting cloud at odometry prediction.");
+                    "Rejected large local AMCL scan correction after %.2f m "
+                    "travel (%.3f/%.3f m, %.3f/%.3f rad); using causal "
+                    "odometry pose for this scan.",
+                    accumulated_odom_travel_m_, correction_distance,
+                    correction_distance_limit, correction_yaw,
+                    correction_yaw_limit);
             }
 
             if (!local_scan_correction_rejected) {
@@ -1951,6 +1992,43 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             }
         }
         local_tracking_update = true;
+    }
+
+    // A local likelihood-field cluster can be close to the causal odometry
+    // prediction and still belong to a visually similar wall section. Once
+    // AMCL is locked, reject that map-frame alias before it reaches the
+    // controller if it leaves the known raceline envelope. This is a map /
+    // scan-consistency gate, not a timing or source-timestamp gate; a rejected
+    // scan falls back to the causal odometry pose above.
+    if (local_tracking && local_tracking_update &&
+        !local_scan_correction_rejected && !global_heading_points_.empty()) {
+        const double local_raceline_distance = raceline_distance_to_pose(
+            est.x, est.y);
+        const double local_raceline_heading_error =
+            raceline_heading_error_to_pose(est.x, est.y, est.theta);
+        const bool local_pose_on_raceline =
+            (local_tracking_max_raceline_distance_m_ <= 0.0 ||
+             local_raceline_distance <= local_tracking_max_raceline_distance_m_) &&
+            (local_tracking_max_raceline_heading_error_rad_ <= 0.0 ||
+             local_raceline_heading_error <=
+                 local_tracking_max_raceline_heading_error_rad_);
+        if (!local_pose_on_raceline) {
+            local_scan_correction_rejected = true;
+            est = odom_prediction;
+            est.covariance = causal_odom_covariance();
+            last_scan_applied_xy_correction_m_ = 0.0;
+            last_scan_applied_yaw_correction_rad_ = 0.0;
+            last_scan_applied_x_m_ = 0.0;
+            last_scan_applied_y_m_ = 0.0;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Rejected local AMCL raceline alias: distance=%.3f/%.3f m "
+                "heading_error=%.3f/%.3f rad; using causal odometry pose.",
+                local_raceline_distance,
+                local_tracking_max_raceline_distance_m_,
+                local_raceline_heading_error,
+                local_tracking_max_raceline_heading_error_rad_);
+        }
     }
 
     // A scan correction is genuine map support only when the local cluster

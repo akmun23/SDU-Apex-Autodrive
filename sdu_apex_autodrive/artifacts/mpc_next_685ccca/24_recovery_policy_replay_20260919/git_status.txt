@@ -1,0 +1,23 @@
+ M f1tenth_localization/config/gpu_amcl_cpp_params.yaml
+ M f1tenth_localization/gpu_amcl_cpp/include/gpu_amcl_cpp/core/amcl_node.hpp
+ M f1tenth_localization/gpu_amcl_cpp/src/core/amcl_node.cpp
+ M f1tenth_mpc/README.md
+ M f1tenth_mpc/config/mpc_autodrive.yaml
+ M f1tenth_mpc/include/mpc_rti.h
+ M f1tenth_mpc/include/vehicle_model.h
+ M f1tenth_mpc/src/mpc_controller_node.cpp
+ M f1tenth_mpc/src/mpc_rti.c
+ M f1tenth_mpc/src/vehicle_model.c
+ M f1tenth_mpc/test/benchmark_mpc_rti.c
+ M f1tenth_mpc/test/replay_mpc_rti.cpp
+ M f1tenth_mpc/test/test_mpc_rti.c
+ M sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/16_first_step_feasibility_simlog_20260918/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/17_icra_sim_replay_holdout_20260918/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/18_stop_event_solver_diagnostic_20260919/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/19_fixed_rho_stop_holdout_20260919/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/20_residual_recovery_sim_replay_20260919/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/21_r1_strict_sim_replay_20260919/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/22_retry_sim_replay_20260919/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/23_ey_feasibility_recovery_20260919/
+?? sdu_apex_autodrive/artifacts/mpc_next_685ccca/24_recovery_policy_replay_20260919/

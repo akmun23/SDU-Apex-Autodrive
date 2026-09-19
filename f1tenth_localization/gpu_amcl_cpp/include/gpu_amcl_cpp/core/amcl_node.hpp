@@ -189,6 +189,8 @@ private:
     double global_pose_covariance_yaw_max_ = 0.12;
     double global_pose_max_track_distance_m_ = 0.45;
     double global_pose_max_track_heading_error_rad_ = 0.45;
+    double local_tracking_max_raceline_distance_m_ = 0.65;
+    double local_tracking_max_raceline_heading_error_rad_ = 1.20;
     bool global_start_anchor_enabled_ = true;
     double global_start_anchor_radius_m_ = 0.90;
     double global_start_anchor_x_m_ = std::numeric_limits<double>::quiet_NaN();
@@ -258,6 +260,14 @@ private:
     double odom_history_duration_s_ = 0.2;
     double odom_reset_distance_m_ = 2.0;
     double odom_reset_yaw_rad_ = 1.5;
+    // During startup/first lap AMCL may apply a larger scan-supported
+    // correction to finish global alignment. After the configured travel
+    // distance, every local correction is limited to a small per-scan step;
+    // repeated accepted scans can still remove the full accumulated drift.
+    double local_large_correction_phase_distance_m_ = 51.7;
+    double local_post_phase_correction_max_distance_m_ = 0.20;
+    double local_post_phase_correction_max_yaw_rad_ = 0.12;
+    double accumulated_odom_travel_m_ = 0.0;
 
     // A scan can be delivered before the odometry sample carrying the same
     // source-time interval. Keep it briefly and retry once newer odometry is

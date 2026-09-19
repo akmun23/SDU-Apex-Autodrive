@@ -698,9 +698,12 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
         if not _client_connected.is_set():
             gevent.sleep(period)
             continue
-        if not _bootstrap_packet_seen.is_set():
-            gevent.sleep(period)
-            continue
+        # In the interactive GUI, Unity emits one unsolicited packet from
+        # OnConnect and that packet opens the request gate.  Batchmode has no
+        # GUI connect-button path and deliberately does not emit that packet;
+        # waiting for it here deadlocks both sides (Unity waits for Bridge,
+        # while this sender waits for Unity).  The first response to this
+        # actual Bridge request is therefore allowed to be the first packet.
         with _pending_request_lock:
             generation = _connection_generation
 

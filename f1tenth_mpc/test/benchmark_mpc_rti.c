@@ -185,6 +185,7 @@ int main(int argc, char **argv)
                    .use_prefactorization = use_prefactorization,
                    .use_scaling = use_scaling},
         .degraded_residual_limit = 0.05f,
+        .rti2_residual_recovery_limit = 0.25f,
         .maximum_regularization = 1.0e-2f,
         .max_consecutive_degraded_solves = 3};
     if (use_scaling) {

@@ -52,6 +52,14 @@
     corridor_preview_halfwidth_m: 0.10
     nonlinear_corridor_tolerance_m: 0.001
 
+    # Recovery is entered only after the nominal bounded seed violates the
+    # normal corridor. Keep nominal parity by default; policy variants are
+    # offline-testable and do not relax either actuator envelope.
+    recovery_seed_policy: nominal
+    recovery_steering_k_e_y: 0.0
+    recovery_steering_k_e_psi: 0.0
+    recovery_steering_k_r: 0.0
+
     # Fixed rho reuses the quadratic Riccati factorization once per QP.
     # Adaptive rho is enabled with the existing 100-iteration cap. Penalty
     # changes/refactor cost are diagnostic; timing does not reject candidates.
@@ -81,3 +89,7 @@
     rti2_residual_imbalance_trigger: 8.0
     rti2_lateral_load_trigger_mps2: 3.0
     rti2_nonsmooth_columns_trigger: 50
+    # If R1 reaches the 100-iteration cap with a finite residual above the
+    # normal degraded gate, retain it only as an exact nonlinear-checked R2
+    # seed when <= this bound. R1-only remains strict; R2 must converge.
+    rti2_residual_recovery_limit: 0.25

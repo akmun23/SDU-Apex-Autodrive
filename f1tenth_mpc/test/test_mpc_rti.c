@@ -497,6 +497,7 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
     MpcRtiCycleConfiguration_t cycle_config = {
         .model = config,
         .solver = solver_config,
+        .rti2_residual_recovery_limit = 0.25f,
         .degraded_residual_limit = 0.01f,
         .maximum_regularization = 1.0e-2f,
         .max_consecutive_degraded_solves = 1};
@@ -609,12 +610,122 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
                "RTI reset clears nominal and ADMM warm-start memory");
 }
 
+static void test_directional_corridor_schedule(void)
+{
+    MpcTrajectorySample_t trajectory[80];
+    size_t trajectory_count = 0;
+    double lap_length = 0.0;
+    make_circle_trajectory(trajectory, &trajectory_count, &lap_length);
+    MpcRtiConfiguration_t config = test_configuration();
+    config.corridor_preview_halfwidth_m = 0.0f;
+
+    const MpcRtiState_t current = {
+        .plant = {.e_y = 0.60f, .e_psi = 0.0f, .u = 4.0f, .v = 0.0f,
+                  .r = 0.4f, .target_speed = 3.9f,
+                  .steering_command = atanf(0.1f /
+                      MPC_YAW_RATE_STEERING_GAIN_PER_M)},
+        .previous_steering_rate = 0.0f,
+        .previous_target_speed_rate = 0.0f};
+    MpcRtiNominal_t nominal;
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1];
+    check_true(mpc_rti_build_nominal(&current, 0.0, NULL, trajectory,
+        trajectory_count, lap_length, 0.025f, 4, &config, &nominal,
+        references), "recovery schedule receives a valid nominal");
+
+    /* Isolate the schedule policy from model fitting: this is a deterministic
+     * bounded seed that is outside the inset for one stage and re-enters at
+     * the next stage. */
+    nominal.states[0].plant.e_y = 0.60f;
+    nominal.states[1].plant.e_y = 0.58f;
+    nominal.states[2].plant.e_y = 0.54f;
+    nominal.states[3].plant.e_y = 0.20f;
+    nominal.states[4].plant.e_y = 0.10f;
+    for (int k = 0; k <= 4; ++k) nominal.progress[k] = 0.10 * k;
+
+    MpcRtiCorridorSchedule_t schedule;
+    check_true(mpc_rti_build_corridor_schedule(&current, &nominal,
+        trajectory, trajectory_count, lap_length, 0.025f, &config, &schedule),
+        "directional recovery schedule builds");
+    check_true(schedule.recovery_active && !schedule.recovery_not_found,
+        "schedule activates only for a recoverable seed");
+    check_true(schedule.first_normal_feasible_stage == 2,
+        "schedule records the first normal-feasible stage");
+    check_true(schedule.active_upper[1] > schedule.normal_upper[1] &&
+               schedule.active_lower[1] == schedule.normal_lower[1],
+        "schedule widens only the violated directional side");
+    check_close(schedule.active_upper[2], schedule.normal_upper[2], 1.0e-7f,
+        "schedule restores the normal upper bound at re-entry");
+    check_close(schedule.active_lower[2], schedule.normal_lower[2], 1.0e-7f,
+        "schedule restores the normal lower bound at re-entry");
+    check_true(schedule.active_upper[1] >= schedule.seed_e_y[1] &&
+               schedule.active_lower[1] <= schedule.seed_e_y[1],
+        "temporary envelope contains the bounded recovery seed");
+
+    MpcRtiConfiguration_t feedback_config = config;
+    feedback_config.recovery_seed_policy =
+        MPC_RTI_RECOVERY_SEED_HEADING_FEEDBACK;
+    feedback_config.recovery_steering_k_e_y = 1.0f;
+    feedback_config.recovery_steering_k_e_psi = 1.0f;
+    feedback_config.recovery_steering_k_r = 0.1f;
+    MpcRtiCorridorSchedule_t feedback_schedule;
+    check_true(mpc_rti_build_corridor_schedule(&current, &nominal,
+        trajectory, trajectory_count, lap_length, 0.025f, &feedback_config,
+        &feedback_schedule),
+        "heading-feedback recovery seed builds deterministically");
+    check_true(feedback_schedule.horizon == nominal.horizon &&
+               (feedback_schedule.recovery_active ||
+                feedback_schedule.recovery_not_found ||
+                feedback_schedule.max_seed_violation <= 1.0e-6f),
+        "heading-feedback recovery reports a bounded schedule outcome");
+    check_true(fabsf(feedback_schedule.seed_e_y[1] - schedule.seed_e_y[1]) >
+                   1.0e-5f,
+               "heading-feedback policy changes only the recovery seed");
+
+    MpcRtiProblem_t normal_problem;
+    MpcRtiProblem_t scheduled_problem;
+    check_true(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
+        references, 4, 0.025f, &config, &normal_problem),
+        "normal parity QP builds");
+    check_true(mpc_rti_build_ltv_qp_with_schedule(nominal.states,
+        nominal.controls, references, 4, 0.025f, &config, &schedule,
+        &scheduled_problem), "scheduled QP builds");
+    check_close(scheduled_problem.steps[1].x_ub[MPC_RTI_IDX_EY],
+        schedule.active_upper[1], 1.0e-7f,
+        "QP consumes the scheduled active upper bound");
+    check_close(scheduled_problem.steps[2].x_ub[MPC_RTI_IDX_EY],
+        normal_problem.steps[2].x_ub[MPC_RTI_IDX_EY], 1.0e-7f,
+        "QP restores normal bounds after re-entry");
+    check_close(scheduled_problem.steps[1].u_lb[0],
+        normal_problem.steps[1].u_lb[0], 1.0e-7f,
+        "recovery does not relax the steering-rate actuator limit");
+    check_close(scheduled_problem.steps[1].u_ub[1],
+        normal_problem.steps[1].u_ub[1], 1.0e-7f,
+        "recovery does not relax the speed-rate actuator limit");
+    check_close(scheduled_problem.x0[MPC_RTI_IDX_EY], current.plant.e_y,
+        1.0e-7f, "measured x0 remains fixed and is never projected");
+
+    MpcRtiNominal_t normal_nominal = nominal;
+    for (int k = 0; k <= 4; ++k) normal_nominal.states[k].plant.e_y = 0.0f;
+    MpcRtiCorridorSchedule_t normal_schedule;
+    check_true(mpc_rti_build_corridor_schedule(&current, &normal_nominal,
+        trajectory, trajectory_count, lap_length, 0.025f, &config,
+        &normal_schedule),
+        "normal schedule builds");
+    check_true(!normal_schedule.recovery_active &&
+               !normal_schedule.recovery_not_found,
+        "normal schedule is a no-op");
+    check_close(normal_schedule.active_upper[1],
+        normal_schedule.normal_upper[1], 1.0e-7f,
+        "normal schedule preserves exact normal upper bound");
+}
+
 int main(void)
 {
     test_absolute_nine_state_affine_ltv_build();
     test_previous_control_penalty_matrix_algebra();
     test_invalid_problem_rejected();
     test_two_pass_nominal_qp_and_nonlinear_candidate();
+    test_directional_corridor_schedule();
     if (failures) {
         fprintf(stderr, "%d MPC RTI QP checks failed\n", failures);
         return 1;

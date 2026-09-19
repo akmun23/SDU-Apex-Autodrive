@@ -178,6 +178,28 @@ public:
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
             declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.001));
+        const std::string recovery_seed_policy = declare_parameter<std::string>(
+            "recovery_seed_policy", "nominal");
+        if (recovery_seed_policy == "nominal") {
+            rti_config_.model.recovery_seed_policy =
+                MPC_RTI_RECOVERY_SEED_NOMINAL;
+        } else if (recovery_seed_policy == "heading_feedback") {
+            rti_config_.model.recovery_seed_policy =
+                MPC_RTI_RECOVERY_SEED_HEADING_FEEDBACK;
+        } else if (recovery_seed_policy == "brake_heading_feedback") {
+            rti_config_.model.recovery_seed_policy =
+                MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK;
+        } else {
+            throw std::runtime_error(
+                "recovery_seed_policy must be nominal, heading_feedback, "
+                "or brake_heading_feedback");
+        }
+        rti_config_.model.recovery_steering_k_e_y = static_cast<float>(
+            declare_parameter<double>("recovery_steering_k_e_y", 0.0));
+        rti_config_.model.recovery_steering_k_e_psi = static_cast<float>(
+            declare_parameter<double>("recovery_steering_k_e_psi", 0.0));
+        rti_config_.model.recovery_steering_k_r = static_cast<float>(
+            declare_parameter<double>("recovery_steering_k_r", 0.0));
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", 100);
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
@@ -225,6 +247,8 @@ public:
             declare_parameter<double>("rti2_lateral_load_trigger_mps2", 3.0));
         rti_config_.rti2_nonsmooth_columns_trigger = declare_parameter<int>(
             "rti2_nonsmooth_columns_trigger", 50);
+        rti_config_.rti2_residual_recovery_limit = static_cast<float>(
+            declare_parameter<double>("rti2_residual_recovery_limit", 0.25));
         rti_config_.degraded_residual_limit = static_cast<float>(
             declare_parameter<double>("solver_degraded_tolerance", 0.05));
         rti_config_.maximum_regularization = static_cast<float>(
@@ -376,6 +400,42 @@ private:
             last_steering_rate_radps_ = 0.0;
             last_target_speed_rate_mps2_ = 0.0;
             publish_command(0.0, 0.0);
+        } else if (shadow_mode_) {
+            target_speed_initialized_ = false;
+        }
+        if (diagnostics_pub_ && emit_shadow_diagnostic)
+            publish_shadow_failure(reason);
+    }
+
+    /* A localization/model feasibility rejection is not a reason to command
+     * an emergency stop. Hold the last bounded steering command and keep the
+     * current/requested speed so AMCL can converge again on subsequent legal
+     * measurements. This is deliberately separate from publish_stop(), which
+     * remains reserved for invalid actuator/input safety conditions. */
+    void publish_driving_fallback(const char *reason,
+                                  double observed_speed_mps,
+                                  double requested_speed_mps,
+                                  bool emit_shadow_diagnostic = true)
+    {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
+            "holding bounded driving command while localization recovers", reason);
+        mpc_rti_memory_reset(&rti_memory_);
+        if (enabled_) {
+            const double speed_ceiling = active_speed_ceiling();
+            const double finite_observed = std::isfinite(observed_speed_mps)
+                ? std::max(0.0, observed_speed_mps) : 0.0;
+            const double finite_requested = std::isfinite(requested_speed_mps)
+                ? std::max(0.0, requested_speed_mps) : 0.0;
+            target_speed_mps_ = clamp(
+                std::max(finite_observed, finite_requested),
+                0.0, speed_ceiling);
+            last_steering_command_rad_ = clamp(
+                std::isfinite(last_steering_command_rad_)
+                    ? last_steering_command_rad_ : 0.0,
+                -rti_config_.model.max_steering_rad,
+                rti_config_.model.max_steering_rad);
+            target_speed_initialized_ = true;
+            publish_command(last_steering_command_rad_, target_speed_mps_);
         } else if (shadow_mode_) {
             target_speed_initialized_ = false;
         }
@@ -645,7 +705,19 @@ private:
         json << ",\"corridor_margin_m\":"
              << rti_config_.model.corridor_margin_m
              << ",\"first_prediction_corridor_margin_m\":"
-             << rti_config_.model.first_prediction_corridor_margin_m;
+             << rti_config_.model.first_prediction_corridor_margin_m
+             << ",\"rti2_residual_recovery_limit\":"
+             << rti_config_.rti2_residual_recovery_limit
+             << ",\"recovery_active\":"
+             << (result.recovery_active ? "true" : "false")
+             << ",\"recovery_not_found\":"
+             << (result.recovery_not_found ? "true" : "false")
+             << ",\"recovery_reentry_stage\":"
+             << result.recovery_reentry_stage
+             << ",\"recovery_initial_normal_violation_m\":";
+        json_number(result.recovery_initial_normal_violation_m);
+        json << ",\"recovery_max_seed_violation_m\":";
+        json_number(result.recovery_max_seed_violation_m);
         json << ",\"lateral_accel_proxy_mps2\":";
         json_number(result.lateral_accel_proxy_mps2);
         json << ",\"lateral_accel_proxy_stage\":"
@@ -755,7 +827,8 @@ private:
             !std::isfinite(message->twist.twist.linear.x) ||
             !std::isfinite(message->twist.twist.linear.y) ||
             !std::isfinite(message->twist.twist.angular.z)) {
-            publish_stop("MPC rejected zero-stamped or invalid odometry");
+            publish_driving_fallback(
+                "MPC received uncertain odometry", 0.0, target_speed_mps_);
             return;
         }
         if (odom_stamp.nanoseconds() <= 0) odom_stamp = now();
@@ -778,7 +851,9 @@ private:
         }
 
         if (odom_status != MpcSyncStatus::kOk) {
-            publish_stop("MPC rejected invalid legal odometry sample");
+            publish_driving_fallback(
+                "MPC rejected uncertain legal odometry sample", 0.0,
+                target_speed_mps_);
             return;
         }
 
@@ -795,9 +870,12 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC waiting for legal state input: %s",
                 MpcStateSynchronizer::status_name(sync_status));
-            // Startup can deliver odometry before AMCL's first pose. Do not
-            // publish a timing/missing-input stop that overwrites the last
-            // usable command; resume as soon as both legal inputs exist.
+            // A delayed/temporarily missing AMCL sample is not a command to
+            // stop. Refresh the last bounded command so a downstream command
+            // watchdog cannot turn estimator uncertainty into a vehicle stop.
+            // The next legal map pose is still allowed to correct the state.
+            publish_driving_fallback(
+                "MPC waiting for legal state input", 0.0, target_speed_mps_);
             return;
         }
 
@@ -813,13 +891,15 @@ private:
         if (!mpc_trajectory_project(trajectory_.data(), trajectory_.size(),
                 track_length_m_, coherent_state.map_x, coherent_state.map_y,
                 coherent_state.map_yaw, previous_segment, 160, &projection)) {
-            publish_stop("MPC could not project pose onto raceline");
+            publish_driving_fallback("MPC could not project uncertain pose",
+                coherent_state.u, target_speed_mps_);
             return;
         }
         if (!startup_path_validated_) {
             if (projection.distance > startup_path_max_distance_m_ ||
                 std::abs(projection.heading_error) > startup_path_heading_tolerance_rad_) {
-                publish_stop("MPC startup path gate rejected pose");
+                publish_driving_fallback("MPC startup pose is not yet aligned",
+                    coherent_state.u, target_speed_mps_);
                 return;
             }
             startup_path_validated_ = true;
@@ -844,7 +924,8 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC command-time prediction rejected state: %s",
                 control_time_status_name(prediction_status));
-            publish_stop("MPC command-time state prediction failed");
+            publish_driving_fallback("MPC command-time state prediction is uncertain",
+                coherent_state.u, target_speed_mps_);
             return;
         }
         const MpcSynchronizedState &command_time_state =
@@ -913,8 +994,8 @@ private:
                     last_projected_s_, source_dt, result, solve_us,
                     control_ros_time.nanoseconds(), callback_steady_ns,
                     synchronize_steady_ns);
-            publish_stop("MPC RTI cycle rejected its candidate",
-                         false);
+            publish_driving_fallback("MPC RTI cycle rejected its candidate",
+                command_time_state.u, commanded_speed, false);
             return;
         }
 

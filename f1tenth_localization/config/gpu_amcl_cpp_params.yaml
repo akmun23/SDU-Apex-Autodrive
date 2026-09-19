@@ -40,6 +40,14 @@ gpu_amcl_cpp:
     current_map_pose_process_yaw2_per_s: 0.0
     localization_degraded_after_s: 0.30
 
+    # AMCL may make larger scan-supported corrections during startup and the
+    # first lap while the global hypothesis settles. After this accumulated
+    # odometry travel, only small per-scan corrections are accepted; repeated
+    # scans can still remove the full drift without teleporting the pose.
+    local_large_correction_phase_distance_m: 51.7
+    local_post_phase_correction_max_distance_m: 0.20
+    local_post_phase_correction_max_yaw_rad: 0.12
+
     # The official bridge provides cumulative wheel angles plus IMU yaw. Keep
     # the motion model conservative so scan corrections do not let artificial
     # yaw noise dominate the local particle cloud.
@@ -122,10 +130,9 @@ gpu_amcl_cpp:
     pose_jump_confirm_distance_m: 0.75
     pose_jump_confirm_yaw_rad: 0.60
 
-    # Do not cap the accumulated translational correction. AMCL must be able
-    # to apply the correction supported by repeated scans; the causal local
-    # cluster association and the 1 m pose-jump sanity gate remain the alias
-    # protections.
+    # Before the first-lap phase limit, allow scan-supported corrections to
+    # complete global alignment. The phase-specific small-step limits above
+    # apply after one lap; they cap each correction, not the accumulated drift.
     local_scan_correction_max_distance_m: 0.0
     local_scan_correction_max_yaw_rad: 0.0
     # Associate local scan clusters with the causal odometry-predicted pose;
@@ -202,13 +209,23 @@ gpu_amcl_cpp:
     # Keep a bounded track/heading envelope for startup candidates. A saved
     # map-start anchor disambiguates the opposite-looking corridors.
     global_pose_max_track_distance_m: 0.65
-    global_pose_max_track_heading_error_rad: 0.45
+    # The first scan can carry a repeatable heading bias of about 1.1 rad in
+    # this closed-track map.  The saved start anchor and the stable-scan,
+    # cluster-weight, covariance, and travel gates still disambiguate startup;
+    # keep the heading envelope wide enough that AMCL can publish the anchored
+    # provisional pose instead of waiting forever while the car is stationary.
+    global_pose_max_track_heading_error_rad: 1.20
+    # Once globally locked, prevent a local likelihood-field alias from
+    # moving /current_map_pose into a visually similar off-raceline section.
+    # This does not inspect or reject packet timing.
+    local_tracking_max_raceline_distance_m: 0.65
+    local_tracking_max_raceline_heading_error_rad: 1.20
     global_start_anchor_enabled: true
     global_start_anchor_radius_m: 0.75
     global_start_anchor_x_m: 0.8006
     global_start_anchor_y_m: 3.1583
     global_start_anchor_yaw_rad: -1.5707963267948966
-    global_start_anchor_heading_tolerance_rad: 0.80
+    global_start_anchor_heading_tolerance_rad: 1.20
     # Do not lock a visually plausible closed-track alias from one scan.
     # Require repeated strong, stable scan support during the slow startup
     # localization phase before PP is allowed to use the pose.

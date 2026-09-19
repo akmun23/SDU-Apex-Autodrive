@@ -75,7 +75,10 @@ struct ReplayMetrics {
     std::size_t rti2_triggers{};
     std::size_t rti2_selected{};
     std::size_t rti2_fallbacks{};
-    std::size_t rti2_reason_counts[11]{};
+    std::size_t rti2_reason_counts[13]{};
+    std::size_t recovery_active{};
+    std::size_t recovery_not_found{};
+    std::size_t recovery_reentered{};
 };
 
 void fail(const std::string &message)
@@ -177,7 +180,11 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
                                                 int max_degraded_solves,
                                                 float corridor_margin_m,
                                                 float first_prediction_corridor_margin_m,
-                                                float corridor_preview_halfwidth_m)
+                                                float corridor_preview_halfwidth_m,
+                                                int recovery_seed_policy,
+                                                float recovery_steering_k_e_y,
+                                                float recovery_steering_k_e_psi,
+                                                float recovery_steering_k_r)
 {
     MpcRtiConfiguration_t model{};
     model.weight_e_y = 1500.0f;
@@ -203,6 +210,10 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     model.corridor_preview_halfwidth_m = corridor_preview_halfwidth_m;
     model.nonlinear_corridor_tolerance_m = 0.001f;
     model.use_fd_jacobian_oracle = use_fd_jacobian ? 1 : 0;
+    model.recovery_seed_policy = recovery_seed_policy;
+    model.recovery_steering_k_e_y = recovery_steering_k_e_y;
+    model.recovery_steering_k_e_psi = recovery_steering_k_e_psi;
+    model.recovery_steering_k_r = recovery_steering_k_r;
 
     MpcRtiCycleConfiguration_t configuration{};
     configuration.model = model;
@@ -233,6 +244,7 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     configuration.rti2_residual_imbalance_trigger = 8.0f;
     configuration.rti2_lateral_load_trigger_mps2 = 3.0f;
     configuration.rti2_nonsmooth_columns_trigger = 50;
+    configuration.rti2_residual_recovery_limit = 0.25f;
     configuration.degraded_residual_limit = degraded_residual_limit;
     configuration.maximum_regularization = 1.0e-2f;
     configuration.max_consecutive_degraded_solves = max_degraded_solves;
@@ -254,9 +266,14 @@ bool replay_events(const std::string &events_path, int max_iterations,
                    float corridor_margin_m,
                    float first_prediction_corridor_margin_m,
                    float corridor_preview_halfwidth_m,
+                   int recovery_seed_policy,
+                   float recovery_steering_k_e_y,
+                   float recovery_steering_k_e_psi,
+                   float recovery_steering_k_r,
                    bool diagnostic_relaxed_residual_gate,
                    const std::string &actions_path,
                    const std::string &trajectory_path,
+                   const std::string &recovery_schedule_path,
                    const std::vector<MpcTrajectorySample_t> &trajectory,
                    double lap_length)
 {
@@ -297,7 +314,10 @@ bool replay_events(const std::string &events_path, int max_iterations,
                          "candidate_curvature_error_max_per_m,"
                          "candidate_left_bound_error_max_m,"
                          "candidate_right_bound_error_max_m,"
-                         "nonlinear_failure_stage,nonlinear_failure_reason\n";
+                         "nonlinear_failure_stage,nonlinear_failure_reason,"
+                         "recovery_active,recovery_not_found,"
+                         "recovery_reentry_stage,recovery_initial_violation_m,"
+                         "recovery_max_seed_violation_m\n";
         action_output << std::setprecision(10);
     }
     std::ofstream trajectory_output;
@@ -311,6 +331,19 @@ bool replay_events(const std::string &events_path, int max_iterations,
                              "previous_target_speed_rate_mps2,steering_rate_radps,"
                              "target_speed_rate_mps2\n";
         trajectory_output << std::setprecision(10);
+    }
+    std::ofstream recovery_schedule_output;
+    if (!recovery_schedule_path.empty()) {
+        recovery_schedule_output.open(recovery_schedule_path);
+        if (!recovery_schedule_output.good())
+            fail("cannot open recovery schedule output: " +
+                 recovery_schedule_path);
+        recovery_schedule_output
+            << "event_index,source_stamp_ns,stage,recovery_active,"
+               "recovery_not_found,recovery_reentry_stage,recovery_stage,"
+               "normal_lower_m,normal_upper_m,active_lower_m,active_upper_m,"
+               "seed_e_y_m,seed_violation_m\n";
+        recovery_schedule_output << std::setprecision(10);
     }
 
     MpcSyncConfig sync_config;
@@ -326,7 +359,11 @@ bool replay_events(const std::string &events_path, int max_iterations,
                              rho, rho_u, degraded_residual_limit,
                              max_degraded_solves, corridor_margin_m,
                              first_prediction_corridor_margin_m,
-                             corridor_preview_halfwidth_m);
+                             corridor_preview_halfwidth_m,
+                             recovery_seed_policy,
+                             recovery_steering_k_e_y,
+                             recovery_steering_k_e_psi,
+                             recovery_steering_k_r);
     MpcRtiMemory_t memory{};
     mpc_rti_memory_reset(&memory);
     ReplayMetrics metrics;
@@ -506,7 +543,12 @@ bool replay_events(const std::string &events_path, int max_iterations,
         if (result.rti2_triggered && result.selected_candidate == 1 &&
             result.r2_status >= MPC_RTI_CYCLE_REJECTED_INPUT)
             ++metrics.rti2_fallbacks;
-        for (unsigned int bit = 0; bit < 11; ++bit) {
+        if (result.recovery_active) ++metrics.recovery_active;
+        if (result.recovery_not_found) ++metrics.recovery_not_found;
+        if (result.recovery_reentry_stage >= 0 &&
+            result.recovery_reentry_stage <= PREDICTION_HORIZON)
+            ++metrics.recovery_reentered;
+        for (unsigned int bit = 0; bit < 13; ++bit) {
             if ((result.rti2_trigger_reason_mask & (1u << bit)) != 0u)
                 ++metrics.rti2_reason_counts[bit];
         }
@@ -640,7 +682,28 @@ bool replay_events(const std::string &events_path, int max_iterations,
                 << result.max_candidate_left_bound_error_m << ','
                 << result.max_candidate_right_bound_error_m << ','
                 << result.nonlinear_failure_stage << ','
-                << result.nonlinear_failure_reason << '\n';
+                << result.nonlinear_failure_reason << ','
+                << (result.recovery_active ? 1 : 0) << ','
+                << (result.recovery_not_found ? 1 : 0) << ','
+                << result.recovery_reentry_stage << ','
+                << result.recovery_initial_normal_violation_m << ','
+                << result.recovery_max_seed_violation_m << '\n';
+        }
+        if (recovery_schedule_output.good()) {
+            for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+                recovery_schedule_output
+                    << fields[0] << ',' << source_stamp_ns << ',' << k << ','
+                    << (result.recovery_active ? 1 : 0) << ','
+                    << (result.recovery_not_found ? 1 : 0) << ','
+                    << result.recovery_reentry_stage << ','
+                    << result.recovery_stage[k] << ','
+                    << result.recovery_normal_lower_m[k] << ','
+                    << result.recovery_normal_upper_m[k] << ','
+                    << result.recovery_active_lower_m[k] << ','
+                    << result.recovery_active_upper_m[k] << ','
+                    << result.recovery_seed_e_y_m[k] << ','
+                    << result.recovery_seed_violation_m[k] << '\n';
+            }
         }
         metrics.solve_ms.push_back(solve_ms);
         ++metrics.solves;
@@ -728,10 +791,12 @@ bool replay_events(const std::string &events_path, int max_iterations,
             /* x0 is measured and not constrained by the QP. Report future
              * predicted clearance only, consistent with candidate acceptance. */
             if (k > 0) {
-                const double lower = configuration.model.corridor_margin_m -
+                const double predicted_margin = k == 1
+                    ? configuration.model.first_prediction_corridor_margin_m
+                    : configuration.model.corridor_margin_m;
+                const double lower = predicted_margin -
                     sample.right_bound;
-                const double upper = sample.left_bound -
-                    configuration.model.corridor_margin_m;
+                const double upper = sample.left_bound - predicted_margin;
                 metrics.minimum_clearance_m.push_back(std::min(
                     predicted.plant.e_y - lower,
                     upper - predicted.plant.e_y));
@@ -804,11 +869,14 @@ bool replay_events(const std::string &events_path, int max_iterations,
             : 0.0) << '\n'
         << "rti2_reason_counts[progress,curvature,left_bound,right_bound,"
            "low_slack,nonsmooth,action_correction,degraded,residual_imbalance,"
-           "steering_reversal,lateral_load]=";
-    for (std::size_t index = 0; index < 11; ++index)
+           "steering_reversal,lateral_load,corridor_repair,residual_recovery]=";
+    for (std::size_t index = 0; index < 13; ++index)
         std::cout << (index == 0 ? "" : ",")
                   << metrics.rti2_reason_counts[index];
     std::cout << '\n'
+        << "recovery[active,not_found,reentered_within_horizon]="
+        << metrics.recovery_active << ',' << metrics.recovery_not_found << ','
+        << metrics.recovery_reentered << '\n'
         << "quadratic_factorizations=" << metrics.quadratic_factorizations
         << " factor_per_solve=" << (metrics.solves > 0
             ? static_cast<double>(metrics.quadratic_factorizations) /
@@ -905,8 +973,12 @@ int main(int argc, char **argv)
                      "[--corridor-margin METERS] "
                      "[--first-prediction-corridor-margin METERS] "
                      "[--corridor-preview METERS] "
+                     "[--recovery-policy nominal|heading_feedback|brake_heading_feedback] "
+                     "[--recovery-k-ey VALUE] [--recovery-k-epsi VALUE] "
+                     "[--recovery-k-r VALUE] "
                      "[--actions OUTPUT_CSV] "
-                     "[--trajectory OUTPUT_CSV]\n";
+                     "[--trajectory OUTPUT_CSV] "
+                     "[--recovery-schedule OUTPUT_CSV]\n";
         return 2;
     }
     int max_iterations = 50;
@@ -924,8 +996,13 @@ int main(int argc, char **argv)
     float corridor_margin_m = 0.05f;
     float first_prediction_corridor_margin_m = 0.05f;
     float corridor_preview_halfwidth_m = 0.10f;
+    int recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
+    float recovery_steering_k_e_y = 0.0f;
+    float recovery_steering_k_e_psi = 0.0f;
+    float recovery_steering_k_r = 0.0f;
     std::string actions_path;
     std::string trajectory_path;
+    std::string recovery_schedule_path;
     for (int index = 2; index < argc; ++index) {
         const std::string option(argv[index]);
         if (option == "--fd-jacobian") {
@@ -957,6 +1034,26 @@ int main(int argc, char **argv)
             first_prediction_corridor_margin_m = std::stof(argv[++index]);
         } else if (option == "--corridor-preview" && index + 1 < argc) {
             corridor_preview_halfwidth_m = std::stof(argv[++index]);
+        } else if (option == "--recovery-policy" && index + 1 < argc) {
+            const std::string policy(argv[++index]);
+            if (policy == "nominal") {
+                recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
+            } else if (policy == "heading_feedback") {
+                recovery_seed_policy = MPC_RTI_RECOVERY_SEED_HEADING_FEEDBACK;
+            } else if (policy == "brake_heading_feedback") {
+                recovery_seed_policy =
+                    MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK;
+            } else {
+                std::cerr << "recovery policy must be nominal, heading_feedback, "
+                             "or brake_heading_feedback\n";
+                return 2;
+            }
+        } else if (option == "--recovery-k-ey" && index + 1 < argc) {
+            recovery_steering_k_e_y = std::stof(argv[++index]);
+        } else if (option == "--recovery-k-epsi" && index + 1 < argc) {
+            recovery_steering_k_e_psi = std::stof(argv[++index]);
+        } else if (option == "--recovery-k-r" && index + 1 < argc) {
+            recovery_steering_k_r = std::stof(argv[++index]);
         } else if (option == "--rho" && index + 1 < argc) {
             rho = std::stof(argv[++index]);
         } else if (option == "--rho-u" && index + 1 < argc) {
@@ -965,6 +1062,8 @@ int main(int argc, char **argv)
             actions_path = argv[++index];
         } else if (option == "--trajectory" && index + 1 < argc) {
             trajectory_path = argv[++index];
+        } else if (option == "--recovery-schedule" && index + 1 < argc) {
+            recovery_schedule_path = argv[++index];
         } else if (!numeric_settings_seen && index + 1 < argc) {
             max_iterations = std::stoi(argv[index]);
             tolerance = std::stof(argv[++index]);
@@ -1007,7 +1106,9 @@ int main(int argc, char **argv)
         rho, rho_u, degraded_residual_limit, max_degraded_solves,
         corridor_margin_m, first_prediction_corridor_margin_m,
         corridor_preview_halfwidth_m,
+        recovery_seed_policy, recovery_steering_k_e_y,
+        recovery_steering_k_e_psi, recovery_steering_k_r,
         diagnostic_relaxed_residual_gate,
-        actions_path, trajectory_path,
+        actions_path, trajectory_path, recovery_schedule_path,
         trajectory, lap_length) ? 0 : 1;
 }

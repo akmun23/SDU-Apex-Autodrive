@@ -1,0 +1,20 @@
+{
+  "dataset": "pp_mpc_shadow_icra_20260918",
+  "runtime_inputs_only": true,
+  "cycles": 13030,
+  "accepted": 13030,
+  "rejected": 0,
+  "prediction_horizon_steps": 30,
+  "prediction_dt_s": 0.025,
+  "adaptive_rho": true,
+  "max_iterations": 100,
+  "scaling": "physical",
+  "solve_ms": {"p50": 2.605134, "p95": 8.185182, "max": 10.624827},
+  "residual_p95": {"primal": 0.009978, "dual": 0.009584},
+  "minimum_predicted_corridor_clearance_m": 0.218062,
+  "recovery": {"active_cycles": 0, "not_found_cycles": 0, "normal_schedule_cycles": 13030},
+  "amcl_post_phase_max_correction_m": 0.2,
+  "amcl_post_phase_max_correction_yaw_rad": 0.12,
+  "live_authority_run_completed": false,
+  "unity_behavior_changed": false
+}
