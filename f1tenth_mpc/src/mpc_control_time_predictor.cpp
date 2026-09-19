@@ -10,6 +10,7 @@ namespace f1tenth_mpc {
 namespace {
 
 constexpr double kNsToSeconds = 1.0e-9;
+constexpr double kProjectionSearchDistanceM = 3.0;
 
 double wrap_angle(double angle)
 {
@@ -30,9 +31,15 @@ bool project_source(const MpcSynchronizedState &source,
                     std::size_t previous_segment,
                     MpcPathProjection_t *projection)
 {
+    const std::size_t local_radius =
+        previous_segment < trajectory_count
+        ? mpc_trajectory_search_radius_for_distance(
+              trajectory, trajectory_count, lap_length_m, previous_segment,
+              kProjectionSearchDistanceM)
+        : 0;
     return mpc_trajectory_project(trajectory, trajectory_count, lap_length_m,
-        source.map_x, source.map_y, source.map_yaw, previous_segment, 160,
-        projection) != 0;
+        source.map_x, source.map_y, source.map_yaw, previous_segment,
+        local_radius, projection) != 0;
 }
 
 bool project_predicted_map_pose(MpcControlTimePrediction *prediction,
@@ -41,9 +48,15 @@ bool project_predicted_map_pose(MpcControlTimePrediction *prediction,
                                 double lap_length_m,
                                 std::size_t previous_segment)
 {
+    const std::size_t local_radius =
+        previous_segment < trajectory_count
+        ? mpc_trajectory_search_radius_for_distance(
+              trajectory, trajectory_count, lap_length_m, previous_segment,
+              kProjectionSearchDistanceM)
+        : 0;
     if (!mpc_trajectory_project(trajectory, trajectory_count, lap_length_m,
             prediction->state.map_x, prediction->state.map_y,
-            prediction->state.map_yaw, previous_segment, 160,
+            prediction->state.map_yaw, previous_segment, local_radius,
             &prediction->projection)) return false;
     prediction->progress_m = prediction->projection.s;
     return true;
