@@ -55,16 +55,25 @@ jobs:
   python:
     name: Python analysis and controller tests
     runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
+        shell: bash
         run: |
+          source /opt/ros/humble/setup.bash
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3-pip
           python3 -m pip install --upgrade pip
-          python3 -m pip install numpy pandas pytest
+          python3 -m pip install numpy pandas pytest pillow gevent
       - name: Run Python tests
+        shell: bash
         run: |
+          source /opt/ros/humble/setup.bash
           PYTHONPATH=sdu_apex_autodrive pytest -q sdu_apex_autodrive/test
       - name: Check whitespace and syntax
+        shell: bash
         run: |
           git diff --check
           python3 -m compileall -q sdu_apex_autodrive/sdu_apex_autodrive
