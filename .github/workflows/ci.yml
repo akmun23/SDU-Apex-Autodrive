@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
-          PYTHONPATH=sdu_apex_autodrive python3 -m pytest -q sdu_apex_autodrive/test
+          PYTHONPATH=sdu_apex_autodrive:${PYTHONPATH} python3 -m pytest -q sdu_apex_autodrive/test
       - name: Check whitespace and syntax
         shell: bash
         run: |
