@@ -1548,10 +1548,16 @@ static unsigned int adaptive_rti2_trigger_mask(
 
 static MpcRtiCycleStatus_t reject_cycle(
     MpcRtiMemory_t *memory,
+    const MpcRtiMemory_t *entry_memory,
     MpcRtiCycleResult_t *result,
     MpcRtiCycleStatus_t status)
 {
-    if (memory) mpc_rti_memory_reset(memory);
+    /* A rejected same-sample candidate must not erase the last accepted RTI
+     * trajectory. mpc_rti_build_nominal() re-anchors that trajectory to the
+     * next measured x0, so restoring the entry snapshot is both causal and a
+     * better warm start than forcing every transient reject into a cold solve.
+     * Solver mutations from the failed cycle are rolled back as well. */
+    if (memory && entry_memory) *memory = *entry_memory;
     if (result) result->status = status;
     return status;
 }
@@ -1597,9 +1603,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         !isfinite(lap_length) || !valid_cycle_configuration(configuration) ||
         horizon < 1 || horizon > PREDICTION_HORIZON ||
         !isfinite(prediction_dt) || prediction_dt <= 0.0f) {
-        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+        return reject_cycle(
+            memory, NULL, result, MPC_RTI_CYCLE_REJECTED_INPUT);
     }
 
+    const MpcRtiMemory_t cycle_entry_memory = *memory;
     const double cycle_start_us = monotonic_microseconds();
     MpcRtiNominal_t nominal;
     MpcRtiReference_t references[PREDICTION_HORIZON + 1];
@@ -1609,7 +1617,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             references)) {
         result->r1_status = MPC_RTI_CYCLE_REJECTED_INPUT;
         result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+        return reject_cycle(memory, &cycle_entry_memory, result,
+            MPC_RTI_CYCLE_REJECTED_INPUT);
     }
     result->nominal_first_control = nominal.controls[0];
     MpcRtiCorridorSchedule_t corridor_schedule;
@@ -1618,7 +1627,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             &corridor_schedule)) {
         result->r1_status = MPC_RTI_CYCLE_REJECTED_INPUT;
         result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+        return reject_cycle(memory, &cycle_entry_memory, result,
+            MPC_RTI_CYCLE_REJECTED_INPUT);
     }
     result->recovery_active = corridor_schedule.recovery_active;
     result->recovery_not_found = corridor_schedule.recovery_not_found;
@@ -1684,7 +1694,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->nonlinear_failure_stage = r1.nonlinear_failure_stage;
         result->nonlinear_failure_reason = r1.nonlinear_failure_reason;
         result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-        return reject_cycle(memory, result, r1_status);
+        return reject_cycle(memory, &cycle_entry_memory, result, r1_status);
     }
 
     MpcRtiPassResult_t selected = r1;
@@ -1737,7 +1747,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                     r1.nonlinear_failure_reason;
                 result->total_rti_us =
                     monotonic_microseconds() - cycle_start_us;
-                return reject_cycle(memory, result, r1_status);
+                return reject_cycle(memory, &cycle_entry_memory, result, r1_status);
             }
         }
         MpcRtiReference_t r2_references[PREDICTION_HORIZON + 1];
@@ -1813,7 +1823,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             result->nonlinear_failure_stage = r2.nonlinear_failure_stage;
             result->nonlinear_failure_reason = r2.nonlinear_failure_reason;
             result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-            return reject_cycle(memory, result,
+            return reject_cycle(memory, &cycle_entry_memory, result,
                 (MpcRtiCycleStatus_t)result->r2_status);
         }
     }
