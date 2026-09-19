@@ -5,6 +5,7 @@
 #include "mpc_rti.h"
 #include "mpc_control_time_predictor.hpp"
 #include "mpc_state_synchronizer.hpp"
+#include "mpc_authority_policy.hpp"
 
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -12,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/float32.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -110,6 +112,17 @@ public:
             0.0, declare_parameter<double>("startup_path_max_distance_m", 0.80));
         startup_path_heading_tolerance_rad_ = std::max(
             0.0, declare_parameter<double>("startup_path_heading_tolerance_rad", 0.75));
+        localization_covariance_xy_max_ = std::max(
+            0.0, declare_parameter<double>("localization_covariance_xy_max", 0.25));
+        localization_covariance_yaw_max_ = std::max(
+            0.0, declare_parameter<double>("localization_covariance_yaw_max", 0.12));
+        localization_required_updates_ = std::max(
+            1, static_cast<int>(
+                declare_parameter<int64_t>("localization_required_updates", 5)));
+        steering_feedback_topic_ = declare_parameter<std::string>(
+            "steering_feedback_topic", "/autodrive/roboracer_1/steering");
+        steering_feedback_timeout_s_ = std::max(
+            0.01, declare_parameter<double>("steering_feedback_timeout_s", 0.25));
 
         if (enabled_) {
             command_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
@@ -129,6 +142,10 @@ public:
         // Control must consume the newest state, not replay a queue of stale
         // 40 Hz samples after an executor/DDS scheduling pause.
         const auto latest_state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+        steering_feedback_sub_ = create_subscription<std_msgs::msg::Float32>(
+            steering_feedback_topic_, latest_state_qos,
+            std::bind(&MpcControllerNode::steering_feedback_callback, this,
+                      std::placeholders::_1));
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             pose_topic_, latest_state_qos,
             std::bind(&MpcControllerNode::pose_callback, this, std::placeholders::_1));
@@ -412,6 +429,7 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
         mpc_rti_memory_reset(&rti_memory_);
         if (enabled_) {
+            has_accepted_command_ = false;
             target_speed_mps_ = 0.0;
             target_speed_initialized_ = true;
             last_steering_command_rad_ = 0.0;
@@ -425,43 +443,38 @@ private:
             publish_shadow_failure(reason);
     }
 
-    /* A localization/model feasibility rejection is not a reason to command
-     * an emergency stop. Hold the last bounded steering command and keep the
-     * current/requested speed so AMCL can converge again on subsequent legal
-     * measurements. This is deliberately separate from publish_stop(), which
-     * remains reserved for invalid actuator/input safety conditions. */
+    /* A transient localization/model rejection after authority has been
+     * established is not an emergency stop: retain a bounded command until
+     * the next legal state arrives.  Before the first accepted MPC cycle,
+     * however, there is no command to retain.  Remain neutral rather than
+     * inventing motion from the raceline/startup speed cap. */
     void publish_driving_fallback(const char *reason,
                                   double observed_speed_mps,
                                   double requested_speed_mps,
                                   bool emit_shadow_diagnostic = true)
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
-            "holding bounded driving command while localization recovers", reason);
+            "using bounded authority fallback", reason);
         mpc_rti_memory_reset(&rti_memory_);
         if (enabled_) {
             const double speed_ceiling = active_speed_ceiling();
-            const double finite_observed = std::isfinite(observed_speed_mps) &&
-                    observed_speed_mps > 1.0e-6
-                ? std::max(0.0, observed_speed_mps) : 0.0;
-            const double finite_requested = std::isfinite(requested_speed_mps)
-                ? std::max(0.0, requested_speed_mps) : 0.0;
             const double local_cap = std::min(
                 speed_ceiling, local_raceline_speed_cap());
-            const double previous_command = target_speed_initialized_
-                ? clamp(target_speed_mps_, 0.0, local_cap) : local_cap;
-            const double observed_cap = finite_observed > 0.0
-                ? finite_observed : local_cap;
-            const double requested_cap = finite_requested > 1.0e-6
-                ? finite_requested : local_cap;
-            target_speed_mps_ = clamp(
-                std::min({observed_cap, requested_cap,
-                    previous_command, local_cap}),
-                0.0, speed_ceiling);
-            last_steering_command_rad_ = clamp(
-                std::isfinite(last_steering_command_rad_)
-                    ? last_steering_command_rad_ : 0.0,
-                -rti_config_.model.max_steering_rad,
-                rti_config_.model.max_steering_rad);
+            target_speed_mps_ = mpc_fallback_target_speed(
+                has_accepted_command_, target_speed_mps_,
+                observed_speed_mps, requested_speed_mps,
+                local_cap, speed_ceiling);
+            if (!has_accepted_command_) {
+                last_steering_command_rad_ = 0.0;
+                last_steering_rate_radps_ = 0.0;
+                last_target_speed_rate_mps2_ = 0.0;
+            } else {
+                last_steering_command_rad_ = clamp(
+                    std::isfinite(last_steering_command_rad_)
+                        ? last_steering_command_rad_ : 0.0,
+                    -rti_config_.model.max_steering_rad,
+                    rti_config_.model.max_steering_rad);
+            }
             target_speed_initialized_ = true;
             publish_command(last_steering_command_rad_, target_speed_mps_);
         } else if (shadow_mode_) {
@@ -512,14 +525,60 @@ private:
         observed_steering_command_rad_ = steering;
     }
 
+    void steering_feedback_callback(
+        const std_msgs::msg::Float32::SharedPtr message)
+    {
+        const double steering = static_cast<double>(message->data);
+        if (!std::isfinite(steering))
+            return;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        steering_feedback_angle_rad_ = clamp(
+            steering, -rti_config_.model.max_steering_rad,
+            rti_config_.model.max_steering_rad);
+        steering_feedback_received_ = true;
+        last_steering_feedback_time_ = now();
+    }
+
     void publish_shadow_failure(const char * reason)
     {
         if (!diagnostics_pub_) return;
+        bool localization_ready = false;
+        int localization_good_updates = 0;
+        bool steering_feedback_received = false;
+        double steering_feedback_angle = 0.0;
+        double steering_feedback_age_s =
+            std::numeric_limits<double>::quiet_NaN();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+            localization_good_updates = localization_good_updates_;
+            steering_feedback_received = steering_feedback_received_;
+            steering_feedback_angle = steering_feedback_angle_rad_;
+            if (steering_feedback_received) {
+                steering_feedback_age_s =
+                    (now() - last_steering_feedback_time_).seconds();
+            }
+        }
         std_msgs::msg::String message;
         std::ostringstream json;
-        json << "{\"status\":\"rejected\",\"reason\":\"" << reason
+        json << std::setprecision(9)
+             << "{\"status\":\"rejected\",\"reason\":\"" << reason
              << "\",\"source_stamp_ns\":" << last_source_stamp_.nanoseconds()
-             << '}';
+             << ",\"authority_command_established\":"
+             << (has_accepted_command_ ? "true" : "false")
+             << ",\"localization\":{\"ready\":"
+             << (localization_ready ? "true" : "false")
+             << ",\"good_updates\":" << localization_good_updates
+             << ",\"required_updates\":" << localization_required_updates_
+             << "},\"steering_feedback\":{\"received\":"
+             << (steering_feedback_received ? "true" : "false")
+             << ",\"angle_rad\":" << steering_feedback_angle
+             << ",\"age_s\":";
+        if (std::isfinite(steering_feedback_age_s))
+            json << steering_feedback_age_s;
+        else
+            json << "null";
+        json << "}}";
         message.data = json.str();
         diagnostics_pub_->publish(message);
     }
@@ -574,6 +633,29 @@ private:
         double observed_steering_command_rad = 0.0;
         double observed_steering_rate_radps = 0.0;
         double observed_target_speed_rate_mps2 = 0.0;
+        bool localization_ready = false;
+        int localization_good_updates = 0;
+        bool steering_feedback_received = false;
+        bool steering_feedback_fresh = false;
+        double steering_feedback_angle = 0.0;
+        double steering_feedback_age_s =
+            std::numeric_limits<double>::quiet_NaN();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+            localization_good_updates = localization_good_updates_;
+            steering_feedback_received = steering_feedback_received_;
+            steering_feedback_angle = steering_feedback_angle_rad_;
+            if (steering_feedback_received) {
+                steering_feedback_age_s =
+                    static_cast<double>(
+                        control_ros_stamp_ns -
+                        last_steering_feedback_time_.nanoseconds()) * 1.0e-9;
+                steering_feedback_fresh =
+                    steering_feedback_age_s >= 0.0 &&
+                    steering_feedback_age_s <= steering_feedback_timeout_s_;
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(command_history_mutex_);
             observed_command_stamp_ns = observed_command_stamp_ns_;
@@ -654,6 +736,21 @@ private:
             << observed_steering_command_rad << ",\"steering_rate_radps\":"
             << observed_steering_rate_radps << ",\"target_speed_rate_mps2\":"
             << observed_target_speed_rate_mps2 << '}'
+            << ",\"authority_command_established\":"
+            << (has_accepted_command_ ? "true" : "false")
+            << ",\"localization\":{\"ready\":"
+            << (localization_ready ? "true" : "false")
+            << ",\"good_updates\":" << localization_good_updates
+            << ",\"required_updates\":" << localization_required_updates_
+            << "}"
+            << ",\"steering_feedback\":{\"received\":"
+            << (steering_feedback_received ? "true" : "false")
+            << ",\"fresh\":"
+            << (steering_feedback_fresh ? "true" : "false")
+            << ",\"angle_rad\":" << steering_feedback_angle
+            << ",\"age_s\":";
+        json_number(steering_feedback_age_s);
+        json << "}"
             << ",\"progress_m\":" << progress
             << ",\"path_curvature_per_m\":";
         json_number(current_path_sample_valid ? current_path_sample.curvature :
@@ -865,10 +962,19 @@ private:
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
         if (!std::isfinite(message->pose.pose.position.x) ||
             !std::isfinite(message->pose.pose.position.y) || !std::isfinite(yaw)) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_good_updates_ = 0;
+            localization_ready_ = false;
             return;
         }
+
+        const bool covariance_good = mpc_localization_covariance_good(
+            message->pose.covariance[0], message->pose.covariance[7],
+            message->pose.covariance[35],
+            localization_covariance_xy_max_, localization_covariance_yaw_max_);
         rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
         if (stamp.nanoseconds() <= 0) stamp = now();
+
         std::lock_guard<std::mutex> lock(state_mutex_);
         const auto status = state_synchronizer_.set_map_pose({
             stamp.nanoseconds(), message->pose.pose.position.x,
@@ -877,6 +983,30 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC map-pose handoff rejected: %s",
                 MpcStateSynchronizer::status_name(status));
+        }
+
+        if (!covariance_good) {
+            localization_good_updates_ = 0;
+            localization_ready_ = false;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "MPC waiting for qualified localization covariance: "
+                "xy=(%.4f,%.4f)/%.4f yaw=%.4f/%.4f",
+                message->pose.covariance[0], message->pose.covariance[7],
+                localization_covariance_xy_max_,
+                message->pose.covariance[35], localization_covariance_yaw_max_);
+            return;
+        }
+
+        if (localization_good_updates_ < localization_required_updates_)
+            ++localization_good_updates_;
+        if (!localization_ready_ &&
+            localization_good_updates_ >= localization_required_updates_) {
+            localization_ready_ = true;
+            RCLCPP_INFO(
+                get_logger(),
+                "MPC localization qualified after %d consecutive covariance-bounded updates",
+                localization_good_updates_);
         }
     }
 
@@ -922,6 +1052,18 @@ private:
             publish_driving_fallback(
                 "MPC rejected uncertain legal odometry sample", 0.0,
                 target_speed_mps_);
+            return;
+        }
+
+        bool localization_ready = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            localization_ready = localization_ready_;
+        }
+        if (!localization_ready) {
+            publish_driving_fallback(
+                "MPC waiting for covariance-qualified localization",
+                0.0, target_speed_mps_);
             return;
         }
 
@@ -1016,8 +1158,25 @@ private:
             control_time_prediction.previous_steering_rate_radps;
         double previous_target_speed_rate =
             control_time_prediction.previous_target_speed_rate_mps2;
+
+        bool steering_feedback_fresh = false;
+        double steering_feedback_angle = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (steering_feedback_received_) {
+                const double feedback_age_s =
+                    (control_ros_time - last_steering_feedback_time_).seconds();
+                steering_feedback_fresh = feedback_age_s >= 0.0 &&
+                    feedback_age_s <= steering_feedback_timeout_s_;
+                steering_feedback_angle = steering_feedback_angle_rad_;
+            }
+        }
+        commanded_steering = mpc_select_current_steering(
+            commanded_steering, steering_feedback_fresh,
+            steering_feedback_angle, rti_config_.model.max_steering_rad);
+
         if (!target_speed_initialized_) {
-            if (!shadow_mode_ || command_history_snapshot.size() == 0)
+            if (command_history_snapshot.size() == 0)
                 commanded_speed = clamp(
                     std::max(0.0, command_time_state.u), 0.0, speed_ceiling);
             if (enabled_) target_speed_mps_ = commanded_speed;
@@ -1074,6 +1233,7 @@ private:
                 control_ros_time.nanoseconds(), callback_steady_ns,
                 synchronize_steady_ns);
         if (enabled_) {
+            has_accepted_command_ = true;
             target_speed_mps_ = result.published_target_speed;
             last_steering_command_rad_ = result.published_steering_command;
             last_steering_rate_radps_ = result.first_control.steering_rate;
@@ -1088,6 +1248,9 @@ private:
     bool startup_path_validated_{};
     bool progress_initialized_{};
     bool target_speed_initialized_{};
+    bool has_accepted_command_{};
+    bool localization_ready_{};
+    bool steering_feedback_received_{};
     std::string odom_topic_;
     std::string pose_topic_;
     std::string command_topic_;
@@ -1095,6 +1258,7 @@ private:
     std::string path_frame_;
     std::string command_frame_;
     std::string trajectory_file_;
+    std::string steering_feedback_topic_;
     std::string control_time_mode_name_;
     MpcControlTimeMode control_time_mode_{
         MpcControlTimeMode::kAcceptedModelCommandHistory};
@@ -1108,6 +1272,10 @@ private:
     double source_dt_max_s_{};
     double startup_path_max_distance_m_{};
     double startup_path_heading_tolerance_rad_{};
+    double localization_covariance_xy_max_{};
+    double localization_covariance_yaw_max_{};
+    double steering_feedback_timeout_s_{};
+    double steering_feedback_angle_rad_{};
     double track_length_m_{};
     double startup_progress_m_{};
     double last_projected_s_{};
@@ -1120,8 +1288,11 @@ private:
     double observed_steering_rate_radps_{};
     double observed_target_speed_rate_mps2_{};
     int64_t observed_command_stamp_ns_{};
+    int localization_required_updates_{};
+    int localization_good_updates_{};
     std::size_t last_closest_index_{};
     rclcpp::Time last_source_stamp_{0, 0, RCL_ROS_TIME};
+    rclcpp::Time last_steering_feedback_time_{0, 0, RCL_ROS_TIME};
     MpcRtiCycleConfiguration_t rti_config_{};
     MpcRtiMemory_t rti_memory_{};
     std::vector<Waypoint> trajectory_;
@@ -1132,6 +1303,8 @@ private:
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr command_pub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr
+        steering_feedback_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
         observed_command_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;

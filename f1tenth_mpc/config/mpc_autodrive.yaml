@@ -29,6 +29,20 @@
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
 
+    # Match the localization qualification already proven by Pure Pursuit.
+    # A process-start delay is not an AMCL lock: MPC remains neutral until
+    # this many consecutive /current_map_pose updates have bounded covariance.
+    localization_covariance_xy_max: 0.25
+    localization_covariance_yaw_max: 0.12
+    localization_required_updates: 5
+
+    # AutoDRIVE's measured steering state closes the actuator-state loop.
+    # PP already uses this feedback because command-to-wheel steering lag is
+    # material during turn-in and reversal; MPC must optimize from the same
+    # physical state instead of assuming its last command was realized.
+    steering_feedback_topic: /autodrive/roboracer_1/steering
+    steering_feedback_timeout_s: 0.25
+
     # 9-state RTI objective; these are initial, not live-tuned weights.
     weight_e_y: 1500.0
     weight_e_psi: 50.0

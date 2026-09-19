@@ -26,19 +26,80 @@ jobs:
         run: |
           ctest --test-dir build/f1tenth_localization --output-on-failure
 
+  mpc-cpu:
+    name: ROS 2 Humble CPU MPC
+    runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MPC dependencies
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake \
+            ros-humble-ackermann-msgs ros-humble-rclcpp-components
+      - name: Build MPC
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build --merge-install \
+            --packages-select f1tenth_mpc \
+            --cmake-args -DBUILD_TESTING=ON
+      - name: Run MPC tests
+        shell: bash
+        run: |
+          ctest --test-dir build/f1tenth_mpc --output-on-failure
+
+      - name: Replay clean PP-shadow MPC holdout
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          build/f1tenth_mpc/mpc_rti_offline_replay \
+            <(gzip -dc sdu_apex_autodrive/artifacts/mpc_next_685ccca/11_shadow/pp_mpc_shadow_icra_20260918/events.csv.gz) \
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive \
+            --actions /tmp/mpc_rti_baseline.csv
+      - name: A/B selective adaptive-R2 triggers
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          build/f1tenth_mpc/mpc_rti_offline_replay \
+            <(gzip -dc sdu_apex_autodrive/artifacts/mpc_next_685ccca/11_shadow/pp_mpc_shadow_icra_20260918/events.csv.gz) \
+            100 0.01 --prefactorized --adaptive-rho --rti-mode adaptive \
+            --rti2-curvature-trigger 0.10 \
+            --rti2-bound-trigger 0.10 \
+            --rti2-min-slack-trigger 0.15 \
+            --rti2-nonsmooth-trigger 1000 \
+            --rti2-lateral-load-trigger 6.5 \
+            --actions /tmp/mpc_rti_selective.csv
+          python3 tools/mpc/compare_rti_replays.py \
+            /tmp/mpc_rti_baseline.csv /tmp/mpc_rti_selective.csv \
+            --max-steering-delta-rad 0.003 \
+            --max-speed-delta-mps 0.03 \
+            --max-trigger-ratio 0.40
+
   python:
     name: Python analysis and controller tests
     runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
+        shell: bash
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install numpy pandas pytest
+          source /opt/ros/humble/setup.bash
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3-numpy python3-pandas python3-pytest python3-pil \
+            python3-gevent python3-scipy
       - name: Run Python tests
+        shell: bash
         run: |
-          PYTHONPATH=sdu_apex_autodrive pytest -q sdu_apex_autodrive/test
+          source /opt/ros/humble/setup.bash
+          PYTHONPATH=sdu_apex_autodrive:${PYTHONPATH:-} python3 -m pytest -q sdu_apex_autodrive/test
       - name: Check whitespace and syntax
+        shell: bash
         run: |
           git diff --check
           python3 -m compileall -q sdu_apex_autodrive/sdu_apex_autodrive

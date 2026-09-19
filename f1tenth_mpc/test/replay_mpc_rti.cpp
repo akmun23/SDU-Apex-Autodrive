@@ -175,6 +175,11 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
                                                 bool use_scaling,
                                                 bool adaptive_rho,
                                                 MpcRtiRefinementMode_t refinement_mode,
+                                                float rti2_curvature_trigger_per_m,
+                                                float rti2_bound_trigger_m,
+                                                float rti2_min_slack_trigger_m,
+                                                int rti2_nonsmooth_trigger,
+                                                float rti2_lateral_load_trigger_mps2,
                                                 float rho,
                                                 float rho_u,
                                                 float degraded_residual_limit,
@@ -238,14 +243,17 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     }
     configuration.refinement_mode = refinement_mode;
     configuration.rti2_progress_error_trigger_m = 0.10f;
-    configuration.rti2_curvature_error_trigger_per_m = 0.02f;
-    configuration.rti2_bound_error_trigger_m = 0.05f;
-    configuration.rti2_min_corridor_slack_trigger_m = 0.25f;
+    configuration.rti2_curvature_error_trigger_per_m =
+        rti2_curvature_trigger_per_m;
+    configuration.rti2_bound_error_trigger_m = rti2_bound_trigger_m;
+    configuration.rti2_min_corridor_slack_trigger_m =
+        rti2_min_slack_trigger_m;
     configuration.rti2_steering_rate_correction_trigger_radps = 0.50f;
     configuration.rti2_target_speed_rate_correction_trigger_mps2 = 1.0f;
     configuration.rti2_residual_imbalance_trigger = 8.0f;
-    configuration.rti2_lateral_load_trigger_mps2 = 3.0f;
-    configuration.rti2_nonsmooth_columns_trigger = 50;
+    configuration.rti2_lateral_load_trigger_mps2 =
+        rti2_lateral_load_trigger_mps2;
+    configuration.rti2_nonsmooth_columns_trigger = rti2_nonsmooth_trigger;
     configuration.rti2_residual_recovery_limit = 0.25f;
     configuration.degraded_residual_limit = degraded_residual_limit;
     configuration.maximum_regularization = 1.0e-2f;
@@ -262,6 +270,11 @@ bool replay_events(const std::string &events_path, int max_iterations,
                    bool use_prefactorization,
                    bool use_scaling, bool adaptive_rho,
                    MpcRtiRefinementMode_t refinement_mode,
+                   float rti2_curvature_trigger_per_m,
+                   float rti2_bound_trigger_m,
+                   float rti2_min_slack_trigger_m,
+                   int rti2_nonsmooth_trigger,
+                   float rti2_lateral_load_trigger_mps2,
                    float rho, float rho_u,
                    float degraded_residual_limit,
                    int max_degraded_solves,
@@ -358,6 +371,11 @@ bool replay_events(const std::string &events_path, int max_iterations,
         replay_configuration(max_iterations, tolerance, use_fd_jacobian,
                              use_prefactorization, use_scaling, adaptive_rho,
                              refinement_mode,
+                             rti2_curvature_trigger_per_m,
+                             rti2_bound_trigger_m,
+                             rti2_min_slack_trigger_m,
+                             rti2_nonsmooth_trigger,
+                             rti2_lateral_load_trigger_mps2,
                              rho, rho_u, degraded_residual_limit,
                              max_degraded_solves, corridor_margin_m,
                              first_prediction_corridor_margin_m,
@@ -972,6 +990,11 @@ int main(int argc, char **argv)
                      "[--rho-u VALUE] [--adaptive-rho] "
                      "[--diagnostic-residual-limit VALUE] "
                      "[--rti-mode r1|r2|adaptive] "
+                     "[--rti2-curvature-trigger VALUE] "
+                     "[--rti2-bound-trigger VALUE] "
+                     "[--rti2-min-slack-trigger VALUE] "
+                     "[--rti2-nonsmooth-trigger COUNT] "
+                     "[--rti2-lateral-load-trigger VALUE] "
                      "[--corridor-margin METERS] "
                      "[--first-prediction-corridor-margin METERS] "
                      "[--corridor-preview METERS] "
@@ -991,6 +1014,11 @@ int main(int argc, char **argv)
     bool use_scaling = false;
     bool adaptive_rho = false;
     MpcRtiRefinementMode_t refinement_mode = MPC_RTI_REFINEMENT_R1;
+    float rti2_curvature_trigger_per_m = 0.02f;
+    float rti2_bound_trigger_m = 0.05f;
+    float rti2_min_slack_trigger_m = 0.25f;
+    int rti2_nonsmooth_trigger = 50;
+    float rti2_lateral_load_trigger_mps2 = 3.0f;
     bool diagnostic_relaxed_residual_gate = false;
     float rho = 7.0f;
     float rho_u = 7.0f;
@@ -1025,6 +1053,21 @@ int main(int argc, char **argv)
                 std::cerr << "rti mode must be r1, r2, or adaptive\n";
                 return 2;
             }
+        } else if (option == "--rti2-curvature-trigger" &&
+                   index + 1 < argc) {
+            rti2_curvature_trigger_per_m = std::stof(argv[++index]);
+        } else if (option == "--rti2-bound-trigger" &&
+                   index + 1 < argc) {
+            rti2_bound_trigger_m = std::stof(argv[++index]);
+        } else if (option == "--rti2-min-slack-trigger" &&
+                   index + 1 < argc) {
+            rti2_min_slack_trigger_m = std::stof(argv[++index]);
+        } else if (option == "--rti2-nonsmooth-trigger" &&
+                   index + 1 < argc) {
+            rti2_nonsmooth_trigger = std::stoi(argv[++index]);
+        } else if (option == "--rti2-lateral-load-trigger" &&
+                   index + 1 < argc) {
+            rti2_lateral_load_trigger_mps2 = std::stof(argv[++index]);
         } else if (option == "--diagnostic-residual-limit" &&
                    index + 1 < argc) {
             degraded_residual_limit = std::stof(argv[++index]);
@@ -1075,6 +1118,18 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (!std::isfinite(rti2_curvature_trigger_per_m) ||
+        rti2_curvature_trigger_per_m < 0.0f ||
+        !std::isfinite(rti2_bound_trigger_m) ||
+        rti2_bound_trigger_m < 0.0f ||
+        !std::isfinite(rti2_min_slack_trigger_m) ||
+        rti2_min_slack_trigger_m < 0.0f ||
+        rti2_nonsmooth_trigger < 0 ||
+        !std::isfinite(rti2_lateral_load_trigger_mps2) ||
+        rti2_lateral_load_trigger_mps2 < 0.0f) {
+        std::cerr << "RTI2 trigger thresholds must be finite and nonnegative\n";
+        return 2;
+    }
     if (!std::isfinite(rho) || !std::isfinite(rho_u) ||
         rho < 1.0f || rho > 127.0f || rho_u < 1.0f || rho_u > 127.0f) {
         std::cerr << "rho and rho-u must lie in [1, 127]\n";
@@ -1105,6 +1160,11 @@ int main(int argc, char **argv)
     return replay_events(argv[1], max_iterations, tolerance,
         use_fd_jacobian, use_prefactorization, use_scaling, adaptive_rho,
         refinement_mode,
+        rti2_curvature_trigger_per_m,
+        rti2_bound_trigger_m,
+        rti2_min_slack_trigger_m,
+        rti2_nonsmooth_trigger,
+        rti2_lateral_load_trigger_mps2,
         rho, rho_u, degraded_residual_limit, max_degraded_solves,
         corridor_margin_m, first_prediction_corridor_margin_m,
         corridor_preview_halfwidth_m,
