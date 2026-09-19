@@ -75,12 +75,12 @@ static void test_current_raceline_loads_and_wraps(void)
     }
     fclose(input);
 
-    check_true(count == 2587, "current trajectory contains 2587 rows before endpoint removal");
+    check_true(count == 313, "current exact trajectory contains 313 rows");
     double lap_length = 0.0;
     check_true(mpc_trajectory_prepare(track_points, &count, &lap_length),
                "current trajectory validates and prepares");
-    check_true(count == 2586, "current trajectory contains 2586 unique points");
-    check_near(lap_length, 51.7, 0.03,
+    check_true(count == 313, "current exact trajectory contains 313 unique points");
+    check_near(lap_length, 53.21, 0.03,
                "closed-loop length includes the final-to-first segment");
 
     MpcTrajectorySample_t at_start;
@@ -196,8 +196,8 @@ static void test_metric_local_projection_window_and_no_global_reacquire(void)
         points, count, lap_length, 0, 0.15);
     const size_t long_radius = mpc_trajectory_search_radius_for_distance(
         points, count, lap_length, 0, 2.05);
-    check_true(short_radius == 1,
-               "metric search uses only the nearby segment on sparse path");
+    check_true(short_radius == 2,
+               "metric search covers the requested distance in both directions");
     check_true(long_radius >= short_radius && long_radius < count,
                "metric search radius grows with arc distance, not point count");
 
