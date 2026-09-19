@@ -301,10 +301,9 @@ static float corridor_margin_at_prediction(
         : configuration->corridor_margin_m;
 }
 
-static float heading_aware_corridor_margin(
+static float physical_wall_margin(
     const MpcRtiConfiguration_t *configuration,
-    float e_psi,
-    int prediction_index)
+    float e_psi)
 {
     if (!configuration || !isfinite(e_psi)) return INFINITY;
     const float physical_half_extent =
@@ -312,11 +311,17 @@ static float heading_aware_corridor_margin(
         configuration->vehicle_longitudinal_extent_m * fabsf(sinf(e_psi));
     const float lateral_extent = fmaxf(
         configuration->planning_half_width_m, physical_half_extent);
-    const float footprint_margin =
-        configuration->wall_clearance_m + lateral_extent;
+    return configuration->wall_clearance_m + lateral_extent;
+}
+
+static float heading_aware_corridor_margin(
+    const MpcRtiConfiguration_t *configuration,
+    float e_psi,
+    int prediction_index)
+{
     return fmaxf(
         corridor_margin_at_prediction(configuration, prediction_index),
-        footprint_margin);
+        physical_wall_margin(configuration, e_psi));
 }
 
 static int state_inside_command_envelope(
@@ -717,15 +722,24 @@ static int fill_corridor_schedule_for_seed(
     schedule->first_normal_feasible_stage = -1;
     schedule->initial_normal_violation = 0.0f;
     schedule->max_seed_violation = 0.0f;
+    float hard_physical_lower[PREDICTION_HORIZON + 1] = {0};
+    float hard_physical_upper[PREDICTION_HORIZON + 1] = {0};
     for (int k = 0; k <= seed->horizon; ++k) {
         MpcRtiReference_t reference;
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 seed->progress[k], configuration, &reference)) return 0;
-        const float margin = heading_aware_corridor_margin(
-            configuration, seed->states[k].plant.e_psi, k);
+        const float hard_margin = physical_wall_margin(
+            configuration, seed->states[k].plant.e_psi);
+        const float margin = fmaxf(
+            corridor_margin_at_prediction(configuration, k), hard_margin);
+        hard_physical_lower[k] = hard_margin - reference.right_bound;
+        hard_physical_upper[k] = reference.left_bound - hard_margin;
         schedule->normal_lower[k] = margin - reference.right_bound;
         schedule->normal_upper[k] = reference.left_bound - margin;
-        if (!isfinite(schedule->normal_lower[k]) ||
+        if (!isfinite(hard_physical_lower[k]) ||
+            !isfinite(hard_physical_upper[k]) ||
+            hard_physical_lower[k] > hard_physical_upper[k] ||
+            !isfinite(schedule->normal_lower[k]) ||
             !isfinite(schedule->normal_upper[k]) ||
             schedule->normal_lower[k] > schedule->normal_upper[k]) return 0;
         schedule->seed_e_y[k] = seed->states[k].plant.e_y;
@@ -760,12 +774,20 @@ static int fill_corridor_schedule_for_seed(
         schedule->recovery_stage[k] = temporary ? 1 : 0;
         if (!temporary) continue;
         if (schedule->seed_e_y[k] < schedule->normal_lower[k]) {
-            schedule->active_lower[k] = schedule->seed_e_y[k] - epsilon;
+            schedule->active_lower[k] = fmaxf(
+                schedule->seed_e_y[k] - epsilon, hard_physical_lower[k]);
             schedule->active_upper[k] = schedule->normal_upper[k];
         } else if (schedule->seed_e_y[k] > schedule->normal_upper[k]) {
             schedule->active_lower[k] = schedule->normal_lower[k];
-            schedule->active_upper[k] = schedule->seed_e_y[k] + epsilon;
+            schedule->active_upper[k] = fminf(
+                schedule->seed_e_y[k] + epsilon, hard_physical_upper[k]);
         }
+        /* Recovery may relax an extra controller inset, but the physical
+         * virtual-car envelope is never recoverable/soft. */
+        schedule->active_lower[k] = fmaxf(
+            schedule->active_lower[k], hard_physical_lower[k]);
+        schedule->active_upper[k] = fminf(
+            schedule->active_upper[k], hard_physical_upper[k]);
         if (!isfinite(schedule->active_lower[k]) ||
             !isfinite(schedule->active_upper[k]) ||
             schedule->active_lower[k] > schedule->active_upper[k]) return 0;
@@ -1019,10 +1041,16 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
         if (schedule && schedule->horizon == horizon) {
             float lower = schedule->active_lower[k + 1];
             float upper = schedule->active_upper[k + 1];
-            /* Temporary recovery stages may start outside the normal physical
-             * envelope, but once the schedule has re-entered, validate the
-             * exact candidate with its own heading-aware body footprint rather
-             * than the seed's footprint. */
+            /* The virtual-car body envelope is hard even during recovery.
+             * Recovery may relax only additional controller margin. */
+            const float hard_margin = physical_wall_margin(
+                configuration, states[k + 1].plant.e_psi);
+            lower = fmaxf(lower,
+                hard_margin - candidate_reference.right_bound -
+                configuration->nonlinear_corridor_tolerance_m);
+            upper = fminf(upper,
+                candidate_reference.left_bound - hard_margin +
+                configuration->nonlinear_corridor_tolerance_m);
             if (!schedule->recovery_stage[k + 1]) {
                 const float exact_margin = heading_aware_corridor_margin(
                     configuration, states[k + 1].plant.e_psi, k + 1);
