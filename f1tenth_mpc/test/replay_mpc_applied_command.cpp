@@ -258,9 +258,15 @@ bool build_continuous_projections(
     double progress = 0.0;
     for (const auto &state : states) {
         MpcPathProjection_t projection{};
+        const std::size_t local_radius =
+            previous_segment < trajectory.size()
+            ? mpc_trajectory_search_radius_for_distance(
+                  trajectory.data(), trajectory.size(), lap_length_m,
+                  previous_segment, 3.0)
+            : 0;
         if (!mpc_trajectory_project(trajectory.data(), trajectory.size(),
                 lap_length_m, state.map_x, state.map_y, state.map_yaw,
-                previous_segment, 64, &projection)) return false;
+                previous_segment, local_radius, &projection)) return false;
         if (projections->empty()) {
             progress = projection.s;
         } else {
