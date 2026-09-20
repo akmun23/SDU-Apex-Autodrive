@@ -7,9 +7,10 @@ behavior; it is not a real-car model. The handoff's frozen model and
 localization parameters remain unchanged. Unity physics, scene geometry,
 sensor behavior, and timing are out of scope for edits.
 
-The RTI controller uses seven plant states
-`[e_y, e_psi, u, v, r, target_speed, steering_command]`, two previous-rate
-history states, and two optimizer inputs
+The RTI controller uses ten plant states
+`[e_y, e_psi, u, v, r, target_speed, steering_command,
+delayed_steering_command_1, delayed_steering_command_2,
+actual_steering_angle]`, two previous-rate history states, and two optimizer inputs
 `[steering_command_rate, target_speed_rate]`. Its horizon is 30 stages at
 25 ms (0.75 s). Raceline projection and references are continuous in arc
 length. The ROS adapter synchronizes legal `/current_map_pose` and `/odom`
@@ -43,6 +44,10 @@ the car.
 - Direct command authority (`controller:=mpc`): uses the same MPC path. The
   launch waits 2 seconds after AMCL starts before creating the MPC container;
   adjust with `mpc_start_delay_sec:=...` or set it to zero to disable.
+- Competition authority (`competition.launch.py`): fixed MPC-only launch with
+  the official API bridge, no shadow/recorder/override/RViz switches, and the
+  immutable `mpc_iros_2026_competition.yaml` profile. This is the only launch
+  used by the competition image.
 
 Use batchmode for simulator testing and do not add `-no-graphics`. A passing
 unit test or offline replay is not a live-driving acceptance result. The

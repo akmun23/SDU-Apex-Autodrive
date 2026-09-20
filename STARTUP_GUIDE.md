@@ -1,8 +1,41 @@
 # AutoDRIVE startup guide
 
-This is the single supported local startup path for the compete track. It uses
-two terminals by design: one terminal owns Unity, and the other owns the ROS 2
-development/controller container.
+There are separate local-development and competition startup contracts. The
+GUI/source-built player workflow below is for local development only. The
+competition contract uses the official compete image and its fixed entrypoint.
+
+## Competition image
+
+Build the submitted image from the pinned official 2026 IROS compete base:
+
+```bash
+cd /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive
+docker build -t sdu-apex-autodrive:iros-2026 .
+```
+
+Run it without Compose, source mounts, environment overrides, or a second
+launch shell:
+
+```bash
+docker run --name autodrive_roboracer_api --rm -it \
+  --network=host --ipc=host --privileged --gpus all \
+  sdu-apex-autodrive:iros-2026
+```
+
+The image entrypoint starts `competition.launch.py` unconditionally. That
+launch includes the installed official headless API bridge unchanged, starts
+the legal sensor-derived odometry/EKF/AMCL/MPC/actuator chain, waits for AMCL
+warm-up, and does not start development bridges, shadow MPC, recorders, RViz,
+ground-truth tools, or parameter overrides. The simulator is the official
+competition environment; do not mount this repository into the container.
+
+The competition package base is pinned in `Dockerfile` to
+`autodriveecosystem/autodrive_roboracer_api:2026-iros-compete`.
+
+## Local GUI development
+
+This workflow uses two terminals by design: one terminal owns Unity, and the
+other owns the ROS 2 development/controller container.
 
 ```text
 Unity compete player -> AutoDRIVE bridge -> odometry/EKF/AMCL -> MPC
@@ -111,17 +144,8 @@ SDU_APEX_CONTROLLER=ftg ./tools/start_dev.sh
 SDU_APEX_CONTROLLER=pure_pursuit ./tools/start_dev.sh
 ```
 
-The default MPC uses `f1tenth_mpc/config/mpc_autodrive.yaml`. To reproduce the
-validated moderate-weight authority candidate without changing production
-defaults, opt in explicitly:
-
-```bash
-SDU_APEX_MPC_OVERRIDE_PARAMS=/workspace/src/sdu_apex_autodrive/config/mpc_weight_test_moderate_balanced_authority.yaml \
-  ./tools/start_dev.sh
-```
-
-The override is intentionally not the default until another collision-terminal
-run confirms the full target acceptance set. Diagnostic recorders and per-cycle
+The default MPC uses the frozen
+`f1tenth_mpc/config/mpc_iros_2026_competition.yaml` profile. Diagnostic recorders and per-cycle
 MPC JSON diagnostics are also off by default so normal GUI operation does not
 add file, serialization, or DDS load to the 40 Hz path. Enable MPC diagnostics
 explicitly when collecting a controller trace:

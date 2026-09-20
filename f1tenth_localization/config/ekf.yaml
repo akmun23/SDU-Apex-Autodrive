@@ -33,8 +33,4 @@ ekf_localization:
     # converted into several apparently valid one-metre updates.
     max_odom_delta_m: 3.0
 
-    # Enabled only by the finite open-ground identification suite. Production
-    # runtime leaves this disabled; AMCL remains an independent map correction.
-    reset_enabled: false
-    reset_topic: /autodrive/reset_command
     publish_tf: false

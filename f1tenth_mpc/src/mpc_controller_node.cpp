@@ -94,6 +94,11 @@ public:
         physical_steering_delay_s_ = std::clamp(
             declare_parameter<double>("physical_steering_delay_s", 0.05),
             0.0, 0.20);
+        if (std::abs(physical_steering_delay_s_ -
+                     2.0 * static_cast<double>(TIME_STEP_SECONDS)) > 1.0e-9) {
+            throw std::runtime_error(
+                "physical_steering_delay_s must equal two 40 Hz model steps");
+        }
         control_time_mode_name_ = declare_parameter<std::string>(
             "control_time_predictor_mode", "ct2");
         if (control_time_mode_name_ == "ct0") {
@@ -328,6 +333,11 @@ public:
             RCLCPP_WARN(get_logger(),
                 "MPC shadow active: subscribing to legal inputs; command authority is disabled");
         }
+    }
+
+    ~MpcControllerNode() override
+    {
+        report_health("shutdown");
     }
 
 private:
@@ -601,6 +611,44 @@ private:
              << '}';
         message.data = json.str();
         diagnostics_pub_->publish(message);
+    }
+
+    void record_cycle_health(MpcRtiCycleStatus_t status,
+                             const MpcRtiCycleResult_t & result,
+                             double solve_us)
+    {
+        ++control_cycles_;
+        if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
+            ++accepted_optimal_;
+        } else if (status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+            ++accepted_degraded_;
+        }
+        if (result.residual_candidate_published) ++residual_candidate_published_;
+        if (result.best_effort_action_published) ++best_effort_action_published_;
+        if (result.corridor_repair_used) ++corridor_repair_used_;
+        max_solver_iterations_seen_ = std::max(
+            max_solver_iterations_seen_, result.solver_iterations);
+        max_solve_us_ = std::max(max_solve_us_, solve_us);
+        if (control_cycles_ % 400 == 0) report_health("periodic");
+    }
+
+    void report_health(const char * phase)
+    {
+        RCLCPP_INFO(get_logger(),
+            "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
+            "accepted_degraded=%llu residual_candidate_published=%llu "
+            "best_effort_action_published=%llu corridor_repair_used=%llu "
+            "hard_fallback_cycles=%llu max_solver_iterations_seen=%d "
+            "max_solve_us=%.1f",
+            phase,
+            static_cast<unsigned long long>(control_cycles_),
+            static_cast<unsigned long long>(accepted_optimal_),
+            static_cast<unsigned long long>(accepted_degraded_),
+            static_cast<unsigned long long>(residual_candidate_published_),
+            static_cast<unsigned long long>(best_effort_action_published_),
+            static_cast<unsigned long long>(corridor_repair_used_),
+            static_cast<unsigned long long>(hard_fallback_cycles_),
+            max_solver_iterations_seen_, max_solve_us_);
     }
 
     static const char * cycle_status_name(MpcRtiCycleStatus_t status)
@@ -1242,6 +1290,7 @@ private:
         const auto solve_finish = std::chrono::steady_clock::now();
         const double solve_us = std::chrono::duration<double, std::micro>(
             solve_finish - solve_start).count();
+        record_cycle_health(status, result, solve_us);
         if (result.corridor_repair_used) {
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC exact corridor repair accepted: alpha=%.4f "
@@ -1291,6 +1340,7 @@ private:
             publish_driving_fallback(
                 "MPC RTI cycle had no exact-feasible candidate",
                 command_time_state.u, commanded_speed, false);
+            ++hard_fallback_cycles_;
             return;
         }
 
@@ -1381,6 +1431,15 @@ private:
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
         observed_command_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
+    std::uint64_t control_cycles_{};
+    std::uint64_t accepted_optimal_{};
+    std::uint64_t accepted_degraded_{};
+    std::uint64_t residual_candidate_published_{};
+    std::uint64_t best_effort_action_published_{};
+    std::uint64_t corridor_repair_used_{};
+    std::uint64_t hard_fallback_cycles_{};
+    int max_solver_iterations_seen_{};
+    double max_solve_us_{};
 };
 
 }  // namespace f1tenth_mpc

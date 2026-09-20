@@ -58,10 +58,6 @@ def _setup(context):
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
                 {"use_sim_time": LaunchConfiguration("use_sim_time")},
-                # ``reset_command`` is restricted simulator control. The
-                # runtime observer uses only the allowed encoder and IMU
-                # streams and starts a fresh process epoch naturally.
-                {"reset_enabled": False},
             ],
             remappings=[
                 ("/tf", "/sdu/tf"),
@@ -78,7 +74,6 @@ def _setup(context):
             parameters=[
                 LaunchConfiguration("ekf_params"),
                 {"use_sim_time": LaunchConfiguration("use_sim_time")},
-                {"reset_enabled": False},
             ],
         ),
         LifecycleNode(

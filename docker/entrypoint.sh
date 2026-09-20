@@ -19,6 +19,8 @@ if [[ "$#" -gt 0 ]]; then
   exec "$@"
 fi
 
+python3 /workspace/src/tools/verify_runtime_topic_policy.py
+
 # Start exactly one official bridge and one selected team controller. MPC is
 # the normal local racing controller; explicitly enable its command publisher
 # here so a GUI simulator only needs its Connect button after this container is

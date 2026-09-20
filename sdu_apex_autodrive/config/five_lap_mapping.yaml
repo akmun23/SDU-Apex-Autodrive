@@ -1,8 +1,7 @@
 five_lap_map_saver:
   ros__parameters:
-    # Ground truth is allowed only for this map-construction run. It makes
-    # the lap gate unambiguous; racing still uses the team /odom topic.
-    odom_topic: /autodrive/roboracer_1/odom
+    # Mapping uses the team odometry stream only.
+    odom_topic: /odom
     save_map_service: /slam_toolbox/save_map
     completion_topic: /sdu/mapping_complete
 
@@ -27,17 +26,10 @@ five_lap_map_saver:
     stop_before_save: true
     save_each_lap: true
     lap_snapshot_settle_s: 1.0
-    # Preserve the fixed map->gt_odom transform produced by the mapping-only
-    # ground-truth TF. This is required for absolute offline localization
-    # scoring; it is never consumed by the racing stack.
+    # Preserve the map->odom transform produced by the team localization tree.
     provenance_enabled: true
     # Empty means <output_directory>/<map_name>.provenance.yaml, so changing
     # map_name cannot accidentally reuse another map's transform.
     provenance_file: ""
     provenance_map_frame: map
-    provenance_world_frame: gt_odom
-    # Never reset the simulator during mapping. A collision is a crash and
-    # must terminate the run rather than contaminate later laps.
-    reset_at_lap_boundary: false
-    reset_topic: /autodrive/reset_command
-    reset_pulse_sec: 0.50
+    provenance_world_frame: odom

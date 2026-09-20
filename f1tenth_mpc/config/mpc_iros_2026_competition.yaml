@@ -1,0 +1,89 @@
+/**:
+  ros__parameters:
+    # Frozen IROS 2026 autonomous MPC profile.  This file is intentionally
+    # complete so the competition image does not depend on a host overlay.
+    enabled: false
+    shadow_mode: false
+    odom_topic: /odom
+    pose_topic: /current_map_pose
+    command_topic: /cmd/speed
+    diagnostics_topic: /mpc/diagnostics
+    publish_diagnostics: false
+    path_frame: map
+    command_frame: base_link
+    trajectory_file: ""
+
+    max_speed_mps: 16.0
+    startup_speed_mps: 1.5
+    startup_ramp_laps: 1.0
+
+    state_extrapolation_max_s: 0.12
+    control_time_predictor_mode: ct2
+    command_actuation_delay_s: 0.0
+    physical_steering_delay_s: 0.05
+    pose_odom_max_skew_s: 0.12
+    source_dt_min_s: 0.001
+    source_dt_max_s: 0.250
+    startup_path_max_distance_m: 0.80
+    startup_path_heading_tolerance_rad: 0.75
+
+    yaw_rate_response_time_constant_s: 0.087735
+    yaw_rate_steering_gain_per_m: 3.011897
+    yaw_rate_curvature_gain_reduction_per_m: 0.0
+    yaw_rate_curvature_gain_start_per_m: 0.20
+    yaw_rate_curvature_gain_end_per_m: 0.40
+    yaw_rate_low_speed_response_time_constant_s: 0.0
+    yaw_rate_low_speed_transition_speed_mps: 2.0
+
+    # Closed-loop authority profile: strong speed tracking, moderate lateral
+    # tracking, low heading cost, and the BachelorProject lateral-velocity term.
+    weight_e_y: 125.0
+    weight_e_psi: 2.0
+    weight_u: 200.0
+    weight_u_overspeed: 200.0
+    weight_target_speed_state: 20.0
+    weight_v: 5.0
+    weight_r: 1.5
+    weight_steering_command: 3.0
+    weight_steering_rate: 5.0
+    weight_target_speed_rate: 0.5
+    weight_steering_rate_change: 10.0
+    weight_target_speed_rate_change: 5.0
+    terminal_multiplier: 3.0
+
+    max_steering_rad: 0.5235987756
+    max_steering_rate_radps: 3.2
+    max_target_speed_rate_increase_mps2: 3.0
+    max_target_speed_rate_reduction_mps2: 8.0
+    corridor_margin_m: 0.30
+    first_prediction_corridor_margin_m: 0.30
+    corridor_preview_halfwidth_m: 0.10
+    nonlinear_corridor_tolerance_m: 0.001
+
+    recovery_seed_policy: nominal
+    recovery_steering_k_e_y: 0.0
+    recovery_steering_k_e_psi: 0.0
+    recovery_steering_k_r: 0.0
+
+    admm_rho: 7.0
+    admm_rho_input: 7.0
+    adaptive_rho: true
+    admm_over_relaxation: 1.6
+    solver_tolerance: 0.01
+    solver_degraded_tolerance: 0.01
+    max_solver_iterations: 100
+    solver_max_regularization: 0.01
+    max_consecutive_degraded_solves: 3
+    use_riccati_prefactorization: true
+
+    rti_refinement_mode: adaptive
+    rti2_progress_error_trigger_m: 0.10
+    rti2_curvature_error_trigger_per_m: 0.02
+    rti2_bound_error_trigger_m: 0.05
+    rti2_min_corridor_slack_trigger_m: 0.25
+    rti2_steering_rate_correction_trigger_radps: 0.50
+    rti2_target_speed_rate_correction_trigger_mps2: 1.0
+    rti2_residual_imbalance_trigger: 8.0
+    rti2_lateral_load_trigger_mps2: 3.0
+    rti2_nonsmooth_columns_trigger: 50
+    rti2_residual_recovery_limit: 0.25

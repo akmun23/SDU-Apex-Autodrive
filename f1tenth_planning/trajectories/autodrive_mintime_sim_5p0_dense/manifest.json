@@ -1,0 +1,36 @@
+{
+  "schema": "sdu-apex-raceline-manifest-v1",
+  "trajectory": "autodrive_mintime_raceline.csv",
+  "sha256": "86019b57460382e07022ea5914994dfe684d6e0958d72153e6051f0e8d362272",
+  "samples": 2577,
+  "track_length_m": 51.5021742,
+  "speed_mps": {
+    "min": 1.666087,
+    "max": 9.55784379
+  },
+  "acceleration_mps2": {
+    "min": -7.51715203,
+    "max": 3.00618136
+  },
+  "curvature_radpm": {
+    "min": -1.68674651,
+    "max": 1.7481018
+  },
+  "validated_controller": "MPC",
+  "validated_profile": "moderate_balanced_authority",
+  "validated_runtime": {
+    "horizon_steps": 30,
+    "step_seconds": 0.025,
+    "startup_ramp_laps": 1.0,
+    "max_command_speed_mps": 16.0,
+    "adaptive_rho": true,
+    "max_solver_iterations": 100
+  },
+  "validated_live_result": {
+    "post_ramp_laps": 10,
+    "collisions": 0,
+    "best_lap_time_s": 10.770,
+    "mean_lap_time_s": 10.926,
+    "laps_at_or_below_11_s": 8
+  }
+}

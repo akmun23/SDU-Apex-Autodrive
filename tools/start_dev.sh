@@ -23,6 +23,8 @@ echo "Controller: ${controller}"
 echo "The bridge, odometry, localization, controller, and actuator are one launch."
 echo "The simulator may already be connected or may connect while this starts."
 
+python3 tools/verify_runtime_topic_policy.py
+
 SDU_APEX_AUTOSTART=1 \
 SDU_APEX_CONTROLLER="${controller}" \
 SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \

@@ -7,7 +7,6 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <Eigen/Core>
 
@@ -37,7 +36,6 @@ public:
 
 private:
   void odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg);
-  void reset_callback(std_msgs::msg::Bool::ConstSharedPtr msg);
 
   void declare_all_parameters();
   void load_parameters();
@@ -49,7 +47,6 @@ private:
   void publish_odom(const rclcpp::Time & stamp, const nav_msgs::msg::Odometry & source);
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -61,8 +58,6 @@ private:
 
   bool initialized_{false};
   bool odom_received_{false};
-  bool reset_pending_{false};
-  bool reset_epoch_active_{false};
 
   double process_noise_scale_{1.0};
   double process_noise_xy_m2_per_m_{0.0004};
@@ -70,14 +65,12 @@ private:
   double process_noise_yaw2_per_rad_{0.0004};
   double process_noise_yaw2_per_m_{0.0001};
   double max_odom_delta_m_{20.0};
-  bool reset_enabled_{false};
   bool publish_tf_{false};
 
   std::string odom_topic_{"/odom"};
   std::string output_topic_{"/ekf_pose"};
   std::string output_odom_topic_{"/ekf_odom"};
   std::string odom_frame_{"odom"};
-  std::string reset_topic_{"/autodrive/reset_command"};
 
   mutable std::mutex mutex_;
 };

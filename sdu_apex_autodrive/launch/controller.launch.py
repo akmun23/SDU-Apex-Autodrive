@@ -99,10 +99,6 @@ def _setup(context):
     sensor_odom_override_path = LaunchConfiguration(
         "sensor_odom_override_params").perform(context)
     with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
-    with_ground_truth_monitor = _bool(
-        LaunchConfiguration("with_ground_truth_monitor").perform(context))
-    with_telemetry_recorder = _bool(
-        LaunchConfiguration("with_telemetry_recorder").perform(context))
     with_model_id_recorder = _bool(
         LaunchConfiguration("with_model_id_recorder").perform(context))
     model_id_record_lidar_ranges = _bool(
@@ -136,8 +132,6 @@ def _setup(context):
             "ekf_localization", "map_server", "lifecycle_manager_map",
             "gpu_amcl_cpp",
         })
-    if with_ground_truth_monitor:
-        expected_runtime_nodes.add("ground_truth_amcl_monitor")
     if with_model_id_recorder:
         expected_runtime_nodes.add("model_id_timing_recorder")
     if with_mpc_shadow:
@@ -192,10 +186,6 @@ def _setup(context):
             output="screen",
             parameters=[
                 *sensor_odom_parameter_sources,
-                # ``reset_command`` is a restricted simulator-control topic.
-                # Runtime odometry is deliberately continuous and uses only
-                # the allowed encoder and IMU inputs.
-                {"reset_enabled": False},
             ],
             remappings=[
                 ("/tf", "/sdu/tf"),
@@ -224,7 +214,6 @@ def _setup(context):
                 output="screen",
                 parameters=[
                     LaunchConfiguration("ekf_params"),
-                    {"reset_enabled": False},
                 ],
             ),
             map_server,
@@ -272,56 +261,6 @@ def _setup(context):
             remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         )
         actions.append(amcl_node)
-
-    if with_ground_truth_monitor:
-        # Development diagnostics only. Ground truth is not consumed by AMCL
-        # or any controller and must be disabled for a rules-only run.
-        actions.append(Node(
-            package="sdu_apex_autodrive",
-            executable="ground_truth_amcl_monitor",
-            name="ground_truth_amcl_monitor",
-            output="screen",
-            parameters=[{
-                "output_csv": LaunchConfiguration("ground_truth_output_csv"),
-                "map_provenance_file": LaunchConfiguration("map_provenance_file"),
-                "require_absolute_map_scoring": LaunchConfiguration(
-                    "require_absolute_map_scoring"),
-                "map_start_x_m": LaunchConfiguration("map_start_x_m"),
-                "map_start_y_m": LaunchConfiguration("map_start_y_m"),
-                "map_start_yaw_rad": LaunchConfiguration("map_start_yaw_rad"),
-            }],
-        ))
-
-    if with_telemetry_recorder:
-        # Allowed-sensor recorder only.  It does not subscribe to simulator
-        # pose, collision, lap, or debug-state topics and does not publish a
-        # command in sensor_record mode.
-        actions.append(Node(
-            package="sdu_apex_autodrive",
-            executable="calibration",
-            name="allowed_telemetry_recorder",
-            output="screen",
-            parameters=[
-                LaunchConfiguration("calibration_params"),
-                {
-                    "mode": "sensor_record",
-                    "output_dir": LaunchConfiguration("telemetry_output_dir"),
-                    # Launch arguments are strings and ROS 2 otherwise infers
-                    # an integer for values such as ``100``.  The recorder
-                    # declares this parameter as a double; force the type so
-                    # a valid test command cannot silently kill the recorder
-                    # before it captures source-time data.
-                    "duration_sec": ParameterValue(
-                        LaunchConfiguration("telemetry_duration_sec"),
-                        value_type=float,
-                    ),
-                    # Preserve callback-level snapshots as well as the 50 Hz
-                    # timer rows. This is required to reconstruct the exact
-                    # first-turn ordering at native 20 Hz simulator cadence.
-                    "capture_source_events": True,
-                },
-            ],
-        ))
 
     if with_model_id_recorder:
         # Causal diagnostics only. This recorder embeds the packet-side
@@ -538,16 +477,6 @@ def generate_launch_description():
             description="Development visualization; disabled for race launch by default",
         ),
         DeclareLaunchArgument(
-            "with_ground_truth_monitor",
-            default_value="false",
-            description="Development-only aligned simulator ground-truth diagnostics",
-        ),
-        DeclareLaunchArgument(
-            "with_telemetry_recorder",
-            default_value="false",
-            description="Record allowed sensor/controller telemetry for offline tuning",
-        ),
-        DeclareLaunchArgument(
             "with_model_id_recorder",
             default_value="false",
             description=(
@@ -593,63 +522,6 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            "telemetry_output_dir",
-            default_value="/workspace/src/sdu_apex_autodrive/artifacts/calibration/raw",
-        ),
-        DeclareLaunchArgument(
-            "telemetry_duration_sec",
-            default_value="0.0",
-            description=(
-                "Finite diagnostics recorder duration; zero keeps recording until "
-                "the launch is stopped"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "ground_truth_output_csv",
-            default_value=(
-                "/workspace/src/sdu_apex_autodrive/artifacts/calibration/"
-                "ground_truth_amcl.csv"
-            ),
-            description="Diagnostics-only AMCL/EKF/odom versus simulator ground-truth CSV",
-        ),
-        DeclareLaunchArgument(
-            "map_provenance_file",
-            default_value="",
-            description=(
-                "Diagnostics-only fixed map-to-simulator transform produced when the "
-                "map was saved"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "require_absolute_map_scoring",
-            default_value="false",
-            description=(
-                "Fail the diagnostics monitor instead of silently using relative "
-                "first-pair scoring"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "map_start_x_m",
-            default_value="nan",
-            description=(
-                "Diagnostics-only map-frame X of the vehicle at map recording start"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "map_start_y_m",
-            default_value="nan",
-            description=(
-                "Diagnostics-only map-frame Y of the vehicle at map recording start"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "map_start_yaw_rad",
-            default_value="nan",
-            description=(
-                "Diagnostics-only map-frame yaw of the vehicle at map recording start"
-            ),
-        ),
-        DeclareLaunchArgument(
             "controller_max_speed",
             default_value="16.0",
             description=(
@@ -659,7 +531,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "mpc_params",
-            default_value=os.path.join(mpc, "config", "mpc_autodrive.yaml"),
+            default_value=os.path.join(
+                mpc, "config", "mpc_iros_2026_competition.yaml"),
             description="Source-command MPC adapter configuration",
         ),
         DeclareLaunchArgument(

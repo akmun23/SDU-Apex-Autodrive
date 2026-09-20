@@ -75,8 +75,7 @@ def generate_launch_description():
             output="screen",
         ),
         # Mapping is deliberately isolated from the racing odometry TF tree.
-        # The actuator and lap gate consume simulator odometry below, while
-        # these are the only base-to-sensor transforms needed by SLAM.
+        # These are the only base-to-sensor transforms needed by SLAM.
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
@@ -98,18 +97,6 @@ def generate_launch_description():
             ],
             remappings=[("/tf_static", "/sdu/tf_static")],
             output="screen",
-        ),
-        Node(
-            package="sdu_apex_autodrive",
-            executable="ground_truth_mapping_tf",
-            name="ground_truth_mapping_tf",
-            output="screen",
-            parameters=[{
-                "ground_truth_topic": "/autodrive/roboracer_1/odom",
-                "odom_frame": "gt_odom",
-                "base_frame": "base_link",
-            }],
-            remappings=[("/tf", "/sdu/tf")],
         ),
         GroupAction([
             SetRemap(src="/tf", dst="/sdu/tf"),

@@ -12,7 +12,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
@@ -68,8 +67,6 @@ public:
     declare_parameter("imu_topic", "/autodrive/roboracer_1/imu");
     declare_parameter("odom_topic", "/odom");
     declare_parameter("diagnostics_topic", "/odom/diagnostics");
-    declare_parameter("reset_enabled", false);
-    declare_parameter("reset_topic", "/autodrive/reset_command");
 
     declare_parameter("odom_frame", "odom");
     declare_parameter("base_frame", "base_link");
@@ -242,16 +239,6 @@ public:
       [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) {
         imu_callback(*msg);
       });
-    if (get_parameter("reset_enabled").as_bool()) {
-      reset_sub_ = create_subscription<std_msgs::msg::Bool>(
-        get_parameter("reset_topic").as_string(), rclcpp::QoS(10),
-        [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
-          if (msg->data) {
-            reset_diagnostic_epoch();
-          }
-        });
-    }
-
     publish_static_transforms();
     RCLCPP_INFO(
       get_logger(),
@@ -361,16 +348,6 @@ private:
       "imu_acceleration_reference_x_m").as_double();
     config.max_imu_ax_abs_mps2 = get_parameter("max_imu_ax_abs_mps2").as_double();
     return config;
-  }
-
-  void reset_diagnostic_epoch()
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    packet_assembler_.reset();
-    last_processed_stamp_ns_ = 0;
-    yaw_initialized_ = false;
-    observer_.reset();
-    RCLCPP_INFO(get_logger(), "Odometry observer reset to diagnostic origin");
   }
 
   void publish_static_transforms()
@@ -572,7 +549,6 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
 
   std::mutex mutex_;
   int64_t last_processed_stamp_ns_{0};

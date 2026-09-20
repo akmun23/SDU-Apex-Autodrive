@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     image: sdu-apex-autodrive:humble
     container_name: sdu_apex_autodrive
+    # Compose is a development convenience only.  The competition image
+    # entrypoint remains the immutable competition launcher.
+    entrypoint: ["/workspace/src/docker/entrypoint.sh"]
     network_mode: host
     ipc: host
     privileged: true

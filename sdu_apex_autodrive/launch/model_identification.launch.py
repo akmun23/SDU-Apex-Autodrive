@@ -103,7 +103,6 @@ def _setup(context):
             output="screen",
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
-                {"reset_enabled": False},
             ],
             remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         ),

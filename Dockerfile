@@ -1,5 +1,5 @@
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS cuda_toolkit
-FROM autodriveecosystem/autodrive_roboracer_api:2026-iros-practice@sha256:6e4c29536b7283a1a7322473d46dab2d4ad5513cf40d1bdfc908ee9d408e26e9
+FROM autodriveecosystem/autodrive_roboracer_api:2026-iros-compete@sha256:4ce4334657feb4c6760aa61f23a76f8962bf80e8e746e2547b082985a95a46a2
 
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,9 +33,9 @@ RUN source /opt/ros/humble/setup.bash \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
       -DCMAKE_CUDA_ARCHITECTURES="61;89"
 
-# Use the entrypoint name supplied by the official API image/instructions.
-# The official API image remains the base; this adds only team startup logic.
-COPY docker/entrypoint.sh /home/autodrive_devkit.sh
+# The competition image has one fixed, self-contained startup path.  Compose
+# explicitly overrides this with docker/entrypoint.sh for development only.
+COPY docker/competition_entrypoint.sh /home/autodrive_devkit.sh
 RUN chmod +x /home/autodrive_devkit.sh
 
 ENTRYPOINT ["/home/autodrive_devkit.sh"]

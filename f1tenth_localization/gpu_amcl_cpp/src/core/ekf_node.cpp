@@ -36,17 +36,10 @@ EkfNode::EkfNode(const rclcpp::NodeOptions & options)
     odom_topic_, sensor_qos,
     std::bind(&EkfNode::odom_callback, this, std::placeholders::_1));
 
-  if (reset_enabled_) {
-    reset_sub_ = create_subscription<std_msgs::msg::Bool>(
-      reset_topic_, rclcpp::QoS(10).reliable(),
-      std::bind(&EkfNode::reset_callback, this, std::placeholders::_1));
-  }
-
   RCLCPP_INFO(
     get_logger(),
-    "Local odometry trust filter ready: %s -> %s and %s in frame %s; reset events=%s",
-    odom_topic_.c_str(), output_odom_topic_.c_str(), output_topic_.c_str(), odom_frame_.c_str(),
-    reset_enabled_ ? reset_topic_.c_str() : "disabled");
+    "Local odometry trust filter ready: %s -> %s and %s in frame %s",
+    odom_topic_.c_str(), output_odom_topic_.c_str(), output_topic_.c_str(), odom_frame_.c_str());
 }
 
 void EkfNode::declare_all_parameters()
@@ -61,8 +54,6 @@ void EkfNode::declare_all_parameters()
   declare_parameter("process_noise_yaw2_per_rad", process_noise_yaw2_per_rad_);
   declare_parameter("process_noise_yaw2_per_m", process_noise_yaw2_per_m_);
   declare_parameter("max_odom_delta_m", max_odom_delta_m_);
-  declare_parameter("reset_enabled", reset_enabled_);
-  declare_parameter("reset_topic", reset_topic_);
   declare_parameter("publish_tf", publish_tf_);
 }
 
@@ -84,8 +75,6 @@ void EkfNode::load_parameters()
     0.0, get_parameter("process_noise_yaw2_per_m").as_double());
   max_odom_delta_m_ = std::max(
     1.0, get_parameter("max_odom_delta_m").as_double());
-  reset_enabled_ = get_parameter("reset_enabled").as_bool();
-  reset_topic_ = get_parameter("reset_topic").as_string();
   publish_tf_ = get_parameter("publish_tf").as_bool();
 }
 
@@ -157,19 +146,6 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
       state_.setZero();
       covariance_ = odom_process_covariance(*msg);
       publish = true;
-    } else if (reset_pending_) {
-      // The diagnostic suite explicitly announces each simulator reset. The
-      // official sensor odometry topic retains its world-relative pose across
-      // that teleport, so a pose discontinuity cannot reliably identify the
-      // new epoch. Reset only on this scheduled event; frozen wheel motion
-      // during braking is never treated as a reset.
-      previous_odom_ = odom_pose;
-      previous_odom_stamp_ = stamp;
-      state_.setZero();
-      covariance_ = odom_process_covariance(*msg);
-      reset_pending_ = false;
-      initialized_ = true;
-      publish = true;
     } else {
       const Eigen::Vector3d delta =
         math_utils::se2_relative(previous_odom_, odom_pose);
@@ -186,20 +162,7 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
           std::hypot(delta[0], delta[1]), std::abs(delta[2]));
         previous_odom_ = odom_pose;
         previous_odom_stamp_ = stamp;
-        // In the reset-enabled diagnostic suite a simulator teleport can be
-        // delivered before the reset Bool callback. Treat that impossible
-        // pose jump as the epoch boundary so the EKF cannot publish one
-        // stale pre-reset pose. Production keeps reset_enabled=false and
-        // therefore retains the normal impossible-jump rejection behavior.
-        if (reset_enabled_) {
-          state_.setZero();
-          covariance_ = odom_process_covariance(*msg);
-          reset_pending_ = false;
-          initialized_ = true;
-          publish = true;
-        } else {
-          return;
-        }
+        return;
       } else {
         previous_odom_ = odom_pose;
         previous_odom_stamp_ = stamp;
@@ -213,20 +176,6 @@ void EkfNode::odom_callback(nav_msgs::msg::Odometry::ConstSharedPtr msg)
   if (publish) {
     publish_pose(stamp);
     publish_odom(stamp, *msg);
-  }
-}
-
-void EkfNode::reset_callback(std_msgs::msg::Bool::ConstSharedPtr msg)
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!msg->data) {
-    reset_epoch_active_ = false;
-    return;
-  }
-  if (!reset_epoch_active_) {
-    reset_pending_ = true;
-    reset_epoch_active_ = true;
-    RCLCPP_INFO(get_logger(), "Scheduled local EKF epoch reset armed");
   }
 }
 
