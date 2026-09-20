@@ -1,0 +1,19 @@
+/**:
+  ros__parameters:
+    # Closed-loop authority candidate.  This is the requested direction:
+    # moderate lateral tracking, low-but-nonzero heading guidance, strong
+    # velocity tracking, and the BachelorProject lateral-velocity term.
+    # Model, corridor, actuator, solver, and 16 m/s envelope are unchanged.
+    weight_e_y: 125.0
+    weight_e_psi: 2.0
+    weight_u: 200.0
+    weight_u_overspeed: 200.0
+    weight_target_speed_state: 20.0
+    weight_v: 5.0
+    weight_r: 1.5
+    weight_steering_command: 3.0
+    weight_steering_rate: 5.0
+    weight_target_speed_rate: 0.5
+    weight_steering_rate_change: 10.0
+    weight_target_speed_rate_change: 5.0
+    terminal_multiplier: 3.0

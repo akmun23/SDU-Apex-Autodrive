@@ -2,7 +2,34 @@ import math
 
 import pytest
 
-from sdu_apex_autodrive.ground_truth_amcl_monitor import align_world_pose_to_map
+from sdu_apex_autodrive.ground_truth_amcl_monitor import (
+    align_world_pose_to_map,
+    signed_longitudinal_lateral_error,
+)
+
+
+def test_signed_error_exposes_along_track_lag_and_lateral_offset() -> None:
+    along, lateral = signed_longitudinal_lateral_error(
+        estimate_x=0.8,
+        estimate_y=0.2,
+        expected_x=1.0,
+        expected_y=0.0,
+        expected_yaw=0.0,
+    )
+    assert along == pytest.approx(-0.2)
+    assert lateral == pytest.approx(0.2)
+
+
+def test_signed_error_rotates_into_vehicle_frame() -> None:
+    along, lateral = signed_longitudinal_lateral_error(
+        estimate_x=0.0,
+        estimate_y=0.8,
+        expected_x=0.0,
+        expected_y=1.0,
+        expected_yaw=math.pi / 2.0,
+    )
+    assert along == pytest.approx(-0.2)
+    assert lateral == pytest.approx(0.0)
 
 
 def test_explicit_map_alignment_uses_relative_start_heading() -> None:

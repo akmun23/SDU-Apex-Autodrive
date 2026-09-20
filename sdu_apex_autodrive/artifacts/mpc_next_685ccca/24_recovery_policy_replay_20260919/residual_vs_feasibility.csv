@@ -1,3 +1,0 @@
-case,cycles,accepted,rejected,residual_p95_primal,residual_p95_dual,solve_p95_ms,recovery_active,interpretation
-clean_unscaled_holdout,13030,13030,0,0.009978,0.009584,8.185182,0,production_equivalent_baseline
-same_holdout_with_optional_dimensionless_scaling,13030,8903,4127,0.273952,0.217001,6.310532,4,diagnostic_only_not_promoted

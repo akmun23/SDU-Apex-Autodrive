@@ -56,6 +56,14 @@ struct OdometryObserverConfig
   // then again in the current packet. Reject only that two-stage signature;
   // ordinary acceleration packets have no packet-vs-window disagreement.
   double wheel_burst_disagreement_mps{1.0};
+  // A pending burst can also be caused by a stale low causal estimate rather
+  // than by a genuinely high wheel rate. In that case, holding the estimate
+  // forever makes /odom fall behind the car. Move toward the rolling rate at
+  // a bounded physical acceleration instead of accepting the burst directly.
+  // The ceiling is the competition operating envelope, not a command-speed
+  // limiter; rates above it remain rejected as encoder evidence.
+  double wheel_burst_catchup_accel_mps2{2.5};
+  double wheel_burst_catchup_max_mps{16.0};
   // In a turn, a fresh synchronized packet can be a valid current-motion
   // sample while the rolling window still contains a repeated angle. Permit
   // that recovery only when the packet is close to the causal speed and is
@@ -113,10 +121,10 @@ struct OdometryObserverConfig
   // The simulator's lateral IMU acceleration contains enough bias/noise to
   // create a persistent pose error when integrated at native 20 Hz.  The
   // default car model therefore uses wheel speed plus IMU yaw only (a
-  // no-lateral-slip kinematic update). The implementation automatically
-  // enables the dynamic option during an explicitly rejected wheel-slip or
-  // dropout interval; this flag remains available for offline comparison and
-  // vehicles with a separately validated slip model.
+  // no-lateral-slip kinematic update). The dynamic propagation is opt-in;
+  // an encoder dropout never enables it implicitly because the Unity IMU
+  // lateral acceleration is not a validated replacement for the missing
+  // lateral state.
   bool integrate_lateral_acceleration_in_turn{false};
   // Optional bounded COM lateral-velocity model using causal wheel speed and
   // yaw rate. Its output is translated to base_link with the configured point

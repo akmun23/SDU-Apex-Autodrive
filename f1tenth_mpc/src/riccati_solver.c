@@ -30,6 +30,10 @@
 
 #include "riccati_solver.h"
 
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
 #ifdef MPC_ENABLE_RICCATI_PROFILE
 #include <time.h>
 #endif
@@ -228,6 +232,349 @@ static int invert_regularized_control_hessian(
     return 0;
 }
 
+enum
+{
+    ACTIVE_RICCATI_NX = 9,
+    ACTIVE_RICCATI_PLANT_NX = 7,
+    ACTIVE_RICCATI_NU = 2
+};
+
+/* The production RTI wrapper augments a 7-state plant with two exact
+ * previous-input memory states. Recognize that layout conservatively so the
+ * generic public solver remains available for arbitrary dense test problems. */
+static int active_augmented_structure(
+    const RiccatiStepData_t *steps,
+    int horizon)
+{
+    if (!steps || horizon <= 0 || horizon > PREDICTION_HORIZON) return 0;
+    for (int k = 0; k < horizon; ++k) {
+        const RiccatiStepData_t *sd = &steps[k];
+        for (int row = 0; row < ACTIVE_RICCATI_PLANT_NX; ++row) {
+            if (sd->A[row][ACTIVE_RICCATI_PLANT_NX] != 0.0f ||
+                sd->A[row][ACTIVE_RICCATI_PLANT_NX + 1] != 0.0f)
+                return 0;
+        }
+        for (int row = ACTIVE_RICCATI_PLANT_NX; row < ACTIVE_RICCATI_NX; ++row)
+            for (int column = 0; column < ACTIVE_RICCATI_NX; ++column)
+                if (sd->A[row][column] != 0.0f) return 0;
+
+        if (sd->B[ACTIVE_RICCATI_PLANT_NX][0] != 1.0f ||
+            sd->B[ACTIVE_RICCATI_PLANT_NX][1] != 0.0f ||
+            sd->B[ACTIVE_RICCATI_PLANT_NX + 1][0] != 0.0f ||
+            sd->B[ACTIVE_RICCATI_PLANT_NX + 1][1] != 1.0f)
+            return 0;
+        if (sd->d[ACTIVE_RICCATI_PLANT_NX] != 0.0f ||
+            sd->d[ACTIVE_RICCATI_PLANT_NX + 1] != 0.0f)
+            return 0;
+        for (int row = 0; row < ACTIVE_RICCATI_PLANT_NX; ++row) {
+            if (sd->N[row][0] != 0.0f || sd->N[row][1] != 0.0f)
+                return 0;
+        }
+        if (sd->N[ACTIVE_RICCATI_PLANT_NX][0] == 0.0f ||
+            sd->N[ACTIVE_RICCATI_PLANT_NX][1] != 0.0f ||
+            sd->N[ACTIVE_RICCATI_PLANT_NX + 1][0] != 0.0f ||
+            sd->N[ACTIVE_RICCATI_PLANT_NX + 1][1] == 0.0f)
+            return 0;
+    }
+    return 1;
+}
+
+static void active_form_control_terms(
+    const RiccatiStepData_t *sd,
+    float P[RICCATI_MAX_NX][RICCATI_MAX_NX],
+    const float r_aug_diag[ACTIVE_RICCATI_NU],
+    float M[ACTIVE_RICCATI_NU][RICCATI_MAX_NX],
+    float S[ACTIVE_RICCATI_NU][ACTIVE_RICCATI_NU],
+    float G[ACTIVE_RICCATI_NU][RICCATI_MAX_NX])
+{
+    for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+        for (int j = 0; j < ACTIVE_RICCATI_NX; ++j) {
+            for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                M[a][j] += sd->B[s][a] * P[s][j];
+            /* The two memory rows of B are an identity matrix. */
+            M[a][j] += P[ACTIVE_RICCATI_PLANT_NX + a][j];
+        }
+    }
+    for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+        for (int b = 0; b < ACTIVE_RICCATI_NU; ++b) {
+            S[a][b] = a == b ? r_aug_diag[a] : 0.0f;
+            for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                S[a][b] += M[a][s] * sd->B[s][b];
+            S[a][b] += M[a][ACTIVE_RICCATI_PLANT_NX + b];
+        }
+        for (int j = 0; j < ACTIVE_RICCATI_NX; ++j) {
+            G[a][j] = sd->N[j][a];
+            if (j < ACTIVE_RICCATI_PLANT_NX) {
+                for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                    G[a][j] += sd->A[s][j] * M[a][s];
+            }
+        }
+    }
+}
+
+static void active_form_p_a(
+    const RiccatiStepData_t *sd,
+    float P[RICCATI_MAX_NX][RICCATI_MAX_NX],
+    float P_A[RICCATI_MAX_NX][RICCATI_MAX_NX])
+{
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+        for (int j = 0; j < ACTIVE_RICCATI_PLANT_NX; ++j) {
+            for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                P_A[i][j] += P[i][s] * sd->A[s][j];
+        }
+    }
+}
+
+static void active_update_p(
+    const RiccatiStepData_t *sd,
+    const float q_aug_diag[RICCATI_MAX_NX],
+    float P_A[RICCATI_MAX_NX][RICCATI_MAX_NX],
+    float G[ACTIVE_RICCATI_NU][RICCATI_MAX_NX],
+    float K[ACTIVE_RICCATI_NU][RICCATI_MAX_NX],
+    float P_next[RICCATI_MAX_NX][RICCATI_MAX_NX])
+{
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+        for (int j = 0; j < ACTIVE_RICCATI_NX; ++j) {
+            P_next[i][j] = i == j ? q_aug_diag[i] : 0.0f;
+            if (i < ACTIVE_RICCATI_PLANT_NX &&
+                j < ACTIVE_RICCATI_PLANT_NX) {
+                for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                    P_next[i][j] += sd->A[s][i] * P_A[s][j];
+            }
+            for (int a = 0; a < ACTIVE_RICCATI_NU; ++a)
+                P_next[i][j] += G[a][i] * K[a][j];
+        }
+    }
+}
+
+static void active_state_affine_shift(
+    const float *P,
+    const float d[RICCATI_MAX_NX],
+    const float p_next[RICCATI_MAX_NX],
+    float p_shift[RICCATI_MAX_NX])
+{
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+        p_shift[i] = p_next[i];
+        for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+            p_shift[i] += P[i * RICCATI_MAX_NX + s] * d[s];
+    }
+}
+
+static void active_b_transpose_p(
+    const RiccatiStepData_t *sd,
+    const float p_shift[RICCATI_MAX_NX],
+    float btp[ACTIVE_RICCATI_NU])
+{
+    for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+        for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+            btp[a] += sd->B[s][a] * p_shift[s];
+        btp[a] += p_shift[ACTIVE_RICCATI_PLANT_NX + a];
+    }
+}
+
+static int riccati_solver_pass_active(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    int N,
+    float rho,
+    float rho_u,
+    const float z_x[][RICCATI_MAX_NX],
+    const float y_x[][RICCATI_MAX_NX],
+    const float z_u[][RICCATI_MAX_NU],
+    const float y_u[][RICCATI_MAX_NU],
+    float x_out[][RICCATI_MAX_NX],
+    float u_out[][RICCATI_MAX_NU])
+{
+    float K[PREDICTION_HORIZON][ACTIVE_RICCATI_NU][RICCATI_MAX_NX] = {{{0}}};
+    float kk[PREDICTION_HORIZON][ACTIVE_RICCATI_NU] = {{0}};
+    float P[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+    float p[RICCATI_MAX_NX] = {0};
+
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+        const int constrained = terminal_x_ub[i] < BIG_BOUND ||
+            terminal_x_lb[i] > -BIG_BOUND;
+        P[i][i] = terminal_Q[i] + (constrained ? rho : 0.0f);
+        p[i] = terminal_q[i] - (constrained ?
+            rho * (z_x[N][i] - y_x[N][i]) : 0.0f);
+    }
+
+    for (int k = N - 1; k >= 0; --k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        float q_aug_diag[RICCATI_MAX_NX] = {0};
+        float q_aug_linear[RICCATI_MAX_NX] = {0};
+        float r_aug_linear[ACTIVE_RICCATI_NU] = {0};
+        float r_aug_diag[ACTIVE_RICCATI_NU] = {0};
+        float M[ACTIVE_RICCATI_NU][RICCATI_MAX_NX] = {{0}};
+        float S[ACTIVE_RICCATI_NU][ACTIVE_RICCATI_NU] = {{0}};
+        float Si[ACTIVE_RICCATI_NU][ACTIVE_RICCATI_NU] = {{0}};
+        float G[ACTIVE_RICCATI_NU][RICCATI_MAX_NX] = {{0}};
+        float p_shift[RICCATI_MAX_NX] = {0};
+        float P_A[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+        float P_next[RICCATI_MAX_NX][RICCATI_MAX_NX] = {{0}};
+        float p_next[RICCATI_MAX_NX] = {0};
+        float btp[ACTIVE_RICCATI_NU] = {0};
+
+        for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+            const int constrained = k > 0 &&
+                (sd->x_ub[i] < BIG_BOUND || sd->x_lb[i] > -BIG_BOUND);
+            q_aug_diag[i] = sd->Q_diag[i] + (constrained ? rho : 0.0f);
+            q_aug_linear[i] = sd->q[i] - (constrained ?
+                rho * (z_x[k][i] - y_x[k][i]) : 0.0f);
+            if (!isfinite(q_aug_diag[i]) || !isfinite(q_aug_linear[i]))
+                return 0;
+        }
+        for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+            r_aug_diag[a] = sd->R_diag[a] + rho_u;
+            r_aug_linear[a] = sd->r[a] -
+                rho_u * (z_u[k][a] - y_u[k][a]);
+            if (!isfinite(r_aug_diag[a]) || !isfinite(r_aug_linear[a]))
+                return 0;
+        }
+
+        active_form_control_terms(sd, P, r_aug_diag, M, S, G);
+        if (!invert_regularized_control_hessian(S, ACTIVE_RICCATI_NU, Si))
+            return 0;
+        active_state_affine_shift(&P[0][0], sd->d, p, p_shift);
+        active_b_transpose_p(sd, p_shift, btp);
+        for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+            for (int j = 0; j < ACTIVE_RICCATI_NX; ++j) {
+                for (int b = 0; b < ACTIVE_RICCATI_NU; ++b)
+                    K[k][a][j] -= Si[a][b] * G[b][j];
+            }
+            for (int b = 0; b < ACTIVE_RICCATI_NU; ++b)
+                kk[k][a] -= Si[a][b] * (r_aug_linear[b] + btp[b]);
+        }
+        active_form_p_a(sd, P, P_A);
+        active_update_p(sd, q_aug_diag, P_A, G, K[k], P_next);
+        for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+            p_next[i] = q_aug_linear[i];
+            if (i < ACTIVE_RICCATI_PLANT_NX) {
+                for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                    p_next[i] += sd->A[s][i] * p_shift[s];
+            }
+            for (int a = 0; a < ACTIVE_RICCATI_NU; ++a)
+                p_next[i] += G[a][i] * kk[k][a];
+            if (!isfinite(p_next[i])) return 0;
+        }
+        memcpy(P, P_next, sizeof(P));
+        memcpy(p, p_next, sizeof(p));
+    }
+
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) x_out[0][i] = x0[i];
+    for (int k = 0; k < N; ++k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+            u_out[k][a] = kk[k][a];
+            for (int s = 0; s < ACTIVE_RICCATI_NX; ++s)
+                u_out[k][a] += K[k][a][s] * x_out[k][s];
+            if (!isfinite(u_out[k][a])) return 0;
+        }
+        for (int i = 0; i < ACTIVE_RICCATI_PLANT_NX; ++i) {
+            x_out[k + 1][i] = sd->d[i];
+            for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                x_out[k + 1][i] += sd->A[i][s] * x_out[k][s];
+            for (int a = 0; a < ACTIVE_RICCATI_NU; ++a)
+                x_out[k + 1][i] += sd->B[i][a] * u_out[k][a];
+        }
+        x_out[k + 1][ACTIVE_RICCATI_PLANT_NX] = u_out[k][0];
+        x_out[k + 1][ACTIVE_RICCATI_PLANT_NX + 1] = u_out[k][1];
+        for (int i = 0; i < ACTIVE_RICCATI_NX; ++i)
+            if (!isfinite(x_out[k + 1][i])) return 0;
+    }
+    return 1;
+}
+
+static int riccati_solver_pass_factored_active(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    int N,
+    const RiccatiFactorization_t *factor,
+    const float z_x[][RICCATI_MAX_NX],
+    const float y_x[][RICCATI_MAX_NX],
+    const float z_u[][RICCATI_MAX_NU],
+    const float y_u[][RICCATI_MAX_NU],
+    float x_out[][RICCATI_MAX_NX],
+    float u_out[][RICCATI_MAX_NU])
+{
+    (void)terminal_x_lb;
+    (void)terminal_x_ub;
+    float p[PREDICTION_HORIZON + 1][RICCATI_MAX_NX] = {{0}};
+    float kk[PREDICTION_HORIZON][ACTIVE_RICCATI_NU] = {{0}};
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+        p[N][i] = terminal_q[i] -
+            (factor->x_is_constrained[N][i]
+                ? factor->rho * (z_x[N][i] - y_x[N][i]) : 0.0f);
+        if (!isfinite(p[N][i])) return 0;
+    }
+
+    for (int k = N - 1; k >= 0; --k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        float p_shift[RICCATI_MAX_NX] = {0};
+        float q_aug_linear[RICCATI_MAX_NX] = {0};
+        float r_aug_linear[ACTIVE_RICCATI_NU] = {0};
+        float btp[ACTIVE_RICCATI_NU] = {0};
+        active_state_affine_shift(&factor->P[k + 1][0][0], sd->d,
+                                  p[k + 1], p_shift);
+        for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+            q_aug_linear[i] = sd->q[i] -
+                (factor->x_is_constrained[k][i]
+                    ? factor->rho * (z_x[k][i] - y_x[k][i]) : 0.0f);
+            if (!isfinite(p_shift[i]) || !isfinite(q_aug_linear[i])) return 0;
+        }
+        for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+            r_aug_linear[a] = sd->r[a] -
+                factor->rho_u * (z_u[k][a] - y_u[k][a]);
+        }
+        active_b_transpose_p(sd, p_shift, btp);
+        for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+            for (int b = 0; b < ACTIVE_RICCATI_NU; ++b)
+                kk[k][a] -= factor->S_inv[k][a][b] *
+                    (r_aug_linear[b] + btp[b]);
+            if (!isfinite(kk[k][a])) return 0;
+        }
+        for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) {
+            p[k][i] = q_aug_linear[i];
+            if (i < ACTIVE_RICCATI_PLANT_NX) {
+                for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                    p[k][i] += sd->A[s][i] * p_shift[s];
+            }
+            for (int a = 0; a < ACTIVE_RICCATI_NU; ++a)
+                p[k][i] += factor->G[k][a][i] * kk[k][a];
+            if (!isfinite(p[k][i])) return 0;
+        }
+    }
+
+    for (int i = 0; i < ACTIVE_RICCATI_NX; ++i) x_out[0][i] = x0[i];
+    for (int k = 0; k < N; ++k) {
+        const RiccatiStepData_t *sd = &step_data[k];
+        for (int a = 0; a < ACTIVE_RICCATI_NU; ++a) {
+            u_out[k][a] = kk[k][a];
+            for (int s = 0; s < ACTIVE_RICCATI_NX; ++s)
+                u_out[k][a] += factor->K[k][a][s] * x_out[k][s];
+            if (!isfinite(u_out[k][a])) return 0;
+        }
+        for (int i = 0; i < ACTIVE_RICCATI_PLANT_NX; ++i) {
+            x_out[k + 1][i] = sd->d[i];
+            for (int s = 0; s < ACTIVE_RICCATI_PLANT_NX; ++s)
+                x_out[k + 1][i] += sd->A[i][s] * x_out[k][s];
+            for (int a = 0; a < ACTIVE_RICCATI_NU; ++a)
+                x_out[k + 1][i] += sd->B[i][a] * u_out[k][a];
+        }
+        x_out[k + 1][ACTIVE_RICCATI_PLANT_NX] = u_out[k][0];
+        x_out[k + 1][ACTIVE_RICCATI_PLANT_NX + 1] = u_out[k][1];
+        for (int i = 0; i < ACTIVE_RICCATI_NX; ++i)
+            if (!isfinite(x_out[k + 1][i])) return 0;
+    }
+    return 1;
+}
+
 /*===========================================================================
  * Riccati Backward + Forward Pass
  *===========================================================================*/
@@ -262,6 +609,13 @@ int riccati_solver_pass(
         nu <= 0 || nu > RICCATI_MAX_NU || N <= 0 ||
         N > PREDICTION_HORIZON) {
         return 0;
+    }
+
+    if (nx == ACTIVE_RICCATI_NX && nu == ACTIVE_RICCATI_NU &&
+        active_augmented_structure(step_data, N)) {
+        return riccati_solver_pass_active(
+            step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub,
+            x0, N, rho, rho_u, z_x, y_x, z_u, y_u, x_out, u_out);
     }
 
     for (int i = 0; i < nx; ++i) {
@@ -444,11 +798,13 @@ int riccati_solver_factorize(
     const float *terminal_x_ub,
     int nx,
     int nu,
-    int N,
+    int horizon,
     float rho,
     float rho_u,
-    RiccatiFactorization_t *factor)
+    RiccatiFactorization_t *factorization)
 {
+    const int N = horizon;
+    RiccatiFactorization_t *const factor = factorization;
     if (!step_data || !terminal_Q || !terminal_x_lb || !terminal_x_ub ||
         !factor || nx <= 0 || nx > RICCATI_MAX_NX || nu <= 0 ||
         nu > RICCATI_MAX_NU || N <= 0 || N > PREDICTION_HORIZON ||
@@ -563,8 +919,8 @@ int riccati_solver_pass_factored(
     const float *x0,
     int nx,
     int nu,
-    int N,
-    const RiccatiFactorization_t *factor,
+    int horizon,
+    const RiccatiFactorization_t *factorization,
     const float z_x[][RICCATI_MAX_NX],
     const float y_x[][RICCATI_MAX_NX],
     const float z_u[][RICCATI_MAX_NU],
@@ -572,6 +928,8 @@ int riccati_solver_pass_factored(
     float x_out[][RICCATI_MAX_NX],
     float u_out[][RICCATI_MAX_NU])
 {
+    const int N = horizon;
+    const RiccatiFactorization_t *const factor = factorization;
     if (!step_data || !terminal_q || !terminal_x_lb || !terminal_x_ub ||
         !x0 || !factor || !factor->valid || !z_x || !y_x || !z_u || !y_u ||
         !x_out || !u_out || nx != factor->nx || nu != factor->nu ||
@@ -579,6 +937,13 @@ int riccati_solver_pass_factored(
         nu <= 0 || nu > RICCATI_MAX_NU || N <= 0 ||
         N > PREDICTION_HORIZON) {
         return 0;
+    }
+
+    if (nx == ACTIVE_RICCATI_NX && nu == ACTIVE_RICCATI_NU &&
+        active_augmented_structure(step_data, N)) {
+        return riccati_solver_pass_factored_active(
+            step_data, terminal_q, terminal_x_lb, terminal_x_ub, x0, N,
+            factor, z_x, y_x, z_u, y_u, x_out, u_out);
     }
 
     float p[PREDICTION_HORIZON + 1][RICCATI_MAX_NX] = {{0}};
@@ -747,6 +1112,13 @@ static RiccatiStatus_t riccati_admm_solve_core(
     }
     if (config && config->use_prefactorization != 0 &&
         config->use_prefactorization != 1) {
+        solution->status = RICCATI_STATUS_ERROR;
+        return RICCATI_STATUS_ERROR;
+    }
+    const float over_relaxation = config &&
+        config->over_relaxation > 0.0f ? config->over_relaxation : 1.0f;
+    if (!isfinite(over_relaxation) || over_relaxation < 1.0f ||
+        over_relaxation > 2.0f) {
         solution->status = RICCATI_STATUS_ERROR;
         return RICCATI_STATUS_ERROR;
     }
@@ -932,6 +1304,12 @@ static RiccatiStatus_t riccati_admm_solve_core(
         /*--- Fused z-update, y-update, and residual computation ---*/
         float state_primal = 0.0f, state_dual = 0.0f;
         float ctrl_primal = 0.0f, ctrl_dual = 0.0f;
+        /* Adaptive-rho balancing is dimensionless, but the production
+         * convergence gate below deliberately remains the raw physical
+         * residual.  A metre, radian, m/s, and rad/s residual must not be
+         * compared as if they were the same channel. */
+        float state_primal_balance = 0.0f, state_dual_balance = 0.0f;
+        float ctrl_primal_balance = 0.0f, ctrl_dual_balance = 0.0f;
 #ifdef MPC_ENABLE_RICCATI_PROFILE
         const uint64_t projection_start_ns = riccati_profile_now_ns();
 #endif
@@ -941,7 +1319,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
             for (int s = 0; s < nx; s++) {
                 if (x_is_constrained[k][s]) {
                     float x_val = solution->x[k][s];
-                    float x_hat = x_val;
+                    float x_hat = over_relaxation * x_val +
+                        (1.0f - over_relaxation) * z_x[k][s];
                     float val = x_hat + y_x[k][s];
                     const float xlb = (k < N) ? step_data[k].x_lb[s] : terminal_x_lb[s];
                     const float xub = (k < N) ? step_data[k].x_ub[s] : terminal_x_ub[s];
@@ -951,15 +1330,22 @@ static RiccatiStatus_t riccati_admm_solve_core(
                     if (val > xub) val = xub;
 
                     float z_new = val;
+                    const float span = fmaxf(xub - xlb, 1.0e-3f);
                     /* Dual residual */
                     float z_prev = z_x[k][s];
                     float dd = fabsf(rho * (z_new - z_prev));
                     state_dual = fmaxf(state_dual, dd);
-                    /* y-update: y += x - z */
+                    state_dual_balance = fmaxf(
+                        state_dual_balance, dd / span);
+                    /* y-update: y += x_hat - z.  x_hat is the standard ADMM
+                     * over-relaxed primal point; with alpha=1 this is the
+                     * original unrelaxed update. */
                     y_x[k][s] = x_hat - z_new + y_x[k][s];
                     /* Primal residual */
-                    float pd = fabsf(x_hat - z_new);
+                    float pd = fabsf(solution->x[k][s] - z_new);
                     state_primal = fmaxf(state_primal, pd);
+                    state_primal_balance = fmaxf(
+                        state_primal_balance, pd / span);
                     z_x[k][s] = z_new;
                 } else {
                     z_x[k][s] = solution->x[k][s];
@@ -972,21 +1358,26 @@ static RiccatiStatus_t riccati_admm_solve_core(
             const RiccatiStepData_t *sd = &step_data[k];
             for (int a = 0; a < nu; a++) {
                 float u_val = solution->u[k][a];
-                float u_hat = u_val;
+                float u_hat = over_relaxation * u_val +
+                    (1.0f - over_relaxation) * z_u[k][a];
                 /* z-update: z = clip(u_hat + y, lb, ub) */
                 float val = u_hat + y_u[k][a];
                 if (val < sd->u_lb[a]) val = sd->u_lb[a];
                 if (val > sd->u_ub[a]) val = sd->u_ub[a];
                 float z_new = val;
+                const float span = fmaxf(sd->u_ub[a] - sd->u_lb[a], 1.0e-3f);
                 /* Dual residual */
                 float z_prev = z_u[k][a];
                 float dd = fabsf(rho_u * (z_new - z_prev));
                 ctrl_dual = fmaxf(ctrl_dual, dd);
-                /* y-update: y += u - z */
+                ctrl_dual_balance = fmaxf(ctrl_dual_balance, dd / span);
+                /* y-update uses the same over-relaxed primal point as the
+                 * state split. */
                 y_u[k][a] = u_hat - z_new + y_u[k][a];
                 /* Primal residual */
-                float pd = fabsf(u_hat - z_new);
+                float pd = fabsf(solution->u[k][a] - z_new);
                 ctrl_primal = fmaxf(ctrl_primal, pd);
+                ctrl_primal_balance = fmaxf(ctrl_primal_balance, pd / span);
                 z_u[k][a] = z_new;
             }
         }
@@ -1060,22 +1451,33 @@ static RiccatiStatus_t riccati_admm_solve_core(
             int scale_rho_u = 0;
 
             if (shared_rho) {
-                if (primal_res > adapt_ratio_shared * dual_res && rho < rho_max) {
+                const float primal_balance = state_primal_balance >
+                    ctrl_primal_balance ? state_primal_balance :
+                    ctrl_primal_balance;
+                const float dual_balance = state_dual_balance >
+                    ctrl_dual_balance ? state_dual_balance : ctrl_dual_balance;
+                if (primal_balance > adapt_ratio_shared * dual_balance &&
+                    rho < rho_max) {
                     scale_rho = 1;
-                } else if (dual_res > adapt_ratio_shared * primal_res && rho > rho_min) {
+                } else if (dual_balance > adapt_ratio_shared * primal_balance &&
+                           rho > rho_min) {
                     scale_rho = -1;
                 }
                 scale_rho_u = scale_rho;
             } else {
-                if (state_primal > adapt_ratio_state * state_dual && rho < rho_max) {
+                if (state_primal_balance > adapt_ratio_state *
+                        state_dual_balance && rho < rho_max) {
                     scale_rho = 1;
-                } else if (state_dual > adapt_ratio_state * state_primal && rho > rho_min) {
+                } else if (state_dual_balance > adapt_ratio_state *
+                               state_primal_balance && rho > rho_min) {
                     scale_rho = -1;
                 }
 
-                if (ctrl_primal > adapt_ratio_ctrl * ctrl_dual && rho_u < rho_max) {
+                if (ctrl_primal_balance > adapt_ratio_ctrl *
+                        ctrl_dual_balance && rho_u < rho_max) {
                     scale_rho_u = 1;
-                } else if (ctrl_dual > adapt_ratio_ctrl * ctrl_primal && rho_u > rho_min) {
+                } else if (ctrl_dual_balance > adapt_ratio_ctrl *
+                               ctrl_primal_balance && rho_u > rho_min) {
                     scale_rho_u = -1;
                 }
             }
@@ -1190,11 +1592,12 @@ RiccatiStatus_t riccati_admm_solve(
     const float *terminal_x_lb,
     const float *terminal_x_ub,
     const float *x0,
-    int nx, int nu, int N,
+    int nx, int nu, int horizon,
     const RiccatiAdmmConfig_t *config,
     RiccatiAdmmState_t *admm_state,
     RiccatiSolution_t *solution)
 {
+    const int N = horizon;
     if (!admm_state || !solution) {
         if (solution) solution->status = RICCATI_STATUS_ERROR;
         return RICCATI_STATUS_ERROR;

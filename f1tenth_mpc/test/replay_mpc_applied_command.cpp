@@ -25,6 +25,11 @@ namespace {
 
 constexpr std::size_t kMaximumTrajectoryPoints = 4000;
 constexpr int64_t kControlStepNs = 25'000'000LL;
+/* This replay must use the same causal steering-delay assumption as the
+ * authority run. It is deliberately a replay constant, not a simulator
+ * truth input: the runtime controller reconstructs it from its own command
+ * history. */
+constexpr int64_t kPhysicalSteeringDelayNs = 50'000'000LL;
 constexpr std::array<int, 5> kHorizonSteps{{1, 5, 10, 20, 30}};
 constexpr std::array<const char *, 6> kSpeedBinNames{{"0-0.5", "0.5-2", "2-4",
                                                        "4-6", "6-8", ">8"}};
@@ -359,6 +364,17 @@ std::size_t command_at_or_before(
         static_cast<std::size_t>(std::distance(commands.begin(), upper) - 1);
 }
 
+bool command_at_or_before_or_default(
+    const std::vector<MpcCommandHistoryEntry> &commands, int64_t stamp_ns,
+    const MpcCommandHistoryEntry &fallback,
+    MpcCommandHistoryEntry *result)
+{
+    if (!result) return false;
+    const std::size_t index = command_at_or_before(commands, stamp_ns);
+    *result = index < commands.size() ? commands[index] : fallback;
+    return true;
+}
+
 bool rollout_actual_commands(
     const MpcSynchronizedState &source,
     const MpcPathProjection_t &source_projection,
@@ -378,33 +394,49 @@ bool rollout_actual_commands(
     plant.u = static_cast<float>(std::max(0.0, source.u));
     plant.v = static_cast<float>(source.v);
     plant.r = static_cast<float>(source.yaw_rate);
-    plant.target_speed = static_cast<float>(commands[initial_command_index].target_speed_mps);
+    const MpcCommandHistoryEntry &active_command =
+        commands[initial_command_index];
+    plant.target_speed = static_cast<float>(active_command.target_speed_mps);
     plant.steering_command = static_cast<float>(
-        commands[initial_command_index].steering_command_rad);
+        active_command.steering_command_rad);
+
+    /* Reconstruct the three command-side states from only the recorded
+     * /cmd/speed history. This is the same information available to live
+     * MPC. The previous implementation initialized the physical angle to the
+     * newest command, which removed the measured two-sample actuator delay
+     * from the replay and made the horizon score meaningless. */
+    MpcCommandHistoryEntry delayed_command{};
+    command_at_or_before_or_default(commands,
+        source.source_stamp_ns - kControlStepNs, active_command,
+        &delayed_command);
+    plant.delayed_steering_command_1 = static_cast<float>(
+        delayed_command.steering_command_rad);
+    command_at_or_before_or_default(commands,
+        source.source_stamp_ns - kPhysicalSteeringDelayNs, active_command,
+        &delayed_command);
+    plant.delayed_steering_command_2 = static_cast<float>(
+        delayed_command.steering_command_rad);
+    plant.actual_steering_angle = plant.delayed_steering_command_2;
     double progress_m = source_projection.s;
     const int64_t target_stamp_ns = source.source_stamp_ns +
         static_cast<int64_t>(horizon_steps) * kControlStepNs;
-    std::size_t next_command_index = initial_command_index + 1;
-    int64_t cursor_ns = source.source_stamp_ns;
 
-    while (cursor_ns < target_stamp_ns) {
-        if (next_command_index < commands.size() &&
-            commands[next_command_index].stamp_ns <= cursor_ns) {
-            plant.target_speed = static_cast<float>(
-                commands[next_command_index].target_speed_mps);
-            plant.steering_command = static_cast<float>(
-                commands[next_command_index].steering_command_rad);
-            ++next_command_index;
-            continue;
-        }
-        const int64_t next_change_ns = next_command_index < commands.size()
-            ? commands[next_command_index].stamp_ns : target_stamp_ns;
-        const int64_t segment_end_ns = std::min({target_stamp_ns,
-            next_change_ns, cursor_ns + kControlStepNs});
-        const float dt = static_cast<float>(
-            static_cast<double>(segment_end_ns - cursor_ns) * 1.0e-9);
+    /* The accepted model is a 40 Hz discrete plant. Timestamp jitter in the
+     * event log must not create extra queue shifts inside one plant step.
+     * Select the command active at each 25 ms boundary, then integrate one
+     * complete model step. */
+    for (int step_index = 0; step_index < horizon_steps; ++step_index) {
+        const int64_t step_start_ns = source.source_stamp_ns +
+            static_cast<int64_t>(step_index) * kControlStepNs;
+        MpcCommandHistoryEntry step_command{};
+        command_at_or_before_or_default(commands, step_start_ns,
+            active_command, &step_command);
+        plant.target_speed = static_cast<float>(step_command.target_speed_mps);
+        plant.steering_command = static_cast<float>(
+            step_command.steering_command_rad);
         MpcTrajectorySample_t path_sample{};
-        if (!(dt > 0.0f) || !mpc_trajectory_sample(trajectory.data(),
+        const float dt = static_cast<float>(kControlStepNs) * 1.0e-9f;
+        if (!mpc_trajectory_sample(trajectory.data(),
                 trajectory.size(), lap_length_m, progress_m, &path_sample))
             return false;
         const MpcModelControl_t held_command{0.0f, 0.0f};
@@ -413,7 +445,6 @@ bool rollout_actual_commands(
         if (!step.valid) return false;
         plant = step.next;
         progress_m += step.delta_s_m;
-        cursor_ns = segment_end_ns;
     }
 
     MpcTrajectorySample_t final_path_sample{};

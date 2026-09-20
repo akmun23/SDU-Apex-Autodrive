@@ -132,17 +132,16 @@ geometry, sensor behavior, or timing.
       Fresh 16 m/s-or-lower source-valid captures are required for every future
       ablation; historical reports are not input evidence.
 
-## Provisional ten-state Riccati and actuator-path recode — 2026-09-18
+## Historical Riccati and actuator-path recode — 2026-09-18
 
-This records the existing implementation snapshot only. The later
-`SDU_Apex_Autodrive_MPC_Full_Rewrite_Coding_Handoff_2026-09-18.md` replaces
-the ten-state design as the target; the old path remains in code until the
-nine-state rewrite passes its gates.
+This section records the implementation snapshot from that date. The active
+controller is now the nine-state RTI implementation described above; the
+superseded 10-state controller and its compatibility-only files have been
+removed from the repository.
 
-The production core uses `NX_FRENET=6`, `NX_AUG=10`, `NU=2`, and a fixed
-30-stage/25 ms horizon. The augmented state order is
-`[e_y, e_psi, v_x, v_y, yaw_rate, target_speed, commanded_steering,
-effective_steering, previous_steering_rate, previous_target_speed_rate]`.
+The production core uses a fixed 30-stage/25 ms horizon. The augmented state
+order is `[e_y, e_psi, u, v, yaw_rate, target_speed, commanded_steering,
+previous_steering_rate, previous_target_speed_rate]`.
 The two optimizer inputs are steering rate and target-speed slew.
 
 The Riccati backward/forward pass now evaluates full matrices for every active
@@ -156,11 +155,11 @@ With affine dynamics `x+ = A x + B u + d`, diagonal state/control quadratics
 indefinite cases now fail explicitly instead of silently dropping
 off-diagonal terms.
 
-All ten augmented states have explicit nonzero default costs at stage and
-terminal nodes. This includes the target-speed and commanded-steering states,
-which previously had zero cost. The state and control-effort weights are
-declared as ROS parameters in `config/mpc_autodrive.yaml`; these are initial
-tuning values and still need driving validation.
+In that superseded ten-state snapshot, all augmented states had explicit
+nonzero default costs at stage and terminal nodes. The active controller is
+the nine-state implementation described above; its weights are declared as
+ROS parameters in `config/mpc_autodrive.yaml` and still need driving
+validation.
 
 Validation in the Humble workspace container:
 
@@ -170,9 +169,8 @@ Validation in the Humble workspace container:
   `2e-4`.
 - The same test exercises state-box and control-box ADMM projections for the
   10-state problem and reaches the configured residual tolerance.
-- `mpc_core_test` verifies all ten state weights are positive by default,
-  verifies the target-speed-state weight changes the optimized slew, and
-  checks that steering-rate output is integrated over measured control dt.
+- `vehicle_model_test` covers the authoritative seven-state source-command
+  stage, including its clipping, braking, and constant-turn branches.
 - All three package tests pass. A 500-sample N30 core benchmark (no ROS/DDS)
   measured p50/p95/p99/max of `0.110/0.155/0.163/0.165 ms`; none of the solves
   hit the iteration limit (maximum 8 of 50 iterations).
@@ -316,13 +314,10 @@ after explicit approval to build an isolated player from the current dirty
 Unity checkout with physics/behavior equivalence checked. MPC authority stays
 disabled.
 
-One handoff-conformance item remains independent of the simulator blocker:
-the production ROS node calls the 9-state `mpc_rti_solve_cycle`, but the old
-`mpc_compute_optimal_control`/10-state `mpc_types.h` path remains compiled for
-legacy regression tests. It is not used by the ROS component, but the handoff
-file map calls for consolidation into `mpc.c` and removal of obsolete
-effective-steering/environment-override code. Resolve that before declaring
-the full rewrite complete or enabling production MPC.
+The handoff-conformance cleanup is complete: the ROS node and offline tools
+share the nine-state `mpc_rti_solve_cycle` path. The superseded compatibility
+controller, old model API, and unused math-helper path are no longer part of
+the package.
 
 ## Timing and sensor-reference audit — 2026-09-17
 

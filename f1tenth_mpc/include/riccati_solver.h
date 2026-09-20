@@ -24,9 +24,6 @@
 #define RICCATI_SOLVER_H
 
 #include "mpc_types.h"
-#include <string.h>
-#include <stdio.h>
-#include <math.h>
 #include <stdint.h>
 
 #ifdef __cplusplus

@@ -23,9 +23,11 @@ track:
   # Never use a footprint narrower than optimizer_width_m=0.30. When the car
   # is angled, also account for the true 0.510 x 0.273 m rectangular body.
   heading_aware_physical_footprint: true
-  # Controller output is the actual optimizer-node path. No 0.02 m spline
-  # densification is used because it created artificial curvature spikes.
+  # Keep the solved mesh as the source of truth, but export a periodic linear
+  # controller-facing trajectory at the same 0.02 m spacing used by the
+  # previously validated dense raceline. This adds no spline or new curvature.
   export_optimizer_nodes: true
+  export_spacing_m: 0.02
 
 lateral_envelope:
   # 1.0 means use path_tracking_autodrive.yaml:max_lateral_accel exactly.

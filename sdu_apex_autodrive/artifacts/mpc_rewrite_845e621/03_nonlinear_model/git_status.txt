@@ -1,4 +1,0 @@
-HEAD: 845e621989daaf1e9fbe041723f7e6066a6f01d2
-Worktree: dirty; existing local changes preserved.
-Phase files: f1tenth_mpc/include/vehicle_model.h, f1tenth_mpc/src/vehicle_model.c, f1tenth_mpc/test/test_vehicle_model.c.
-No Unity, scene, simulator timing, or vehicle-behavior files changed.

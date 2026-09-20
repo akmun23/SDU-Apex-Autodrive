@@ -1,3 +1,0 @@
-status: not_final
-required_score_steps: [5, 10, 20, 30]
-required_error_components: [longitudinal, lateral, yaw]

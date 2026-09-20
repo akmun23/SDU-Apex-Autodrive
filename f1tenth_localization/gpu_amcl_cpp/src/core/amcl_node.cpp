@@ -205,7 +205,7 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<std::string>("global_heading_trajectory_package", "f1tenth_planning");
     declare_parameter<std::string>(
         "global_heading_trajectory_rel_path",
-        "trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv");
+        "trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv");
     declare_parameter<double>("global_pose_covariance_xy_max", 0.25);
     declare_parameter<double>("global_pose_covariance_yaw_max", 0.12);
     declare_parameter<double>("global_pose_max_track_distance_m", 0.45);
@@ -1845,25 +1845,15 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             const double correction_yaw_limit = post_startup_phase
                 ? local_post_phase_correction_max_yaw_rad_
                 : local_scan_correction_max_yaw_rad_;
-            const bool correction_within_nominal_gate =
-                (correction_distance_limit <= 0.0 ||
-                 correction_distance <= correction_distance_limit) &&
-                (correction_yaw_limit <= 0.0 ||
-                 correction_yaw <= correction_yaw_limit);
-            if (!correction_within_nominal_gate) {
-                local_scan_correction_rejected = true;
-                est = odom_prediction;
-                est.covariance = causal_odom_covariance();
-                RCLCPP_WARN_THROTTLE(
-                    get_logger(), *get_clock(), 1000,
-                    "Rejected large local AMCL scan correction after %.2f m "
-                    "travel (%.3f/%.3f m, %.3f/%.3f rad); using causal "
-                    "odometry pose for this scan.",
-                    accumulated_odom_travel_m_, correction_distance,
-                    correction_distance_limit, correction_yaw,
-                    correction_yaw_limit);
-            }
-
+            // The phase limit is a limit on the correction delivered to the
+            // controller, not on the unattenuated particle-cluster
+            // innovation.  The latter can be slightly larger than the
+            // allowed step while xy/along-track gains reduce the actual pose
+            // update well below it.  Rejecting the raw innovation discarded a
+            // valid scan, switched the pose to odometry, and allowed a small
+            // odometry error to accumulate until the next scan no longer had
+            // a local cluster.  Keep the association and raceline gates
+            // below active, then clamp only the applied local correction.
             if (!local_scan_correction_rejected) {
                 // A confirmed global recovery is already a full map-frame
                 // pose. Do not attenuate it back toward the failed odometry
@@ -1923,6 +1913,18 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                     odom_prediction.theta + yaw_gain * math_utils::angle_diff(
                         est.theta, odom_prediction.theta));
 
+                if (!local_tracking_recovery_confirmed) {
+                    if (correction_yaw_limit > 0.0) {
+                        const double applied_yaw = math_utils::angle_diff(
+                            est.theta, odom_prediction.theta);
+                        if (std::abs(applied_yaw) > correction_yaw_limit) {
+                            est.theta = math_utils::normalize_angle(
+                                odom_prediction.theta +
+                                std::copysign(correction_yaw_limit, applied_yaw));
+                        }
+                    }
+                }
+
                 // This independent 1-D map-likelihood score was fit around the
                 // fused current map pose using only legal pose/scan inputs and
                 // a chronological held-out split. Search around this same
@@ -1975,6 +1977,26 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                             "applied=%.3fm score_gain=%.4f gain=%.2f",
                             score.offset_m, scan_likelihood_applied_m,
                             score.score_gain, scan_likelihood_along_track_gain_);
+                    }
+                }
+
+                if (!local_tracking_recovery_confirmed &&
+                    correction_distance_limit > 0.0) {
+                    const double applied_x = est.x - odom_prediction.x;
+                    const double applied_y = est.y - odom_prediction.y;
+                    const double applied_distance =
+                        std::hypot(applied_x, applied_y);
+                    if (applied_distance > correction_distance_limit) {
+                        const double scale = correction_distance_limit /
+                            applied_distance;
+                        est.x = odom_prediction.x + scale * applied_x;
+                        est.y = odom_prediction.y + scale * applied_y;
+                        RCLCPP_INFO_THROTTLE(
+                            get_logger(), *get_clock(), 1000,
+                            "Bounded local AMCL scan correction after %.2f m "
+                            "travel (%.3f -> %.3f m); retaining scan update.",
+                            accumulated_odom_travel_m_, applied_distance,
+                            correction_distance_limit);
                     }
                 }
 

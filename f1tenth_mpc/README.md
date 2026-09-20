@@ -32,28 +32,30 @@ was added for the observed simulator stop transition; it is not a timing
 acceptance rule and does not permit an unchecked residual candidate to control
 the car.
 
-The old `mpc_compute_optimal_control` implementation is now isolated in a
-`BUILD_TESTING`-only compatibility library. It is linked only by its historical
-regression test/benchmark, is not linked into `mpc_core` or the ROS component,
-and its `mpc.h` API is not installed. The production solver path is the 9-state
-RTI implementation described above.
-
 ## Runtime modes
 
-- Default (`enabled: false`, `shadow_mode: false`): inert, with no command
-  publisher.
-- Shadow (`controller:=pure_pursuit with_mpc_shadow:=true`): runs beside Pure
-  Pursuit, subscribes to its `/cmd/speed`, publishes diagnostics on
-  `/mpc_shadow/diagnostics`, and has no `/cmd/speed` publisher.
-- Command authority (`controller:=mpc mpc_enabled:=true`): available for
-  controlled validation, but not yet declared driving-ready. By default, the
+- Normal development (`./tools/start_dev.sh`): MPC command authority, AMCL
+  warm-up, first-lap ramp, and terminal collision handling are enabled by the
+  unified launcher.
+- Shadow (`controller:=pure_pursuit with_mpc_shadow:=true`): an explicit
+  diagnostic mode beside Pure Pursuit. It has no `/cmd/speed` authority and is
+  not valid evidence for MPC closed-loop driving.
+- Direct command authority (`controller:=mpc`): uses the same MPC path. The
   launch waits 2 seconds after AMCL starts before creating the MPC container;
   adjust with `mpc_start_delay_sec:=...` or set it to zero to disable.
 
 Use batchmode for simulator testing and do not add `-no-graphics`. A passing
 unit test or offline replay is not a live-driving acceptance result. The
-current status and evidence are recorded in
-`artifacts/mpc_rewrite_845e621/` and the worklist document.
+Current tuning evidence is summarized in
+`docs/MPC_WEIGHT_EVALUATION.md`. Historical replay dumps are kept outside the
+runtime repository and are not required to start the controller.
+
+Per-cycle MPC JSON diagnostics are disabled on the normal authority path to
+avoid serialization/DDS work at 40 Hz. Enable them only for a diagnostic run:
+
+```bash
+SDU_APEX_MPC_PUBLISH_DIAGNOSTICS=true ./tools/start_dev.sh
+```
 
 Build and test in the ROS 2 Humble workspace container:
 

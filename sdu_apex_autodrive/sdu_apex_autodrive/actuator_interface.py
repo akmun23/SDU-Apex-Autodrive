@@ -7,10 +7,11 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry
 import rclpy
 from rcl_interfaces.msg import SetParametersResult
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Bool, Float32, Int32
+from std_msgs.msg import Bool, Float32
 
 from .speed_controller import (
     LongitudinalStateEstimator,
@@ -102,20 +103,6 @@ class ActuatorInterface(Node):
         self.last_longitudinal_mode = LongitudinalMode.STOP
         self.last_neutral_reason = None
         self.external_stop_latched = False
-        self.collision_count = None
-        self.collision_baseline_ready = False
-        self.collision_baseline_candidate = None
-        self.collision_baseline_candidate_since = None
-        self.collision_reset_enabled = bool(
-            self.get_parameter("collision_reset_enabled").value)
-        self.collision_terminal_stop = bool(
-            self.get_parameter("collision_terminal_stop").value)
-        self.collision_reset_pulse_sec = float(
-            self.get_parameter("collision_reset_pulse_sec").value)
-        self.collision_baseline_stable_sec = max(
-            0.1, float(self.get_parameter("collision_baseline_stable_sec").value))
-        self.reset_release_time = None
-        self.reset_release_sent = False
         self.steering_pub = self.create_publisher(
             Float32, self.get_parameter("steering_topic").value, 10)
         self.throttle_pub = self.create_publisher(
@@ -145,17 +132,6 @@ class ActuatorInterface(Node):
         self.imu_sub = self.create_subscription(
             Imu, self.get_parameter("imu_topic").value,
             self._on_imu, rclpy.qos.qos_profile_sensor_data)
-        self.reset_pub = None
-        self.collision_sub = None
-        if self.collision_reset_enabled:
-            self.reset_pub = self.create_publisher(
-                Bool, self.get_parameter("reset_command_topic").value, 10)
-        # Monitor collisions independently from reset handling. Mapping runs
-        # must abort on a crash without publishing a simulator reset command.
-        if self.collision_reset_enabled or self.collision_terminal_stop:
-            self.collision_sub = self.create_subscription(
-                Int32, self.get_parameter("collision_topic").value,
-                self._on_collision_count, 10)
         external_stop_topic = str(self.get_parameter("external_stop_topic").value)
         self.external_stop_sub = None
         if external_stop_topic:
@@ -208,19 +184,6 @@ class ActuatorInterface(Node):
         self.declare_parameter("publish_rate_hz", 40.0)
         self.declare_parameter("max_steering_angle_rad", 0.5236)
         self.declare_parameter("max_target_speed_mps", 16.0)
-        self.declare_parameter("collision_topic", "/autodrive/roboracer_1/collision_count")
-        self.declare_parameter("reset_command_topic", "/autodrive/reset_command")
-        self.declare_parameter("collision_reset_enabled", False)
-        self.declare_parameter("collision_reset_pulse_sec", 0.5)
-        # Collision stopping is terminal. Reset handling is a separate opt-in
-        # hook and is not required for collision monitoring.
-        self.declare_parameter("collision_terminal_stop", False)
-        # The official counter is cumulative and can be published as zero
-        # before the bridge delivers the simulator's existing count. Require a
-        # stable observation before treating a later increment as this run's
-        # terminal collision.
-        self.declare_parameter("collision_baseline_stable_sec", 1.0)
-
         self.declare_parameter("kp", 0.003)
         self.declare_parameter("ki", 0.0001)
         self.declare_parameter("ka", 0.001)
@@ -471,92 +434,6 @@ class ActuatorInterface(Node):
         self.acceleration = self.speed_estimator.acceleration_mps2
         self.imu_time = arrival_time
 
-    def _on_collision_count(self, msg: Int32) -> None:
-        """Latch a terminal failure and reset the simulator vehicle.
-
-        This subscription is intentionally isolated to the actuator safety
-        layer. ``collision_count`` and ``reset_command`` are simulator-only
-        diagnostics/control and must not be used by competition controller
-        logic.
-        """
-        count = max(0, int(msg.data))
-        now_sec = self.get_clock().now().nanoseconds / 1e9
-        previous = self.collision_count
-        self.collision_count = count
-        # The simulator keeps collision_count cumulative across vehicle
-        # resets and bridge sessions. The bridge can briefly publish its
-        # default zero before the first actual simulator sample, so a simple
-        # previous-value comparison would mistake an old collision for a new
-        # one. Wait for one stable count, then only a subsequent increment is
-        # considered a collision in this actuator run.
-        if not self.collision_baseline_ready:
-            if self.collision_baseline_candidate != count:
-                self.collision_baseline_candidate = count
-                self.collision_baseline_candidate_since = now_sec
-                return
-            if self.collision_baseline_candidate_since is None:
-                self.collision_baseline_candidate_since = now_sec
-                return
-            if now_sec - self.collision_baseline_candidate_since >= self.collision_baseline_stable_sec:
-                self.collision_baseline_ready = True
-                self.get_logger().info(
-                    f"Collision baseline established at cumulative count {count}")
-            return
-
-        # A simulator/bridge reset may make the cumulative counter decrease.
-        # Re-baseline that explicit external state instead of treating a later
-        # count as an artificial increment.
-        if previous is not None and count < previous:
-            self.collision_baseline_ready = False
-            self.collision_baseline_candidate = count
-            self.collision_baseline_candidate_since = now_sec
-            return
-
-        collision_detected = previous is not None and count > previous
-        if collision_detected and not self.external_stop_latched:
-            self._latch_collision(count)
-
-    def _latch_collision(self, count: int) -> None:
-        self.external_stop_latched = self.collision_terminal_stop
-        self.command = None
-        self.command_time = None
-        self.speed_controller.reset()
-        self.speed_estimator.reset()
-        self.speed = 0.0
-        self.acceleration = 0.0
-        self.control_time = None
-        if self.reset_pub is not None:
-            now = self.get_clock().now()
-            self.reset_release_time = now.nanoseconds / 1e9 + self.collision_reset_pulse_sec
-            self.reset_release_sent = False
-            self.reset_pub.publish(Bool(data=True))
-        if self.reset_pub is not None:
-            self.get_logger().error(
-                f"Collision count increased to {count}; simulator reset requested")
-        else:
-            self.get_logger().error(
-                f"Collision count increased to {count}; terminal stop latched, "
-                "no simulator reset published")
-
-    def _service_reset_pulse(self, now) -> None:
-        if self.reset_pub is None or self.reset_release_time is None:
-            return
-        now_sec = now.nanoseconds / 1e9
-        if now_sec < self.reset_release_time:
-            self.reset_pub.publish(Bool(data=True))
-            return
-        if not self.reset_release_sent:
-            self.reset_pub.publish(Bool(data=False))
-            self.reset_release_sent = True
-            self.reset_release_time = None
-            if self.collision_terminal_stop:
-                self.get_logger().error(
-                    "Simulator reset pulse completed; actuator remains latched neutral after collision")
-            else:
-                self.external_stop_latched = False
-                self.get_logger().warn(
-                    "Simulator reset pulse completed; mapping actuator resumed after collision")
-
     def _on_external_stop(self, msg: Bool) -> None:
         if not msg.data or self.external_stop_latched:
             return
@@ -568,7 +445,6 @@ class ActuatorInterface(Node):
 
     def _tick(self) -> None:
         now = self.get_clock().now()
-        self._service_reset_pulse(now)
         if self.external_stop_latched:
             return self._neutral("external stop")
         if (self.raw_throttle_override is not None and
@@ -685,11 +561,9 @@ def main(args=None) -> None:
     node = ActuatorInterface()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        if node.reset_pub is not None and node.reset_release_time is not None:
-            node.reset_pub.publish(Bool(data=False))
         if rclpy.ok():
             node._publish(0.0, 0.0)
         node.destroy_node()

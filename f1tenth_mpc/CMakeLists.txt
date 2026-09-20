@@ -24,7 +24,6 @@ find_package(std_msgs REQUIRED)
 # prediction path.  Historic replay plants and report-pinned manifest checks
 # are not part of the controller build.
 add_library(mpc_core STATIC
-  src/util_math.c
   src/mpc_reference.c
   src/vehicle_model.c
   src/mpc_linearization.c
@@ -72,16 +71,6 @@ if(BUILD_TESTING)
   target_compile_definitions(mpc_core PRIVATE
     MPC_ENABLE_FD_ORACLE)
 
-  # Compatibility-only implementation of the old 10-state controller. Keep
-  # it available to its regression test, but never link it into the exported
-  # production MPC library or ROS component.
-  add_library(mpc_legacy_compat STATIC src/mpc.c)
-  target_include_directories(mpc_legacy_compat PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(mpc_legacy_compat PUBLIC mpc_core m)
-  set_target_properties(mpc_legacy_compat PROPERTIES
-    POSITION_INDEPENDENT_CODE ON)
-
   add_executable(vehicle_model_test test/test_vehicle_model.c)
   target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
   add_test(NAME vehicle_model_test COMMAND vehicle_model_test)
@@ -94,10 +83,6 @@ if(BUILD_TESTING)
   target_link_libraries(mpc_rti_test PRIVATE mpc_core m)
   add_test(NAME mpc_rti_test COMMAND mpc_rti_test)
 
-  add_executable(mpc_core_test test/test_mpc.c)
-  target_link_libraries(mpc_core_test PRIVATE mpc_legacy_compat mpc_core m)
-  add_test(NAME mpc_core_test COMMAND mpc_core_test)
-
   add_executable(riccati_solver_test test/test_riccati_solver.c)
   target_link_libraries(riccati_solver_test PRIVATE mpc_core m)
   add_test(NAME riccati_solver_test COMMAND riccati_solver_test)
@@ -105,7 +90,7 @@ if(BUILD_TESTING)
   add_executable(mpc_reference_test test/test_mpc_reference.c)
   target_link_libraries(mpc_reference_test PRIVATE mpc_core m)
   target_compile_definitions(mpc_reference_test PRIVATE
-    MPC_TEST_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+    MPC_TEST_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
   add_test(NAME mpc_reference_test COMMAND mpc_reference_test)
 
   add_executable(mpc_state_synchronizer_test test/test_mpc_state_synchronizer.cpp)
@@ -123,41 +108,35 @@ if(BUILD_TESTING)
   add_executable(mpc_replay_metrics_test test/test_replay_metrics.cpp)
   add_test(NAME mpc_replay_metrics_test COMMAND mpc_replay_metrics_test)
 
-  add_executable(mpc_core_benchmark test/benchmark_mpc_core.c)
-  target_link_libraries(mpc_core_benchmark PRIVATE mpc_legacy_compat mpc_core m)
-
   add_executable(mpc_rti_benchmark test/benchmark_mpc_rti.c)
   target_link_libraries(mpc_rti_benchmark PRIVATE mpc_core m)
   target_compile_definitions(mpc_rti_benchmark PRIVATE
-    MPC_RTI_BENCH_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+    MPC_RTI_BENCH_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
 
   add_executable(mpc_rti_offline_replay test/replay_mpc_rti.cpp)
   target_link_libraries(mpc_rti_offline_replay PRIVATE
     mpc_core mpc_state_sync m)
   target_compile_definitions(mpc_rti_offline_replay PRIVATE
-    MPC_RTI_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+    MPC_RTI_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
 
   add_executable(mpc_prediction_accuracy_replay
     test/replay_mpc_prediction_accuracy.cpp)
   target_link_libraries(mpc_prediction_accuracy_replay PRIVATE mpc_control_time)
   target_compile_definitions(mpc_prediction_accuracy_replay PRIVATE
-    MPC_PREDICTION_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+    MPC_PREDICTION_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
 
   add_executable(mpc_applied_command_replay
     test/replay_mpc_applied_command.cpp)
   target_link_libraries(mpc_applied_command_replay PRIVATE mpc_control_time)
   target_compile_definitions(mpc_applied_command_replay PRIVATE
-    MPC_APPLIED_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv")
+    MPC_APPLIED_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
 endif()
 
 install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
-# mpc.h exposes the superseded 10-state compatibility API. It stays in the
-# source tree for its opt-in regression test but is intentionally not installed.
-install(DIRECTORY include/ DESTINATION include
-  PATTERN "mpc.h" EXCLUDE)
+install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)

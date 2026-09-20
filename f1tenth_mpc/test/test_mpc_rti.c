@@ -27,6 +27,7 @@ static MpcRtiConfiguration_t test_configuration(void)
         .weight_e_y = 1500.0f,
         .weight_e_psi = 50.0f,
         .weight_u = 200.0f,
+        .weight_u_overspeed = 200.0f,
         .weight_target_speed_state = 20.0f,
         .weight_v = 0.0f,
         .weight_r = 1.5f,
@@ -57,7 +58,8 @@ static void make_nominal(
     states[0] = (MpcRtiState_t){
         .plant = {.e_y = 0.02f, .e_psi = -0.01f, .u = 5.0f,
                   .v = 0.04f, .r = 0.21f, .target_speed = 5.2f,
-                  .steering_command = 0.03f},
+                  .steering_command = 0.03f,
+                  .actual_steering_angle = 0.03f},
         .previous_steering_rate = 0.4f,
         .previous_target_speed_rate = -0.8f};
     controls[0] = (MpcModelControl_t){
@@ -137,9 +139,19 @@ static void test_absolute_nine_state_affine_ltv_build(void)
     check_close(problem.x0[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE], -0.8f,
                 1.0e-7f, "QP x0 carries prior target-speed rate");
 
-    check_close(problem.steps[0].x_lb[MPC_RTI_IDX_EY], -0.35f, 1.0e-7f,
+    const float stage_zero_physical_extent =
+        0.5f * MPC_CAR_WIDTH_M * fabsf(cosf(states[0].plant.e_psi)) +
+        fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M, MPC_REAR_OVERHANG_M) *
+            fabsf(sinf(states[0].plant.e_psi));
+    const float stage_zero_margin = config.corridor_margin_m +
+        fmaxf(0.0f, fmaxf(0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M,
+                            stage_zero_physical_extent) -
+                        0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M);
+    check_close(problem.steps[0].x_lb[MPC_RTI_IDX_EY],
+                stage_zero_margin - refs[0].right_bound, 1.0e-7f,
                 "right corridor and robust margin form e_y lower bound");
-    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_EY], 0.40f, 1.0e-7f,
+    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_EY],
+                refs[0].left_bound - stage_zero_margin, 1.0e-7f,
                 "left corridor and robust margin form e_y upper bound");
     check_close(problem.steps[0].x_ub[MPC_RTI_IDX_U], 16.0f, 1.0e-7f,
                 "body-speed state has project maximum bound");
@@ -166,6 +178,7 @@ static void test_previous_control_penalty_matrix_algebra(void)
     config.weight_e_y = 3.5f;
     config.weight_e_psi = 0.7f;
     config.weight_u = 2.0f;
+    config.weight_u_overspeed = 2.0f;
     config.weight_v = 0.4f;
     config.weight_r = 1.5f;
     config.weight_steering_command = 0.8f;
@@ -199,7 +212,11 @@ static void test_previous_control_penalty_matrix_algebra(void)
     const float x[MPC_RTI_NX] = {
         sample.plant.e_y, sample.plant.e_psi, sample.plant.u,
         sample.plant.v, sample.plant.r, sample.plant.target_speed,
-        sample.plant.steering_command, sample.previous_steering_rate,
+        sample.plant.steering_command,
+        sample.plant.delayed_steering_command_1,
+        sample.plant.delayed_steering_command_2,
+        sample.plant.actual_steering_angle,
+        sample.previous_steering_rate,
         sample.previous_target_speed_rate};
     const float u[MPC_RTI_NU] = {
         input.steering_rate, input.target_speed_rate};
@@ -429,16 +446,32 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
         cold_references, horizon, 0.025f, &first_step_relaxed,
         &first_step_relaxed_problem),
         "first-prediction corridor envelope can be evaluated independently");
+    const float relaxed_first_physical_extent =
+        0.5f * MPC_CAR_WIDTH_M * fabsf(cosf(nominal.states[1].plant.e_psi)) +
+        fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M, MPC_REAR_OVERHANG_M) *
+            fabsf(sinf(nominal.states[1].plant.e_psi));
+    const float relaxed_first_margin =
+        fmaxf(0.0f, fmaxf(0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M,
+                            relaxed_first_physical_extent) -
+                        0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M);
     check_close(first_step_relaxed_problem.steps[1].x_lb[MPC_RTI_IDX_EY],
-        -cold_references[1].right_bound, 1.0e-7f,
-        "first predicted state uses its configured corridor margin");
+        relaxed_first_margin - cold_references[1].right_bound, 1.0e-7f,
+        "first predicted state uses its configured margin plus heading projection");
     check_close(first_step_relaxed_problem.steps[1].x_ub[MPC_RTI_IDX_EY],
-        cold_references[1].left_bound, 1.0e-7f,
-        "first predicted upper bound uses its configured corridor margin");
+        cold_references[1].left_bound - relaxed_first_margin, 1.0e-7f,
+        "first predicted upper bound uses its configured margin plus heading projection");
+    const float normal_second_physical_extent =
+        0.5f * MPC_CAR_WIDTH_M * fabsf(cosf(nominal.states[2].plant.e_psi)) +
+        fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M, MPC_REAR_OVERHANG_M) *
+            fabsf(sinf(nominal.states[2].plant.e_psi));
+    const float normal_second_margin = config.corridor_margin_m +
+        fmaxf(0.0f, fmaxf(0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M,
+                            normal_second_physical_extent) -
+                        0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M);
     check_close(first_step_relaxed_problem.steps[2].x_lb[MPC_RTI_IDX_EY],
-        config.corridor_margin_m - cold_references[2].right_bound,
+        normal_second_margin - cold_references[2].right_bound,
         1.0e-7f,
-        "normal hard corridor margin remains active after the first prediction");
+        "normal hard corridor margin and heading projection remain active after the first prediction");
     RiccatiAdmmConfig_t solver_config = {
         .rho = 7.0f, .rho_u = 7.0f, .tolerance = 1.0e-4f,
         .max_iterations = 500, .adaptive_rho = 0, .shared_rho = 0};
@@ -625,6 +658,45 @@ static void test_two_pass_nominal_qp_and_nonlinear_candidate(void)
                "RTI reset clears nominal and ADMM warm-start memory");
 }
 
+static void test_measured_speed_may_exceed_active_command_ceiling(void)
+{
+    MpcTrajectorySample_t trajectory[80];
+    size_t trajectory_count = 0;
+    double lap_length = 0.0;
+    make_circle_trajectory(trajectory, &trajectory_count, &lap_length);
+
+    MpcRtiConfiguration_t config = test_configuration();
+    config.max_speed_mps = 4.0f;
+    config.active_speed_ceiling_mps = 4.0f;
+    const MpcRtiState_t measured_overspeed = {
+        .plant = {
+            .e_y = 0.0f,
+            .e_psi = 0.0f,
+            .u = 4.5f,
+            .v = 0.0f,
+            .r = 0.45f,
+            .target_speed = 4.0f,
+            .steering_command = atanf(
+                0.1f / MPC_YAW_RATE_STEERING_GAIN_PER_M)},
+        .previous_steering_rate = 0.0f,
+        .previous_target_speed_rate = 0.0f};
+    MpcRtiNominal_t nominal;
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1];
+
+    check_true(mpc_rti_build_nominal(&measured_overspeed, 0.0,
+        NULL, trajectory, trajectory_count, lap_length, 0.025f, 4,
+        &config, &nominal, references),
+        "measured speed above active command ceiling remains a valid MPC state");
+
+    MpcRtiProblem_t problem;
+    check_true(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
+        references, 4, 0.025f, &config, &problem),
+        "QP accepts a physically valid measured overspeed state");
+    check_close(problem.steps[0].x_ub[MPC_RTI_IDX_U],
+        vehicle_model_get_parameters().maximum_command_speed_mps,
+        1.0e-7f, "QP uses the physical speed envelope for measured u");
+}
+
 static void test_directional_corridor_schedule(void)
 {
     MpcTrajectorySample_t trajectory[80];
@@ -705,8 +777,8 @@ static void test_directional_corridor_schedule(void)
         nominal.controls, references, 4, 0.025f, &config, &schedule,
         &scheduled_problem), "scheduled QP builds");
     check_close(scheduled_problem.steps[1].x_ub[MPC_RTI_IDX_EY],
-        schedule.active_upper[1], 1.0e-7f,
-        "QP consumes the scheduled active upper bound");
+        normal_problem.steps[1].x_ub[MPC_RTI_IDX_EY], 1.0e-7f,
+        "QP keeps the strict physical upper bound during recovery search");
     check_close(scheduled_problem.steps[2].x_ub[MPC_RTI_IDX_EY],
         normal_problem.steps[2].x_ub[MPC_RTI_IDX_EY], 1.0e-7f,
         "QP restores normal bounds after re-entry");
@@ -740,6 +812,7 @@ int main(void)
     test_previous_control_penalty_matrix_algebra();
     test_invalid_problem_rejected();
     test_two_pass_nominal_qp_and_nonlinear_candidate();
+    test_measured_speed_may_exceed_active_command_ceiling();
     test_directional_corridor_schedule();
     if (failures) {
         fprintf(stderr, "%d MPC RTI QP checks failed\n", failures);

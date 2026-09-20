@@ -62,7 +62,7 @@ struct MpcSyncConfig {
 
 class MpcStateSynchronizer {
 public:
-    explicit MpcStateSynchronizer(MpcSyncConfig config = {});
+    explicit MpcStateSynchronizer(const MpcSyncConfig &config = {});
 
     MpcSyncStatus push_odometry(const MpcOdomSample &sample);
     MpcSyncStatus set_map_pose(const MpcMapPoseAnchor &anchor);

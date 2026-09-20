@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace f1tenth_mpc {
 namespace {
@@ -186,7 +187,9 @@ MpcControlTimeStatus predict_to_control_time(
         !(config.model_integration_step_s > 0.0) ||
         !std::isfinite(config.maximum_command_speed_mps) ||
         config.maximum_command_speed_mps <= 0.0 ||
-        config.maximum_command_speed_mps > MPC_MAX_COMMAND_SPEED_MPS)
+        config.maximum_command_speed_mps > MPC_MAX_COMMAND_SPEED_MPS ||
+        !std::isfinite(config.command_actuation_delay_s) ||
+        config.command_actuation_delay_s < 0.0)
         return MpcControlTimeStatus::kInvalidInput;
     const double age_s = static_cast<double>(target_stamp_ns -
         source_state.source_stamp_ns) * kNsToSeconds;
@@ -195,6 +198,29 @@ MpcControlTimeStatus predict_to_control_time(
     result.state = source_state;
     result.age_s = age_s;
     result.state.source_age_s = age_s;
+    /* The bridge can preserve the nominal 40 Hz sensor stream while queued
+     * actuator requests reach Unity later. Shift command events to their
+     * effective application time, but leave the measured sensor state and its
+     * receive timestamp untouched. This keeps the runtime causal and uses no
+     * simulator-only feedback. */
+    MpcCommandHistory effective_command_history;
+    const MpcCommandHistory *causal_command_history = &command_history;
+    if (config.command_actuation_delay_s > 0.0) {
+        const int64_t delay_ns = static_cast<int64_t>(std::llround(
+            config.command_actuation_delay_s * 1.0e9));
+        for (std::size_t i = 0; i < command_history.size(); ++i) {
+            MpcCommandHistoryEntry entry{};
+            if (!command_history.at(i, &entry) || delay_ns < 0 ||
+                entry.stamp_ns > std::numeric_limits<int64_t>::max() - delay_ns ||
+                !effective_command_history.push({
+                    entry.stamp_ns + delay_ns,
+                    entry.steering_command_rad,
+                    entry.target_speed_mps})) {
+                return MpcControlTimeStatus::kInvalidInput;
+            }
+        }
+        causal_command_history = &effective_command_history;
+    }
     const auto record_command_event = [&result](
         const MpcCommandHistoryEntry &entry) {
         if (entry.stamp_ns <= 0 ||
@@ -207,16 +233,16 @@ MpcControlTimeStatus predict_to_control_time(
             result.command_event_stamp_count++] = entry.stamp_ns;
     };
     MpcCommandHistoryEntry command_at_target{};
-    if (command_history.latest_at_or_before(target_stamp_ns,
+    if (causal_command_history->latest_at_or_before(target_stamp_ns,
             &command_at_target)) {
         result.target_speed_mps = command_at_target.target_speed_mps;
         result.steering_command_rad = command_at_target.steering_command_rad;
         MpcCommandHistoryEntry previous_command{};
-        for (std::size_t i = 1; i < command_history.size(); ++i) {
+        for (std::size_t i = 1; i < causal_command_history->size(); ++i) {
             MpcCommandHistoryEntry candidate{};
             MpcCommandHistoryEntry following{};
-            if (!command_history.at(i - 1, &candidate) ||
-                !command_history.at(i, &following)) break;
+            if (!causal_command_history->at(i - 1, &candidate) ||
+                !causal_command_history->at(i, &following)) break;
             if (following.stamp_ns > target_stamp_ns) break;
             previous_command = candidate;
         }
@@ -255,7 +281,7 @@ MpcControlTimeStatus predict_to_control_time(
         // legal state without extrapolating it; the measured age remains in
         // diagnostics and the MPC still receives a usable state.
         result.used_time_fallback = true;
-        if (command_history.latest_at_or_before(target_stamp_ns,
+        if (causal_command_history->latest_at_or_before(target_stamp_ns,
                 &command_at_target)) {
             result.target_speed_mps = command_at_target.target_speed_mps;
             result.steering_command_rad =
@@ -290,8 +316,8 @@ MpcControlTimeStatus predict_to_control_time(
         plant.v = static_cast<float>(source_state.v);
         plant.r = static_cast<float>(source_state.yaw_rate);
         MpcCommandHistoryEntry active_command{};
-        if (command_history.latest_at_or_before(source_state.source_stamp_ns,
-                &active_command)) {
+        if (causal_command_history->latest_at_or_before(
+                source_state.source_stamp_ns, &active_command)) {
             record_command_event(active_command);
             plant.target_speed = static_cast<float>(active_command.target_speed_mps);
             plant.steering_command =
@@ -308,7 +334,7 @@ MpcControlTimeStatus predict_to_control_time(
         std::size_t guard = 0;
         while (cursor_ns < target_stamp_ns) {
             MpcCommandHistoryEntry next_command{};
-            const bool has_next = command_history.next_after(cursor_ns,
+            const bool has_next = causal_command_history->next_after(cursor_ns,
                 target_stamp_ns, &next_command);
             const int64_t segment_end_ns = has_next ? next_command.stamp_ns :
                 target_stamp_ns;

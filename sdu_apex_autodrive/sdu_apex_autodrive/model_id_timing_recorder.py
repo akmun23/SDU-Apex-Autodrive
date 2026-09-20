@@ -63,7 +63,7 @@ EVENT_FILE_NAMES = {
     ),
     "controller_trace.csv": (
         "/cmd/speed", "/pure_pursuit/diagnostics",
-        "/mpc_shadow/diagnostics",
+        "/mpc_shadow/diagnostics", "/mpc/diagnostics",
     ),
     "runtime_state.csv": (
         "/odom", "/ekf_odom", "/amcl_pose", "/current_map_pose",
@@ -313,9 +313,14 @@ class ModelIdTimingRecorder(Node):
         self.create_subscription(
             AckermannDriveStamped, "/cmd/speed",
             lambda message: self._record_ros("/cmd/speed", message), depth)
-        self.create_subscription(
-            LaserScan, "/autodrive/roboracer_1/lidar",
-            lambda message: self._record_ros("/autodrive/roboracer_1/lidar", message), sensor_qos)
+        # LiDAR is not needed for the live MPC model-vs-vehicle comparison.
+        # Do not deserialize and walk the complete range vector unless raw
+        # LiDAR capture was explicitly requested; doing so otherwise adds a
+        # large Python callback/write workload to the timing-sensitive run.
+        if self.record_lidar_ranges:
+            self.create_subscription(
+                LaserScan, "/autodrive/roboracer_1/lidar",
+                lambda message: self._record_ros("/autodrive/roboracer_1/lidar", message), sensor_qos)
         for topic in (
                 "/odom/diagnostics", "/amcl_localization_health",
                 "/amcl_scan_alignment", "/amcl_gpu_timing",
@@ -326,6 +331,10 @@ class ModelIdTimingRecorder(Node):
         self.create_subscription(
             String, "/mpc_shadow/diagnostics",
             lambda message: self._record_ros("/mpc_shadow/diagnostics", message),
+            depth)
+        self.create_subscription(
+            String, "/mpc/diagnostics",
+            lambda message: self._record_ros("/mpc/diagnostics", message),
             depth)
         self.create_subscription(
             Float64, "/amcl_timing",

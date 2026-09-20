@@ -25,7 +25,7 @@ DEFAULT_MAP = (
 )
 DEFAULT_TRAJECTORY = (
     "/workspace/src/f1tenth_planning/trajectories/"
-    "autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv"
+    "autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv"
 )
 
 
@@ -58,10 +58,10 @@ def _setup(context):
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
                 {"use_sim_time": LaunchConfiguration("use_sim_time")},
-                # The simulator reset command changes encoder epoch and
-                # physical pose. Rebaseline the local observer with it so a
-                # previous run cannot leak stale speed into a new run.
-                {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+                # ``reset_command`` is restricted simulator control. The
+                # runtime observer uses only the allowed encoder and IMU
+                # streams and starts a fresh process epoch naturally.
+                {"reset_enabled": False},
             ],
             remappings=[
                 ("/tf", "/sdu/tf"),
@@ -78,7 +78,7 @@ def _setup(context):
             parameters=[
                 LaunchConfiguration("ekf_params"),
                 {"use_sim_time": LaunchConfiguration("use_sim_time")},
-                {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+                {"reset_enabled": False},
             ],
         ),
         LifecycleNode(

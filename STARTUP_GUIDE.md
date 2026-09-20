@@ -5,7 +5,7 @@ two terminals by design: one terminal owns Unity, and the other owns the ROS 2
 development/controller container.
 
 ```text
-Unity compete player -> AutoDRIVE bridge -> odometry/EKF/AMCL -> Pure Pursuit
+Unity compete player -> AutoDRIVE bridge -> odometry/EKF/AMCL -> MPC
                                                         -> actuator interface
 ```
 
@@ -67,7 +67,7 @@ cd /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive
 
 This starts only the verified source-built simulator. It deliberately uses
 neither `-batchmode` nor `-no-graphics`, so the Unity GUI remains visible. The
-the socket is enabled from the GUI: after Terminal 2 is running, press
+The socket is enabled from the GUI: after Terminal 2 is running, press
 `Connect` once in the simulator window. The `-ip` and `-port` values are filled
 from the launcher arguments.
 
@@ -85,30 +85,49 @@ The development terminal starts:
 
 1. one `autodrive_bridge_40hz`;
 2. sensor odometry, EKF, map server, and CUDA AMCL;
-3. Pure Pursuit with the production map and mintime raceline;
+3. MPC with the production model, weights, map, and mintime raceline;
 4. the actuator interface.
 
-If the bridge source has changed since the container image was built, run the
-first start with `AUTODRIVE_REBUILD=1 ./tools/start_dev.sh`; otherwise the
-container may still contain the old bridge installation. Once the socket
-connects, telemetry flows. There is no second ROS launch and
-no second bridge. The GUI `Connect` button enables the simulator socket; it
-does not create a second controller process. AMCL starts with global particle
-initialization and a scan-supported saved map-start prior. Pure Pursuit may use
-only the confirmed start-gated provisional pose, at the 1.5 m/s startup cap;
-after 0.75 m of travel AMCL transitions to local tracking, and PP ramps its
-speed cap across the first completed lap. This gives AMCL motion at low speed
-without allowing a visually plausible closed-track alias to command a crash.
-Use the FTG command below when you need an immediate moving sensor run without
-raceline localization.
+The start script rebuilds the derived image by default; Docker reuses cached
+layers when nothing changed. Set `AUTODRIVE_REBUILD=0` only when deliberately
+using an already verified image. Once the socket connects, telemetry flows.
+There is no second ROS launch and no second bridge. The GUI `Connect` button
+enables the simulator socket; it does not create a second controller process.
+AMCL starts with global particle
+initialization and a scan-supported saved map-start prior. MPC waits for the
+configured AMCL warm-up delay before it is loaded, and the first lap remains
+ramped by the active controller policy. A collision is terminal: the stack
+stops and does not reset or continue driving. Use the explicit FTG or Pure
+Pursuit commands below only for diagnostics.
 
 Do not also run `ros2 launch ... controller.launch.py`: `start_dev.sh` already
 starts the unified launch.
 
-The default controller is Pure Pursuit. For an immediate moving FTG run:
+The default controller is MPC. For an explicit diagnostic alternative:
 
 ```bash
 SDU_APEX_CONTROLLER=ftg ./tools/start_dev.sh
+# or
+SDU_APEX_CONTROLLER=pure_pursuit ./tools/start_dev.sh
+```
+
+The default MPC uses `f1tenth_mpc/config/mpc_autodrive.yaml`. To reproduce the
+validated moderate-weight authority candidate without changing production
+defaults, opt in explicitly:
+
+```bash
+SDU_APEX_MPC_OVERRIDE_PARAMS=/workspace/src/sdu_apex_autodrive/config/mpc_weight_test_moderate_balanced_authority.yaml \
+  ./tools/start_dev.sh
+```
+
+The override is intentionally not the default until another collision-terminal
+run confirms the full target acceptance set. Diagnostic recorders and per-cycle
+MPC JSON diagnostics are also off by default so normal GUI operation does not
+add file, serialization, or DDS load to the 40 Hz path. Enable MPC diagnostics
+explicitly when collecting a controller trace:
+
+```bash
+SDU_APEX_MPC_PUBLISH_DIAGNOSTICS=true ./tools/start_dev.sh
 ```
 
 To use another verified source-built player deliberately, override the path in

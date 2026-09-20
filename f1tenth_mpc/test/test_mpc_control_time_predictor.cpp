@@ -70,10 +70,12 @@ MpcSynchronizedState make_source()
 MpcControlTimePrediction predict(
     MpcControlTimeMode mode, const MpcSynchronizedState &source,
     int64_t target_stamp_ns, const MpcCommandHistory &history,
-    const std::vector<MpcTrajectorySample_t> &trajectory, double lap_length)
+    const std::vector<MpcTrajectorySample_t> &trajectory, double lap_length,
+    double command_actuation_delay_s = 0.0)
 {
     MpcControlTimePrediction result{};
     MpcControlTimePredictorConfig config;
+    config.command_actuation_delay_s = command_actuation_delay_s;
     CHECK(predict_to_control_time(mode, source, target_stamp_ns, history,
         trajectory.data(), trajectory.size(), lap_length,
         std::numeric_limits<std::size_t>::max(), nullptr, config, &result) ==
@@ -242,6 +244,32 @@ void test_model_prediction_and_zero_history_fallback()
     CHECK(fallback_a.state.u == fallback_b.state.u);
 }
 
+void test_command_actuation_delay_shifts_effective_timeline()
+{
+    const auto trajectory = make_circle(10.0);
+    const double lap_length = 2.0 * kPi * 10.0;
+    MpcCommandHistory history;
+    CHECK(history.push({kSourceStampNs - 100000000LL, 0.0, 2.0}));
+    CHECK(history.push({kSourceStampNs + 25000000LL, 0.4, 4.0}));
+
+    const auto immediate = predict(
+        MpcControlTimeMode::kAcceptedModelCommandHistory, make_source(),
+        kSourceStampNs + 100000000LL, history, trajectory, lap_length);
+    const auto delayed = predict(
+        MpcControlTimeMode::kAcceptedModelCommandHistory, make_source(),
+        kSourceStampNs + 100000000LL, history, trajectory, lap_length, 0.05);
+
+    CHECK(immediate.command_changes_used == 1);
+    CHECK(delayed.command_changes_used == 1);
+    CHECK(delayed.command_event_stamp_count == 2);
+    CHECK(delayed.command_event_stamps_ns[0] ==
+        kSourceStampNs - 50000000LL);
+    CHECK(delayed.command_event_stamps_ns[1] ==
+        kSourceStampNs + 75000000LL);
+    CHECK(delayed.steering_command_rad == 0.4);
+    CHECK(delayed.target_speed_mps == 4.0);
+}
+
 }  // namespace
 
 int main()
@@ -251,6 +279,7 @@ int main()
     test_ct0_and_timing_fallback();
     test_history_order_wrap_and_future_causality();
     test_model_prediction_and_zero_history_fallback();
+    test_command_actuation_delay_shifts_effective_timeline();
     std::cout << "MPC control-time predictor tests passed\n";
     return 0;
 }

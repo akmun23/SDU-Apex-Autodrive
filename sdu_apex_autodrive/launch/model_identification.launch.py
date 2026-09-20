@@ -103,10 +103,7 @@ def _setup(context):
             output="screen",
             parameters=[
                 LaunchConfiguration("sensor_odom_params"),
-                {
-                    "reset_enabled": True,
-                    "reset_topic": "/autodrive/reset_command",
-                },
+                {"reset_enabled": False},
             ],
             remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         ),
@@ -120,8 +117,6 @@ def _setup(context):
                 {
                     "allow_raw_throttle_override": True,
                     "allow_raw_steering_override": True,
-                    "collision_reset_enabled": False,
-                    "collision_terminal_stop": False,
                     "external_stop_topic": "/autodrive/roboracer_1/bridge_timing_fault",
                 },
             ],

@@ -168,6 +168,30 @@ bool load_trajectory(std::vector<MpcTrajectorySample_t> *points,
     return true;
 }
 
+/*
+ * Keep the offline replay objective explicit.  The old replay tool exposed
+ * only e_y, e_psi, and u while silently using a different set of values for
+ * every other term than the production YAML.  That made weight comparisons
+ * misleading: a candidate was not being evaluated with the same objective
+ * that the live node would use.  This small value object also makes it
+ * possible for the sweep tool to vary one objective term at a time.
+ */
+struct ReplayWeights {
+    float e_y = 150.0f;
+    float e_psi = 10.0f;
+    float u = 50.0f;
+    float u_overspeed = 150.0f;
+    float target_speed_state = 20.0f;
+    float v = 0.0f;
+    float r = 1.5f;
+    float steering_command = 5.0f;
+    float steering_rate = 5.0f;
+    float target_speed_rate = 0.5f;
+    float steering_rate_change = 10.0f;
+    float target_speed_rate_change = 5.0f;
+    float terminal_multiplier = 3.0f;
+};
+
 MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
                                                 float tolerance,
                                                 bool use_fd_jacobian,
@@ -185,21 +209,24 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
                                                 int recovery_seed_policy,
                                                 float recovery_steering_k_e_y,
                                                 float recovery_steering_k_e_psi,
-                                                float recovery_steering_k_r)
+                                                float recovery_steering_k_r,
+                                                float over_relaxation,
+                                                const ReplayWeights &weights)
 {
     MpcRtiConfiguration_t model{};
-    model.weight_e_y = 1500.0f;
-    model.weight_e_psi = 50.0f;
-    model.weight_u = 200.0f;
-    model.weight_target_speed_state = 20.0f;
-    model.weight_v = 0.0f;
-    model.weight_r = 1.5f;
-    model.weight_steering_command = 1.0f;
-    model.weight_steering_rate = 2.0f;
-    model.weight_target_speed_rate = 0.5f;
-    model.weight_steering_rate_change = 5.0f;
-    model.weight_target_speed_rate_change = 5.0f;
-    model.terminal_multiplier = 3.0f;
+    model.weight_e_y = weights.e_y;
+    model.weight_e_psi = weights.e_psi;
+    model.weight_u = weights.u;
+    model.weight_u_overspeed = weights.u_overspeed;
+    model.weight_target_speed_state = weights.target_speed_state;
+    model.weight_v = weights.v;
+    model.weight_r = weights.r;
+    model.weight_steering_command = weights.steering_command;
+    model.weight_steering_rate = weights.steering_rate;
+    model.weight_target_speed_rate = weights.target_speed_rate;
+    model.weight_steering_rate_change = weights.steering_rate_change;
+    model.weight_target_speed_rate_change = weights.target_speed_rate_change;
+    model.terminal_multiplier = weights.terminal_multiplier;
     model.max_speed_mps = 16.0f;
     model.active_speed_ceiling_mps = 16.0f;
     model.max_steering_rad = SOURCE_MAX_STEERING_RAD;
@@ -225,11 +252,13 @@ MpcRtiCycleConfiguration_t replay_configuration(int max_iterations,
     configuration.solver.max_iterations = max_iterations;
     configuration.solver.adaptive_rho = adaptive_rho ? 1 : 0;
     configuration.solver.shared_rho = 0;
+    configuration.solver.over_relaxation = over_relaxation;
     configuration.solver.use_prefactorization = use_prefactorization ? 1 : 0;
     configuration.solver.use_scaling = use_scaling ? 1 : 0;
     if (use_scaling) {
         const float state_scale[MPC_RTI_NX] = {
-            0.10f, 0.25f, 10.0f, 0.25f, 3.2f, 10.0f, 0.5f, 1.2f, 8.0f};
+            0.10f, 0.25f, 10.0f, 0.25f, 3.2f, 10.0f,
+            0.5f, 0.5f, 1.2f, 8.0f};
         const float input_scale[MPC_RTI_NU] = {1.2f, 8.0f};
         std::copy(state_scale, state_scale + MPC_RTI_NX,
                   configuration.solver.state_scale);
@@ -272,6 +301,8 @@ bool replay_events(const std::string &events_path, int max_iterations,
                    float recovery_steering_k_e_y,
                    float recovery_steering_k_e_psi,
                    float recovery_steering_k_r,
+                   float over_relaxation,
+                   const ReplayWeights &weights,
                    bool diagnostic_relaxed_residual_gate,
                    const std::string &actions_path,
                    const std::string &trajectory_path,
@@ -292,8 +323,9 @@ bool replay_events(const std::string &events_path, int max_iterations,
                          "rti_iterations_used,rti2_triggered,rti2_trigger_reason_mask,"
                          "rti2_budget_skipped,"
                          "r1_status,r2_status,r1_objective,r2_objective,"
-                         "r1_slack_m,r2_slack_m,selected_candidate,r1_iterations,"
-                         "r2_iterations,r1_steering_rate_radps,"
+                         "r1_slack_m,r2_slack_m,selected_candidate,"
+                         "residual_candidate_published,best_effort_action_published,"
+                         "r1_iterations,r2_iterations,r1_steering_rate_radps,"
                          "r1_target_speed_rate_mps2,r1_next_progress_m,"
                          "r1_next_e_y_m,r1_next_raw_bound_clearance_m,"
                          "r1_next_first_step_clearance_m,"
@@ -365,7 +397,8 @@ bool replay_events(const std::string &events_path, int max_iterations,
                              recovery_seed_policy,
                              recovery_steering_k_e_y,
                              recovery_steering_k_e_psi,
-                             recovery_steering_k_r);
+                             recovery_steering_k_r, over_relaxation,
+                             weights);
     MpcRtiMemory_t memory{};
     mpc_rti_memory_reset(&memory);
     ReplayMetrics metrics;
@@ -515,6 +548,7 @@ bool replay_events(const std::string &events_path, int max_iterations,
         state.plant.r = static_cast<float>(synchronized.yaw_rate);
         state.plant.target_speed = static_cast<float>(target_speed);
         state.plant.steering_command = static_cast<float>(steering_command);
+        state.plant.actual_steering_angle = state.plant.steering_command;
         state.previous_steering_rate =
             static_cast<float>(previous_steering_rate);
         state.previous_target_speed_rate =
@@ -644,6 +678,8 @@ bool replay_events(const std::string &events_path, int max_iterations,
                 << result.r2_min_corridor_slack << ','
                 << (result.selected_candidate == 2 ? "R2" :
                     result.selected_candidate == 1 ? "R1" : "none") << ','
+                << (result.residual_candidate_published ? 1 : 0) << ','
+                << (result.best_effort_action_published ? 1 : 0) << ','
                 << result.r1_solver_iterations << ','
                 << result.r2_solver_iterations << ','
                 << (pass_has_action(result.r1_status)
@@ -978,30 +1014,49 @@ int main(int argc, char **argv)
                      "[--recovery-policy nominal|heading_feedback|brake_heading_feedback] "
                      "[--recovery-k-ey VALUE] [--recovery-k-epsi VALUE] "
                      "[--recovery-k-r VALUE] "
+                     "[--weight-ey VALUE] [--weight-epsi VALUE] "
+                     "[--weight-u VALUE] [--weight-u-overspeed VALUE] "
+                     "[--weight-target-speed-state VALUE] [--weight-v VALUE] "
+                     "[--weight-r VALUE] [--weight-steering-command VALUE] "
+                     "[--weight-steering-rate VALUE] "
+                     "[--weight-target-speed-rate VALUE] "
+                     "[--weight-steering-rate-change VALUE] "
+                     "[--weight-target-speed-rate-change VALUE] "
+                     "[--terminal-multiplier VALUE] "
+                     "[--yaw-rate-tau VALUE] [--yaw-rate-gain VALUE] "
+                     "[--yaw-curvature-reduction VALUE] "
+                     "[--yaw-curvature-start VALUE] [--yaw-curvature-end VALUE] "
+                     "[--yaw-low-speed-tau VALUE] "
+                     "[--yaw-low-speed-transition VALUE] "
+                     "[--over-relaxation VALUE] "
                      "[--actions OUTPUT_CSV] "
                      "[--trajectory OUTPUT_CSV] "
                      "[--recovery-schedule OUTPUT_CSV]\n";
         return 2;
     }
-    int max_iterations = 50;
+    int max_iterations = 100;
     float tolerance = 0.01f;
     bool numeric_settings_seen = false;
     bool use_fd_jacobian = false;
-    bool use_prefactorization = false;
+    bool use_prefactorization = true;
     bool use_scaling = false;
-    bool adaptive_rho = false;
-    MpcRtiRefinementMode_t refinement_mode = MPC_RTI_REFINEMENT_R1;
+    bool adaptive_rho = true;
+    MpcRtiRefinementMode_t refinement_mode = MPC_RTI_REFINEMENT_ADAPTIVE;
     bool diagnostic_relaxed_residual_gate = false;
     float rho = 7.0f;
     float rho_u = 7.0f;
-    float degraded_residual_limit = 0.05f;
-    float corridor_margin_m = 0.05f;
-    float first_prediction_corridor_margin_m = 0.05f;
+    float degraded_residual_limit = 0.01f;
+    float corridor_margin_m = 0.30f;
+    float first_prediction_corridor_margin_m = 0.30f;
     float corridor_preview_halfwidth_m = 0.10f;
     int recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
     float recovery_steering_k_e_y = 0.0f;
     float recovery_steering_k_e_psi = 0.0f;
     float recovery_steering_k_r = 0.0f;
+    float over_relaxation = 1.6f;
+    MpcYawRateModelParameters_t yaw_model =
+        vehicle_model_default_yaw_rate_parameters();
+    ReplayWeights weights;
     std::string actions_path;
     std::string trajectory_path;
     std::string recovery_schedule_path;
@@ -1056,6 +1111,56 @@ int main(int argc, char **argv)
             recovery_steering_k_e_psi = std::stof(argv[++index]);
         } else if (option == "--recovery-k-r" && index + 1 < argc) {
             recovery_steering_k_r = std::stof(argv[++index]);
+        } else if (option == "--weight-ey" && index + 1 < argc) {
+            weights.e_y = std::stof(argv[++index]);
+        } else if (option == "--weight-epsi" && index + 1 < argc) {
+            weights.e_psi = std::stof(argv[++index]);
+        } else if (option == "--weight-u" && index + 1 < argc) {
+            weights.u = std::stof(argv[++index]);
+        } else if (option == "--weight-u-overspeed" && index + 1 < argc) {
+            weights.u_overspeed = std::stof(argv[++index]);
+        } else if (option == "--weight-target-speed-state" &&
+                   index + 1 < argc) {
+            weights.target_speed_state = std::stof(argv[++index]);
+        } else if (option == "--weight-v" && index + 1 < argc) {
+            weights.v = std::stof(argv[++index]);
+        } else if (option == "--weight-r" && index + 1 < argc) {
+            weights.r = std::stof(argv[++index]);
+        } else if (option == "--weight-steering-command" &&
+                   index + 1 < argc) {
+            weights.steering_command = std::stof(argv[++index]);
+        } else if (option == "--weight-steering-rate" && index + 1 < argc) {
+            weights.steering_rate = std::stof(argv[++index]);
+        } else if (option == "--weight-target-speed-rate" &&
+                   index + 1 < argc) {
+            weights.target_speed_rate = std::stof(argv[++index]);
+        } else if (option == "--weight-steering-rate-change" &&
+                   index + 1 < argc) {
+            weights.steering_rate_change = std::stof(argv[++index]);
+        } else if (option == "--weight-target-speed-rate-change" &&
+                   index + 1 < argc) {
+            weights.target_speed_rate_change = std::stof(argv[++index]);
+        } else if (option == "--terminal-multiplier" && index + 1 < argc) {
+            weights.terminal_multiplier = std::stof(argv[++index]);
+        } else if (option == "--yaw-rate-tau" && index + 1 < argc) {
+            yaw_model.response_time_constant_s = std::stof(argv[++index]);
+        } else if (option == "--yaw-rate-gain" && index + 1 < argc) {
+            yaw_model.steering_gain_per_m = std::stof(argv[++index]);
+        } else if (option == "--yaw-curvature-reduction" && index + 1 < argc) {
+            yaw_model.curvature_gain_reduction_per_m =
+                std::stof(argv[++index]);
+        } else if (option == "--yaw-curvature-start" && index + 1 < argc) {
+            yaw_model.curvature_gain_start_per_m = std::stof(argv[++index]);
+        } else if (option == "--yaw-curvature-end" && index + 1 < argc) {
+            yaw_model.curvature_gain_end_per_m = std::stof(argv[++index]);
+        } else if (option == "--yaw-low-speed-tau" && index + 1 < argc) {
+            yaw_model.low_speed_response_time_constant_s =
+                std::stof(argv[++index]);
+        } else if (option == "--yaw-low-speed-transition" && index + 1 < argc) {
+            yaw_model.low_speed_transition_speed_mps =
+                std::stof(argv[++index]);
+        } else if (option == "--over-relaxation" && index + 1 < argc) {
+            over_relaxation = std::stof(argv[++index]);
         } else if (option == "--rho" && index + 1 < argc) {
             rho = std::stof(argv[++index]);
         } else if (option == "--rho-u" && index + 1 < argc) {
@@ -1090,10 +1195,46 @@ int main(int argc, char **argv)
                      "and first-step margin <= horizon margin\n";
         return 2;
     }
+    if (!std::isfinite(over_relaxation) || over_relaxation < 1.0f ||
+        over_relaxation > 2.0f) {
+        std::cerr << "over-relaxation must lie in [1, 2]\n";
+        return 2;
+    }
+    const float weight_values[] = {
+        weights.e_y, weights.e_psi, weights.u, weights.u_overspeed,
+        weights.target_speed_state, weights.v, weights.r,
+        weights.steering_command, weights.steering_rate,
+        weights.target_speed_rate, weights.steering_rate_change,
+        weights.target_speed_rate_change, weights.terminal_multiplier};
+    for (const float value : weight_values) {
+        if (!std::isfinite(value) || value < 0.0f) {
+            std::cerr << "MPC weights must be finite and nonnegative\n";
+            return 2;
+        }
+    }
+    if (weights.terminal_multiplier <= 0.0f) {
+        std::cerr << "terminal multiplier must be positive\n";
+        return 2;
+    }
+    if (max_iterations < 1) {
+        std::cerr << "max iterations must be positive\n";
+        return 2;
+    }
+    if (!std::isfinite(tolerance) || tolerance <= 0.0f) {
+        std::cerr << "solver tolerance must be positive\n";
+        return 2;
+    }
+    if (!vehicle_model_set_yaw_rate_parameters(&yaw_model)) {
+        std::cerr << "invalid yaw-rate model parameters\n";
+        return 2;
+    }
     if (!std::isfinite(degraded_residual_limit) ||
-        degraded_residual_limit < 0.05f ||
+        degraded_residual_limit < 0.0f ||
+        (diagnostic_relaxed_residual_gate &&
+         degraded_residual_limit < 0.05f) ||
         degraded_residual_limit > 1000.0f) {
-        std::cerr << "diagnostic residual limit must lie in [0.05, 1000]\n";
+        std::cerr << "residual limit must be in [0, 1000]; diagnostic relaxed "
+                     "limit must be in [0.05, 1000]\n";
         return 2;
     }
     const int max_degraded_solves = diagnostic_relaxed_residual_gate
@@ -1110,6 +1251,8 @@ int main(int argc, char **argv)
         corridor_preview_halfwidth_m,
         recovery_seed_policy, recovery_steering_k_e_y,
         recovery_steering_k_e_psi, recovery_steering_k_r,
+        over_relaxation,
+        weights,
         diagnostic_relaxed_residual_gate,
         actions_path, trajectory_path, recovery_schedule_path,
         trajectory, lap_length) ? 0 : 1;

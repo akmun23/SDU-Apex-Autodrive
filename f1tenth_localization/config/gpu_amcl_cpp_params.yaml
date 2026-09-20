@@ -196,10 +196,9 @@ gpu_amcl_cpp:
     global_max_lateral_offset_m: 1.50
     global_heading_trajectory_file: ""
     global_heading_trajectory_package: f1tenth_planning
-    # Fallback for direct AMCL launches. AMCL and PP must use the same
-    # map-frame raceline; the old ICRA file runs in the opposite direction at
-    # the simulator start.
-    global_heading_trajectory_rel_path: trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+    # Fallback for direct AMCL launches. AMCL and the controller must use the
+    # same dense map-frame raceline and its start direction.
+    global_heading_trajectory_rel_path: trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv
     # Startup localization is scan-supported, but the deterministic simulator
     # spawn still needs its saved map-start prior to reject closed-track
     # aliases. The controller then uses the first-lap speed ramp while AMCL

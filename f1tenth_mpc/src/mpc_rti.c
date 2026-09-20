@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "mpc_rti.h"
+#include "vehicle_model.h"
 
 #include <math.h>
 #include <string.h>
@@ -18,6 +19,7 @@ static int finite_rti_state(const MpcRtiState_t *state)
         isfinite(state->plant.v) && isfinite(state->plant.r) &&
         isfinite(state->plant.target_speed) &&
         isfinite(state->plant.steering_command) &&
+        isfinite(state->plant.actual_steering_angle) &&
         isfinite(state->previous_steering_rate) &&
         isfinite(state->previous_target_speed_rate);
 }
@@ -55,6 +57,7 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->weight_e_y,
         configuration->weight_e_psi,
         configuration->weight_u,
+        configuration->weight_u_overspeed,
         configuration->weight_target_speed_state,
         configuration->weight_v,
         configuration->weight_r,
@@ -107,6 +110,12 @@ static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
     x[MPC_RTI_IDX_R] = state->plant.r;
     x[MPC_RTI_IDX_TARGET_SPEED] = state->plant.target_speed;
     x[MPC_RTI_IDX_STEERING_COMMAND] = state->plant.steering_command;
+    x[MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1] =
+        state->plant.delayed_steering_command_1;
+    x[MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2] =
+        state->plant.delayed_steering_command_2;
+    x[MPC_RTI_IDX_ACTUAL_STEERING_ANGLE] =
+        state->plant.actual_steering_angle;
     x[MPC_RTI_IDX_PREVIOUS_STEERING_RATE] = state->previous_steering_rate;
     x[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE] =
         state->previous_target_speed_rate;
@@ -178,8 +187,7 @@ static int reference_at_progress(
     const float speed = fminf((float)sample.speed,
         configuration->active_speed_ceiling_mps);
     const float feedforward = clampf_rti(
-        atanf((float)sample.curvature /
-              MPC_YAW_RATE_STEERING_GAIN_PER_M),
+        vehicle_model_steering_for_curvature((float)sample.curvature),
         -configuration->max_steering_rad,
         configuration->max_steering_rad);
     float left_bound = (float)sample.left_bound;
@@ -274,14 +282,33 @@ static int corridor_contains(
     const MpcRtiConfiguration_t *configuration,
     float corridor_margin_m)
 {
-    const float lower = corridor_margin_m -
-        reference->right_bound -
+    const float lower = corridor_margin_m - reference->right_bound -
         configuration->nonlinear_corridor_tolerance_m;
-    const float upper = reference->left_bound -
-        corridor_margin_m +
+    const float upper = reference->left_bound - corridor_margin_m +
         configuration->nonlinear_corridor_tolerance_m;
     return isfinite(lower) && isfinite(upper) && lower <= upper &&
         state->plant.e_y >= lower && state->plant.e_y <= upper;
+}
+
+static void record_rollout_failure(
+    MpcRtiRolloutFailure_t *failure,
+    int stage,
+    const MpcRtiState_t *state,
+    const MpcRtiReference_t *reference,
+    double progress,
+    float margin_m,
+    float lower_bound_m,
+    float upper_bound_m)
+{
+    if (!failure || !state || !reference) return;
+    failure->valid = 1;
+    failure->stage = stage;
+    failure->state = *state;
+    failure->reference = *reference;
+    failure->progress = progress;
+    failure->margin_m = margin_m;
+    failure->lower_bound_m = lower_bound_m;
+    failure->upper_bound_m = upper_bound_m;
 }
 
 static float corridor_margin_at_prediction(
@@ -293,18 +320,54 @@ static float corridor_margin_at_prediction(
         : configuration->corridor_margin_m;
 }
 
+static float corridor_margin_for_state(
+    const MpcRtiConfiguration_t *configuration,
+    const MpcModelState_t *state,
+    int prediction_index)
+{
+    if (!configuration || !state || !isfinite(state->e_psi))
+        return NAN;
+
+    /* Match the exact-min-time raceline generator's rectangle projection.
+     * The configured margin is the aligned center-to-wall margin (0.30 m in
+     * the production profile).  Only the excess footprint caused by heading
+     * error is added, so the aligned contract remains unchanged.  This is a
+     * geometric feasibility rule, not a change to Unity physics. */
+    const float abs_cos = fabsf(cosf(state->e_psi));
+    const float abs_sin = fabsf(sinf(state->e_psi));
+    const float physical_extent =
+        0.5f * MPC_CAR_WIDTH_M * abs_cos +
+        fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M,
+              MPC_REAR_OVERHANG_M) * abs_sin;
+    const float planning_half_width = 0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M;
+    const float footprint = fmaxf(planning_half_width, physical_extent);
+    const float excess_heading_extent =
+        fmaxf(0.0f, footprint - planning_half_width);
+    return corridor_margin_at_prediction(configuration, prediction_index) +
+        excess_heading_extent;
+}
+
 static int state_inside_command_envelope(
     const MpcRtiState_t *state,
     const MpcRtiConfiguration_t *configuration)
 {
     /* The two history states are observed prior commands, not new actions.
-     * Keep them finite, but allow them outside today's optimizer input box;
-     * QP inputs themselves remain bounded at every stage. */
+     * Keep them finite, but allow them outside today's target-command box;
+     * the Unity car can overshoot a lowered target while its longitudinal
+     * dynamics settle.  The physical model limit, not the active command
+     * ceiling, is the valid measured-speed envelope. */
+    const VehicleParameters_t vehicle = vehicle_model_get_parameters();
     return finite_rti_state(state) && state->plant.u >= 0.0f &&
-        state->plant.u <= configuration->max_speed_mps &&
+        state->plant.u <= vehicle.maximum_command_speed_mps &&
         state->plant.target_speed >= 0.0f &&
         state->plant.target_speed <= configuration->active_speed_ceiling_mps &&
         fabsf(state->plant.steering_command) <=
+            configuration->max_steering_rad &&
+        fabsf(state->plant.delayed_steering_command_1) <=
+            configuration->max_steering_rad &&
+        fabsf(state->plant.delayed_steering_command_2) <=
+            configuration->max_steering_rad &&
+        fabsf(state->plant.actual_steering_angle) <=
             configuration->max_steering_rad;
 }
 
@@ -336,15 +399,13 @@ static void set_unconstrained_bounds(RiccatiStepData_t *stage)
     }
 }
 
-static int set_state_bounds(
+static int set_state_bounds_with_corridor(
     float lower[MPC_RTI_NX],
     float upper[MPC_RTI_NX],
-    const MpcRtiReference_t *reference,
-    const MpcRtiConfiguration_t *configuration,
-    float corridor_margin_m)
+    float ey_lower,
+    float ey_upper,
+    const MpcRtiConfiguration_t *configuration)
 {
-    const float ey_lower = corridor_margin_m - reference->right_bound;
-    const float ey_upper = reference->left_bound - corridor_margin_m;
     if (!isfinite(ey_lower) || !isfinite(ey_upper) || ey_lower > ey_upper)
         return 0;
 
@@ -355,43 +416,47 @@ static int set_state_bounds(
     lower[MPC_RTI_IDX_EY] = ey_lower;
     upper[MPC_RTI_IDX_EY] = ey_upper;
     lower[MPC_RTI_IDX_U] = 0.0f;
-    upper[MPC_RTI_IDX_U] = configuration->max_speed_mps;
+    upper[MPC_RTI_IDX_U] =
+        vehicle_model_get_parameters().maximum_command_speed_mps;
     lower[MPC_RTI_IDX_TARGET_SPEED] = 0.0f;
     upper[MPC_RTI_IDX_TARGET_SPEED] =
         configuration->active_speed_ceiling_mps;
     lower[MPC_RTI_IDX_STEERING_COMMAND] =
         -configuration->max_steering_rad;
     upper[MPC_RTI_IDX_STEERING_COMMAND] =
+        configuration->max_steering_rad;
+    lower[MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1] =
+        -configuration->max_steering_rad;
+    upper[MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1] =
+        configuration->max_steering_rad;
+    lower[MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2] =
+        -configuration->max_steering_rad;
+    upper[MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2] =
+        configuration->max_steering_rad;
+    lower[MPC_RTI_IDX_ACTUAL_STEERING_ANGLE] =
+        -configuration->max_steering_rad;
+    upper[MPC_RTI_IDX_ACTUAL_STEERING_ANGLE] =
         configuration->max_steering_rad;
     return 1;
 }
 
-static int set_state_bounds_with_ey(
-    float lower[MPC_RTI_NX],
-    float upper[MPC_RTI_NX],
-    const MpcRtiConfiguration_t *configuration,
-    float ey_lower,
-    float ey_upper)
+static void add_tracking_term(
+    float *q_diag,
+    float *q_linear,
+    int index,
+    float weight,
+    float target,
+    float multiplier)
 {
-    if (!isfinite(ey_lower) || !isfinite(ey_upper) || ey_lower > ey_upper)
-        return 0;
-
-    for (int i = 0; i < MPC_RTI_NX; ++i) {
-        lower[i] = -BIG_BOUND;
-        upper[i] = BIG_BOUND;
-    }
-    lower[MPC_RTI_IDX_EY] = ey_lower;
-    upper[MPC_RTI_IDX_EY] = ey_upper;
-    lower[MPC_RTI_IDX_U] = 0.0f;
-    upper[MPC_RTI_IDX_U] = configuration->max_speed_mps;
-    lower[MPC_RTI_IDX_TARGET_SPEED] = 0.0f;
-    upper[MPC_RTI_IDX_TARGET_SPEED] =
-        configuration->active_speed_ceiling_mps;
-    lower[MPC_RTI_IDX_STEERING_COMMAND] =
-        -configuration->max_steering_rad;
-    upper[MPC_RTI_IDX_STEERING_COMMAND] =
-        configuration->max_steering_rad;
-    return 1;
+    /* Zero-weight channels are common in the active profile (for example
+     * lateral velocity). Avoid constructing/multiplying a term that cannot
+     * affect the QP. Keeping this helper scalar also lets the compiler fold
+     * the fixed factor without creating per-stage temporary arrays. */
+    if (weight <= 0.0f) return;
+    const float scaled_weight = multiplier * weight;
+    const float doubled_weight = 2.0f * scaled_weight;
+    q_diag[index] += doubled_weight;
+    q_linear[index] -= doubled_weight * target;
 }
 
 static void add_tracking_cost(
@@ -399,31 +464,30 @@ static void add_tracking_cost(
     float q[MPC_RTI_NX],
     const MpcRtiReference_t *reference,
     const MpcRtiConfiguration_t *configuration,
-    float multiplier)
+    float multiplier,
+    float nominal_u)
 {
-    const int indices[] = {
-        MPC_RTI_IDX_EY, MPC_RTI_IDX_EPSI, MPC_RTI_IDX_U,
-        MPC_RTI_IDX_V, MPC_RTI_IDX_R,
-        MPC_RTI_IDX_STEERING_COMMAND};
-    const float targets[] = {
-        reference->e_y, reference->e_psi, reference->u,
-        reference->v, reference->r, reference->steering_command};
-    const float target_speed = reference->target_speed;
-    const float weights[] = {
-        configuration->weight_e_y, configuration->weight_e_psi,
-        configuration->weight_u, configuration->weight_v,
-        configuration->weight_r, configuration->weight_steering_command,
-    };
-    for (int i = 0; i < 6; ++i) {
-        const int index = indices[i];
-        const float scaled_weight = multiplier * weights[i];
-        Q[index] += 2.0f * scaled_weight;
-        q[index] -= 2.0f * scaled_weight * targets[i];
-    }
-    const float target_speed_weight =
-        multiplier * configuration->weight_target_speed_state;
-    Q[MPC_RTI_IDX_TARGET_SPEED] += 2.0f * target_speed_weight;
-    q[MPC_RTI_IDX_TARGET_SPEED] -= 2.0f * target_speed_weight * target_speed;
+    const float speed_weight = nominal_u > reference->u
+        ? configuration->weight_u_overspeed : configuration->weight_u;
+    add_tracking_term(Q, q, MPC_RTI_IDX_EY,
+        configuration->weight_e_y, reference->e_y, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_EPSI,
+        configuration->weight_e_psi, reference->e_psi, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_U,
+        speed_weight, reference->u, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_V,
+        configuration->weight_v, reference->v, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_R,
+        configuration->weight_r, reference->r, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_STEERING_COMMAND,
+        configuration->weight_steering_command,
+        reference->steering_command, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_ACTUAL_STEERING_ANGLE,
+        configuration->weight_steering_command,
+        reference->steering_command, multiplier);
+    add_tracking_term(Q, q, MPC_RTI_IDX_TARGET_SPEED,
+        configuration->weight_target_speed_state,
+        reference->target_speed, multiplier);
 }
 
 int mpc_rti_build_ltv_qp_with_schedule(
@@ -444,6 +508,7 @@ int mpc_rti_build_ltv_qp_with_schedule(
     }
     if (!vehicle_model_set_active_target_speed_ceiling(
             configuration->active_speed_ceiling_mps)) return 0;
+    (void)schedule;
     for (int k = 0; k <= horizon; ++k) {
         if (!finite_rti_state(&nominal_states[k]) ||
             !finite_reference(&references[k])) return 0;
@@ -494,7 +559,7 @@ int mpc_rti_build_ltv_qp_with_schedule(
         }
 
         add_tracking_cost(stage->Q_diag, stage->q, &references[k],
-                          configuration, 1.0f);
+                          configuration, 1.0f, nominal_states[k].plant.u);
         stage->R_diag[0] = 2.0f * configuration->weight_steering_rate +
             2.0f * configuration->weight_steering_rate_change;
         stage->R_diag[1] = 2.0f * configuration->weight_target_speed_rate +
@@ -508,14 +573,12 @@ int mpc_rti_build_ltv_qp_with_schedule(
         stage->N[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE][1] =
             -2.0f * configuration->weight_target_speed_rate_change;
 
-        if (schedule && schedule->recovery_active &&
-            schedule->horizon == horizon) {
-            if (!set_state_bounds_with_ey(stage->x_lb, stage->x_ub,
-                    configuration,
-                    schedule->active_lower[k], schedule->active_upper[k]))
-                return 0;
-        } else if (!set_state_bounds(stage->x_lb, stage->x_ub, &references[k],
-                configuration, corridor_margin_at_prediction(configuration, k)))
+        const float margin = corridor_margin_for_state(configuration,
+            &nominal_states[k].plant, k);
+        const float ey_lower = margin - references[k].right_bound;
+        const float ey_upper = references[k].left_bound - margin;
+        if (!set_state_bounds_with_corridor(stage->x_lb, stage->x_ub,
+                ey_lower, ey_upper, configuration))
             return 0;
         stage->u_lb[0] = -configuration->max_steering_rate_radps;
         stage->u_ub[0] = configuration->max_steering_rate_radps;
@@ -525,19 +588,17 @@ int mpc_rti_build_ltv_qp_with_schedule(
 
     add_tracking_cost(problem->terminal_Q, problem->terminal_q,
                       &references[horizon], configuration,
-                      configuration->terminal_multiplier);
-    if (schedule && schedule->recovery_active && schedule->horizon == horizon) {
-        if (!set_state_bounds_with_ey(problem->terminal_x_lb,
-                problem->terminal_x_ub, configuration,
-                schedule->active_lower[horizon],
-                schedule->active_upper[horizon])) return 0;
-    } else {
-        const float terminal_margin = horizon == 1
-            ? configuration->first_prediction_corridor_margin_m
-            : configuration->corridor_margin_m;
-        if (!set_state_bounds(problem->terminal_x_lb, problem->terminal_x_ub,
-                &references[horizon], configuration, terminal_margin)) return 0;
-    }
+                      configuration->terminal_multiplier,
+                      nominal_states[horizon].plant.u);
+    const float terminal_margin = corridor_margin_for_state(
+        configuration, &nominal_states[horizon].plant, horizon);
+    const float terminal_lower = terminal_margin -
+        references[horizon].right_bound;
+    const float terminal_upper = references[horizon].left_bound -
+        terminal_margin;
+    if (!set_state_bounds_with_corridor(problem->terminal_x_lb,
+            problem->terminal_x_ub, terminal_lower, terminal_upper,
+            configuration)) return 0;
     return 1;
 }
 
@@ -696,7 +757,8 @@ static int fill_corridor_schedule_for_seed(
         MpcRtiReference_t reference;
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 seed->progress[k], configuration, &reference)) return 0;
-        const float margin = corridor_margin_at_prediction(configuration, k);
+        const float margin = corridor_margin_for_state(configuration,
+            &seed->states[k].plant, k);
         schedule->normal_lower[k] = margin - reference.right_bound;
         schedule->normal_upper[k] = reference.left_bound - margin;
         if (!isfinite(schedule->normal_lower[k]) ||
@@ -880,9 +942,11 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
     const MpcRtiCorridorSchedule_t *schedule,
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1],
-    int *failure_stage)
+    int *failure_stage,
+    MpcRtiRolloutFailure_t *failure)
 {
     if (failure_stage) *failure_stage = -1;
+    if (failure) memset(failure, 0, sizeof(*failure));
     if (path_delta) memset(path_delta, 0, sizeof(*path_delta));
     if (!finite_rti_state(initial_state) || !isfinite(initial_progress) ||
         !controls || !trajectory || trajectory_count < 3 ||
@@ -892,6 +956,9 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
         !states || !valid_configuration(configuration) || horizon < 1 ||
         horizon > PREDICTION_HORIZON || !isfinite(prediction_dt) ||
         prediction_dt <= 0.0f) return MPC_RTI_ROLLOUT_INVALID_INPUT;
+    /* Recovery schedules are retained for diagnostics and seed selection, but
+     * do not widen the optimization safety set. */
+    (void)schedule;
     if (!vehicle_model_set_active_target_speed_ceiling(
             configuration->active_speed_ceiling_mps))
         return MPC_RTI_ROLLOUT_INVALID_INPUT;
@@ -989,21 +1056,19 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
                 nominal_references[k + 1].right_bound);
             path_delta->sample_count = k + 2;
         }
-        int in_corridor = 0;
-        if (schedule && schedule->recovery_active &&
-            schedule->horizon == horizon) {
-            const float lower = schedule->active_lower[k + 1];
-            const float upper = schedule->active_upper[k + 1];
-            in_corridor = isfinite(lower) && isfinite(upper) &&
-                lower <= upper && states[k + 1].plant.e_y >= lower &&
-                states[k + 1].plant.e_y <= upper;
-        } else {
-            in_corridor = corridor_contains(&states[k + 1],
-                &candidate_reference, configuration,
-                corridor_margin_at_prediction(configuration, k + 1));
-        }
+        const float margin = corridor_margin_for_state(configuration,
+            &states[k + 1].plant, k + 1);
+        const float lower_bound = margin - candidate_reference.right_bound -
+            configuration->nonlinear_corridor_tolerance_m;
+        const float upper_bound = candidate_reference.left_bound - margin +
+            configuration->nonlinear_corridor_tolerance_m;
+        const int in_corridor = corridor_contains(&states[k + 1],
+            &candidate_reference, configuration, margin);
         if (!in_corridor) {
             if (failure_stage) *failure_stage = k;
+            record_rollout_failure(failure, k, &states[k + 1],
+                &candidate_reference, candidate_progress[k + 1],
+                margin, lower_bound, upper_bound);
             return MPC_RTI_ROLLOUT_CORRIDOR;
         }
     }
@@ -1031,7 +1096,7 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
         initial_state, initial_progress, controls, trajectory,
         trajectory_count, lap_length, nominal_references, nominal_progress,
         path_delta, horizon, prediction_dt, configuration, NULL, states,
-        progress, failure_stage);
+        progress, failure_stage, NULL);
 }
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory)
@@ -1091,6 +1156,8 @@ typedef struct
     int nonsmooth_columns;
     int nonlinear_failure_stage;
     int nonlinear_failure_reason;
+    MpcRtiRolloutFailure_t nonlinear_failure;
+    int first_action_valid;
     float nonlinear_objective;
     float minimum_corridor_slack;
     float lateral_accel_proxy;
@@ -1132,6 +1199,9 @@ static int evaluate_nonlinear_candidate(
         !candidate->valid || candidate->horizon < 1 ||
         candidate->horizon > PREDICTION_HORIZON) return 0;
 
+    /* The exact nonlinear candidate remains subject to the normal physical
+     * corridor. Recovery information is retained for diagnostics only. */
+    (void)schedule;
     double cost = 0.0;
     float min_slack = INFINITY;
     float max_lateral_accel = 0.0f;
@@ -1141,19 +1211,10 @@ static int evaluate_nonlinear_candidate(
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 candidate->progress[k], model, &reference)) return 0;
         if (k > 0) {
-            int in_corridor = 0;
-            if (schedule && schedule->recovery_active &&
-                schedule->horizon == candidate->horizon) {
-                const float lower = schedule->active_lower[k];
-                const float upper = schedule->active_upper[k];
-                in_corridor = isfinite(lower) && isfinite(upper) &&
-                    lower <= upper && candidate->states[k].plant.e_y >= lower &&
-                    candidate->states[k].plant.e_y <= upper;
-            } else {
-                in_corridor = corridor_contains(&candidate->states[k],
-                    &reference, model, corridor_margin_at_prediction(model, k));
-            }
-            if (!in_corridor) return 0;
+            const float margin = corridor_margin_for_state(model,
+                &candidate->states[k].plant, k);
+            if (!corridor_contains(&candidate->states[k], &reference,
+                    model, margin)) return 0;
         }
         const MpcModelState_t *state = &candidate->states[k].plant;
         const double terminal_scale = k == candidate->horizon
@@ -1164,27 +1225,24 @@ static int evaluate_nonlinear_candidate(
             state->u - reference.u,
             state->v - reference.v,
             state->r - reference.r,
-            state->steering_command - reference.steering_command};
+            state->steering_command - reference.steering_command,
+            state->actual_steering_angle - reference.steering_command};
+        const double speed_weight = state->u > reference.u
+            ? model->weight_u_overspeed : model->weight_u;
         const double weights[] = {
-            model->weight_e_y, model->weight_e_psi, model->weight_u,
+            model->weight_e_y, model->weight_e_psi, speed_weight,
             model->weight_v, model->weight_r,
+            model->weight_steering_command,
             model->weight_steering_command};
         for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i)
             cost += terminal_scale * weights[i] * errors[i] * errors[i];
 
         if (k > 0) {
-            float left_slack;
-            float right_slack;
-            if (schedule && schedule->recovery_active &&
-                schedule->horizon == candidate->horizon) {
-                left_slack = schedule->active_upper[k] - state->e_y;
-                right_slack = state->e_y - schedule->active_lower[k];
-            } else {
-                left_slack = reference.left_bound -
-                    corridor_margin_at_prediction(model, k) - state->e_y;
-                right_slack = reference.right_bound -
-                    corridor_margin_at_prediction(model, k) + state->e_y;
-            }
+            const float margin = corridor_margin_for_state(model, state, k);
+            const float left_slack = reference.left_bound - margin -
+                state->e_y + model->nonlinear_corridor_tolerance_m;
+            const float right_slack = reference.right_bound - margin +
+                state->e_y + model->nonlinear_corridor_tolerance_m;
             min_slack = fminf(min_slack, fminf(left_slack, right_slack));
         }
         lateral_accel_proxy_by_stage[k] = fabsf(state->u * state->r);
@@ -1213,6 +1271,102 @@ static int evaluate_nonlinear_candidate(
     *minimum_corridor_slack = min_slack;
     *lateral_accel_proxy = max_lateral_accel;
     return 1;
+}
+
+/* A single RTI linearization can produce a QP step whose exact nonlinear
+ * rollout leaves the corridor even though the previous exact nominal is
+ * feasible.  Do not widen the corridor or accept that rollout.  Instead,
+ * backtrack the QP control increment toward the exact nominal and validate
+ * every trial with the same nonlinear model and corridor schedule.  This is
+ * an ordinary trust-region/line-search repair: the returned candidate is
+ * publishable only after the existing exact rollout and objective checks
+ * pass. */
+static int build_exact_corridor_repair_candidate(
+    const MpcRtiState_t *current_state,
+    double current_progress,
+    const MpcRtiNominal_t *nominal,
+    const MpcRtiPassResult_t *failed_pass,
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    int horizon,
+    const MpcRtiCycleConfiguration_t *configuration,
+    const MpcRtiCorridorSchedule_t *schedule,
+    MpcRtiNominal_t *candidate,
+    MpcRtiCandidatePathDelta_t *path_delta,
+    float *alpha_out)
+{
+    if (!current_state || !nominal || !nominal->valid || !failed_pass ||
+        !references || !trajectory ||
+        !configuration || !candidate || !path_delta || !alpha_out ||
+        horizon < 1 || horizon > PREDICTION_HORIZON) return 0;
+
+    /* The failed pass stores its QP controls even when its nonlinear rollout
+     * is rejected.  The invalid candidate flag is expected in this path, so
+     * only the controls are copied below. */
+    const float alphas[] = {0.75f, 0.50f, 0.25f, 0.125f, 0.0625f, 0.0f};
+    for (size_t trial = 0; trial < sizeof(alphas) / sizeof(alphas[0]);
+         ++trial) {
+        const float alpha = alphas[trial];
+        MpcModelControl_t controls[PREDICTION_HORIZON] = {0};
+        int controls_valid = 1;
+        for (int k = 0; k < horizon; ++k) {
+            const MpcModelControl_t nominal_control = nominal->controls[k];
+            const MpcModelControl_t qp_control = failed_pass->candidate.controls[k];
+            controls[k].steering_rate = nominal_control.steering_rate +
+                alpha * (qp_control.steering_rate - nominal_control.steering_rate);
+            controls[k].target_speed_rate = nominal_control.target_speed_rate +
+                alpha * (qp_control.target_speed_rate -
+                    nominal_control.target_speed_rate);
+            if (!isfinite(controls[k].steering_rate) ||
+                !isfinite(controls[k].target_speed_rate)) {
+                controls_valid = 0;
+                break;
+            }
+        }
+        if (!controls_valid) continue;
+
+        MpcRtiState_t states[PREDICTION_HORIZON + 1];
+        double progress[PREDICTION_HORIZON + 1];
+        MpcRtiCandidatePathDelta_t trial_delta;
+        int failure_stage = -1;
+        const MpcRtiRolloutStatus_t rollout_status =
+            mpc_rti_rollout_candidate_with_schedule(
+                current_state, current_progress, controls, trajectory,
+                trajectory_count, lap_length, references, nominal->progress,
+                &trial_delta, horizon, prediction_dt,
+                &configuration->model, schedule, states, progress,
+                &failure_stage, NULL);
+        if (rollout_status != MPC_RTI_ROLLOUT_OK) continue;
+
+        MpcRtiNominal_t trial_candidate = {0};
+        trial_candidate.horizon = horizon;
+        trial_candidate.valid = 1;
+        memcpy(trial_candidate.controls, controls,
+            (size_t)horizon * sizeof(controls[0]));
+        memcpy(trial_candidate.states, states,
+            (size_t)(horizon + 1) * sizeof(states[0]));
+        memcpy(trial_candidate.progress, progress,
+            (size_t)(horizon + 1) * sizeof(progress[0]));
+        float objective;
+        float minimum_corridor_slack;
+        float lateral_accel_proxy;
+        int lateral_accel_proxy_stage = -1;
+        float lateral_accel_proxy_by_stage[PREDICTION_HORIZON + 1] = {0};
+        if (!evaluate_nonlinear_candidate(&trial_candidate, trajectory,
+                trajectory_count, lap_length, configuration, schedule,
+                &objective, &minimum_corridor_slack, &lateral_accel_proxy,
+                &lateral_accel_proxy_stage,
+                lateral_accel_proxy_by_stage)) continue;
+
+        *candidate = trial_candidate;
+        *path_delta = trial_delta;
+        *alpha_out = alpha;
+        return 1;
+    }
+    return 0;
 }
 
 static MpcRtiCycleStatus_t solve_rti_pass(
@@ -1283,6 +1437,23 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         return pass->status;
     }
 
+    MpcModelControl_t candidate_controls[PREDICTION_HORIZON] = {0};
+    for (int k = 0; k < horizon; ++k) {
+        candidate_controls[k].steering_rate = solution.u[k][0];
+        candidate_controls[k].target_speed_rate = solution.u[k][1];
+    }
+    pass->first_action = candidate_controls[0];
+    pass->first_action_valid = isfinite(pass->first_action.steering_rate) &&
+        isfinite(pass->first_action.target_speed_rate) &&
+        pass->first_action.steering_rate >=
+            -configuration->model.max_steering_rate_radps - 1.0e-5f &&
+        pass->first_action.steering_rate <=
+            configuration->model.max_steering_rate_radps + 1.0e-5f &&
+        pass->first_action.target_speed_rate >=
+            -configuration->model.max_target_speed_rate_reduction_mps2 - 1.0e-5f &&
+        pass->first_action.target_speed_rate <=
+            configuration->model.max_target_speed_rate_increase_mps2 + 1.0e-5f;
+
     int accepted_degraded = 0;
     int residual_recovery_candidate = 0;
     if (solver_status == RICCATI_STATUS_MAX_ITERATIONS) {
@@ -1312,11 +1483,6 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         return pass->status;
     }
 
-    MpcModelControl_t candidate_controls[PREDICTION_HORIZON] = {0};
-    for (int k = 0; k < horizon; ++k) {
-        candidate_controls[k].steering_rate = solution.u[k][0];
-        candidate_controls[k].target_speed_rate = solution.u[k][1];
-    }
     pass->candidate.horizon = horizon;
     memcpy(pass->candidate.controls, candidate_controls,
            (size_t)horizon * sizeof(candidate_controls[0]));
@@ -1329,7 +1495,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         trajectory_count, lap_length, references, nominal->progress,
         &pass->path_delta, horizon, prediction_dt, &configuration->model,
         schedule, candidate_states, candidate_progress,
-        &pass->nonlinear_failure_stage);
+        &pass->nonlinear_failure_stage, &pass->nonlinear_failure);
     if (rollout_status != MPC_RTI_ROLLOUT_OK) {
         pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
         pass->nonlinear_failure_reason = (int)rollout_status;
@@ -1347,6 +1513,12 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             &pass->nonlinear_objective, &pass->minimum_corridor_slack,
             &pass->lateral_accel_proxy, &pass->lateral_accel_proxy_stage,
             pass->lateral_accel_proxy_by_stage)) {
+        /* `candidate.valid` means that the candidate passed the complete
+         * nonlinear acceptance gate, not merely that the rollout produced
+         * finite state arrays.  Keeping it set here lets the caller mistake
+         * a corridor-invalid candidate for a publishable residual candidate
+         * and can also select states[1] instead of the bounded first action. */
+        pass->candidate.valid = 0;
         pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
         pass->nonlinear_failure_reason = MPC_RTI_ROLLOUT_INVALID_MODEL;
         pass->solve_us = monotonic_microseconds() - start_us;
@@ -1511,7 +1683,14 @@ static MpcRtiCycleStatus_t reject_cycle(
     MpcRtiCycleResult_t *result,
     MpcRtiCycleStatus_t status)
 {
-    if (memory) mpc_rti_memory_reset(memory);
+    /* A residual rejection is a numerical convergence failure, not a
+     * feasibility failure. Keep the finite ADMM z/y/rho iterate so the next
+     * 40 Hz cycle can continue the same constrained solve. If its exact
+     * nonlinear candidate is usable, the caller promotes it to degraded
+     * authority; hard input, solver, regularity, and nonlinear failures retain
+     * the cold-start behavior. */
+    if (memory && status != MPC_RTI_CYCLE_REJECTED_RESIDUAL)
+        mpc_rti_memory_reset(memory);
     if (result) result->status = status;
     return status;
 }
@@ -1544,9 +1723,12 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->r1_min_corridor_slack = NAN;
         result->r2_min_corridor_slack = NAN;
         result->minimum_predicted_corridor_slack_m = NAN;
+        result->rejection_speed_guard_limit_mps = NAN;
+        result->unguarded_published_target_speed_mps = NAN;
         result->recovery_reentry_stage = -1;
         result->recovery_initial_normal_violation_m = NAN;
         result->recovery_max_seed_violation_m = NAN;
+        result->corridor_repair_alpha = NAN;
         result->lateral_accel_proxy_mps2 = NAN;
         result->lateral_accel_proxy_stage = -1;
         for (int k = 0; k <= PREDICTION_HORIZON; ++k)
@@ -1602,6 +1784,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             corridor_schedule.seed_violation[k];
         result->recovery_stage[k] = corridor_schedule.recovery_stage[k];
     }
+    const MpcRtiMemory_t memory_before_r1 = *memory;
     MpcRtiPassResult_t r1;
     const MpcRtiCycleStatus_t r1_status = solve_rti_pass(
         current_state, current_progress, &nominal, references, trajectory,
@@ -1611,6 +1794,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->r1_status = (int)r1_status;
     result->r1_nonlinear_failure_reason = r1.nonlinear_failure_reason;
     result->r1_nonlinear_failure_stage = r1.nonlinear_failure_stage;
+    result->r1_nonlinear_failure = r1.nonlinear_failure;
     result->r1_first_action = r1.first_action;
     result->r1_solver_iterations = r1.iterations;
     result->r1_solve_us = r1.solve_us;
@@ -1618,11 +1802,17 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->r1_min_corridor_slack = r1.minimum_corridor_slack;
     result->rho_start = r1.rho_start;
     result->rho_u_start = r1.rho_u_start;
+    result->rho_final = r1.rho_final;
+    result->rho_u_final = r1.rho_u_final;
     result->rho_change_count = r1.rho_change_count;
     result->factorization_count = r1.factorization_count;
     result->factorization_time_ns = r1.factorization_time_ns;
     const int r1_accepted = r1_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
         r1_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
+    const int r1_best_effort_available = !r1_accepted &&
+        r1.first_action_valid &&
+        (r1_status == MPC_RTI_CYCLE_REJECTED_RESIDUAL ||
+         r1_status == MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT);
     const MpcRtiMemory_t r1_memory = *memory;
     const int repairable_corridor_failure = !r1_accepted &&
         configuration->refinement_mode != MPC_RTI_REFINEMENT_R1 &&
@@ -1633,8 +1823,45 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         configuration->refinement_mode != MPC_RTI_REFINEMENT_R1 &&
         r1_status == MPC_RTI_CYCLE_REJECTED_RESIDUAL &&
         r1.candidate.valid;
+    MpcRtiPassResult_t corridor_repair = r1;
+    int corridor_repair_available = 0;
+    float corridor_repair_alpha = NAN;
+    if (repairable_corridor_failure) {
+        corridor_repair_available =
+            build_exact_corridor_repair_candidate(
+                current_state, current_progress, &nominal, &r1, references,
+                trajectory, trajectory_count, lap_length, prediction_dt,
+                horizon, configuration, &corridor_schedule,
+                &corridor_repair.candidate, &corridor_repair.path_delta,
+                &corridor_repair_alpha);
+        if (corridor_repair_available) {
+            corridor_repair.status = MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
+            corridor_repair.first_action =
+                corridor_repair.candidate.controls[0];
+            corridor_repair.nonlinear_failure_reason = -1;
+            corridor_repair.nonlinear_failure_stage = -1;
+            corridor_repair.nonlinear_objective = INFINITY;
+            corridor_repair.minimum_corridor_slack = -INFINITY;
+            corridor_repair.lateral_accel_proxy_stage = -1;
+            float repair_lateral_accel_by_stage[PREDICTION_HORIZON + 1] = {0};
+            if (!evaluate_nonlinear_candidate(
+                    &corridor_repair.candidate, trajectory,
+                    trajectory_count, lap_length, configuration,
+                    &corridor_schedule, &corridor_repair.nonlinear_objective,
+                    &corridor_repair.minimum_corridor_slack,
+                    &corridor_repair.lateral_accel_proxy,
+                    &corridor_repair.lateral_accel_proxy_stage,
+                    repair_lateral_accel_by_stage)) {
+                corridor_repair_available = 0;
+            } else {
+                memcpy(corridor_repair.lateral_accel_proxy_by_stage,
+                    repair_lateral_accel_by_stage,
+                    sizeof(repair_lateral_accel_by_stage));
+            }
+        }
+    }
     if (!r1_accepted && !repairable_corridor_failure &&
-        !repairable_residual_failure) {
+        !repairable_residual_failure && !r1_best_effort_available) {
         result->solver_iterations = r1.iterations;
         result->primal_residual = r1.primal_residual;
         result->dual_residual = r1.dual_residual;
@@ -1648,7 +1875,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     }
 
     MpcRtiPassResult_t selected = r1;
-    int selected_candidate = r1_accepted ? 1 : 0;
+    int selected_candidate = r1_accepted || r1_best_effort_available ? 1 : 0;
+    int best_effort_action_published = r1_best_effort_available;
     unsigned int trigger_mask = 0;
     if (configuration->refinement_mode == MPC_RTI_REFINEMENT_ADAPTIVE &&
         r1_accepted) {
@@ -1695,9 +1923,19 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 result->nonlinear_failure_stage = r1.nonlinear_failure_stage;
                 result->nonlinear_failure_reason =
                     r1.nonlinear_failure_reason;
-                result->total_rti_us =
-                    monotonic_microseconds() - cycle_start_us;
-                return reject_cycle(memory, result, r1_status);
+                if (corridor_repair_available) {
+                    *memory = memory_before_r1;
+                    selected = corridor_repair;
+                    selected_candidate = 3;
+                    best_effort_action_published = 0;
+                    result->corridor_repair_used = 1;
+                    result->corridor_repair_alpha = corridor_repair_alpha;
+                    result->rti2_triggered = 1;
+                } else {
+                    result->total_rti_us =
+                        monotonic_microseconds() - cycle_start_us;
+                    return reject_cycle(memory, result, r1_status);
+                }
             }
         }
         MpcRtiReference_t r2_references[PREDICTION_HORIZON + 1];
@@ -1722,12 +1960,15 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             result->r2_nonlinear_failure_reason =
                 r2.nonlinear_failure_reason;
             result->r2_nonlinear_failure_stage = r2.nonlinear_failure_stage;
+            result->r2_nonlinear_failure = r2.nonlinear_failure;
             result->rti_iterations_used = 2;
             result->r2_first_action = r2.first_action;
             result->r2_solver_iterations = r2.iterations;
             result->r2_solve_us = r2.solve_us;
             result->r2_nonlinear_objective = r2.nonlinear_objective;
             result->r2_min_corridor_slack = r2.minimum_corridor_slack;
+            result->rho_final = r2.rho_final;
+            result->rho_u_final = r2.rho_u_final;
             result->rho_change_count += r2.rho_change_count;
             result->factorization_count += r2.factorization_count;
             result->factorization_time_ns += r2.factorization_time_ns;
@@ -1749,6 +1990,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 if (select_r2) {
                     selected = r2;
                     selected_candidate = 2;
+                    best_effort_action_published = 0;
                 }
             } else {
                 if (r1_accepted) {
@@ -1764,17 +2006,65 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         if (!r1_accepted &&
             result->r2_status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
             result->r2_status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
-            result->solver_iterations = r2.iterations;
-            result->primal_residual = r2.primal_residual;
-            result->dual_residual = r2.dual_residual;
-            result->maximum_regularization = r2.maximum_regularization;
-            result->regularization_count = r2.regularization_count;
-            result->nonsmooth_jacobian_columns = r2.nonsmooth_columns;
-            result->nonlinear_failure_stage = r2.nonlinear_failure_stage;
-            result->nonlinear_failure_reason = r2.nonlinear_failure_reason;
-            result->total_rti_us = monotonic_microseconds() - cycle_start_us;
-            return reject_cycle(memory, result,
-                (MpcRtiCycleStatus_t)result->r2_status);
+            /* A residual-recovery R1 candidate may have passed the exact
+             * nonlinear rollout, but it has not passed the convergence gate.
+             * Do not promote it to a command when R2 also fails: otherwise a
+             * residual failure is hidden as an accepted degraded cycle. */
+            if (corridor_repair_available) {
+                *memory = memory_before_r1;
+                selected = corridor_repair;
+                selected_candidate = 3;
+                best_effort_action_published = 0;
+                result->corridor_repair_used = 1;
+                result->corridor_repair_alpha = corridor_repair_alpha;
+            } else if (result->r2_status == MPC_RTI_CYCLE_REJECTED_RESIDUAL &&
+                       r2.candidate.valid) {
+                /* R2 may fail only the numerical residual gate while its
+                 * bounded candidate has already passed the exact nonlinear
+                 * rollout and corridor checks. Keep that best found control
+                 * rather than withdrawing authority or braking. */
+                selected = r2;
+                selected.status = MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
+                selected_candidate = 2;
+                best_effort_action_published = 0;
+                result->residual_candidate_published = 1;
+            } else if (r1_status == MPC_RTI_CYCLE_REJECTED_RESIDUAL &&
+                       r1.candidate.valid) {
+                /* If R2 did not produce a usable candidate, retain R1's
+                 * exact-feasible residual-limited iterate. */
+                *memory = r1_memory;
+                selected = r1;
+                selected.status = MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
+                selected_candidate = 1;
+                best_effort_action_published = 0;
+                result->residual_candidate_published = 1;
+            } else if (r2.first_action_valid &&
+                       (result->r2_status == MPC_RTI_CYCLE_REJECTED_RESIDUAL ||
+                        result->r2_status ==
+                            MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT)) {
+                /* The full R2 horizon may be invalid even though its first
+                 * bounded action is finite. Publish that action, but retain
+                 * the rejected status and mark the result as best effort. */
+                selected = r2;
+                selected_candidate = 2;
+                best_effort_action_published = 1;
+            } else if (r1_best_effort_available) {
+                selected = r1;
+                selected_candidate = 1;
+                best_effort_action_published = 1;
+            } else {
+                result->solver_iterations = r2.iterations;
+                result->primal_residual = r2.primal_residual;
+                result->dual_residual = r2.dual_residual;
+                result->maximum_regularization = r2.maximum_regularization;
+                result->regularization_count = r2.regularization_count;
+                result->nonsmooth_jacobian_columns = r2.nonsmooth_columns;
+                result->nonlinear_failure_stage = r2.nonlinear_failure_stage;
+                result->nonlinear_failure_reason = r2.nonlinear_failure_reason;
+                result->total_rti_us = monotonic_microseconds() - cycle_start_us;
+                return reject_cycle(memory, result,
+                    (MpcRtiCycleStatus_t)result->r2_status);
+            }
         }
     }
 
@@ -1810,16 +2100,71 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->nonlinear_failure_stage = selected.nonlinear_failure_stage;
     result->nonlinear_failure_reason = selected.nonlinear_failure_reason;
     result->first_control = selected.first_action;
-    result->published_steering_command =
-        selected.candidate.states[1].plant.steering_command;
-    result->published_target_speed =
-        selected.candidate.states[1].plant.target_speed;
+    if (selected.candidate.valid) {
+        result->published_steering_command =
+            selected.candidate.states[1].plant.steering_command;
+        result->published_target_speed =
+            selected.candidate.states[1].plant.target_speed;
+    } else if (best_effort_action_published) {
+        /* The complete horizon is not trusted, but the first model action is
+         * finite and envelope-valid. Apply exactly one model time step to the
+         * measured actuator states; do not invent a geometric fallback. */
+        result->published_steering_command = clampf_rti(
+            current_state->plant.steering_command +
+                prediction_dt * selected.first_action.steering_rate,
+            -configuration->model.max_steering_rad,
+            configuration->model.max_steering_rad);
+        result->published_target_speed = clampf_rti(
+            current_state->plant.target_speed +
+                prediction_dt * selected.first_action.target_speed_rate,
+            0.0f, configuration->model.active_speed_ceiling_mps);
+    }
+    result->unguarded_published_target_speed_mps =
+        result->published_target_speed;
+
+    /* A rejected horizon may still expose a finite first action so that the
+     * car remains under MPC authority.  That action is not allowed to retain
+     * an accelerating target while the local raceline is already slowing
+     * down.  This is not a global speed cap and it does not alter accepted
+     * MPC candidates: it only converts a failed-candidate speed command into
+     * the speed requested by the active trajectory sample.  The failure and
+     * the clamp remain visible in the result telemetry. */
+    const int rejection_speed_guard_needed = best_effort_action_published ||
+        result->residual_candidate_published;
+    if (rejection_speed_guard_needed) {
+        MpcTrajectorySample_t local_sample;
+        if (mpc_trajectory_sample(trajectory, trajectory_count, lap_length,
+                current_progress, &local_sample)) {
+            const float local_speed_limit = clampf_rti(
+                (float)local_sample.speed, 0.0f,
+                configuration->model.active_speed_ceiling_mps);
+            result->rejection_speed_guard_limit_mps = local_speed_limit;
+            if (result->published_target_speed > local_speed_limit) {
+                result->published_target_speed = local_speed_limit;
+                result->rejection_speed_guard_applied = 1;
+            }
+        }
+    }
     result->status = selected.status;
 
-    memory->nominal = selected.candidate;
+    if (best_effort_action_published &&
+        selected.status != MPC_RTI_CYCLE_REJECTED_RESIDUAL) {
+        /* Match the original rejection boundary: a nonlinear-invalid
+         * horizon must not poison either the nominal trajectory or the ADMM
+         * warm start. Preserve the previously accepted nominal while still
+         * publishing its finite first action. */
+        const MpcRtiNominal_t previous_nominal = memory_before_r1.nominal;
+        mpc_rti_memory_reset(memory);
+        memory->nominal = previous_nominal;
+    } else if (selected.candidate.valid) {
+        memory->nominal = selected.candidate;
+    }
+    result->best_effort_action_published = best_effort_action_published;
     memory->consecutive_degraded_solves =
         selected.status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED
-            ? r1_memory.consecutive_degraded_solves + 1 : 0;
+            ? (selected_candidate == 3
+                ? memory_before_r1.consecutive_degraded_solves
+                : r1_memory.consecutive_degraded_solves) + 1 : 0;
     result->rho_final = memory->solver_state.rho;
     result->rho_u_final = memory->solver_state.rho_u;
     result->total_rti_us = monotonic_microseconds() - cycle_start_us;
@@ -1863,17 +2208,22 @@ float mpc_rti_scalar_stage_cost(
     const float etarget = state->plant.target_speed - reference->target_speed;
     const float edelta = state->plant.steering_command -
         reference->steering_command;
+    const float eactual_delta = state->plant.actual_steering_angle -
+        reference->steering_command;
     const float dq_delta = control->steering_rate -
         state->previous_steering_rate;
     const float dq_speed = control->target_speed_rate -
         state->previous_target_speed_rate;
     return configuration->weight_e_y * ey * ey +
         configuration->weight_e_psi * epsi * epsi +
-        configuration->weight_u * eu * eu +
+        (state->plant.u > reference->u
+            ? configuration->weight_u_overspeed : configuration->weight_u) *
+            eu * eu +
         configuration->weight_target_speed_state * etarget * etarget +
         configuration->weight_v * ev * ev +
         configuration->weight_r * er * er +
         configuration->weight_steering_command * edelta * edelta +
+        configuration->weight_steering_command * eactual_delta * eactual_delta +
         configuration->weight_steering_rate *
             control->steering_rate * control->steering_rate +
         configuration->weight_target_speed_rate *

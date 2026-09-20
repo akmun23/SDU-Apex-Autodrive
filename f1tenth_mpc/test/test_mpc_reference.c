@@ -75,12 +75,15 @@ static void test_current_raceline_loads_and_wraps(void)
     }
     fclose(input);
 
-    check_true(count == 2587, "current trajectory contains 2587 rows before endpoint removal");
+    const size_t loaded_count = count;
+    check_true(loaded_count >= 2000 && loaded_count < TEST_MAX_POINTS,
+               "dense exact trajectory contains controller-resolution rows");
     double lap_length = 0.0;
     check_true(mpc_trajectory_prepare(track_points, &count, &lap_length),
                "current trajectory validates and prepares");
-    check_true(count == 2586, "current trajectory contains 2586 unique points");
-    check_near(lap_length, 51.7, 0.03,
+    check_true(count == loaded_count,
+               "dense exact trajectory retains all unique points");
+    check_near(lap_length, 51.5222, 0.01,
                "closed-loop length includes the final-to-first segment");
 
     MpcTrajectorySample_t at_start;

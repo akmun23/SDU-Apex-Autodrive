@@ -75,6 +75,12 @@ sensor_odometry:
     # the rolling rate is already >1 m/s above causal speed and the current
     # packet is another >1 m/s above that rolling rate.
     wheel_burst_disagreement_mps: 1.0
+    # If a pending burst is actually a stale low causal estimate, let /odom
+    # catch up toward the rolling rate at a bounded acceleration. This is not
+    # a vehicle-speed command limit; values above the 16 m/s competition
+    # envelope remain rejected as encoder evidence.
+    wheel_burst_catchup_accel_mps2: 2.5
+    wheel_burst_catchup_max_mps: 16.0
     # A repeated cumulative-angle burst can make rolling/current wheel rates
     # agree while both are still far above causal speed. Established-speed
     # turn entry rejects that positive innovation and propagates with IMU
@@ -141,9 +147,10 @@ sensor_odometry:
     # Use the validated no-lateral-slip kinematic turn update. Integrating
     # simulator lateral IMU acceleration at 20 Hz caused false pose drift in
     # the first bend; enable only after a separately validated slip model.
-    # Keep lateral integration disabled in normal turns. The observer
-    # automatically enables the validated dynamic propagation during an
-    # explicitly rejected wheel-slip/dropout interval.
+    # Keep lateral integration disabled in normal turns. An explicitly
+    # rejected wheel-slip/dropout interval does not enable this path
+    # implicitly: the Unity lateral IMU acceleration is not a validated
+    # replacement for the missing lateral state.
     integrate_lateral_acceleration_in_turn: false
     # This bounded sensor-only model estimates COM lateral velocity from
     # causal mapped wheel speed and IMU yaw rate. The result is transformed

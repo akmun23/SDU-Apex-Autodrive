@@ -232,7 +232,7 @@ void test_bounded_kinematic_lateral_slip_model()
     "sideslip model goes to zero with no yaw rate");
 }
 
-void test_wheel_slip_enables_dynamic_turn_observer()
+void test_wheel_slip_does_not_enable_dynamic_turn_observer()
 {
   OdometryObserverConfig config;
   config.wheel_speed_scale = 1.0;
@@ -242,9 +242,9 @@ void test_wheel_slip_enables_dynamic_turn_observer()
   observer.update(observation(0.050, four_mps_delta, four_mps_delta));
   observer.update(observation(0.100, 2.0 * four_mps_delta, 2.0 * four_mps_delta));
 
-  // The wheel pair jumps to a coherent but implausible rate. With the
-  // explicit dynamic option disabled, this must still switch to the
-  // validated dynamic path because the wheel measurement was rejected.
+  // The wheel pair jumps to a coherent but implausible rate. Rejecting the
+  // longitudinal measurement must not silently promote the unvalidated
+  // lateral IMU acceleration into the vehicle state.
   const double twelve_mps_delta = 12.0 * 0.050 / config.wheel_radius_m;
   const auto slip = observer.update(observation(
     0.150, 2.0 * four_mps_delta + twelve_mps_delta,
@@ -253,8 +253,8 @@ void test_wheel_slip_enables_dynamic_turn_observer()
     "implausible wheel slew is diagnosed as rejected");
   require(!slip.wheel_update_used,
     "implausible wheel slew is not used for longitudinal speed");
-  require(std::abs(slip.body_v_mps) > 1.0e-5,
-    "rejected wheel slip enables dynamic lateral propagation");
+  require(std::abs(slip.body_v_mps) < 1.0e-12,
+    "rejected wheel slip does not enable dynamic lateral propagation");
 }
 
 void test_launch_uses_wheel_speed_during_acceleration()
@@ -824,7 +824,7 @@ int main()
   test_bounded_turn_speed_bias_model();
   test_turn_mode_and_pose();
   test_bounded_kinematic_lateral_slip_model();
-  test_wheel_slip_enables_dynamic_turn_observer();
+  test_wheel_slip_does_not_enable_dynamic_turn_observer();
   test_launch_uses_wheel_speed_during_acceleration();
   test_pose_integration_uses_velocity_midpoint();
   test_coherent_current_packet_updates_pose_without_changing_state();

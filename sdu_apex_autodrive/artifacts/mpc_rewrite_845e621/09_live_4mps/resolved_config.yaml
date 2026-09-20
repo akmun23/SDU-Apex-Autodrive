@@ -1,6 +1,0 @@
-status: not_run
-simulator_mode: batchmode
-no_graphics_flag: false
-speed_cap_mps: 4.0
-required_clean_laps: 1
-production_mpc_enabled: false

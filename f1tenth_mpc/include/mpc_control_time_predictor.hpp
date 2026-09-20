@@ -57,6 +57,10 @@ struct MpcControlTimePredictorConfig {
     double maximum_state_age_s{0.120};
     double model_integration_step_s{0.025};
     double maximum_command_speed_mps{16.0};
+    /* Commands are timestamped when published by the controller, while the
+     * simulator may apply them later after the bridge transport backlog. The
+     * effective command timeline is shifted forward by this measured delay. */
+    double command_actuation_delay_s{0.0};
 };
 
 struct MpcControlTimePrediction {

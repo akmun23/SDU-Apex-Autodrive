@@ -144,7 +144,11 @@ def main() -> int:
         centerline, root, model, envelope, cfg, warm,
         checkpoint_dir=output / "checkpoints",
     )
-    report = export_solution(solution, model, envelope, cfg, output)
+    export_spacing = cfg.get("track", {}).get("export_spacing_m")
+    report = export_solution(
+        solution, model, envelope, cfg, output,
+        output_spacing_m=(float(export_spacing)
+                          if export_spacing is not None else None))
 
     # Replace approximate wall-distance columns with the same map ray-cast
     # used by the repository's existing trajectory pipeline, then enforce the

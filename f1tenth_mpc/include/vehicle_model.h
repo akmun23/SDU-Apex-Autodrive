@@ -24,6 +24,15 @@ typedef struct
     float r;
     float target_speed;
     float steering_command;
+    /* Unity's bridge delivers the steering target through a two-sample
+     * command queue before the physical steering angle follows it. These
+     * states are reconstructed from our own past published commands. */
+    float delayed_steering_command_1;
+    float delayed_steering_command_2;
+    /* Unity keeps a separate physical wheel angle and slews it toward the
+     * delayed commanded target. This state is estimated causally by the
+     * controller; it is not a simulator-only runtime input. */
+    float actual_steering_angle;
 } MpcModelState_t;
 
 typedef struct
@@ -31,6 +40,25 @@ typedef struct
     float steering_rate;
     float target_speed_rate;
 } MpcModelControl_t;
+
+/*
+ * The Unity wheel/contact response is represented here as an identified
+ * command-to-yaw map.  These are not real-car tire parameters.  The optional
+ * curvature term is an empirical correction for the observed reduction in
+ * yaw response during the simulator's high-curvature transitions.
+ */
+typedef struct
+{
+    float response_time_constant_s;
+    float steering_gain_per_m;
+    float curvature_gain_reduction_per_m;
+    float curvature_gain_start_per_m;
+    float curvature_gain_end_per_m;
+    /* Optional empirical low-speed response extension.  A value of zero
+     * leaves the identified constant-time-constant model unchanged. */
+    float low_speed_response_time_constant_s;
+    float low_speed_transition_speed_mps;
+} MpcYawRateModelParameters_t;
 
 enum
 {
@@ -40,6 +68,7 @@ enum
     MPC_STAGE_CLIPPED_TARGET_SPEED = 1u << 3,
     MPC_STAGE_CLIPPED_ACCELERATION = 1u << 4,
     MPC_STAGE_CLIPPED_BODY_SPEED = 1u << 5,
+    MPC_STAGE_CLIPPED_ACTUAL_STEERING = 1u << 6,
 };
 
 typedef struct
@@ -55,7 +84,7 @@ typedef struct
 extern "C" {
 #endif
 
-/* Authoritative 7-state accepted AutoDRIVE model stage. The control-rate
+/* Authoritative 8-state accepted AutoDRIVE model stage. The control-rate
  * decisions update command states before this same interval's response. */
 MpcStageResult_t mpc_vehicle_model_step(
     const MpcModelState_t *state,
@@ -67,43 +96,21 @@ VehicleParameters_t vehicle_model_default_parameters(void);
 VehicleParameters_t vehicle_model_get_parameters(void);
 int vehicle_model_set_parameters(const VehicleParameters_t *parameters);
 
+MpcYawRateModelParameters_t vehicle_model_default_yaw_rate_parameters(void);
+MpcYawRateModelParameters_t vehicle_model_get_yaw_rate_parameters(void);
+int vehicle_model_set_yaw_rate_parameters(
+    const MpcYawRateModelParameters_t *parameters);
+
+/* Identified Unity steering relation used by both prediction and feed-forward. */
+float vehicle_model_yaw_rate_gain(float steering_rad);
+float vehicle_model_yaw_rate_gain_for_curvature(float curvature_radpm);
+float vehicle_model_steering_for_curvature(float curvature_radpm);
+
 /* Apply the controller's temporary target-speed ceiling to every nonlinear
  * and linearized model step.  This is a command-policy limit, not a change to
  * the Unity vehicle physics or the project-wide 16 m/s model envelope. */
 float vehicle_model_get_active_target_speed_ceiling(void);
 int vehicle_model_set_active_target_speed_ceiling(float ceiling_mps);
-
-/* Clamp MPC command-space output to the source steering and project limits. */
-ControlInput_t vehicle_model_saturate_control(const ControlInput_t *raw_control);
-
-VehicleState_t vehicle_model_predict_next_state(
-    const VehicleState_t *current_state,
-    const ControlInput_t *control_input,
-    float time_step);
-
-FrenetState_t vehicle_model_predict_next_frenet_state(
-    const FrenetState_t *state,
-    const ControlInput_t *control,
-    float time_step,
-    float path_curvature);
-
-void vehicle_model_predict_trajectory(
-    const VehicleState_t *initial_state,
-    const ControlInput_t *control_sequence,
-    float time_step,
-    uint16_t step_count,
-    VehicleState_t *predicted_trajectory);
-
-/* Numerical linearization is intentional: it guarantees that the Riccati
- * stage uses the same source-command map as recursive scoring. */
-void vehicle_model_compute_frenet_linearization(
-    const FrenetState_t *frenet_state,
-    const ControlInput_t *operating_control,
-    float time_step,
-    float path_curvature,
-    float reference_velocity,
-    float state_matrix_A[NX_FRENET][NX_FRENET],
-    float input_matrix_B[NX_FRENET][NU]);
 
 #ifdef __cplusplus
 }

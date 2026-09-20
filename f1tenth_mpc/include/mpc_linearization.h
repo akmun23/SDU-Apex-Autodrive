@@ -7,9 +7,9 @@
 
 typedef struct
 {
-    float A[7][7];
-    float B[7][2];
-    float d[7];
+    float A[MPC_MODEL_NX][MPC_MODEL_NX];
+    float B[MPC_MODEL_NX][2];
+    float d[MPC_MODEL_NX];
     unsigned int nominal_branch_flags;
     uint16_t nonsmooth_column_mask;
     int nonsmooth_column_count;

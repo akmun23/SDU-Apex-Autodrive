@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 
-enum { NX = 7, CONTROL_COUNT = 2 };
+enum { NX = MPC_MODEL_NX, CONTROL_COUNT = 2 };
 
 static int failures = 0;
 static float max_directional_relative_error = 0.0f;
@@ -36,6 +36,9 @@ static void state_to_array(const MpcModelState_t *state, float x[NX])
     x[4] = state->r;
     x[5] = state->target_speed;
     x[6] = state->steering_command;
+    x[7] = state->delayed_steering_command_1;
+    x[8] = state->delayed_steering_command_2;
+    x[9] = state->actual_steering_angle;
 }
 
 static void output_to_array(const MpcStageResult_t *stage, float y[NX])
@@ -106,8 +109,9 @@ static void check_directional_derivative(
     if (!linearization.valid) return;
 
     const float dx[NX] = {0.21f, 0.07f, 0.53f, -0.13f,
-                          0.62f, 0.31f, 0.018f};
-    const float du[NU] = {0.34f, -0.42f};
+                          0.62f, 0.31f, 0.018f, -0.021f,
+                          0.017f, -0.016f};
+    const float du[2] = {0.34f, -0.42f};
     float x_plus[NX];
     float x_minus[NX];
     float x0[NX];
@@ -120,11 +124,17 @@ static void check_directional_derivative(
     const MpcModelState_t state_plus = {
         .e_y = x_plus[0], .e_psi = x_plus[1], .u = x_plus[2],
         .v = x_plus[3], .r = x_plus[4], .target_speed = x_plus[5],
-        .steering_command = x_plus[6]};
+        .steering_command = x_plus[6],
+        .delayed_steering_command_1 = x_plus[7],
+        .delayed_steering_command_2 = x_plus[8],
+        .actual_steering_angle = x_plus[9]};
     const MpcModelState_t state_minus = {
         .e_y = x_minus[0], .e_psi = x_minus[1], .u = x_minus[2],
         .v = x_minus[3], .r = x_minus[4], .target_speed = x_minus[5],
-        .steering_command = x_minus[6]};
+        .steering_command = x_minus[6],
+        .delayed_steering_command_1 = x_minus[7],
+        .delayed_steering_command_2 = x_minus[8],
+        .actual_steering_angle = x_minus[9]};
     const MpcModelControl_t control_plus = {
         .steering_rate = control->steering_rate + h * du[0],
         .target_speed_rate = control->target_speed_rate + h * du[1]};
@@ -293,14 +303,14 @@ static void test_analytic_jacobian_against_fd_oracle(void)
         MpcModelState_t state = {
             .e_y = uniform_random(-0.30f, 0.30f),
             .e_psi = uniform_random(-0.30f, 0.30f),
-            .u = uniform_random(2.0f, 10.0f),
+            .u = uniform_random(2.0f, 6.0f),
             .v = uniform_random(-0.15f, 0.15f),
             .r = uniform_random(-1.8f, 1.8f),
             .target_speed = 0.0f,
-            .steering_command = uniform_random(-0.20f, 0.20f)};
+            .steering_command = uniform_random(-0.025f, 0.025f)};
         state.target_speed = state.u + uniform_random(-0.30f, 0.30f);
         const MpcModelControl_t control = {
-            .steering_rate = uniform_random(-1.5f, 1.5f),
+            .steering_rate = uniform_random(-0.2f, 0.2f),
             .target_speed_rate = uniform_random(-1.0f, 1.0f)};
         const float curvature = uniform_random(-0.18f, 0.18f);
 

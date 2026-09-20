@@ -11,8 +11,8 @@ extern "C" {
 
 enum
 {
-    MPC_RTI_PLANT_NX = 7,
-    MPC_RTI_NX = 9,
+    MPC_RTI_PLANT_NX = 10,
+    MPC_RTI_NX = 12,
     MPC_RTI_NU = 2,
     MPC_RTI_IDX_EY = 0,
     MPC_RTI_IDX_EPSI = 1,
@@ -21,8 +21,11 @@ enum
     MPC_RTI_IDX_R = 4,
     MPC_RTI_IDX_TARGET_SPEED = 5,
     MPC_RTI_IDX_STEERING_COMMAND = 6,
-    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 7,
-    MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE = 8
+    MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1 = 7,
+    MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2 = 8,
+    MPC_RTI_IDX_ACTUAL_STEERING_ANGLE = 9,
+    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 10,
+    MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE = 11
 };
 
 typedef struct
@@ -52,6 +55,8 @@ typedef struct
     float weight_e_y;
     float weight_e_psi;
     float weight_u;
+    /* Used only while the nominal state is above the raceline speed. */
+    float weight_u_overspeed;
     float weight_target_speed_state;
     float weight_v;
     float weight_r;
@@ -128,6 +133,21 @@ typedef enum
     MPC_RTI_ROLLOUT_STATE_LIMIT,
     MPC_RTI_ROLLOUT_CORRIDOR
 } MpcRtiRolloutStatus_t;
+
+/* Details of the first state that made an exact nonlinear candidate
+ * unacceptable. This is diagnostic data only: it does not widen the
+ * corridor or change action selection. */
+typedef struct
+{
+    int valid;
+    int stage;
+    MpcRtiState_t state;
+    MpcRtiReference_t reference;
+    double progress;
+    float margin_m;
+    float lower_bound_m;
+    float upper_bound_m;
+} MpcRtiRolloutFailure_t;
 
 typedef struct
 {
@@ -223,6 +243,12 @@ typedef struct
     MpcRtiCandidatePathDelta_t candidate_path_delta;
     float published_steering_command;
     float published_target_speed;
+    /* A rejection-only policy guard.  It is deliberately separate from the
+     * accepted MPC candidate so the controller cannot silently turn a failed
+     * horizon into a faster-than-raceline command. */
+    float rejection_speed_guard_limit_mps;
+    float unguarded_published_target_speed_mps;
+    int rejection_speed_guard_applied;
     int solver_iterations;
     float primal_residual;
     float dual_residual;
@@ -241,6 +267,8 @@ typedef struct
     int r2_nonlinear_failure_reason;
     int r1_nonlinear_failure_stage;
     int r2_nonlinear_failure_stage;
+    MpcRtiRolloutFailure_t r1_nonlinear_failure;
+    MpcRtiRolloutFailure_t r2_nonlinear_failure;
     float r1_nonlinear_objective;
     float r2_nonlinear_objective;
     float r1_min_corridor_slack;
@@ -252,7 +280,13 @@ typedef struct
     double r1_solve_us;
     double r2_solve_us;
     double total_rti_us;
-    int selected_candidate; /* 1=R1, 2=R2. */
+    int selected_candidate; /* 1=R1, 2=R2, 3=exact corridor repair. */
+    int corridor_repair_used;
+    /* Exact-feasible candidate retained despite an ADMM residual limit. */
+    int residual_candidate_published;
+    /* Finite first action retained when the full horizon failed validation. */
+    int best_effort_action_published;
+    float corridor_repair_alpha;
     float rho_start;
     float rho_u_start;
     float rho_final;
@@ -365,7 +399,8 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
     const MpcRtiCorridorSchedule_t *schedule,
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1],
-    int *failure_stage);
+    int *failure_stage,
+    MpcRtiRolloutFailure_t *failure);
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory);
 

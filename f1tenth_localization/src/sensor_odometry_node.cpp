@@ -124,6 +124,10 @@ public:
     declare_parameter(
       "wheel_burst_disagreement_mps", observer_defaults.wheel_burst_disagreement_mps);
     declare_parameter(
+      "wheel_burst_catchup_accel_mps2", observer_defaults.wheel_burst_catchup_accel_mps2);
+    declare_parameter(
+      "wheel_burst_catchup_max_mps", observer_defaults.wheel_burst_catchup_max_mps);
+    declare_parameter(
       "allow_turn_current_packet_recovery", observer_defaults.allow_turn_current_packet_recovery);
     declare_parameter(
       "turn_current_packet_max_increase_mps",
@@ -290,6 +294,10 @@ private:
       0.0, get_parameter("wheel_recovery_launch_wheel_speed_mps").as_double());
     config.wheel_burst_disagreement_mps = get_parameter(
       "wheel_burst_disagreement_mps").as_double();
+    config.wheel_burst_catchup_accel_mps2 = std::max(
+      0.0, get_parameter("wheel_burst_catchup_accel_mps2").as_double());
+    config.wheel_burst_catchup_max_mps = std::max(
+      0.0, get_parameter("wheel_burst_catchup_max_mps").as_double());
     config.allow_turn_current_packet_recovery = get_parameter(
       "allow_turn_current_packet_recovery").as_bool();
     config.turn_current_packet_max_increase_mps = std::max(

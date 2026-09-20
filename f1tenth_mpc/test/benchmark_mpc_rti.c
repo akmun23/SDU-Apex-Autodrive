@@ -157,12 +157,14 @@ int main(int argc, char **argv)
     const MpcRtiState_t state = {
         .plant = {.e_y = 0.0f, .e_psi = 0.0f, .u = speed, .v = 0.0f,
                   .r = curvature * speed, .target_speed = target_speed,
-                  .steering_command = steering_command},
+                  .steering_command = steering_command,
+                  .actual_steering_angle = steering_command},
         .previous_steering_rate = 0.0f,
         .previous_target_speed_rate = 0.0f};
     const MpcRtiConfiguration_t model = {
         .weight_e_y = 1500.0f, .weight_e_psi = 50.0f,
-        .weight_u = 200.0f, .weight_target_speed_state = 20.0f,
+        .weight_u = 200.0f, .weight_u_overspeed = 200.0f,
+        .weight_target_speed_state = 20.0f,
         .weight_v = 0.0f, .weight_r = 1.5f,
         .weight_steering_command = 1.0f, .weight_steering_rate = 2.0f,
         .weight_target_speed_rate = 0.5f,
@@ -192,7 +194,8 @@ int main(int argc, char **argv)
         .max_consecutive_degraded_solves = 3};
     if (use_scaling) {
         const float state_scale[RICCATI_MAX_NX] = {
-            0.10f, 0.25f, 10.0f, 0.25f, 3.2f, 10.0f, 0.5f, 1.2f, 8.0f, 1.0f};
+            0.10f, 0.25f, 10.0f, 0.25f, 3.2f, 10.0f,
+            0.5f, 0.5f, 1.2f, 8.0f};
         const float input_scale[RICCATI_MAX_NU] = {1.2f, 8.0f};
         memcpy(configuration.solver.state_scale, state_scale,
                sizeof(state_scale));

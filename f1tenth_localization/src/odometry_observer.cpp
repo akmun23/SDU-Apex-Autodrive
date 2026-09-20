@@ -32,6 +32,8 @@ OdometryObserverConfig deployment_observer_config()
   config.wheel_recovery_launch_innovation_mps = 2.0;
   config.wheel_recovery_launch_wheel_speed_mps = 4.0;
   config.wheel_burst_disagreement_mps = 1.0;
+  config.wheel_burst_catchup_accel_mps2 = 2.5;
+  config.wheel_burst_catchup_max_mps = 16.0;
   config.allow_turn_current_packet_recovery = true;
   config.turn_current_packet_max_increase_mps = 0.20;
   config.use_turn_speed_bias_model = true;
@@ -591,12 +593,38 @@ OdometryEstimate OdometryObserver::update(
       0.0, wheel_packet_mapped + turn_speed_bias_mps(
       wheel_packet_mapped, observation.yaw_rate_radps));
     last_turn_speed_bias_mps_ = turn_wheel_bias;
+    // A repeated encoder packet is a longitudinal measurement dropout, not
+    // evidence that the lateral IMU acceleration is a valid vehicle-state
+    // model. On the Unity car the latter contains contact/COM transients;
+    // enabling it automatically during a dropout accumulated a false
+    // lateral velocity of almost 1 m/s in a live MPC run. Keep the dynamic
+    // option explicit so it can only be enabled by a separately validated
+    // vehicle profile. The dropout path below still propagates longitudinal
+    // braking from ax and uses the bounded kinematic lateral model when
+    // configured.
     const bool integrate_lateral_dynamics =
-      config_.integrate_lateral_acceleration_in_turn || wheel_dropout_active_;
+      config_.integrate_lateral_acceleration_in_turn;
     // Longitudinal wheel speed is the observable with the correct scale in a
     // turn.  Use it to anchor u before and after the IMU RK2 lateral update;
     // otherwise the turn model integrates small ax bias and can report
     // 0.30 m/s while the encoders and vehicle are travelling at 0.50 m/s.
+    // A repeated zero/near-zero packet makes the current-packet derivative
+    // unusable, but the rolling window can still contain the real motion.
+    // Recover from that ordinary dropout with the rolling rate.  The old
+    // path preferred the instantaneous packet whenever it happened to fall
+    // inside the innovation gate; in the simulator that selected stale low
+    // rates (for example 1.55 m/s while the car was travelling about 2.7
+    // m/s) and permanently put MPC behind the raceline.
+    const bool window_wheel_recovery = wheel_dropout_active_ &&
+      !wheel_burst_recovery_pending_ &&
+      !wheel_burst_rejected_ &&
+      !wheel_slew_rejected &&
+      observation.ax_mps2 > config_.turn_wheel_braking_ax_mps2 &&
+      !launch_wheel_spin(speed_mps_) &&
+      wheel_packet >= config_.wheel_freeze_speed_mps &&
+      turn_wheel_mapped >= config_.wheel_freeze_speed_mps &&
+      std::abs(turn_wheel_mapped - speed_mps_) <=
+      config_.wheel_innovation_max_mps;
     const bool normal_wheel_recovery = wheel_dropout_active_ &&
       !wheel_burst_rejected_ &&
       !launch_wheel_spin(speed_mps_) &&
@@ -620,8 +648,20 @@ OdometryEstimate OdometryObserver::update(
       config_.wheel_burst_disagreement_mps > 0.0 &&
       turn_wheel_packet_mapped > turn_wheel_mapped +
       config_.wheel_burst_disagreement_mps;
-    const bool wheel_recovery = normal_wheel_recovery ||
-      turn_current_packet_recovery;
+    const bool packet_wheel_recovery = !window_wheel_recovery &&
+      (normal_wheel_recovery || turn_current_packet_recovery);
+    const bool wheel_recovery = window_wheel_recovery ||
+      packet_wheel_recovery;
+    const bool burst_window_catchup =
+      wheel_burst_recovery_pending_ && !wheel_recovery &&
+      !launch_wheel_spin(speed_mps_) &&
+      observation.ax_mps2 > config_.turn_wheel_braking_ax_mps2 &&
+      config_.wheel_burst_catchup_accel_mps2 > 0.0 &&
+      config_.wheel_burst_catchup_max_mps > 0.0 &&
+      turn_wheel_mapped >= config_.wheel_freeze_speed_mps &&
+      turn_wheel_mapped <= config_.wheel_burst_catchup_max_mps &&
+      turn_wheel_mapped > body_u_mps_ +
+      config_.wheel_burst_disagreement_mps;
     const bool wheel_coherent = !wheel_burst_rejected_ &&
       !launch_wheel_spin(speed_mps_) &&
       wheel_packet >= config_.wheel_freeze_speed_mps &&
@@ -638,16 +678,28 @@ OdometryEstimate OdometryObserver::update(
       body_u_mps_ = turn_wheel_mapped;
       wheel_update_used = true;
     } else if (wheel_recovery) {
-      body_u_mps_ = turn_wheel_packet_mapped;
+      body_u_mps_ = window_wheel_recovery ?
+        turn_wheel_mapped : turn_wheel_packet_mapped;
       wheel_dropout_active_ = false;
       wheel_burst_recovery_pending_ = false;
-      // The rolling window still contains the repeated cumulative-angle
-      // packet. Rebase it at the first valid recovery packet so the next
-      // normal update cannot lock onto a stale low rate.
-      encoder_history_.clear();
-      encoder_history_.push_back({
-        observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
+      if (packet_wheel_recovery) {
+        // The rolling window still contains the repeated cumulative-angle
+        // packet. Rebase it only when a current-packet recovery was actually
+        // required; ordinary dropout recovery already used the window and
+        // must retain it for the next delayed callback.
+        encoder_history_.clear();
+        encoder_history_.push_back({
+          observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
+      }
       wheel_update_used = true;
+    } else if (burst_window_catchup) {
+      // The rolling rate is useful evidence that the causal state is stale,
+      // but it may still contain part of a cumulative-angle burst. Catch up
+      // at a bounded rate and keep the pending flag set until a coherent
+      // current packet clears the burst condition.
+      body_u_mps_ = std::min(
+        turn_wheel_mapped,
+        body_u_mps_ + config_.wheel_burst_catchup_accel_mps2 * dt_s);
     } else if (wheel_dropout_active_ && !integrate_lateral_dynamics) {
       // The encoder stream can repeat one cumulative angle for several source
       // packets while the car is braking in a turn. Propagate the last causal
@@ -709,7 +761,9 @@ OdometryEstimate OdometryObserver::update(
         // must not overwrite the recovered longitudinal anchor with the same
         // interval's IMU acceleration. Otherwise a delayed-encoder burst
         // creates an artificial under-speed step immediately after recovery.
-        body_u_mps_ = wheel_recovery ? turn_wheel_packet_mapped : turn_wheel_mapped;
+        body_u_mps_ = wheel_recovery ?
+          (window_wheel_recovery ? turn_wheel_mapped : turn_wheel_packet_mapped) :
+          turn_wheel_mapped;
       }
     } else {
       // The encoder is the trusted longitudinal measurement in a turn. Do
@@ -763,7 +817,20 @@ OdometryEstimate OdometryObserver::update(
     speed_mps_ = speed_pred;
     // Timing degradation is diagnostic only. Use the paired encoder sample
     // regardless of the source interval; no packet-age horizon discards it.
-    const bool wheel_recovery = wheel_dropout_active_ &&
+      // During an ordinary repeated-angle dropout, the rolling encoder rate
+      // is the least burst-sensitive causal measurement. Prefer it over a
+      // current-packet derivative that can be a delayed low-rate sample.
+      const bool window_wheel_recovery = wheel_dropout_active_ &&
+        !wheel_burst_recovery_pending_ &&
+        !wheel_burst_rejected_ &&
+        !wheel_slew_rejected &&
+        observation.ax_mps2 > config_.turn_wheel_braking_ax_mps2 &&
+        !launch_wheel_spin(speed_pred) &&
+        wheel_packet >= config_.wheel_freeze_speed_mps &&
+        wheel_mapped >= config_.wheel_freeze_speed_mps &&
+        std::abs(wheel_mapped - speed_pred) <=
+        config_.wheel_innovation_max_mps;
+      const bool packet_wheel_recovery = wheel_dropout_active_ &&
         !wheel_burst_rejected_ &&
         !launch_wheel_spin(speed_pred) &&
         wheel_packet >= config_.wheel_freeze_speed_mps &&
@@ -777,6 +844,17 @@ OdometryEstimate OdometryObserver::update(
         config_.turn_current_packet_max_increase_mps <= 0.0 ||
         wheel_packet_mapped <= speed_pred +
         config_.turn_current_packet_max_increase_mps);
+      const bool wheel_recovery = window_wheel_recovery ||
+        (!window_wheel_recovery && packet_wheel_recovery);
+      const bool burst_window_catchup =
+        wheel_burst_recovery_pending_ && !wheel_recovery &&
+        !launch_wheel_spin(speed_pred) &&
+        observation.ax_mps2 > config_.turn_wheel_braking_ax_mps2 &&
+        config_.wheel_burst_catchup_accel_mps2 > 0.0 &&
+        config_.wheel_burst_catchup_max_mps > 0.0 &&
+        wheel_mapped >= config_.wheel_freeze_speed_mps &&
+        wheel_mapped <= config_.wheel_burst_catchup_max_mps &&
+        wheel_mapped > speed_pred + config_.wheel_burst_disagreement_mps;
       const bool wheel_ok =
         std::abs(observation.ax_mps2) < config_.wheel_update_ax_abs_max_mps2 &&
         (!wheel_dropout_active_ ?
@@ -790,20 +868,26 @@ OdometryEstimate OdometryObserver::update(
         config_.wheel_burst_disagreement_mps)) : wheel_recovery);
     if (wheel_ok) {
       if (wheel_recovery) {
-        speed_mps_ = wheel_packet_mapped;
+        speed_mps_ = window_wheel_recovery ? wheel_mapped : wheel_packet_mapped;
         wheel_dropout_active_ = false;
         wheel_burst_recovery_pending_ = false;
-        // Discard the repeated-angle sample from the rolling window. The
-        // recovered current packet is the new causal encoder baseline.
-        encoder_history_.clear();
-        encoder_history_.push_back({
-          observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
+        if (!window_wheel_recovery) {
+          // Discard the repeated-angle sample from the rolling window only
+          // when the current packet, rather than the window, recovered us.
+          encoder_history_.clear();
+          encoder_history_.push_back({
+            observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
+        }
       } else {
         speed_mps_ = speed_pred < config_.wheel_freeze_speed_mps ? wheel_mapped :
           (1.0 - config_.wheel_update_beta) * speed_pred +
           config_.wheel_update_beta * wheel_mapped;
       }
       wheel_update_used = true;
+    } else if (burst_window_catchup) {
+      speed_mps_ = std::min(
+        wheel_mapped,
+        speed_pred + config_.wheel_burst_catchup_accel_mps2 * dt_s);
     }
     body_u_mps_ = speed_mps_;
     body_v_mps_ = 0.0;

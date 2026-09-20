@@ -1,7 +1,0 @@
-container: sdu_apex_autodrive
-command: colcon test --merge-install --packages-select f1tenth_mpc f1tenth_localization
-result: PASS
-tests: 12
-errors: 0
-failures: 0
-skipped: 0

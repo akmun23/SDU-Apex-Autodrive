@@ -15,8 +15,10 @@ services:
       # Keep the base workspace idle.  The tracked start script overrides this
       # to start exactly one bridge and one controller before Unity connects.
       SDU_APEX_AUTOSTART: ${SDU_APEX_AUTOSTART:-0}
-      SDU_APEX_CONTROLLER: ${SDU_APEX_CONTROLLER:-ftg}
+      SDU_APEX_CONTROLLER: ${SDU_APEX_CONTROLLER:-mpc}
       SDU_APEX_WITH_RVIZ: ${SDU_APEX_WITH_RVIZ:-false}
+      SDU_APEX_MPC_OVERRIDE_PARAMS: ${SDU_APEX_MPC_OVERRIDE_PARAMS:-}
+      SDU_APEX_MPC_PUBLISH_DIAGNOSTICS: ${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - .:/workspace/src:rw

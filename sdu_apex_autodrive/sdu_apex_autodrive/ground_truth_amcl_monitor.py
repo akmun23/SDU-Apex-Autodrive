@@ -41,6 +41,33 @@ def _rotate(x: float, y: float, angle: float) -> Tuple[float, float]:
     return c * x - s * y, s * x + c * y
 
 
+def signed_longitudinal_lateral_error(
+    estimate_x: float,
+    estimate_y: float,
+    expected_x: float,
+    expected_y: float,
+    expected_yaw: float,
+) -> Tuple[float, float]:
+    """Return signed along-track and left-positive cross-track error.
+
+    The estimate-minus-ground-truth displacement is expressed in the expected
+    vehicle frame.  A negative longitudinal value therefore means the
+    estimate is behind the vehicle, while a positive lateral value means it
+    is to the vehicle's left.  Keeping these components beside the Euclidean
+    norm makes along-track odometry drift visible instead of masking it.
+    """
+    dx = estimate_x - expected_x
+    dy = estimate_y - expected_y
+    tangent_x = math.cos(expected_yaw)
+    tangent_y = math.sin(expected_yaw)
+    normal_x = -tangent_y
+    normal_y = tangent_x
+    return (
+        dx * tangent_x + dy * tangent_y,
+        dx * normal_x + dy * normal_y,
+    )
+
+
 def align_world_pose_to_map(
     world_pose: Tuple[float, float, float],
     world_start: Tuple[float, float, float],
@@ -200,16 +227,20 @@ class GroundTruthAmclMonitor(Node):
                 "stamp_s", "time_s", "gt_x_m", "gt_y_m", "gt_yaw_rad",
                 "gt_world_x_m", "gt_world_y_m", "gt_world_yaw_rad",
                 "amcl_x_m", "amcl_y_m", "amcl_yaw_rad", "amcl_error_m", "amcl_error_rad",
+                "amcl_longitudinal_error_m", "amcl_lateral_error_m",
                 "amcl_absolute_error_m", "amcl_absolute_error_rad",
                 "amcl_relative_drift_m", "amcl_relative_drift_rad",
                 "current_map_x_m", "current_map_y_m", "current_map_yaw_rad",
                 "current_map_error_m", "current_map_error_rad",
+                "current_map_longitudinal_error_m", "current_map_lateral_error_m",
                 "current_map_absolute_error_m", "current_map_absolute_error_rad",
                 "current_map_relative_drift_m", "current_map_relative_drift_rad",
                 "ekf_x_m", "ekf_y_m", "ekf_yaw_rad", "ekf_error_m", "ekf_error_rad",
+                "ekf_longitudinal_error_m", "ekf_lateral_error_m",
                 "ekf_absolute_error_m", "ekf_absolute_error_rad",
                 "ekf_relative_drift_m", "ekf_relative_drift_rad",
                 "odom_x_m", "odom_y_m", "odom_yaw_rad", "odom_error_m", "odom_error_rad",
+                "odom_longitudinal_error_m", "odom_lateral_error_m",
                 "odom_absolute_error_m", "odom_absolute_error_rad",
                 "odom_relative_drift_m", "odom_relative_drift_rad",
                 "gt_speed_mps", "collision_count",
@@ -459,11 +490,16 @@ class GroundTruthAmclMonitor(Node):
             absolute_error_xy = math.nan
             absolute_error_yaw = math.nan
             error_xy, error_yaw = relative_error_xy, relative_error_yaw
+        amcl_longitudinal_error, amcl_lateral_error = (
+            signed_longitudinal_lateral_error(
+                amcl_x, amcl_y, expected_x, expected_y, expected_yaw))
 
         current_map_pose = _interpolate(
             self.current_map_samples, stamp, self.pair_timeout)
         current_map_error_xy = math.nan
         current_map_error_yaw = math.nan
+        current_map_longitudinal_error = math.nan
+        current_map_lateral_error = math.nan
         current_map_absolute_error_xy = math.nan
         current_map_absolute_error_yaw = math.nan
         current_map_relative_error_xy = math.nan
@@ -483,6 +519,9 @@ class GroundTruthAmclMonitor(Node):
             else:
                 current_map_error_xy = current_map_relative_error_xy
                 current_map_error_yaw = current_map_relative_error_yaw
+            (current_map_longitudinal_error,
+             current_map_lateral_error) = signed_longitudinal_lateral_error(
+                 cx, cy, expected_x, expected_y, expected_yaw)
             current_map_report = (
                 "current_map=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad"
                 % (cx, cy, cyaw, current_map_error_xy, current_map_error_yaw))
@@ -520,6 +559,8 @@ class GroundTruthAmclMonitor(Node):
         ekf_map_pose = self._map_pose_from_ekf(ekf_pose) if ekf_pose else None
         ekf_error_xy = math.nan
         ekf_error_yaw = math.nan
+        ekf_longitudinal_error = math.nan
+        ekf_lateral_error = math.nan
         ekf_absolute_error_xy = math.nan
         ekf_absolute_error_yaw = math.nan
         ekf_relative_error_xy = math.nan
@@ -538,12 +579,17 @@ class GroundTruthAmclMonitor(Node):
             else:
                 ekf_error_xy = ekf_relative_error_xy
                 ekf_error_yaw = ekf_relative_error_yaw
+            (ekf_longitudinal_error,
+             ekf_lateral_error) = signed_longitudinal_lateral_error(
+                 ex, ey, expected_x, expected_y, expected_yaw)
             ekf_report = "ekf=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad" % (
                 ex, ey, eyaw, ekf_error_xy, ekf_error_yaw)
 
         odom_map_pose = self._map_pose_from_odom(odom_pose) if odom_pose else None
         odom_error_xy = math.nan
         odom_error_yaw = math.nan
+        odom_longitudinal_error = math.nan
+        odom_lateral_error = math.nan
         odom_absolute_error_xy = math.nan
         odom_absolute_error_yaw = math.nan
         odom_relative_error_xy = math.nan
@@ -562,6 +608,9 @@ class GroundTruthAmclMonitor(Node):
             else:
                 odom_error_xy = odom_relative_error_xy
                 odom_error_yaw = odom_relative_error_yaw
+            (odom_longitudinal_error,
+             odom_lateral_error) = signed_longitudinal_lateral_error(
+                 ox, oy, expected_x, expected_y, expected_yaw)
             odom_report = (
                 "odom=(%.3f, %.3f, %.3f) error=%.3f m / %.3f rad"
                 % (ox, oy, oyaw, odom_error_xy, odom_error_yaw))
@@ -606,20 +655,25 @@ class GroundTruthAmclMonitor(Node):
                 f"{gt_world_x:.6f}", f"{gt_world_y:.6f}", f"{gt_world_yaw:.6f}",
                 f"{amcl_x:.6f}", f"{amcl_y:.6f}", f"{amcl_yaw:.6f}",
                 f"{error_xy:.6f}", f"{error_yaw:.6f}",
+                f"{amcl_longitudinal_error:.6f}", f"{amcl_lateral_error:.6f}",
                 f"{absolute_error_xy:.6f}", f"{absolute_error_yaw:.6f}",
                 f"{relative_error_xy:.6f}", f"{relative_error_yaw:.6f}",
                 f"{cx:.6f}", f"{cy:.6f}", f"{ctheta:.6f}",
                 f"{current_map_error_xy:.6f}", f"{current_map_error_yaw:.6f}",
+                f"{current_map_longitudinal_error:.6f}",
+                f"{current_map_lateral_error:.6f}",
                 f"{current_map_absolute_error_xy:.6f}",
                 f"{current_map_absolute_error_yaw:.6f}",
                 f"{current_map_relative_error_xy:.6f}",
                 f"{current_map_relative_error_yaw:.6f}",
                 f"{ex:.6f}", f"{ey:.6f}", f"{etheta:.6f}",
                 f"{ekf_error_xy:.6f}", f"{ekf_error_yaw:.6f}",
+                f"{ekf_longitudinal_error:.6f}", f"{ekf_lateral_error:.6f}",
                 f"{ekf_absolute_error_xy:.6f}", f"{ekf_absolute_error_yaw:.6f}",
                 f"{ekf_relative_error_xy:.6f}", f"{ekf_relative_error_yaw:.6f}",
                 f"{ox:.6f}", f"{oy:.6f}", f"{otheta:.6f}",
                 f"{odom_error_xy:.6f}", f"{odom_error_yaw:.6f}",
+                f"{odom_longitudinal_error:.6f}", f"{odom_lateral_error:.6f}",
                 f"{odom_absolute_error_xy:.6f}", f"{odom_absolute_error_yaw:.6f}",
                 f"{odom_relative_error_xy:.6f}", f"{odom_relative_error_yaw:.6f}",
                 f"{self.gt_speed_mps:.6f}",

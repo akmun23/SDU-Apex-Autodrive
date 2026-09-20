@@ -827,13 +827,17 @@ def _interp_periodic(sq: np.ndarray, s: np.ndarray, v: np.ndarray, length: float
 def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEnvelope,
                     config: dict[str, Any], output_dir: str | Path,
                     output_spacing_m: float | None = None) -> dict[str, Any]:
-    """Export the actual optimizer-node path without geometry-corrupting densification.
+    """Export the solved path, optionally at a denser controller-facing spacing.
 
     V1.2 linearly interpolated e_y to 0.02 m and then fitted another periodic
     cubic spline through the dense points.  That created artificial 20--100 1/m
     curvature spikes which were absent from the OCP.  V1.3 exports the solved
-    mesh itself.  At 0.08--0.11 m there are already several path samples per
-    25 ms MPC stage at race speed.
+    mesh itself.  The controller-facing export may now be linearly densified
+    in the solved path arclength.  This preserves the exact piecewise-linear
+    OCP geometry and fields; it does not fit a new spline or invent curvature.
+    A dense export is useful for projection and wall checking at 40 Hz because
+    the controller then sees several trajectory points during one fast control
+    step instead of a single coarse optimizer node.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -884,14 +888,63 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
     left_approx = np.maximum(tr.left - ey, 0.0)
     right_approx = np.maximum(tr.right + ey, 0.0)
 
+    # Keep the OCP node solution for the report and solution_nodes.csv, but
+    # optionally export a uniform controller-facing view of that same
+    # piecewise-linear path.  Periodic linear interpolation is intentional:
+    # it cannot change the solved geometry or create the curvature spikes that
+    # caused the old dense cubic export to be rejected.
+    export_s = s_actual
+    export_x = x
+    export_y = y
+    export_heading = psi_opt_wrapped
+    export_curvature = kappa_dynamic
+    export_speed = u
+    export_accel = accel
+    export_left = left_approx
+    export_right = right_approx
+    if output_spacing_m is not None:
+        spacing = float(output_spacing_m)
+        if not np.isfinite(spacing) or spacing <= 0.0:
+            raise ValueError("output_spacing_m must be finite and positive")
+        if spacing < float(np.mean(seg)):
+            export_count = max(3, int(np.ceil(L_actual / spacing)))
+            export_s = np.arange(export_count, dtype=float) * L_actual / export_count
+            source_s = np.r_[s_actual, L_actual]
+
+            def periodic_linear(values: np.ndarray, closure_value: float | None = None) -> np.ndarray:
+                # A wrapped angular field cannot close by interpolating the
+                # raw first value.  ``psi_opt_unwrapped`` is continuous along
+                # the solved lap, so choose the 2*pi-equivalent of its first
+                # value that is nearest the last value before interpolating
+                # the closing segment.  Without this, a dense export can
+                # contain a false multi-radian heading jump at the lap seam.
+                if closure_value is None:
+                    closure_value = float(values[0])
+                return np.interp(
+                    export_s, source_s, np.r_[values, closure_value])
+
+            export_x = periodic_linear(x)
+            export_y = periodic_linear(y)
+            heading_closure = float(psi_opt_unwrapped[0]) + 2.0 * np.pi * round(
+                (float(psi_opt_unwrapped[-1]) - float(psi_opt_unwrapped[0])) /
+                (2.0 * np.pi))
+            export_heading = periodic_linear(
+                psi_opt_unwrapped, closure_value=heading_closure)
+            export_curvature = periodic_linear(kappa_dynamic)
+            export_speed = periodic_linear(u)
+            export_accel = periodic_linear(accel)
+            export_left = periodic_linear(left_approx)
+            export_right = periodic_linear(right_approx)
+
     traj_path = out / "autodrive_mintime_raceline.csv"
     with traj_path.open("w", encoding="utf-8") as f:
         f.write("# s_m,x_m,y_m,psi_rad,kappa_radpm,velocity_mps,acceleration_mps2,d_left_m,d_right_m\n")
-        for i in range(tr.count):
+        for i in range(len(export_s)):
             f.write(
-                f"{s_actual[i]:.7f},{x[i]:.7f},{y[i]:.7f},{psi_opt_wrapped[i]:.8f},"
-                f"{kappa_dynamic[i]:.8f},{u[i]:.7f},{accel[i]:.7f},"
-                f"{left_approx[i]:.6f},{right_approx[i]:.6f}\n")
+                f"{export_s[i]:.7f},{export_x[i]:.7f},{export_y[i]:.7f},"
+                f"{np.arctan2(np.sin(export_heading[i]), np.cos(export_heading[i])):.8f},"
+                f"{export_curvature[i]:.8f},{export_speed[i]:.7f},{export_accel[i]:.7f},"
+                f"{export_left[i]:.6f},{export_right[i]:.6f}\n")
 
     node_path = out / "solution_nodes.csv"
     with node_path.open("w", encoding="utf-8") as f:
@@ -925,9 +978,12 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
         "track": {
             **tr.to_dict(),
             "optimized_path_length_m": L_actual,
-            "output_points": int(tr.count),
-            "export_spacing_mean_m": float(np.mean(seg)),
-            "export_mode": "optimizer_nodes_no_dense_respline",
+            "output_points": int(len(export_s)),
+            "export_spacing_mean_m": float(L_actual / len(export_s)),
+            "export_mode": (
+                "optimizer_nodes"
+                if len(export_s) == tr.count else
+                "periodic_linear_controller_densification"),
         },
         "vehicle_model": model.to_dict(),
         "vehicle_provenance": model.provenance(),
@@ -977,4 +1033,3 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
         },
     }
     return report
-

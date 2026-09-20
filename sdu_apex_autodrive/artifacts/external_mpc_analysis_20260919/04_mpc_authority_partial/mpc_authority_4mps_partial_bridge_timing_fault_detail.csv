@@ -1,2 +1,0 @@
-event_index,arrival_monotonic_ns,arrival_epoch_ns,topic,message_type,header_stamp_ns,simulation_time_s,payload_json
-11327,95830494090489,1789737678477104805,/autodrive/roboracer_1/bridge_timing_fault_detail,String,,,"{""value"":""no simulator response within 0.150s""}"

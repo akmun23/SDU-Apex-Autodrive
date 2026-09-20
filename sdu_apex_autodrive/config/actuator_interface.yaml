@@ -18,16 +18,6 @@ autodrive_actuator_interface:
     # remains source-timestamped. This does not fabricate simulator samples.
     publish_rate_hz: 40.0
 
-    # Simulator-only terminal failure handling. This is deliberately isolated
-    # from competition controller inputs and must be disabled for a rules-only
-    # deployment that does not permit collision telemetry.
-    collision_topic: /autodrive/roboracer_1/collision_count
-    reset_command_topic: /autodrive/reset_command
-    collision_reset_enabled: false
-    collision_reset_pulse_sec: 0.5
-    collision_baseline_stable_sec: 1.0
-    collision_terminal_stop: false
-
     max_steering_angle_rad: 0.5236
     # Project operating ceiling. This clamps all controller requests at the
     # actuator boundary as a final safety net; it does not alter simulator

@@ -27,7 +27,7 @@ DEFAULT_MAP = (
 )
 DEFAULT_TRAJECTORY = (
     "/workspace/src/f1tenth_planning/trajectories/"
-    "autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv"
+    "autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv"
 )
 
 
@@ -95,11 +95,12 @@ def _setup(context):
     map_path = LaunchConfiguration("map").perform(context)
     trajectory = LaunchConfiguration("trajectory").perform(context)
     amcl_override_path = LaunchConfiguration("amcl_override_params").perform(context)
+    mpc_override_path = LaunchConfiguration("mpc_override_params").perform(context)
+    sensor_odom_override_path = LaunchConfiguration(
+        "sensor_odom_override_params").perform(context)
     with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
     with_ground_truth_monitor = _bool(
         LaunchConfiguration("with_ground_truth_monitor").perform(context))
-    with_collision_safety = _bool(
-        LaunchConfiguration("with_collision_safety").perform(context))
     with_telemetry_recorder = _bool(
         LaunchConfiguration("with_telemetry_recorder").perform(context))
     with_model_id_recorder = _bool(
@@ -154,10 +155,27 @@ def _setup(context):
                 f"amcl_override_params does not exist: {amcl_override_path}"
             )
         amcl_parameter_sources.append(amcl_override_path)
+    mpc_parameter_sources = [LaunchConfiguration("mpc_params")]
+    if mpc_override_path.strip():
+        if not os.path.isfile(mpc_override_path):
+            raise RuntimeError(
+                f"mpc_override_params does not exist: {mpc_override_path}"
+            )
+        mpc_parameter_sources.append(mpc_override_path)
+    sensor_odom_parameter_sources = [LaunchConfiguration("sensor_odom_params")]
+    if sensor_odom_override_path.strip():
+        if not os.path.isfile(sensor_odom_override_path):
+            raise RuntimeError(
+                f"sensor_odom_override_params does not exist: "
+                f"{sensor_odom_override_path}"
+            )
+        sensor_odom_parameter_sources.append(sensor_odom_override_path)
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        # Pace commands independently of the official telemetry decoder so
-        # the simulator is not throttled by camera/LIDAR ROS publication.
+        # Keep the nominal 40 Hz request cadence on constrained hardware. The
+        # response stream remains FIFO/receive-time based; controller-side
+        # command history accounts for transport delay without consuming
+        # simulator-only truth.
         Node(
             package="sdu_apex_autodrive",
             executable="autodrive_bridge_40hz",
@@ -173,10 +191,11 @@ def _setup(context):
             name="sensor_odometry",
             output="screen",
             parameters=[
-                LaunchConfiguration("sensor_odom_params"),
-                # Keep simulator reset epochs from carrying old speed/pose
-                # into the next controller run.
-                {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+                *sensor_odom_parameter_sources,
+                # ``reset_command`` is a restricted simulator-control topic.
+                # Runtime odometry is deliberately continuous and uses only
+                # the allowed encoder and IMU inputs.
+                {"reset_enabled": False},
             ],
             remappings=[
                 ("/tf", "/sdu/tf"),
@@ -205,7 +224,7 @@ def _setup(context):
                 output="screen",
                 parameters=[
                     LaunchConfiguration("ekf_params"),
-                    {"reset_enabled": True, "reset_topic": "/autodrive/reset_command"},
+                    {"reset_enabled": False},
                 ],
             ),
             map_server,
@@ -380,6 +399,9 @@ def _setup(context):
                         ),
                         "command_topic": "/cmd/speed",
                         "diagnostics_topic": "/mpc_shadow/diagnostics",
+                        # Shadow is an explicit diagnostic mode; authority
+                        # diagnostics remain opt-in below.
+                        "publish_diagnostics": True,
                     },
                 ],
             )
@@ -393,15 +415,14 @@ def _setup(context):
             output="screen",
         ))
     else:
-        # The MPC adapter remains command-inhibited unless the explicit launch
-        # argument is set. This keeps a source-command baseline from silently
-        # becoming actuator authority before its legal-state N30 acceptance.
+        # The unified development launcher uses this as the sole command
+        # authority. Diagnostics remain separately opt-in below.
         component = ComposableNode(
             package="f1tenth_mpc",
             plugin="f1tenth_mpc::MpcControllerNode",
             name="mpc_controller_node",
             parameters=[
-                LaunchConfiguration("mpc_params"),
+                *mpc_parameter_sources,
                 {
                     "trajectory_file": trajectory,
                     "max_speed_mps": ParameterValue(
@@ -410,6 +431,15 @@ def _setup(context):
                     ),
                     "enabled": ParameterValue(
                         LaunchConfiguration("mpc_enabled"), value_type=bool),
+                    # Authority diagnostics must never be written to the
+                    # historical shadow topic.  The controller is live MPC
+                    # here; keep its per-cycle result independently
+                    # recordable for closed-loop debugging when explicitly
+                    # enabled. The normal authority path avoids JSON/DDS work.
+                    "diagnostics_topic": "/mpc/diagnostics",
+                    "publish_diagnostics": ParameterValue(
+                        LaunchConfiguration("mpc_publish_diagnostics"),
+                        value_type=bool),
                 },
             ],
             remappings=[
@@ -449,25 +479,22 @@ def _setup(context):
             )))
         else:
             actions.append(mpc_container)
-    actions.append(Node(
+    actuator_node = Node(
         package="sdu_apex_autodrive",
         executable="actuator_interface",
         name="autodrive_actuator_interface",
         output="screen",
         parameters=[
             LaunchConfiguration("actuator_params"),
-            # Keep the simulator-only collision reset outside the default
-            # competition interface. Enable it explicitly for test runs.
             {
                 "input_topic": "/cmd/speed",
-                "collision_reset_enabled": with_collision_safety,
-                "collision_terminal_stop": with_collision_safety,
                 # Bridge timing diagnostics are non-fatal on the constrained
                 # competition hardware; they must never stop actuator output.
                 "external_stop_topic": "",
             },
         ],
-    ))
+    )
+    actions.append(actuator_node)
 
     if with_rviz:
         # RViz sees only the team's allowed-sensor TF tree.
@@ -623,14 +650,6 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            "with_collision_safety",
-            default_value="false",
-            description=(
-                "Simulator-only collision latch/reset for diagnostics; false is the "
-                "rules-compliant default"
-            ),
-        ),
-        DeclareLaunchArgument(
             "controller_max_speed",
             default_value="16.0",
             description=(
@@ -644,11 +663,26 @@ def generate_launch_description():
             description="Source-command MPC adapter configuration",
         ),
         DeclareLaunchArgument(
+            "mpc_override_params",
+            default_value="",
+            description=(
+                "Optional YAML layered after the production MPC parameters "
+                "for one-factor live weight/model experiments"
+            ),
+        ),
+        DeclareLaunchArgument(
             "mpc_enabled",
+            default_value="true",
+            description=(
+                "Allow MPC commands in the unified development launch."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "mpc_publish_diagnostics",
             default_value="false",
             description=(
-                "Allow MPC commands. Keep false until the source-command "
-                "stage map passes legal-state N30 validation."
+                "Publish per-cycle MPC JSON diagnostics. Disabled by default "
+                "to avoid serialization/DDS work on the 40 Hz authority path."
             ),
         ),
         DeclareLaunchArgument(
@@ -707,6 +741,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "sensor_odom_params",
             default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),
+        ),
+        DeclareLaunchArgument(
+            "sensor_odom_override_params",
+            default_value="",
+            description=(
+                "Optional YAML layered after the production sensor odometry "
+                "parameters for one-factor live observer experiments"
+            ),
         ),
         DeclareLaunchArgument(
             "amcl_params",

@@ -941,6 +941,29 @@ def _force_ipv4_server() -> None:
     official_bridge.pywsgi.WSGIServer = IPv4WSGIServer
 
 
+def _disable_restricted_bridge_subscriptions() -> None:
+    """Keep the stock bridge from subscribing to simulator reset control.
+
+    The official bridge's default configuration includes
+    ``/autodrive/reset_command``. That topic is restricted by the RoboRacer
+    simulator rules and is not needed by the competition data path. The
+    bridge still publishes the simulator's protocol telemetry required to
+    expose the allowed sensors, but it does not consume reset commands.
+    """
+    config = getattr(official_bridge, "config", None)
+    pub_sub_dict = getattr(config, "pub_sub_dict", None)
+    subscribers = getattr(pub_sub_dict, "subscribers", None)
+    if subscribers is None:
+        raise RuntimeError(
+            "official AutoDRIVE bridge configuration has no subscriber list")
+    restricted = "/autodrive/reset_command"
+    pub_sub_dict.subscribers = [
+        entry for entry in subscribers if entry.topic != restricted
+    ]
+    if any(entry.topic == restricted for entry in pub_sub_dict.subscribers):
+        raise RuntimeError("restricted reset subscription remained in bridge config")
+
+
 def main() -> None:
     global _handler_timing_enabled, _publication_diagnostic_enabled
     global _shutdown_requested
@@ -971,20 +994,10 @@ def main() -> None:
 
     original_connect = official_bridge.sio.handlers.get("/", {}).get("connect")
     original_disconnect = official_bridge.sio.handlers.get("/", {}).get("disconnect")
-    original_reset_callback = getattr(
-        official_bridge, "callback_reset_command", None)
-
-    # The official bridge registers its ROS subscriptions during
-    # ``official_bridge.main()``. Wrap that callback before startup so reset
-    # levels are received by the same executor/thread as the native bridge,
-    # instead of creating a second subscription lazily from a Socket.IO
-    # packet callback.
-    if original_reset_callback is not None:
-        def wrapped_reset_callback(message: Bool) -> Any:
-            _on_reset_command(message)
-            return original_reset_callback(message)
-
-        official_bridge.callback_reset_command = wrapped_reset_callback
+    # The stock bridge includes a restricted reset-command subscriber. Remove
+    # it before the bridge creates its ROS node; no runtime node in this stack
+    # may consume simulator reset control.
+    _disable_restricted_bridge_subscriptions()
 
     def mark_connected(sid: Any, environ: Any) -> Any:
         _reset_request_pipeline()
@@ -1034,8 +1047,6 @@ def main() -> None:
         _reset_request_pipeline()
         sender.join(timeout=max(1.0, 2.0 / rate_hz))
         official_bridge.sio.emit = original_emit
-        if original_reset_callback is not None:
-            official_bridge.callback_reset_command = original_reset_callback
 
 
 if __name__ == "__main__":

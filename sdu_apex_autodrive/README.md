@@ -3,7 +3,7 @@
 The active runtime is deliberately small:
 
 ```text
-simulator -> bridge -> sensor odometry -> EKF -> CUDA AMCL -> Pure Pursuit
+simulator -> bridge -> sensor odometry -> EKF -> CUDA AMCL -> MPC
                                       \-> diagnostics-only CSV + ground truth score
 ```
 
@@ -34,11 +34,13 @@ command.
 
 The direct launch commands below are for controlled diagnostics only. For a
 normal simulator run, use the root startup guide so the bridge and controller
-are started exactly once before Unity connects. The mapping launch is FTG-only
-and the racing launch is FTG or Pure Pursuit:
+are started exactly once before Unity connects. The mapping launch is FTG-only.
+The normal racing launch is MPC; FTG and Pure Pursuit remain explicit
+diagnostic alternatives:
 
 ```bash
 ros2 launch sdu_apex_autodrive mapping.launch.py
+ros2 launch sdu_apex_autodrive controller.launch.py controller:=mpc mpc_enabled:=true with_collision_safety:=true
 ros2 launch sdu_apex_autodrive controller.launch.py controller:=ftg
 ros2 launch sdu_apex_autodrive controller.launch.py controller:=pure_pursuit
 ros2 launch sdu_apex_autodrive localization.launch.py start_bridge:=false
@@ -48,13 +50,34 @@ The production defaults are:
 
 ```text
 map:       f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml
-raceline:  f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv
+raceline:  f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv
 ```
 
 This is the saved 2.5 cm FTG map of the ICRA compete track, paired with its
 mintime raceline. The simulator asset and ROS map are selected independently:
 the compose default now selects the compete scene, while these files remain
 the runtime map/raceline inputs.
+
+The default controller started by `./tools/start_dev.sh` is MPC, with MPC
+authority enabled and collision as a terminal abort. For an explicit
+alternative diagnostic run:
+
+```bash
+SDU_APEX_CONTROLLER=ftg ./tools/start_dev.sh
+# or
+SDU_APEX_CONTROLLER=pure_pursuit ./tools/start_dev.sh
+```
+
+The default MPC uses `f1tenth_mpc/config/mpc_autodrive.yaml`. A tested
+moderate-weight overlay is available for controlled comparison:
+
+```bash
+SDU_APEX_MPC_OVERRIDE_PARAMS=/workspace/src/sdu_apex_autodrive/config/mpc_weight_test_moderate_balanced_authority.yaml \
+  ./tools/start_dev.sh
+```
+
+Raw authority recordings remain local evidence and are ignored by Git; keep
+only curated summaries and small screening tables in the repository.
 
 ## Simulator cadence
 

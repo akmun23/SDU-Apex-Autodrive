@@ -3,13 +3,13 @@
 #include <math.h>
 #include <string.h>
 
-#define MPC_MODEL_NX 7
 #define MPC_MODEL_NU 2
 
 #ifdef MPC_ENABLE_FD_ORACLE
 static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f, 1.0e-3f};
+    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
+    1.0e-3f, 1.0e-3f};
 static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 #endif
 
@@ -22,6 +22,9 @@ static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
     x[4] = state->r;
     x[5] = state->target_speed;
     x[6] = state->steering_command;
+    x[7] = state->delayed_steering_command_1;
+    x[8] = state->delayed_steering_command_2;
+    x[9] = state->actual_steering_angle;
 }
 
 #ifdef MPC_ENABLE_FD_ORACLE
@@ -35,6 +38,9 @@ static MpcModelState_t array_to_state(const float x[MPC_MODEL_NX])
     state.r = x[4];
     state.target_speed = x[5];
     state.steering_command = x[6];
+    state.delayed_steering_command_1 = x[7];
+    state.delayed_steering_command_2 = x[8];
+    state.actual_steering_angle = x[9];
     return state;
 }
 #endif

@@ -1,6 +1,0 @@
-category,count,fraction_of_rejected_pct
-solver_residual,1400,84.49004224502113
-nonlinear_unknown,164,9.897404948702475
-invalid_input_or_state,85,5.1297525648762825
-missing_synchronized_state,6,0.3621001810500905
-input_gate:mpc_command-time_state_prediction_failed,2,0.12070006035003017

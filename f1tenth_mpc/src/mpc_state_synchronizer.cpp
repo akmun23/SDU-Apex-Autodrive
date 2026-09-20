@@ -61,7 +61,7 @@ bool interpolate_odom(const std::deque<MpcOdomSample> &samples,
 
 }  // namespace
 
-MpcStateSynchronizer::MpcStateSynchronizer(MpcSyncConfig config)
+MpcStateSynchronizer::MpcStateSynchronizer(const MpcSyncConfig &config)
     : config_(config)
 {
     if (config_.odom_buffer_capacity < 2) {

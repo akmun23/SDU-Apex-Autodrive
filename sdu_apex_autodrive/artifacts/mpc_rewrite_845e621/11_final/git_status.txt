@@ -1,2 +1,0 @@
-HEAD: 845e621989daaf1e9fbe041723f7e6066a6f01d2
-Status: final acceptance pending.

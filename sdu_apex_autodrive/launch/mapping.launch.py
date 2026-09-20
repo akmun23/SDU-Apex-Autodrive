@@ -153,14 +153,10 @@ def generate_launch_description():
             parameters=[
                 LaunchConfiguration("actuator_params"),
                 # Mapping is the only workflow that uses the completion
-                # latch; racing launches leave this optional hook disabled.
-                # A collision is a terminal mapping failure. Explicitly
-                # disable reset publication so a crash cannot be hidden by
-                # continuing from a simulator reset.
+                # latch. Collision counters and reset commands are restricted
+                # simulator topics and are never consumed here.
                 {"external_stop_topic": "/sdu/mapping_complete",
-                 "odom_topic": "/autodrive/roboracer_1/odom",
-                 "collision_reset_enabled": False,
-                 "collision_terminal_stop": True},
+                 "odom_topic": "/odom"},
             ],
         ),
         map_saver,
