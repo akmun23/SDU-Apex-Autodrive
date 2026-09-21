@@ -95,8 +95,6 @@ if(BUILD_TESTING)
 
   add_executable(mpc_state_synchronizer_test test/test_mpc_state_synchronizer.cpp)
   target_link_libraries(mpc_state_synchronizer_test PRIVATE mpc_state_sync)
-  target_compile_definitions(mpc_state_synchronizer_test PRIVATE
-    MPC_SYNC_TEST_EVENTS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../sdu_apex_autodrive/artifacts/simulator_trace/mpc_target_response_candidate_4mps_20260918/events.csv")
   add_test(NAME mpc_state_synchronizer_test COMMAND mpc_state_synchronizer_test)
 
   add_executable(mpc_control_time_predictor_test
@@ -105,31 +103,11 @@ if(BUILD_TESTING)
   add_test(NAME mpc_control_time_predictor_test
     COMMAND mpc_control_time_predictor_test)
 
-  add_executable(mpc_replay_metrics_test test/test_replay_metrics.cpp)
-  add_test(NAME mpc_replay_metrics_test COMMAND mpc_replay_metrics_test)
-
   add_executable(mpc_rti_benchmark test/benchmark_mpc_rti.c)
   target_link_libraries(mpc_rti_benchmark PRIVATE mpc_core m)
   target_compile_definitions(mpc_rti_benchmark PRIVATE
     MPC_RTI_BENCH_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
 
-  add_executable(mpc_rti_offline_replay test/replay_mpc_rti.cpp)
-  target_link_libraries(mpc_rti_offline_replay PRIVATE
-    mpc_core mpc_state_sync m)
-  target_compile_definitions(mpc_rti_offline_replay PRIVATE
-    MPC_RTI_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
-
-  add_executable(mpc_prediction_accuracy_replay
-    test/replay_mpc_prediction_accuracy.cpp)
-  target_link_libraries(mpc_prediction_accuracy_replay PRIVATE mpc_control_time)
-  target_compile_definitions(mpc_prediction_accuracy_replay PRIVATE
-    MPC_PREDICTION_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
-
-  add_executable(mpc_applied_command_replay
-    test/replay_mpc_applied_command.cpp)
-  target_link_libraries(mpc_applied_command_replay PRIVATE mpc_control_time)
-  target_compile_definitions(mpc_applied_command_replay PRIVATE
-    MPC_APPLIED_REPLAY_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
 endif()
 
 install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
@@ -137,7 +115,8 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
+install(FILES config/mpc_iros_2026_competition.yaml
+  DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)
 ament_export_libraries(mpc_core)

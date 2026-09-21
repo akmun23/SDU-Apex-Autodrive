@@ -74,8 +74,19 @@ def generate_launch_description():
             condition=launch_bridge,
             output="screen",
         ),
-        # Mapping is deliberately isolated from the racing odometry TF tree.
-        # These are the only base-to-sensor transforms needed by SLAM.
+        # Mapping uses the same legal encoder/IMU odometry as racing.  The
+        # mapper must not silently consume an official simulator odometry or
+        # ground-truth TF stream.
+        Node(
+            package="f1tenth_localization",
+            executable="sensor_odometry_node",
+            name="sensor_odometry",
+            output="screen",
+            parameters=[LaunchConfiguration("sensor_odom_params")],
+            remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
+        ),
+        # Mapping is deliberately isolated from any external TF tree. These
+        # are the only base-to-sensor transforms needed by SLAM.
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",

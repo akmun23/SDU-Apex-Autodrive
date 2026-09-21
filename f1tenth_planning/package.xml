@@ -3,7 +3,7 @@
 <package format="3">
   <name>f1tenth_planning</name>
   <version>1.0.0</version>
-  <description>F1Tenth planning and trajectory generation package</description>
+  <description>AutoDRIVE competition map and canonical raceline</description>
   <maintainer email="pabjo23@student.sdu.dk">Pascal</maintainer>
   <license>MIT</license>
 

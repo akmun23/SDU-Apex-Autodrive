@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # These files constitute the normal autonomous launch and its runtime nodes.
 RUNTIME_FILES = (
     "sdu_apex_autodrive/launch/controller.launch.py",
-    "sdu_apex_autodrive/launch/localization.launch.py",
     "sdu_apex_autodrive/launch/mapping.launch.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/actuator_interface.py",

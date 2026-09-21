@@ -1,4 +1,10 @@
-"""Single user-facing launch for one AutoDRIVE racing controller."""
+"""Local development launch for the legal AutoDRIVE controller stack.
+
+The launch exposes the three maintained driving modes: FTG for mapping,
+Pure Pursuit as a baseline, and the production MPC.  There is one installed
+raceline and no shadow controller, simulator-truth recorder, or parameter
+overlay.
+"""
 
 import math
 import os
@@ -21,14 +27,9 @@ from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
 
 
-DEFAULT_MAP = (
-    "/workspace/src/f1tenth_planning/maps/"
-    "autodrive_track_ftg_commit_20260909_025m.yaml"
-)
-DEFAULT_TRAJECTORY = (
-    "/workspace/src/f1tenth_planning/trajectories/"
-    "autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv"
-)
+MAP_NAME = "autodrive_track_ftg_commit_20260909_025m.yaml"
+RACELINE_PATH = os.path.join(
+    "autodrive_mintime_sim_5p0_dense", "autodrive_mintime_raceline.csv")
 
 
 def _bool(value: str) -> bool:
@@ -41,14 +42,7 @@ def _bool(value: str) -> bool:
 
 
 def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
-    """Fail before startup if a previous controller stack is still alive.
-
-    ROS 2 permits two processes with the same node name.  That is unsafe for
-    this stack because both processes can publish the absolute ``/odom`` and
-    ``/cmd/speed`` topics, producing alternating states that look like an
-    odometry fault.  The check is deliberately launch-local and does not
-    touch simulator state.
-    """
+    """Reject duplicate local publishers before starting a second stack."""
     try:
         result = subprocess.run(
             ["ros2", "node", "list"],
@@ -58,14 +52,11 @@ def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
             timeout=3.0,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(
-            "unable to verify that no previous controller stack is running"
-        ) from exc
+        raise RuntimeError("unable to verify that no previous stack is running") from exc
     if result.returncode != 0:
         raise RuntimeError(
-            "ros2 node list failed during controller-stack preflight: "
-            f"{result.stderr.strip()}"
-        )
+            "ros2 node list failed during controller preflight: "
+            f"{result.stderr.strip()}")
     existing_names = {
         line.strip().rsplit("/", 1)[-1]
         for line in result.stdout.splitlines()
@@ -74,307 +65,152 @@ def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
     duplicates = sorted(expected_names.intersection(existing_names))
     if duplicates:
         raise RuntimeError(
-            "controller-stack preflight found existing runtime node(s): "
-            f"{', '.join(duplicates)}. Stop the previous launch/container "
-            "before starting another one; duplicate publishers corrupt "
-            "/odom and /cmd/speed."
-        )
+            "controller preflight found existing runtime node(s): "
+            f"{', '.join(duplicates)}. Stop the previous stack first.")
 
 
 def _setup(context):
     controller = LaunchConfiguration("controller").perform(context).lower()
     if controller not in ("ftg", "pure_pursuit", "mpc"):
-        raise RuntimeError(
-            "controller must be ftg, pure_pursuit, or mpc")
-    with_mpc_shadow = _bool(
-        LaunchConfiguration("with_mpc_shadow").perform(context))
-    if with_mpc_shadow and controller != "pure_pursuit":
-        raise RuntimeError(
-            "with_mpc_shadow:=true is supported only alongside Pure Pursuit")
+        raise RuntimeError("controller must be ftg, pure_pursuit, or mpc")
 
-    map_path = LaunchConfiguration("map").perform(context)
-    trajectory = LaunchConfiguration("trajectory").perform(context)
-    amcl_override_path = LaunchConfiguration("amcl_override_params").perform(context)
-    mpc_override_path = LaunchConfiguration("mpc_override_params").perform(context)
-    sensor_odom_override_path = LaunchConfiguration(
-        "sensor_odom_override_params").perform(context)
+    integration = get_package_share_directory("sdu_apex_autodrive")
+    localization = get_package_share_directory("f1tenth_localization")
+    planning = get_package_share_directory("f1tenth_planning")
+    control = get_package_share_directory("f1tenth_control")
+    mpc = get_package_share_directory("f1tenth_mpc")
+
+    map_path = os.path.join(planning, "maps", MAP_NAME)
+    trajectory = os.path.join(planning, "trajectories", RACELINE_PATH)
     with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
-    with_model_id_recorder = _bool(
-        LaunchConfiguration("with_model_id_recorder").perform(context))
-    model_id_record_lidar_ranges = _bool(
-        LaunchConfiguration("model_id_record_lidar_ranges").perform(context))
-    if model_id_record_lidar_ranges and not with_model_id_recorder:
-        raise RuntimeError(
-            "model_id_record_lidar_ranges requires with_model_id_recorder:=true")
-    force_localization = _bool(
-        LaunchConfiguration("force_localization").perform(context))
     use_localization = _bool(
         LaunchConfiguration("use_localization").perform(context))
+    force_localization = _bool(
+        LaunchConfiguration("force_localization").perform(context))
+    needs_localization = use_localization and (
+        controller != "ftg" or force_localization)
     mpc_start_delay_sec = float(
         LaunchConfiguration("mpc_start_delay_sec").perform(context))
     if not math.isfinite(mpc_start_delay_sec) or mpc_start_delay_sec < 0.0:
         raise RuntimeError("mpc_start_delay_sec must be finite and non-negative")
-    # FTG normally runs without localization for mapping. This explicit
-    # diagnostic mode exercises the full localization stack alongside the
-    # same LiDAR-only FTG command path on a saved map.
-    needs_localization = use_localization and (
-        controller != "ftg" or force_localization)
 
-    expected_runtime_nodes = {
+    if needs_localization:
+        for path in (map_path, trajectory):
+            if not os.path.isfile(path):
+                raise RuntimeError(f"required installed file does not exist: {path}")
+
+    expected_names = {
         "autodrive_bridge",
         "sensor_odometry",
         "controller_container",
         "autodrive_actuator_interface",
     }
-    amcl_node = None
     if needs_localization:
-        expected_runtime_nodes.update({
+        expected_names.update({
             "ekf_localization", "map_server", "lifecycle_manager_map",
             "gpu_amcl_cpp",
         })
-    if with_model_id_recorder:
-        expected_runtime_nodes.add("model_id_timing_recorder")
-    if with_mpc_shadow:
-        expected_runtime_nodes.add("mpc_shadow_node")
-    _reject_existing_runtime_nodes(expected_runtime_nodes)
+    _reject_existing_runtime_nodes(expected_names)
 
-    if needs_localization and not os.path.isfile(map_path):
-        raise RuntimeError(f"map does not exist: {map_path}")
-    if needs_localization and not os.path.isfile(trajectory):
-        raise RuntimeError(f"trajectory does not exist: {trajectory}")
-    amcl_parameter_sources = [LaunchConfiguration("amcl_params")]
-    if amcl_override_path.strip():
-        if not os.path.isfile(amcl_override_path):
-            raise RuntimeError(
-                f"amcl_override_params does not exist: {amcl_override_path}"
-            )
-        amcl_parameter_sources.append(amcl_override_path)
-    mpc_parameter_sources = [LaunchConfiguration("mpc_params")]
-    if mpc_override_path.strip():
-        if not os.path.isfile(mpc_override_path):
-            raise RuntimeError(
-                f"mpc_override_params does not exist: {mpc_override_path}"
-            )
-        mpc_parameter_sources.append(mpc_override_path)
-    sensor_odom_parameter_sources = [LaunchConfiguration("sensor_odom_params")]
-    if sensor_odom_override_path.strip():
-        if not os.path.isfile(sensor_odom_override_path):
-            raise RuntimeError(
-                f"sensor_odom_override_params does not exist: "
-                f"{sensor_odom_override_path}"
-            )
-        sensor_odom_parameter_sources.append(sensor_odom_override_path)
-    actions = [
-        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        # Keep the nominal 40 Hz request cadence on constrained hardware. The
-        # response stream remains FIFO/receive-time based; controller-side
-        # command history accounts for transport delay without consuming
-        # simulator-only truth.
-        Node(
-            package="sdu_apex_autodrive",
-            executable="autodrive_bridge_40hz",
-            name="autodrive_bridge",
-            output="screen",
-            emulate_tty=True,
-        ),
-        # Team odometry uses only allowed encoders and IMU.
-        # Its TF is isolated from the restricted simulator /tf.
-        Node(
-            package="f1tenth_localization",
-            executable="sensor_odometry_node",
-            name="sensor_odometry",
-            output="screen",
-            parameters=[
-                *sensor_odom_parameter_sources,
-            ],
-            remappings=[
-                ("/tf", "/sdu/tf"),
-                ("/tf_static", "/sdu/tf_static"),
-            ],
-        ),
-    ]
+    bridge = Node(
+        package="sdu_apex_autodrive",
+        executable="autodrive_bridge_40hz",
+        name="autodrive_bridge",
+        output="screen",
+        emulate_tty=True,
+    )
+    odometry = Node(
+        package="f1tenth_localization",
+        executable="sensor_odometry_node",
+        name="sensor_odometry",
+        output="screen",
+        parameters=[os.path.join(localization, "config", "sensor_odometry.yaml")],
+        remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
+    )
+    actions = [SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+               bridge, odometry]
+    amcl_node = None
 
     if needs_localization:
         map_server = LifecycleNode(
             package="nav2_map_server",
             executable="map_server",
             name="map_server",
-            namespace="",
             output="screen",
             parameters=[{"yaml_filename": map_path}],
         )
         actions.extend([
-            # AMCL consumes this causal covariance-bearing local odometry
-            # stream. Raw /odom stays available for diagnostics and is never
-            # treated as a process covariance by the trust filter.
             Node(
                 package="f1tenth_localization",
                 executable="ekf_localization_node",
                 name="ekf_localization",
                 output="screen",
-                parameters=[
-                    LaunchConfiguration("ekf_params"),
-                ],
+                parameters=[os.path.join(localization, "config", "ekf.yaml")],
             ),
             map_server,
-            # Use a launch-owned lifecycle manager.  Emitting configure and
-            # activate events directly can race map_server discovery and leave
-            # AMCL permanently waiting for a map.
             Node(
                 package="nav2_lifecycle_manager",
                 executable="lifecycle_manager",
                 name="lifecycle_manager_map",
                 output="screen",
-                parameters=[{
-                    "autostart": True,
-                    "node_names": ["map_server"],
-                }],
+                parameters=[{"autostart": True, "node_names": ["map_server"]}],
             ),
-            # AMCL and sensor odometry must publish into the same
-            # team-isolated TF tree so map->base_link is available.
         ])
-        # This is the user's CUDA AMCL, not Nav2 AMCL. Keep the action handle
-        # so an MPC-specific warm-up timer can start from its process-start event.
         amcl_node = Node(
             package="f1tenth_localization",
             executable="gpu_amcl_cpp_node",
             name="gpu_amcl_cpp",
             output="screen",
             parameters=[
-                *amcl_parameter_sources,
+                os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
                 {
                     "global_heading_trajectory_file": trajectory,
-                    "odom_topic": LaunchConfiguration("amcl_odom_topic"),
-                },
-                {
-                    "global_initialization": LaunchConfiguration(
-                        "amcl_global_initialization"
-                    ),
-                    "global_pose_max_track_distance_m": LaunchConfiguration(
-                        "amcl_max_track_distance"
-                    ),
-                    "initial_pose_heading_offset_rad": LaunchConfiguration(
-                        "amcl_initial_heading_offset"
-                    ),
+                    "odom_topic": "/ekf_odom",
+                    "global_initialization": True,
+                    "global_pose_max_track_distance_m": 0.65,
+                    "initial_pose_heading_offset_rad": 0.0,
                 },
             ],
             remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         )
         actions.append(amcl_node)
 
-    if with_model_id_recorder:
-        # Causal diagnostics only. This recorder embeds the packet-side
-        # simulator fields offline and never publishes or feeds ground truth
-        # into localization/control.
-        actions.append(Node(
-            package="sdu_apex_autodrive",
-            executable="model_id_timing_recorder",
-            name="model_id_timing_recorder",
-            output="screen",
-            parameters=[{
-                "output_dir": LaunchConfiguration("model_id_output_dir"),
-                "run_name": LaunchConfiguration("model_id_run_name"),
-                "experiment_mode": "track_validation",
-                "record_lidar_ranges": model_id_record_lidar_ranges,
-                "duration_sec": ParameterValue(
-                    LaunchConfiguration("model_id_duration_sec"), value_type=float),
-            }],
-        ))
-
     if controller == "ftg":
-        ftg_max_speed = float(LaunchConfiguration("ftg_max_speed").perform(context))
-        component = ComposableNode(
+        controller_component = ComposableNode(
             package="f1tenth_control",
             plugin="f1tenth_control::FTGNode",
             name="ftg_node",
             parameters=[
-                LaunchConfiguration("ftg_params"),
-                {"max_speed": ftg_max_speed},
+                os.path.join(control, "config", "ftg_params.yaml"),
+                {"max_speed": 0.40},
             ],
             remappings=[
                 ("scan", "/autodrive/roboracer_1/lidar"),
                 ("drive", "/cmd/speed"),
             ],
         )
-        actions.append(ComposableNodeContainer(
-            name="controller_container",
-            namespace="",
-            package="rclcpp_components",
-            executable="component_container",
-            composable_node_descriptions=[component],
-            output="screen",
-        ))
     elif controller == "pure_pursuit":
-        component = ComposableNode(
+        controller_component = ComposableNode(
             package="f1tenth_control",
             plugin="f1tenth_control::PurePursuitNode",
             name="pure_pursuit_node",
             parameters=[
-                LaunchConfiguration("path_tracking_params"),
-                {
-                    "trajectory_file": trajectory,
-                    "max_speed": LaunchConfiguration("controller_max_speed"),
-                },
+                os.path.join(control, "config", "path_tracking_autodrive.yaml"),
+                {"trajectory_file": trajectory, "max_speed": 16.0},
             ],
         )
-        components = [component]
-        if with_mpc_shadow:
-            if not os.path.isfile(trajectory):
-                raise RuntimeError(
-                    f"MPC shadow requires a valid raceline: {trajectory}")
-            shadow_component = ComposableNode(
-                package="f1tenth_mpc",
-                plugin="f1tenth_mpc::MpcControllerNode",
-                name="mpc_shadow_node",
-                parameters=[
-                    LaunchConfiguration("mpc_params"),
-                    {
-                        "enabled": False,
-                        "shadow_mode": True,
-                        "trajectory_file": trajectory,
-                        "max_speed_mps": ParameterValue(
-                            LaunchConfiguration("controller_max_speed"),
-                            value_type=float,
-                        ),
-                        "command_topic": "/cmd/speed",
-                        "diagnostics_topic": "/mpc_shadow/diagnostics",
-                        # Shadow is an explicit diagnostic mode; authority
-                        # diagnostics remain opt-in below.
-                        "publish_diagnostics": True,
-                    },
-                ],
-            )
-            components.append(shadow_component)
-        actions.append(ComposableNodeContainer(
-            name="controller_container",
-            namespace="",
-            package="rclcpp_components",
-            executable="component_container",
-            composable_node_descriptions=components,
-            output="screen",
-        ))
     else:
-        # The unified development launcher uses this as the sole command
-        # authority. Diagnostics remain separately opt-in below.
-        component = ComposableNode(
+        controller_component = ComposableNode(
             package="f1tenth_mpc",
             plugin="f1tenth_mpc::MpcControllerNode",
             name="mpc_controller_node",
             parameters=[
-                *mpc_parameter_sources,
+                os.path.join(mpc, "config", "mpc_iros_2026_competition.yaml"),
                 {
                     "trajectory_file": trajectory,
                     "max_speed_mps": ParameterValue(
                         LaunchConfiguration("controller_max_speed"),
-                        value_type=float,
-                    ),
-                    "enabled": ParameterValue(
-                        LaunchConfiguration("mpc_enabled"), value_type=bool),
-                    # Authority diagnostics must never be written to the
-                    # historical shadow topic.  The controller is live MPC
-                    # here; keep its per-cycle result independently
-                    # recordable for closed-loop debugging when explicitly
-                    # enabled. The normal authority path avoids JSON/DDS work.
+                        value_type=float),
                     "diagnostics_topic": "/mpc/diagnostics",
                     "publish_diagnostics": ParameterValue(
                         LaunchConfiguration("mpc_publish_diagnostics"),
@@ -387,273 +223,78 @@ def _setup(context):
                 ("drive", "/cmd/speed"),
             ],
         )
-        mpc_container = ComposableNodeContainer(
-            name="controller_container",
-            namespace="",
-            package="rclcpp_components",
-            executable="component_container",
-            composable_node_descriptions=[component],
-            output="screen",
-        )
-        if needs_localization and mpc_start_delay_sec > 0.0:
-            # Register ahead of AMCL process startup. AMCL continues to receive
-            # scans during this timer; only MPC composition is delayed.
-            actions.insert(0, RegisterEventHandler(
-                OnProcessStart(
-                    target_action=amcl_node,
-                    on_start=[TimerAction(
-                        period=mpc_start_delay_sec,
-                        actions=[
-                            LogInfo(msg=(
-                                "AMCL warm-up complete; launching MPC after "
-                                f"{mpc_start_delay_sec:.2f} s"
-                            )),
-                            mpc_container,
-                        ],
-                    )],
-                )
-            ))
-            actions.append(LogInfo(msg=(
-                f"MPC launch delayed {mpc_start_delay_sec:.2f} s after AMCL starts"
+
+    controller_container = ComposableNodeContainer(
+        name="controller_container",
+        namespace="",
+        package="rclcpp_components",
+        executable="component_container",
+        composable_node_descriptions=[controller_component],
+        output="screen",
+    )
+    if controller == "mpc" and needs_localization and mpc_start_delay_sec > 0.0:
+        actions.insert(0, RegisterEventHandler(
+            OnProcessStart(
+                target_action=amcl_node,
+                on_start=[TimerAction(
+                    period=mpc_start_delay_sec,
+                    actions=[
+                        LogInfo(msg=(
+                            "AMCL warm-up complete; launching MPC after "
+                            f"{mpc_start_delay_sec:.2f} s")),
+                        controller_container,
+                    ],
+                )],
             )))
-        else:
-            actions.append(mpc_container)
-    actuator_node = Node(
+    else:
+        actions.append(controller_container)
+
+    actions.append(Node(
         package="sdu_apex_autodrive",
         executable="actuator_interface",
         name="autodrive_actuator_interface",
         output="screen",
         parameters=[
-            LaunchConfiguration("actuator_params"),
-            {
-                "input_topic": "/cmd/speed",
-                # Bridge timing diagnostics are non-fatal on the constrained
-                # competition hardware; they must never stop actuator output.
-                "external_stop_topic": "",
-            },
+            os.path.join(integration, "config", "actuator_interface.yaml"),
+            {"input_topic": "/cmd/speed", "external_stop_topic": ""},
         ],
-    )
-    actions.append(actuator_node)
-
+    ))
     if with_rviz:
-        # RViz sees only the team's allowed-sensor TF tree.
         actions.append(Node(
             package="rviz2",
             executable="rviz2",
             name="rviz",
             output="screen",
-            remappings=[
-                ("/tf", "/sdu/tf"),
-                ("/tf_static", "/sdu/tf_static"),
-            ],
+            remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         ))
-
     actions.append(LogInfo(msg=(
-        f"controller={controller} custom_amcl={needs_localization} "
-        f"mpc_shadow={with_mpc_shadow} rviz={with_rviz}"
-    )))
+        f"controller={controller} localization={needs_localization} "
+        f"rviz={with_rviz}")))
     return actions
 
 
 def generate_launch_description():
-    integration = get_package_share_directory("sdu_apex_autodrive")
-    localization = get_package_share_directory("f1tenth_localization")
-    control = get_package_share_directory("f1tenth_control")
-    mpc = get_package_share_directory("f1tenth_mpc")
-
     return LaunchDescription([
         DeclareLaunchArgument(
-            "controller",
-            default_value="pure_pursuit",
-            description=(
-                "Controller to run: FTG, Pure Pursuit, or MPC."
-            ),
-        ),
-        DeclareLaunchArgument("map", default_value=DEFAULT_MAP),
-        DeclareLaunchArgument("trajectory", default_value=DEFAULT_TRAJECTORY),
+            "controller", default_value="mpc",
+            description="Controller: mpc, pure_pursuit, or ftg."),
         DeclareLaunchArgument(
-            "with_rviz",
-            default_value="false",
-            description="Development visualization; disabled for race launch by default",
-        ),
+            "with_rviz", default_value="false",
+            description="Start RViz on the team TF tree."),
         DeclareLaunchArgument(
-            "with_model_id_recorder",
-            default_value="false",
-            description=(
-                "Record immutable causal bridge/packet/sensor tables for offline "
-                "model validation; no simulator truth enters runtime control"
-            ),
-        ),
+            "use_localization", default_value="true",
+            description="Start the map, EKF, and AMCL chain."),
         DeclareLaunchArgument(
-            "model_id_record_lidar_ranges",
-            default_value="false",
-            description=(
-                "Optional full LiDAR range sidecar for offline AMCL scan-"
-                "observability analysis; requires the model-ID recorder"
-            ),
-        ),
+            "force_localization", default_value="false",
+            description="Also start localization when running FTG mapping diagnostics."),
         DeclareLaunchArgument(
-            "model_id_output_dir",
-            default_value="/workspace/src/sdu_apex_autodrive/artifacts/simulator_trace",
-        ),
+            "controller_max_speed", default_value="16.0",
+            description="MPC/PP target-speed ceiling in m/s."),
         DeclareLaunchArgument(
-            "model_id_run_name",
-            default_value="track_validation",
-        ),
+            "mpc_publish_diagnostics", default_value="false",
+            description="Publish live MPC diagnostics; disabled on the normal 40 Hz path."),
         DeclareLaunchArgument(
-            "model_id_duration_sec",
-            default_value="0.0",
-            description="Optional finite duration for the causal model-ID recorder",
-        ),
-        DeclareLaunchArgument(
-            "force_localization",
-            default_value="false",
-            description=(
-                "Start map localization alongside FTG for diagnostics; FTG uses "
-                "only LiDAR for its command"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "use_localization",
-            default_value="true",
-            description=(
-                "Start the map/AMCL stack. Disable only for diagnostics that "
-                "provide an explicit external pose on /current_map_pose."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "controller_max_speed",
-            default_value="16.0",
-            description=(
-                "Maximum controller target speed [m/s]. The project "
-                "operating ceiling is 16 m/s; this does not alter simulator physics."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "mpc_params",
-            default_value=os.path.join(
-                mpc, "config", "mpc_iros_2026_competition.yaml"),
-            description="Source-command MPC adapter configuration",
-        ),
-        DeclareLaunchArgument(
-            "mpc_override_params",
-            default_value="",
-            description=(
-                "Optional YAML layered after the production MPC parameters "
-                "for one-factor live weight/model experiments"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "mpc_enabled",
-            default_value="true",
-            description=(
-                "Allow MPC commands in the unified development launch."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "mpc_publish_diagnostics",
-            default_value="false",
-            description=(
-                "Publish per-cycle MPC JSON diagnostics. Disabled by default "
-                "to avoid serialization/DDS work on the 40 Hz authority path."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "mpc_start_delay_sec",
-            default_value="2.0",
-            description=(
-                "Wait this many seconds after the AMCL process starts before "
-                "launching the MPC controller; set to 0 to disable"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "with_mpc_shadow",
-            default_value="false",
-            description=(
-                "Run the 9-state MPC beside Pure Pursuit without /cmd/speed "
-                "authority; record /mpc_shadow/diagnostics for Phase 10."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "ftg_max_speed",
-            default_value="0.40",
-            description="FTG diagnostic speed cap [m/s]",
-        ),
-        DeclareLaunchArgument(
-            "amcl_global_initialization",
-            default_value="true",
-            description=(
-                "Localize from LiDAR over the complete track at startup; "
-                "disable only for a deliberate known-pose unit test."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "amcl_max_track_distance",
-            default_value="0.65",
-            description=(
-                "Maximum global AMCL candidate distance from the raceline [m]. "
-                "This rejects visually plausible closed-track aliases during "
-                "startup."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "amcl_odom_topic",
-            default_value="/ekf_odom",
-            description="Timestamped odometry input used by AMCL",
-        ),
-        DeclareLaunchArgument(
-            "amcl_initial_heading_offset",
-            default_value="0.0",
-            description=(
-                "Optional local AMCL startup yaw offset in map radians. The "
-                "default is zero so the known-start pose uses the raceline "
-                "heading exactly; only override for a measured frame offset."
-            ),
-        ),
-
-        DeclareLaunchArgument(
-            "sensor_odom_params",
-            default_value=os.path.join(localization, "config", "sensor_odometry.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "sensor_odom_override_params",
-            default_value="",
-            description=(
-                "Optional YAML layered after the production sensor odometry "
-                "parameters for one-factor live observer experiments"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "amcl_params",
-            default_value=os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "amcl_override_params",
-            default_value="",
-            description=(
-                "Optional YAML layered after the production AMCL parameters "
-                "for one-factor offline/live experiments"
-            ),
-        ),
-        DeclareLaunchArgument(
-            "ekf_params",
-            default_value=os.path.join(localization, "config", "ekf.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "ftg_params",
-            default_value=os.path.join(control, "config", "ftg_params.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "path_tracking_params",
-            default_value=os.path.join(control, "config", "path_tracking_autodrive.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "actuator_params",
-            default_value=os.path.join(integration, "config", "actuator_interface.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "calibration_params",
-            default_value=os.path.join(integration, "config", "calibration.yaml"),
-        ),
+            "mpc_start_delay_sec", default_value="2.0",
+            description="Delay MPC startup after AMCL process start."),
         OpaqueFunction(function=_setup),
     ])

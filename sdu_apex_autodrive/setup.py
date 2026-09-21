@@ -1,5 +1,5 @@
-from glob import glob
 import os
+from glob import glob
 from setuptools import setup
 
 package_name = "sdu_apex_autodrive"
@@ -17,20 +17,10 @@ def source_files(pattern):
     return glob(pattern)
 
 
-calibration_manifest = "artifacts/calibration/MANIFEST.yaml"
-calibration_manifest_files = (
-    [calibration_manifest] if os.path.isfile(calibration_manifest) else []
-)
-
-
 setup(
     name=package_name,
     version="0.3.0",
-    packages=[
-        package_name,
-        package_name + ".scripts",
-        package_name + ".odometry_analysis",
-    ],
+    packages=[package_name],
     data_files=[
         (
             "share/ament_index/resource_index/packages",
@@ -42,10 +32,6 @@ setup(
             os.path.join("share", package_name, "launch"),
             source_files("launch/*.launch.py"),
         ),
-        (
-            os.path.join("share", package_name, "artifacts", "calibration"),
-            calibration_manifest_files,
-        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -56,21 +42,8 @@ setup(
     entry_points={
         "console_scripts": [
             "actuator_interface = sdu_apex_autodrive.actuator_interface:main",
-            "calibration = sdu_apex_autodrive.calibration:main",
             "lap_map_saver = sdu_apex_autodrive.lap_map_saver:main",
-            "ground_truth_mapping_tf = sdu_apex_autodrive.ground_truth_mapping_tf:main",
-            "ground_truth_amcl_monitor = sdu_apex_autodrive.ground_truth_amcl_monitor:main",
             "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
-            "model_id_timing_recorder = sdu_apex_autodrive.model_id_timing_recorder:main",
-            "analyze_calibration = sdu_apex_autodrive.scripts.analyze_calibration:main",
-            "audit_calibration_csv = sdu_apex_autodrive.scripts.audit_calibration_csv:main",
-            "validate_odometry_observer = sdu_apex_autodrive.scripts.validate_odometry_observer:main",
-            "calibrate_ekf_covariance = sdu_apex_autodrive.odometry_analysis.covariance_calibration:main",
-            "source_time_diagnostic_report = sdu_apex_autodrive.odometry_analysis.source_time_diagnostic_report:main",
-            "full_speed_localization_report = sdu_apex_autodrive.odometry_analysis.full_speed_localization_report:main",
-            "localization_error_decomposition = sdu_apex_autodrive.odometry_analysis.localization_error_decomposition:main",
-            "score_localization_run = sdu_apex_autodrive.odometry_analysis.localization_run_score:main",
-            "scan_match_benchmark = sdu_apex_autodrive.odometry_analysis.scan_match_benchmark:main",
         ],
     },
 )

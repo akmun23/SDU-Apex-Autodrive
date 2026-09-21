@@ -6,59 +6,17 @@ log/
 **/install/
 **/log/
 
-# Python
+# Python and local tooling
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-
-# Editors and local environment
 .idea/
 .vscode/
 .env
 
-# Planning scratch outputs are reproducible and must not become repository data.
-f1tenth_planning/global_racetrajectory_optimization/outputs/
-f1tenth_planning/global_racetrajectory_optimization/inputs/tracks/*_prepared.npz
-f1tenth_planning/trajectories/*_gvd.png
-f1tenth_planning/trajectories/*_viz.png
-f1tenth_planning/trajectories/*_prepared_splines_debug.png
-f1tenth_planning/trajectories/*step0_width_debug*.png
-f1tenth_planning/trajectories/optimize_*.log
-
-# Live recordings, bags, plots, and extracted diagnostics are local test
-# outputs, not source inputs. Keep the repository's analysis baseline small.
-f1tenth_planning/analysis/**
-!f1tenth_planning/analysis/
-!f1tenth_planning/analysis/README.md
-
-# Calibration recordings and generated model artifacts stay local. MANIFEST.yaml
-# records logical dataset IDs, hashes, provenance and accepted metrics without
-# putting large raw/model files in Git.
-sdu_apex_autodrive/artifacts/calibration/raw/**
-!sdu_apex_autodrive/artifacts/calibration/raw/
-!sdu_apex_autodrive/artifacts/calibration/raw/.gitkeep
-sdu_apex_autodrive/artifacts/calibration/derived/**
-!sdu_apex_autodrive/artifacts/calibration/derived/
-!sdu_apex_autodrive/artifacts/calibration/derived/**/
-!sdu_apex_autodrive/artifacts/calibration/derived/**/metrics.csv
-!sdu_apex_autodrive/artifacts/calibration/derived/**/wheel_speed_map.csv
-!sdu_apex_autodrive/artifacts/calibration/MANIFEST.yaml
-sdu_apex_autodrive/artifacts/calibration/derived/**/sensor_fusion_model*.hpp
-# Fresh simulator traces are local evidence. Keep only their small logical
-# manifest/provenance in a handoff when needed; never commit raw recordings.
-sdu_apex_autodrive/artifacts/simulator_trace/**
-sensor_record_*
-
-# MPC/PP authority runs are generated evidence, not source.  Keep curated
-# summaries and small screening tables in the repository; keep raw event
-# streams and per-run CSV partitions outside Git.
-sdu_apex_autodrive/artifacts/mpc_*/
-sdu_apex_autodrive/artifacts/pp_*/
-sdu_apex_autodrive/artifacts/*authority*/
-sdu_apex_autodrive/artifacts/*telemetry*/
-# Historical replay/shadow dumps are archived evidence, not runtime inputs.
-sdu_apex_autodrive/artifacts/external_mpc_analysis_*/
-sdu_apex_autodrive/artifacts/mpc_next_*/
-sdu_apex_autodrive/artifacts/mpc_rewrite_*/
-sdu_apex_autodrive/artifacts/calibration/ground_truth_amcl.csv
+# Runtime recordings and generated analysis never belong in the source tree.
+artifacts/
+*.bag
+*.db3
+*.csv.tmp

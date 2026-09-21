@@ -77,6 +77,7 @@ def generate_launch_description():
         package="nav2_map_server",
         executable="map_server",
         name="map_server",
+        namespace="",
         output="screen",
         parameters=[{"yaml_filename": map_path}],
     )
@@ -121,8 +122,6 @@ def generate_launch_description():
         parameters=[
             mpc_params,
             {
-                "enabled": True,
-                "shadow_mode": False,
                 "trajectory_file": trajectory_path,
                 "max_speed_mps": 16.0,
                 "publish_diagnostics": False,

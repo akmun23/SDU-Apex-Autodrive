@@ -6,5 +6,11 @@
 **/__pycache__
 **/*.pyc
 .pytest_cache
-/sdu_apex_autodrive/artifacts/
-/f1tenth_planning/analysis/
+artifacts
+
+# Offline raceline-generation source is kept in Git but is not part of the
+# competition/runtime image.
+SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3
+f1tenth_planning/global_racetrajectory_optimization
+f1tenth_planning/scripts
+f1tenth_planning/config/autodrive_sim_vehicle.yaml

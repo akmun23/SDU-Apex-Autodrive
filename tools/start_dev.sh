@@ -10,24 +10,27 @@ if [[ "${controller}" != "mpc" && "${controller}" != "pure_pursuit" && "${contro
   exit 2
 fi
 
-compose_build=()
-# The image contains the installed ROS/Python workspace.  Rebuild by default
-# so source/config changes cannot silently leave the container on an old
-# controller; Docker reuses all unchanged layers.
-if [[ "${AUTODRIVE_REBUILD:-1}" == "1" ]]; then
-  compose_build+=(--build)
-fi
+image="${SDU_APEX_IMAGE:-sdu-apex-autodrive:dev}"
+container="${SDU_APEX_CONTAINER:-sdu_apex_autodrive_dev}"
 
-echo "Starting the ROS 2 development/controller stack in Terminal 2..."
+echo "Starting the ROS 2 development/controller stack..."
 echo "Controller: ${controller}"
 echo "The bridge, odometry, localization, controller, and actuator are one launch."
 echo "The simulator may already be connected or may connect while this starts."
 
 python3 tools/verify_runtime_topic_policy.py
 
-SDU_APEX_AUTOSTART=1 \
-SDU_APEX_CONTROLLER="${controller}" \
-SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
-SDU_APEX_MPC_OVERRIDE_PARAMS="${SDU_APEX_MPC_OVERRIDE_PARAMS:-}" \
-SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
-docker compose up "${compose_build[@]}" workspace
+if [[ "${AUTODRIVE_REBUILD:-1}" == "1" ]]; then
+  docker build -t "${image}" .
+fi
+
+docker rm -f "${container}" >/dev/null 2>&1 || true
+exec docker run --rm --name "${container}" \
+  --network=host --ipc=host --privileged --gpus all \
+  -e SDU_APEX_AUTOSTART=1 \
+  -e SDU_APEX_CONTROLLER="${controller}" \
+  -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
+  -e SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
+  -v "${repo_root}:/workspace/src:rw" \
+  --entrypoint /workspace/src/docker/entrypoint.sh \
+  "${image}"

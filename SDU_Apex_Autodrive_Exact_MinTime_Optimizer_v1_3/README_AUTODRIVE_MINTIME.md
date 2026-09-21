@@ -111,7 +111,7 @@ clearance, development testing converged in:
 ## Output
 
 ```text
-autodrive_mintime_exact/
+artifacts/raceline_generation/
 ├── autodrive_mintime_raceline.csv
 ├── solution_nodes.csv
 ├── report.json
@@ -125,6 +125,10 @@ autodrive_mintime_exact/
 The controller trajectory is now the **actual optimizer-node path** rather than
 a 0.02 m re-spline. The old dense export was responsible for artificial
 curvature spikes.
+
+The generated directory is ignored and is not installed by the ROS package.
+Only an explicitly reviewed replacement is copied into the one canonical
+runtime raceline directory.
 
 Send back the entire output directory or at minimum:
 

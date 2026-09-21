@@ -349,7 +349,7 @@ class FiveLapMapSaver(Node):
             return False
         try:
             # TF lookup(target, source) returns the transform that maps source
-            # coordinates into target coordinates. Thus this is map -> gt_odom.
+            # coordinates into target coordinates. Thus this is map -> odom.
             transform = self._tf_buffer.lookup_transform(
                 self.provenance_world_frame,
                 self.provenance_map_frame,
@@ -380,7 +380,7 @@ class FiveLapMapSaver(Node):
             f"  x_m: {transform.transform.translation.x:.12g}\n"
             f"  y_m: {transform.transform.translation.y:.12g}\n"
             f"  yaw_rad: {yaw:.12g}\n"
-            "source: mapping_ground_truth_tf_at_save\n"
+            "source: mapping_team_tf_at_save\n"
             f"map_yaml_sha256: {yaml_hash}\n"
             f"map_image_sha256: {image_hash}\n",
             encoding="utf-8",

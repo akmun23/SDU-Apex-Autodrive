@@ -7,9 +7,8 @@ slam_toolbox:
     ceres_dogleg_type: TRADITIONAL_DOGLEG
     ceres_loss_function: SOFT_L1
 
-    # Mapping-only frame driven by the simulator ground-truth transform.
-    # This is never used by the deployed racing localization stack.
-    odom_frame: gt_odom
+    # Mapping frame driven by the legal encoder/IMU odometry node.
+    odom_frame: odom
     base_frame: base_link
     map_frame: map
     scan_topic: /autodrive/roboracer_1/lidar
@@ -37,9 +36,8 @@ slam_toolbox:
     tf_buffer_duration: 120.0
     enable_interactive_mode: false
 
-    # Ground-truth mapping already supplies the globally correct pose. The
-    # previous scan matcher was free to perturb those poses and produced
-    # duplicated wall layers over repeated laps. Use the exact pose directly.
+    # The mapper receives the legal odometry stream and LiDAR. Keep scan
+    # matching disabled for the deterministic map-building workflow.
     use_scan_matching: false
     use_scan_barycenter: false
     minimum_travel_distance: 0.10
@@ -48,12 +46,8 @@ slam_toolbox:
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.15
     link_scan_maximum_distance: 1.5
-    # Five laps can accumulate more than 2 m of dead-reckoning error before
-    # the first reliable return. Use the standard search envelope and let the
-    # scan response, not odometry alone, decide the loop match.
+    # Keep a bounded loop-search envelope for mapping drift.
     loop_search_maximum_distance: 3.0
-    # Loop closure is unnecessary with the same simulator world pose for
-    # every scan and can introduce a second inconsistent correction source.
     do_loop_closing: false
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0

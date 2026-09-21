@@ -100,7 +100,10 @@ def main() -> int:
 
     default_map = root / "f1tenth_planning/maps/autodrive_track_ftg_commit_20260909_025m.yaml"
     map_path = (args.map or default_map).resolve()
-    output = (args.output or (root / "f1tenth_planning/trajectories/autodrive_mintime_exact")).resolve()
+    # Generated solver checkpoints never live beside the runtime raceline.
+    # The source tree keeps one deployed CSV; generation output is ignored and
+    # can be supplied explicitly with --output when it needs to be archived.
+    output = (args.output or (root / "artifacts/raceline_generation")).resolve()
     output.mkdir(parents=True, exist_ok=True)
 
     centerline = args.centerline
@@ -115,7 +118,9 @@ def main() -> int:
 
     warm = args.warm_raceline
     if warm is None:
-        candidate = root / "f1tenth_planning/trajectories/autodrive_track_ftg_commit_20260909_025m_mintime_raceline.csv"
+        candidate = root / (
+            "f1tenth_planning/trajectories/"
+            "autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
         if candidate.exists():
             warm = candidate
 

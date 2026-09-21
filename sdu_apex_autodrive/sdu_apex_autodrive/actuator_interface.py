@@ -174,10 +174,13 @@ class ActuatorInterface(Node):
         # Mapping completion is not part of the race actuator contract. The
         # mapping launch enables its optional hook explicitly when needed.
         self.declare_parameter("external_stop_topic", "")
-        self.declare_parameter("command_timeout_sec", 0.25)
+        # Keep the source fallback identical to the canonical runtime YAML.
+        # The YAML is the normal owner; these values are only for direct node
+        # construction and must not silently select a different controller.
+        self.declare_parameter("command_timeout_sec", 0.0)
         # Tolerate a few missed 40 Hz source periods, but do not allow a
         # stale speed estimate to drive for the old 300 ms window.
-        self.declare_parameter("odom_timeout_sec", 0.125)
+        self.declare_parameter("odom_timeout_sec", 0.0)
         self.declare_parameter("max_feedback_speed_mps", 30.0)
         # Match the accepted native simulator source cadence. The timeout
         # watchdog still neutralizes the outputs if commands or odometry stop.
@@ -191,8 +194,8 @@ class ActuatorInterface(Node):
         # 1.0 is the AutoDRIVE normalized forward-throttle protocol bound,
         # not a tuning ceiling. The controller determines the actual output.
         self.declare_parameter("throttle_max_forward", 1.0)
-        self.declare_parameter("throttle_rise_rate_per_sec", 0.90)
-        self.declare_parameter("throttle_fall_rate_per_sec", 4.0)
+        self.declare_parameter("throttle_rise_rate_per_sec", 10.0)
+        self.declare_parameter("throttle_fall_rate_per_sec", 10.0)
         self.declare_parameter("stop_speed_threshold_mps", 0.02)
         # Small overshoots must be corrected with the calibrated throttle
         # feedback.  Zero throttle is active braking in this simulator, so
@@ -201,18 +204,18 @@ class ActuatorInterface(Node):
         self.declare_parameter("overspeed_coast_threshold_mps", 1.0)
         # Once target speed and acceleration are settled, hold the calibrated
         # feed-forward throttle until either deadband is left.
-        self.declare_parameter("speed_hold_error_deadband_mps", 0.25)
-        self.declare_parameter("speed_hold_recovery_error_mps", 0.25)
+        self.declare_parameter("speed_hold_error_deadband_mps", 0.15)
+        self.declare_parameter("speed_hold_recovery_error_mps", 0.75)
         self.declare_parameter("speed_hold_acceleration_deadband_mps2", 0.35)
         # Far below target, use the calibrated acceleration envelope. Handoff
         # is predictive so the vehicle reaches the target without a large
         # overshoot, then the target-speed feed-forward value is held.
-        self.declare_parameter("speed_boost_error_mps", 1.5)
-        self.declare_parameter("speed_hold_prediction_horizon_sec", 0.25)
+        self.declare_parameter("speed_boost_error_mps", 100.0)
+        self.declare_parameter("speed_hold_prediction_horizon_sec", 0.35)
         self.declare_parameter("speed_hold_entry_margin_mps", 0.15)
         self.declare_parameter("speed_downshift_stable_sec", 0.20)
         self.declare_parameter("speed_downshift_band_mps", 0.10)
-        self.declare_parameter("speed_overspeed_confirmation_sec", 0.30)
+        self.declare_parameter("speed_overspeed_confirmation_sec", 0.05)
         self.declare_parameter("hard_overspeed_cutoff_mps", 0.50)
         # Allowed-input longitudinal observer.  It rejects encoder wheel-spin
         # when the IMU-integrated body speed disagrees materially.
@@ -223,9 +226,9 @@ class ActuatorInterface(Node):
         # Condition only the speed signal consumed by the actuator loop. The
         # estimator's published /odom topic remains the calibrated sensor
         # fusion output and is not low-pass filtered here.
-        self.declare_parameter("speed_measurement_filter_alpha", 0.35)
-        self.declare_parameter("speed_error_to_accel_gain", 1.25)
-        self.declare_parameter("speed_error_integral_to_accel_gain", 0.05)
+        self.declare_parameter("speed_measurement_filter_alpha", 0.75)
+        self.declare_parameter("speed_error_to_accel_gain", 0.0)
+        self.declare_parameter("speed_error_integral_to_accel_gain", 0.0)
         # Full-throttle open-ground acceleration is speed dependent. The
         # scalar is the low-speed cap; the envelope below is the measured
         # monotonic capability curve used at runtime.

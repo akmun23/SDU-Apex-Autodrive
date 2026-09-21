@@ -2,8 +2,7 @@
   ros__parameters:
     # Frozen IROS 2026 autonomous MPC profile.  This file is intentionally
     # complete so the competition image does not depend on a host overlay.
-    enabled: false
-    shadow_mode: false
+    enabled: true
     odom_topic: /odom
     pose_topic: /current_map_pose
     command_topic: /cmd/speed

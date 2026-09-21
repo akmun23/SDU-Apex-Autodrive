@@ -24,8 +24,8 @@ python3 /workspace/src/tools/verify_runtime_topic_policy.py
 # Start exactly one official bridge and one selected team controller. MPC is
 # the normal local racing controller; explicitly enable its command publisher
 # here so a GUI simulator only needs its Connect button after this container is
-# running. Diagnostics recorders remain opt-in to avoid adding CSV I/O to the
-# timing-sensitive default path.
+# running. Diagnostics are limited to the live MPC publisher and remain off by
+# default so the normal 40 Hz path does not serialize JSON.
 controller="${SDU_APEX_CONTROLLER:-mpc}"
 launch_args=(
   "controller:=${controller}"
@@ -33,11 +33,7 @@ launch_args=(
 )
 if [[ "${controller}" == "mpc" ]]; then
   launch_args+=(
-    "mpc_enabled:=true"
     "mpc_publish_diagnostics:=${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}"
   )
-  if [[ -n "${SDU_APEX_MPC_OVERRIDE_PARAMS:-}" ]]; then
-    launch_args+=("mpc_override_params:=${SDU_APEX_MPC_OVERRIDE_PARAMS}")
-  fi
 fi
 exec ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"

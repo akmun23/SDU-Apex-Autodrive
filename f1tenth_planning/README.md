@@ -1,23 +1,21 @@
-# Track planning
+# Competition planning data
 
-The active planning pipeline is the single `optimize_trajectory.py` entry
-point. It extracts the corridor from the production map and runs the TUM
-minimum-time optimizer using the AutoDRIVE vehicle profile in
-`config/autodrive_sim_vehicle.yaml`.
+This package contains the ICRA competition map and exactly one installed
+raceline. The raceline is consumed by Pure Pursuit, AMCL global initialization,
+and the MPC; keeping one file avoids silently testing different trajectories.
 
-The optimizer uses one constant-friction vehicle model. Variable-friction map
-branches and their unused input files are not part of this repository.
+Runtime files:
 
-```bash
-python3 f1tenth_planning/scripts/optimize_trajectory.py
-```
+- `maps/autodrive_track_ftg_commit_20260909_025m.yaml` and its PGM image
+- `trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv`
+- the trajectory manifest in the same directory
 
-The current production inputs are the 2.5 cm FTG map and its generated mintime
-raceline. The output CSV is consumed directly by Pure Pursuit. Intermediate
-prepared tracks and visualizations are generated locally and are not part of
-the clean baseline.
+Trajectory optimization and experimental outputs are intentionally outside
+this competition runtime repository. A replacement raceline must be reviewed
+and replace the canonical CSV in one change; do not add parallel candidates.
 
-The exported trajectory contains arc length, position, heading, curvature,
-target speed, acceleration, and left/right wall distances. The optimizer
-verifies the vehicle steering curvature limit and wall clearance before the
-CSV is usable by the controller.
+The reviewed exact minimum-time generator is retained under
+`SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/`. It writes checkpoints to
+the ignored `artifacts/raceline_generation/` directory by default and uses the
+canonical CSV only as an optional warm start. It does not create additional
+installed runtime racelines.

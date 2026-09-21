@@ -266,8 +266,8 @@ void test_command_actuation_delay_shifts_effective_timeline()
         kSourceStampNs - 50000000LL);
     CHECK(delayed.command_event_stamps_ns[1] ==
         kSourceStampNs + 75000000LL);
-    CHECK(delayed.steering_command_rad == 0.4);
-    CHECK(delayed.target_speed_mps == 4.0);
+    CHECK(std::abs(delayed.steering_command_rad - 0.4) < 1.0e-6);
+    CHECK(std::abs(delayed.target_speed_mps - 4.0) < 1.0e-6);
 }
 
 }  // namespace

@@ -90,11 +90,6 @@ target_include_directories(amcl_localization_math_test PRIVATE gpu_amcl_cpp/incl
 target_link_libraries(amcl_localization_math_test Eigen3::Eigen)
 add_test(NAME amcl_localization_math_test COMMAND amcl_localization_math_test)
 
-add_executable(odometry_observer_replay
-  src/odometry_observer_replay.cpp
-  src/odometry_observer.cpp)
-target_include_directories(odometry_observer_replay PRIVATE include)
-
 add_executable(ekf_localization_node
   gpu_amcl_cpp/src/main_ekf.cpp
   gpu_amcl_cpp/src/core/ekf_node.cpp)

@@ -2,7 +2,7 @@
 <package format="3">
   <name>sdu_apex_autodrive</name>
   <version>0.3.0</version>
-  <description>Single-launch AutoDRIVE racing and calibration integration.</description>
+  <description>AutoDRIVE racing, mapping, and controller integration.</description>
   <maintainer email="akmun23@student.sdu.dk">Aksel Munksgaard-Ottosen</maintainer>
   <license>MIT</license>
 
@@ -15,15 +15,12 @@
   <depend>tf2_ros</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
-  <exec_depend>python3-yaml</exec_depend>
-
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>f1tenth_control</exec_depend>
   <exec_depend>f1tenth_localization</exec_depend>
   <exec_depend>f1tenth_mpc</exec_depend>
-  <exec_depend>sdu_apex_msgs</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>

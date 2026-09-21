@@ -194,21 +194,21 @@ public:
         if (!vehicle_model_set_yaw_rate_parameters(&yaw_model)) {
             throw std::runtime_error("invalid yaw-rate model parameters");
         }
-        /* Keep parameter fallbacks identical to config/mpc_autodrive.yaml.
+        /* Keep parameter fallbacks identical to the canonical competition YAML.
          * Otherwise a missing/renamed YAML silently selected the historical
          * BachelorProject objective while the offline replay and documented
          * production profile used different weights. */
-        rti_config_.model.weight_e_y = declare_weight("weight_e_y", 150.0f);
-        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 10.0f);
-        rti_config_.model.weight_u = declare_weight("weight_u", 50.0f);
+        rti_config_.model.weight_e_y = declare_weight("weight_e_y", 125.0f);
+        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 2.0f);
+        rti_config_.model.weight_u = declare_weight("weight_u", 200.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
-            "weight_u_overspeed", 150.0f);
+            "weight_u_overspeed", 200.0f);
         rti_config_.model.weight_target_speed_state = declare_weight(
             "weight_target_speed_state", 20.0f);
-        rti_config_.model.weight_v = declare_weight("weight_v", 0.0f);
+        rti_config_.model.weight_v = declare_weight("weight_v", 5.0f);
         rti_config_.model.weight_r = declare_weight("weight_r", 1.5f);
         rti_config_.model.weight_steering_command = declare_weight(
-            "weight_steering_command", 5.0f);
+            "weight_steering_command", 3.0f);
         rti_config_.model.weight_steering_rate = declare_weight(
             "weight_steering_rate", 5.0f);
         rti_config_.model.weight_target_speed_rate = declare_weight(
