@@ -28,6 +28,12 @@
 
     yaw_rate_response_time_constant_s: 0.087735
     yaw_rate_steering_gain_per_m: 3.011897
+    # Ground-truth identification shows a sharp authority loss near the
+    # physical steering limit. Keep the nominal gain below 0.41 rad and
+    # transition to approximately 1.23 1/m by 0.46 rad.
+    yaw_rate_steering_gain_reduction_per_rad: 35.6
+    yaw_rate_steering_gain_start_rad: 0.41
+    yaw_rate_steering_gain_end_rad: 0.46
     yaw_rate_curvature_gain_reduction_per_m: 0.0
     yaw_rate_curvature_gain_start_per_m: 0.20
     yaw_rate_curvature_gain_end_per_m: 0.40

@@ -28,11 +28,11 @@ the racing launch:
 - lap/time/result topics, including `speed`
 - absolute `/tf`
 
-The competition launch includes the official headless API bridge unchanged.
-The development bridge wrapper is not used by that launch. The official bridge
-may still publish simulator telemetry as part of its protocol, but no team node
-subscribes to those restricted outputs. Team TF is remapped to `/sdu/tf` and
-`/sdu/tf_static`.
+The competition launch uses the repository's rate-controlled wrapper around the
+official headless API bridge. The wrapper only subscribes to the permitted
+steering and throttle command topics and may still publish simulator telemetry
+as part of the API protocol; no team node subscribes to those restricted
+outputs. Team TF is remapped to `/sdu/tf` and `/sdu/tf_static`.
 
 The unqualified `/odom` name in this repository is the team observer's own
 derived topic; it is not connected to or remapped from

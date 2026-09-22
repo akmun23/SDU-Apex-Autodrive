@@ -2,6 +2,10 @@
 build/
 install/
 log/
+log-current/
+build-current/
+install-current/
+live_runs/
 **/build/
 **/install/
 **/log/

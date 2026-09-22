@@ -462,19 +462,15 @@ bool AmclNode::should_publish_pose_estimate(
         return true;
     }
 
-    // Normal local updates still reject a large alternative pose. A confirmed
-    // lost-track recovery is the one deliberate exception: AMCL must be able
-    // to remove accumulated odometry drift after several scan-supported
-    // candidates, rather than preserving a stale map->odom transform forever.
-    if (global_localization_locked_ && !allow_locked_recovery) {
-        have_pending_jump_pose_ = false;
-        pending_jump_pose_count_ = 0;
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 1000,
-            "AMCL local pose jump rejected: %.2f m, %.2f rad; preserving last valid map pose.",
-            jump_distance, jump_yaw);
-        return false;
-    }
+    // A locked local estimate must still pass the confirmation streak below.
+    // The previous early return made that streak unreachable for ordinary
+    // locked tracking: one large but scan-supported correction was discarded,
+    // its pending candidate was cleared, and the stale map->odom transform
+    // was propagated forever. The association, cluster-quality, raceline,
+    // and confirmation gates remain active; a single inconsistent jump is
+    // still rejected. The recovery flag is retained for the explicit global
+    // recovery path, which uses the same confirmation logic.
+    (void)allow_locked_recovery;
 
     bool same_pending = false;
     if (have_pending_jump_pose_) {

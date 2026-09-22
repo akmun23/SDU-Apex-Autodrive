@@ -27,12 +27,11 @@ OdometryObserverConfig deployment_observer_config()
   config.decel_ax_offset_mps2 = 0.020;
   config.wheel_update_ax_abs_max_mps2 = 6.5;
   config.wheel_freeze_speed_mps = 0.15;
-  config.wheel_innovation_max_mps = 1.50;
   config.wheel_recovery_launch_speed_mps = 2.0;
   config.wheel_recovery_launch_innovation_mps = 2.0;
   config.wheel_recovery_launch_wheel_speed_mps = 4.0;
   config.wheel_burst_disagreement_mps = 1.0;
-  config.wheel_burst_catchup_accel_mps2 = 2.5;
+  config.wheel_burst_catchup_accel_mps2 = 6.5;
   config.wheel_burst_catchup_max_mps = 16.0;
   config.allow_turn_current_packet_recovery = true;
   config.turn_current_packet_max_increase_mps = 0.20;
@@ -383,8 +382,7 @@ OdometryEstimate OdometryObserver::update(
     speed_mps_ > std::max(2.0, config_.wheel_recovery_launch_speed_mps) &&
     last_wheel_mapped_mps_ > 0.0 &&
     std::abs(wheel_mapped - last_wheel_mapped_mps_) / dt_s >
-    config_.wheel_speed_slew_limit_mps2 &&
-    std::abs(wheel_mapped - speed_mps_) > config_.wheel_innovation_max_mps;
+    config_.wheel_speed_slew_limit_mps2;
   last_wheel_raw_mps_ = wheel_raw;
   last_wheel_mapped_mps_ = wheel_mapped;
   last_wheel_packet_mps_ = wheel_packet;
@@ -429,27 +427,6 @@ OdometryEstimate OdometryObserver::update(
     wheel_burst_recovery_pending_ = true;
   }
 
-  // A repeated cumulative-encoder burst can make the rolling and current
-  // packet rates agree while both are far above the causal body speed. The
-  // coherence shortcut below is useful for a stale low window, but it must
-  // not promote this physically impossible positive jump when a steering
-  // transient enters turn mode. Hold the causal state and let IMU
-  // propagation catch up until a wheel packet returns inside the innovation
-  // gate.
-  const bool positive_wheel_innovation_fault =
-    config_.wheel_innovation_max_mps > 0.0 &&
-    speed_mps_ >= std::max(2.0, config_.wheel_recovery_launch_speed_mps) &&
-    wheel_mapped > speed_mps_ + config_.wheel_innovation_max_mps &&
-    wheel_packet_mapped > speed_mps_ + config_.wheel_innovation_max_mps &&
-    config_.wheel_burst_disagreement_mps > 0.0 &&
-    std::abs(wheel_packet_mapped - wheel_mapped) <=
-    0.25 * config_.wheel_burst_disagreement_mps &&
-    !wheel_burst_rejected_;
-  if (positive_wheel_innovation_fault) {
-    wheel_dropout_active_ = true;
-    wheel_burst_recovery_pending_ = true;
-  }
-
   // A coherent rolling-window/current-packet pair is not sufficient evidence
   // during launch: both rates can describe wheel spin while the body is still
   // accelerating from rest. The accepted model-identification recordings
@@ -481,15 +458,28 @@ OdometryEstimate OdometryObserver::update(
     if (wheel_raw < config_.wheel_freeze_speed_mps && predicted_speed > 0.5) {
       return false;
     }
-    // Permit the first positive wheel sample to establish motion.  The old
-    // innovation gate compared it with a zero IMU prediction and rejected
-    // the launch sample, which was especially harmful when turn mode was
-    // entered immediately by the steering transient.
-    return std::abs(wheel_mapped - predicted_speed) <=
-      config_.wheel_innovation_max_mps ||
-      (predicted_speed < config_.wheel_freeze_speed_mps &&
-      wheel_mapped >= config_.stationary_speed_threshold_mps);
+    // Permit the first positive wheel sample to establish motion. The
+    // remaining checks above only reject explicit packet, launch-spin, and
+    // slew anomalies.
+    return true;
   };
+
+  // A delayed bridge callback can span several nominal packets.  If the
+  // current cumulative-encoder rate agrees with the rolling-window rate, it
+  // is the only measurement of that complete delayed interval.  The normal
+  // packet validity gate is for a nominal packet, so it must not reject this
+  // coherent long-interval average solely because the state is stale.
+  // Repeated-angle and burst packets remain excluded by the existing gates.
+  const bool long_interval_wheel_recovery =
+    dt_s > config_.normal_packet_dt_max_s &&
+    wheel_packet >= config_.wheel_freeze_speed_mps &&
+    wheel_packet_mapped >= config_.wheel_freeze_speed_mps &&
+    wheel_packet_mapped <= config_.wheel_burst_catchup_max_mps &&
+    !wheel_burst_rejected_ && !wheel_slew_rejected &&
+    !launch_wheel_spin(speed_mps_) &&
+    config_.wheel_burst_disagreement_mps > 0.0 &&
+    std::abs(wheel_packet_mapped - wheel_mapped) <=
+    config_.wheel_burst_disagreement_mps;
 
   // The simulator has emitted an impossible longitudinal acceleration sample
   // while stationary (approximately -123 m/s^2).  In turn mode that value
@@ -568,9 +558,7 @@ OdometryEstimate OdometryObserver::update(
     turn_calm_time_s_ = 0.0;
     // The first turn can be entered during launch, before the IMU speed
     // prediction has caught up with the synchronized encoder packet. The
-    // encoder is the trusted longitudinal measurement in turn mode; keeping
-    // the lower prediction here makes the normal innovation gate reject valid
-    // wheel speeds for several packets and loses launch distance.
+    // encoder is the trusted longitudinal measurement in turn mode.
     if (!wheel_dropout_active_ &&
       wheel_packet >= config_.wheel_freeze_speed_mps && finite(wheel_mapped)) {
       body_u_mps_ = std::max(0.0, wheel_mapped + turn_wheel_bias);
@@ -611,8 +599,8 @@ OdometryEstimate OdometryObserver::update(
     // A repeated zero/near-zero packet makes the current-packet derivative
     // unusable, but the rolling window can still contain the real motion.
     // Recover from that ordinary dropout with the rolling rate.  The old
-    // path preferred the instantaneous packet whenever it happened to fall
-    // inside the innovation gate; in the simulator that selected stale low
+    // path preferred the instantaneous packet whenever it was nonzero; in the
+    // simulator that selected stale low
     // rates (for example 1.55 m/s while the car was travelling about 2.7
     // m/s) and permanently put MPC behind the raceline.
     const bool window_wheel_recovery = wheel_dropout_active_ &&
@@ -623,8 +611,8 @@ OdometryEstimate OdometryObserver::update(
       !launch_wheel_spin(speed_mps_) &&
       wheel_packet >= config_.wheel_freeze_speed_mps &&
       turn_wheel_mapped >= config_.wheel_freeze_speed_mps &&
-      std::abs(turn_wheel_mapped - speed_mps_) <=
-      config_.wheel_innovation_max_mps;
+      turn_wheel_mapped >= speed_mps_ -
+      config_.turn_current_packet_max_decrease_mps;
     const bool normal_wheel_recovery = wheel_dropout_active_ &&
       !wheel_burst_rejected_ &&
       !launch_wheel_spin(speed_mps_) &&
@@ -633,10 +621,10 @@ OdometryEstimate OdometryObserver::update(
       (config_.wheel_burst_disagreement_mps > 0.0 &&
       std::abs(turn_wheel_packet_mapped - turn_wheel_mapped) <=
       config_.wheel_burst_disagreement_mps)) &&
-      (std::abs(turn_wheel_packet_mapped - speed_mps_) <=
-      config_.wheel_innovation_max_mps) &&
       turn_wheel_packet_mapped <= speed_mps_ +
-      config_.turn_current_packet_max_increase_mps;
+      config_.turn_current_packet_max_increase_mps &&
+      turn_wheel_packet_mapped >= speed_mps_ -
+      config_.turn_current_packet_max_decrease_mps;
     const bool turn_current_packet_recovery =
       config_.allow_turn_current_packet_recovery && wheel_dropout_active_ &&
       wheel_burst_recovery_pending_ && !wheel_burst_rejected_ &&
@@ -645,13 +633,35 @@ OdometryEstimate OdometryObserver::update(
       turn_wheel_packet_mapped >= speed_mps_ &&
       turn_wheel_packet_mapped <= speed_mps_ +
       config_.turn_current_packet_max_increase_mps &&
+      turn_wheel_packet_mapped >= speed_mps_ -
+      config_.turn_current_packet_max_decrease_mps &&
       config_.wheel_burst_disagreement_mps > 0.0 &&
       turn_wheel_packet_mapped > turn_wheel_mapped +
       config_.wheel_burst_disagreement_mps;
     const bool packet_wheel_recovery = !window_wheel_recovery &&
       (normal_wheel_recovery || turn_current_packet_recovery);
+    // After a rejected burst, a current packet that agrees with the rolling
+    // rate is a coherent recovery measurement when it is moderately above
+    // the stale causal speed. Keep the broader burst disagreement bound as
+    // the upper limit: a rolling/current pair that is more than that above
+    // the causal state is still a positive burst and must use bounded
+    // catch-up instead of overwriting the state.
+    const bool coherent_burst_recovery = wheel_burst_recovery_pending_ &&
+      !wheel_burst_rejected_ && !wheel_slew_rejected &&
+      !launch_wheel_spin(speed_mps_) &&
+      wheel_packet >= config_.wheel_freeze_speed_mps &&
+      turn_wheel_mapped >= config_.wheel_freeze_speed_mps &&
+      turn_wheel_mapped <= config_.wheel_burst_catchup_max_mps &&
+      turn_wheel_mapped >= speed_mps_ -
+      config_.turn_current_packet_max_decrease_mps &&
+      turn_wheel_mapped <= speed_mps_ +
+      config_.wheel_burst_disagreement_mps &&
+      config_.wheel_burst_disagreement_mps > 0.0 &&
+      std::abs(turn_wheel_packet_mapped - turn_wheel_mapped) <=
+      config_.wheel_burst_disagreement_mps;
     const bool wheel_recovery = window_wheel_recovery ||
-      packet_wheel_recovery;
+      packet_wheel_recovery || long_interval_wheel_recovery ||
+      coherent_burst_recovery;
     const bool burst_window_catchup =
       wheel_burst_recovery_pending_ && !wheel_recovery &&
       !launch_wheel_spin(speed_mps_) &&
@@ -667,9 +677,7 @@ OdometryEstimate OdometryObserver::update(
       wheel_packet >= config_.wheel_freeze_speed_mps &&
       config_.wheel_burst_disagreement_mps > 0.0 &&
       !wheel_slew_rejected &&
-      (speed_mps_ < std::max(2.0, config_.wheel_recovery_launch_speed_mps) ||
-      std::abs(turn_wheel_mapped - speed_mps_) <=
-      config_.wheel_innovation_max_mps) &&
+      turn_wheel_mapped >= config_.wheel_freeze_speed_mps &&
       std::abs(turn_wheel_packet_mapped - turn_wheel_mapped) <=
       config_.wheel_burst_disagreement_mps;
     const bool wheel_ok = !wheel_burst_rejected_ && !wheel_dropout_active_ &&
@@ -682,7 +690,7 @@ OdometryEstimate OdometryObserver::update(
         turn_wheel_mapped : turn_wheel_packet_mapped;
       wheel_dropout_active_ = false;
       wheel_burst_recovery_pending_ = false;
-      if (packet_wheel_recovery) {
+      if (packet_wheel_recovery || long_interval_wheel_recovery) {
         // The rolling window still contains the repeated cumulative-angle
         // packet. Rebase it only when a current-packet recovery was actually
         // required; ordinary dropout recovery already used the window and
@@ -828,8 +836,8 @@ OdometryEstimate OdometryObserver::update(
         !launch_wheel_spin(speed_pred) &&
         wheel_packet >= config_.wheel_freeze_speed_mps &&
         wheel_mapped >= config_.wheel_freeze_speed_mps &&
-        std::abs(wheel_mapped - speed_pred) <=
-        config_.wheel_innovation_max_mps;
+        wheel_mapped >= speed_pred -
+        config_.turn_current_packet_max_decrease_mps;
       const bool packet_wheel_recovery = wheel_dropout_active_ &&
         !wheel_burst_rejected_ &&
         !launch_wheel_spin(speed_pred) &&
@@ -838,14 +846,29 @@ OdometryEstimate OdometryObserver::update(
         (config_.wheel_burst_disagreement_mps > 0.0 &&
         std::abs(wheel_packet_mapped - wheel_mapped) <=
         config_.wheel_burst_disagreement_mps)) &&
-        (std::abs(wheel_packet_mapped - speed_pred) <=
-        config_.wheel_innovation_max_mps) &&
         (!wheel_burst_recovery_pending_ ||
         config_.turn_current_packet_max_increase_mps <= 0.0 ||
         wheel_packet_mapped <= speed_pred +
-        config_.turn_current_packet_max_increase_mps);
+        config_.turn_current_packet_max_increase_mps) &&
+        wheel_packet_mapped >= speed_pred -
+        config_.turn_current_packet_max_decrease_mps;
+      const bool coherent_burst_recovery = wheel_burst_recovery_pending_ &&
+        !wheel_burst_rejected_ && !wheel_slew_rejected &&
+        !launch_wheel_spin(speed_pred) &&
+        wheel_packet >= config_.wheel_freeze_speed_mps &&
+        wheel_mapped >= config_.wheel_freeze_speed_mps &&
+        wheel_mapped <= config_.wheel_burst_catchup_max_mps &&
+        wheel_mapped >= speed_pred -
+        config_.turn_current_packet_max_decrease_mps &&
+        wheel_mapped <= speed_pred +
+        config_.wheel_burst_disagreement_mps &&
+        config_.wheel_burst_disagreement_mps > 0.0 &&
+        std::abs(wheel_packet_mapped - wheel_mapped) <=
+        config_.wheel_burst_disagreement_mps;
       const bool wheel_recovery = window_wheel_recovery ||
-        (!window_wheel_recovery && packet_wheel_recovery);
+        (!window_wheel_recovery &&
+        (packet_wheel_recovery || long_interval_wheel_recovery ||
+        coherent_burst_recovery));
       const bool burst_window_catchup =
         wheel_burst_recovery_pending_ && !wheel_recovery &&
         !launch_wheel_spin(speed_pred) &&

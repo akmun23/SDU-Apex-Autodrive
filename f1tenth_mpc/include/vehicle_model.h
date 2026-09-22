@@ -51,6 +51,12 @@ typedef struct
 {
     float response_time_constant_s;
     float steering_gain_per_m;
+    /* Empirical authority loss as the physical steering angle approaches the
+     * Unity steering limit. The nominal gain remains active below the start
+     * of this transition. */
+    float steering_gain_reduction_per_rad;
+    float steering_gain_start_rad;
+    float steering_gain_end_rad;
     float curvature_gain_reduction_per_m;
     float curvature_gain_start_per_m;
     float curvature_gain_end_per_m;

@@ -42,9 +42,6 @@ struct OdometryObserverConfig
   // replaced by the slower IMU prediction.
   double wheel_update_ax_abs_max_mps2{6.5};
   double wheel_freeze_speed_mps{0.15};
-  // Permit recovery from a transient IMU-speed error while retaining the
-  // frozen-wheel and timing gates for missing packets.
-  double wheel_innovation_max_mps{1.50};
   // During launch the encoder can report a coherent wheel rate while the
   // driven wheels are spinning far faster than the body. Do not let the
   // coherent-recovery shortcut promote that value into odometry until the
@@ -62,7 +59,7 @@ struct OdometryObserverConfig
   // a bounded physical acceleration instead of accepting the burst directly.
   // The ceiling is the competition operating envelope, not a command-speed
   // limiter; rates above it remain rejected as encoder evidence.
-  double wheel_burst_catchup_accel_mps2{2.5};
+  double wheel_burst_catchup_accel_mps2{6.5};
   double wheel_burst_catchup_max_mps{16.0};
   // In a turn, a fresh synchronized packet can be a valid current-motion
   // sample while the rolling window still contains a repeated angle. Permit
@@ -71,6 +68,9 @@ struct OdometryObserverConfig
   // the stricter window-coherence rule.
   bool allow_turn_current_packet_recovery{true};
   double turn_current_packet_max_increase_mps{0.20};
+  // Do not accept a stale low current packet as recovery from a moving
+  // dropout.  The limit is chosen above one source-step of measured braking.
+  double turn_current_packet_max_decrease_mps{0.50};
   // Provisional, bounded turn-speed residual calibration identified from
   // held-out live runs. It uses only mapped wheel speed and IMU yaw rate at
   // runtime; simulator truth is used offline to fit/score the coefficients.
@@ -109,9 +109,9 @@ struct OdometryObserverConfig
   double turn_exit_abs_ay_mps2{0.5};
   double turn_exit_hold_s{0.5};
   // During a hard turn/braking transient the IMU-integrated prediction can
-  // temporarily exceed the synchronized wheel estimate by more than the
-  // normal innovation gate.  A valid nonzero wheel packet is still useful in
-  // that case; isolated zero packets remain protected by wheel_freeze_speed.
+  // temporarily exceed the synchronized wheel estimate. A valid nonzero
+  // wheel packet is still useful; isolated zero packets remain protected by
+  // wheel_freeze_speed.
   double turn_wheel_braking_ax_mps2{-1.0};
   // Longitudinal location of the point whose velocity is differentiated by
   // the Unity IMU script, relative to base_link/rear axle. This is not the

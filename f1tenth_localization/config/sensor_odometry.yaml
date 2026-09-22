@@ -58,9 +58,6 @@ sensor_odometry:
     # acceleration, leaving /odom on the much slower IMU prediction.
     wheel_update_ax_abs_max_mps2: 6.5
     wheel_freeze_speed_mps: 0.15
-    # Allow the wheel measurement to recover a transient IMU-speed error;
-    # frozen-wheel and source-timing gates still reject missing packets.
-    wheel_innovation_max_mps: 1.50
     # Launch wheel-spin guard: a coherent encoder rate above the low-speed
     # body prediction is not accepted as a recovery until the body is moving.
     # This only blocks the coherence shortcut; normal established-speed
@@ -76,12 +73,17 @@ sensor_odometry:
     # catch up toward the rolling rate at a bounded acceleration. This is not
     # a vehicle-speed command limit; values above the 16 m/s competition
     # envelope remain rejected as encoder evidence.
-    wheel_burst_catchup_accel_mps2: 2.5
+    # Ground-truth-scored runs show the 2.5 m/s^2 catch-up left /odom behind
+    # by more than 1 m/s after a stale burst.  6.5 m/s^2 matches the existing
+    # measured wheel-update acceleration envelope while remaining below the
+    # observed transient outliers; the wheel and burst gates still decide
+    # whether catch-up is allowed.
+    wheel_burst_catchup_accel_mps2: 6.5
     wheel_burst_catchup_max_mps: 16.0
     # A repeated cumulative-angle burst can make rolling/current wheel rates
     # agree while both are still far above causal speed. Established-speed
     # turn entry rejects that positive innovation and propagates with IMU
-    # dynamics until a packet returns inside wheel_innovation_max_mps.
+    # dynamics until a coherent wheel packet returns.
     # In a turn, use a fresh synchronized packet to recover from a stale
     # rolling window when it is close to the causal speed. Straight-line
     # burst recovery remains window-coherent.
@@ -90,6 +92,10 @@ sensor_odometry:
     # Limit its instantaneous positive correction while keeping normal
     # coherent wheel updates and causal IMU dropout braking unchanged.
     turn_current_packet_max_increase_mps: 0.20
+    # A moving car cannot lose more than this amount in one synchronized
+    # source step under the measured IMU braking envelope.  Smaller packets
+    # remain dropout evidence instead of collapsing /odom to stale motion.
+    turn_current_packet_max_decrease_mps: 0.50
     # Provisional held-out turn-speed residual model. Runtime inputs are only
     # mapped encoder speed and IMU yaw rate; simulator truth was used offline
     # to identify/score these coefficients. The correction is bounded to 0.10
@@ -113,7 +119,12 @@ sensor_odometry:
     # Reject an abrupt rolling wheel-rate change that is not compatible with
     # the causal body-speed estimate. This catches wheel slip even when the
     # rolling and current packet rates agree. A causal-speed release recovers.
-    wheel_speed_slew_limit_mps2: 40.0
+    # The recorded accepted hairpin packet fell by 26.4 m/s^2 while the
+    # vehicle's measured deceleration was about 5.8 m/s^2.  Reject that
+    # cumulative-angle step and keep the causal IMU prediction until the next
+    # coherent encoder packet; normal acceleration and braking remain below
+    # this bound in the held-out run.
+    wheel_speed_slew_limit_mps2: 8.0
     # After a repeated cumulative-angle packet, the first valid packet
     # re-baselines the rolling window before normal estimation resumes.
     # Separate true stopped detection from the 0.15 m/s missing-encoder gate;

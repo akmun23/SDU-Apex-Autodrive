@@ -175,6 +175,15 @@ public:
         yaw_model.steering_gain_per_m = static_cast<float>(
             declare_parameter<double>("yaw_rate_steering_gain_per_m",
                 default_yaw_model.steering_gain_per_m));
+        yaw_model.steering_gain_reduction_per_rad = static_cast<float>(
+            declare_parameter<double>("yaw_rate_steering_gain_reduction_per_rad",
+                default_yaw_model.steering_gain_reduction_per_rad));
+        yaw_model.steering_gain_start_rad = static_cast<float>(
+            declare_parameter<double>("yaw_rate_steering_gain_start_rad",
+                default_yaw_model.steering_gain_start_rad));
+        yaw_model.steering_gain_end_rad = static_cast<float>(
+            declare_parameter<double>("yaw_rate_steering_gain_end_rad",
+                default_yaw_model.steering_gain_end_rad));
         yaw_model.curvature_gain_reduction_per_m = static_cast<float>(
             declare_parameter<double>("yaw_rate_curvature_gain_reduction_per_m",
                 default_yaw_model.curvature_gain_reduction_per_m));
@@ -496,11 +505,9 @@ private:
             publish_shadow_failure(reason);
     }
 
-    /* A legal-input/localization rejection is not an instant collision abort.
-     * A rejected MPC candidate is never published as if it were valid.  The
-     * RTI authority path uses no stale/geometric driving fallback; a rejected
-     * cycle is stopped by publish_stop() at the call site so the failure stays
-     * observable and cannot move the car with an unknown command.  Collision
+    /* A rejected MPC candidate is never published as if it were valid.  The
+     * fallback preserves only bounded command continuity; hard RTI rejection
+     * callers additionally request the configured speed reduction. Collision
      * monitoring still terminates the process immediately. */
     void publish_driving_fallback(const char *reason,
                                   double observed_speed_mps,
@@ -1333,13 +1340,14 @@ private:
                     last_projected_s_, source_dt, result, solve_us,
                     control_ros_time.nanoseconds(), callback_steady_ns,
                     synchronize_steady_ns);
-            /* No exact-feasible candidate exists. Keep bounded command
-             * continuity instead of hard-braking for a numerical failure.
-             * This path remains visible in diagnostics and resets the failed
-             * RTI memory. */
+            /* No exact-feasible candidate exists. Keep command continuity,
+             * but apply the configured bounded speed reduction so a numerical
+             * failure cannot preserve an unsafe racing speed. This path
+             * remains visible in diagnostics and resets the failed RTI
+             * memory. */
             publish_driving_fallback(
                 "MPC RTI cycle had no exact-feasible candidate",
-                command_time_state.u, commanded_speed, false);
+                command_time_state.u, commanded_speed, false, true, true);
             ++hard_fallback_cycles_;
             return;
         }

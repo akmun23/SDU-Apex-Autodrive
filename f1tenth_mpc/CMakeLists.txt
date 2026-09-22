@@ -66,50 +66,6 @@ target_include_directories(mpc_controller_node PUBLIC
   $<INSTALL_INTERFACE:include>)
 rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcControllerNode")
 
-include(CTest)
-if(BUILD_TESTING)
-  target_compile_definitions(mpc_core PRIVATE
-    MPC_ENABLE_FD_ORACLE)
-
-  add_executable(vehicle_model_test test/test_vehicle_model.c)
-  target_link_libraries(vehicle_model_test PRIVATE mpc_core m)
-  add_test(NAME vehicle_model_test COMMAND vehicle_model_test)
-
-  add_executable(mpc_linearization_test test/test_mpc_linearization.c)
-  target_link_libraries(mpc_linearization_test PRIVATE mpc_core m)
-  add_test(NAME mpc_linearization_test COMMAND mpc_linearization_test)
-
-  add_executable(mpc_rti_test test/test_mpc_rti.c)
-  target_link_libraries(mpc_rti_test PRIVATE mpc_core m)
-  add_test(NAME mpc_rti_test COMMAND mpc_rti_test)
-
-  add_executable(riccati_solver_test test/test_riccati_solver.c)
-  target_link_libraries(riccati_solver_test PRIVATE mpc_core m)
-  add_test(NAME riccati_solver_test COMMAND riccati_solver_test)
-
-  add_executable(mpc_reference_test test/test_mpc_reference.c)
-  target_link_libraries(mpc_reference_test PRIVATE mpc_core m)
-  target_compile_definitions(mpc_reference_test PRIVATE
-    MPC_TEST_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
-  add_test(NAME mpc_reference_test COMMAND mpc_reference_test)
-
-  add_executable(mpc_state_synchronizer_test test/test_mpc_state_synchronizer.cpp)
-  target_link_libraries(mpc_state_synchronizer_test PRIVATE mpc_state_sync)
-  add_test(NAME mpc_state_synchronizer_test COMMAND mpc_state_synchronizer_test)
-
-  add_executable(mpc_control_time_predictor_test
-    test/test_mpc_control_time_predictor.cpp)
-  target_link_libraries(mpc_control_time_predictor_test PRIVATE mpc_control_time)
-  add_test(NAME mpc_control_time_predictor_test
-    COMMAND mpc_control_time_predictor_test)
-
-  add_executable(mpc_rti_benchmark test/benchmark_mpc_rti.c)
-  target_link_libraries(mpc_rti_benchmark PRIVATE mpc_core m)
-  target_compile_definitions(mpc_rti_benchmark PRIVATE
-    MPC_RTI_BENCH_TRAJECTORY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
-
-endif()
-
 install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

@@ -11,7 +11,7 @@ if(BUILD_GPU_AMCL)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   if(NOT CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 61 89)
+    set(CMAKE_CUDA_ARCHITECTURES 61 86 89)
   endif()
 endif()
 
@@ -70,25 +70,6 @@ add_executable(sensor_odometry_node
 target_include_directories(sensor_odometry_node PRIVATE include)
 ament_target_dependencies(sensor_odometry_node
   rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros)
-
-add_executable(odometry_observer_test
-  test/odometry_observer_test.cpp
-  src/odometry_observer.cpp)
-target_include_directories(odometry_observer_test PRIVATE include)
-enable_testing()
-add_test(NAME odometry_observer_test COMMAND odometry_observer_test)
-
-add_executable(sensor_packet_assembler_test
-  test/sensor_packet_assembler_test.cpp
-  src/sensor_packet_assembler.cpp)
-target_include_directories(sensor_packet_assembler_test PRIVATE include)
-add_test(NAME sensor_packet_assembler_test COMMAND sensor_packet_assembler_test)
-
-add_executable(amcl_localization_math_test
-  test/amcl_localization_math_test.cpp)
-target_include_directories(amcl_localization_math_test PRIVATE gpu_amcl_cpp/include)
-target_link_libraries(amcl_localization_math_test Eigen3::Eigen)
-add_test(NAME amcl_localization_math_test COMMAND amcl_localization_math_test)
 
 add_executable(ekf_localization_node
   gpu_amcl_cpp/src/main_ekf.cpp

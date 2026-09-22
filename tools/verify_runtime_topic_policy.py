@@ -54,7 +54,6 @@ def main() -> int:
 
     competition_launch = (ROOT / COMPETITION_FILES[0]).read_text(encoding="utf-8")
     for token in (
-        "autodrive_bridge_40hz",
         "mpc_shadow_node",
         "with_mpc_shadow",
         "mpc_override_params",
@@ -65,9 +64,9 @@ def main() -> int:
         if token in competition_launch:
             errors.append(
                 f"{COMPETITION_FILES[0]}: development-only token remains: {token}")
-    if "bringup_headless.launch.py" not in competition_launch:
+    if "autodrive_bridge_40hz" not in competition_launch:
         errors.append(
-            f"{COMPETITION_FILES[0]}: official headless API launch is not included")
+            f"{COMPETITION_FILES[0]}: rate-controlled official bridge wrapper is missing")
 
     competition_entrypoint = (ROOT / COMPETITION_FILES[1]).read_text(encoding="utf-8")
     if "exec ros2 launch sdu_apex_autodrive competition.launch.py" not in competition_entrypoint:

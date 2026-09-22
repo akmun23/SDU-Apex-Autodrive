@@ -136,6 +136,7 @@ def _setup(context):
             package="nav2_map_server",
             executable="map_server",
             name="map_server",
+            namespace="",
             output="screen",
             parameters=[{"yaml_filename": map_path}],
         )

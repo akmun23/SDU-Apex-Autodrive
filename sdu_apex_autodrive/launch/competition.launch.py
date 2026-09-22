@@ -1,18 +1,18 @@
-"""Immutable autonomous launch used by the IROS 2026 competition image.
+"""Immutable autonomous launch used by the competition container.
 
 This launch has no development switches, shadow controller, recorder, RViz,
-simulator telemetry input, or custom bridge.  The official API bridge is
-included from the installed competition package; the team side consumes only
-the allowed sensor topics and its own derived state.
+or simulator telemetry input.  The repository bridge wrapper runs the
+official API bridge with the fixed numeric telemetry pacing required by the
+competition simulator; the team side consumes only allowed sensor topics and
+its own derived state.
 """
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, LogInfo, RegisterEventHandler, TimerAction
+from launch.actions import LogInfo, RegisterEventHandler, SetEnvironmentVariable, TimerAction
 from launch.event_handlers import OnProcessStart
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
 
@@ -25,7 +25,6 @@ def generate_launch_description():
     localization = get_package_share_directory("f1tenth_localization")
     planning = get_package_share_directory("f1tenth_planning")
     mpc = get_package_share_directory("f1tenth_mpc")
-    official_api = get_package_share_directory("autodrive_roboracer")
 
     map_path = os.path.join(
         planning, "maps", "autodrive_track_ftg_commit_20260909_025m.yaml")
@@ -40,12 +39,10 @@ def generate_launch_description():
         localization, "config", "gpu_amcl_cpp_params.yaml")
     actuator_params = os.path.join(
         integration, "config", "actuator_interface.yaml")
-    official_launch = os.path.join(
-        official_api, "launch", "bringup_headless.launch.py")
 
     required_files = (
         map_path, trajectory_path, mpc_params, sensor_odom_params,
-        ekf_params, amcl_params, actuator_params, official_launch,
+        ekf_params, amcl_params, actuator_params,
     )
     missing = [path for path in required_files if not os.path.isfile(path)]
     if missing:
@@ -53,10 +50,16 @@ def generate_launch_description():
             "competition launch is missing installed runtime file(s): "
             + ", ".join(missing))
 
-    # This is the unchanged official bridge launch.  Do not replace it with
-    # the development bridge or patch the installed official package.
-    official_bridge = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(official_launch))
+    # The wrapper imports the installed official bridge, but paces numeric
+    # packets independently of decoder/publication latency.  It also removes
+    # the stock restricted reset subscription before creating the bridge node.
+    bridge = Node(
+        package="sdu_apex_autodrive",
+        executable="autodrive_bridge_40hz",
+        name="autodrive_bridge",
+        output="screen",
+        emulate_tty=True,
+    )
 
     sensor_odom = Node(
         package="f1tenth_localization",
@@ -166,7 +169,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        official_bridge,
+        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        bridge,
         sensor_odom,
         ekf,
         map_server,

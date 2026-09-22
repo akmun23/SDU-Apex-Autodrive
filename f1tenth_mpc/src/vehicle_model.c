@@ -29,6 +29,9 @@ static float active_target_speed_ceiling_mps = MPC_MAX_COMMAND_SPEED_MPS;
 static MpcYawRateModelParameters_t active_yaw_rate_parameters = {
     .response_time_constant_s = MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS,
     .steering_gain_per_m = MPC_YAW_RATE_STEERING_GAIN_PER_M,
+    .steering_gain_reduction_per_rad = 0.0f,
+    .steering_gain_start_rad = 0.41f,
+    .steering_gain_end_rad = 0.46f,
     .curvature_gain_reduction_per_m = 0.0f,
     .curvature_gain_start_per_m = 0.20f,
     .curvature_gain_end_per_m = 0.40f,
@@ -52,7 +55,16 @@ static int finite_positive(float value)
 
 float vehicle_model_yaw_rate_gain(float steering_rad)
 {
-    return isfinite(steering_rad) ? active_yaw_rate_parameters.steering_gain_per_m : NAN;
+    if (!isfinite(steering_rad)) return NAN;
+    const float magnitude = fabsf(steering_rad);
+    const float active_interval = clampf_local(
+        magnitude - active_yaw_rate_parameters.steering_gain_start_rad,
+        0.0f,
+        active_yaw_rate_parameters.steering_gain_end_rad -
+            active_yaw_rate_parameters.steering_gain_start_rad);
+    return active_yaw_rate_parameters.steering_gain_per_m -
+        active_yaw_rate_parameters.steering_gain_reduction_per_rad *
+            active_interval;
 }
 
 MpcYawRateModelParameters_t vehicle_model_default_yaw_rate_parameters(void)
@@ -60,6 +72,9 @@ MpcYawRateModelParameters_t vehicle_model_default_yaw_rate_parameters(void)
     return (MpcYawRateModelParameters_t){
         .response_time_constant_s = MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS,
         .steering_gain_per_m = MPC_YAW_RATE_STEERING_GAIN_PER_M,
+        .steering_gain_reduction_per_rad = 0.0f,
+        .steering_gain_start_rad = 0.41f,
+        .steering_gain_end_rad = 0.46f,
         .curvature_gain_reduction_per_m = 0.0f,
         .curvature_gain_start_per_m = 0.20f,
         .curvature_gain_end_per_m = 0.40f,
@@ -79,6 +94,12 @@ int vehicle_model_set_yaw_rate_parameters(
     if (parameters == NULL ||
         !finite_positive(parameters->response_time_constant_s) ||
         !finite_positive(parameters->steering_gain_per_m) ||
+        !isfinite(parameters->steering_gain_reduction_per_rad) ||
+        parameters->steering_gain_reduction_per_rad < 0.0f ||
+        !isfinite(parameters->steering_gain_start_rad) ||
+        parameters->steering_gain_start_rad < 0.0f ||
+        !isfinite(parameters->steering_gain_end_rad) ||
+        parameters->steering_gain_end_rad <= parameters->steering_gain_start_rad ||
         !isfinite(parameters->curvature_gain_reduction_per_m) ||
         parameters->curvature_gain_reduction_per_m < 0.0f ||
         !isfinite(parameters->curvature_gain_start_per_m) ||
@@ -95,7 +116,12 @@ int vehicle_model_set_yaw_rate_parameters(
         (parameters->low_speed_response_time_constant_s > 0.0f &&
             parameters->low_speed_transition_speed_mps <= 0.0f) ||
         parameters->steering_gain_per_m -
-                parameters->curvature_gain_reduction_per_m < 0.01f) {
+                parameters->curvature_gain_reduction_per_m *
+                    (parameters->curvature_gain_end_per_m -
+                    parameters->curvature_gain_start_per_m) -
+                parameters->steering_gain_reduction_per_rad *
+                    (parameters->steering_gain_end_rad -
+                    parameters->steering_gain_start_rad) < 0.01f) {
         return 0;
     }
     active_yaw_rate_parameters = *parameters;
@@ -184,8 +210,11 @@ static float yaw_rate_response(
      * authority A/B at the first high-curvature transition: it caused the
      * N30 steering solution to reverse near s=34.6 m.  This is a Unity
      * response fit, not a real-car tire or friction model. */
+    const float path_gain = vehicle_model_yaw_rate_gain_for_curvature(path_curvature);
+    const float steering_gain = vehicle_model_yaw_rate_gain(steering_rad);
+    const float nominal_gain = active_yaw_rate_parameters.steering_gain_per_m;
     const float steady_yaw_rate = speed_mps * tanf(steering_rad) *
-        vehicle_model_yaw_rate_gain_for_curvature(path_curvature);
+        (steering_gain - nominal_gain + path_gain);
     const float response_time_constant =
         active_yaw_rate_parameters.low_speed_response_time_constant_s > 0.0f
         ? active_yaw_rate_parameters.response_time_constant_s +
@@ -680,8 +709,32 @@ static int vehicle_model_step_impl(
         yaw_retention = jet_constant(expf(
             -dt / active_yaw_rate_parameters.response_time_constant_s));
     }
+    const float steering_start = active_yaw_rate_parameters.steering_gain_start_rad;
+    const float steering_end = active_yaw_rate_parameters.steering_gain_end_rad;
+    mark_nonsmooth_difference(
+        actual_next, jet_constant(steering_start), steering_start, linearization);
+    mark_nonsmooth_difference(
+        actual_next, jet_constant(-steering_start), steering_start, linearization);
+    mark_nonsmooth_difference(
+        actual_next, jet_constant(steering_end), steering_end, linearization);
+    mark_nonsmooth_difference(
+        actual_next, jet_constant(-steering_end), steering_end, linearization);
+    const float path_gain = vehicle_model_yaw_rate_gain_for_curvature(path_curvature);
+    const float steering_magnitude = fabsf(actual_next.value);
+    MpcJet_t yaw_gain = jet_constant(
+        path_gain - active_yaw_rate_parameters.steering_gain_per_m +
+        vehicle_model_yaw_rate_gain(actual_next.value));
+    if (actual_next.differentiated &&
+        steering_magnitude > steering_start && steering_magnitude < steering_end) {
+        const float sign = actual_next.value < 0.0f ? -1.0f : 1.0f;
+        const float derivative =
+            -active_yaw_rate_parameters.steering_gain_reduction_per_rad * sign;
+        yaw_gain.differentiated = 1;
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            yaw_gain.derivative[i] += derivative * actual_next.derivative[i];
+    }
     MpcJet_t yaw_steady = jet_multiply(
-        jet_constant(vehicle_model_yaw_rate_gain_for_curvature(path_curvature)),
+        yaw_gain,
         jet_multiply(u_mid, jet_tangent(actual_next)));
     MpcJet_t r_next = jet_add(
         jet_multiply(yaw_retention, x[4]),

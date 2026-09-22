@@ -32,5 +32,5 @@ exec docker run --rm --name "${container}" \
   -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
   -e SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
   -v "${repo_root}:/workspace/src:rw" \
-  --entrypoint /workspace/src/docker/entrypoint.sh \
-  "${image}"
+  --entrypoint /bin/bash \
+  "${image}" /workspace/src/docker/entrypoint.sh

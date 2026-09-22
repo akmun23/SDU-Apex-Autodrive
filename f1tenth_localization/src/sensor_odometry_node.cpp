@@ -107,7 +107,6 @@ public:
     declare_parameter(
       "wheel_update_ax_abs_max_mps2", observer_defaults.wheel_update_ax_abs_max_mps2);
     declare_parameter("wheel_freeze_speed_mps", observer_defaults.wheel_freeze_speed_mps);
-    declare_parameter("wheel_innovation_max_mps", observer_defaults.wheel_innovation_max_mps);
     declare_parameter(
       "wheel_recovery_launch_speed_mps", observer_defaults.wheel_recovery_launch_speed_mps);
     declare_parameter(
@@ -129,6 +128,9 @@ public:
     declare_parameter(
       "turn_current_packet_max_increase_mps",
       observer_defaults.turn_current_packet_max_increase_mps);
+    declare_parameter(
+      "turn_current_packet_max_decrease_mps",
+      observer_defaults.turn_current_packet_max_decrease_mps);
     declare_parameter(
       "use_turn_speed_bias_model", observer_defaults.use_turn_speed_bias_model);
     declare_parameter(
@@ -271,8 +273,6 @@ private:
     config.wheel_update_ax_abs_max_mps2 = get_parameter(
       "wheel_update_ax_abs_max_mps2").as_double();
     config.wheel_freeze_speed_mps = get_parameter("wheel_freeze_speed_mps").as_double();
-    config.wheel_innovation_max_mps = get_parameter(
-      "wheel_innovation_max_mps").as_double();
     config.wheel_recovery_launch_speed_mps = std::max(
       0.0, get_parameter("wheel_recovery_launch_speed_mps").as_double());
     config.wheel_recovery_launch_innovation_mps = std::max(
@@ -289,6 +289,8 @@ private:
       "allow_turn_current_packet_recovery").as_bool();
     config.turn_current_packet_max_increase_mps = std::max(
       0.0, get_parameter("turn_current_packet_max_increase_mps").as_double());
+    config.turn_current_packet_max_decrease_mps = std::max(
+      0.0, get_parameter("turn_current_packet_max_decrease_mps").as_double());
     config.use_turn_speed_bias_model = get_parameter(
       "use_turn_speed_bias_model").as_bool();
     config.turn_speed_bias_constant_mps = get_parameter(

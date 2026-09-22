@@ -17,16 +17,25 @@ import gzip
 import json
 import math
 import os
+import threading
 import time
 from collections import deque
 from copy import copy
 from typing import Any
 
 import gevent
+import rclpy
 from gevent.event import Event
 from gevent.lock import Semaphore
 from std_msgs.msg import Bool
+from std_msgs.msg import Float32
 from std_msgs.msg import String
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 
 from autodrive_roboracer import autodrive_bridge as official_bridge
 
@@ -108,6 +117,11 @@ _active_simulation_physics_step: int | None = None
 _active_telemetry_sequence: int | None = None
 _active_simulator_packet: dict[str, float | int | None] = {}
 _active_request_slot_pool: Semaphore | None = None
+
+_command_listener_stop = threading.Event()
+_command_listener_thread: threading.Thread | None = None
+_command_listener_executor: Any = None
+_command_listener_node: Any = None
 
 _packet_timing_lock = Semaphore()
 _packet_handler_lock = Semaphore(1)
@@ -663,18 +677,6 @@ def _rate_hz() -> float:
     return rate
 
 
-def _remember_command(data: Any) -> None:
-    if not isinstance(data, dict) or "V1 Throttle" not in data:
-        return
-    command = {
-        "V1 Throttle": str(data.get("V1 Throttle", "0.0")),
-        "V1 Steering": str(data.get("V1 Steering", "0.0")),
-        "V1 Reset": str(data.get("V1 Reset", "False")),
-    }
-    with _command_lock:
-        _latest_command.update(command)
-
-
 def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
     """Keep the nominal request cadence without response-age stop gates."""
     global _connection_generation
@@ -942,13 +944,14 @@ def _force_ipv4_server() -> None:
 
 
 def _disable_restricted_bridge_subscriptions() -> None:
-    """Keep the stock bridge from subscribing to simulator reset control.
+    """Keep the stock bridge from owning control-input subscriptions.
 
-    The official bridge's default configuration includes
-    ``/autodrive/reset_command``. That topic is restricted by the RoboRacer
-    simulator rules and is not needed by the competition data path. The
-    bridge still publishes the simulator's protocol telemetry required to
-    expose the allowed sensors, but it does not consume reset commands.
+    The official bridge's default configuration includes a reset subscriber
+    and handles actuator command callbacks in the same ROS executor that is
+    fed by the large numeric packet decoder.  Under load that executor can
+    make legal steering/throttle commands stale.  Remove all three stock
+    subscribers; the small dedicated command listener below owns only the two
+    legal actuator command topics, while reset control remains disabled.
     """
     config = getattr(official_bridge, "config", None)
     pub_sub_dict = getattr(config, "pub_sub_dict", None)
@@ -956,12 +959,73 @@ def _disable_restricted_bridge_subscriptions() -> None:
     if subscribers is None:
         raise RuntimeError(
             "official AutoDRIVE bridge configuration has no subscriber list")
-    restricted = "/autodrive/reset_command"
+    restricted = {
+        "/autodrive/reset_command",
+        "/autodrive/roboracer_1/throttle_command",
+        "/autodrive/roboracer_1/steering_command",
+    }
     pub_sub_dict.subscribers = [
-        entry for entry in subscribers if entry.topic != restricted
+        entry for entry in subscribers if entry.topic not in restricted
     ]
-    if any(entry.topic == restricted for entry in pub_sub_dict.subscribers):
-        raise RuntimeError("restricted reset subscription remained in bridge config")
+    if any(entry.topic in restricted for entry in pub_sub_dict.subscribers):
+        raise RuntimeError("stock bridge control subscription remained in bridge config")
+
+
+def _update_command_field(field: str, value: float) -> None:
+    if not math.isfinite(value):
+        return
+    with _command_lock:
+        _latest_command[field] = str(round(value, 3))
+
+
+def _run_command_listener() -> None:
+    """Receive legal actuator commands on an executor isolated from decoding."""
+    global _command_listener_executor, _command_listener_node
+    while not _command_listener_stop.is_set():
+        if not rclpy.ok():
+            time.sleep(0.01)
+            continue
+        try:
+            node = rclpy.create_node("autodrive_bridge_command_input")
+            qos = QoSProfile(
+                depth=1,
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.VOLATILE,
+                history=QoSHistoryPolicy.KEEP_LAST,
+            )
+            node.create_subscription(
+                Float32,
+                "/autodrive/roboracer_1/throttle_command",
+                lambda message: _update_command_field(
+                    "V1 Throttle", float(message.data)),
+                qos,
+            )
+            node.create_subscription(
+                Float32,
+                "/autodrive/roboracer_1/steering_command",
+                lambda message: _update_command_field(
+                    "V1 Steering", float(message.data)),
+                qos,
+            )
+            executor = rclpy.executors.SingleThreadedExecutor()
+            executor.add_node(node)
+            _command_listener_node = node
+            _command_listener_executor = executor
+            executor.spin()
+            executor.shutdown()
+            node.destroy_node()
+            return
+        except Exception as exc:
+            if not _command_listener_stop.is_set() and rclpy.ok():
+                print(
+                    "[autodrive_bridge_40hz] command listener failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            return
+        finally:
+            _command_listener_executor = None
+            _command_listener_node = None
 
 
 def main() -> None:
@@ -1021,11 +1085,17 @@ def main() -> None:
 
     def intercept_emit(event: str, data: Any = None, *args: Any, **kwargs: Any) -> Any:
         if event == "Bridge":
-            _remember_command(data)
             return None
         return original_emit(event, data, *args, **kwargs)
 
     official_bridge.sio.emit = intercept_emit
+    _command_listener_stop.clear()
+    _command_listener_thread = threading.Thread(
+        target=_run_command_listener,
+        name="autodrive-command-input",
+        daemon=True,
+    )
+    _command_listener_thread.start()
     _stop_sender.clear()
     _client_connected.clear()
     _reset_request_pipeline()
@@ -1042,6 +1112,11 @@ def main() -> None:
         official_bridge.main()
     finally:
         _shutdown_requested = True
+        _command_listener_stop.set()
+        if _command_listener_executor is not None:
+            _command_listener_executor.shutdown()
+        if _command_listener_thread is not None:
+            _command_listener_thread.join(timeout=1.0)
         _stop_sender.set()
         _client_connected.clear()
         _reset_request_pipeline()

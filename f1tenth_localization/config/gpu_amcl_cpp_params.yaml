@@ -168,6 +168,12 @@ gpu_amcl_cpp:
     # ambiguous branch-pulling component to the value accepted in the 11.77
     # lap full-speed run. The normal component remains at full gain.
     local_scan_correction_along_track_gain: 0.25
+    # At racing speed the accepted scan innovation is a measured odometry
+    # phase correction. Increase only this tangent component; the normal
+    # correction, local association, raceline gate, and applied-distance cap
+    # remain unchanged.
+    local_scan_correction_fast_speed_threshold_mps: 3.0
+    local_scan_correction_fast_along_track_gain: 0.50
     # Heading was already source-time stable in the crash run. Keep its map
     # correction conservative until a heading-observability campaign justifies
     # a larger value.
@@ -232,10 +238,11 @@ gpu_amcl_cpp:
     global_lock_stability_distance_m: 0.35
     global_lock_stability_yaw_rad: 0.25
     global_lock_min_cluster_weight: 0.50
-    # Do not lock on stationary closed-track scan aliases. Require the car to
-    # leave the spawn by a small odometry distance so moving scans can
-    # disambiguate the corridor before AMCL hands the pose to the controller.
-    global_lock_min_travel_m: 0.5
+    # The explicit start anchor, five stable scans, covariance, and map gates
+    # disambiguate startup. A long 0.5 m provisional ramp let the controller
+    # reach the first corner before the global lock was handed off; require
+    # only 0.10 m of motion so the handoff happens before that transition.
+    global_lock_min_travel_m: 0.10
     # Odom yaw was unbiased in the GT campaign, while the corridor scan
     # likelihood had a repeatable heading offset. Use the saved map-start yaw
     # plus the odom delta for the global lock heading.
