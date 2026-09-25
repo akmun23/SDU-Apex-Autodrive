@@ -30,7 +30,6 @@ EkfNode::EkfNode(const rclcpp::NodeOptions & options)
   if (publish_tf_) {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   }
-
   const auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
     odom_topic_, sensor_qos,
@@ -255,6 +254,7 @@ void EkfNode::publish_odom(
     transform.transform.rotation = output.pose.pose.orientation;
     tf_broadcaster_->sendTransform(transform);
   }
+
 }
 
 }  // namespace gpu_amcl_cpp

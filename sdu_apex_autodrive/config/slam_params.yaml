@@ -7,18 +7,18 @@ slam_toolbox:
     ceres_dogleg_type: TRADITIONAL_DOGLEG
     ceres_loss_function: SOFT_L1
 
-    # Mapping frame driven by the legal encoder/IMU odometry node.
-    odom_frame: odom
-    base_frame: base_link
+    # Ground truth is used only for development map construction. It is not
+    # consumed by AMCL, odometry, EKF, MPC, or any competition runtime node.
+    odom_frame: world
+    base_frame: roboracer_1
     map_frame: map
     scan_topic: /autodrive/roboracer_1/lidar
     use_sim_time: false
     mode: mapping
 
     debug_logging: false
-    # One of every two native scans is sufficient with the exact pose and
-    # keeps the mapper below its measured processing capacity, avoiding queue
-    # drops that would leave holes in the occupancy grid.
+    # Downsample the nominal 40 Hz LiDAR stream to bound mapper load while
+    # retaining dense coverage at the mapping speed.
     throttle_scans: 2
     transform_publish_period: 0.02
     # Publish the corrected occupancy grid frequently enough that the final
@@ -28,16 +28,14 @@ slam_toolbox:
     min_laser_range: 0.06
     max_laser_range: 10.0
     minimum_time_interval: 0.10
-    # The source-patched compete scene delivers LiDAR and odometry at 40 Hz;
-    # throttle_scans above intentionally feeds every second scan to mapping.
-    # The prebuilt compete asset can be slower, so allow normal DDS jitter
-    # without accepting a stale TF.
+    # Simulator timing can fall below nominal under graphics load. Allow DDS
+    # jitter without accepting a stale ground-truth transform.
     transform_timeout: 1.0
     tf_buffer_duration: 120.0
     enable_interactive_mode: false
 
-    # The mapper receives the legal odometry stream and LiDAR. Keep scan
-    # matching disabled for the deterministic map-building workflow.
+    # Simulator world->vehicle->lidar TF supplies exact scan poses; keep scan
+    # matching disabled so this map reflects the real scene geometry directly.
     use_scan_matching: false
     use_scan_barycenter: false
     minimum_travel_distance: 0.10

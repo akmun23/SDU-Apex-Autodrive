@@ -25,6 +25,7 @@ OdometryObserverConfig deployment_observer_config()
   config.decel_detect_ax_mps2 = -0.5;
   config.decel_ax_scale = 1.005;
   config.decel_ax_offset_mps2 = 0.020;
+  config.wheel_dropout_positive_ax_max_mps2 = 4.4;
   config.wheel_update_ax_abs_max_mps2 = 6.5;
   config.wheel_freeze_speed_mps = 0.15;
   config.wheel_recovery_launch_speed_mps = 2.0;
@@ -464,18 +465,38 @@ OdometryEstimate OdometryObserver::update(
     return true;
   };
 
-  // A delayed bridge callback can span several nominal packets.  If the
-  // current cumulative-encoder rate agrees with the rolling-window rate, it
-  // is the only measurement of that complete delayed interval.  The normal
-  // packet validity gate is for a nominal packet, so it must not reject this
-  // coherent long-interval average solely because the state is stale.
-  // Repeated-angle and burst packets remain excluded by the existing gates.
+  // A delayed bridge callback can span several nominal packets. Its average
+  // wheel rate is useful only if it is also compatible with the causal
+  // longitudinal prediction over that interval. The encoder bridge can
+  // repeat a stale cumulative angle across a long interval while its rolling
+  // and packet rates agree, so agreement between those two rates alone is
+  // not sufficient to recover a moving estimate.
+  double long_interval_ax_mps2 = observation.ax_mps2;
+  if (observation.ax_mps2 < config_.decel_detect_ax_mps2) {
+    long_interval_ax_mps2 = config_.decel_ax_scale * observation.ax_mps2 +
+      config_.decel_ax_offset_mps2;
+  }
+  const double acceleration_reference_x_m = finite(
+    config_.imu_acceleration_reference_x_m) ?
+    config_.imu_acceleration_reference_x_m : 0.0;
+  long_interval_ax_mps2 += observation.yaw_rate_radps *
+    observation.yaw_rate_radps * acceleration_reference_x_m;
+  const double long_interval_expected_average_speed_mps = std::max(
+    0.0, speed_mps_ + 0.5 * long_interval_ax_mps2 * dt_s);
+  const double long_interval_speed_tolerance_mps = std::max(
+    config_.turn_current_packet_max_decrease_mps,
+    0.5 * config_.wheel_speed_slew_limit_mps2 * dt_s);
   const bool long_interval_wheel_recovery =
     dt_s > config_.normal_packet_dt_max_s &&
     wheel_packet >= config_.wheel_freeze_speed_mps &&
     wheel_packet_mapped >= config_.wheel_freeze_speed_mps &&
     wheel_packet_mapped <= config_.wheel_burst_catchup_max_mps &&
     !wheel_burst_rejected_ && !wheel_slew_rejected &&
+    !moving_encoder_dropout &&
+    wheel_packet_mapped >= long_interval_expected_average_speed_mps -
+    long_interval_speed_tolerance_mps &&
+    wheel_packet_mapped <= long_interval_expected_average_speed_mps +
+    long_interval_speed_tolerance_mps &&
     !launch_wheel_spin(speed_mps_) &&
     config_.wheel_burst_disagreement_mps > 0.0 &&
     std::abs(wheel_packet_mapped - wheel_mapped) <=
@@ -720,12 +741,11 @@ OdometryEstimate OdometryObserver::update(
       }
       braking_ax += observation.yaw_rate_radps * observation.yaw_rate_radps *
         imu_acceleration_reference_x;
-      // Positive ax is ambiguous while wheel slip is active because the
-      // unobserved r*v term can have either sign. Apply only deceleration and
-      // hold through positive acceleration until a causal wheel sample returns.
-      if (braking_ax < 0.0) {
-        body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
+      if (braking_ax > 0.0) {
+        braking_ax = std::min(
+          braking_ax, config_.wheel_dropout_positive_ax_max_mps2);
       }
+      body_u_mps_ = std::max(0.0, body_u_mps_ + braking_ax * dt_s);
     } else if (!integrate_lateral_dynamics &&
       wheel_raw < config_.wheel_freeze_speed_mps &&
       observation.ax_mps2 <= config_.turn_wheel_braking_ax_mps2)
@@ -820,6 +840,14 @@ OdometryEstimate OdometryObserver::update(
     if (observation.ax_mps2 < config_.decel_detect_ax_mps2) {
       ax_effective = config_.decel_ax_scale * observation.ax_mps2 +
         config_.decel_ax_offset_mps2;
+    }
+    // During encoder dropout, continue using measured longitudinal IMU
+    // acceleration. Bound positive integration to the clean-run vehicle
+    // envelope so an encoder burst cannot turn an IMU transient into an
+    // unbounded speed correction.
+    if (wheel_dropout_active_ && ax_effective > 0.0) {
+      ax_effective = std::min(
+        ax_effective, config_.wheel_dropout_positive_ax_max_mps2);
     }
     speed_pred = std::max(0.0, speed_mps_ + ax_effective * dt_s);
     speed_mps_ = speed_pred;

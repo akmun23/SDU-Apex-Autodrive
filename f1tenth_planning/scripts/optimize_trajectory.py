@@ -40,7 +40,7 @@ import numpy as np
 import yaml
 from scipy.interpolate import splprep, splev, CubicSpline
 from scipy.interpolate import splprep, splev, CubicSpline, UnivariateSpline
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, maximum_filter1d
 
 
 MIN_TIME_OPT_TYPE = 'mintime'
@@ -123,6 +123,7 @@ def load_vehicle_profile(profile_path):
         'steering.max_steering_rate_radps': steering.get(
             'max_steering_rate_radps'
         ),
+        'tire.mintime_friction_coeff': tire.get('mintime_friction_coeff'),
     }
     missing = [name for name, value in required.items() if value is None]
     if missing:
@@ -143,6 +144,7 @@ def load_vehicle_profile(profile_path):
         'max_steering_rate_radps': float(
             steering['max_steering_rate_radps']
         ),
+        'mintime_friction_coeff': float(tire['mintime_friction_coeff']),
         'expected_curvlim_m_inv': expected_curvlim,
         'expected_minimum_turn_radius_m': expected_radius,
     }
@@ -2266,6 +2268,22 @@ def patch_mintime_optim_numeric_option(ini_content, option_name, value,
     return patched
 
 
+def patch_velocity_profile_filter_window(ini_content, window):
+    """Set the TPH speed-profile smoothing window, or disable it with None."""
+    # racecar.ini stores Python-style dictionaries parsed by json.loads.
+    value_text = "null" if window is None else str(int(window))
+    pattern = (
+        r'("vel_profile_conv_filt_window"\s*:\s*)'
+        r'(?:None|null|\d+)'
+    )
+    patched, count = re.subn(pattern, rf'\g<1>{value_text}', ini_content,
+                             count=1, flags=re.IGNORECASE)
+    if count != 1:
+        raise RuntimeError(
+            "Could not patch vel_profile_conv_filt_window in racecar.ini")
+    return patched
+
+
 def patch_mintime_optim_bool_option(ini_content, option_name, value,
                                     insert_after='penalty_F'):
     """Patch or insert a boolean option in optim_opts_mintime."""
@@ -2422,9 +2440,19 @@ def convert_tum_to_trajectory(input_csv, output_csv, max_speed=None, min_speed=N
 
     clamped_hi = 0
     clamped_lo = 0
+    arc_length = 0.0
+    previous_xy = None
     with open(output_csv, 'w') as f:
         f.write('# s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2\n')
         for row in rows:
+            x_m = float(row[1])
+            y_m = float(row[2])
+            if previous_xy is not None:
+                arc_length += math.hypot(
+                    x_m - previous_xy[0], y_m - previous_xy[1])
+            row[0] = f"{arc_length:.7f}"
+            previous_xy = (x_m, y_m)
+
             # Apply psi + pi/2 heading correction
             psi = float(row[3])
             psi_corrected = psi + math.pi / 2.0
@@ -2449,6 +2477,172 @@ def convert_tum_to_trajectory(input_csv, output_csv, max_speed=None, min_speed=N
     if clamped_lo > 0:
         print(f"  Clamped {clamped_lo}/{len(rows)} velocities to min {min_speed:.1f} m/s")
     return len(rows)
+
+
+def scale_trajectory_speed(trajectory_path, scale):
+    """Derate a converted trajectory without changing its geometry."""
+    if scale == 1.0:
+        return
+    rows = []
+    with open(trajectory_path, 'r') as f:
+        for row in csv.reader(f):
+            if not row or row[0].startswith('#'):
+                continue
+            if len(row) < 7:
+                raise ValueError(
+                    f"trajectory row has fewer than 7 columns: {row!r}")
+            row[5] = f"{float(row[5]) * scale:.7f}"
+            row[6] = f"{float(row[6]) * scale * scale:.7f}"
+            rows.append(row[:7])
+    with open(trajectory_path, 'w') as f:
+        f.write('# s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2\n')
+        for row in rows:
+            f.write(','.join(row) + '\n')
+    print(
+        f"  Applied uniform speed scale {scale:.3f}; "
+        f"acceleration scale {scale * scale:.3f}")
+
+
+def apply_empirical_speed_profile(trajectory_path, max_speed,
+                                  lateral_accel_limit,
+                                  combined_accel_limit,
+                                  accel_limit, decel_limit,
+                                  curvature_preview_m,
+                                  tight_turn_curvature_threshold,
+                                  tight_turn_speed_cap):
+    """Recompute speeds from curvature and the collision-free sim envelope.
+
+    The limits are based on the 99th-percentile dynamics from three clean
+    simulator runs. A combined longitudinal/lateral limit is applied at both
+    ends of every segment, so braking into a turn cannot exceed the measured
+    combined envelope. The tighter cap is reserved for the turn curvature at
+    which the real MPC's exact first-step corridor check rejected the rollout.
+    Geometry is left untouched.
+    """
+    rows = []
+    with open(trajectory_path, 'r') as f:
+        for row in csv.reader(f):
+            if not row or row[0].startswith('#'):
+                continue
+            if len(row) < 7:
+                raise ValueError(
+                    f"trajectory row has fewer than 7 columns: {row!r}")
+            rows.append([float(value) for value in row[:7]])
+
+    data = np.asarray(rows, dtype=float)
+    if len(data) < 3 or not np.all(np.isfinite(data)):
+        raise ValueError('empirical speed profile needs 3+ finite waypoints')
+
+    xy = data[:, 1:3]
+    if np.linalg.norm(xy[-1] - xy[0]) <= 1e-6:
+        # TUM exports a duplicate closing point; controller CSVs are cyclic
+        # and must contain that location only once.
+        data = data[:-1]
+        xy = data[:, 1:3]
+    if len(data) < 3:
+        raise ValueError('empirical speed profile needs 3+ unique waypoints')
+    curvature = np.abs(data[:, 4])
+    ds = np.linalg.norm(np.roll(xy, -1, axis=0) - xy, axis=1)
+    if np.any(ds <= 1e-6):
+        raise ValueError('trajectory has duplicate adjacent waypoints')
+
+    mean_spacing = float(np.mean(ds))
+    window_points = max(3, int(round(curvature_preview_m / mean_spacing)))
+    if window_points % 2 == 0:
+        window_points += 1
+    curvature_envelope = maximum_filter1d(
+        curvature, size=window_points, mode='wrap')
+
+    # Curvature sets the lateral-force speed ceiling before acceleration and
+    # braking constraints are propagated around the closed lap.
+    speed = np.minimum(
+        max_speed,
+        np.sqrt(lateral_accel_limit /
+                np.maximum(curvature_envelope, 1e-9)),
+    )
+    tight_turn_mask = (
+        curvature_envelope >= tight_turn_curvature_threshold)
+    speed[tight_turn_mask] = np.minimum(
+        speed[tight_turn_mask], tight_turn_speed_cap)
+    count = len(speed)
+
+    def segment_limit(speed_a, curvature_a, speed_b, curvature_b, limit):
+        lateral_demand = max(
+            speed_a * speed_a * curvature_a,
+            speed_b * speed_b * curvature_b,
+        )
+        combined_remaining = math.sqrt(max(
+            combined_accel_limit * combined_accel_limit
+            - lateral_demand * lateral_demand,
+            0.0,
+        ))
+        return min(limit, combined_remaining)
+
+    for _ in range(100):
+        previous = speed.copy()
+
+        # Acceleration pass, including the lateral load at the destination.
+        for i in range(count):
+            j = (i + 1) % count
+            candidate = math.sqrt(
+                speed[i] * speed[i] + 2.0 * accel_limit * ds[i])
+            for _ in range(12):
+                available = segment_limit(
+                    speed[i], curvature_envelope[i],
+                    candidate, curvature_envelope[j], accel_limit)
+                updated = math.sqrt(
+                    speed[i] * speed[i] + 2.0 * available * ds[i])
+                if abs(updated - candidate) < 1e-7:
+                    candidate = updated
+                    break
+                candidate = min(candidate, updated)
+            speed[j] = min(speed[j], candidate)
+
+        # Braking pass, including the lateral load at the braking waypoint.
+        for j in range(count - 1, -1, -1):
+            i = (j - 1) % count
+            candidate = math.sqrt(
+                speed[j] * speed[j] + 2.0 * decel_limit * ds[i])
+            for _ in range(12):
+                available = segment_limit(
+                    speed[i], curvature_envelope[i],
+                    speed[j], curvature_envelope[j], decel_limit)
+                updated = math.sqrt(
+                    speed[j] * speed[j] + 2.0 * available * ds[i])
+                if abs(updated - candidate) < 1e-7:
+                    candidate = updated
+                    break
+                candidate = min(candidate, updated)
+            speed[i] = min(speed[i], candidate)
+
+        if float(np.max(np.abs(speed - previous))) < 1e-6:
+            break
+    else:
+        raise RuntimeError('empirical speed profile did not converge')
+
+    next_speed = np.roll(speed, -1)
+    longitudinal_accel = (next_speed * next_speed - speed * speed) / (2.0 * ds)
+    estimated_time = float(np.sum(2.0 * ds / (speed + next_speed)))
+    data[:, 5] = speed
+    data[:, 6] = longitudinal_accel
+
+    with open(trajectory_path, 'w') as f:
+        f.write('# s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2\n')
+        for row in data:
+            f.write(','.join(f'{value:.7f}' for value in row) + '\n')
+
+    lateral_peak = float(np.max(speed * speed * curvature))
+    combined_peak = float(np.max(np.hypot(
+        longitudinal_accel, speed * speed * curvature)))
+    print(
+        f'  Empirical speed profile: estimated lap {estimated_time:.2f}s, '
+        f'max speed {speed.max():.2f}m/s, '
+        f'peak lateral {lateral_peak:.2f}m/s^2, '
+        f'peak combined {combined_peak:.2f}m/s^2')
+    print(
+        f'  Tight-turn MPC cap: {tight_turn_speed_cap:.2f}m/s at '
+        f'|kappa| >= {tight_turn_curvature_threshold:.2f} 1/m')
+    return estimated_time
 
 
 def write_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
@@ -2600,7 +2794,14 @@ def verify_output(csv_path, curvlim=None, car_width=None, wall_clearance=0.0):
     print(f"\n  --- Trajectory Summary ---")
     print(f"  Waypoints:      {n}")
     print(f"  Columns:        {ncols}")
-    print(f"  Track length:   {w[-1, 0]:.1f} m")
+    ds = np.diff(w[:, 0])
+    if not np.all(np.isfinite(ds)) or np.any(ds <= 0.0):
+        print("  ERROR: Station values must increase strictly at every waypoint")
+        return False
+    closing_distance = float(np.hypot(
+        w[0, 1] - w[-1, 1], w[0, 2] - w[-1, 2]))
+    track_length = float(w[-1, 0] - w[0, 0] + closing_distance)
+    print(f"  Track length:   {track_length:.1f} m")
     print(f"  X range:        [{w[:, 1].min():.2f}, {w[:, 1].max():.2f}] m")
     print(f"  Y range:        [{w[:, 2].min():.2f}, {w[:, 2].max():.2f}] m")
     print(f"  Psi range:      [{w[:, 3].min():.4f}, {w[:, 3].max():.4f}] rad")
@@ -2755,10 +2956,22 @@ def main():
 
         # Minimum-time optimizer settings
         opt_type=MIN_TIME_OPT_TYPE,
-        max_speed=12.0,         # m/s (set to None for no clamping)
+        max_speed=9.43,         # maximum speed observed in clean sim bags
         min_speed=1.5,          # m/s (set to None for no clamping)
+        velocity_filter_window=81,
+        speed_scale=1.0,
+        lateral_accel_limit=8.40,   # below measured clean-run p95: 8.53 m/s^2
+        combined_accel_limit=9.20,  # measured clean-run p95: 9.02 m/s^2
+        accel_limit=3.80,           # measured clean-run p99: 3.96 m/s^2
+        decel_limit=7.20,           # measured clean-run braking p1: -7.26 m/s^2
+        curvature_preview_m=0.50,   # >2x the observed AMCL along-track p95
+        tight_turn_curvature_threshold=1.10,
+        tight_turn_speed_cap=2.50,
         waypoint_spacing=0.02,
-        reopt_mintime_solution=True,        # Try false false or true true
+        # The second min-curvature pass was infeasible on the practice map
+        # and made the measured lap-time profile slower; the mintime result
+        # remains subject to the strict curvature check below.
+        reopt_mintime_solution=False,
         recalc_vel_profile_by_tph=True,    # If true follow the files ax max and ggv
 
         # Centerline extraction settings
@@ -2772,10 +2985,14 @@ def main():
         direction='cw',             # 'auto', 'cw', or 'ccw'
 
         # Vehicle width and separate center-to-wall clearance constraint.
-        # width_opt remains car_width; wall_clearance reduces the allowed
-        # centerline corridor by this extra margin on each side.
+        # Keep a 0.25m optimizer target, then accept no less than the 0.15m
+        # side-clearance floor verified against the ray-cast map.
         car_width=0.30,
-        wall_clearance=0.15,
+        # Track-boundary inset used while measuring/conditioning the centerline.
+        wall_clearance=0.32,
+        # Clearance enforced by TUM's vehicle-centre corridor constraints.
+        optimizer_wall_clearance=0.32,
+        required_wall_clearance=0.15,
         reopt_free_dev=0.005,
         reopt_kappa_factor=0.95,
         max_ray_distance=8.0,
@@ -2809,6 +3026,48 @@ def main():
         'MINTIME_OPTIMIZER_SMOOTHING_S',
         args.optimizer_smoothing_s,
     )
+    args.max_speed = _env_float('MINTIME_MAX_SPEED', args.max_speed)
+    raw_filter_window = os.environ.get('MINTIME_VELOCITY_FILTER_WINDOW')
+    if raw_filter_window is not None:
+        normalized_filter_window = raw_filter_window.strip().lower()
+        if normalized_filter_window in {'0', 'none', 'off'}:
+            args.velocity_filter_window = None
+        else:
+            try:
+                args.velocity_filter_window = int(raw_filter_window)
+            except ValueError as exc:
+                raise ValueError(
+                    'MINTIME_VELOCITY_FILTER_WINDOW must be an odd positive '
+                    'integer or 0/none/off') from exc
+        print("  Env override: MINTIME_VELOCITY_FILTER_WINDOW="
+              f"{args.velocity_filter_window or 'disabled'}")
+    args.speed_scale = _env_float('MINTIME_SPEED_SCALE', args.speed_scale)
+    args.lateral_accel_limit = _env_float(
+        'MINTIME_LATERAL_ACCEL_LIMIT', args.lateral_accel_limit)
+    args.combined_accel_limit = _env_float(
+        'MINTIME_COMBINED_ACCEL_LIMIT', args.combined_accel_limit)
+    args.accel_limit = _env_float('MINTIME_ACCEL_LIMIT', args.accel_limit)
+    args.decel_limit = _env_float('MINTIME_DECEL_LIMIT', args.decel_limit)
+    args.curvature_preview_m = _env_float(
+        'MINTIME_CURVATURE_PREVIEW_M', args.curvature_preview_m)
+    args.tight_turn_curvature_threshold = _env_float(
+        'MINTIME_TIGHT_TURN_CURVATURE_THRESHOLD',
+        args.tight_turn_curvature_threshold)
+    args.tight_turn_speed_cap = _env_float(
+        'MINTIME_TIGHT_TURN_SPEED_CAP', args.tight_turn_speed_cap)
+    args.car_width = _env_float('MINTIME_CAR_WIDTH', args.car_width)
+    args.wall_clearance = _env_float(
+        'MINTIME_WALL_CLEARANCE',
+        args.wall_clearance,
+    )
+    args.optimizer_wall_clearance = _env_float(
+        'MINTIME_OPTIMIZER_WALL_CLEARANCE',
+        args.optimizer_wall_clearance,
+    )
+    args.required_wall_clearance = _env_float(
+        'MINTIME_REQUIRED_WALL_CLEARANCE',
+        args.required_wall_clearance,
+    )
     args.keep_best_smoothing = _env_bool(
         'MINTIME_KEEP_BEST_SMOOTHING',
         False,
@@ -2821,10 +3080,43 @@ def main():
         'MINTIME_CURVATURE_PENALTY_MARGIN',
         args.curvature_penalty_margin,
     )
+    args.use_empirical_speed_profile = _env_bool(
+        'MINTIME_USE_EMPIRICAL_SPEED_PROFILE', False)
     args.centerline_only = _env_bool(
         'MINTIME_CENTERLINE_ONLY',
         args.centerline_only,
     )
+    if (not math.isfinite(args.max_speed) or args.max_speed <= 0.0 or
+            not math.isfinite(args.speed_scale) or
+            not 0.0 < args.speed_scale <= 1.0 or
+            not math.isfinite(args.car_width) or args.car_width <= 0.0 or
+            not math.isfinite(args.wall_clearance) or args.wall_clearance < 0.0 or
+            not math.isfinite(args.optimizer_wall_clearance) or
+            args.optimizer_wall_clearance < args.required_wall_clearance or
+            not math.isfinite(args.required_wall_clearance) or
+            args.required_wall_clearance < 0.0):
+        raise ValueError(
+            'MINTIME_MAX_SPEED and MINTIME_CAR_WIDTH must be positive, '
+            'MINTIME_SPEED_SCALE must be in (0, 1], and '
+            'preparation wall clearance must be non-negative and the '
+            'optimizer clearance must meet the ray-cast required floor')
+    if (args.velocity_filter_window is not None and
+            (args.velocity_filter_window <= 0 or
+             args.velocity_filter_window % 2 == 0)):
+        raise ValueError(
+            'MINTIME_VELOCITY_FILTER_WINDOW must be an odd positive integer '
+            'or 0/none/off')
+    empirical_limits = (
+        args.lateral_accel_limit, args.combined_accel_limit,
+        args.accel_limit, args.decel_limit, args.curvature_preview_m,
+        args.tight_turn_curvature_threshold, args.tight_turn_speed_cap)
+    if (not all(math.isfinite(value) and value > 0.0
+                for value in empirical_limits) or
+            args.combined_accel_limit < args.lateral_accel_limit):
+        raise ValueError(
+            'Empirical acceleration limits and curvature preview must be '
+            'positive, and combined acceleration must be at least the '
+            'lateral limit')
 
     # Verify map path
     if not os.path.exists(args.map):
@@ -2836,6 +3128,16 @@ def main():
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"ERROR: Invalid vehicle profile: {exc}")
         sys.exit(1)
+
+    args.mintime_friction_coeff = _env_float(
+        'MINTIME_MUE', vehicle_profile['mintime_friction_coeff'])
+    if (not math.isfinite(args.mintime_friction_coeff) or
+            args.mintime_friction_coeff <= 0.0):
+        raise ValueError('MINTIME_MUE must be a finite positive coefficient')
+    args.mintime_penalty_delta = _env_float('MINTIME_PENALTY_DELTA', 10.0)
+    if (not math.isfinite(args.mintime_penalty_delta) or
+            not 0.0 <= args.mintime_penalty_delta <= 50.0):
+        raise ValueError('MINTIME_PENALTY_DELTA must be in [0, 50]')
 
     curvlim = read_curvlim_from_racecar_ini(racecar_ini)
     if args.strict_curvlim and (curvlim is None or curvlim <= 0.0):
@@ -2850,11 +3152,6 @@ def main():
         sys.exit(1)
     if curvlim is None:
         print("  WARNING: curvlim not found in racecar.ini; smoothing guard disabled")
-
-    if args.strict_curvlim and not args.reopt_mintime_solution:
-        print("  INFO: strict_curvlim enabled; forcing reopt_mintime_solution=True")
-        args.reopt_mintime_solution = True
-
 
     track_name = os.environ.get('MINTIME_TRACK_NAME', args.track_name)
     track_csv = os.path.join(global_opt_dir, 'inputs', 'tracks', f'{track_name}.csv')
@@ -2883,6 +3180,9 @@ def main():
     recalc_label = str(args.recalc_vel_profile_by_tph)
     print(f"  Recalc velocity:  {recalc_label}")
     print(f"  Max speed:        {args.max_speed} m/s")
+    print("  Speed filter:     "
+          f"{args.velocity_filter_window or 'disabled'} samples")
+    print(f"  Speed-rate limits: +{args.accel_limit:.2f}/-{args.decel_limit:.2f} m/s^2")
     print(f"  Centerline spacing: {args.centerline_spacing} m")
     print(f"  Optimizer spacing:  {args.optimizer_spacing} m")
     print(f"  Optimizer smoothing: s={args.optimizer_smoothing_s}, "
@@ -2892,12 +3192,16 @@ def main():
     print(f"  Vehicle mass:     {vehicle_profile['mass_kg']:.3f} kg "
           f"({vehicle_profile['weight_n']:.3f} N)")
     print("  Tire model:       TUM mintime Pacejka B/C/E parameters")
+    print(f"  TUM friction:     {args.mintime_friction_coeff:.3f}")
+    print(f"  Empirical profile: {args.use_empirical_speed_profile}")
     print(f"  Steering limits:  "
           f"angle={vehicle_profile['max_steering_rad']:.4f} rad, "
           f"rate={vehicle_profile['max_steering_rate_radps']:.4f} rad/s")
     print(f"  Minimum turn R:   "
           f"{vehicle_profile['expected_minimum_turn_radius_m']:.4f} m")
-    print(f"  Wall clearance:   {args.wall_clearance} m")
+    print(f"  Preparation inset:{args.wall_clearance:7.3f} m")
+    print(f"  Optimizer clear.: {args.optimizer_wall_clearance} m")
+    print(f"  Required minimum: {args.required_wall_clearance} m")
     print(f"  Reopt free dev:   {args.reopt_free_dev} m")
     print(f"  Reopt kappa fac:  {args.reopt_kappa_factor}")
     print(f"  Optimizer width:  {args.car_width:.3f} m")
@@ -3082,6 +3386,11 @@ def main():
             original_ini_content,
         )
 
+        patched_ini = patch_velocity_profile_filter_window(
+            patched_ini, args.velocity_filter_window)
+        print("  Patched racecar.ini: velocity filter -> "
+              f"{args.velocity_filter_window or 'disabled'}")
+
         print(f"  Patched racecar.ini: width_opt -> {optimizer_width:.3f} "
               f"(configured optimizer width)")
 
@@ -3105,11 +3414,31 @@ def main():
         patched_ini = patch_mintime_optim_numeric_option(
             patched_ini,
             "wall_clearance",
-            args.wall_clearance,
+            args.optimizer_wall_clearance,
         )
         print(
-            f"  Patched racecar.ini: wall_clearance -> "
-            f"{args.wall_clearance:.3f}"
+            f"  Patched racecar.ini: optimizer wall_clearance -> "
+            f"{args.optimizer_wall_clearance:.3f}"
+        )
+
+        patched_ini = patch_mintime_optim_numeric_option(
+            patched_ini,
+            "mue",
+            args.mintime_friction_coeff,
+        )
+        print(
+            f"  Patched racecar.ini: mintime friction -> "
+            f"{args.mintime_friction_coeff:.3f}"
+        )
+
+        patched_ini = patch_mintime_optim_numeric_option(
+            patched_ini,
+            "penalty_delta",
+            args.mintime_penalty_delta,
+        )
+        print(
+            f"  Patched racecar.ini: steering regularization -> "
+            f"{args.mintime_penalty_delta:.3f}"
         )
 
         patched_ini = patch_mintime_optim_numeric_option(
@@ -3216,6 +3545,22 @@ def main():
         tum_output, intermediate_csv,
         max_speed=args.max_speed, min_speed=args.min_speed
     )
+    if args.use_empirical_speed_profile:
+        apply_empirical_speed_profile(
+            intermediate_csv,
+            max_speed=args.max_speed,
+            lateral_accel_limit=args.lateral_accel_limit,
+            combined_accel_limit=args.combined_accel_limit,
+            accel_limit=args.accel_limit,
+            decel_limit=args.decel_limit,
+            curvature_preview_m=args.curvature_preview_m,
+            tight_turn_curvature_threshold=(
+                args.tight_turn_curvature_threshold),
+            tight_turn_speed_cap=args.tight_turn_speed_cap,
+        )
+    else:
+        print('  Retaining the TUM/GGV velocity profile without a second pass.')
+    scale_trajectory_speed(intermediate_csv, args.speed_scale)
 
     # ---- Step 3: Add wall distances -----------------------------------------
     wall_script = os.path.join(scripts_dir, 'compute_wall_distances.py')
@@ -3230,7 +3575,7 @@ def main():
         '--output', output_csv,
         '--max-distance', str(args.max_ray_distance),
         '--car-width', str(args.car_width),
-        '--wall-clearance', str(args.wall_clearance),
+        '--wall-clearance', str(args.required_wall_clearance),
     ]
     run_step("Step 3: Compute ray-cast wall distances", wall_cmd)
 
@@ -3246,7 +3591,7 @@ def main():
         output_csv,
         curvlim=curvlim if args.strict_curvlim else None,
         car_width=args.car_width,
-        wall_clearance=args.wall_clearance,
+        wall_clearance=args.required_wall_clearance,
     )
 
     # ---- Visualization --------------------------------------------------------

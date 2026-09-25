@@ -44,8 +44,11 @@ geometry:
   minimum_turn_radius_m: 0.5611828748
 
 tire:
-  friction_coeff: 0.745
-  mintime_friction_coeff: 0.745
+  # Practice-simulator identification from three collision-free 40 Hz runs:
+  # measured lateral acceleration p95=8.53 m/s^2 (0.87 g). Use 0.86 for the
+  # TUM tire model so its nominal limit stays just below that observed envelope.
+  friction_coeff: 0.86
+  mintime_friction_coeff: 0.86
   rolling_resistance_coeff: 0.163
   # Pacejka parameters consumed by TUM's mintime model.
   pacejka:
@@ -78,14 +81,14 @@ steering:
 
 dynamics:
   max_speed_mps: 12.0
-  max_acceleration_mps2: 7.31
-  max_deceleration_mps2: 7.31
-  max_lateral_accel_mps2: 7.3078
+  max_acceleration_mps2: 3.8
+  max_deceleration_mps2: 7.2
+  max_lateral_accel_mps2: 8.4
   # Runtime path tracking uses the conservative simulator idle-braking value;
   # this is intentionally not the TUM active-brake limit.
   passive_deceleration_mps2: 1.50
   max_acceleration_speed_mps: [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
-  max_acceleration_envelope_mps2: [7.31, 7.31, 7.31, 7.31, 7.31, 7.31]
+  max_acceleration_envelope_mps2: [3.8, 3.8, 3.8, 3.8, 3.8, 3.8, 3.8]
 
 mintime:
   max_speed_mps: 12.0

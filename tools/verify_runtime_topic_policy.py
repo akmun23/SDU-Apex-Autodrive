@@ -6,16 +6,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# These files constitute the normal autonomous launch and its runtime nodes.
+# Only the fixed competition launch is subject to this runtime input policy.
+# Development mapping and recording are deliberately outside this allowlist.
 RUNTIME_FILES = (
-    "sdu_apex_autodrive/launch/controller.launch.py",
-    "sdu_apex_autodrive/launch/mapping.launch.py",
+    "sdu_apex_autodrive/launch/competition.launch.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/actuator_interface.py",
-    "sdu_apex_autodrive/sdu_apex_autodrive/lap_map_saver.py",
     "f1tenth_localization/src/sensor_odometry_node.cpp",
+    "f1tenth_localization/gpu_amcl_cpp/src/core/amcl_node.cpp",
     "f1tenth_localization/gpu_amcl_cpp/src/core/ekf_node.cpp",
-    "f1tenth_localization/gpu_amcl_cpp/include/gpu_amcl_cpp/core/ekf_node.hpp",
+    "f1tenth_mpc/src/mpc_controller_node.cpp",
     "f1tenth_localization/config/sensor_odometry.yaml",
     "f1tenth_localization/config/ekf.yaml",
 )
@@ -36,6 +36,12 @@ RESTRICTED = (
     "/autodrive/roboracer_1/lap_time",
     "/autodrive/roboracer_1/last_lap_time",
     "/autodrive/roboracer_1/best_lap_time",
+    "/tf",
+)
+
+TF_LISTENER_TOKENS = (
+    "tf2_ros::TransformListener",
+    "create_subscription<tf2_msgs::msg::TFMessage>",
 )
 
 
@@ -52,7 +58,27 @@ def main() -> int:
             if topic in text:
                 errors.append(f"{relative}: restricted topic remains: {topic}")
 
+    for relative in (
+        "f1tenth_localization/src/sensor_odometry_node.cpp",
+        "f1tenth_localization/gpu_amcl_cpp/src/core/amcl_node.cpp",
+        "f1tenth_localization/gpu_amcl_cpp/src/core/ekf_node.cpp",
+        "f1tenth_mpc/src/mpc_controller_node.cpp",
+    ):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        for token in TF_LISTENER_TOKENS:
+            if token in text:
+                errors.append(f"{relative}: restricted TF listener remains")
+
     competition_launch = (ROOT / COMPETITION_FILES[0]).read_text(encoding="utf-8")
+    if any(topic in competition_launch for topic in (
+        '"/tf"', '"/tf_static"', '"/sdu/tf"', '"/sdu/tf_static"',
+    )):
+        errors.append(
+            f"{COMPETITION_FILES[0]}: transform topic use or alias is forbidden")
+    for required in ('"publish_tf": False',):
+        if required not in competition_launch:
+            errors.append(
+                f"{COMPETITION_FILES[0]}: team transform output must be disabled")
     for token in (
         "mpc_shadow_node",
         "with_mpc_shadow",

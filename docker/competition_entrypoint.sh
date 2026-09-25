@@ -11,4 +11,4 @@ source /home/autodrive_devkit/install/setup.bash
 source /workspace/install/setup.bash
 
 set -u
-exec ros2 launch sdu_apex_autodrive competition.launch.py
+exec ros2 launch sdu_apex_autodrive competition.launch.py >/dev/null 2>&1

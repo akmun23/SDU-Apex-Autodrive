@@ -1,4 +1,4 @@
-"""SLAM using allowed encoder/IMU odometry plus LiDAR."""
+"""Development-only SLAM mapping from simulator pose and LiDAR."""
 
 import os
 
@@ -7,7 +7,6 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
-    GroupAction,
     IncludeLaunchDescription,
     RegisterEventHandler,
     SetEnvironmentVariable,
@@ -17,8 +16,9 @@ from launch.events import Shutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import ComposableNodeContainer, Node, SetRemap
+from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -33,10 +33,14 @@ def generate_launch_description():
         executable="lap_map_saver",
         name="five_lap_map_saver",
         output="screen",
-        parameters=[LaunchConfiguration("mapping_params")],
-        remappings=[
-            ("/tf", "/sdu/tf"),
-            ("/tf_static", "/sdu/tf_static"),
+        parameters=[
+            LaunchConfiguration("mapping_params"),
+            {
+                "output_directory": ParameterValue(
+                    LaunchConfiguration("map_output_directory"), value_type=str),
+                "map_name": ParameterValue(
+                    LaunchConfiguration("map_name"), value_type=str),
+            },
         ],
     )
 
@@ -59,6 +63,16 @@ def generate_launch_description():
             default_value=os.path.join(integration, "config", "five_lap_mapping.yaml"),
         ),
         DeclareLaunchArgument(
+            "map_output_directory",
+            default_value="/workspace/src/live_runs/maps",
+            description="Output directory for this mapped track; never the canonical map folder.",
+        ),
+        DeclareLaunchArgument(
+            "map_name",
+            default_value="track_map",
+            description="Map filename stem for this mapping run.",
+        ),
+        DeclareLaunchArgument(
             "actuator_params",
             default_value=os.path.join(integration, "config", "actuator_interface.yaml"),
         ),
@@ -74,9 +88,8 @@ def generate_launch_description():
             condition=launch_bridge,
             output="screen",
         ),
-        # Mapping uses the same legal encoder/IMU odometry as racing.  The
-        # mapper must not silently consume an official simulator odometry or
-        # ground-truth TF stream.
+        # Keep team odometry live for comparison and bag analysis, but the
+        # development-only map is registered against simulator ground truth.
         Node(
             package="f1tenth_localization",
             executable="sensor_odometry_node",
@@ -85,8 +98,8 @@ def generate_launch_description():
             parameters=[LaunchConfiguration("sensor_odom_params")],
             remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
         ),
-        # Mapping is deliberately isolated from any external TF tree. These
-        # are the only base-to-sensor transforms needed by SLAM.
+        # Keep team sensor transforms private to odometry. SLAM uses the
+        # simulator's native world->vehicle->lidar transforms on /tf.
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
@@ -109,19 +122,15 @@ def generate_launch_description():
             remappings=[("/tf_static", "/sdu/tf_static")],
             output="screen",
         ),
-        GroupAction([
-            SetRemap(src="/tf", dst="/sdu/tf"),
-            SetRemap(src="/tf_static", dst="/sdu/tf_static"),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(slam, "launch", "online_async_launch.py")
-                ),
-                launch_arguments={
-                    "slam_params_file": LaunchConfiguration("slam_params"),
-                    "use_sim_time": "false",
-                }.items(),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(slam, "launch", "online_async_launch.py")
             ),
-        ]),
+            launch_arguments={
+                "slam_params_file": LaunchConfiguration("slam_params"),
+                "use_sim_time": "false",
+            }.items(),
+        ),
         ComposableNodeContainer(
             name="mapping_ftg_container",
             namespace="",

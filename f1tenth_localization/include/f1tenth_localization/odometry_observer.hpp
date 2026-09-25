@@ -37,6 +37,9 @@ struct OdometryObserverConfig
   // the closed loop.
   double decel_ax_scale{1.005};
   double decel_ax_offset_mps2{0.020};
+  // Keep the observed body acceleration during encoder dropouts, with a cap
+  // measured from clean simulator acceleration samples.
+  double wheel_dropout_positive_ax_max_mps2{4.4};
   // Wheel speed is the direct longitudinal measurement.  Keep this gate
   // above the measured launch acceleration so valid wheel updates are not
   // replaced by the slower IMU prediction.

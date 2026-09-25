@@ -24,7 +24,7 @@
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
 
 /* Other swept MPC defaults */
-#define MAX_ITERATIONS 100                             /* Default solver iteration budget per control update. */
+#define MAX_ITERATIONS 200                             /* Default solver iteration budget per control update. */
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
@@ -51,17 +51,15 @@
 #define MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 5.36267417f /* 12/14 m/s fit; independent 15.3 m/s holdout. */
 #define MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV 0.27655518f /* Measured full-brake envelope per current speed. */
 #define MPC_MAX_COMMAND_SPEED_MPS 16.0f                  /* Project command envelope, not simulator physics. */
-#define MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2 3.0f   /* Output target-speed increase policy. */
+#define MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2 3.8f   /* Matches the validated 3.8 m/s^2 machine-acceleration envelope. */
 #define MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2 8.0f  /* Output target-speed reduction policy. */
 
-/* These are the geometry values used by the exact-min-time raceline
- * generator.  They describe the virtual AutoDRIVE car/planning footprint;
- * they are not real-car tire or physics parameters.  The trajectory wall
- * distances are raw centerline-to-wall distances. */
+/* AutoDRIVE vehicle footprint dimensions used for MPC corridor projection.
+ * They are geometry only, not tire or vehicle-dynamics parameters. */
 #define MPC_CAR_WIDTH_M 0.273f
 #define MPC_REAR_OVERHANG_M 0.080f
 #define MPC_REAR_AXLE_TO_FRONT_BUMPER_M 0.430f
-#define MPC_PLANNING_FOOTPRINT_WIDTH_M 0.300f
+/* Hard minimum clearance between the projected vehicle footprint and wall. */
 #define MPC_REQUIRED_WALL_CLEARANCE_M 0.150f
 
 /*===========================================================================

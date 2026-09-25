@@ -10,31 +10,23 @@ import hashlib
 import math
 import time
 
-from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from slam_toolbox.srv import SaveMap
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Int32
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
 class FiveLapMapSaver(Node):
-    """Count sensor-odometry laps and request one map save without simulator pose."""
+    """Save a development map after ground-truth lap coverage."""
 
     def __init__(self) -> None:
         super().__init__("five_lap_map_saver")
         self._declare_parameters()
 
-        self.odom_topic = str(self.get_parameter("odom_topic").value)
+        self.lap_count_topic = str(self.get_parameter("lap_count_topic").value)
         self.target_laps = int(self.get_parameter("target_laps").value)
-        self.start_radius = float(self.get_parameter("start_radius_m").value)
-        self.departure_radius = float(self.get_parameter("departure_radius_m").value)
-        self.minimum_lap_distance = float(
-            self.get_parameter("minimum_lap_distance_m").value)
-        self.start_heading_tolerance = float(
-            self.get_parameter("start_heading_tolerance_rad").value)
-        self.maximum_odom_step = float(self.get_parameter("maximum_odom_step_m").value)
         self.settle_before_save_s = float(
             self.get_parameter("settle_before_save_s").value)
         self.stop_before_save = bool(self.get_parameter("stop_before_save").value)
@@ -43,6 +35,12 @@ class FiveLapMapSaver(Node):
             0.0, float(self.get_parameter("lap_snapshot_settle_s").value))
         self.output_path = Path(str(self.get_parameter("output_directory").value))
         self.map_name = str(self.get_parameter("map_name").value)
+        if not self.map_name or Path(self.map_name).name != self.map_name:
+            raise ValueError("map_name must be a filename without a directory")
+        self.output_path.mkdir(parents=True, exist_ok=True)
+        if any(self.output_path.glob(f"{self.map_name}*")):
+            raise FileExistsError(
+                f"map output already exists for {self.map_name!r}; choose a new map_name")
         self.save_map_service = str(self.get_parameter("save_map_service").value)
         self.provenance_enabled = bool(self.get_parameter("provenance_enabled").value)
         self.provenance_file = str(self.get_parameter("provenance_file").value).strip()
@@ -57,22 +55,10 @@ class FiveLapMapSaver(Node):
                 not self.provenance_map_frame or not self.provenance_world_frame):
             raise ValueError("map provenance frame names must not be empty")
 
-        if self.target_laps <= 0 or min(
-            self.start_radius,
-            self.departure_radius,
-            self.minimum_lap_distance,
-            self.maximum_odom_step,
-        ) <= 0.0:
-            raise ValueError("five-lap mapping parameters must be positive")
-        if not (0.0 < self.start_heading_tolerance <= math.pi):
-            raise ValueError("start_heading_tolerance_rad must be in (0, pi]")
+        if self.target_laps <= 0:
+            raise ValueError("target_laps must be positive")
         if self.settle_before_save_s < 0.0:
             raise ValueError("settle_before_save_s must not be negative")
-        if self.departure_radius <= self.start_radius:
-            raise ValueError("departure_radius_m must exceed start_radius_m")
-        if not self.map_name or Path(self.map_name).name != self.map_name:
-            raise ValueError("map_name must be a filename without a directory")
-
         self._save_client = self.create_client(SaveMap, self.save_map_service)
         self._tf_buffer = Buffer() if self.provenance_enabled else None
         self._tf_listener = (
@@ -85,18 +71,14 @@ class FiveLapMapSaver(Node):
         self._completion_pub = self.create_publisher(
             Bool, str(self.get_parameter("completion_topic").value), completion_qos)
         self._completion_pub.publish(Bool(data=False))
-        self._odom_sub = self.create_subscription(
-            Odometry, self.odom_topic, self._on_odom, rclpy.qos.qos_profile_sensor_data)
-
-        self._last_odom_xy = None
-        # Re-anchor after every confirmed crossing. A fixed origin is not a
-        # valid repeated-lap gate once wheel/IMU odometry has accumulated
-        # drift; the map itself is allowed to correct that drift later.
-        self._lap_anchor_xy = None
-        self._lap_anchor_heading = None
-        self._distance_m = 0.0
-        self._lap_start_distance_m = 0.0
-        self._departed_start = False
+        self._lap_count_sub = self.create_subscription(
+            Int32,
+            self.lap_count_topic,
+            self._on_lap_count,
+            rclpy.qos.qos_profile_sensor_data,
+        )
+        self._initial_sim_lap_count = None
+        self._last_sim_lap_count = None
         self._laps = 0
         self._save_requested = False
         self._finished = False
@@ -113,23 +95,14 @@ class FiveLapMapSaver(Node):
             f"{self.output_path}/{self.map_name}.[yaml|pgm]")
 
     def _declare_parameters(self) -> None:
-        self.declare_parameter("odom_topic", "/odom")
+        self.declare_parameter("lap_count_topic", "/autodrive/roboracer_1/lap_count")
         self.declare_parameter("save_map_service", "/slam_toolbox/save_map")
         self.declare_parameter("completion_topic", "/sdu/mapping_complete")
         self.declare_parameter("output_directory", "/workspace/src/f1tenth_planning/maps")
         self.declare_parameter("map_name", "autodrive_track_5laps")
         self.declare_parameter("target_laps", 5)
-        self.declare_parameter("start_radius_m", 0.50)
-        self.declare_parameter("departure_radius_m", 1.00)
-        self.declare_parameter("minimum_lap_distance_m", 8.00)
-        # Position-only returns can accept a U-turn that retraces the outgoing
-        # path. A genuine directed lap must return with approximately the same
-        # vehicle heading as at departure.
-        self.declare_parameter("start_heading_tolerance_rad", 0.75)
-        self.declare_parameter("maximum_odom_step_m", 1.00)
-        # A return to the odometry start is only the trigger for stopping the
-        # car. SLAM Toolbox still needs time to apply the loop constraint,
-        # publish the corrected map, and serialize the optimized graph.
+        # Once the simulator reports the target number of complete laps, allow
+        # SLAM to publish and serialize the final map.
         self.declare_parameter("settle_before_save_s", 8.0)
         self.declare_parameter("stop_before_save", True)
         self.declare_parameter("save_each_lap", True)
@@ -137,89 +110,35 @@ class FiveLapMapSaver(Node):
         self.declare_parameter("provenance_enabled", False)
         self.declare_parameter("provenance_file", "")
         self.declare_parameter("provenance_map_frame", "map")
-        self.declare_parameter("provenance_world_frame", "odom")
+        self.declare_parameter("provenance_world_frame", "world")
 
-    def _on_odom(self, msg: Odometry) -> None:
-        x = float(msg.pose.pose.position.x)
-        y = float(msg.pose.pose.position.y)
-        orientation = msg.pose.pose.orientation
-        heading = math.atan2(
-            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
-            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
-        )
-        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(heading)):
-            return
-        current = (x, y)
-        if self._last_odom_xy is not None:
-            step = math.dist(current, self._last_odom_xy)
-            if step <= self.maximum_odom_step:
-                self._distance_m += step
-            else:
-                self.get_logger().warn(
-                    f"Ignoring {step:.2f} m odometry/reset jump; re-arming lap gate")
-                # A mapping-only simulator reset can occur after a collision
-                # at any point on the track. Do not let the post-reset pose
-                # inherit the pre-reset departure state or count a false lap.
-                self._lap_anchor_xy = current
-                self._lap_anchor_heading = heading
-                self._lap_start_distance_m = self._distance_m
-                self._departed_start = False
-        self._last_odom_xy = current
-
-        if self._finished or self._laps >= self.target_laps:
-            return
-        if self._lap_anchor_xy is None:
-            self._lap_anchor_xy = current
-            self._lap_anchor_heading = heading
-            self._lap_start_distance_m = self._distance_m
+    def _on_lap_count(self, msg: Int32) -> None:
+        current = int(msg.data)
+        if self._initial_sim_lap_count is None:
+            self._initial_sim_lap_count = current
+            self._last_sim_lap_count = current
             self.get_logger().info(
-                f"Mapping start fixed at ({current[0]:.2f}, {current[1]:.2f}) "
-                "in odom")
+                f"Ground-truth lap counter baseline: {current}")
             return
-
-        separation = math.dist(current, self._lap_anchor_xy)
-        if not self._departed_start:
-            if separation >= self.departure_radius:
-                self._departed_start = True
+        if current < self._last_sim_lap_count:
+            self.get_logger().error(
+                "Simulator lap counter reset during mapping; refusing a partial map")
+            self._finished = True
+            self._completion_pub.publish(Bool(data=True))
             return
-
-        lap_distance = self._distance_m - self._lap_start_distance_m
-        if separation > self.start_radius or lap_distance < self.minimum_lap_distance:
-            return
-
-        heading_error = abs(math.atan2(
-            math.sin(heading - float(self._lap_anchor_heading)),
-            math.cos(heading - float(self._lap_anchor_heading)),
-        ))
-        if heading_error > self.start_heading_tolerance:
-            self.get_logger().warn(
-                f"Rejecting odometry return as reverse/retraced path: "
-                f"distance={lap_distance:.1f} m, position error="
-                f"{separation:.2f} m, heading error={heading_error:.2f} rad "
-                f"(limit {self.start_heading_tolerance:.2f})")
-            return
-
-        self._laps += 1
-        self._lap_start_distance_m = self._distance_m
-        # Use this confirmed crossing as the next lap's odometry anchor. The
-        # anchor may move slowly in odom as drift accumulates, while the
-        # minimum-distance gate still prevents short corner loops.
-        self._lap_anchor_xy = current
-        self._lap_anchor_heading = heading
-        self._departed_start = False
-        self.get_logger().info(
-            f"Completed mapping lap {self._laps}/{self.target_laps} "
-            f"({lap_distance:.1f} m)")
-        if self.save_each_lap:
-            self._queue_lap_snapshot(self._laps)
-        if self._laps >= self.target_laps:
-            self._target_reached_monotonic = time.monotonic()
+        self._last_sim_lap_count = current
+        completed = current - self._initial_sim_lap_count
+        while self._laps < min(completed, self.target_laps):
+            self._laps += 1
             self.get_logger().info(
-                f"{self.target_laps} mapping laps complete; stopping and "
-                f"waiting {self.settle_before_save_s:.1f}s for loop closure")
-        # No simulator reset is permitted between laps. Continue from the
-        # actual vehicle pose; a collision is handled by the terminal abort
-        # callback above.
+                f"Completed simulator mapping lap {self._laps}/{self.target_laps}")
+            if self.save_each_lap:
+                self._queue_lap_snapshot(self._laps)
+            if self._laps >= self.target_laps:
+                self._target_reached_monotonic = time.monotonic()
+                self.get_logger().info(
+                    f"{self.target_laps} mapping laps complete; stopping and "
+                    f"waiting {self.settle_before_save_s:.1f}s for map save")
 
     def _queue_lap_snapshot(self, lap_number: int) -> None:
         if self._snapshot_pending_lap is not None or self._snapshot_in_flight:
@@ -349,7 +268,7 @@ class FiveLapMapSaver(Node):
             return False
         try:
             # TF lookup(target, source) returns the transform that maps source
-            # coordinates into target coordinates. Thus this is map -> odom.
+            # coordinates into target coordinates. Thus this is map -> world.
             transform = self._tf_buffer.lookup_transform(
                 self.provenance_world_frame,
                 self.provenance_map_frame,
@@ -380,7 +299,7 @@ class FiveLapMapSaver(Node):
             f"  x_m: {transform.transform.translation.x:.12g}\n"
             f"  y_m: {transform.transform.translation.y:.12g}\n"
             f"  yaw_rad: {yaw:.12g}\n"
-            "source: mapping_team_tf_at_save\n"
+            "source: simulator_truth_tf_at_save\n"
             f"map_yaml_sha256: {yaml_hash}\n"
             f"map_image_sha256: {image_hash}\n",
             encoding="utf-8",

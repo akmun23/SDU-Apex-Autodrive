@@ -7,6 +7,7 @@ sensor_odometry:
     diagnostics_topic: /odom/diagnostics
     odom_frame: odom
     base_frame: base_link
+    publish_tf: true
     lidar_frame: lidar
     imu_frame: imu
     lidar_x_m: 0.2733
@@ -27,15 +28,16 @@ sensor_odometry:
     wheel_radius_m: 0.059
     # Fallback scale for deployments without the identified speed table.
     wheel_speed_scale: 0.968
-    # Source-time speed-step data show a repeatable speed-dependent encoder
-    # bias. These values are a legal sensor calibration (raw encoder speed to
-    # body-speed estimate); they do not use simulator truth at runtime and do
-    # not alter simulator physics. Values above 14 m/s are held at the last
-    # identified point until a clean high-speed body-speed experiment exists.
+    # The 2026-09-24 independent 12-lap runs cross-validated these raw-encoder
+    # scale knots on straight, accepted, non-burst samples (232/221 samples).
+    # Held-out p95 absolute wheel-speed error fell from 0.178/0.187 to
+    # 0.091/0.125 m/s. Simulator truth was used only offline; runtime inputs
+    # remain encoder/IMU, and simulator physics is unchanged. Keep the
+    # previously identified >10 m/s calibration points pending new samples.
     wheel_speed_scale_speeds_mps: [0.0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0, 8.0,
       10.0, 12.0, 14.0]
-    wheel_speed_scale_values: [1.0, 0.998, 0.994, 0.992, 0.990, 0.9815,
-      0.9735, 0.9658, 0.9587, 0.9520, 0.9445]
+    wheel_speed_scale_values: [1.0, 0.998, 0.994, 0.992, 0.9947, 0.9788,
+      0.9561, 0.9548, 0.9479, 0.9520, 0.9445]
     reset_encoder_jump_rad: 50.0
     # Smooth the simulator's repeated cumulative-angle packets over two
     # native 20 Hz samples.  The recorded run comparison showed that 150 ms
@@ -53,10 +55,14 @@ sensor_odometry:
     # not simulator physics.
     decel_ax_scale: 1.005
     decel_ax_offset_mps2: 0.020
-    # Wheel speed is the direct longitudinal measurement.  The previous
-    # 0.6 m/s^2 gate rejected valid wheel updates during normal launch
-    # acceleration, leaving /odom on the much slower IMU prediction.
-    wheel_update_ax_abs_max_mps2: 6.5
+    # Ground-truth-scored positive IMU acceleration during encoder dropouts
+    # reduces practice-run speed-error p95 without accepting bursty wheel rates.
+    # 4.4 m/s^2 is the measured clean-run acceleration ceiling.
+    wheel_dropout_positive_ax_max_mps2: 4.4
+    # Wheel speed is the direct longitudinal measurement. The real-sim
+    # collision capture reached 6.72 m/s^2 while clean-run braking reached
+    # 7.74 m/s^2; keep those measured wheel updates available.
+    wheel_update_ax_abs_max_mps2: 8.0
     wheel_freeze_speed_mps: 0.15
     # Launch wheel-spin guard: a coherent encoder rate above the low-speed
     # body prediction is not accepted as a recovery until the body is moving.

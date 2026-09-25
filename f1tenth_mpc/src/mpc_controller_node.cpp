@@ -241,7 +241,8 @@ public:
         rti_config_.model.max_target_speed_rate_reduction_mps2 = static_cast<float>(
             declare_parameter<double>("max_target_speed_rate_reduction_mps2", 8.0));
         rti_config_.model.corridor_margin_m = static_cast<float>(
-            declare_parameter<double>("corridor_margin_m", 0.30));
+            declare_parameter<double>("corridor_margin_m",
+                                      MPC_REQUIRED_WALL_CLEARANCE_M));
         rti_config_.model.first_prediction_corridor_margin_m =
             static_cast<float>(declare_parameter<double>(
                 "first_prediction_corridor_margin_m",
@@ -941,6 +942,8 @@ private:
              << (result.residual_candidate_published ? "true" : "false")
             << ",\"best_effort_action_published\":"
             << (result.best_effort_action_published ? "true" : "false")
+            << ",\"best_effort_action_repaired\":"
+            << (result.best_effort_action_repaired ? "true" : "false")
             << ",\"rejection_speed_guard_applied\":"
             << (result.rejection_speed_guard_applied ? "true" : "false")
             << ",\"rejection_speed_guard_limit_mps\":";
@@ -1354,7 +1357,7 @@ private:
 
         if (has_usable_best_effort_action) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC published a bounded best-effort first action despite "
+                "MPC published a one-step-feasible action despite "
                 "full-horizon rejection (status=%s,r1=%d,r2=%d)",
                 cycle_status_name(status), result.r1_status,
                 result.r2_status);

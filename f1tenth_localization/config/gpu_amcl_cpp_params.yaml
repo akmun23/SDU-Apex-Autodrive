@@ -8,9 +8,12 @@ gpu_amcl_cpp:
     # remains available for diagnostics and offline odometry scoring.
     odom_topic: /ekf_odom
 
-    num_particles: 2500
+    # The two clean 40 Hz practice bags requested about 7,500 KLD particles
+    # per resample while this cap held the filter at 2,500. Raise it only to
+    # 5,000 for an in-simulator accuracy/latency comparison.
+    num_particles: 5000
     min_particles: 1000
-    max_particles: 2500
+    max_particles: 5000
     use_kld_sampling: true
     kld_epsilon: 0.10
     kld_z: 1.96
@@ -58,6 +61,8 @@ gpu_amcl_cpp:
     slip_angular_threshold: 1.0
     slip_noise_multiplier: 2.0
 
+    # 5,000-particle live comparison showed no localization benefit from
+    # doubling the scan sampling, so keep the lower-latency 270-beam setting.
     max_beams: 270
     z_hit: 0.90
     z_rand: 0.10
@@ -151,35 +156,26 @@ gpu_amcl_cpp:
     local_tracking_recovery_min_cluster_weight: 0.80
     local_tracking_recovery_stability_distance_m: 0.35
     local_tracking_recovery_stability_yaw_rad: 0.25
-    # Apply each accepted scan innovation continuously. The fast acceptance
-    # recording showed that, once the causal prediction was at least 0.10 m
-    # from GT, the accepted innovation pointed back toward GT in about 92% of
-    # samples; 0.25 therefore left too much odometry drift to accumulate.
-    # Validate the higher gain at real driving speed while retaining the
-    # causal association and cluster-quality checks.
-    local_scan_correction_xy_gain: 0.50
-    # Apply each accepted scan innovation continuously. AMCL must be able to
-    # remove accumulated odometry drift in both map axes; this is not a
-    # lifetime correction budget. The accepted full-speed run showed that the
-    # upper-hairpin ambiguity is specifically in the raceline-tangent
-    # component, so only that component is attenuated below.
+    # The short-course bag showed accepted scan innovations aligned with the
+    # offline pose error, while the prior gains applied only a small fraction
+    # of the correction. Keep the scan association, cluster, raceline, and
+    # pose-jump gates; test full scan-supported correction here.
+    local_scan_correction_xy_gain: 1.0
     local_scan_correction_cross_track_only: false
-    # Keep continuous along-track drift correction enabled, but reduce the
-    # ambiguous branch-pulling component to the value accepted in the 11.77
-    # lap full-speed run. The normal component remains at full gain.
-    local_scan_correction_along_track_gain: 0.25
-    # At racing speed the accepted scan innovation is a measured odometry
-    # phase correction. Increase only this tangent component; the normal
-    # correction, local association, raceline gate, and applied-distance cap
-    # remain unchanged.
+    # Keep the tangent component enabled at startup and racing speeds;
+    # accepted innovations remain bounded by the existing map/association gates.
+    local_scan_correction_along_track_gain: 1.0
+    # Use the same scan-supported correction at high speed, with the existing
+    # cluster-quality, association, and raceline checks retained.
     local_scan_correction_fast_speed_threshold_mps: 3.0
-    local_scan_correction_fast_along_track_gain: 0.50
+    local_scan_correction_fast_along_track_gain: 1.0
     # Heading was already source-time stable in the crash run. Keep its map
     # correction conservative until a heading-observability campaign justifies
     # a larger value.
     local_scan_correction_yaw_gain: 0.0
-    # Experimental independent 1-D scan-likelihood correction. Production
-    # remains disabled until its matched live AMCL/Pure Pursuit A/B passes.
+    # Disabled after the live A/B showed a biased negative along-track offset
+    # accumulating into metre-scale position error. Revisit only with a new
+    # ground-truth-verified correction model.
     scan_likelihood_along_track_gain: 0.0
     # Recenter the local particle cloud on the fused pose after each accepted
     # scan. Without this, the cloud retains the previous scan mode and a small

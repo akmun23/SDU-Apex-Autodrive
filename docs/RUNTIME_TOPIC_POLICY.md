@@ -1,8 +1,10 @@
 # Runtime topic policy
 
-The normal `./tools/start_dev.sh` launch is restricted to the official
-competition sensor inputs and team-derived state. It must not subscribe to
-simulator ground truth, race-result, collision, reset, or simulator TF topics.
+The fixed `competition.launch.py` is restricted to the official competition
+sensor inputs and team-derived state. Its MPC and localization nodes must not
+subscribe to simulator ground truth, race-result, collision, reset, or
+simulator transform data. The development and mapping launches are separate
+debug workflows and may use restricted streams for analysis.
 
 The official AutoDRIVE simulator guide defines these sensor inputs as allowed:
 
@@ -20,7 +22,7 @@ The team may publish the actuator outputs
 team-generated `/odom`, `/ekf_odom`, and `/current_map_pose`.
 
 The following are restricted during autonomous runtime and are not consumed by
-the racing launch:
+the competition stack:
 
 - simulator pose/IPS and simulator `/odom`
 - `/autodrive/roboracer_1/collision_count`
@@ -30,9 +32,13 @@ the racing launch:
 
 The competition launch uses the repository's rate-controlled wrapper around the
 official headless API bridge. The wrapper only subscribes to the permitted
-steering and throttle command topics and may still publish simulator telemetry
-as part of the API protocol; no team node subscribes to those restricted
-outputs. Team TF is remapped to `/sdu/tf` and `/sdu/tf_static`.
+steering and throttle command topics. The upstream API may publish restricted
+telemetry, but the competition MPC, odometry, EKF, and AMCL do not consume it.
+The competition launch has no transform-topic remaps and disables team
+transform publication. The MPC consumes only team `/odom` and
+`/current_map_pose`. Development mapping is intentionally separate: its SLAM
+mapper uses simulator `/tf` and `lap_count` to build a map offline, and the
+competition entrypoint never starts that launch or subscribes to those topics.
 
 The unqualified `/odom` name in this repository is the team observer's own
 derived topic; it is not connected to or remapped from

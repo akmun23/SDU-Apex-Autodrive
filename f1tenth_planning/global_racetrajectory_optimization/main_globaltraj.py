@@ -26,7 +26,7 @@ def repair_closed_velocity_profile(vx_profile: np.ndarray,
                                    pars: dict,
                                    debug: bool,
                                    max_passes: int = 80) -> np.ndarray:
-    """Conservatively remove closed-loop acceleration spikes from TPH velocity output."""
+    """Enforce GGV lateral and longitudinal limits after profile filtering."""
     if ggv is None or ax_max_machines is None:
         return vx_profile
 
@@ -46,6 +46,13 @@ def repair_closed_velocity_profile(vx_profile: np.ndarray,
     passes_done = 0
     for pass_idx in range(max_passes):
         prev_vx = vx_repaired.copy()
+
+        # calc_vel_profile applies the lateral GGV limit before its optional
+        # convolution filter. Filtering can raise speeds back above that
+        # limit, so reapply the measured curvature bound in every pass.
+        ay_limit = np.interp(vx_repaired, ggv[:, 0], ggv[:, 2])
+        v_lateral_max = np.sqrt(np.maximum(ay_limit * radii, 0.0))
+        vx_repaired = np.minimum(vx_repaired, v_lateral_max)
 
         # Forward pass: limit acceleration from point i to point i+1.
         for i in range(vx_repaired.size):
@@ -91,6 +98,16 @@ def repair_closed_velocity_profile(vx_profile: np.ndarray,
         passes_done = pass_idx + 1
         if pass_delta < 1e-6:
             break
+
+    ay_limit = np.interp(vx_repaired, ggv[:, 0], ggv[:, 2])
+    ay_demand = np.divide(
+        vx_repaired * vx_repaired,
+        radii,
+        out=np.zeros_like(vx_repaired),
+        where=np.isfinite(radii),
+    )
+    if np.any(ay_demand > ay_limit + 1e-5):
+        raise RuntimeError("Repaired velocity profile exceeds the lateral GGV limit")
 
     if debug and max_delta > 1e-6:
         print("INFO: Repaired closed TPH velocity profile: "
@@ -582,14 +599,20 @@ if opt_type == 'mintime' and mintime_opts["reopt_mintime_solution"]:
     except Exception as exc:
         print(
             "WARNING: Mintime reoptimization failed "
-            f"({type(exc).__name__}: {exc}). Using original mintime solution."
+            f"({type(exc).__name__}: {exc}). "
+            "Keeping the original geometry and recomputing its GGV speed profile."
         )
         alpha_opt = alpha_mintime
         reftrack_interp = reftrack_mintime
         normvec_normalized_interp = normvec_mintime
         a_interp = a_mintime
         mintime_opts["reopt_mintime_solution"] = False
-        mintime_opts["recalc_vel_profile_by_tph"] = False
+        if ggv is None or ax_max_machines is None:
+            raise RuntimeError(
+                "Mintime reoptimization failed and calibrated GGV data is "
+                "unavailable; refusing the unconstrained velocity profile."
+            ) from exc
+        mintime_opts["recalc_vel_profile_by_tph"] = True
 
 # ----------------------------------------------------------------------------------------------------------------------
 # INTERPOLATE SPLINES TO SMALL DISTANCES BETWEEN RACELINE POINTS -------------------------------------------------------

@@ -44,7 +44,9 @@ AmclNode::AmclNode(const rclcpp::NodeOptions& options)
         "amcl_scan_alignment", rclcpp::QoS(10));
     localization_health_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
         "amcl_localization_health", rclcpp::QoS(10));
-    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    if (publish_tf_) {
+        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    }
     scan_retry_timer_ = create_wall_timer(
         5ms, std::bind(&AmclNode::retry_pending_scans, this));
 
@@ -115,6 +117,7 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<std::string>("base_frame_id", "base_link");
     declare_parameter<std::string>("odom_frame_id", "odom");
     declare_parameter<std::string>("global_frame_id", "map");
+    declare_parameter<bool>("publish_tf", true);
 
     // Topics
     declare_parameter<std::string>("scan_topic", "/autodrive/roboracer_1/lidar");
@@ -279,6 +282,7 @@ void AmclNode::load_parameters() {
     base_frame_   = get_parameter("base_frame_id").as_string();
     odom_frame_   = get_parameter("odom_frame_id").as_string();
     global_frame_ = get_parameter("global_frame_id").as_string();
+    publish_tf_   = get_parameter("publish_tf").as_bool();
     scan_topic_   = get_parameter("scan_topic").as_string();
     odom_topic_   = get_parameter("odom_topic").as_string();
     update_min_d_ = get_parameter("update_min_d").as_double();
@@ -1928,7 +1932,9 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 // fitting share the correction reference. Keep it disabled in
                 // production until its matched live A/B passes. Apply only to
                 // an accepted local scan (never during global bootstrap,
-                // recovery, or a rejected cluster).
+                // recovery, or a rejected cluster). The configured gain is a
+                // conservative live candidate and must be scored against the
+                // simulator truth bag before promotion.
                 if (scan_likelihood_along_track_gain_ > 0.0 &&
                     !global_sensor_bootstrap &&
                     !local_tracking_recovery_confirmed) {
@@ -2572,17 +2578,16 @@ void AmclNode::publish_pose(const PoseEstimate& est, const rclcpp::Time& stamp) 
         current_map_pose_covariance_ = est.covariance;
     }
 
-    // The propagated control pose is emitted only from odom_callback, once
-    // per newest odometry source sample. Keep the scan-time correction in TF
-    // here without publishing a duplicate /current_map_pose message.
-    geometry_msgs::msg::TransformStamped map_odom_tf;
-    map_odom_tf.header.stamp = stamp;
-    map_odom_tf.header.frame_id = global_frame_;
-    map_odom_tf.child_frame_id = odom_frame_;
-    map_odom_tf.transform.translation.x = map_odom[0];
-    map_odom_tf.transform.translation.y = map_odom[1];
-    map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom[2]);
-    tf_broadcaster_->sendTransform(map_odom_tf);
+    if (publish_tf_ && tf_broadcaster_) {
+        geometry_msgs::msg::TransformStamped map_odom_tf;
+        map_odom_tf.header.stamp = stamp;
+        map_odom_tf.header.frame_id = global_frame_;
+        map_odom_tf.child_frame_id = odom_frame_;
+        map_odom_tf.transform.translation.x = map_odom[0];
+        map_odom_tf.transform.translation.y = map_odom[1];
+        map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom[2]);
+        tf_broadcaster_->sendTransform(map_odom_tf);
+    }
 
     last_published_pose_ = est;
     have_last_published_pose_ = true;
@@ -2675,17 +2680,16 @@ void AmclNode::publish_current_map_pose(
     cov[35] = current_map_pose_covariance_(2, 2);
     current_map_pose_pub_->publish(pose_msg);
 
-    // Keep the team TF tree current with the same map->odom correction used
-    // for the propagated pose. The raw /amcl_pose remains the scan-time
-    // measurement; controllers consume /current_map_pose instead.
-    geometry_msgs::msg::TransformStamped map_odom_tf;
-    map_odom_tf.header.stamp = stamp;
-    map_odom_tf.header.frame_id = global_frame_;
-    map_odom_tf.child_frame_id = odom_frame_;
-    map_odom_tf.transform.translation.x = map_odom_pose_[0];
-    map_odom_tf.transform.translation.y = map_odom_pose_[1];
-    map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom_pose_[2]);
-    tf_broadcaster_->sendTransform(map_odom_tf);
+    if (publish_tf_ && tf_broadcaster_) {
+        geometry_msgs::msg::TransformStamped map_odom_tf;
+        map_odom_tf.header.stamp = stamp;
+        map_odom_tf.header.frame_id = global_frame_;
+        map_odom_tf.child_frame_id = odom_frame_;
+        map_odom_tf.transform.translation.x = map_odom_pose_[0];
+        map_odom_tf.transform.translation.y = map_odom_pose_[1];
+        map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom_pose_[2]);
+        tf_broadcaster_->sendTransform(map_odom_tf);
+    }
 
     if (localization_health_pub_->get_subscription_count() > 0) {
         double correction_age = std::numeric_limits<double>::infinity();

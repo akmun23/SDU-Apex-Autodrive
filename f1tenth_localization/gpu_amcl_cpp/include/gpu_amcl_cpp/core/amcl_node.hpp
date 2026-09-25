@@ -310,6 +310,7 @@ private:
     std::string global_frame_;
     std::string scan_topic_;
     std::string odom_topic_;
+    bool publish_tf_{true};
 
     // Callback groups for parallel execution
     rclcpp::CallbackGroup::SharedPtr scan_cb_group_;

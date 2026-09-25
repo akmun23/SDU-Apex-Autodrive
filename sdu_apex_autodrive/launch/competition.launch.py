@@ -26,12 +26,20 @@ def generate_launch_description():
     planning = get_package_share_directory("f1tenth_planning")
     mpc = get_package_share_directory("f1tenth_mpc")
 
-    map_path = os.path.join(
-        planning, "maps", "autodrive_track_ftg_commit_20260909_025m.yaml")
-    trajectory_path = os.path.join(
-        planning, "trajectories", "autodrive_mintime_sim_5p0_dense",
-        "autodrive_mintime_raceline.csv")
-    mpc_params = os.path.join(mpc, "config", "mpc_iros_2026_competition.yaml")
+    map_relative_path = os.environ.get(
+        "SDU_APEX_MAP_REL",
+        "maps/autodrive_track_ftg_commit_20260909_025m.yaml")
+    trajectory_relative_path = os.environ.get(
+        "SDU_APEX_TRAJECTORY_REL",
+        "trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
+    if (os.path.isabs(map_relative_path) or ".." in map_relative_path.split(os.sep) or
+            os.path.isabs(trajectory_relative_path) or
+            ".." in trajectory_relative_path.split(os.sep)):
+        raise RuntimeError("competition track assets must be relative to f1tenth_planning")
+    map_path = os.path.normpath(os.path.join(planning, map_relative_path))
+    trajectory_path = os.path.normpath(
+        os.path.join(planning, trajectory_relative_path))
+    mpc_params = os.path.join(mpc, "config", "mpc_competition.yaml")
     sensor_odom_params = os.path.join(
         localization, "config", "sensor_odometry.yaml")
     ekf_params = os.path.join(localization, "config", "ekf.yaml")
@@ -66,8 +74,7 @@ def generate_launch_description():
         executable="sensor_odometry_node",
         name="sensor_odometry",
         output="screen",
-        parameters=[sensor_odom_params],
-        remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
+        parameters=[sensor_odom_params, {"publish_tf": False}],
     )
     ekf = Node(
         package="f1tenth_localization",
@@ -104,9 +111,9 @@ def generate_launch_description():
                 "global_initialization": True,
                 "global_pose_max_track_distance_m": 0.65,
                 "initial_pose_heading_offset_rad": 0.0,
+                "publish_tf": False,
             },
         ],
-        remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
     )
     actuator = Node(
         package="sdu_apex_autodrive",

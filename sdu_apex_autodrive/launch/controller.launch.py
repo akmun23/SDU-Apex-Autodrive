@@ -80,8 +80,15 @@ def _setup(context):
     control = get_package_share_directory("f1tenth_control")
     mpc = get_package_share_directory("f1tenth_mpc")
 
-    map_path = os.path.join(planning, "maps", MAP_NAME)
-    trajectory = os.path.join(planning, "trajectories", RACELINE_PATH)
+    map_override = LaunchConfiguration("map_yaml").perform(context).strip()
+    trajectory_override = LaunchConfiguration(
+        "trajectory_file").perform(context).strip()
+    if bool(map_override) != bool(trajectory_override):
+        raise RuntimeError(
+            "map_yaml and trajectory_file must be overridden as a matching pair")
+    map_path = map_override or os.path.join(planning, "maps", MAP_NAME)
+    trajectory = trajectory_override or os.path.join(
+        planning, "trajectories", RACELINE_PATH)
     with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
     use_localization = _bool(
         LaunchConfiguration("use_localization").perform(context))
@@ -201,12 +208,22 @@ def _setup(context):
             ],
         )
     else:
+        mpc_parameter_files = [
+            os.path.join(mpc, "config", "mpc_competition.yaml")
+        ]
+        mpc_parameter_overlay = LaunchConfiguration(
+            "mpc_parameter_overlay").perform(context).strip()
+        if mpc_parameter_overlay:
+            if not os.path.isfile(mpc_parameter_overlay):
+                raise RuntimeError(
+                    "MPC parameter overlay does not exist: "
+                    f"{mpc_parameter_overlay}")
+            mpc_parameter_files.append(mpc_parameter_overlay)
         controller_component = ComposableNode(
             package="f1tenth_mpc",
             plugin="f1tenth_mpc::MpcControllerNode",
             name="mpc_controller_node",
-            parameters=[
-                os.path.join(mpc, "config", "mpc_iros_2026_competition.yaml"),
+            parameters=mpc_parameter_files + [
                 {
                     "trajectory_file": trajectory,
                     "max_speed_mps": ParameterValue(
@@ -280,6 +297,12 @@ def generate_launch_description():
             "controller", default_value="mpc",
             description="Controller: mpc, pure_pursuit, or ftg."),
         DeclareLaunchArgument(
+            "map_yaml", default_value="",
+            description="Development map YAML; empty selects the installed default."),
+        DeclareLaunchArgument(
+            "trajectory_file", default_value="",
+            description="Development raceline CSV; empty selects the installed default."),
+        DeclareLaunchArgument(
             "with_rviz", default_value="false",
             description="Start RViz on the team TF tree."),
         DeclareLaunchArgument(
@@ -294,6 +317,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "mpc_publish_diagnostics", default_value="false",
             description="Publish live MPC diagnostics; disabled on the normal 40 Hz path."),
+        DeclareLaunchArgument(
+            "mpc_parameter_overlay", default_value="",
+            description=("Development-only ROS parameter YAML layered over "
+                         "the competition MPC defaults.")),
         DeclareLaunchArgument(
             "mpc_start_delay_sec", default_value="2.0",
             description="Delay MPC startup after AMCL process start."),

@@ -56,10 +56,7 @@ class SensorOdometryNode final : public rclcpp::Node
 public:
   SensorOdometryNode()
   : Node("sensor_odometry"),
-    observer_(default_observer_config()),
-    tf_broadcaster_(std::make_unique<tf2_ros::TransformBroadcaster>(*this)),
-    static_tf_broadcaster_(
-      std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this))
+    observer_(default_observer_config())
   {
     const auto observer_defaults = default_observer_config();
     declare_parameter("left_encoder_topic", "/autodrive/roboracer_1/left_encoder");
@@ -70,17 +67,18 @@ public:
 
     declare_parameter("odom_frame", "odom");
     declare_parameter("base_frame", "base_link");
+    declare_parameter("publish_tf", true);
     declare_parameter("lidar_frame", "lidar");
     declare_parameter("imu_frame", "imu");
     declare_parameter("lidar_x_m", 0.2733);
     declare_parameter("lidar_y_m", 0.0);
     declare_parameter("lidar_z_m", 0.096);
     declare_parameter("imu_x_m", 0.08);
+    declare_parameter("imu_y_m", 0.0);
+    declare_parameter("imu_z_m", 0.055);
     declare_parameter(
       "imu_acceleration_reference_x_m",
       observer_defaults.imu_acceleration_reference_x_m);
-    declare_parameter("imu_y_m", 0.0);
-    declare_parameter("imu_z_m", 0.055);
     declare_parameter("imu_orientation_correction_gain", 1.0);
     declare_parameter("max_imu_orientation_step_rad", 0.30);
     declare_parameter("pose_xy_variance", 0.01);
@@ -104,6 +102,9 @@ public:
     declare_parameter("decel_detect_ax_mps2", observer_defaults.decel_detect_ax_mps2);
     declare_parameter("decel_ax_scale", observer_defaults.decel_ax_scale);
     declare_parameter("decel_ax_offset_mps2", observer_defaults.decel_ax_offset_mps2);
+    declare_parameter(
+      "wheel_dropout_positive_ax_max_mps2",
+      observer_defaults.wheel_dropout_positive_ax_max_mps2);
     declare_parameter(
       "wheel_update_ax_abs_max_mps2", observer_defaults.wheel_update_ax_abs_max_mps2);
     declare_parameter("wheel_freeze_speed_mps", observer_defaults.wheel_freeze_speed_mps);
@@ -194,6 +195,7 @@ public:
     observer_ = f1tenth_localization::OdometryObserver(observer_config_);
     odom_frame_ = get_parameter("odom_frame").as_string();
     base_frame_ = get_parameter("base_frame").as_string();
+    publish_tf_ = get_parameter("publish_tf").as_bool();
     lidar_frame_ = get_parameter("lidar_frame").as_string();
     imu_frame_ = get_parameter("imu_frame").as_string();
     lidar_x_m_ = get_parameter("lidar_x_m").as_double();
@@ -202,6 +204,11 @@ public:
     imu_x_m_ = get_parameter("imu_x_m").as_double();
     imu_y_m_ = get_parameter("imu_y_m").as_double();
     imu_z_m_ = get_parameter("imu_z_m").as_double();
+    if (publish_tf_) {
+      tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+      static_tf_broadcaster_ =
+        std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+    }
     imu_orientation_correction_gain_ = std::clamp(
       get_parameter("imu_orientation_correction_gain").as_double(), 0.0, 1.0);
     max_imu_orientation_step_rad_ = std::max(
@@ -241,7 +248,9 @@ public:
       [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) {
         imu_callback(*msg);
       });
-    publish_static_transforms();
+    if (publish_tf_) {
+      publish_static_transforms();
+    }
     RCLCPP_INFO(
       get_logger(),
       "Deterministic odometry observer: timestamp-paired encoders + IMU; jitter accepted");
@@ -270,6 +279,8 @@ private:
     config.decel_detect_ax_mps2 = get_parameter("decel_detect_ax_mps2").as_double();
     config.decel_ax_scale = get_parameter("decel_ax_scale").as_double();
     config.decel_ax_offset_mps2 = get_parameter("decel_ax_offset_mps2").as_double();
+    config.wheel_dropout_positive_ax_max_mps2 = std::max(
+      0.0, get_parameter("wheel_dropout_positive_ax_max_mps2").as_double());
     config.wheel_update_ax_abs_max_mps2 = get_parameter(
       "wheel_update_ax_abs_max_mps2").as_double();
     config.wheel_freeze_speed_mps = get_parameter("wheel_freeze_speed_mps").as_double();
@@ -532,13 +543,16 @@ private:
       estimate.turn_speed_bias_mps};
     diagnostics_pub_->publish(diagnostics);
 
-    geometry_msgs::msg::TransformStamped transform;
-    transform.header = odom.header;
-    transform.child_frame_id = base_frame_;
-    transform.transform.translation.x = estimate.x_m;
-    transform.transform.translation.y = estimate.y_m;
-    transform.transform.rotation = odom.pose.pose.orientation;
-    tf_broadcaster_->sendTransform(transform);
+    if (publish_tf_) {
+      geometry_msgs::msg::TransformStamped transform;
+      transform.header = odom.header;
+      transform.child_frame_id = base_frame_;
+      transform.transform.translation.x = estimate.x_m;
+      transform.transform.translation.y = estimate.y_m;
+      transform.transform.rotation = odom.pose.pose.orientation;
+      tf_broadcaster_->sendTransform(transform);
+    }
+
   }
 
   f1tenth_localization::OdometryObserverConfig observer_config_;
@@ -563,6 +577,7 @@ private:
   double previous_yaw_rate_radps_{0.0};
   double imu_orientation_correction_gain_{1.0};
   double max_imu_orientation_step_rad_{0.30};
+  bool publish_tf_{true};
 
   std::string odom_frame_;
   std::string base_frame_;

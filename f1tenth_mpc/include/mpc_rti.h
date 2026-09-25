@@ -286,6 +286,9 @@ typedef struct
     int residual_candidate_published;
     /* Finite first action retained when the full horizon failed validation. */
     int best_effort_action_published;
+    /* A failed-horizon first action was moved toward the nominal control
+     * until its exact one-step nonlinear rollout satisfied the corridor. */
+    int best_effort_action_repaired;
     float corridor_repair_alpha;
     float rho_start;
     float rho_u_start;

@@ -1,35 +1,25 @@
 five_lap_map_saver:
   ros__parameters:
-    # Mapping uses the team odometry stream only.
-    odom_topic: /odom
+    # Ground-truth lap count is permitted only in this development mapper;
+    # the competition localization/controller stack does not subscribe to it.
+    lap_count_topic: /autodrive/roboracer_1/lap_count
     save_map_service: /slam_toolbox/save_map
     completion_topic: /sdu/mapping_complete
 
     # The map name is written without an extension.  SLAM Toolbox creates the
     # matching .yaml and .pgm files in this directory.
-    output_directory: /workspace/src/f1tenth_planning/maps
-    map_name: autodrive_track_ftg_commit_20260909_025m
+    output_directory: /workspace/src/live_runs/maps
+    map_name: track_map
     target_laps: 5
 
-    # A lap is a return to the encoder/IMU odometry start point only after the
-    # car has left it and travelled a meaningful distance.  This avoids using
-    # the SLAM map pose while loop closure is still correcting it.
-    start_radius_m: 1.00
-    departure_radius_m: 1.50
-    # The compete track is about 45 m in sensor-odometry distance.  Eight
-    # metres lets a short corner loop be misclassified as a lap and can save a
-    # partial SLAM map.  Keep the gate above the observed false-return path.
-    minimum_lap_distance_m: 35.00
-    start_heading_tolerance_rad: 0.75
-    maximum_odom_step_m: 1.00
     settle_before_save_s: 8.0
     stop_before_save: true
     save_each_lap: true
     lap_snapshot_settle_s: 1.0
-    # Preserve the map->odom transform produced by the team localization tree.
+    # Preserve map-to-simulator-world alignment for offline map validation.
     provenance_enabled: true
     # Empty means <output_directory>/<map_name>.provenance.yaml, so changing
     # map_name cannot accidentally reuse another map's transform.
     provenance_file: ""
     provenance_map_frame: map
-    provenance_world_frame: odom
+    provenance_world_frame: world

@@ -1,125 +1,85 @@
 # AutoDRIVE startup guide
 
-This guide covers the validated local workflow:
-
-1. start the simulator;
-2. start the source-mounted ROS development stack;
-3. optionally record a real run for offline scoring.
+This guide covers the official practice and compete simulator images, the
+development stack, track mapping, and competition-image rehearsals. The
+controller must always receive a map and raceline generated for the same
+simulator track.
 
 The normal controller is MPC. The development launch also supports Pure
 Pursuit and FTG explicitly.
 
-## 1. Start the simulator
+## 1. Start the development stack before the simulator
 
-The simulator is maintained outside this repository. The following starts the
-pinned headless simulator container on the API port used by the bridge:
-
-```bash
-SIM_NAME=autodrive_sim
-docker rm -f "$SIM_NAME" 2>/dev/null || true
-docker run -d --name "$SIM_NAME" \
-  --network host --ipc host --privileged --gpus all \
-  --entrypoint /bin/bash \
-  autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete \
-  -lc '
-    set -e
-    Xvfb :123 -screen 0 1920x1080x24 -ac >/tmp/autodrive_sim_xvfb.log 2>&1 &
-    xvfb_pid=$!
-    export DISPLAY=:123
-    sleep 2
-    kill -0 "$xvfb_pid"
-    cd /home/autodrive_simulator
-    exec ./AutoDRIVE\ Simulator.x86_64 -batchmode \
-      -ip 127.0.0.1 -port 4567 \
-      -logFile /tmp/autodrive_sim_unity.log
-  '
-```
-
-Check that it is running:
+The simulator waits for the ROS bridge to listen on port 4567 before starting
+Unity, so the bridge must be running first. Start the matching development
+stack, recorder, and run watcher before the simulator. For the practice MPC,
+follow sections 2 and 5, then start the simulator as the final step. The
+batchmode helper starts Xvfb so Unity retains a graphics display; it uses
+`-batchmode` and never uses `-no-graphics`:
 
 ```bash
-docker ps --filter name=autodrive_sim
-docker logs -f autodrive_sim
+SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode \
+  ./tools/start_simulator.sh
 ```
 
-Leave the simulator running while starting ROS. The bridge should eventually
-print `Connected!`.
+Keep the terminal open. Stop the simulator with `Ctrl-C`. The helper does not
+delete or replace existing containers. Docker commands automatically use the
+isolated rootless daemon when its socket is available; an explicit
+`DOCKER_HOST` still takes precedence.
 
-### 1.1 Start the simulator with a visible GUI
-
-The ROS launch and competition topic policy are unchanged. Replace the
-headless simulator command above with one of these GUI options.
-
-For a standalone simulator build on the host, run this from the simulator
-checkout:
+For the other packaged course, select its image explicitly:
 
 ```bash
-cd /home/akselmo/Documents/GitHub/AutoDRIVE/Builds
-./AutoDRIVE-Simulator.x86_64 -ip 127.0.0.1 -port 4567
+SDU_APEX_SIM_TRACK=compete SDU_APEX_SIM_MODE=batchmode \
+  ./tools/start_simulator.sh
 ```
 
-If using the pinned simulator container, forward the host X11 display and do
-not use `-batchmode` or `Xvfb`:
+The `gui` mode is available only when a desktop display and readable
+`XAUTHORITY` are explicitly supplied. Do not use `-no-graphics` for the
+batchmode run.
 
-```bash
-DISPLAY_VALUE="${DISPLAY:-:0}"
-export DISPLAY="$DISPLAY_VALUE"
-xhost +local:root
-docker rm -f autodrive_sim_gui 2>/dev/null || true
-docker run --rm --name autodrive_sim_gui \
-  --network host --ipc host --privileged --gpus all \
-  -e DISPLAY="$DISPLAY_VALUE" \
-  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  --entrypoint /bin/bash \
-  autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete \
-  -lc '
-    set -e
-    cd /home/autodrive_simulator
-    exec ./AutoDRIVE\ Simulator.x86_64 \
-      -ip 127.0.0.1 -port 4567 \
-      -logFile /tmp/autodrive_sim_unity_gui.log
-  '
-xhost -local:root
-```
-
-Keep that terminal open. Start the ROS stack from another terminal with
-`./tools/start_dev.sh`; when the simulator window is open, use its `Connect`
-control if it has not connected automatically. The bridge should then print
-`Connected!`. The X11 permission is removed when the simulator command exits.
+The official competition guidance distinguishes the practice/qualification
+track from the later released track, so they require separately mapped maps
+and racelines. See the [official track guidance](https://autodrive-ecosystem.github.io/competitions/roboracer-sim-racing-icra-2026/),
+the [practice simulator image](https://hub.docker.com/layers/autodriveecosystem/autodrive_roboracer_sim/2026-icra-practice/images/sha256-264e3946dc4ff199d667caa65b3bebc1829822acf201a3a33e7aa406bc574441),
+and the [compete simulator image](https://hub.docker.com/layers/autodriveecosystem/autodrive_roboracer_sim/2026-icra-compete/images/sha256-0511fb6d6db7f31ec0d20787c0498eb05f3bd45ae6b9683165e8680b61e9b159).
 
 ## 2. Start the development stack
 
-From the repository root:
+For the practice run, first build the development image against the matching
+API image. This keeps the expensive rebuild separate from starting the stack,
+so the recorder can be started before the controller:
 
 ```bash
+source tools/docker_env.sh
+docker build --network=host \
+  --build-arg AUTODRIVE_API_IMAGE=autodriveecosystem/autodrive_roboracer_api@sha256:2447bb8466e631b10412096ddde1b183c806ae328aee6383f9e373a0d46772cc \
+  -t sdu-apex-autodrive:practice-dev .
+```
+
+For the compete image, use the matching API digest and a distinct image tag:
+
+```bash
+AUTODRIVE_API_IMAGE=autodriveecosystem/autodrive_roboracer_api@sha256:ce081910948c3f30898322358d682b79cf165aa287a3dc27128dbacae99178c7 \
+SDU_APEX_IMAGE=sdu-apex-autodrive:dev-compete \
 ./tools/start_dev.sh
 ```
 
-This builds `sdu-apex-autodrive:dev` when necessary, mounts the source tree,
-runs the runtime topic-policy check, and starts one legal bridge, sensor odom,
-EKF, AMCL, controller, and actuator chain. MPC is the default.
+The helper builds when `AUTODRIVE_REBUILD=1` (the default), mounts the source,
+runs the topic-policy check, then starts the legal bridge, odometry,
+localization, controller, and actuator. MPC is the default. For an existing
+matching image, set `AUTODRIVE_REBUILD=0`.
 
-For a quick restart using the existing image:
-
-```bash
-AUTODRIVE_REBUILD=0 ./tools/start_dev.sh
-```
-
-If the development tag is not present locally and Docker cannot resolve the
-registry, use the exact local image used by the validated high-speed
-15-lap run instead of rebuilding:
+For this practice track, start MPC with the map and raceline as a matching
+pair:
 
 ```bash
-SDU_APEX_IMAGE=sdu-apex-autodrive:cleanup-20260921-final3 \
-AUTODRIVE_REBUILD=0 ./tools/start_dev.sh
+AUTODRIVE_REBUILD=0 \
+SDU_APEX_IMAGE=sdu-apex-autodrive:practice-dev \
+SDU_APEX_MAP_YAML="$PWD/f1tenth_planning/maps/autodrive_practice_20260924_b.yaml" \
+SDU_APEX_TRAJECTORY_FILE="$PWD/f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv" \
+./tools/start_dev.sh
 ```
-
-This tag currently resolves to image ID
-`sha256:0402847abdbd654b2418e981bb676ae7808091e70d25e855ac314aa61b5e3e89`,
-which is the image recorded for that run. It starts the installed binaries
-from that image with the current source tree mounted for configuration and
-policy checks. Rebuild the image after production source changes once Docker
-registry DNS is working again.
 
 To select another maintained development controller:
 
@@ -142,78 +102,154 @@ Stop the ROS stack with `Ctrl-C`, or from another terminal run:
 
 ```bash
 ./tools/stop_autodrive.sh
-docker stop autodrive_sim
 ```
 
 Do not start a second stack before stopping the first one. The development
 launch rejects duplicate runtime nodes.
 
-## 3. Exact competition-container rehearsal
+## 3. Map and race on each track
+
+Mapping uses simulator world pose and lap count only in this development
+workflow. FTG drives the car; MPC and a race line are not used to collect the
+map. First build and start the development mapper against the matching API
+base. This launch contains the bridge, SLAM, FTG mapping controller, and
+actuator:
+
+```bash
+AUTODRIVE_API_IMAGE=autodriveecosystem/autodrive_roboracer_api@sha256:2447bb8466e631b10412096ddde1b183c806ae328aee6383f9e373a0d46772cc \
+SDU_APEX_IMAGE=sdu-apex-autodrive:dev-practice \
+SDU_APEX_LAUNCH=mapping SDU_APEX_MAP_NAME=icra_practice \
+./tools/start_dev.sh
+```
+
+In two more terminals, start the debug recorder and then the collision watcher.
+Only after all three are running, start the simulator in a fourth terminal:
+
+```bash
+SDU_APEX_IMAGE=sdu-apex-autodrive:dev-practice \
+SDU_APEX_RUN_ID=map_icra_practice ./tools/record_debug_bag.sh
+```
+
+```bash
+./tools/watch_sim_run.sh sdu_apex_autodrive_dev sdu_apex_sim_practice \
+  rec_map_icra_practice collision 1800
+```
+
+```bash
+SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode \
+  ./tools/start_simulator.sh
+```
+
+The mapper counts five simulator laps, writes per-lap snapshots and the final
+map under `live_runs/maps/`, then requests actuator neutral. Wait for the
+`5-lap map saved successfully` log, stop the mapping stack with `Ctrl-C`, and
+then stop the watcher with `Ctrl-C`; its cleanup stops the simulator and
+finalizes the bag. If a collision occurs, the watcher stops the simulator and
+finalizes the bag immediately; then stop the mapping stack. Never use
+post-collision samples for map or model validation.
+
+For the other official track, use its matching API image, with distinct
+image/container names and a distinct map name. Start its mapper, recorder,
+and watcher before starting its simulator, using `SDU_APEX_SIM_TRACK=compete`.
+```bash
+AUTODRIVE_API_IMAGE=autodriveecosystem/autodrive_roboracer_api@sha256:ce081910948c3f30898322358d682b79cf165aa287a3dc27128dbacae99178c7 \
+SDU_APEX_IMAGE=sdu-apex-autodrive:dev-compete \
+SDU_APEX_LAUNCH=mapping SDU_APEX_MAP_NAME=icra_compete \
+./tools/start_dev.sh
+```
+
+Use matching image and container names in the recorder/watcher commands.
+`start_dev.sh` builds by default; set `AUTODRIVE_REBUILD=0` only when that
+exact development image is already built.
+
+Generate a matching minimum-time raceline from each saved map with the map
+optimizer, using an environment that has the optimizer requirements installed:
+
+```bash
+MINTIME_MAP="$PWD/live_runs/maps/icra_practice.yaml" \
+MINTIME_TRACK_NAME=icra_practice_mintime \
+MINTIME_OUTPUT="$PWD/f1tenth_planning/trajectories/icra_practice" \
+python3 f1tenth_planning/scripts/optimize_trajectory.py
+```
+
+Promote each validated map YAML and its referenced image into
+`f1tenth_planning/maps/` with a unique name. Keep its resulting raceline under
+`f1tenth_planning/trajectories/`. Then race with both paths explicitly paired:
+
+```bash
+SDU_APEX_MAP_YAML="$PWD/f1tenth_planning/maps/icra_practice.yaml" \
+SDU_APEX_TRAJECTORY_FILE="$PWD/f1tenth_planning/trajectories/icra_practice/icra_practice_mintime_raceline.csv" \
+AUTODRIVE_API_IMAGE=autodriveecosystem/autodrive_roboracer_api@sha256:2447bb8466e631b10412096ddde1b183c806ae328aee6383f9e373a0d46772cc \
+SDU_APEX_IMAGE=sdu-apex-autodrive:dev-practice \
+./tools/start_dev.sh
+```
+
+`map_yaml` and `trajectory_file` must be supplied together; the launch rejects
+a mixed map/raceline pair.
+
+## 4. Exact competition-container rehearsal
 
 Build the self-contained image without mounting the source tree:
 
 ```bash
-docker build -t sdu-apex-autodrive:competition .
+AUTODRIVE_MAP_REL=maps/icra_practice.yaml \
+AUTODRIVE_TRAJECTORY_REL=trajectories/icra_practice/icra_practice_mintime_raceline.csv \
+AUTODRIVE_API_IMAGE=autodriveecosystem/autodrive_roboracer_api@sha256:2447bb8466e631b10412096ddde1b183c806ae328aee6383f9e373a0d46772cc \
+SDU_APEX_IMAGE=sdu-apex-autodrive:competition-practice \
+./tools/build_competition.sh
 ```
 
 With the simulator already running, start the fixed MPC-only launch:
 
 ```bash
-docker run --rm --name sdu_apex_autodrive_competition \
-  --network host --ipc host --privileged --gpus all \
-  sdu-apex-autodrive:competition
+SDU_APEX_IMAGE=sdu-apex-autodrive:competition-practice \
+./tools/run_competition.sh
 ```
 
-This path uses the installed production files and `competition.launch.py`. It
-does not start RViz, a shadow controller, a simulator-truth input, or a
-parameter overlay. Follow the container output with:
-
-```bash
-docker logs -f sdu_apex_autodrive_competition
-```
+This path uses the map and raceline baked into the image and
+`competition.launch.py`. Build a separate image for each track. It does not
+start RViz, a shadow controller, a simulator-truth input, a parameter overlay,
+or a recorder; ROS output is discarded and Docker logging is disabled.
 
 The competition launch starts MPC only after the AMCL warm-up. The runtime
 nodes consume simulator LiDAR, IMU, encoders, steering, and throttle feedback,
 plus the team-derived `/odom`, `/ekf_odom`, and `/current_map_pose` topics.
 
-## 4. Record a real run
+## 5. Record a real run
 
 Recording all topics is allowed for debugging and offline analysis, but the
 active controller, odom, EKF, and AMCL must not subscribe to simulator truth,
 IPS, simulator odom, lap, collision, reset, result, or absolute `/tf` topics.
 
-Start the recorder in a second terminal. Create only the run parent directory;
-`ros2 bag record` must create the final `run` directory itself.
+The debug bag records only the LiDAR/IMU/encoder inputs, odometry, EKF and AMCL
+outputs/diagnostics, commands and actuator feedback, bridge timing, and
+simulator ground truth/lap/collision data needed for offline comparisons. It
+does not record the camera or large particle-cloud streams. Simulator truth,
+IPS, lap, and collision data are debug-bag-only and must never be subscribed to
+by the controller, odometry, EKF, or AMCL nodes. Create only a run parent
+directory; `ros2 bag record` must create the final `run` directory itself.
 
 ```bash
-RUN_ID=real_run_$(date +%Y%m%d_%H%M%S)
-mkdir -p "live_runs/$RUN_ID"
-
-docker run -d --name "rec_$RUN_ID" \
-  --network host --ipc host --privileged --gpus all \
-  -v "$PWD:/workspace/src:rw" \
-  --entrypoint /bin/bash \
-  sdu-apex-autodrive:dev \
-  -lc '
-    set -e
-    source /opt/ros/humble/setup.bash
-    source /home/autodrive_devkit/install/setup.bash
-    exec ros2 bag record -a \
-      -o /workspace/src/live_runs/'"$RUN_ID"'/run
-  '
+SDU_APEX_RUN_ID=real_run_$(date +%Y%m%d_%H%M%S) \
+./tools/record_debug_bag.sh
 ```
 
-After the run:
+Start the recorder before the controller can move the car. For 1 warmup + 10
+racing + 1 extra lap, start the collision watcher with target lap 12. It stops
+the simulator and finalizes the recorder on the first collision or after the
+target count:
 
 ```bash
-docker stop "rec_$RUN_ID"
-ros2 bag info "live_runs/$RUN_ID/run"
+./tools/watch_sim_run.sh sdu_apex_autodrive_dev sdu_apex_sim_practice rec_<run-id> 12 360
 ```
 
-For a scored run, stop recording and the ROS/simulator containers at the first
-collision. Never use post-collision samples for estimator or MPC conclusions.
+Never use post-collision samples for
+estimator or MPC conclusions. Acceptance requires zero collisions, measured
+40 Hz delivery of the sensor/bridge data during driving, and each of the ten
+racing laps below 11 seconds; the warmup and extra lap are not timed as racing
+laps.
 
-## 5. Preflight and useful checks
+## 6. Preflight and useful checks
 
 Run the static topic-boundary check before launching a stack:
 
@@ -239,13 +275,6 @@ The bridge target is 40 Hz. A sustained lower rate or a growing AMCL scan
 queue indicates a transport or processing problem and should be investigated
 before changing localization or MPC parameters.
 
-## Mapping
-
-Mapping remains separate from racing:
-
-```bash
-ros2 launch sdu_apex_autodrive mapping.launch.py
-```
-
-It uses the legal LiDAR/IMU/encoder-derived path and writes maps under
-`f1tenth_planning/maps/`. Mapping outputs are not racing racelines.
+Mapping remains a separate development launch. Only the fixed competition
+image uses the selected map/raceline pair; controller/localization runtime
+inputs remain unchanged.

@@ -71,7 +71,7 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(FILES config/mpc_iros_2026_competition.yaml
+install(FILES config/mpc_competition.yaml
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)

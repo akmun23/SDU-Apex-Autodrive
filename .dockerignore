@@ -1,12 +1,19 @@
 .git
 **/build
+build-*
 **/install
+install-*
 **/log
+log-*
 **/.venv
 **/__pycache__
 **/*.pyc
 .pytest_cache
 artifacts
+live_runs
+tools
+docs
+STARTUP_GUIDE.md
 
 # Offline raceline-generation source is kept in Git but is not part of the
 # competition/runtime image.

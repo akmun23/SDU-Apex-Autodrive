@@ -65,7 +65,10 @@ def _env_enabled(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-_command_lock = Semaphore()
+# This state is shared by the gevent request sender and the native ROS
+# command-listener thread. Use an OS-thread lock at that boundary; the other
+# bridge locks remain gevent-local.
+_command_lock = threading.Lock()
 _latest_command: dict[str, str] = {
     "V1 Throttle": "0.0",
     "V1 Steering": "0.0",
@@ -77,6 +80,7 @@ _latest_command: dict[str, str] = {
     "V1 Publish Rear Camera": "False",
     "V1 Publish LIDAR Intensity": "False",
 }
+_latest_steering_update_monotonic_ns: int | None = None
 _reset_level = False
 _reset_deadline_monotonic: float | None = None
 _RESET_HOLD_SEC = 0.75
@@ -92,7 +96,7 @@ _pending_request_lock = Semaphore()
 _connection_generation = 0
 _bridge_request_sequence = 0
 _pending_requests: deque[
-    tuple[Any, int, Semaphore | None, int, int, dict[str, str]]
+    tuple[Any, int, Semaphore | None, int, int, dict[str, str], int | None]
 ] = deque()
 _pending_request_started_ns: int | None = None
 _first_request_sent = False
@@ -106,6 +110,7 @@ _active_request_monotonic_ns: int | None = None
 _active_packet_arrival_ns: int | None = None
 _active_request_sequence: int | None = None
 _active_command: dict[str, str] = {}
+_active_steering_update_monotonic_ns: int | None = None
 _active_applied_command_sequence: int | None = None
 _active_commanded_throttle_norm: float | None = None
 _active_commanded_steering_norm: float | None = None
@@ -159,7 +164,8 @@ def _set_pending_request(
         slot_pool: Semaphore | None,
         generation: int,
         request_sequence: int,
-        command: dict[str, str]) -> bool:
+        command: dict[str, str],
+        steering_update_monotonic_ns: int | None) -> bool:
     """Record one request boundary for FIFO response association."""
     global _pending_request_started_ns, _first_request_sent
     node = getattr(official_bridge, "autodrive_bridge", None)
@@ -175,7 +181,8 @@ def _set_pending_request(
                 generation != _connection_generation):
             return False
         _pending_requests.append((_copy_stamp(stamp), request_ns, slot_pool,
-                                  generation, request_sequence, dict(command)))
+                                  generation, request_sequence, dict(command),
+                                  steering_update_monotonic_ns))
         _pending_request_started_ns = _pending_requests[0][1]
         _first_request_sent = True
     return True
@@ -212,6 +219,7 @@ def _reset_request_pipeline() -> None:
     global _active_request_stamp, _active_packet_stamp
     global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
+    global _active_steering_update_monotonic_ns
     global _active_applied_command_sequence
     global _active_commanded_throttle_norm, _active_commanded_steering_norm
     global _active_applied_throttle_norm, _active_applied_steering_norm
@@ -233,6 +241,7 @@ def _reset_request_pipeline() -> None:
         _active_packet_arrival_ns = None
         _active_request_sequence = None
         _active_command = {}
+        _active_steering_update_monotonic_ns = None
         _active_applied_command_sequence = None
         _active_commanded_throttle_norm = None
         _active_commanded_steering_norm = None
@@ -254,6 +263,7 @@ def _finish_packet() -> None:
     global _packet_stamp, _active_request_stamp, _active_packet_stamp
     global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
+    global _active_steering_update_monotonic_ns
     global _active_applied_command_sequence
     global _active_commanded_throttle_norm, _active_commanded_steering_norm
     global _active_applied_throttle_norm, _active_applied_steering_norm
@@ -271,6 +281,7 @@ def _finish_packet() -> None:
         _active_packet_arrival_ns = None
         _active_request_sequence = None
         _active_command = {}
+        _active_steering_update_monotonic_ns = None
         _active_applied_command_sequence = None
         _active_commanded_throttle_norm = None
         _active_commanded_steering_norm = None
@@ -423,6 +434,7 @@ def _capture_competition_packet(data: Any) -> bool:
     global _active_request_stamp, _active_packet_stamp
     global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
+    global _active_steering_update_monotonic_ns
     global _active_simulator_packet, _active_request_slot_pool
     global _pending_request_started_ns
 
@@ -500,9 +512,10 @@ def _capture_competition_packet(data: Any) -> bool:
             slot_pool = None
             request_sequence = -1
             command = {}
+            steering_update_monotonic_ns = None
         else:
             (request_stamp, request_ns, slot_pool, _, request_sequence,
-             command) = _pending_requests.popleft()
+             command, steering_update_monotonic_ns) = _pending_requests.popleft()
             _pending_request_started_ns = (
                 _pending_requests[0][1] if _pending_requests else None)
         _active_request_slot_pool = slot_pool
@@ -512,6 +525,7 @@ def _capture_competition_packet(data: Any) -> bool:
         _active_packet_arrival_ns = arrival_ns
         _active_request_sequence = request_sequence
         _active_command = command
+        _active_steering_update_monotonic_ns = steering_update_monotonic_ns
         _active_simulator_packet = simulator_packet
         # Enhanced Unity-only fields are not runtime inputs and may be absent
         # from the competition image. Keep diagnostic slots empty.
@@ -572,6 +586,7 @@ def _record_packet_arrival() -> None:
         request_ns = _active_request_monotonic_ns
         request_sequence = _active_request_sequence
         command = dict(_active_command)
+        steering_update_ns = _active_steering_update_monotonic_ns
         applied_command_sequence = _active_applied_command_sequence
         commanded_throttle_norm = _active_commanded_throttle_norm
         commanded_steering_norm = _active_commanded_steering_norm
@@ -600,6 +615,9 @@ def _record_packet_arrival() -> None:
             int(receive_stamp.sec) * 1_000_000_000 + int(receive_stamp.nanosec)),
         "request_monotonic_ns": request_ns,
         "request_sequence": request_sequence,
+        "steering_command_update_age_ms": (
+            None if request_ns is None or steering_update_ns is None else
+            (request_ns - steering_update_ns) / 1.0e6),
         "connection_generation": connection_generation,
         "sent_throttle_norm": _parse_command_float(command, "V1 Throttle"),
         "sent_steering_norm": _parse_command_float(command, "V1 Steering"),
@@ -646,7 +664,7 @@ def _install_packet_timestamp_patch() -> None:
 
     for name in (
         "create_joint_state_msg", "create_imu_msg", "create_odom_msg",
-        "create_laserscan_msg", "create_image_msg", "create_tf_msg",
+        "create_laserscan_msg", "create_image_msg",
     ):
         if hasattr(official_bridge, name):
             setattr(official_bridge, name, stamped_creator(
@@ -717,11 +735,14 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
                 _reset_deadline_monotonic = None
                 _latest_command["V1 Reset"] = "False"
             command = dict(_latest_command)
+            steering_update_monotonic_ns = (
+                _latest_steering_update_monotonic_ns)
             command["V1 Reset"] = "True" if _reset_level else "False"
 
         request_sequence = _next_request_sequence()
         if not _set_pending_request(
-                None, generation, request_sequence, command):
+                None, generation, request_sequence, command,
+                steering_update_monotonic_ns):
             continue
         try:
             # Keep all outgoing Socket.IO calls serialized. The official bridge
@@ -972,10 +993,13 @@ def _disable_restricted_bridge_subscriptions() -> None:
 
 
 def _update_command_field(field: str, value: float) -> None:
+    global _latest_steering_update_monotonic_ns
     if not math.isfinite(value):
         return
     with _command_lock:
         _latest_command[field] = str(round(value, 3))
+        if field == "V1 Steering":
+            _latest_steering_update_monotonic_ns = time.monotonic_ns()
 
 
 def _run_command_listener() -> None:

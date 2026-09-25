@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    # Frozen IROS 2026 autonomous MPC profile.  This file is intentionally
+    # Frozen competition autonomous MPC profile. This file is intentionally
     # complete so the competition image does not depend on a host overlay.
     enabled: true
     odom_topic: /odom
@@ -58,12 +58,16 @@
 
     max_steering_rad: 0.5235987756
     max_steering_rate_radps: 3.2
-    max_target_speed_rate_increase_mps2: 3.0
+    # Matches ax_max_machines=3.8; the 3.0 limit saturated across the logged straight.
+    max_target_speed_rate_increase_mps2: 3.8
     max_target_speed_rate_reduction_mps2: 8.0
-    corridor_margin_m: 0.30
-    first_prediction_corridor_margin_m: 0.30
+    # Minimum physical wall clearance; car extent is projected per heading.
+    corridor_margin_m: 0.15
+    first_prediction_corridor_margin_m: 0.15
     corridor_preview_halfwidth_m: 0.10
-    nonlinear_corridor_tolerance_m: 0.001
+    # The .005 m profile completed all ten racing laps below 11 s with no
+    # collision. The .010 m trial collided during the opening hairpin.
+    nonlinear_corridor_tolerance_m: 0.005
 
     recovery_seed_policy: nominal
     recovery_steering_k_e_y: 0.0

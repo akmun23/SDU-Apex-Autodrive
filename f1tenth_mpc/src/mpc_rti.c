@@ -328,23 +328,19 @@ static float corridor_margin_for_state(
     if (!configuration || !state || !isfinite(state->e_psi))
         return NAN;
 
-    /* Match the exact-min-time raceline generator's rectangle projection.
-     * The configured margin is the aligned center-to-wall margin (0.30 m in
-     * the production profile).  Only the excess footprint caused by heading
-     * error is added, so the aligned contract remains unchanged.  This is a
-     * geometric feasibility rule, not a change to Unity physics. */
+    /* Require the configured wall clearance plus the vehicle rectangle's
+     * lateral projection about the rear axle. This keeps the full physical
+     * clearance at every heading without padding the aligned car to the
+     * wider planning footprint. This is a geometric feasibility rule, not a
+     * change to Unity physics. */
     const float abs_cos = fabsf(cosf(state->e_psi));
     const float abs_sin = fabsf(sinf(state->e_psi));
     const float physical_extent =
         0.5f * MPC_CAR_WIDTH_M * abs_cos +
         fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M,
               MPC_REAR_OVERHANG_M) * abs_sin;
-    const float planning_half_width = 0.5f * MPC_PLANNING_FOOTPRINT_WIDTH_M;
-    const float footprint = fmaxf(planning_half_width, physical_extent);
-    const float excess_heading_extent =
-        fmaxf(0.0f, footprint - planning_half_width);
     return corridor_margin_at_prediction(configuration, prediction_index) +
-        excess_heading_extent;
+        physical_extent;
 }
 
 static int state_inside_command_envelope(
@@ -369,6 +365,46 @@ static int state_inside_command_envelope(
             configuration->max_steering_rad &&
         fabsf(state->plant.actual_steering_angle) <=
             configuration->max_steering_rad;
+}
+
+static int first_action_inside_exact_corridor(
+    const MpcRtiState_t *current_state,
+    double current_progress,
+    const MpcModelControl_t *control,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *configuration)
+{
+    if (!current_state || !control || !trajectory || !configuration ||
+        !finite_rti_state(current_state) || !isfinite(current_progress) ||
+        !isfinite(prediction_dt) || prediction_dt <= 0.0f ||
+        !isfinite(control->steering_rate) ||
+        !isfinite(control->target_speed_rate)) return 0;
+
+    MpcRtiReference_t current_reference;
+    if (!reference_at_progress(trajectory, trajectory_count, lap_length,
+            current_progress, configuration, &current_reference)) return 0;
+    const MpcStageResult_t step = mpc_vehicle_model_step(
+        &current_state->plant, control, prediction_dt,
+        current_reference.path_curvature);
+    if (!step.valid || !isfinite(current_progress + step.delta_s_m)) return 0;
+
+    MpcRtiState_t next_state = *current_state;
+    next_state.plant = step.next;
+    next_state.previous_steering_rate = control->steering_rate;
+    next_state.previous_target_speed_rate = control->target_speed_rate;
+    if (!state_inside_command_envelope(&next_state, configuration)) return 0;
+
+    MpcRtiReference_t next_reference;
+    const double next_progress = current_progress + step.delta_s_m;
+    if (!reference_at_progress(trajectory, trajectory_count, lap_length,
+            next_progress, configuration, &next_reference)) return 0;
+    const float margin = corridor_margin_for_state(configuration,
+        &next_state.plant, 1);
+    return corridor_contains(&next_state, &next_reference,
+        configuration, margin);
 }
 
 static int valid_previous_nominal(
@@ -2099,6 +2135,47 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->nonsmooth_jacobian_columns = selected.nonsmooth_columns;
     result->nonlinear_failure_stage = selected.nonlinear_failure_stage;
     result->nonlinear_failure_reason = selected.nonlinear_failure_reason;
+    if (best_effort_action_published &&
+        !first_action_inside_exact_corridor(current_state, current_progress,
+            &selected.first_action, trajectory, trajectory_count, lap_length,
+            prediction_dt, &configuration->model)) {
+        /* A rejected horizon is not a license to publish an unverified first
+         * step. Backtrack only that action toward the last shifted nominal;
+         * accept it only when the exact model predicts the same hard
+         * footprint corridor used by full-horizon validation. */
+        static const float alpha[] = {
+            1.0f, 0.75f, 0.50f, 0.25f, 0.125f, 0.0625f, 0.0f};
+        int repaired = 0;
+        const MpcModelControl_t candidate_actions[] = {
+            selected.first_action, r1.first_action};
+        const int candidate_actions_valid[] = {1, r1.first_action_valid};
+        for (size_t candidate_index = 0;
+             candidate_index < sizeof(candidate_actions) /
+                 sizeof(candidate_actions[0]) && !repaired;
+             ++candidate_index) {
+            if (!candidate_actions_valid[candidate_index]) continue;
+            for (size_t i = 0; i < sizeof(alpha) / sizeof(alpha[0]); ++i) {
+                MpcModelControl_t trial;
+                trial.steering_rate = nominal.controls[0].steering_rate +
+                    alpha[i] * (candidate_actions[candidate_index].steering_rate -
+                        nominal.controls[0].steering_rate);
+                trial.target_speed_rate =
+                    nominal.controls[0].target_speed_rate +
+                    alpha[i] * (candidate_actions[candidate_index].target_speed_rate -
+                        nominal.controls[0].target_speed_rate);
+                if (!first_action_inside_exact_corridor(current_state,
+                        current_progress, &trial, trajectory,
+                        trajectory_count, lap_length, prediction_dt,
+                        &configuration->model)) continue;
+                selected.first_action = trial;
+                result->best_effort_action_repaired =
+                    candidate_index != 0 || i != 0;
+                repaired = 1;
+                break;
+            }
+        }
+        if (!repaired) best_effort_action_published = 0;
+    }
     result->first_control = selected.first_action;
     if (selected.candidate.valid) {
         result->published_steering_command =
@@ -2147,7 +2224,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     }
     result->status = selected.status;
 
-    if (best_effort_action_published &&
+    if ((best_effort_action_published || !selected.candidate.valid) &&
         selected.status != MPC_RTI_CYCLE_REJECTED_RESIDUAL) {
         /* Match the original rejection boundary: a nonlinear-invalid
          * horizon must not poison either the nominal trajectory or the ADMM
