@@ -7,6 +7,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Int32
 
 
@@ -15,6 +16,8 @@ class SimRunWatcher(Node):
         super().__init__("development_sim_run_watcher")
         self.lap_count: int | None = None
         self.collision_count: int | None = None
+        self.progress_position: tuple[float, float] | None = None
+        self.last_progress_time: float | None = None
         self.create_subscription(
             Int32,
             "/autodrive/roboracer_1/lap_count",
@@ -27,6 +30,7 @@ class SimRunWatcher(Node):
             self._collision_callback,
             10,
         )
+        self.create_subscription(Odometry, "/odom", self._odom_callback, 10)
 
     def _lap_callback(self, message: Int32) -> None:
         if message.data != self.lap_count:
@@ -38,16 +42,30 @@ class SimRunWatcher(Node):
             self.collision_count = message.data
             print(f"collision_count={message.data}", flush=True)
 
+    def _odom_callback(self, message: Odometry) -> None:
+        position = message.pose.pose.position
+        current = (float(position.x), float(position.y))
+        if self.progress_position is None:
+            self.progress_position = current
+            self.last_progress_time = time.monotonic()
+            return
+        dx = current[0] - self.progress_position[0]
+        dy = current[1] - self.progress_position[1]
+        if dx * dx + dy * dy >= 0.10 * 0.10:
+            self.progress_position = current
+            self.last_progress_time = time.monotonic()
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-lap", type=int, default=0)
     parser.add_argument("--collision-only", action="store_true")
     parser.add_argument("--timeout-s", type=float, default=120.0)
+    parser.add_argument("--stall-timeout-s", type=float, default=20.0)
     args = parser.parse_args()
     if ((args.target_lap < 1 and not args.collision_only) or
             (args.collision_only and args.target_lap != 0) or
-            args.timeout_s <= 0.0):
+            args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0):
         parser.error(
             "set a positive target-lap or collision-only, and a positive timeout-s")
 
@@ -61,6 +79,12 @@ def main() -> int:
             if watcher.collision_count is not None and watcher.collision_count > 0:
                 print("SCREEN_ABORT: collision", flush=True)
                 result = 3
+                break
+            if (watcher.last_progress_time is not None and
+                    time.monotonic() - watcher.last_progress_time >=
+                    args.stall_timeout_s):
+                print("SCREEN_ABORT: no odometry progress", flush=True)
+                result = 4
                 break
             if (args.target_lap > 0 and watcher.lap_count is not None and
                     watcher.lap_count >= args.target_lap):

@@ -26,8 +26,12 @@
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
 
-    yaw_rate_response_time_constant_s: 0.087735
-    yaw_rate_steering_gain_per_m: 3.011897
+    # Identified from synchronized truth yaw-rate and measured steering in two
+    # independent 12-lap bags. Alternating-lap holdouts reduced one-step yaw
+    # prediction RMSE from about 0.05 to 0.02 rad/s; a third live 12-lap run
+    # remained collision-free with no nonlinear-rollout rejections.
+    yaw_rate_response_time_constant_s: 0.015
+    yaw_rate_steering_gain_per_m: 2.95
     # Ground-truth identification shows a sharp authority loss near the
     # physical steering limit. Keep the nominal gain below 0.41 rad and
     # transition to approximately 1.23 1/m by 0.46 rad.

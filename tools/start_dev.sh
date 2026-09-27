@@ -104,12 +104,13 @@ exec docker run --rm --name "${container}" \
   --log-opt max-size=10m --log-opt max-file=3 \
   "${ros_domain_args[@]}" \
   -e SDU_APEX_AUTOSTART=1 \
+  -e SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC="${SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC:-false}" \
   -e "SDU_APEX_LAUNCH=${launch_mode}" \
   -e "SDU_APEX_MAP_NAME=${SDU_APEX_MAP_NAME:-track_map}" \
   -e SDU_APEX_CONTROLLER="${controller}" \
   -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
   -e SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
-  -e SDU_APEX_BUILD_MPC="${SDU_APEX_BUILD_MPC:-0}" \
+  -e SDU_APEX_BUILD_MPC="${SDU_APEX_BUILD_MPC:-1}" \
   -e "SDU_APEX_MPC_PARAMETER_OVERLAY=${mpc_parameter_overlay}" \
   -e "SDU_APEX_MAP_YAML=${map_yaml_override}" \
   -e "SDU_APEX_TRAJECTORY_FILE=${trajectory_file_override}" \

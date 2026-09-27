@@ -136,14 +136,13 @@ class VehicleModel:
         if pp.get("max_lateral_accel") is None:
             raise ValueError(f"max_lateral_accel missing from {pp_path}")
 
-        # Fail hard if duplicated active controller values drift apart. This is
-        # deliberate: the optimizer must never silently optimize a different car.
+        # Fail hard only when shared vehicle limits drift apart. Target-speed
+        # slew limits are controller policies, so Pure Pursuit's limits must
+        # not be compared with the MPC's independently sourced limits below.
         checks = [
             ("max_speed", pp.get("max_speed"), constants["MPC_MAX_COMMAND_SPEED_MPS"]),
             ("max_steering", pp.get("max_steering"), constants["SOURCE_MAX_STEERING_RAD"]),
             ("max_steering_rate", pp.get("max_steering_rate"), constants["SOURCE_STEERING_RATE_RADPS"]),
-            ("max_accel_cmd", pp.get("max_accel_cmd"), constants["MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2"]),
-            ("max_decel_cmd", pp.get("max_decel_cmd"), constants["MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2"]),
         ]
         for name, observed, expected in checks:
             if observed is not None and not _close(float(observed), float(expected), tol=5.0e-4):

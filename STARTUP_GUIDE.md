@@ -26,6 +26,9 @@ Keep the terminal open. Stop the simulator with `Ctrl-C`. The helper does not
 delete or replace existing containers. Docker commands automatically use the
 isolated rootless daemon when its socket is available; an explicit
 `DOCKER_HOST` still takes precedence.
+On this machine that user-level service is enabled and the CLI's `rootless`
+context is selected. Check it with `systemctl --user status docker.service`
+and `docker info` if a launch cannot reach the daemon.
 
 For the other packaged course, select its image explicitly:
 
@@ -69,6 +72,10 @@ The helper builds when `AUTODRIVE_REBUILD=1` (the default), mounts the source,
 runs the topic-policy check, then starts the legal bridge, odometry,
 localization, controller, and actuator. MPC is the default. For an existing
 matching image, set `AUTODRIVE_REBUILD=0`.
+The development launcher still builds only the mounted `f1tenth_mpc` package
+by default, so the controller binary stays aligned with its YAML model limits.
+Set `SDU_APEX_BUILD_MPC=0` only when the image's MPC binary is known to match
+the current source and configuration.
 
 For this practice track, start MPC with the map and raceline as a matching
 pair:
@@ -235,9 +242,9 @@ SDU_APEX_RUN_ID=real_run_$(date +%Y%m%d_%H%M%S) \
 ```
 
 Start the recorder before the controller can move the car. For 1 warmup + 10
-racing + 1 extra lap, start the collision watcher with target lap 12. It stops
-the simulator and finalizes the recorder on the first collision or after the
-target count:
+racing + 1 extra lap, start the run watcher with target lap 12. It stops the
+simulator and finalizes the recorder on the first collision, after 20 seconds
+without 0.1 m of odometry progress, or after the target count:
 
 ```bash
 ./tools/watch_sim_run.sh sdu_apex_autodrive_dev sdu_apex_sim_practice rec_<run-id> 12 360

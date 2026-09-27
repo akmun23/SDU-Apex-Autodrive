@@ -39,8 +39,8 @@
 #define SOURCE_MAX_STEERING_RAD 0.5235987756f            /* VehicleController SteeringLimit: 30 deg. */
 #define SOURCE_STEERING_RATE_RADPS 3.2f                  /* Prefab SteeringRate: 183.346 deg/s. */
 #define SOURCE_STEERING_WHEELBASE_M 0.324f               /* VehicleController Wheelbase: 324 mm. */
-#define MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS 0.087735f /* Closed-loop authority model retained after the newer saturated model failed at s~=34.6 m; not a real-car tire constant. */
-#define MPC_YAW_RATE_STEERING_GAIN_PER_M 3.011897f       /* Closed-loop authority gain per u*tan(delta), distinct from source wheelbase. */
+#define MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS 0.015f /* Practice-bag system identification: held-out 40 Hz yaw-rate steps across independent laps. */
+#define MPC_YAW_RATE_STEERING_GAIN_PER_M 2.95f          /* Held-out yaw-rate gain per u*tan(delta), distinct from source wheelbase. */
 #define MPC_LATERAL_ACCELERATION_LIMIT_BASE_MPS2 2.313214f /* Retained as identification metadata; the active authority model below does not impose this fitted saturation. */
 #define MPC_LATERAL_ACCELERATION_LIMIT_SPEED_GAIN_MPS 0.731701f /* Retained as identification metadata; not used as an artificial source-physics limit. */
 #define MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 (-0.37356440f) /* Last live-proven authority model; offline fit was rejected after closed-loop regression. */

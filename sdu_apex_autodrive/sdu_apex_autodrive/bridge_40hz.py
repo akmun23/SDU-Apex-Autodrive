@@ -17,6 +17,7 @@ import gzip
 import json
 import math
 import os
+import signal
 import threading
 import time
 from collections import deque
@@ -134,6 +135,8 @@ _packet_timing_publisher: Any = None
 _timing_fault_publisher: Any = None
 _timing_fault_detail_publisher: Any = None
 _packet_sequence = 0
+_packet_schema_diagnostic_count = 0
+_encoder_probe_samples: list[dict[str, Any]] = []
 _packet_contract_installed = False
 _handler_timing_enabled = False
 _handler_timing_count = 0
@@ -437,10 +440,45 @@ def _capture_competition_packet(data: Any) -> bool:
     global _active_steering_update_monotonic_ns
     global _active_simulator_packet, _active_request_slot_pool
     global _pending_request_started_ns
+    global _packet_schema_diagnostic_count
+    global _encoder_probe_samples
 
     if not isinstance(data, dict):
         _trigger_timing_fault("non-dictionary simulator packet")
         return False
+
+    if (_packet_schema_diagnostic_count < 3 and
+            _env_enabled("SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC", False)):
+        print(
+            "[autodrive_bridge_40hz] source packet schema: " +
+            json.dumps({
+                "packet_index": _packet_schema_diagnostic_count + 1,
+                "field_count": len(data),
+                "field_names": sorted(str(key) for key in data),
+            }, separators=(",", ":")),
+            flush=True,
+        )
+        _packet_schema_diagnostic_count += 1
+
+    if (len(_encoder_probe_samples) < 40 and
+            _env_enabled("SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC", False)):
+        try:
+            feedback_throttle = float(data.get("V1 Throttle", 0.0))
+        except (TypeError, ValueError):
+            feedback_throttle = 0.0
+        if feedback_throttle > 0.02:
+            _encoder_probe_samples.append({
+                "arrival_monotonic_ns": time.monotonic_ns(),
+                "feedback_throttle": feedback_throttle,
+                "encoder_angles": data.get("V1 Encoder Angles"),
+                "encoder_ticks": data.get("V1 Encoder Ticks"),
+            })
+            if len(_encoder_probe_samples) == 40:
+                print(
+                    "[autodrive_bridge_40hz] encoder probe samples: " +
+                    json.dumps(_encoder_probe_samples, separators=(",", ":")),
+                    flush=True,
+                )
 
     with _pending_request_lock:
         has_pending_request = bool(_pending_requests)
@@ -1052,10 +1090,21 @@ def _run_command_listener() -> None:
             _command_listener_node = None
 
 
+def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
+    """Enter normal bridge cleanup instead of tearing ROS down mid-packet."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    _command_listener_stop.set()
+    _stop_sender.set()
+    raise SystemExit(128 + signum)
+
+
 def main() -> None:
     global _handler_timing_enabled, _publication_diagnostic_enabled
     global _shutdown_requested
     _shutdown_requested = False
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     rate_hz = _rate_hz()
     _handler_timing_enabled = _env_enabled(
         "AUTODRIVE_BRIDGE_LOG_HANDLER_TIMING", False)

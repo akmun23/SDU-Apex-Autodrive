@@ -2605,7 +2605,7 @@ def apply_empirical_speed_profile(trajectory_path, max_speed,
                 speed[j] * speed[j] + 2.0 * decel_limit * ds[i])
             for _ in range(12):
                 available = segment_limit(
-                    speed[i], curvature_envelope[i],
+                    candidate, curvature_envelope[i],
                     speed[j], curvature_envelope[j], decel_limit)
                 updated = math.sqrt(
                     speed[j] * speed[j] + 2.0 * available * ds[i])
@@ -2756,7 +2756,9 @@ def write_trajectory_from_path(path_xy, output_csv, waypoint_spacing,
 #  Step 4 -- Verification (kept from original)
 # =============================================================================
 
-def verify_output(csv_path, curvlim=None, car_width=None, wall_clearance=0.0):
+def verify_output(csv_path, curvlim=None, car_width=None, wall_clearance=0.0,
+                  max_acceleration=None, max_deceleration=None,
+                  max_lateral_accel=None, max_combined_accel=None):
     """Sanity-check the final trajectory CSV."""
     waypoints = []
     with open(csv_path, 'r') as f:
@@ -2808,6 +2810,16 @@ def verify_output(csv_path, curvlim=None, car_width=None, wall_clearance=0.0):
     print(f"  Psi vs atan2:   max err = {math.degrees(max_psi_err):.2f} deg")
     print(f"  Kappa range:    [{w[:, 4].min():.4f}, {w[:, 4].max():.4f}] 1/m")
     print(f"  Velocity range: [{w[:, 5].min():.2f}, {w[:, 5].max():.2f}] m/s")
+    longitudinal_accel = w[:, 6]
+    lateral_accel = np.square(w[:, 5]) * w[:, 4]
+    combined_accel = np.hypot(longitudinal_accel, lateral_accel)
+    print(
+        "  Accel envelope: "
+        f"longitudinal=[{longitudinal_accel.min():.2f}, "
+        f"{longitudinal_accel.max():.2f}] m/s^2, "
+        f"lateral_max={np.abs(lateral_accel).max():.2f} m/s^2, "
+        f"combined_max={combined_accel.max():.2f} m/s^2"
+    )
 
     if ncols >= 9:
         print(f"  Left wall:      [{w[:, 7].min():.3f}, {w[:, 7].max():.3f}] m")
@@ -2845,6 +2857,34 @@ def verify_output(csv_path, curvlim=None, car_width=None, wall_clearance=0.0):
             print(
                 "  ERROR: Curvature limit violated: "
                 f"{max_abs_kappa:.4f} > {curvlim:.4f} 1/m"
+            )
+            ok = False
+    # Reject a geometrically valid path if its speed profile exceeds the
+    # measured simulator acceleration envelope. Tolerate only CSV rounding.
+    tolerance = 0.05
+    dynamics_limits = (
+        (max_acceleration is not None and
+         longitudinal_accel.max() > max_acceleration + tolerance,
+         "positive longitudinal acceleration", max_acceleration,
+         longitudinal_accel.max()),
+        (max_deceleration is not None and
+         longitudinal_accel.min() < -max_deceleration - tolerance,
+         "braking deceleration", max_deceleration,
+         -longitudinal_accel.min()),
+        (max_lateral_accel is not None and
+         np.abs(lateral_accel).max() > max_lateral_accel + tolerance,
+         "lateral acceleration", max_lateral_accel,
+         np.abs(lateral_accel).max()),
+        (max_combined_accel is not None and
+         combined_accel.max() > max_combined_accel + tolerance,
+         "combined acceleration", max_combined_accel,
+         combined_accel.max()),
+    )
+    for violated, name, limit, measured in dynamics_limits:
+        if violated:
+            print(
+                f"  ERROR: {name} exceeds configured limit "
+                f"({measured:.2f} > {limit:.2f} m/s^2)"
             )
             ok = False
     return ok
@@ -3592,6 +3632,10 @@ def main():
         curvlim=curvlim if args.strict_curvlim else None,
         car_width=args.car_width,
         wall_clearance=args.required_wall_clearance,
+        max_acceleration=args.accel_limit,
+        max_deceleration=args.decel_limit,
+        max_lateral_accel=args.lateral_accel_limit,
+        max_combined_accel=args.combined_accel_limit,
     )
 
     # ---- Visualization --------------------------------------------------------

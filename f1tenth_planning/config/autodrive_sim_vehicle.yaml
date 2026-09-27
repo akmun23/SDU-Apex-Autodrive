@@ -50,16 +50,17 @@ tire:
   friction_coeff: 0.86
   mintime_friction_coeff: 0.86
   rolling_resistance_coeff: 0.163
-  # Pacejka parameters consumed by TUM's mintime model.
+  # Robust axle-force fit to the collision-free 12-lap and high-steer bags.
+  # Friction stayed fixed at 0.86; the fit corrected TUM's Pacejka curve shape.
   pacejka:
     f_z0_n: 16.26
-    B_front: 2.39
-    C_front: 3.2
-    E_front: 1.0
+    B_front: 37.3
+    C_front: 2.98
+    E_front: 1.15
     eps_front: -0.1
-    B_rear: 1.67
-    C_rear: 3.2
-    E_rear: 1.0
+    B_rear: 52.1
+    C_rear: 3.20
+    E_rear: 1.16
     eps_rear: -0.1
 
 # These are retained for comparison with the physical BachelorProject model
@@ -74,9 +75,8 @@ physical_reference:
 steering:
   max_steering_angle_rad: 0.5236
   max_steering_rate_radps: 3.2
-  # TUM mintime actuator time constant. This is distinct from the measured
-  # servo travel time below and is kept equal to the BachelorProject setup.
-  mintime_time_constant_s: 0.117
+  # TUM's finite-difference rate bound is delta_max / this value.
+  mintime_time_constant_s: 0.163625
   servo_time_constant_s: 0.3675
 
 dynamics:

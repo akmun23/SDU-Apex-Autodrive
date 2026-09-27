@@ -432,10 +432,13 @@ def opt_mintime(reftrack: np.ndarray,
 
     domega_z = (sf / veh["I_z"]) * ((f_x_rr - f_x_rl) * veh["track_width_rear"] / 2
                                     - (f_y_rl + f_y_rr) * veh["wheelbase_rear"]
+                                    # Front longitudinal-force difference acts
+                                    # across the axle track; the summed front
+                                    # lateral force acts at the front axle.
                                     + ((f_x_fr - f_x_fl) * ca.cos(delta)
                                        + (f_y_fl - f_y_fr) * ca.sin(delta)) * veh["track_width_front"] / 2
                                     + ((f_y_fl + f_y_fr) * ca.cos(delta)
-                                       + (f_x_fl + f_x_fr) * ca.sin(delta)) * veh["track_width_front"])
+                                       + (f_x_fl + f_x_fr) * ca.sin(delta)) * veh["wheelbase_front"])
 
     dn = sf * v * ca.sin(xi + beta)
 
