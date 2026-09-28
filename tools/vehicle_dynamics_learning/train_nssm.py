@@ -42,29 +42,75 @@ def _torch():
     return torch, nn
 
 
-def _model_type(torch, nn, hidden_size: int):
+def _model_type(torch, nn, hidden_size: int, architecture: str,
+                expert_count: int, history_steps: int,
+                feature_count: int = FEATURE_COUNT):
     class RecurrentTransition(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.cell = nn.GRUCell(FEATURE_COUNT, hidden_size)
-            self.rate = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
+            self.architecture = architecture
+            self.expert_count = expert_count if architecture == "mixture" else 1
+            self.input_feature_count = feature_count
+            if architecture == "narx":
+                self.rate = nn.Sequential(
+                    nn.Linear(history_steps * feature_count, 2 * hidden_size),
+                    nn.SiLU(),
+                    nn.Linear(2 * hidden_size, hidden_size),
+                    nn.SiLU(),
+                    nn.Linear(hidden_size, STATE_COUNT),
+                )
+            else:
+                self.cell = nn.GRUCell(feature_count, hidden_size)
+            if architecture == "gru":
+                self.rate = self._rate_head(nn, hidden_size)
+            elif architecture == "mixture":
+                self.gate = nn.Sequential(
+                    nn.Linear(hidden_size + feature_count, hidden_size),
+                    nn.SiLU(),
+                    nn.Linear(hidden_size, expert_count),
+                )
+                self.experts = nn.ModuleList(
+                    self._rate_head(nn, hidden_size)
+                    for _ in range(expert_count))
+
+        @staticmethod
+        def _rate_head(nn, size: int):
+            return nn.Sequential(
+                nn.Linear(size, size),
                 nn.SiLU(),
-                nn.Linear(hidden_size, hidden_size),
+                nn.Linear(size, size),
                 nn.SiLU(),
-                nn.Linear(hidden_size, STATE_COUNT),
+                nn.Linear(size, STATE_COUNT),
             )
 
+        def gate_probabilities(self, feature, hidden):
+            if self.architecture == "gru":
+                return None
+            gate_input = torch.cat((feature, hidden), dim=1)
+            return torch.softmax(self.gate(gate_input), dim=1)
+
         def advance(self, feature, hidden, dt):
+            if self.architecture == "narx":
+                flat_history = hidden.reshape(hidden.shape[0], -1)
+                rate_normalized_per_s = self.rate(flat_history)
+                state_next = feature[:, :STATE_COUNT] + dt[:, None] * rate_normalized_per_s
+                return state_next, hidden
             hidden = self.cell(feature, hidden)
-            rate_normalized_per_s = self.rate(hidden)
+            if self.architecture == "gru":
+                rate_normalized_per_s = self.rate(hidden)
+            else:
+                probabilities = self.gate_probabilities(feature, hidden)
+                expert_rates = torch.stack(
+                    [expert(hidden) for expert in self.experts], dim=1)
+                rate_normalized_per_s = torch.sum(
+                    probabilities[:, :, None] * expert_rates, dim=1)
             state_next = feature[:, :STATE_COUNT] + dt[:, None] * rate_normalized_per_s
             return state_next, hidden
 
     return RecurrentTransition
 
 
-def _load_dataset(path: Path) -> dict[str, Any]:
+def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[str, Any]:
     data = np.load(path, allow_pickle=False)
     required = {"schema_version", "feature_names", "frames", "dt_s",
                 "sequence_bounds", "sequence_run_index", "run_ids", "run_splits"}
@@ -89,6 +135,32 @@ def _load_dataset(path: Path) -> dict[str, Any]:
         raise ValueError("sequence bounds exceed the frame array")
     if len(run_ids) != len(splits) or np.any(seq_run < 0) or np.any(seq_run >= len(run_ids)):
         raise ValueError("run metadata indices are invalid")
+    feature_names = data["feature_names"].astype(str).tolist()
+    if feature_names != [
+            "u_rear_mps", "v_rear_mps", "yaw_rate_rps",
+            "steering_feedback_rad", "throttle_feedback_norm",
+            "rear_left_surface_mps", "rear_right_surface_mps",
+            "steering_command_rad", "throttle_command_norm"]:
+        raise ValueError("unexpected base feature ordering")
+    if include_throttle_variation:
+        throttle_variation = np.zeros(len(frames), dtype=np.float32)
+        for start, end in bounds:
+            start, end = int(start), int(end)
+            local_dt = dt_s[start:end]
+            if np.any(local_dt <= 0.0):
+                raise ValueError("non-positive dt in a sequence used for throttle-variation features")
+            local_time = np.cumsum(local_dt, dtype=np.float64)
+            command = frames[start:end, 8]
+            for index in range(1, end - start):
+                left = int(np.searchsorted(
+                    local_time, local_time[index] - 0.100, side="left"))
+                window_s = local_time[index] - local_time[left]
+                if left < index and 0.075 <= window_s <= 0.145:
+                    throttle_variation[start + index] = float(np.sum(
+                        np.abs(np.diff(command[left:index + 1]))))
+        frames = np.column_stack((frames, throttle_variation)).astype(
+            np.float32, copy=False)
+        feature_names.append("throttle_command_total_variation_100ms")
     return {
         "frames": frames,
         "dt_s": dt_s,
@@ -96,7 +168,7 @@ def _load_dataset(path: Path) -> dict[str, Any]:
         "seq_run": seq_run,
         "run_ids": run_ids,
         "splits": splits,
-        "feature_names": data["feature_names"].astype(str).tolist(),
+        "feature_names": feature_names,
     }
 
 
@@ -126,12 +198,26 @@ def _candidate_start(data: dict[str, Any], seq_id: int,
 
 def _sample_batch(data: dict[str, Any], groups: dict[int, list[int]], batch_size: int,
                   history_steps: int, rollout_steps: int,
-                  rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                  rng: np.random.Generator,
+                  steering_windows: dict[int, list[tuple[int, int]]] | None = None,
+                  steering_fraction: float = 0.0
+                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
+    steering_run_ids = (np.asarray(sorted(steering_windows), dtype=np.int32)
+                        if steering_windows else np.empty(0, dtype=np.int32))
     histories, futures, dts = [], [], []
-    for run in rng.choice(run_ids, size=batch_size, replace=True):
-        seq_id = int(rng.choice(groups[int(run)]))
-        start = _candidate_start(data, seq_id, history_steps, rollout_steps, rng)
+    for _ in range(batch_size):
+        use_steering_window = (
+            len(steering_run_ids) > 0 and rng.random() < steering_fraction)
+        if use_steering_window:
+            run = int(rng.choice(steering_run_ids))
+            candidates = steering_windows[run]
+            seq_id, start = candidates[int(rng.integers(len(candidates)))]
+        else:
+            run = int(rng.choice(run_ids))
+            seq_id = int(rng.choice(groups[run]))
+            start = _candidate_start(data, seq_id, history_steps,
+                                     rollout_steps, rng)
         hist_begin = start - history_steps + 1
         next_ids = np.arange(start + 1, start + rollout_steps + 1, dtype=np.int64)
         histories.append(data["frames"][hist_begin:start + 1])
@@ -140,6 +226,34 @@ def _sample_batch(data: dict[str, Any], groups: dict[int, list[int]], batch_size
     return (np.asarray(histories, dtype=np.float32),
             np.asarray(futures, dtype=np.float32),
             np.asarray(dts, dtype=np.float32))
+
+
+def _high_steering_windows(data: dict[str, Any], groups: dict[int, list[int]],
+                           history_steps: int, rollout_steps: int,
+                           steering_threshold: float
+                           ) -> dict[int, list[tuple[int, int]]]:
+    """Index training windows whose mean future measured steering reaches target."""
+    selected: dict[int, list[tuple[int, int]]] = {}
+    for run, sequence_ids in groups.items():
+        run_windows = []
+        for seq_id in sequence_ids:
+            seq_start, seq_end = map(int, data["bounds"][seq_id])
+            low = seq_start + history_steps - 1
+            high = seq_end - rollout_steps - 1
+            if high < low:
+                continue
+            abs_steering = np.abs(data["frames"][seq_start:seq_end, 3])
+            prefix = np.concatenate(([0.0], np.cumsum(abs_steering,
+                                                       dtype=np.float64)))
+            for start in range(low, high + 1):
+                first = start + 1 - seq_start
+                last = first + rollout_steps
+                mean_abs_steering = (prefix[last] - prefix[first]) / rollout_steps
+                if mean_abs_steering >= steering_threshold:
+                    run_windows.append((seq_id, start))
+        if run_windows:
+            selected[int(run)] = run_windows
+    return selected
 
 
 def _fixed_eval_windows(data: dict[str, Any], groups: dict[int, list[int]],
@@ -191,8 +305,13 @@ def _normalizers(data: dict[str, Any], train_groups: dict[int, list[int]]) -> tu
     values = np.concatenate(selected, axis=0).astype(np.float64, copy=False)
     mean = values.mean(axis=0).astype(np.float32)
     scale = values.std(axis=0).astype(np.float32)
-    scale = np.maximum(scale, np.asarray([0.05, 0.05, 0.05, 0.02, 0.02,
-                                         0.10, 0.10, 0.02, 0.02], dtype=np.float32))
+    minimum_scale = np.asarray([0.05, 0.05, 0.05, 0.02, 0.02,
+                                0.10, 0.10, 0.02, 0.02], dtype=np.float32)
+    if values.shape[1] > len(minimum_scale):
+        minimum_scale = np.concatenate((minimum_scale,
+                                        np.full(values.shape[1] - len(minimum_scale),
+                                                0.02, dtype=np.float32)))
+    scale = np.maximum(scale, minimum_scale)
     return mean, scale
 
 
@@ -207,22 +326,33 @@ def _tensor_batch(torch, arrays, mean: np.ndarray, scale: np.ndarray, device):
     )
 
 
-def _rollout(model, history, future, dts, history_steps: int):
+def _rollout(model, history, future, dts, history_steps: int,
+             teacher_force_channels: tuple[int, ...] = ()):
     torch, _ = _torch()
     batch = history.shape[0]
-    hidden = torch.zeros(batch, model.cell.hidden_size,
-                         dtype=history.dtype, device=history.device)
-    # Burn in on prior observed history; then predict recursively from the
-    # final observed frame. Ground truth states are not injected after t0.
-    for index in range(history_steps - 1):
-        hidden = model.cell(history[:, index, :], hidden)
+    if model.architecture == "narx":
+        hidden = history
+    else:
+        hidden = torch.zeros(batch, model.cell.hidden_size,
+                             dtype=history.dtype, device=history.device)
+        # Burn in on prior observed history; then predict recursively from the
+        # final observed frame. Ground truth states are not injected after t0.
+        for index in range(history_steps - 1):
+            hidden = model.cell(history[:, index, :], hidden)
     feature = history[:, -1, :]
     predicted = []
     for index in range(future.shape[1]):
         state_next, hidden = model.advance(feature, hidden, dts[:, index])
+        if teacher_force_channels:
+            channel_indices = torch.as_tensor(
+                teacher_force_channels, dtype=torch.long, device=history.device)
+            state_next = state_next.clone()
+            state_next[:, channel_indices] = future[:, index, channel_indices]
         predicted.append(state_next)
-        next_command = future[:, index, 7:9]
-        feature = torch.cat((state_next, next_command), dim=1)
+        next_inputs = future[:, index, STATE_COUNT:]
+        feature = torch.cat((state_next, next_inputs), dim=1)
+        if model.architecture == "narx":
+            hidden = torch.cat((hidden[:, 1:, :], feature[:, None, :]), dim=1)
     return torch.stack(predicted, dim=1)
 
 
@@ -360,6 +490,77 @@ def _score_ensemble(torch, models, arrays, mean, scale, device,
     return result
 
 
+def _gate_diagnostics(torch, model, arrays, mean, scale, device,
+                      history_steps: int) -> dict[str, Any] | None:
+    if model.architecture != "mixture":
+        return None
+    history, future, dts = _tensor_batch(torch, arrays, mean, scale, device)
+    batch = history.shape[0]
+    hidden = torch.zeros(batch, model.cell.hidden_size,
+                         dtype=history.dtype, device=history.device)
+    with torch.no_grad():
+        for index in range(history_steps - 1):
+            hidden = model.cell(history[:, index, :], hidden)
+        feature = history[:, -1, :]
+        gate_rows = []
+        truth_rows = []
+        for index in range(future.shape[1]):
+            hidden = model.cell(feature, hidden)
+            probabilities = model.gate_probabilities(feature, hidden)
+            gate_rows.append(probabilities.cpu().numpy())
+            truth_feature = (history[:, -1, :] if index == 0
+                             else future[:, index - 1, :])
+            truth_rows.append((truth_feature * torch.as_tensor(
+                scale, dtype=torch.float32, device=device) + torch.as_tensor(
+                mean, dtype=torch.float32, device=device)).cpu().numpy())
+            expert_rates = torch.stack(
+                [expert(hidden) for expert in model.experts], dim=1)
+            rate = torch.sum(probabilities[:, :, None] * expert_rates, dim=1)
+            state_next = feature[:, :STATE_COUNT] + dts[:, index, None] * rate
+            feature = torch.cat((state_next, future[:, index, 7:9]), dim=1)
+
+    gates = np.concatenate(gate_rows, axis=0)
+    contexts = np.concatenate(truth_rows, axis=0)
+    names = ("speed_magnitude", "abs_steering_feedback", "throttle_feedback",
+             "rear_encoder_minus_body_u", "throttle_command_error")
+    variables = np.column_stack((
+        np.hypot(contexts[:, 0], contexts[:, 1]),
+        np.abs(contexts[:, 3]),
+        contexts[:, 4],
+        0.5 * (contexts[:, 5] + contexts[:, 6]) - contexts[:, 0],
+        contexts[:, 8] - contexts[:, 4],
+    ))
+    correlations: dict[str, list[float | None]] = {}
+    for name, values in zip(names, variables.T):
+        coefficients = []
+        for expert in range(gates.shape[1]):
+            gate_values = gates[:, expert]
+            if (not np.isfinite(values).all()
+                    or not np.isfinite(gate_values).all()
+                    or np.std(values) <= 1.0e-6
+                    or np.std(gate_values) <= 1.0e-6):
+                coefficients.append(None)
+            else:
+                correlation = float(np.corrcoef(values, gate_values)[0, 1])
+                coefficients.append(correlation if np.isfinite(correlation) else None)
+        correlations[name] = coefficients
+    mean_probability = gates.mean(axis=0)
+    hard_occupancy = np.bincount(
+        gates.argmax(axis=1), minlength=gates.shape[1]) / len(gates)
+    entropy = -np.sum(gates * np.log(np.maximum(gates, 1.0e-12)), axis=1)
+    return {
+        "expert_count": int(gates.shape[1]),
+        "mean_gate_probability": mean_probability.tolist(),
+        "hard_occupancy": hard_occupancy.tolist(),
+        "normalized_gate_entropy": float(
+            np.mean(entropy) / math.log(gates.shape[1])),
+        "gate_context_correlation": correlations,
+        "interpretation_note": (
+            "Post-hoc correlations only; gate inference uses causal model state. "
+            "Variables are aggregate proxies, not per-wheel force labels."),
+    }
+
+
 def _save_checkpoint(torch, path: Path, model, mean, scale, metadata: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save({"state_dict": model.state_dict(), "feature_mean": mean,
@@ -369,7 +570,26 @@ def _save_checkpoint(torch, path: Path, model, mean, scale, metadata: dict[str, 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
     torch, nn = _torch()
-    data = _load_dataset(args.dataset)
+    data = _load_dataset(args.dataset, args.throttle_variation_feature)
+    selected_validation_runs: list[str] = []
+    selected_experiment_test_runs: list[str] = []
+    total_selected = (args.holdout_train_run_count
+                      + args.experiment_test_run_count)
+    if total_selected:
+        eligible = np.flatnonzero(data["splits"] == "train")
+        if total_selected >= len(eligible):
+            raise ValueError("selected run holdouts must be fewer than train runs")
+        split_rng = np.random.default_rng(args.run_split_seed)
+        chosen = np.sort(split_rng.choice(
+            eligible, size=total_selected, replace=False))
+        validation_ids = chosen[:args.holdout_train_run_count]
+        experiment_test_ids = chosen[args.holdout_train_run_count:]
+        selected_validation_runs = [str(data["run_ids"][index])
+                                    for index in validation_ids]
+        selected_experiment_test_runs = [str(data["run_ids"][index])
+                                         for index in experiment_test_ids]
+        data["splits"][validation_ids] = "validation"
+        data["splits"][experiment_test_ids] = "experiment_test"
     history_steps = args.history_steps
     rollout_steps = args.rollout_steps
     if history_steps < 2 or rollout_steps < max(DEFAULT_HORIZONS):
@@ -380,6 +600,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("no sufficiently long sequences in train split")
     if not validation_groups:
         raise ValueError("no sufficiently long sequences in validation split")
+    steering_windows = None
+    if args.high_steering_window_fraction > 0.0:
+        steering_windows = _high_steering_windows(
+            data, train_groups, history_steps, rollout_steps,
+            args.high_steering_window_threshold)
+        if not steering_windows:
+            raise ValueError(
+                "no training rollouts meet the high-steering window threshold")
     test_groups = _sequence_groups(data, "final_test", history_steps, rollout_steps)
     other_holdout_groups = _sequence_groups(data, "test", history_steps, rollout_steps)
     mean, scale = _normalizers(data, train_groups)
@@ -395,7 +623,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("CUDA requested but torch.cuda.is_available() is false")
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
-    RecurrentTransition = _model_type(torch, nn, args.hidden_size)
+    RecurrentTransition = _model_type(
+        torch, nn, args.hidden_size, args.architecture, args.experts,
+        history_steps, len(data["feature_names"]))
     deadline = time.monotonic() + args.time_budget_hours * 3600.0
     total_steps = 0
     member_results: list[dict[str, Any]] = []
@@ -427,7 +657,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                member_steps < args.max_steps_per_member):
             model.train()
             batches = _sample_batch(data, train_groups, args.batch_size,
-                                    history_steps, rollout_steps, np_rng)
+                                    history_steps, rollout_steps, np_rng,
+                                    steering_windows,
+                                    args.high_steering_window_fraction)
             hist, future, dts = _tensor_batch(torch, batches, mean, scale, device)
             prediction = _rollout(model, hist, future, dts, history_steps)
             target = future[:, :, :STATE_COUNT]
@@ -455,8 +687,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 stale_evaluations = 0
                 _save_checkpoint(torch, checkpoint, model, mean, scale, {
                     "schema_version": 1, "member": member,
+                    "architecture": args.architecture,
+                    "expert_count": args.experts if args.architecture == "mixture" else 1,
                     "seed": seed, "step": member_steps,
                     "feature_names": data["feature_names"],
+                    "throttle_variation_feature": args.throttle_variation_feature,
+                    "high_steering_window_fraction": args.high_steering_window_fraction,
+                    "high_steering_window_threshold_rad": args.high_steering_window_threshold,
                     "state_names": data["feature_names"][:STATE_COUNT],
                     "history_steps": history_steps,
                     "rollout_steps": rollout_steps,
@@ -504,10 +741,23 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "sequence_counts": {
             split: sum(len(group) for run, group in groups.items()
                        if data["splits"][run] == split)
-            for split, groups in (("train", train_groups), ("validation", validation_groups))
+            for split, groups in (("train", train_groups),
+                                  ("validation", validation_groups),
+                                  ("experiment_test", _sequence_groups(
+                                      data, "experiment_test", history_steps,
+                                      rollout_steps)))
         },
         "normalization": {"mean": mean.tolist(), "scale": scale.tolist()},
         "configuration": {
+            "architecture": args.architecture,
+            "throttle_variation_feature": args.throttle_variation_feature,
+            "high_steering_window_fraction": args.high_steering_window_fraction,
+            "high_steering_window_threshold_rad": args.high_steering_window_threshold,
+            "high_steering_windows_by_run": (
+                {str(data["run_ids"][run]): len(windows)
+                 for run, windows in steering_windows.items()}
+                if steering_windows else {}),
+            "experts": args.experts if args.architecture == "mixture" else 1,
             "members_requested": args.members,
             "members_completed": len(member_results),
             "history_steps": history_steps,
@@ -518,11 +768,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "time_budget_hours": args.time_budget_hours,
             "max_steps_per_member": args.max_steps_per_member,
             "seed": args.seed,
+            "run_split_seed": args.run_split_seed,
+            "additional_validation_runs": selected_validation_runs,
+            "experiment_test_runs": selected_experiment_test_runs,
         },
         "total_optimizer_steps": total_steps,
         "members": member_results,
         "validation_ensemble": _score_ensemble(
             torch, member_models, val_arrays, mean, scale, device, history_steps),
+        "validation_gate_diagnostics": (
+            _gate_diagnostics(torch, member_models[0], val_arrays, mean,
+                              scale, device, history_steps)
+            if member_models else None),
     }
     if args.score_final_test:
         test_sets = {}
@@ -556,7 +813,47 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "ensemble": _score_ensemble(
                     torch, scored_models, test_arrays, mean, scale,
                     device, history_steps),
+                "gate_diagnostics": (
+                    _gate_diagnostics(torch, scored_models[0], test_arrays,
+                                      mean, scale, device, history_steps)
+                    if scored_models else None),
             }
+    if args.score_experiment_test:
+        experiment_groups = _sequence_groups(
+            data, "experiment_test", history_steps, rollout_steps)
+        if not experiment_groups:
+            raise ValueError("no experiment-test sequences available")
+        experiment_windows = _fixed_eval_windows(
+            data, experiment_groups, history_steps, rollout_steps,
+            args.eval_windows)
+        experiment_arrays = _batch_from_windows(
+            data, experiment_windows, history_steps, rollout_steps)
+        experiment_models = []
+        experiment_results = []
+        for member, result in enumerate(member_results):
+            if not result["checkpoint"]:
+                continue
+            payload = torch.load(args.output_dir / result["checkpoint"],
+                                 map_location=device, weights_only=False)
+            model = RecurrentTransition().to(device)
+            model.load_state_dict(payload["state_dict"])
+            experiment_models.append(model)
+            experiment_results.append({
+                "member": member,
+                "score": _score_model(torch, model, experiment_arrays,
+                                       mean, scale, device, history_steps),
+            })
+        report["experiment_test"] = {
+            "runs": selected_experiment_test_runs,
+            "members": experiment_results,
+            "ensemble": _score_ensemble(
+                torch, experiment_models, experiment_arrays, mean, scale,
+                device, history_steps),
+            "gate_diagnostics": (
+                _gate_diagnostics(torch, experiment_models[0], experiment_arrays,
+                                  mean, scale, device, history_steps)
+                if experiment_models else None),
+        }
     report_path = args.output_dir / "training_report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
                            encoding="utf-8")
@@ -569,6 +866,16 @@ def main() -> int:
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--architecture", choices=("gru", "mixture", "narx"),
+                        default="gru")
+    parser.add_argument("--throttle-variation-feature", action="store_true",
+                        help="add the causal 100 ms total variation of commanded throttle to model inputs")
+    parser.add_argument("--high-steering-window-fraction", type=float, default=0.0,
+                        help="fraction of each batch drawn from high-steering training rollouts")
+    parser.add_argument("--high-steering-window-threshold", type=float, default=0.30,
+                        help="minimum mean absolute measured steering (rad) over sampled rollout")
+    parser.add_argument("--experts", type=int, default=4,
+                        help="number of learned transition experts for mixture architecture")
     parser.add_argument("--members", type=int, default=5)
     parser.add_argument("--time-budget-hours", type=float, default=8.0,
                         help="total wall-clock budget shared by all ensemble members")
@@ -583,11 +890,25 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=1.0e-5)
     parser.add_argument("--seed", type=int, default=20260929)
+    parser.add_argument("--holdout-train-run-count", type=int, default=0,
+                        help="move this many complete train runs into validation")
+    parser.add_argument("--experiment-test-run-count", type=int, default=0,
+                        help="hold out this many additional train runs for one-time scoring")
+    parser.add_argument("--run-split-seed", type=int, default=20260928,
+                        help="seed for selecting whole-run validation holdouts")
     parser.add_argument("--score-final-test", action="store_true",
                         help="evaluate the untouched final-test runs once after training")
+    parser.add_argument("--score-experiment-test", action="store_true",
+                        help="score the selected experiment-test runs once after training")
     args = parser.parse_args()
-    if args.members < 1 or args.time_budget_hours <= 0.0 or args.max_steps_per_member < 1:
-        parser.error("members, time budget, and step cap must be positive")
+    if (args.members < 1 or args.time_budget_hours <= 0.0
+            or args.max_steps_per_member < 1 or args.experts < 2
+            or args.holdout_train_run_count < 0
+            or args.experiment_test_run_count < 0
+            or not 0.0 <= args.high_steering_window_fraction < 1.0
+            or args.high_steering_window_threshold < 0.0
+            or (args.score_experiment_test and args.experiment_test_run_count == 0)):
+        parser.error("members, time budget, step cap, and experts must be positive")
     if args.output_dir.exists():
         parser.error(f"output directory already exists: {args.output_dir}")
     try:

@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  printf '%s\n' \
+    "Usage: $0" \
+    "Runs the development-only open-plane experiment against the Explore simulator." \
+    "Start it separately with: SDU_APEX_SIM_TRACK=explore SDU_APEX_SIM_MODE=batchmode ./tools/start_simulator.sh" \
+    "Configure with SDU_APEX_EXPERIMENT_PROFILE, SDU_APEX_EXPERIMENT_RUN_ID, and related SDU_APEX_EXPERIMENT_* variables." \
+    "New paired throttle-slew profile: throttle_slew_pair at 4.5 or 6.5 m/s." \
+    "Use --help to display this text; positional arguments are not accepted."
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+if (($# != 0)); then
+  usage >&2
+  exit 2
+fi
+
 # Start the pinned explore simulator separately with:
 #   SDU_APEX_SIM_TRACK=explore SDU_APEX_SIM_MODE=batchmode ./tools/start_simulator.sh
 # Then run this script. It launches only the bridge, minimal recorder, and the
@@ -26,8 +45,8 @@ if [[ ! "${run_id}" =~ ^[[:alnum:]_-]+$ ]]; then
   echo "Run ID may contain only letters, digits, underscores, and hyphens." >&2
   exit 2
 fi
-if [[ "${profile}" != high_angle_boundary && "${profile}" != isolated_boundary && "${profile}" != isolated_speed_sweep && "${profile}" != isolated_force_3mps && "${profile}" != isolated_force_4mps && "${profile}" != isolated_force_5mps && "${profile}" != isolated_highspeed_surface && "${profile}" != isolated_3to5_response_surface && "${profile}" != isolated_highspeed_crossfactor && "${profile}" != isolated_transition_65mps && "${profile}" != isolated_transition_45mps && "${profile}" != isolated_transition_speed_surface && "${profile}" != isolated_transition_support && "${profile}" != isolated_transition_bridge && "${profile}" != isolated_transition_low_support && "${profile}" != isolated_transition_full_surface && "${profile}" != transient_4mps && "${profile}" != transient_fullsteer_4mps && "${profile}" != transient_transition_4mps && "${profile}" != transient_transition_4mps_fixedthrottle && "${profile}" != transient_transition_dwell_4mps_fixedthrottle && "${profile}" != full_input_excitation && "${profile}" != grid ]]; then
-  echo "SDU_APEX_EXPERIMENT_PROFILE must be high_angle_boundary, isolated_boundary, isolated_speed_sweep, isolated_force_3mps, isolated_force_4mps, isolated_force_5mps, isolated_highspeed_surface, isolated_3to5_response_surface, isolated_highspeed_crossfactor, isolated_transition_65mps, isolated_transition_45mps, isolated_transition_speed_surface, isolated_transition_support, isolated_transition_bridge, isolated_transition_low_support, isolated_transition_full_surface, transient_4mps, transient_fullsteer_4mps, transient_transition_4mps, transient_transition_4mps_fixedthrottle, transient_transition_dwell_4mps_fixedthrottle, full_input_excitation, or grid." >&2
+if [[ "${profile}" != high_angle_boundary && "${profile}" != isolated_boundary && "${profile}" != isolated_speed_sweep && "${profile}" != isolated_force_3mps && "${profile}" != isolated_force_4mps && "${profile}" != isolated_force_5mps && "${profile}" != isolated_highspeed_surface && "${profile}" != isolated_3to5_response_surface && "${profile}" != isolated_highspeed_crossfactor && "${profile}" != isolated_transition_65mps && "${profile}" != isolated_transition_45mps && "${profile}" != isolated_transition_speed_surface && "${profile}" != isolated_transition_support && "${profile}" != isolated_transition_bridge && "${profile}" != isolated_transition_low_support && "${profile}" != isolated_transition_full_surface && "${profile}" != transient_4mps && "${profile}" != transient_fullsteer_4mps && "${profile}" != transient_transition_4mps && "${profile}" != transient_transition_4mps_fixedthrottle && "${profile}" != transient_transition_dwell_4mps_fixedthrottle && "${profile}" != throttle_slew_pair && "${profile}" != full_input_excitation && "${profile}" != grid ]]; then
+  echo "Invalid SDU_APEX_EXPERIMENT_PROFILE; run $0 --help for usage." >&2
   exit 2
 fi
 if [[ -e "${run_parent}/run" ]]; then
@@ -146,9 +165,9 @@ docker run --rm --name "${container}" \
       exit 1
     fi
 
-    # A large async cache reduces turnover for this ~180 MB run. Synchronous
-    # writes caused recorder-side receive gaps; regular rosbag mode still
-    # writes asynchronously during capture, so validate the closed bag.
+    # A large async cache reduces turnover for this run. Do not open/read the
+    # SQLite bag until rosbag2 has closed it: a concurrent reader can lock the
+    # database and terminate the recorder while it is writing.
     ros2 bag record --max-cache-size 268435456 -o "${rosbag_output}" \
       /autodrive/roboracer_1/odom \
       /autodrive/roboracer_1/ips \

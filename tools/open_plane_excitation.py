@@ -62,8 +62,15 @@ FULL_INPUT_STEERING_LEVELS_RAD = (
 )
 FULL_INPUT_THROTTLE_LEVELS = (0.0, 0.08, 0.14, 0.20, 0.28, 0.36, 0.44, 0.50)
 THROTTLE_FEEDFORWARD = (0.10, 0.18, 0.27, 0.31, 0.34)
+THROTTLE_SLEW_STEERING_RAD = (0.30, 0.42)
+THROTTLE_SLEW_DELTA_NORM = 0.08
+THROTTLE_SLEW_STIMULUS_DELAY_S = 0.60
+THROTTLE_SLEW_RAMP_S = 0.30
+THROTTLE_SLEW_PHASE_S = 1.80
+THROTTLE_START_FEEDBACK_TOLERANCE = 0.03
 ODOM_TOPIC = "/autodrive/roboracer_1/odom"
 STEERING_TOPIC = "/autodrive/roboracer_1/steering"
+THROTTLE_FEEDBACK_TOPIC = "/autodrive/roboracer_1/throttle"
 COLLISION_TOPIC = "/autodrive/roboracer_1/collision_count"
 STEERING_COMMAND_TOPIC = "/autodrive/roboracer_1/steering_command"
 THROTTLE_COMMAND_TOPIC = "/autodrive/roboracer_1/throttle_command"
@@ -82,6 +89,30 @@ class Phase:
     validate_samples: bool = False
     validate_speed: bool = True
     settle_before_probe: bool = False
+    throttle_profile: str | None = None
+    throttle_start_norm: float | None = None
+    throttle_end_norm: float | None = None
+    throttle_stimulus_delay_s: float = 0.0
+    throttle_ramp_duration_s: float = 0.0
+    condition_pair_id: str | None = None
+
+
+def _slew_probe_command(phase: Phase, elapsed_s: float) -> float:
+    if phase.throttle_start_norm is None or phase.throttle_end_norm is None:
+        raise ValueError("slew probe requires start and end throttle commands")
+    if phase.throttle_profile not in ("ramp", "step"):
+        raise ValueError("slew probe profile must be ramp or step")
+    if elapsed_s < phase.throttle_stimulus_delay_s:
+        return phase.throttle_start_norm
+    stimulus_elapsed = elapsed_s - phase.throttle_stimulus_delay_s
+    if phase.throttle_profile == "step":
+        return (phase.throttle_start_norm
+                if stimulus_elapsed < PERIOD_SEC else phase.throttle_end_norm)
+    if phase.throttle_ramp_duration_s <= 0.0:
+        raise ValueError("ramp duration must be positive")
+    fraction = min(1.0, stimulus_elapsed / phase.throttle_ramp_duration_s)
+    return (phase.throttle_start_norm + fraction
+            * (phase.throttle_end_norm - phase.throttle_start_norm))
 
 
 def build_schedule(seed: int, profile: str = "high_angle_boundary",
@@ -112,6 +143,50 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     steering_rad=steering,
                     validate_samples=True,
                 ))
+        return phases
+    if profile == "throttle_slew_pair":
+        target_speed = transition_speed_mps
+        if target_speed not in (4.5, 6.5):
+            raise ValueError("throttle_slew_pair supports only 4.5 or 6.5 m/s")
+        phases.extend((
+            Phase(f"approach_{target_speed:.1f}mps", 8.0, target_speed,
+                  throttle_mode="approach", reach_speed_target=True),
+            Phase(f"settle_{target_speed:.1f}mps", 1.0, target_speed),
+        ))
+        base_throttle = THROTTLE_FEEDFORWARD[SPEED_TARGETS_MPS.index(target_speed)]
+        conditions = [
+            (sign * steering, delta_sign)
+            for steering in THROTTLE_SLEW_STEERING_RAD
+            for sign in (-1.0, 1.0)
+            for delta_sign in (-1.0, 1.0)
+        ]
+        for repetition in range(1, 4):
+            ordered_conditions = conditions.copy()
+            rng.shuffle(ordered_conditions)
+            for steering_rad, delta_sign in ordered_conditions:
+                pair_id = (
+                    f"r{repetition}_v{target_speed:.1f}_"
+                    f"s{steering_rad:+.2f}_d{delta_sign:+.0f}")
+                shapes = ["ramp", "step"]
+                rng.shuffle(shapes)
+                final_throttle = base_throttle + delta_sign * THROTTLE_SLEW_DELTA_NORM
+                for shape in shapes:
+                    phases.append(Phase(
+                        f"throttle_slew_{pair_id}_{shape}",
+                        THROTTLE_SLEW_PHASE_S,
+                        target_speed,
+                        steering_rad=steering_rad,
+                        throttle_mode="slew_probe",
+                        validate_samples=True,
+                        validate_speed=False,
+                        settle_before_probe=True,
+                        throttle_profile=shape,
+                        throttle_start_norm=base_throttle,
+                        throttle_end_norm=final_throttle,
+                        throttle_stimulus_delay_s=THROTTLE_SLEW_STIMULUS_DELAY_S,
+                        throttle_ramp_duration_s=THROTTLE_SLEW_RAMP_S,
+                        condition_pair_id=pair_id,
+                    ))
         return phases
     if profile == "full_input_excitation":
         # Randomized factorial actuator excitation. Each replicate contains
@@ -691,6 +766,8 @@ class OpenPlaneExcitation:
         self.last_odom_at: float | None = None
         self.steering_feedback_rad: float | None = None
         self.last_steering_at: float | None = None
+        self.throttle_feedback_norm: float | None = None
+        self.last_throttle_at: float | None = None
         self.collision_initial: int | None = None
         self.last_collision_at: float | None = None
         self.collision_baseline_safe = False
@@ -702,6 +779,7 @@ class OpenPlaneExcitation:
         self.phase_max_tilt_rad = 0.0
         self.phase_governor_ticks = 0
         self.phase_start_published = False
+        self.phase_stimulus_published = False
         self.published_count = 0
         self.last_status_log = 0.0
         self.neutral_ticks_remaining = 0
@@ -726,6 +804,9 @@ class OpenPlaneExcitation:
             Odometry, ODOM_TOPIC, self._on_odom, sensor_qos)
         self.steering_sub = self.node.create_subscription(
             Float32, STEERING_TOPIC, self._on_steering, sensor_qos)
+        self.throttle_sub = self.node.create_subscription(
+            Float32, THROTTLE_FEEDBACK_TOPIC, self._on_throttle_feedback,
+            sensor_qos)
         self.collision_sub = self.node.create_subscription(
             Int32, COLLISION_TOPIC, self._on_collision, sensor_qos)
         self.timer = self.node.create_timer(PERIOD_SEC, self._tick)
@@ -837,6 +918,12 @@ class OpenPlaneExcitation:
             self.steering_feedback_rad = value
             self.last_steering_at = time.monotonic()
 
+    def _on_throttle_feedback(self, message: Float32) -> None:
+        value = float(message.data)
+        if math.isfinite(value):
+            self.throttle_feedback_norm = value
+            self.last_throttle_at = time.monotonic()
+
     def _on_collision(self, message: Int32) -> None:
         self.last_collision_at = time.monotonic()
         count = int(message.data)
@@ -891,10 +978,17 @@ class OpenPlaneExcitation:
                 return low_throttle + ratio * (high_throttle - low_throttle)
         return THROTTLE_FEEDFORWARD[-1]
 
-    def _phase_command(self, phase: Phase) -> float:
+    def _phase_command(self, phase: Phase,
+                       phase_elapsed_s: float | None = None) -> float:
         assert self.speed_mps is not None
         if phase.throttle_mode in ("fixed", "excitation"):
             return float(phase.throttle_norm or 0.0)
+        if phase.throttle_mode == "slew_probe":
+            if phase_elapsed_s is None:
+                assert self.phase_started_at is not None
+                phase_elapsed_s = max(
+                    0.0, time.monotonic() - self.phase_started_at)
+            return _slew_probe_command(phase, phase_elapsed_s)
         error = phase.speed_target_mps - self.speed_mps
         feedforward = self._feedforward(phase.speed_target_mps)
         if phase.throttle_mode == "approach":
@@ -1000,6 +1094,13 @@ class OpenPlaneExcitation:
                 and state_metrics[1] <= PROBE_START_MAX_VY_MPS
                 and state_metrics[2] <= PROBE_START_MAX_YAW_RATE_RPS
                 and abs(self.steering_feedback_rad) <= PROBE_START_MAX_STEERING_RAD
+                and (phase.throttle_mode != "slew_probe" or (
+                    self.throttle_feedback_norm is not None
+                    and self.last_throttle_at is not None
+                    and now - self.last_throttle_at <= ODOM_TIMEOUT_SEC
+                    and abs(self.throttle_feedback_norm
+                            - float(phase.throttle_start_norm))
+                        <= THROTTLE_START_FEEDBACK_TOLERANCE))
             )
             if state_ready:
                 if self.probe_stable_since is None:
@@ -1035,6 +1136,7 @@ class OpenPlaneExcitation:
                 "seed": self.seed,
                 "phase_index": self.phase_index,
                 "phase_count": len(self.phases),
+                "phase_elapsed_s": phase_elapsed,
                 "label": phase.label,
                 "target_speed_mps": phase.speed_target_mps,
                 "steering_command_rad": phase.steering_rad,
@@ -1058,11 +1160,42 @@ class OpenPlaneExcitation:
                     if self.tilt_rad is not None else None
                 ),
                 "initial_steering_rad": self.steering_feedback_rad,
+                "initial_throttle_feedback_norm": self.throttle_feedback_norm,
                 "initial_window_speed_mps": state_metrics[0] if state_metrics else None,
                 "initial_window_abs_vy_mps": state_metrics[1] if state_metrics else None,
                 "initial_window_abs_yaw_rate_rps": state_metrics[2] if state_metrics else None,
+                "throttle_profile": phase.throttle_profile,
+                "throttle_start_norm": phase.throttle_start_norm,
+                "throttle_end_norm": phase.throttle_end_norm,
+                "throttle_stimulus_delay_s": phase.throttle_stimulus_delay_s,
+                "throttle_ramp_duration_s": phase.throttle_ramp_duration_s,
+                "condition_pair_id": phase.condition_pair_id,
                 "monotonic_ns": time.monotonic_ns(),
             })
+        if (phase.throttle_mode == "slew_probe"
+                and not self.phase_stimulus_published
+                and phase_elapsed >= phase.throttle_stimulus_delay_s):
+            self._publish_event({
+                "event": "throttle_slew_stimulus",
+                "profile": self.profile,
+                "seed": self.seed,
+                "phase_index": self.phase_index,
+                "label": phase.label,
+                "condition_pair_id": phase.condition_pair_id,
+                "throttle_profile": phase.throttle_profile,
+                "throttle_start_norm": phase.throttle_start_norm,
+                "throttle_end_norm": phase.throttle_end_norm,
+                "steering_command_rad": phase.steering_rad,
+                "speed_mps": self.speed_mps,
+                "vx_mps": self.vx_mps,
+                "vy_mps": self.vy_mps,
+                "yaw_rate_rps": self.yaw_rate_rps,
+                "steering_feedback_rad": self.steering_feedback_rad,
+                "throttle_feedback_norm": self.throttle_feedback_norm,
+                "phase_elapsed_s": phase_elapsed,
+                "monotonic_ns": time.monotonic_ns(),
+            })
+            self.phase_stimulus_published = True
         if phase.reach_speed_target and self.speed_mps >= phase.speed_target_mps - 0.10:
             self.node.get_logger().info(
                 f"phase complete: {phase.label}, measured_speed={self.speed_mps:.3f}m/s")
@@ -1079,11 +1212,11 @@ class OpenPlaneExcitation:
             self._next_phase(now)
             return
 
-        throttle = self._phase_command(phase)
+        throttle = self._phase_command(phase, phase_elapsed)
         # Speed-regulated phases get a target-speed guard. Fixed-input probes
         # must remain fixed so their actuator command is an identified input;
         # the global emergency-speed cutoff above still bounds the experiment.
-        if (phase.throttle_mode not in ("fixed", "excitation") and
+        if (phase.throttle_mode not in ("fixed", "excitation", "slew_probe") and
                 self.speed_mps >= phase.speed_target_mps + 0.50):
             throttle = 0.0
         if (phase.throttle_mode == "excitation" and
@@ -1108,8 +1241,10 @@ class OpenPlaneExcitation:
         self.phase_max_tilt_rad = self.tilt_rad or 0.0
         self.phase_governor_ticks = 0
         self.phase_start_published = False
+        self.phase_stimulus_published = False
 
     def _publish_event(self, event: dict[str, object]) -> None:
+        event.setdefault("wall_time_ns", time.time_ns())
         self.phase_event_queue.put(
             json.dumps(event, separators=(",", ":"), sort_keys=True))
 
@@ -1170,6 +1305,12 @@ class OpenPlaneExcitation:
                 phase.throttle_norm
                 if phase.throttle_mode in ("fixed", "excitation") else None
             ),
+            "throttle_profile": phase.throttle_profile,
+            "throttle_start_norm": phase.throttle_start_norm,
+            "throttle_end_norm": phase.throttle_end_norm,
+            "throttle_stimulus_delay_s": phase.throttle_stimulus_delay_s,
+            "throttle_ramp_duration_s": phase.throttle_ramp_duration_s,
+            "condition_pair_id": phase.condition_pair_id,
             "speed_error_median_mps": self._percentile(speed_errors, 0.5),
             "speed_error_p95_mps": self._percentile(speed_errors, 0.95),
             "steering_error_p95_rad": self._percentile(steering_errors, 0.95),
@@ -1228,6 +1369,7 @@ def main() -> int:
                                                "transient_transition_4mps",
                                                "transient_transition_4mps_fixedthrottle",
                                                "transient_transition_dwell_4mps_fixedthrottle",
+                                               "throttle_slew_pair",
                                                "full_input_excitation", "grid"),
                         default="high_angle_boundary",
                         help="isolated profiles recover near-straight speed/yaw/lateral-velocity state before each probe")
@@ -1255,9 +1397,13 @@ def main() -> int:
                                  "isolated_transition_support",
                                  "isolated_transition_bridge",
                                  "isolated_transition_low_support",
-                                 "isolated_transition_full_surface")
+                                 "isolated_transition_full_surface",
+                                 "throttle_slew_pair")
                 and not 3.0 <= args.transition_speed_mps <= 9.0)):
         parser.error("--transition-speed-mps must be in [3, 9] for transition profiles")
+    if (args.profile == "throttle_slew_pair"
+            and args.transition_speed_mps not in (4.5, 6.5)):
+        parser.error("throttle_slew_pair supports only 4.5 or 6.5 m/s")
     if (not math.isfinite(args.speed_hold_kp) or args.speed_hold_kp < 0.0 or
             not math.isfinite(args.speed_hold_ki) or args.speed_hold_ki < 0.0 or
             not math.isfinite(args.speed_median_gate_mps) or

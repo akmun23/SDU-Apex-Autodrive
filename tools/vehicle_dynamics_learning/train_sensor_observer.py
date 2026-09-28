@@ -127,6 +127,38 @@ def _sample_batch(data: dict[str, Any], groups: dict[int, list[tuple[int, int]]]
     return np.asarray(inputs, dtype=np.float32), np.asarray(targets, dtype=np.float32)
 
 
+def _training_weights(inputs: np.ndarray, targets: np.ndarray,
+                      mode: str, boost: float) -> np.ndarray:
+    """Weight nonlinear training intervals without changing model inputs.
+
+    The state labels are used only to select/weight examples during training;
+    they are never supplied to the observer. Steering/encoder residual
+    thresholds target measured high-response and wheel-spin regimes.
+    """
+    weights = np.ones(inputs.shape[:2], dtype=np.float32)
+    if mode == "uniform":
+        return weights
+
+    speed = np.hypot(targets[:, :, 0], targets[:, :, 1])
+    abs_steer = np.abs(inputs[:, :, 0])
+    encoder_mean = np.mean(inputs[:, :, 2:4], axis=2)
+    encoder_residual = np.abs(encoder_mean - targets[:, :, 0])
+    high_response = (((abs_steer >= 0.10) & (speed >= 5.5))
+                     | (abs_steer >= 0.30))
+    encoder_mismatch = ((encoder_residual >= 0.50)
+                        & (np.abs(inputs[:, :, 1]) >= 0.15))
+    if mode == "high_response":
+        selected = high_response
+    elif mode == "encoder_mismatch":
+        selected = encoder_mismatch
+    elif mode == "combined":
+        selected = high_response | encoder_mismatch
+    else:
+        raise ValueError(f"unknown training weight mode: {mode}")
+    weights[selected] = boost
+    return weights
+
+
 def _eval_windows(groups: dict[int, list[tuple[int, int]]],
                   window_steps: int, max_windows: int
                   ) -> dict[int, list[tuple[int, int]]]:
@@ -293,6 +325,31 @@ def _score(torch, model, arrays, sensor_mean, sensor_scale,
             "conditioning_uses_offline_truth_only_for_evaluation": True,
             "cells": cells,
         }
+        encoder_residual = np.abs(sensor_u - truth_uv_np[:, :, 0])
+        residual_edges = (0.0, 0.25, 0.50, 1.0, float("inf"))
+        residual_bin = np.digitize(encoder_residual, residual_edges[1:-1])
+        residual_cells = {}
+        for i in range(len(residual_edges) - 1):
+            selected = residual_bin == i
+            count = int(np.count_nonzero(selected))
+            if not count:
+                continue
+            observer_error = predicted_np[selected] - truth_uv_np[selected]
+            baseline_error = np.column_stack((
+                sensor_u[selected] - truth_uv_np[:, :, 0][selected],
+                -truth_uv_np[:, :, 1][selected]))
+            residual_cells[f"abs_encoder_minus_u_{residual_edges[i]}_"
+                           f"{residual_edges[i + 1]}_mps"] = {
+                "scored_samples": count,
+                "observer_rmse_u_v_mps": np.sqrt(
+                    np.mean(observer_error ** 2, axis=0)).tolist(),
+                "encoder_zero_v_baseline_rmse_u_v_mps": np.sqrt(
+                    np.mean(baseline_error ** 2, axis=0)).tolist(),
+            }
+        result["rear_encoder_residual_rmse"] = {
+            "is_a_proxy_not_a_direct_contact_slip_measurement": True,
+            "cells": residual_cells,
+        }
     return result
 
 
@@ -340,11 +397,19 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         model.train()
         arrays = _sample_batch(data, train_groups, args.batch_size,
                                window_steps, rng)
+        raw_inputs, raw_targets = arrays
+        weights = _training_weights(raw_inputs, raw_targets,
+                                    args.weight_mode,
+                                    args.hard_region_weight)
         x, y = _tensor_batch(torch, arrays, sensor_mean, sensor_scale,
                              truth_mean, truth_scale, device)
         prediction = model(x)[:, args.burn_in:]
         target = y[:, args.burn_in:]
-        loss = nn.functional.smooth_l1_loss(prediction, target, beta=0.05)
+        pointwise_loss = nn.functional.smooth_l1_loss(
+            prediction, target, beta=0.05, reduction="none").mean(dim=-1)
+        weight_tensor = torch.as_tensor(
+            weights[:, args.burn_in:], dtype=torch.float32, device=device)
+        loss = torch.sum(pointwise_loss * weight_tensor) / torch.sum(weight_tensor)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
@@ -371,7 +436,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "burn_in": args.burn_in, "score_steps": args.score_steps,
                 "sensor_feature_names": data["sensor_feature_names"],
                 "target_names": list(LEARNED_STATE_NAMES),
-                "training_runs": [data["run_ids"][run] for run in sorted(train_groups)],
+                "weight_mode": args.weight_mode,
+                "hard_region_weight": args.hard_region_weight,
+                "training_runs": [str(data["run_ids"][run])
+                                  for run in sorted(train_groups)],
             })
         else:
             stale += 1
@@ -407,6 +475,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                           "learning_rate": args.learning_rate,
                           "time_budget_hours": args.time_budget_hours,
                           "max_steps": args.max_steps, "seed": args.seed,
+                          "weight_mode": args.weight_mode,
+                          "hard_region_weight": args.hard_region_weight,
                           "optimizer_steps": step, "best_step": best_step},
         "best_validation": _score(
             torch, model, val_arrays, sensor_mean, sensor_scale,
@@ -453,6 +523,12 @@ def main() -> int:
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=1.0e-5)
+    parser.add_argument("--weight-mode",
+                        choices=("uniform", "high_response", "encoder_mismatch", "combined"),
+                        default="uniform",
+                        help="optionally emphasize high-response or encoder/body-speed-residual intervals")
+    parser.add_argument("--hard-region-weight", type=float, default=4.0,
+                        help="relative loss weight for selected intervals (default: 4)")
     parser.add_argument("--seed", type=int, default=20260930)
     parser.add_argument("--score-test", action="store_true",
                         help="score named whole-run holdouts after training")
@@ -462,6 +538,8 @@ def main() -> int:
     if (args.time_budget_hours <= 0.0 or args.max_steps < 1
             or args.burn_in < 1 or args.score_steps < 1):
         parser.error("time, steps, burn-in, and scored length must be positive")
+    if not math.isfinite(args.hard_region_weight) or args.hard_region_weight < 1.0:
+        parser.error("--hard-region-weight must be finite and at least 1")
     if args.score_final_test:
         args.score_test = True
     if args.output_dir.exists():
