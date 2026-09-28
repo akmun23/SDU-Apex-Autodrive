@@ -1,6 +1,311 @@
 # Engineering state: open-plane dynamics identification
 
-Updated: 2026-09-27
+Updated: 2026-09-28
+
+## 2026-09-28 observer/nonlinear-dynamics result
+
+The exact-source sensor-odometry replay (encoder + IMU only, joined by source
+stamp) matches the 12-lap practice baseline's recorded `/odom` exactly:
+forward-speed RMSE against bridge truth is `0.139 m/s`, and lateral-speed
+RMSE is `0.009 m/s` (the bag has one timing-fault flag, retained as a caveat).
+It fails on broad open-plane full-input captures: the two training runs have
+`u` biases of `+12.35/+13.41 m/s` and RMSE `21.49/20.58 m/s`; the earlier
+independent holdout has `+8.56 m/s` bias and `13.12 m/s` RMSE. A new
+independent full-input run confirms the failure: `+13.81 m/s` bias,
+`20.65 m/s` `u` RMSE, and `0.92 m/s` `v` RMSE, with exact gyro yaw rate. The
+open-plane bags do not contain a team `/odom` reference, so these are
+current-source raw-sensor replays, not recorded-output equivalence checks.
+Do not interpret small KNN next-increment errors as full state accuracy; they
+omit current observer-to-truth error.
+
+The same-stamp encoder/truth analysis finds a repeatable throttle-dependent
+wheel-spin surface: at `|steer|>=0.30`, throttle `>=0.30`, and truth speed below
+`6 m/s`, rear surface speed exceeds the ground-truth contact speed by median
+`7.75–8.05 m/s` in both training runs and the independent holdout. At throttle
+`<=0.15`, the high-steer median residual is near zero. This is not a constant
+wheel-radius error. Under spin the body `u` can become negative while unsigned
+wheel speed remains high; a rejected burst can then leave odometry integrating
+positive IMU acceleration with stale speed.
+
+The global turn lateral-acceleration observer option is rejected by real-bag
+replay: it lowers open-plane holdout `u` RMSE `13.12 -> 5.61 m/s` but worsens
+`v` RMSE `0.88 -> 6.71 m/s`, and on practice worsens `v` RMSE `0.009 -> 0.899
+m/s`. No runtime parameter changed. Next identify a bounded, causal wheel-spin
+measurement model and separate longitudinal turn dynamics from lateral
+velocity estimation; require independent full-input holdout and practice
+transfer before implementation.
+
+Detailed evidence, exact run paths, and the evaluator caveats are in
+[`OPEN_PLANE_PER_WHEEL_DYNAMICS.md`](OPEN_PLANE_PER_WHEEL_DYNAMICS.md).
+
+## Raw receipt-time actuator/body re-evaluation — 2026-09-28
+
+The earlier actuator fit joined Float32 command topics to odometry-grid
+samples. Those command messages have no source header, so nearest-neighbor
+alignment obscured their independent receipt timing. That earlier timing
+interpretation—including treating 3.2 rad/s as the selected steering-rate
+limit—is superseded. Re-fitting raw per-topic receipt-time streams with
+causal zero-order-hold command lookup selects a 25 ms grid delay plus a 50 ms
+first-order steering lag (equal-run training RMSE `0.02380 rad`) and a 25 ms
+grid delay plus zero-order throttle response (RMSE `0.01453`). These are
+receipt-clock surrogate choices, not identified physical delays: the command
+streams lack source timestamps, and one training run has a 106 ms maximum
+command gap despite a roughly 39.5 Hz average rate. Large-input phase-edge
+errors remain regime dependent; neither scalar candidate is a universal
+actuator law.
+
+With those training-selected actuator candidates, the history-conditioned
+nonlinear-`u/r` plus affine-`v` model was re-evaluated using the same whole-run
+training split and the existing practice/open-plane holdouts. On the 16-lap
+practice holdout, predicting actuators rather than replaying measured future
+feedback changed 750 ms `u/v/r` RMSE from `0.2103/0.0502/0.3398` to
+`0.2049/0.0476/0.3337`; the paired yaw change was `-0.0066 rad/s` with 95%
+cluster interval `[-0.0150,+0.0001]`, so it is not a demonstrated yaw gain.
+On the open-plane transfer, the corresponding hybrid rollout changed from
+`0.8126/0.7871/0.9800` to `0.8099/0.7899/0.9490` at 750 ms, with only
+`482/551` supported candidate starts. The hybrid is materially better than
+the affine reference in forward speed and yaw, but the remaining yaw error,
+support loss, and domain sensitivity reject promotion as a complete offline
+plant or MPC model. These previously inspected bags are a corrected analysis,
+not a fresh final holdout.
+
+The evaluator now excludes a rollout when its delayed causal command is
+missing or older than the same 120 ms limit used during capture alignment; it
+does not substitute a future sample. A randomized full-input run on the pinned
+Explore player completed 552/552 phases with zero collisions, timing faults,
+invalid phases, or abort. The whole bag contains a 111.8 ms core-stream gap
+before the first phase, during unassigned bridge/player warm-up. Across the
+active phase windows, core streams average 39.966 Hz (p95 gap 25.76 ms,
+maximum 49.21 ms) and command streams average 40.000 Hz (maximum gap 27.37
+ms). The evaluator now applies rate/gap limits to the phase windows used for
+fitting while continuing to report the whole-bag warm-up gap. The run is a
+valid active-phase holdout at
+`live_runs/openplane_full_input_validation_20260928/run/run_0.db3`; its frozen
+model score is complete. The truth-state nonlinear spline cuts 750 ms
+recursive `u/v/r` RMSE from `1.819/1.172/1.837` to `0.570/0.971/0.847`, but
+only 508/552 starts are supported. The hybrid nonlinear-`u/r` plus affine-`v`
+model scores `0.933/0.890/0.974` on 487/552 starts. Predicting actuators from
+commands barely changes the hybrid at 750 ms (`0.934/0.891/0.975` to
+`0.937/0.890/0.995` on matched starts). This points away from command lag as
+the main remaining error. Full nonlinear one-step yaw error is still worse
+than affine (`0.158` vs `0.143 rad/s`); the recursive gain does not make this
+a validated free-running plant. No runtime MPC/odometry/localization or
+simulator physics changed.
+
+## Causal-history sufficiency and domain-transfer result — 2026-09-28
+
+The whole-bag feature ladder was run on the new holdout using exact-source
+sensor-odometry replays from encoders and IMU as the state feature. The capture
+contains 552/552 valid excitation phases, zero collisions and timing faults,
+and phase-only cadence of 39.966 Hz for core streams / 40.000 Hz for commands.
+Training remains the two earlier whole runs; this holdout was not used for
+fitting.
+
+The oracle-state M5 conditional one-step `u/v/r` increment RMSE is
+`0.0169/0.0171/0.0406`; replacing current truth state with replayed observer
+state increases it to `0.0401/0.0415/0.0878` (about 2.4x). On replayed states,
+causal history improves M0-to-M5 increments from
+`0.1273/0.0915/0.1572` to `0.0401/0.0415/0.0878`, with 98.1% cross-run joint
+support. These are conditional one-step metrics, not recursive simulation or
+absolute state accuracy.
+
+A 32-neighbor supervised state-correction diagnostic trained on open-plane
+runs 1–2 reduces the new open-plane holdout's observer `u/v/r` RMSE from
+`19.70/0.93/0.00` to `0.92/0.26/0.11`; its forward-speed absolute-error p95
+is still `1.94 m/s`. It fails the independent practice transfer: on
+`amcl_startup_lock010b_20260922`, replayed observer `u/v/r` RMSE is
+`0.126/0.011/0.000`, while the open-plane-trained M5 KNN correction gives
+`1.539/0.013/0.271`; nominal feature support is 98.4%. The practice bag's
+historical `/odom` differs from this exact-source replay (`u` RMSE
+`0.082 m/s`, maximum `1.022 m/s`, p95 aligned-pose residual `0.785 m`), so
+this is a counterfactual current-source replay, not validation of that old
+controller's recorded estimate. The correction is rejected: high nominal
+feature support did not prevent large practice degradation.
+
+The evidence separates three effects: state/history helps predict nonlinear
+transitions; the open-plane observer speed is grossly wrong under wheelspin;
+and a generic open-plane KNN correction is unsafe to transfer to practice. Do
+not deploy it. Next model an explicit wheel-spin/traction regime with causal
+encoder, throttle, steering, and IMU history; choose model structure using
+training-run splits and require a fresh whole-run holdout plus practice
+transfer. Per-wheel contact forces and normal-load/suspension states remain
+unobserved; aggregate dynamics or wheel-spin state is identifiable only to
+the extent that independent runs support it.
+
+As a feature ablation, M6 adds causal body-frame IMU acceleration, 100/250 ms
+acceleration means, 250 ms rear slip-proxy means, and 100 ms slip-proxy rates.
+It reduces M5 one-step transition increments on both open-plane leave-one-run-
+out folds: `u/v/r` RMSE changes `.0581/.0531/.1057 -> .0382/.0409/.0807` and
+`.0401/.0409/.0891 -> .0329/.0351/.0775`. On the new open-plane validation
+run, it changes `.0401/.0415/.0878 -> .0332/.0352/.0769`; on the practice
+transfer screen, `.0520/.0036/.0751 -> .0393/.0041/.0679`. This supports M6
+as a causal observer-state transition feature set, not a complete plant: the
+M6 oracle-state result is worse than M5 in `v/r`, and KNN absolute-state
+correction still degrades practice (`u/v/r .126/.011/0 -> 1.051/.147/.457`).
+M7 adds the rear slip-proxy acceleration minus IMU-`ax` residual; its changes
+are mixed and it is not selected. Both feature additions remain offline
+diagnostics pending a fresh full-input holdout.
+
+## Command-to-feedback actuator screen and coupled body rollout — 2026-09-28
+
+Added [`evaluate_open_plane_actuator_dynamics.py`](../../tools/evaluate_open_plane_actuator_dynamics.py)
+to fit causal steering/throttle response candidates using the two complete
+full-input training runs, with whole-run open-plane and practice holdouts. The
+best fit families were a 25 ms delay, 25 ms first-order lag, and 3.2 rad/s
+steering-rate limit (steering one-step train RMSE `0.0343 rad`) and a 25 ms
+delay/25 ms first-order throttle lag (train RMSE `0.0474` normalized
+throttle). This is an actuator surrogate, not a wheel/tire model.
+
+The candidate was then coupled to the nonlinear-u/r plus affine-v body model
+and recursively rolled out on the untouched track bag. At 750 ms, replacing
+measured future actuator feedback with predicted actuator state raised matched
+holdout RMSE by `+0.0834 m/s` in `u` (whole-lap bootstrap 95% CI
+`[+0.0621,+0.1065]`, 0/16 lap clusters favored prediction), `+0.0017 m/s` in
+`v` (`[+0.0009,+0.0027]`, 3/16 favored), and `+0.1522 rad/s` in yaw rate
+(`[+0.0925,+0.2181]`, 2/16 favored). At 250 ms the corresponding pooled
+forward/yaw errors also rose (`0.1535 -> 0.2364 m/s`, `0.3476 -> 0.5890
+rad/s`). Thus a plausible one-step actuator fit does not yet produce a
+reliable free-running plant, especially for yaw. It remains rejected for
+MPC/offline-simulator promotion; this result localizes a material missing
+command-to-actuator/body coupling but does not identify its physical cause.
+
+The body hybrid still strongly outperforms the affine reference on that track
+holdout, so this does not erase the identified nonlinear body response. On the
+independent open-plane transfer, however, even the measured-actuator hybrid
+has 750 ms `u/v/r` RMSE `0.724/0.687/0.932`; predicted actuators change this to
+`0.801/0.647/0.832`. State-conditioned transfer is therefore not yet a
+validated universal plant. Next work should compare per-lap yaw residuals
+against steering-feedback prediction error and steering-rate/reversal regime,
+using training runs for any model selection and preserving complete runs as
+holdouts. Do not tune MPC weights or promote parameters from this result.
+
+No simulator physics, competition runtime, MPC, odometry, localization, or
+topic policy changed. Public-source internal wheel labels remain excluded
+because that player did not pass pinned-player motion equivalence; exact
+per-wheel contact/force attribution still needs instrumentation that matches
+the pinned binary.
+
+### Throttle-versus-steering causal attribution
+
+The body evaluator now supports predicting one actuator channel while
+replaying measured feedback for the other. On the same 16 complete-lap
+clusters, steering-only prediction is neutral at 750 ms (`u 0.2321 -> 0.2322`,
+`v 0.0558 -> 0.0553`, `r 0.4378 -> 0.4391`); the yaw RMSE difference is
+`+0.0005 rad/s` with a paired interval spanning zero. Throttle-only prediction
+reproduces essentially the full failure (`u 0.2315 -> 0.3158`, `v 0.0564 ->
+0.0584`, `r 0.4423 -> 0.5917`). Its 750 ms complete-lap mean RMSE increases
+are `+0.0834 m/s` forward speed (`[+0.0619,+0.1065]`) and `+0.1476 rad/s`
+yaw (`[+0.0881,+0.2135]`); both intervals exclude zero. The combined model
+is nearly identical to throttle-only. Thus the steering lag hypothesis is
+not the limiting factor in this test.
+
+On the 367 matched track rollouts, throttle-only body error is most severe
+after command cuts: 103 windows with a throttle drop of at least `0.10` had
+750 ms `u` RMSE `0.258 -> 0.422 m/s` and yaw RMSE `0.469 -> 0.881 rad/s`.
+Across 206 windows whose command reached zero, yaw RMSE changed `0.481 ->
+0.712 rad/s`; at initial speed at least 6 m/s (95 windows) it changed `0.246
+-> 0.786 rad/s`. In the 150 windows whose peak steering stayed below `0.15`
+rad, yaw changed `0.186 -> 0.625`; by contrast, the 125 windows reaching
+`|steer| >= 0.30` changed `0.665 -> 0.676`. The per-step throttle-feedback
+surrogate error was `0.0223` normalized overall and `0.0387` after command
+cuts. These descriptive bins indicate a throttle/braking-history interaction,
+not a high-angle-only actuator problem. They do not distinguish an
+inadequate throttle actuator equation from a body model that overstates
+throttle's effect on yaw; the rollout is ground-truth-state-conditioned at
+each start and still is not a free-running simulator.
+
+Adding the independent `amcl_startup_lock010b` run to actuator training did
+not change the selected throttle equation (`25 ms` delay plus `25 ms`
+first-order lag). Although its actuator-only fit improved, coupling that
+unchanged equation to the body model reproduced the same track error. On the
+independent open-plane holdout it raised 750 ms forward RMSE `0.724 -> 0.777
+m/s` and yaw `0.932 -> 0.940 rad/s`, with lateral error nearly unchanged
+(`0.687 -> 0.686 m/s`). Do not tune the two lag constants from the already
+inspected track holdout. The next model needs a causal throttle-cut/braking
+state or stronger validation of the throttle-to-yaw transition, selected on
+training-run splits and then tested on a fresh complete run.
+
+## Whole-lap uncertainty for observer-state body-model holdouts — 2026-09-28
+
+Recursive rollout comparisons on the two clean 17-lap high-speed practice
+runs now use lap-counter clusters rather than treating each overlapping
+0.5-second rollout start as independent. For each lap-counter cluster,
+per-axis RMSE is computed first; 10,000 paired bootstrap resamples of those
+clusters produce confidence intervals for candidate-minus-baseline RMSE.
+Each bag exposes counter values 0–17. The bootstrap excludes the run-up/first
+counter value and the terminal partial-lap value, leaving 16 complete-lap
+clusters per bag. These are still repeated laps within only two independent
+simulator runs, not 32 independent run-level replications.
+
+With open-plane train runs 1–2 plus one practice run used for fitting, and the
+other complete practice run held out, the hybrid nonlinear-`u/r` plus
+affine-`v` candidate improved 750 ms pooled RMSE in both directions:
+
+| Held-out practice bag | Affine → hybrid `u` | `v` | yaw rate |
+| --- | ---: | ---: | ---: |
+| `mpc_brake_rejection_20260922` | 3.759 → 0.726 m/s | 0.130 → 0.077 m/s | 1.144 → 0.754 rad/s |
+| `amcl_startup_lock010b_20260922` | 3.642 → 0.743 m/s | 0.127 → 0.073 m/s | 1.131 → 0.738 rad/s |
+
+The paired per-cluster mean RMSE changes (hybrid minus affine) were:
+
+| Held-out practice bag | `u` mean Δ [95% CI] | `v` mean Δ [95% CI] | yaw-rate mean Δ [95% CI] |
+| --- | ---: | ---: | ---: |
+| `mpc_brake_rejection_20260922` | −3.017 [−3.175, −2.859] m/s | −0.0518 [−0.0558, −0.0475] m/s | −0.3895 [−0.4052, −0.3749] rad/s |
+| `amcl_startup_lock010b_20260922` | −2.938 [−3.097, −2.774] m/s | −0.0539 [−0.0581, −0.0493] m/s | −0.3935 [−0.4143, −0.3719] rad/s |
+
+All 16 complete-lap clusters favored the hybrid on all three outputs in both
+folds. At 25 ms, however, the hybrid regressed forward-velocity RMSE in both
+folds; its improvement is concentrated at 125–750 ms.
+The all-nonlinear `v` channel remains unstable and is rejected: by 750 ms it
+increases lateral RMSE from about 0.06 to 0.83–0.87 m/s on the matched
+supported starts.
+
+This is promising, but **not a promotion result**. Both practice bags are
+historical, and there are only two independent practice runs. Open-plane
+observer-state transfer remains physically unusable: on the untouched
+full-input holdout, `u` RMSE is still about 14.9 m/s at 750 ms. The production
+observer itself has 13.1 m/s forward-state RMSE on that aggressive open-plane
+run, versus about 0.14 m/s on practice, so the state coordinate changes
+quality drastically by domain. A track-only fit/whole-run test was attempted
+but correctly stopped at the evaluator's 5,000-transition minimum (3,910
+available); the minimum was not lowered. Collect another clean independent
+practice run before claiming track-only model transfer. No runtime MPC,
+odometry, localization, or simulator behavior changed.
+
+## 2026-09-28 nonlinear plant / observer follow-up
+
+A causal rear-encoder-slip-threshold gate around a supervised KNN speed
+correction did not generalize robustly: the `0.5 m/s` gate changed independent
+open-plane holdout `u` RMSE only `13.12 -> 12.95 m/s`, while leaving most rows
+uncorrected; leave-one-training-run-out results were essentially baseline.
+Pure signed integration of the production IMU `ax`, even after estimating a
+startup stationary bias, diverged over the long excitation runs (holdout
+`u` RMSE about `616 m/s`) and also regressed the practice baseline (about
+`3.84 m/s` versus `0.12 m/s`). Both are rejected as observer candidates; no
+runtime code changed.
+
+Separately, the truth-state-conditioned nonlinear body spline is a useful
+offline plant candidate, not a deployable odometry model. Fitted on complete
+open-plane runs 1–2 and recursively rolled from each held-out phase's true
+initial state (no later truth injection), its 50 ms command-aligned holdout
+750 ms `u/v/r` RMSE was `0.66/0.98/0.85` with 543/552 supported rollouts;
+affine was `1.99/1.12/1.94`. On the practice 12-lap bag, a corrected evaluator
+scored 144 windows across all five continuous segments. At 750 ms the same
+open-plane plant gave `0.54/1.20/0.89` with 100% marginal feature-range
+support. This is a material transfer failure, and the bag only reached
+`0.282 rad` steering (one timing-fault flag), so it says nothing about high-
+steering track transfer.
+
+The transfer attempt exposed and fixed an evaluator bug: unphased runs were
+being scored only at the beginning of the first continuous segment. Recursive
+practice rollouts now start every 0.5 s within every continuous segment;
+phase-labeled excitation runs still start at each phase boundary. The new
+practice score is consequently a whole-run transfer screen, not a five-point
+sample. The plant remains offline-only, conditions on measured actuator
+feedback, and still lacks actuator/wheel-state simulation and a steering-
+Jacobian acceptance result. Next fit practice-conditioned data with a separate
+whole-run practice holdout while retaining the independent open-plane holdout;
+do not promote this spline to MPC or tune weights against it yet.
 
 ## 2026-09-26 frame audit — applied to development analyses
 
@@ -19,6 +324,29 @@ the predeclared 5-horizon rollout gate. The guide-informed four-wheel force
 model fits held-out aggregate lateral force (1.181 N at 4 m/s transition) but
 cannot produce a physically usable, speed-consistent yaw/lateral rollout.
 Reject it for MPC promotion. The detailed results and limitations are in
+[`OPEN_PLANE_PER_WHEEL_DYNAMICS.md`](OPEN_PLANE_PER_WHEEL_DYNAMICS.md).
+
+## Whole-run state/history sufficiency — 2026-09-27
+
+Added `tools/analyze_vehicle_state_sufficiency.py` for a nonlinear conditional
+transition ablation with whole-run splits and cross-run joint-support
+diagnostics. Training uses full-input runs 1–2. Independent 3/4/5 m/s holds
+show that adding current `v,r` materially reduces lateral/yaw one-step error;
+throttle feedback helps `u`; rear-wheel slip proxies do not consistently help;
+actuator/history features have mixed, speed-dependent yaw effects. This is
+evidence that body state matters and that hidden/history state may matter in
+some regimes, not proof of one global latent state.
+
+A clean 12-lap practice holdout had zero collisions/faults and 39.95 Hz core
+streams, but max steering was only 0.2833 rad, so it does not validate the
+high-angle region. A different practice bag was rejected for a recorded
+simulator socket-loss timing fault. The diagnostic currently conditions on
+the simulator-truth `/autodrive/roboracer_1/odom` stream for both state and
+target. It does not read `/ips` or transform topics, but the current-state
+features are oracle truth rather than team `/odom` or legal sensor estimates.
+It is a one-step KNN probe, not a differentiable or recursively validated
+simulator. Keep it out of MPC.
+Detailed metrics, exact splits, and caveats are in
 [`OPEN_PLANE_PER_WHEEL_DYNAMICS.md`](OPEN_PLANE_PER_WHEEL_DYNAMICS.md).
 
 ## Fixed-speed experiment loop — P=0.04 validated at 3–4.5 m/s — 2026-09-27
