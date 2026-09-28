@@ -2,6 +2,130 @@
 
 Updated: 2026-09-28
 
+## Offline nonlinear model-learning checkpoint — 2026-09-28
+
+This is the current handoff point for the open-plane dynamics work. The main
+progress is not a deployed controller change: it is a clean separation of
+sensor-state estimation from future plant prediction, plus a run-grouped
+dataset and two recurrent offline experiments. No simulator physics, MPC,
+odometry, AMCL/EKF, or competition runtime topics/configuration were changed.
+Runtime topic policy still passes.
+
+### Dataset and reproducibility
+
+Added `tools/vehicle_dynamics_learning/prepare_dataset.py`,
+`train_sensor_observer.py`, and `train_nssm.py`. The exporter now preserves
+causally receipt-time-aligned IMU `ax`, `ay`, and yaw-rate along with
+encoder-derived rear wheel-surface speeds and actuator feedback/commands.
+Schema v2 keeps two separate arrays: `frames` for oracle-state plant prediction and
+`sensor_frames` plus a validity mask for causal sensor-only state estimation.
+There are 405,995 samples in 6,173 valid sequences from 84 parsed bags; 86
+bags were found and two could not be parsed because they lack steering and
+throttle command topics (`openplane_excitation_train_20260926_codex1` and
+`openplane_isolated_force_3mps_20260926`). Sensor rows are valid for 99.9996%
+of training samples and all validation/named-test/final-test samples. Missing readings are
+masked, not invented. Splits are by whole run; 64 training runs have usable
+windows, one validation run, seven scoreable named holdout runs, and one
+designated final run. The final run has since been inspected once, so a new
+unseen run is needed for any future final evaluation.
+
+The manifest shows good but incomplete excitation coverage: 519/660
+speed × signed-steering × throttle cells are represented, but only 270 cells
+have at least 100 samples from at least two runs. Training reaches about
+`8.41 m/s` and the steering limit (`±0.524 rad`); the very fastest and
+combined high-demand regions remain comparatively sparse.
+
+Reproducible source and commands are in
+[`tools/vehicle_dynamics_learning/README.md`](../../tools/vehicle_dynamics_learning/README.md).
+Persistent local copies of the generated bundles/checkpoints/reports are under
+`live_runs/derived_dynamics_learning_20260928/` (ignored by git, not source
+code). Raw source bags remain unchanged. The original scratch training
+environment and smoke-test outputs were removed to reclaim temporary storage.
+Key artifacts are `sensor_dataset/openplane_dynamics.npz` plus its manifest,
+`sensor_observer/sensor_observer.pt` plus `observer_report.json`, and
+`oracle_plant/member_00.pt` plus `training_report.json`. The oracle model's
+exact original training bundle is retained in `oracle_dataset/`.
+
+### Sensor-only current-state observer
+
+The sensor observer takes only current/past competition-available sensor,
+actuator-feedback, command, and `dt` samples. It has no truth/body-state input;
+offline bridge state is used only for labels. IMU yaw rate is passed through
+directly: receipt-time-aligned labels match it essentially exactly in ordinary
+samples (zero p50/p95/p99 error; rare outliers remain in the source data).
+The GRU therefore estimates `u` and `v`, rather than relearning yaw.
+
+On its full-input validation run, 32-update (about 0.8 s) scoring gives
+`u/v/r` RMSE `0.109/0.071/0.00059` (`m/s, m/s, rad/s`), compared with
+`4.017/0.983/0.00059` for rear-encoder mean / zero lateral speed / direct
+gyro.
+All seven scoreable named whole-run holdouts beat that baseline on `u` and
+`v`; worst held-out `u/v` RMSE is `0.166/0.231 m/s`. Across 214 overlapping
+high-demand windows on three bags, the `8+ m/s`,
+`|steer| >= 0.42 rad`,
+throttle `>= 0.3` stratum gives `u/v` RMSE `0.099/0.005`, versus
+`3.650/0.052` for that simple baseline. Window counts are not independent
+trials, and the high-demand evidence is from only three runs.
+
+One separate full-input capture, `openplane_full_input_validation_20260929`,
+was scored once after fitting: observer `u/v/r` RMSE `0.133/0.117/0.00027`
+versus `3.925/1.109/0.00027` for baseline. It was held out from training but
+has now been inspected; do not treat it as a future blind test. These are
+offline open-plane labels, not practice-track transfer or demonstrated
+production odometry accuracy.
+
+### Oracle-current-state plant benchmark
+
+`train_nssm.py` is a different experiment. Its 16-step history includes
+offline true body state; at rollout it predicts 32 steps recursively while
+receiving logged future commands. It is not a legal-sensor observer and does
+not prove the simulator's hidden per-wheel forces. The initial 15-minute
+experiment completed one of five requested ensemble members (per-member
+budget allocation has since been fixed), with best validation normalized RMSE
+`0.137`. On named open-plane holdouts it beat a trend baseline at 750 ms;
+individual run results are in its saved report. The one-member checkpoint has
+no ensemble uncertainty, so it is only evidence that the model family merits
+further evaluation, not a deployable free-running plant. The 20260929
+designated final run was scored once in this experiment too.
+
+### What is not resolved / next continuation
+
+Practice transfer is still the gating evidence. Three possible 12-lap practice
+bags were extracted successfully: `practice_current_baseline_20260926_codex1`,
+`practice_speed_headroom_12lap_20260927_01`, and
+`practice_yaw_model_calibrated_12lap_20260926`. Each has a `bridge_timing_fault`
+and fails the strict stream-quality gate; all three max steering values are
+only about `0.28 rad`, so they would not validate the high-angle regime anyway.
+The gate was not loosened and no transfer score is claimed. Do not use these
+bags as clean evidence without locating the exact fault interval and
+pre-registering a defensible active-window exclusion rule. Search the
+remaining practice bags for a clean run with meaningful high-steer coverage.
+
+Resume in this order:
+
+1. Inspect exact timing-fault intervals and identify clean, in-scope practice
+   bags without relaxing collision/cadence requirements. Score the frozen
+   observer on complete independent practice runs, with a separately reported
+   high-steer/high-speed stratum and temporal reset/warm-up behavior.
+2. Compare observer `u/v` against the production sensor odometry and bridge
+   labels on identical timestamps. Do not deploy the learned observer merely
+   because it wins against the crude encoder/zero-`v` baseline.
+3. If state-estimation transfer is useful, evaluate the oracle plant separately
+   against existing empirical models at high steering and on new complete-run
+   holdouts. Complete independent ensemble members, check free recursive
+   stability and uncertainty calibration; do not use the consumed 20260929
+   final run for model selection.
+4. Only after those gates, consider an isolated runtime integration or MPC
+   trial. Keep competition-topic restrictions intact and validate any behavior
+   change in the competition simulator. No weights/raceline should be tuned
+   from observer label fit alone.
+
+The adaptive-model handoff's useful conclusion remains: aggregate predictive
+state models are identifiable from these signals more readily than individual
+wheel forces; teacher/observer/plant roles must remain distinct; evaluate by
+whole runs and then practice transfer. No additional repeated open-plane
+excitation was run for this checkpoint.
+
 ## 2026-09-28 observer/nonlinear-dynamics result
 
 The exact-source sensor-odometry replay (encoder + IMU only, joined by source

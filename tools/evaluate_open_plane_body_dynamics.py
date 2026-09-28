@@ -68,6 +68,7 @@ class MotionSample:
     actuator_history: np.ndarray | None = None  # rates and current commands
     receipt_ns: int = 0  # odometry receipt-time coordinate for raw-stream joins
     imu_acceleration_mps2: np.ndarray | None = None  # causal body-frame [ax, ay]
+    imu_yaw_rate_rps: float | None = None  # causal body-frame gyro z
 
 
 @dataclass(frozen=True)
@@ -232,16 +233,22 @@ def load_capture(path: Path) -> Capture:
             connection, topics, THROTTLE_COMMAND)
         imu_ax: list[analysis.ScalarRow] = []
         imu_ay: list[analysis.ScalarRow] = []
+        imu_wz: list[analysis.ScalarRow] = []
         for receipt_ns, message in analysis._messages(
                 connection, topics, analysis.IMU):
             ax = float(message.linear_acceleration.x)
             ay = float(message.linear_acceleration.y)
-            if math.isfinite(ax) and math.isfinite(ay):
-                source_ns = analysis._stamp_ns(message.header.stamp)
+            wz = float(message.angular_velocity.z)
+            source_ns = analysis._stamp_ns(message.header.stamp)
+            if math.isfinite(ax):
                 imu_ax.append(analysis.ScalarRow(receipt_ns, source_ns, ax))
+            if math.isfinite(ay):
                 imu_ay.append(analysis.ScalarRow(receipt_ns, source_ns, ay))
+            if math.isfinite(wz):
+                imu_wz.append(analysis.ScalarRow(receipt_ns, source_ns, wz))
         imu_ax_times = [row.receipt_ns for row in imu_ax]
         imu_ay_times = [row.receipt_ns for row in imu_ay]
+        imu_wz_times = [row.receipt_ns for row in imu_wz]
 
         def read_encoder(topic: str) -> list[analysis.EncoderRow]:
             rows = []
@@ -373,10 +380,12 @@ def load_capture(path: Path) -> Capture:
                                analysis.ALIGNMENT_LIMIT_NS),
                 _causal_scalar(imu_ay, imu_ay_times, receipt_ns,
                                analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_wz, imu_wz_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
             )
             imu_acceleration = (
-                np.asarray([row.value for row in aligned_imu], dtype=float)
-                if all(row is not None for row in aligned_imu) else None)
+                np.asarray([row.value for row in aligned_imu[:2]], dtype=float)
+                if all(row is not None for row in aligned_imu[:2]) else None)
             wheel_speeds = (
                 _encoder_surface_speed(left_encoder, left_encoder_times, receipt_ns),
                 _encoder_surface_speed(right_encoder, right_encoder_times, receipt_ns),
@@ -393,6 +402,8 @@ def load_capture(path: Path) -> Capture:
                 rear_wheel_surface_mps,
                 receipt_ns=receipt_ns,
                 imu_acceleration_mps2=imu_acceleration,
+                imu_yaw_rate_rps=(aligned_imu[2].value
+                                  if aligned_imu[2] is not None else None),
             ))
         rows.sort(key=lambda row: row.time_s)
         rows = _attach_actuator_history(rows)
@@ -421,10 +432,12 @@ def load_capture(path: Path) -> Capture:
                                analysis.ALIGNMENT_LIMIT_NS),
                 _causal_scalar(imu_ay, imu_ay_times, receipt_ns,
                                analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_wz, imu_wz_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
             )
             imu_acceleration = (
-                np.asarray([row.value for row in aligned_imu], dtype=float)
-                if all(row is not None for row in aligned_imu) else None)
+                np.asarray([row.value for row in aligned_imu[:2]], dtype=float)
+                if all(row is not None for row in aligned_imu[:2]) else None)
             wheel_speeds = (
                 _encoder_surface_speed(left_encoder, left_encoder_times, receipt_ns),
                 _encoder_surface_speed(right_encoder, right_encoder_times, receipt_ns),
@@ -442,6 +455,8 @@ def load_capture(path: Path) -> Capture:
                 lap_count=lap_at(receipt_ns),
                 receipt_ns=receipt_ns,
                 imu_acceleration_mps2=imu_acceleration,
+                imu_yaw_rate_rps=(aligned_imu[2].value
+                                  if aligned_imu[2] is not None else None),
             ))
         rows.sort(key=lambda row: row.time_s)
         rows = _attach_actuator_history(rows)
