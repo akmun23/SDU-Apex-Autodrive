@@ -1,6 +1,17 @@
 # Engineering state: open-plane dynamics identification
 
-Updated: 2026-09-28
+Updated: 2026-09-29
+
+## Current primary objective and evidence
+
+The priority is a sensor-only observer that estimates the car's actual
+movement across normal and nonlinear/high-slip regimes, not lap time by itself.
+The latest independent-run comparisons, practice counterexample, coverage
+limits, and next gates are recorded in
+[`SENSOR_OBSERVER_PROGRESS_20260929.md`](SENSOR_OBSERVER_PROGRESS_20260929.md).
+That checkpoint supersedes earlier statements in this file that practice
+transfer had not yet been evaluated. The offline GRU remains research-only;
+no production odometry/MPC/localization or simulator-physics change was made.
 
 ## Offline nonlinear model-learning checkpoint — 2026-09-28
 

@@ -117,7 +117,8 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
     missing = required - set(data.files)
     if missing:
         raise ValueError(f"dataset missing arrays: {sorted(missing)}")
-    if int(data["schema_version"][0]) not in (1, 2):
+    schema_version = int(data["schema_version"][0])
+    if schema_version not in (1, 2, 3):
         raise ValueError(f"unsupported schema version {data['schema_version']}")
     frames = data["frames"].astype(np.float32, copy=False)
     dt_s = data["dt_s"].astype(np.float32, copy=False)
@@ -142,6 +143,29 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
             "rear_left_surface_mps", "rear_right_surface_mps",
             "steering_command_rad", "throttle_command_norm"]:
         raise ValueError("unexpected base feature ordering")
+    attitude_names = [
+        "imu_roll_rad", "imu_pitch_rad",
+        "imu_roll_rate_rps", "imu_pitch_rate_rps",
+    ]
+    if schema_version >= 3:
+        required_attitude = {"attitude_feature_names", "imu_attitude_frames",
+                             "imu_attitude_valid"}
+        missing_attitude = required_attitude - set(data.files)
+        if missing_attitude:
+            raise ValueError(
+                f"dataset missing attitude arrays: {sorted(missing_attitude)}")
+        stored_names = data["attitude_feature_names"].astype(str).tolist()
+        if stored_names != attitude_names:
+            raise ValueError("unexpected IMU attitude feature ordering")
+        attitude = data["imu_attitude_frames"].astype(np.float32, copy=False)
+        attitude_valid = data["imu_attitude_valid"].astype(bool, copy=False)
+        if (attitude.shape != (len(frames), len(attitude_names))
+                or attitude_valid.shape != (len(frames),)
+                or not np.isfinite(attitude).all()):
+            raise ValueError("dataset contains invalid IMU attitude arrays")
+    else:
+        attitude = None
+        attitude_valid = None
     if include_throttle_variation:
         throttle_variation = np.zeros(len(frames), dtype=np.float32)
         for start, end in bounds:
@@ -169,6 +193,9 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         "run_ids": run_ids,
         "splits": splits,
         "feature_names": feature_names,
+        "imu_attitude_frames": attitude,
+        "imu_attitude_valid": attitude_valid,
+        "imu_attitude_feature_names": attitude_names,
     }
 
 
@@ -327,7 +354,8 @@ def _tensor_batch(torch, arrays, mean: np.ndarray, scale: np.ndarray, device):
 
 
 def _rollout(model, history, future, dts, history_steps: int,
-             teacher_force_channels: tuple[int, ...] = ()):
+             teacher_force_channels: tuple[int, ...] = (),
+             held_input_channels: tuple[int, ...] = ()):
     torch, _ = _torch()
     batch = history.shape[0]
     if model.architecture == "narx":
@@ -350,6 +378,12 @@ def _rollout(model, history, future, dts, history_steps: int,
             state_next[:, channel_indices] = future[:, index, channel_indices]
         predicted.append(state_next)
         next_inputs = future[:, index, STATE_COUNT:]
+        if held_input_channels:
+            next_inputs = next_inputs.clone()
+            for channel in held_input_channels:
+                if channel < STATE_COUNT or channel >= feature.shape[1]:
+                    raise ValueError("held input channel is outside the exogenous frame")
+                next_inputs[:, channel - STATE_COUNT] = feature[:, channel]
         feature = torch.cat((state_next, next_inputs), dim=1)
         if model.architecture == "narx":
             hidden = torch.cat((hidden[:, 1:, :], feature[:, None, :]), dim=1)

@@ -26,7 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 from tools import evaluate_open_plane_body_dynamics as body  # noqa: E402
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 FEATURE_NAMES = (
     "u_rear_mps", "v_rear_mps", "yaw_rate_rps",
     "steering_feedback_rad", "throttle_feedback_norm",
@@ -38,6 +38,10 @@ SENSOR_FEATURE_NAMES = (
     "rear_left_surface_mps", "rear_right_surface_mps",
     "imu_ax_mps2", "imu_ay_mps2", "imu_yaw_rate_rps",
     "steering_command_rad", "throttle_command_norm", "sample_dt_s",
+)
+ATTITUDE_FEATURE_NAMES = (
+    "imu_roll_rad", "imu_pitch_rad",
+    "imu_roll_rate_rps", "imu_pitch_rate_rps",
 )
 PREDICTED_STATE_NAMES = FEATURE_NAMES[:7]
 HISTORY_STEPS = 16
@@ -89,8 +93,21 @@ def _sensor_frame(sample: body.MotionSample) -> np.ndarray | None:
             and np.isfinite(values).all() else None)
 
 
+def _attitude_frame(sample: body.MotionSample) -> np.ndarray | None:
+    if (sample.imu_roll_pitch_rad is None
+            or sample.imu_roll_pitch_rate_rps is None):
+        return None
+    values = np.concatenate((sample.imu_roll_pitch_rad,
+                             sample.imu_roll_pitch_rate_rps)).astype(
+                                 np.float64, copy=False)
+    return (values if values.shape == (len(ATTITUDE_FEATURE_NAMES),)
+            and np.isfinite(values).all() else None)
+
+
 def _quality(capture: body.Capture) -> tuple[bool, list[str]]:
     failures: list[str] = []
+    if capture.aborted:
+        failures.append("experiment_aborted")
     if capture.collision_count_start != 0 or capture.collision_count_end != 0:
         failures.append("collision_count_nonzero")
     if capture.timing_faults:
@@ -121,12 +138,14 @@ def _fingerprint(sequences: list[tuple[np.ndarray, np.ndarray]]) -> str:
 
 
 def _extract(path: Path) -> tuple[
-        dict[str, Any], list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
+        dict[str, Any], list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
+                                  np.ndarray, np.ndarray, np.ndarray]]]:
     capture = body.load_capture(path)
     run_id = path.parents[1].name
     clean, failures = _quality(capture)
     split = _split_for_name(run_id)
-    extracted: list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    extracted: list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
+                          np.ndarray, np.ndarray, np.ndarray]] = []
     fingerprint_sequences: list[tuple[np.ndarray, np.ndarray]] = []
 
     # load_capture gives each accepted phase 500 ms of pre-phase context.
@@ -136,6 +155,8 @@ def _extract(path: Path) -> tuple[
         frames: list[np.ndarray] = []
         sensor_frames: list[np.ndarray] = []
         sensor_valid: list[bool] = []
+        attitude_frames: list[np.ndarray] = []
+        attitude_valid: list[bool] = []
         times: list[float] = []
         for sample in sequence:
             if sample.time_s < 0.0:
@@ -144,17 +165,24 @@ def _extract(path: Path) -> tuple[
             if row is None:
                 continue
             sensor_row = _sensor_frame(sample)
+            attitude_row = _attitude_frame(sample)
             frames.append(row)
             sensor_frames.append(
                 sensor_row if sensor_row is not None else
                 np.zeros(len(SENSOR_FEATURE_NAMES) - 1, dtype=np.float64))
             sensor_valid.append(sensor_row is not None)
+            attitude_frames.append(
+                attitude_row if attitude_row is not None else
+                np.zeros(len(ATTITUDE_FEATURE_NAMES), dtype=np.float64))
+            attitude_valid.append(attitude_row is not None)
             times.append(float(sample.time_s))
         if len(frames) < HISTORY_STEPS + ROLLOUT_STEPS + 1:
             continue
         frame_array = np.asarray(frames, dtype=np.float32)
         sensor_array = np.asarray(sensor_frames, dtype=np.float32)
         valid_array = np.asarray(sensor_valid, dtype=bool)
+        attitude_array = np.asarray(attitude_frames, dtype=np.float32)
+        attitude_valid_array = np.asarray(attitude_valid, dtype=bool)
         time_array = np.asarray(times, dtype=np.float64)
         dt = np.diff(time_array, prepend=time_array[0] - 0.025)
         if not np.isfinite(frame_array).all() or not np.isfinite(dt).all():
@@ -172,22 +200,32 @@ def _extract(path: Path) -> tuple[
                 local_sensor = np.column_stack((
                     sensor_array[start:end], local_dt.astype(np.float32)))
                 local_valid = valid_array[start:end]
-                extracted.append((label, local_frames, local_sensor,
-                                  local_valid, local_dt.astype(np.float32)))
+                local_attitude = attitude_array[start:end]
+                local_attitude_valid = attitude_valid_array[start:end]
+                extracted.append((label, local_frames, local_sensor, local_valid,
+                                  local_attitude, local_attitude_valid,
+                                  local_dt.astype(np.float32)))
                 fingerprint_sequences.append((
                     np.column_stack((local_frames, local_sensor,
-                                     local_valid.astype(np.float32))), local_dt))
+                                     local_valid.astype(np.float32),
+                                     local_attitude,
+                                     local_attitude_valid.astype(np.float32))),
+                    local_dt))
         else:
             local_sensor = np.column_stack((sensor_array, dt.astype(np.float32)))
             extracted.append((label, frame_array, local_sensor, valid_array,
+                              attitude_array, attitude_valid_array,
                               dt.astype(np.float32)))
             fingerprint_sequences.append((
                 np.column_stack((frame_array, local_sensor,
-                                 valid_array.astype(np.float32))), dt))
+                                 valid_array.astype(np.float32), attitude_array,
+                                 attitude_valid_array.astype(np.float32))), dt))
 
     values = np.concatenate([item[1] for item in extracted], axis=0) if extracted else np.empty((0, len(FEATURE_NAMES)))
     observer_values = np.concatenate([item[2] for item in extracted], axis=0) if extracted else np.empty((0, len(SENSOR_FEATURE_NAMES)))
     observer_valid = np.concatenate([item[3] for item in extracted], axis=0) if extracted else np.empty((0,), dtype=bool)
+    attitude_values = np.concatenate([item[4] for item in extracted], axis=0) if extracted else np.empty((0, len(ATTITUDE_FEATURE_NAMES)))
+    attitude_valid_rows = np.concatenate([item[5] for item in extracted], axis=0) if extracted else np.empty((0,), dtype=bool)
     stream_stats = capture.phase_stream_stats or capture.stream_stats
     record: dict[str, Any] = {
         "run_id": run_id,
@@ -211,6 +249,10 @@ def _extract(path: Path) -> tuple[
         "feature_max": values.max(axis=0).tolist() if len(values) else None,
         "feature_names": list(FEATURE_NAMES),
         "sensor_feature_names": list(SENSOR_FEATURE_NAMES),
+        "attitude_feature_names": list(ATTITUDE_FEATURE_NAMES),
+        "attitude_valid_samples": int(np.count_nonzero(attitude_valid_rows)),
+        "attitude_valid_fraction": (float(np.mean(attitude_valid_rows))
+                                    if len(attitude_valid_rows) else 0.0),
         "sensor_valid_samples": int(np.count_nonzero(observer_valid)),
         "sensor_valid_fraction": (float(np.mean(observer_valid))
                                   if len(observer_valid) else 0.0),
@@ -259,7 +301,9 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path]) -> dict[str
         raise ValueError(f"no openplane bags found under {root}")
 
     records: list[dict[str, Any]] = []
-    extracted_by_run: dict[str, list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]] = {}
+    extracted_by_run: dict[str, list[tuple[str, np.ndarray, np.ndarray,
+                                          np.ndarray, np.ndarray, np.ndarray,
+                                          np.ndarray]]] = {}
     errors: list[dict[str, str]] = []
     for index, path in enumerate(bags, start=1):
         if not path.is_file():
@@ -280,6 +324,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path]) -> dict[str
     frame_blocks: list[np.ndarray] = []
     sensor_blocks: list[np.ndarray] = []
     sensor_valid_blocks: list[np.ndarray] = []
+    attitude_blocks: list[np.ndarray] = []
+    attitude_valid_blocks: list[np.ndarray] = []
     dt_blocks: list[np.ndarray] = []
     frame_run_blocks: list[np.ndarray] = []
     bounds: list[tuple[int, int]] = []
@@ -296,10 +342,13 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path]) -> dict[str
         if not run_sequences:
             continue
         used_runs.add(run_id)
-        for label, frames, sensor_frames, sensor_valid, dt in run_sequences:
+        for (label, frames, sensor_frames, sensor_valid, attitude_frames,
+             attitude_valid, dt) in run_sequences:
             frame_blocks.append(frames)
             sensor_blocks.append(sensor_frames)
             sensor_valid_blocks.append(sensor_valid)
+            attitude_blocks.append(attitude_frames)
+            attitude_valid_blocks.append(attitude_valid)
             dt_blocks.append(dt)
             frame_run_blocks.append(np.full(len(frames), run_index[run_id], dtype=np.int32))
             end = cursor + len(frames)
@@ -313,6 +362,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path]) -> dict[str
     frames = np.concatenate(frame_blocks, axis=0).astype(np.float32, copy=False)
     sensor_frames = np.concatenate(sensor_blocks, axis=0).astype(np.float32, copy=False)
     sensor_valid = np.concatenate(sensor_valid_blocks, axis=0).astype(bool, copy=False)
+    attitude_frames = np.concatenate(attitude_blocks, axis=0).astype(np.float32, copy=False)
+    attitude_valid = np.concatenate(attitude_valid_blocks, axis=0).astype(bool, copy=False)
     dt_s = np.concatenate(dt_blocks, axis=0).astype(np.float32, copy=False)
     frame_run_index = np.concatenate(frame_run_blocks)
     splits = np.asarray([r["effective_split"] for r in records], dtype="U32")
@@ -322,10 +373,13 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path]) -> dict[str
         schema_version=np.asarray([SCHEMA_VERSION], dtype=np.int32),
         feature_names=np.asarray(FEATURE_NAMES, dtype="U64"),
         sensor_feature_names=np.asarray(SENSOR_FEATURE_NAMES, dtype="U64"),
+        attitude_feature_names=np.asarray(ATTITUDE_FEATURE_NAMES, dtype="U64"),
         predicted_state_names=np.asarray(PREDICTED_STATE_NAMES, dtype="U64"),
         frames=frames,
         sensor_frames=sensor_frames,
         sensor_valid=sensor_valid,
+        imu_attitude_frames=attitude_frames,
+        imu_attitude_valid=attitude_valid,
         dt_s=dt_s,
         sequence_bounds=np.asarray(bounds, dtype=np.int64),
         sequence_run_index=np.asarray(sequence_run, dtype=np.int32),
@@ -388,7 +442,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path]) -> dict[str
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "label_source": "offline bridge /autodrive/roboracer_1/odom only",
         "oracle_plant_features": list(FEATURE_NAMES),
-        "sensor_estimator_inputs": list(SENSOR_FEATURE_NAMES),
+            "sensor_estimator_inputs": list(SENSOR_FEATURE_NAMES),
+            "offline_attitude_conditioning_inputs": list(ATTITUDE_FEATURE_NAMES),
         "sensor_estimator_target": ["u_rear_mps", "v_rear_mps", "yaw_rate_rps"],
         "predicted_state": list(PREDICTED_STATE_NAMES),
         "selection": "openplane* bags; valid phase samples only; nonnegative phase time; 16+32+1 sample minimum; no interpolation across gaps",

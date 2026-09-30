@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import shlex
@@ -95,11 +96,17 @@ def _verify_image_sources(image: str, repo_root: Path,
     return image_id
 
 
-def _container_script(integrate_lateral_acceleration_in_turn: bool = False) -> str:
+def _container_script(integrate_lateral_acceleration_in_turn: bool = False,
+                      wheel_burst_catchup_accel_mps2: float | None = None
+                      ) -> str:
     topics = " ".join(shlex.quote(topic) for topic in SENSOR_TOPICS)
     lateral_override = (
         "  -p integrate_lateral_acceleration_in_turn:=true \\\n"
         if integrate_lateral_acceleration_in_turn else "")
+    catchup_override = (
+        "  -p wheel_burst_catchup_accel_mps2:="
+        f"{float(wheel_burst_catchup_accel_mps2)!r} \\\n"
+        if wheel_burst_catchup_accel_mps2 is not None else "")
     return f"""set -Ee
 source /opt/ros/humble/setup.bash
 source /home/autodrive_devkit/install/setup.bash
@@ -126,7 +133,7 @@ trap cleanup EXIT
   --ros-args --params-file /tmp/sensor_odometry.yaml \\
   -p publish_tf:=false -p odom_topic:=/replayed_odom \\
   -p diagnostics_topic:=/replayed_odom_diagnostics \\
-{lateral_override}  >/results/observer.log 2>&1 &
+{lateral_override}{catchup_override}  >/results/observer.log 2>&1 &
 node_pid=$!
 sleep 2
 if ! kill -0 "$node_pid" 2>/dev/null; then
@@ -253,7 +260,8 @@ def _verify_against_recorded_odom(input_bag: Path, replay_bag: Path) -> str:
 
 
 def replay(bag: Path, output_dir: Path, image: str, rate: float,
-           domain_id: int, integrate_lateral_acceleration_in_turn: bool = False
+           domain_id: int, integrate_lateral_acceleration_in_turn: bool = False,
+           wheel_burst_catchup_accel_mps2: float | None = None
            ) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     bag = bag.resolve()
@@ -268,6 +276,10 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         raise ValueError("--rate must be finite and between 0.1 and 4.0")
     if not 0 <= domain_id <= 232:
         raise ValueError("--domain-id must be between 0 and 232")
+    if (wheel_burst_catchup_accel_mps2 is not None and
+            (not math.isfinite(wheel_burst_catchup_accel_mps2) or
+             wheel_burst_catchup_accel_mps2 < 0.0)):
+        raise ValueError("wheel burst catch-up acceleration must be finite and nonnegative")
 
     docker_env = _docker_environment(repo_root)
     image_id = _verify_image_sources(image, repo_root, docker_env)
@@ -279,6 +291,10 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
     print(f"Playback rate: {rate:g}x; isolated ROS domain: {domain_id}", flush=True)
     if integrate_lateral_acceleration_in_turn:
         print("Observer-only override: integrate_lateral_acceleration_in_turn=true",
+              flush=True)
+    if wheel_burst_catchup_accel_mps2 is not None:
+        print("Offline-only override: "
+              f"wheel_burst_catchup_accel_mps2={wheel_burst_catchup_accel_mps2:g}",
               flush=True)
     print("Input topics: " + ", ".join(SENSOR_TOPICS), flush=True)
 
@@ -292,16 +308,37 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         f"type=bind,source={repo_root / SOURCE_FILES[-1]},"
         "target=/tmp/sensor_odometry.yaml,readonly",
         "--entrypoint", "/bin/bash", image, "-lc",
-        _container_script(integrate_lateral_acceleration_in_turn),
+        _container_script(integrate_lateral_acceleration_in_turn,
+                          wheel_burst_catchup_accel_mps2),
     ]
     _docker(image, command, docker_env)
     replay_bag = output_dir / "replayed" / "replayed_0.db3"
-    if integrate_lateral_acceleration_in_turn:
+    if (integrate_lateral_acceleration_in_turn or
+            wheel_burst_catchup_accel_mps2 is not None):
         print("Observer equivalence: parameter variant; recorded /odom equality "
               "is not expected", flush=True)
     else:
         verification = _verify_against_recorded_odom(bag, replay_bag)
         print(f"Observer equivalence: {verification}", flush=True)
+    metadata = {
+        "image": image,
+        "image_id": image_id,
+        "input_bag": str(bag),
+        "input_bag_sha256": _sha256(bag),
+        "playback_rate": rate,
+        "domain_id": domain_id,
+        "sensor_topics": list(SENSOR_TOPICS),
+        "parameter_overrides": {
+            **({"integrate_lateral_acceleration_in_turn": True}
+               if integrate_lateral_acceleration_in_turn else {}),
+            **({"wheel_burst_catchup_accel_mps2":
+                wheel_burst_catchup_accel_mps2}
+               if wheel_burst_catchup_accel_mps2 is not None else {}),
+        },
+    }
+    (output_dir / "replay_metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
 
 
 def main() -> int:
@@ -318,10 +355,13 @@ def main() -> int:
                         help="isolated ROS domain for the offline replay")
     parser.add_argument("--integrate-lateral-acceleration-in-turn", action="store_true",
                         help="offline-only observer A/B; override that parameter to true")
+    parser.add_argument("--wheel-burst-catchup-accel-mps2", type=float,
+                        help="offline-only parameter override for controlled burst-recovery replay")
     args = parser.parse_args()
     try:
         replay(args.bag, args.output_dir, args.image, args.rate, args.domain_id,
-               args.integrate_lateral_acceleration_in_turn)
+               args.integrate_lateral_acceleration_in_turn,
+               args.wheel_burst_catchup_accel_mps2)
     except (OSError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         parser.exit(2, f"sensor-odometry replay failed: {exc}\n")
     return 0

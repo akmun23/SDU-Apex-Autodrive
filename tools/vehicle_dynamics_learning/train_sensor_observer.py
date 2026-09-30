@@ -50,8 +50,8 @@ def _load_dataset(path: Path) -> dict[str, Any]:
     missing = required - set(data.files)
     if missing:
         raise ValueError(f"dataset missing arrays: {sorted(missing)}")
-    if int(data["schema_version"][0]) != 2:
-        raise ValueError("sensor observer requires dataset schema version 2")
+    if int(data["schema_version"][0]) not in (2, 3):
+        raise ValueError("sensor observer requires dataset schema version 2 or 3")
     frames = data["frames"].astype(np.float32, copy=False)
     sensors = data["sensor_frames"].astype(np.float32, copy=False)
     valid = data["sensor_valid"].astype(bool, copy=False)

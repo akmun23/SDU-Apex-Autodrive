@@ -25,23 +25,6 @@ case "${track}" in
     ;;
 esac
 
-# The Unity client retries noisily when the bridge is not listening yet.
-bridge_wait_command='
-echo "Waiting for the ROS bridge on 127.0.0.1:4567"
-bridge_ready=0
-for attempt in $(seq 1 1800); do
-  if (exec 3<>/dev/tcp/127.0.0.1/4567) >/dev/null 2>&1; then
-    bridge_ready=1
-    break
-  fi
-  sleep 0.1
-done
-if [[ "${bridge_ready}" != "1" ]]; then
-  echo "ROS bridge did not start listening on TCP port 4567 within 180 seconds" >&2
-  exit 1
-fi
-'
-
 container_player_binary="./AutoDRIVE Simulator.x86_64"
 simulator_log_file="${SDU_APEX_SIM_LOG_FILE:--}"
 player_mount_args=()
@@ -70,11 +53,11 @@ fi
 
 case "${mode}" in
   gui)
-    simulator_command="${bridge_wait_command}exec \"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
+    simulator_command="exec \"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
     tty_args=(-it)
     ;;
   batchmode)
-    simulator_command="${bridge_wait_command}Xvfb :123 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & xvfb_pid=\$!; export DISPLAY=:123; for attempt in \$(seq 1 50); do [[ -S /tmp/.X11-unix/X123 ]] && break; sleep 0.1; done; kill -0 \"\$xvfb_pid\"; exec \"${container_player_binary}\" -batchmode -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
+    simulator_command="Xvfb :123 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & xvfb_pid=\$!; export DISPLAY=:123; for attempt in \$(seq 1 50); do [[ -S /tmp/.X11-unix/X123 ]] && break; sleep 0.1; done; kill -0 \"\$xvfb_pid\"; exec \"${container_player_binary}\" -batchmode -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
     tty_args=()
     ;;
   *)

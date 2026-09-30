@@ -7,6 +7,11 @@ physics, change the competition controller, or add a runtime topic subscriber.
 
 ## Checkpoint: 2026-09-28
 
+Audit warning: the old schema-v2 oracle and sensor datasets both contain
+captures marked `aborted=true` that were nonetheless labeled clean. All
+numeric observer/plant results in this historical checkpoint are exploratory
+until rebuilt and re-evaluated from the corrected capture-completion gate.
+
 Two distinct models have now been evaluated on the exported open-plane data:
 
 - A **sensor-only state observer** estimates present rear-axle `u` and `v`
@@ -38,6 +43,49 @@ checkpoint for artifact locations, caveats, and the next specific steps.
 No model has been connected to MPC, odometry, AMCL, or EKF. Runtime topic
 policy and simulator physics were not changed.
 
+## 2026-09-29 structured-body model evaluation
+
+The handoff's physics-structured family has been implemented and evaluated:
+predict aggregate effective accelerations
+`a_x_eff`, `a_y_eff`, and `alpha_z_eff`, then integrate the known body-frame
+coupling
+`u_dot=a_x_eff+r*v`, `v_dot=a_y_eff-r*u`, `r_dot=alpha_z_eff`.
+Compared models were a no-latent acceleration MLP, latent dimensions 2/4/8,
+and a linear prior plus learned residual, against a fold-local plain-GRU
+control. Five grouped whole-run folds trained only on original training runs;
+the paired score uses independent runs, not overlapping windows.
+
+The first tournament appeared to leave the GRU as the best general teacher,
+but a subsequent audit found that the source dataset had admitted aborted
+captures into training. That tournament and its numeric comparisons are
+therefore **provisional and superseded**; do not use them for model selection.
+The old NPZ/report are preserved with `AUDIT.md` markers. A corrected
+capture-completion gate now rejects aborted runs, and both the no-attitude
+and attitude-conditioned grouped CVs are being rerun before drawing a model
+conclusion. None of these research models is connected to MPC or odometry.
+The final corrected results and limitations will be recorded in
+[`STRUCTURED_BODY_STATE_MODEL_EVALUATION_20260929.md`](../../docs/development/STRUCTURED_BODY_STATE_MODEL_EVALUATION_20260929.md)
+and the JSON under `live_runs/derived_dynamics_learning_20260928/`.
+
+A targeted Explore experiment reached measured body speed about `8.2 m/s`.
+The 8.0/8.3 m/s surfaces completed; high-steering 8.3 m/s probes failed the
+predeclared matched-speed gate and are excluded from model fitting. A
+separate 8.6 m/s probe sequence later produced a delayed rollover after
+steering returned to zero (tilt exceeded 120 degrees; collision count stayed
+zero). The 8-degree tilt and 9 m/s speed stops remain unchanged; this is a
+physical-support limit, not a reason to weaken the experiment abort.
+
+Because body prediction frames previously omitted measured roll/pitch, the
+schema-v3 exporter now carries a separate four-channel IMU attitude view:
+roll, pitch, and their body gyro rates. A follow-up grouped-CV ablation
+conditions models on the observed attitude history, holds attitude at its
+last observed value during rollout, and never supplies future IMU samples.
+This is a predictive identification test—not an attitude-state simulator or
+a runtime sensor dependency. An independent whole-run holdout is preserved
+outside training. Results are not considered complete until both the
+no-attitude and attitude-conditioned reports have been compared on identical
+run folds and the selected model has been scored once on that holdout.
+
 ## Why supervised dynamics identification, not RL first
 
 These bags are rich in commanded inputs and state labels, but they do not carry
@@ -53,13 +101,14 @@ tire forces.
 ## Dataset semantics
 
 `prepare_dataset.py` scans `live_runs/openplane*/run/run_0.db3` read-only and
-exports a compact NPZ plus a JSON manifest. It keeps validated phase samples,
+exports a compact NPZ plus a JSON manifest. It rejects any capture marked
+aborted, in addition to collision/timing failures. It keeps validated phase samples,
 uses causal encoder-derived rear wheel surface speeds, excludes pre-phase
 context overlap, and breaks sequences at packet gaps rather than interpolating
 across them. It reports every discovered bag, including rejected or
 source-player runs, and preserves the original bags unchanged.
 
-The archive contains two aligned feature views (schema version 2):
+The archive contains separate aligned feature views (schema versions 2–3):
 
 - `frames`: nine **oracle-plant** features: truth body `u, v, r`, steering and
   throttle feedback, rear-left/right encoder-derived surface speed, then
@@ -69,6 +118,9 @@ The archive contains two aligned feature views (schema version 2):
   `ax`, `ay`, IMU yaw rate, steering and throttle commands, and sample `dt`.
   `sensor_valid` marks rows with all required sensors present; missing values
   are not synthesized. Observer targets are offline bridge-state `u, v`.
+- Schema 3 adds `imu_attitude_frames` and `imu_attitude_valid`, four causally
+  aligned roll/pitch and roll/pitch-rate measurements. It does not change the
+  nine oracle-plant or ten sensor-observer feature layouts.
 
 The plant experiment uses bridge state as history and target. During rollout it
 receives the logged future command trace and feeds back only its own predicted
@@ -136,7 +188,7 @@ and the ensemble mean; member spread is compared with held-out error as a
 diagnostic, not assumed to be calibrated uncertainty. No model is integrated
 into MPC automatically.
 
-To train the sensor-only observer instead, use the same schema-v2 dataset:
+To train the sensor-only observer instead, use the same schema-v2 or schema-v3 dataset:
 
 ```bash
 python3 tools/vehicle_dynamics_learning/train_sensor_observer.py \

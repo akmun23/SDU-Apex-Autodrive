@@ -405,6 +405,39 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                         **throttle_args,
                     ))
         return phases
+    if profile == "isolated_highspeed_tail":
+        # Extend the clean training domain to its empirically supported upper
+        # edge. A 2026-09-29 run completed the 8.0/8.3 m/s surfaces, but at
+        # 8.6 m/s developed a delayed roll/pitch impulse after steering had
+        # returned to zero (tilt >120 deg, no collision-count change). Do not
+        # repeat that unsafe region or relax the existing 8 deg / 9 m/s stops.
+        speed_steering = (
+            (8.0, (0.025, 0.040, 0.055, 0.070)),
+            (8.3, (0.022, 0.035, 0.050, 0.065)),
+        )
+        for target_speed, steering_levels in speed_steering:
+            phases.extend((
+                Phase(f"approach_{target_speed:.1f}mps", 8.0,
+                      target_speed, throttle_mode="approach",
+                      reach_speed_target=True),
+                Phase(f"settle_{target_speed:.1f}mps", 1.0, target_speed),
+            ))
+            conditions = [0.0] + [sign * angle for angle in steering_levels
+                                  for sign in (-1.0, 1.0)]
+            for repetition in range(1, 4):
+                ordered = conditions.copy()
+                rng.shuffle(ordered)
+                for steering in ordered:
+                    phases.append(Phase(
+                        f"tail_r{repetition}_{target_speed:.1f}mps_"
+                        f"steer_{steering:+.4f}rad",
+                        1.2,
+                        target_speed,
+                        steering_rad=steering,
+                        validate_samples=True,
+                        settle_before_probe=True,
+                    ))
+        return phases
     if profile == "isolated_transition_65mps":
         # Resolve the held-out Jacobian mismatch around the response minimum.
         # Keep this narrow profile at the already repeatable 6.5 m/s operating
@@ -1357,6 +1390,7 @@ def main() -> int:
                                                "isolated_highspeed_surface",
                                                "isolated_3to5_response_surface",
                                                "isolated_highspeed_crossfactor",
+                                               "isolated_highspeed_tail",
                                                "isolated_transition_65mps",
                                                "isolated_transition_45mps",
                                                "isolated_transition_speed_surface",

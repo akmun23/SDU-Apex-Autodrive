@@ -69,6 +69,8 @@ class MotionSample:
     receipt_ns: int = 0  # odometry receipt-time coordinate for raw-stream joins
     imu_acceleration_mps2: np.ndarray | None = None  # causal body-frame [ax, ay]
     imu_yaw_rate_rps: float | None = None  # causal body-frame gyro z
+    imu_roll_pitch_rad: np.ndarray | None = None  # measured roll, pitch
+    imu_roll_pitch_rate_rps: np.ndarray | None = None  # body gyro x, y
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,21 @@ def _causal_scalar(rows: list[analysis.ScalarRow], times: list[int],
         return None
     row = rows[index]
     return row if target_ns - row.receipt_ns <= max_age_ns else None
+
+
+def _roll_pitch_from_quaternion(x: float, y: float, z: float,
+                                w: float) -> tuple[float, float] | None:
+    """Return finite roll/pitch from a normalized IMU quaternion."""
+    values = np.asarray([x, y, z, w], dtype=np.float64)
+    norm = float(np.linalg.norm(values))
+    if not np.isfinite(values).all() or not math.isfinite(norm) or norm < 0.5:
+        return None
+    x, y, z, w = values / norm
+    roll = math.atan2(2.0 * (w * x + y * z),
+                      1.0 - 2.0 * (x * x + y * y))
+    sin_pitch = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = math.asin(sin_pitch)
+    return (roll, pitch) if math.isfinite(roll) and math.isfinite(pitch) else None
 
 
 def _command_at_receipt(capture: Capture, channel: str,
@@ -234,21 +251,43 @@ def load_capture(path: Path) -> Capture:
         imu_ax: list[analysis.ScalarRow] = []
         imu_ay: list[analysis.ScalarRow] = []
         imu_wz: list[analysis.ScalarRow] = []
+        imu_roll: list[analysis.ScalarRow] = []
+        imu_pitch: list[analysis.ScalarRow] = []
+        imu_wx: list[analysis.ScalarRow] = []
+        imu_wy: list[analysis.ScalarRow] = []
         for receipt_ns, message in analysis._messages(
                 connection, topics, analysis.IMU):
             ax = float(message.linear_acceleration.x)
             ay = float(message.linear_acceleration.y)
+            wx = float(message.angular_velocity.x)
+            wy = float(message.angular_velocity.y)
             wz = float(message.angular_velocity.z)
             source_ns = analysis._stamp_ns(message.header.stamp)
+            roll_pitch = _roll_pitch_from_quaternion(
+                float(message.orientation.x), float(message.orientation.y),
+                float(message.orientation.z), float(message.orientation.w))
             if math.isfinite(ax):
                 imu_ax.append(analysis.ScalarRow(receipt_ns, source_ns, ax))
             if math.isfinite(ay):
                 imu_ay.append(analysis.ScalarRow(receipt_ns, source_ns, ay))
+            if roll_pitch is not None:
+                imu_roll.append(analysis.ScalarRow(receipt_ns, source_ns,
+                                                   roll_pitch[0]))
+                imu_pitch.append(analysis.ScalarRow(receipt_ns, source_ns,
+                                                    roll_pitch[1]))
+            if math.isfinite(wx):
+                imu_wx.append(analysis.ScalarRow(receipt_ns, source_ns, wx))
+            if math.isfinite(wy):
+                imu_wy.append(analysis.ScalarRow(receipt_ns, source_ns, wy))
             if math.isfinite(wz):
                 imu_wz.append(analysis.ScalarRow(receipt_ns, source_ns, wz))
         imu_ax_times = [row.receipt_ns for row in imu_ax]
         imu_ay_times = [row.receipt_ns for row in imu_ay]
         imu_wz_times = [row.receipt_ns for row in imu_wz]
+        imu_roll_times = [row.receipt_ns for row in imu_roll]
+        imu_pitch_times = [row.receipt_ns for row in imu_pitch]
+        imu_wx_times = [row.receipt_ns for row in imu_wx]
+        imu_wy_times = [row.receipt_ns for row in imu_wy]
 
         def read_encoder(topic: str) -> list[analysis.EncoderRow]:
             rows = []
@@ -386,6 +425,22 @@ def load_capture(path: Path) -> Capture:
             imu_acceleration = (
                 np.asarray([row.value for row in aligned_imu[:2]], dtype=float)
                 if all(row is not None for row in aligned_imu[:2]) else None)
+            aligned_attitude = (
+                _causal_scalar(imu_roll, imu_roll_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_pitch, imu_pitch_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_wx, imu_wx_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_wy, imu_wy_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+            )
+            imu_body_attitude = (
+                np.asarray([row.value for row in aligned_attitude[:2]], dtype=float)
+                if all(row is not None for row in aligned_attitude[:2]) else None)
+            imu_body_attitude_rate = (
+                np.asarray([row.value for row in aligned_attitude[2:]], dtype=float)
+                if all(row is not None for row in aligned_attitude[2:]) else None)
             wheel_speeds = (
                 _encoder_surface_speed(left_encoder, left_encoder_times, receipt_ns),
                 _encoder_surface_speed(right_encoder, right_encoder_times, receipt_ns),
@@ -404,6 +459,8 @@ def load_capture(path: Path) -> Capture:
                 imu_acceleration_mps2=imu_acceleration,
                 imu_yaw_rate_rps=(aligned_imu[2].value
                                   if aligned_imu[2] is not None else None),
+                imu_roll_pitch_rad=imu_body_attitude,
+                imu_roll_pitch_rate_rps=imu_body_attitude_rate,
             ))
         rows.sort(key=lambda row: row.time_s)
         rows = _attach_actuator_history(rows)
@@ -438,6 +495,22 @@ def load_capture(path: Path) -> Capture:
             imu_acceleration = (
                 np.asarray([row.value for row in aligned_imu[:2]], dtype=float)
                 if all(row is not None for row in aligned_imu[:2]) else None)
+            aligned_attitude = (
+                _causal_scalar(imu_roll, imu_roll_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_pitch, imu_pitch_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_wx, imu_wx_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+                _causal_scalar(imu_wy, imu_wy_times, receipt_ns,
+                               analysis.ALIGNMENT_LIMIT_NS),
+            )
+            imu_body_attitude = (
+                np.asarray([row.value for row in aligned_attitude[:2]], dtype=float)
+                if all(row is not None for row in aligned_attitude[:2]) else None)
+            imu_body_attitude_rate = (
+                np.asarray([row.value for row in aligned_attitude[2:]], dtype=float)
+                if all(row is not None for row in aligned_attitude[2:]) else None)
             wheel_speeds = (
                 _encoder_surface_speed(left_encoder, left_encoder_times, receipt_ns),
                 _encoder_surface_speed(right_encoder, right_encoder_times, receipt_ns),
@@ -457,6 +530,8 @@ def load_capture(path: Path) -> Capture:
                 imu_acceleration_mps2=imu_acceleration,
                 imu_yaw_rate_rps=(aligned_imu[2].value
                                   if aligned_imu[2] is not None else None),
+                imu_roll_pitch_rad=imu_body_attitude,
+                imu_roll_pitch_rate_rps=imu_body_attitude_rate,
             ))
         rows.sort(key=lambda row: row.time_s)
         rows = _attach_actuator_history(rows)
