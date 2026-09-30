@@ -86,6 +86,117 @@ outside training. Results are not considered complete until both the
 no-attitude and attitude-conditioned reports have been compared on identical
 run folds and the selected model has been scored once on that holdout.
 
+## 2026-09-30 full-trajectory plant checkpoint
+
+The mixed-domain dataset combines validated Explore runs with active intervals
+from complete practice-track captures. The canonical inventory and model
+comparison are recorded in
+[`OFFLINE_PLANT_TRAINING_UPDATE_20260930.md`](../../docs/development/OFFLINE_PLANT_TRAINING_UPDATE_20260930.md).
+Use its manifest as the run catalog; records failing the full-stream,
+collision, or sequence gates are not included. Raw bags have not been deleted.
+
+Free-running evaluation uses the full captured command trace and a single
+rear-axle pose anchor. After an initial true-state history, the model receives
+only its own predicted body/actuator/wheel state and future steering/throttle
+commands. The plain mixed-domain GRU is currently stronger than the
+physics-structured Euler model and the first integrated-heading-loss
+candidate for whole-run position prediction. Even the plain model accumulates
+meter-scale unanchored position error, so no candidate is yet suitable as a
+trusted offline lap simulator or runtime model.
+
+The development-only open-plane excitation runner accepts
+`SDU_APEX_EXPERIMENT_PROBE_DWELL_S` to lengthen only validated probe phases;
+the default `0` preserves existing profile durations. Keep the existing
+speed/tilt/collision/timing gates. Longer dwell is for matched, feasible probes,
+not for expanding high-speed/full-lock combinations. For example, a
+single-speed transition surface may use a 4-second dwell and longer timeout:
+
+```bash
+SDU_APEX_EXPERIMENT_PROFILE=isolated_transition_full_surface \
+SDU_APEX_EXPERIMENT_SPEED_MPS=4.5 \
+SDU_APEX_EXPERIMENT_PROBE_DWELL_S=4 \
+SDU_APEX_EXPERIMENT_TIMEOUT_S=900 \
+./tools/run_open_plane_experiment.sh
+```
+
+For throttle/steering interaction, use the development-only
+`throttle_transition_surface` profile. The refined design samples throttle
+targets every 5% from a 0% baseline, then probes 5%, 10%, 20%, 40%, and full-
+throttle increases from each 10% baseline. It repeats each transition twice
+with a seeded randomized order. At 13 steering settings from -30° to +30° in
+5° increments, this gives 1,508 reset-isolated conditions rather than 65,650
+conditions in an exhaustive 1% throttle matrix at the same 13 steering values.
+This is a broad screening
+surface, not a claim that unsampled throttle histories are identical; the
+repeated response curves reveal where follow-up refinement is warranted.
+
+Each condition begins after the simulator's built-in reset has returned the
+car to its spawn. It records a 4-second baseline at the starting throttle and
+fixed steering, then an 8-second step response at the target throttle, and
+resets again. It deliberately does not wait for the body motion to settle:
+high-steering telemetry has shown strongly oscillatory speed and yaw, so an
+equilibrium gate can prevent those useful transients from ever completing.
+The response bag records commands, actual throttle/steering feedback,
+odometry, encoders, IMU, collision count and bridge timing at the existing
+40 Hz rate. Actual actuator feedback mismatch is reported separately from
+completion so deadband/quantization remains visible. Response fitting requires
+the actual throttle and steering to track within tolerance and the stream to
+pass its cadence gate.
+
+There is no test speed cap, distance cap, or per-transition timeout. Maximum
+speed and displacement are observations, not stop conditions. A rollover
+invalidates that condition and requests the normal reset; any collision or
+bridge timing fault aborts the entire capture immediately. Reset recovery is
+verified at the spawn before another condition begins. The reset input is
+development-only and explicitly disabled in the competition launch.
+
+Steering is fixed during each throttle transition. Set
+`SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD` to comma-separated signed radians;
+the refined capture uses 13 values spaced by 5° across the full `+/-0.5236`
+rad command range. Keep distinct captures under distinct run IDs and inspect
+the closed bags before using them for training. Do not combine a reset gap
+with active 40 Hz cadence statistics.
+
+Start the simulator in one terminal, then launch the capture in another.
+
+```bash
+SDU_APEX_SIM_TRACK=explore SDU_APEX_SIM_MODE=batchmode ./tools/start_simulator.sh
+```
+
+```bash
+SDU_APEX_EXPERIMENT_PROFILE=throttle_transition_surface \
+SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD='-0.5236,-0.4363333,-0.3490667,-0.2618,-0.1745333,-0.0872667,0,0.0872667,0.1745333,0.2618,0.3490667,0.4363333,0.5236' \
+SDU_APEX_EXPERIMENT_THROTTLE_TARGET_STEP_PERCENT=5 \
+SDU_APEX_EXPERIMENT_THROTTLE_BASELINE_STEP_PERCENT=10 \
+SDU_APEX_EXPERIMENT_THROTTLE_REPEAT_COUNT=2 \
+SDU_APEX_EXPERIMENT_RUN_ID=openplane_throttle_5pct_5deg_20260930_r04 \
+SDU_APEX_EXPERIMENT_SEED=20260930 \
+./tools/run_open_plane_experiment.sh
+```
+
+After the recorder closes, the runner audits the transition bag and writes
+`throttle_transition_analysis.json` plus `analysis.log` beside it. To repeat
+the audit manually:
+
+```bash
+python3 tools/analyze_open_plane_throttle_transitions.py \
+  live_runs/openplane_throttle_5pct_5deg_20260930_r04/run/run_0.db3
+```
+
+The audit verifies requested condition and replicate coverage, reset recovery
+and spawn consistency, zero collisions/timing faults, actual throttle tracking,
+and active-phase stream cadence (reset gaps are excluded). It reports
+within-condition repeat variability alongside speed, displacement and actuator
+response; it does not impose a speed or distance stop.
+
+The reset-isolated throttle matrix intentionally probes throttle transitions
+at the selected fixed steering angles without a speed governor; its observed
+rollover conditions are recorded separately from collision-aborted runs. This
+does not imply every speed/steering combination is feasible or that a learned
+model should extrapolate across unobserved states. For track data, use complete
+runs of feasible racing trajectories and reserve new raceline/speed
+combinations for unseen evaluation.
+
 ## Why supervised dynamics identification, not RL first
 
 These bags are rich in commanded inputs and state labels, but they do not carry

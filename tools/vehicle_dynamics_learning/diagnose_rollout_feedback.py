@@ -68,7 +68,11 @@ def diagnose(dataset_path: Path, run_dir: Path, run_ids: list[str],
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError("CUDA requested but torch.cuda.is_available() is false")
     factory = _model_type(torch, nn, hidden_size, architecture, expert_count,
-                          history_steps)
+                          history_steps, len(metadata["feature_names"]),
+                          mean, scale,
+                          metadata.get("body_acceleration_mean"),
+                          metadata.get("body_acceleration_scale"),
+                          metadata.get("integration_method", "euler"))
     models = []
     for member in train_report["members"]:
         checkpoint_name = member.get("checkpoint")

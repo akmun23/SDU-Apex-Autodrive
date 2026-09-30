@@ -67,6 +67,7 @@ def generate_launch_description():
         name="autodrive_bridge",
         output="screen",
         emulate_tty=True,
+        additional_env=["SDU_APEX_DEV_SIM_RESET_ENABLED=0"],
     )
 
     sensor_odom = Node(

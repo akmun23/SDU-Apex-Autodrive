@@ -548,9 +548,9 @@ def analyze(path: Path) -> int:
 
     probe_phases = [phase for phase in phases
                     if phase.label.startswith(("boundary_", "isolated_", "sweep_",
-                                               "steer_"))]
+                                               "steer_", "throttle_"))]
     isolated_phases = [phase for phase in probe_phases
-                       if phase.label.startswith("isolated_")]
+                       if phase.label.startswith(("isolated_", "throttle_"))]
     matched_starts = 0
     for phase in isolated_phases:
         state = (phase.initial_vx_mps, phase.initial_vy_mps,
@@ -587,10 +587,10 @@ def analyze(path: Path) -> int:
     paired_sweeps: dict[tuple[int, int, int, int], dict[str, dict[str, float]]] = defaultdict(dict)
     probe_phases = [phase for phase in phases
                     if phase.label.startswith(("boundary_", "isolated_", "sweep_",
-                                               "steer_"))]
+                                               "steer_", "throttle_"))]
     for phase in phases:
         if not phase.label.startswith(("boundary_", "isolated_", "sweep_",
-                                      "steer_")):
+                                      "steer_", "throttle_")):
             continue
         start = phase.start_ns + PHASE_SETTLE_NS
         low = bisect.bisect_left(odom_times, start)

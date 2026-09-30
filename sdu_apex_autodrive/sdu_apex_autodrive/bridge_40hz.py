@@ -46,6 +46,8 @@ DEFAULT_RATE_HZ = EXPECTED_RATE_HZ
 PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
+DEV_SIM_RESET_ENABLE_ENV = "SDU_APEX_DEV_SIM_RESET_ENABLED"
+DEV_SIM_RESET_TOPIC = "/autodrive/reset_command"
 
 # Requests are paced on a 25 ms host-clock grid. Actual response/arrival times
 # are retained; response age and packet gaps never stop or reject the stream.
@@ -1041,7 +1043,7 @@ def _update_command_field(field: str, value: float) -> None:
 
 
 def _run_command_listener() -> None:
-    """Receive legal actuator commands on an executor isolated from decoding."""
+    """Receive actuator commands separately from the numeric decoder."""
     global _command_listener_executor, _command_listener_node
     while not _command_listener_stop.is_set():
         if not rclpy.ok():
@@ -1069,6 +1071,13 @@ def _run_command_listener() -> None:
                     "V1 Steering", float(message.data)),
                 qos,
             )
+            if _env_enabled(DEV_SIM_RESET_ENABLE_ENV, False):
+                node.create_subscription(
+                    Bool, DEV_SIM_RESET_TOPIC, _on_reset_command, qos)
+                print(
+                    "[autodrive_bridge_40hz] development simulator reset input enabled",
+                    flush=True,
+                )
             executor = rclpy.executors.SingleThreadedExecutor()
             executor.add_node(node)
             _command_listener_node = node

@@ -70,6 +70,9 @@ def main() -> int:
                 errors.append(f"{relative}: restricted TF listener remains")
 
     competition_launch = (ROOT / COMPETITION_FILES[0]).read_text(encoding="utf-8")
+    if '"SDU_APEX_DEV_SIM_RESET_ENABLED=0"' not in competition_launch:
+        errors.append(
+            f"{COMPETITION_FILES[0]}: development simulator reset input must be disabled")
     if any(topic in competition_launch for topic in (
         '"/tf"', '"/tf_static"', '"/sdu/tf"', '"/sdu/tf_static"',
     )):

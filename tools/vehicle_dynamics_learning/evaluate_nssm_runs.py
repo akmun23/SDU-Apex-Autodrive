@@ -85,7 +85,12 @@ def evaluate(dataset_path: Path, run_dir: Path, max_windows_per_run: int,
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError("CUDA requested but torch.cuda.is_available() is false")
     model_factory = _model_type(torch, nn, hidden_size, architecture,
-                                expert_count, history_steps, len(feature_names))
+                                expert_count, history_steps, len(feature_names),
+                                first_payload["feature_mean"],
+                                first_payload["feature_scale"],
+                                metadata.get("body_acceleration_mean"),
+                                metadata.get("body_acceleration_scale"),
+                                metadata.get("integration_method", "euler"))
     models = []
     if training_report.get("members"):
         checkpoint_paths = [run_dir / member["checkpoint"]

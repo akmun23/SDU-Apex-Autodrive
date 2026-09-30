@@ -24,10 +24,22 @@ from typing import Any
 
 import numpy as np
 
+try:
+    from .structured_body_models import (
+        acceleration_statistics,
+        training_transition_rows,
+    )
+except ImportError:
+    from structured_body_models import (
+        acceleration_statistics,
+        training_transition_rows,
+    )
+
 
 STATE_COUNT = 7
 FEATURE_COUNT = 9
 DEFAULT_HORIZONS = (1, 4, 10, 20, 30)
+LONG_PLANT_HORIZONS = (40, 80, 200)
 
 
 def _torch():
@@ -44,13 +56,26 @@ def _torch():
 
 def _model_type(torch, nn, hidden_size: int, architecture: str,
                 expert_count: int, history_steps: int,
-                feature_count: int = FEATURE_COUNT):
+                feature_count: int = FEATURE_COUNT,
+                feature_mean: np.ndarray | None = None,
+                feature_scale: np.ndarray | None = None,
+                body_acceleration_mean: np.ndarray | None = None,
+                body_acceleration_scale: np.ndarray | None = None,
+                integration_method: str = "euler"):
+    if integration_method not in ("euler", "heun"):
+        raise ValueError("integration method must be euler or heun")
+    if architecture == "structured_gru" and any(value is None for value in (
+            feature_mean, feature_scale, body_acceleration_mean,
+            body_acceleration_scale)):
+        raise ValueError("structured_gru requires fold-local state and acceleration scalers")
+
     class RecurrentTransition(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.architecture = architecture
             self.expert_count = expert_count if architecture == "mixture" else 1
             self.input_feature_count = feature_count
+            self.integration_method = integration_method
             if architecture == "narx":
                 self.rate = nn.Sequential(
                     nn.Linear(history_steps * feature_count, 2 * hidden_size),
@@ -61,7 +86,7 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
                 )
             else:
                 self.cell = nn.GRUCell(feature_count, hidden_size)
-            if architecture == "gru":
+            if architecture in ("gru", "structured_gru"):
                 self.rate = self._rate_head(nn, hidden_size)
             elif architecture == "mixture":
                 self.gate = nn.Sequential(
@@ -72,6 +97,15 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
                 self.experts = nn.ModuleList(
                     self._rate_head(nn, hidden_size)
                     for _ in range(expert_count))
+            if architecture == "structured_gru":
+                self.register_buffer("feature_mean", torch.as_tensor(
+                    feature_mean, dtype=torch.float32))
+                self.register_buffer("feature_scale", torch.as_tensor(
+                    feature_scale, dtype=torch.float32))
+                self.register_buffer("body_acceleration_mean", torch.as_tensor(
+                    body_acceleration_mean, dtype=torch.float32))
+                self.register_buffer("body_acceleration_scale", torch.as_tensor(
+                    body_acceleration_scale, dtype=torch.float32))
 
         @staticmethod
         def _rate_head(nn, size: int):
@@ -84,10 +118,37 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
             )
 
         def gate_probabilities(self, feature, hidden):
-            if self.architecture == "gru":
+            if self.architecture in ("gru", "structured_gru"):
                 return None
             gate_input = torch.cat((feature, hidden), dim=1)
             return torch.softmax(self.gate(gate_input), dim=1)
+
+        def _state_rate(self, feature, hidden):
+            if self.architecture == "narx":
+                return self.rate(hidden.reshape(hidden.shape[0], -1))
+            if self.architecture in ("gru", "structured_gru"):
+                rate = self.rate(hidden)
+            else:
+                probabilities = self.gate_probabilities(feature, hidden)
+                expert_rates = torch.stack(
+                    [expert(hidden) for expert in self.experts], dim=1)
+                rate = torch.sum(probabilities[:, :, None] * expert_rates, dim=1)
+            if self.architecture != "structured_gru":
+                return rate
+
+            # Learn aggregate effective [a_x, a_y, alpha_z], while retaining
+            # the exact body-frame transport terms in the known equations.
+            physical = (feature[:, :3] * self.feature_scale[:3]
+                        + self.feature_mean[:3])
+            acceleration = (rate[:, :3] * self.body_acceleration_scale
+                            + self.body_acceleration_mean)
+            u, v, yaw_rate = physical.unbind(dim=1)
+            ax, ay, alpha_z = acceleration.unbind(dim=1)
+            body_derivative = torch.stack((ax + yaw_rate * v,
+                                           ay - yaw_rate * u,
+                                           alpha_z), dim=1)
+            body_rate_normalized = body_derivative / self.feature_scale[:3]
+            return torch.cat((body_rate_normalized, rate[:, 3:]), dim=1)
 
         def advance(self, feature, hidden, dt):
             if self.architecture == "narx":
@@ -96,15 +157,16 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
                 state_next = feature[:, :STATE_COUNT] + dt[:, None] * rate_normalized_per_s
                 return state_next, hidden
             hidden = self.cell(feature, hidden)
-            if self.architecture == "gru":
-                rate_normalized_per_s = self.rate(hidden)
+            rate_start = self._state_rate(feature, hidden)
+            if self.integration_method == "euler":
+                rate = rate_start
             else:
-                probabilities = self.gate_probabilities(feature, hidden)
-                expert_rates = torch.stack(
-                    [expert(hidden) for expert in self.experts], dim=1)
-                rate_normalized_per_s = torch.sum(
-                    probabilities[:, :, None] * expert_rates, dim=1)
-            state_next = feature[:, :STATE_COUNT] + dt[:, None] * rate_normalized_per_s
+                provisional = feature[:, :STATE_COUNT] + dt[:, None] * rate_start
+                provisional_feature = torch.cat(
+                    (provisional, feature[:, STATE_COUNT:]), dim=1)
+                rate_end = self._state_rate(provisional_feature, hidden)
+                rate = 0.5 * (rate_start + rate_end)
+            state_next = feature[:, :STATE_COUNT] + dt[:, None] * rate
             return state_next, hidden
 
     return RecurrentTransition
@@ -415,8 +477,10 @@ def _score_model(torch, model, arrays, mean, scale, device,
         persistence_error = persistence - physical_future
         trend_error = trend - physical_future
         physical_errors = errors
+        integrated_heading_error = torch.cumsum(
+            physical_errors[:, :, 2] * dts, dim=1)
         horizons: dict[str, Any] = {}
-        for step in DEFAULT_HORIZONS:
+        for step in DEFAULT_HORIZONS + LONG_PLANT_HORIZONS:
             if step > errors.shape[1]:
                 continue
             subset = errors[:, step - 1, :]
@@ -431,7 +495,7 @@ def _score_model(torch, model, arrays, mean, scale, device,
         state_names = ("u_mps", "v_mps", "yaw_rate_rps", "steering_rad",
                        "throttle_norm", "rear_left_surface_mps", "rear_right_surface_mps")
         baselines: dict[str, Any] = {"persistence": {}, "constant_recent_trend": {}}
-        for step in DEFAULT_HORIZONS:
+        for step in DEFAULT_HORIZONS + LONG_PLANT_HORIZONS:
             if step > errors.shape[1]:
                 continue
             persist_rmse = torch.sqrt(torch.mean(
@@ -465,10 +529,17 @@ def _score_model(torch, model, arrays, mean, scale, device,
                     "rmse_at_30_steps": dict(zip(("u_mps", "v_mps", "yaw_rate_rps"),
                                                   map(float, rmse))),
                 }
+    integrated_heading_rmse = torch.sqrt(torch.mean(
+        integrated_heading_error ** 2)).item()
+    integrated_heading_final_p95 = torch.quantile(
+        torch.abs(integrated_heading_error[:, -1]), 0.95).item()
     return {"windows": int(history.shape[0]), "horizons": horizons,
             "baselines": baselines, "speed_steer_bins_at_30_steps": speed_steer,
             "mean_normalized_rmse": float(normalized_rmse.mean()),
-            "normalized_rmse_by_state": normalized_rmse.tolist()}
+            "normalized_rmse_by_state": normalized_rmse.tolist(),
+            "integrated_heading_error_rmse_rad": integrated_heading_rmse,
+            "integrated_heading_final_abs_p95_rad": integrated_heading_final_p95,
+            "integrated_heading_normalized_rmse": integrated_heading_rmse / 0.1}
 
 
 def _score_ensemble(torch, models, arrays, mean, scale, device,
@@ -493,7 +564,7 @@ def _score_ensemble(torch, models, arrays, mean, scale, device,
     names = ("u_mps", "v_mps", "yaw_rate_rps", "steering_rad",
              "throttle_norm", "rear_left_surface_mps", "rear_right_surface_mps")
     result: dict[str, Any] = {"members": len(models), "horizons": {}}
-    for step in DEFAULT_HORIZONS:
+    for step in DEFAULT_HORIZONS + LONG_PLANT_HORIZONS:
         if step > error.shape[1]:
             continue
         e = error[:, step - 1, :].cpu().numpy()
@@ -645,6 +716,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     test_groups = _sequence_groups(data, "final_test", history_steps, rollout_steps)
     other_holdout_groups = _sequence_groups(data, "test", history_steps, rollout_steps)
     mean, scale = _normalizers(data, train_groups)
+    body_acceleration_mean = body_acceleration_scale = None
+    if args.architecture == "structured_gru":
+        _, acceleration_targets, _ = training_transition_rows(
+            data, set(train_groups))
+        acceleration = acceleration_statistics(acceleration_targets)
+        body_acceleration_mean = acceleration.mean
+        body_acceleration_scale = acceleration.scale
     val_windows = _fixed_eval_windows(data, validation_groups, history_steps,
                                       rollout_steps, args.eval_windows)
     if not val_windows:
@@ -659,7 +737,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     RecurrentTransition = _model_type(
         torch, nn, args.hidden_size, args.architecture, args.experts,
-        history_steps, len(data["feature_names"]))
+        history_steps, len(data["feature_names"]), mean, scale,
+        body_acceleration_mean, body_acceleration_scale,
+        args.integration_method)
     deadline = time.monotonic() + args.time_budget_hours * 3600.0
     total_steps = 0
     member_results: list[dict[str, Any]] = []
@@ -697,7 +777,19 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             hist, future, dts = _tensor_batch(torch, batches, mean, scale, device)
             prediction = _rollout(model, hist, future, dts, history_steps)
             target = future[:, :, :STATE_COUNT]
-            loss = nn.functional.smooth_l1_loss(prediction, target, beta=0.05)
+            state_loss = nn.functional.smooth_l1_loss(
+                prediction, target, beta=0.05)
+            heading_loss = torch.zeros((), dtype=state_loss.dtype,
+                                       device=state_loss.device)
+            if args.heading_trajectory_loss_weight > 0.0:
+                integrated_heading_error = torch.cumsum(
+                    (prediction[:, :, 2] - target[:, :, 2])
+                    * float(scale[2]) * dts, dim=1)
+                heading_loss = nn.functional.smooth_l1_loss(
+                    integrated_heading_error / 0.1,
+                    torch.zeros_like(integrated_heading_error), beta=1.0)
+            loss = (state_loss + args.heading_trajectory_loss_weight
+                    * heading_loss)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
@@ -708,7 +800,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             score = _score_model(torch, model, val_arrays, mean, scale,
                                  device, history_steps)
-            score_value = score["mean_normalized_rmse"]
+            score_value = (score["mean_normalized_rmse"]
+                           + args.heading_trajectory_loss_weight
+                           * score["integrated_heading_normalized_rmse"])
+            score["model_selection_score"] = score_value
             history.append({"step": member_steps,
                             "train_loss": float(loss.detach().cpu()),
                             "validation": score})
@@ -722,6 +817,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 _save_checkpoint(torch, checkpoint, model, mean, scale, {
                     "schema_version": 1, "member": member,
                     "architecture": args.architecture,
+                    "integration_method": args.integration_method,
+                    "heading_trajectory_loss_weight":
+                        args.heading_trajectory_loss_weight,
+                    "heading_trajectory_loss_scale_rad": 0.1,
                     "expert_count": args.experts if args.architecture == "mixture" else 1,
                     "seed": seed, "step": member_steps,
                     "feature_names": data["feature_names"],
@@ -733,6 +832,17 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "rollout_steps": rollout_steps,
                     "hidden_size": args.hidden_size,
                     "training_runs": [data["run_ids"][i] for i in sorted(train_groups)],
+                    "body_acceleration_mean": (
+                        body_acceleration_mean.tolist()
+                        if body_acceleration_mean is not None else None),
+                    "body_acceleration_scale": (
+                        body_acceleration_scale.tolist()
+                        if body_acceleration_scale is not None else None),
+                    "body_equations": ({
+                        "u_dot": "a_x_eff + r*v",
+                        "v_dot": "a_y_eff - r*u",
+                        "yaw_rate_dot": "alpha_z_eff",
+                    } if args.architecture == "structured_gru" else None),
                 })
             else:
                 stale_evaluations += 1
@@ -784,6 +894,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "normalization": {"mean": mean.tolist(), "scale": scale.tolist()},
         "configuration": {
             "architecture": args.architecture,
+            "integration_method": args.integration_method,
+            "heading_trajectory_loss_weight":
+                args.heading_trajectory_loss_weight,
+            "heading_trajectory_loss_scale_rad": 0.1,
             "throttle_variation_feature": args.throttle_variation_feature,
             "high_steering_window_fraction": args.high_steering_window_fraction,
             "high_steering_window_threshold_rad": args.high_steering_window_threshold,
@@ -900,8 +1014,15 @@ def main() -> int:
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--architecture", choices=("gru", "mixture", "narx"),
+    parser.add_argument("--architecture", choices=("gru", "structured_gru",
+                                                      "mixture", "narx"),
                         default="gru")
+    parser.add_argument("--integration-method", choices=("euler", "heun"),
+                        default="euler",
+                        help="state integration used by recursive GRU and structured-GRU rollouts")
+    parser.add_argument("--heading-trajectory-loss-weight", type=float,
+                        default=0.0,
+                        help="penalize accumulated yaw-angle prediction error over each recursive training rollout")
     parser.add_argument("--throttle-variation-feature", action="store_true",
                         help="add the causal 100 ms total variation of commanded throttle to model inputs")
     parser.add_argument("--high-steering-window-fraction", type=float, default=0.0,
@@ -939,6 +1060,7 @@ def main() -> int:
             or args.max_steps_per_member < 1 or args.experts < 2
             or args.holdout_train_run_count < 0
             or args.experiment_test_run_count < 0
+            or args.heading_trajectory_loss_weight < 0.0
             or not 0.0 <= args.high_steering_window_fraction < 1.0
             or args.high_steering_window_threshold < 0.0
             or (args.score_experiment_test and args.experiment_test_run_count == 0)):

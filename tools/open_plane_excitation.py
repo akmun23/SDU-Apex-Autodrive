@@ -18,7 +18,7 @@ import statistics
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import rclpy
 from nav_msgs.msg import Odometry
@@ -758,6 +758,7 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
 class OpenPlaneExcitation:
     def __init__(self, seed: int, timeout_s: float, profile: str,
                  transition_speed_mps: float = 4.5,
+                 probe_dwell_s: float = 0.0,
                  speed_hold_kp: float = 0.04,
                  speed_hold_ki: float = 0.0,
                  speed_median_gate_mps: float = MAX_SPEED_MEDIAN_ERROR_MPS,
@@ -771,10 +772,21 @@ class OpenPlaneExcitation:
                 not math.isfinite(speed_p95_gate_mps) or
                 speed_p95_gate_mps <= 0.0):
             raise ValueError("speed-error gates must be finite and positive")
+        if not math.isfinite(probe_dwell_s) or not 0.0 <= probe_dwell_s <= 15.0:
+            raise ValueError("probe dwell must be finite and in [0, 15] seconds")
+        if probe_dwell_s > 0.0 and profile in ("full_input_excitation", "grid"):
+            raise ValueError("probe dwell override is not supported for large grid profiles")
         self.node = rclpy.create_node("open_plane_excitation")
         self.seed = seed
         self.profile = profile
         self.phases = build_schedule(seed, profile, transition_speed_mps)
+        if probe_dwell_s > 0.0:
+            self.phases = [
+                replace(phase, duration_s=probe_dwell_s)
+                if phase.validate_samples else phase
+                for phase in self.phases
+            ]
+        self.probe_dwell_s = probe_dwell_s
         self.timeout_s = timeout_s
         self.speed_hold_kp = speed_hold_kp
         self.speed_hold_ki = speed_hold_ki
@@ -853,6 +865,8 @@ class OpenPlaneExcitation:
             f"phases={len(self.phases)}, "
             f"schedule_max={nominal_schedule_s + reset_budget_s:.1f}s "
             f"(nominal={nominal_schedule_s:.1f}s, reset_budget={reset_budget_s:.1f}s), "
+            f"probe_dwell_override={probe_dwell_s:.1f}s, "
+            f"throttle_command_cap={MAX_THROTTLE:.2f}, "
             f"speed_hold_kp={speed_hold_kp:.3f}, "
             f"speed_hold_ki={speed_hold_ki:.3f}, "
             f"speed_gates[p50/p95]={speed_median_gate_mps:.3f}/"
@@ -1247,8 +1261,7 @@ class OpenPlaneExcitation:
 
         throttle = self._phase_command(phase, phase_elapsed)
         # Speed-regulated phases get a target-speed guard. Fixed-input probes
-        # must remain fixed so their actuator command is an identified input;
-        # the global emergency-speed cutoff above still bounds the experiment.
+        # remain fixed except for explicit excitation-mode safety governing.
         if (phase.throttle_mode not in ("fixed", "excitation", "slew_probe") and
                 self.speed_mps >= phase.speed_target_mps + 0.50):
             throttle = 0.0
@@ -1411,6 +1424,8 @@ def main() -> int:
                         help="whole experiment timeout, bounded to (0, 1200] seconds")
     parser.add_argument("--transition-speed-mps", type=float, default=4.5,
                         help="speed for transition surface/support profiles (3–8 m/s)")
+    parser.add_argument("--probe-dwell-s", type=float, default=0.0,
+                        help="override valid probe-phase dwell only (0 keeps profile defaults; max 15 s)")
     parser.add_argument("--speed-hold-kp", type=float, default=0.04,
                         help="proportional throttle correction per m/s speed error")
     parser.add_argument("--speed-hold-ki", type=float, default=0.0,
@@ -1445,8 +1460,15 @@ def main() -> int:
             not math.isfinite(args.speed_p95_gate_mps) or
             args.speed_p95_gate_mps <= 0.0):
         parser.error("speed controller gains must be nonnegative and speed gates positive")
+    if (not math.isfinite(args.probe_dwell_s) or
+            not 0.0 <= args.probe_dwell_s <= 15.0):
+        parser.error("--probe-dwell-s must be in [0, 15]")
+    if (args.probe_dwell_s > 0.0 and
+            args.profile in ("full_input_excitation", "grid")):
+        parser.error("--probe-dwell-s is unsupported for full_input_excitation and grid")
     experiment = OpenPlaneExcitation(args.seed, args.timeout_s, args.profile,
                                     args.transition_speed_mps,
+                                    args.probe_dwell_s,
                                     args.speed_hold_kp,
                                     args.speed_hold_ki,
                                     args.speed_median_gate_mps,
