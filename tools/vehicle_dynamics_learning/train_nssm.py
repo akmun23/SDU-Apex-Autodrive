@@ -25,6 +25,19 @@ from typing import Any
 import numpy as np
 
 try:
+    from .family_condition_sampler import (
+        FamilyConditionSampler,
+        build_sequence_sampler,
+        run_family_labels,
+    )
+except ImportError:
+    from family_condition_sampler import (
+        FamilyConditionSampler,
+        build_sequence_sampler,
+        run_family_labels,
+    )
+
+try:
     from .structured_body_models import (
         REAR_AXLE_TO_COM_X_M,
         acceleration_statistics,
@@ -187,7 +200,7 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
     if missing:
         raise ValueError(f"dataset missing arrays: {sorted(missing)}")
     schema_version = int(data["schema_version"][0])
-    if schema_version not in (1, 2, 3, 4, 5, 6):
+    if schema_version not in (1, 2, 3, 4, 5, 6, 7, 8):
         raise ValueError(f"unsupported schema version {data['schema_version']}")
     frames = data["frames"].astype(np.float32, copy=False)
     dt_s = data["dt_s"].astype(np.float32, copy=False)
@@ -203,6 +216,94 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         raise ValueError("sequence bounds and run-index arrays disagree")
     if np.any(bounds[:, 0] < 0) or np.any(bounds[:, 1] > len(frames)) or np.any(bounds[:, 1] <= bounds[:, 0]):
         raise ValueError("sequence bounds exceed the frame array")
+    run_families = condition_labels = sequence_condition_id = None
+    sequence_reset_index = sequence_replicate_index = None
+    training_families = training_family_names = None
+    training_family_probabilities = frame_domain_speed_mps = None
+    domain_speed_cap_mps = None
+    if schema_version >= 7:
+        required_schema7 = {
+            "run_families", "condition_labels", "condition_run_index",
+            "sequence_condition_id", "sequence_reset_index",
+            "sequence_replicate_index", "frame_run_index",
+            "frame_reset_index",
+        }
+        missing_schema7 = required_schema7 - set(data.files)
+        if missing_schema7:
+            raise ValueError(
+                f"schema-7 dataset lacks metadata: {sorted(missing_schema7)}")
+        run_families = data["run_families"].astype(str)
+        condition_labels = data["condition_labels"].astype(str)
+        condition_run_index = data["condition_run_index"].astype(np.int32,
+                                                               copy=False)
+        sequence_condition_id = data["sequence_condition_id"].astype(
+            np.int32, copy=False)
+        sequence_reset_index = data["sequence_reset_index"].astype(
+            np.int32, copy=False)
+        sequence_replicate_index = data["sequence_replicate_index"].astype(
+            np.int32, copy=False)
+        frame_run_index = data["frame_run_index"].astype(np.int32, copy=False)
+        frame_reset_index = data["frame_reset_index"].astype(np.int32, copy=False)
+        if (run_families.shape != run_ids.shape
+                or condition_run_index.shape != condition_labels.shape
+                or sequence_condition_id.shape != seq_run.shape
+                or sequence_reset_index.shape != seq_run.shape
+                or sequence_replicate_index.shape != seq_run.shape
+                or frame_run_index.shape != (len(frames),)
+                or frame_reset_index.shape != (len(frames),)):
+            raise ValueError("schema-7 run/condition/reset arrays do not align")
+        if (np.any(condition_run_index < 0)
+                or np.any(condition_run_index >= len(run_ids))
+                or np.any(sequence_condition_id < 0)
+                or np.any(sequence_condition_id >= len(condition_labels))):
+            raise ValueError("schema-7 condition references are out of range")
+        if np.any(condition_run_index[sequence_condition_id] != seq_run):
+            raise ValueError("schema-7 condition IDs refer to a different run")
+        for sequence_id, (start_raw, end_raw) in enumerate(bounds):
+            start, end = int(start_raw), int(end_raw)
+            expected_run = int(seq_run[sequence_id])
+            expected_reset = int(sequence_reset_index[sequence_id])
+            if (np.any(frame_run_index[start:end] != expected_run)
+                    or np.any(frame_reset_index[start:end] != expected_reset)):
+                raise ValueError(
+                    "schema-7 frame run/reset metadata disagrees with sequence metadata")
+        if schema_version >= 8:
+            required_race_domain = {
+                "dataset_role", "domain_speed_cap_mps", "domain_cooldown_steps",
+                "training_families", "training_family_names",
+                "training_family_probabilities", "frame_domain_speed_mps",
+            }
+            missing_race = required_race_domain - set(data.files)
+            if missing_race:
+                raise ValueError(
+                    f"schema-8 dataset lacks race-domain metadata: {sorted(missing_race)}")
+            role = str(data["dataset_role"].astype(str)[0])
+            if role != "race_domain":
+                raise ValueError(
+                    f"plant training rejects non-race-domain dataset role {role!r}")
+            speed_cap = float(data["domain_speed_cap_mps"][0])
+            domain_speed_cap_mps = speed_cap
+            frame_domain_speed_mps = data["frame_domain_speed_mps"].astype(
+                np.float32, copy=False)
+            training_families = data["training_families"].astype(str)
+            training_family_names = data["training_family_names"].astype(str)
+            training_family_probabilities = data[
+                "training_family_probabilities"].astype(np.float32, copy=False)
+            if (not np.isfinite(speed_cap) or speed_cap <= 0.0
+                    or frame_domain_speed_mps.shape != (len(frames),)
+                    or training_families.shape != run_ids.shape
+                    or training_family_names.shape
+                    != training_family_probabilities.shape
+                    or len(training_family_names) == 0
+                    or not np.isfinite(training_family_probabilities).all()
+                    or np.any(training_family_probabilities < 0.0)
+                    or not np.isclose(training_family_probabilities.sum(), 1.0,
+                                      rtol=0.0, atol=1e-6)):
+                raise ValueError("invalid schema-8 domain/sampling metadata")
+            if (not np.isfinite(frame_domain_speed_mps).all()
+                    or np.any(frame_domain_speed_mps < 0.0)
+                    or np.any(frame_domain_speed_mps > speed_cap + 1e-5)):
+                raise ValueError("race-domain frames exceed the declared speed support")
     packet_sequence = None
     if schema_version >= 4:
         if "packet_sequence" not in data.files:
@@ -361,6 +462,16 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         "lap_count": lap_count,
         "simulator_rigid_state": simulator_rigid_state,
         "simulator_linear_acceleration": simulator_linear_acceleration,
+        "run_families": run_families,
+        "condition_labels": condition_labels,
+        "sequence_condition_id": sequence_condition_id,
+        "sequence_reset_index": sequence_reset_index,
+        "sequence_replicate_index": sequence_replicate_index,
+        "training_families": training_families,
+        "training_family_names": training_family_names,
+        "training_family_probabilities": training_family_probabilities,
+        "frame_domain_speed_mps": frame_domain_speed_mps,
+        "domain_speed_cap_mps": domain_speed_cap_mps,
         "schema_version": schema_version,
     }
 
@@ -399,7 +510,8 @@ def _sample_batch(data: dict[str, Any], groups: dict[int, list[int]], batch_size
                   rng: np.random.Generator,
                   steering_windows: dict[int, list[tuple[int, int]]] | None = None,
                   steering_fraction: float = 0.0,
-                  include_pose: bool = False):
+                  include_pose: bool = False,
+                  family_sampler=None, steering_sampler=None):
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
     steering_run_ids = (np.asarray(sorted(steering_windows), dtype=np.int32)
                         if steering_windows else np.empty(0, dtype=np.int32))
@@ -408,12 +520,18 @@ def _sample_batch(data: dict[str, Any], groups: dict[int, list[int]], batch_size
         use_steering_window = (
             len(steering_run_ids) > 0 and rng.random() < steering_fraction)
         if use_steering_window:
-            run = int(rng.choice(steering_run_ids))
-            candidates = steering_windows[run]
-            seq_id, start = candidates[int(rng.integers(len(candidates)))]
+            if steering_sampler is None:
+                run = int(rng.choice(steering_run_ids))
+                candidates = steering_windows[run]
+                seq_id, start = candidates[int(rng.integers(len(candidates)))]
+            else:
+                run, (seq_id, start), _, _ = steering_sampler.sample(rng)
         else:
-            run = int(rng.choice(run_ids))
-            seq_id = int(rng.choice(groups[run]))
+            if family_sampler is None:
+                run = int(rng.choice(run_ids))
+                seq_id = int(rng.choice(groups[run]))
+            else:
+                run, seq_id, _, _ = family_sampler.sample(rng)
             start = _candidate_start(data, seq_id, history_steps,
                                      rollout_steps, rng)
         hist_begin = start - history_steps + 1
@@ -987,6 +1105,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("no sufficiently long sequences in train split")
     if not validation_groups:
         raise ValueError("no sufficiently long sequences in validation split")
+    family_sampler = build_sequence_sampler(data, train_groups)
     auxiliary_train_groups: dict[int, list[int]] = {}
     auxiliary_validation_groups: dict[int, list[int]] = {}
     if auxiliary_enabled:
@@ -999,6 +1118,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if not auxiliary_train_groups or not auxiliary_validation_groups:
             raise ValueError(
                 "auxiliary rollout has no pose-valid train or validation runs")
+    auxiliary_family_sampler = (
+        build_sequence_sampler(data, auxiliary_train_groups)
+        if auxiliary_enabled else None)
     steering_windows = None
     if args.high_steering_window_fraction > 0.0:
         steering_windows = _high_steering_windows(
@@ -1007,6 +1129,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if not steering_windows:
             raise ValueError(
                 "no training rollouts meet the high-steering window threshold")
+    steering_sampler = None
+    if steering_windows:
+        steering_sampler = FamilyConditionSampler(
+            steering_windows, run_family_labels(data),
+            lambda run, item: (
+                int(data["sequence_condition_id"][int(item[0])])
+                if data.get("sequence_condition_id") is not None else None))
     auxiliary_steering_windows = None
     if auxiliary_enabled and args.auxiliary_high_steering_window_fraction > 0.0:
         auxiliary_steering_windows = _high_steering_windows(
@@ -1018,6 +1147,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if not auxiliary_steering_windows:
             raise ValueError(
                 "no auxiliary training rollouts meet the high-steering threshold")
+    auxiliary_steering_sampler = None
+    if auxiliary_steering_windows:
+        auxiliary_steering_sampler = FamilyConditionSampler(
+            auxiliary_steering_windows, run_family_labels(data),
+            lambda run, item: (
+                int(data["sequence_condition_id"][int(item[0])])
+                if data.get("sequence_condition_id") is not None else None))
     test_groups = _sequence_groups(
         data, "final_test", history_steps, rollout_steps, position_loss_enabled)
     other_holdout_groups = _sequence_groups(
@@ -1126,7 +1262,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                                     history_steps, rollout_steps, np_rng,
                                     steering_windows,
                                     args.high_steering_window_fraction,
-                                    position_loss_enabled)
+                                    position_loss_enabled, family_sampler,
+                                    steering_sampler)
             hist, future, dts, pose_targets = _tensor_batch(
                 torch, batches, mean, scale, device)
             prediction = _rollout(model, hist, future, dts, history_steps)
@@ -1142,7 +1279,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     history_steps, args.auxiliary_rollout_steps, np_rng,
                     auxiliary_steering_windows,
                     args.auxiliary_high_steering_window_fraction,
-                    position_loss_enabled)
+                    position_loss_enabled, auxiliary_family_sampler,
+                    auxiliary_steering_sampler)
                 aux_hist, aux_future, aux_dts, aux_pose = _tensor_batch(
                     torch, auxiliary_batch, mean, scale, device)
                 aux_prediction = _rollout(
@@ -1316,6 +1454,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "validation": sum(
                     len(group) for group in auxiliary_validation_groups.values()),
             } if auxiliary_enabled else {}),
+        "training_sampler": {
+            "primary": family_sampler.metadata,
+            "primary_high_steering": (
+                steering_sampler.metadata if steering_sampler is not None else None),
+            "auxiliary": (auxiliary_family_sampler.metadata
+                          if auxiliary_family_sampler is not None else None),
+            "auxiliary_high_steering": (
+                auxiliary_steering_sampler.metadata
+                if auxiliary_steering_sampler is not None else None),
+        },
         "normalization": {"mean": mean.tolist(), "scale": scale.tolist()},
         "configuration": {
             "architecture": args.architecture,

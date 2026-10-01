@@ -41,6 +41,7 @@ class PlantEstimate:
     state: np.ndarray
     uncertainty: np.ndarray
     support_distance: float | None
+    within_speed_domain: bool = True
 
 
 def _integrate_pose(previous: np.ndarray, current: np.ndarray,
@@ -80,7 +81,8 @@ class HistoricalGruPlant:
 
     def __init__(self, torch, models: list[Any], feature_mean: np.ndarray,
                  feature_scale: np.ndarray, history_steps: int,
-                 support_tree=None) -> None:
+                 support_tree=None,
+                 max_supported_speed_mps: float | None = None) -> None:
         if not models:
             raise ValueError("at least one frozen model is required")
         if feature_mean.shape != (FRAME_FEATURE_COUNT,):
@@ -99,6 +101,11 @@ class HistoricalGruPlant:
         if self.history_steps < 2:
             raise ValueError("historical GRU needs at least two context frames")
         self.support_tree = support_tree
+        if (max_supported_speed_mps is not None
+                and (not np.isfinite(max_supported_speed_mps)
+                     or max_supported_speed_mps <= 0.0)):
+            raise ValueError("maximum supported speed must be finite and positive")
+        self.max_supported_speed_mps = max_supported_speed_mps
         self._features: list[Any] = []
         self._hidden: list[Any] = []
         self._member_states: np.ndarray | None = None
@@ -201,13 +208,20 @@ class HistoricalGruPlant:
 
     def _make_estimate(self) -> PlantEstimate:
         mean_state = np.mean(self._member_states, axis=0)
+        within_domain = True
+        if self.max_supported_speed_mps is not None:
+            member_speeds = np.hypot(self._member_states[:, 0],
+                                     self._member_states[:, 1])
+            within_domain = bool(np.all(
+                member_speeds <= self.max_supported_speed_mps))
         support = None
-        if self.support_tree is not None:
+        if within_domain and self.support_tree is not None:
             normalized = ((mean_state - self.feature_mean[:7])
                           / self.feature_scale[:7])
             support = float(self.support_tree.query(normalized, k=1)[0])
         result = _summarize_ensemble(self._member_states, self._member_poses)
-        return PlantEstimate(result.state, result.uncertainty, support)
+        return PlantEstimate(result.state, result.uncertainty, support,
+                             within_domain)
 
 
 def build_training_support_tree(data: dict[str, Any],
@@ -241,7 +255,9 @@ def build_training_support_tree(data: dict[str, Any],
 
 
 def load_historical_gru_plant(run_dir: Path, dataset_path: Path,
-                              device: str = "cpu") -> HistoricalGruPlant:
+                              device: str = "cpu",
+                              max_supported_speed_mps: float | None = None
+                              ) -> HistoricalGruPlant:
     """Load the frozen baseline and construct its train-only support index."""
     torch, _ = _torch()
     if device == "cpu":
@@ -252,7 +268,9 @@ def load_historical_gru_plant(run_dir: Path, dataset_path: Path,
         data, payload["feature_mean"], payload["feature_scale"])
     return HistoricalGruPlant(
         torch, models, payload["feature_mean"], payload["feature_scale"],
-        int(metadata["history_steps"]), support_tree)
+        int(metadata["history_steps"]), support_tree,
+        (data["domain_speed_cap_mps"] if max_supported_speed_mps is None
+         else max_supported_speed_mps))
 
 
 class RssmTeacherPlant:
@@ -266,7 +284,8 @@ class RssmTeacherPlant:
     def __init__(self, torch, models: list[Any], x_mean: np.ndarray,
                  x_scale: np.ndarray, y_mean: np.ndarray,
                  y_scale: np.ndarray, context_steps: int,
-                 support_tree=None) -> None:
+                 support_tree=None,
+                 max_supported_speed_mps: float | None = None) -> None:
         if not models:
             raise ValueError("at least one frozen RSSM model is required")
         if x_mean.shape != (9,) or x_scale.shape != (9,):
@@ -281,6 +300,11 @@ class RssmTeacherPlant:
         self.y_scale = np.asarray(y_scale, dtype=np.float32)
         self.context_steps = int(context_steps)
         self.support_tree = support_tree
+        if (max_supported_speed_mps is not None
+                and (not np.isfinite(max_supported_speed_mps)
+                     or max_supported_speed_mps <= 0.0)):
+            raise ValueError("maximum supported speed must be finite and positive")
+        self.max_supported_speed_mps = max_supported_speed_mps
         self._hidden: list[Any] = []
         self._states: list[Any] = []
         self._member_states: np.ndarray | None = None
@@ -388,17 +412,26 @@ class RssmTeacherPlant:
 
     def _make_estimate(self) -> PlantEstimate:
         mean_state = np.mean(self._member_states, axis=0)
+        within_domain = True
+        if self.max_supported_speed_mps is not None:
+            member_speeds = np.hypot(self._member_states[:, 0],
+                                     self._member_states[:, 1])
+            within_domain = bool(np.all(
+                member_speeds <= self.max_supported_speed_mps))
         support = None
-        if self.support_tree is not None:
+        if within_domain and self.support_tree is not None:
             normalized = ((mean_state - self.x_mean[:7])
                           / self.x_scale[:7])
             support = float(self.support_tree.query(normalized, k=1)[0])
         result = _summarize_ensemble(self._member_states, self._member_poses)
-        return PlantEstimate(result.state, result.uncertainty, support)
+        return PlantEstimate(result.state, result.uncertainty, support,
+                             within_domain)
 
 
 def load_rssm_teacher_plant(checkpoints: list[Path], dataset_path: Path,
-                            device: str = "cpu") -> RssmTeacherPlant:
+                            device: str = "cpu",
+                            max_supported_speed_mps: float | None = None
+                            ) -> RssmTeacherPlant:
     """Load one or more fixed-split RSSM checkpoints for prior-only stepping."""
     if not checkpoints:
         raise ValueError("at least one RSSM checkpoint is required")
@@ -428,4 +461,6 @@ def load_rssm_teacher_plant(checkpoints: list[Path], dataset_path: Path,
     support_tree = build_training_support_tree(data, x_mean, x_scale)
     return RssmTeacherPlant(
         torch, models, x_mean, x_scale, y_mean, y_scale,
-        int(metadata["context_steps"]), support_tree)
+        int(metadata["context_steps"]), support_tree,
+        (data["domain_speed_cap_mps"] if max_supported_speed_mps is None
+         else max_supported_speed_mps))

@@ -21,8 +21,18 @@ from typing import Any
 import numpy as np
 
 from tools.vehicle_dynamics_learning.train_nssm import _load_dataset, _torch
+from tools.vehicle_dynamics_learning.family_condition_sampler import (
+    build_sequence_sampler,
+)
 from tools.vehicle_dynamics_learning.experiment_artifacts import (
     write_standard_artifacts,
+)
+from tools.vehicle_dynamics_learning.race_domain_objectives import (
+    RACE_SPEED_DOMAINS,
+    RACE_SPEED_BIN_EDGES_MPS,
+    race_speed_bin_weights,
+    race_speed_domain_labels,
+    weighted_smooth_l1,
 )
 
 
@@ -166,12 +176,17 @@ def _sample_windows(data: dict[str, Any], groups: dict[int, list[tuple[int, int]
 def _training_batch(data: dict[str, Any], targets: np.ndarray,
                     groups: dict[int, list[tuple[int, int]]],
                     batch_size: int, context_steps: int, future_steps: int,
-                    rng: np.random.Generator) -> tuple[np.ndarray, ...]:
+                    rng: np.random.Generator,
+                    family_sampler=None) -> tuple[np.ndarray, ...]:
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
     context_rows, command_rows, target_rows = [], [], []
-    for run_id in rng.choice(run_ids, size=batch_size, replace=True):
-        sequences = groups[int(run_id)]
-        start, end = sequences[int(rng.integers(0, len(sequences)))]
+    for _ in range(batch_size):
+        if family_sampler is None:
+            run_id = int(rng.choice(run_ids))
+            sequences = groups[run_id]
+            start, end = sequences[int(rng.integers(0, len(sequences)))]
+        else:
+            run_id, (start, end), _, _ = family_sampler.sample(rng)
         last_start = end - context_steps - future_steps - 1
         index = int(rng.integers(start, last_start + 1))
         future_start = index + context_steps
@@ -221,17 +236,58 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
               groups: dict[int, list[tuple[int, int]]], x_mean: np.ndarray,
               x_scale: np.ndarray, y_mean: np.ndarray, y_scale: np.ndarray,
               device, context_steps: int, future_steps: int, seed: int,
-              max_windows_per_run: int) -> dict[str, Any]:
+              max_windows_per_run: int, *, stratify: bool = False
+              ) -> dict[str, Any]:
     windows = _windows_by_run(
         data, targets, groups, max_windows_per_run, context_steps,
         future_steps, seed)
     model.eval()
     per_run = {}
+    regime_run_scores: dict[str, dict[str, dict[str, dict[str, float]]]] = {
+        "speed_mps": defaultdict(lambda: defaultdict(dict)),
+        "absolute_steering_rad": defaultdict(lambda: defaultdict(dict)),
+        "wheel_body_mismatch": defaultdict(lambda: defaultdict(dict)),
+    } if stratify else {}
+    mismatch_thresholds = None
+    race_domain = int(data.get("schema_version", 0)) >= 8
+    race_domain_speed_run_scores: dict[str, dict[str, dict[str, float]]] = {
+        domain: defaultdict(dict) for domain in RACE_SPEED_DOMAINS
+    }
+    if stratify:
+        training_mismatch = []
+        for sequence_index, (start_value, end_value) in enumerate(data["bounds"]):
+            run_index = int(data["seq_run"][sequence_index])
+            if data["splits"][run_index] != "train":
+                continue
+            start, end = int(start_value), int(end_value)
+            frame = data["frames"][start:end]
+            local = np.abs(0.5 * (frame[:, 5] + frame[:, 6]) - frame[:, 0])
+            training_mismatch.append(local[np.isfinite(local)])
+        if not training_mismatch or not sum(map(len, training_mismatch)):
+            raise ValueError("cannot define mismatch strata without train rows")
+        mismatch_thresholds = np.quantile(
+            np.concatenate(training_mismatch), (0.50, 0.90))
+    speed_edges = (0.0, 3.0, 5.0, 7.0, 9.0, 10.0, 11.0, 12.0)
+    steering_edges = (0.0, 0.10, 0.20, 0.30, 0.40, 0.5240001)
+
+    def interval_labels(values: np.ndarray, edges: tuple[float, ...],
+                        suffix: str) -> np.ndarray:
+        indices = np.searchsorted(np.asarray(edges), values, side="right") - 1
+        labels = np.full(len(values), "outside", dtype="U32")
+        valid = (indices >= 0) & (indices < len(edges) - 1)
+        for index, bin_index in enumerate(indices):
+            if valid[index]:
+                labels[index] = (
+                    f"{edges[bin_index]:g}-{edges[bin_index + 1]:g}{suffix}")
+        labels[values == edges[-1]] = f"{edges[-2]:g}-{edges[-1]:g}{suffix}"
+        return labels
     horizon_steps = sorted(set(step for step in (
         round(0.25 / DT_S), round(0.75 / DT_S), round(2.0 / DT_S),
         round(5.0 / DT_S), future_steps) if step <= future_steps))
     for run_id, run_windows in windows.items():
         batch_predictions, batch_targets, window_pose_errors = [], [], []
+        window_initial_states = []
+        initial_speed, initial_steering, initial_mismatch = [], [], []
         with torch.no_grad():
             for batch_start in range(0, len(run_windows), 16):
                 local = run_windows[batch_start:batch_start + 16]
@@ -244,9 +300,20 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
                     command_array.append(data["frames"][future_start:future_end, 7:9])
                     target_array.append(targets[future_start:future_end])
                     initial_states.append(targets[future_start - 1, :STATE_COUNT])
+                    window_initial_states.append(
+                        targets[future_start - 1, :STATE_COUNT])
                     initial_poses.append(data["simulator_pose_xyyaw"][future_start - 1])
                     ground_truth_poses.append(
                         data["simulator_pose_xyyaw"][future_start:future_end])
+                    rigid_initial = data["simulator_rigid_state"][future_start - 1]
+                    feature_initial = data["frames"][future_start - 1]
+                    initial_speed.append(float(np.hypot(
+                        rigid_initial[7], rigid_initial[8])))
+                    if stratify:
+                        initial_steering.append(abs(float(feature_initial[3])))
+                        initial_mismatch.append(abs(float(
+                            0.5 * (feature_initial[5] + feature_initial[6])
+                            - feature_initial[0])))
                 context = (np.stack(context_array) - x_mean) / x_scale
                 commands = (np.stack(command_array) - x_mean[7:9]) / x_scale[7:9]
                 context_t = torch.as_tensor(context, dtype=torch.float32,
@@ -272,6 +339,29 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
         target_all = np.concatenate(batch_targets)
         state_error = pred_all[:, :, :STATE_COUNT] - target_all[:, :, :STATE_COUNT]
         norm_error = state_error / y_scale[:STATE_COUNT]
+        initial_state_all = np.stack(window_initial_states)
+        persistence_error = (
+            initial_state_all[:, None, :] - target_all[:, :, :STATE_COUNT]
+        ) / y_scale[:STATE_COUNT]
+        run_regime_labels = {}
+        run_speed_domain_labels = None
+        if race_domain:
+            run_speed_domain_labels = race_speed_domain_labels(
+                np.asarray(initial_speed, dtype=np.float64))
+        if stratify:
+            speed_values = np.asarray(initial_speed)
+            steering_values = np.asarray(initial_steering)
+            mismatch_values = np.asarray(initial_mismatch)
+            mismatch_low, mismatch_high = map(float, mismatch_thresholds)
+            run_regime_labels = {
+                "speed_mps": interval_labels(speed_values, speed_edges, "mps"),
+                "absolute_steering_rad": interval_labels(
+                    steering_values, steering_edges, "rad"),
+                "wheel_body_mismatch": np.where(
+                    mismatch_values <= mismatch_low, "low",
+                    np.where(mismatch_values <= mismatch_high,
+                             "moderate", "high")),
+            }
         horizon_result = {}
         for step in horizon_steps:
             error_at_step = state_error[:, step - 1]
@@ -285,7 +375,12 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
                     normalized_at_step[:, :3] ** 2))),
                 "normalized_full_state_rmse": float(np.sqrt(np.mean(
                     normalized_at_step ** 2))),
+                "persistence_normalized_body_state_rmse": float(np.sqrt(
+                    np.mean(persistence_error[:, step - 1, :3] ** 2))),
             }
+            metric["direct_to_persistence_rmse_ratio"] = (
+                metric["normalized_body_state_rmse"]
+                / max(metric["persistence_normalized_body_state_rmse"], 1e-8))
             if window_pose_errors:
                 local_pose = np.stack(window_pose_errors)[:, :step]
                 metric["position_xy_rmse_m"] = np.sqrt(np.mean(
@@ -294,6 +389,26 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
                     local_pose[:, :, 2] ** 2)))
                 metric["pose_windows"] = int(len(window_pose_errors))
             horizon_result[f"{step * DT_S:g}s"] = metric
+            if race_domain:
+                horizon_key = f"{step * DT_S:g}s"
+                run_name = str(data["run_ids"][run_id])
+                for domain in RACE_SPEED_DOMAINS:
+                    selected = run_speed_domain_labels == domain
+                    if np.any(selected):
+                        race_domain_speed_run_scores[domain][run_name][horizon_key] = float(
+                            np.sqrt(np.mean(
+                                norm_error[selected, step - 1, :3] ** 2)))
+            if stratify:
+                horizon_key = f"{step * DT_S:g}s"
+                for axis, labels in run_regime_labels.items():
+                    for label in np.unique(labels):
+                        selected = labels == label
+                        if label == "outside" or not np.any(selected):
+                            continue
+                        regime_score = float(np.sqrt(np.mean(
+                            norm_error[selected, step - 1, :3] ** 2)))
+                        regime_run_scores[axis][str(label)][
+                            str(data["run_ids"][run_id])][horizon_key] = regime_score
         per_run[str(data["run_ids"][run_id])] = {
             "window_count": int(len(run_windows)),
             "horizons": horizon_result,
@@ -310,19 +425,106 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
             "run_min": float(np.min(values)) if values else None,
             "run_max": float(np.max(values)) if values else None,
         }
-    score_values = [macro[key]["macro_run_mean_normalized_body_state_rmse"]
-                    for key in ("0.25s", "0.75s", "2s", "5s")
-                    if key in macro
-                    and macro[key]["macro_run_mean_normalized_body_state_rmse"]
-                    is not None]
+        persistence_values = [
+            row["horizons"][key]["persistence_normalized_body_state_rmse"]
+            for row in per_run.values() if key in row["horizons"]]
+        macro[key]["macro_run_mean_persistence_normalized_body_state_rmse"] = (
+            float(np.mean(persistence_values)) if persistence_values else None)
+        macro[key]["direct_to_persistence_rmse_ratio"] = (
+            float(np.mean(values) / max(np.mean(persistence_values), 1e-8))
+            if values and persistence_values else None)
+    by_regime = {}
+    if stratify:
+        rng = np.random.default_rng(seed + 271828)
+        for axis, bins in regime_run_scores.items():
+            by_regime[axis] = {}
+            for label, runs in bins.items():
+                by_regime[axis][label] = {}
+                for horizon in sorted({
+                        key for values in runs.values() for key in values}):
+                    run_values = np.asarray([
+                        values[horizon] for values in runs.values()
+                        if horizon in values], dtype=np.float64)
+                    if len(run_values) >= 2:
+                        draws = rng.integers(
+                            0, len(run_values), size=(1000, len(run_values)))
+                        ci = np.quantile(np.mean(run_values[draws], axis=1),
+                                         (0.025, 0.975)).tolist()
+                    else:
+                        ci = None
+                    by_regime[axis][label][horizon] = {
+                        "independent_run_count": int(len(run_values)),
+                        "macro_run_mean_normalized_body_state_rmse": (
+                            float(np.mean(run_values)) if len(run_values) else None),
+                        "run_min": float(np.min(run_values)) if len(run_values) else None,
+                        "run_max": float(np.max(run_values)) if len(run_values) else None,
+                        "run_cluster_bootstrap_95pct_ci": ci,
+                        "per_run": {
+                            run_id: float(values[horizon])
+                            for run_id, values in sorted(runs.items())
+                            if horizon in values},
+                    }
+    race_domain_speed_macro = {}
+    for domain, run_scores in race_domain_speed_run_scores.items():
+        race_domain_speed_macro[domain] = {}
+        for horizon in horizon_steps:
+            key = f"{horizon * DT_S:g}s"
+            values = np.asarray([scores[key] for scores in run_scores.values()
+                                 if key in scores], dtype=np.float64)
+            if len(values):
+                rng = np.random.default_rng(seed + horizon + len(domain))
+                draws = rng.integers(0, len(values), size=(1000, len(values)))
+                interval = np.quantile(np.mean(values[draws], axis=1),
+                                       (0.025, 0.975)).tolist()
+            else:
+                interval = None
+            race_domain_speed_macro[domain][key] = {
+                "independent_run_count": int(len(values)),
+                "macro_run_mean_normalized_body_state_rmse": (
+                    float(np.mean(values)) if len(values) else None),
+                "run_cluster_bootstrap_95pct_ci": interval,
+                "per_run": {
+                    run_id: float(scores[key])
+                    for run_id, scores in sorted(run_scores.items())
+                    if key in scores},
+            }
+    primary_keys = ("0.25s", "0.75s", "2s")
+    if race_domain:
+        score_values = [
+            race_domain_speed_macro[domain][key][
+                "macro_run_mean_normalized_body_state_rmse"]
+            for domain in RACE_SPEED_DOMAINS for key in primary_keys
+            if key in race_domain_speed_macro[domain]
+            and race_domain_speed_macro[domain][key]["independent_run_count"] >= 2
+            and race_domain_speed_macro[domain][key][
+                "macro_run_mean_normalized_body_state_rmse"] is not None]
+        if len(score_values) != len(RACE_SPEED_DOMAINS) * len(primary_keys):
+            checkpoint_score = None
+        else:
+            checkpoint_score = float(np.mean(score_values))
+    else:
+        score_values = [macro[key]["macro_run_mean_normalized_body_state_rmse"]
+                        for key in ("0.25s", "0.75s", "2s", "5s")
+                        if key in macro
+                        and macro[key]["macro_run_mean_normalized_body_state_rmse"]
+                        is not None]
+        checkpoint_score = float(np.mean(score_values)) if score_values else None
     return {
         "eligible_run_count": len(groups),
         "eligible_sequence_count": sum(map(len, groups.values())),
         "window_count": sum(map(len, windows.values())),
         "macro_run_horizons": macro,
-        "checkpoint_selection_score": (
-            float(np.mean(score_values)) if score_values else None),
+        "checkpoint_selection_score": checkpoint_score,
+        "checkpoint_selection_basis": (
+            "equal macro over core 0-9 and fast-boundary 9-12 m/s, each averaged across independent runs at 0.25/0.75/2 s; each cell requires at least two validation runs"
+            if race_domain else "legacy macro run mean at available 0.25/0.75/2/5 s horizons"),
+        "race_domain_speed_macro": race_domain_speed_macro,
         "per_run": per_run,
+        "by_initial_regime": by_regime,
+        "wheel_body_mismatch_train_thresholds_mps": (
+            {"low_upper_p50": float(mismatch_thresholds[0]),
+             "moderate_upper_p90": float(mismatch_thresholds[1])}
+            if mismatch_thresholds is not None else None),
     }
 
 
@@ -361,6 +563,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     }
     if not groups["train"] or not groups["validation"]:
         raise ValueError("need eligible whole-run train and validation sequences")
+    family_sampler = build_sequence_sampler(data, groups["train"])
     x_mean, x_scale, y_mean, y_scale = _fit_normalizers(
         data, targets, groups["train"])
     Model = _torch_model(torch, nn, context_steps, future_steps,
@@ -380,7 +583,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         steps_completed = step
         context, commands, labels = _training_batch(
             data, targets, groups["train"], batch_size, context_steps,
-            future_steps, rng)
+            future_steps, rng, family_sampler)
         context = (context - x_mean) / x_scale
         commands = (commands - x_mean[7:9]) / x_scale[7:9]
         labels = (labels - y_mean) / y_scale
@@ -390,12 +593,22 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         model.train()
         optimizer.zero_grad(set_to_none=True)
         prediction = model(context_t, commands_t)
-        state_loss = nn.functional.smooth_l1_loss(
-            prediction[:, :, :STATE_COUNT], labels_t[:, :, :STATE_COUNT],
-            beta=0.5)
-        acceleration_loss = nn.functional.smooth_l1_loss(
-            prediction[:, :, STATE_COUNT:], labels_t[:, :, STATE_COUNT:],
-            beta=0.5)
+        if int(data.get("schema_version", 0)) >= 8:
+            speeds = np.hypot(labels[:, :, 0], labels[:, :, 1])
+            speed_weights = race_speed_bin_weights(speeds)
+            state_loss = weighted_smooth_l1(
+                torch, prediction[:, :, :STATE_COUNT],
+                labels_t[:, :, :STATE_COUNT], speed_weights, beta=0.5)
+            acceleration_loss = weighted_smooth_l1(
+                torch, prediction[:, :, STATE_COUNT:],
+                labels_t[:, :, STATE_COUNT:], speed_weights, beta=0.5)
+        else:
+            state_loss = nn.functional.smooth_l1_loss(
+                prediction[:, :, :STATE_COUNT], labels_t[:, :, :STATE_COUNT],
+                beta=0.5)
+            acceleration_loss = nn.functional.smooth_l1_loss(
+                prediction[:, :, STATE_COUNT:], labels_t[:, :, STATE_COUNT:],
+                beta=0.5)
         loss = state_loss + 0.10 * acceleration_loss
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite training loss at step {step}")
@@ -465,13 +678,15 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     final_validation = _evaluate(
         torch, model, data, targets, groups["validation"],
         x_mean, x_scale, y_mean, y_scale, device, context_steps,
-        future_steps, eval_rng_seed, max_eval_windows_per_run)
+        future_steps, eval_rng_seed, max_eval_windows_per_run,
+        stratify=int(data.get("schema_version", 0)) >= 8)
     test_metrics = None
     if score_test and groups["test"]:
         test_metrics = _evaluate(
             torch, model, data, targets, groups["test"],
             x_mean, x_scale, y_mean, y_scale, device, context_steps,
-            future_steps, eval_rng_seed + 1, max_eval_windows_per_run)
+            future_steps, eval_rng_seed + 1, max_eval_windows_per_run,
+            stratify=int(data.get("schema_version", 0)) >= 8)
     report = {
         "schema_version": 1,
         "architecture": "direct_sequence_transformer",
@@ -500,11 +715,17 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         "eligible_sequences_by_split": {
             split: sum(map(len, split_groups.values()))
             for split, split_groups in groups.items()},
+        "training_sampler": family_sampler.metadata,
         "validation": final_validation,
         "test_scored_once": bool(score_test),
         "test": test_metrics,
         "future_truth_or_sensors_used_as_inputs": False,
         "free_running_plant": False,
+        "race_domain_loss_weighting": ({
+            "speed_bins_mps": list(RACE_SPEED_BIN_EDGES_MPS),
+            "method": "equal total contribution per populated true future-speed bin in each batch",
+            "checkpoint_selection": "equal core 0-9 / fast boundary 9-12 macro over independent validation runs at 0.25, 0.75, and 2 seconds",
+        } if int(data.get("schema_version", 0)) >= 8 else None),
         "checkpoint": str(output_dir / "best_direct_sequence.pt"),
         "history": history,
     }
@@ -517,6 +738,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
          "batch_size": batch_size, "max_steps": max_steps,
          "eval_every": eval_every, "patience": patience,
          "max_eval_windows_per_run": max_eval_windows_per_run,
+         "training_sampler": family_sampler.metadata,
          "score_test": score_test}, seed, report,
         ("tools/vehicle_dynamics_learning/train_direct_sequence_teacher.py",
          "tools/vehicle_dynamics_learning/train_nssm.py",

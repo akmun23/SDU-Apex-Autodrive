@@ -31,8 +31,16 @@ from tools.vehicle_dynamics_learning.train_direct_sequence_teacher import (
     _targets,
 )
 from tools.vehicle_dynamics_learning.train_nssm import _load_dataset, _torch
+from tools.vehicle_dynamics_learning.family_condition_sampler import (
+    build_sequence_sampler,
+)
 from tools.vehicle_dynamics_learning.experiment_artifacts import (
     write_standard_artifacts,
+)
+from tools.vehicle_dynamics_learning.race_domain_objectives import (
+    RACE_SPEED_BIN_EDGES_MPS,
+    race_speed_bin_weights,
+    weighted_smooth_l1,
 )
 
 
@@ -139,11 +147,17 @@ def _sample_batch(data: dict[str, Any], targets: np.ndarray,
                   context_steps: int, rollout_steps: int,
                   x_mean: np.ndarray, x_scale: np.ndarray,
                   y_mean: np.ndarray, y_scale: np.ndarray,
-                  rng: np.random.Generator) -> tuple[np.ndarray, ...]:
+                  rng: np.random.Generator,
+                  family_sampler=None) -> tuple[np.ndarray, ...]:
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
     contexts, commands, labels, initial_states = [], [], [], []
-    for run_id in rng.choice(run_ids, size=batch_size, replace=True):
-        start, end = groups[int(run_id)][int(rng.integers(0, len(groups[int(run_id)])))]
+    for _ in range(batch_size):
+        if family_sampler is None:
+            run_id = int(rng.choice(run_ids))
+            start, end = groups[run_id][
+                int(rng.integers(0, len(groups[run_id])))]
+        else:
+            run_id, (start, end), _, _ = family_sampler.sample(rng)
         last_start = end - context_steps - rollout_steps - 1
         index = int(rng.integers(start, last_start + 1))
         future_start = index + context_steps
@@ -167,7 +181,7 @@ def _sample_batch(data: dict[str, Any], targets: np.ndarray,
 
 def _batch_loss(torch, nn, model, context, commands, labels, initial_state,
                 kl_weight: float, free_rollout_weight: float,
-                acceleration_weight: float):
+                acceleration_weight: float, speed_weights=None):
     batch_size, horizon = labels.shape[:2]
     hidden = model.encode(context)
     current_state = initial_state
@@ -183,10 +197,19 @@ def _batch_loss(torch, nn, model, context, commands, labels, initial_state,
         latent = post_mean + torch.exp(post_log_std) * torch.randn_like(post_mean)
         prediction, acceleration = model.decode(
             hidden, latent, command, current_state)
-        reconstruction = reconstruction + nn.functional.smooth_l1_loss(
-            prediction, next_target, beta=0.5) / horizon
-        acceleration_loss = acceleration_loss + nn.functional.smooth_l1_loss(
-            acceleration, labels[:, step, STATE_COUNT:], beta=0.5) / horizon
+        if speed_weights is None:
+            reconstruction_step = nn.functional.smooth_l1_loss(
+                prediction, next_target, beta=0.5)
+            acceleration_step = nn.functional.smooth_l1_loss(
+                acceleration, labels[:, step, STATE_COUNT:], beta=0.5)
+        else:
+            reconstruction_step = weighted_smooth_l1(
+                torch, prediction, next_target, speed_weights[:, step], beta=0.5)
+            acceleration_step = weighted_smooth_l1(
+                torch, acceleration, labels[:, step, STATE_COUNT:],
+                speed_weights[:, step], beta=0.5)
+        reconstruction = reconstruction + reconstruction_step / horizon
+        acceleration_loss = acceleration_loss + acceleration_step / horizon
         variance_ratio = torch.exp(2.0 * post_log_std - 2.0 * prior_log_std)
         mean_distance = (post_mean - prior_mean) ** 2 * torch.exp(
             -2.0 * prior_log_std)
@@ -198,9 +221,14 @@ def _batch_loss(torch, nn, model, context, commands, labels, initial_state,
 
     prior_rollout = model(context, commands, initial_state=initial_state,
                           sample_prior=True)
-    free_rollout_loss = nn.functional.smooth_l1_loss(
-        prior_rollout[:, :, :STATE_COUNT], labels[:, :, :STATE_COUNT],
-        beta=0.5)
+    if speed_weights is None:
+        free_rollout_loss = nn.functional.smooth_l1_loss(
+            prior_rollout[:, :, :STATE_COUNT], labels[:, :, :STATE_COUNT],
+            beta=0.5)
+    else:
+        free_rollout_loss = weighted_smooth_l1(
+            torch, prior_rollout[:, :, :STATE_COUNT],
+            labels[:, :, :STATE_COUNT], speed_weights, beta=0.5)
     loss = (free_rollout_weight * free_rollout_loss
             + 0.25 * reconstruction + kl_weight * kl_total
             + acceleration_weight * acceleration_loss)
@@ -244,6 +272,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     }
     if not groups["train"] or not groups["validation"]:
         raise ValueError("need eligible whole-run train and validation data")
+    family_sampler = build_sequence_sampler(data, groups["train"])
     x_mean, x_scale, y_mean, y_scale = _fit_normalizers(
         data, targets, groups["train"])
     Model = _rssm_model(torch, nn, hidden_size, latent_size,
@@ -264,7 +293,15 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         batch = _sample_batch(
             data, targets, groups["train"], batch_size,
             context_steps, rollout_steps, x_mean, x_scale,
-            y_mean, y_scale, rng)
+            y_mean, y_scale, rng, family_sampler)
+        speed_weights = None
+        if int(data.get("schema_version", 0)) >= 8:
+            physical_labels = batch[2] * y_scale + y_mean
+            target_speed = np.hypot(
+                physical_labels[:, :, 0], physical_labels[:, :, 1])
+            speed_weights = torch.as_tensor(
+                race_speed_bin_weights(target_speed), dtype=torch.float32,
+                device=device)
         context = torch.as_tensor(batch[0], dtype=torch.float32, device=device)
         commands = torch.as_tensor(batch[1], dtype=torch.float32, device=device)
         labels = torch.as_tensor(batch[2], dtype=torch.float32, device=device)
@@ -274,7 +311,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         loss, parts = _batch_loss(
             torch, nn, model, context, commands, labels, initial,
             kl_weight=0.01, free_rollout_weight=1.0,
-            acceleration_weight=0.05)
+            acceleration_weight=0.05, speed_weights=speed_weights)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite RSSM loss at step {step}")
         loss.backward()
@@ -335,11 +372,13 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     validation = _evaluate(
         torch, model, data, targets, groups["validation"],
         x_mean, x_scale, y_mean, y_scale, device, context_steps,
-        rollout_steps, eval_seed, max_eval_windows_per_run)
+        rollout_steps, eval_seed, max_eval_windows_per_run,
+        stratify=int(data.get("schema_version", 0)) >= 8)
     test = (_evaluate(
         torch, model, data, targets, groups["test"],
         x_mean, x_scale, y_mean, y_scale, device, context_steps,
-        rollout_steps, eval_seed + 1, max_eval_windows_per_run)
+        rollout_steps, eval_seed + 1, max_eval_windows_per_run,
+        stratify=int(data.get("schema_version", 0)) >= 8)
         if score_test and groups["test"] else None)
     report = {
         "schema_version": 1,
@@ -366,11 +405,17 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         "eligible_sequences_by_split": {
             split: sum(map(len, local_groups.values()))
             for split, local_groups in groups.items()},
+        "training_sampler": family_sampler.metadata,
         "validation": validation,
         "test_scored_once": bool(score_test),
         "test": test,
         "posterior_uses_future_target_during_training_only": True,
         "free_rollout_uses_prior_only": True,
+        "race_domain_loss_weighting": ({
+            "speed_bins_mps": list(RACE_SPEED_BIN_EDGES_MPS),
+            "method": "equal total contribution per populated true future-speed bin in each batch",
+            "checkpoint_selection": "equal core 0-9 / fast boundary 9-12 macro over independent validation runs at 0.25, 0.75, and 2 seconds",
+        } if int(data.get("schema_version", 0)) >= 8 else None),
         "checkpoint": str(output_dir / "best_rssm_teacher.pt"),
         "history": history,
     }
@@ -383,6 +428,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
          "batch_size": batch_size, "max_steps": max_steps,
          "eval_every": eval_every, "patience": patience,
          "max_eval_windows_per_run": max_eval_windows_per_run,
+         "training_sampler": family_sampler.metadata,
          "score_test": score_test}, seed, report,
         ("tools/vehicle_dynamics_learning/train_rssm_teacher.py",
          "tools/vehicle_dynamics_learning/train_direct_sequence_teacher.py",

@@ -27,6 +27,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import evaluate_open_plane_body_dynamics as body  # noqa: E402
+from tools.race_domain_experiment_plan import (  # noqa: E402
+    RACE_DOMAIN_BOUNDARY_SPEED_MPS,
+    RACE_DOMAIN_GOVERNOR_MPS,
+    RACE_DOMAIN_HARD_LIMIT_MPS,
+    RACE_DOMAIN_THROTTLE_SPEED_ANCHORS,
+    build_race_domain_boundary_plan,
+    build_race_domain_moderate_braking_plan,
+    build_race_domain_plan,
+)
 
 
 SCHEMA_VERSION = 7
@@ -192,6 +201,225 @@ def _replicate_index(label: str) -> int:
     return int(match.group(1)) if match else -1
 
 
+def _validate_race_domain_capture_events(
+        events: list[tuple[int, dict[str, Any]]]) -> dict[str, Any]:
+    """Admit only exact, fully completed race-domain capture protocols.
+
+    These profiles intentionally have no steady-speed ``valid`` score. They
+    are eligible only as whole runs when their recorded plans and completion
+    events match a known seed/version; normal stream, packet-alignment,
+    collision, timing, and sequence gates still apply.
+    """
+    result: dict[str, Any] = {
+        "admitted": False,
+        "profile": "race_domain_continuous",
+        "gate": "completed_seeded_65_block_260s_capture_integrity",
+    }
+    starts = [(stamp, event) for stamp, event in events
+              if event.get("event") == "phase_start"]
+    ends = [(stamp, event) for stamp, event in events
+            if event.get("event") == "phase_end"]
+    finishes = [event for _, event in events
+                if event.get("event") == "experiment_end"]
+    if len(starts) != 1 or len(ends) != 1 or len(finishes) != 1:
+        result["reason"] = "expected_exactly_one_start_end_and_experiment_end"
+        return result
+
+    start_ns, start = starts[0]
+    end_ns, end = ends[0]
+    finish = finishes[0]
+    seed = start.get("seed")
+    profile = start.get("profile")
+    result["profile"] = profile
+    result["gate"] = f"completed_seeded_{profile}_capture_integrity"
+    if (not isinstance(seed, int) or isinstance(seed, bool)
+            or profile not in ("race_domain_continuous",
+                               "race_domain_brake_boundary",
+                               "race_domain_moderate_braking")
+            or start.get("label") != profile
+            or start.get("phase_index") != 0
+            or start.get("phase_count") != 1
+            or start.get("race_domain_speed_governor_mps")
+                != RACE_DOMAIN_GOVERNOR_MPS
+            or start.get("race_domain_hard_limit_mps")
+                != RACE_DOMAIN_HARD_LIMIT_MPS):
+        result["reason"] = "profile_start_metadata_mismatch"
+        return result
+    actual_plan = start.get("race_domain_command_plan")
+    if not isinstance(actual_plan, list):
+        result["reason"] = "command_plan_missing_or_invalid"
+        return result
+    expected_anchors = [
+        {"speed_mps": speed, "throttle_norm": throttle}
+        for speed, throttle in RACE_DOMAIN_THROTTLE_SPEED_ANCHORS
+    ]
+    recorded_anchors = start.get("race_domain_throttle_speed_anchors")
+    if recorded_anchors is not None and recorded_anchors != expected_anchors:
+        result["reason"] = "throttle_speed_anchors_mismatched"
+        return result
+
+    recorded_version = start.get("race_domain_plan_version")
+    if profile == "race_domain_continuous":
+        if recorded_version not in (None, 1, 2):
+            result["reason"] = "unsupported_race_domain_plan_version"
+            return result
+        candidates = (((2, RACE_DOMAIN_BOUNDARY_SPEED_MPS),)
+                      if recorded_version == 2 else
+                      ((1, 11.0), (2, RACE_DOMAIN_BOUNDARY_SPEED_MPS)))
+    elif profile == "race_domain_brake_boundary":
+        if recorded_version != 3:
+            result["reason"] = "unsupported_race_domain_plan_version"
+            return result
+        candidates = ((3, None),)
+    else:
+        if recorded_version != 4:
+            result["reason"] = "unsupported_race_domain_plan_version"
+            return result
+        candidates = ((4, None),)
+    if (recorded_version in (2, 3, 4)
+            and start.get("race_domain_boundary_target_mps")
+                != RACE_DOMAIN_BOUNDARY_SPEED_MPS):
+        result["reason"] = "race_domain_boundary_target_mismatch"
+        return result
+
+    matched_plan = None
+    for plan_version, boundary_speed in candidates:
+        if plan_version == 3:
+            expected = build_race_domain_boundary_plan(seed)
+        elif plan_version == 4:
+            expected = build_race_domain_moderate_braking_plan(seed)
+        else:
+            expected = build_race_domain_plan(
+                seed, boundary_speed_mps=boundary_speed)
+        if len(actual_plan) != len(expected):
+            continue
+        matches = True
+        for actual, block in zip(actual_plan, expected):
+            if not isinstance(actual, dict):
+                matches = False
+                break
+            expected_fields = {
+                "label": block.label,
+                "duration_s": block.duration_s,
+                "target_speed_mps": block.target_speed_mps,
+                "steering_rad": block.steering_rad,
+            }
+            for field, value in expected_fields.items():
+                observed = actual.get(field)
+                if (isinstance(value, float)
+                        and (not isinstance(observed, (int, float))
+                             or abs(float(observed) - value) > 1.0e-7)):
+                    matches = False
+                    break
+                if not isinstance(value, float) and observed != value:
+                    matches = False
+                    break
+            if not matches:
+                break
+        if matches:
+            matched_plan = (plan_version, expected)
+            break
+    if matched_plan is None:
+        result["reason"] = "command_plan_mismatch_or_wrong_length"
+        return result
+    plan_version, expected = matched_plan
+    block_events = sorted(
+        ((stamp, event) for stamp, event in events
+         if event.get("event") == "race_domain_block_start"),
+        key=lambda row: row[0])
+    if profile in ("race_domain_brake_boundary",
+                   "race_domain_moderate_braking"):
+        if len(block_events) != len(expected):
+            result["reason"] = "boundary_block_event_count_mismatch"
+            return result
+        for block_index, ((_, event), block) in enumerate(
+                zip(block_events, expected)):
+            if (event.get("profile") != profile
+                    or event.get("seed") != seed
+                    or event.get("phase_index") != 0
+                    or event.get("block_index") != block_index
+                    or event.get("label") != block.label
+                    or not isinstance(event.get("target_speed_mps"), (int, float))
+                    or abs(float(event["target_speed_mps"])
+                           - block.target_speed_mps) > 1.0e-7
+                    or not isinstance(
+                        event.get("steering_command_rad"), (int, float))
+                    or abs(float(event["steering_command_rad"])
+                           - block.steering_rad) > 1.0e-7):
+                result["reason"] = "boundary_block_event_mismatch"
+                return result
+    if (profile == "race_domain_continuous"
+            and recorded_anchors is None and plan_version != 1):
+        result["reason"] = "throttle_speed_anchors_missing_for_plan_version"
+        return result
+
+    duration_s = (end_ns - start_ns) / 1e9
+    expected_duration_s = sum(block.duration_s for block in expected)
+    if abs(duration_s - expected_duration_s) > 2.0:
+        result["reason"] = "completed_phase_duration_outside_capture_tolerance"
+        return result
+    if (end.get("profile") != profile
+            or end.get("phase_index") != 0
+            or end.get("status") != "complete"
+            or end.get("valid") is not None
+            or end.get("quality_failures") not in ([], None)
+            or finish.get("profile") != profile
+            or finish.get("phase_count") != 1
+            or finish.get("aborted") is not False
+            or finish.get("reason") != "schedule complete"
+            or finish.get("quality_failures") not in ([], None)):
+        result["reason"] = "phase_or_experiment_did_not_complete_cleanly"
+        return result
+
+    result.update({
+        "admitted": True,
+        "reason": "exact_profile_completed; whole_run_quality_gates_still_required",
+        "seed": seed,
+        "plan_version": plan_version,
+        "boundary_target_mps": max(block.target_speed_mps for block in expected),
+        "feedforward_version": (
+            "empirical_throttle_surface_inverse" if recorded_anchors is not None
+            else "legacy_feedforward_capped_at_8_5mps"),
+        "planned_blocks": len(expected),
+        "planned_duration_s": expected_duration_s,
+        "recorded_duration_s": duration_s,
+        "recorded_block_start_events": len(block_events),
+        "planned_conditions": [
+            {
+                "block_index": index,
+                "label": block.label,
+                "duration_s": block.duration_s,
+                "target_speed_mps": block.target_speed_mps,
+                "steering_rad": block.steering_rad,
+            }
+            for index, block in enumerate(expected)
+        ],
+    })
+    return result
+
+
+def _race_domain_capture_admission(path: Path) -> dict[str, Any]:
+    """Read-only event check for the one deliberately unscored profile."""
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        topics = body.analysis._topic_map(connection)
+        if body.analysis.PHASE not in topics:
+            return {"admitted": False,
+                    "reason": "phase_event_topic_missing"}
+        events = []
+        for receipt_ns, message in body.analysis._messages(
+                connection, topics, body.analysis.PHASE):
+            try:
+                event = json.loads(message.data)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(event, dict):
+                events.append((int(receipt_ns), event))
+        return _validate_race_domain_capture_events(events)
+    finally:
+        connection.close()
+
+
 def _extract(path: Path, coalesce_contiguous_phases: bool = False,
              practice_active_interval: bool = False,
              include_nonvalid_phases: bool = False) -> tuple[
@@ -202,6 +430,15 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
                                   np.ndarray]]]:
     capture = body.load_capture(
         path, include_nonvalid_phases=include_nonvalid_phases)
+    race_domain_admission: dict[str, Any] | None = None
+    if (not include_nonvalid_phases
+            and capture.phase_count == 1
+            and capture.valid_phase_count == 0
+            and capture.invalid_phase_count == 0
+            and capture.unscored_phase_count == 1):
+        race_domain_admission = _race_domain_capture_admission(path)
+        if race_domain_admission.get("admitted"):
+            capture = body.load_capture(path, include_nonvalid_phases=True)
     run_id = path.parents[1].name
     reset_topic_present, reset_epoch_starts_ns = _reset_epoch_starts(path)
     clean, failures = _quality(capture)
@@ -401,6 +638,7 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         "quality_gate_scope": ("complete_lap_0_to_12_active_interval"
                                if active_interval is not None else "whole_bag"),
         "practice_active_interval_validation": active_interval_report,
+        "unscored_race_domain_capture_admission": race_domain_admission,
         "active_interval_receipt_ns": list(active_interval)
             if active_interval is not None else None,
         "quality_failures": failures,

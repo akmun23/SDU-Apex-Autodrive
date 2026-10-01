@@ -136,10 +136,10 @@ def _candidate_starts(data: dict[str, Any], split: str, history_steps: int,
                         or not np.isfinite(data["sensor_frames"][sensor_start:index + 1]).all()
                         or not np.isfinite(data["simulator_pose_xyyaw"][index]).all()):
                     continue
-                speed = float(data["frames"][index, 0])
+                speed = float(np.hypot(*data["frames"][index, :2]))
                 steering = float(data["frames"][index, 3])
                 abs_steering = abs(steering)
-                if not 2.0 <= speed <= 9.0:
+                if not 2.0 <= speed <= 12.0:
                     continue
                 mode = ("straight" if abs_steering <= 0.12 else
                         "turn" if 0.12 < abs_steering <= 0.40 else None)
@@ -168,6 +168,7 @@ def _candidate_starts(data: dict[str, Any], split: str, history_steps: int,
             selected.append({
                 "run_index": run,
                 "run_id": str(data["run_ids"][run]),
+                "split": split,
                 "mode": mode,
                 "index": index,
                 "sequence_start": sequence_start,
@@ -225,6 +226,8 @@ def _run_branch(data: dict[str, Any], branch: dict[str, Any], *,
     history = data["frames"][history_start:index + 1]
     initial_pose = data["simulator_pose_xyyaw"][index].astype(np.float64)
     estimate = plant.reset(history, initial_pose)
+    if not estimate.within_speed_domain:
+        raise ValueError("branch start is outside the plant's supported speed domain")
     odometry.reset()
     actuator.reset()
     encoders.reset()
@@ -253,6 +256,7 @@ def _run_branch(data: dict[str, Any], branch: dict[str, Any], *,
     initial_target = _speed_at(trajectory, progress_m, mpc.lap_length_m)
 
     frames = []
+    domain_exit = None
     actual_command_history = data["frames"][index - 2:index + 1, 7]
     steering_command = float(actual_command_history[-1])
     delayed_1 = float(actual_command_history[-2])
@@ -281,6 +285,17 @@ def _run_branch(data: dict[str, Any], branch: dict[str, Any], *,
         throttle_command = actuator_command.throttle_normalized
         plant_estimate = plant.step(steering_command_rad, throttle_command, DT_S)
         next_vehicle_state = plant_estimate.state
+        if not plant_estimate.within_speed_domain:
+            domain_exit = {
+                "time_s": (step_index + 1) * DT_S,
+                "speed_mps": float(np.hypot(
+                    next_vehicle_state[3], next_vehicle_state[4])),
+                "state": next_vehicle_state.tolist(),
+                "steering_command_rad": steering_command_rad,
+                "throttle_command_norm": throttle_command,
+                "reason": "predicted_state_exceeded_race_speed_cap",
+            }
+            break
         encoder_sample = encoders.step(
             float(next_vehicle_state[8]), float(next_vehicle_state[9]), DT_S)
         imu_sample = imu.step(next_vehicle_state[3:6],
@@ -354,68 +369,78 @@ def _run_branch(data: dict[str, Any], branch: dict[str, Any], *,
         previous_target_speed_rate = cycle.target_speed_rate_mps2
         previous_target_speed = cycle.target_speed_mps
 
-    if not frames:
+    if not frames and domain_exit is None:
         raise RuntimeError("closed-loop branch produced no steps")
-    columns = {name: np.asarray([row[name] for row in frames])
-               for name in frames[0]}
-    distance = _unwrapped_progress_distance(
-        columns["progress_m"], mpc.lap_length_m)
+    columns = ({name: np.asarray([row[name] for row in frames])
+                for name in frames[0]} if frames else {})
+    distance = (_unwrapped_progress_distance(
+        columns["progress_m"], mpc.lap_length_m) if frames else 0.0)
     status_counts = {
-        "accepted_optimal": int(np.count_nonzero(columns["mpc_status"] == 0)),
-        "accepted_degraded": int(np.count_nonzero(columns["mpc_status"] == 1)),
-        "rejected_input": int(np.count_nonzero(columns["mpc_status"] == 2)),
-        "rejected_solver": int(np.count_nonzero(columns["mpc_status"] == 3)),
-        "rejected_residual": int(np.count_nonzero(columns["mpc_status"] == 4)),
-        "rejected_regularization": int(np.count_nonzero(columns["mpc_status"] == 5)),
-        "rejected_nonlinear_rollout": int(np.count_nonzero(columns["mpc_status"] == 6)),
+        "accepted_optimal": int(np.count_nonzero(columns["mpc_status"] == 0)) if frames else 0,
+        "accepted_degraded": int(np.count_nonzero(columns["mpc_status"] == 1)) if frames else 0,
+        "rejected_input": int(np.count_nonzero(columns["mpc_status"] == 2)) if frames else 0,
+        "rejected_solver": int(np.count_nonzero(columns["mpc_status"] == 3)) if frames else 0,
+        "rejected_residual": int(np.count_nonzero(columns["mpc_status"] == 4)) if frames else 0,
+        "rejected_regularization": int(np.count_nonzero(columns["mpc_status"] == 5)) if frames else 0,
+        "rejected_nonlinear_rollout": int(np.count_nonzero(columns["mpc_status"] == 6)) if frames else 0,
     }
     reason_names = {
         1: "invalid_input", 2: "invalid_model", 3: "command_limit",
         4: "state_limit", 5: "corridor",
     }
-    failure_reason_counts = {
+    failure_reason_counts = ({
         reason_names[int(reason)]: int(np.count_nonzero(
             columns["nonlinear_failure_reason"] == reason))
         for reason in np.unique(columns["nonlinear_failure_reason"])
         if int(reason) in reason_names
-    }
+    } if frames else {})
     known_status_total = sum(status_counts.values())
-    if known_status_total != horizon_steps:
-        status_counts["other_or_unmapped"] = horizon_steps - known_status_total
+    if known_status_total != len(frames):
+        status_counts["other_or_unmapped"] = len(frames) - known_status_total
+    support_values = (columns.get("plant_support_distance", np.asarray([]))
+                      if columns else np.asarray([]))
+    finite_support = support_values[np.isfinite(support_values)]
     return {
         "run_id": branch["run_id"],
-        "run_family_split": "held-out practice branch",
+        "run_family_split": f"{branch['split']} practice branch",
         "mode": branch["mode"],
         "start_index": index,
-        "start_speed_mps": float(history[-1, 0]),
+        "start_speed_mps": float(np.hypot(*history[-1, :2])),
         "start_steering_rad": float(history[-1, 3]),
-        "branch_seconds": horizon_steps * DT_S,
-        "step_count": horizon_steps,
+        "requested_branch_seconds": horizon_steps * DT_S,
+        "branch_seconds": len(frames) * DT_S,
+        "step_count": len(frames),
+        "terminated_out_of_domain": domain_exit is not None,
+        "out_of_domain_event": domain_exit,
         "progress_m": distance,
-        "lateral_error_rmse_m": _rmse(columns["truth_lateral_error_m"]),
-        "max_abs_truth_lateral_error_m": _nanmax_abs(
-            columns["truth_lateral_error_m"]),
-        "mean_localization_error_m": float(np.mean(
-            columns["localization_error_m"])),
-        "odom_body_u_rmse_mps": _rmse(
-            columns["production_odom_u_mps"] - columns["plant_u_mps"]),
-        "odom_body_v_rmse_mps": _rmse(
-            columns["production_odom_v_mps"] - columns["plant_v_mps"]),
-        "odom_yaw_rate_rmse_radps": _rmse(
+        "lateral_error_rmse_m": (_rmse(columns["truth_lateral_error_m"])
+                                 if frames else None),
+        "max_abs_truth_lateral_error_m": (_nanmax_abs(
+            columns["truth_lateral_error_m"]) if frames else None),
+        "mean_localization_error_m": (float(np.mean(
+            columns["localization_error_m"])) if frames else None),
+        "odom_body_u_rmse_mps": (_rmse(
+            columns["production_odom_u_mps"] - columns["plant_u_mps"])
+            if frames else None),
+        "odom_body_v_rmse_mps": (_rmse(
+            columns["production_odom_v_mps"] - columns["plant_v_mps"])
+            if frames else None),
+        "odom_yaw_rate_rmse_radps": (_rmse(
             columns["production_odom_yaw_rate_rps"]
-            - columns["plant_yaw_rate_rps"]),
+            - columns["plant_yaw_rate_rps"]) if frames else None),
         "mpc_status_counts": status_counts,
-        "mpc_non_optimal_status_steps": int(horizon_steps - status_counts["accepted_optimal"]),
-        "mpc_best_effort_steps": int(np.count_nonzero(columns["best_effort_action"])),
-        "mpc_residual_candidate_steps": int(np.count_nonzero(columns["residual_candidate"])),
-        "mpc_speed_guard_steps": int(np.count_nonzero(columns["rejection_speed_guard"])),
+        "mpc_action_count": len(frames) + int(domain_exit is not None),
+        "mpc_non_optimal_status_steps": int(len(frames) - status_counts["accepted_optimal"]),
+        "mpc_best_effort_steps": int(np.count_nonzero(columns["best_effort_action"])) if frames else 0,
+        "mpc_residual_candidate_steps": int(np.count_nonzero(columns["residual_candidate"])) if frames else 0,
+        "mpc_speed_guard_steps": int(np.count_nonzero(columns["rejection_speed_guard"])) if frames else 0,
         "mpc_nonlinear_failure_steps": int(np.count_nonzero(
-            columns["nonlinear_failure_stage"] >= 0)),
+            columns["nonlinear_failure_stage"] >= 0)) if frames else 0,
         "mpc_rollout_failure_reason_counts": failure_reason_counts,
-        "minimum_support_distance": float(np.nanmin(
-            columns["plant_support_distance"])),
-        "maximum_support_distance": float(np.nanmax(
-            columns["plant_support_distance"])),
+        "minimum_support_distance": (float(np.min(finite_support))
+                                     if len(finite_support) else None),
+        "maximum_support_distance": (float(np.max(finite_support))
+                                     if len(finite_support) else None),
         "initial_localization_distance_to_raceline_m": float(
             branch["initial_projection"][3]),
         "trace": columns,
@@ -435,10 +460,12 @@ def run(dataset_path: Path, output_dir: Path, *, split: str = "validation",
     data = _load_dataset(dataset_path)
     horizon_steps = round(branch_seconds / DT_S)
     plant = (load_rssm_teacher_plant([plant_checkpoint], dataset_path,
-                                     device="cpu")
+                                     device="cpu",
+                                     max_supported_speed_mps=12.0)
              if plant_checkpoint is not None
              else load_historical_gru_plant(
-                 DEFAULT_GRU, dataset_path, device="cpu"))
+                 DEFAULT_GRU, dataset_path, device="cpu",
+                 max_supported_speed_mps=12.0))
     with ProductionMpc(DEFAULT_MPC_LIB, DEFAULT_MPC_YAML,
                        DEFAULT_TRAJECTORY) as selector:
         starts = _candidate_starts(
@@ -467,7 +494,8 @@ def run(dataset_path: Path, output_dir: Path, *, split: str = "validation",
                 data, branch, plant=plant, odometry=odometry, mpc=mpc,
                 actuator=actuator, localization=localization,
                 encoders=encoders, imu=imu, trajectory=trajectory,
-                mpc_max_speed=float(mpc_params.get("max_speed_mps", 16.0)),
+                mpc_max_speed=min(
+                    float(mpc_params.get("max_speed_mps", 16.0)), 12.0),
                 steering_limit_rad=float(actuator_params["max_steering_angle_rad"]),
                 horizon_steps=horizon_steps,
             )
@@ -491,6 +519,12 @@ def run(dataset_path: Path, output_dir: Path, *, split: str = "validation",
         "branch_count": len(branches),
         "branch_seconds": horizon_steps * DT_S,
         "physics_timebase_s": DT_S,
+        "race_domain_constraints": {
+            "speed_cap_mps": 12.0,
+            "mpc_target_speed_cap_mps": 12.0,
+            "predicted_state_outside_cap": (
+                "terminate before forwarding it to synthetic sensors"),
+        },
         "plant": (f"frozen prior-only RSSM: {plant_checkpoint.resolve()}"
                   if plant_checkpoint is not None else
                   "frozen historical mixed GRU; command-only after context reset"),

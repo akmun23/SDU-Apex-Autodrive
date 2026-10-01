@@ -24,6 +24,9 @@ from typing import Any
 import numpy as np
 
 from tools.vehicle_dynamics_learning.train_nssm import _load_dataset, _torch
+from tools.vehicle_dynamics_learning.family_condition_sampler import (
+    build_sequence_sampler,
+)
 from tools.vehicle_dynamics_learning.experiment_artifacts import (
     write_standard_artifacts,
 )
@@ -405,12 +408,17 @@ def _initial_state(data: dict[str, Any], start: int,
 
 
 def _sample_batch(data, physical_state, acceleration, groups,
-                  batch_size, horizon_steps, rng):
+                  batch_size, horizon_steps, rng, family_sampler=None):
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
     initials, commands, state_targets, accel_targets = [], [], [], []
-    for run_value in rng.choice(run_ids, size=batch_size, replace=True):
-        sequences = groups[int(run_value)]
-        sequence_start, end = sequences[int(rng.integers(0, len(sequences)))]
+    for _ in range(batch_size):
+        if family_sampler is None:
+            run_value = int(rng.choice(run_ids))
+            sequences = groups[run_value]
+            sequence_start, end = sequences[
+                int(rng.integers(0, len(sequences)))]
+        else:
+            run_value, (sequence_start, end), _, _ = family_sampler.sample(rng)
         start = sequence_start
         index = int(rng.integers(sequence_start, end - horizon_steps))
         initials.append(_initial_state(
@@ -562,6 +570,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
               for split in ("train", "validation", "test", "final_test")}
     if not groups["train"] or not groups["validation"]:
         raise ValueError("need eligible whole-run train and validation data")
+    family_sampler = build_sequence_sampler(data, groups["train"])
     train_indices = np.concatenate([
         np.arange(start, end - 1)
         for sequences in groups["train"].values()
@@ -586,7 +595,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     for step in range(1, max_steps + 1):
         initial, commands, target, accel_target = _sample_batch(
             data, physical_state, acceleration, groups["train"], batch_size,
-            shooting_steps, rng)
+            shooting_steps, rng, family_sampler)
         initial_t = torch.as_tensor(initial, dtype=torch.float32, device=device)
         commands_t = torch.as_tensor(commands, dtype=torch.float32,
                                      device=device)
@@ -692,6 +701,7 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         "eligible_runs": {
             key: [str(data["run_ids"][i]) for i in sorted(value)]
             for key, value in groups.items()},
+        "training_sampler": family_sampler.metadata,
         "best_step": best_step,
         "best_validation_score": best_score,
         "parameters": model.export_parameters(),

@@ -22,6 +22,10 @@ from typing import Any
 
 import numpy as np
 
+from tools.vehicle_dynamics_learning.family_condition_sampler import (
+    build_sequence_sampler,
+)
+
 
 STATE_NAMES = ("u_rear_mps", "v_rear_mps", "yaw_rate_rps")
 LEARNED_STATE_NAMES = STATE_NAMES[:2]
@@ -130,10 +134,17 @@ def _candidate(groups: dict[int, list[tuple[int, int]]], rng: np.random.Generato
 
 def _sample_batch(data: dict[str, Any], groups: dict[int, list[tuple[int, int]]],
                   batch_size: int, window_steps: int,
-                  rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+                  rng: np.random.Generator,
+                  family_sampler=None) -> tuple[np.ndarray, np.ndarray]:
     inputs, targets = [], []
     for _ in range(batch_size):
-        start, end = _candidate(groups, rng, window_steps)
+        if family_sampler is None:
+            start, end = _candidate(groups, rng, window_steps)
+        else:
+            _, (segment_start, segment_end), _, _ = family_sampler.sample(rng)
+            start = int(rng.integers(segment_start,
+                                     segment_end - window_steps + 1))
+            end = start + window_steps
         inputs.append(data["sensors"][start:end])
         targets.append(data["truth"][start:end])
     return np.asarray(inputs, dtype=np.float32), np.asarray(targets, dtype=np.float32)
@@ -379,6 +390,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     validation_groups = _valid_segments(data, "validation", window_steps)
     if not train_groups or not validation_groups:
         raise ValueError("train and validation must both have valid sensor windows")
+    family_sampler = build_sequence_sampler(data, train_groups)
     validation_windows = _eval_windows(validation_groups, window_steps, args.eval_windows)
     flat_validation = [window for windows in validation_windows.values() for window in windows]
     val_arrays = _arrays_for_windows(data, flat_validation)
@@ -408,7 +420,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     while time.monotonic() < deadline and step < args.max_steps:
         model.train()
         arrays = _sample_batch(data, train_groups, args.batch_size,
-                               window_steps, rng)
+                               window_steps, rng, family_sampler)
         raw_inputs, raw_targets = arrays
         weights = _training_weights(raw_inputs, raw_targets,
                                     args.weight_mode,
@@ -478,6 +490,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "valid_segment_counts": {name: sum(len(items) for items in groups.values())
                                  for name, groups in (("train", train_groups),
                                                       ("validation", validation_groups))},
+        "training_sampler": family_sampler.metadata,
         "normalization": {"sensor_mean": sensor_mean.tolist(),
                           "sensor_scale": sensor_scale.tolist(),
                           "target_mean": truth_mean.tolist(),

@@ -28,11 +28,11 @@ DT_S = 0.025
 
 DEFAULT_DATASET = (
     REPO_ROOT / "live_runs/derived_dynamics_learning_20260928/"
-    "plant_teacher_mixed_dataset_full3d_reset_safe_20261001"
+    "plant_teacher_race_domain_v1/cooldown_2s"
 )
 DEFAULT_THROTTLE = (
     REPO_ROOT / "live_runs/derived_dynamics_learning_20260928/"
-    "throttle_surface_40hz_sourcealigned_dataset_20260930"
+    "throttle_surface_race_domain_v1"
 )
 
 TARGET_NAMES = (
@@ -511,12 +511,20 @@ def _throttle_surface_analysis(dataset_dir: Path, output_dir: Path
         return {"available": False, "reason": "throttle surface archive absent"}
     metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
     z = np.load(npz_path, allow_pickle=False)
+    if (metadata.get("dataset_role")
+            != "throttle_surface_race_domain_response_analysis"):
+        raise ValueError("throttle atlas requires the capped race-domain view")
     bounds = z["sequence_bounds"]
     body = z["body_state"]
     surface = z["encoder_surface_mps_100ms"]
     feedback = z["actuator_feedback"]
     attitude = z["imu_roll_pitch_rad"]
     time_from_stimulus = z["time_from_stimulus_s"][:, 0]
+    domain_speed = z["frame_domain_speed_mps"].astype(np.float64, copy=False)
+    if (float(z["domain_speed_cap_mps"][0]) != 12.0
+            or not np.isfinite(domain_speed).all()
+            or np.any(domain_speed > 12.0)):
+        raise ValueError("throttle response archive contains out-of-domain rows")
     debug = z["bridge_debug_telemetry"]
     packet_sequence = z["packet_sequence"].reshape(-1)
     debug_names = metadata["bridge_debug_telemetry_names"]
@@ -599,15 +607,27 @@ def _throttle_surface_analysis(dataset_dir: Path, output_dir: Path
                     (0.500, 1.000), (1.000, 2.000), (2.000, 4.000),
                     (4.000, 8.000))
     sequences = metadata["sequences"]
+    packet_contiguous = z["sequence_packet_contiguous"].astype(bool, copy=False)
+    skipped_packet_gap = 0
+    skipped_baseline = 0
+    incomplete_window_count = 0
     for sequence_index, (start_value, end_value) in enumerate(bounds):
         start, end = int(start_value), int(end_value)
+        if not packet_contiguous[sequence_index]:
+            skipped_packet_gap += 1
+            continue
+        if end <= start:
+            skipped_baseline += 1
+            continue
         event = sequences[sequence_index]
         t = time_from_stimulus[start:end]
         state = body[start:end]
-        baseline = (t >= -3.75) & (t <= -0.25)
+        local_domain = domain_speed[start:end] <= 12.0
+        baseline = (t >= -3.75) & (t <= -0.25) & local_domain
         if np.count_nonzero(baseline) < 20:
-            baseline = (t < 0.0) & (t >= -4.0)
-        if not np.any(baseline):
+            baseline = ((t < 0.0) & (t >= -4.0) & local_domain)
+        if np.count_nonzero(baseline) < 20:
+            skipped_baseline += 1
             continue
         base = np.mean(state[baseline], axis=0)
         base_feedback = np.mean(feedback[start:end][baseline], axis=0)
@@ -623,8 +643,10 @@ def _throttle_surface_analysis(dataset_dir: Path, output_dir: Path
             wheel_acceleration[1:] = np.diff(surface[start:end], axis=0) / DT_S
             yaw_acceleration[1:] = np.diff(state[:, 2]) / DT_S
         for window_index, (lower, upper) in enumerate(window_specs):
-            in_window = (t >= lower) & (t < upper)
-            if not np.any(in_window):
+            in_window = (t >= lower) & (t < upper) & local_domain
+            required_samples = int(round((upper - lower) / DT_S))
+            if np.count_nonzero(in_window) != required_samples:
+                incomplete_window_count += 1
                 continue
             local_state = state[in_window]
             local_feedback = feedback[start:end][in_window]
@@ -734,6 +756,16 @@ def _throttle_surface_analysis(dataset_dir: Path, output_dir: Path
     return {
         "available": True,
         "source_manifest": str(manifest_path),
+        "domain_speed_cap_mps": 12.0,
+        "zero_throttle_semantics": (
+            "active brake torque in this simulator, not coast; the wire protocol "
+            "has no separate coast command"),
+        "condition_count": int(len(bounds)),
+        "conditions_skipped_for_packet_gap": skipped_packet_gap,
+        "conditions_skipped_for_missing_baseline": skipped_baseline,
+        "incomplete_time_windows_excluded": incomplete_window_count,
+        "conditions_with_complete_response_windows": int(len({
+            row["sequence_index"] for row in details})),
         "sequence_count": len(bounds),
         "encoder_measurement_audit": encoder_measurement_audit,
         "window_count": len(window_specs),
@@ -776,10 +808,15 @@ def build(dataset_dir: Path, throttle_dir: Path, output_dir: Path) -> dict[str, 
     npz_path = dataset_dir / "openplane_dynamics.npz"
     manifest_path = dataset_dir / "manifest.json"
     data_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if data_manifest.get("dataset_role") != "race_domain_training_and_evaluation":
+        raise ValueError("response atlas requires the clean race-domain dataset view")
+    if float(data_manifest.get("speed_cap_mps", -1.0)) != 12.0:
+        raise ValueError("response atlas requires a 12 m/s race-domain cap")
     z = np.load(npz_path, allow_pickle=False)
     required = ("frames", "sensor_frames", "imu_attitude_frames",
                 "simulator_rigid_state", "simulator_linear_acceleration",
-                "sequence_bounds", "sequence_run_index", "run_ids", "run_splits")
+                "sequence_bounds", "sequence_run_index", "run_ids", "run_splits",
+                "frame_domain_speed_mps")
     missing = [name for name in required if name not in z.files]
     if missing:
         raise ValueError("dataset lacks required schema-7 arrays: " + ", ".join(missing))
@@ -788,20 +825,28 @@ def build(dataset_dir: Path, throttle_dir: Path, output_dir: Path) -> dict[str, 
     z.close()
     derived, _ = _per_sequence_derive(data)
     frames = data["frames"]
+    race_speed = data["frame_domain_speed_mps"].astype(np.float64, copy=False)
+    if (not np.isfinite(race_speed).all() or np.any(race_speed < 0.0)
+            or np.any(race_speed > 12.0)):
+        raise ValueError("race-domain atlas rows violate the declared speed cap")
     run_ids = data["run_ids"].astype(str)
     frame_run = data["frame_run_index"].astype(np.int32, copy=False)
     split_for_run = data["run_splits"].astype(str)
+    represented_run_indices = np.unique(frame_run)
+    represented_splits = split_for_run[represented_run_indices]
     run_split_per_frame = split_for_run[frame_run]
     truth = data["simulator_rigid_state"]
     accel = data["simulator_linear_acceleration"]
-    base_valid = (np.isfinite(truth).all(axis=1)
+    base_valid = ((race_speed <= 12.0)
+                  & np.isfinite(truth).all(axis=1)
                   & np.isfinite(accel).all(axis=1)
-                  & np.isfinite(frames).all(axis=1))
+                  & np.isfinite(frames).all(axis=1)
+                  & np.isin(run_split_per_frame, ("train", "validation")))
     targets = {name: derived[f"target_{name}"] for name in TARGET_NAMES}
 
     condition_specs = {
         "speed_com_mps": [-math.inf, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                           12, 14, 16, 18, 20, 22, math.inf],
+                           11, 12, math.inf],
         "steering_actual_rad": [-math.inf, -0.524, -0.45, -0.40, -0.35,
                                 -0.30, -0.25, -0.20, -0.15, -0.10, -0.05,
                                 0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30,
@@ -825,8 +870,7 @@ def build(dataset_dir: Path, throttle_dir: Path, output_dir: Path) -> dict[str, 
         table_rows.extend(_bin_table(
             name, derived[name], edges, targets, frame_run, base_valid))
 
-    speed_edges = [-math.inf, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22,
-                   math.inf]
+    speed_edges = [-math.inf, 0, 2, 4, 6, 8, 9, 10, 11, 12, math.inf]
     abs_steering = np.abs(derived["steering_actual_rad"])
     abs_lateral = np.abs(derived["simulator_ay_body_mps2"])
     lat_demand_edges = [-math.inf, 0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15,
@@ -867,11 +911,18 @@ def build(dataset_dir: Path, throttle_dir: Path, output_dir: Path) -> dict[str, 
     regimes = {}
     for name, mask in {
         "speed_0_3mps": derived["speed_com_mps"] < 3,
-        "speed_3_6mps": ((derived["speed_com_mps"] >= 3)
-                          & (derived["speed_com_mps"] < 6)),
-        "speed_6_10mps": ((derived["speed_com_mps"] >= 6)
+        "speed_3_5mps": ((derived["speed_com_mps"] >= 3)
+                          & (derived["speed_com_mps"] < 5)),
+        "speed_5_7mps": ((derived["speed_com_mps"] >= 5)
+                          & (derived["speed_com_mps"] < 7)),
+        "speed_7_9mps": ((derived["speed_com_mps"] >= 7)
+                          & (derived["speed_com_mps"] < 9)),
+        "speed_9_10mps": ((derived["speed_com_mps"] >= 9)
                            & (derived["speed_com_mps"] < 10)),
-        "speed_10mps_plus": derived["speed_com_mps"] >= 10,
+        "speed_10_11mps": ((derived["speed_com_mps"] >= 10)
+                            & (derived["speed_com_mps"] < 11)),
+        "speed_11_12mps": ((derived["speed_com_mps"] >= 11)
+                            & (derived["speed_com_mps"] <= 12)),
         "steering_abs_ge_0_30rad": abs_steering >= .30,
         "steering_abs_ge_0_40rad": abs_steering >= .40,
         "wheel_mismatch_abs_ge_1mps": (
@@ -899,12 +950,18 @@ def build(dataset_dir: Path, throttle_dir: Path, output_dir: Path) -> dict[str, 
             manifest_path.read_bytes()).hexdigest(),
         "fixed_dt_s": DT_S,
         "sample_count": int(len(frames)),
+        "analysis_splits_included": ["train", "validation"],
+        "analysis_sample_count": int(np.count_nonzero(base_valid)),
         "sequence_count": int(len(data["sequence_bounds"])),
-        "run_count": int(len(run_ids)),
+        "run_count": int(len(represented_run_indices)),
         "run_split_counts": {
-            split: int(np.count_nonzero(split_for_run == split))
-            for split in np.unique(split_for_run)},
+            split: int(np.count_nonzero(represented_splits == split))
+            for split in np.unique(represented_splits)},
         "label_frame_audit": frame_semantics,
+        "dataset_role": data_manifest["dataset_role"],
+        "speed_cap_mps": 12.0,
+        "zero_throttle_semantics": (
+            "active brake torque; no separate coast command is observable"),
         "support": {
             name: _range_stats(derived[name]) for name in (
                 "u_rear_mps", "v_rear_mps", "u_com_mps", "v_com_mps",

@@ -20,6 +20,20 @@ import time
 from collections import deque
 from dataclasses import dataclass, replace
 
+from race_domain_experiment_plan import (
+    RACE_DOMAIN_BOUNDARY_SPEED_MPS,
+    RACE_DOMAIN_GOVERNOR_MPS,
+    RACE_DOMAIN_HARD_LIMIT_MPS,
+    RACE_DOMAIN_THROTTLE_SPEED_ANCHORS,
+    build_race_domain_boundary_plan,
+    build_race_domain_moderate_braking_plan,
+    build_race_domain_plan,
+    plan_duration_s,
+    race_domain_feedforward,
+    race_domain_moderate_steering_limit,
+    steering_limit_for_speed,
+)
+
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -215,6 +229,21 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     validate_samples=True,
                     validate_speed=False,
                 ))
+        return phases
+    if profile in ("race_domain_continuous", "race_domain_brake_boundary",
+                   "race_domain_moderate_braking"):
+        plan = (build_race_domain_moderate_braking_plan(seed)
+                if profile == "race_domain_moderate_braking" else
+                build_race_domain_boundary_plan(seed)
+                if profile == "race_domain_brake_boundary" else
+                build_race_domain_plan(
+                    seed, boundary_speed_mps=RACE_DOMAIN_BOUNDARY_SPEED_MPS))
+        phases.append(Phase(
+            profile,
+            plan_duration_s(plan),
+            0.0,
+            throttle_mode="race_domain_continuous",
+        ))
         return phases
     if profile == "isolated_boundary":
         target_speed = 2.2
@@ -776,6 +805,22 @@ class OpenPlaneExcitation:
             raise ValueError("probe dwell must be finite and in [0, 15] seconds")
         if probe_dwell_s > 0.0 and profile in ("full_input_excitation", "grid"):
             raise ValueError("probe dwell override is not supported for large grid profiles")
+        self.race_domain_plan = (
+            build_race_domain_moderate_braking_plan(seed)
+            if profile == "race_domain_moderate_braking" else
+            build_race_domain_boundary_plan(seed)
+            if profile == "race_domain_brake_boundary" else
+            build_race_domain_plan(
+                seed, boundary_speed_mps=RACE_DOMAIN_BOUNDARY_SPEED_MPS)
+            if profile == "race_domain_continuous" else ())
+        self.race_domain_plan_version = (
+            4 if profile == "race_domain_moderate_braking" else
+            3 if profile == "race_domain_brake_boundary" else 2)
+        if (profile in ("race_domain_continuous", "race_domain_brake_boundary",
+                        "race_domain_moderate_braking")
+                and timeout_s < plan_duration_s(self.race_domain_plan) + 5.0):
+            raise ValueError(
+                "race-domain capture timeout must exceed its plan by 5 seconds")
         self.node = rclpy.create_node("open_plane_excitation")
         self.seed = seed
         self.profile = profile
@@ -802,6 +847,7 @@ class OpenPlaneExcitation:
         self.probe_stable_since: float | None = None
         self.ready_since: float | None = None
         self.phase_index = 0
+        self.last_race_domain_block_index = -1
         self.speed_mps: float | None = None
         self.vx_mps: float | None = None
         self.vy_mps: float | None = None
@@ -1042,11 +1088,15 @@ class OpenPlaneExcitation:
             return max(0.0, min(MAX_THROTTLE, feedforward + 0.14 * error))
         return self._speed_hold_command(phase.speed_target_mps)
 
-    def _speed_hold_command(self, target_speed_mps: float) -> float:
+    def _speed_hold_command(self, target_speed_mps: float,
+                            race_domain: bool = False) -> float:
         assert self.speed_mps is not None
         now = time.monotonic()
         error = target_speed_mps - self.speed_mps
         feedforward = self._feedforward(target_speed_mps)
+        if race_domain:
+            feedforward = race_domain_feedforward(
+                target_speed_mps, feedforward)
         if self.speed_integral_target_mps != target_speed_mps:
             self.speed_integral_throttle = 0.0
             self.speed_integral_target_mps = target_speed_mps
@@ -1123,8 +1173,14 @@ class OpenPlaneExcitation:
                 aborted=True,
             )
             return
-        if self.speed_mps > EMERGENCY_SPEED_MPS:
-            self._finish(f"emergency speed cutoff: {self.speed_mps:.3f}m/s", aborted=True)
+        speed_limit = (RACE_DOMAIN_HARD_LIMIT_MPS
+                       if self.profile in ("race_domain_continuous",
+                                           "race_domain_brake_boundary",
+                                           "race_domain_moderate_braking")
+                       else EMERGENCY_SPEED_MPS)
+        if self.speed_mps > speed_limit:
+            self._finish(f"emergency speed cutoff: {self.speed_mps:.3f}m/s "
+                         f"> {speed_limit:.2f}m/s", aborted=True)
             return
         assert self.phase_started_at is not None
         phase = self.phases[self.phase_index]
@@ -1217,6 +1273,25 @@ class OpenPlaneExcitation:
                 "throttle_stimulus_delay_s": phase.throttle_stimulus_delay_s,
                 "throttle_ramp_duration_s": phase.throttle_ramp_duration_s,
                 "condition_pair_id": phase.condition_pair_id,
+                "race_domain_command_plan": [
+                    {
+                        "target_speed_mps": block.target_speed_mps,
+                        "steering_rad": block.steering_rad,
+                        "duration_s": block.duration_s,
+                        "label": block.label,
+                    }
+                    for block in self.race_domain_plan
+                ],
+                "race_domain_zero_throttle_semantics": (
+                    "active_brake_torque; no separate coast command"),
+                "race_domain_speed_governor_mps": RACE_DOMAIN_GOVERNOR_MPS,
+                "race_domain_hard_limit_mps": RACE_DOMAIN_HARD_LIMIT_MPS,
+                "race_domain_plan_version": self.race_domain_plan_version,
+                "race_domain_boundary_target_mps": RACE_DOMAIN_BOUNDARY_SPEED_MPS,
+                "race_domain_throttle_speed_anchors": [
+                    {"speed_mps": speed, "throttle_norm": throttle}
+                    for speed, throttle in RACE_DOMAIN_THROTTLE_SPEED_ANCHORS
+                ],
                 "monotonic_ns": time.monotonic_ns(),
             })
         if (phase.throttle_mode == "slew_probe"
@@ -1257,6 +1332,50 @@ class OpenPlaneExcitation:
                 )
                 return
             self._next_phase(now)
+            return
+
+        if self.profile in ("race_domain_continuous",
+                            "race_domain_brake_boundary",
+                            "race_domain_moderate_braking"):
+            block_index = min(
+                int(phase_elapsed // self.race_domain_plan[0].duration_s),
+                len(self.race_domain_plan) - 1)
+            block = self.race_domain_plan[block_index]
+            if (self.profile in ("race_domain_brake_boundary",
+                                 "race_domain_moderate_braking")
+                    and block_index != self.last_race_domain_block_index):
+                self._publish_event({
+                    "event": "race_domain_block_start",
+                    "profile": self.profile,
+                    "seed": self.seed,
+                    "phase_index": self.phase_index,
+                    "block_index": block_index,
+                    "label": block.label,
+                    "target_speed_mps": block.target_speed_mps,
+                    "steering_command_rad": block.steering_rad,
+                    "measured_speed_mps": self.speed_mps,
+                    "steering_feedback_rad": self.steering_feedback_rad,
+                    "throttle_feedback_norm": self.throttle_feedback_norm,
+                    "tilt_rad": self.tilt_rad,
+                    "monotonic_ns": time.monotonic_ns(),
+                })
+                self.last_race_domain_block_index = block_index
+            throttle = self._speed_hold_command(
+                block.target_speed_mps, race_domain=True)
+            if self.speed_mps >= block.target_speed_mps + 0.50:
+                # In this simulator zero throttle is active braking.
+                throttle = 0.0
+            steering_limit = (
+                race_domain_moderate_steering_limit(self.speed_mps)
+                if self.profile == "race_domain_moderate_braking" else
+                steering_limit_for_speed(self.speed_mps))
+            steering = max(-steering_limit,
+                           min(steering_limit, block.steering_rad))
+            if self.speed_mps >= RACE_DOMAIN_GOVERNOR_MPS:
+                throttle = 0.0
+                steering = 0.0
+                self.phase_governor_ticks += 1
+            self._publish(steering, throttle)
             return
 
         throttle = self._phase_command(phase, phase_elapsed)
@@ -1417,7 +1536,10 @@ def main() -> int:
                                                "transient_transition_4mps_fixedthrottle",
                                                "transient_transition_dwell_4mps_fixedthrottle",
                                                "throttle_slew_pair",
-                                               "full_input_excitation", "grid"),
+                                               "full_input_excitation",
+                                               "race_domain_continuous",
+                                               "race_domain_brake_boundary",
+                                               "race_domain_moderate_braking", "grid"),
                         default="high_angle_boundary",
                         help="isolated profiles recover near-straight speed/yaw/lateral-velocity state before each probe")
     parser.add_argument("--timeout-s", type=float, default=150.0,
@@ -1439,6 +1561,19 @@ def main() -> int:
     args = parser.parse_args()
     if not math.isfinite(args.timeout_s) or not 0.0 < args.timeout_s <= 1200.0:
         parser.error("--timeout-s must be greater than 0 and no more than 1200")
+    if args.profile == "race_domain_continuous" and args.timeout_s < 265.0:
+        parser.error("race_domain_continuous requires --timeout-s >= 265")
+    if args.profile == "race_domain_brake_boundary":
+        required = plan_duration_s(build_race_domain_boundary_plan(args.seed)) + 5.0
+        if args.timeout_s < required:
+            parser.error(
+                f"race_domain_brake_boundary requires --timeout-s >= {required:g}")
+    if args.profile == "race_domain_moderate_braking":
+        required = plan_duration_s(
+            build_race_domain_moderate_braking_plan(args.seed)) + 5.0
+        if args.timeout_s < required:
+            parser.error(
+                f"race_domain_moderate_braking requires --timeout-s >= {required:g}")
 
     rclpy.init()
     if (not math.isfinite(args.transition_speed_mps)

@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_DATASET = (
     REPO_ROOT / "live_runs/derived_dynamics_learning_20260928/"
-    "plant_teacher_mixed_dataset_full3d_reset_safe_20261001"
+    "plant_teacher_race_domain_v1/cooldown_2s"
 )
 HISTORY_MS = (0, 100, 250, 500, 1000, 2000)
 MATCH_RMS_RADII = (0.35, 0.50, 0.75)
@@ -73,6 +73,7 @@ def _balanced_query_indices(data: dict[str, np.ndarray],
     rng = np.random.default_rng(seed)
     bounds = data["sequence_bounds"]
     sequence_run = data["sequence_run_index"]
+    run_splits = data["run_splits"].astype(str)
     frames = data["frames"]
     rigid = data["simulator_rigid_state"]
     acceleration = data["simulator_linear_acceleration"]
@@ -80,6 +81,10 @@ def _balanced_query_indices(data: dict[str, np.ndarray],
     for start_value, end_value, run_value in zip(
             bounds[:, 0], bounds[:, 1], sequence_run):
         start, end, run = int(start_value), int(end_value), int(run_value)
+        # Keep blind whole-run splits out of both the query set and its
+        # cross-run neighbour pool. This report informs model selection.
+        if run_splits[run] not in {"train", "validation"}:
+            continue
         first = start + int(2000 / 1000 / DT_S)
         last = end - 1
         if last <= first:
@@ -246,16 +251,20 @@ def _summarize(data: dict[str, np.ndarray], sample_indices: np.ndarray,
 
     report_rows: list[dict[str, Any]] = []
     query_rows: list[dict[str, Any]] = []
+    query_steering = np.abs(data["frames"][sample_indices, 3])
     regime_masks = {
-        "speed_lt_3": sample_speed < 3,
-        "speed_3_to_6": (sample_speed >= 3) & (sample_speed < 6),
-        "speed_6_to_10": (sample_speed >= 6) & (sample_speed < 10),
-        "speed_ge_10": sample_speed >= 10,
-        "steering_abs_lt_0_16": np.abs(data["frames"][sample_indices, 3]) < .16,
-        "steering_abs_0_16_to_0_30": (
-            (np.abs(data["frames"][sample_indices, 3]) >= .16)
-            & (np.abs(data["frames"][sample_indices, 3]) < .30)),
-        "steering_abs_ge_0_30": np.abs(data["frames"][sample_indices, 3]) >= .30,
+        "speed_0_to_3": (sample_speed >= 0) & (sample_speed < 3),
+        "speed_3_to_5": (sample_speed >= 3) & (sample_speed < 5),
+        "speed_5_to_7": (sample_speed >= 5) & (sample_speed < 7),
+        "speed_7_to_9": (sample_speed >= 7) & (sample_speed < 9),
+        "speed_9_to_10": (sample_speed >= 9) & (sample_speed < 10),
+        "speed_10_to_11": (sample_speed >= 10) & (sample_speed < 11),
+        "speed_11_to_12": (sample_speed >= 11) & (sample_speed <= 12),
+        "steering_abs_0_to_0_10": query_steering < .10,
+        "steering_abs_0_10_to_0_20": (query_steering >= .10) & (query_steering < .20),
+        "steering_abs_0_20_to_0_30": (query_steering >= .20) & (query_steering < .30),
+        "steering_abs_0_30_to_0_40": (query_steering >= .30) & (query_steering < .40),
+        "steering_abs_0_40_to_0_524": (query_steering >= .40) & (query_steering <= .524),
     }
     current_support = nearest_by_history[0]
     for milliseconds in HISTORY_MS:
@@ -357,16 +366,23 @@ def build(dataset_dir: Path, output_dir: Path, seed: int = 20261001
         raise ValueError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     z = np.load(dataset_dir / "openplane_dynamics.npz", allow_pickle=False)
+    if (int(z["schema_version"][0]) != 8
+            or str(z["dataset_role"].astype(str)[0]) != "race_domain"
+            or float(z["domain_speed_cap_mps"][0]) != 12.0):
+        raise ValueError("matched-state analysis requires race-domain schema 8")
     required = ("frames", "simulator_rigid_state",
                 "simulator_linear_acceleration", "sequence_bounds",
                 "sequence_run_index", "run_ids", "run_splits",
-                "frame_run_index")
+                "frame_run_index", "frame_domain_speed_mps")
     missing = [key for key in required if key not in z.files]
     if missing:
         raise ValueError("reset-safe dataset missing arrays: " + ", ".join(missing))
     data = {key: z[key] for key in required}
     z.close()
     current = _current_features(data)
+    if (not np.isfinite(data["frame_domain_speed_mps"]).all()
+            or np.any(data["frame_domain_speed_mps"] > 12.0)):
+        raise ValueError("matched-state dataset violates the 12 m/s race cap")
     indices, runs, speeds = _balanced_query_indices(data, current, seed)
     targets, target_names = _target_responses(data, indices)
     features = _history_feature_sets(data, current, indices)
@@ -380,6 +396,8 @@ def build(dataset_dir: Path, output_dir: Path, seed: int = 20261001
         "schema_version": 1,
         "dataset": str(dataset_dir / "openplane_dynamics.npz"),
         "fixed_dt_s": DT_S,
+        "dataset_role": "race_domain",
+        "speed_cap_mps": 12.0,
         "matching_method": (
             "Nearest neighbors in robust-IQR-scaled observed state/input space, "
             "with all neighbors from the query's source run excluded. History "
@@ -406,6 +424,7 @@ def build(dataset_dir: Path, output_dir: Path, seed: int = 20261001
         "balanced_query_count": int(len(indices)),
         "query_run_count": int(len(selected_run_ids)),
         "query_run_ids": selected_run_ids,
+        "query_splits_included": ["train", "validation"],
         "targets": target_names,
         "results": compare,
         "query_metrics_csv_gz": str(query_path),

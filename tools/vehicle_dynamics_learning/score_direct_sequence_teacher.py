@@ -52,7 +52,7 @@ def score(checkpoint_path: Path, dataset_path: Path, split: str,
         payload["x_mean"], payload["x_scale"],
         payload["y_mean"], payload["y_scale"], device,
         int(metadata["context_steps"]), int(metadata["future_steps"]),
-        seed, max_windows_per_run)
+        seed, max_windows_per_run, stratify=True)
     report = {
         "schema_version": 1,
         "checkpoint": str(checkpoint_path.resolve()),
@@ -62,6 +62,8 @@ def score(checkpoint_path: Path, dataset_path: Path, split: str,
         "independent_run_count": len(evaluated_ids),
         "device": str(device),
         "metrics": metrics,
+        "regime_metrics_are_grouped_by_initial_race_state": True,
+        "wheel_mismatch_strata_fit_on_training_rows_only": True,
         "future_truth_or_sensors_used_as_inputs": False,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)

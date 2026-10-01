@@ -221,6 +221,115 @@ model should extrapolate across unobserved states. For track data, use complete
 runs of feasible racing trajectories and reserve new raceline/speed
 combinations for unseen evaluation.
 
+## Continuous race-domain capture (0–12 m/s)
+
+Use the development-only `race_domain_continuous` profile to capture longer
+closed-loop histories without reset or omitted phase intervals. Its 65 seeded
+four-second blocks cover target speeds from 2 to 11.1 m/s, paired turn directions,
+steering magnitudes scaled down with speed, a corner-exit/unwind sequence, and
+descending speed targets that exercise throttle cuts and the simulator's active
+brake. Actual steering is further limited by measured speed; a 11.2 m/s command
+governor and 11.9 m/s hard cutoff keep the experiment inside the race domain.
+Existing collision and 8-degree tilt stops remain active. This changes only the
+development command schedule, not simulator physics.
+
+The first completed run exposed a capture-design bug: the old speed
+feedforward table ended at 8.5 m/s, so 9.5/10.5/11.0 m/s targets produced only
+0.367/0.388/0.397 throttle and the car topped out at 9.595 m/s. A stable,
+near-straight throttle-sweep analysis found preliminary plateaus near
+8.49/9.66/10.82 m/s at 0.35/0.40/0.45 command, from one source run. The
+continuous profile now uses the linear inverse of those observations only
+above 8.49 m/s to improve excitation; it remains capped at 0.50. This is a
+capture-only calibration to be verified on new bags, not a vehicle model or
+runtime control change. Schedule version 2 moves its upper target from 11.0 to
+11.1 m/s, remaining below the unchanged 11.2 m/s governor. The completed
+version-2 validation run reached 11.109 m/s with zero >12 m/s samples and
+passed the whole-run gates; this validates data coverage, not model accuracy.
+
+Start the same pinned Explore simulator in batchmode. Redirect Unity logs to
+`/dev/null` to avoid the simulator's repeated external WebSocket diagnostics
+flooding the terminal; the bridge, experiment, recorder and quality logs remain
+in the workspace:
+
+```bash
+SDU_APEX_SIM_TRACK=explore \
+SDU_APEX_SIM_MODE=batchmode \
+SDU_APEX_SIM_LOG_FILE=/dev/null \
+./tools/start_simulator.sh
+```
+
+In another terminal, run one independent capture at a time with a unique ID and
+seed. The run writes only the existing minimal dynamics topics at the bridge's
+40 Hz rate:
+
+```bash
+SDU_APEX_EXPERIMENT_PROFILE=race_domain_continuous \
+SDU_APEX_EXPERIMENT_RUN_ID='openplane_race_domain_train_YYYYMMDD_rNN' \
+SDU_APEX_EXPERIMENT_SEED=17010 \
+SDU_APEX_EXPERIMENT_TIMEOUT_S=300 \
+./tools/run_open_plane_experiment.sh
+```
+
+For the targeted brake/turn-in follow-up, keep the same simulator launcher and
+run one seeded capture at a time. Change the run ID and seed for independent
+train/validation repetitions; the profile preserves the matching plan in its
+bag events and the dataset builder admits only an exact completed plan:
+
+```bash
+SDU_APEX_EXPERIMENT_PROFILE=race_domain_brake_boundary \
+SDU_APEX_EXPERIMENT_RUN_ID='openplane_race_domain_brake_boundary_train_r01' \
+SDU_APEX_EXPERIMENT_SEED=17020 \
+SDU_APEX_EXPERIMENT_TIMEOUT_S=270 \
+./tools/run_open_plane_experiment.sh
+```
+
+Restart the simulator through the same batchmode command between independent
+captures so each starts from the same simulator spawn. Assign new complete runs
+to validation/test/final-test before rebuilding datasets; never split a run's
+windows across roles. A stopped or aborted pilot is diagnostic only, not a
+training or holdout run. Zero throttle means active braking in this vehicle
+interface; there is no separate coast input to claim or fit.
+
+The focused `race_domain_brake_boundary` follow-up keeps the same 11.2 m/s
+governor, 11.9 m/s hard cutoff, collision abort, and 8-degree tilt stop. It
+adds seeded left/right steering sweeps at 9.5, 10.5, and 11.1 m/s, increasing
+the largest tested angles by only 0.01 rad from the prior clean profile (0.09
+rad at 9.5/10.5; 0.05 rad at 11.1). Eight matched target-speed reductions
+preserve steering through braking, followed by corner-exit/unwind sequences.
+The plan returns to 3 m/s between the high-speed brake trials and the exit
+sequence. Its 51 four-second blocks take 204 seconds. This is a targeted development
+experiment, not a feasibility claim: measured steering/throttle feedback,
+speed, tilt, and the existing abort gates determine usable samples. Rebuild
+the immutable race-domain view only after the bag passes the same stream,
+timing, packet, and collision quality gates.
+
+The coverage audit showed that this legacy profile still left moderate-steering
+9–12 m/s braking unsupported. The follow-up `race_domain_moderate_braking`
+profile therefore uses 64 six-second blocks (384 seconds): a straight approach,
+signed steering steps through 0.10–0.14 rad at 9.5/10.5 m/s and 0.10–0.12 rad
+at 11.1 m/s, then randomized paired turn-in, positive-throttle reduction,
+zero-throttle active braking, and steering-release sequences in both
+directions. It includes corner exits/unwind and returns to 3 m/s before each
+high-speed transition. Its profile-specific steering ceiling applies only to
+this development test; the production vehicle and simulator are unchanged.
+The 8-degree tilt abort, collision abort, 11.2 m/s governor, and 11.9 m/s hard
+cutoff remain active. Zero throttle is active braking; this simulator interface
+has no distinct coast or negative-throttle command. Block start events capture
+measured speed and actuator feedback, so pairs that fail to reach their
+requested approach speed must be marked unmatched rather than counted as
+matched braking trials.
+
+Run one capture per fresh Explore batchmode start, then assign the whole run to
+its split before rebuilding the dataset:
+
+```bash
+SDU_APEX_EXPERIMENT_PROFILE=race_domain_moderate_braking \
+SDU_APEX_EXPERIMENT_RUN_ID='openplane_race_domain_moderate_braking_train_r01' \
+SDU_APEX_EXPERIMENT_SEED=17022 \
+SDU_APEX_EXPERIMENT_TIMEOUT_S=430 \
+./tools/run_open_plane_experiment.sh
+```
+
 ## Why supervised dynamics identification, not RL first
 
 These bags are rich in commanded inputs and state labels, but they do not carry

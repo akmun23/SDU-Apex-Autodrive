@@ -1,0 +1,5 @@
+# Development-only operating-domain cap for <=12 m/s race-model captures.
+# Do not use this file in the competition image or as a physics/model change.
+/**:
+  ros__parameters:
+    max_speed_mps: 12.0

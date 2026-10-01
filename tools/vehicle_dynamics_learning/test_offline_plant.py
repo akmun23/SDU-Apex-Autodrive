@@ -71,6 +71,21 @@ class OfflinePlantTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             plant.step(0.0, 0.0, 0.0)
 
+    def test_race_speed_cap_marks_out_of_domain_without_clipping(self) -> None:
+        torch, _ = _torch()
+        plant = HistoricalGruPlant(
+            torch, [_EchoModel(torch)], np.zeros(9, dtype=np.float32),
+            np.ones(9, dtype=np.float32), 2,
+            max_supported_speed_mps=12.0)
+        history = np.zeros((2, 9), dtype=np.float32)
+        history[-1, 0] = 12.01
+
+        estimate = plant.reset(history)
+
+        self.assertFalse(estimate.within_speed_domain)
+        self.assertAlmostEqual(float(estimate.state[3]), 12.01, places=5)
+        self.assertIsNone(estimate.support_distance)
+
     def test_rssm_adapter_steps_from_prior_only(self) -> None:
         torch, nn = _torch()
         torch.set_num_threads(1)
@@ -82,7 +97,8 @@ class OfflinePlantTest(unittest.TestCase):
             torch, nn, 16, 4, x_mean, x_scale, y_mean, y_scale)
         model = model_type().eval()
         plant = RssmTeacherPlant(
-            torch, [model], x_mean, x_scale, y_mean, y_scale, 40)
+            torch, [model], x_mean, x_scale, y_mean, y_scale, 40,
+            max_supported_speed_mps=12.0)
         history = np.zeros((40, 9), dtype=np.float32)
         history[-1, :3] = [2.0, 0.2, 1.0]
         history[-1, 3:9] = [0.1, 0.4, 1.8, 2.1, 0.2, 0.5]
@@ -96,6 +112,13 @@ class OfflinePlantTest(unittest.TestCase):
         self.assertTrue(np.isfinite(output.state).all())
         self.assertTrue(np.isfinite(output.uncertainty).all())
         self.assertIsNone(plant.get_support())
+        self.assertTrue(output.within_speed_domain)
+
+        over_limit = history.copy()
+        over_limit[-1, 0] = 12.01
+        outside = plant.reset(over_limit)
+        self.assertFalse(outside.within_speed_domain)
+        self.assertAlmostEqual(float(outside.state[3]), 12.01, places=5)
 
 
 if __name__ == "__main__":

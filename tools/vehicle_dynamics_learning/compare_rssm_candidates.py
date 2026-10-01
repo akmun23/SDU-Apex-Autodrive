@@ -202,7 +202,10 @@ def compare(checkpoints: list[Path], dataset_path: Path, output_path: Path,
         "schema_version": 1,
         "dataset": str(dataset_path.resolve()),
         "split": split,
-        "split_status": "previously consumed diagnostic; not blind confirmation",
+        "split_status": (
+            "checkpoint-selection validation; not blind confirmation"
+            if split == "validation" else
+            "held-out split diagnostic; historical consumption must be checked"),
         "context_seconds": context * DT_S,
         "prediction_seconds": horizon * DT_S,
         "common_eligible_runs": common_run_names,
