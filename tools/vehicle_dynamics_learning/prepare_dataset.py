@@ -10,8 +10,10 @@ is launched.
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -27,8 +29,9 @@ if str(REPO_ROOT) not in sys.path:
 from tools import evaluate_open_plane_body_dynamics as body  # noqa: E402
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SIMULATOR_DT_S = 0.025
+RESET_COMMAND_TOPIC = "/autodrive/reset_command"
 FEATURE_NAMES = (
     "u_rear_mps", "v_rear_mps", "yaw_rate_rps",
     "steering_feedback_rad", "throttle_feedback_norm",
@@ -156,6 +159,39 @@ def _fingerprint(sequences: list[tuple[np.ndarray, np.ndarray]]) -> str:
     return digest.hexdigest()
 
 
+def _reset_epoch_starts(path: Path) -> tuple[bool, list[int]]:
+    """Read rising edges of the development reset command from a closed bag."""
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        topics = body.analysis._topic_map(connection)
+        if RESET_COMMAND_TOPIC not in topics:
+            return False, []
+        starts: list[int] = []
+        reset_active = False
+        for receipt_ns, message in body.analysis._messages(
+                connection, topics, RESET_COMMAND_TOPIC):
+            active = bool(message.data)
+            if active and not reset_active:
+                starts.append(int(receipt_ns))
+            reset_active = active
+        return True, starts
+    finally:
+        connection.close()
+
+
+def _run_family(run_id: str) -> str:
+    if run_id.startswith("practice_"):
+        return "practice_track"
+    if run_id.startswith("openplane_"):
+        return "open_plane"
+    return "other"
+
+
+def _replicate_index(label: str) -> int:
+    match = re.search(r"(?:^|_)throttle_r(\d+)_", label)
+    return int(match.group(1)) if match else -1
+
+
 def _extract(path: Path, coalesce_contiguous_phases: bool = False,
              practice_active_interval: bool = False,
              include_nonvalid_phases: bool = False) -> tuple[
@@ -167,6 +203,7 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
     capture = body.load_capture(
         path, include_nonvalid_phases=include_nonvalid_phases)
     run_id = path.parents[1].name
+    reset_topic_present, reset_epoch_starts_ns = _reset_epoch_starts(path)
     clean, failures = _quality(capture)
     packet_match_fraction = (
         capture.packet_sequence_matched_samples
@@ -354,6 +391,7 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
     stream_stats = capture.phase_stream_stats or capture.stream_stats
     record: dict[str, Any] = {
         "run_id": run_id,
+        "run_family": _run_family(run_id),
         "bag": (str(path.resolve().relative_to(REPO_ROOT))
                 if path.resolve().is_relative_to(REPO_ROOT) else str(path.resolve())),
         "bytes": path.stat().st_size,
@@ -390,6 +428,12 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
             float(np.mean(simulator_acceleration_valid))
             if len(simulator_acceleration_valid) else 0.0),
         "sequences_exported": len(extracted),
+        "reset_metadata": {
+            "topic": RESET_COMMAND_TOPIC,
+            "topic_present": reset_topic_present,
+            "epoch_count": len(reset_epoch_starts_ns),
+            "epoch_start_receipt_ns": reset_epoch_starts_ns,
+        },
         "samples_exported": int(len(values)),
         "fingerprint": _fingerprint(fingerprint_sequences) if extracted else None,
         "feature_min": values.min(axis=0).tolist() if len(values) else None,
@@ -421,16 +465,19 @@ def _coalesce_contiguous_sequences(
                          np.ndarray, np.ndarray, np.ndarray, np.ndarray,
                          np.ndarray, np.ndarray, np.ndarray, np.ndarray,
                          np.ndarray, np.ndarray]],
+    reset_epoch_starts_ns: list[int] | None = None,
 ) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
                 np.ndarray, np.ndarray, np.ndarray, np.ndarray,
                 np.ndarray, np.ndarray, np.ndarray, np.ndarray,
                 np.ndarray, np.ndarray]]:
-    """Join fragments only when simulator packet IDs are consecutive.
+    """Join fragments only when packet IDs are consecutive and no reset intervened.
 
-    Phase and lap markers are experiment bookkeeping, not physical resets.
-    Receipt timestamps remain for event association only. Missing or duplicate
-    packet IDs break continuity; each retained transition has exactly 25 ms.
+    Phase and lap markers alone are not physical resets. A recorded reset edge
+    is a hard boundary even when simulator packet IDs happen to remain
+    consecutive. Receipt timestamps are used only to associate that event;
+    each retained transition still uses the fixed 25 ms simulator interval.
     """
+    reset_epoch_starts_ns = sorted(reset_epoch_starts_ns or [])
     rows: list[tuple[int, int, str, np.ndarray, np.ndarray, bool,
                      np.ndarray, bool, np.ndarray, np.ndarray, int,
                      np.ndarray, np.ndarray]] = []
@@ -469,9 +516,12 @@ def _coalesce_contiguous_sequences(
         if len(current) < 2:
             current.clear()
             return
+        source_labels = {row[2] for row in current}
+        segment_label = (next(iter(source_labels)) if len(source_labels) == 1
+                         else "continuous_run_mixed_conditions")
         dt = np.full(len(current), SIMULATOR_DT_S, dtype=np.float32)
         result.append((
-            "continuous_run",
+            segment_label,
             np.stack([row[3] for row in current]).astype(np.float32, copy=False),
             np.stack([row[4] for row in current]).astype(np.float32, copy=False),
             np.asarray([row[5] for row in current], dtype=bool),
@@ -489,8 +539,14 @@ def _coalesce_contiguous_sequences(
         current.clear()
 
     for row in deduplicated:
-        if current and row[0] != current[-1][0] + 1:
-            flush()
+        if current:
+            previous = current[-1]
+            packet_gap = row[0] != previous[0] + 1
+            reset_between = (
+                bisect.bisect_right(reset_epoch_starts_ns, previous[1])
+                < bisect.bisect_right(reset_epoch_starts_ns, row[1]))
+            if packet_gap or reset_between:
+                flush()
         current.append(row)
     flush()
     return result
@@ -574,7 +630,12 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
     bounds: list[tuple[int, int]] = []
     sequence_run: list[int] = []
     sequence_labels: list[str] = []
+    sequence_condition_id: list[int] = []
+    sequence_reset_index: list[int] = []
+    sequence_replicate_index: list[int] = []
     sample_time_ns_blocks: list[np.ndarray] = []
+    frame_reset_index_blocks: list[np.ndarray] = []
+    condition_label_to_index: dict[str, int] = {}
     cursor = 0
     used_runs: set[str] = set()
     for record in records:
@@ -586,10 +647,15 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         if not run_sequences:
             continue
         if coalesce_contiguous_phases:
-            run_sequences = _coalesce_contiguous_sequences(run_sequences)
+            reset_metadata = record.get("reset_metadata", {})
+            run_sequences = _coalesce_contiguous_sequences(
+                run_sequences,
+                reset_metadata.get("epoch_start_receipt_ns", []))
             if not run_sequences:
                 continue
         used_runs.add(run_id)
+        reset_starts = record.get("reset_metadata", {}).get(
+            "epoch_start_receipt_ns", [])
         for (label, frames, sensor_frames, sensor_valid, attitude_frames,
              attitude_valid, dt, packet_sequence, sample_time_ns,
              odom_pose, simulator_pose, lap_count, simulator_rigid_state,
@@ -608,10 +674,20 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             simulator_rigid_state_blocks.append(simulator_rigid_state)
             simulator_acceleration_blocks.append(simulator_acceleration)
             frame_run_blocks.append(np.full(len(frames), run_index[run_id], dtype=np.int32))
+            first_sample_receipt_ns = int(sample_time_ns[0])
+            reset_index = bisect.bisect_right(
+                reset_starts, first_sample_receipt_ns)
+            frame_reset_index_blocks.append(
+                np.full(len(frames), reset_index, dtype=np.int32))
             end = cursor + len(frames)
             bounds.append((cursor, end))
             sequence_run.append(run_index[run_id])
             sequence_labels.append(label)
+            if label not in condition_label_to_index:
+                condition_label_to_index[label] = len(condition_label_to_index)
+            sequence_condition_id.append(condition_label_to_index[label])
+            sequence_reset_index.append(reset_index)
+            sequence_replicate_index.append(_replicate_index(label))
             cursor = end
     if not frame_blocks:
         raise ValueError("no clean, eligible sequences were exported")
@@ -636,8 +712,15 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
     simulator_linear_acceleration = np.concatenate(
         simulator_acceleration_blocks).astype(np.float32, copy=False)
     frame_run_index = np.concatenate(frame_run_blocks)
+    frame_reset_index = np.concatenate(frame_reset_index_blocks)
     splits = np.asarray([r["effective_split"] for r in records], dtype="U32")
     run_ids = np.asarray([r["run_id"] for r in records], dtype="U128")
+    run_families = np.asarray([r.get("run_family", "other") for r in records],
+                              dtype="U32")
+    condition_labels = np.asarray(
+        [label for label, _ in sorted(condition_label_to_index.items(),
+                                      key=lambda item: item[1])],
+        dtype="U256")
     np.savez_compressed(
         output_dir / "openplane_dynamics.npz",
         schema_version=np.asarray([SCHEMA_VERSION], dtype=np.int32),
@@ -661,8 +744,16 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         sequence_bounds=np.asarray(bounds, dtype=np.int64),
         sequence_run_index=np.asarray(sequence_run, dtype=np.int32),
         sequence_labels=np.asarray(sequence_labels, dtype="U256"),
+        sequence_condition_id=np.asarray(sequence_condition_id, dtype=np.int32),
+        sequence_reset_index=np.asarray(sequence_reset_index, dtype=np.int32),
+        sequence_replicate_index=np.asarray(sequence_replicate_index,
+                                            dtype=np.int32),
+        frame_run_index=frame_run_index.astype(np.int32, copy=False),
+        frame_reset_index=frame_reset_index,
         run_ids=run_ids,
+        run_families=run_families,
         run_splits=splits,
+        condition_labels=condition_labels,
     )
     train_mask = splits[frame_run_index] == "train"
     train_frames = frames[train_mask]
@@ -730,7 +821,7 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             SIMULATOR_ACCELERATION_NAMES),
         "selection": ("openplane* bags and requested additional bags; valid phase samples only; nonnegative phase time; "
                       + ("contiguous phases/laps joined by simulator packet sequence; a missing packet breaks a sequence; "
-                         "receipt timestamps are never interpreted as physics dt"
+                         "recorded reset commands also break sequences; receipt timestamps are event association only"
                          if coalesce_contiguous_phases else
                          "phase/lap segments retained separately")
                       ),
@@ -741,9 +832,17 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         "feature_names": list(FEATURE_NAMES),
         "packet_sequence_policy": (
             "Each /odom source stamp is joined exactly to bridge_packet_timing; "
-            "only consecutive packet_sequence values remain in a sequence. "
+            "only consecutive packet_sequence values remain in a sequence; "
+            "recorded reset-command rising edges are hard sequence boundaries. "
             "Every sample interval is the fixed simulator dt=0.025 s. "
             "Receipt/request timestamps are association and diagnostics only."),
+        "sequence_metadata": {
+            "run_family": "practice_track/open_plane/other, derived from run ID prefix",
+            "condition": "phase label when homogeneous; mixed-condition marker otherwise",
+            "replicate_index": "parsed from throttle phase labels; -1 when not applicable",
+            "reset_index": "number of recorded reset-command rising edges before sequence start",
+            "failure_status": "run-level collision/timing/alignment/aborted gate in manifest runs",
+        },
         "pose_label_policy": (
             "odom_pose_xyyaw is the bridge /odom pose; "
             "simulator_pose_xyyaw is same-packet simulator position and yaw "
@@ -785,7 +884,7 @@ def main() -> int:
                         metavar="RUN_ID=SPLIT",
                         help="set one run's effective starting split: train, validation, test, or final_test")
     parser.add_argument("--coalesce-contiguous-phases", action="store_true",
-                        help="for plant identification, join phase/lap fragments by recorded time and break only at data gaps")
+                        help="for plant identification, join contiguous fragments but break at packet gaps and recorded reset events")
     parser.add_argument("--practice-active-interval", action="store_true",
                         help="allow only 12-lap practice captures that pass lap, collision, active 40 Hz and post-run fault checks; crop to active laps")
     parser.add_argument("--output-dir", type=Path, required=True,

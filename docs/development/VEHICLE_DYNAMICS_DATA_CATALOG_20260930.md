@@ -127,3 +127,37 @@ model-data cleanup: they have separate controller/regression uses and are
 outside this catalog’s plant-training inclusion rule. Their retention is not
 a claim that every historical tuning run is needed; removing them requires a
 separate best-run/regression audit.
+
+## 2026-10-01 schema-7 audit view
+
+The source schema-6 archive remains unchanged. A separate reset-aware analysis
+view is available at:
+
+```text
+live_runs/derived_dynamics_learning_20260928/
+  plant_teacher_mixed_dataset_full3d_reset_safe_20261001/
+```
+
+It contains the same 850,576 fixed-25-ms rows and 7,797 sequences, with
+explicit sequence/run family, condition, replicate, reset-index, and run
+quality metadata. Simulator pose, rigid-body state, and acceleration labels
+remain separate from production-odometry and sensor-estimator channels.
+
+Reset-topic inventory across the 116 run records found three bags: throttle
+surface r04 (771 reset-command epochs; rejected by the whole-run quality
+gate), r05 (739; accepted), and straight throttle-transition r01 (246; rejected
+by the whole-run gate). For clean r05, all reset edges already fell between
+archived sequences; the 741 archived r05 sequences have zero within-sequence
+reset crossings and zero internal packet gaps. The initial suspicion that the
+archive merged r05 conditions across resets was tested and disproved.
+
+The future dataset exporter now treats a recorded reset-command rising edge
+as a hard boundary even if packet IDs happen to be consecutive. Three focused
+unit tests cover reset splitting, continuous joining without reset, and packet
+gap splitting.
+
+The four exporter-exception bags were re-audited after the fix. None produced
+clean eligible aligned sequences, so none were added. See
+[`FULL_MODELING_RESET_PROGRESS_20261001.md`](FULL_MODELING_RESET_PROGRESS_20261001.md)
+for per-bag findings and the independently counted continuous-horizon run
+coverage.

@@ -264,6 +264,32 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
             raise ValueError("simulator orientation quaternion is not normalized")
     else:
         simulator_rigid_state = simulator_linear_acceleration = None
+    if schema_version >= 3:
+        required_sensor = {"sensor_feature_names", "sensor_frames",
+                           "sensor_valid"}
+        missing_sensor = required_sensor - set(data.files)
+        if not missing_sensor:
+            sensor_feature_names = data["sensor_feature_names"].astype(str).tolist()
+            expected_sensor_names = [
+                "steering_feedback_rad", "throttle_feedback_norm",
+                "rear_left_surface_mps", "rear_right_surface_mps",
+                "imu_ax_mps2", "imu_ay_mps2", "imu_yaw_rate_rps",
+                "steering_command_rad", "throttle_command_norm", "sample_dt_s",
+            ]
+            if sensor_feature_names != expected_sensor_names:
+                raise ValueError("unexpected sensor-feature ordering")
+            sensor_frames = data["sensor_frames"].astype(np.float32, copy=False)
+            sensor_valid = data["sensor_valid"].astype(bool, copy=False)
+            if (sensor_frames.shape != (len(frames), len(expected_sensor_names))
+                    or sensor_valid.shape != (len(frames),)
+                    or not np.isfinite(sensor_frames).all()):
+                raise ValueError("sensor arrays must align and be finite")
+        else:
+            sensor_feature_names = None
+            sensor_frames = sensor_valid = None
+    else:
+        sensor_feature_names = None
+        sensor_frames = sensor_valid = None
     if len(run_ids) != len(splits) or np.any(seq_run < 0) or np.any(seq_run >= len(run_ids)):
         raise ValueError("run metadata indices are invalid")
     feature_names = data["feature_names"].astype(str).tolist()
@@ -323,6 +349,9 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         "run_ids": run_ids,
         "splits": splits,
         "feature_names": feature_names,
+        "sensor_feature_names": sensor_feature_names,
+        "sensor_frames": sensor_frames,
+        "sensor_valid": sensor_valid,
         "imu_attitude_frames": attitude,
         "imu_attitude_valid": attitude_valid,
         "imu_attitude_feature_names": attitude_names,
