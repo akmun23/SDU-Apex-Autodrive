@@ -348,31 +348,36 @@ def analyze(bag: Path, output: Path) -> dict[str, Any]:
         }
         if len(expected) != len(scheduled):
             raise ValueError("scheduled_conditions contains duplicate keys")
-    elif design:
-        target_step = int(design["target_step_percent"])
-        baseline_step = int(design["baseline_step_percent"])
-        deltas = [int(value) for value in design["step_deltas_percent"]]
-        repeat_count = int(design["repeat_count"])
-        transitions = {
-            (0, end) for end in range(target_step, 101, target_step)
-        }
-        for start in range(baseline_step, 100, baseline_step):
-            transitions.update(
-                (start, start + delta) for delta in deltas
-                if start + delta <= 100)
-            transitions.add((start, 100))
+        repeat_count = int(design.get(
+            "repeat_count",
+            max((key[3] for key in expected), default=1)))
     else:
-        # Backward-compatible audit for the original exhaustive 1% sweep.
-        repeat_count = 1
-        transitions = {
-            (start, end) for start in range(100) for end in range(start + 1, 101)
+        if design:
+            target_step = int(design["target_step_percent"])
+            baseline_step = int(design["baseline_step_percent"])
+            deltas = [int(value) for value in design["step_deltas_percent"]]
+            repeat_count = int(design["repeat_count"])
+            transitions = {
+                (0, end) for end in range(target_step, 101, target_step)
+            }
+            for start in range(baseline_step, 100, baseline_step):
+                transitions.update(
+                    (start, start + delta) for delta in deltas
+                    if start + delta <= 100)
+                transitions.add((start, 100))
+        else:
+            # Backward-compatible audit for the original exhaustive 1% sweep.
+            repeat_count = 1
+            transitions = {
+                (start, end) for start in range(100)
+                for end in range(start + 1, 101)
+            }
+        expected = {
+            (round(angle * 10_000), start, end, replicate)
+            for angle in steering_angles
+            for start, end in transitions
+            for replicate in range(1, repeat_count + 1)
         }
-    expected = {
-        (round(angle * 10_000), start, end, replicate)
-        for angle in steering_angles
-        for start, end in transitions
-        for replicate in range(1, repeat_count + 1)
-    }
     missing_pairs = expected - seen_pairs
     unexpected_pairs = seen_pairs - expected
     replicate_groups: dict[tuple[int, int, int], list[dict[str, Any]]] = defaultdict(list)

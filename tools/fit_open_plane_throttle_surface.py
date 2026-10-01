@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -87,12 +88,49 @@ def _feature_value(row: dict[str, Any], name: str) -> Any:
     return row.get(name)
 
 
-def fit(analysis_path: Path) -> dict[str, Any]:
-    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
-    rows = [row for row in analysis.get("conditions", [])
-            if row.get("usable_for_response_fit") is True]
+def fit(analysis_paths: list[Path]) -> dict[str, Any]:
+    analyses = [json.loads(path.read_text(encoding="utf-8"))
+                for path in analysis_paths]
+    sources = []
+    rows = []
+    seen_keys = set()
+    repeat_counts = set()
+    for path, analysis in zip(analysis_paths, analyses):
+        if analysis.get("profile") != "throttle_transition_surface":
+            raise ValueError(f"not a throttle transition analysis: {path}")
+        repeat_count = analysis.get("design", {}).get("repeat_count")
+        if repeat_count is not None:
+            repeat_counts.add(int(repeat_count))
+        source_rows = [row for row in analysis.get("conditions", [])
+                       if row.get("usable_for_response_fit") is True]
+        sources.append({
+            "path": str(path.resolve()),
+            "passed_integrity_gates": analysis.get("passed_integrity_gates"),
+            "fit_usable_conditions": len(source_rows),
+        })
+        for row in source_rows:
+            key = (
+                round(float(row["steering_command_rad"]) * 10_000),
+                round(float(row["throttle_start_norm"]) * 100),
+                round(float(row["throttle_end_norm"]) * 100),
+                int(row["replicate_index"]),
+            )
+            if key in seen_keys:
+                raise ValueError(
+                    "duplicate fit-usable condition across analyses: "
+                    f"{key}")
+            seen_keys.add(key)
+            rows.append(row)
     if len(rows) < 50:
         raise ValueError(f"only {len(rows)} fit-usable conditions; need at least 50")
+    replicates_by_condition = Counter(
+        (round(float(row["steering_command_rad"]) * 10_000),
+         round(float(row["throttle_start_norm"]) * 100),
+         round(float(row["throttle_end_norm"]) * 100))
+        for row in rows)
+    replicate_distribution = Counter(replicates_by_condition.values())
+    expected_replicates = (next(iter(repeat_counts))
+                           if len(repeat_counts) == 1 else None)
 
     scores: dict[str, Any] = {}
     for target in TARGETS:
@@ -149,14 +187,29 @@ def fit(analysis_path: Path) -> dict[str, Any]:
         scores[target] = target_scores
 
     return {
-        "source_analysis": str(analysis_path.resolve()),
-        "source_passed_integrity_gates": analysis.get("passed_integrity_gates"),
+        "source_analyses": sources,
+        "source_passed_integrity_gates": all(
+            source["passed_integrity_gates"] is True for source in sources),
         "fit_usable_conditions": len(rows),
+        "replicate_coverage": {
+            "unique_steering_throttle_conditions": len(replicates_by_condition),
+            "expected_replicates_per_condition": expected_replicates,
+            "replicate_count_distribution": {
+                str(count): groups
+                for count, groups in sorted(replicate_distribution.items())
+            },
+            "all_conditions_have_expected_replicates": bool(
+                expected_replicates is not None
+                and all(count == expected_replicates
+                        for count in replicates_by_condition.values())),
+        },
         "validation": (
-            "Grouped out-of-fold estimates. Replicates of the same steering and "
-            "throttle transition remain in one fold; separate splits hold out "
-            "whole throttle transitions or whole steering angles. One capture "
-            "only: exploratory, not a run-level generalization claim."
+            "Grouped out-of-fold estimates over fit-usable rows from the listed "
+            "captures. Replicates of each steering/throttle condition remain "
+            "in one fold; separate splits hold out whole throttle transitions "
+            "or whole steering angles. These reset-isolated response trials are "
+            "not independent continuous runs, so this is exploratory and not "
+            "a run-level plant-generalization claim."
         ),
         "scores": scores,
     }
@@ -164,11 +217,12 @@ def fit(analysis_path: Path) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("analysis", type=Path, help="closed-bag analysis JSON")
+    parser.add_argument("analysis", type=Path, nargs="+",
+                        help="one or more closed-bag analysis JSON files")
     parser.add_argument("--output", type=Path,
-                        help="output JSON (default: beside input)")
+                        help="output JSON (default: beside first input)")
     args = parser.parse_args()
-    output = args.output or args.analysis.with_name("preliminary_fit.json")
+    output = args.output or args.analysis[0].with_name("preliminary_fit.json")
     try:
         result = fit(args.analysis)
     except (OSError, ValueError, json.JSONDecodeError) as exc:

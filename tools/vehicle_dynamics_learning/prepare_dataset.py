@@ -27,7 +27,8 @@ if str(REPO_ROOT) not in sys.path:
 from tools import evaluate_open_plane_body_dynamics as body  # noqa: E402
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
+SIMULATOR_DT_S = 0.025
 FEATURE_NAMES = (
     "u_rear_mps", "v_rear_mps", "yaw_rate_rps",
     "steering_feedback_rad", "throttle_feedback_norm",
@@ -45,6 +46,17 @@ ATTITUDE_FEATURE_NAMES = (
     "imu_roll_rate_rps", "imu_pitch_rate_rps",
 )
 PREDICTED_STATE_NAMES = FEATURE_NAMES[:7]
+SIMULATOR_RIGID_STATE_NAMES = (
+    "position_x_m", "position_y_m", "position_z_m",
+    "orientation_x", "orientation_y", "orientation_z", "orientation_w",
+    "linear_velocity_x_mps", "linear_velocity_y_mps",
+    "linear_velocity_z_mps", "angular_velocity_x_rps",
+    "angular_velocity_y_rps", "angular_velocity_z_rps",
+)
+SIMULATOR_ACCELERATION_NAMES = (
+    "linear_acceleration_x_mps2", "linear_acceleration_y_mps2",
+    "linear_acceleration_z_mps2",
+)
 HISTORY_STEPS = 16
 ROLLOUT_STEPS = 32
 DEFAULT_ROOT = REPO_ROOT / "live_runs"
@@ -113,6 +125,12 @@ def _quality(capture: body.Capture) -> tuple[bool, list[str]]:
         failures.append("collision_count_nonzero")
     if capture.timing_faults:
         failures.append("bridge_timing_fault")
+    packet_match_fraction = (
+        capture.packet_sequence_matched_samples
+        / capture.packet_sequence_total_samples
+        if capture.packet_sequence_total_samples else 0.0)
+    if packet_match_fraction < 0.999:
+        failures.append("packet_sequence_alignment_below_99_9_percent")
     streams = capture.phase_stream_stats or capture.stream_stats
     command_topics = set(body.COMMAND_STREAM_TOPICS)
     for topic in body.STREAM_TOPICS:
@@ -139,13 +157,21 @@ def _fingerprint(sequences: list[tuple[np.ndarray, np.ndarray]]) -> str:
 
 
 def _extract(path: Path, coalesce_contiguous_phases: bool = False,
-             practice_active_interval: bool = False) -> tuple[
+             practice_active_interval: bool = False,
+             include_nonvalid_phases: bool = False) -> tuple[
         dict[str, Any], list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
+                                  np.ndarray, np.ndarray, np.ndarray,
+                                  np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray]]]:
-    capture = body.load_capture(path)
+    capture = body.load_capture(
+        path, include_nonvalid_phases=include_nonvalid_phases)
     run_id = path.parents[1].name
     clean, failures = _quality(capture)
+    packet_match_fraction = (
+        capture.packet_sequence_matched_samples
+        / capture.packet_sequence_total_samples
+        if capture.packet_sequence_total_samples else 0.0)
     active_interval = None
     active_interval_report = None
     if practice_active_interval and run_id.startswith("practice_"):
@@ -169,6 +195,8 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
     split = _split_for_name(run_id)
     extracted: list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
                           np.ndarray, np.ndarray, np.ndarray,
+                          np.ndarray, np.ndarray, np.ndarray,
+                          np.ndarray, np.ndarray, np.ndarray,
                           np.ndarray]] = []
     fingerprint_sequences: list[tuple[np.ndarray, np.ndarray]] = []
 
@@ -181,8 +209,13 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         sensor_valid: list[bool] = []
         attitude_frames: list[np.ndarray] = []
         attitude_valid: list[bool] = []
-        times: list[float] = []
+        packet_sequences: list[int] = []
         receipt_times_ns: list[int] = []
+        odom_poses: list[np.ndarray] = []
+        simulator_poses: list[np.ndarray] = []
+        lap_counts: list[int] = []
+        simulator_rigid_states: list[np.ndarray] = []
+        simulator_accelerations: list[np.ndarray] = []
         for sample in sequence:
             if sample.time_s < 0.0:
                 continue
@@ -203,8 +236,31 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
                 attitude_row if attitude_row is not None else
                 np.zeros(len(ATTITUDE_FEATURE_NAMES), dtype=np.float64))
             attitude_valid.append(attitude_row is not None)
-            times.append(float(sample.time_s))
+            packet_sequences.append(int(sample.packet_sequence))
             receipt_times_ns.append(int(sample.receipt_ns))
+            odom_pose = sample.pose_xyyaw
+            simulator_pose = sample.simulator_pose_xyyaw
+            odom_poses.append(
+                np.asarray(odom_pose, dtype=np.float64).copy()
+                if odom_pose is not None else
+                np.full(3, np.nan, dtype=np.float64))
+            simulator_poses.append(
+                np.asarray(simulator_pose, dtype=np.float64).copy()
+                if simulator_pose is not None else
+                np.full(3, np.nan, dtype=np.float64))
+            lap_counts.append(int(sample.lap_count)
+                              if sample.lap_count is not None else -1)
+            simulator_rigid_states.append(
+                np.asarray(sample.simulator_rigid_state, dtype=np.float64).copy()
+                if sample.simulator_rigid_state is not None else
+                np.full(len(SIMULATOR_RIGID_STATE_NAMES), np.nan,
+                        dtype=np.float64))
+            simulator_accelerations.append(
+                np.asarray(sample.simulator_linear_acceleration,
+                           dtype=np.float64).copy()
+                if sample.simulator_linear_acceleration is not None else
+                np.full(len(SIMULATOR_ACCELERATION_NAMES), np.nan,
+                        dtype=np.float64))
         minimum_phase_samples = (2 if coalesce_contiguous_phases
                                  else HISTORY_STEPS + ROLLOUT_STEPS + 1)
         if len(frames) < minimum_phase_samples:
@@ -214,54 +270,87 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         valid_array = np.asarray(sensor_valid, dtype=bool)
         attitude_array = np.asarray(attitude_frames, dtype=np.float32)
         attitude_valid_array = np.asarray(attitude_valid, dtype=bool)
-        time_array = np.asarray(times, dtype=np.float64)
+        packet_sequence_array = np.asarray(packet_sequences, dtype=np.int64)
         receipt_time_array = np.asarray(receipt_times_ns, dtype=np.int64)
-        dt = np.diff(time_array, prepend=time_array[0] - 0.025)
-        if not np.isfinite(frame_array).all() or not np.isfinite(dt).all():
+        odom_pose_array = np.asarray(odom_poses, dtype=np.float32)
+        simulator_pose_array = np.asarray(simulator_poses, dtype=np.float32)
+        lap_count_array = np.asarray(lap_counts, dtype=np.int32)
+        simulator_rigid_state_array = np.asarray(
+            simulator_rigid_states, dtype=np.float32)
+        simulator_acceleration_array = np.asarray(
+            simulator_accelerations, dtype=np.float32)
+        if not np.isfinite(frame_array).all():
             continue
-        if np.any((dt[1:] < 0.015) | (dt[1:] > 0.075)):
-            # Split across timing discontinuities instead of interpolating.
-            breaks = np.flatnonzero((dt[1:] < 0.015) | (dt[1:] > 0.075)) + 1
-            bounds = np.concatenate(([0], breaks, [len(frame_array)]))
-            for start, end in zip(bounds[:-1], bounds[1:]):
-                minimum_segment_samples = (2 if coalesce_contiguous_phases
-                                           else HISTORY_STEPS + ROLLOUT_STEPS + 1)
-                if end - start < minimum_segment_samples:
-                    continue
-                local_frames = frame_array[start:end]
-                local_dt = dt[start:end].copy()
-                local_dt[0] = 0.025
-                local_sensor = np.column_stack((
-                    sensor_array[start:end], local_dt.astype(np.float32)))
-                local_valid = valid_array[start:end]
-                local_attitude = attitude_array[start:end]
-                local_attitude_valid = attitude_valid_array[start:end]
-                local_receipt_times = receipt_time_array[start:end]
-                extracted.append((label, local_frames, local_sensor, local_valid,
-                                  local_attitude, local_attitude_valid,
-                                  local_dt.astype(np.float32),
-                                  local_receipt_times))
-                fingerprint_sequences.append((
-                    np.column_stack((local_frames, local_sensor,
-                                     local_valid.astype(np.float32),
-                                     local_attitude,
-                                     local_attitude_valid.astype(np.float32))),
-                    local_dt))
-        else:
-            local_sensor = np.column_stack((sensor_array, dt.astype(np.float32)))
-            extracted.append((label, frame_array, local_sensor, valid_array,
-                              attitude_array, attitude_valid_array,
-                              dt.astype(np.float32), receipt_time_array))
+        # Simulator packet identity defines continuity. Receipt timestamps are
+        # retained for event/sensor joins, never interpreted as physics dt.
+        starts: list[int] = []
+        ends: list[int] = []
+        segment_start: int | None = None
+        for index, packet_id in enumerate(packet_sequence_array):
+            if packet_id < 0:
+                if segment_start is not None:
+                    starts.append(segment_start)
+                    ends.append(index)
+                    segment_start = None
+                continue
+            if segment_start is None:
+                segment_start = index
+            elif packet_id != packet_sequence_array[index - 1] + 1:
+                starts.append(segment_start)
+                ends.append(index)
+                segment_start = index
+        if segment_start is not None:
+            starts.append(segment_start)
+            ends.append(len(packet_sequence_array))
+        minimum_segment_samples = (2 if coalesce_contiguous_phases
+                                   else HISTORY_STEPS + ROLLOUT_STEPS + 1)
+        for start, end in zip(starts, ends):
+            if end - start < minimum_segment_samples:
+                continue
+            local_frames = frame_array[start:end]
+            local_sequences = packet_sequence_array[start:end]
+            local_dt = np.full(end - start, SIMULATOR_DT_S, dtype=np.float32)
+            local_sensor = np.column_stack((sensor_array[start:end], local_dt))
+            local_valid = valid_array[start:end]
+            local_attitude = attitude_array[start:end]
+            local_attitude_valid = attitude_valid_array[start:end]
+            local_receipt_times = receipt_time_array[start:end]
+            local_odom_pose = odom_pose_array[start:end]
+            local_simulator_pose = simulator_pose_array[start:end]
+            local_lap_count = lap_count_array[start:end]
+            local_simulator_rigid_state = simulator_rigid_state_array[start:end]
+            local_simulator_acceleration = simulator_acceleration_array[start:end]
+            extracted.append((label, local_frames, local_sensor, local_valid,
+                              local_attitude, local_attitude_valid, local_dt,
+                              local_sequences, local_receipt_times,
+                              local_odom_pose, local_simulator_pose,
+                              local_lap_count, local_simulator_rigid_state,
+                              local_simulator_acceleration))
             fingerprint_sequences.append((
-                np.column_stack((frame_array, local_sensor,
-                                 valid_array.astype(np.float32), attitude_array,
-                                 attitude_valid_array.astype(np.float32))), dt))
+                np.column_stack((local_frames, local_sensor,
+                                 local_valid.astype(np.float32), local_attitude,
+                                 local_attitude_valid.astype(np.float32))), local_dt))
 
     values = np.concatenate([item[1] for item in extracted], axis=0) if extracted else np.empty((0, len(FEATURE_NAMES)))
     observer_values = np.concatenate([item[2] for item in extracted], axis=0) if extracted else np.empty((0, len(SENSOR_FEATURE_NAMES)))
     observer_valid = np.concatenate([item[3] for item in extracted], axis=0) if extracted else np.empty((0,), dtype=bool)
     attitude_values = np.concatenate([item[4] for item in extracted], axis=0) if extracted else np.empty((0, len(ATTITUDE_FEATURE_NAMES)))
     attitude_valid_rows = np.concatenate([item[5] for item in extracted], axis=0) if extracted else np.empty((0,), dtype=bool)
+    simulator_pose_values = (
+        np.concatenate([item[10] for item in extracted], axis=0)
+        if extracted else np.empty((0, 3), dtype=np.float32))
+    simulator_pose_valid = np.isfinite(simulator_pose_values).all(axis=1)
+    simulator_rigid_values = (
+        np.concatenate([item[12] for item in extracted], axis=0)
+        if extracted else np.empty(
+            (0, len(SIMULATOR_RIGID_STATE_NAMES)), dtype=np.float32))
+    simulator_rigid_valid = np.isfinite(simulator_rigid_values).all(axis=1)
+    simulator_acceleration_values = (
+        np.concatenate([item[13] for item in extracted], axis=0)
+        if extracted else np.empty(
+            (0, len(SIMULATOR_ACCELERATION_NAMES)), dtype=np.float32))
+    simulator_acceleration_valid = np.isfinite(
+        simulator_acceleration_values).all(axis=1)
     stream_stats = capture.phase_stream_stats or capture.stream_stats
     record: dict[str, Any] = {
         "run_id": run_id,
@@ -284,6 +373,22 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         "unscored_phases": capture.unscored_phase_count,
         "collisions": [capture.collision_count_start, capture.collision_count_end],
         "timing_faults": capture.timing_faults,
+        "packet_sequence_alignment": {
+            "matched_samples": capture.packet_sequence_matched_samples,
+            "total_samples": capture.packet_sequence_total_samples,
+            "match_fraction": packet_match_fraction,
+        },
+        "simulator_pose_valid_samples": int(np.count_nonzero(simulator_pose_valid)),
+        "simulator_pose_valid_fraction": (
+            float(np.mean(simulator_pose_valid)) if len(simulator_pose_valid) else 0.0),
+        "simulator_rigid_state_valid_samples": int(
+            np.count_nonzero(simulator_rigid_valid)),
+        "simulator_rigid_state_valid_fraction": (
+            float(np.mean(simulator_rigid_valid))
+            if len(simulator_rigid_valid) else 0.0),
+        "simulator_acceleration_valid_fraction": (
+            float(np.mean(simulator_acceleration_valid))
+            if len(simulator_acceleration_valid) else 0.0),
         "sequences_exported": len(extracted),
         "samples_exported": int(len(values)),
         "fingerprint": _fingerprint(fingerprint_sequences) if extracted else None,
@@ -313,67 +418,80 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
 
 def _coalesce_contiguous_sequences(
     sequences: list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
-                         np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+                         np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                         np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                         np.ndarray, np.ndarray]],
 ) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
-                np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """Join phase/lap fragments only when their recorded timestamps touch.
+                np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                np.ndarray, np.ndarray]]:
+    """Join fragments only when simulator packet IDs are consecutive.
 
     Phase and lap markers are experiment bookkeeping, not physical resets.
-    This plant-dataset mode joins across those markers but starts a new
-    sequence at a real timing gap. Sub-15 ms duplicate-like samples are
-    discarded so the resulting transition intervals remain in the validated
-    40 Hz regime. No values are interpolated.
+    Receipt timestamps remain for event association only. Missing or duplicate
+    packet IDs break continuity; each retained transition has exactly 25 ms.
     """
-    rows: list[tuple[int, str, np.ndarray, np.ndarray, bool,
-                     np.ndarray, bool]] = []
-    for label, frames, sensors, sensor_valid, attitude, attitude_valid, _, times in sequences:
+    rows: list[tuple[int, int, str, np.ndarray, np.ndarray, bool,
+                     np.ndarray, bool, np.ndarray, np.ndarray, int,
+                     np.ndarray, np.ndarray]] = []
+    for (label, frames, sensors, sensor_valid, attitude, attitude_valid,
+         _, packet_sequences, receipt_times, odom_poses, simulator_poses,
+         lap_counts, simulator_rigid_states,
+         simulator_accelerations) in sequences:
         rows.extend(
-            (int(time_ns), label, frame, sensor, bool(sensor_ok), attitude_row,
-             bool(attitude_ok))
-            for time_ns, frame, sensor, sensor_ok, attitude_row, attitude_ok
-            in zip(times, frames, sensors, sensor_valid, attitude,
-                   attitude_valid)
+            (int(packet_id), int(receipt_ns), label, frame, sensor,
+             bool(sensor_ok), attitude_row, bool(attitude_ok), odom_pose,
+             simulator_pose, int(lap_count), simulator_rigid_state,
+             simulator_acceleration)
+            for (packet_id, receipt_ns, frame, sensor, sensor_ok,
+                 attitude_row, attitude_ok, odom_pose, simulator_pose,
+                 lap_count, simulator_rigid_state,
+                 simulator_acceleration) in zip(
+                     packet_sequences, receipt_times, frames, sensors,
+                     sensor_valid, attitude, attitude_valid, odom_poses,
+                     simulator_poses, lap_counts, simulator_rigid_states,
+                     simulator_accelerations)
         )
-    rows.sort(key=lambda row: row[0])
+    rows.sort(key=lambda row: (row[0], row[1]))
 
-    deduplicated: list[tuple[int, str, np.ndarray, np.ndarray, bool,
-                             np.ndarray, bool]] = []
+    deduplicated: list[tuple[int, int, str, np.ndarray, np.ndarray, bool,
+                             np.ndarray, bool, np.ndarray, np.ndarray, int,
+                             np.ndarray, np.ndarray]] = []
     for row in rows:
-        if deduplicated and row[0] == deduplicated[-1][0]:
+        if row[0] < 0 or (deduplicated and row[0] == deduplicated[-1][0]):
             continue
         deduplicated.append(row)
 
     result = []
     current = []
-    previous_time_ns: int | None = None
 
     def flush() -> None:
         if len(current) < 2:
             current.clear()
             return
-        time_ns = np.asarray([row[0] for row in current], dtype=np.int64)
-        dt = np.diff(time_ns, prepend=time_ns[0] - 25_000_000).astype(np.float64) / 1e9
+        dt = np.full(len(current), SIMULATOR_DT_S, dtype=np.float32)
         result.append((
             "continuous_run",
-            np.stack([row[2] for row in current]).astype(np.float32, copy=False),
             np.stack([row[3] for row in current]).astype(np.float32, copy=False),
-            np.asarray([row[4] for row in current], dtype=bool),
-            np.stack([row[5] for row in current]).astype(np.float32, copy=False),
-            np.asarray([row[6] for row in current], dtype=bool),
-            dt.astype(np.float32),
-            time_ns,
+            np.stack([row[4] for row in current]).astype(np.float32, copy=False),
+            np.asarray([row[5] for row in current], dtype=bool),
+            np.stack([row[6] for row in current]).astype(np.float32, copy=False),
+            np.asarray([row[7] for row in current], dtype=bool),
+            dt,
+            np.asarray([row[0] for row in current], dtype=np.int64),
+            np.asarray([row[1] for row in current], dtype=np.int64),
+            np.stack([row[8] for row in current]).astype(np.float32, copy=False),
+            np.stack([row[9] for row in current]).astype(np.float32, copy=False),
+            np.asarray([row[10] for row in current], dtype=np.int32),
+            np.stack([row[11] for row in current]).astype(np.float32, copy=False),
+            np.stack([row[12] for row in current]).astype(np.float32, copy=False),
         ))
         current.clear()
 
     for row in deduplicated:
-        if previous_time_ns is not None:
-            delta_ns = row[0] - previous_time_ns
-            if delta_ns < 15_000_000:
-                continue
-            if delta_ns > 75_000_000:
-                flush()
+        if current and row[0] != current[-1][0] + 1:
+            flush()
         current.append(row)
-        previous_time_ns = row[0]
     flush()
     return result
 
@@ -417,9 +535,7 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         raise ValueError(f"no openplane bags found under {root}")
 
     records: list[dict[str, Any]] = []
-    extracted_by_run: dict[str, list[tuple[str, np.ndarray, np.ndarray,
-                                          np.ndarray, np.ndarray, np.ndarray,
-                                          np.ndarray, np.ndarray]]] = {}
+    extracted_by_run: dict[str, list[tuple]] = {}
     errors: list[dict[str, str]] = []
     for index, path in enumerate(bags, start=1):
         if not path.is_file():
@@ -448,6 +564,12 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
     attitude_blocks: list[np.ndarray] = []
     attitude_valid_blocks: list[np.ndarray] = []
     dt_blocks: list[np.ndarray] = []
+    packet_sequence_blocks: list[np.ndarray] = []
+    odom_pose_blocks: list[np.ndarray] = []
+    simulator_pose_blocks: list[np.ndarray] = []
+    lap_count_blocks: list[np.ndarray] = []
+    simulator_rigid_state_blocks: list[np.ndarray] = []
+    simulator_acceleration_blocks: list[np.ndarray] = []
     frame_run_blocks: list[np.ndarray] = []
     bounds: list[tuple[int, int]] = []
     sequence_run: list[int] = []
@@ -469,14 +591,22 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
                 continue
         used_runs.add(run_id)
         for (label, frames, sensor_frames, sensor_valid, attitude_frames,
-             attitude_valid, dt, sample_time_ns) in run_sequences:
+             attitude_valid, dt, packet_sequence, sample_time_ns,
+             odom_pose, simulator_pose, lap_count, simulator_rigid_state,
+             simulator_acceleration) in run_sequences:
             frame_blocks.append(frames)
             sensor_blocks.append(sensor_frames)
             sensor_valid_blocks.append(sensor_valid)
             attitude_blocks.append(attitude_frames)
             attitude_valid_blocks.append(attitude_valid)
             dt_blocks.append(dt)
+            packet_sequence_blocks.append(packet_sequence)
             sample_time_ns_blocks.append(sample_time_ns)
+            odom_pose_blocks.append(odom_pose)
+            simulator_pose_blocks.append(simulator_pose)
+            lap_count_blocks.append(lap_count)
+            simulator_rigid_state_blocks.append(simulator_rigid_state)
+            simulator_acceleration_blocks.append(simulator_acceleration)
             frame_run_blocks.append(np.full(len(frames), run_index[run_id], dtype=np.int32))
             end = cursor + len(frames)
             bounds.append((cursor, end))
@@ -492,8 +622,19 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
     attitude_frames = np.concatenate(attitude_blocks, axis=0).astype(np.float32, copy=False)
     attitude_valid = np.concatenate(attitude_valid_blocks, axis=0).astype(bool, copy=False)
     dt_s = np.concatenate(dt_blocks, axis=0).astype(np.float32, copy=False)
+    packet_sequence = np.concatenate(packet_sequence_blocks).astype(
+        np.int64, copy=False)
     sample_time_ns = np.concatenate(sample_time_ns_blocks).astype(
         np.int64, copy=False)
+    odom_pose_xyyaw = np.concatenate(odom_pose_blocks).astype(
+        np.float32, copy=False)
+    simulator_pose_xyyaw = np.concatenate(simulator_pose_blocks).astype(
+        np.float32, copy=False)
+    lap_count = np.concatenate(lap_count_blocks).astype(np.int32, copy=False)
+    simulator_rigid_state = np.concatenate(
+        simulator_rigid_state_blocks).astype(np.float32, copy=False)
+    simulator_linear_acceleration = np.concatenate(
+        simulator_acceleration_blocks).astype(np.float32, copy=False)
     frame_run_index = np.concatenate(frame_run_blocks)
     splits = np.asarray([r["effective_split"] for r in records], dtype="U32")
     run_ids = np.asarray([r["run_id"] for r in records], dtype="U128")
@@ -510,7 +651,13 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         imu_attitude_frames=attitude_frames,
         imu_attitude_valid=attitude_valid,
         dt_s=dt_s,
+        packet_sequence=packet_sequence,
         sample_time_ns=sample_time_ns,
+        odom_pose_xyyaw=odom_pose_xyyaw,
+        simulator_pose_xyyaw=simulator_pose_xyyaw,
+        lap_count=lap_count,
+        simulator_rigid_state=simulator_rigid_state,
+        simulator_linear_acceleration=simulator_linear_acceleration,
         sequence_bounds=np.asarray(bounds, dtype=np.int64),
         sequence_run_index=np.asarray(sequence_run, dtype=np.int32),
         sequence_labels=np.asarray(sequence_labels, dtype="U256"),
@@ -522,10 +669,10 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
     if len(train_frames):
         speed = np.hypot(train_frames[:, 0], train_frames[:, 1])
         abs_steer = np.abs(train_frames[:, 3])
-        speed_edges = np.arange(0.0, 11.0, 1.0)
+        speed_edges = np.arange(0.0, 22.0, 1.0)
         steer_edges = np.asarray([-0.524, -0.42, -0.30, -0.20, -0.10,
                                   0.0, 0.10, 0.20, 0.30, 0.42, 0.524])
-        throttle_edges = np.asarray([0.0, 0.10, 0.20, 0.30, 0.40, 0.50])
+        throttle_edges = np.arange(0.0, 1.05, 0.05)
         speed_bin = np.clip(np.digitize(speed, speed_edges[1:], right=False),
                             0, len(speed_edges) - 1)
         steer_bin = np.clip(np.digitize(train_frames[:, 3], steer_edges[1:-1],
@@ -548,9 +695,9 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             "throttle_feedback_p01_p50_p99_max": [float(np.quantile(train_frames[:, 4], q))
                                                    for q in (0.01, 0.50, 0.99)] + [float(train_frames[:, 4].max())],
             "grid": {
-                "speed_edges_mps": speed_edges.tolist() + ["10+"],
+                "speed_edges_mps": speed_edges.tolist() + ["21+"],
                 "signed_steering_edges_rad": steer_edges.tolist(),
-                "throttle_edges_norm": throttle_edges.tolist() + ["0.5+"],
+                "throttle_edges_norm": throttle_edges.tolist() + ["1.0+"],
                 "total_cells": int((len(speed_edges)) * (len(steer_edges) - 1) * len(throttle_edges)),
                 "observed_cells": len(observed),
                 "cells_with_at_least_100_samples_and_2_runs": sum(
@@ -570,15 +717,20 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "label_source": "offline bridge /autodrive/roboracer_1/odom only",
+        "label_source": ("offline bridge /autodrive/roboracer_1/odom twist; "
+                         "simulator pose from same-packet bridge diagnostics "
+                         "is stored separately for scoring only"),
         "oracle_plant_features": list(FEATURE_NAMES),
             "sensor_estimator_inputs": list(SENSOR_FEATURE_NAMES),
             "offline_attitude_conditioning_inputs": list(ATTITUDE_FEATURE_NAMES),
         "sensor_estimator_target": ["u_rear_mps", "v_rear_mps", "yaw_rate_rps"],
         "predicted_state": list(PREDICTED_STATE_NAMES),
+        "simulator_rigid_state_names": list(SIMULATOR_RIGID_STATE_NAMES),
+        "simulator_linear_acceleration_names": list(
+            SIMULATOR_ACCELERATION_NAMES),
         "selection": ("openplane* bags and requested additional bags; valid phase samples only; nonnegative phase time; "
-                      + ("contiguous phases/laps joined by receipt time; sequences break at gaps outside 15-75 ms; "
-                         "sub-15 ms duplicate-like samples removed; no interpolation"
+                      + ("contiguous phases/laps joined by simulator packet sequence; a missing packet breaks a sequence; "
+                         "receipt timestamps are never interpreted as physics dt"
                          if coalesce_contiguous_phases else
                          "phase/lap segments retained separately")
                       ),
@@ -587,6 +739,21 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         "split_policy": "whole-run split; validation_20260928=validation; validation_20260929=final_test; named holdouts=test; exact fingerprint collisions take the most conservative split",
         "stream_gate": ">=38 Hz, p95 gap<=35 ms, sensor max gap<=60 ms, command max gap<=120 ms, zero collision count and zero bridge timing faults",
         "feature_names": list(FEATURE_NAMES),
+        "packet_sequence_policy": (
+            "Each /odom source stamp is joined exactly to bridge_packet_timing; "
+            "only consecutive packet_sequence values remain in a sequence. "
+            "Every sample interval is the fixed simulator dt=0.025 s. "
+            "Receipt/request timestamps are association and diagnostics only."),
+        "pose_label_policy": (
+            "odom_pose_xyyaw is the bridge /odom pose; "
+            "simulator_pose_xyyaw is same-packet simulator position and yaw "
+            "from bridge_packet_timing, retained only as an offline score label. "
+            "Neither pose label is a model input."),
+        "rigid_state_label_policy": (
+            "simulator_rigid_state and simulator_linear_acceleration are "
+            "same-packet bridge diagnostics. They are offline teacher labels "
+            "only; future values are not plant inputs."),
+        "simulator_dt_s": SIMULATOR_DT_S,
         "history_steps": HISTORY_STEPS,
         "rollout_steps": ROLLOUT_STEPS,
         "export": {

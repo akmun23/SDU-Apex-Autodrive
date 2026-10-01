@@ -1,5 +1,17 @@
 # Offline plant training update — 2026-09-30
 
+## Newer 3D teacher update — 2026-10-01
+
+The schema-6 3D rigid-body data audit, frame/acceleration conventions, and
+latest command-only teacher results are now recorded in
+[`RIGID_BODY_TEACHER_PROGRESS_20261001.md`](RIGID_BODY_TEACHER_PROGRESS_20261001.md).
+That later update supersedes this document for the 3D teacher status. The
+existing 2D GRU remains the stronger full-run comparator; no new model is
+integrated into MPC or odometry.
+
+Current data layout and run status supersede the in-progress details below:
+see [`VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md`](VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md).
+
 ## Bottom line
 
 There is enough data to demonstrate useful local state prediction, but not to
@@ -20,11 +32,12 @@ records. These are bag counts, not independent long trajectories: many are
 short or fragmented. The derived archive is about 30 MB; local training
 environments are not datasets and should not be mistaken for run files.
 
-Do not delete or move raw bags as part of cleanup yet. Some rejected captures
-include pre-failure data that could be useful in a separate failure-analysis
-task. For model training, use the manifest-qualified derived dataset; keep
-failed/aborted/stream-fault records excluded. This gives a clean analytical
-view without irreversibly removing evidence.
+The dataset exporter excludes rejected/aborted/stream-fault records from its
+training and evaluation arrays, while retaining their quality dispositions in
+the manifest. Some aborted captures contain complete pre-abort phases near
+the high-speed boundary; those are being kept separate for phase-level
+salvage analysis, not mixed into the clean archive. See the data catalog for
+the current retained/discarded set.
 
 ## What the completed evaluation established
 
@@ -191,20 +204,24 @@ preflight remains clean: full throttle for 10 seconds reached 18.4232 m/s and
 129.2301 m travel, then returned within 0.0002 m of spawn, with no collision or
 timing fault and 39.9969 Hz active odometry.
 
-Runs r01/r02/r03 under
-`live_runs/openplane_throttle_5pct_5deg_20260930_r01` through `r03` are
-preserved failed/incomplete pilots; none is a training capture. r03 passed
-startup reset, but its first high-steering response had a 4.25 m/s speed range
-and 5.9 rad/s yaw-rate range over an 8-second live window and never met the old
-steady-state gate. The suite now uses a 4-second baseline plus an 8-second
-fixed response window. The active capture is
-`live_runs/openplane_throttle_5pct_5deg_20260930_r04/`; it has reached 18 of
-1,508 conditions with all 18 resets recovered. A live active-only odometry
-audit measured 39.98 Hz with a 25.59 ms p95 gap; the reset interval was
-excluded. The analyzer checks expected design coverage per replicate,
-feedback tracking, reset/spawn consistency, collision/timing state, and
-active-stream cadence, and reports within-condition response variability.
-Keep rollover-invalidated conditions distinct from collision-aborted captures.
+The initial `r01` and `r02` throttle-transition pilots were discarded after
+they produced no fit-usable response conditions. `r03` remains separate and
+pending condition-level review because its first response was prolonged and
+did not complete normally. The replacement r04 capture completed 770
+fit-usable conditions and one interrupted condition; its overall design gate
+is false because the r04 capture was partial. The r05 supplement completed
+the remaining 738 conditions. The combined reports now cover all 1,508
+expected replicate keys, with two fit-usable repeats for each of 754
+steering/throttle conditions. r05 passed its closed-bag checks: active streams
+were about 39.981–40.004 Hz, all scheduled conditions tracked their commands
+and actuator feedback, resets returned within 1.6 mm, and there were no
+collisions or timing faults. The analyzer's scheduled-condition post-run path
+had a `NameError`; it was fixed and rerun successfully against the closed bag.
+The first combined grouped fit predicts 8-second speed change well on held-out
+throttle transitions (0.827 m/s RMSE) but does not generalize to a held-out
+steering angle (2.829 m/s RMSE, R² -0.023). This is not yet a recursive plant
+model or a solution to high-angle prediction. Full results and artifacts are
+in [`OPENPLANE_THROTTLE_SURFACE_RESULTS_20260930.md`](OPENPLANE_THROTTLE_SURFACE_RESULTS_20260930.md).
 
 Restarts after the exhaustive pilot exposed a reset edge case: the
 old process had been stopped while the car was approximately 573 m from its

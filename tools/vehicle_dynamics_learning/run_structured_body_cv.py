@@ -954,9 +954,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "experiment": "physics-structured aggregate effective-acceleration body model",
         "runtime_policy": "offline only; no MPC/odom/planner/runtime topic changes",
         "body_equations": {
-            "u_dot": "a_x_eff + r*v",
-            "v_dot": "a_y_eff - r*u",
+            "u_rear_dot": "a_x_eff + r*(v_rear + L*r)",
+            "v_rear_dot": "a_y_eff - r*u_rear - L*alpha_z_eff",
             "yaw_rate_dot": "alpha_z_eff",
+            "rear_axle_to_com_x_m": 0.15532,
             "learned_outputs": ["a_x_eff_mps2", "a_y_eff_mps2",
                                 "alpha_z_eff_radps2"],
         },

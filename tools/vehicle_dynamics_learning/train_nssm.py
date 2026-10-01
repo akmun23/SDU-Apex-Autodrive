@@ -26,11 +26,13 @@ import numpy as np
 
 try:
     from .structured_body_models import (
+        REAR_AXLE_TO_COM_X_M,
         acceleration_statistics,
         training_transition_rows,
     )
 except ImportError:
     from structured_body_models import (
+        REAR_AXLE_TO_COM_X_M,
         acceleration_statistics,
         training_transition_rows,
     )
@@ -38,8 +40,9 @@ except ImportError:
 
 STATE_COUNT = 7
 FEATURE_COUNT = 9
+SIMULATOR_DT_S = 0.025
 DEFAULT_HORIZONS = (1, 4, 10, 20, 30)
-LONG_PLANT_HORIZONS = (40, 80, 200)
+LONG_PLANT_HORIZONS = (40, 80, 200, 440)
 
 
 def _torch():
@@ -61,7 +64,8 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
                 feature_scale: np.ndarray | None = None,
                 body_acceleration_mean: np.ndarray | None = None,
                 body_acceleration_scale: np.ndarray | None = None,
-                integration_method: str = "euler"):
+                integration_method: str = "euler",
+                rear_axle_to_com_x_m: float = 0.0):
     if integration_method not in ("euler", "heun"):
         raise ValueError("integration method must be euler or heun")
     if architecture == "structured_gru" and any(value is None for value in (
@@ -144,8 +148,11 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
                             + self.body_acceleration_mean)
             u, v, yaw_rate = physical.unbind(dim=1)
             ax, ay, alpha_z = acceleration.unbind(dim=1)
-            body_derivative = torch.stack((ax + yaw_rate * v,
-                                           ay - yaw_rate * u,
+            body_derivative = torch.stack((
+                                           ax + yaw_rate
+                                           * (v + rear_axle_to_com_x_m * yaw_rate),
+                                           ay - yaw_rate * u
+                                           - rear_axle_to_com_x_m * alpha_z,
                                            alpha_z), dim=1)
             body_rate_normalized = body_derivative / self.feature_scale[:3]
             return torch.cat((body_rate_normalized, rate[:, 3:]), dim=1)
@@ -180,7 +187,7 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
     if missing:
         raise ValueError(f"dataset missing arrays: {sorted(missing)}")
     schema_version = int(data["schema_version"][0])
-    if schema_version not in (1, 2, 3):
+    if schema_version not in (1, 2, 3, 4, 5, 6):
         raise ValueError(f"unsupported schema version {data['schema_version']}")
     frames = data["frames"].astype(np.float32, copy=False)
     dt_s = data["dt_s"].astype(np.float32, copy=False)
@@ -196,6 +203,67 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         raise ValueError("sequence bounds and run-index arrays disagree")
     if np.any(bounds[:, 0] < 0) or np.any(bounds[:, 1] > len(frames)) or np.any(bounds[:, 1] <= bounds[:, 0]):
         raise ValueError("sequence bounds exceed the frame array")
+    packet_sequence = None
+    if schema_version >= 4:
+        if "packet_sequence" not in data.files:
+            raise ValueError("fixed-timebase dataset lacks packet_sequence")
+        packet_sequence = data["packet_sequence"].astype(np.int64, copy=False)
+        if packet_sequence.shape != (len(frames),):
+            raise ValueError("packet_sequence must align with every frame")
+        if not np.allclose(dt_s, SIMULATOR_DT_S, rtol=0.0, atol=1e-7):
+            raise ValueError("schema-4 plant data must use exact 25 ms simulator dt")
+        for start_raw, end_raw in bounds:
+            start, end = int(start_raw), int(end_raw)
+            if np.any(np.diff(packet_sequence[start:end]) != 1):
+                raise ValueError("a plant sequence contains a simulator packet gap")
+    if schema_version >= 5:
+        required_pose = {"odom_pose_xyyaw", "simulator_pose_xyyaw", "lap_count"}
+        missing_pose = required_pose - set(data.files)
+        if missing_pose:
+            raise ValueError(
+                f"schema-5 plant data lacks pose labels: {sorted(missing_pose)}")
+        odom_pose = data["odom_pose_xyyaw"].astype(np.float32, copy=False)
+        simulator_pose = data["simulator_pose_xyyaw"].astype(
+            np.float32, copy=False)
+        lap_count = data["lap_count"].astype(np.int32, copy=False)
+        if (odom_pose.shape != (len(frames), 3)
+                or simulator_pose.shape != (len(frames), 3)
+                or lap_count.shape != (len(frames),)):
+            raise ValueError("schema-5 pose/lap arrays must align with every frame")
+        for pose in (odom_pose, simulator_pose):
+            finite_values = np.isfinite(pose)
+            partial_rows = finite_values.any(axis=1) & ~finite_values.all(axis=1)
+            if np.any(np.isinf(pose)) or np.any(partial_rows):
+                raise ValueError("pose rows must be fully finite or fully unavailable")
+    else:
+        odom_pose = simulator_pose = lap_count = None
+    if schema_version >= 6:
+        required_rigid = {"simulator_rigid_state",
+                          "simulator_linear_acceleration"}
+        missing_rigid = required_rigid - set(data.files)
+        if missing_rigid:
+            raise ValueError(
+                f"schema-6 plant data lacks rigid-state labels: {sorted(missing_rigid)}")
+        simulator_rigid_state = data["simulator_rigid_state"].astype(
+            np.float32, copy=False)
+        simulator_linear_acceleration = data[
+            "simulator_linear_acceleration"].astype(np.float32, copy=False)
+        if (simulator_rigid_state.shape != (len(frames), 13)
+                or simulator_linear_acceleration.shape != (len(frames), 3)):
+            raise ValueError("schema-6 rigid-state labels must align with every frame")
+        for values in (simulator_rigid_state, simulator_linear_acceleration):
+            finite_values = np.isfinite(values)
+            partial_rows = finite_values.any(axis=1) & ~finite_values.all(axis=1)
+            if np.any(np.isinf(values)) or np.any(partial_rows):
+                raise ValueError(
+                    "rigid-state rows must be fully finite or fully unavailable")
+        valid_rigid = np.isfinite(simulator_rigid_state).all(axis=1)
+        quat_norm = np.linalg.norm(simulator_rigid_state[valid_rigid, 3:7],
+                                   axis=1)
+        if np.any((quat_norm < 0.9) | (quat_norm > 1.1)):
+            raise ValueError("simulator orientation quaternion is not normalized")
+    else:
+        simulator_rigid_state = simulator_linear_acceleration = None
     if len(run_ids) != len(splits) or np.any(seq_run < 0) or np.any(seq_run >= len(run_ids)):
         raise ValueError("run metadata indices are invalid")
     feature_names = data["feature_names"].astype(str).tolist()
@@ -258,11 +326,19 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         "imu_attitude_frames": attitude,
         "imu_attitude_valid": attitude_valid,
         "imu_attitude_feature_names": attitude_names,
+        "packet_sequence": packet_sequence,
+        "odom_pose_xyyaw": odom_pose,
+        "simulator_pose_xyyaw": simulator_pose,
+        "lap_count": lap_count,
+        "simulator_rigid_state": simulator_rigid_state,
+        "simulator_linear_acceleration": simulator_linear_acceleration,
+        "schema_version": schema_version,
     }
 
 
 def _sequence_groups(data: dict[str, Any], split: str,
-                     history_steps: int, rollout_steps: int) -> dict[int, list[int]]:
+                     history_steps: int, rollout_steps: int,
+                     require_pose: bool = False) -> dict[int, list[int]]:
     groups: dict[int, list[int]] = {}
     for seq_id, (start, end) in enumerate(data["bounds"]):
         run = int(data["seq_run"][seq_id])
@@ -270,6 +346,10 @@ def _sequence_groups(data: dict[str, Any], split: str,
             continue
         if int(end - start) < history_steps + rollout_steps:
             continue
+        if require_pose:
+            pose = data.get("simulator_pose_xyyaw")
+            if pose is None or not np.isfinite(pose[int(start):int(end)]).all():
+                continue
         groups.setdefault(run, []).append(seq_id)
     return groups
 
@@ -289,12 +369,12 @@ def _sample_batch(data: dict[str, Any], groups: dict[int, list[int]], batch_size
                   history_steps: int, rollout_steps: int,
                   rng: np.random.Generator,
                   steering_windows: dict[int, list[tuple[int, int]]] | None = None,
-                  steering_fraction: float = 0.0
-                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                  steering_fraction: float = 0.0,
+                  include_pose: bool = False):
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
     steering_run_ids = (np.asarray(sorted(steering_windows), dtype=np.int32)
                         if steering_windows else np.empty(0, dtype=np.int32))
-    histories, futures, dts = [], [], []
+    histories, futures, dts, pose_targets = [], [], [], []
     for _ in range(batch_size):
         use_steering_window = (
             len(steering_run_ids) > 0 and rng.random() < steering_fraction)
@@ -312,16 +392,27 @@ def _sample_batch(data: dict[str, Any], groups: dict[int, list[int]], batch_size
         histories.append(data["frames"][hist_begin:start + 1])
         futures.append(data["frames"][next_ids])
         dts.append(data["dt_s"][next_ids])
-    return (np.asarray(histories, dtype=np.float32),
-            np.asarray(futures, dtype=np.float32),
-            np.asarray(dts, dtype=np.float32))
+        if include_pose:
+            pose_ids = np.concatenate((np.asarray([start]), next_ids))
+            pose = data["simulator_pose_xyyaw"][pose_ids]
+            if not np.isfinite(pose).all():
+                raise ValueError("position-supervised window has missing simulator pose labels")
+            pose_targets.append(pose)
+    batch = (np.asarray(histories, dtype=np.float32),
+             np.asarray(futures, dtype=np.float32),
+             np.asarray(dts, dtype=np.float32))
+    if include_pose:
+        return (*batch, np.asarray(pose_targets, dtype=np.float32))
+    return batch
 
 
 def _high_steering_windows(data: dict[str, Any], groups: dict[int, list[int]],
                            history_steps: int, rollout_steps: int,
-                           steering_threshold: float
+                           steering_threshold: float,
+                           high_speed_threshold_mps: float = 0.0,
+                           joint_regime_fraction: float = 0.0
                            ) -> dict[int, list[tuple[int, int]]]:
-    """Index training windows whose mean future measured steering reaches target."""
+    """Index steering windows, optionally requiring sustained speed/steer overlap."""
     selected: dict[int, list[tuple[int, int]]] = {}
     for run, sequence_ids in groups.items():
         run_windows = []
@@ -334,12 +425,27 @@ def _high_steering_windows(data: dict[str, Any], groups: dict[int, list[int]],
             abs_steering = np.abs(data["frames"][seq_start:seq_end, 3])
             prefix = np.concatenate(([0.0], np.cumsum(abs_steering,
                                                        dtype=np.float64)))
+            prefix_joint = None
+            if joint_regime_fraction > 0.0:
+                speed = np.hypot(
+                    data["frames"][seq_start:seq_end, 0],
+                    data["frames"][seq_start:seq_end, 1])
+                joint = ((speed >= high_speed_threshold_mps)
+                         & (abs_steering >= steering_threshold))
+                prefix_joint = np.concatenate((
+                    [0.0], np.cumsum(joint, dtype=np.float64)))
             for start in range(low, high + 1):
                 first = start + 1 - seq_start
                 last = first + rollout_steps
                 mean_abs_steering = (prefix[last] - prefix[first]) / rollout_steps
-                if mean_abs_steering >= steering_threshold:
-                    run_windows.append((seq_id, start))
+                if mean_abs_steering < steering_threshold:
+                    continue
+                if prefix_joint is not None:
+                    joint_fraction = (
+                        prefix_joint[last] - prefix_joint[first]) / rollout_steps
+                    if joint_fraction < joint_regime_fraction:
+                        continue
+                run_windows.append((seq_id, start))
         if run_windows:
             selected[int(run)] = run_windows
     return selected
@@ -367,19 +473,27 @@ def _fixed_eval_windows(data: dict[str, Any], groups: dict[int, list[int]],
 
 
 def _batch_from_windows(data: dict[str, Any], windows: list[tuple[int, int]],
-                        history_steps: int, rollout_steps: int
-                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    histories, futures, dts = [], [], []
+                        history_steps: int, rollout_steps: int,
+                        include_pose: bool = False):
+    histories, futures, dts, pose_targets = [], [], [], []
     for seq_id, start in windows:
-        seq_begin, _ = map(int, data["bounds"][seq_id])
         begin = start - history_steps + 1
         next_ids = np.arange(start + 1, start + rollout_steps + 1, dtype=np.int64)
         histories.append(data["frames"][begin:start + 1])
         futures.append(data["frames"][next_ids])
         dts.append(data["dt_s"][next_ids])
-    return (np.asarray(histories, dtype=np.float32),
-            np.asarray(futures, dtype=np.float32),
-            np.asarray(dts, dtype=np.float32))
+        if include_pose:
+            pose_ids = np.concatenate((np.asarray([start]), next_ids))
+            pose = data["simulator_pose_xyyaw"][pose_ids]
+            if not np.isfinite(pose).all():
+                raise ValueError("position-supervised window has missing simulator pose labels")
+            pose_targets.append(pose)
+    batch = (np.asarray(histories, dtype=np.float32),
+             np.asarray(futures, dtype=np.float32),
+             np.asarray(dts, dtype=np.float32))
+    if include_pose:
+        return (*batch, np.asarray(pose_targets, dtype=np.float32))
+    return batch
 
 
 def _normalizers(data: dict[str, Any], train_groups: dict[int, list[int]]) -> tuple[np.ndarray, np.ndarray]:
@@ -405,14 +519,82 @@ def _normalizers(data: dict[str, Any], train_groups: dict[int, list[int]]) -> tu
 
 
 def _tensor_batch(torch, arrays, mean: np.ndarray, scale: np.ndarray, device):
-    histories, futures, dts = arrays
+    histories, futures, dts = arrays[:3]
     histories = (histories - mean[None, None, :]) / scale[None, None, :]
     futures = (futures - mean[None, None, :]) / scale[None, None, :]
     return (
         torch.as_tensor(histories, dtype=torch.float32, device=device),
         torch.as_tensor(futures, dtype=torch.float32, device=device),
         torch.as_tensor(dts, dtype=torch.float32, device=device),
+        (torch.as_tensor(arrays[3], dtype=torch.float32, device=device)
+         if len(arrays) > 3 else None),
     )
+
+
+def _integrate_rear_axle_pose(torch, predicted_normalized, history, dts,
+                              pose_targets, mean, scale):
+    """Integrate predicted rear-axle twist in world XY from one pose anchor."""
+    state_scale = torch.as_tensor(scale[:STATE_COUNT], dtype=torch.float32,
+                                   device=history.device)
+    state_mean = torch.as_tensor(mean[:STATE_COUNT], dtype=torch.float32,
+                                  device=history.device)
+    predicted = predicted_normalized * state_scale + state_mean
+    initial = history[:, -1, :STATE_COUNT] * state_scale + state_mean
+    previous = torch.cat((initial[:, None, :], predicted[:, :-1, :]), dim=1)
+    midpoint = 0.5 * (previous + predicted)
+    yaw_increment = midpoint[:, :, 2] * dts
+    initial_yaw = pose_targets[:, :1, 2]
+    yaw_midpoint = (initial_yaw + torch.cumsum(yaw_increment, dim=1)
+                    - 0.5 * yaw_increment)
+    u = midpoint[:, :, 0]
+    v = midpoint[:, :, 1]
+    displacement = torch.stack((
+        (u * torch.cos(yaw_midpoint) - v * torch.sin(yaw_midpoint)) * dts,
+        (u * torch.sin(yaw_midpoint) + v * torch.cos(yaw_midpoint)) * dts,
+    ), dim=-1)
+    return pose_targets[:, :1, :2] + torch.cumsum(displacement, dim=1)
+
+
+def _rollout_objective(torch, nn, prediction, future, history, dts,
+                       pose_targets, mean, scale, heading_weight,
+                       position_weight, position_scale_m):
+    target = future[:, :, :STATE_COUNT]
+    state_loss = nn.functional.smooth_l1_loss(
+        prediction, target, beta=0.05)
+    heading_loss = torch.zeros((), dtype=state_loss.dtype,
+                               device=state_loss.device)
+    if heading_weight > 0.0:
+        heading_error = torch.cumsum(
+            (prediction[:, :, 2] - target[:, :, 2])
+            * float(scale[2]) * dts, dim=1)
+        heading_loss = nn.functional.smooth_l1_loss(
+            heading_error / 0.1, torch.zeros_like(heading_error), beta=1.0)
+    position_loss = torch.zeros((), dtype=state_loss.dtype,
+                                device=state_loss.device)
+    if position_weight > 0.0:
+        if pose_targets is None:
+            raise ValueError("position trajectory loss requires simulator poses")
+        predicted_xy = _integrate_rear_axle_pose(
+            torch, prediction, history, dts, pose_targets, mean, scale)
+        position_error = predicted_xy - pose_targets[:, 1:, :2]
+        position_loss = nn.functional.smooth_l1_loss(
+            position_error / position_scale_m,
+            torch.zeros_like(position_error), beta=1.0)
+    total = (state_loss + heading_weight * heading_loss
+             + position_weight * position_loss)
+    return total, {
+        "state": state_loss,
+        "heading": heading_loss,
+        "position": position_loss,
+    }
+
+
+def _model_selection_score(score: dict[str, Any], heading_weight: float,
+                           position_weight: float) -> float:
+    return (score["mean_normalized_rmse"]
+            + heading_weight * score["integrated_heading_normalized_rmse"]
+            + position_weight * score.get(
+                "position_trajectory_normalized_loss", 0.0))
 
 
 def _rollout(model, history, future, dts, history_steps: int,
@@ -453,8 +635,11 @@ def _rollout(model, history, future, dts, history_steps: int,
 
 
 def _score_model(torch, model, arrays, mean, scale, device,
-                 history_steps: int) -> dict[str, Any]:
-    history, future, dts = _tensor_batch(torch, arrays, mean, scale, device)
+                 history_steps: int,
+                 position_trajectory_loss_scale_m: float = 0.5
+                 ) -> dict[str, Any]:
+    history, future, dts, pose_targets = _tensor_batch(
+        torch, arrays, mean, scale, device)
     model.eval()
     with torch.no_grad():
         pred_norm = _rollout(model, history, future, dts, history_steps)
@@ -492,6 +677,25 @@ def _score_model(torch, model, arrays, mean, scale, device,
                     "throttle_norm", "rear_left_surface_mps", "rear_right_surface_mps"), rmse)},
             }
         normalized_rmse = torch.sqrt(torch.mean((pred_norm - target_norm) ** 2, dim=(0, 1))).cpu().numpy()
+        position_metrics = {}
+        if pose_targets is not None:
+            predicted_xy = _integrate_rear_axle_pose(
+                torch, pred_norm, history, dts, pose_targets, mean, scale)
+            position_error = predicted_xy - pose_targets[:, 1:, :2]
+            radial_error = torch.linalg.vector_norm(position_error, dim=-1)
+            normalized_position_loss = torch.nn.functional.smooth_l1_loss(
+                position_error / position_trajectory_loss_scale_m,
+                torch.zeros_like(position_error), beta=1.0)
+            position_metrics = {
+                "position_trajectory_radial_rmse_m": float(torch.sqrt(
+                    torch.mean(radial_error ** 2)).cpu()),
+                "position_trajectory_radial_p95_m": float(torch.quantile(
+                    radial_error.reshape(-1), 0.95).cpu()),
+                "position_trajectory_endpoint_rmse_m": float(torch.sqrt(
+                    torch.mean(radial_error[:, -1] ** 2)).cpu()),
+                "position_trajectory_normalized_loss": float(
+                    normalized_position_loss.cpu()),
+            }
         state_names = ("u_mps", "v_mps", "yaw_rate_rps", "steering_rad",
                        "throttle_norm", "rear_left_surface_mps", "rear_right_surface_mps")
         baselines: dict[str, Any] = {"persistence": {}, "constant_recent_trend": {}}
@@ -539,13 +743,14 @@ def _score_model(torch, model, arrays, mean, scale, device,
             "normalized_rmse_by_state": normalized_rmse.tolist(),
             "integrated_heading_error_rmse_rad": integrated_heading_rmse,
             "integrated_heading_final_abs_p95_rad": integrated_heading_final_p95,
-            "integrated_heading_normalized_rmse": integrated_heading_rmse / 0.1}
+            "integrated_heading_normalized_rmse": integrated_heading_rmse / 0.1,
+            **position_metrics}
 
 
 def _score_ensemble(torch, models, arrays, mean, scale, device,
                     history_steps: int) -> dict[str, Any]:
     """Score ensemble mean and whether member spread tracks held-out error."""
-    history, future, dts = _tensor_batch(torch, arrays, mean, scale, device)
+    history, future, dts, _ = _tensor_batch(torch, arrays, mean, scale, device)
     scale_tensor = torch.as_tensor(scale[:STATE_COUNT], dtype=torch.float32,
                                    device=device)
     mean_tensor = torch.as_tensor(mean[:STATE_COUNT], dtype=torch.float32,
@@ -599,7 +804,7 @@ def _gate_diagnostics(torch, model, arrays, mean, scale, device,
                       history_steps: int) -> dict[str, Any] | None:
     if model.architecture != "mixture":
         return None
-    history, future, dts = _tensor_batch(torch, arrays, mean, scale, device)
+    history, future, dts, _ = _tensor_batch(torch, arrays, mean, scale, device)
     batch = history.shape[0]
     hidden = torch.zeros(batch, model.cell.hidden_size,
                          dtype=history.dtype, device=history.device)
@@ -673,9 +878,48 @@ def _save_checkpoint(torch, path: Path, model, mean, scale, metadata: dict[str, 
     os.replace(temporary, path)
 
 
+def _initialize_model(model, payload: dict[str, Any],
+                      target_architecture: str) -> str:
+    """Load a same-family checkpoint or exactly lift a GRU into a mixture."""
+    source_architecture = payload.get("metadata", {}).get("architecture", "gru")
+    source_state = payload["state_dict"]
+    if source_architecture == target_architecture:
+        model.load_state_dict(source_state, strict=True)
+        return "same_architecture"
+    if not (source_architecture == "gru" and target_architecture == "mixture"):
+        raise ValueError(
+            f"cannot initialize {target_architecture} from {source_architecture}")
+
+    target_state = model.state_dict()
+    recurrent_names = ("cell.weight_ih", "cell.weight_hh",
+                       "cell.bias_ih", "cell.bias_hh")
+    for name in recurrent_names:
+        if (name not in source_state
+                or source_state[name].shape != target_state[name].shape):
+            raise ValueError(f"GRU checkpoint has incompatible tensor {name}")
+        target_state[name] = source_state[name]
+
+    expert_count = len(model.experts)
+    for expert_index, expert in enumerate(model.experts):
+        for layer_name, layer_tensor in expert.state_dict().items():
+            source_name = f"rate.{layer_name}"
+            if (source_name not in source_state
+                    or source_state[source_name].shape != layer_tensor.shape):
+                raise ValueError(
+                    f"GRU checkpoint has incompatible rate tensor {source_name}")
+            target_state[f"experts.{expert_index}.{layer_name}"] = source_state[source_name]
+    model.load_state_dict(target_state, strict=True)
+    return f"gru_lifted_to_{expert_count}_identical_mixture_experts"
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     torch, nn = _torch()
     data = _load_dataset(args.dataset, args.throttle_variation_feature)
+    if not np.allclose(data["dt_s"], SIMULATOR_DT_S,
+                       rtol=0.0, atol=1e-7):
+        raise ValueError(
+            "plant training requires fixed 25 ms simulator time; re-export "
+            "datasets that derive dt from receipt timestamps")
     selected_validation_runs: list[str] = []
     selected_experiment_test_runs: list[str] = []
     total_selected = (args.holdout_train_run_count
@@ -699,12 +943,33 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     rollout_steps = args.rollout_steps
     if history_steps < 2 or rollout_steps < max(DEFAULT_HORIZONS):
         raise ValueError("history must be >=2 and rollout must cover all score horizons")
-    train_groups = _sequence_groups(data, "train", history_steps, rollout_steps)
-    validation_groups = _sequence_groups(data, "validation", history_steps, rollout_steps)
+    auxiliary_enabled = args.auxiliary_rollout_loss_weight > 0.0
+    if auxiliary_enabled and not (
+            max(DEFAULT_HORIZONS) <= args.auxiliary_rollout_steps < rollout_steps):
+        raise ValueError(
+            "auxiliary rollout must cover standard horizons and be shorter "
+            "than the primary rollout")
+    position_loss_enabled = args.position_trajectory_loss_weight > 0.0
+    train_groups = _sequence_groups(
+        data, "train", history_steps, rollout_steps, position_loss_enabled)
+    validation_groups = _sequence_groups(
+        data, "validation", history_steps, rollout_steps, position_loss_enabled)
     if not train_groups:
         raise ValueError("no sufficiently long sequences in train split")
     if not validation_groups:
         raise ValueError("no sufficiently long sequences in validation split")
+    auxiliary_train_groups: dict[int, list[int]] = {}
+    auxiliary_validation_groups: dict[int, list[int]] = {}
+    if auxiliary_enabled:
+        auxiliary_train_groups = _sequence_groups(
+            data, "train", history_steps, args.auxiliary_rollout_steps,
+            position_loss_enabled)
+        auxiliary_validation_groups = _sequence_groups(
+            data, "validation", history_steps, args.auxiliary_rollout_steps,
+            position_loss_enabled)
+        if not auxiliary_train_groups or not auxiliary_validation_groups:
+            raise ValueError(
+                "auxiliary rollout has no pose-valid train or validation runs")
     steering_windows = None
     if args.high_steering_window_fraction > 0.0:
         steering_windows = _high_steering_windows(
@@ -713,9 +978,48 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if not steering_windows:
             raise ValueError(
                 "no training rollouts meet the high-steering window threshold")
-    test_groups = _sequence_groups(data, "final_test", history_steps, rollout_steps)
-    other_holdout_groups = _sequence_groups(data, "test", history_steps, rollout_steps)
+    auxiliary_steering_windows = None
+    if auxiliary_enabled and args.auxiliary_high_steering_window_fraction > 0.0:
+        auxiliary_steering_windows = _high_steering_windows(
+            data, auxiliary_train_groups, history_steps,
+            args.auxiliary_rollout_steps,
+            args.auxiliary_high_steering_window_threshold,
+            args.auxiliary_high_speed_threshold_mps,
+            args.auxiliary_high_speed_steering_fraction)
+        if not auxiliary_steering_windows:
+            raise ValueError(
+                "no auxiliary training rollouts meet the high-steering threshold")
+    test_groups = _sequence_groups(
+        data, "final_test", history_steps, rollout_steps, position_loss_enabled)
+    other_holdout_groups = _sequence_groups(
+        data, "test", history_steps, rollout_steps, position_loss_enabled)
     mean, scale = _normalizers(data, train_groups)
+    initial_payload = None
+    initial_metadata = None
+    if args.initial_checkpoint is not None:
+        initial_payload = torch.load(
+            args.initial_checkpoint, map_location="cpu", weights_only=False)
+        initial_metadata = initial_payload.get("metadata", {})
+        source_architecture = initial_metadata.get("architecture", "gru")
+        if (source_architecture != args.architecture
+                and not (source_architecture == "gru"
+                         and args.architecture == "mixture")):
+            raise ValueError("initial checkpoint architecture does not match")
+        if int(initial_metadata.get("hidden_size", -1)) != args.hidden_size:
+            raise ValueError("initial checkpoint hidden size does not match")
+        if initial_metadata.get("feature_names") != data["feature_names"]:
+            raise ValueError("initial checkpoint feature names do not match")
+        if bool(initial_metadata.get("throttle_variation_feature", False)) != bool(
+                args.throttle_variation_feature):
+            raise ValueError("initial checkpoint throttle feature layout does not match")
+        if initial_metadata.get("integration_method", "euler") != args.integration_method:
+            raise ValueError("initial checkpoint integration method does not match")
+        mean = np.asarray(initial_payload["feature_mean"], dtype=np.float32)
+        scale = np.asarray(initial_payload["feature_scale"], dtype=np.float32)
+        if (mean.shape != (len(data["feature_names"]),)
+                or scale.shape != mean.shape or not np.isfinite(mean).all()
+                or not np.isfinite(scale).all() or np.any(scale <= 0.0)):
+            raise ValueError("initial checkpoint normalizers are invalid")
     body_acceleration_mean = body_acceleration_scale = None
     if args.architecture == "structured_gru":
         _, acceleration_targets, _ = training_transition_rows(
@@ -727,19 +1031,34 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                                       rollout_steps, args.eval_windows)
     if not val_windows:
         raise ValueError("validation split has no rollout windows")
-    val_arrays = _batch_from_windows(data, val_windows, history_steps, rollout_steps)
+    val_arrays = _batch_from_windows(
+        data, val_windows, history_steps, rollout_steps, position_loss_enabled)
+    auxiliary_val_arrays = None
+    auxiliary_val_windows: list[tuple[int, int]] = []
+    if auxiliary_enabled:
+        auxiliary_val_windows = _fixed_eval_windows(
+            data, auxiliary_validation_groups, history_steps,
+            args.auxiliary_rollout_steps, args.eval_windows)
+        if not auxiliary_val_windows:
+            raise ValueError("auxiliary validation split has no rollout windows")
+        auxiliary_val_arrays = _batch_from_windows(
+            data, auxiliary_val_windows, history_steps,
+            args.auxiliary_rollout_steps, position_loss_enabled)
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError("CUDA requested but torch.cuda.is_available() is false")
+    if device == "cpu":
+        torch.set_num_threads(args.cpu_threads)
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
     RecurrentTransition = _model_type(
         torch, nn, args.hidden_size, args.architecture, args.experts,
         history_steps, len(data["feature_names"]), mean, scale,
         body_acceleration_mean, body_acceleration_scale,
-        args.integration_method)
+        args.integration_method,
+        REAR_AXLE_TO_COM_X_M if args.architecture == "structured_gru" else 0.0)
     deadline = time.monotonic() + args.time_budget_hours * 3600.0
     total_steps = 0
     member_results: list[dict[str, Any]] = []
@@ -759,6 +1078,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         model = RecurrentTransition().to(device)
+        initialization_mode = "random_initialization"
+        if initial_payload is not None:
+            initialization_mode = _initialize_model(
+                model, initial_payload, args.architecture)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate,
                                       weight_decay=args.weight_decay)
         best_score = math.inf
@@ -773,23 +1096,36 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             batches = _sample_batch(data, train_groups, args.batch_size,
                                     history_steps, rollout_steps, np_rng,
                                     steering_windows,
-                                    args.high_steering_window_fraction)
-            hist, future, dts = _tensor_batch(torch, batches, mean, scale, device)
+                                    args.high_steering_window_fraction,
+                                    position_loss_enabled)
+            hist, future, dts, pose_targets = _tensor_batch(
+                torch, batches, mean, scale, device)
             prediction = _rollout(model, hist, future, dts, history_steps)
-            target = future[:, :, :STATE_COUNT]
-            state_loss = nn.functional.smooth_l1_loss(
-                prediction, target, beta=0.05)
-            heading_loss = torch.zeros((), dtype=state_loss.dtype,
-                                       device=state_loss.device)
-            if args.heading_trajectory_loss_weight > 0.0:
-                integrated_heading_error = torch.cumsum(
-                    (prediction[:, :, 2] - target[:, :, 2])
-                    * float(scale[2]) * dts, dim=1)
-                heading_loss = nn.functional.smooth_l1_loss(
-                    integrated_heading_error / 0.1,
-                    torch.zeros_like(integrated_heading_error), beta=1.0)
-            loss = (state_loss + args.heading_trajectory_loss_weight
-                    * heading_loss)
+            loss, loss_terms = _rollout_objective(
+                torch, nn, prediction, future, hist, dts, pose_targets,
+                mean, scale, args.heading_trajectory_loss_weight,
+                args.position_trajectory_loss_weight,
+                args.position_trajectory_loss_scale_m)
+            auxiliary_loss = None
+            if auxiliary_enabled:
+                auxiliary_batch = _sample_batch(
+                    data, auxiliary_train_groups, args.batch_size,
+                    history_steps, args.auxiliary_rollout_steps, np_rng,
+                    auxiliary_steering_windows,
+                    args.auxiliary_high_steering_window_fraction,
+                    position_loss_enabled)
+                aux_hist, aux_future, aux_dts, aux_pose = _tensor_batch(
+                    torch, auxiliary_batch, mean, scale, device)
+                aux_prediction = _rollout(
+                    model, aux_hist, aux_future, aux_dts, history_steps)
+                auxiliary_loss, _ = _rollout_objective(
+                    torch, nn, aux_prediction, aux_future, aux_hist,
+                    aux_dts, aux_pose, mean, scale,
+                    args.heading_trajectory_loss_weight,
+                    args.position_trajectory_loss_weight,
+                    args.position_trajectory_loss_scale_m)
+                loss = (loss + args.auxiliary_rollout_loss_weight
+                        * auxiliary_loss)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
@@ -799,16 +1135,32 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             if member_steps % args.eval_every != 0 and member_steps != 1:
                 continue
             score = _score_model(torch, model, val_arrays, mean, scale,
-                                 device, history_steps)
-            score_value = (score["mean_normalized_rmse"]
-                           + args.heading_trajectory_loss_weight
-                           * score["integrated_heading_normalized_rmse"])
+                                 device, history_steps,
+                                 args.position_trajectory_loss_scale_m)
+            score_value = _model_selection_score(
+                score, args.heading_trajectory_loss_weight,
+                args.position_trajectory_loss_weight)
+            auxiliary_score = None
+            if auxiliary_val_arrays is not None:
+                auxiliary_score = _score_model(
+                    torch, model, auxiliary_val_arrays, mean, scale, device,
+                    history_steps, args.position_trajectory_loss_scale_m)
+                score_value += args.auxiliary_rollout_loss_weight * (
+                    _model_selection_score(
+                        auxiliary_score, args.heading_trajectory_loss_weight,
+                        args.position_trajectory_loss_weight))
             score["model_selection_score"] = score_value
+            if auxiliary_score is not None:
+                score["auxiliary_validation"] = auxiliary_score
             history.append({"step": member_steps,
                             "train_loss": float(loss.detach().cpu()),
+                            "auxiliary_train_loss": (
+                                float(auxiliary_loss.detach().cpu())
+                                if auxiliary_loss is not None else None),
                             "validation": score})
             print(f"member={member + 1}/{args.members} step={member_steps} "
-                  f"train={float(loss.detach().cpu()):.6f} "
+                  f"train={float(loss.detach().cpu()):.6f}"
+                  f"{f' aux={float(auxiliary_loss.detach().cpu()):.5f}' if auxiliary_loss is not None else ''} "
                   f"val_nrmse={score_value:.5f} device={device}", flush=True)
             if score_value < best_score:
                 best_score = score_value
@@ -821,6 +1173,24 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "heading_trajectory_loss_weight":
                         args.heading_trajectory_loss_weight,
                     "heading_trajectory_loss_scale_rad": 0.1,
+                    "position_trajectory_loss_weight":
+                        args.position_trajectory_loss_weight,
+                    "position_trajectory_loss_scale_m":
+                        args.position_trajectory_loss_scale_m,
+                    "auxiliary_rollout_steps": (
+                        args.auxiliary_rollout_steps if auxiliary_enabled else None),
+                    "auxiliary_rollout_loss_weight":
+                        args.auxiliary_rollout_loss_weight,
+                    "auxiliary_high_steering_window_fraction":
+                        args.auxiliary_high_steering_window_fraction,
+                    "auxiliary_high_speed_threshold_mps":
+                        args.auxiliary_high_speed_threshold_mps,
+                    "auxiliary_high_speed_steering_fraction":
+                        args.auxiliary_high_speed_steering_fraction,
+                    "initial_checkpoint": (
+                        str(args.initial_checkpoint.resolve())
+                        if args.initial_checkpoint is not None else None),
+                    "initialization_mode": initialization_mode,
                     "expert_count": args.experts if args.architecture == "mixture" else 1,
                     "seed": seed, "step": member_steps,
                     "feature_names": data["feature_names"],
@@ -831,17 +1201,28 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "history_steps": history_steps,
                     "rollout_steps": rollout_steps,
                     "hidden_size": args.hidden_size,
-                    "training_runs": [data["run_ids"][i] for i in sorted(train_groups)],
+                    "training_runs": sorted(set(
+                        [str(data["run_ids"][i]) for i in train_groups]
+                        + [str(data["run_ids"][i])
+                           for i in auxiliary_train_groups]
+                        + list((initial_metadata or {}).get(
+                            "training_runs", [])))),
                     "body_acceleration_mean": (
                         body_acceleration_mean.tolist()
                         if body_acceleration_mean is not None else None),
                     "body_acceleration_scale": (
                         body_acceleration_scale.tolist()
                         if body_acceleration_scale is not None else None),
+                    "rear_axle_to_com_x_m": (
+                        REAR_AXLE_TO_COM_X_M
+                        if args.architecture == "structured_gru" else 0.0),
                     "body_equations": ({
-                        "u_dot": "a_x_eff + r*v",
-                        "v_dot": "a_y_eff - r*u",
+                        "u_rear_dot": (
+                            "a_x_eff + r*(v_rear + L*r)"),
+                        "v_rear_dot": (
+                            "a_y_eff - r*u_rear - L*alpha_z_eff"),
                         "yaw_rate_dot": "alpha_z_eff",
+                        "L": REAR_AXLE_TO_COM_X_M,
                     } if args.architecture == "structured_gru" else None),
                 })
             else:
@@ -853,17 +1234,26 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             model.load_state_dict(payload["state_dict"])
             member_models.append(model)
             best_validation = _score_model(torch, model, val_arrays, mean,
-                                           scale, device, history_steps)
+                                           scale, device, history_steps,
+                                           args.position_trajectory_loss_scale_m)
+            best_auxiliary_validation = (
+                _score_model(torch, model, auxiliary_val_arrays, mean, scale,
+                             device, history_steps,
+                             args.position_trajectory_loss_scale_m)
+                if auxiliary_val_arrays is not None else None)
         else:
             best_validation = None
+            best_auxiliary_validation = None
         member_results.append({
             "member": member,
             "seed": seed,
+            "initialization_mode": initialization_mode,
             "steps": member_steps,
             "elapsed_seconds": time.monotonic() - member_started,
             "budget_seconds": member_deadline - member_started,
             "best_step": best_step,
             "best_validation": best_validation,
+            "best_auxiliary_validation": best_auxiliary_validation,
             "history": history,
             "checkpoint": checkpoint.name if checkpoint.is_file() else None,
         })
@@ -889,15 +1279,50 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                                   ("validation", validation_groups),
                                   ("experiment_test", _sequence_groups(
                                       data, "experiment_test", history_steps,
-                                      rollout_steps)))
+                                      rollout_steps, position_loss_enabled)))
         },
+        "auxiliary_sequence_counts": (
+            {
+                "train": sum(len(group) for group in auxiliary_train_groups.values()),
+                "validation": sum(
+                    len(group) for group in auxiliary_validation_groups.values()),
+            } if auxiliary_enabled else {}),
         "normalization": {"mean": mean.tolist(), "scale": scale.tolist()},
         "configuration": {
             "architecture": args.architecture,
+            "rear_axle_to_com_x_m": (
+                REAR_AXLE_TO_COM_X_M
+                if args.architecture == "structured_gru" else 0.0),
             "integration_method": args.integration_method,
             "heading_trajectory_loss_weight":
                 args.heading_trajectory_loss_weight,
             "heading_trajectory_loss_scale_rad": 0.1,
+            "position_trajectory_loss_weight":
+                args.position_trajectory_loss_weight,
+            "position_trajectory_loss_scale_m":
+                args.position_trajectory_loss_scale_m,
+            "auxiliary_rollout_steps": (
+                args.auxiliary_rollout_steps if auxiliary_enabled else None),
+            "auxiliary_rollout_loss_weight":
+                args.auxiliary_rollout_loss_weight,
+            "auxiliary_high_steering_window_fraction":
+                args.auxiliary_high_steering_window_fraction,
+            "auxiliary_high_steering_window_threshold_rad":
+                args.auxiliary_high_steering_window_threshold,
+            "auxiliary_high_speed_threshold_mps":
+                args.auxiliary_high_speed_threshold_mps,
+            "auxiliary_high_speed_steering_fraction":
+                args.auxiliary_high_speed_steering_fraction,
+            "auxiliary_steering_windows_by_run": (
+                {str(data["run_ids"][run]): len(windows)
+                 for run, windows in auxiliary_steering_windows.items()}
+                if auxiliary_steering_windows else {}),
+            "initial_checkpoint": (
+                str(args.initial_checkpoint.resolve())
+                if args.initial_checkpoint is not None else None),
+            "initialization_mode": (
+                member_results[0].get("initialization_mode")
+                if member_results else "random_initialization"),
             "throttle_variation_feature": args.throttle_variation_feature,
             "high_steering_window_fraction": args.high_steering_window_fraction,
             "high_steering_window_threshold_rad": args.high_steering_window_threshold,
@@ -924,6 +1349,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "members": member_results,
         "validation_ensemble": _score_ensemble(
             torch, member_models, val_arrays, mean, scale, device, history_steps),
+        "auxiliary_validation_ensemble": (
+            _score_ensemble(torch, member_models, auxiliary_val_arrays,
+                            mean, scale, device, history_steps)
+            if auxiliary_val_arrays is not None else None),
         "validation_gate_diagnostics": (
             _gate_diagnostics(torch, member_models[0], val_arrays, mean,
                               scale, device, history_steps)
@@ -941,7 +1370,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             test_windows = _fixed_eval_windows(data, groups, history_steps,
                                                rollout_steps, args.eval_windows)
             test_arrays = _batch_from_windows(data, test_windows, history_steps,
-                                              rollout_steps)
+                                              rollout_steps,
+                                              position_loss_enabled)
             test_results = []
             scored_models = []
             for member, result in enumerate(member_results):
@@ -955,7 +1385,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 test_results.append({"member": member,
                                      "score": _score_model(
                                          torch, model, test_arrays, mean,
-                                         scale, device, history_steps)})
+                                         scale, device, history_steps,
+                                         args.position_trajectory_loss_scale_m)})
             report[split_name] = {
                 "members": test_results,
                 "ensemble": _score_ensemble(
@@ -966,16 +1397,45 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                                       mean, scale, device, history_steps)
                     if scored_models else None),
             }
+        if auxiliary_enabled:
+            for split_name, report_name in (
+                    ("test", "short_horizon_named_holdouts"),
+                    ("final_test", "short_horizon_final_test_20260929")):
+                auxiliary_groups = _sequence_groups(
+                    data, split_name, history_steps,
+                    args.auxiliary_rollout_steps, position_loss_enabled)
+                if not auxiliary_groups:
+                    continue
+                auxiliary_windows = _fixed_eval_windows(
+                    data, auxiliary_groups, history_steps,
+                    args.auxiliary_rollout_steps, args.eval_windows)
+                auxiliary_arrays = _batch_from_windows(
+                    data, auxiliary_windows, history_steps,
+                    args.auxiliary_rollout_steps, position_loss_enabled)
+                report[report_name] = {
+                    "rollout_steps": args.auxiliary_rollout_steps,
+                    "runs": [str(data["run_ids"][run])
+                             for run in sorted(auxiliary_groups)],
+                    "members": [{
+                        "member": member,
+                        "score": _score_model(
+                            torch, model, auxiliary_arrays, mean, scale,
+                            device, history_steps,
+                            args.position_trajectory_loss_scale_m),
+                    } for member, model in enumerate(member_models)],
+                }
     if args.score_experiment_test:
         experiment_groups = _sequence_groups(
-            data, "experiment_test", history_steps, rollout_steps)
+            data, "experiment_test", history_steps, rollout_steps,
+            position_loss_enabled)
         if not experiment_groups:
             raise ValueError("no experiment-test sequences available")
         experiment_windows = _fixed_eval_windows(
             data, experiment_groups, history_steps, rollout_steps,
             args.eval_windows)
         experiment_arrays = _batch_from_windows(
-            data, experiment_windows, history_steps, rollout_steps)
+            data, experiment_windows, history_steps, rollout_steps,
+            position_loss_enabled)
         experiment_models = []
         experiment_results = []
         for member, result in enumerate(member_results):
@@ -989,7 +1449,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             experiment_results.append({
                 "member": member,
                 "score": _score_model(torch, model, experiment_arrays,
-                                       mean, scale, device, history_steps),
+                                       mean, scale, device, history_steps,
+                                       args.position_trajectory_loss_scale_m),
             })
         report["experiment_test"] = {
             "runs": selected_experiment_test_runs,
@@ -1014,6 +1475,8 @@ def main() -> int:
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--cpu-threads", type=int, default=1,
+                        help="PyTorch intra-op threads for CPU training; small-batch recurrent rollouts benchmark faster with one thread")
     parser.add_argument("--architecture", choices=("gru", "structured_gru",
                                                       "mixture", "narx"),
                         default="gru")
@@ -1023,6 +1486,31 @@ def main() -> int:
     parser.add_argument("--heading-trajectory-loss-weight", type=float,
                         default=0.0,
                         help="penalize accumulated yaw-angle prediction error over each recursive training rollout")
+    parser.add_argument("--position-trajectory-loss-weight", type=float,
+                        default=0.0,
+                        help="penalize integrated rear-axle XY trajectory error using simulator pose labels")
+    parser.add_argument("--position-trajectory-loss-scale-m", type=float,
+                        default=0.5,
+                        help="position error scale in metres for the robust trajectory loss")
+    parser.add_argument("--auxiliary-rollout-steps", type=int, default=0,
+                        help="optional shorter rollout for multi-scale recursive training")
+    parser.add_argument("--auxiliary-rollout-loss-weight", type=float,
+                        default=0.0,
+                        help="weight of the shorter rollout objective and its validation score")
+    parser.add_argument("--auxiliary-high-steering-window-fraction",
+                        type=float, default=0.0,
+                        help="fraction of auxiliary batches sampled from high-steering windows")
+    parser.add_argument("--auxiliary-high-steering-window-threshold",
+                        type=float, default=0.16,
+                        help="minimum mean absolute steering in an auxiliary window (rad)")
+    parser.add_argument("--auxiliary-high-speed-threshold-mps", type=float,
+                        default=0.0,
+                        help="speed threshold for joint high-speed/high-steering auxiliary windows")
+    parser.add_argument("--auxiliary-high-speed-steering-fraction", type=float,
+                        default=0.0,
+                        help="minimum fraction of each auxiliary rollout simultaneously above speed and steering thresholds")
+    parser.add_argument("--initial-checkpoint", type=Path,
+                        help="initialize model weights and normalization from a compatible checkpoint")
     parser.add_argument("--throttle-variation-feature", action="store_true",
                         help="add the causal 100 ms total variation of commanded throttle to model inputs")
     parser.add_argument("--high-steering-window-fraction", type=float, default=0.0,
@@ -1057,14 +1545,27 @@ def main() -> int:
                         help="score the selected experiment-test runs once after training")
     args = parser.parse_args()
     if (args.members < 1 or args.time_budget_hours <= 0.0
-            or args.max_steps_per_member < 1 or args.experts < 2
+            or args.cpu_threads < 1
+            or args.max_steps_per_member < 1
+            or (args.architecture == "mixture" and args.experts < 2)
             or args.holdout_train_run_count < 0
             or args.experiment_test_run_count < 0
             or args.heading_trajectory_loss_weight < 0.0
+            or args.position_trajectory_loss_weight < 0.0
+            or args.position_trajectory_loss_scale_m <= 0.0
+            or args.auxiliary_rollout_loss_weight < 0.0
+            or (args.auxiliary_rollout_loss_weight > 0.0
+                and args.auxiliary_rollout_steps <= 0)
+            or not 0.0 <= args.auxiliary_high_steering_window_fraction < 1.0
+            or args.auxiliary_high_steering_window_threshold < 0.0
+            or args.auxiliary_high_speed_threshold_mps < 0.0
+            or not 0.0 <= args.auxiliary_high_speed_steering_fraction <= 1.0
+            or (args.auxiliary_high_speed_steering_fraction > 0.0
+                and args.auxiliary_high_speed_threshold_mps <= 0.0)
             or not 0.0 <= args.high_steering_window_fraction < 1.0
             or args.high_steering_window_threshold < 0.0
             or (args.score_experiment_test and args.experiment_test_run_count == 0)):
-        parser.error("members, time budget, step cap, and experts must be positive")
+        parser.error("invalid model, rollout, loss weight, split, or time-budget configuration")
     if args.output_dir.exists():
         parser.error(f"output directory already exists: {args.output_dir}")
     try:

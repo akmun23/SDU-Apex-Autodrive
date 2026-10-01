@@ -71,6 +71,11 @@ class MotionSample:
     imu_yaw_rate_rps: float | None = None  # causal body-frame gyro z
     imu_roll_pitch_rad: np.ndarray | None = None  # measured roll, pitch
     imu_roll_pitch_rate_rps: np.ndarray | None = None  # body gyro x, y
+    packet_sequence: int = -1  # simulator-step identity; never a time interval
+    pose_xyyaw: np.ndarray | None = None  # offline bridge pose label [world x,y,yaw]
+    simulator_pose_xyyaw: np.ndarray | None = None  # packet-level simulator truth
+    simulator_rigid_state: np.ndarray | None = None  # position, quaternion, body v, body omega
+    simulator_linear_acceleration: np.ndarray | None = None  # packet-level xyz
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,8 @@ class Capture:
     actuator_streams: dict[str, tuple[np.ndarray, np.ndarray]] = field(
         default_factory=dict)
     phase_start_times_ns: tuple[int, ...] = ()
+    packet_sequence_matched_samples: int = 0
+    packet_sequence_total_samples: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,8 +134,9 @@ def _continuous_segments(rows: list[MotionSample]) -> list[tuple[MotionSample, .
     segments: list[tuple[MotionSample, ...]] = []
     start = 0
     for index in range(1, len(rows)):
-        dt = rows[index].time_s - rows[index - 1].time_s
-        if MIN_DT_S <= dt <= MAX_DT_S:
+        previous = rows[index - 1].packet_sequence
+        current = rows[index].packet_sequence
+        if previous >= 0 and current == previous + 1:
             continue
         if index - start >= 10:
             segments.append(tuple(rows[start:index]))
@@ -162,6 +170,18 @@ def _roll_pitch_from_quaternion(x: float, y: float, z: float,
     return (roll, pitch) if math.isfinite(roll) and math.isfinite(pitch) else None
 
 
+def _yaw_from_quaternion(x: float, y: float, z: float,
+                         w: float) -> float | None:
+    values = np.asarray([x, y, z, w], dtype=np.float64)
+    norm = float(np.linalg.norm(values))
+    if not np.isfinite(values).all() or not math.isfinite(norm) or norm < 0.5:
+        return None
+    x, y, z, w = values / norm
+    yaw = math.atan2(2.0 * (w * z + x * y),
+                     1.0 - 2.0 * (y * y + z * z))
+    return yaw if math.isfinite(yaw) else None
+
+
 def _command_at_receipt(capture: Capture, channel: str,
                         target_ns: int) -> float | None:
     command_times, command_values = capture.actuator_streams[
@@ -183,9 +203,9 @@ def _attach_actuator_history(rows: list[MotionSample]) -> list[MotionSample]:
         rates = np.zeros(2, dtype=float)
         if index:
             previous = rows[index - 1]
-            dt_s = sample.time_s - previous.time_s
-            if MIN_DT_S <= dt_s <= MAX_DT_S:
-                rates = (sample.actuators[:2] - previous.actuators[:2]) / dt_s
+            if (previous.packet_sequence >= 0
+                    and sample.packet_sequence == previous.packet_sequence + 1):
+                rates = (sample.actuators[:2] - previous.actuators[:2]) / 0.025
         commands = np.asarray((
             float(np.float32(sample.actuators[3] * STEERING_LIMIT_RAD)),
             float(sample.actuators[2])), dtype=float)
@@ -224,7 +244,14 @@ def _encoder_surface_speed(rows: list[analysis.EncoderRow], times: list[int],
     return analysis.WHEEL_RADIUS_M * (current.angle_rad - older.angle_rad) / dt_s
 
 
-def load_capture(path: Path) -> Capture:
+def load_capture(path: Path,
+                 include_nonvalid_phases: bool = False) -> Capture:
+    """Load aligned capture sequences.
+
+    By default, only experiment phases explicitly marked valid are returned.
+    The offline salvage audit may opt into completed invalid/unscored phases,
+    but it must independently apply its stricter interval-quality gates.
+    """
     if not path.is_file():
         raise ValueError(f"bag does not exist: {path}")
     connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
@@ -237,6 +264,51 @@ def load_capture(path: Path) -> Capture:
         if missing:
             raise ValueError("missing topic(s): " + ", ".join(sorted(set(missing))))
         has_phase_markers = analysis.PHASE in topics
+        packet_sequence_by_source_stamp: dict[int, int] = {}
+        simulator_pose_by_source_stamp: dict[int, np.ndarray] = {}
+        simulator_rigid_state_by_source_stamp: dict[int, np.ndarray] = {}
+        simulator_acceleration_by_source_stamp: dict[int, np.ndarray] = {}
+        for _, message in analysis._messages(
+                connection, topics, analysis.PACKET_TIMING):
+            try:
+                packet = json.loads(message.data)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            source_stamp = packet.get("bridge_receive_ros_stamp_ns")
+            packet_sequence = packet.get("packet_sequence")
+            if (isinstance(source_stamp, int)
+                    and isinstance(packet_sequence, int)):
+                prior = packet_sequence_by_source_stamp.get(source_stamp)
+                if prior is not None and prior != packet_sequence:
+                    raise ValueError("bridge packet timing has conflicting packet identity")
+                packet_sequence_by_source_stamp[source_stamp] = packet_sequence
+                pose_values = np.asarray((
+                    packet.get("simulator_position_x", math.nan),
+                    packet.get("simulator_position_y", math.nan),
+                    packet.get("simulator_orientation_euler_z", math.nan),
+                ), dtype=np.float64)
+                if np.isfinite(pose_values).all():
+                    simulator_pose_by_source_stamp[source_stamp] = pose_values
+                rigid_values = np.asarray((
+                    *(packet.get(f"simulator_position_{axis}", math.nan)
+                      for axis in ("x", "y", "z")),
+                    *(packet.get(f"simulator_orientation_quaternion_{axis}", math.nan)
+                      for axis in ("x", "y", "z", "w")),
+                    *(packet.get(f"simulator_linear_velocity_{axis}", math.nan)
+                      for axis in ("x", "y", "z")),
+                    *(packet.get(f"simulator_angular_velocity_{axis}", math.nan)
+                      for axis in ("x", "y", "z")),
+                ), dtype=np.float64)
+                if (np.isfinite(rigid_values).all()
+                        and np.linalg.norm(rigid_values[3:7]) > 1.0e-8):
+                    simulator_rigid_state_by_source_stamp[source_stamp] = rigid_values
+                acceleration_values = np.asarray((
+                    packet.get("simulator_linear_acceleration_x", math.nan),
+                    packet.get("simulator_linear_acceleration_y", math.nan),
+                    packet.get("simulator_linear_acceleration_z", math.nan),
+                ), dtype=np.float64)
+                if np.isfinite(acceleration_values).all():
+                    simulator_acceleration_by_source_stamp[source_stamp] = acceleration_values
         lap_count_topic = "/autodrive/roboracer_1/lap_count"
         if not has_phase_markers and lap_count_topic not in topics:
             raise ValueError(
@@ -304,6 +376,7 @@ def load_capture(path: Path) -> Capture:
         right_encoder_times = [row.receipt_ns for row in right_encoder]
 
         odometry: list[tuple[int, int, np.ndarray]] = []
+        pose_by_receipt: dict[int, np.ndarray] = {}
         domain_rows: list[tuple[float, float, float, float, float]] = []
         for receipt_ns, message in analysis._messages(
                 connection, topics, analysis.ODOM):
@@ -318,6 +391,18 @@ def load_capture(path: Path) -> Capture:
             source_stamp_ns = analysis._stamp_ns(message.header.stamp)
             if source_stamp_ns <= 0:
                 source_stamp_ns = receipt_ns
+            packet_sequence = packet_sequence_by_source_stamp.get(
+                source_stamp_ns, -1)
+            pose = message.pose.pose
+            yaw = _yaw_from_quaternion(
+                float(pose.orientation.x), float(pose.orientation.y),
+                float(pose.orientation.z), float(pose.orientation.w))
+            pose_values = np.asarray((float(pose.position.x),
+                                      float(pose.position.y),
+                                      yaw if yaw is not None else math.nan),
+                                     dtype=np.float64)
+            if np.isfinite(pose_values).all():
+                pose_by_receipt[receipt_ns] = pose_values
             odometry.append((receipt_ns, source_stamp_ns, state))
             aligned = (
                 _causal_scalar(steering, steering_times, receipt_ns,
@@ -392,7 +477,7 @@ def load_capture(path: Path) -> Capture:
         return lap_values[index] if index >= 0 else None
 
     for phase in phases:
-        if phase.valid is not True:
+        if phase.valid is not True and not include_nonvalid_phases:
             continue
         # Include 500 ms of causal context for history-state diagnostics. The
         # model-fitting loop ignores negative phase times, so this does not add
@@ -461,8 +546,17 @@ def load_capture(path: Path) -> Capture:
                                   if aligned_imu[2] is not None else None),
                 imu_roll_pitch_rad=imu_body_attitude,
                 imu_roll_pitch_rate_rps=imu_body_attitude_rate,
+                packet_sequence=packet_sequence_by_source_stamp.get(
+                    source_stamp_ns, -1),
+                pose_xyyaw=pose_by_receipt.get(receipt_ns),
+                simulator_pose_xyyaw=simulator_pose_by_source_stamp.get(
+                    source_stamp_ns),
+                simulator_rigid_state=simulator_rigid_state_by_source_stamp.get(
+                    source_stamp_ns),
+                simulator_linear_acceleration=(
+                    simulator_acceleration_by_source_stamp.get(source_stamp_ns)),
             ))
-        rows.sort(key=lambda row: row.time_s)
+        rows.sort(key=lambda row: row.packet_sequence)
         rows = _attach_actuator_history(rows)
         segments = _continuous_segments(rows)
         sequences.extend(segments)
@@ -532,8 +626,17 @@ def load_capture(path: Path) -> Capture:
                                   if aligned_imu[2] is not None else None),
                 imu_roll_pitch_rad=imu_body_attitude,
                 imu_roll_pitch_rate_rps=imu_body_attitude_rate,
+                packet_sequence=packet_sequence_by_source_stamp.get(
+                    source_stamp_ns, -1),
+                pose_xyyaw=pose_by_receipt.get(receipt_ns),
+                simulator_pose_xyyaw=simulator_pose_by_source_stamp.get(
+                    source_stamp_ns),
+                simulator_rigid_state=simulator_rigid_state_by_source_stamp.get(
+                    source_stamp_ns),
+                simulator_linear_acceleration=(
+                    simulator_acceleration_by_source_stamp.get(source_stamp_ns)),
             ))
-        rows.sort(key=lambda row: row.time_s)
+        rows.sort(key=lambda row: row.packet_sequence)
         rows = _attach_actuator_history(rows)
         segments = _continuous_segments(rows)
         for segment in segments:
@@ -597,6 +700,10 @@ def load_capture(path: Path) -> Capture:
         },
         phase_start_times_ns=tuple(
             phase.start_ns for phase in phases if phase.valid is True),
+        packet_sequence_matched_samples=sum(
+            source_stamp in packet_sequence_by_source_stamp
+            for _, source_stamp, _ in odometry),
+        packet_sequence_total_samples=len(odometry),
     )
 
 

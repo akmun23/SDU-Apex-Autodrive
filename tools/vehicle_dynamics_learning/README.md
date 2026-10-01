@@ -5,6 +5,10 @@ dataset and trains a recurrent nonlinear state-transition surrogate. It is
 offline development tooling only: it does not launch the simulator, modify
 physics, change the competition controller, or add a runtime topic subscriber.
 
+For the current source-of-truth dataset, run inventory, cleanup decisions, and
+the next evidence-based capture plan, start at
+[`VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md`](../../docs/development/VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md).
+
 ## Checkpoint: 2026-09-28
 
 Audit warning: the old schema-v2 oracle and sensor datasets both contain
@@ -47,9 +51,12 @@ policy and simulator physics were not changed.
 
 The handoff's physics-structured family has been implemented and evaluated:
 predict aggregate effective accelerations
-`a_x_eff`, `a_y_eff`, and `alpha_z_eff`, then integrate the known body-frame
-coupling
-`u_dot=a_x_eff+r*v`, `v_dot=a_y_eff-r*u`, `r_dot=alpha_z_eff`.
+`a_x_eff`, `a_y_eff`, and `alpha_z_eff` at the center of mass (COM), then
+integrate rear-axle state with the measured longitudinal COM offset `L`:
+`u_rear_dot=a_x_eff+r*(v_rear+L*r)`,
+`v_rear_dot=a_y_eff-r*u_rear-L*alpha_z_eff`,
+`r_dot=alpha_z_eff`. Here `L=0.15532 m`; pose integration remains rear-axle
+referenced, as confirmed by open-plane pose/twist consistency.
 Compared models were a no-latent acceleration MLP, latent dimensions 2/4/8,
 and a linear prior plus learned residual, against a fold-local plain-GRU
 control. Five grouped whole-run folds trained only on original training runs;
@@ -93,7 +100,24 @@ from complete practice-track captures. The canonical inventory and model
 comparison are recorded in
 [`OFFLINE_PLANT_TRAINING_UPDATE_20260930.md`](../../docs/development/OFFLINE_PLANT_TRAINING_UPDATE_20260930.md).
 Use its manifest as the run catalog; records failing the full-stream,
-collision, or sequence gates are not included. Raw bags have not been deleted.
+collision, or sequence gates are not included in the derived training/evaluation
+arrays. A subsequent interval-level salvage pass left the 93-run canonical
+archive unchanged and wrote three separately gated datasets from the 24
+whole-capture rejects; details and exact splits are in the
+[`vehicle-dynamics data catalog`](../../docs/development/VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md)
+and the
+[`offline plant next-step plan`](../../docs/development/OFFLINE_PLANT_NEXT_STEPS_20260930.md).
+
+The salvage tool is `salvage_rejected_phases.py`. It only reads the closed bags
+named by the canonical manifest and writes separate `verified`,
+`speed_target_mismatch`, and `unverified` NPZ archives plus a per-phase JSON
+audit. It does not rewrite source bags or merge auxiliary tiers into the
+baseline. Run it only in an environment with the repository's ROS 2 message
+packages available:
+
+```bash
+python3 tools/vehicle_dynamics_learning/salvage_rejected_phases.py
+```
 
 Free-running evaluation uses the full captured command trace and a single
 rear-axle pose anchor. After an initial true-state history, the model receives
@@ -337,3 +361,16 @@ Do not promote because one-step RMSE is small. A candidate must:
 This is an identified *aggregate* plant surrogate. Per-wheel tire-force
 recovery still requires synchronized wheel-local slip/load/force labels from a
 player proven equivalent to the pinned Explore build.
+
+## 2026-10-01 3D rigid-body teacher
+
+The current schema-6 data and model checkpoint are documented in
+[`RIGID_BODY_TEACHER_PROGRESS_20261001.md`](../../docs/development/RIGID_BODY_TEACHER_PROGRESS_20261001.md).
+The dedicated trainer is `train_rigid_body_teacher.py`. It uses the simulator's
+body-frame COM velocity/angular-rate labels, packet acceleration as an
+offline-only teacher target, and explicit rigid-body/quaternion/rear-axle
+integration. Future rollout inputs remain predicted state plus commands only.
+
+The acceleration-supervised model improves on the preceding 3D candidate, but
+still loses to the current 2D GRU on the same complete practice capture. Keep
+both as offline comparators; neither change is connected to MPC or odometry.

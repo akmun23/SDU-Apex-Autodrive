@@ -50,8 +50,9 @@ def _load_dataset(path: Path) -> dict[str, Any]:
     missing = required - set(data.files)
     if missing:
         raise ValueError(f"dataset missing arrays: {sorted(missing)}")
-    if int(data["schema_version"][0]) not in (2, 3):
-        raise ValueError("sensor observer requires dataset schema version 2 or 3")
+    schema_version = int(data["schema_version"][0])
+    if schema_version not in (2, 3, 4, 5, 6):
+        raise ValueError("sensor observer requires dataset schema version 2 through 6")
     frames = data["frames"].astype(np.float32, copy=False)
     sensors = data["sensor_frames"].astype(np.float32, copy=False)
     valid = data["sensor_valid"].astype(bool, copy=False)
@@ -68,6 +69,17 @@ def _load_dataset(path: Path) -> dict[str, Any]:
         raise ValueError("sensor features/validity must align with truth frames")
     if dt_s.shape != (len(frames),) or not np.isfinite(frames).all():
         raise ValueError("invalid truth or sample-interval array")
+    if schema_version >= 4:
+        if "packet_sequence" not in data.files:
+            raise ValueError("fixed-timebase observer dataset lacks packet_sequence")
+        packet_sequence = data["packet_sequence"].astype(np.int64, copy=False)
+        if (packet_sequence.shape != (len(frames),)
+                or not np.allclose(dt_s, 0.025, rtol=0.0, atol=1e-7)):
+            raise ValueError("fixed-timebase observer data must use exact 25 ms packet time")
+        for start_raw, end_raw in data["sequence_bounds"]:
+            start, end = int(start_raw), int(end_raw)
+            if np.any(np.diff(packet_sequence[start:end]) != 1):
+                raise ValueError("observer sequence contains a simulator packet gap")
     if not np.isfinite(sensors[valid]).all():
         raise ValueError("valid sensor rows contain non-finite values")
     if bounds.ndim != 2 or bounds.shape[1] != 2 or len(bounds) != len(seq_run):

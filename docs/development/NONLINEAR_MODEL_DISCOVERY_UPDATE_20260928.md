@@ -136,4 +136,9 @@ The first four complete model captures ran from zero speed. Run `r05` later hit 
 
 The next model experiment should isolate the causes instead of combining feature and sampling changes: keep the plain-GRU training split fixed; train a high-steering-sampled model without the throttle-variation feature; compare its one-step and 750 ms per-run residuals with the plain GRU; and only then consider a physics-structured nonlinear residual using the measured throttle slew and signed steering/speed regime. The five fresh runs above have now been used for model comparison and must not be reused for checkpoint selection. Before claiming a new winner, collect a new independent whole-run holdout set, ideally restarting the same Explore simulator for each run. All candidates remain offline-only; no MPC, odometry, localization, competition image, or simulator physics was changed.
 
-For reproducibility, model scoring used a workspace-local CPU PyTorch 2.14.0 environment at `live_runs/derived_dynamics_learning_20260928/model_eval_venv/`; no new container image was pulled.
+Historical note: the local model environment mentioned during this analysis
+was removed during the 2026-09-30 data cleanup. At cleanup it contained
+Python 3.12.3, NumPy 1.26.4, and a PyTorch 2.14.0+cu130 build; this conflicts
+with the earlier description here as a CPU build, so do not rely on that
+ignored environment to reproduce the old metrics. Recreate dependencies using
+the setup instructions in `tools/vehicle_dynamics_learning/README.md`.

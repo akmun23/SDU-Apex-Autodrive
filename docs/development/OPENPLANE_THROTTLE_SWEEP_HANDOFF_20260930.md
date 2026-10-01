@@ -1,21 +1,27 @@
 # Open-plane throttle sweep — pause handoff (2026-09-30)
 
+This began as a pause handoff. The sweep is now complete; final integrity and
+combined-fit results are in
+[`OPENPLANE_THROTTLE_SURFACE_RESULTS_20260930.md`](OPENPLANE_THROTTLE_SURFACE_RESULTS_20260930.md).
+For the broader workspace inventory, see
+[`VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md`](VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md).
+
 ## Status
 
-The first Explore-simulator run was stopped cleanly at the user's request. Its experiment container closed the rosbag, ran the partial-data analyzer, and exited; the simulator was stopped. That data is preserved and must not be deleted. A seeded supplement is now running in a separate directory, resuming only the unusable/unstarted conditions.
+The original Explore-simulator run was stopped before the full design finished. Its closed bag is preserved. A seeded supplement later completed the remaining schedule in a separate directory. Together, the fit-usable rows cover the full 1,508-condition design with two valid replicates per steering/throttle condition; see the final results report for the audit and response-surface fit.
 
 - Run: `live_runs/openplane_throttle_5pct_5deg_20260930_r04/`
 - Bag: `live_runs/openplane_throttle_5pct_5deg_20260930_r04/run/run_0.db3` (1,679,384,576 bytes)
 - Analysis: `live_runs/openplane_throttle_5pct_5deg_20260930_r04/throttle_transition_analysis.json`
 - Logs: `experiment.log`, `recorder.log`, `bridge.log`, and `analysis.log` in the run directory.
 - Seed: `20260930`
-- Supplement run: `live_runs/openplane_throttle_5pct_5deg_20260930_r05_resume/` (active; latest heartbeat reached condition 40/738, with its reset in progress)
+- Supplement run: `live_runs/openplane_throttle_5pct_5deg_20260930_r05_resume/` (closed; 738/738 scheduled conditions valid)
 
 ## Test design
 
 This is a randomized throttle **step-response surface**, not a gradual-ramp-versus-step comparison. It uses 13 steering commands from -30° to +30° in 5° increments. It covers 58 throttle transitions per steering angle, with two replicates (1,508 conditions total). The design includes 0%-start targets at 5% increments, plus transitions from 10% throttle baselines using 5/10/20/40 percentage-point steps and a full-throttle endpoint. Each condition has a 4 s baseline dwell and 8 s response observation, then a simulator reset. There is no speed or distance cap.
 
-## Partial-run results
+## r04 partial-run results (historical)
 
 Stopped during phase index 770 (`steer=-0.3490667 rad`, throttle `0.00 -> 0.90`). The phase was correctly recorded as interrupted and is not fit-usable.
 
@@ -29,7 +35,7 @@ Stopped during phase index 770 (`steer=-0.3490667 rad`, throttle `0.00 -> 0.90`)
 
 `passed_integrity_gates` is `false` because the 1,508-condition sweep was intentionally interrupted, leaving 737 unstarted conditions and one incomplete condition. The completed data did **not** fail its stream, command/feedback, reset, collision, or timing checks. This resolves the earlier concern that the run might simply be collecting unusable data: the analyzed 770 completed conditions are usable under the current gates.
 
-## Preliminary response fit
+## r04-only preliminary response fit (superseded)
 
 `tools/fit_open_plane_throttle_surface.py` fits the closed analysis JSON and writes `live_runs/openplane_throttle_5pct_5deg_20260930_r04/preliminary_fit.json`. It compares a mean baseline, quadratic ridge, and ExtraTrees using grouped out-of-fold predictions. Replicates of one steering/throttle condition stay together; additional evaluations hold out whole throttle transitions and whole steering angles.
 
@@ -41,9 +47,9 @@ Stopped during phase index 770 (`steer=-0.3490667 rad`, throttle `0.00 -> 0.90`)
 
 This is preliminary evidence of a learnable response surface within sampled support, not proof of a useful full vehicle plant. The supplement should improve replication coverage; after it closes, refit with the combined unique conditions and preserve whole steering levels as holdouts.
 
-## Resume guidance
+## Resume implementation (completed)
 
-Do not rerun all 1,508 conditions or overwrite either bag. Supplement support is implemented in `tools/open_plane_throttle_transition_surface.py` and `tools/run_open_plane_experiment.sh` through `SDU_APEX_EXPERIMENT_RESUME_ANALYSIS`. It validates the seed/design, skips conditions marked fit-usable in the source analysis, and records the exact scheduled subset so the analyzer can validate a partial-design bag. Preflight confirmed it skipped 770 conditions and scheduled the interrupted condition plus the 737 absent conditions. The active supplement is `live_runs/openplane_throttle_5pct_5deg_20260930_r05_resume/`; its latest logged position was condition 40/738, with a reset in progress. Keep the r04 bag immutable. Once r05 closes, verify its keys do not overlap the 770 usable r04 keys and that the union covers the complete 1,508-condition design with the requested replicate counts and quality gates.
+Resume support in `tools/open_plane_throttle_transition_surface.py` and `tools/run_open_plane_experiment.sh` validated the original seed/design, skipped fit-usable r04 conditions, and recorded the exact supplemental schedule. The r05 bag is closed and analyzed. Do not rerun the completed schedule or overwrite either source bag; see the final results report for coverage, stream, reset, feedback, and grouped-fit metrics.
 
 If the next question is specifically the effect of throttle slew, add matched gradual-ramp and rapid-step conditions at the same starting state, steering, and final throttle. This step-response sweep alone cannot isolate that comparison.
 

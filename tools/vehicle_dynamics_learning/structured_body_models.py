@@ -19,6 +19,7 @@ BODY_NAMES = ("u_mps", "v_mps", "yaw_rate_rps")
 BODY_HORIZONS = (1, 5, 10, 20, 30)
 BODY_HORIZON_SECONDS = (0.025, 0.125, 0.250, 0.500, 0.750)
 DT_REFERENCE_S = 0.025
+REAR_AXLE_TO_COM_X_M = 0.15532
 
 
 @dataclass(frozen=True)
@@ -29,14 +30,18 @@ class AccelerationStatistics:
 
 
 def generalized_accelerations(
-    current: np.ndarray, following: np.ndarray, dt_s: np.ndarray
+    current: np.ndarray, following: np.ndarray, dt_s: np.ndarray,
+    rear_axle_to_com_x_m: float = REAR_AXLE_TO_COM_X_M,
 ) -> np.ndarray:
     """Convert measured body-state differences into effective accelerations.
 
-    With x-forward/y-left and positive yaw, body-frame kinematics give
-    u_dot = a_x + r*v and v_dot = a_y - r*u.  The learned channels are therefore
-    a_x_eff = u_dot - r*v, a_y_eff = v_dot + r*u, and alpha_z = r_dot.
-    They aggregate all contact and actuator effects; they are not tire forces.
+    State lateral velocity is measured at the rear axle, while the published
+    rigid-body equations use the center of mass (COM). For a COM offset `L`
+    forward of the rear axle, v_com = v_rear + L*r. Thus
+    u_dot = a_x + r*(v_rear + L*r) and
+    v_rear_dot = a_y - r*u - L*r_dot. The returned channels are the effective
+    COM accelerations [a_x, a_y, alpha_z]; they aggregate contact and actuator
+    effects and are not individual tire forces.
     """
     current = np.asarray(current, dtype=np.float64)
     following = np.asarray(following, dtype=np.float64)
@@ -51,9 +56,12 @@ def generalized_accelerations(
         raise ValueError("sample intervals must be finite and positive")
     derivative = (following[:, :3] - current[:, :3]) / dt_s[:, None]
     u, v, r = current[:, 0], current[:, 1], current[:, 2]
-    return np.column_stack((derivative[:, 0] - r * v,
-                            derivative[:, 1] + r * u,
-                            derivative[:, 2])).astype(np.float32)
+    yaw_acceleration = derivative[:, 2]
+    return np.column_stack((
+        derivative[:, 0] - r * (v + rear_axle_to_com_x_m * r),
+        derivative[:, 1] + r * u + rear_axle_to_com_x_m * yaw_acceleration,
+        yaw_acceleration,
+    )).astype(np.float32)
 
 
 def training_transition_rows(
@@ -220,13 +228,16 @@ def make_structured_model(
     return StructuredBodyModel()
 
 
-def integrate_body_state(torch, body, acceleration, dt_s):
-    """Apply the known continuous body-frame coupling over one Euler step."""
+def integrate_body_state(torch, body, acceleration, dt_s,
+                         rear_axle_to_com_x_m: float = REAR_AXLE_TO_COM_X_M):
+    """Integrate rear-axle velocity using COM rigid-body accelerations."""
     u, v, yaw_rate = body.unbind(dim=1)
     ax_eff, ay_eff, yaw_accel = acceleration.unbind(dim=1)
     return torch.stack((
-        u + dt_s * (ax_eff + yaw_rate * v),
-        v + dt_s * (ay_eff - yaw_rate * u),
+        u + dt_s * (ax_eff + yaw_rate
+                    * (v + rear_axle_to_com_x_m * yaw_rate)),
+        v + dt_s * (ay_eff - yaw_rate * u
+                    - rear_axle_to_com_x_m * yaw_accel),
         yaw_rate + dt_s * yaw_accel,
     ), dim=1)
 

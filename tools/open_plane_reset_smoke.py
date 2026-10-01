@@ -63,6 +63,9 @@ class ResetSmoke:
         self.throttle_feedback: float | None = None
         self.steering_feedback: float | None = None
         self.stable_since: float | None = None
+        self.phase_started = False
+        self.phase_closed = False
+        self.phase_start_odom_index = 0
         self.odom_count = 0
         self.odom_receipts: list[float] = []
         self.done = False
@@ -119,6 +122,8 @@ class ResetSmoke:
     def _finish(self, reason: str, *, aborted: bool) -> None:
         if self.done:
             return
+        if self.phase_started and not self.phase_closed:
+            self._close_phase(valid=False, reason=reason)
         self.done = True
         self.aborted = aborted
         self.reason = reason
@@ -161,6 +166,52 @@ class ResetSmoke:
         self._publish_event(result)
         self.node.get_logger().info(json.dumps(result, sort_keys=True))
 
+    def _start_phase(self) -> None:
+        self.phase_started = True
+        self.phase_start_odom_index = len(self.odom_receipts)
+        self._publish_event({
+            "event": "phase_start",
+            "profile": "throttle_reset_smoke",
+            "seed": 0,
+            "phase_index": 0,
+            "phase_count": 1,
+            "label": f"straight_throttle_{self.probe_throttle:.3f}",
+            "target_speed_mps": 0.0,
+            "steering_command_rad": 0.0,
+            "throttle_mode": "fixed",
+            "fixed_throttle_command_norm": self.probe_throttle,
+            "requested_throttle_command_norm": self.probe_throttle,
+            "monotonic_ns": time.monotonic_ns(),
+        })
+
+    def _close_phase(self, *, valid: bool, reason: str = "") -> None:
+        if not self.phase_started or self.phase_closed:
+            return
+        active_receipts = self.odom_receipts[self.phase_start_odom_index:]
+        gaps = [right - left for left, right in zip(
+            active_receipts, active_receipts[1:])
+            if 0.0 < right - left <= 0.075]
+        duration = sum(gaps)
+        result = {
+            "event": "phase_end",
+            "profile": "throttle_reset_smoke",
+            "phase_index": 0,
+            "label": f"straight_throttle_{self.probe_throttle:.3f}",
+            "status": "complete" if valid else "incomplete",
+            "valid": valid,
+            "reason": reason,
+            "quality_failures": [] if valid else [reason or "incomplete"],
+            "samples": len(active_receipts),
+            "measured_speed_max_mps": self.max_speed_mps,
+            "active_interval_rate_hz": len(gaps) / duration if duration else None,
+            "active_interval_gap_p95_ms": (
+                sorted(gaps)[math.ceil(0.95 * len(gaps)) - 1] * 1000.0
+                if gaps else None),
+            "monotonic_ns": time.monotonic_ns(),
+        }
+        self._publish_event(result)
+        self.phase_closed = True
+
     def _tick(self) -> None:
         if self.done:
             return
@@ -180,35 +231,85 @@ class ResetSmoke:
             )
             if not ready:
                 return
-            self.spawn_xy = self.position_xy
-            self.state = "drive"
+            self.state = "initial_reset_hold"
             self.state_started_at = now
+            self._command(0.0)
             self._publish_event({
-                "event": "reset_smoke_start",
+                "event": "initial_sim_reset_start",
                 "profile": "throttle_reset_smoke",
-                "requested_throttle_norm": self.probe_throttle,
-                "probe_hold_s": self.probe_hold_s,
-                "speed_mps": self.speed_mps,
-                "position_xy": self.spawn_xy,
+                "position_xy": self.position_xy,
+                "reset_command": True,
                 "monotonic_ns": time.monotonic_ns(),
             })
 
+        reset_states = ("initial_reset_hold", "initial_reset_wait",
+                        "reset_hold", "reset_wait")
         if self.last_odom_at is None or now - self.last_odom_at > ODOM_TIMEOUT_S:
-            if self.state not in ("reset_hold", "reset_wait"):
+            if self.state not in reset_states:
                 self._finish("odometry timeout", aborted=True)
                 return
-        if (self.state not in ("reset_hold", "reset_wait")
+        if (self.state not in reset_states
                 and (self.last_collision_at is None
                      or now - self.last_collision_at > COLLISION_TIMEOUT_S)):
             self._finish("collision telemetry timeout", aborted=True)
             return
 
-        if self.state == "drive":
+        if self.state == "initial_reset_hold":
+            self._command(0.0)
+            self.reset_pub.publish(Bool(data=True))
+            if now - self.state_started_at >= RESET_HOLD_S:
+                self.reset_pub.publish(Bool(data=False))
+                self.state = "initial_reset_wait"
+                self.state_started_at = now
+                self.stable_since = None
+                self._publish_event({
+                    "event": "initial_sim_reset_release",
+                    "profile": "throttle_reset_smoke",
+                    "reset_command": False,
+                    "monotonic_ns": time.monotonic_ns(),
+                })
+
+        elif self.state == "initial_reset_wait":
+            self._command(0.0)
+            if now - self.state_started_at > RESET_TIMEOUT_S:
+                self._finish("initial simulator reset did not settle", aborted=True)
+                return
+            recovered = (
+                self.last_odom_at is not None
+                and self.last_odom_at >= self.state_started_at
+                and self.speed_mps is not None and self.speed_mps <= 0.20
+                and self.throttle_feedback is not None
+                and abs(self.throttle_feedback) <= 0.02
+                and self.steering_feedback is not None
+                and abs(self.steering_feedback) <= 0.02
+            )
+            if recovered:
+                if self.stable_since is None:
+                    self.stable_since = now
+                elif now - self.stable_since >= 0.50:
+                    self.spawn_xy = self.position_xy
+                    self.state = "drive"
+                    self.state_started_at = now
+                    self._publish_event({
+                        "event": "reset_smoke_start",
+                        "profile": "throttle_reset_smoke",
+                        "requested_throttle_norm": self.probe_throttle,
+                        "probe_hold_s": self.probe_hold_s,
+                        "speed_mps": self.speed_mps,
+                        "position_xy": self.spawn_xy,
+                        "monotonic_ns": time.monotonic_ns(),
+                    })
+                    self._start_phase()
+            else:
+                self.stable_since = None
+
+        elif self.state == "drive":
             if self.speed_mps is not None and self.speed_mps > 0.1:
                 self.pre_reset_speed_mps = self.speed_mps
             self._command(self.probe_throttle)
             if now - self.state_started_at >= self.probe_hold_s:
                 self.pre_reset_xy = self.position_xy
+                self._close_phase(valid=True)
                 self.state = "reset_hold"
                 self.state_started_at = now
                 self._command(0.0)

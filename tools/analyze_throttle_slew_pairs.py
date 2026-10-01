@@ -14,6 +14,7 @@ import math
 import sqlite3
 import statistics
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,62 @@ PAIR_GATES = {
     "throttle_feedback_norm": 0.03,
 }
 BOOTSTRAP_SEED = 20260928
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _fixed_encoder_surface_by_source_stamp(
+        bag: Path) -> tuple[dict[int, int], dict[int, np.ndarray], dict[str, float]]:
+    """Join encoder angles by packet identity and differentiate at fixed 40 Hz."""
+    connection = sqlite3.connect(bag.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        topics = common._topic_map(connection)
+        required = (common.PACKET_TIMING, common.LEFT_ENCODER,
+                    common.RIGHT_ENCODER)
+        missing = [topic for topic in required if topic not in topics]
+        if missing:
+            raise ValueError(f"bag lacks packet-aligned encoder inputs: {missing}")
+        packet_by_stamp: dict[int, int] = {}
+        for _, message in common._messages(
+                connection, topics, common.PACKET_TIMING):
+            try:
+                row = json.loads(message.data)
+                packet_by_stamp[int(row["bridge_receive_ros_stamp_ns"])] = int(
+                    row["packet_sequence"])
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+        angles: list[dict[int, float]] = []
+        match_fractions: dict[str, float] = {}
+        for topic, side in ((common.LEFT_ENCODER, "left"),
+                            (common.RIGHT_ENCODER, "right")):
+            rows = list(common._messages(connection, topics, topic))
+            by_packet: dict[int, float] = {}
+            matched = 0
+            for _, message in rows:
+                if not message.position:
+                    continue
+                stamp = common._stamp_ns(message.header.stamp)
+                sequence = packet_by_stamp.get(stamp)
+                if sequence is None:
+                    continue
+                by_packet[sequence] = float(message.position[0])
+                matched += 1
+            match_fractions[side] = matched / max(1, len(rows))
+            angles.append(by_packet)
+        wheel_speed_by_stamp: dict[int, np.ndarray] = {}
+        for stamp, sequence in packet_by_stamp.items():
+            if sequence < 4:
+                continue
+            if any(any((sequence - step) not in side_angles
+                       for step in range(5)) for side_angles in angles):
+                continue
+            wheel_speed_by_stamp[stamp] = np.asarray([
+                common.WHEEL_RADIUS_M * (side_angles[sequence]
+                                         - side_angles[sequence - 4])
+                / (4 * PERIOD_S)
+                for side_angles in angles], dtype=np.float64)
+        return packet_by_stamp, wheel_speed_by_stamp, match_fractions
+    finally:
+        connection.close()
 
 
 def _phase_events(path: Path) -> tuple[dict[int, dict[str, Any]],
@@ -130,61 +187,86 @@ def _median_window(samples: list[tuple[float, dict[str, float]]],
 
 def _phase_result(start: dict[str, Any], end: dict[str, Any],
                   stimulus: dict[str, Any],
-                  sequences: dict[str, list[body.MotionSample]]) -> dict[str, Any]:
+                  sequences: dict[str, list[body.MotionSample]],
+                  packet_by_source_stamp: dict[int, int]) -> dict[str, Any]:
     label = str(start["label"])
     profile_epoch = float(start.get("phase_elapsed_s", 0.0))
-    phase_origin_ns = int(start["receipt_ns"])
-    stimulus_rel_s = (int(stimulus["receipt_ns"]) - phase_origin_ns) / 1e9
-    # Align responses to the bag-received stimulus marker; use its monotonic
-    # phase clock separately to reconstruct the commanded profile.
-    relative_rows = [
-        ((sample.receipt_ns - int(stimulus["receipt_ns"])) / 1e9, values)
-        for sample in sequences.get(label, [])
-        if (values := _sample_values(sample)) is not None
-    ]
-    relative_rows.sort(key=lambda row: row[0])
-    # Convert event phase elapsed into the profile clock for target tracking.
+    phase_start_ns = int(start["receipt_ns"])
+    stimulus_ns = int(stimulus["receipt_ns"])
+    phase_end_ns = int(end["receipt_ns"])
+    packet_samples = []
+    for sample in sequences.get(label, []):
+        packet_sequence = packet_by_source_stamp.get(sample.source_stamp_ns)
+        if (packet_sequence is None
+                or sample.receipt_ns < phase_start_ns
+                or sample.receipt_ns > phase_end_ns):
+            continue
+        packet_samples.append((packet_sequence, sample))
+    packet_samples.sort(key=lambda row: row[0])
+    deduplicated: dict[int, body.MotionSample] = {}
+    for packet_sequence, sample in packet_samples:
+        deduplicated.setdefault(packet_sequence, sample)
+    packet_samples = sorted(deduplicated.items())
+    phase_start_candidates = [
+        i for i, (_sequence, sample) in enumerate(packet_samples)
+        if sample.receipt_ns >= phase_start_ns]
+    stimulus_candidates = [
+        i for i, (_sequence, sample) in enumerate(packet_samples)
+        if sample.receipt_ns >= stimulus_ns]
+    if not phase_start_candidates or not stimulus_candidates:
+        raise ValueError(f"{label}: no packet sample brackets phase events")
+    phase_start_index = phase_start_candidates[0]
+    stimulus_index = stimulus_candidates[0]
+    phase_samples = packet_samples[phase_start_index:]
+    phase_start_sequence = phase_samples[0][0]
+    stimulus_sequence = packet_samples[stimulus_index][0]
+    packet_gaps = [right[0] - left[0]
+                   for left, right in zip(phase_samples, phase_samples[1:])]
+    fixed_packet_timebase_pass = all(step == 1 for step in packet_gaps)
+    relative_rows = []
+    for sequence, sample in packet_samples:
+        if sequence < phase_start_sequence:
+            continue
+        values = _sample_values(sample)
+        if values is not None:
+            relative_rows.append(((sequence - stimulus_sequence) * PERIOD_S,
+                                  values))
+
+    # Simulator samples advance by packet ordinal at 25 ms. Receipt offsets
+    # only select the bracketing packet and are retained as a transport check.
     command_errors: list[float] = []
     feedback_errors: list[float] = []
+    command_values: list[float] = []
+    sample_elapsed: list[float] = []
     threshold_s: float | None = None
     initial = float(start["throttle_start_norm"])
     final = float(start["throttle_end_norm"])
     midpoint = initial + 0.5 * (final - initial)
-    phase_duration_s = (int(end["receipt_ns"]) - phase_origin_ns) / 1e9
-    phase_samples = [sample for sample in sequences.get(label, [])
-                     if 0.0 <= sample.time_s <= phase_duration_s]
-    if "wall_time_ns" in start:
-        phase_epoch_wall_ns = (int(start["wall_time_ns"])
-                               - profile_epoch * 1e9)
-        clock_offset_s = (
-            (phase_origin_ns - phase_epoch_wall_ns) / 1e9 - profile_epoch)
+    for sequence, sample in phase_samples:
+        sample_elapsed.append(
+            profile_epoch + (sequence - phase_start_sequence) * PERIOD_S)
+        command_values.append(float(sample.actuators[2]))
+    offsets = np.arange(-0.060, 0.0601, PERIOD_S / 10.0)
+    if command_values:
+        profile_scores = [
+            np.mean(np.square(np.asarray(command_values) - np.asarray([
+                _target_throttle(start, value + offset)
+                for value in sample_elapsed])))
+            for offset in offsets]
+        clock_offset_s = float(offsets[int(np.argmin(profile_scores))])
     else:
-        # Legacy phase markers lacked a wall-clock anchor. Infer only the
-        # sub-100ms event/receipt offset from the directly recorded command;
-        # retain and report the fitted offset instead of calling it timing-free.
-        offsets = np.arange(-0.100, 0.1001, 0.0025)
-        if phase_samples:
-            command_values = np.asarray(
-                [float(sample.actuators[2]) for sample in phase_samples])
-            sample_elapsed = np.asarray(
-                [profile_epoch + sample.time_s for sample in phase_samples])
-            errors = [np.mean(np.square(
-                command_values - np.asarray([
-                    _target_throttle(start, value + offset)
-                    for value in sample_elapsed]))) for offset in offsets]
-            clock_offset_s = float(offsets[int(np.argmin(errors))])
-        else:
-            clock_offset_s = 0.0
-    for sample in phase_samples:
-        elapsed = profile_epoch + sample.time_s + clock_offset_s
+        clock_offset_s = 0.0
+    for (sequence, sample), elapsed_base in zip(phase_samples, sample_elapsed):
+        elapsed = elapsed_base + clock_offset_s
         desired = _target_throttle(start, elapsed)
         command_errors.append(float(sample.actuators[2]) - desired)
         feedback_errors.append(float(sample.actuators[1]) - desired)
         delta = final - initial
         reached = (sample.actuators[1] >= midpoint if delta > 0.0
                    else sample.actuators[1] <= midpoint)
-        if threshold_s is None and reached and sample.time_s >= 0.0:
-            threshold_s = elapsed - float(stimulus["phase_elapsed_s"])
+        if (threshold_s is None and reached
+                and sequence >= stimulus_sequence):
+            threshold_s = (sequence - stimulus_sequence) * PERIOD_S
     command_mismatch_count = sum(abs(error) > 0.005 for error in command_errors)
     command_max_abs_error = (max(map(abs, command_errors))
                              if command_errors else None)
@@ -229,7 +311,10 @@ def _phase_result(start: dict[str, Any], end: dict[str, Any],
         "feedback_final_error_norm": (
             float(np.median(feedback_errors[-6:])) if feedback_errors else None),
         "feedback_half_response_s_from_stimulus": threshold_s,
-        "stimulus_event_receipt_offset_s": stimulus_rel_s,
+        "stimulus_to_sample_receipt_delay_ms": (
+            packet_samples[stimulus_index][1].receipt_ns - stimulus_ns) / 1e6,
+        "fixed_packet_timebase_pass": fixed_packet_timebase_pass,
+        "packet_gap_count": sum(step != 1 for step in packet_gaps),
         "analyzed_samples": len(relative_rows),
         "command_profile_pass": (
             bool(command_errors)
@@ -241,7 +326,8 @@ def _phase_result(start: dict[str, Any], end: dict[str, Any],
                 else float(step_edge_rmse))
             and command_max_abs_error is not None
             and command_max_abs_error <= abs(final - initial) + 0.003
-            and abs(clock_offset_s) <= 0.060),
+            and abs(clock_offset_s) <= 0.060
+            and fixed_packet_timebase_pass),
         "feedback_profile_pass": (
             bool(feedback_errors)
             and abs(float(np.median(feedback_errors[-6:]))) <= 0.03
@@ -263,6 +349,8 @@ def _pair_match(ramp: dict[str, Any], step: dict[str, Any]) -> tuple[bool, dict[
             failures.append(f"{profile['profile']}_command_profile")
         if not profile["feedback_profile_pass"]:
             failures.append(f"{profile['profile']}_feedback_profile")
+        if not profile["fixed_packet_timebase_pass"]:
+            failures.append(f"{profile['profile']}_packet_timebase_gap")
         if abs(profile["stimulus_state"]["steering_feedback_rad"]
                - profile["steering_command_rad"]) > PAIR_GATES["steering_feedback_rad"]:
             failures.append(f"{profile['profile']}_steering_not_settled")
@@ -303,10 +391,17 @@ def analyze(bag_paths: list[Path], output: Path,
     for bag in bag_paths:
         capture = body.load_capture(bag)
         starts, ends, stimuli, experiment_end = _phase_events(bag)
+        packet_by_source_stamp, wheel_speed_by_source_stamp, encoder_matches = (
+            _fixed_encoder_surface_by_source_stamp(bag))
         run_id = bag.parents[1].name
         sequences: dict[str, list[body.MotionSample]] = defaultdict(list)
         for label, sequence in zip(capture.sequence_labels, capture.sequences):
-            sequences[label].extend(sequence)
+            sequences[label].extend(
+                replace(
+                    sample,
+                    rear_wheel_surface_mps=wheel_speed_by_source_stamp.get(
+                        sample.source_stamp_ns))
+                for sample in sequence)
         phases_by_pair: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         for index, start in starts.items():
             if start.get("profile") != "throttle_slew_pair":
@@ -317,7 +412,8 @@ def analyze(bag_paths: list[Path], output: Path,
                 continue
             if start.get("condition_pair_id") is None:
                 continue
-            result = _phase_result(start, ends[index], stimuli[index], sequences)
+            result = _phase_result(start, ends[index], stimuli[index], sequences,
+                                   packet_by_source_stamp)
             result["run_id"] = run_id
             phase_rows.append(result)
             phases_by_pair[result["condition_pair_id"]][result["profile"]] = result
@@ -366,7 +462,11 @@ def analyze(bag_paths: list[Path], output: Path,
         expected_phase_count = 48
         run_reports.append({
             "run_id": run_id,
-            "bag": str(bag.resolve()),
+            "bag": str(bag.resolve().relative_to(REPO_ROOT)),
+            "simulator_timebase": (
+                "consecutive packet sequence numbers are 0.025 s apart; receipt "
+                "timestamps only select the packet bracketing an event"),
+            "encoder_source_stamp_match_fraction": encoder_matches,
             "aborted": capture.aborted,
             "experiment_reason": capture.reason,
             "experiment_end_event": experiment_end,

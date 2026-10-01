@@ -90,7 +90,8 @@ def evaluate(dataset_path: Path, run_dir: Path, max_windows_per_run: int,
                                 first_payload["feature_scale"],
                                 metadata.get("body_acceleration_mean"),
                                 metadata.get("body_acceleration_scale"),
-                                metadata.get("integration_method", "euler"))
+                                metadata.get("integration_method", "euler"),
+                                metadata.get("rear_axle_to_com_x_m", 0.0))
     models = []
     if training_report.get("members"):
         checkpoint_paths = [run_dir / member["checkpoint"]

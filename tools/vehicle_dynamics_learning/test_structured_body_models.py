@@ -17,13 +17,20 @@ from run_structured_body_cv import (
     _train_loss,
 )
 from structured_body_models import (
+    REAR_AXLE_TO_COM_X_M,
     acceleration_statistics,
     generalized_accelerations,
     integrate_body_state,
     make_structured_model,
     rollout_structured_body,
 )
-from train_nssm import _model_type, _rollout, _torch
+from train_nssm import (
+    _integrate_rear_axle_pose,
+    _initialize_model,
+    _model_type,
+    _rollout,
+    _torch,
+)
 from tools.evaluate_open_plane_body_dynamics import _roll_pitch_from_quaternion
 from tools.evaluate_open_plane_body_dynamics import STREAM_TOPICS
 from tools.vehicle_dynamics_learning.prepare_dataset import _quality
@@ -40,18 +47,92 @@ class StructuredBodyModelTests(unittest.TestCase):
         zero_acceleration = torch.zeros((1, 3))
         dt = torch.tensor([0.01])
         next_body = integrate_body_state(torch, body, zero_acceleration, dt)
-        np.testing.assert_allclose(next_body.numpy(), [[2.0, -0.02, 1.0]],
-                                   rtol=0.0, atol=1e-7)
+        np.testing.assert_allclose(
+            next_body.numpy(),
+            [[2.0 + 0.01 * REAR_AXLE_TO_COM_X_M, -0.02, 1.0]],
+            rtol=0.0, atol=1e-7)
 
         accel = np.asarray([[0.5, 1.0, 2.0]], dtype=np.float32)
-        next_physical = np.asarray([[2.005, -0.01, 1.02]], dtype=np.float32)
         current = np.zeros((1, 9), dtype=np.float32)
         following = np.zeros_like(current)
         current[0, :3] = [2.0, 0.0, 1.0]
-        following[0, :3] = next_physical[0]
+        next_state = integrate_body_state(
+            torch, torch.as_tensor(current[:, :3]), torch.as_tensor(accel), dt)
+        following[0, :3] = next_state.numpy()[0]
         recovered = generalized_accelerations(current, following,
                                               np.asarray([0.01]))
         np.testing.assert_allclose(recovered, accel, rtol=0.0, atol=2e-5)
+
+    def test_structured_gru_integrates_rear_axle_com_offset(self):
+        torch = self.torch
+        mean = np.zeros(9, dtype=np.float32)
+        scale = np.ones(9, dtype=np.float32)
+        model_type = _model_type(
+            torch, self.nn, 16, "structured_gru", 1, 16, 9,
+            mean, scale, np.zeros(3, dtype=np.float32),
+            np.ones(3, dtype=np.float32), "euler", REAR_AXLE_TO_COM_X_M)
+        model = model_type()
+        for parameter in model.rate.parameters():
+            torch.nn.init.zeros_(parameter)
+        feature = torch.zeros((1, 9))
+        feature[0, :3] = torch.tensor([2.0, 0.0, 1.0])
+        next_state, _ = model.advance(
+            feature, torch.zeros((1, 16)), torch.tensor([0.01]))
+        np.testing.assert_allclose(
+            next_state.detach().numpy()[0, :3],
+            [2.0 + 0.01 * REAR_AXLE_TO_COM_X_M, -0.02, 1.0],
+            rtol=0.0, atol=1e-7)
+
+    def test_gru_lift_to_mixture_preserves_initial_transition(self):
+        torch, nn = self.torch, self.nn
+        torch.manual_seed(211)
+        mean = np.linspace(-0.5, 0.5, 9, dtype=np.float32)
+        scale = np.linspace(0.5, 1.5, 9, dtype=np.float32)
+        gru_type = _model_type(torch, nn, 16, "gru", 1, 16, 9)
+        source = gru_type().eval()
+        payload = {
+            "state_dict": source.state_dict(),
+            "metadata": {"architecture": "gru"},
+        }
+        mixture_type = _model_type(
+            torch, nn, 16, "mixture", 4, 16, 9, mean, scale)
+        mixture = mixture_type().eval()
+        mode = _initialize_model(mixture, payload, "mixture")
+        self.assertEqual(mode, "gru_lifted_to_4_identical_mixture_experts")
+
+        feature = torch.randn((7, 9))
+        hidden = torch.randn((7, 16))
+        dt = torch.full((7,), 0.025)
+        with torch.no_grad():
+            expected, _ = source.advance(feature, hidden, dt)
+            actual, _ = mixture.advance(feature, hidden, dt)
+        torch.testing.assert_close(expected, actual, rtol=1e-6, atol=1e-6)
+
+    def test_planar_pose_loss_integrates_rear_axle_twist_midpoint(self):
+        torch = self.torch
+        history = torch.zeros((1, 2, 9))
+        history[0, -1, 0] = 2.0
+        history[0, -1, 2] = 1.0
+        predicted = torch.zeros((1, 2, 7), requires_grad=True)
+        with torch.no_grad():
+            predicted[:, :, 0] = 2.0
+            predicted[:, :, 2] = 1.0
+        pose = torch.zeros((1, 3, 3))
+        pose[0, 0] = torch.tensor([1.0, 2.0, 0.4])
+        dts = torch.full((1, 2), 0.1)
+        integrated = _integrate_rear_axle_pose(
+            torch, predicted, history, dts, pose,
+            np.zeros(9, dtype=np.float32),
+            np.ones(9, dtype=np.float32))
+        expected = np.asarray([[
+            [1.0 + 0.2 * np.cos(0.45), 2.0 + 0.2 * np.sin(0.45)],
+            [1.0 + 0.2 * (np.cos(0.45) + np.cos(0.55)),
+             2.0 + 0.2 * (np.sin(0.45) + np.sin(0.55))],
+        ]], dtype=np.float32)
+        np.testing.assert_allclose(integrated.detach().numpy(), expected,
+                                   rtol=0.0, atol=1e-6)
+        integrated.square().sum().backward()
+        self.assertTrue(torch.isfinite(predicted.grad).all())
 
     def test_imu_quaternion_roll_pitch_conversion(self):
         roll = 0.31

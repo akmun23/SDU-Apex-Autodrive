@@ -72,7 +72,8 @@ def diagnose(dataset_path: Path, run_dir: Path, run_ids: list[str],
                           mean, scale,
                           metadata.get("body_acceleration_mean"),
                           metadata.get("body_acceleration_scale"),
-                          metadata.get("integration_method", "euler"))
+                          metadata.get("integration_method", "euler"),
+                          metadata.get("rear_axle_to_com_x_m", 0.0))
     models = []
     for member in train_report["members"]:
         checkpoint_name = member.get("checkpoint")
