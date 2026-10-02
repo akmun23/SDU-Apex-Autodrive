@@ -54,13 +54,15 @@ def _family_for_run(run_id: str, broad_family: str) -> str:
         return "braking_down_transition"
     if "throttle_slew" in name or "throttle_transitions" in name:
         return "steering_transition_slew"
+    if "highspeed" in name and ("surface" in name or "crossfactor" in name):
+        return "steering_transition_slew"
     if ("surface" in name
             or "throttle_5pct_5deg" in name
             or "full_surface" in name):
         return "throttle_surface"
     if any(token in name for token in (
-            "transition", "boundary", "fullsteer", "high_angle",
-            "steeringonly", "combined_slip")):
+            "transition", "boundary", "fullsteer", "highsteer", "high_angle",
+            "steeringonly", "combined_slip", "dynamic_steering")):
         return "steering_transition_slew"
     # Remaining accepted open-plane experiments are continuous/general input
     # excitation rather than a new, unsupported sampling family.

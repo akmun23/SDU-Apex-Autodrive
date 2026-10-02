@@ -44,6 +44,11 @@ from tools.vehicle_dynamics_learning.race_domain_objectives import (
 )
 
 
+POSE_LOSS_HORIZONS_S = (0.25, 0.75, 2.0)
+POSE_POSITION_SCALE_M = 0.25
+POSE_HEADING_SCALE_RAD = 0.10
+
+
 def _rssm_model(torch, nn, hidden_size: int, latent_size: int,
                 x_mean: np.ndarray, x_scale: np.ndarray,
                 y_mean: np.ndarray, y_scale: np.ndarray):
@@ -142,15 +147,143 @@ def _rssm_model(torch, nn, hidden_size: int, latent_size: int,
     return RSSMTeacher
 
 
+def _mirror_normalized_features(values: np.ndarray, mean: np.ndarray,
+                                scale: np.ndarray) -> np.ndarray:
+    """Reflect a left-turn sample into the equivalent right-turn frame."""
+    physical = np.asarray(values) * scale + mean
+    mirrored = physical.copy()
+    mirrored[..., 1:4] *= -1.0  # lateral speed, yaw rate, steering feedback
+    mirrored[..., 5], mirrored[..., 6] = (
+        physical[..., 6].copy(), physical[..., 5].copy())
+    mirrored[..., 7] *= -1.0  # steering command
+    return ((mirrored - mean) / scale).astype(values.dtype, copy=False)
+
+
+def _mirror_normalized_commands(values: np.ndarray, mean: np.ndarray,
+                                scale: np.ndarray) -> np.ndarray:
+    physical = np.asarray(values) * scale + mean
+    mirrored = physical.copy()
+    mirrored[..., 0] *= -1.0
+    return ((mirrored - mean) / scale).astype(values.dtype, copy=False)
+
+
+def _mirror_normalized_state(values: np.ndarray, mean: np.ndarray,
+                             scale: np.ndarray) -> np.ndarray:
+    physical = np.asarray(values) * scale + mean
+    mirrored = _mirror_physical_state(physical)
+    return ((mirrored - mean) / scale).astype(values.dtype, copy=False)
+
+
+def _mirror_physical_state(values: np.ndarray) -> np.ndarray:
+    mirrored = np.asarray(values).copy()
+    mirrored[..., 1:4] *= -1.0
+    mirrored[..., 5], mirrored[..., 6] = (
+        values[..., 6].copy(), values[..., 5].copy())
+    return mirrored
+
+
+def _mirror_normalized_targets(values: np.ndarray, mean: np.ndarray,
+                               scale: np.ndarray) -> np.ndarray:
+    physical = np.asarray(values) * scale + mean
+    mirrored = physical.copy()
+    mirrored[..., :STATE_COUNT] = _mirror_physical_state(
+        physical[..., :STATE_COUNT])
+    mirrored[..., STATE_COUNT + 1] *= -1.0  # lateral acceleration
+    mirrored[..., STATE_COUNT + 2] *= -1.0  # yaw acceleration
+    return ((mirrored - mean) / scale).astype(values.dtype, copy=False)
+
+
+def _local_pose_targets(poses: np.ndarray) -> np.ndarray:
+    """Express future simulator poses relative to the rollout's initial pose."""
+    values = np.asarray(poses, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 3 or len(values) < 2:
+        raise ValueError("pose window must have shape (N>=2, 3)")
+    if not np.isfinite(values).all():
+        raise ValueError("pose window contains non-finite values")
+    origin = values[0]
+    dx = values[1:, 0] - origin[0]
+    dy = values[1:, 1] - origin[1]
+    cosine, sine = math.cos(origin[2]), math.sin(origin[2])
+    local = np.empty((len(values) - 1, 3), dtype=np.float32)
+    local[:, 0] = cosine * dx + sine * dy
+    local[:, 1] = -sine * dx + cosine * dy
+    delta_yaw = values[1:, 2] - origin[2]
+    local[:, 2] = np.arctan2(np.sin(delta_yaw), np.cos(delta_yaw))
+    return local
+
+
+def _integrate_pose_from_com_states(torch, predicted_states,
+                                    initial_state_normalized,
+                                    y_mean: np.ndarray,
+                                    y_scale: np.ndarray):
+    """Integrate predicted COM states into rear-axle-relative pose."""
+    mean = torch.as_tensor(y_mean[:STATE_COUNT], dtype=predicted_states.dtype,
+                           device=predicted_states.device)
+    scale = torch.as_tensor(y_scale[:STATE_COUNT],
+                            dtype=predicted_states.dtype,
+                            device=predicted_states.device)
+    physical = predicted_states[..., :STATE_COUNT] * scale + mean
+    previous = initial_state_normalized * scale + mean
+    pose = torch.zeros((physical.shape[0], 3), dtype=physical.dtype,
+                       device=physical.device)
+    trajectory = []
+    for index in range(physical.shape[1]):
+        following = physical[:, index, :3]
+        u = 0.5 * (previous[:, 0] + following[:, 0])
+        r = 0.5 * (previous[:, 2] + following[:, 2])
+        v_rear = 0.5 * (
+            previous[:, 1] - COM_X_M * previous[:, 2]
+            + following[:, 1] - COM_X_M * following[:, 2])
+        yaw_mid = pose[:, 2] + 0.5 * r * DT_S
+        dx = (u * torch.cos(yaw_mid) - v_rear * torch.sin(yaw_mid)) * DT_S
+        dy = (u * torch.sin(yaw_mid) + v_rear * torch.cos(yaw_mid)) * DT_S
+        pose = torch.stack((pose[:, 0] + dx, pose[:, 1] + dy,
+                            pose[:, 2] + r * DT_S), dim=-1)
+        trajectory.append(pose)
+        previous = following
+    return torch.stack(trajectory, dim=1)
+
+
+def _integrated_pose_loss(torch, nn, predicted_states, target_pose,
+                          initial_state, y_mean: np.ndarray,
+                          y_scale: np.ndarray) -> Any:
+    predicted_pose = _integrate_pose_from_com_states(
+        torch, predicted_states, initial_state, y_mean, y_scale)
+    losses = []
+    for seconds in POSE_LOSS_HORIZONS_S:
+        index = round(seconds / DT_S) - 1
+        if index >= predicted_pose.shape[1]:
+            continue
+        position_error = (
+            predicted_pose[:, index, :2] - target_pose[:, index, :2]
+        ) / POSE_POSITION_SCALE_M
+        heading_error = torch.atan2(
+            torch.sin(predicted_pose[:, index, 2] - target_pose[:, index, 2]),
+            torch.cos(predicted_pose[:, index, 2] - target_pose[:, index, 2]),
+        ) / POSE_HEADING_SCALE_RAD
+        zero_position = torch.zeros_like(position_error)
+        zero_heading = torch.zeros_like(heading_error)
+        position_loss = nn.functional.smooth_l1_loss(
+            position_error, zero_position, beta=1.0)
+        heading_loss = nn.functional.smooth_l1_loss(
+            heading_error, zero_heading, beta=1.0)
+        losses.append(0.5 * (position_loss + heading_loss))
+    if not losses:
+        raise ValueError("rollout is shorter than every pose-loss horizon")
+    return torch.stack(losses).mean()
+
+
 def _sample_batch(data: dict[str, Any], targets: np.ndarray,
                   groups: dict[int, list[tuple[int, int]]], batch_size: int,
                   context_steps: int, rollout_steps: int,
                   x_mean: np.ndarray, x_scale: np.ndarray,
                   y_mean: np.ndarray, y_scale: np.ndarray,
                   rng: np.random.Generator,
-                  family_sampler=None) -> tuple[np.ndarray, ...]:
+                  family_sampler=None,
+                  symmetry_augmentation: bool = False
+                  ) -> tuple[np.ndarray, ...]:
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
-    contexts, commands, labels, initial_states = [], [], [], []
+    contexts, commands, labels, initial_states, pose_targets = [], [], [], [], []
     for _ in range(batch_size):
         if family_sampler is None:
             run_id = int(rng.choice(run_ids))
@@ -175,13 +308,39 @@ def _sample_batch(data: dict[str, Any], targets: np.ndarray,
                        - y_mean) / y_scale)
         initial_states.append((initial_physical - y_mean[:STATE_COUNT])
                               / y_scale[:STATE_COUNT])
-    return (np.stack(contexts), np.stack(commands), np.stack(labels),
-            np.stack(initial_states))
+        simulator_pose = data.get("simulator_pose_xyyaw")
+        if simulator_pose is None:
+            raise ValueError("integrated pose training requires simulator poses")
+        pose_window = simulator_pose[
+            future_start - 1:future_start + rollout_steps]
+        pose_targets.append(_local_pose_targets(pose_window))
+    batch = [np.stack(contexts), np.stack(commands), np.stack(labels),
+             np.stack(initial_states), np.stack(pose_targets)]
+    mirrored_count = 0
+    if symmetry_augmentation:
+        mirrored = rng.random(batch_size) < 0.5
+        mirrored_count = int(np.count_nonzero(mirrored))
+        if mirrored_count:
+            batch[0][mirrored] = _mirror_normalized_features(
+                batch[0][mirrored], x_mean, x_scale)
+            batch[1][mirrored] = _mirror_normalized_commands(
+                batch[1][mirrored], x_mean[7:9], x_scale[7:9])
+            batch[2][mirrored] = _mirror_normalized_targets(
+                batch[2][mirrored], y_mean, y_scale)
+            batch[3][mirrored] = _mirror_normalized_state(
+                batch[3][mirrored], y_mean[:STATE_COUNT],
+                y_scale[:STATE_COUNT])
+            batch[4][mirrored, :, 1] *= -1.0
+            batch[4][mirrored, :, 2] *= -1.0
+    return (*batch, mirrored_count)
 
 
 def _batch_loss(torch, nn, model, context, commands, labels, initial_state,
                 kl_weight: float, free_rollout_weight: float,
-                acceleration_weight: float, speed_weights=None):
+                acceleration_weight: float, speed_weights=None,
+                pose_targets=None, pose_loss_weight: float = 0.1,
+                y_mean: np.ndarray | None = None,
+                y_scale: np.ndarray | None = None):
     batch_size, horizon = labels.shape[:2]
     hidden = model.encode(context)
     current_state = initial_state
@@ -219,8 +378,10 @@ def _batch_loss(torch, nn, model, context, commands, labels, initial_state,
         hidden = model.advance_memory(hidden, next_target, command, latent)
         current_state = next_target
 
+    # The offline plant uses the prior mean at inference; train its recursive
+    # rollout against that same deterministic transition.
     prior_rollout = model(context, commands, initial_state=initial_state,
-                          sample_prior=True)
+                          sample_prior=False)
     if speed_weights is None:
         free_rollout_loss = nn.functional.smooth_l1_loss(
             prior_rollout[:, :, :STATE_COUNT], labels[:, :, :STATE_COUNT],
@@ -232,12 +393,53 @@ def _batch_loss(torch, nn, model, context, commands, labels, initial_state,
     loss = (free_rollout_weight * free_rollout_loss
             + 0.25 * reconstruction + kl_weight * kl_total
             + acceleration_weight * acceleration_loss)
+    pose_loss = torch.zeros((), device=context.device)
+    if pose_loss_weight > 0.0:
+        if pose_targets is None or y_mean is None or y_scale is None:
+            raise ValueError("pose loss requires pose targets and state scales")
+        pose_loss = _integrated_pose_loss(
+            torch, nn, prior_rollout, pose_targets, initial_state,
+            y_mean, y_scale)
+        loss = loss + pose_loss_weight * pose_loss
     return loss, {
         "free_rollout": free_rollout_loss,
         "posterior_reconstruction": reconstruction,
         "kl": kl_total,
         "acceleration": acceleration_loss,
+        "integrated_pose": pose_loss,
     }
+
+
+def _pose_aware_selection_score(validation: dict[str, Any],
+                                pose_loss_weight: float) -> tuple[float | None,
+                                                                  float | None]:
+    """Add run-macro short-pose error to the existing speed-balanced score."""
+    state_score = validation.get("checkpoint_selection_score")
+    if state_score is None:
+        return None, None
+    rows = []
+    for run in validation.get("per_run", {}).values():
+        horizons = run.get("horizons", {})
+        for horizon in ("0.25s", "0.75s", "2s"):
+            metrics = horizons.get(horizon)
+            if metrics is None:
+                continue
+            position_xy = metrics.get("position_xy_rmse_m")
+            heading = metrics.get("heading_rmse_rad")
+            if (position_xy is None or heading is None
+                    or not np.isfinite(position_xy).all()
+                    or not np.isfinite(heading)):
+                continue
+            radial_rmse = float(np.hypot(*position_xy))
+            rows.append(0.5 * (
+                radial_rmse / POSE_POSITION_SCALE_M
+                + float(heading) / POSE_HEADING_SCALE_RAD))
+    if not rows:
+        if pose_loss_weight == 0.0:
+            return float(state_score), None
+        return None, None
+    pose_score = float(np.mean(rows))
+    return float(state_score + pose_loss_weight * pose_score), pose_score
 
 
 def train(dataset_path: Path, output_dir: Path, *, device_name: str,
@@ -245,7 +447,11 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
           hidden_size: int, latent_size: int, batch_size: int,
           max_steps: int, eval_every: int, patience: int,
           max_eval_windows_per_run: int, seed: int,
-          score_test: bool) -> dict[str, Any]:
+          score_test: bool,
+          symmetry_augmentation: bool = False,
+          pose_loss_weight: float = 0.1) -> dict[str, Any]:
+    if not np.isfinite(pose_loss_weight) or pose_loss_weight < 0.0:
+        raise ValueError("pose loss weight must be finite and nonnegative")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -283,17 +489,22 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     rng = np.random.default_rng(seed)
     eval_seed = seed + 65041
     best_score = math.inf
+    best_state_score = None
+    best_pose_score = None
     best_step = 0
     patience_count = 0
     history = []
     start_time = time.perf_counter()
     steps_completed = 0
+    symmetry_augmented_samples = 0
     for step in range(1, max_steps + 1):
         steps_completed = step
         batch = _sample_batch(
             data, targets, groups["train"], batch_size,
             context_steps, rollout_steps, x_mean, x_scale,
-            y_mean, y_scale, rng, family_sampler)
+            y_mean, y_scale, rng, family_sampler,
+            symmetry_augmentation=symmetry_augmentation)
+        symmetry_augmented_samples += batch[5]
         speed_weights = None
         if int(data.get("schema_version", 0)) >= 8:
             physical_labels = batch[2] * y_scale + y_mean
@@ -306,12 +517,16 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
         commands = torch.as_tensor(batch[1], dtype=torch.float32, device=device)
         labels = torch.as_tensor(batch[2], dtype=torch.float32, device=device)
         initial = torch.as_tensor(batch[3], dtype=torch.float32, device=device)
+        pose_targets = torch.as_tensor(batch[4], dtype=torch.float32,
+                                       device=device)
         model.train()
         optimizer.zero_grad(set_to_none=True)
         loss, parts = _batch_loss(
             torch, nn, model, context, commands, labels, initial,
             kl_weight=0.01, free_rollout_weight=1.0,
-            acceleration_weight=0.05, speed_weights=speed_weights)
+            acceleration_weight=0.05, speed_weights=speed_weights,
+            pose_targets=pose_targets, pose_loss_weight=pose_loss_weight,
+            y_mean=y_mean, y_scale=y_scale)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite RSSM loss at step {step}")
         loss.backward()
@@ -322,13 +537,17 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
                 torch, model, data, targets, groups["validation"],
                 x_mean, x_scale, y_mean, y_scale, device, context_steps,
                 rollout_steps, eval_seed, max_eval_windows_per_run)
-            score = validation["checkpoint_selection_score"]
+            score, pose_score = _pose_aware_selection_score(
+                validation, pose_loss_weight=pose_loss_weight)
             event = {
                 "step": step,
                 "training_loss": float(loss.detach().cpu()),
                 "loss_parts": {name: float(value.detach().cpu())
                                for name, value in parts.items()},
                 "validation_score": score,
+                "validation_state_score": validation[
+                    "checkpoint_selection_score"],
+                "validation_pose_score": pose_score,
                 "validation": validation,
             }
             history.append(event)
@@ -336,6 +555,8 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
                               "validation_score": score}), flush=True)
             if score is not None and score < best_score:
                 best_score = score
+                best_state_score = validation["checkpoint_selection_score"]
+                best_pose_score = pose_score
                 best_step = step
                 patience_count = 0
                 torch.save({
@@ -351,6 +572,14 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
                         "rollout_steps": rollout_steps,
                         "hidden_size": hidden_size,
                         "latent_size": latent_size,
+                        "training_objective": {
+                            "prior_rollout": "deterministic prior mean",
+                            "integrated_pose_loss_weight": pose_loss_weight,
+                            "integrated_pose_horizons_s": list(
+                                POSE_LOSS_HORIZONS_S),
+                            "position_scale_m": POSE_POSITION_SCALE_M,
+                            "heading_scale_rad": POSE_HEADING_SCALE_RAD,
+                        },
                         "training_runs": [str(data["run_ids"][i])
                                           for i in sorted(groups["train"])],
                         "posterior_uses_future_target_during_training_only": True,
@@ -399,6 +628,9 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
             time.perf_counter() - start_time, 1e-9),
         "best_step": best_step,
         "best_validation_score": best_score,
+        "best_pose_aware_validation_score": best_score,
+        "best_validation_state_score": best_state_score,
+        "best_validation_pose_score": best_pose_score,
         "eligible_runs_by_split": {
             split: [str(data["run_ids"][i]) for i in sorted(local_groups)]
             for split, local_groups in groups.items()},
@@ -406,6 +638,19 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
             split: sum(map(len, local_groups.values()))
             for split, local_groups in groups.items()},
         "training_sampler": family_sampler.metadata,
+        "symmetry_augmentation": symmetry_augmentation,
+        "symmetry_augmented_sample_fraction": (
+            symmetry_augmented_samples / (steps_completed * batch_size)),
+        "training_objective": {
+            "prior_rollout": "deterministic prior mean to match plant inference",
+            "integrated_pose_loss_weight": pose_loss_weight,
+            "integrated_pose_horizons_s": list(POSE_LOSS_HORIZONS_S),
+            "position_scale_m": POSE_POSITION_SCALE_M,
+            "heading_scale_rad": POSE_HEADING_SCALE_RAD,
+            "checkpoint_selection": (
+                "existing speed/run-balanced body-state score + pose-loss-weight times "
+                "run-macro normalized position/heading RMSE at 0.25/0.75/2 s"),
+        },
         "validation": validation,
         "test_scored_once": bool(score_test),
         "test": test,
@@ -428,7 +673,11 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
          "batch_size": batch_size, "max_steps": max_steps,
          "eval_every": eval_every, "patience": patience,
          "max_eval_windows_per_run": max_eval_windows_per_run,
+         "pose_loss_weight": pose_loss_weight,
          "training_sampler": family_sampler.metadata,
+         "symmetry_augmentation": symmetry_augmentation,
+         "symmetry_augmented_sample_fraction": (
+             symmetry_augmented_samples / (steps_completed * batch_size)),
          "score_test": score_test}, seed, report,
         ("tools/vehicle_dynamics_learning/train_rssm_teacher.py",
          "tools/vehicle_dynamics_learning/train_direct_sequence_teacher.py",
@@ -452,7 +701,10 @@ def main() -> int:
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--max-eval-windows-per-run", type=int, default=32)
     parser.add_argument("--seed", type=int, default=20261003)
+    parser.add_argument("--pose-loss-weight", type=float, default=0.1)
     parser.add_argument("--score-test", action="store_true")
+    parser.add_argument("--symmetry-augmentation", action="store_true",
+                        help="randomly reflect half of sampled training windows")
     args = parser.parse_args()
     train(
         args.dataset, args.output_dir, device_name=args.device,
@@ -462,7 +714,9 @@ def main() -> int:
         batch_size=args.batch_size, max_steps=args.max_steps,
         eval_every=args.eval_every, patience=args.patience,
         max_eval_windows_per_run=args.max_eval_windows_per_run,
-        seed=args.seed, score_test=args.score_test)
+        seed=args.seed, score_test=args.score_test,
+        symmetry_augmentation=args.symmetry_augmentation,
+        pose_loss_weight=args.pose_loss_weight)
     print(f"wrote {args.output_dir / 'training_report.json'}")
     return 0
 

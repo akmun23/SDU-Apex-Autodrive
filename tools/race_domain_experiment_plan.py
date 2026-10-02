@@ -21,6 +21,18 @@ RACE_DOMAIN_MODERATE_STEER_LIMITS = {
     10.5: 0.14,
     11.1: 0.12,
 }
+HIGH_STEER_VALIDATION_SPEED_MPS = 7.5
+HIGH_STEER_VALIDATION_DWELL_S = 7.5
+HIGH_STEER_VALIDATION_REPETITIONS = 1
+HIGH_STEER_VALIDATION_ANGLES_RAD = (0.20, 0.25, 0.30, 0.35,
+                                     0.42, 0.46, 0.50, 0.5236)
+RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS = (9.5, 10.5, 11.1)
+RACE_DOMAIN_STEERING_FRONTIER_ANGLES_RAD = {
+    9.5: (0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20),
+    10.5: (0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20),
+    11.1: (0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18),
+}
+RACE_DOMAIN_STEERING_FRONTIER_DWELL_S = 3.0
 # Preliminary only: stable, near-straight throttle-sweep plateaus in
 # openplane_throttle_5pct_5deg_20260930_r05_resume yielded approximately
 # (8.49 m/s, 0.35), (9.66 m/s, 0.40), and (10.82 m/s, 0.45). This one-run
@@ -267,6 +279,64 @@ def build_race_domain_moderate_braking_plan(
             blocks.append(CommandBlock(
                 speed, sign * steering, dwell,
                 f"corner_exit_{'L' if sign > 0 else 'R'}_{index}"))
+    return tuple(blocks)
+
+
+def build_high_steer_validation_plan(seed: int) -> tuple[CommandBlock, ...]:
+    """Replicate the observed 7.7–7.9 m/s high-steer cells with long holds.
+
+    Existing held-out data reaches about 7.8 m/s at up to 0.524 rad, but the
+    condition fragments are too short for a 2 s context plus a 5 s free
+    rollout and the high-steer cells come from one run. Each capture performs
+    one randomized 7.5 s sweep of those observed angles at 7.5 m/s; independent
+    whole-run captures provide replication.
+    """
+    rng = random.Random(seed)
+    conditions = [CommandBlock(
+        HIGH_STEER_VALIDATION_SPEED_MPS, 0.0,
+        HIGH_STEER_VALIDATION_DWELL_S, "baseline_zero_steer")]
+    conditions.extend(
+        CommandBlock(
+            HIGH_STEER_VALIDATION_SPEED_MPS, sign * angle,
+            HIGH_STEER_VALIDATION_DWELL_S,
+            f"steer_{sign:+.0f}_{angle:.4f}")
+        for angle in HIGH_STEER_VALIDATION_ANGLES_RAD
+        for sign in (-1.0, 1.0)
+    )
+    blocks: list[CommandBlock] = []
+    for repetition in range(1, HIGH_STEER_VALIDATION_REPETITIONS + 1):
+        ordered = conditions.copy()
+        rng.shuffle(ordered)
+        blocks.extend(CommandBlock(
+            block.target_speed_mps, block.steering_rad, block.duration_s,
+            f"r{repetition}_{block.label}") for block in ordered)
+    return tuple(blocks)
+
+
+def build_race_domain_steering_frontier_plan(
+        seed: int) -> tuple[CommandBlock, ...]:
+    """Probe matched-start high-speed steering response around the known edge.
+
+    Earlier 9.5–11.1 m/s captures stopped at 0.12–0.14 rad and showed a
+    reproducible yaw/lateral-acceleration roll-off. This plan samples the
+    response more densely through 0.20 rad, in both turn directions. The
+    caller settles to the same near-straight state before every block and
+    keeps the simulator's tilt and hard-speed aborts active.
+    """
+    rng = random.Random(seed)
+    blocks: list[CommandBlock] = []
+    for speed in RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS:
+        blocks.append(CommandBlock(
+            speed, 0.0, RACE_DOMAIN_STEERING_FRONTIER_DWELL_S,
+            f"frontier_baseline_{speed:g}"))
+        signed = [sign * magnitude
+                  for magnitude in RACE_DOMAIN_STEERING_FRONTIER_ANGLES_RAD[speed]
+                  for sign in (-1.0, 1.0)]
+        rng.shuffle(signed)
+        blocks.extend(CommandBlock(
+            speed, steering, RACE_DOMAIN_STEERING_FRONTIER_DWELL_S,
+            f"frontier_{speed:g}_{steering:+.3f}")
+            for steering in signed)
     return tuple(blocks)
 
 

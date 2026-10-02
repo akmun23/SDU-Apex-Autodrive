@@ -353,7 +353,9 @@ def _groups(data: dict[str, Any], physical_state: np.ndarray,
 
 def _initial_state(data: dict[str, Any], start: int,
                    physical_state: np.ndarray,
-                   sequence_start: int) -> np.ndarray:
+                   sequence_start: int,
+                   front_surface_speed_mps: tuple[float, float] | None = None
+                   ) -> np.ndarray:
     u, v, yaw_rate = map(float, physical_state[start, :3])
     steering = float(data["frames"][start, 3])
     tangent = math.tan(steering)
@@ -368,7 +370,9 @@ def _initial_state(data: dict[str, Any], start: int,
         angle = front_angles[index] if index < 2 else 0.0
         vx_wheel = math.cos(angle) * vx_body + math.sin(angle) * vy_body
         if index < 2:
-            wheel_omega.append(vx_wheel / WHEEL_RADIUS_M)
+            surface_speed = (vx_wheel if front_surface_speed_mps is None
+                             else float(front_surface_speed_mps[index]))
+            wheel_omega.append(surface_speed / WHEEL_RADIUS_M)
         else:
             rear_col = 3 + index - 2
             wheel_omega.append(float(physical_state[start, rear_col])

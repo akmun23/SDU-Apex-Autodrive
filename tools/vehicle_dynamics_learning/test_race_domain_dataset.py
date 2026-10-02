@@ -35,6 +35,17 @@ class RaceDomainDatasetTest(unittest.TestCase):
                          "practice_race")
         self.assertEqual(_family_for_run("openplane_throttle_slew_r01", "open_plane"),
                          "steering_transition_slew")
+        self.assertEqual(_family_for_run("openplane_highsteer_75_train_r02", "open_plane"),
+                         "steering_transition_slew")
+        self.assertEqual(_family_for_run(
+            "openplane_race_domain_dynamic_steering_train_r02", "open_plane"),
+            "steering_transition_slew")
+        self.assertEqual(_family_for_run(
+            "openplane_isolated_highspeed_surface_20260927", "open_plane"),
+            "steering_transition_slew")
+        self.assertEqual(_family_for_run(
+            "openplane_highspeed_crossfactor_20260927_02", "open_plane"),
+            "steering_transition_slew")
         self.assertEqual(_family_for_run("openplane_rootless_40_surface", "open_plane"),
                          "throttle_surface")
         self.assertEqual(_family_for_run("openplane_full_input_train1", "open_plane"),

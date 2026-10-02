@@ -59,6 +59,7 @@ exec docker run --rm --name "${container}" \
       /autodrive/roboracer_1/bridge_packet_timing \
       /autodrive/roboracer_1/bridge_timing_fault \
       /autodrive/roboracer_1/bridge_timing_fault_detail \
+      /autodrive/reset_command \
       /odom \
       /odom/diagnostics \
       /ekf_odom \

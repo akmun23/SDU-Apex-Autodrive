@@ -26,6 +26,20 @@ cleanup() {
     return
   fi
   cleanup_done=1
+  # Finalize the bag before disconnecting the simulator bridge; otherwise the
+  # expected socket close is recorded as a timing fault in the captured run.
+  docker kill --signal SIGINT "${recorder_container}" >/dev/null 2>&1 || true
+  recorder_state="true"
+  for _ in $(seq 1 100); do
+    recorder_state="$(docker inspect --format '{{.State.Running}}' \
+      "${recorder_container}" 2>/dev/null || true)"
+    [[ "${recorder_state}" == "true" ]] || break
+    sleep 0.1
+  done
+  if [[ "${recorder_state}" == "true" ]]; then
+    docker stop --timeout 5 "${recorder_container}" >/dev/null 2>&1 || true
+  fi
+
   docker stop --timeout 0 "${simulator_container}" >/dev/null 2>&1 || true
   docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
   for _ in $(seq 1 10); do
@@ -36,7 +50,6 @@ cleanup() {
   if [[ "${running:-false}" == "true" ]]; then
     docker stop --timeout 0 "${controller_container}" >/dev/null 2>&1 || true
   fi
-  docker kill --signal SIGINT "${recorder_container}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT

@@ -13,6 +13,9 @@ usage() {
     "race_domain_continuous records one uninterrupted 0–12 m/s speed/steering/braking sequence." \
     "race_domain_brake_boundary records legacy low-steering paired tests at 9–11.1 m/s." \
     "race_domain_moderate_braking adds 9–11.1 m/s turn-in, throttle reduction, active braking and release." \
+    "race_domain_steering_frontier maps reset-isolated steering response at 9.5, 10.5, and 11.1 m/s." \
+    "isolated_highsteer_75_long repeats the observed 7.5 m/s high-steering envelope with 8 s holds." \
+    "race_domain_dynamic_steering records continuous signed steering transitions at 4.5, 6.5, and 7.5 m/s." \
     "Resume a partial surface with SDU_APEX_EXPERIMENT_RESUME_ANALYSIS pointing to its closed analysis JSON." \
     "Set SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD to comma-separated steering angles in radians." \
     "Set SDU_APEX_EXPERIMENT_THROTTLE_REPEAT_COUNT, TARGET_STEP_PERCENT, and BASELINE_STEP_PERCENT." \
@@ -46,6 +49,10 @@ elif [[ "${profile}" == race_domain_brake_boundary ]]; then
   default_timeout_s=270
 elif [[ "${profile}" == race_domain_moderate_braking ]]; then
   default_timeout_s=430
+elif [[ "${profile}" == race_domain_steering_frontier ]]; then
+  default_timeout_s=1200
+elif [[ "${profile}" == isolated_highsteer_75_long ]]; then
+  default_timeout_s=240
 fi
 timeout_s="${SDU_APEX_EXPERIMENT_TIMEOUT_S:-${default_timeout_s}}"
 steering_angles_rad="${SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD:-0.0}"
@@ -56,7 +63,8 @@ smoke_throttle="${SDU_APEX_EXPERIMENT_SMOKE_THROTTLE:-1.0}"
 smoke_hold_s="${SDU_APEX_EXPERIMENT_SMOKE_HOLD_S:-5.0}"
 dev_sim_reset_enabled=0
 if [[ "${profile}" == throttle_reset_smoke ||
-      "${profile}" == throttle_transition_surface ]]; then
+      "${profile}" == throttle_transition_surface ||
+      "${profile}" == race_domain_steering_frontier ]]; then
   dev_sim_reset_enabled=1
 fi
 probe_dwell_s="${SDU_APEX_EXPERIMENT_PROBE_DWELL_S:-0}"
@@ -75,7 +83,7 @@ if [[ ! "${run_id}" =~ ^[[:alnum:]_-]+$ ]]; then
   echo "Run ID may contain only letters, digits, underscores, and hyphens." >&2
   exit 2
 fi
-if [[ "${profile}" != high_angle_boundary && "${profile}" != isolated_boundary && "${profile}" != isolated_speed_sweep && "${profile}" != isolated_force_3mps && "${profile}" != isolated_force_4mps && "${profile}" != isolated_force_5mps && "${profile}" != isolated_highspeed_surface && "${profile}" != isolated_3to5_response_surface && "${profile}" != isolated_highspeed_crossfactor && "${profile}" != isolated_highspeed_tail && "${profile}" != isolated_transition_65mps && "${profile}" != isolated_transition_45mps && "${profile}" != isolated_transition_speed_surface && "${profile}" != isolated_transition_support && "${profile}" != isolated_transition_bridge && "${profile}" != isolated_transition_low_support && "${profile}" != isolated_transition_full_surface && "${profile}" != transient_4mps && "${profile}" != transient_fullsteer_4mps && "${profile}" != transient_transition_4mps && "${profile}" != transient_transition_4mps_fixedthrottle && "${profile}" != transient_transition_dwell_4mps_fixedthrottle && "${profile}" != throttle_slew_pair && "${profile}" != throttle_reset_smoke && "${profile}" != throttle_transition_surface && "${profile}" != full_input_excitation && "${profile}" != race_domain_continuous && "${profile}" != race_domain_brake_boundary && "${profile}" != race_domain_moderate_braking && "${profile}" != grid ]]; then
+if [[ "${profile}" != high_angle_boundary && "${profile}" != isolated_boundary && "${profile}" != isolated_speed_sweep && "${profile}" != isolated_force_3mps && "${profile}" != isolated_force_4mps && "${profile}" != isolated_force_5mps && "${profile}" != isolated_highspeed_surface && "${profile}" != isolated_highsteer_75_long && "${profile}" != race_domain_dynamic_steering && "${profile}" != isolated_3to5_response_surface && "${profile}" != isolated_highspeed_crossfactor && "${profile}" != isolated_highspeed_tail && "${profile}" != isolated_transition_65mps && "${profile}" != isolated_transition_45mps && "${profile}" != isolated_transition_speed_surface && "${profile}" != isolated_transition_support && "${profile}" != isolated_transition_bridge && "${profile}" != isolated_transition_low_support && "${profile}" != isolated_transition_full_surface && "${profile}" != transient_4mps && "${profile}" != transient_fullsteer_4mps && "${profile}" != transient_transition_4mps && "${profile}" != transient_transition_4mps_fixedthrottle && "${profile}" != transient_transition_dwell_4mps_fixedthrottle && "${profile}" != throttle_slew_pair && "${profile}" != throttle_reset_smoke && "${profile}" != throttle_transition_surface && "${profile}" != full_input_excitation && "${profile}" != race_domain_continuous && "${profile}" != race_domain_brake_boundary && "${profile}" != race_domain_moderate_braking && "${profile}" != race_domain_steering_frontier && "${profile}" != grid ]]; then
   echo "Invalid SDU_APEX_EXPERIMENT_PROFILE; run $0 --help for usage." >&2
   exit 2
 fi

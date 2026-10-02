@@ -223,7 +223,7 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
     domain_speed_cap_mps = None
     if schema_version >= 7:
         required_schema7 = {
-            "run_families", "condition_labels", "condition_run_index",
+            "run_families", "condition_labels",
             "sequence_condition_id", "sequence_reset_index",
             "sequence_replicate_index", "frame_run_index",
             "frame_reset_index",
@@ -234,8 +234,6 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
                 f"schema-7 dataset lacks metadata: {sorted(missing_schema7)}")
         run_families = data["run_families"].astype(str)
         condition_labels = data["condition_labels"].astype(str)
-        condition_run_index = data["condition_run_index"].astype(np.int32,
-                                                               copy=False)
         sequence_condition_id = data["sequence_condition_id"].astype(
             np.int32, copy=False)
         sequence_reset_index = data["sequence_reset_index"].astype(
@@ -245,20 +243,15 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         frame_run_index = data["frame_run_index"].astype(np.int32, copy=False)
         frame_reset_index = data["frame_reset_index"].astype(np.int32, copy=False)
         if (run_families.shape != run_ids.shape
-                or condition_run_index.shape != condition_labels.shape
                 or sequence_condition_id.shape != seq_run.shape
                 or sequence_reset_index.shape != seq_run.shape
                 or sequence_replicate_index.shape != seq_run.shape
                 or frame_run_index.shape != (len(frames),)
                 or frame_reset_index.shape != (len(frames),)):
             raise ValueError("schema-7 run/condition/reset arrays do not align")
-        if (np.any(condition_run_index < 0)
-                or np.any(condition_run_index >= len(run_ids))
-                or np.any(sequence_condition_id < 0)
+        if (np.any(sequence_condition_id < 0)
                 or np.any(sequence_condition_id >= len(condition_labels))):
             raise ValueError("schema-7 condition references are out of range")
-        if np.any(condition_run_index[sequence_condition_id] != seq_run):
-            raise ValueError("schema-7 condition IDs refer to a different run")
         for sequence_id, (start_raw, end_raw) in enumerate(bounds):
             start, end = int(start_raw), int(end_raw)
             expected_run = int(seq_run[sequence_id])
@@ -272,11 +265,19 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
                 "dataset_role", "domain_speed_cap_mps", "domain_cooldown_steps",
                 "training_families", "training_family_names",
                 "training_family_probabilities", "frame_domain_speed_mps",
+                "condition_run_index",
             }
             missing_race = required_race_domain - set(data.files)
             if missing_race:
                 raise ValueError(
                     f"schema-8 dataset lacks race-domain metadata: {sorted(missing_race)}")
+            condition_run_index = data["condition_run_index"].astype(
+                np.int32, copy=False)
+            if (condition_run_index.shape != condition_labels.shape
+                    or np.any(condition_run_index < 0)
+                    or np.any(condition_run_index >= len(run_ids))
+                    or np.any(condition_run_index[sequence_condition_id] != seq_run)):
+                raise ValueError("schema-8 condition IDs refer to a different run")
             role = str(data["dataset_role"].astype(str)[0])
             if role != "race_domain":
                 raise ValueError(
@@ -305,6 +306,7 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
                     or np.any(frame_domain_speed_mps > speed_cap + 1e-5)):
                 raise ValueError("race-domain frames exceed the declared speed support")
     packet_sequence = None
+    sample_time_ns = None
     if schema_version >= 4:
         if "packet_sequence" not in data.files:
             raise ValueError("fixed-timebase dataset lacks packet_sequence")
@@ -317,6 +319,14 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
             start, end = int(start_raw), int(end_raw)
             if np.any(np.diff(packet_sequence[start:end]) != 1):
                 raise ValueError("a plant sequence contains a simulator packet gap")
+        if "sample_time_ns" in data.files:
+            sample_time_ns = data["sample_time_ns"].astype(np.int64, copy=False)
+            if sample_time_ns.shape != (len(frames),):
+                raise ValueError("sample_time_ns must align with every frame")
+            for start_raw, end_raw in bounds:
+                start, end = int(start_raw), int(end_raw)
+                if np.any(np.diff(sample_time_ns[start:end]) <= 0):
+                    raise ValueError("sample receipt times must increase within a sequence")
     if schema_version >= 5:
         required_pose = {"odom_pose_xyyaw", "simulator_pose_xyyaw", "lap_count"}
         missing_pose = required_pose - set(data.files)
@@ -457,6 +467,7 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         "imu_attitude_valid": attitude_valid,
         "imu_attitude_feature_names": attitude_names,
         "packet_sequence": packet_sequence,
+        "sample_time_ns": sample_time_ns,
         "odom_pose_xyyaw": odom_pose,
         "simulator_pose_xyyaw": simulator_pose,
         "lap_count": lap_count,

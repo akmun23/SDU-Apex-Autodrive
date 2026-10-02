@@ -57,7 +57,24 @@ def _transitions(rows: list[tuple[int, Any]]) -> list[tuple[int, int]]:
     return result
 
 
-def _receipt_gates(path: Path) -> dict[str, Any]:
+def _validate_lap_count_transitions(counts: list[int], expected_laps: int) -> None:
+    expected = list(range(expected_laps + 1))
+    if counts != expected:
+        raise ValueError(
+            f"expected completed lap-count transitions 0..{expected_laps}; got {counts}")
+
+
+def _receipt_gates(path: Path, expected_laps: int = 12,
+                   allow_post_run_disconnect: bool = True) -> dict[str, Any]:
+    """Validate one uninterrupted active practice interval.
+
+    The production observer evaluator retains its historical 12-lap default
+    and narrowly classified trailing-disconnect allowance. Fresh model
+    validation uses ``expected_laps=6`` and disables that allowance so every
+    timing fault rejects the capture.
+    """
+    if expected_laps < 1:
+        raise ValueError("expected_laps must be positive")
     connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         topics = analysis._topic_map(connection)
@@ -69,8 +86,7 @@ def _receipt_gates(path: Path) -> dict[str, Any]:
 
         transitions = _transitions(_read_messages(connection, topics, LAP_COUNT))
         counts = [count for _, count in transitions]
-        if counts != list(range(13)):
-            raise ValueError(f"expected completed lap-count transitions 0..12; got {counts}")
+        _validate_lap_count_transitions(counts, expected_laps)
         active_start_ns, _ = transitions[0]
         active_end_ns, _ = transitions[-1]
         if active_end_ns <= active_start_ns:
@@ -88,15 +104,21 @@ def _receipt_gates(path: Path) -> dict[str, Any]:
         terminal_disconnect = None
         for receipt_ns, _ in faults:
             if receipt_ns <= active_end_ns:
-                raise ValueError("bridge timing fault occurred before completed lap 12")
+                raise ValueError(
+                    f"bridge timing fault occurred before completed lap {expected_laps}")
+            if not allow_post_run_disconnect:
+                raise ValueError("bridge timing fault occurred after active interval")
             nearby = [(abs(detail_ns - receipt_ns), str(message.data))
                       for detail_ns, message in details
                       if abs(detail_ns - receipt_ns) <= 100_000_000]
             reason = min(nearby)[1] if nearby else ""
-            if reason != "simulator Socket.IO connection lost" or receipt_ns - active_end_ns > 1_000_000_000:
+            if (reason != "simulator Socket.IO connection lost"
+                    or receipt_ns - active_end_ns > 1_000_000_000):
                 raise ValueError(f"unclassified timing fault after run: {reason!r}")
-            terminal_disconnect = {"time_after_lap12_s": (receipt_ns - active_end_ns) / 1e9,
-                                   "detail": reason}
+            terminal_disconnect = {
+                "time_after_active_end_s": (receipt_ns - active_end_ns) / 1e9,
+                "detail": reason,
+            }
 
         cadence = {}
         for topic in body.STREAM_TOPICS:
@@ -122,9 +144,13 @@ def _receipt_gates(path: Path) -> dict[str, Any]:
                 raise ValueError(f"active interval stream-quality failure on {topic}: "
                                  f"{rate_hz:.2f} Hz, p95 {p95:.2f} ms, max {max_gap:.2f} ms")
 
-        return {"lap_count_transitions": counts,
+        return {"expected_laps": expected_laps,
+                "lap_count_transitions": counts,
                 "active_start_receipt_ns": active_start_ns,
-                "lap12_receipt_ns": active_end_ns,
+                "active_end_receipt_ns": active_end_ns,
+                f"lap{expected_laps}_receipt_ns": active_end_ns,
+                **({"lap12_receipt_ns": active_end_ns}
+                   if expected_laps == 12 else {}),
                 "active_duration_s": (active_end_ns - active_start_ns) / 1e9,
                 "collision_min_max": [min(collisions), max(collisions)],
                 "timing_faults_during_active_interval": 0,

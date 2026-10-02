@@ -21,11 +21,15 @@ from collections import deque
 from dataclasses import dataclass, replace
 
 from race_domain_experiment_plan import (
+    HIGH_STEER_VALIDATION_SPEED_MPS,
     RACE_DOMAIN_BOUNDARY_SPEED_MPS,
     RACE_DOMAIN_GOVERNOR_MPS,
     RACE_DOMAIN_HARD_LIMIT_MPS,
     RACE_DOMAIN_THROTTLE_SPEED_ANCHORS,
+    RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS,
+    build_race_domain_steering_frontier_plan,
     build_race_domain_boundary_plan,
+    build_high_steer_validation_plan,
     build_race_domain_moderate_braking_plan,
     build_race_domain_plan,
     plan_duration_s,
@@ -37,7 +41,7 @@ from race_domain_experiment_plan import (
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import Float32, Int32, String
+from std_msgs.msg import Bool, Float32, Int32, String
 
 
 RATE_HZ = 40.0
@@ -86,9 +90,14 @@ ODOM_TOPIC = "/autodrive/roboracer_1/odom"
 STEERING_TOPIC = "/autodrive/roboracer_1/steering"
 THROTTLE_FEEDBACK_TOPIC = "/autodrive/roboracer_1/throttle"
 COLLISION_TOPIC = "/autodrive/roboracer_1/collision_count"
+RESET_COMMAND_TOPIC = "/autodrive/reset_command"
 STEERING_COMMAND_TOPIC = "/autodrive/roboracer_1/steering_command"
 THROTTLE_COMMAND_TOPIC = "/autodrive/roboracer_1/throttle_command"
 PHASE_TOPIC = "/open_plane_experiment/phase"
+SIM_RESET_HOLD_SEC = 0.90
+SIM_RESET_TIMEOUT_SEC = 4.0
+SIM_RESET_STABLE_SEC = 0.50
+SIM_SPAWN_TOLERANCE_M = 0.25
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,7 @@ class Phase:
     reach_speed_target: bool = False
     validate_samples: bool = False
     validate_speed: bool = True
+    validate_steering: bool = True
     settle_before_probe: bool = False
     throttle_profile: str | None = None
     throttle_start_norm: float | None = None
@@ -228,6 +238,91 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     throttle_norm=throttle,
                     validate_samples=True,
                     validate_speed=False,
+                ))
+        return phases
+    if profile == "isolated_highsteer_75_long":
+        # The prior validation run measured 7.7–7.9 m/s with steering up to
+        # 0.524 rad, but each high-steer condition lasted only ~2.5 s and came
+        # from one run. Hold the empirically observed feasible cells long
+        # enough to support a 2 s context plus 5 s command-only evaluation.
+        phases.extend((
+            Phase("approach_7.5mps", 12.0, HIGH_STEER_VALIDATION_SPEED_MPS,
+                  throttle_mode="approach", reach_speed_target=True),
+            Phase("settle_7.5mps", 1.0, HIGH_STEER_VALIDATION_SPEED_MPS),
+        ))
+        phases.extend(Phase(
+            block.label, block.duration_s, block.target_speed_mps,
+            steering_rad=block.steering_rad,
+            validate_samples=True,
+            # Steering-induced speed loss and speed-hold throttle response are
+            # measurements here, not reasons to discard a valid run.
+            validate_speed=False,
+            settle_before_probe=True,
+        ) for block in build_high_steer_validation_plan(seed))
+        return phases
+    if profile == "race_domain_dynamic_steering":
+        # The static speed/steering surfaces already cover steady response.
+        # This compact whole-run sequence adds matched-speed steering
+        # reversals so the plant sees the transients it must recursively
+        # predict when following a high-curvature raceline. The 7.5 m/s
+        # maximum is the repeated full-lock condition established by the
+        # held-out high-steer captures; this profile does not extrapolate
+        # that steering demand to higher speed.
+        steering_magnitudes = (0.15, 0.30, 0.42, 0.50, 0.5236)
+        for target_speed in (4.5, 6.5, HIGH_STEER_VALIDATION_SPEED_MPS):
+            phases.extend((
+                Phase(f"approach_{target_speed:.1f}mps", 10.0,
+                      target_speed, throttle_mode="approach",
+                      reach_speed_target=True),
+                Phase(f"settle_{target_speed:.1f}mps", 1.0, target_speed),
+            ))
+            first_sign = 1.0 if rng.getrandbits(1) else -1.0
+            steering_trace = [0.0]
+            steering_trace.extend(first_sign * angle
+                                  for angle in steering_magnitudes)
+            steering_trace.append(0.0)
+            steering_trace.extend(-first_sign * angle
+                                  for angle in steering_magnitudes)
+            for index, steering in enumerate(steering_trace):
+                phases.append(Phase(
+                    f"dynamic_v{target_speed:.1f}_step{index:02d}_"
+                    f"steer_{steering:+.4f}",
+                    1.25,
+                    target_speed,
+                    steering_rad=steering,
+                    validate_samples=True,
+                    validate_steering=False,
+                    # Speed-controller effort and speed loss under transient
+                    # lateral demand are observed plant behavior, not a
+                    # reason to discard a correctly recorded transition.
+                    # Steering feedback is itself a predicted plant state;
+                    # its lag is retained and checked in offline response
+                    # analysis instead of a steady-state command-error gate.
+                    validate_speed=False,
+                ))
+        return phases
+    if profile == "race_domain_steering_frontier":
+        # Existing runs showed reproducible high-speed yaw/ay roll-off beyond
+        # 0.10–0.14 rad, but their steering conditions followed one another
+        # without matched initial lateral/yaw state. Give every condition a
+        # fresh spawn reset, speed approach, and matched-state settling period;
+        # this also prevents reaching the finite edge of the Explore plane.
+        plan = build_race_domain_steering_frontier_plan(seed)
+        for target_speed in RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS:
+            for block in (item for item in plan
+                          if item.target_speed_mps == target_speed):
+                phases.append(Phase(
+                    f"approach_{block.label}", 6.0, target_speed,
+                    throttle_mode="race_domain_approach",
+                    reach_speed_target=True))
+                phases.append(Phase(
+                    block.label, block.duration_s, block.target_speed_mps,
+                    steering_rad=block.steering_rad,
+                    throttle_mode="race_domain_hold",
+                    validate_samples=True,
+                    # Cornering speed loss is measured plant behavior.
+                    validate_speed=False,
+                    settle_before_probe=True,
                 ))
         return phases
     if profile in ("race_domain_continuous", "race_domain_brake_boundary",
@@ -853,6 +948,7 @@ class OpenPlaneExcitation:
         self.vy_mps: float | None = None
         self.yaw_rate_rps: float | None = None
         self.tilt_rad: float | None = None
+        self.position_xy: tuple[float, float] | None = None
         self.state_history: deque[tuple[float, float, float, float]] = deque(maxlen=64)
         self.last_odom_at: float | None = None
         self.steering_feedback_rad: float | None = None
@@ -876,6 +972,13 @@ class OpenPlaneExcitation:
         self.neutral_ticks_remaining = 0
         self.shutdown_sent = False
         self.finish_reason = ""
+        self.reset_state: str | None = None
+        self.reset_started_at: float | None = None
+        self.reset_released_at: float | None = None
+        self.reset_stable_since: float | None = None
+        self.reset_reason = ""
+        self.reset_count = 0
+        self.spawn_xy: tuple[float, float] | None = None
 
         sensor_qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         self.steering_pub = self.node.create_publisher(
@@ -898,19 +1001,29 @@ class OpenPlaneExcitation:
         self.throttle_sub = self.node.create_subscription(
             Float32, THROTTLE_FEEDBACK_TOPIC, self._on_throttle_feedback,
             sensor_qos)
+        self.reset_pub = (
+            self.node.create_publisher(Bool, RESET_COMMAND_TOPIC, 1)
+            if profile == "race_domain_steering_frontier" else None
+        )
         self.collision_sub = self.node.create_subscription(
             Int32, COLLISION_TOPIC, self._on_collision, sensor_qos)
         self.timer = self.node.create_timer(PERIOD_SEC, self._tick)
         nominal_schedule_s = sum(phase.duration_s for phase in self.phases)
-        reset_budget_s = (
+        settle_budget_s = (
             sum(phase.settle_before_probe for phase in self.phases)
             * PROBE_START_TIMEOUT_SEC
+        )
+        reset_budget_s = (
+            sum(phase.label.startswith("approach_frontier_")
+                for phase in self.phases)
+            * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
         )
         self.node.get_logger().info(
             f"waiting for source odom and zero collision count; profile={profile}, seed={seed}, "
             f"phases={len(self.phases)}, "
-            f"schedule_max={nominal_schedule_s + reset_budget_s:.1f}s "
-            f"(nominal={nominal_schedule_s:.1f}s, reset_budget={reset_budget_s:.1f}s), "
+            f"schedule_max={nominal_schedule_s + settle_budget_s + reset_budget_s:.1f}s "
+            f"(nominal={nominal_schedule_s:.1f}s, settle_budget={settle_budget_s:.1f}s, "
+            f"reset_budget={reset_budget_s:.1f}s), "
             f"probe_dwell_override={probe_dwell_s:.1f}s, "
             f"throttle_command_cap={MAX_THROTTLE:.2f}, "
             f"speed_hold_kp={speed_hold_kp:.3f}, "
@@ -934,6 +1047,8 @@ class OpenPlaneExcitation:
     def _finish(self, reason: str, aborted: bool) -> None:
         if self.done:
             return
+        if self.reset_pub is not None:
+            self.reset_pub.publish(Bool(data=False))
         if self.phase_start_published and self.phase_index < len(self.phases):
             self._close_phase("aborted" if aborted else "complete", reason)
         self.done = True
@@ -944,6 +1059,7 @@ class OpenPlaneExcitation:
             "profile": self.profile,
             "seed": self.seed,
             "phase_count": len(self.phases),
+            "sim_reset_count": self.reset_count,
             "reason": reason,
             "aborted": aborted,
             "quality_failures": self.quality_failures,
@@ -976,10 +1092,13 @@ class OpenPlaneExcitation:
         vy = vy_com - yaw_rate * COM_X_M
         speed = math.hypot(vx, vy)
         orientation = message.pose.pose.orientation
+        position = message.pose.pose.position
+        x = float(position.x)
+        y = float(position.y)
         tilt_cosine = 1.0 - 2.0 * (
             float(orientation.x) ** 2 + float(orientation.y) ** 2)
         tilt = math.acos(max(-1.0, min(1.0, tilt_cosine)))
-        if not all(map(math.isfinite, (vx, vy, yaw_rate, speed, tilt))):
+        if not all(map(math.isfinite, (vx, vy, yaw_rate, speed, tilt, x, y))):
             return
         now = time.monotonic()
         self.speed_mps = speed
@@ -987,6 +1106,7 @@ class OpenPlaneExcitation:
         self.vy_mps = vy
         self.yaw_rate_rps = yaw_rate
         self.tilt_rad = tilt
+        self.position_xy = (x, y)
         self.last_odom_at = now
         self.state_history.append((now, speed, vy, yaw_rate))
         if (self.started_at is not None and self.phase_started_at is not None and
@@ -1030,6 +1150,112 @@ class OpenPlaneExcitation:
         elif count > self.collision_initial:
             self._finish(f"collision count increased to {count}", aborted=True)
 
+    def _start_phase(self, now: float) -> None:
+        phase = self.phases[self.phase_index]
+        self.phase_started_at = now
+        self.probe_wait_started_at = now if phase.settle_before_probe else None
+        self.probe_stable_since = None
+        self.phase_samples.clear()
+        self.phase_max_speed_mps = self.speed_mps or 0.0
+        self.phase_max_tilt_rad = self.tilt_rad or 0.0
+        self.phase_governor_ticks = 0
+        self.phase_start_published = False
+        self.phase_stimulus_published = False
+
+    def _begin_sim_reset(self, now: float, reason: str) -> None:
+        if self.reset_pub is None:
+            self._finish("built-in simulator reset publisher unavailable", aborted=True)
+            return
+        self.reset_state = "hold"
+        self.reset_started_at = now
+        self.reset_released_at = None
+        self.reset_stable_since = None
+        self.reset_reason = reason
+        self.phase_started_at = None
+        self.phase_start_published = False
+        self._publish(0.0, 0.0)
+        self.reset_pub.publish(Bool(data=True))
+        self._publish_event({
+            "event": "sim_reset_start",
+            "profile": self.profile,
+            "reason": reason,
+            "next_phase_index": self.phase_index,
+            "position_xy": self.position_xy,
+            "speed_mps": self.speed_mps,
+            "monotonic_ns": time.monotonic_ns(),
+        })
+
+    def _tick_sim_reset(self, now: float) -> None:
+        assert self.reset_pub is not None and self.reset_started_at is not None
+        self._publish(0.0, 0.0)
+        if self.reset_state == "hold":
+            self.reset_pub.publish(Bool(data=True))
+            if now - self.reset_started_at >= SIM_RESET_HOLD_SEC:
+                self.reset_pub.publish(Bool(data=False))
+                self.reset_state = "wait"
+                self.reset_released_at = now
+                self.reset_stable_since = None
+                self._publish_event({
+                    "event": "sim_reset_release",
+                    "profile": self.profile,
+                    "next_phase_index": self.phase_index,
+                    "reset_command": False,
+                    "monotonic_ns": time.monotonic_ns(),
+                })
+            return
+
+        self.reset_pub.publish(Bool(data=False))
+        if now - self.reset_started_at > SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC:
+            self._finish("simulator did not return to spawn after reset", aborted=True)
+            return
+        position_ok = (
+            self.position_xy is not None
+            and (self.spawn_xy is None or math.dist(
+                self.position_xy, self.spawn_xy) <= SIM_SPAWN_TOLERANCE_M)
+        )
+        state_ready = (
+            self.reset_released_at is not None
+            and self.last_odom_at is not None
+            and self.last_odom_at >= self.reset_released_at
+            and self.last_steering_at is not None
+            and self.last_steering_at >= self.reset_released_at
+            and self.last_throttle_at is not None
+            and self.last_throttle_at >= self.reset_released_at
+            and self.speed_mps is not None and self.speed_mps <= 0.20
+            and self.steering_feedback_rad is not None
+            and abs(self.steering_feedback_rad) <= 0.02
+            and self.throttle_feedback_norm is not None
+            and abs(self.throttle_feedback_norm) <= 0.02
+            and position_ok
+        )
+        if not state_ready:
+            self.reset_stable_since = None
+            return
+        if self.reset_stable_since is None:
+            self.reset_stable_since = now
+            return
+        if now - self.reset_stable_since < SIM_RESET_STABLE_SEC:
+            return
+
+        if self.spawn_xy is None:
+            self.spawn_xy = self.position_xy
+        assert self.spawn_xy is not None and self.position_xy is not None
+        self.reset_count += 1
+        self._publish_event({
+            "event": "sim_reset_recovered",
+            "profile": self.profile,
+            "reason": self.reset_reason,
+            "next_phase_index": self.phase_index,
+            "reset_index": self.reset_count,
+            "spawn_xy": self.spawn_xy,
+            "position_xy": self.position_xy,
+            "position_error_m": math.dist(self.position_xy, self.spawn_xy),
+            "speed_mps": self.speed_mps,
+            "monotonic_ns": time.monotonic_ns(),
+        })
+        self.reset_state = None
+        self._start_phase(now)
+
     def _maybe_start(self) -> None:
         if (self.started_at is not None or self.done or self.speed_mps is None or
                 not self.collision_baseline_safe or self.last_collision_at is None):
@@ -1050,12 +1276,16 @@ class OpenPlaneExcitation:
                 return
             if publisher.get_subscription_count() == 0:
                 return
+        if (self.profile == "race_domain_steering_frontier"
+                and (self.reset_pub is None
+                     or self.reset_pub.get_subscription_count() == 0)):
+            return
         self.started_at = now
-        self.phase_started_at = now
-        self.probe_wait_started_at = (
-            now if self.phases[0].settle_before_probe else None
-        )
-        self._neutral("source odom and zero collision baseline ready")
+        if self.profile == "race_domain_steering_frontier":
+            self._begin_sim_reset(now, "initial reset to spawn")
+        else:
+            self._start_phase(now)
+            self._neutral("source odom and zero collision baseline ready")
         self.node.get_logger().info(
             f"experiment started at measured speed={self.speed_mps:.3f}m/s")
 
@@ -1084,9 +1314,14 @@ class OpenPlaneExcitation:
             return _slew_probe_command(phase, phase_elapsed_s)
         error = phase.speed_target_mps - self.speed_mps
         feedforward = self._feedforward(phase.speed_target_mps)
-        if phase.throttle_mode == "approach":
+        if phase.throttle_mode == "race_domain_approach":
+            feedforward = race_domain_feedforward(
+                phase.speed_target_mps, feedforward)
+        if phase.throttle_mode in ("approach", "race_domain_approach"):
             return max(0.0, min(MAX_THROTTLE, feedforward + 0.14 * error))
-        return self._speed_hold_command(phase.speed_target_mps)
+        return self._speed_hold_command(
+            phase.speed_target_mps,
+            race_domain=phase.throttle_mode == "race_domain_hold")
 
     def _speed_hold_command(self, target_speed_mps: float,
                             race_domain: bool = False) -> float:
@@ -1149,21 +1384,32 @@ class OpenPlaneExcitation:
         if now - self.created_at >= self.timeout_s:
             self._finish("total timeout reached before readiness", aborted=True)
             return
+        if self.started_at is None:
+            if now - self.last_status_log >= 2.0:
+                self.node.get_logger().info("no actuator output until source odom arrives")
+                self.last_status_log = now
+            return
+        elapsed = now - self.started_at
+        if elapsed >= self.timeout_s:
+            self._finish("total timeout reached", aborted=True)
+            return
+        # The 40 Hz bridge intentionally pauses packet publication while the
+        # simulator reset level is asserted. Reset recovery has its own bounded
+        # timeout and must not be preempted by the normal stream-staleness gates.
+        if self.reset_state is not None:
+            self._tick_sim_reset(now)
+            return
         if (self.last_collision_at is not None and
                 now - self.last_collision_at > COLLISION_TIMEOUT_SEC):
             self._finish("collision telemetry timeout", aborted=True)
             return
-        if self.started_at is None or self.speed_mps is None:
+        if self.speed_mps is None:
             if now - self.last_status_log >= 2.0:
                 self.node.get_logger().info("no actuator output until source odom arrives")
                 self.last_status_log = now
             return
         if self.last_odom_at is None or now - self.last_odom_at > ODOM_TIMEOUT_SEC:
             self._finish("source odometry timeout", aborted=True)
-            return
-        elapsed = now - self.started_at
-        if elapsed >= self.timeout_s:
-            self._finish("total timeout reached", aborted=True)
             return
         if (self.tilt_rad is not None
                 and self.tilt_rad >= MAX_EXPERIMENT_TILT_RAD):
@@ -1176,7 +1422,8 @@ class OpenPlaneExcitation:
         speed_limit = (RACE_DOMAIN_HARD_LIMIT_MPS
                        if self.profile in ("race_domain_continuous",
                                            "race_domain_brake_boundary",
-                                           "race_domain_moderate_braking")
+                                           "race_domain_moderate_braking",
+                                           "race_domain_steering_frontier")
                        else EMERGENCY_SPEED_MPS)
         if self.speed_mps > speed_limit:
             self._finish(f"emergency speed cutoff: {self.speed_mps:.3f}m/s "
@@ -1225,7 +1472,9 @@ class OpenPlaneExcitation:
                 # Restore a common speed before each fixed-throttle probe;
                 # the probe's throttle level begins only after this state is
                 # stable, so its starting conditions remain comparable.
-                self._publish(0.0, self._speed_hold_command(phase.speed_target_mps))
+                self._publish(0.0, self._speed_hold_command(
+                    phase.speed_target_mps,
+                    race_domain=phase.throttle_mode == "race_domain_hold"))
                 return
 
         phase_elapsed = now - self.phase_started_at
@@ -1392,21 +1641,17 @@ class OpenPlaneExcitation:
         self._publish(steering, throttle)
 
     def _next_phase(self, now: float) -> None:
+        previous_phase = self.phases[self.phase_index]
         self._close_phase("complete")
         self.phase_index += 1
         if self.phase_index >= len(self.phases):
             self._finish("schedule complete", aborted=False)
             return
-        self.phase_started_at = now
-        next_phase = self.phases[self.phase_index]
-        self.probe_wait_started_at = now if next_phase.settle_before_probe else None
-        self.probe_stable_since = None
-        self.phase_samples.clear()
-        self.phase_max_speed_mps = self.speed_mps or 0.0
-        self.phase_max_tilt_rad = self.tilt_rad or 0.0
-        self.phase_governor_ticks = 0
-        self.phase_start_published = False
-        self.phase_stimulus_published = False
+        if (self.profile == "race_domain_steering_frontier"
+                and previous_phase.label.startswith("frontier_")):
+            self._begin_sim_reset(now, f"completed {previous_phase.label}")
+        else:
+            self._start_phase(now)
 
     def _publish_event(self, event: dict[str, object]) -> None:
         event.setdefault("wall_time_ns", time.time_ns())
@@ -1480,6 +1725,7 @@ class OpenPlaneExcitation:
             "speed_error_p95_mps": self._percentile(speed_errors, 0.95),
             "steering_error_p95_rad": self._percentile(steering_errors, 0.95),
             "speed_validation_enabled": phase.validate_speed,
+            "steering_validation_enabled": phase.validate_steering,
             "monotonic_ns": time.monotonic_ns(),
         }
         if phase.validate_samples:
@@ -1497,7 +1743,9 @@ class OpenPlaneExcitation:
             if (phase.validate_speed and
                     (p95_error is None or p95_error > self.speed_p95_gate_mps)):
                 failures.append("speed_p95")
-            if steering_error is None or steering_error > MAX_STEERING_P95_ERROR_RAD:
+            if (phase.validate_steering
+                    and (steering_error is None
+                         or steering_error > MAX_STEERING_P95_ERROR_RAD)):
                 failures.append("steering_p95")
             metrics["valid"] = not failures
             metrics["quality_failures"] = failures
@@ -1520,6 +1768,8 @@ def main() -> int:
                                                "isolated_force_4mps",
                                                "isolated_force_5mps",
                                                "isolated_highspeed_surface",
+                                               "isolated_highsteer_75_long",
+                                               "race_domain_dynamic_steering",
                                                "isolated_3to5_response_surface",
                                                "isolated_highspeed_crossfactor",
                                                "isolated_highspeed_tail",
@@ -1539,7 +1789,8 @@ def main() -> int:
                                                "full_input_excitation",
                                                "race_domain_continuous",
                                                "race_domain_brake_boundary",
-                                               "race_domain_moderate_braking", "grid"),
+                                               "race_domain_moderate_braking",
+                                               "race_domain_steering_frontier", "grid"),
                         default="high_angle_boundary",
                         help="isolated profiles recover near-straight speed/yaw/lateral-velocity state before each probe")
     parser.add_argument("--timeout-s", type=float, default=150.0,
@@ -1574,6 +1825,37 @@ def main() -> int:
         if args.timeout_s < required:
             parser.error(
                 f"race_domain_moderate_braking requires --timeout-s >= {required:g}")
+    if args.profile == "race_domain_steering_frontier":
+        schedule = build_schedule(args.seed, args.profile,
+                                  args.transition_speed_mps)
+        reset_cycles = sum(
+            phase.label.startswith("approach_frontier_")
+            for phase in schedule)
+        required = (
+            sum(phase.duration_s for phase in schedule)
+            + sum(phase.settle_before_probe for phase in schedule)
+            * PROBE_START_TIMEOUT_SEC
+            + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        if args.timeout_s < required:
+            parser.error(
+                f"race_domain_steering_frontier requires --timeout-s >= {required:g}")
+    if args.profile == "isolated_highsteer_75_long":
+        schedule = build_schedule(args.seed, args.profile,
+                                  args.transition_speed_mps)
+        required = (sum(phase.duration_s for phase in schedule)
+                    + sum(phase.settle_before_probe for phase in schedule)
+                    * PROBE_START_TIMEOUT_SEC + 5.0)
+        if args.timeout_s < required:
+            parser.error(
+                f"isolated_highsteer_75_long requires --timeout-s >= {required:g}")
+    if args.profile == "race_domain_dynamic_steering":
+        required = sum(phase.duration_s for phase in build_schedule(
+            args.seed, args.profile, args.transition_speed_mps)) + 5.0
+        if args.timeout_s < required:
+            parser.error(
+                f"race_domain_dynamic_steering requires --timeout-s >= {required:g}")
 
     rclpy.init()
     if (not math.isfinite(args.transition_speed_mps)

@@ -3,13 +3,22 @@ from __future__ import annotations
 import unittest
 
 from tools.race_domain_experiment_plan import (
+    HIGH_STEER_VALIDATION_ANGLES_RAD,
+    HIGH_STEER_VALIDATION_DWELL_S,
+    HIGH_STEER_VALIDATION_REPETITIONS,
+    HIGH_STEER_VALIDATION_SPEED_MPS,
     RACE_DOMAIN_GOVERNOR_MPS,
     BLOCK_DURATION_S,
     RACE_DOMAIN_HARD_LIMIT_MPS,
     RACE_DOMAIN_SPEEDS_MPS,
+    RACE_DOMAIN_STEERING_FRONTIER_ANGLES_RAD,
+    RACE_DOMAIN_STEERING_FRONTIER_DWELL_S,
+    RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS,
     build_race_domain_plan,
     build_race_domain_boundary_plan,
+    build_high_steer_validation_plan,
     build_race_domain_moderate_braking_plan,
+    build_race_domain_steering_frontier_plan,
     plan_duration_s,
     race_domain_feedforward,
     race_domain_moderate_steering_limit,
@@ -155,6 +164,60 @@ class RaceDomainExperimentPlanTest(unittest.TestCase):
                              for block in first), 4)
         self.assertEqual(sum(block.label.startswith("corner_exit_R_")
                              for block in first), 4)
+
+    def test_long_high_steer_plan_replicates_measured_cells_and_is_seeded(self):
+        first = build_high_steer_validation_plan(17031)
+        self.assertEqual(first, build_high_steer_validation_plan(17031))
+        self.assertNotEqual(first, build_high_steer_validation_plan(17032))
+        condition_count = 1 + 2 * len(HIGH_STEER_VALIDATION_ANGLES_RAD)
+        self.assertEqual(len(first), condition_count
+                         * HIGH_STEER_VALIDATION_REPETITIONS)
+        self.assertEqual(plan_duration_s(first), condition_count
+                         * HIGH_STEER_VALIDATION_REPETITIONS
+                         * HIGH_STEER_VALIDATION_DWELL_S)
+        self.assertTrue(all(block.target_speed_mps
+                            == HIGH_STEER_VALIDATION_SPEED_MPS
+                            for block in first))
+        self.assertTrue(all(block.duration_s
+                            == HIGH_STEER_VALIDATION_DWELL_S
+                            for block in first))
+        for repetition in range(1, HIGH_STEER_VALIDATION_REPETITIONS + 1):
+            group = [block for block in first
+                     if block.label.startswith(f"r{repetition}_")]
+            self.assertEqual(len(group), condition_count)
+            self.assertEqual(sum(block.steering_rad == 0.0 for block in group), 1)
+            for angle in HIGH_STEER_VALIDATION_ANGLES_RAD:
+                self.assertEqual(sum(abs(block.steering_rad - angle) < 1e-9
+                                     for block in group), 1)
+                self.assertEqual(sum(abs(block.steering_rad + angle) < 1e-9
+                                     for block in group), 1)
+
+    def test_high_speed_steering_frontier_is_seeded_matched_two_sided_grid(self):
+        first = build_race_domain_steering_frontier_plan(17041)
+        self.assertEqual(first, build_race_domain_steering_frontier_plan(17041))
+        self.assertNotEqual(first, build_race_domain_steering_frontier_plan(17042))
+        self.assertEqual(len(first), 61)
+        self.assertAlmostEqual(
+            plan_duration_s(first),
+            61 * RACE_DOMAIN_STEERING_FRONTIER_DWELL_S)
+        self.assertTrue(all(block.target_speed_mps in
+                            RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS
+                            for block in first))
+        for speed in RACE_DOMAIN_STEERING_FRONTIER_SPEEDS_MPS:
+            local = [block for block in first
+                     if block.target_speed_mps == speed]
+            self.assertEqual(len(local), 1 + 2 * len(
+                RACE_DOMAIN_STEERING_FRONTIER_ANGLES_RAD[speed]))
+            baseline = [block for block in local if block.steering_rad == 0.0]
+            self.assertEqual(len(baseline), 1)
+            for angle in RACE_DOMAIN_STEERING_FRONTIER_ANGLES_RAD[speed]:
+                self.assertEqual(sum(abs(block.steering_rad - angle) < 1e-9
+                                     for block in local), 1)
+                self.assertEqual(sum(abs(block.steering_rad + angle) < 1e-9
+                                     for block in local), 1)
+            self.assertEqual(
+                max(abs(block.steering_rad) for block in local),
+                max(RACE_DOMAIN_STEERING_FRONTIER_ANGLES_RAD[speed]))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,38 @@ def race_speed_bin_weights(speed_mps: np.ndarray) -> np.ndarray:
     return weights.reshape(speed.shape).astype(np.float32)
 
 
+def race_speed_mismatch_weights(speed_mps: np.ndarray,
+                                wheel_body_mismatch_mps: np.ndarray,
+                                mismatch_thresholds_mps: tuple[float, float]
+                                ) -> np.ndarray:
+    """Balance speed and observed wheel/body-mismatch proxy independently.
+
+    The mismatch is not a tire-slip measurement. Thresholds must be computed
+    from training runs only. The product of marginal weights emphasizes both
+    fast and high-mismatch samples without pretending every joint cell has
+    support.
+    """
+    speed = np.asarray(speed_mps, dtype=np.float64)
+    mismatch = np.abs(np.asarray(wheel_body_mismatch_mps, dtype=np.float64))
+    if speed.shape != mismatch.shape or speed.size == 0:
+        raise ValueError("speed and wheel/body-mismatch arrays must align")
+    low, high = map(float, mismatch_thresholds_mps)
+    if (not np.isfinite((low, high)).all() or low < 0.0 or high <= low
+            or not np.isfinite(mismatch).all()):
+        raise ValueError("invalid training-derived mismatch thresholds/labels")
+    speed_weights = race_speed_bin_weights(speed)
+    mismatch_bin = np.where(mismatch <= low, 0,
+                            np.where(mismatch <= high, 1, 2))
+    counts = np.bincount(mismatch_bin.reshape(-1), minlength=3)
+    populated = counts > 0
+    per_bin = np.zeros(3, dtype=np.float64)
+    per_bin[populated] = speed.size / (np.count_nonzero(populated)
+                                       * counts[populated])
+    weights = speed_weights * per_bin[mismatch_bin]
+    weights /= np.mean(weights)
+    return weights.astype(np.float32)
+
+
 def race_speed_domain_labels(speed_mps: np.ndarray) -> np.ndarray:
     """Label validation starts as core (<9) or fast boundary ([9,12])."""
     speed = np.asarray(speed_mps, dtype=np.float64)

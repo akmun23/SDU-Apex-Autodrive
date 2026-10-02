@@ -36,6 +36,13 @@ from tools.vehicle_dynamics_learning.train_nssm import (
 from tools.vehicle_dynamics_learning.structured_body_models import (
     REAR_AXLE_TO_COM_X_M,
 )
+from tools.vehicle_dynamics_learning.family_condition_sampler import (
+    build_sequence_sampler,
+)
+from tools.vehicle_dynamics_learning.race_domain_objectives import (
+    RACE_SPEED_BIN_EDGES_MPS,
+    race_speed_mismatch_weights,
+)
 
 
 STATE_NAMES = (
@@ -254,7 +261,8 @@ def _groups(data, split, history_steps, rollout_steps):
 
 
 def _sample_indices(data, groups, batch_size, history_steps, rollout_steps,
-                    rng):
+                    rng, family_sampler=None,
+                    mismatch_thresholds_mps=None):
     run_ids = np.asarray(sorted(groups), dtype=np.int32)
     batch = {key: [] for key in ("history_state", "history_quaternion",
                                   "history_command", "initial_state",
@@ -262,11 +270,15 @@ def _sample_indices(data, groups, batch_size, history_steps, rollout_steps,
                                   "commands", "target_state",
                                   "target_quaternion", "target_position",
                                   "target_acceleration",
-                                  "target_rate")}
+                                  "target_rate", "sample_weights")}
     state_all, quaternion_all, position_all = _SAMPLE_ARRAYS
     for _ in range(batch_size):
-        run = int(rng.choice(run_ids))
-        seq_id = int(rng.choice(groups[run]))
+        if family_sampler is None:
+            run = int(rng.choice(run_ids))
+            seq_id = int(rng.choice(groups[run]))
+        else:
+            run, seq_id, _, _ = family_sampler.sample(rng)
+            seq_id = int(seq_id)
         seq_start, seq_end = map(int, data["bounds"][seq_id])
         low = seq_start + history_steps - 1
         high = seq_end - rollout_steps - 1
@@ -302,12 +314,40 @@ def _sample_indices(data, groups, batch_size, history_steps, rollout_steps,
         omega_mid = 0.5 * (previous[:, 3:6] + following[:, 3:6])
         rates[:, :3] += np.cross(omega_mid, velocity_mid)
         batch["target_rate"].append(rates.astype(np.float32))
+        if mismatch_thresholds_mps is not None:
+            target_speed = np.hypot(state_all[target_indices, 0],
+                                    state_all[target_indices, 1])
+            target_mismatch = np.abs(
+                0.5 * (data["frames"][target_indices, 5]
+                       + data["frames"][target_indices, 6])
+                - data["frames"][target_indices, 0])
+            batch["sample_weights"].append(race_speed_mismatch_weights(
+                target_speed, target_mismatch, mismatch_thresholds_mps))
+        else:
+            batch["sample_weights"].append(
+                np.ones(rollout_steps, dtype=np.float32))
     return {key: np.asarray(value, dtype=np.float32)
             for key, value in batch.items()}
 
 
 def _prepare_tensor_batch(torch, batch, device):
     return _torch_arrays(torch, batch, device)
+
+
+def _training_mismatch_thresholds(data, groups) -> tuple[float, float]:
+    values = []
+    for sequences in groups.values():
+        for sequence_id in sequences:
+            start, end = map(int, data["bounds"][sequence_id])
+            frames = data["frames"][start:end]
+            values.append(np.abs(0.5 * (frames[:, 5] + frames[:, 6])
+                                 - frames[:, 0]))
+    if not values:
+        raise ValueError("no training-run wheel/body mismatch proxy values")
+    thresholds = np.quantile(np.concatenate(values), (0.50, 0.90))
+    if thresholds[1] <= thresholds[0]:
+        raise ValueError("training wheel/body mismatch proxy has no spread")
+    return float(thresholds[0]), float(thresholds[1])
 
 
 def _rollout(model, batch, dt_s: float, history_steps: int,
@@ -346,11 +386,24 @@ def _rollout(model, batch, dt_s: float, history_steps: int,
 
     state_error = ((predicted_state - batch["target_state"])
                    / state_scale[None, None, :])
-    state_loss = torch.mean(torch.nn.functional.smooth_l1_loss(
-        state_error, torch.zeros_like(state_error), beta=0.5))
+    sample_weights = batch.get("sample_weights")
+
+    def weighted_time_mean(values):
+        if values.ndim == 3:
+            values = values.mean(dim=-1)
+        if sample_weights is None:
+            return torch.mean(values)
+        weights = sample_weights.to(dtype=values.dtype, device=values.device)
+        return torch.sum(values * weights) / torch.clamp(
+            torch.sum(weights), min=1.0e-12)
+
+    state_loss = weighted_time_mean(torch.nn.functional.smooth_l1_loss(
+        state_error, torch.zeros_like(state_error), beta=0.5,
+        reduction="none"))
     position_error_m = (predicted_position - batch["target_position"])
-    position_loss = torch.mean(torch.nn.functional.smooth_l1_loss(
-        position_error_m / 0.15, torch.zeros_like(position_error_m), beta=1.0))
+    position_loss = weighted_time_mean(torch.nn.functional.smooth_l1_loss(
+        position_error_m / 0.15, torch.zeros_like(position_error_m), beta=1.0,
+        reduction="none"))
     relative_q = model._quat_multiply(
         torch.cat((-predicted_quaternion[..., :3],
                    predicted_quaternion[..., 3:4]), dim=-1),
@@ -359,19 +412,21 @@ def _rollout(model, batch, dt_s: float, history_steps: int,
     relative_vector_norm = torch.linalg.vector_norm(relative_q[..., :3], dim=-1)
     attitude_error = 2.0 * torch.atan2(relative_vector_norm,
                                       torch.abs(relative_q[..., 3]))
-    attitude_loss = torch.mean(torch.nn.functional.smooth_l1_loss(
-        attitude_error / 0.05, torch.zeros_like(attitude_error), beta=1.0))
+    attitude_loss = weighted_time_mean(torch.nn.functional.smooth_l1_loss(
+        attitude_error / 0.05, torch.zeros_like(attitude_error), beta=1.0,
+        reduction="none"))
     normalized_rate_error = ((predicted_rate - batch["target_rate"])
                              / model.rate_scale[None, None, :])
-    rate_loss = torch.mean(torch.nn.functional.smooth_l1_loss(
+    rate_loss = weighted_time_mean(torch.nn.functional.smooth_l1_loss(
         normalized_rate_error, torch.zeros_like(normalized_rate_error),
-        beta=0.5))
+        beta=0.5, reduction="none"))
     normalized_acceleration_error = (
         (predicted_rate[..., :3] - batch["target_acceleration"])
         / model.rate_scale[None, None, :3])
-    acceleration_loss = torch.mean(torch.nn.functional.smooth_l1_loss(
+    acceleration_loss = weighted_time_mean(torch.nn.functional.smooth_l1_loss(
         normalized_acceleration_error,
-        torch.zeros_like(normalized_acceleration_error), beta=0.5))
+        torch.zeros_like(normalized_acceleration_error), beta=0.5,
+        reduction="none"))
     total = (state_loss + position_weight * position_loss
              + attitude_weight * attitude_loss
              + rate_weight * rate_loss
@@ -593,6 +648,10 @@ def train(args):
                                 args.rollout_steps)
     if not train_groups or not validation_groups:
         raise ValueError("whole-run train and validation splits must both have usable sequences")
+    family_sampler = build_sequence_sampler(data, train_groups)
+    mismatch_thresholds_mps = (
+        _training_mismatch_thresholds(data, train_groups)
+        if data["schema_version"] >= 8 else None)
     # Keep feature/rate scales identical when comparing short- and long-
     # rollout fits. The 80-step floor is the shortest horizon in the model
     # evaluation suite; shorter training-only runs never define the scales.
@@ -640,7 +699,8 @@ def train(args):
         model.train()
         batch = _prepare_tensor_batch(torch, _sample_indices(
             data, train_groups, args.batch_size, args.history_steps,
-            args.rollout_steps, rng), device)
+            args.rollout_steps, rng, family_sampler,
+            mismatch_thresholds_mps), device)
         losses = _rollout(
             model, batch, SIMULATOR_DT_S, args.history_steps,
             model.state_scale, args.position_loss_weight,
@@ -721,6 +781,20 @@ def train(args):
                         "rate_scale": rate_scale,
                         "training_run_ids": [str(data["run_ids"][i])
                                              for i in sorted(train_groups)],
+                        "training_sampler": family_sampler.metadata,
+                        "race_domain_training_loss_weighting": ({
+                            "speed_bin_edges_mps": list(
+                                RACE_SPEED_BIN_EDGES_MPS),
+                            "wheel_body_mismatch_proxy_thresholds_mps":
+                                mismatch_thresholds_mps,
+                            "wheel_body_mismatch_proxy_definition": (
+                                "abs(mean(rear wheel surface speed) - rear axle u); "
+                                "not a tire-slip measurement"),
+                            "method": (
+                                "multiply equal-population speed-bin and "
+                                "train-quantile mismatch-bin weights; renormalize "
+                                "to mean one per sampled rollout"),
+                        } if mismatch_thresholds_mps is not None else None),
                         "normalization_run_ids": [
                             str(data["run_ids"][i])
                             for i in normalization_run_indices],
@@ -765,6 +839,9 @@ def train(args):
             split: int(np.count_nonzero(data["splits"] == split))
             for split in np.unique(data["splits"])},
         "train_runs": checkpoint["metadata"]["training_run_ids"],
+        "training_sampler": family_sampler.metadata,
+        "race_domain_training_loss_weighting": checkpoint["metadata"][
+            "race_domain_training_loss_weighting"],
         "normalization_runs": checkpoint["metadata"]["normalization_run_ids"],
         "validation_runs": checkpoint["metadata"]["validation_run_ids"],
         "best_validation_step": int(best_step),

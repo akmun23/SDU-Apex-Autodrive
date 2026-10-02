@@ -245,12 +245,17 @@ def _encoder_surface_speed(rows: list[analysis.EncoderRow], times: list[int],
 
 
 def load_capture(path: Path,
-                 include_nonvalid_phases: bool = False) -> Capture:
+                 include_nonvalid_phases: bool = False,
+                 continuous_phased_run: bool = False) -> Capture:
     """Load aligned capture sequences.
 
     By default, only experiment phases explicitly marked valid are returned.
     The offline salvage audit may opt into completed invalid/unscored phases,
     but it must independently apply its stricter interval-quality gates.
+    ``continuous_phased_run`` instead exports one whole-bag causal sequence
+    from a phase-marked capture. This preserves the samples at phase boundaries
+    for recursive plant training; phase validity and whole-run quality metadata
+    remain available for admission and scoring.
     """
     if not path.is_file():
         raise ValueError(f"bag does not exist: {path}")
@@ -476,7 +481,7 @@ def load_capture(path: Path,
         index = bisect.bisect_right(lap_receipts, receipt_ns) - 1
         return lap_values[index] if index >= 0 else None
 
-    for phase in phases:
+    for phase in (() if continuous_phased_run else phases):
         if phase.valid is not True and not include_nonvalid_phases:
             continue
         # Include 500 ms of causal context for history-state diagnostics. The
@@ -562,7 +567,7 @@ def load_capture(path: Path,
         sequences.extend(segments)
         sequence_labels.extend([phase.label] * len(segments))
 
-    if not has_phase_markers and odometry:
+    if (not has_phase_markers or continuous_phased_run) and odometry:
         rows = []
         time_origin_ns = odometry[0][0]
         for receipt_ns, source_stamp_ns, state in odometry:

@@ -452,12 +452,21 @@ def run(dataset_path: Path, output_dir: Path, *, split: str = "validation",
         plant_checkpoint: Path | None = None) -> dict[str, Any]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty {output_dir}")
-    if split not in ("validation", "test"):
-        raise ValueError("closed-loop branch starts must come from validation or test runs")
+    if split not in ("validation", "test", "unseen_practice"):
+        raise ValueError(
+            "closed-loop branch starts must come from validation, test, "
+            "or the isolated unseen-practice split")
     if not np.isfinite(branch_seconds) or not 0.5 <= branch_seconds <= 2.0:
         raise ValueError("branch horizon must be in [0.5, 2.0] seconds")
     output_dir.mkdir(parents=True, exist_ok=True)
     data = _load_dataset(dataset_path)
+    if split == "unseen_practice":
+        unseen_ids = [str(data["run_ids"][run])
+                      for run in np.flatnonzero(data["splits"] == split)]
+        if not unseen_ids or any(not run_id.startswith("practice_unseen_")
+                                 for run_id in unseen_ids):
+            raise ValueError(
+                "unseen_practice accepts only explicitly named unseen practice runs")
     horizon_steps = round(branch_seconds / DT_S)
     plant = (load_rssm_teacher_plant([plant_checkpoint], dataset_path,
                                      device="cpu",
@@ -512,7 +521,8 @@ def run(dataset_path: Path, output_dir: Path, *, split: str = "validation",
     run_ids = sorted({row["run_id"] for row in branches})
     report = {
         "schema_version": 1,
-        "purpose": "2-second held-out-state production-stack surrogate screen",
+        "purpose": (f"{horizon_steps * DT_S:g}-second held-out-state "
+                    "production-stack surrogate screen"),
         "validity": "offline diagnostic only; no claim of counterfactual truth or collision fidelity",
         "split": split,
         "independent_run_count": len(run_ids),
@@ -567,7 +577,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DEFAULT_ARCHIVE)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--split", choices=("validation", "test"), default="validation")
+    parser.add_argument("--split", choices=("validation", "test", "unseen_practice"),
+                        default="validation")
     parser.add_argument("--branch-seconds", type=float, default=2.0)
     parser.add_argument("--plant-checkpoint", type=Path)
     args = parser.parse_args()

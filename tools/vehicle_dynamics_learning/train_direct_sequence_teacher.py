@@ -236,7 +236,8 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
               groups: dict[int, list[tuple[int, int]]], x_mean: np.ndarray,
               x_scale: np.ndarray, y_mean: np.ndarray, y_scale: np.ndarray,
               device, context_steps: int, future_steps: int, seed: int,
-              max_windows_per_run: int, *, stratify: bool = False
+              max_windows_per_run: int, *, stratify: bool = False,
+              support_data: dict[str, Any] | None = None
               ) -> dict[str, Any]:
     windows = _windows_by_run(
         data, targets, groups, max_windows_per_run, context_steps,
@@ -254,13 +255,17 @@ def _evaluate(torch, model, data: dict[str, Any], targets: np.ndarray,
         domain: defaultdict(dict) for domain in RACE_SPEED_DOMAINS
     }
     if stratify:
+        training_data = data if support_data is None else support_data
+        if training_data["feature_names"] != data["feature_names"]:
+            raise ValueError("support and evaluation feature layouts differ")
         training_mismatch = []
-        for sequence_index, (start_value, end_value) in enumerate(data["bounds"]):
-            run_index = int(data["seq_run"][sequence_index])
-            if data["splits"][run_index] != "train":
+        for sequence_index, (start_value, end_value) in enumerate(
+                training_data["bounds"]):
+            run_index = int(training_data["seq_run"][sequence_index])
+            if training_data["splits"][run_index] != "train":
                 continue
             start, end = int(start_value), int(end_value)
-            frame = data["frames"][start:end]
+            frame = training_data["frames"][start:end]
             local = np.abs(0.5 * (frame[:, 5] + frame[:, 6]) - frame[:, 0])
             training_mismatch.append(local[np.isfinite(local)])
         if not training_mismatch or not sum(map(len, training_mismatch)):

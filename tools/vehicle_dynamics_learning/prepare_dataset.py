@@ -80,6 +80,8 @@ def _split_for_name(name: str) -> str:
         return "exclude_source_player_mismatch"
     if "replay" in lowered:
         return "exclude_replay"
+    if lowered.startswith("practice_model_validation_"):
+        return "validation"
     if "validation_20260928" in lowered:
         return "validation"
     if "validation_20260929" in lowered:
@@ -422,14 +424,16 @@ def _race_domain_capture_admission(path: Path) -> dict[str, Any]:
 
 def _extract(path: Path, coalesce_contiguous_phases: bool = False,
              practice_active_interval: bool = False,
-             include_nonvalid_phases: bool = False) -> tuple[
+             include_nonvalid_phases: bool = False,
+             continuous_whole_run: bool = False) -> tuple[
         dict[str, Any], list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray]]]:
     capture = body.load_capture(
-        path, include_nonvalid_phases=include_nonvalid_phases)
+        path, include_nonvalid_phases=include_nonvalid_phases,
+        continuous_phased_run=continuous_whole_run)
     race_domain_admission: dict[str, Any] | None = None
     if (not include_nonvalid_phases
             and capture.phase_count == 1
@@ -637,6 +641,7 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         "whole_bag_quality_failures": failures,
         "quality_gate_scope": ("complete_lap_0_to_12_active_interval"
                                if active_interval is not None else "whole_bag"),
+        "continuous_whole_run_export": continuous_whole_run,
         "practice_active_interval_validation": active_interval_report,
         "unscored_race_domain_capture_admission": race_domain_admission,
         "active_interval_receipt_ns": list(active_interval)
@@ -817,7 +822,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             coalesce_contiguous_phases: bool = False,
             additional_bags: list[Path] | None = None,
             split_overrides: dict[str, str] | None = None,
-            practice_active_interval: bool = False) -> dict[str, Any]:
+            practice_active_interval: bool = False,
+            continuous_whole_run: bool = False) -> dict[str, Any]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -839,7 +845,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         print(f"[{index}/{len(bags)}] reading {run_id}", flush=True)
         try:
             record, sequences = _extract(
-                path, coalesce_contiguous_phases, practice_active_interval)
+                path, coalesce_contiguous_phases, practice_active_interval,
+                continuous_whole_run=continuous_whole_run)
             override = (split_overrides or {}).get(run_id)
             if override is not None:
                 record["suggested_split"] = override
@@ -1057,7 +1064,10 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         "simulator_rigid_state_names": list(SIMULATOR_RIGID_STATE_NAMES),
         "simulator_linear_acceleration_names": list(
             SIMULATOR_ACCELERATION_NAMES),
-        "selection": ("openplane* bags and requested additional bags; valid phase samples only; nonnegative phase time; "
+        "selection": ("openplane* bags and requested additional bags; "
+                      + ("complete continuous whole-run sequences from each admitted bag; "
+                         if continuous_whole_run else
+                         "valid phase samples only; nonnegative phase time; ")
                       + ("contiguous phases/laps joined by simulator packet sequence; a missing packet breaks a sequence; "
                          "recorded reset commands also break sequences; receipt timestamps are event association only"
                          if coalesce_contiguous_phases else
@@ -1123,6 +1133,8 @@ def main() -> int:
                         help="set one run's effective starting split: train, validation, test, or final_test")
     parser.add_argument("--coalesce-contiguous-phases", action="store_true",
                         help="for plant identification, join contiguous fragments but break at packet gaps and recorded reset events")
+    parser.add_argument("--continuous-whole-run", action="store_true",
+                        help="for a quality-gated phase-marked capture, export the complete causal sensor/command stream, including phase boundaries")
     parser.add_argument("--practice-active-interval", action="store_true",
                         help="allow only 12-lap practice captures that pass lap, collision, active 40 Hz and post-run fault checks; crop to active laps")
     parser.add_argument("--output-dir", type=Path, required=True,
@@ -1142,7 +1154,8 @@ def main() -> int:
         manifest = prepare(args.root, args.output_dir, args.bag,
                            args.coalesce_contiguous_phases,
                            args.additional_bag, split_overrides,
-                           args.practice_active_interval)
+                           args.practice_active_interval,
+                           args.continuous_whole_run)
     except (OSError, ValueError) as exc:
         print(f"dataset preparation failed: {exc}", file=sys.stderr)
         return 2
