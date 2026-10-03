@@ -200,7 +200,7 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
     if missing:
         raise ValueError(f"dataset missing arrays: {sorted(missing)}")
     schema_version = int(data["schema_version"][0])
-    if schema_version not in (1, 2, 3, 4, 5, 6, 7, 8):
+    if schema_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
         raise ValueError(f"unsupported schema version {data['schema_version']}")
     frames = data["frames"].astype(np.float32, copy=False)
     dt_s = data["dt_s"].astype(np.float32, copy=False)
@@ -279,9 +279,11 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
                     or np.any(condition_run_index[sequence_condition_id] != seq_run)):
                 raise ValueError("schema-8 condition IDs refer to a different run")
             role = str(data["dataset_role"].astype(str)[0])
-            if role != "race_domain":
+            allowed_roles = ({"race_domain"} if schema_version == 8 else
+                             {"race_domain", "replacement_teacher_dataset_v1"})
+            if role not in allowed_roles:
                 raise ValueError(
-                    f"plant training rejects non-race-domain dataset role {role!r}")
+                    f"plant training rejects dataset role {role!r}")
             speed_cap = float(data["domain_speed_cap_mps"][0])
             domain_speed_cap_mps = speed_cap
             frame_domain_speed_mps = data["frame_domain_speed_mps"].astype(
@@ -433,6 +435,28 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
     else:
         attitude = None
         attitude_valid = None
+    raw_wheel_state = raw_wheel_valid = raw_wheel_source_hash = None
+    raw_encoder_keys = {"encoder_raw_surface_mps", "encoder_raw_valid"}
+    if raw_encoder_keys.intersection(data.files):
+        if not raw_encoder_keys.issubset(data.files):
+            raise ValueError("raw encoder sidecar requires both values and validity")
+        raw_wheel_state = data["encoder_raw_surface_mps"].astype(
+            np.float32, copy=False)
+        raw_wheel_valid = data["encoder_raw_valid"].astype(bool, copy=False)
+        if "encoder_raw_source_dataset_sha256" not in data.files:
+            raise ValueError("raw encoder sidecar lacks its source-dataset hash")
+        raw_wheel_source_hash = str(
+            data["encoder_raw_source_dataset_sha256"].astype(str)[0])
+        if (raw_wheel_state.shape != (len(frames), 2)
+                or raw_wheel_valid.shape != (len(frames),)
+                or len(raw_wheel_source_hash) != 64
+                or not np.isfinite(raw_wheel_state[raw_wheel_valid]).all()):
+            raise ValueError("raw encoder sidecar arrays do not align or are non-finite")
+        frame_run = data["frame_run_index"].astype(np.int32, copy=False)
+        for run_index, split in enumerate(splits):
+            if (str(split) in {"test", "final_test"}
+                    and np.any(raw_wheel_valid[frame_run == run_index])):
+                raise ValueError("raw encoder sidecar must not open test/final-test runs")
     if include_throttle_variation:
         throttle_variation = np.zeros(len(frames), dtype=np.float32)
         for start, end in bounds:
@@ -466,6 +490,9 @@ def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[
         "imu_attitude_frames": attitude,
         "imu_attitude_valid": attitude_valid,
         "imu_attitude_feature_names": attitude_names,
+        "encoder_raw_surface_mps": raw_wheel_state,
+        "encoder_raw_valid": raw_wheel_valid,
+        "encoder_raw_source_dataset_sha256": raw_wheel_source_hash,
         "packet_sequence": packet_sequence,
         "sample_time_ns": sample_time_ns,
         "odom_pose_xyyaw": odom_pose,

@@ -18,7 +18,7 @@ import statistics
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 from race_domain_experiment_plan import (
     HIGH_STEER_VALIDATION_SPEED_MPS,
@@ -36,6 +36,14 @@ from race_domain_experiment_plan import (
     race_domain_feedforward,
     race_domain_moderate_steering_limit,
     steering_limit_for_speed,
+)
+from race_domain_dynamic_coupled_plan import (
+    DYNAMIC_STEERING_FREQUENCIES_HZ,
+    FRONTIER_11MPS_ANGLES_RAD,
+    FRONTIER_SWEEP_ANGLES_RAD,
+    PRBS_MIN_DWELL_S,
+    build_dynamic_coupled_plan,
+    plan_as_dicts as dynamic_coupled_plan_as_dicts,
 )
 
 import rclpy
@@ -98,6 +106,11 @@ SIM_RESET_HOLD_SEC = 0.90
 SIM_RESET_TIMEOUT_SEC = 4.0
 SIM_RESET_STABLE_SEC = 0.50
 SIM_SPAWN_TOLERANCE_M = 0.25
+DYNAMIC_COUPLED_PROFILES = (
+    "race_domain_dynamic_coupled_train",
+    "race_domain_dynamic_coupled_validation",
+    "race_domain_dynamic_coupled_final",
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +132,14 @@ class Phase:
     throttle_stimulus_delay_s: float = 0.0
     throttle_ramp_duration_s: float = 0.0
     condition_pair_id: str | None = None
+    steering_profile: str | None = None
+    steering_amplitude_rad: float | None = None
+    steering_frequency_hz: float | None = None
+    steering_frequencies_hz: tuple[float, ...] = ()
+    steering_phases_rad: tuple[float, ...] = ()
+    steering_waypoints: tuple[tuple[float, float], ...] = ()
+    steering_prbs_levels_normalized: tuple[float, ...] = ()
+    steering_dwell_s: float = 0.0
 
 
 def _slew_probe_command(phase: Phase, elapsed_s: float) -> float:
@@ -137,6 +158,229 @@ def _slew_probe_command(phase: Phase, elapsed_s: float) -> float:
     fraction = min(1.0, stimulus_elapsed / phase.throttle_ramp_duration_s)
     return (phase.throttle_start_norm + fraction
             * (phase.throttle_end_norm - phase.throttle_start_norm))
+
+
+def _phase_steering_command(phase: Phase, elapsed_s: float) -> float:
+    """Evaluate the stored deterministic dynamic steering command."""
+    profile = phase.steering_profile
+    if profile is None:
+        return phase.steering_rad
+    amplitude = phase.steering_amplitude_rad
+    if amplitude is None or not 0.0 <= amplitude <= MAX_STEERING_RAD:
+        raise ValueError("dynamic steering requires an in-range amplitude")
+    elapsed = max(0.0, elapsed_s)
+    if profile == "multisine":
+        if (not phase.steering_frequencies_hz
+                or len(phase.steering_frequencies_hz)
+                != len(phase.steering_phases_rad)):
+            raise ValueError("multisine steering requires matched frequencies/phases")
+        wave = sum(math.sin(math.tau * frequency * elapsed + phase_offset)
+                   for frequency, phase_offset in zip(
+                       phase.steering_frequencies_hz,
+                       phase.steering_phases_rad))
+        wave /= len(phase.steering_frequencies_hz)
+        wave *= min(1.0, elapsed / 0.25)
+    elif profile == "triangle":
+        if phase.steering_frequency_hz is None or phase.steering_frequency_hz <= 0.0:
+            raise ValueError("triangle steering requires a positive frequency")
+        cycle = (elapsed * phase.steering_frequency_hz + 0.25) % 1.0
+        wave = (1.0 - 4.0 * abs(cycle - 0.5)) * min(1.0, elapsed / 0.25)
+    elif profile == "prbs":
+        if phase.steering_dwell_s < PRBS_MIN_DWELL_S:
+            raise ValueError("piecewise steering dwell is too short")
+        levels = phase.steering_prbs_levels_normalized
+        if not levels:
+            raise ValueError("PRBS steering requires stored levels")
+        ramp_s = 0.25
+        active_s = elapsed - ramp_s
+        if active_s < 0.0:
+            wave = levels[0] * min(1.0, elapsed / ramp_s)
+        elif active_s < len(levels) * phase.steering_dwell_s:
+            index = min(int(active_s / phase.steering_dwell_s), len(levels) - 1)
+            wave = levels[index]
+        else:
+            tail_s = active_s - len(levels) * phase.steering_dwell_s
+            wave = levels[-1] * max(0.0, 1.0 - tail_s / ramp_s)
+    elif profile == "waypoints":
+        points = phase.steering_waypoints
+        if len(points) < 2:
+            raise ValueError("waypoint steering requires at least two points")
+        if elapsed <= points[0][0]:
+            return points[0][1]
+        for (t0, v0), (t1, v1) in zip(points, points[1:]):
+            if elapsed <= t1:
+                fraction = (elapsed - t0) / (t1 - t0)
+                return v0 + fraction * (v1 - v0)
+        return points[-1][1]
+    else:
+        raise ValueError(f"unknown dynamic steering profile: {profile}")
+    return amplitude * max(-1.0, min(1.0, wave))
+
+
+def _nominal_feedforward(speed_mps: float) -> float:
+    if speed_mps <= SPEED_TARGETS_MPS[0]:
+        return THROTTLE_FEEDFORWARD[0]
+    for index in range(1, len(SPEED_TARGETS_MPS)):
+        if speed_mps <= SPEED_TARGETS_MPS[index]:
+            low_speed, high_speed = SPEED_TARGETS_MPS[index - 1:index + 1]
+            low_throttle, high_throttle = THROTTLE_FEEDFORWARD[index - 1:index + 1]
+            fraction = (speed_mps - low_speed) / (high_speed - low_speed)
+            return low_throttle + fraction * (high_throttle - low_throttle)
+    return THROTTLE_FEEDFORWARD[-1]
+
+
+def _steering_waypoints(
+        values: tuple[float, ...], sign: int, transition_s: float = 0.15,
+        dwell_s: float = 0.35) -> tuple[tuple[float, float], ...]:
+    points = [(0.0, 0.0)]
+    elapsed = 0.0
+    for value in values:
+        elapsed += transition_s
+        points.append((elapsed, sign * value))
+        elapsed += dwell_s
+        points.append((elapsed, sign * value))
+    return tuple(points)
+
+
+def _dynamic_coupled_manoeuvre_phases(condition) -> list[Phase]:
+    speed = condition.target_speed_mps
+    magnitude = condition.max_steering_rad
+    sign = condition.first_turn_sign
+    nominal = race_domain_feedforward(speed, _nominal_feedforward(speed))
+    throttle_up = min(MAX_THROTTLE, nominal + 0.03)
+    throttle_down = max(0.0, nominal - 0.05)
+    condition_id = condition.condition_id
+
+    def dynamic(label: str, duration: float, *, profile: str,
+                amplitude: float, frequency: float | None = None,
+                frequencies: tuple[float, ...] = (),
+                phases: tuple[float, ...] = (),
+                waypoints: tuple[tuple[float, float], ...] = (),
+                prbs_levels: tuple[float, ...] = (),
+                dwell_s: float = 0.0) -> Phase:
+        return Phase(
+            f"coupled_{condition_id}_{label}", duration, speed,
+            throttle_mode="race_domain_hold", validate_samples=True,
+            validate_speed=False, validate_steering=False,
+            condition_pair_id=condition_id,
+            steering_profile=profile,
+            steering_amplitude_rad=amplitude,
+            steering_frequency_hz=frequency,
+            steering_frequencies_hz=frequencies,
+            steering_phases_rad=phases,
+            steering_waypoints=waypoints,
+            steering_prbs_levels_normalized=prbs_levels,
+            steering_dwell_s=dwell_s,
+        )
+
+    def throttle_ramp(label: str, start: float, end: float,
+                      steering_amplitude: float) -> Phase:
+        return Phase(
+            f"coupled_{condition_id}_{label}", 1.50, speed,
+            throttle_mode="slew_probe", validate_samples=True,
+            validate_speed=False, validate_steering=False,
+            throttle_profile="ramp", throttle_start_norm=start,
+            throttle_end_norm=end, throttle_stimulus_delay_s=0.15,
+            throttle_ramp_duration_s=0.60,
+            condition_pair_id=condition_id,
+            steering_profile="triangle",
+            steering_amplitude_rad=steering_amplitude,
+            steering_frequency_hz=condition.triangle_frequency_hz,
+        )
+
+    triangle_values = (0.0, 0.35 * magnitude, 0.75 * magnitude,
+                       magnitude, 0.60 * magnitude, 0.0,
+                       -0.35 * magnitude, -0.75 * magnitude,
+                       -magnitude, -0.60 * magnitude, 0.0)
+    turn_waypoints = _steering_waypoints(
+        triangle_values, sign, transition_s=0.20, dwell_s=0.40)
+    turn_phase = dynamic(
+        "turn_in_unwind_reversal", turn_waypoints[-1][0],
+        profile="waypoints", amplitude=magnitude,
+        waypoints=turn_waypoints)
+    multisine = dynamic(
+        "multisine_steering", 12.0, profile="multisine",
+        amplitude=magnitude,
+        frequencies=DYNAMIC_STEERING_FREQUENCIES_HZ,
+        phases=condition.multisine_phase_rad)
+    triangle = dynamic(
+        "triangular_steering", 8.0, profile="triangle",
+        amplitude=0.80 * magnitude,
+        frequency=condition.triangle_frequency_hz)
+    prbs = dynamic(
+        "random_piecewise_steering",
+        0.25 + len(condition.prbs_levels_normalized) * PRBS_MIN_DWELL_S + 0.25,
+        profile="prbs", amplitude=magnitude,
+        prbs_levels=condition.prbs_levels_normalized,
+        dwell_s=PRBS_MIN_DWELL_S)
+    pickup = throttle_ramp(
+        "steering_throttle_pickup", nominal, throttle_up,
+        0.55 * magnitude)
+    reduction = throttle_ramp(
+        "steering_throttle_reduction", throttle_up, throttle_down,
+        0.55 * magnitude)
+    brake_waypoints = _steering_waypoints(
+        (0.0, sign * min(0.10, 0.40 * magnitude), 0.0),
+        1, transition_s=0.25, dwell_s=0.25)
+    active_brake = Phase(
+        f"coupled_{condition_id}_steering_active_brake",
+        brake_waypoints[-1][0], speed,
+        throttle_mode="fixed", throttle_norm=0.0,
+        validate_samples=True, validate_speed=False,
+        validate_steering=False, condition_pair_id=condition_id,
+        steering_profile="waypoints",
+        steering_amplitude_rad=max(abs(value) for _, value in brake_waypoints),
+        steering_waypoints=brake_waypoints)
+    release_waypoints = ((0.0, sign * min(0.08, 0.30 * magnitude)),
+                         (0.30, 0.0), (1.50, 0.0))
+    brake_release = Phase(
+        f"coupled_{condition_id}_brake_release_unwind", 1.50, speed,
+        throttle_mode="slew_probe", validate_samples=True,
+        validate_speed=False, validate_steering=False,
+        throttle_profile="ramp", throttle_start_norm=0.0,
+        throttle_end_norm=nominal, throttle_stimulus_delay_s=0.15,
+        throttle_ramp_duration_s=0.60,
+        condition_pair_id=condition_id,
+        steering_profile="waypoints",
+        steering_amplitude_rad=max(abs(value) for _, value in release_waypoints),
+        steering_waypoints=release_waypoints)
+
+    if condition.speed_band == "5-7":
+        return [multisine, triangle, prbs, turn_phase, pickup, reduction,
+                active_brake, brake_release]
+    if condition.speed_band == "7-9":
+        return [multisine, triangle, prbs, turn_phase, pickup, reduction,
+                active_brake, brake_release]
+
+    steering_levels = (
+        FRONTIER_11MPS_ANGLES_RAD
+        if math.isclose(speed, 11.1) else FRONTIER_SWEEP_ANGLES_RAD)
+    sweep_values = ((0.0, *steering_levels, 0.0,
+                     *tuple(-value for value in steering_levels), 0.0))
+    sweep_waypoints = _steering_waypoints(
+        sweep_values, sign, transition_s=0.12, dwell_s=0.28)
+    mixed_order = (0.0, 0.12, 0.04, 0.16, 0.0,
+                   -0.12, -0.04, -0.16, 0.0)
+    mixed_waypoints = _steering_waypoints(
+        mixed_order, sign, transition_s=0.14, dwell_s=0.36)
+    reversal_waypoints = _steering_waypoints(
+        (0.0, 0.08, -0.08, 0.08, 0.0), sign,
+        transition_s=0.15, dwell_s=0.35)
+    return [
+        dynamic("frontier_sweep_both_signs", sweep_waypoints[-1][0],
+                profile="waypoints", amplitude=magnitude,
+                waypoints=sweep_waypoints),
+        dynamic("frontier_mixed_order", mixed_waypoints[-1][0],
+                profile="waypoints", amplitude=magnitude,
+                waypoints=mixed_waypoints),
+        dynamic("frontier_reversal_008", reversal_waypoints[-1][0],
+                profile="waypoints", amplitude=0.08,
+                waypoints=reversal_waypoints),
+        throttle_ramp("frontier_turnin_throttle_reduction",
+                      nominal, throttle_down, min(0.12, magnitude)),
+        active_brake,
+        brake_release,
+    ]
 
 
 def build_schedule(seed: int, profile: str = "high_angle_boundary",
@@ -300,6 +544,25 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     # analysis instead of a steady-state command-error gate.
                     validate_speed=False,
                 ))
+        return phases
+    if profile in DYNAMIC_COUPLED_PROFILES:
+        for condition in build_dynamic_coupled_plan(seed):
+            condition_id = condition.condition_id
+            speed = condition.target_speed_mps
+            phases.extend((
+                Phase(
+                    f"approach_coupled_{condition_id}", 12.0, speed,
+                    throttle_mode="race_domain_approach",
+                    reach_speed_target=True,
+                    condition_pair_id=condition_id,
+                ),
+                Phase(
+                    f"settle_coupled_{condition_id}", 1.0, speed,
+                    throttle_mode="race_domain_hold",
+                    condition_pair_id=condition_id,
+                ),
+            ))
+            phases.extend(_dynamic_coupled_manoeuvre_phases(condition))
         return phases
     if profile == "race_domain_steering_frontier":
         # Existing runs showed reproducible high-speed yaw/ay roll-off beyond
@@ -898,8 +1161,12 @@ class OpenPlaneExcitation:
             raise ValueError("speed-error gates must be finite and positive")
         if not math.isfinite(probe_dwell_s) or not 0.0 <= probe_dwell_s <= 15.0:
             raise ValueError("probe dwell must be finite and in [0, 15] seconds")
-        if probe_dwell_s > 0.0 and profile in ("full_input_excitation", "grid"):
-            raise ValueError("probe dwell override is not supported for large grid profiles")
+        if probe_dwell_s > 0.0 and profile in (
+                "full_input_excitation", "grid", *DYNAMIC_COUPLED_PROFILES):
+            raise ValueError("probe dwell override is unsupported for this fixed capture protocol")
+        self.dynamic_coupled_plan = (
+            build_dynamic_coupled_plan(seed)
+            if profile in DYNAMIC_COUPLED_PROFILES else ())
         self.race_domain_plan = (
             build_race_domain_moderate_braking_plan(seed)
             if profile == "race_domain_moderate_braking" else
@@ -910,16 +1177,28 @@ class OpenPlaneExcitation:
             if profile == "race_domain_continuous" else ())
         self.race_domain_plan_version = (
             4 if profile == "race_domain_moderate_braking" else
-            3 if profile == "race_domain_brake_boundary" else 2)
+            3 if profile == "race_domain_brake_boundary" else
+            2 if profile == "race_domain_continuous" else None)
         if (profile in ("race_domain_continuous", "race_domain_brake_boundary",
                         "race_domain_moderate_braking")
                 and timeout_s < plan_duration_s(self.race_domain_plan) + 5.0):
             raise ValueError(
                 "race-domain capture timeout must exceed its plan by 5 seconds")
+        phases = build_schedule(seed, profile, transition_speed_mps)
+        if profile in DYNAMIC_COUPLED_PROFILES:
+            required = (
+                sum(phase.duration_s for phase in phases)
+                + len(self.dynamic_coupled_plan)
+                * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+                + 5.0
+            )
+            if timeout_s < required:
+                raise ValueError(
+                    f"{profile} requires --timeout-s >= {required:g}")
         self.node = rclpy.create_node("open_plane_excitation")
         self.seed = seed
         self.profile = profile
-        self.phases = build_schedule(seed, profile, transition_speed_mps)
+        self.phases = phases
         if probe_dwell_s > 0.0:
             self.phases = [
                 replace(phase, duration_s=probe_dwell_s)
@@ -1003,7 +1282,8 @@ class OpenPlaneExcitation:
             sensor_qos)
         self.reset_pub = (
             self.node.create_publisher(Bool, RESET_COMMAND_TOPIC, 1)
-            if profile == "race_domain_steering_frontier" else None
+            if (profile == "race_domain_steering_frontier"
+                or profile in DYNAMIC_COUPLED_PROFILES) else None
         )
         self.collision_sub = self.node.create_subscription(
             Int32, COLLISION_TOPIC, self._on_collision, sensor_qos)
@@ -1016,8 +1296,9 @@ class OpenPlaneExcitation:
         reset_budget_s = (
             sum(phase.label.startswith("approach_frontier_")
                 for phase in self.phases)
-            * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
-        )
+            + (len(self.dynamic_coupled_plan)
+               if self.dynamic_coupled_plan else 0)
+        ) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
         self.node.get_logger().info(
             f"waiting for source odom and zero collision count; profile={profile}, seed={seed}, "
             f"phases={len(self.phases)}, "
@@ -1276,12 +1557,14 @@ class OpenPlaneExcitation:
                 return
             if publisher.get_subscription_count() == 0:
                 return
-        if (self.profile == "race_domain_steering_frontier"
+        if ((self.profile == "race_domain_steering_frontier"
+             or self.profile in DYNAMIC_COUPLED_PROFILES)
                 and (self.reset_pub is None
                      or self.reset_pub.get_subscription_count() == 0)):
             return
         self.started_at = now
-        if self.profile == "race_domain_steering_frontier":
+        if (self.profile == "race_domain_steering_frontier"
+                or self.profile in DYNAMIC_COUPLED_PROFILES):
             self._begin_sim_reset(now, "initial reset to spawn")
         else:
             self._start_phase(now)
@@ -1291,15 +1574,7 @@ class OpenPlaneExcitation:
 
     @staticmethod
     def _feedforward(speed_target: float) -> float:
-        if speed_target <= SPEED_TARGETS_MPS[0]:
-            return THROTTLE_FEEDFORWARD[0]
-        for index in range(1, len(SPEED_TARGETS_MPS)):
-            if speed_target <= SPEED_TARGETS_MPS[index]:
-                low_speed, high_speed = SPEED_TARGETS_MPS[index - 1:index + 1]
-                low_throttle, high_throttle = THROTTLE_FEEDFORWARD[index - 1:index + 1]
-                ratio = (speed_target - low_speed) / (high_speed - low_speed)
-                return low_throttle + ratio * (high_throttle - low_throttle)
-        return THROTTLE_FEEDFORWARD[-1]
+        return _nominal_feedforward(speed_target)
 
     def _phase_command(self, phase: Phase,
                        phase_elapsed_s: float | None = None) -> float:
@@ -1423,7 +1698,8 @@ class OpenPlaneExcitation:
                        if self.profile in ("race_domain_continuous",
                                            "race_domain_brake_boundary",
                                            "race_domain_moderate_braking",
-                                           "race_domain_steering_frontier")
+                                           "race_domain_steering_frontier",
+                                           *DYNAMIC_COUPLED_PROFILES)
                        else EMERGENCY_SPEED_MPS)
         if self.speed_mps > speed_limit:
             self._finish(f"emergency speed cutoff: {self.speed_mps:.3f}m/s "
@@ -1492,6 +1768,15 @@ class OpenPlaneExcitation:
                 "label": phase.label,
                 "target_speed_mps": phase.speed_target_mps,
                 "steering_command_rad": phase.steering_rad,
+                "steering_profile": phase.steering_profile,
+                "steering_amplitude_rad": phase.steering_amplitude_rad,
+                "steering_frequency_hz": phase.steering_frequency_hz,
+                "steering_frequencies_hz": phase.steering_frequencies_hz,
+                "steering_phases_rad": phase.steering_phases_rad,
+                "steering_waypoints": phase.steering_waypoints,
+                "steering_prbs_levels_normalized": (
+                    phase.steering_prbs_levels_normalized),
+                "steering_dwell_s": phase.steering_dwell_s,
                 "throttle_mode": phase.throttle_mode,
                 "speed_hold_kp": self.speed_hold_kp,
                 "speed_hold_ki": self.speed_hold_ki,
@@ -1522,6 +1807,16 @@ class OpenPlaneExcitation:
                 "throttle_stimulus_delay_s": phase.throttle_stimulus_delay_s,
                 "throttle_ramp_duration_s": phase.throttle_ramp_duration_s,
                 "condition_pair_id": phase.condition_pair_id,
+                "dynamic_coupled_plan_version": (
+                    1 if self.profile in DYNAMIC_COUPLED_PROFILES else None),
+                "dynamic_coupled_conditions": (
+                    dynamic_coupled_plan_as_dicts(self.seed)
+                    if (self.profile in DYNAMIC_COUPLED_PROFILES
+                        and self.phase_index == 0) else None),
+                "dynamic_coupled_command_plan": (
+                    [asdict(item) for item in self.phases]
+                    if (self.profile in DYNAMIC_COUPLED_PROFILES
+                        and self.phase_index == 0) else None),
                 "race_domain_command_plan": [
                     {
                         "target_speed_mps": block.target_speed_mps,
@@ -1637,7 +1932,15 @@ class OpenPlaneExcitation:
                 self.speed_mps >= EXCITATION_SPEED_GOVERNOR_MPS and throttle > 0.0):
             throttle = 0.0
             self.phase_governor_ticks += 1
-        steering = phase.steering_rad
+        if (self.profile in DYNAMIC_COUPLED_PROFILES
+                and self.speed_mps >= RACE_DOMAIN_GOVERNOR_MPS
+                and throttle > 0.0):
+            # Keep the captured motion inside the handoff's 11.2 m/s support;
+            # retain the requested steering so the state at the boundary is
+            # still observed rather than replaced with an artificial straight.
+            throttle = 0.0
+            self.phase_governor_ticks += 1
+        steering = _phase_steering_command(phase, phase_elapsed)
         self._publish(steering, throttle)
 
     def _next_phase(self, now: float) -> None:
@@ -1647,9 +1950,14 @@ class OpenPlaneExcitation:
         if self.phase_index >= len(self.phases):
             self._finish("schedule complete", aborted=False)
             return
+        next_phase = self.phases[self.phase_index]
         if (self.profile == "race_domain_steering_frontier"
                 and previous_phase.label.startswith("frontier_")):
             self._begin_sim_reset(now, f"completed {previous_phase.label}")
+        elif (self.profile in DYNAMIC_COUPLED_PROFILES
+              and next_phase.label.startswith("approach_coupled_")):
+            self._begin_sim_reset(
+                now, f"completed {previous_phase.condition_pair_id}")
         else:
             self._start_phase(now)
 
@@ -1790,7 +2098,8 @@ def main() -> int:
                                                "race_domain_continuous",
                                                "race_domain_brake_boundary",
                                                "race_domain_moderate_braking",
-                                               "race_domain_steering_frontier", "grid"),
+                                               "race_domain_steering_frontier",
+                                               *DYNAMIC_COUPLED_PROFILES, "grid"),
                         default="high_angle_boundary",
                         help="isolated profiles recover near-straight speed/yaw/lateral-velocity state before each probe")
     parser.add_argument("--timeout-s", type=float, default=150.0,
@@ -1841,6 +2150,18 @@ def main() -> int:
         if args.timeout_s < required:
             parser.error(
                 f"race_domain_steering_frontier requires --timeout-s >= {required:g}")
+    if args.profile in DYNAMIC_COUPLED_PROFILES:
+        schedule = build_schedule(args.seed, args.profile,
+                                  args.transition_speed_mps)
+        reset_cycles = len(build_dynamic_coupled_plan(args.seed))
+        required = (
+            sum(phase.duration_s for phase in schedule)
+            + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        if args.timeout_s < required:
+            parser.error(
+                f"{args.profile} requires --timeout-s >= {required:g}")
     if args.profile == "isolated_highsteer_75_long":
         schedule = build_schedule(args.seed, args.profile,
                                   args.transition_speed_mps)
@@ -1881,8 +2202,9 @@ def main() -> int:
             not 0.0 <= args.probe_dwell_s <= 15.0):
         parser.error("--probe-dwell-s must be in [0, 15]")
     if (args.probe_dwell_s > 0.0 and
-            args.profile in ("full_input_excitation", "grid")):
-        parser.error("--probe-dwell-s is unsupported for full_input_excitation and grid")
+            args.profile in ("full_input_excitation", "grid",
+                             *DYNAMIC_COUPLED_PROFILES)):
+        parser.error("--probe-dwell-s is unsupported for this fixed capture profile")
     experiment = OpenPlaneExcitation(args.seed, args.timeout_s, args.profile,
                                     args.transition_speed_mps,
                                     args.probe_dwell_s,

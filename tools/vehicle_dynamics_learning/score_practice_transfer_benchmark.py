@@ -28,6 +28,7 @@ from tools.vehicle_dynamics_learning.train_rssm_teacher import _rssm_model
 
 
 SCORE_HORIZONS_S = (0.25, 0.5, 0.75, 1.0, 2.0, 5.0)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 STATE_NAMES = (
     "u_com_mps", "v_com_mps", "yaw_rate_rps", "steering_feedback_rad",
     "throttle_feedback_norm", "rear_left_surface_mps",
@@ -43,6 +44,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _workspace_path(value: str | Path) -> Path:
+    """Resolve container-recorded /workspace paths from the host checkout too."""
+    path = Path(value)
+    if path.is_file():
+        return path.resolve()
+    if path.is_absolute():
+        try:
+            relative = path.relative_to(Path("/workspace"))
+        except ValueError:
+            return path
+        candidate = REPO_ROOT / relative
+        if candidate.is_file():
+            return candidate.resolve()
+    return path
+
+
 def _registry_checkpoints(registry_path: Path) -> dict[str, dict[str, Any]]:
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     entries = {item["role"]: item for item in registry["model_checkpoints"]}
@@ -55,7 +72,7 @@ def _registry_checkpoints(registry_path: Path) -> dict[str, dict[str, Any]]:
     result = {}
     for name, role in expected_roles.items():
         item = entries[role]
-        path = Path(item["path"])
+        path = _workspace_path(item["path"])
         if not path.is_absolute():
             path = Path(__file__).resolve().parents[2] / path
         if not path.is_file():
@@ -230,7 +247,7 @@ def score(benchmark_path: Path, registry_path: Path, output_path: Path,
             or benchmark.get("frozen") is not True
             or benchmark.get("training_or_checkpoint_selection_use") is not False):
         raise ValueError("input is not a frozen validation-only practice benchmark")
-    dataset_path = Path(benchmark["dataset"])
+    dataset_path = _workspace_path(benchmark["dataset"])
     if _sha256(dataset_path) != benchmark["dataset_sha256"]:
         raise ValueError("benchmark source dataset changed after freezing")
 

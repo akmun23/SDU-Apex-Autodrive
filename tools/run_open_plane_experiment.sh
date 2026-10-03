@@ -16,6 +16,7 @@ usage() {
     "race_domain_steering_frontier maps reset-isolated steering response at 9.5, 10.5, and 11.1 m/s." \
     "isolated_highsteer_75_long repeats the observed 7.5 m/s high-steering envelope with 8 s holds." \
     "race_domain_dynamic_steering records continuous signed steering transitions at 4.5, 6.5, and 7.5 m/s." \
+    "race_domain_dynamic_coupled_{train,validation,final} records randomized waveforms across the supported 5–11.1 m/s envelope." \
     "Resume a partial surface with SDU_APEX_EXPERIMENT_RESUME_ANALYSIS pointing to its closed analysis JSON." \
     "Set SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD to comma-separated steering angles in radians." \
     "Set SDU_APEX_EXPERIMENT_THROTTLE_REPEAT_COUNT, TARGET_STEP_PERCENT, and BASELINE_STEP_PERCENT." \
@@ -49,6 +50,10 @@ elif [[ "${profile}" == race_domain_brake_boundary ]]; then
   default_timeout_s=270
 elif [[ "${profile}" == race_domain_moderate_braking ]]; then
   default_timeout_s=430
+elif [[ "${profile}" == race_domain_dynamic_coupled_train ||
+        "${profile}" == race_domain_dynamic_coupled_validation ||
+        "${profile}" == race_domain_dynamic_coupled_final ]]; then
+  default_timeout_s=600
 elif [[ "${profile}" == race_domain_steering_frontier ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == isolated_highsteer_75_long ]]; then
@@ -64,7 +69,10 @@ smoke_hold_s="${SDU_APEX_EXPERIMENT_SMOKE_HOLD_S:-5.0}"
 dev_sim_reset_enabled=0
 if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == throttle_transition_surface ||
-      "${profile}" == race_domain_steering_frontier ]]; then
+      "${profile}" == race_domain_steering_frontier ||
+      "${profile}" == race_domain_dynamic_coupled_train ||
+      "${profile}" == race_domain_dynamic_coupled_validation ||
+      "${profile}" == race_domain_dynamic_coupled_final ]]; then
   dev_sim_reset_enabled=1
 fi
 probe_dwell_s="${SDU_APEX_EXPERIMENT_PROBE_DWELL_S:-0}"
@@ -83,10 +91,27 @@ if [[ ! "${run_id}" =~ ^[[:alnum:]_-]+$ ]]; then
   echo "Run ID may contain only letters, digits, underscores, and hyphens." >&2
   exit 2
 fi
-if [[ "${profile}" != high_angle_boundary && "${profile}" != isolated_boundary && "${profile}" != isolated_speed_sweep && "${profile}" != isolated_force_3mps && "${profile}" != isolated_force_4mps && "${profile}" != isolated_force_5mps && "${profile}" != isolated_highspeed_surface && "${profile}" != isolated_highsteer_75_long && "${profile}" != race_domain_dynamic_steering && "${profile}" != isolated_3to5_response_surface && "${profile}" != isolated_highspeed_crossfactor && "${profile}" != isolated_highspeed_tail && "${profile}" != isolated_transition_65mps && "${profile}" != isolated_transition_45mps && "${profile}" != isolated_transition_speed_surface && "${profile}" != isolated_transition_support && "${profile}" != isolated_transition_bridge && "${profile}" != isolated_transition_low_support && "${profile}" != isolated_transition_full_surface && "${profile}" != transient_4mps && "${profile}" != transient_fullsteer_4mps && "${profile}" != transient_transition_4mps && "${profile}" != transient_transition_4mps_fixedthrottle && "${profile}" != transient_transition_dwell_4mps_fixedthrottle && "${profile}" != throttle_slew_pair && "${profile}" != throttle_reset_smoke && "${profile}" != throttle_transition_surface && "${profile}" != full_input_excitation && "${profile}" != race_domain_continuous && "${profile}" != race_domain_brake_boundary && "${profile}" != race_domain_moderate_braking && "${profile}" != race_domain_steering_frontier && "${profile}" != grid ]]; then
+case "${profile}" in
+  high_angle_boundary|isolated_boundary|isolated_speed_sweep|isolated_force_3mps|\
+  isolated_force_4mps|isolated_force_5mps|isolated_highspeed_surface|\
+  isolated_highsteer_75_long|race_domain_dynamic_steering|\
+  race_domain_dynamic_coupled_train|race_domain_dynamic_coupled_validation|\
+  race_domain_dynamic_coupled_final|isolated_3to5_response_surface|\
+  isolated_highspeed_crossfactor|isolated_highspeed_tail|\
+  isolated_transition_65mps|isolated_transition_45mps|\
+  isolated_transition_speed_surface|isolated_transition_support|\
+  isolated_transition_bridge|isolated_transition_low_support|\
+  isolated_transition_full_surface|transient_4mps|transient_fullsteer_4mps|\
+  transient_transition_4mps|transient_transition_4mps_fixedthrottle|\
+  transient_transition_dwell_4mps_fixedthrottle|throttle_slew_pair|\
+  throttle_reset_smoke|throttle_transition_surface|full_input_excitation|\
+  race_domain_continuous|race_domain_brake_boundary|\
+  race_domain_moderate_braking|race_domain_steering_frontier|grid) ;;
+  *)
   echo "Invalid SDU_APEX_EXPERIMENT_PROFILE; run $0 --help for usage." >&2
   exit 2
-fi
+    ;;
+esac
 if [[ -n "${resume_analysis_input}" ]]; then
   if [[ "${profile}" != throttle_transition_surface ]]; then
     echo "Resume analysis is supported only for throttle_transition_surface." >&2
@@ -128,7 +153,7 @@ echo "Profile: ${profile}; seed: ${seed}; ROS domain: ${domain_id}"
 echo "Output: ${run_parent}/run (minimal dynamics topics; no LiDAR/camera)"
 echo "Waiting for the explore simulator at 127.0.0.1:4567..."
 
-docker run --rm --name "${container}" \
+  docker run --rm --name "${container}" \
   --network=host --ipc=host \
   --log-opt max-size=10m --log-opt max-file=2 \
   -e "ROS_DOMAIN_ID=${domain_id}" \
