@@ -108,6 +108,14 @@ def _transition_indices(data: dict[str, Any], allowed_splits: set[str]
     return np.concatenate(selected), np.concatenate(run_indices)
 
 
+def _command_rows(source_rows: np.ndarray,
+                  command_offset_frames: int) -> np.ndarray:
+    """Map a source-state transition to its tested command-row convention."""
+    if command_offset_frames not in (-1, 0):
+        raise ValueError("command offset must be -1 or 0 frames")
+    return np.asarray(source_rows, dtype=np.int64) + 1 + command_offset_frames
+
+
 def _summarize(values: np.ndarray, run_index: np.ndarray,
                run_ids: np.ndarray, selected: np.ndarray,
                valid: np.ndarray | None = None) -> dict[str, Any]:
@@ -135,11 +143,14 @@ def _summarize(values: np.ndarray, run_index: np.ndarray,
 
 
 def _covariates(data: dict[str, Any], state: np.ndarray,
-                rows: np.ndarray) -> dict[str, np.ndarray]:
+                rows: np.ndarray,
+                command_offset_frames: int) -> dict[str, np.ndarray]:
     frames = np.asarray(data["frames"], dtype=np.float64)
     steering_rate = (state[rows, 3] - state[rows - 1, 3]) / DT_S
-    command_throttle = frames[rows + 1, 8]
-    throttle_slew = (frames[rows + 1, 8] - frames[rows, 8]) / DT_S
+    command_rows = _command_rows(rows, command_offset_frames)
+    command_throttle = frames[command_rows, 8]
+    throttle_slew = (
+        frames[command_rows, 8] - frames[command_rows - 1, 8]) / DT_S
     signed_mismatch = 0.5 * (state[rows, 5] + state[rows, 6]) - state[rows, 0]
     return {
         "speed_mps": np.hypot(state[rows, 0], state[rows, 1]),
@@ -218,7 +229,8 @@ def _wheel_measurement_semantics(data: dict[str, Any], rows: np.ndarray,
 
 def _predict_domain(torch, model, metadata: dict[str, Any],
                     data: dict[str, Any], allowed_splits: set[str],
-                    device: str, batch_size: int = 512) -> dict[str, Any]:
+                    device: str, command_offset_frames: int,
+                    batch_size: int = 512) -> dict[str, Any]:
     wheel_source = str(metadata.get("wheel_state_source", "filtered_odometry"))
     base_state = physical_state_from_dataset(data, wheel_state_source=wheel_source)
     state = (append_roll_state(data, base_state)
@@ -248,7 +260,8 @@ def _predict_domain(torch, model, metadata: dict[str, Any],
             history = np.concatenate((history, raw_history[history_indices]), axis=2)
         initial = state[source]
         delayed = frames[source - 1, 7:9]
-        commands = frames[source + 1, 7:9]
+        commands = frames[
+            _command_rows(source, command_offset_frames), 7:9]
         with torch.no_grad():
             next_state, _, _, _ = model.rollout(
                 torch.as_tensor(initial, dtype=torch.float32, device=device),
@@ -306,7 +319,8 @@ def _predict_domain(torch, model, metadata: dict[str, Any],
             data, rows, run_index, run_ids, predicted, truth, wheel_source),
         "stratified_errors": {},
     }
-    covariates = _covariates(data, base_state, rows)
+    covariates = _covariates(
+        data, base_state, rows, command_offset_frames)
     for factor, (edges, labels) in GROUPS.items():
         factor_rows: dict[str, Any] = {}
         values = covariates[factor]
@@ -330,7 +344,10 @@ def _predict_domain(torch, model, metadata: dict[str, Any],
 
 def diagnose(checkpoint: Path, dynamic_dataset: Path,
              practice_dataset: Path, output: Path,
-             device: str = "cuda") -> dict[str, Any]:
+             device: str = "cuda",
+             command_offset_frames: int = 0) -> dict[str, Any]:
+    if command_offset_frames not in (-1, 0):
+        raise ValueError("command offset must be -1 or 0 frames")
     checkpoint, dynamic_dataset, practice_dataset, output = (
         path.resolve() for path in
         (checkpoint, dynamic_dataset, practice_dataset, output))
@@ -343,7 +360,9 @@ def diagnose(checkpoint: Path, dynamic_dataset: Path,
         results[name] = {
             "dataset": str(dataset_path),
             "dataset_sha256": _sha256(dataset_path),
-            **_predict_domain(torch, model, metadata, data, splits, device),
+            **_predict_domain(
+                torch, model, metadata, data, splits, device,
+                command_offset_frames),
         }
     result = {
         "schema_version": 1,
@@ -354,6 +373,11 @@ def diagnose(checkpoint: Path, dynamic_dataset: Path,
         "test_and_final_test_used": False,
         "future_truth_or_feedback_used_for_prediction": False,
         "initialization": "each transition uses only its own current state and preceding 80 measured frames; next-state labels are scoring only",
+        "command_offset_frames_from_target_state_row": int(
+            command_offset_frames),
+        "command_alignment_note": (
+            "-1 uses the command stored with the source-state row; 0 uses "
+            "the command stored with the target-state row"),
         "cadence_s": DT_S,
         "domains": results,
     }
@@ -372,9 +396,12 @@ def main() -> int:
                         default=DEFAULT_PRACTICE_DATASET)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--command-offset-frames", type=int,
+                        choices=(-1, 0), default=0)
     args = parser.parse_args()
     result = diagnose(args.checkpoint, args.dynamic_dataset,
-                      args.practice_dataset, args.output, args.device)
+                      args.practice_dataset, args.output, args.device,
+                      args.command_offset_frames)
     print(json.dumps({
         "output": str(args.output.resolve()),
         "domains": {name: {

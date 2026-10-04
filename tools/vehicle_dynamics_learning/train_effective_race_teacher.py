@@ -99,6 +99,84 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _verify_append_only_dataset_extension(source_metadata: dict[str, Any],
+                                         target_dataset: Path,
+                                         target_data: dict[str, Any]
+                                         ) -> dict[str, Any]:
+    """Prove that a new training view only appends whole-run data.
+
+    Warm-start transfer across dataset hashes is safe only when every old
+    archive array is an exact prefix of its counterpart and the whole-run
+    validation membership is unchanged. This intentionally rejects reordering,
+    edits, changed labels, and altered validation/test rows.
+    """
+    source_value = source_metadata.get("dataset_path")
+    if not source_value:
+        raise ValueError("checkpoint has no source dataset path for prefix proof")
+    source_dataset = Path(str(source_value))
+    if str(source_dataset).startswith("/workspace/src/"):
+        source_dataset = REPO_ROOT / str(source_dataset).removeprefix(
+            "/workspace/src/")
+    elif not source_dataset.is_absolute():
+        source_dataset = REPO_ROOT / source_dataset
+    source_dataset = source_dataset.resolve()
+    if (not source_dataset.is_file()
+            or _sha256(source_dataset) != source_metadata.get("dataset_sha256")):
+        raise ValueError("checkpoint source dataset is missing or its hash changed")
+
+    source_train = [str(value) for value in source_metadata.get("training_runs", ())]
+    source_validation = [str(value) for value in
+                         source_metadata.get("validation_runs", ())]
+    target_train = [str(run) for run, split in
+                    zip(target_data["run_ids"], target_data["splits"])
+                    if str(split) == "train"]
+    target_validation = [str(run) for run, split in
+                         zip(target_data["run_ids"], target_data["splits"])
+                         if str(split) == "validation"]
+    if (not source_train or not set(source_train).issubset(target_train)
+            or source_validation != target_validation):
+        raise ValueError(
+            "append-only transfer requires source training runs to remain in "
+            "training and identical whole-run validation membership")
+
+    prefix_arrays = 0
+    appended_rows: dict[str, int] = {}
+    with np.load(source_dataset, allow_pickle=False) as source, \
+            np.load(target_dataset, allow_pickle=False) as target:
+        if set(source.files) != set(target.files):
+            raise ValueError("append-only transfer found changed dataset fields")
+        for name in source.files:
+            old, new = source[name], target[name]
+            if old.shape == new.shape:
+                candidate = new
+            elif (old.ndim > 0 and old.ndim == new.ndim
+                  and old.shape[1:] == new.shape[1:]
+                  and old.shape[0] <= new.shape[0]):
+                candidate = new[:old.shape[0]]
+                appended_rows[name] = int(new.shape[0] - old.shape[0])
+            else:
+                raise ValueError(
+                    f"append-only transfer found incompatible shape for {name}")
+            equal = (np.array_equal(old, candidate, equal_nan=True)
+                     if old.dtype.kind in "fc" else
+                     np.array_equal(old, candidate))
+            if not equal:
+                raise ValueError(
+                    f"append-only transfer found modified prefix in {name}")
+            prefix_arrays += 1
+    return {
+        "verified": True,
+        "source_dataset": str(source_dataset),
+        "source_dataset_sha256": str(source_metadata["dataset_sha256"]),
+        "target_dataset_sha256": _sha256(target_dataset),
+        "exact_prefix_array_count": prefix_arrays,
+        "source_training_runs_preserved": len(source_train),
+        "new_training_run_count": len(target_train) - len(source_train),
+        "validation_runs_unchanged": len(source_validation),
+        "appended_rows_by_array": appended_rows,
+    }
+
+
 def _run_indices(data: dict[str, Any]) -> np.ndarray:
     result = np.full(len(data["frames"]), -1, dtype=np.int32)
     for (start_raw, end_raw), run_raw in zip(data["bounds"], data["seq_run"]):
@@ -376,12 +454,17 @@ def _state_distillation_loss(torch, nn, student_state, teacher_state,
         student, teacher, beta=1.0)
 
 
-def _state_distillation_channels(output_head_only: str | None):
+def _state_distillation_channels(output_head_only: str | None,
+                                 include_roll_state: bool = False):
     """Select parent states that isolate a targeted head's coupled effects."""
     if output_head_only == "wheel":
         return (0, 1, 2)  # forward speed, lateral speed, yaw rate
-    if output_head_only == "longitudinal":
-        return (1, 2, 5, 6)  # lateral speed, yaw rate, both rear wheels
+    if output_head_only in ("longitudinal", "longitudinal_pose"):
+        channels = (1, 2, 5, 6)  # preserve cornering and wheel-state dynamics
+        return channels + ((7, 8) if include_roll_state else ())
+    if output_head_only == "yaw_pose":
+        channels = (0, 1, 5, 6)  # preserve speed and wheel-state dynamics
+        return channels + ((7, 8) if include_roll_state else ())
     if output_head_only == "longitudinal_wheel":
         return (1, 2)
     if output_head_only == "body_wheel":
@@ -416,8 +499,9 @@ def _loss(torch, nn, model, batch: tuple[np.ndarray, ...], normalizers: dict[str
     if (not np.isfinite(terminal_heading_loss_weight)
             or terminal_heading_loss_weight < 0.0
             or (terminal_heading_loss_weight > 0.0
-                and output_head_only != "longitudinal_wheel")):
-        raise ValueError("terminal heading loss is restricted to longitudinal-wheel head training")
+                and output_head_only not in (
+                    "longitudinal_pose", "longitudinal_wheel"))):
+        raise ValueError("terminal heading loss is restricted to longitudinal pose-aware head training")
     if (not np.isfinite(pose_secondary_weight)
             or pose_secondary_weight < 0.0):
         raise ValueError("pose secondary loss weight must be finite and nonnegative")
@@ -505,6 +589,19 @@ def _loss(torch, nn, model, batch: tuple[np.ndarray, ...], normalizers: dict[str
         total = (yaw_state_loss + 0.5 * heading_loss
                  + yaw_terminal_position_weight * terminal_position_loss
                  + wheel_state_weight * wheel_loss)
+    elif output_head_only == "yaw_pose":
+        yaw_state_loss = nn.functional.smooth_l1_loss(
+            state_error[:, :, 2], torch.zeros_like(state_error[:, :, 2]),
+            beta=1.0)
+        heading_loss = nn.functional.smooth_l1_loss(
+            pose_heading_error, torch.zeros_like(pose_heading_error), beta=1.0)
+        terminal_position_loss = nn.functional.smooth_l1_loss(
+            pose_position_error[:, -1],
+            torch.zeros_like(pose_position_error[:, -1]), beta=1.0)
+        total = (yaw_state_loss + 0.5 * heading_loss
+                 + pose_secondary_weight * pose_loss
+                 + yaw_terminal_position_weight * terminal_position_loss
+                 + state_distillation_weight * distillation_loss)
     elif output_head_only == "longitudinal":
         # Isolate the forward-motion equation after the residual attribution
         # found a repeatable low-throttle practice bias. Only the ax output
@@ -515,6 +612,17 @@ def _loss(torch, nn, model, batch: tuple[np.ndarray, ...], normalizers: dict[str
         total = (_weighted_longitudinal_loss(
                     torch, nn, state_error, target_tensor, command_tensor,
                     longitudinal_low_throttle_weight)
+                 + state_distillation_weight * distillation_loss)
+    elif output_head_only == "longitudinal_pose":
+        # Tune only forward acceleration against recursive speed and pose.
+        # Distillation keeps lateral/yaw, wheel and internally predicted roll
+        # states near the stronger parent so an axial correction cannot
+        # silently trade away its cornering behavior.
+        total = (_weighted_longitudinal_loss(
+                    torch, nn, state_error, target_tensor, command_tensor,
+                    longitudinal_low_throttle_weight)
+                 + pose_secondary_weight * pose_loss
+                 + terminal_heading_loss_weight * terminal_heading_loss
                  + state_distillation_weight * distillation_loss)
     elif output_head_only == "longitudinal_wheel":
         total = (_weighted_longitudinal_loss(
@@ -537,7 +645,7 @@ def _loss(torch, nn, model, batch: tuple[np.ndarray, ...], normalizers: dict[str
                  + state_distillation_weight * distillation_loss)
     if (output_head_only not in (
             None, "body_wheel", "wheel", "longitudinal",
-            "longitudinal_wheel")
+            "longitudinal_pose", "longitudinal_wheel", "yaw_pose")
             and state_distillation_weight > 0.0):
         raise ValueError("state distillation requires full-model or a supported isolated-head mode")
     components = {
@@ -641,7 +749,8 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
           distillation_teacher_checkpoint: Path | None = None,
           pose_secondary_weight: float = LOSS_WEIGHTS["pose_secondary"],
           wheel_dynamics_mode: str = "surface_acceleration",
-          turn_reflection_augmentation: bool = False
+          turn_reflection_augmentation: bool = False,
+          allow_append_only_dataset_extension: bool = False
           ) -> dict[str, Any]:
     dataset_path, output_dir = dataset_path.resolve(), output_dir.resolve()
     if init_checkpoint is not None:
@@ -650,7 +759,8 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
         distillation_teacher_checkpoint = distillation_teacher_checkpoint.resolve()
     roll_residual_head_finetune = (
         output_head_only in ("body", "body_wheel", "wheel", "yaw",
-                             "longitudinal", "longitudinal_wheel")
+                             "longitudinal", "longitudinal_pose",
+                             "longitudinal_wheel", "yaw_pose")
         and include_roll_state and roll_residual_mode)
     if output_dir.exists():
         raise FileExistsError(f"refusing to reuse EDSSM training directory: {output_dir}")
@@ -664,12 +774,14 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
             or wheel_state_weight < 0.0
             or not np.isfinite(yaw_terminal_position_weight)
             or yaw_terminal_position_weight < 0.0
+            or (yaw_terminal_position_weight > 0.0
+                and output_head_only not in ("yaw", "yaw_pose"))
             or not np.isfinite(longitudinal_low_throttle_weight)
             or not 1.0 <= longitudinal_low_throttle_weight <= 10.0
             or (longitudinal_low_throttle_weight > 1.0
                 and output_head_only not in (
-                    None, "longitudinal", "body_wheel",
-                    "longitudinal_wheel"))
+                     None, "longitudinal", "body_wheel",
+                    "longitudinal_pose", "longitudinal_wheel"))
             or not np.isfinite(state_distillation_weight)
             or not 0.0 <= state_distillation_weight <= 10.0
             or not np.isfinite(terminal_heading_loss_weight)
@@ -679,30 +791,35 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
             or not np.isfinite(max_throttle_command)
             or not 0.0 <= max_throttle_command <= 1.0
             or (terminal_heading_loss_weight > 0.0
-                and output_head_only != "longitudinal_wheel")
+                and output_head_only not in (
+                    "longitudinal_pose", "longitudinal_wheel"))
             or (state_distillation_weight > 0.0
                 and (init_checkpoint is None
                      or output_head_only not in (
                          None, "body_wheel", "wheel", "longitudinal",
-                         "longitudinal_wheel")))
+                         "longitudinal_pose", "longitudinal_wheel",
+                         "yaw_pose")))
             or (distillation_teacher_checkpoint is not None
                 and state_distillation_weight <= 0.0)
             or (couple_roll_acceleration and not include_roll_state)
             or (roll_residual_mode and not include_roll_state)
             or (fit_roll_oscillator_state and not include_roll_state)
             or (roll_residual_mode and init_checkpoint is None)
+            or (allow_append_only_dataset_extension
+                and (init_checkpoint is None or not roll_residual_mode))
             or (init_checkpoint is not None
                 and not (roll_residual_mode or output_head_only is not None
                          or stratify_signed_wheel_mismatch))
             or (stratify_signed_wheel_mismatch and init_checkpoint is None)
             or (output_head_only not in (
                 None, "body", "body_wheel", "wheel", "yaw",
-                "longitudinal", "longitudinal_wheel", "roll_residual"))
+                "longitudinal", "longitudinal_pose",
+                "longitudinal_wheel", "yaw_pose", "roll_residual"))
             or (output_head_only is not None
                 and init_checkpoint is None)
             or (output_head_only in (
                     "body", "body_wheel", "wheel", "yaw", "longitudinal",
-                    "longitudinal_wheel")
+                    "longitudinal_pose", "longitudinal_wheel", "yaw_pose")
                 and (include_roll_state or roll_residual_mode)
                 and not roll_residual_head_finetune)
             or (output_head_only == "roll_residual"
@@ -717,6 +834,13 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
     torch, nn = _torch()
     if device_name.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError("CUDA requested but unavailable")
+    data = _load_dataset(dataset_path)
+    dataset_extension = None
+    if allow_append_only_dataset_extension:
+        source_checkpoint = torch.load(
+            init_checkpoint, map_location="cpu", weights_only=False)
+        dataset_extension = _verify_append_only_dataset_extension(
+            source_checkpoint.get("metadata", {}), dataset_path, data)
     if device_name == "cpu":
         torch.set_num_threads(1)
     random.seed(seed)
@@ -724,7 +848,6 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    data = _load_dataset(dataset_path)
     if (int(data["schema_version"]) != 9
             or np.any(~np.isin(data["splits"], ("train", "validation", "test", "final_test")))):
         raise ValueError("EDSSM requires the frozen schema-9 whole-run dataset")
@@ -815,7 +938,7 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
     warm_start = None
     if output_head_only in (
             "body", "body_wheel", "wheel", "yaw", "longitudinal",
-            "longitudinal_wheel"):
+            "longitudinal_pose", "longitudinal_wheel", "yaw_pose"):
         source = torch.load(init_checkpoint, map_location="cpu",
                             weights_only=False)
         source_metadata = source.get("metadata", {})
@@ -862,7 +985,9 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
             "body_wheel": (0, 1, 3, 4),
             "wheel": (3, 4),
             "yaw": (2,),
+            "yaw_pose": (2,),
             "longitudinal": (0,),
+            "longitudinal_pose": (0,),
             "longitudinal_wheel": (0, 3, 4),
         }[output_head_only]
         if expert_count == 1:
@@ -896,7 +1021,9 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
         source = torch.load(init_checkpoint, map_location="cpu",
                             weights_only=False)
         source_metadata = source.get("metadata", {})
-        if (source_metadata.get("dataset_sha256") != _sha256(dataset_path)
+        same_training_dataset = (
+            source_metadata.get("dataset_sha256") == _sha256(dataset_path))
+        if (not (same_training_dataset or dataset_extension is not None)
                 or source_metadata.get("encoder") != encoder
                 or int(source_metadata.get("latent_size", -1)) != latent_size
                 or int(source_metadata.get("expert_count", 1)) != expert_count
@@ -922,10 +1049,33 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
                     or source_metadata.get("roll_oscillator_fit") is not None):
                 raise ValueError("roll-state continuation settings do not match checkpoint")
             model.load_state_dict(source["model_state_dict"], strict=True)
+            if dataset_extension is not None:
+                # Keep the inherited network's scaling and analytic actuator
+                # response aligned with its learned weights while the added
+                # training run changes only sampled dynamics transitions.
+                for name in arrays:
+                    inherited = np.asarray(
+                        source_metadata[name], dtype=np.float32)
+                    arrays[name] = inherited
+                    normalizers[name] = inherited
+                inherited_actuator = source_metadata["actuator_fit"]
+                actuator_fit = ActuatorFit(
+                    ActuatorChannel(**inherited_actuator["steering"]),
+                    ActuatorChannel(**inherited_actuator["throttle"]),
+                    inherited_actuator.get("diagnostics", {}))
+                model.steering_delay_steps = actuator_fit.steering.delay_steps
+                model.throttle_delay_steps = actuator_fit.throttle.delay_steps
+                model.steering_alpha = float(actuator_fit.steering.alpha)
+                model.throttle_alpha = float(actuator_fit.throttle.alpha)
             warm_start = {
                 "checkpoint": str(init_checkpoint),
                 "sha256": _sha256(init_checkpoint),
                 "mode": "full-model continuation of the matching predicted-roll residual teacher",
+                "dataset_extension_proof": dataset_extension,
+                "normalizer_policy": (
+                    "retain verified parent training-only normalizers and "
+                    "actuator response; update learned dynamics on appended run"
+                    if dataset_extension is not None else "unchanged"),
                 "trainable_parameter_count": sum(
                     parameter.numel() for parameter in model.parameters()
                     if parameter.requires_grad),
@@ -1003,7 +1153,7 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
     if state_distillation_weight > 0.0:
         teacher_path = (distillation_teacher_checkpoint or init_checkpoint)
         state_distillation_channels = _state_distillation_channels(
-            output_head_only)
+            output_head_only, include_roll_state)
         state_names = PHYSICAL_STATE_NAMES + ROLL_STATE_NAMES
         teacher_checkpoint = {
             "path": str(teacher_path),
@@ -1073,7 +1223,11 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
         "roll_oscillator_fit": roll_oscillator_report,
         "warm_start": warm_start,
         "training_objective_mode": (
-            (f"{output_head_only}_head_only" if output_head_only else
+            ("longitudinal_pose_head_only_recursive_path" if
+             output_head_only == "longitudinal_pose" else
+             "yaw_pose_head_only_recursive_path" if
+             output_head_only == "yaw_pose" else
+             f"{output_head_only}_head_only" if output_head_only else
             "joint_state_pose_with_low_throttle_forward_weight_and_yaw_wheel_distillation"
             if state_distillation_weight > 0.0 else
              "joint_state_pose_with_low_throttle_forward_weight"
@@ -1157,7 +1311,11 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
         "training_domain": (
             f"training whole runs; body speed <=12 m/s; future throttle command "
             f"<={max_throttle_command:.6g}"),
-        "normalization_fit": "training-only median and interquartile range in declared racing domain",
+        "normalization_fit": (
+            "inherited training-only parent median/interquartile range; "
+            "append-only extension proof recorded in warm_start"
+            if dataset_extension is not None else
+            "training-only median and interquartile range in declared racing domain"),
         "acceleration_bound_fit": "training-only 99.9th absolute percentile plus 15% margin in declared racing domain",
         "actuator_fit": {
             "steering": {"delay_steps": actuator_fit.steering.delay_steps,
@@ -1246,7 +1404,8 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
                                   teacher_states, state_distillation_weight,
                                   state_distillation_channels=(
                                       _state_distillation_channels(
-                                          output_head_only)),
+                                          output_head_only,
+                                          include_roll_state)),
                                   terminal_heading_loss_weight=(
                                       terminal_heading_loss_weight),
                                   pose_secondary_weight=pose_secondary_weight)
@@ -1347,7 +1506,8 @@ def main() -> int:
                         help="same-data base checkpoint for targeted residual fine-tuning")
     parser.add_argument("--output-head-only",
                         choices=("body", "body_wheel", "wheel", "yaw",
-                                 "longitudinal", "longitudinal_wheel",
+                                 "longitudinal", "longitudinal_pose",
+                                 "longitudinal_wheel", "yaw_pose",
                                  "roll_residual"),
                         help="freeze the base model and train only the selected dynamics output branch")
     parser.add_argument("--yaw-terminal-position-weight", type=float, default=0.0,
@@ -1363,7 +1523,7 @@ def main() -> int:
                         default=LOSS_WEIGHTS["pose_secondary"],
                         help="weight on the recursively integrated full-trajectory position and heading loss")
     parser.add_argument("--terminal-heading-loss-weight", type=float, default=0.0,
-                        help="additional final integrated-heading loss; restricted to longitudinal-wheel head fine-tuning")
+                        help="additional final integrated-heading loss; restricted to pose-aware longitudinal-head fine-tuning")
     parser.add_argument("--stratify-signed-wheel-mismatch", action="store_true",
                         help="balance negative, near-zero, and positive wheel/body speed-mismatch regimes")
     parser.add_argument("--body-acceleration-source",
@@ -1384,6 +1544,10 @@ def main() -> int:
                         help="add causal raw-minus-filtered wheel-rate innovations and validity to initial history")
     parser.add_argument("--turn-reflection-augmentation", action="store_true",
                         help="randomly mirror half of training windows using empirically checked left/right vehicle symmetry")
+    parser.add_argument("--allow-append-only-dataset-extension", action="store_true",
+                        help=("allow full predicted-roll continuation only after "
+                              "verifying every source archive array is an exact "
+                              "prefix and validation-run membership is unchanged"))
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--sampling-seed", type=int, default=20261009)
     parser.add_argument("--stage-steps", type=int, default=400)
@@ -1428,7 +1592,8 @@ def main() -> int:
                        args.distillation_teacher_checkpoint,
                        args.pose_secondary_weight,
                        args.wheel_dynamics_mode,
-                       args.turn_reflection_augmentation)
+                       args.turn_reflection_augmentation,
+                       args.allow_append_only_dataset_extension)
     except (OSError, ValueError, KeyError, IndexError, TypeError,
             FloatingPointError, RuntimeError) as exc:
         print(f"EDSSM training failed: {exc}", file=sys.stderr)

@@ -5,12 +5,24 @@ import unittest
 import numpy as np
 
 from tools.vehicle_dynamics_learning.diagnose_effective_race_first_step import (
+    _command_rows,
     _summarize,
     _transition_indices,
 )
 
 
 class FirstStepDiagnosticTests(unittest.TestCase):
+    def test_command_offset_maps_target_row_to_tested_alignment(self):
+        source_rows = np.asarray((100, 101))
+        np.testing.assert_array_equal(
+            _command_rows(source_rows, -1), np.asarray((100, 101)))
+        np.testing.assert_array_equal(
+            _command_rows(source_rows, 0), np.asarray((101, 102)))
+
+    def test_command_offset_rejects_unsupported_alignment(self):
+        with self.assertRaises(ValueError):
+            _command_rows(np.asarray((100,)), 1)
+
     def test_transition_rows_stay_inside_selected_sequence_bounds(self):
         data = {
             "splits": np.asarray(("validation", "train")),

@@ -260,6 +260,11 @@ def extract_doc_artifact_refs(docs_dir: Path) -> list[dict[str, Any]]:
     # A comma inside {...} is part of the path expression, not punctuation.
     pattern = re.compile(r"(?:\.\./)?live_runs/[^\s`\]>]+")
     for doc in sorted(docs_dir.glob("*.md")):
+        # This file is a generated rendering of the registry itself. Parsing
+        # its "missing reference" section on the next refresh would create
+        # self-referential unresolved paths and make the registry non-idempotent.
+        if doc.name == DEFAULT_DOC_OUTPUT.name:
+            continue
         text = doc.read_text(encoding="utf-8", errors="replace")
         for match in pattern.finditer(text):
             value = match.group(0).rstrip(".,;:")
@@ -550,6 +555,90 @@ def build_registry(repo_root: Path = ROOT, output: Path = DEFAULT_OUTPUT) -> dic
             "decision_reason": "Evidence artifact; not a promotable model selection result by itself.",
         })
 
+    # WP19-WP23 did not all emit the legacy training_summary.json schema.
+    # Index their frozen reports and checkpoints explicitly so a registry
+    # refresh cannot silently omit the active black-box plant branch.
+    active_root = gate_data_root
+    next_phase_root = active_root / "next_phase_after_2129427"
+    wp25_root = next_phase_root / "wp25_failure_localization"
+    wp26_root = next_phase_root / "wp26_mechanism_ablations"
+    active_specs = (
+        ("WP19 selected checkpoint", active_root / "wp19_target_ablation_v2_common_encoder_mask"
+         / "07_body_state_increment__encoder_angle_increment/model.pt", "checkpoint",
+         active_root / "wp20_support_calibration_v2_model_train_runs"
+         / "wp20_support_calibration_report.json", "selected_wp19_checkpoint_sha256"),
+        ("WP19 report", active_root / "wp19_target_ablation_v2_common_encoder_mask"
+         / "wp19_target_ablation_report.json", "report", None, None),
+        ("WP20 report", active_root / "wp20_support_calibration_v2_model_train_runs"
+         / "wp20_support_calibration_report.json", "report", None, None),
+        ("WP22 A2 checkpoint", active_root / "wp22_augmented_state_space_seed101_smoke_v1"
+         / "seed101_candidate.pt", "checkpoint", active_root / "wp22_augmented_state_space_seed101_smoke_v1"
+         / "wp22_training_report.json", "checkpoint_sha256"),
+        ("WP22 training report", active_root / "wp22_augmented_state_space_seed101_smoke_v1"
+         / "wp22_training_report.json", "report", None, None),
+        ("WP22 failure diagnosis", active_root / "wp22_augmented_state_space_seed101_smoke_v1"
+         / "wp22_failure_diagnosis.json", "diagnostic", None, None),
+        ("WP23 A0 checkpoint", active_root / "wp23_structural_ablations_seed101_v1/A0"
+         / "seed101_A0_candidate.pt", "checkpoint", active_root / "wp23_structural_ablations_seed101_v1/A0"
+         / "wp23_A0_training_report.json", "checkpoint_sha256"),
+        ("WP23 A0 training report", active_root / "wp23_structural_ablations_seed101_v1/A0"
+         / "wp23_A0_training_report.json", "report", None, None),
+        ("WP23 A1 checkpoint", active_root / "wp23_structural_ablations_seed101_v1/A1"
+         / "seed101_A1_candidate.pt", "checkpoint", active_root / "wp23_structural_ablations_seed101_v1/A1"
+         / "wp23_A1_training_report.json", "checkpoint_sha256"),
+        ("WP23 A1 training report", active_root / "wp23_structural_ablations_seed101_v1/A1"
+         / "wp23_A1_training_report.json", "report", None, None),
+        ("WP23 ablation report", active_root / "wp23_structural_ablations_seed101_v1"
+         / "wp23_structural_ablation_report.json", "diagnostic", None, None),
+        ("WP24 frozen comparators", next_phase_root / "frozen_comparators.json",
+         "manifest", None, None),
+        ("WP24 frozen evaluation starts", next_phase_root / "frozen_eval_starts.json",
+         "manifest", None, None),
+        ("WP24 A2 reproduction", wp25_root / "wp24_reproduction_report.json",
+         "diagnostic", None, None),
+        ("WP25 scoring report", wp25_root / "wp25_score_only_diagnostics.json",
+         "diagnostic", None, None),
+        ("WP25 loss-gradient attribution", wp25_root / "wp25_loss_gradient_attribution.json",
+         "diagnostic", None, None),
+        ("WP26 mechanism report", wp26_root / "wp26_mechanism_ablation_report.json",
+         "diagnostic", None, None),
+        ("WP26 D1 checkpoint", wp26_root / "D1/checkpoint.pt", "checkpoint",
+         wp26_root / "D1/training_report.json", "checkpoint_sha256"),
+        ("WP26 D1 training report", wp26_root / "D1/training_report.json",
+         "report", None, None),
+        ("WP26 D2 checkpoint", wp26_root / "D2/checkpoint.pt", "checkpoint",
+         wp26_root / "D2/training_report.json", "checkpoint_sha256"),
+        ("WP26 D2 training report", wp26_root / "D2/training_report.json",
+         "report", None, None),
+        ("WP26 D3 checkpoint", wp26_root / "D3/checkpoint.pt", "checkpoint",
+         wp26_root / "D3/training_report.json", "checkpoint_sha256"),
+        ("WP26 D3 training report", wp26_root / "D3/training_report.json",
+         "report", None, None),
+    )
+    active_artifacts = []
+    for label, path, kind, report_path, report_hash_key in active_specs:
+        if not path.is_file():
+            raise FileNotFoundError(f"required active-branch artifact is missing: {path}")
+        actual = sha256(path)
+        expected = None
+        if kind == "checkpoint" and report_path is not None:
+            report = read_json(report_path)
+            if not report:
+                raise ValueError(f"cannot read checkpoint report: {report_path}")
+            expected = report.get(report_hash_key)
+            if not expected or expected != actual:
+                raise ValueError(f"active checkpoint hash disagrees with its report: {path}")
+        if kind == "checkpoint":
+            checkpoint_hashes[relative(path)] = actual
+        active_artifacts.append({
+            "label": label,
+            "kind": kind,
+            "path": relative(path),
+            "sha256": actual,
+            "report_recorded_sha256": expected,
+            "hash_matches_report": (actual == expected if expected else None),
+        })
+
     doc_refs = extract_doc_artifact_refs(docs_dir)
     referenced_missing = [
         item for item in doc_refs
@@ -589,6 +678,7 @@ def build_registry(repo_root: Path = ROOT, output: Path = DEFAULT_OUTPUT) -> dic
         },
         "experiment_entries": entries,
         "diagnostic_entries": diagnostic_entries,
+        "active_black_box_work_package_artifacts": active_artifacts,
         "document_artifact_references": doc_refs,
         "reviewed_documents": [
             {"path": path, "exists": (repo_root / path).is_file(),
@@ -624,7 +714,7 @@ def build_registry(repo_root: Path = ROOT, output: Path = DEFAULT_OUTPUT) -> dic
                     "status"))
                 if gate_reports["wp18"] else "not found; no history claim"),
             "serious_replacement_training": (
-                "not authorized until WP19 and WP20 close"),
+                "WP19/WP20 closed; WP22/A0/A1 and WP26 D1/D2/D3 remain unpromoted; the A2 family stop gate was reached after WP26"),
         },
         "work_package_evidence": {
             name: {
@@ -646,6 +736,8 @@ def build_registry(repo_root: Path = ROOT, output: Path = DEFAULT_OUTPUT) -> dic
                 for key in gate_paths}.items()},
         "provenance_verification": {
             "checkpoint_hashes": checkpoint_hashes,
+            "active_black_box_artifacts_all_present_and_hashed": all(
+                item["sha256"] for item in active_artifacts),
             "every_claimed_checkpoint_checked": not unresolved_checkpoints,
             "every_resolved_dataset_hash_checked": all(
                 entry.get("dataset_sha256_matches_record") is True
@@ -698,6 +790,12 @@ def validate_registry(registry: dict[str, Any], repo_root: Path = ROOT) -> None:
                 raise ValueError(f"diagnostic artifact reference is missing: {reference['path']}")
             if sha256(path) != reference["sha256_recorded"]:
                 raise ValueError(f"diagnostic artifact hash mismatch: {reference['path']}")
+    for item in registry.get("active_black_box_work_package_artifacts", []):
+        path = resolve_recorded_path(item["path"])
+        if path is None or not path.is_file() or sha256(path) != item["sha256"]:
+            raise ValueError(f"active black-box artifact hash mismatch: {item['path']}")
+        if item.get("report_recorded_sha256") and not item.get("hash_matches_report"):
+            raise ValueError(f"active checkpoint disagrees with its report: {item['path']}")
 
 
 def render_markdown(registry: dict[str, Any], output_path: Path = DEFAULT_DOC_OUTPUT) -> None:
@@ -706,7 +804,7 @@ def render_markdown(registry: dict[str, Any], output_path: Path = DEFAULT_DOC_OU
         f"Repository HEAD: `{registry['repository_head']}`. Worktree was dirty at generation: `{registry['worktree_dirty_at_generation']}`.",
         "", "This is an evidence index, not a model promotion. The registry has no default candidate because no plant has passed the required recursive and task-level gates.",
         "", "## Coverage", "",
-        f"- Training metadata files found: {registry['counts']['training_metadata_files_found']}; indexed model runs: {registry['counts']['indexed_trained_models']}. ",
+        f"- Training metadata files found: {registry['counts']['training_metadata_files_found']}; indexed model runs: {registry['counts']['indexed_trained_models']}.",
         f"- Indexed diagnostic/comparison artifacts: {registry['counts']['indexed_diagnostic_artifacts']}. ",
         f"- `live_runs/` references in development documents: {registry['counts']['document_live_run_references']}; missing literal paths: {registry['counts']['unresolved_document_references']}; unmatched globs: {registry['counts']['unresolved_document_globs']}.",
         f"- Checkpoint hashes checked: {len(registry['provenance_verification']['checkpoint_hashes'])}; unresolved dataset/checkpoint references: {len(registry['provenance_verification']['unresolved_datasets'])}/{len(registry['provenance_verification']['unresolved_checkpoints'])}; recorded diagnostic hash mismatches: {len(registry['provenance_verification']['unresolved_diagnostic_paths'])}.",
@@ -714,10 +812,13 @@ def render_markdown(registry: dict[str, Any], output_path: Path = DEFAULT_DOC_OU
     ]
     for branch, status in registry["mandatory_branch_status"].items():
         lines.append(f"- **{branch}:** {status}.")
+    lines.extend(["", "## Active black-box work-package artifacts", ""])
+    for item in registry.get("active_black_box_work_package_artifacts", []):
+        lines.append(f"- {item['label']}: `{item['path']}` — SHA-256 `{item['sha256']}`.")
     lines.extend(["", "## Current interpretation", "",
         "The raw-wheel, raw-history, wheel-innovation, and contact-slip branches do not provide a universally better recursively coherent model. Contact-slip is rejected. Raw encoder state/history are mixed tradeoffs; neither is accepted as a production state. The fixed-40-Hz view is a separate, causally aligned measurement representation and must not be conflated with the source-stamp-derived sidecar. The two-expert candidate improved some dynamic pose scores while degrading other state channels and practice transfer. The frozen EDSSM parent remains a comparator, not a usable offline plant.",
         "", "WP17 is complete: the fixed-25-ms and stored-filtered wheel-rate oracles predominantly regress the frozen parent on held-out dynamic recursive endpoints, so processed rear-wheel rate is measurement/output only. This does not reject an internally inferred latent traction state.",
-        "", "WP18 is complete with no supported history-length plateau under the tested run-balanced neighbor estimator. This is not evidence that physical history is useless: the tested trailing-mean/slope summaries and changing match dimensions limit that claim. Serious replacement training remains unauthorized until WP19 target representation and WP20 calibrated support gates close.",
+        "", "WP18 is complete with no supported history-length plateau under the tested run-balanced neighbor estimator. This is not evidence that physical history is useless: the tested trailing-mean/slope summaries and changing match dimensions limit that claim. WP19 and WP20 are closed; WP22/A0/A1 and WP26 D1/D2/D3 are indexed below but none passed their material gates. The A2 family stop gate is reached; conditional WP27 is not run.",
         "", "## Reading the machine registry", "",
         "`live_runs/derived_dynamics_learning_20260928/experiment_registry_20261003.json` contains per-run metadata, split IDs, checkpoint/dataset SHA-256 values when resolved, all discovered comparison-artifact references, and missing metadata explicitly. Experiments default to `diagnostic`, `incomplete`, `rejected`, or `unknown`; none are promoted by filename or a single score.",
         "", "Older evidence is retained as historical context. Where it conflicts with the 2026-10-02 replacement-plant report or the 2026-10-03 handoff, the later whole-run recursive validation and current handoff's gates take precedence; no earlier local/conditional yaw result is treated as a validated black-box plant.",

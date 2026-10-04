@@ -512,7 +512,9 @@ def _implied_acceleration(predicted_body: torch.Tensor,
 
 def _train_step(model: AugmentedStateSpacePlant, data: WP22Data,
                 refs, horizon: int, scales: dict[str, Any], optimizer,
-                device: torch.device) -> dict[str, float]:
+                device: torch.device,
+                support_loss_weight: float = SUPPORT_LOSS_WEIGHT
+                ) -> dict[str, float]:
     arrays = _batch_arrays(data, refs, horizon)
     tensors = [torch.as_tensor(value,
                                dtype=torch.bool if index == 7 else torch.float32,
@@ -566,7 +568,7 @@ def _train_step(model: AugmentedStateSpacePlant, data: WP22Data,
             + POSITION_LOSS_WEIGHT * position_loss
             + MEASUREMENT_LOSS_WEIGHT * measurement_loss
             + LATENT_LOSS_WEIGHT * latent_loss
-            + SUPPORT_LOSS_WEIGHT * support_loss)
+            + support_loss_weight * support_loss)
     if not torch.isfinite(loss):
         raise FloatingPointError("WP22 encountered a non-finite training loss")
     optimizer.zero_grad(set_to_none=True)
@@ -989,17 +991,23 @@ def _theoretical_run_probability(data: WP22Data) -> float:
 
 def run_wp22(output: Path, stage_steps: tuple[int, int, int] = STAGE_STEPS,
              device: str = "cpu", variant: str = "A2",
-             work_package: str = "WP22") -> dict[str, Any]:
+             work_package: str = "WP22",
+             support_loss_weight: float = SUPPORT_LOSS_WEIGHT
+             ) -> dict[str, Any]:
     if output.exists():
         raise FileExistsError(f"refusing to overwrite training directory: {output}")
     if len(stage_steps) != 3 or any(step < 1 for step in stage_steps):
         raise ValueError("requires positive Stage A/B/C optimizer-step counts")
-    if variant not in ("A0", "A1", "A2"):
-        raise ValueError("WP22/WP23 only supports the registered A0, A1, A2 variants")
-    if variant == "A0" and work_package != "WP23":
-        raise ValueError("A0 is a WP23 structural ablation")
-    if variant == "A1" and work_package != "WP23":
-        raise ValueError("A1 is a WP23 structural ablation")
+    if variant not in ("A0", "A1", "A2", "D1", "D2", "D3"):
+        raise ValueError("unsupported WP22/WP23/WP26 plant variant")
+    if variant in ("A0", "A1") and work_package != "WP23":
+        raise ValueError(f"{variant} is a WP23 structural ablation")
+    if variant in ("D1", "D2", "D3") and work_package != "WP26":
+        raise ValueError(f"{variant} is a WP26 mechanism ablation")
+    if variant == "A2" and work_package != "WP22":
+        raise ValueError("A2 is the existing WP22 comparator, not a new variant")
+    if not np.isfinite(support_loss_weight) or support_loss_weight < 0.0:
+        raise ValueError("support loss weight must be finite and nonnegative")
     data, wp20_report = _load_data()
     torch.manual_seed(SEED)
     np.random.seed(SEED)
@@ -1013,10 +1021,12 @@ def run_wp22(output: Path, stage_steps: tuple[int, int, int] = STAGE_STEPS,
         config = dataclass_replace(config, latent_enabled=False, latent_size=0)
     elif variant == "A1":
         config = dataclass_replace(config, body_transition_mode="direct_state")
+    elif variant in ("D2", "D3"):
+        config = dataclass_replace(config, latent_measurement_feedback=False)
     model = AugmentedStateSpacePlant(config).to(device_obj)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
     family_counts, run_counts, condition_counts = Counter(), Counter(), Counter()
-    stage_reports = []
+    stage_reports, training_draws = [], []
     for stage_index, (step_count, horizon) in enumerate(zip(stage_steps,
                                                            STAGE_HORIZONS)):
         stage_started = time.perf_counter()
@@ -1030,8 +1040,9 @@ def run_wp22(output: Path, stage_steps: tuple[int, int, int] = STAGE_STEPS,
                     "condition": condition_counts}
         for step_index in range(step_count):
             refs = _sample_windows(data, horizon, BATCH_SIZE, rng, counters)
+            training_draws.append([[int(part) for part in ref] for ref in refs])
             losses.append(_train_step(model, data, refs, horizon, scales,
-                                      optimizer, device_obj))
+                                      optimizer, device_obj, support_loss_weight))
             if (step_index + 1) % 10 == 0 or step_index + 1 == step_count:
                 print(f"  update {step_index + 1}/{step_count}; "
                       f"loss={losses[-1]['loss']:.5f}; "
@@ -1067,7 +1078,8 @@ def run_wp22(output: Path, stage_steps: tuple[int, int, int] = STAGE_STEPS,
     evaluation = _evaluate(data, model, baseline_model, baseline_stats,
                            device_obj, progress_label=f"{work_package} {variant}")
     output.mkdir(parents=True, exist_ok=False)
-    checkpoint_path = output / f"seed101_{variant}_candidate.pt"
+    checkpoint_path = (output / "checkpoint.pt" if work_package == "WP26"
+                       else output / f"seed101_{variant}_candidate.pt")
     save_checkpoint(checkpoint_path, model, {
         "seed": SEED, "work_package": work_package, "variant": variant,
         "candidate_status": evaluation["gate"]["status"]})
@@ -1077,6 +1089,8 @@ def run_wp22(output: Path, stage_steps: tuple[int, int, int] = STAGE_STEPS,
         "architecture_variant": variant,
         "purpose": ("single-seed matched WP23 structural ablation and material gate"
                     if work_package == "WP23" else
+                    "fixed-budget WP26 mechanism ablation against frozen A2"
+                    if work_package == "WP26" else
                     "single-seed staged recursive-training smoke and pre-registered material gate"),
         "candidate_promoted": False,
         "future_truth_or_feedback_used_as_rollout_input": False,
@@ -1135,16 +1149,26 @@ def run_wp22(output: Path, stage_steps: tuple[int, int, int] = STAGE_STEPS,
                 "measurement": MEASUREMENT_LOSS_WEIGHT,
                 "latent": LATENT_LOSS_WEIGHT,
                 "support": SUPPORT_LOSS_WEIGHT,
+                "support_effective": support_loss_weight,
                 "symmetry": SYMMETRY_LOSS_WEIGHT,
             },
             "support_regularization": "WP20 calibrated run-balanced kNN; higher penalty on residuals at low confidence",
+            "latent_measurement_feedback": config.latent_measurement_feedback,
             "label_bounds": diagnostics,
+        },
+        "training_sampler": {
+            "algorithm": "same WP22 family/run/condition sampler; seed 101",
+            "draw_count": len(training_draws),
+            "draws_by_step_and_batch": training_draws,
+            "draws_sha256": hashlib.sha256(json.dumps(
+                training_draws, separators=(",", ":")).encode("utf-8")).hexdigest(),
         },
         "evaluation": evaluation,
         "checkpoint": str(checkpoint_path.relative_to(ROOT)),
         "checkpoint_sha256": sha256_file(checkpoint_path),
     }
-    report_filename = (f"wp23_{variant}_training_report.json"
+    report_filename = ("training_report.json" if work_package == "WP26" else
+                       f"wp23_{variant}_training_report.json"
                        if work_package == "WP23" else "wp22_training_report.json")
     report_path = output / report_filename
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",

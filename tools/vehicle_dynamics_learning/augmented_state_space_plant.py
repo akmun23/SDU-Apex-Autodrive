@@ -52,6 +52,7 @@ class PlantConfig:
     history_feature_names: tuple[str, ...] = HISTORY_FEATURE_NAMES
     latent_size: int = 8
     latent_enabled: bool = True
+    latent_measurement_feedback: bool = True
     body_transition_mode: str = "anchored_increment"
     dt_s: float = DT_S
     wheel_radius_m: float = WHEEL_RADIUS_M
@@ -82,6 +83,8 @@ class PlantConfig:
         expected_latent = 8 if self.latent_enabled else 0
         if self.history_steps < 1 or self.latent_size != expected_latent:
             raise ValueError("enabled latent state requires size 8; disabled requires size 0")
+        if not isinstance(self.latent_measurement_feedback, bool):
+            raise ValueError("latent_measurement_feedback must be boolean")
         if self.body_transition_mode not in ("anchored_increment", "direct_state"):
             raise ValueError("body transition mode must be anchored_increment or direct_state")
         if tuple(self.history_feature_names) != HISTORY_FEATURE_NAMES:
@@ -380,8 +383,10 @@ class AugmentedStateSpacePlant(nn.Module):
         self.body_residual = LatentResidualTransition(
             5 + latent_input_size + 2, residual_limit)
         # Inputs: next state, command, body increment and generated encoder output.
+        latent_measurement_size = 2 if config.latent_measurement_feedback else 0
         self.latent_transition = (LatentStateTransition(
-            5 + 2 + 3 + 2, config.latent_size) if config.latent_enabled else None)
+            5 + 2 + 3 + latent_measurement_size, config.latent_size)
+            if config.latent_enabled else None)
         # Inputs: state(k), state(k+1), command(k), latent(k), Delta body.
         self.measurement_head = MeasurementHead(
             5 + 5 + 2 + latent_input_size + 3,
@@ -508,9 +513,12 @@ class AugmentedStateSpacePlant(nn.Module):
             normalized_state, (state_next - self.state_mean) / self.state_scale,
             normalized_command, latent, transition_delta), dim=1)
         measurement = self.measurement_head(measurement_features)
-        latent_features = torch.cat((
+        latent_feature_parts = [
             (state_next - self.state_mean) / self.state_scale,
-            normalized_command, transition_delta, measurement), dim=1)
+            normalized_command, transition_delta]
+        if self.config.latent_measurement_feedback:
+            latent_feature_parts.append(measurement)
+        latent_features = torch.cat(latent_feature_parts, dim=1)
         latent_next = (self.latent_transition(latent_features, latent)
                        if self.latent_transition is not None else latent)
         pose_next = self.pose_integrator(self._pose, body)

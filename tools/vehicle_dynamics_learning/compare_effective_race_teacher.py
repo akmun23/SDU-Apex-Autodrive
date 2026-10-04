@@ -156,8 +156,11 @@ def _edssm_rollouts(torch, model, data: dict[str, Any], state: np.ndarray,
 def _rssm_rollouts(checkpoint: Path, dataset_path: Path,
                    data: dict[str, Any], windows: list[dict[str, Any]],
                    device: str,
-                   rollout_steps: int = max(HORIZONS.values())
+                   rollout_steps: int = max(HORIZONS.values()),
+                   command_offset_frames: int = 0
                    ) -> tuple[np.ndarray, np.ndarray]:
+    if command_offset_frames not in (-1, 0):
+        raise ValueError("command alignment offset must be -1 or 0 frames")
     plant = load_rssm_teacher_plant(
         [checkpoint], dataset_path, device=device,
         max_supported_speed_mps=12.0)
@@ -171,7 +174,10 @@ def _rssm_rollouts(checkpoint: Path, dataset_path: Path,
         truth_poses = data["simulator_pose_xyyaw"]
         estimate = plant.reset(history, truth_poses[start])
         for step, frame_index in enumerate(future_indices):
-            command = data["frames"][frame_index, 7:9]
+            command_index = frame_index + command_offset_frames
+            if command_index < 0 or command_index >= len(data["frames"]):
+                raise ValueError("command alignment leaves the dataset")
+            command = data["frames"][command_index, 7:9]
             estimate = plant.step(float(command[0]), float(command[1]), DT_S)
             state_out[row_index, step] = estimate.state[3:]
             pose_out[row_index, step] = estimate.state[:3]

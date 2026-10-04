@@ -86,6 +86,17 @@ def test_step_interface_has_no_future_sensor_or_truth_argument() -> None:
     torch.testing.assert_close(measurement_a, measurement_b)
 
 
+def test_latent_transition_can_exclude_generated_measurement_feedback() -> None:
+    plant = _new_model(_config(latent_measurement_feedback=False))
+    assert plant.latent_transition is not None
+    assert plant.latent_transition.cell.input_size == 10
+    plant.reset(_history()[0], torch.tensor([3.0, 0.0, 0.0, 0.0, 0.0]),
+                torch.zeros(3))
+    state, measurement, _ = plant.step(torch.tensor([0.1, 0.2]))
+    assert torch.isfinite(state).all()
+    assert torch.isfinite(measurement).all()
+
+
 def test_pose_integrator_exact_straight_and_lateral_motion() -> None:
     integrate = PoseIntegrator(0.025)
     pose = torch.zeros(1, 3)

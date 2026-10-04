@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Append admitted dynamic-coupled captures to the frozen race-domain view.
 
-The 19-run schema-8 race view is read as the immutable prefix. Only the five
-new, whole-run quality-gated captures are appended; legacy bags are never
+The 19-run schema-8 race view is read as the immutable prefix. Whole-run,
+quality-gated dynamic captures are appended; legacy bags are never
 re-extracted. The output is the schema-9 replacement teacher dataset.
 """
 
@@ -40,6 +40,8 @@ EXPECTED_CAPTURES = {
         ("validation", 20261005, "race_domain_dynamic_coupled_validation"),
     "openplane_dyn_coupled_validation_r02_20261002":
         ("validation", 20261006, "race_domain_dynamic_coupled_validation"),
+    "openplane_dyn_coupled_train_r04_20261004":
+        ("train", 20261007, "race_domain_dynamic_coupled_train"),
 }
 DEFAULT_CAPTURE_DIRS = (
     TASK_ROOT / "capture_qc_r01",
@@ -47,6 +49,7 @@ DEFAULT_CAPTURE_DIRS = (
     TASK_ROOT / "capture_qc_r03",
     TASK_ROOT / "capture_qc_validation_r01",
     TASK_ROOT / "capture_qc_validation_r02",
+    TASK_ROOT / "capture_qc_r04_20261004",
 )
 
 SIMULATOR_DT_S = 0.025
@@ -420,7 +423,8 @@ def build(capture_dirs: tuple[Path, ...] | list[Path],
             != int(frozen_race["sequence_pieces"])):
         raise ValueError("frozen parent sequence count differs from WP0")
     if len(capture_dirs) != len(EXPECTED_CAPTURES):
-        raise ValueError("exactly the five WP4 whole-run captures are required")
+        raise ValueError(
+            f"exactly {len(EXPECTED_CAPTURES)} registered whole-run captures are required")
 
     captures: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]] = {}
     for capture_dir in capture_dirs:
@@ -433,7 +437,7 @@ def build(capture_dirs: tuple[Path, ...] | list[Path],
         _check_shared_schema(base, source, run_id)
         captures[run_id] = (provenance, source)
     if set(captures) != set(EXPECTED_CAPTURES):
-        raise ValueError("WP4 capture set differs from the pre-registered five runs")
+        raise ValueError("capture set differs from the registered whole-run captures")
 
     output = {key: value.copy() for key, value in base.items()}
     old_frame_count = len(base["frames"])
@@ -501,8 +505,9 @@ def build(capture_dirs: tuple[Path, ...] | list[Path],
     expected_rows = old_frame_count + sum(
         len(captures[run_id][1]["frames"]) for run_id in EXPECTED_CAPTURES)
     if (len(output["frames"]) != expected_rows
-            or len(output["run_ids"]) != old_run_count + 5
-            or len(output["sequence_bounds"]) != old_sequence_count + 45
+            or len(output["run_ids"]) != old_run_count + len(EXPECTED_CAPTURES)
+            or len(output["sequence_bounds"])
+                != old_sequence_count + 9 * len(EXPECTED_CAPTURES)
             or not np.allclose(output["dt_s"], SIMULATOR_DT_S,
                                rtol=0.0, atol=1e-7)):
         raise AssertionError("schema-9 row/run/sequence/timebase invariant failed")
@@ -594,7 +599,8 @@ def main() -> int:
                         default=BASELINE_REGISTRY)
     parser.add_argument("--capture-qc-dir", action="append", type=Path,
                         default=None,
-                        help="per-run QC output directory; repeat exactly five times")
+                        help=("per-run QC output directory; repeat once for each "
+                              "registered capture"))
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     args = parser.parse_args()
     capture_dirs = args.capture_qc_dir or list(DEFAULT_CAPTURE_DIRS)

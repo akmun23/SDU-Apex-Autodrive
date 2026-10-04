@@ -236,7 +236,8 @@ def build(dataset_dir: Path = DATASET_DIR,
     new_run_indices = [index for index, run_id in enumerate(run_ids)
                        if run_id in EXPECTED_RUNS]
     if len(new_run_indices) != len(EXPECTED_CAPTURES):
-        raise ValueError("schema-9 dataset does not contain all five new captures")
+        raise ValueError(
+            "schema-9 dataset does not contain every registered new capture")
     dynamic_frames = np.isin(frame_run, np.asarray(new_run_indices))
     rigid = arrays["simulator_rigid_state"].astype(np.float64, copy=False)
     frames = arrays["frames"].astype(np.float64, copy=False)
@@ -501,7 +502,11 @@ def build(dataset_dir: Path = DATASET_DIR,
         speed, steering_feedback, fixed_valid, splits_for_frame,
         run_index_for_frame, sequence_id_for_frame, run_ids)
 
-    expected_run_counts = {"train": 3, "validation": 2}
+    expected_run_counts = {
+        split: sum(1 for registered_split, _, _ in EXPECTED_CAPTURES.values()
+                   if registered_split == split)
+        for split in ("train", "validation")
+    }
     condition_ids = sorted({row["condition_id"] for row in condition_records})
     condition_replicates = []
     for condition_id in condition_ids:
@@ -600,7 +605,8 @@ def build(dataset_dir: Path = DATASET_DIR,
                 missing_conditions),
             "evidence": (
                 "Every preregistered speed/steering-cap condition is present in "
-                "three independent training runs and two independent validation "
+                f"{expected_run_counts['train']} independent training runs and "
+                f"{expected_run_counts['validation']} independent validation "
                 "runs, with both measured steering signs and a valid active-brake "
                 "phase. The 2-D support table is descriptive, not a rectangular "
                 "coverage mandate; infeasible/unplanned cells do not trigger captures."),
