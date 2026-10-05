@@ -74,9 +74,5 @@ exec docker run --rm --name "${container}" \
       /current_map_pose \
       /cmd/speed \
       /mpc/diagnostics \
-      /sdu/tf \
-      /sdu/tf_static \
-      /tf \
-      /tf_static \
       /map
   '

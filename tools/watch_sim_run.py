@@ -74,6 +74,7 @@ def main() -> int:
 
     rclpy.init()
     watcher = SimRunWatcher()
+    print("WATCHER_READY: collision, lap, and odometry subscriptions created", flush=True)
     deadline = time.monotonic() + args.timeout_s
     target_lap_reached_at: float | None = None
     result = 2

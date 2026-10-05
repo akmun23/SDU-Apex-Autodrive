@@ -103,6 +103,12 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     if (!map_pose_valid_) return MpcSyncStatus::kMissingMapPose;
 
     const MpcOdomSample &latest = odometry_.back();
+    const double pose_odom_skew_s = static_cast<double>(
+        latest.stamp_ns - map_pose_.stamp_ns) * kNsToSeconds;
+    if (std::abs(pose_odom_skew_s) > config_.max_pose_odom_skew_s) {
+        return MpcSyncStatus::kPoseOdomSkewExceeded;
+    }
+
     MpcOdomSample odom_at_anchor;
     if (!interpolate_odom(odometry_, map_pose_.stamp_ns, &odom_at_anchor)) {
         // A pose can arrive outside the retained odometry window under host
@@ -127,6 +133,8 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     const int64_t fused_stamp_ns = std::max(latest.stamp_ns, map_pose_.stamp_ns);
     const double age_s = static_cast<double>(command_time_ns - fused_stamp_ns) *
         kNsToSeconds;
+    if (age_s < 0.0) return MpcSyncStatus::kCommandTimeBeforeState;
+    if (age_s > config_.max_state_age_s) return MpcSyncStatus::kStateTooOld;
 
     state->source_stamp_ns = fused_stamp_ns;
     state->odom_source_stamp_ns = latest.stamp_ns;
@@ -139,8 +147,7 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     state->v = latest.v;
     state->yaw_rate = latest.yaw_rate;
     state->source_age_s = age_s;
-    state->pose_odom_skew_s = static_cast<double>(
-        latest.stamp_ns - map_pose_.stamp_ns) * kNsToSeconds;
+    state->pose_odom_skew_s = pose_odom_skew_s;
     return MpcSyncStatus::kOk;
 }
 

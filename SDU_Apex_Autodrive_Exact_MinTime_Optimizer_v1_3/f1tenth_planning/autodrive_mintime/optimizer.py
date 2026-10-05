@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import csv
 import json
 import math
 import time
@@ -80,6 +81,21 @@ def _wall_clearance(config: dict[str, Any], model: VehicleModel) -> float:
     return (model.required_wall_clearance_m
             + float(track.get("extra_wall_clearance_m", 0.0))
             + float(track.get("optimizer_geometry_buffer_m", 0.0)))
+
+
+def _optimizer_steering_rate_limit(model: VehicleModel,
+                                  config: dict[str, Any]) -> float:
+    constraints = config.get("optimizer_constraints", {})
+    if not isinstance(constraints, dict):
+        raise ValueError("optimizer_constraints must be a mapping")
+    limit = float(constraints.get(
+        "max_steering_rate_radps", model.max_steering_rate_radps))
+    if (not math.isfinite(limit) or limit <= 0.0 or
+            limit > model.max_steering_rate_radps):
+        raise ValueError(
+            "optimizer max_steering_rate_radps must be positive and no "
+            "greater than the physical model limit")
+    return limit
 
 
 def _repair_speed_periodic(v: np.ndarray, ds: np.ndarray, model: VehicleModel,
@@ -163,6 +179,7 @@ def _clip_offset_to_safe_corridor(track: Track, ey: np.ndarray,
 
 def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
                 config: dict[str, Any], mode: str = "center") -> Guess:
+    steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     margin = _wall_clearance(config, model)
     nominal_extent = 0.5 * model.planning_footprint_width_m
     left_room = np.maximum(track.left - margin - nominal_extent, 0.01)
@@ -185,11 +202,16 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
 
     ey, epsi, kappa_path = _clip_offset_to_safe_corridor(
         track, ey, model, config)
-    ay_cap = envelope.numpy(np.full(track.count, 0.0))  # only to establish dtype
-    # Fixed-point speed estimate because ay cap may depend on speed.
+    # Fixed-point speed estimate because the measured envelope depends on both
+    # speed and steering demand.
     u = np.full(track.count, min(6.0, model.max_body_speed_mps))
     for _ in range(10):
-        ay_cap = envelope.numpy(u)
+        delta = np.asarray([
+            model.steering_for_yaw_rate(float(speed), float(curvature * speed),
+                                        float(curvature))
+            for speed, curvature in zip(u, kappa_path)
+        ])
+        ay_cap = envelope.numpy(u, delta)
         curve_speed = np.sqrt(np.maximum(ay_cap / np.maximum(np.abs(kappa_path), 1e-4),
                                          model.min_speed_mps ** 2))
         u_new = np.minimum(curve_speed, model.max_body_speed_mps)
@@ -218,7 +240,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         rate = dz / np.maximum(track.ds, 1e-6) * u
         return np.clip(rate, clip_lo, clip_hi)
 
-    qdelta = periodic_rate(delta, -model.max_steering_rate_radps, model.max_steering_rate_radps)
+    qdelta = periodic_rate(delta, -steering_rate_limit, steering_rate_limit)
     qv = periodic_rate(vt, -model.max_target_speed_rate_reduction_mps2,
                        model.max_target_speed_rate_increase_mps2)
     return Guess(ey=ey, epsi=epsi, u=u, r=r, vt=vt, delta=delta,
@@ -228,6 +250,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
 def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
                                     model: VehicleModel, envelope: LateralEnvelope,
                                     config: dict[str, Any]) -> Guess:
+    steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     raw = []
     with open(warm_csv, "r", encoding="utf-8") as f:
         for line in f:
@@ -296,7 +319,14 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
     ey, epsi, kappa_path = _clip_offset_to_safe_corridor(
         track, ey, model, config)
     for _ in range(8):
-        ay_cap = envelope.numpy(u)
+        delta = np.asarray([
+            model.steering_for_yaw_rate(float(speed), float(curvature * speed),
+                                        float(curvature))
+            for speed, curvature in zip(u, kappa_path)
+        ])
+        delta = np.clip(delta, -model.max_steering_rad * 0.98,
+                        model.max_steering_rad * 0.98)
+        ay_cap = envelope.numpy(u, delta)
         curve_cap = np.sqrt(np.maximum(
             ay_cap / np.maximum(np.abs(kappa_path), 1.0e-5),
             model.min_speed_mps ** 2))
@@ -317,7 +347,7 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
     r = kappa_path * u
     vt = np.clip(model.steady_target_speed(u), 0.0, model.max_command_speed_mps)
     qdelta = np.clip((np.roll(delta, -1) - delta) / np.maximum(track.ds, 1e-6) * u,
-                     -model.max_steering_rate_radps, model.max_steering_rate_radps)
+                     -steering_rate_limit, steering_rate_limit)
     qv = np.clip((np.roll(vt, -1) - vt) / np.maximum(track.ds, 1e-6) * u,
                  -model.max_target_speed_rate_reduction_mps2,
                  model.max_target_speed_rate_increase_mps2)
@@ -335,6 +365,43 @@ def _resample_solution_guess(sol: Solution, new_track: Track) -> Guess:
     return Guess(interp(sol.ey), interp(sol.epsi), interp(sol.u), interp(sol.r),
                  interp(sol.vt), interp(sol.delta), interp(sol.qdelta), interp(sol.qv),
                  f"refined_from_{sol.label}")
+
+
+def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
+    """Resample a previous OCP solution, preserving its dynamic-state seed."""
+    required = ("s_ref_m", "ey_m", "epsi_rad", "u_mps", "r_radps",
+                "target_mps", "delta_rad", "qdelta_radps", "qv_mps2")
+    rows: list[dict[str, float]] = []
+    with Path(nodes_csv).open("r", encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None or any(name not in reader.fieldnames for name in required):
+            raise ValueError(f"{nodes_csv} does not contain optimizer state columns")
+        for row in reader:
+            rows.append({name: float(row[name]) for name in required})
+    if len(rows) < 20:
+        raise ValueError(f"Optimizer state seed {nodes_csv} has too few rows")
+    data = {name: np.asarray([row[name] for row in rows], dtype=float)
+            for name in required}
+    old_s = data["s_ref_m"]
+    if (not all(np.all(np.isfinite(values)) for values in data.values()) or
+            np.any(np.diff(old_s) <= 0.0) or old_s[0] < -1.0e-8):
+        raise ValueError(f"Optimizer state seed {nodes_csv} has invalid values/order")
+    old_length = float(old_s[-1] + np.median(np.diff(old_s)))
+    if old_length <= old_s[-1] or track.length <= 0.0:
+        raise ValueError(f"Optimizer state seed {nodes_csv} has invalid lap length")
+    query = track.s / track.length * old_length
+
+    def periodic(values: np.ndarray) -> np.ndarray:
+        return np.interp(query,
+                         np.r_[old_s - old_length, old_s, old_s + old_length],
+                         np.r_[values, values, values])
+
+    return Guess(
+        ey=periodic(data["ey_m"]), epsi=periodic(data["epsi_rad"]),
+        u=periodic(data["u_mps"]), r=periodic(data["r_radps"]),
+        vt=periodic(data["target_mps"]), delta=periodic(data["delta_rad"]),
+        qdelta=periodic(data["qdelta_radps"]), qv=periodic(data["qv_mps2"]),
+        label="warm_solution_nodes")
 
 
 def _periodic_spatial_derivative(z: np.ndarray, track: Track) -> np.ndarray:
@@ -380,6 +447,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     delta = np.asarray(solution.delta)
     qdelta = np.asarray(solution.qdelta)
     qv = np.asarray(solution.qv)
+    steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     wall_margin = _wall_clearance(config, model)
     min_den = float(config.get("numerics", {}).get("min_frenet_denominator", 0.25))
     min_progress = float(config.get("numerics", {}).get("min_progress_mps", 0.30))
@@ -424,7 +492,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
 
     footprint = _vehicle_lateral_extent(epsi, model)
     ay = u * r
-    ay_cap = np.asarray(envelope.numpy(u), dtype=float)
+    ay_cap = np.asarray(envelope.numpy(u, delta), dtype=float)
     brake = np.asarray(model.brake_limit(u), dtype=float)
     return {
         "solver": _solver_summary(solution.solver_stats),
@@ -450,7 +518,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             "right_body_clearance_m": float(np.nanmin(tr.right - wall_margin - footprint + ey)),
             "heading_error_rad": float(max_heading - np.nanmax(np.abs(epsi))),
             "steering_rad": float(model.max_steering_rad - np.nanmax(np.abs(delta))),
-            "steering_rate_radps": float(model.max_steering_rate_radps - np.nanmax(np.abs(qdelta))),
+            "steering_rate_radps": float(steering_rate_limit - np.nanmax(np.abs(qdelta))),
             "target_rate_increase_mps2": float(model.max_target_speed_rate_increase_mps2 - np.nanmax(qv)),
             "target_rate_reduction_mps2": float(model.max_target_speed_rate_reduction_mps2 + np.nanmin(qv)),
         },
@@ -486,6 +554,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
                 max_iter_override: int | None = None) -> Solution:
     n = track.count
     opti = ca.Opti()
+    steering_rate_limit = _optimizer_steering_rate_limit(model, config)
 
     scales = config.get("scaling", {})
     sx = np.asarray([
@@ -497,7 +566,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         float(scales.get("delta_rad", 0.5)),
     ], dtype=float)
     su = np.asarray([
-        float(scales.get("qdelta_radps", model.max_steering_rate_radps)),
+        float(scales.get("qdelta_radps", steering_rate_limit)),
         float(scales.get("qv_mps2", model.max_target_speed_rate_reduction_mps2)),
     ], dtype=float)
 
@@ -562,7 +631,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         accel_nodes.append(raw_a)
         sdot_nodes.append(sdot)
         ay = body_u[k] * yaw_r[k]
-        aycap = ay_fun(body_u[k])
+        aycap = ay_fun(body_u[k], delta[k])
         ay_nodes.append(ay)
         aycap_nodes.append(aycap)
 
@@ -570,7 +639,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         opti.subject_to(opti.bounded(model.min_speed_mps, body_u[k], model.max_body_speed_mps))
         opti.subject_to(opti.bounded(0.0, target_v[k], model.max_command_speed_mps))
         opti.subject_to(opti.bounded(-model.max_steering_rad, delta[k], model.max_steering_rad))
-        opti.subject_to(opti.bounded(-model.max_steering_rate_radps, qdelta[k], model.max_steering_rate_radps))
+        opti.subject_to(opti.bounded(-steering_rate_limit, qdelta[k], steering_rate_limit))
         opti.subject_to(opti.bounded(-model.max_target_speed_rate_reduction_mps2,
                                      qv[k], model.max_target_speed_rate_increase_mps2))
         opti.subject_to(opti.bounded(-max_heading_error, epsi[k], max_heading_error))
@@ -673,7 +742,8 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
 def run_continuation(base_track_path: str | Path, repo_root: str | Path,
                      model: VehicleModel, envelope: LateralEnvelope,
                      config: dict[str, Any], warm_raceline: str | Path | None = None,
-                     checkpoint_dir: str | Path | None = None) -> tuple[Solution, dict[str, Any]]:
+                     checkpoint_dir: str | Path | None = None,
+                     warm_solution_nodes: str | Path | None = None) -> tuple[Solution, dict[str, Any]]:
     """Solve a robust mesh continuation without burning 3000-iteration starts.
 
     The real V1.2 run established two strong empirical facts on this track:
@@ -729,6 +799,10 @@ def run_continuation(base_track_path: str | Path, repo_root: str | Path,
                     if warm_raceline and Path(warm_raceline).exists():
                         candidates.append(_project_warm_raceline_to_track(
                             track, warm_raceline, model, envelope, config))
+                elif mode == "solution_nodes":
+                    if warm_solution_nodes and Path(warm_solution_nodes).exists():
+                        candidates.append(_load_solution_nodes_guess(
+                            track, warm_solution_nodes))
                 elif mode == "previous":
                     if previous is not None:
                         candidates.append(_resample_solution_guess(previous, track))
@@ -985,7 +1059,7 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
 
     time_recomputed = float(np.sum(seg / np.maximum(0.5 * (u + np.roll(u, -1)), 1e-3)))
     ay = u * r
-    aycap = envelope.numpy(u)
+    aycap = envelope.numpy(u, delta)
     footprint = _vehicle_lateral_extent(epsi, model)
     wall_margin = _wall_clearance(config, model)
     left_slack = tr.left - ey - footprint - wall_margin
@@ -1014,6 +1088,11 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
         },
         "vehicle_model": model.to_dict(),
         "vehicle_provenance": model.provenance(),
+        "optimizer_constraints": {
+            "max_steering_rate_radps": _optimizer_steering_rate_limit(
+                model, config),
+            "physical_model_steering_rate_radps": model.max_steering_rate_radps,
+        },
         "lateral_envelope": envelope.to_dict(),
         "wall_safety": {
             "actual_car_width_m": model.car_width_m,

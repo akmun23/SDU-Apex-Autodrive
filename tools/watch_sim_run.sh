@@ -14,10 +14,14 @@ simulator_container="$2"
 recorder_container="$3"
 target_lap="$4"
 timeout_s="${5:-120}"
+stall_timeout_s="${SDU_APEX_WATCH_STALL_TIMEOUT_S:-20}"
+post_target_lap_guard_s="${SDU_APEX_WATCH_POST_TARGET_GUARD_S:-0.5}"
 watcher_container="${SDU_APEX_WATCHER_CONTAINER:-${controller_container}}"
 if [[ ! "${timeout_s}" =~ ^[1-9][0-9]*$ ||
+      ! "${stall_timeout_s}" =~ ^[1-9][0-9]*$ ||
+      ! "${post_target_lap_guard_s}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ||
       ("${target_lap}" != "collision" && ! "${target_lap}" =~ ^[1-9][0-9]*$) ]]; then
-  echo "target-lap must be a positive integer or collision; timeout-s must be positive." >&2
+  echo "target-lap must be a positive integer or collision; timeout-s and SDU_APEX_WATCH_STALL_TIMEOUT_S must be positive integers; SDU_APEX_WATCH_POST_TARGET_GUARD_S must be nonnegative." >&2
   exit 2
 fi
 
@@ -34,8 +38,7 @@ cleanup() {
     docker stop --timeout 0 "${simulator_container}" >/dev/null 2>&1 || true
     docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
   fi
-  # On a clean completion the target-lap collision guard has already elapsed;
-  # finalize the bag before disconnecting the simulator bridge.
+  # On clean completion, finalize the bag at the requested target-lap boundary.
   docker kill --signal SIGINT "${recorder_container}" >/dev/null 2>&1 || true
   recorder_state="true"
   for _ in $(seq 1 100); do
@@ -66,12 +69,12 @@ trap 'watch_status=143; exit 143' TERM
 set +e
 if [[ "${target_lap}" == "collision" ]]; then
   docker exec "${watcher_container}" /bin/bash -lc \
-    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --collision-only --timeout-s "$1"' \
-    _ "${timeout_s}"
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --collision-only --timeout-s "$1" --stall-timeout-s "$2"' \
+    _ "${timeout_s}" "${stall_timeout_s}"
 else
   docker exec "${watcher_container}" /bin/bash -lc \
-    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --target-lap "$1" --timeout-s "$2"' \
-    _ "${target_lap}" "${timeout_s}"
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4"' \
+    _ "${target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}"
 fi
 watch_status=$?
 set -e

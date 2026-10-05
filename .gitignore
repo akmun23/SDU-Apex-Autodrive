@@ -6,6 +6,9 @@ log-current/
 build-current/
 install-current/
 live_runs/
+!live_runs/
+live_runs/**
+!live_runs/racing_performance_ledger.json
 **/build/
 **/install/
 **/log/

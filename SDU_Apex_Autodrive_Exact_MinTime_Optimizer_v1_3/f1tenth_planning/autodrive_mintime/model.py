@@ -206,6 +206,7 @@ class VehicleModel:
         if not isinstance(vehicle_model_overrides, dict):
             raise ValueError("vehicle_model_overrides must be a mapping")
         supported_model_overrides = {
+            "yaw_response_time_constant_s",
             "yaw_gain_reduction_per_rad",
             "yaw_gain_start_rad",
             "yaw_gain_end_rad",
@@ -333,10 +334,15 @@ class VehicleModel:
         yaw_gain_end = float(vehicle_model_overrides.get(
             "yaw_gain_end_rad",
             mpc_params.get("yaw_rate_steering_gain_end_rad", 0.46)))
+        yaw_tau = float(vehicle_model_overrides.get(
+            "yaw_response_time_constant_s",
+            mpc_params.get("yaw_rate_response_time_constant_s",
+                         constants["MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS"])))
         max_steering = float(constants["SOURCE_MAX_STEERING_RAD"])
         base_yaw_gain = float(constants["MPC_YAW_RATE_STEERING_GAIN_PER_M"])
         if (not all(math.isfinite(value) for value in
-                    (yaw_gain_reduction, yaw_gain_start, yaw_gain_end))
+                    (yaw_tau, yaw_gain_reduction, yaw_gain_start, yaw_gain_end))
+                or yaw_tau <= 0.0
                 or yaw_gain_reduction < 0.0 or yaw_gain_start < 0.0
                 or yaw_gain_end <= yaw_gain_start
                 or yaw_gain_end > max_steering + 1.0e-9):
@@ -349,7 +355,7 @@ class VehicleModel:
         model = cls(
             max_steering_rad=constants["SOURCE_MAX_STEERING_RAD"],
             max_steering_rate_radps=constants["SOURCE_STEERING_RATE_RADPS"],
-            yaw_tau_s=constants["MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS"],
+            yaw_tau_s=yaw_tau,
             yaw_gain_per_m=constants["MPC_YAW_RATE_STEERING_GAIN_PER_M"],
             yaw_gain_reduction_per_rad=yaw_gain_reduction,
             yaw_gain_start_rad=yaw_gain_start,
@@ -565,6 +571,7 @@ class VehicleModel:
 @dataclass(frozen=True)
 class LateralEnvelope:
     speed_mps: np.ndarray
+    steering_abs_rad: np.ndarray
     ay_max_mps2: np.ndarray
     source: str
     scale: float = 1.0
@@ -578,30 +585,103 @@ class LateralEnvelope:
         scale = float(section.get("scale", 1.0))
         if scale <= 0.0:
             raise ValueError("lateral_envelope.scale must be positive")
-        cap = model.validated_lateral_accel_mps2
-        return cls(
-            speed_mps=np.asarray([0.0, model.max_body_speed_mps], dtype=float),
-            ay_max_mps2=np.asarray([cap, cap], dtype=float),
-            source=(
+        profile_keys = ("speed_mps", "steering_abs_rad", "ay_max_mps2")
+        profile_present = [key in section for key in profile_keys]
+        if any(profile_present) and not all(profile_present):
+            raise ValueError(
+                "lateral_envelope profiles require speed_mps, "
+                "steering_abs_rad, and ay_max_mps2 together"
+            )
+        if all(profile_present):
+            speed_mps = np.asarray(section["speed_mps"], dtype=float)
+            steering_abs_rad = np.asarray(section["steering_abs_rad"], dtype=float)
+            ay_max_mps2 = np.asarray(section["ay_max_mps2"], dtype=float)
+            if (speed_mps.ndim != 1 or steering_abs_rad.ndim != 1 or
+                    speed_mps.size < 2 or steering_abs_rad.size < 2 or
+                    not np.all(np.isfinite(speed_mps)) or
+                    not np.all(np.isfinite(steering_abs_rad)) or
+                    not np.all(np.diff(speed_mps) > 0.0) or
+                    not np.all(np.diff(steering_abs_rad) > 0.0) or
+                    abs(float(speed_mps[0])) > 1.0e-9 or
+                    speed_mps[-1] < model.max_body_speed_mps or
+                    abs(float(steering_abs_rad[0])) > 1.0e-9 or
+                    steering_abs_rad[-1] < model.max_steering_rad or
+                    ay_max_mps2.shape != (speed_mps.size, steering_abs_rad.size) or
+                    not np.all(np.isfinite(ay_max_mps2)) or
+                    np.any(ay_max_mps2 <= 0.0)):
+                raise ValueError(
+                    "invalid speed/steering lateral-envelope profile or coverage"
+                )
+            source = str(section.get("source", "candidate speed/steering profile"))
+        else:
+            cap = model.validated_lateral_accel_mps2
+            speed_mps = np.asarray([0.0, model.max_body_speed_mps], dtype=float)
+            steering_abs_rad = np.asarray(
+                [0.0, model.max_steering_rad], dtype=float)
+            ay_max_mps2 = np.full((2, 2), cap, dtype=float)
+            source = (
                 "f1tenth_control/config/path_tracking_autodrive.yaml:max_lateral_accel "
                 "(current measured runtime envelope)"
-            ),
+            )
+        return cls(
+            speed_mps=speed_mps,
+            steering_abs_rad=steering_abs_rad,
+            ay_max_mps2=ay_max_mps2,
+            source=source,
             scale=scale,
         )
 
     def casadi_function(self) -> ca.Function:
-        lut = ca.interpolant(
-            "autodrive_ay_cap", "linear", [self.speed_mps.tolist()],
-            self.ay_max_mps2.tolist())
-        u = ca.MX.sym("u")
-        return ca.Function("ay_cap", [u], [self.scale * lut(u)])
+        def interpolate(knots: np.ndarray, values: list[Any], query):
+            # Cubic smoothstep preserves each measured knot value while making
+            # the envelope C1 across cell boundaries for IPOPT's derivatives.
+            result = values[-1]
+            for i in reversed(range(len(knots) - 1)):
+                t = (query - float(knots[i])) / float(knots[i + 1] - knots[i])
+                t = ca.fmin(ca.fmax(t, 0.0), 1.0)
+                weight = t * t * (3.0 - 2.0 * t)
+                segment = values[i] + weight * (values[i + 1] - values[i])
+                result = ca.if_else(query <= float(knots[i + 1]), segment, result)
+            return ca.if_else(query < float(knots[0]), values[0],
+                              ca.if_else(query > float(knots[-1]), values[-1], result))
 
-    def numpy(self, u: np.ndarray | float) -> np.ndarray | float:
-        return self.scale * np.interp(u, self.speed_mps, self.ay_max_mps2)
+        u = ca.MX.sym("u")
+        steering = ca.MX.sym("steering")
+        row_caps = [
+            interpolate(self.steering_abs_rad,
+                        [float(value) for value in row], ca.fabs(steering))
+            for row in self.ay_max_mps2
+        ]
+        return ca.Function(
+            "ay_cap", [u, steering],
+            [self.scale * interpolate(self.speed_mps, row_caps, u)])
+
+    @staticmethod
+    def _smoothstep_coordinate(knots: np.ndarray, query: np.ndarray
+                               ) -> tuple[np.ndarray, np.ndarray]:
+        index = np.clip(np.searchsorted(knots, query, side="right") - 1,
+                        0, knots.size - 2)
+        t = np.clip((query - knots[index]) /
+                    (knots[index + 1] - knots[index]), 0.0, 1.0)
+        return index, t * t * (3.0 - 2.0 * t)
+
+    def numpy(self, u: np.ndarray | float,
+              steering: np.ndarray | float = 0.0) -> np.ndarray | float:
+        speed, steer = np.broadcast_arrays(
+            np.asarray(u, dtype=float), np.abs(np.asarray(steering, dtype=float)))
+        speed_index, speed_weight = self._smoothstep_coordinate(self.speed_mps, speed)
+        steer_index, steer_weight = self._smoothstep_coordinate(
+            self.steering_abs_rad, steer)
+        low = (self.ay_max_mps2[speed_index, steer_index] * (1.0 - steer_weight)
+               + self.ay_max_mps2[speed_index, steer_index + 1] * steer_weight)
+        high = (self.ay_max_mps2[speed_index + 1, steer_index] * (1.0 - steer_weight)
+                + self.ay_max_mps2[speed_index + 1, steer_index + 1] * steer_weight)
+        return self.scale * (low * (1.0 - speed_weight) + high * speed_weight)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "speed_mps": self.speed_mps.tolist(),
+            "steering_abs_rad": self.steering_abs_rad.tolist(),
             "ay_max_mps2": self.ay_max_mps2.tolist(),
             "source": self.source,
             "scale": self.scale,

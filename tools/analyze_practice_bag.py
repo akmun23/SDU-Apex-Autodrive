@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import sqlite3
+import statistics
 import sys
 from pathlib import Path
 from typing import Any
@@ -97,7 +98,7 @@ def fmt(value: Any, digits: int = 3) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
-def analyze(path: Path) -> str:
+def analyze_structured(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError(f"bag database does not exist: {path}")
 
@@ -190,54 +191,101 @@ def analyze(path: Path) -> str:
                     status = "<invalid JSON>"
                 mpc_counts[str(status)] = mpc_counts.get(str(status), 0) + 1
 
-        output = [
-            f"Bag: {path}",
-            f"Final lap count: {final_lap_count}",
-            "Lap-count transitions (count@seconds from first LiDAR): "
-            + ", ".join(
-                f"{count}@{(timestamp - receipt_ns[0]) / 1e9:.3f}"
+        return {
+            "bag": str(path),
+            "final_lap_count": final_lap_count,
+            "lap_count_transitions": [
+                {
+                    "count": count,
+                    "seconds_from_first_lidar": (timestamp - receipt_ns[0]) / 1e9,
+                }
                 for timestamp, count in transitions
+            ],
+            "warmup_lap_s": warmup,
+            "scored_laps_s": scored,
+            "scored_lap_count": len(scored),
+            "scored_mean_s": scored_mean,
+            "scored_median_s": statistics.median(scored) if scored else None,
+            "scored_stdev_s": statistics.stdev(scored) if len(scored) > 1 else None,
+            "scored_best_s": min(scored) if scored else None,
+            "extra_lap_s": extra,
+            "collision_initial": initial_collision,
+            "collision_final": final_collision,
+            "collision_delta": final_collision - initial_collision,
+            "first_collision_s_from_first_lidar": (
+                None if first_collision_ns is None or initial_collision > 0
+                else (first_collision_ns - receipt_ns[0]) / 1e9
             ),
-            f"Warmup lap (count 1): {fmt(warmup, 4)} s",
-            f"Scored laps (counts 2-11): {len(scored)}/10",
-        ]
-        for index, lap_time in enumerate(scored, start=1):
-            output.append(f"  scored {index:02d}: {lap_time:.4f} s")
-        output.extend(
-            [
-                f"Scored mean ({'complete' if len(scored) == 10 else 'partial'}, "
-                f"{len(scored)}/10): {fmt(scored_mean, 4)} s",
-                f"Extra lap (count 12): {fmt(extra, 4)} s",
-                f"Collision count: {initial_collision} -> {final_collision}",
-                "First collision: "
-                + ("none observed" if first_collision_ns is None else
-                   (f"initial collision count already {initial_collision} at bag start"
-                    if initial_collision > 0 else
-                    f"{(first_collision_ns - receipt_ns[0]) / 1e9:.6f} s from first LiDAR receipt "
-                    f"({(first_collision_ns - bag_start_ns) / 1e9:.6f} s from first bag message)")),
-            ]
-        )
-        for label, stats in (("bag receipt", cadence_report(receipt_ns)),
-                             ("header timestamp", cadence_report(header_ns, preserve_order=True))):
-            output.append(
-                f"LiDAR {label}: {stats['count']} messages, "
-                f"{fmt(stats['rate_hz'])} Hz; gaps ms p50/p95/p99/max "
-                f"{fmt(stats['p50_ms'])}/{fmt(stats['p95_ms'])}/"
-                f"{fmt(stats['p99_ms'])}/{fmt(stats['max_ms'])}; "
-                f">30 ms {stats['over_30_ms']}, >35 ms {stats['over_35_ms']}"
-                + (f"; duplicate stamps {stats['duplicate_stamps']}, "
-                   f"nonmonotonic stamps {stats['nonmonotonic_stamps']}"
-                   if label == "header timestamp" else "")
-            )
-        mpc_scope = "before first collision" if first_collision_ns is not None else "recorded run"
-        output.append(f"MPC diagnostic statuses ({mpc_scope}):")
-        if mpc_counts:
-            output.extend(f"  {status}: {count}" for status, count in sorted(mpc_counts.items()))
-        else:
-            output.append("  no diagnostic messages")
-        return "\n".join(output)
+            "lidar_bag_receipt": cadence_report(receipt_ns),
+            "lidar_header_timestamp": cadence_report(header_ns, preserve_order=True),
+            "mpc_status_counts": mpc_counts,
+        }
     finally:
         connection.close()
+
+
+def format_report(report: dict[str, Any]) -> str:
+    scored = report["scored_laps_s"]
+    collision_delta = report["collision_delta"]
+    first_collision_s = report["first_collision_s_from_first_lidar"]
+    output = [
+        f"Bag: {report['bag']}",
+        f"Final lap count: {report['final_lap_count']}",
+        "Lap-count transitions (count@seconds from first LiDAR): "
+        + ", ".join(
+            f"{item['count']}@{item['seconds_from_first_lidar']:.3f}"
+            for item in report["lap_count_transitions"]
+        ),
+        f"Warmup lap (count 1): {fmt(report['warmup_lap_s'], 4)} s",
+        f"Scored laps (counts 2-11): {len(scored)}/10",
+    ]
+    output.extend(
+        f"  scored {index:02d}: {lap_time:.4f} s"
+        for index, lap_time in enumerate(scored, start=1)
+    )
+    output.extend(
+        [
+            f"Scored mean ({'complete' if len(scored) == 10 else 'partial'}, "
+            f"{len(scored)}/10): {fmt(report['scored_mean_s'], 4)} s",
+            f"Extra lap (count 12): {fmt(report['extra_lap_s'], 4)} s",
+            f"Collision count: {report['collision_initial']} -> {report['collision_final']}",
+            "First collision: "
+            + (f"already {report['collision_initial']} at bag start"
+               if report["collision_initial"] > 0 else
+               ("none observed" if collision_delta <= 0 else
+                f"{first_collision_s:.6f} s from first LiDAR receipt")),
+        ]
+    )
+    for label, stats in (
+        ("bag receipt", report["lidar_bag_receipt"]),
+        ("header timestamp", report["lidar_header_timestamp"]),
+    ):
+        output.append(
+            f"LiDAR {label}: {stats['count']} messages, "
+            f"{fmt(stats['rate_hz'])} Hz; gaps ms p50/p95/p99/max "
+            f"{fmt(stats['p50_ms'])}/{fmt(stats['p95_ms'])}/"
+            f"{fmt(stats['p99_ms'])}/{fmt(stats['max_ms'])}; "
+            f">30 ms {stats['over_30_ms']}, >35 ms {stats['over_35_ms']}"
+            + (f"; duplicate stamps {stats['duplicate_stamps']}, "
+               f"nonmonotonic stamps {stats['nonmonotonic_stamps']}"
+               if label == "header timestamp" else "")
+        )
+    mpc_scope = (
+        "before first collision"
+        if collision_delta > 0 or report["collision_initial"] > 0
+        else "recorded run"
+    )
+    output.append(f"MPC diagnostic statuses ({mpc_scope}):")
+    mpc_counts = report["mpc_status_counts"]
+    if mpc_counts:
+        output.extend(f"  {status}: {count}" for status, count in sorted(mpc_counts.items()))
+    else:
+        output.append("  no diagnostic messages")
+    return "\n".join(output)
+
+
+def analyze(path: Path) -> str:
+    return format_report(analyze_structured(path))
 
 
 def main() -> int:
@@ -245,9 +293,12 @@ def main() -> int:
         description="Report measured lap, collision, MPC, and LiDAR evidence from a ROS 2 .db3 bag."
     )
     parser.add_argument("bag", type=Path, help="ROS 2 SQLite .db3 file")
+    parser.add_argument("--json", action="store_true", help="emit structured JSON")
     args = parser.parse_args()
     try:
-        print(analyze(args.bag))
+        report = analyze_structured(args.bag)
+        print(json.dumps(report, indent=2, sort_keys=True) if args.json
+              else format_report(report))
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

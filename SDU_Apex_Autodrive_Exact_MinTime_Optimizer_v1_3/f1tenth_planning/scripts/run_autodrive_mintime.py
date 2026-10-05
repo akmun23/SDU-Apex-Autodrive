@@ -29,6 +29,8 @@ def main() -> int:
     parser.add_argument("--map", type=Path, default=None)
     parser.add_argument("--warm-raceline", type=Path, default=None,
                         help="Existing raceline CSV used only as an IPOPT initial guess.")
+    parser.add_argument("--warm-solution-nodes", type=Path, default=None,
+                        help="Prior optimizer solution_nodes.csv used as a full-state initial guess.")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -117,6 +119,7 @@ def main() -> int:
     centerline = centerline.resolve()
 
     warm = args.warm_raceline
+    warm_nodes = args.warm_solution_nodes
     if warm is None:
         candidate = root / (
             "f1tenth_planning/trajectories/"
@@ -126,6 +129,7 @@ def main() -> int:
 
     print(f"centerline: {centerline}")
     print(f"warm line:  {warm}")
+    print(f"warm nodes: {warm_nodes}")
     print(f"output:     {output}")
 
     # Save provenance before the first nonlinear solve.  Even a failed coarse
@@ -137,6 +141,7 @@ def main() -> int:
         "centerline": str(centerline),
         "map": str(map_path),
         "warm_raceline": str(warm) if warm else None,
+        "warm_solution_nodes": str(warm_nodes) if warm_nodes else None,
         "output": str(output),
         "config": cfg,
         "vehicle_model": model.to_dict(),
@@ -148,6 +153,7 @@ def main() -> int:
     solution, continuation = run_continuation(
         centerline, root, model, envelope, cfg, warm,
         checkpoint_dir=output / "checkpoints",
+        warm_solution_nodes=warm_nodes,
     )
     export_spacing = cfg.get("track", {}).get("export_spacing_m")
     report = export_solution(

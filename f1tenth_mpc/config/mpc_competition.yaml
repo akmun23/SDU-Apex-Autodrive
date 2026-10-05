@@ -22,6 +22,11 @@
     # Held-out open-plane high-steer captures and a clean practice run support
     # one 40 Hz request interval; two intervals materially overpredict lag.
     physical_steering_delay_s: 0.025
+    # The legal simulator steering sensor is the current physical angle. A
+    # three-frame freshness window tolerates one delayed packet while rejecting
+    # a stalled feedback stream.
+    steering_feedback_topic: /autodrive/roboracer_1/steering
+    steering_feedback_max_age_s: 0.075
     pose_odom_max_skew_s: 0.12
     source_dt_min_s: 0.001
     source_dt_max_s: 0.250

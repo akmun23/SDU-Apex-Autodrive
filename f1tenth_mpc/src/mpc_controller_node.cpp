@@ -14,6 +14,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
+#include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
@@ -89,6 +90,11 @@ public:
         const double command_actuation_delay_s = std::clamp(
             declare_parameter<double>("command_actuation_delay_s", 0.0),
             0.0, 1.0);
+        steering_feedback_topic_ = declare_parameter<std::string>(
+            "steering_feedback_topic", "/autodrive/roboracer_1/steering");
+        steering_feedback_max_age_s_ = std::clamp(
+            declare_parameter<double>("steering_feedback_max_age_s", 0.075),
+            0.025, 0.25);
         /* The physical Unity steering state follows a command after one
          * 40 Hz request interval, as identified from held-out actuator
          * command/feedback captures. Runtime uses only our own command
@@ -155,15 +161,19 @@ public:
                     std::bind(&MpcControllerNode::command_callback, this,
                               std::placeholders::_1));
         }
-        // Control must consume the newest state, not replay a queue of stale
-        // 40 Hz samples after an executor/DDS scheduling pause.
-        const auto latest_state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+        // State is time-sensitive: if executor/DDS scheduling falls behind,
+        // drop old samples instead of replaying them as current control input.
+        const auto latest_state_qos = rclcpp::SensorDataQoS().keep_last(1);
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             pose_topic_, latest_state_qos,
             std::bind(&MpcControllerNode::pose_callback, this, std::placeholders::_1));
         odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, latest_state_qos,
             std::bind(&MpcControllerNode::odom_callback, this, std::placeholders::_1));
+        steering_feedback_sub_ = create_subscription<std_msgs::msg::Float32>(
+            steering_feedback_topic_, latest_state_qos,
+            std::bind(&MpcControllerNode::steering_feedback_callback, this,
+                      std::placeholders::_1));
 
         auto declare_weight = [this](const char * name, float fallback) {
             return static_cast<float>(declare_parameter<double>(name, fallback));
@@ -899,7 +909,13 @@ private:
             << ',' << state.plant.actual_steering_angle << ','
             << state.previous_steering_rate << ','
             << state.previous_target_speed_rate << ']'
-            << ",\"solver\":{\"iterations\":" << result.solver_iterations
+            << ",\"steering_feedback_used\":"
+            << (steering_feedback_used_ ? "true" : "false")
+            << ",\"steering_feedback_age_s\":";
+        json_number(steering_feedback_age_s_);
+        json << ",\"steering_feedback_rad\":";
+        json_number(steering_feedback_value_used_rad_);
+        json << ",\"solver\":{\"iterations\":" << result.solver_iterations
             << ",\"primal_residual\":" << result.primal_residual
             << ",\"dual_residual\":" << result.dual_residual
             << ",\"max_regularization\":"
@@ -1109,6 +1125,22 @@ private:
         }
     }
 
+    void steering_feedback_callback(
+        const std_msgs::msg::Float32::SharedPtr message)
+    {
+        const double steering = message->data;
+        if (!std::isfinite(steering) ||
+            std::abs(steering) > rti_config_.model.max_steering_rad + 1.0e-3f) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC ignored invalid steering feedback");
+            return;
+        }
+        std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
+        latest_steering_feedback_rad_ = steering;
+        steering_feedback_receipt_steady_ns_ = steady_time_ns();
+        steering_feedback_received_ = true;
+    }
+
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
     {
         const int64_t callback_steady_ns = steady_time_ns();
@@ -1167,12 +1199,14 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC waiting for legal state input: %s",
                 MpcStateSynchronizer::status_name(sync_status));
-            // A delayed/temporarily missing AMCL sample is not a command to
-            // stop. Refresh the last bounded command so a downstream command
-            // watchdog cannot turn estimator uncertainty into a vehicle stop.
-            // The next legal map pose is still allowed to correct the state.
+            // Do not keep racing on stale odometry/localization. Reduce target
+            // speed at the configured braking rate until a synchronized state
+            // is available again.
+            const std::string reason = std::string(
+                "MPC rejected unsynchronized legal state: ") +
+                MpcStateSynchronizer::status_name(sync_status);
             publish_driving_fallback(
-                "MPC waiting for legal state input", 0.0, target_speed_mps_);
+                reason.c_str(), 0.0, target_speed_mps_, true, true, true);
             return;
         }
 
@@ -1253,10 +1287,10 @@ private:
             target_speed_initialized_ = true;
         }
 
-        /* Unity applies the published target through a separate physical
-         * steering-angle slew. Keep both causal command-history states and
-         * the hidden physical angle from our own published command history;
-         * no simulator feedback or truth topic is consumed here. */
+        /* Keep command-history states for future rollout, but anchor the
+         * current physical steering angle to permitted measured feedback
+         * whenever it is fresh. Command-only reconstruction misses steering
+         * reversals observed in aggressive practice transitions. */
         double delayed_steering_command_1 = commanded_steering;
         double delayed_steering_command_2 = commanded_steering;
         MpcCommandHistoryEntry delayed_command{};
@@ -1272,7 +1306,26 @@ private:
                 &delayed_command)) {
             delayed_steering_command_2 = delayed_command.steering_command_rad;
         }
-        if (!actual_steering_initialized_) {
+        double feedback_steering = 0.0;
+        double feedback_age_s = -1.0;
+        bool feedback_received = false;
+        {
+            std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
+            feedback_received = steering_feedback_received_;
+            feedback_steering = latest_steering_feedback_rad_;
+            if (feedback_received) {
+                feedback_age_s = static_cast<double>(
+                    steady_time_ns() - steering_feedback_receipt_steady_ns_) * 1.0e-9;
+            }
+        }
+        steering_feedback_used_ = feedback_received && feedback_age_s >= 0.0 &&
+            feedback_age_s <= steering_feedback_max_age_s_;
+        steering_feedback_age_s_ = feedback_age_s;
+        steering_feedback_value_used_rad_ = feedback_steering;
+        if (steering_feedback_used_) {
+            estimated_actual_steering_angle_rad_ = feedback_steering;
+            actual_steering_initialized_ = true;
+        } else if (!actual_steering_initialized_) {
             const int64_t delayed_stamp_ns =
                 control_ros_time.nanoseconds() - static_cast<int64_t>(
                     std::llround(physical_steering_delay_s_ * 1.0e9));
@@ -1438,8 +1491,16 @@ private:
     double target_speed_mps_{};
     double last_steering_command_rad_{};
     double physical_steering_delay_s_{};
+    std::string steering_feedback_topic_;
+    double steering_feedback_max_age_s_{};
     double estimated_actual_steering_angle_rad_{};
     bool actual_steering_initialized_{};
+    double latest_steering_feedback_rad_{};
+    int64_t steering_feedback_receipt_steady_ns_{};
+    bool steering_feedback_received_{};
+    bool steering_feedback_used_{};
+    double steering_feedback_age_s_{-1.0};
+    double steering_feedback_value_used_rad_{};
     int64_t last_control_time_ns_{};
     double last_steering_rate_radps_{};
     double last_target_speed_rate_mps2_{};
@@ -1457,9 +1518,12 @@ private:
     MpcCommandHistory command_history_;
     std::mutex state_mutex_;
     std::mutex command_history_mutex_;
+    std::mutex steering_feedback_mutex_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr command_pub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr
+        steering_feedback_sub_;
     rclcpp::Subscription<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr
         observed_command_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;

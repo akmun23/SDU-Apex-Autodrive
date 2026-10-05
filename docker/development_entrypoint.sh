@@ -74,6 +74,7 @@ fi
 if [[ "${controller}" == "mpc" ]]; then
   launch_args+=(
     "mpc_publish_diagnostics:=${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}"
+    "mpc_start_delay_sec:=${SDU_APEX_MPC_START_DELAY_SEC:-2.0}"
   )
   if [[ -n "${SDU_APEX_MPC_PARAMETER_OVERLAY:-}" ]]; then
     launch_args+=(
