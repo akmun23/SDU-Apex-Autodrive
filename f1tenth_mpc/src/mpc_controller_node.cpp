@@ -6,7 +6,9 @@
 #include "mpc_control_time_predictor.hpp"
 #include "mpc_state_synchronizer.hpp"
 #include "vehicle_model.h"
+#include "yaw_response_surface_io.hpp"
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -87,17 +89,17 @@ public:
         const double command_actuation_delay_s = std::clamp(
             declare_parameter<double>("command_actuation_delay_s", 0.0),
             0.0, 1.0);
-        /* The physical Unity steering state follows a command after the
-         * command has traversed the 40 Hz request queue. This is identified
-         * from authority traces and uses only our own command history at
-         * runtime. */
+        /* The physical Unity steering state follows a command after one
+         * 40 Hz request interval, as identified from held-out actuator
+         * command/feedback captures. Runtime uses only our own command
+         * history. */
         physical_steering_delay_s_ = std::clamp(
-            declare_parameter<double>("physical_steering_delay_s", 0.05),
+            declare_parameter<double>("physical_steering_delay_s", 0.025),
             0.0, 0.20);
         if (std::abs(physical_steering_delay_s_ -
-                     2.0 * static_cast<double>(TIME_STEP_SECONDS)) > 1.0e-9) {
+                     static_cast<double>(TIME_STEP_SECONDS)) > 1.0e-9) {
             throw std::runtime_error(
-                "physical_steering_delay_s must equal two 40 Hz model steps");
+                "physical_steering_delay_s must equal one 40 Hz model step");
         }
         control_time_mode_name_ = declare_parameter<std::string>(
             "control_time_predictor_mode", "ct2");
@@ -202,6 +204,24 @@ public:
                 default_yaw_model.low_speed_transition_speed_mps));
         if (!vehicle_model_set_yaw_rate_parameters(&yaw_model)) {
             throw std::runtime_error("invalid yaw-rate model parameters");
+        }
+        const bool yaw_surface_enabled = declare_parameter<bool>(
+            "yaw_rate_response_surface_enabled", false);
+        if (yaw_surface_enabled) {
+            const float blend_start = static_cast<float>(declare_parameter<double>(
+                "yaw_rate_response_surface_blend_q_start", 0.60));
+            const float blend_end = static_cast<float>(declare_parameter<double>(
+                "yaw_rate_response_surface_blend_q_end", 0.85));
+            const auto share = ament_index_cpp::get_package_share_directory(
+                "f1tenth_mpc");
+            const auto surface = load_yaw_response_surface_csv(
+                share + "/config/yaw_response_surface.csv", blend_start, blend_end);
+            if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
+                throw std::runtime_error("invalid empirical yaw response surface");
+            }
+        } else {
+            const MpcYawRateResponseSurface_t disabled_surface{};
+            (void)vehicle_model_set_yaw_rate_response_surface(&disabled_surface);
         }
         /* Keep parameter fallbacks identical to the canonical competition YAML.
          * Otherwise a missing/renamed YAML silently selected the historical
@@ -1029,8 +1049,9 @@ private:
                 0.5 * reference_rate * TIME_STEP_SECONDS,
                 0.0, rti_config_.model.active_speed_ceiling_mps);
             const double feedforward = clamp(
-                vehicle_model_steering_for_curvature(
-                    static_cast<float>(sample.curvature)),
+                vehicle_model_steering_for_curvature_at_speed(
+                    static_cast<float>(sample.curvature),
+                    static_cast<float>(reference_speed)),
                 -rti_config_.model.max_steering_rad,
                 rti_config_.model.max_steering_rad);
             const MpcModelControl_t &control =
@@ -1233,7 +1254,7 @@ private:
         }
 
         /* Unity applies the published target through a separate physical
-         * steering-angle slew. Keep the two causal command-queue states and
+         * steering-angle slew. Keep both causal command-history states and
          * the hidden physical angle from our own published command history;
          * no simulator feedback or truth topic is consumed here. */
         double delayed_steering_command_1 = commanded_steering;
@@ -1268,7 +1289,7 @@ private:
                     0.0, 0.250);
             estimated_actual_steering_angle_rad_ = move_toward(
                 estimated_actual_steering_angle_rad_,
-                delayed_steering_command_2,
+                delayed_steering_command_1,
                 SOURCE_STEERING_RATE_RADPS * control_dt);
         }
         last_control_time_ns_ = control_ros_time.nanoseconds();

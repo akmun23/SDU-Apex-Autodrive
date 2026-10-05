@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare a sensor-odometry replay with recorded production odom on 12 laps."""
+"""Compare sensor-odometry replay with production odom and simulator truth."""
 
 from __future__ import annotations
 
@@ -25,10 +25,13 @@ def _metrics(error: np.ndarray) -> dict[str, Any]:
 
 
 def score(raw_bag: Path, candidate_replay: Path, output: Path,
-          baseline_replay: Path | None = None) -> dict[str, Any]:
+          baseline_replay: Path | None = None,
+          expected_laps: int = 12) -> dict[str, Any]:
     if output.exists():
         raise ValueError(f"refusing to overwrite score: {output}")
-    quality = practice._receipt_gates(raw_bag)
+    quality = practice._receipt_gates(
+        raw_bag, expected_laps=expected_laps,
+        allow_post_run_disconnect=(expected_laps == 12))
     capture = body.load_capture(raw_bag)
     direct = body._read_replayed_states(raw_bag, "/odom")
     candidate = body._read_replayed_states(candidate_replay, "/replayed_odom")
@@ -37,7 +40,8 @@ def score(raw_bag: Path, candidate_replay: Path, output: Path,
 
     x, y, samples, _, _, invalid, unscored = practice._score_arrays(
         capture, quality["active_start_receipt_ns"],
-        quality["lap12_receipt_ns"], [], *practice.WINDOW_STEPS)
+        quality[f"lap{expected_laps}_receipt_ns"], [],
+        *practice.WINDOW_STEPS)
     sensor = x[:, practice.WINDOW_STEPS[0]:].reshape(-1, 10)
     truth = y[:, practice.WINDOW_STEPS[0]:, :3].reshape(-1, 3)
     stamps = [sample.source_stamp_ns for sample in samples]
@@ -102,6 +106,7 @@ def score(raw_bag: Path, candidate_replay: Path, output: Path,
             "sample_window": {"burn_in": practice.WINDOW_STEPS[0],
                               "score_steps": practice.WINDOW_STEPS[1]},
             "scored_samples": len(truth),
+            "expected_laps": expected_laps,
             "exact_source_stamp_coverage": len(stamps),
             "baseline_replay_max_abs_difference_from_recorded_odom": baseline_max_difference,
             "invalid_sensor_samples": invalid,
@@ -121,11 +126,13 @@ def main() -> int:
     parser.add_argument("--raw-bag", type=Path, required=True)
     parser.add_argument("--candidate-replay", type=Path, required=True)
     parser.add_argument("--baseline-replay", type=Path)
+    parser.add_argument("--expected-laps", type=int, default=12,
+                        help="completed lap-count transitions required in the raw capture")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         result = score(args.raw_bag, args.candidate_replay, args.output,
-                       args.baseline_replay)
+                       args.baseline_replay, args.expected_laps)
     except (OSError, ValueError, KeyError) as exc:
         parser.exit(2, f"practice replay scoring failed: {exc}\n")
     print(json.dumps({

@@ -38,6 +38,7 @@ static MpcYawRateModelParameters_t active_yaw_rate_parameters = {
     .low_speed_response_time_constant_s = 0.0f,
     .low_speed_transition_speed_mps = 2.0f,
 };
+static MpcYawRateResponseSurface_t active_yaw_rate_surface = {0};
 
 static float clampf_local(float value, float lower, float upper)
 {
@@ -128,6 +129,44 @@ int vehicle_model_set_yaw_rate_parameters(
     return 1;
 }
 
+int vehicle_model_set_yaw_rate_response_surface(
+    const MpcYawRateResponseSurface_t *surface)
+{
+    if (surface == NULL) return 0;
+    if (!surface->enabled) {
+        active_yaw_rate_surface = (MpcYawRateResponseSurface_t){0};
+        return 1;
+    }
+    if (!isfinite(surface->blend_q_start) ||
+        !isfinite(surface->blend_q_end) ||
+        surface->blend_q_start < 0.0f ||
+        surface->blend_q_end <= surface->blend_q_start) {
+        return 0;
+    }
+    for (int speed_index = 0; speed_index < MPC_YAW_SURFACE_SPEED_KNOTS;
+         ++speed_index) {
+        if (!finite_positive(surface->speed_mps[speed_index]) ||
+            (speed_index > 0 && surface->speed_mps[speed_index] <=
+                surface->speed_mps[speed_index - 1])) {
+            return 0;
+        }
+        for (int direction = 0; direction < MPC_YAW_SURFACE_TURN_DIRECTIONS;
+             ++direction) {
+            for (int knot = 0; knot < MPC_YAW_SURFACE_Q_KNOTS; ++knot) {
+                if (!finite_positive(surface->q[speed_index][direction][knot]) ||
+                    !finite_positive(surface->yaw_rate_abs_rps
+                        [speed_index][direction][knot]) ||
+                    (knot > 0 && surface->q[speed_index][direction][knot] <=
+                        surface->q[speed_index][direction][knot - 1])) {
+                    return 0;
+                }
+            }
+        }
+    }
+    active_yaw_rate_surface = *surface;
+    return 1;
+}
+
 float vehicle_model_yaw_rate_gain_for_curvature(float curvature_radpm)
 {
     if (!isfinite(curvature_radpm)) return NAN;
@@ -201,6 +240,207 @@ int vehicle_model_set_active_target_speed_ceiling(float ceiling_mps)
     return 1;
 }
 
+typedef struct
+{
+    float value;
+    float slope;
+} MpcPchipValue_t;
+
+typedef struct
+{
+    float yaw_rate_rps;
+    float d_yaw_rate_d_speed;
+    float d_yaw_rate_d_steering;
+} MpcYawSurfaceValue_t;
+
+static float pchip_endpoint_slope(float h0, float h1, float d0, float d1)
+{
+    float slope = ((2.0f * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+    if (slope * d0 <= 0.0f) return 0.0f;
+    if (d0 * d1 < 0.0f && fabsf(slope) > 3.0f * fabsf(d0))
+        return 3.0f * d0;
+    return slope;
+}
+
+static void pchip_slopes(const float *x, const float *y, int count,
+                         float *slopes)
+{
+    float h[MPC_YAW_SURFACE_Q_KNOTS - 1];
+    float secant[MPC_YAW_SURFACE_Q_KNOTS - 1];
+    for (int i = 0; i < count - 1; ++i) {
+        h[i] = x[i + 1] - x[i];
+        secant[i] = (y[i + 1] - y[i]) / h[i];
+    }
+    slopes[0] = pchip_endpoint_slope(h[0], h[1], secant[0], secant[1]);
+    slopes[count - 1] = pchip_endpoint_slope(
+        h[count - 2], h[count - 3], secant[count - 2], secant[count - 3]);
+    for (int i = 1; i < count - 1; ++i) {
+        const float left = secant[i - 1];
+        const float right = secant[i];
+        if (left * right <= 0.0f) {
+            slopes[i] = 0.0f;
+            continue;
+        }
+        const float w_left = 2.0f * h[i] + h[i - 1];
+        const float w_right = h[i] + 2.0f * h[i - 1];
+        slopes[i] = (w_left + w_right) /
+            (w_left / left + w_right / right);
+    }
+}
+
+static MpcPchipValue_t pchip_value_and_slope(
+    const float *x, const float *y, int count, float query)
+{
+    if (query < x[0]) return (MpcPchipValue_t){y[0], 0.0f};
+    if (query > x[count - 1])
+        return (MpcPchipValue_t){y[count - 1], 0.0f};
+
+    float slopes[MPC_YAW_SURFACE_Q_KNOTS];
+    pchip_slopes(x, y, count, slopes);
+    int interval = 0;
+    while (interval < count - 2 && query > x[interval + 1]) ++interval;
+    const float width = x[interval + 1] - x[interval];
+    const float t = (query - x[interval]) / width;
+    const float y0 = y[interval];
+    const float y1 = y[interval + 1];
+    const float m0 = slopes[interval];
+    const float m1 = slopes[interval + 1];
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+    const float h10 = t3 - 2.0f * t2 + t;
+    const float h01 = -2.0f * t3 + 3.0f * t2;
+    const float h11 = t3 - t2;
+    const float value = h00 * y0 + h10 * width * m0 +
+        h01 * y1 + h11 * width * m1;
+    const float slope = ((6.0f * t2 - 6.0f * t) * y0 / width) +
+        (3.0f * t2 - 4.0f * t + 1.0f) * m0 +
+        ((-6.0f * t2 + 6.0f * t) * y1 / width) +
+        (3.0f * t2 - 2.0f * t) * m1;
+    return (MpcPchipValue_t){value, slope};
+}
+
+static MpcYawSurfaceValue_t yaw_surface_value(
+    float speed_mps, float steering_rad)
+{
+    const int direction = steering_rad < 0.0f ? 0 : 1;
+    const float turn_sign = steering_rad < 0.0f ? -1.0f : 1.0f;
+    const float demand_q = fabsf(speed_mps * tanf(steering_rad));
+    float row_rate[MPC_YAW_SURFACE_SPEED_KNOTS];
+    float row_q_slope[MPC_YAW_SURFACE_SPEED_KNOTS];
+    for (int i = 0; i < MPC_YAW_SURFACE_SPEED_KNOTS; ++i) {
+        const MpcPchipValue_t point = pchip_value_and_slope(
+            active_yaw_rate_surface.q[i][direction],
+            active_yaw_rate_surface.yaw_rate_abs_rps[i][direction],
+            MPC_YAW_SURFACE_Q_KNOTS, demand_q);
+        row_rate[i] = point.value;
+        row_q_slope[i] = point.slope;
+    }
+
+    const float speed = clampf_local(speed_mps,
+        active_yaw_rate_surface.speed_mps[0],
+        active_yaw_rate_surface.speed_mps[MPC_YAW_SURFACE_SPEED_KNOTS - 1]);
+    int interval = 0;
+    while (interval < MPC_YAW_SURFACE_SPEED_KNOTS - 2 &&
+           speed > active_yaw_rate_surface.speed_mps[interval + 1]) {
+        ++interval;
+    }
+    const float low_speed = active_yaw_rate_surface.speed_mps[interval];
+    const float high_speed = active_yaw_rate_surface.speed_mps[interval + 1];
+    const float fraction = (speed - low_speed) / (high_speed - low_speed);
+    const float magnitude = row_rate[interval] + fraction *
+        (row_rate[interval + 1] - row_rate[interval]);
+    const float q_slope = row_q_slope[interval] + fraction *
+        (row_q_slope[interval + 1] - row_q_slope[interval]);
+    const float speed_slope = (speed_mps <
+            active_yaw_rate_surface.speed_mps[0] ||
+        speed_mps > active_yaw_rate_surface.speed_mps[
+            MPC_YAW_SURFACE_SPEED_KNOTS - 1]) ? 0.0f :
+        (row_rate[interval + 1] - row_rate[interval]) /
+            (high_speed - low_speed);
+    const float tangent = tanf(steering_rad);
+    const float secant_squared = 1.0f + tangent * tangent;
+    return (MpcYawSurfaceValue_t){
+        turn_sign * magnitude,
+        turn_sign * (speed_slope + q_slope * fabsf(tangent)),
+        q_slope * fmaxf(speed_mps, 0.0f) * secant_squared};
+}
+
+static float yaw_surface_blend_weight(float demand_q)
+{
+    const float width = active_yaw_rate_surface.blend_q_end -
+        active_yaw_rate_surface.blend_q_start;
+    const float t = clampf_local(
+        (demand_q - active_yaw_rate_surface.blend_q_start) / width,
+        0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float yaw_surface_blend_slope(float demand_q)
+{
+    if (demand_q <= active_yaw_rate_surface.blend_q_start ||
+        demand_q >= active_yaw_rate_surface.blend_q_end) return 0.0f;
+    const float width = active_yaw_rate_surface.blend_q_end -
+        active_yaw_rate_surface.blend_q_start;
+    const float t = (demand_q - active_yaw_rate_surface.blend_q_start) / width;
+    return 6.0f * t * (1.0f - t) / width;
+}
+
+static float legacy_yaw_steady_response(
+    float speed_mps, float steering_rad, float path_curvature)
+{
+    const float path_gain = vehicle_model_yaw_rate_gain_for_curvature(path_curvature);
+    const float steering_gain = vehicle_model_yaw_rate_gain(steering_rad);
+    const float nominal_gain = active_yaw_rate_parameters.steering_gain_per_m;
+    return speed_mps * tanf(steering_rad) *
+        (steering_gain - nominal_gain + path_gain);
+}
+
+static float yaw_steady_response(
+    float speed_mps, float steering_rad, float path_curvature)
+{
+    const float legacy = legacy_yaw_steady_response(
+        speed_mps, steering_rad, path_curvature);
+    if (!active_yaw_rate_surface.enabled) return legacy;
+
+    const float demand_q = fmaxf(speed_mps, 0.0f) *
+        fabsf(tanf(steering_rad));
+    const float blend = yaw_surface_blend_weight(demand_q);
+    const float empirical = yaw_surface_value(speed_mps, steering_rad).yaw_rate_rps;
+    return legacy + blend * (empirical - legacy);
+}
+
+float vehicle_model_steering_for_curvature_at_speed(
+    float curvature_radpm, float speed_mps)
+{
+    if (!isfinite(curvature_radpm) || !isfinite(speed_mps)) return NAN;
+    if (!active_yaw_rate_surface.enabled)
+        return vehicle_model_steering_for_curvature(curvature_radpm);
+    if (speed_mps <= 0.0f || fabsf(curvature_radpm) < 1.0e-6f) return 0.0f;
+
+    const float desired_yaw_rate = curvature_radpm * speed_mps;
+    const float direction = desired_yaw_rate < 0.0f ? -1.0f : 1.0f;
+    float best_steering = 0.0f;
+    float best_error = fabsf(desired_yaw_rate);
+    /* The measured response has a real non-monotone steering knee, so invert
+     * it by bounded global search instead of Newton iteration on a possibly
+     * negative local derivative. This is a feed-forward seed; MPC still
+     * optimizes the full command sequence against the same response map. */
+    const int intervals = 96;
+    for (int i = 1; i <= intervals; ++i) {
+        const float steering = direction * SOURCE_MAX_STEERING_RAD *
+            ((float)i / (float)intervals);
+        const float response = yaw_steady_response(
+            speed_mps, steering, curvature_radpm);
+        const float error = fabsf(response - desired_yaw_rate);
+        if (error < best_error) {
+            best_error = error;
+            best_steering = steering;
+        }
+    }
+    return best_steering;
+}
+
 static float yaw_rate_response(
     float speed_mps, float steering_rad, float yaw_rate_radps, float time_step,
     float path_curvature)
@@ -210,11 +450,8 @@ static float yaw_rate_response(
      * authority A/B at the first high-curvature transition: it caused the
      * N30 steering solution to reverse near s=34.6 m.  This is a Unity
      * response fit, not a real-car tire or friction model. */
-    const float path_gain = vehicle_model_yaw_rate_gain_for_curvature(path_curvature);
-    const float steering_gain = vehicle_model_yaw_rate_gain(steering_rad);
-    const float nominal_gain = active_yaw_rate_parameters.steering_gain_per_m;
-    const float steady_yaw_rate = speed_mps * tanf(steering_rad) *
-        (steering_gain - nominal_gain + path_gain);
+    const float steady_yaw_rate = yaw_steady_response(
+        speed_mps, steering_rad, path_curvature);
     const float response_time_constant =
         active_yaw_rate_parameters.low_speed_response_time_constant_s > 0.0f
         ? active_yaw_rate_parameters.response_time_constant_s +
@@ -504,12 +741,11 @@ static int vehicle_model_step_scalar(
         stage->branch_flags |= MPC_STAGE_CLIPPED_STEERING_COMMAND;
 
     /* VehicleController keeps a physical steering angle separate from the
-     * autonomous target. The bridge/source path exposes a two-sample command
-     * queue, so the physical state follows the oldest queued target during
-     * this interval. Using delta_next directly for yaw makes a reversal look
-     * instantaneous and causes the N10--N30 horizon to turn too early. */
+     * autonomous target. Held-out command/feedback captures identify one
+     * 40 Hz queue interval before the physical angle follows the target.
+     * Using delta_next directly would make a reversal instantaneous. */
     const float actual_rate_raw =
-        (state->delayed_steering_command_2 -
+        (state->delayed_steering_command_1 -
             state->actual_steering_angle) / dt;
     const float actual_rate = clampf_local(actual_rate_raw,
         -parameters.steering_rate_radps, parameters.steering_rate_radps);
@@ -645,7 +881,7 @@ static int vehicle_model_step_impl(
         MPC_STAGE_CLIPPED_STEERING_COMMAND, stage, linearization);
 
     MpcJet_t actual_rate_raw = jet_divide(
-        jet_subtract(x[8], x[9]), jet_constant(dt));
+        jet_subtract(x[7], x[9]), jet_constant(dt));
     MpcJet_t actual_rate = jet_clip(actual_rate_raw,
         jet_constant(-parameters.steering_rate_radps),
         jet_constant(parameters.steering_rate_radps),
@@ -733,9 +969,61 @@ static int vehicle_model_step_impl(
         for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
             yaw_gain.derivative[i] += derivative * actual_next.derivative[i];
     }
-    MpcJet_t yaw_steady = jet_multiply(
+    MpcJet_t legacy_yaw_steady = jet_multiply(
         yaw_gain,
         jet_multiply(u_mid, jet_tangent(actual_next)));
+    MpcJet_t yaw_steady = legacy_yaw_steady;
+    if (active_yaw_rate_surface.enabled) {
+        const float tangent = tanf(actual_next.value);
+        const float speed_nonnegative = fmaxf(u_mid.value, 0.0f);
+        const float demand_q = speed_nonnegative * fabsf(tangent);
+        MpcJet_t demand_q_jet = jet_constant(demand_q);
+        demand_q_jet.differentiated =
+            u_mid.differentiated || actual_next.differentiated;
+        if (demand_q_jet.differentiated) {
+            const float q_speed_derivative = u_mid.value > 0.0f
+                ? fabsf(tangent) : 0.0f;
+            const float tangent_sign = tangent < 0.0f ? -1.0f : 1.0f;
+            const float q_steering_derivative = speed_nonnegative *
+                (1.0f + tangent * tangent) * tangent_sign;
+            for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
+                demand_q_jet.derivative[i] = q_speed_derivative *
+                    u_mid.derivative[i] + q_steering_derivative *
+                    actual_next.derivative[i];
+            }
+        }
+
+        const MpcYawSurfaceValue_t empirical_value = yaw_surface_value(
+            u_mid.value, actual_next.value);
+        MpcJet_t empirical = jet_constant(empirical_value.yaw_rate_rps);
+        empirical.differentiated =
+            u_mid.differentiated || actual_next.differentiated;
+        if (empirical.differentiated) {
+            for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
+                empirical.derivative[i] =
+                    empirical_value.d_yaw_rate_d_speed * u_mid.derivative[i] +
+                    empirical_value.d_yaw_rate_d_steering *
+                        actual_next.derivative[i];
+            }
+        }
+
+        MpcJet_t blend = jet_constant(
+            yaw_surface_blend_weight(demand_q));
+        blend.differentiated = demand_q_jet.differentiated;
+        if (blend.differentiated) {
+            const float blend_slope = yaw_surface_blend_slope(demand_q);
+            for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+                blend.derivative[i] = blend_slope * demand_q_jet.derivative[i];
+        }
+        yaw_steady = jet_add(legacy_yaw_steady, jet_multiply(
+            blend, jet_subtract(empirical, legacy_yaw_steady)));
+
+        for (int i = 1; i < MPC_YAW_SURFACE_SPEED_KNOTS; ++i) {
+            mark_nonsmooth_difference(u_mid,
+                jet_constant(active_yaw_rate_surface.speed_mps[i]),
+                active_yaw_rate_surface.speed_mps[i], linearization);
+        }
+    }
     MpcJet_t r_next = jet_add(
         jet_multiply(yaw_retention, x[4]),
         jet_multiply(jet_subtract(jet_constant(1.0f), yaw_retention),

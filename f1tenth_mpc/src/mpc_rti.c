@@ -187,7 +187,8 @@ static int reference_at_progress(
     const float speed = fminf((float)sample.speed,
         configuration->active_speed_ceiling_mps);
     const float feedforward = clampf_rti(
-        vehicle_model_steering_for_curvature((float)sample.curvature),
+        vehicle_model_steering_for_curvature_at_speed(
+            (float)sample.curvature, speed),
         -configuration->max_steering_rad,
         configuration->max_steering_rad);
     float left_bound = (float)sample.left_bound;

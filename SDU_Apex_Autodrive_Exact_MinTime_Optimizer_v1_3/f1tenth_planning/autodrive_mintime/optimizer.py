@@ -76,8 +76,10 @@ def _vehicle_lateral_extent(epsi: np.ndarray, model: VehicleModel) -> np.ndarray
 
 
 def _wall_clearance(config: dict[str, Any], model: VehicleModel) -> float:
-    return model.required_wall_clearance_m + float(
-        config.get("track", {}).get("extra_wall_clearance_m", 0.0))
+    track = config.get("track", {})
+    return (model.required_wall_clearance_m
+            + float(track.get("extra_wall_clearance_m", 0.0))
+            + float(track.get("optimizer_geometry_buffer_m", 0.0)))
 
 
 def _repair_speed_periodic(v: np.ndarray, ds: np.ndarray, model: VehicleModel,
@@ -149,7 +151,8 @@ def _clip_offset_to_safe_corridor(track: Track, ey: np.ndarray,
                 "Track is too narrow for the required AutoDRIVE planning footprint + "
                 f"wall clearance at s={track.s[idx]:.3f} m: "
                 f"left={track.left[idx]:.3f} right={track.right[idx]:.3f} "
-                f"required_aligned_center_to_wall={model.aligned_required_center_to_wall_m:.3f} m")
+                f"required_aligned_center_to_wall="
+                f"{0.5 * model.planning_footprint_width_m + margin:.3f} m")
         next_ey = np.minimum(np.maximum(ey, right_min), left_max)
         if np.max(np.abs(next_ey - ey)) < 1.0e-6:
             ey = next_ey
@@ -197,8 +200,13 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
             break
         u = u_new
 
-    delta = np.arctan2(kappa_path, model.yaw_gain_per_m)
-    delta = np.clip(delta, -model.max_steering_rad * 0.98, model.max_steering_rad * 0.98)
+    delta = np.asarray([
+        model.steering_for_yaw_rate(float(speed), float(curvature * speed),
+                                    float(curvature))
+        for speed, curvature in zip(u, kappa_path)
+    ])
+    delta = np.clip(delta, -model.max_steering_rad * 0.98,
+                    model.max_steering_rad * 0.98)
     r = kappa_path * u
     vt = np.asarray(model.steady_target_speed(u), dtype=float)
     vt = np.clip(vt, 0.0, model.max_command_speed_mps)
@@ -299,8 +307,13 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
             break
         u = u_new
 
-    delta = np.clip(np.arctan2(kappa_path, model.yaw_gain_per_m),
-                    -model.max_steering_rad * 0.98, model.max_steering_rad * 0.98)
+    delta = np.asarray([
+        model.steering_for_yaw_rate(float(speed), float(curvature * speed),
+                                    float(curvature))
+        for speed, curvature in zip(u, kappa_path)
+    ])
+    delta = np.clip(delta, -model.max_steering_rad * 0.98,
+                    model.max_steering_rad * 0.98)
     r = kappa_path * u
     vt = np.clip(model.steady_target_speed(u), 0.0, model.max_command_speed_mps)
     qdelta = np.clip((np.roll(delta, -1) - delta) / np.maximum(track.ds, 1e-6) * u,
@@ -370,6 +383,8 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     wall_margin = _wall_clearance(config, model)
     min_den = float(config.get("numerics", {}).get("min_frenet_denominator", 0.25))
     min_progress = float(config.get("numerics", {}).get("min_progress_mps", 0.30))
+    use_lateral_velocity = bool(config.get("lateral_dynamics", {}).get(
+        "use_odometry_lateral_velocity", False))
     max_heading = float(config.get("limits", {}).get("max_heading_error_rad", 0.75))
     scales = config.get("scaling", {})
     sx = np.asarray([
@@ -382,13 +397,18 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     ], dtype=float)
 
     den = 1.0 - tr.kappa * ey
-    sdot = u * np.cos(epsi) / np.maximum(den, 1.0e-9)
+    body_v = (model.lateral_velocity_numeric(u, r) if use_lateral_velocity
+              else np.zeros_like(u))
+    sdot = (u * np.cos(epsi) - body_v * np.sin(epsi)) / np.maximum(den, 1.0e-9)
     raw_a = np.asarray(model.raw_longitudinal_accel(u, vt, qv), dtype=float)
-    r_ss = model.yaw_gain_per_m * u * np.tan(delta)
+    r_ss = np.asarray([
+        model.steady_yaw_rate(float(speed), float(steering), float(curvature))
+        for speed, steering, curvature in zip(u, delta, tr.kappa)
+    ])
     rdot = (r_ss - r) / model.yaw_tau_s
     safe_sdot = np.maximum(sdot, 1.0e-8)
     f = np.vstack([
-        u * np.sin(epsi) / safe_sdot,
+        (u * np.sin(epsi) + body_v * np.cos(epsi)) / safe_sdot,
         (r - tr.kappa * sdot) / safe_sdot,
         raw_a / safe_sdot,
         rdot / safe_sdot,
@@ -506,6 +526,8 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     combined = config.get("combined_acceleration", {})
     combined_enabled = bool(combined.get("enabled", False))
     combined_p = float(combined.get("exponent", 2.0))
+    use_lateral_velocity = bool(config.get("lateral_dynamics", {}).get(
+        "use_odometry_lateral_velocity", False))
 
     long_extent = max(model.rear_axle_to_front_bumper_m, model.rear_overhang_m)
 
@@ -518,12 +540,17 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
 
     for k in range(n):
         den = 1.0 - float(track.kappa[k]) * ey[k]
-        sdot = body_u[k] * ca.cos(epsi[k]) / den  # accepted planning model uses v=0 nominally
+        body_v = (model.lateral_velocity_casadi(body_u[k], yaw_r[k])
+                  if use_lateral_velocity else 0.0)
+        sdot = (
+            body_u[k] * ca.cos(epsi[k]) - body_v * ca.sin(epsi[k])
+        ) / den
         raw_a = model.raw_longitudinal_accel(body_u[k], target_v[k], qv[k])
-        r_ss = model.yaw_gain_per_m * body_u[k] * ca.tan(delta[k])
+        r_ss = model.steady_yaw_rate_casadi(
+            body_u[k], delta[k], float(track.kappa[k]))
         rdot = (r_ss - yaw_r[k]) / model.yaw_tau_s
         f = ca.vertcat(
-            body_u[k] * ca.sin(epsi[k]) / sdot,
+            (body_u[k] * ca.sin(epsi[k]) + body_v * ca.cos(epsi[k])) / sdot,
             (yaw_r[k] - float(track.kappa[k]) * sdot) / sdot,
             raw_a / sdot,
             rdot / sdot,
@@ -993,6 +1020,8 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
             "planning_footprint_width_m": model.planning_footprint_width_m,
             "repo_wall_clearance_m": model.required_wall_clearance_m,
             "extra_wall_clearance_m": float(config.get("track", {}).get("extra_wall_clearance_m", 0.0)),
+            "optimizer_geometry_buffer_m": float(
+                config.get("track", {}).get("optimizer_geometry_buffer_m", 0.0)),
             "aligned_required_center_to_wall_m": (
                 0.5 * model.planning_footprint_width_m + wall_margin),
             "heading_aware_physical_footprint": True,

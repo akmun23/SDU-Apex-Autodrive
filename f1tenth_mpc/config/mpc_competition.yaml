@@ -19,7 +19,9 @@
     state_extrapolation_max_s: 0.12
     control_time_predictor_mode: ct2
     command_actuation_delay_s: 0.0
-    physical_steering_delay_s: 0.05
+    # Held-out open-plane high-steer captures and a clean practice run support
+    # one 40 Hz request interval; two intervals materially overpredict lag.
+    physical_steering_delay_s: 0.025
     pose_odom_max_skew_s: 0.12
     source_dt_min_s: 0.001
     source_dt_max_s: 0.250
@@ -43,6 +45,15 @@
     yaw_rate_curvature_gain_end_per_m: 0.40
     yaw_rate_low_speed_response_time_constant_s: 0.0
     yaw_rate_low_speed_transition_speed_mps: 2.0
+    # Keep the practice/open-plane steady-state surface out of the default MPC
+    # until a history-conditioned version passes closed-loop validation. In
+    # r09 it predicted only ~1.2-1.5 rad/s at high demand where the racing car
+    # sustained ~2.8-3.2 rad/s, drove steering from ~0.2 to ~0.32 rad on the
+    # same opening corner, then rejected the rollout and collided at 4.93 s.
+    # The surface remains available through an explicit development overlay.
+    yaw_rate_response_surface_enabled: false
+    yaw_rate_response_surface_blend_q_start: 0.55
+    yaw_rate_response_surface_blend_q_end: 1.40
 
     # Closed-loop authority profile: strong speed tracking, moderate lateral
     # tracking, low heading cost, and the BachelorProject lateral-velocity term.

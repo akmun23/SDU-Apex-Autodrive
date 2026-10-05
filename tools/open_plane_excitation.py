@@ -111,6 +111,18 @@ DYNAMIC_COUPLED_PROFILES = (
     "race_domain_dynamic_coupled_validation",
     "race_domain_dynamic_coupled_final",
 )
+SUBNET_TRANSIENT_PROFILE = "subnet_highsteer_transients"
+SUBNET_TRANSIENT_SPEED_MPS = HIGH_STEER_VALIDATION_SPEED_MPS
+SUBNET_TRANSIENT_STEERING_RAD = (0.30, 0.42)
+SUBNET_TRANSIENT_MANOEUVRES = (
+    "turnin_acceleration",
+    "turnin_throttle_reduction",
+    "turnin_active_braking",
+    "unwind_acceleration",
+    "unwind_active_braking",
+)
+SUBNET_TRANSIENT_DURATION_S = 2.0
+SUBNET_TRANSIENT_MAX_SPEED_MPS = 8.5
 
 
 @dataclass(frozen=True)
@@ -383,6 +395,93 @@ def _dynamic_coupled_manoeuvre_phases(condition) -> list[Phase]:
     ]
 
 
+def _subnet_highsteer_transient_phases(seed: int) -> list[Phase]:
+    """Build reset-isolated C4 transients in the measured 7.5 m/s envelope."""
+    rng = random.Random(seed)
+    speed = SUBNET_TRANSIENT_SPEED_MPS
+    baseline = _nominal_feedforward(speed)
+    # A prior live probe at +0.05 crossed the unchanged 8.5 m/s test guard.
+    # Keep an independent acceleration stimulus, but reduce its amplitude.
+    pickup = min(MAX_THROTTLE, baseline + 0.02)
+    reduced = max(0.06, baseline - 0.10)
+    conditions = [
+        (angle, sign, manoeuvre)
+        for angle in SUBNET_TRANSIENT_STEERING_RAD
+        for sign in (-1, 1)
+        for manoeuvre in SUBNET_TRANSIENT_MANOEUVRES
+    ]
+    rng.shuffle(conditions)
+
+    phases: list[Phase] = []
+    for index, (angle, sign, manoeuvre) in enumerate(conditions):
+        condition_id = f"c{index:02d}_s{speed:.1f}_d{sign:+d}_a{angle:.2f}_{manoeuvre}"
+        phases.extend((
+            Phase(
+                f"approach_subnet_{condition_id}", 12.0, speed,
+                throttle_mode="race_domain_approach",
+                reach_speed_target=True,
+                validate_samples=True,
+                validate_speed=False, validate_steering=False,
+                condition_pair_id=condition_id,
+            ),
+            Phase(
+                f"settle_subnet_{condition_id}", 1.25, speed,
+                throttle_mode="race_domain_hold",
+                validate_samples=True,
+                validate_speed=False, validate_steering=False,
+                condition_pair_id=condition_id,
+            ),
+        ))
+
+        is_unwind = manoeuvre.startswith("unwind_")
+        steering = sign * angle
+        if is_unwind:
+            # Establish the matched high-steer state before the unwind. This
+            # is a measured precondition, not an assumed instantaneous state.
+            phases.append(Phase(
+                f"precondition_subnet_{condition_id}", 1.25, speed,
+                steering_rad=steering,
+                throttle_mode="fixed", throttle_norm=baseline,
+                validate_samples=True,
+                validate_speed=False, validate_steering=False,
+                condition_pair_id=condition_id,
+            ))
+
+        if manoeuvre.endswith("acceleration"):
+            throttle_end = pickup
+        elif manoeuvre.endswith("throttle_reduction"):
+            # Zero throttle is active brake torque in this simulator, so this
+            # distinct reduction condition remains at positive throttle.
+            throttle_end = reduced
+        else:
+            # The only available brake command is zero throttle; there is no
+            # separate coast input in this actuator interface.
+            throttle_end = 0.0
+
+        if is_unwind:
+            waypoints = ((0.0, steering), (0.30, 0.0),
+                         (SUBNET_TRANSIENT_DURATION_S, 0.0))
+        else:
+            waypoints = ((0.0, 0.0), (0.30, steering),
+                         (SUBNET_TRANSIENT_DURATION_S, steering))
+        phases.append(Phase(
+            f"subnet_{condition_id}", SUBNET_TRANSIENT_DURATION_S, speed,
+            throttle_mode="slew_probe",
+            validate_samples=True,
+            validate_speed=False, validate_steering=False,
+            throttle_profile="ramp",
+            throttle_start_norm=baseline,
+            throttle_end_norm=throttle_end,
+            throttle_stimulus_delay_s=0.15,
+            throttle_ramp_duration_s=0.60,
+            condition_pair_id=condition_id,
+            steering_profile="waypoints",
+            steering_amplitude_rad=angle,
+            steering_waypoints=waypoints,
+        ))
+    return phases
+
+
 def build_schedule(seed: int, profile: str = "high_angle_boundary",
                   transition_speed_mps: float = 4.5) -> list[Phase]:
     """Build repeatable speed blocks and signed steering probes."""
@@ -545,6 +644,8 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     validate_speed=False,
                 ))
         return phases
+    if profile == SUBNET_TRANSIENT_PROFILE:
+        return _subnet_highsteer_transient_phases(seed)
     if profile in DYNAMIC_COUPLED_PROFILES:
         for condition in build_dynamic_coupled_plan(seed):
             condition_id = condition.condition_id
@@ -1162,7 +1263,8 @@ class OpenPlaneExcitation:
         if not math.isfinite(probe_dwell_s) or not 0.0 <= probe_dwell_s <= 15.0:
             raise ValueError("probe dwell must be finite and in [0, 15] seconds")
         if probe_dwell_s > 0.0 and profile in (
-                "full_input_excitation", "grid", *DYNAMIC_COUPLED_PROFILES):
+                "full_input_excitation", "grid", *DYNAMIC_COUPLED_PROFILES,
+                SUBNET_TRANSIENT_PROFILE):
             raise ValueError("probe dwell override is unsupported for this fixed capture protocol")
         self.dynamic_coupled_plan = (
             build_dynamic_coupled_plan(seed)
@@ -1175,6 +1277,11 @@ class OpenPlaneExcitation:
             build_race_domain_plan(
                 seed, boundary_speed_mps=RACE_DOMAIN_BOUNDARY_SPEED_MPS)
             if profile == "race_domain_continuous" else ())
+        phases = build_schedule(seed, profile, transition_speed_mps)
+        self.subnet_transient_reset_count = (
+            sum(phase.label.startswith("approach_subnet_")
+                for phase in phases)
+            if profile == SUBNET_TRANSIENT_PROFILE else 0)
         self.race_domain_plan_version = (
             4 if profile == "race_domain_moderate_braking" else
             3 if profile == "race_domain_brake_boundary" else
@@ -1184,11 +1291,20 @@ class OpenPlaneExcitation:
                 and timeout_s < plan_duration_s(self.race_domain_plan) + 5.0):
             raise ValueError(
                 "race-domain capture timeout must exceed its plan by 5 seconds")
-        phases = build_schedule(seed, profile, transition_speed_mps)
         if profile in DYNAMIC_COUPLED_PROFILES:
             required = (
                 sum(phase.duration_s for phase in phases)
                 + len(self.dynamic_coupled_plan)
+                * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+                + 5.0
+            )
+            if timeout_s < required:
+                raise ValueError(
+                    f"{profile} requires --timeout-s >= {required:g}")
+        if profile == SUBNET_TRANSIENT_PROFILE:
+            required = (
+                sum(phase.duration_s for phase in phases)
+                + self.subnet_transient_reset_count
                 * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
                 + 5.0
             )
@@ -1283,6 +1399,7 @@ class OpenPlaneExcitation:
         self.reset_pub = (
             self.node.create_publisher(Bool, RESET_COMMAND_TOPIC, 1)
             if (profile == "race_domain_steering_frontier"
+                or profile == SUBNET_TRANSIENT_PROFILE
                 or profile in DYNAMIC_COUPLED_PROFILES) else None
         )
         self.collision_sub = self.node.create_subscription(
@@ -1298,6 +1415,7 @@ class OpenPlaneExcitation:
                 for phase in self.phases)
             + (len(self.dynamic_coupled_plan)
                if self.dynamic_coupled_plan else 0)
+            + self.subnet_transient_reset_count
         ) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
         self.node.get_logger().info(
             f"waiting for source odom and zero collision count; profile={profile}, seed={seed}, "
@@ -1558,12 +1676,14 @@ class OpenPlaneExcitation:
             if publisher.get_subscription_count() == 0:
                 return
         if ((self.profile == "race_domain_steering_frontier"
+             or self.profile == SUBNET_TRANSIENT_PROFILE
              or self.profile in DYNAMIC_COUPLED_PROFILES)
                 and (self.reset_pub is None
                      or self.reset_pub.get_subscription_count() == 0)):
             return
         self.started_at = now
         if (self.profile == "race_domain_steering_frontier"
+                or self.profile == SUBNET_TRANSIENT_PROFILE
                 or self.profile in DYNAMIC_COUPLED_PROFILES):
             self._begin_sim_reset(now, "initial reset to spawn")
         else:
@@ -1700,6 +1820,8 @@ class OpenPlaneExcitation:
                                            "race_domain_moderate_braking",
                                            "race_domain_steering_frontier",
                                            *DYNAMIC_COUPLED_PROFILES)
+                       else SUBNET_TRANSIENT_MAX_SPEED_MPS
+                       if self.profile == SUBNET_TRANSIENT_PROFILE
                        else EMERGENCY_SPEED_MPS)
         if self.speed_mps > speed_limit:
             self._finish(f"emergency speed cutoff: {self.speed_mps:.3f}m/s "
@@ -1817,6 +1939,16 @@ class OpenPlaneExcitation:
                     [asdict(item) for item in self.phases]
                     if (self.profile in DYNAMIC_COUPLED_PROFILES
                         and self.phase_index == 0) else None),
+                "subnet_transient_command_plan": (
+                    [asdict(item) for item in self.phases]
+                    if (self.profile == SUBNET_TRANSIENT_PROFILE
+                        and self.phase_index == 0) else None),
+                "subnet_transient_zero_throttle_semantics": (
+                    "active_brake_torque; no separate coast command"
+                    if self.profile == SUBNET_TRANSIENT_PROFILE else None),
+                "subnet_transient_speed_limit_mps": (
+                    SUBNET_TRANSIENT_MAX_SPEED_MPS
+                    if self.profile == SUBNET_TRANSIENT_PROFILE else None),
                 "race_domain_command_plan": [
                     {
                         "target_speed_mps": block.target_speed_mps,
@@ -1940,6 +2072,11 @@ class OpenPlaneExcitation:
             # still observed rather than replaced with an artificial straight.
             throttle = 0.0
             self.phase_governor_ticks += 1
+        if (self.profile == SUBNET_TRANSIENT_PROFILE
+                and self.speed_mps >= SUBNET_TRANSIENT_MAX_SPEED_MPS
+                and throttle > 0.0):
+            throttle = 0.0
+            self.phase_governor_ticks += 1
         steering = _phase_steering_command(phase, phase_elapsed)
         self._publish(steering, throttle)
 
@@ -1956,6 +2093,10 @@ class OpenPlaneExcitation:
             self._begin_sim_reset(now, f"completed {previous_phase.label}")
         elif (self.profile in DYNAMIC_COUPLED_PROFILES
               and next_phase.label.startswith("approach_coupled_")):
+            self._begin_sim_reset(
+                now, f"completed {previous_phase.condition_pair_id}")
+        elif (self.profile == SUBNET_TRANSIENT_PROFILE
+              and next_phase.label.startswith("approach_subnet_")):
             self._begin_sim_reset(
                 now, f"completed {previous_phase.condition_pair_id}")
         else:
@@ -2099,7 +2240,8 @@ def main() -> int:
                                                "race_domain_brake_boundary",
                                                "race_domain_moderate_braking",
                                                "race_domain_steering_frontier",
-                                               *DYNAMIC_COUPLED_PROFILES, "grid"),
+                                               *DYNAMIC_COUPLED_PROFILES,
+                                               SUBNET_TRANSIENT_PROFILE, "grid"),
                         default="high_angle_boundary",
                         help="isolated profiles recover near-straight speed/yaw/lateral-velocity state before each probe")
     parser.add_argument("--timeout-s", type=float, default=150.0,
@@ -2203,7 +2345,8 @@ def main() -> int:
         parser.error("--probe-dwell-s must be in [0, 15]")
     if (args.probe_dwell_s > 0.0 and
             args.profile in ("full_input_excitation", "grid",
-                             *DYNAMIC_COUPLED_PROFILES)):
+                             *DYNAMIC_COUPLED_PROFILES,
+                             SUBNET_TRANSIENT_PROFILE)):
         parser.error("--probe-dwell-s is unsupported for this fixed capture profile")
     experiment = OpenPlaneExcitation(args.seed, args.timeout_s, args.profile,
                                     args.transition_speed_mps,

@@ -29,6 +29,10 @@ def build(repo: Path, output: Path, compiler: str = "cc",
             "-c", str(repo / "f1tenth_mpc/src" / name),
             "-o", str(obj),
         ]
+        if name == "mpc_linearization.c":
+            # Keep the offline-only finite-difference oracle available for
+            # analytic Jacobian checks; the ROS/runtime build is unchanged.
+            command.append("-DMPC_ENABLE_FD_ORACLE")
         subprocess.run(command, cwd=repo, check=True)
         object_files.append(str(obj))
     command = [

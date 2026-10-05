@@ -75,16 +75,12 @@ sensor_odometry:
     # the rolling rate is already >1 m/s above causal speed and the current
     # packet is another >1 m/s above that rolling rate.
     wheel_burst_disagreement_mps: 1.0
-    # If a pending burst is actually a stale low causal estimate, let /odom
-    # catch up toward the rolling rate at a bounded acceleration. This is not
-    # a vehicle-speed command limit; values above the 16 m/s competition
-    # envelope remain rejected as encoder evidence.
-    # Ground-truth-scored runs show the 2.5 m/s^2 catch-up left /odom behind
-    # by more than 1 m/s after a stale burst.  6.5 m/s^2 matches the existing
-    # measured wheel-update acceleration envelope while remaining below the
-    # observed transient outliers; the wheel and burst gates still decide
-    # whether catch-up is allowed.
-    wheel_burst_catchup_accel_mps2: 6.5
+    # Do not add a second acceleration while the wheel burst is rejected:
+    # sensor-only replay on independent high-speed/high-steer turns showed
+    # that IMU-propagated speed already contains this motion, while additive
+    # catch-up creates a large positive speed and pose error. A coherent wheel
+    # recovery can still re-anchor speed through the normal recovery path.
+    wheel_burst_catchup_accel_mps2: 0.0
     wheel_burst_catchup_max_mps: 16.0
     # A repeated cumulative-angle burst can make rolling/current wheel rates
     # agree while both are still far above causal speed. Established-speed
@@ -102,21 +98,36 @@ sensor_odometry:
     # source step under the measured IMU braking envelope.  Smaller packets
     # remain dropout evidence instead of collapsing /odom to stale motion.
     turn_current_packet_max_decrease_mps: 0.50
-    # Provisional held-out turn-speed residual model. Runtime inputs are only
-    # mapped encoder speed and IMU yaw rate; simulator truth was used offline
-    # to identify/score these coefficients. The correction is bounded to 0.10
-    # m/s and is reported in diagnostic vector element 28. The earlier
-    # polynomial candidate increased integrated drift and is not used. This
-    # controlled A/B candidate applies only a small constant turn correction;
-    # it remains subject to live collision-free pose scoring.
+    # Held-out high-speed turn calibration, fitted on train_r03 and evaluated
+    # on independent validation_r01/r02 reset-isolated captures. It uses only
+    # mapped encoder speed and IMU yaw rate at runtime. At >=7.5 m/s and
+    # |steer|>=0.30 rad, forward-speed bias improved from about -0.155 to
+    # -0.002 m/s in both held-out runs. The practice candidate exposed an
+    # overestimate at 3-5 m/s, so fade this fit in only near its validated range.
+    # The bounded correction is reported in diagnostic vector element 28.
+    # Earlier speed/yaw polynomial candidates increased integrated drift and
+    # remain disabled.
     use_turn_speed_bias_model: true
     turn_speed_bias_constant_mps: -0.03
     turn_speed_bias_speed_mps: 0.0
     turn_speed_bias_speed_squared_mps: 0.0
-    turn_speed_bias_yaw_rate_abs_mps: 0.0
+    turn_speed_bias_yaw_rate_abs_mps: 0.185
     turn_speed_bias_yaw_rate_squared_mps: 0.0
     turn_speed_bias_speed_yaw_rate_abs_mps: 0.0
-    turn_speed_bias_max_mps: 0.03
+    turn_speed_bias_max_mps: 0.15
+    turn_speed_bias_start_speed_mps: 6.5
+    turn_speed_bias_full_speed_mps: 7.5
+    # Practice-turn residual refinement: two independent collision-free runs
+    # repeat a +0.04--0.05 m/s forward-speed bias at 2--4 m/s and |yaw rate|>
+    # 1.5 rad/s, while the old slip correction overcorrects at 4--6 m/s. The
+    # speed-shaped gain and earlier fade reduced held-out u RMSE in both runs.
+    # Runtime inputs remain the mapped encoders and IMU yaw rate only.
+    turn_slip_speed_bias_lateral_accel_threshold_mps2: 4.0
+    turn_slip_speed_bias_gain_mps_per_mps2: 0.05
+    turn_slip_speed_bias_start_speed_mps: 2.0
+    turn_slip_speed_bias_full_speed_mps: 2.8
+    turn_slip_speed_bias_fade_start_mps: 4.5
+    turn_slip_speed_bias_fade_end_mps: 5.5
     # The rolling window remains the published speed estimate. When its
     # current packet agrees with the window, use that newer packet only for
     # turn-pose trapezoidal integration to remove transient window lag.

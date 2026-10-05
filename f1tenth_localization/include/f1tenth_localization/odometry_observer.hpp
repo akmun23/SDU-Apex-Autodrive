@@ -56,13 +56,11 @@ struct OdometryObserverConfig
   // then again in the current packet. Reject only that two-stage signature;
   // ordinary acceleration packets have no packet-vs-window disagreement.
   double wheel_burst_disagreement_mps{1.0};
-  // A pending burst can also be caused by a stale low causal estimate rather
-  // than by a genuinely high wheel rate. In that case, holding the estimate
-  // forever makes /odom fall behind the car. Move toward the rolling rate at
-  // a bounded physical acceleration instead of accepting the burst directly.
-  // The ceiling is the competition operating envelope, not a command-speed
-  // limiter; rates above it remain rejected as encoder evidence.
-  double wheel_burst_catchup_accel_mps2{6.5};
+  // Disabled by default: IMU acceleration has already propagated causal speed
+  // while a wheel burst is rejected. Adding another acceleration here caused
+  // a large positive speed/pose error in independent high-speed/high-steer
+  // simulator replays. Coherent wheel recovery remains available separately.
+  double wheel_burst_catchup_accel_mps2{0.0};
   double wheel_burst_catchup_max_mps{16.0};
   // In a turn, a fresh synchronized packet can be a valid current-motion
   // sample while the rolling window still contains a repeated angle. Permit
@@ -81,10 +79,23 @@ struct OdometryObserverConfig
   double turn_speed_bias_constant_mps{0.0};
   double turn_speed_bias_speed_mps{0.0};
   double turn_speed_bias_speed_squared_mps{0.0};
-  double turn_speed_bias_yaw_rate_abs_mps{0.0};
+  double turn_speed_bias_yaw_rate_abs_mps{0.185};
   double turn_speed_bias_yaw_rate_squared_mps{0.0};
   double turn_speed_bias_speed_yaw_rate_abs_mps{0.0};
-  double turn_speed_bias_max_mps{0.10};
+  double turn_speed_bias_max_mps{0.15};
+  // This residual is validated only at high speed; fade it in outside ordinary
+  // practice-track turns instead of extrapolating it over the whole envelope.
+  double turn_speed_bias_start_speed_mps{6.5};
+  double turn_speed_bias_full_speed_mps{7.5};
+  // Practice captures show positive wheel-update speed residual rising with
+  // the wheel-speed/yaw-rate lateral-acceleration proxy. Keep this separate
+  // from the high-speed calibration and fade it out before that regime.
+  double turn_slip_speed_bias_lateral_accel_threshold_mps2{4.0};
+  double turn_slip_speed_bias_gain_mps_per_mps2{0.05};
+  double turn_slip_speed_bias_start_speed_mps{2.0};
+  double turn_slip_speed_bias_full_speed_mps{2.8};
+  double turn_slip_speed_bias_fade_start_mps{4.5};
+  double turn_slip_speed_bias_fade_end_mps{5.5};
   // The rolling encoder window rejects delayed cumulative-angle bursts, but
   // it lags the current motion during a genuine turn transient. When both
   // rates are coherent, use the current packet only for pose integration;

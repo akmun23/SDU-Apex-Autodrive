@@ -14,6 +14,7 @@ simulator_container="$2"
 recorder_container="$3"
 target_lap="$4"
 timeout_s="${5:-120}"
+watcher_container="${SDU_APEX_WATCHER_CONTAINER:-${controller_container}}"
 if [[ ! "${timeout_s}" =~ ^[1-9][0-9]*$ ||
       ("${target_lap}" != "collision" && ! "${target_lap}" =~ ^[1-9][0-9]*$) ]]; then
   echo "target-lap must be a positive integer or collision; timeout-s must be positive." >&2
@@ -21,13 +22,20 @@ if [[ ! "${timeout_s}" =~ ^[1-9][0-9]*$ ||
 fi
 
 cleanup_done=0
+watch_status=0
 cleanup() {
   if [[ "${cleanup_done}" == "1" ]]; then
     return
   fi
   cleanup_done=1
-  # Finalize the bag before disconnecting the simulator bridge; otherwise the
-  # expected socket close is recorded as a timing fault in the captured run.
+  # On any failed screen (especially a collision), stop motion immediately;
+  # bag finalization must never leave the car running while it waits for ROS.
+  if [[ "${watch_status}" != "0" ]]; then
+    docker stop --timeout 0 "${simulator_container}" >/dev/null 2>&1 || true
+    docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
+  fi
+  # On a clean completion the target-lap collision guard has already elapsed;
+  # finalize the bag before disconnecting the simulator bridge.
   docker kill --signal SIGINT "${recorder_container}" >/dev/null 2>&1 || true
   recorder_state="true"
   for _ in $(seq 1 100); do
@@ -52,16 +60,16 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'watch_status=130; exit 130' INT
+trap 'watch_status=143; exit 143' TERM
 
 set +e
 if [[ "${target_lap}" == "collision" ]]; then
-  docker exec "${controller_container}" /bin/bash -lc \
+  docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --collision-only --timeout-s "$1"' \
     _ "${timeout_s}"
 else
-  docker exec "${controller_container}" /bin/bash -lc \
+  docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --target-lap "$1" --timeout-s "$2"' \
     _ "${target_lap}" "${timeout_s}"
 fi

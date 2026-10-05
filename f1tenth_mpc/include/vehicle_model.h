@@ -24,9 +24,9 @@ typedef struct
     float r;
     float target_speed;
     float steering_command;
-    /* Unity's bridge delivers the steering target through a two-sample
-     * command queue before the physical steering angle follows it. These
-     * states are reconstructed from our own past published commands. */
+    /* Preserve both causal command-history samples. The identified physical
+     * steering target follows the newest queued sample (one 40 Hz interval);
+     * these values are reconstructed from our own past published commands. */
     float delayed_steering_command_1;
     float delayed_steering_command_2;
     /* Unity keeps a separate physical wheel angle and slews it toward the
@@ -68,6 +68,31 @@ typedef struct
 
 enum
 {
+    MPC_YAW_SURFACE_SPEED_KNOTS = 3,
+    MPC_YAW_SURFACE_TURN_DIRECTIONS = 2,
+    MPC_YAW_SURFACE_Q_KNOTS = 10,
+};
+
+/* Repeated open-plane response data for yaw-rate magnitude vs
+ * q = speed * tan(|steering|).  It is a Unity-specific, bounded empirical
+ * surface, not a tire-force law. Direction index 0 is right/negative and 1
+ * is left/positive. */
+typedef struct
+{
+    int enabled;
+    float blend_q_start;
+    float blend_q_end;
+    float speed_mps[MPC_YAW_SURFACE_SPEED_KNOTS];
+    float q[MPC_YAW_SURFACE_SPEED_KNOTS]
+           [MPC_YAW_SURFACE_TURN_DIRECTIONS]
+           [MPC_YAW_SURFACE_Q_KNOTS];
+    float yaw_rate_abs_rps[MPC_YAW_SURFACE_SPEED_KNOTS]
+                          [MPC_YAW_SURFACE_TURN_DIRECTIONS]
+                          [MPC_YAW_SURFACE_Q_KNOTS];
+} MpcYawRateResponseSurface_t;
+
+enum
+{
     MPC_STAGE_CLIPPED_STEERING_RATE = 1u << 0,
     MPC_STAGE_CLIPPED_SPEED_RATE = 1u << 1,
     MPC_STAGE_CLIPPED_STEERING_COMMAND = 1u << 2,
@@ -106,11 +131,15 @@ MpcYawRateModelParameters_t vehicle_model_default_yaw_rate_parameters(void);
 MpcYawRateModelParameters_t vehicle_model_get_yaw_rate_parameters(void);
 int vehicle_model_set_yaw_rate_parameters(
     const MpcYawRateModelParameters_t *parameters);
+int vehicle_model_set_yaw_rate_response_surface(
+    const MpcYawRateResponseSurface_t *surface);
 
 /* Identified Unity steering relation used by both prediction and feed-forward. */
 float vehicle_model_yaw_rate_gain(float steering_rad);
 float vehicle_model_yaw_rate_gain_for_curvature(float curvature_radpm);
 float vehicle_model_steering_for_curvature(float curvature_radpm);
+float vehicle_model_steering_for_curvature_at_speed(
+    float curvature_radpm, float speed_mps);
 
 /* Apply the controller's temporary target-speed ceiling to every nonlinear
  * and linearized model step.  This is a command-policy limit, not a change to

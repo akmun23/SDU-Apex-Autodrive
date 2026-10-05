@@ -177,6 +177,28 @@ def _verify_append_only_dataset_extension(source_metadata: dict[str, Any],
     }
 
 
+def _inherit_checkpoint_calibration(model: Any,
+                                    normalizers: dict[str, np.ndarray],
+                                    arrays: dict[str, np.ndarray],
+                                    source_metadata: dict[str, Any]
+                                    ) -> ActuatorFit:
+    """Retain a checkpoint's scales and actuator response during extension."""
+    for name in arrays:
+        inherited = np.asarray(source_metadata[name], dtype=np.float32)
+        arrays[name] = inherited
+        normalizers[name] = inherited
+    actuator = source_metadata["actuator_fit"]
+    fit = ActuatorFit(
+        ActuatorChannel(**actuator["steering"]),
+        ActuatorChannel(**actuator["throttle"]),
+        actuator.get("diagnostics", {}))
+    model.steering_delay_steps = fit.steering.delay_steps
+    model.throttle_delay_steps = fit.throttle.delay_steps
+    model.steering_alpha = float(fit.steering.alpha)
+    model.throttle_alpha = float(fit.throttle.alpha)
+    return fit
+
+
 def _run_indices(data: dict[str, Any]) -> np.ndarray:
     result = np.full(len(data["frames"]), -1, dtype=np.int32)
     for (start_raw, end_raw), run_raw in zip(data["bounds"], data["seq_run"]):
@@ -947,7 +969,8 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
         fixed_cadence_transfer = (
             output_head_only == "wheel"
             and is_fixed_cadence_variant(source_metadata, dataset_path))
-        if (not (same_training_dataset or fixed_cadence_transfer)
+        if (not (same_training_dataset or fixed_cadence_transfer
+                or dataset_extension is not None)
                 or source_metadata.get("encoder") != encoder
                 or int(source_metadata.get("latent_size", -1)) != latent_size
                 or int(source_metadata.get("expert_count", 1)) != expert_count
@@ -978,6 +1001,9 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
                                        "surface_acceleration") != wheel_dynamics_mode):
             raise ValueError("output-head checkpoint does not match the frozen model configuration")
         model.load_state_dict(source["model_state_dict"], strict=True)
+        if dataset_extension is not None:
+            actuator_fit = _inherit_checkpoint_calibration(
+                model, normalizers, arrays, source_metadata)
         for parameter in model.parameters():
             parameter.requires_grad_(False)
         output_indices = {
@@ -1011,8 +1037,14 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
                      "all non-selected parameters frozen"),
             "dataset_compatibility": (
                 "exact hash match" if same_training_dataset else
+                "verified append-only whole-run extension" if
+                dataset_extension is not None else
                 "verified fixed-25ms raw encoder-rate variant; all source "
                 "arrays and validity masks match"),
+            "dataset_extension_proof": dataset_extension,
+            "normalizer_policy": (
+                "retain verified parent training-only normalizers and "
+                "actuator response" if dataset_extension is not None else None),
             "trainable_parameter_count": sum(
                 parameter.numel() for parameter in model.parameters()
                 if parameter.requires_grad),
@@ -1050,23 +1082,8 @@ def train(dataset_path: Path, output_dir: Path, encoder: str, seed: int,
                 raise ValueError("roll-state continuation settings do not match checkpoint")
             model.load_state_dict(source["model_state_dict"], strict=True)
             if dataset_extension is not None:
-                # Keep the inherited network's scaling and analytic actuator
-                # response aligned with its learned weights while the added
-                # training run changes only sampled dynamics transitions.
-                for name in arrays:
-                    inherited = np.asarray(
-                        source_metadata[name], dtype=np.float32)
-                    arrays[name] = inherited
-                    normalizers[name] = inherited
-                inherited_actuator = source_metadata["actuator_fit"]
-                actuator_fit = ActuatorFit(
-                    ActuatorChannel(**inherited_actuator["steering"]),
-                    ActuatorChannel(**inherited_actuator["throttle"]),
-                    inherited_actuator.get("diagnostics", {}))
-                model.steering_delay_steps = actuator_fit.steering.delay_steps
-                model.throttle_delay_steps = actuator_fit.throttle.delay_steps
-                model.steering_alpha = float(actuator_fit.steering.alpha)
-                model.throttle_alpha = float(actuator_fit.throttle.alpha)
+                actuator_fit = _inherit_checkpoint_calibration(
+                    model, normalizers, arrays, source_metadata)
             warm_start = {
                 "checkpoint": str(init_checkpoint),
                 "sha256": _sha256(init_checkpoint),

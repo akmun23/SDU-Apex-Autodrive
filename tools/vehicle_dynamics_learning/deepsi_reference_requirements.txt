@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# Reference implementation used by the 2026-10-04 reset plan.
+torch==2.7.1+cu118
+numpy==1.26.4
+deepSI @ git+https://github.com/GerbenBeintema/deepSI.git@109cf74f49a7b27539232c53981584befc1becc0

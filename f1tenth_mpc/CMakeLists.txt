@@ -13,6 +13,7 @@ if(NOT MSVC)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -55,6 +56,7 @@ set_target_properties(mpc_control_time PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(mpc_controller_node SHARED src/mpc_controller_node.cpp)
 target_link_libraries(mpc_controller_node mpc_core mpc_state_sync mpc_control_time)
 ament_target_dependencies(mpc_controller_node
+  ament_index_cpp
   rclcpp
   rclcpp_components
   nav_msgs
@@ -71,11 +73,11 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(FILES config/mpc_competition.yaml
+install(FILES config/mpc_competition.yaml config/yaw_response_surface.csv
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)
 ament_export_libraries(mpc_core)
-ament_export_dependencies(rclcpp rclcpp_components nav_msgs geometry_msgs
+ament_export_dependencies(ament_index_cpp rclcpp rclcpp_components nav_msgs geometry_msgs
   ackermann_msgs std_msgs)
 ament_package()

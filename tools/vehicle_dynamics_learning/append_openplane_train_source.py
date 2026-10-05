@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Append one quality-gated schema-7 training run without re-extracting old bags.
+"""Append one quality-gated schema-7 train/validation run without re-extraction.
 
 This preserves the frozen source arrays exactly.  It is intentionally limited
-to a single new training run so a changed extractor cannot silently rewrite
-historical training or held-out rows.
+to one whole run at a time so a changed extractor cannot silently rewrite
+historical training or held-out rows. Final/test roles cannot be appended here.
 """
 
 from __future__ import annotations
@@ -40,8 +40,11 @@ def _read_archive(path: Path) -> dict[str, np.ndarray]:
         return {key: archive[key] for key in archive.files}
 
 
-def _single_accepted_training_run(
-        data: dict[str, np.ndarray], manifest: dict[str, Any]) -> str:
+def _single_accepted_role_run(
+        data: dict[str, np.ndarray], manifest: dict[str, Any],
+        expected_split: str) -> str:
+    if expected_split not in ("train", "validation"):
+        raise ValueError("only train and development-validation runs may be appended")
     run_ids = data["run_ids"].astype(str)
     if len(run_ids) != 1:
         raise ValueError("addition must contain exactly one run")
@@ -51,9 +54,9 @@ def _single_accepted_training_run(
     if len(rows) != 1:
         raise ValueError("addition manifest must describe its single run")
     row = rows[0]
-    if str(data["run_splits"][0]) != "train" or row.get(
-            "effective_split") != "train":
-        raise ValueError("addition must be assigned to the train split")
+    if (str(data["run_splits"][0]) != expected_split
+            or row.get("effective_split") != expected_split):
+        raise ValueError(f"addition must be assigned to {expected_split}")
     if (row.get("aborted") or not row.get("clean_stream_and_collision_gate")
             or int(row.get("timing_faults", -1)) != 0
             or any(int(value) != 0 for value in row.get("collisions", []))
@@ -69,7 +72,7 @@ def _single_accepted_training_run(
 
 def append(base_path: Path, base_manifest_path: Path,
            addition_path: Path, addition_manifest_path: Path,
-           output_dir: Path) -> dict[str, Any]:
+           output_dir: Path, expected_split: str = "train") -> dict[str, Any]:
     paths = (base_path, base_manifest_path, addition_path,
              addition_manifest_path, output_dir)
     resolved = [path.resolve() for path in paths]
@@ -91,7 +94,8 @@ def append(base_path: Path, base_manifest_path: Path,
         raise ValueError("source archive fields do not match")
     if int(base["schema_version"][0]) != 7:
         raise ValueError("frozen baseline must be schema 7")
-    run_id = _single_accepted_training_run(addition, addition_manifest)
+    run_id = _single_accepted_role_run(
+        addition, addition_manifest, expected_split)
     if set(base["run_ids"].astype(str)) & {run_id}:
         raise ValueError(f"run already exists in frozen baseline: {run_id}")
 
@@ -197,7 +201,7 @@ def append(base_path: Path, base_manifest_path: Path,
         "note": "All exported sequence boundaries are preserved in the merged archive.",
     }
     manifest["selection"] = (
-        "Frozen baseline schema-7 rows plus one quality-gated training run; "
+        f"Frozen baseline schema-7 rows plus one quality-gated {expected_split} run; "
         "historical bags were not re-extracted.")
     manifest["runs"] = run_rows
     manifest["errors"] = []
@@ -210,7 +214,7 @@ def append(base_path: Path, base_manifest_path: Path,
         "compressed_bytes": dataset_path.stat().st_size,
     }
     manifest["append_provenance"] = {
-        "operation": "append_one_quality_gated_train_run_without_reextracting_base",
+        "operation": "append_one_quality_gated_role_run_without_reextracting_base",
         "frozen_base_dataset": str(base_path.relative_to(REPO_ROOT)),
         "frozen_base_sha256": _sha256(base_path),
         "frozen_base_manifest": str(base_manifest_path.relative_to(REPO_ROOT)),
@@ -220,7 +224,7 @@ def append(base_path: Path, base_manifest_path: Path,
         "added_manifest": str(addition_manifest_path.relative_to(REPO_ROOT)),
         "added_manifest_sha256": _sha256(addition_manifest_path),
         "added_run_id": run_id,
-        "added_split": "train",
+        "added_split": expected_split,
         "historical_rows_and_sequences_preserved_exactly": True,
     }
     manifest["export"]["sha256"] = _sha256(dataset_path)
@@ -234,6 +238,7 @@ def append(base_path: Path, base_manifest_path: Path,
         "sequences": len(merged["sequence_bounds"]),
         "runs": len(merged["run_ids"]),
         "added_run": run_id,
+        "added_split": expected_split,
         "base_rows_preserved": base_frames,
         "base_sequences_preserved": base_sequences,
         "base_runs_preserved": base_runs,
@@ -247,9 +252,13 @@ def main() -> int:
     parser.add_argument("addition", type=Path)
     parser.add_argument("addition_manifest", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--split", choices=("train", "validation"),
+                        default="train",
+                        help="whole-run role assigned before scoring")
     args = parser.parse_args()
     print(json.dumps(append(args.base, args.base_manifest, args.addition,
-                            args.addition_manifest, args.output_dir), indent=2))
+                            args.addition_manifest, args.output_dir,
+                            args.split), indent=2))
     return 0
 
 

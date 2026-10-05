@@ -7,11 +7,18 @@ source /opt/ros/humble/setup.bash
 source /home/autodrive_devkit/install/setup.bash
 source /workspace/install/setup.bash
 
+build_packages=()
 if [[ "${SDU_APEX_BUILD_MPC:-0}" == "1" ]]; then
-  echo "Building f1tenth_mpc from the mounted workspace source..."
+  build_packages+=(f1tenth_mpc)
+fi
+if [[ "${SDU_APEX_BUILD_LOCALIZATION:-0}" == "1" ]]; then
+  build_packages+=(f1tenth_localization)
+fi
+if [[ "${#build_packages[@]}" -gt 0 ]]; then
+  echo "Building mounted workspace packages: ${build_packages[*]}"
   cd /workspace
   CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build \
-    --packages-select f1tenth_mpc \
+    --packages-select "${build_packages[@]}" \
     --parallel-workers 1 \
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

@@ -40,10 +40,18 @@ OdometryObserverConfig deployment_observer_config()
   config.turn_speed_bias_constant_mps = -0.03;
   config.turn_speed_bias_speed_mps = 0.0;
   config.turn_speed_bias_speed_squared_mps = 0.0;
-  config.turn_speed_bias_yaw_rate_abs_mps = 0.0;
+  config.turn_speed_bias_yaw_rate_abs_mps = 0.185;
   config.turn_speed_bias_yaw_rate_squared_mps = 0.0;
   config.turn_speed_bias_speed_yaw_rate_abs_mps = 0.0;
-  config.turn_speed_bias_max_mps = 0.03;
+  config.turn_speed_bias_max_mps = 0.15;
+  config.turn_speed_bias_start_speed_mps = 6.5;
+  config.turn_speed_bias_full_speed_mps = 7.5;
+  config.turn_slip_speed_bias_lateral_accel_threshold_mps2 = 4.0;
+  config.turn_slip_speed_bias_gain_mps_per_mps2 = 0.05;
+  config.turn_slip_speed_bias_start_speed_mps = 2.0;
+  config.turn_slip_speed_bias_full_speed_mps = 2.8;
+  config.turn_slip_speed_bias_fade_start_mps = 4.5;
+  config.turn_slip_speed_bias_fade_end_mps = 5.5;
   config.use_coherent_packet_velocity_for_pose = true;
   config.coherent_packet_pose_blend = 1.0;
   config.wheel_speed_slew_limit_mps2 = 40.0;
@@ -165,8 +173,51 @@ double OdometryObserver::turn_speed_bias_mps(
     config_.turn_speed_bias_yaw_rate_abs_mps * yaw_rate_abs +
     config_.turn_speed_bias_yaw_rate_squared_mps * yaw_rate_abs * yaw_rate_abs +
     config_.turn_speed_bias_speed_yaw_rate_abs_mps * speed * yaw_rate_abs;
-  return std::clamp(
+  const double bounded_bias = std::clamp(
     bias, -config_.turn_speed_bias_max_mps, config_.turn_speed_bias_max_mps);
+  const double speed_span = config_.turn_speed_bias_full_speed_mps -
+    config_.turn_speed_bias_start_speed_mps;
+  double high_speed_gate = 0.0;
+  if (speed_span <= 0.0) {
+    high_speed_gate = speed >= config_.turn_speed_bias_full_speed_mps ? 1.0 : 0.0;
+  } else {
+    const double ramp = std::clamp(
+      (speed - config_.turn_speed_bias_start_speed_mps) / speed_span, 0.0, 1.0);
+    high_speed_gate = ramp * ramp * (3.0 - 2.0 * ramp);
+  }
+
+  // An accepted wheel update carries a repeatable speed-dependent residual in
+  // hard turns. Keep this empirical correction separate from the high-speed
+  // fit: practice holdouts show a positive residual at 2–4 m/s but the
+  // existing correction already becomes too strong above that region.
+  const double slip_entry_width =
+    config_.turn_slip_speed_bias_full_speed_mps -
+    config_.turn_slip_speed_bias_start_speed_mps;
+  const double slip_gate_in = std::clamp(
+    slip_entry_width > 0.0 ?
+      (speed - config_.turn_slip_speed_bias_start_speed_mps) /
+        slip_entry_width : 0.0,
+    0.0, 1.0);
+  const double slip_gate_in_smooth =
+    slip_gate_in * slip_gate_in * (3.0 - 2.0 * slip_gate_in);
+  const double slip_fade_width =
+    config_.turn_slip_speed_bias_fade_end_mps -
+    config_.turn_slip_speed_bias_fade_start_mps;
+  const double slip_fade = std::clamp(
+    slip_fade_width > 0.0 ?
+      (speed - config_.turn_slip_speed_bias_fade_start_mps) /
+        slip_fade_width : 0.0,
+    0.0, 1.0);
+  const double slip_gate_out = 1.0 -
+    slip_fade * slip_fade * (3.0 - 2.0 * slip_fade);
+  const double lateral_accel_proxy = speed * yaw_rate_abs;
+  const double slip_correction = std::min(
+    config_.turn_speed_bias_max_mps,
+    config_.turn_slip_speed_bias_gain_mps_per_mps2 * std::max(
+      0.0, lateral_accel_proxy -
+        config_.turn_slip_speed_bias_lateral_accel_threshold_mps2));
+  return high_speed_gate * bounded_bias -
+    slip_gate_in_smooth * slip_gate_out * slip_correction;
 }
 
 double OdometryObserver::kinematic_base_lateral_velocity(

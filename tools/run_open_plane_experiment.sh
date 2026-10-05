@@ -17,6 +17,7 @@ usage() {
     "isolated_highsteer_75_long repeats the observed 7.5 m/s high-steering envelope with 8 s holds." \
     "race_domain_dynamic_steering records continuous signed steering transitions at 4.5, 6.5, and 7.5 m/s." \
     "race_domain_dynamic_coupled_{train,validation,final} records randomized waveforms across the supported 5–11.1 m/s envelope." \
+    "subnet_highsteer_transients records reset-isolated 7.5 m/s turn-in/unwind throttle transients at 0.30/0.42 rad." \
     "Resume a partial surface with SDU_APEX_EXPERIMENT_RESUME_ANALYSIS pointing to its closed analysis JSON." \
     "Set SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD to comma-separated steering angles in radians." \
     "Set SDU_APEX_EXPERIMENT_THROTTLE_REPEAT_COUNT, TARGET_STEP_PERCENT, and BASELINE_STEP_PERCENT." \
@@ -58,6 +59,8 @@ elif [[ "${profile}" == race_domain_steering_frontier ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == isolated_highsteer_75_long ]]; then
   default_timeout_s=240
+elif [[ "${profile}" == subnet_highsteer_transients ]]; then
+  default_timeout_s=600
 fi
 timeout_s="${SDU_APEX_EXPERIMENT_TIMEOUT_S:-${default_timeout_s}}"
 steering_angles_rad="${SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD:-0.0}"
@@ -72,7 +75,8 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == race_domain_steering_frontier ||
       "${profile}" == race_domain_dynamic_coupled_train ||
       "${profile}" == race_domain_dynamic_coupled_validation ||
-      "${profile}" == race_domain_dynamic_coupled_final ]]; then
+      "${profile}" == race_domain_dynamic_coupled_final ||
+      "${profile}" == subnet_highsteer_transients ]]; then
   dev_sim_reset_enabled=1
 fi
 probe_dwell_s="${SDU_APEX_EXPERIMENT_PROBE_DWELL_S:-0}"
@@ -96,7 +100,8 @@ case "${profile}" in
   isolated_force_4mps|isolated_force_5mps|isolated_highspeed_surface|\
   isolated_highsteer_75_long|race_domain_dynamic_steering|\
   race_domain_dynamic_coupled_train|race_domain_dynamic_coupled_validation|\
-  race_domain_dynamic_coupled_final|isolated_3to5_response_surface|\
+  race_domain_dynamic_coupled_final|subnet_highsteer_transients|\
+  isolated_3to5_response_surface|\
   isolated_highspeed_crossfactor|isolated_highspeed_tail|\
   isolated_transition_65mps|isolated_transition_45mps|\
   isolated_transition_speed_surface|isolated_transition_support|\

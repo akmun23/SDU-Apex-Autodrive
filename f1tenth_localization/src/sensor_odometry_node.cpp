@@ -150,6 +150,30 @@ public:
       observer_defaults.turn_speed_bias_speed_yaw_rate_abs_mps);
     declare_parameter("turn_speed_bias_max_mps", observer_defaults.turn_speed_bias_max_mps);
     declare_parameter(
+      "turn_speed_bias_start_speed_mps",
+      observer_defaults.turn_speed_bias_start_speed_mps);
+    declare_parameter(
+      "turn_speed_bias_full_speed_mps",
+      observer_defaults.turn_speed_bias_full_speed_mps);
+    declare_parameter(
+      "turn_slip_speed_bias_lateral_accel_threshold_mps2",
+      observer_defaults.turn_slip_speed_bias_lateral_accel_threshold_mps2);
+    declare_parameter(
+      "turn_slip_speed_bias_gain_mps_per_mps2",
+      observer_defaults.turn_slip_speed_bias_gain_mps_per_mps2);
+    declare_parameter(
+      "turn_slip_speed_bias_start_speed_mps",
+      observer_defaults.turn_slip_speed_bias_start_speed_mps);
+    declare_parameter(
+      "turn_slip_speed_bias_full_speed_mps",
+      observer_defaults.turn_slip_speed_bias_full_speed_mps);
+    declare_parameter(
+      "turn_slip_speed_bias_fade_start_mps",
+      observer_defaults.turn_slip_speed_bias_fade_start_mps);
+    declare_parameter(
+      "turn_slip_speed_bias_fade_end_mps",
+      observer_defaults.turn_slip_speed_bias_fade_end_mps);
+    declare_parameter(
       "use_coherent_packet_velocity_for_pose",
       observer_defaults.use_coherent_packet_velocity_for_pose);
     declare_parameter(
@@ -318,6 +342,22 @@ private:
       "turn_speed_bias_speed_yaw_rate_abs_mps").as_double();
     config.turn_speed_bias_max_mps = std::max(
       0.0, get_parameter("turn_speed_bias_max_mps").as_double());
+    config.turn_speed_bias_start_speed_mps = get_parameter(
+      "turn_speed_bias_start_speed_mps").as_double();
+    config.turn_speed_bias_full_speed_mps = get_parameter(
+      "turn_speed_bias_full_speed_mps").as_double();
+    config.turn_slip_speed_bias_lateral_accel_threshold_mps2 = get_parameter(
+      "turn_slip_speed_bias_lateral_accel_threshold_mps2").as_double();
+    config.turn_slip_speed_bias_gain_mps_per_mps2 = get_parameter(
+      "turn_slip_speed_bias_gain_mps_per_mps2").as_double();
+    config.turn_slip_speed_bias_start_speed_mps = get_parameter(
+      "turn_slip_speed_bias_start_speed_mps").as_double();
+    config.turn_slip_speed_bias_full_speed_mps = get_parameter(
+      "turn_slip_speed_bias_full_speed_mps").as_double();
+    config.turn_slip_speed_bias_fade_start_mps = get_parameter(
+      "turn_slip_speed_bias_fade_start_mps").as_double();
+    config.turn_slip_speed_bias_fade_end_mps = get_parameter(
+      "turn_slip_speed_bias_fade_end_mps").as_double();
     config.use_coherent_packet_velocity_for_pose = get_parameter(
       "use_coherent_packet_velocity_for_pose").as_bool();
     config.coherent_packet_pose_blend = std::clamp(

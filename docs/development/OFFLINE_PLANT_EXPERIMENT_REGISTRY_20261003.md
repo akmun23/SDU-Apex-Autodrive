@@ -1,15 +1,15 @@
 # Offline Plant Experiment Registry — 2026-10-03
 
-Repository HEAD: `2129427838101eee277e17e91727810bbe2df687`. Worktree was dirty at generation: `True`.
+Repository HEAD: `5b26c5ac829acf56d77bdb71a979b7e494703ac5`. Worktree was dirty at generation: `True`.
 
 This is an evidence index, not a model promotion. The registry has no default candidate because no plant has passed the required recursive and task-level gates.
 
 ## Coverage
 
-- Training metadata files found: 115; indexed model runs: 93.
-- Indexed diagnostic/comparison artifacts: 47. 
-- `live_runs/` references in development documents: 138; missing literal paths: 2; unmatched globs: 1.
-- Checkpoint hashes checked: 55; unresolved dataset/checkpoint references: 0/0; recorded diagnostic hash mismatches: 0.
+- Training metadata files found: 135; indexed model runs: 101.
+- Indexed diagnostic/comparison artifacts: 51.
+- `live_runs/` references in development documents: 152; missing literal paths: 3; unmatched globs: 1.
+- Checkpoint hashes checked: 60; unresolved dataset/checkpoint references: 0/0; recorded diagnostic hash mismatches: 0.
 
 ## Current branch decisions
 
@@ -92,65 +92,9 @@ Older evidence is retained as historical context. Where it conflicts with the 20
 
 ## Referenced artifacts not present
 
+- Missing literal reference `live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/rigid_acceleration_history_direct_supervision_10s_v1/rigid_acceleration_history_direct_supervision_5s_vs_10s_full_practice_20261004.json` from docs/development/BLACK_BOX_OFFLINE_PLANT_PROGRESS_20261003.md; it is not a present indexed checkpoint/dataset/comparison artifact.
 - Missing literal reference `live_runs/derived_dynamics_learning_20260928/model_eval_venv` from docs/development/VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md; it is not a present indexed checkpoint/dataset/comparison artifact.
 - Missing literal reference `live_runs/vehicle_model_training_env` from docs/development/VEHICLE_DYNAMICS_DATA_CATALOG_20260930.md; it is not a present indexed checkpoint/dataset/comparison artifact.
 - Unmatched historical glob `live_runs/openplane_throttle_slew_holdout_{45,65}_rNN/run/run_0.db3` from docs/development/NONLINEAR_MODEL_DISCOVERY_UPDATE_20260928.md.
 
 The historical `model_eval_venv` and `vehicle_model_training_env` references are absent local directories, not missing training outputs. Wildcard/brace references are expanded and counted separately; they are not silently reported as resolved files.
-
-## Follow-on diagnostics recorded 2026-10-04
-
-These research artifacts were created after the registry scan above; none is a
-promoted model:
-
-- 40 Hz discrete vs 40/200/1000 Hz continuous-vector-field comparison:
-  [`multirate_study_report.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/multirate_vector_field_v1/multirate_study_report.json), SHA-256 `64353baad39b1c50bb947e16af39606f82fb8142ac559d469f8a1535f2562f82`.
-- 10 s frozen/specialist/gated high-steering comparison:
-  [`rigid_acceleration_highsteer_residual_gate_10s_20261004.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/rigid_acceleration_highsteer_residual_gate_10s_20261004.json), SHA-256 `54e5122010571c7010e7bcd111b5abedaccaa5dfc919b6d7e5d1423ebd46a696`.
-- Oracle body-motion/pose-integrator isolation:
-  [`truth_pose_integration_diagnostic_v1.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/truth_pose_integration_diagnostic_v1.json), SHA-256 `b82712307ea2f63bc9fdf927f76dae331ed2881fbd076dfba364ba05dbae2122`.
-- High-steering-only 40/200/1000 Hz comparison of the same frozen continuous model:
-  [`highsteer_substep_diagnostic_20261004.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/multirate_vector_field_v1/highsteer_substep_diagnostic_20261004.json), SHA-256 `104f9a33462adea7075c5e5f864e02b3ca97927ab02e5ba1247bc1fe84e42426`; evaluator [`analyze_multirate_highsteer_substeps.py`](../../tools/vehicle_dynamics_learning/analyze_multirate_highsteer_substeps.py).
-- Held-out whole-run wheel-mismatch and roll/roll-rate residual attribution:
-  [`rigid_acceleration_sensor_residual_value_with_run_bootstrap_20261004.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/rigid_acceleration_sensor_residual_value_with_run_bootstrap_20261004.json); evaluator [`diagnose_rigid_acceleration_sensor_residual_value.py`](../../tools/vehicle_dynamics_learning/diagnose_rigid_acceleration_sensor_residual_value.py). Six dynamic validation captures show a small but repeatable roll-associated reduction in lateral acceleration residual and a repeatable yaw-residual penalty. This is teacher-forced one-step attribution only; no measured future sensor enters any rollout and no candidate has been promoted.
-- Frozen-parent roll residual ablation and measured-roll oracle:
-  [`roll_state_oracle.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/roll_state_oracle_causal_test_20261004/roll_state_oracle.json), SHA-256 `1c56c2ad9afd060bbdb9adde1e8b7261c52904db44e87625acd330df1062b041`; evaluator [`diagnose_roll_state_oracle.py`](../../tools/vehicle_dynamics_learning/diagnose_roll_state_oracle.py). The roll-conditioned acceleration path is needed by the frozen checkpoint (disabling it worsens 5 s position on both domains); measured roll injected every step does not reliably improve pose and regresses both position and heading on practice. Oracle results are noncausal; no candidate is promoted.
-- Signed steering/speed/rollout-age yaw residual attribution:
-  [`signed_turn_yaw_error_20261004.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/signed_turn_yaw_error_20261004.json), SHA-256 `85858902884032344e2050726fb608b3c1ec721e16f423e4c386e0954ef1a9eb`; evaluator [`analyze_signed_turn_yaw_error.py`](../../tools/vehicle_dynamics_learning/analyze_signed_turn_yaw_error.py). Directional yaw-rate bias remains visible in practice, but the right-turn/high-speed cells have too few independent captures to justify a new asymmetric fit. This is post-hoc held-out stratification, not sensor feedback or training.
-
-Interpretation is in [`BLACK_BOX_OFFLINE_PLANT_PROGRESS_20261003.md`](BLACK_BOX_OFFLINE_PLANT_PROGRESS_20261003.md#2026-10-04--multirate-and-no-latent-high-steering-follow-up). The 1 kHz substep variant is not more accurate on the measured 40 Hz data; the gated model has a repeatable high-steering development gain but is not a full-domain simulator. No untouched confirmation data or production path was used.
-
-### 2026-10-04 follow-on: yaw/pose head trial
-
-This one-head fine-tune is rejected despite a better internal validation
-selection score. It changes the current comparator but is not promoted and
-must not be integrated into MPC/odometry.
-
-- Candidate checkpoint:
-  `live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/effective_teacher_yaw_pose_v1_20261004/best.pt`
-  SHA-256 `432f604dc1200a991d5c362ff121a6d8d2e2182ea59e617603828fca8fc4672a`.
-- Training: 1,200 updates; yaw-acceleration heads only; 514 trainable
-  parameters; best development score 1.0970329. No test/final-test data used
-  for selection.
-- Practice report:
-  [`effective_teacher_yaw_pose_practice_minus1_20261004.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/effective_teacher_yaw_pose_practice_minus1_20261004.json),
-  SHA-256 `2fb40dd3471495f4c5224f139e5e3fe53f6f662f7fe107508e08d52ba45abf0f`.
-- High-steering report:
-  [`effective_teacher_yaw_pose_highsteer_20261004.json`](../../live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261003/full_throttle_domain_v1/next_phase_after_2129427/history_context_sufficiency_v1/effective_teacher_yaw_pose_highsteer_20261004.json),
-  SHA-256 `e131ba1d5c71966fba35e915c24ad52b0a56db29f1ec709af9ab86f31b82fa38`.
-
-On practice r02/r03, candidate full-capture position RMSE is 4.114/3.751 m
-and heading RMSE 0.851/0.788 rad; frozen parent is 1.167/2.195 m and
-0.145/0.126 rad on the same runs. The candidate makes negative-turn yaw bias
-worse (~+0.06 rad/s vs parent ~+0.022 rad/s) and does not correct the
-positive-turn bias (~-0.075 rad/s for both). Reject. Additional blind-practice
-views were not usable for 10 s recursive testing because their contiguous
-capture segments are shorter than the 80-step history plus 400-step horizon;
-these were not treated as whole-run evidence.
-
-Rate decision: the 40/200/1000 Hz experiment changes 2 s high-steering
-position RMSE only from 4.234045 m to 4.233892 m (40 Hz to 1 kHz), while
-training takes 4.33 s vs 0.45 s for 300 updates. With only 40 Hz labels,
-1 kHz latent substeps do not address the dominant model error. High accuracy
-remains unmet; see the dated progress section for full details and next
-diagnostic.

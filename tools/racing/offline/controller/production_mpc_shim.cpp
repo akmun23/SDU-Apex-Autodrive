@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -15,6 +16,8 @@ extern "C" {
 #include "mpc_rti.h"
 #include "vehicle_model.h"
 }
+
+#include "yaw_response_surface_io.hpp"
 
 namespace
 {
@@ -74,6 +77,24 @@ MpcRtiCycleConfiguration_t load_config(const std::string & path,
       defaults.low_speed_transition_speed_mps);
   if (!vehicle_model_set_yaw_rate_parameters(&yaw)) {
     throw std::runtime_error("invalid production yaw-rate model parameters");
+  }
+  const bool yaw_surface_enabled = read_param<bool>(
+      params, "yaw_rate_response_surface_enabled", false);
+  if (yaw_surface_enabled) {
+    const float blend_start = fparam(params,
+        "yaw_rate_response_surface_blend_q_start", 0.60f);
+    const float blend_end = fparam(params,
+        "yaw_rate_response_surface_blend_q_end", 0.85f);
+    const auto surface_path = std::filesystem::path(path).parent_path() /
+        "yaw_response_surface.csv";
+    const auto surface = f1tenth_mpc::load_yaw_response_surface_csv(
+        surface_path.string(), blend_start, blend_end);
+    if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
+      throw std::runtime_error("invalid production yaw-rate response surface");
+    }
+  } else {
+    const MpcYawRateResponseSurface_t disabled_surface{};
+    (void)vehicle_model_set_yaw_rate_response_surface(&disabled_surface);
   }
 
   MpcRtiCycleConfiguration_t config{};

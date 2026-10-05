@@ -62,16 +62,20 @@ def main() -> int:
     parser.add_argument("--collision-only", action="store_true")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--stall-timeout-s", type=float, default=20.0)
+    parser.add_argument("--post-target-lap-guard-s", type=float, default=0.5,
+                        help="keep collision monitoring active after the target lap")
     args = parser.parse_args()
     if ((args.target_lap < 1 and not args.collision_only) or
             (args.collision_only and args.target_lap != 0) or
-            args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0):
+            args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0 or
+            args.post_target_lap_guard_s < 0.0):
         parser.error(
             "set a positive target-lap or collision-only, and a positive timeout-s")
 
     rclpy.init()
     watcher = SimRunWatcher()
     deadline = time.monotonic() + args.timeout_s
+    target_lap_reached_at: float | None = None
     result = 2
     try:
         while time.monotonic() < deadline:
@@ -88,9 +92,14 @@ def main() -> int:
                 break
             if (args.target_lap > 0 and watcher.lap_count is not None and
                     watcher.lap_count >= args.target_lap):
-                print("SCREEN_COMPLETE: lap limit", flush=True)
-                result = 0
-                break
+                if target_lap_reached_at is None:
+                    target_lap_reached_at = time.monotonic()
+                    print("target lap reached; retaining collision watch", flush=True)
+                elif (time.monotonic() - target_lap_reached_at >=
+                      args.post_target_lap_guard_s):
+                    print("SCREEN_COMPLETE: lap limit", flush=True)
+                    result = 0
+                    break
         else:
             print("SCREEN_ABORT: timeout", flush=True)
     finally:

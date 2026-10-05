@@ -97,7 +97,11 @@ def _verify_image_sources(image: str, repo_root: Path,
 
 
 def _container_script(integrate_lateral_acceleration_in_turn: bool = False,
-                      wheel_burst_catchup_accel_mps2: float | None = None
+                      wheel_burst_catchup_accel_mps2: float | None = None,
+                      turn_speed_bias_yaw_rate_abs_mps: float | None = None,
+                      turn_speed_bias_max_mps: float | None = None,
+                      start_offset_s: float | None = None,
+                      duration_wall_s: float | None = None,
                       ) -> str:
     topics = " ".join(shlex.quote(topic) for topic in SENSOR_TOPICS)
     lateral_override = (
@@ -107,6 +111,37 @@ def _container_script(integrate_lateral_acceleration_in_turn: bool = False,
         "  -p wheel_burst_catchup_accel_mps2:="
         f"{float(wheel_burst_catchup_accel_mps2)!r} \\\n"
         if wheel_burst_catchup_accel_mps2 is not None else "")
+    turn_bias_override = ""
+    if turn_speed_bias_yaw_rate_abs_mps is not None:
+        turn_bias_override += (
+            "  -p turn_speed_bias_yaw_rate_abs_mps:="
+            f"{float(turn_speed_bias_yaw_rate_abs_mps)!r} \\\n")
+    if turn_speed_bias_max_mps is not None:
+        turn_bias_override += (
+            "  -p turn_speed_bias_max_mps:="
+            f"{float(turn_speed_bias_max_mps)!r} \\\n")
+    playback_window = ""
+    playback_timeout = ""
+    if start_offset_s is not None:
+        playback_window = f" --start-offset {start_offset_s:.9g}"
+    if duration_wall_s is not None:
+        playback_timeout = (
+            "set +e\n"
+            f"timeout --signal=INT --kill-after=3 {duration_wall_s:.9g}s "
+            f"ros2 bag play /input --rate \"$BAG_PLAY_RATE\""
+            f"{playback_window} --topics {topics}\n"
+            "play_rc=$?\n"
+            "set -e\n"
+            "if [[ \"$play_rc\" != 0 && \"$play_rc\" != 124 && \"$play_rc\" != 130 ]]; then\n"
+            "  echo \"rosbag playback failed: $play_rc\" >&2\n"
+            "  exit \"$play_rc\"\n"
+            "fi\n"
+        )
+    else:
+        playback_timeout = (
+            f"ros2 bag play /input --rate \"$BAG_PLAY_RATE\""
+            f"{playback_window} --topics {topics}\n"
+        )
     return f"""set -Ee
 source /opt/ros/humble/setup.bash
 source /home/autodrive_devkit/install/setup.bash
@@ -133,7 +168,7 @@ trap cleanup EXIT
   --ros-args --params-file /tmp/sensor_odometry.yaml \\
   -p publish_tf:=false -p odom_topic:=/replayed_odom \\
   -p diagnostics_topic:=/replayed_odom_diagnostics \\
-{lateral_override}{catchup_override}  >/results/observer.log 2>&1 &
+{lateral_override}{catchup_override}{turn_bias_override}  >/results/observer.log 2>&1 &
 node_pid=$!
 sleep 2
 if ! kill -0 "$node_pid" 2>/dev/null; then
@@ -159,7 +194,7 @@ if [[ "$ready" != 1 ]]; then
   tail -80 /results/recorder.log >&2
   exit 1
 fi
-ros2 bag play /input --rate "$BAG_PLAY_RATE" --topics {topics}
+{playback_timeout.rstrip()}
 sleep 1
 kill -INT "$record_pid"
 wait "$record_pid" || true
@@ -261,7 +296,12 @@ def _verify_against_recorded_odom(input_bag: Path, replay_bag: Path) -> str:
 
 def replay(bag: Path, output_dir: Path, image: str, rate: float,
            domain_id: int, integrate_lateral_acceleration_in_turn: bool = False,
-           wheel_burst_catchup_accel_mps2: float | None = None
+           wheel_burst_catchup_accel_mps2: float | None = None,
+           turn_speed_bias_yaw_rate_abs_mps: float | None = None,
+           turn_speed_bias_max_mps: float | None = None,
+           start_offset_s: float | None = None,
+           duration_wall_s: float | None = None,
+           source_sequence_index: int | None = None,
            ) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     bag = bag.resolve()
@@ -276,10 +316,27 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         raise ValueError("--rate must be finite and between 0.1 and 4.0")
     if not 0 <= domain_id <= 232:
         raise ValueError("--domain-id must be between 0 and 232")
+    if ((start_offset_s is None) != (duration_wall_s is None)
+            or start_offset_s is not None and
+            (not math.isfinite(start_offset_s) or start_offset_s < 0.0)
+            or duration_wall_s is not None and
+            (not math.isfinite(duration_wall_s) or duration_wall_s <= 0.0)):
+        raise ValueError("playback window requires nonnegative start offset and positive wall duration")
+    if source_sequence_index is not None and (
+            start_offset_s is None or source_sequence_index < 0):
+        raise ValueError("--source-sequence-index requires a playback window and nonnegative index")
     if (wheel_burst_catchup_accel_mps2 is not None and
             (not math.isfinite(wheel_burst_catchup_accel_mps2) or
              wheel_burst_catchup_accel_mps2 < 0.0)):
         raise ValueError("wheel burst catch-up acceleration must be finite and nonnegative")
+    if ((turn_speed_bias_yaw_rate_abs_mps is None) !=
+            (turn_speed_bias_max_mps is None)):
+        raise ValueError("turn speed bias coefficient and limit must be set together")
+    for name, value in (("turn speed bias coefficient",
+                         turn_speed_bias_yaw_rate_abs_mps),
+                        ("turn speed bias limit", turn_speed_bias_max_mps)):
+        if value is not None and (not math.isfinite(value) or value < 0.0):
+            raise ValueError(f"{name} must be finite and nonnegative")
 
     docker_env = _docker_environment(repo_root)
     image_id = _verify_image_sources(image, repo_root, docker_env)
@@ -289,6 +346,10 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
     print(f"Input bag, read-only: {bag}", flush=True)
     print(f"Output directory: {output_dir}", flush=True)
     print(f"Playback rate: {rate:g}x; isolated ROS domain: {domain_id}", flush=True)
+    if start_offset_s is not None:
+        print(f"Playback window: start={start_offset_s:g}s, "
+              f"wall duration={duration_wall_s:g}s; fresh observer process",
+              flush=True)
     if integrate_lateral_acceleration_in_turn:
         print("Observer-only override: integrate_lateral_acceleration_in_turn=true",
               flush=True)
@@ -296,6 +357,10 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         print("Offline-only override: "
               f"wheel_burst_catchup_accel_mps2={wheel_burst_catchup_accel_mps2:g}",
               flush=True)
+    if turn_speed_bias_yaw_rate_abs_mps is not None:
+        print("Offline-only turn calibration override: "
+              f"yaw-rate coefficient={turn_speed_bias_yaw_rate_abs_mps:g}, "
+              f"absolute limit={turn_speed_bias_max_mps:g} m/s", flush=True)
     print("Input topics: " + ", ".join(SENSOR_TOPICS), flush=True)
 
     command = [
@@ -309,12 +374,16 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         "target=/tmp/sensor_odometry.yaml,readonly",
         "--entrypoint", "/bin/bash", image, "-lc",
         _container_script(integrate_lateral_acceleration_in_turn,
-                          wheel_burst_catchup_accel_mps2),
+                          wheel_burst_catchup_accel_mps2,
+                          turn_speed_bias_yaw_rate_abs_mps,
+                          turn_speed_bias_max_mps,
+                          start_offset_s, duration_wall_s),
     ]
     _docker(image, command, docker_env)
     replay_bag = output_dir / "replayed" / "replayed_0.db3"
     if (integrate_lateral_acceleration_in_turn or
-            wheel_burst_catchup_accel_mps2 is not None):
+            wheel_burst_catchup_accel_mps2 is not None or
+            turn_speed_bias_yaw_rate_abs_mps is not None):
         print("Observer equivalence: parameter variant; recorded /odom equality "
               "is not expected", flush=True)
     else:
@@ -326,6 +395,12 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         "input_bag": str(bag),
         "input_bag_sha256": _sha256(bag),
         "playback_rate": rate,
+        "playback_window": ({
+            "start_offset_s": start_offset_s,
+            "duration_wall_s": duration_wall_s,
+            "source_sequence_index": source_sequence_index,
+            "observer_reinitialized_for_segment": True,
+        } if start_offset_s is not None else None),
         "domain_id": domain_id,
         "sensor_topics": list(SENSOR_TOPICS),
         "parameter_overrides": {
@@ -334,6 +409,10 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
             **({"wheel_burst_catchup_accel_mps2":
                 wheel_burst_catchup_accel_mps2}
                if wheel_burst_catchup_accel_mps2 is not None else {}),
+            **({"turn_speed_bias_yaw_rate_abs_mps":
+                turn_speed_bias_yaw_rate_abs_mps,
+                "turn_speed_bias_max_mps": turn_speed_bias_max_mps}
+               if turn_speed_bias_yaw_rate_abs_mps is not None else {}),
         },
     }
     (output_dir / "replay_metadata.json").write_text(
@@ -357,11 +436,25 @@ def main() -> int:
                         help="offline-only observer A/B; override that parameter to true")
     parser.add_argument("--wheel-burst-catchup-accel-mps2", type=float,
                         help="offline-only parameter override for controlled burst-recovery replay")
+    parser.add_argument("--turn-speed-bias-yaw-rate-abs-mps", type=float,
+                        help="offline-only turn speed correction per rad/s yaw rate")
+    parser.add_argument("--turn-speed-bias-max-mps", type=float,
+                        help="offline-only absolute bound paired with turn speed correction")
+    parser.add_argument("--start-offset-s", type=float,
+                        help="play one isolated segment from this bag offset")
+    parser.add_argument("--duration-wall-s", type=float,
+                        help="wall-clock playback window; pairs with --start-offset-s")
+    parser.add_argument("--source-sequence-index", type=int,
+                        help="source reset-sequence represented by this isolated segment")
     args = parser.parse_args()
     try:
         replay(args.bag, args.output_dir, args.image, args.rate, args.domain_id,
                args.integrate_lateral_acceleration_in_turn,
-               args.wheel_burst_catchup_accel_mps2)
+               args.wheel_burst_catchup_accel_mps2,
+               args.turn_speed_bias_yaw_rate_abs_mps,
+               args.turn_speed_bias_max_mps,
+               args.start_offset_s, args.duration_wall_s,
+               args.source_sequence_index)
     except (OSError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         parser.exit(2, f"sensor-odometry replay failed: {exc}\n")
     return 0

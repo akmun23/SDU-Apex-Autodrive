@@ -1053,7 +1053,11 @@ def _run_command_listener() -> None:
             node = rclpy.create_node("autodrive_bridge_command_input")
             qos = QoSProfile(
                 depth=1,
-                reliability=QoSReliabilityPolicy.RELIABLE,
+                # These are latest-value actuator setpoints, not an event
+                # history. If the listener is briefly delayed, retransmitting
+                # an old steering/throttle sample is less safe than taking the
+                # newest one on the next bridge request.
+                reliability=QoSReliabilityPolicy.BEST_EFFORT,
                 durability=QoSDurabilityPolicy.VOLATILE,
                 history=QoSHistoryPolicy.KEEP_LAST,
             )
