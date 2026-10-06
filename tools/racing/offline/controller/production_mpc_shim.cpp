@@ -22,6 +22,35 @@ extern "C" {
 namespace
 {
 
+constexpr std::size_t kFailureDiagnosticCount = 29;
+constexpr std::size_t kStepOutputCount = 16 + 2 * kFailureDiagnosticCount;
+
+void copy_failure_diagnostics(const MpcRtiRolloutFailure_t & failure,
+                              double * output)
+{
+  const auto & state = failure.state;
+  const auto & plant = state.plant;
+  const auto & reference = failure.reference;
+  const double values[kFailureDiagnosticCount] = {
+    static_cast<double>(failure.valid),
+    static_cast<double>(failure.stage),
+    failure.progress,
+    plant.e_y, plant.e_psi, plant.u, plant.v, plant.r,
+    plant.target_speed, plant.steering_command,
+    plant.delayed_steering_command_1,
+    plant.delayed_steering_command_2,
+    plant.actual_steering_angle,
+    state.previous_steering_rate,
+    state.previous_target_speed_rate,
+    reference.e_y, reference.e_psi, reference.u, reference.v, reference.r,
+    reference.steering_command, reference.target_speed,
+    reference.target_speed_rate, reference.path_curvature,
+    reference.left_bound, reference.right_bound,
+    failure.margin_m, failure.lower_bound_m, failure.upper_bound_m,
+  };
+  std::copy(values, values + kFailureDiagnosticCount, output);
+}
+
 template<typename T>
 T read_param(const YAML::Node & params, const char * name, T fallback)
 {
@@ -85,10 +114,28 @@ MpcRtiCycleConfiguration_t load_config(const std::string & path,
         "yaw_rate_response_surface_blend_q_start", 0.60f);
     const float blend_end = fparam(params,
         "yaw_rate_response_surface_blend_q_end", 0.85f);
-    const auto surface_path = std::filesystem::path(path).parent_path() /
+    const float speed_blend_margin = fparam(params,
+        "yaw_rate_response_surface_speed_blend_margin_mps", 0.50f);
+    const float low_speed_blend_margin = fparam(params,
+        "yaw_rate_response_surface_low_speed_blend_margin_mps",
+        speed_blend_margin);
+    const float low_speed_support_fadeout = fparam(params,
+        "yaw_rate_response_surface_low_speed_support_fadeout_mps", 0.0f);
+    const float high_speed_support_fadein = fparam(params,
+        "yaw_rate_response_surface_high_speed_support_fadein_mps", 0.0f);
+    const auto configured_surface_path = read_param<std::string>(
+        params, "yaw_rate_response_surface_file", "");
+    auto surface_path = std::filesystem::path(path).parent_path() /
         "yaw_response_surface.csv";
+    if (!configured_surface_path.empty()) {
+      const std::filesystem::path configured(configured_surface_path);
+      surface_path = configured.is_absolute()
+          ? configured : std::filesystem::path(path).parent_path() / configured;
+    }
     const auto surface = f1tenth_mpc::load_yaw_response_surface_csv(
-        surface_path.string(), blend_start, blend_end);
+        surface_path.string(), blend_start, blend_end, speed_blend_margin,
+        low_speed_blend_margin, low_speed_support_fadeout,
+        high_speed_support_fadein);
     if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
       throw std::runtime_error("invalid production yaw-rate response surface");
     }
@@ -269,7 +316,7 @@ public:
   bool step(const double * state, double progress, double speed_ceiling,
             double * out, std::size_t out_size)
   {
-    if (!state || !out || out_size < 16 || !std::isfinite(progress) ||
+    if (!state || !out || out_size < kStepOutputCount || !std::isfinite(progress) ||
         !std::isfinite(speed_ceiling) || speed_ceiling <= 0.0 ||
         speed_ceiling > maximum_speed_) return false;
     MpcRtiState_t current{};
@@ -305,6 +352,9 @@ public:
       static_cast<double>(result.rti2_triggered),
     };
     std::copy(values, values + 16, out);
+    copy_failure_diagnostics(result.r1_nonlinear_failure, out + 16);
+    copy_failure_diagnostics(result.r2_nonlinear_failure,
+                             out + 16 + kFailureDiagnosticCount);
     return true;
   }
 

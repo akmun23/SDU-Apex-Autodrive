@@ -14,7 +14,10 @@ namespace f1tenth_mpc
 {
 
 inline MpcYawRateResponseSurface_t load_yaw_response_surface_csv(
-    const std::string & path, float blend_q_start, float blend_q_end)
+    const std::string & path, float blend_q_start, float blend_q_end,
+    float speed_blend_margin_mps, float low_speed_blend_margin_mps,
+    float low_speed_support_fadeout_mps = 0.0f,
+    float high_speed_support_fadein_mps = 0.0f)
 {
     static constexpr std::array<float, MPC_YAW_SURFACE_Q_KNOTS> kSteeringKnots{
         0.15f, 0.20f, 0.21f, 0.22f, 0.23f,
@@ -27,6 +30,10 @@ inline MpcYawRateResponseSurface_t load_yaw_response_surface_csv(
     result.enabled = 1;
     result.blend_q_start = blend_q_start;
     result.blend_q_end = blend_q_end;
+    result.speed_blend_margin_mps = speed_blend_margin_mps;
+    result.low_speed_blend_margin_mps = low_speed_blend_margin_mps;
+    result.low_speed_support_fadeout_mps = low_speed_support_fadeout_mps;
+    result.high_speed_support_fadein_mps = high_speed_support_fadein_mps;
 
     std::string line;
     bool header_seen = false;
@@ -83,13 +90,14 @@ inline MpcYawRateResponseSurface_t load_yaw_response_surface_csv(
         ++row_index;
     }
 
-    const size_t expected_rows = static_cast<size_t>(MPC_YAW_SURFACE_SPEED_KNOTS *
+    const size_t rows_per_speed = static_cast<size_t>(
         MPC_YAW_SURFACE_TURN_DIRECTIONS * MPC_YAW_SURFACE_Q_KNOTS);
-    if (!header_seen || row_index != expected_rows) {
+    if (!header_seen || row_index % rows_per_speed != 0 ||
+        row_index < 3 * rows_per_speed) {
         throw std::runtime_error("yaw response surface row count mismatch: " +
-                                 std::to_string(row_index) + "/" +
-                                 std::to_string(expected_rows));
+                                 std::to_string(row_index));
     }
+    result.speed_count = static_cast<int>(row_index / rows_per_speed);
     return result;
 }
 

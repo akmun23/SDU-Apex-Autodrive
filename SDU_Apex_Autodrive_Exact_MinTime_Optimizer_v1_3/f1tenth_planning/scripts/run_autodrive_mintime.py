@@ -32,6 +32,10 @@ def main() -> int:
     parser.add_argument("--warm-solution-nodes", type=Path, default=None,
                         help="Prior optimizer solution_nodes.csv used as a full-state initial guess.")
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--yaw-lag-exact-fraction", type=float, default=None,
+                        help="Offline transcription continuation: 0=trapezoidal, 1=exact first-order yaw lag.")
+    parser.add_argument("--yaw-surface-response-scale", type=float, default=None,
+                        help="Offline continuation scale for the empirical yaw residual, in [0, 1].")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -78,6 +82,12 @@ def main() -> int:
                     f"optimizer bundle ({tool_root}) or repository ({root})"
                 )
     cfg = load_yaml(config_path)
+    if args.yaw_lag_exact_fraction is not None:
+        cfg.setdefault("solver", {})["yaw_lag_exact_fraction"] = (
+            args.yaw_lag_exact_fraction)
+    if args.yaw_surface_response_scale is not None:
+        cfg.setdefault("vehicle_model_overrides", {})[
+            "yaw_surface_response_scale"] = args.yaw_surface_response_scale
     model = VehicleModel.from_repo(root, cfg)
     envelope = LateralEnvelope.from_repo(root, model, cfg)
 
@@ -161,13 +171,15 @@ def main() -> int:
         output_spacing_m=(float(export_spacing)
                           if export_spacing is not None else None))
 
-    # Replace approximate wall-distance columns with the same map ray-cast
-    # used by the repository's existing trajectory pipeline, then enforce the
-    # exact optimize_trajectory.py safety semantics as a hard postcondition.
+    # Replace approximate wall-distance columns with the map ray-cast used by
+    # the repository's trajectory pipeline, then enforce the physical repo
+    # clearance plus any explicitly requested extra wall clearance.
     trajectory_path = Path(report["files"]["trajectory"])
     wallchecked_path = output / "autodrive_mintime_raceline_wallchecked.csv"
     wall_script = root / "f1tenth_planning/scripts/compute_wall_distances.py"
     extra_clearance = float(cfg.get("track", {}).get("extra_wall_clearance_m", 0.0))
+    # optimizer_geometry_buffer_m is intentionally an internal optimization
+    # cushion; it is not part of the physical/map clearance acceptance policy.
     required_clearance = model.required_wall_clearance_m + extra_clearance
     cmd = [
         sys.executable, str(wall_script),

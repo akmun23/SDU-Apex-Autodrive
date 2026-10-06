@@ -59,6 +59,13 @@
     yaw_rate_response_surface_enabled: false
     yaw_rate_response_surface_blend_q_start: 0.55
     yaw_rate_response_surface_blend_q_end: 1.40
+    # Keep this measured 3–5 m/s surface from being clamped and applied as if
+    # it were valid at unrelated speeds. The smooth taper is inactive while
+    # the surface itself is disabled.
+    yaw_rate_response_surface_speed_blend_margin_mps: 0.50
+    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.50
+    yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.0
+    yaw_rate_response_surface_high_speed_support_fadein_mps: 0.0
 
     # Closed-loop authority profile: strong speed tracking, moderate lateral
     # tracking, low heading cost, and the BachelorProject lateral-velocity term.

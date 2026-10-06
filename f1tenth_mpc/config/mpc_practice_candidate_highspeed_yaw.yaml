@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    # Candidate-only development overlay. It keeps the shipped MPC parameters
+    # and weights, enabling only the evidence-supported high-speed yaw surface.
+    # The simulator image and physics remain untouched.
+    yaw_rate_response_surface_enabled: true
+    yaw_rate_response_surface_file: /workspace/src/live_runs/raceline_candidates/highspeed_yaw_surface_supportgate_v01_20261006/yaw_response_surface_combined.csv
+    yaw_rate_response_surface_blend_q_start: 0.78
+    yaw_rate_response_surface_blend_q_end: 0.90
+    yaw_rate_response_surface_speed_blend_margin_mps: 0.10
+    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.60
+    yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.25
+    yaw_rate_response_surface_high_speed_support_fadein_mps: 0.10

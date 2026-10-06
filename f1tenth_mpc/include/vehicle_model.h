@@ -68,7 +68,7 @@ typedef struct
 
 enum
 {
-    MPC_YAW_SURFACE_SPEED_KNOTS = 3,
+    MPC_YAW_SURFACE_SPEED_KNOTS = 5,
     MPC_YAW_SURFACE_TURN_DIRECTIONS = 2,
     MPC_YAW_SURFACE_Q_KNOTS = 10,
 };
@@ -80,8 +80,18 @@ enum
 typedef struct
 {
     int enabled;
+    int speed_count;
     float blend_q_start;
     float blend_q_end;
+    /* Smoothly disable the empirical table outside its measured speed knots. */
+    float speed_blend_margin_mps;
+    /* Independent low-speed fade; the upper measured-speed fade remains above. */
+    float low_speed_blend_margin_mps;
+    /* Optional evidence gates around the measured low- and high-speed bands.
+     * The low band ends at speed_mps[0], and the high band begins at
+     * speed_mps[2]; the intervening knot is an unsupported bridge. */
+    float low_speed_support_fadeout_mps;
+    float high_speed_support_fadein_mps;
     float speed_mps[MPC_YAW_SURFACE_SPEED_KNOTS];
     float q[MPC_YAW_SURFACE_SPEED_KNOTS]
            [MPC_YAW_SURFACE_TURN_DIRECTIONS]

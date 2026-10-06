@@ -10,6 +10,18 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class NonlinearRolloutFailure:
+    valid: bool
+    stage: int
+    progress_m: float
+    state: tuple[float, ...]
+    reference: tuple[float, ...]
+    margin_m: float
+    lower_bound_m: float
+    upper_bound_m: float
+
+
+@dataclass(frozen=True)
 class MpcCycle:
     status: int
     steering_command_rad: float
@@ -27,6 +39,27 @@ class MpcCycle:
     rejection_speed_guard: bool
     rti_iterations: int
     rti2_triggered: bool
+    r1_failure: NonlinearRolloutFailure
+    r2_failure: NonlinearRolloutFailure
+
+
+_FAILURE_DIAGNOSTIC_COUNT = 29
+_FAILURE_STATE_COUNT = 12
+_FAILURE_REFERENCE_COUNT = 11
+
+
+def _failure_from_output(output: np.ndarray, offset: int) -> NonlinearRolloutFailure:
+    values = output[offset:offset + _FAILURE_DIAGNOSTIC_COUNT]
+    return NonlinearRolloutFailure(
+        valid=bool(values[0]),
+        stage=int(values[1]),
+        progress_m=float(values[2]),
+        state=tuple(map(float, values[3:3 + _FAILURE_STATE_COUNT])),
+        reference=tuple(map(float, values[15:15 + _FAILURE_REFERENCE_COUNT])),
+        margin_m=float(values[26]),
+        lower_bound_m=float(values[27]),
+        upper_bound_m=float(values[28]),
+    )
 
 
 class ProductionMpc:
@@ -60,10 +93,16 @@ class ProductionMpc:
 
     @property
     def lap_length_m(self) -> float:
-        return float(self.library.offline_mpc_lap_length(self._handle))
+        return float(self.library.offline_mpc_lap_length(self._require_open()))
+
+    def _require_open(self) -> int:
+        handle = self._handle
+        if not handle:
+            raise RuntimeError("ProductionMpc is closed")
+        return handle
 
     def reset(self) -> None:
-        self.library.offline_mpc_reset(self._handle)
+        self.library.offline_mpc_reset(self._require_open())
 
     def project(self, pose_xyyaw: np.ndarray,
                 previous_segment: int = (2**64 - 1),
@@ -74,7 +113,7 @@ class ProductionMpc:
             raise ValueError("map pose must be finite x/y/yaw")
         output = (ctypes.c_double * 5)()
         ok = self.library.offline_mpc_project(
-            self._handle, float(pose[0]), float(pose[1]), float(pose[2]),
+            self._require_open(), float(pose[0]), float(pose[1]), float(pose[2]),
             int(previous_segment), int(local_search_radius), output, len(output))
         if not ok or not np.isfinite(np.asarray(output)[:4]).all():
             raise ValueError("production MPC could not project map pose")
@@ -86,9 +125,9 @@ class ProductionMpc:
         if values.shape != (12,) or not np.isfinite(values).all():
             raise ValueError("MPC state must be 12 finite production channels")
         state_buffer = (ctypes.c_double * 12)(*values)
-        output = (ctypes.c_double * 16)()
+        output = (ctypes.c_double * (16 + 2 * _FAILURE_DIAGNOSTIC_COUNT))()
         ok = self.library.offline_mpc_step(
-            self._handle, state_buffer, float(progress_m),
+            self._require_open(), state_buffer, float(progress_m),
             float(speed_ceiling_mps), output, len(output))
         if not ok:
             raise ValueError("production MPC rejected invalid offline inputs")
@@ -111,6 +150,9 @@ class ProductionMpc:
             rejection_speed_guard=bool(output[13]),
             rti_iterations=int(output[14]),
             rti2_triggered=bool(output[15]),
+            r1_failure=_failure_from_output(output, 16),
+            r2_failure=_failure_from_output(
+                output, 16 + _FAILURE_DIAGNOSTIC_COUNT),
         )
 
     def close(self) -> None:

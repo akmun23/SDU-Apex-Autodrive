@@ -146,8 +146,13 @@ class VehicleModel:
     yaw_curvature_gain_start_per_m: float
     yaw_curvature_gain_end_per_m: float
     yaw_surface_enabled: bool
+    yaw_surface_response_scale: float
     yaw_surface_blend_q_start: float
     yaw_surface_blend_q_end: float
+    yaw_surface_speed_blend_margin_mps: float
+    yaw_surface_low_speed_blend_margin_mps: float
+    yaw_surface_low_speed_support_fadeout_mps: float
+    yaw_surface_high_speed_support_fadein_mps: float
     yaw_surface_speed_mps: tuple[float, ...]
     yaw_surface_q: tuple[tuple[tuple[float, ...], ...], ...]
     yaw_surface_rate_rps: tuple[tuple[tuple[float, ...], ...], ...]
@@ -211,8 +216,14 @@ class VehicleModel:
             "yaw_gain_start_rad",
             "yaw_gain_end_rad",
             "yaw_surface_enabled",
+            "yaw_surface_response_scale",
+            "yaw_surface_csv",
             "yaw_surface_blend_q_start",
             "yaw_surface_blend_q_end",
+            "yaw_surface_speed_blend_margin_mps",
+            "yaw_surface_low_speed_blend_margin_mps",
+            "yaw_surface_low_speed_support_fadeout_mps",
+            "yaw_surface_high_speed_support_fadein_mps",
         }
         unknown_model_overrides = set(vehicle_model_overrides) - supported_model_overrides
         if unknown_model_overrides:
@@ -233,16 +244,55 @@ class VehicleModel:
             surface_override if surface_override is not None else
             bool(mpc_params.get("yaw_rate_response_surface_enabled", False))
         )
+        surface_response_scale = float(vehicle_model_overrides.get(
+            "yaw_surface_response_scale", 1.0))
         surface_blend_q_start = float(vehicle_model_overrides.get(
             "yaw_surface_blend_q_start",
             mpc_params.get("yaw_rate_response_surface_blend_q_start", 0.60)))
         surface_blend_q_end = float(vehicle_model_overrides.get(
             "yaw_surface_blend_q_end",
             mpc_params.get("yaw_rate_response_surface_blend_q_end", 0.85)))
+        surface_speed_blend_margin = float(vehicle_model_overrides.get(
+            "yaw_surface_speed_blend_margin_mps",
+            mpc_params.get("yaw_rate_response_surface_speed_blend_margin_mps", 0.50)))
+        surface_low_speed_blend_margin = float(vehicle_model_overrides.get(
+            "yaw_surface_low_speed_blend_margin_mps",
+            mpc_params.get("yaw_rate_response_surface_low_speed_blend_margin_mps",
+                           surface_speed_blend_margin)))
+        surface_low_speed_support_fadeout = float(vehicle_model_overrides.get(
+            "yaw_surface_low_speed_support_fadeout_mps",
+            mpc_params.get("yaw_rate_response_surface_low_speed_support_fadeout_mps", 0.0)))
+        surface_high_speed_support_fadein = float(vehicle_model_overrides.get(
+            "yaw_surface_high_speed_support_fadein_mps",
+            mpc_params.get("yaw_rate_response_surface_high_speed_support_fadein_mps", 0.0)))
+        surface_csv_override = vehicle_model_overrides.get("yaw_surface_csv")
+        if surface_csv_override is not None:
+            if not isinstance(surface_csv_override, str) or not surface_csv_override.strip():
+                raise ValueError("vehicle_model_overrides.yaw_surface_csv must be a nonempty path")
+            candidate_surface_path = Path(surface_csv_override)
+            if not candidate_surface_path.is_absolute():
+                candidate_surface_path = repo_root / candidate_surface_path
+            surface_csv_path = candidate_surface_path.resolve()
+            try:
+                surface_csv_path.relative_to(repo_root)
+            except ValueError as exc:
+                raise ValueError("yaw_surface_csv must be inside the repository") from exc
         if (not math.isfinite(surface_blend_q_start)
                 or not math.isfinite(surface_blend_q_end)
+                or not math.isfinite(surface_speed_blend_margin)
+                or not math.isfinite(surface_low_speed_blend_margin)
+                or not math.isfinite(surface_low_speed_support_fadeout)
+                or not math.isfinite(surface_high_speed_support_fadein)
+                or not math.isfinite(surface_response_scale)
                 or surface_blend_q_start < 0.0
-                or surface_blend_q_end <= surface_blend_q_start):
+                or surface_blend_q_end <= surface_blend_q_start
+                or surface_speed_blend_margin < 0.0
+                or surface_low_speed_blend_margin < 0.0
+                or surface_low_speed_support_fadeout < 0.0
+                or surface_high_speed_support_fadein < 0.0
+                or not 0.0 <= surface_response_scale <= 1.0
+                or ((surface_low_speed_support_fadeout > 0.0) !=
+                    (surface_high_speed_support_fadein > 0.0))):
             raise ValueError("invalid yaw-response-surface blend override")
         surface_speeds: list[float] = []
         surface_q: list[list[list[float]]] = []
@@ -253,9 +303,14 @@ class VehicleModel:
             with surface_csv_path.open("r", encoding="utf-8", newline="") as stream:
                 rows = list(csv.DictReader(
                     line for line in stream if not line.lstrip().startswith("#")))
-            if len(rows) != 3 * 2 * len(steering_knots):
-                raise ValueError(f"yaw response surface must contain 60 samples: {surface_csv_path}")
-            for speed_index in range(3):
+            rows_per_speed = 2 * len(steering_knots)
+            if (len(rows) % rows_per_speed != 0
+                    or not 3 <= len(rows) // rows_per_speed <= 5):
+                raise ValueError(
+                    "yaw response surface must contain 3-5 complete speed knots: "
+                    f"{surface_csv_path}")
+            surface_speed_count = len(rows) // rows_per_speed
+            for speed_index in range(surface_speed_count):
                 speed_rows: list[list[float]] = []
                 rate_rows: list[list[float]] = []
                 for direction_index, expected_sign in enumerate((-1, 1)):
@@ -285,6 +340,12 @@ class VehicleModel:
                     rate_rows.append(rate_values)
                 surface_q.append(speed_rows)
                 surface_rates.append(rate_rows)
+            if (surface_low_speed_support_fadeout > 0.0
+                    and surface_low_speed_support_fadeout +
+                    surface_high_speed_support_fadein >=
+                    surface_speeds[2] - surface_speeds[0]):
+                raise ValueError(
+                    "yaw response support fades overlap the measured low/high speed bands")
 
         geom = sim_profile.get("geometry", {})
         mintime = sim_profile.get("mintime", {})
@@ -367,8 +428,15 @@ class VehicleModel:
             yaw_curvature_gain_end_per_m=float(mpc_params.get(
                 "yaw_rate_curvature_gain_end_per_m", 0.40)),
             yaw_surface_enabled=surface_enabled,
+            yaw_surface_response_scale=surface_response_scale,
             yaw_surface_blend_q_start=surface_blend_q_start,
             yaw_surface_blend_q_end=surface_blend_q_end,
+            yaw_surface_speed_blend_margin_mps=surface_speed_blend_margin,
+            yaw_surface_low_speed_blend_margin_mps=surface_low_speed_blend_margin,
+            yaw_surface_low_speed_support_fadeout_mps=(
+                surface_low_speed_support_fadeout),
+            yaw_surface_high_speed_support_fadein_mps=(
+                surface_high_speed_support_fadein),
             yaw_surface_speed_mps=tuple(surface_speeds),
             yaw_surface_q=tuple(tuple(tuple(row) for row in speed_rows)
                                  for speed_rows in surface_q),
@@ -431,7 +499,7 @@ class VehicleModel:
     def steady_yaw_rate(self, speed: float, steering: float,
                         path_curvature: float = 0.0) -> float:
         legacy = self._legacy_yaw_rate_numeric(speed, steering, path_curvature)
-        if not self.yaw_surface_enabled:
+        if not self.yaw_surface_enabled or self.yaw_surface_response_scale <= 0.0:
             return legacy
         speed_nonnegative = max(speed, 0.0)
         q = speed_nonnegative * abs(math.tan(steering))
@@ -439,22 +507,51 @@ class VehicleModel:
         row_values = [
             _pchip_value(self.yaw_surface_q[i][sign_index],
                          self.yaw_surface_rate_rps[i][sign_index], q)
-            for i in range(3)
+            for i in range(len(self.yaw_surface_speed_mps))
         ]
-        s0, s1, s2 = self.yaw_surface_speed_mps
-        s = min(max(speed, s0), s2)
-        if s <= s1:
-            fraction = (s - s0) / (s1 - s0)
-            magnitude = row_values[0] + fraction * (row_values[1] - row_values[0])
-        else:
-            fraction = (s - s1) / (s2 - s1)
-            magnitude = row_values[1] + fraction * (row_values[2] - row_values[1])
+        knots = self.yaw_surface_speed_mps
+        s = min(max(speed, knots[0]), knots[-1])
+        interval = next((i for i in range(len(knots) - 1)
+                         if s <= knots[i + 1]), len(knots) - 2)
+        fraction = (s - knots[interval]) / (knots[interval + 1] - knots[interval])
+        magnitude = row_values[interval] + fraction * (
+            row_values[interval + 1] - row_values[interval])
         empirical = (-1.0 if steering < 0.0 else 1.0) * magnitude
         blend_t = min(max((q - self.yaw_surface_blend_q_start) /
                           (self.yaw_surface_blend_q_end - self.yaw_surface_blend_q_start),
                           0.0), 1.0)
-        blend = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        q_blend = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        low, high = self.yaw_surface_speed_mps[0], self.yaw_surface_speed_mps[-1]
+        low_margin = self.yaw_surface_low_speed_blend_margin_mps
+        high_margin = self.yaw_surface_speed_blend_margin_mps
+        if low_margin > 0.0:
+            enter_t = min(max((speed - (low - low_margin)) / low_margin, 0.0), 1.0)
+            enter = enter_t * enter_t * (3.0 - 2.0 * enter_t)
+        else:
+            enter = 1.0
+        if high_margin > 0.0:
+            leave_t = min(max(((high + high_margin) - speed) / high_margin, 0.0), 1.0)
+            leave = leave_t * leave_t * (3.0 - 2.0 * leave_t)
+        else:
+            leave = 1.0
+        speed_blend = enter * leave * self._yaw_surface_speed_support(speed)
+        blend = self.yaw_surface_response_scale * q_blend * speed_blend
         return legacy + blend * (empirical - legacy)
+
+    def _yaw_surface_speed_support(self, speed: float) -> float:
+        low_margin = self.yaw_surface_low_speed_support_fadeout_mps
+        high_margin = self.yaw_surface_high_speed_support_fadein_mps
+        if low_margin <= 0.0 and high_margin <= 0.0:
+            return 1.0
+        low_knot = self.yaw_surface_speed_mps[0]
+        high_knot = self.yaw_surface_speed_mps[2]
+        low_t = min(max((speed - low_knot) / low_margin, 0.0), 1.0) \
+            if low_margin > 0.0 else 0.0
+        high_t = min(max((speed - (high_knot - high_margin)) / high_margin,
+                         0.0), 1.0) if high_margin > 0.0 else 0.0
+        low_weight = 1.0 - low_t * low_t * (3.0 - 2.0 * low_t)
+        high_weight = high_t * high_t * (3.0 - 2.0 * high_t)
+        return low_weight + high_weight
 
     def steady_yaw_rate_casadi(self, speed, steering, path_curvature):
         steer_delta = ca.fmin(ca.fmax(
@@ -467,7 +564,7 @@ class VehicleModel:
         path_gain = self.yaw_gain_per_m - self.yaw_curvature_gain_reduction_per_m * curvature_delta
         legacy = speed * ca.tan(steering) * (
             steering_gain - self.yaw_gain_per_m + path_gain)
-        if not self.yaw_surface_enabled:
+        if not self.yaw_surface_enabled or self.yaw_surface_response_scale <= 0.0:
             return legacy
 
         query_speed = ca.fmax(speed, 0.0)
@@ -477,29 +574,79 @@ class VehicleModel:
             rows = [
                 _pchip_casadi(self.yaw_surface_q[i][direction],
                               self.yaw_surface_rate_rps[i][direction], q)
-                for i in range(3)
+                for i in range(len(self.yaw_surface_speed_mps))
             ]
-            s0, s1, s2 = self.yaw_surface_speed_mps
-            s = ca.fmin(ca.fmax(speed, s0), s2)
-            low = rows[0] + (s - s0) / (s1 - s0) * (rows[1] - rows[0])
-            high = rows[1] + (s - s1) / (s2 - s1) * (rows[2] - rows[1])
-            magnitude = ca.if_else(s <= s1, low, high)
+            knots = self.yaw_surface_speed_mps
+            s = ca.fmin(ca.fmax(speed, knots[0]), knots[-1])
+            magnitude = rows[-1]
+            for index in reversed(range(len(knots) - 1)):
+                segment = rows[index] + (
+                    (s - knots[index]) / (knots[index + 1] - knots[index])
+                    * (rows[index + 1] - rows[index]))
+                magnitude = ca.if_else(s <= knots[index + 1], segment, magnitude)
             direction_values.append(magnitude if direction == 1 else -magnitude)
         empirical = ca.if_else(steering < 0.0, direction_values[0], direction_values[1])
         blend_t = ca.fmin(ca.fmax(
             (q - self.yaw_surface_blend_q_start) /
             (self.yaw_surface_blend_q_end - self.yaw_surface_blend_q_start), 0.0), 1.0)
-        blend = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        q_blend = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        low, high = self.yaw_surface_speed_mps[0], self.yaw_surface_speed_mps[-1]
+        low_margin = self.yaw_surface_low_speed_blend_margin_mps
+        high_margin = self.yaw_surface_speed_blend_margin_mps
+        if low_margin > 0.0:
+            enter_t = ca.fmin(ca.fmax((speed - (low - low_margin)) / low_margin, 0.0), 1.0)
+            enter = enter_t * enter_t * (3.0 - 2.0 * enter_t)
+        else:
+            enter = 1.0
+        if high_margin > 0.0:
+            leave_t = ca.fmin(ca.fmax(((high + high_margin) - speed) / high_margin, 0.0), 1.0)
+            leave = leave_t * leave_t * (3.0 - 2.0 * leave_t)
+        else:
+            leave = 1.0
+        if (self.yaw_surface_low_speed_support_fadeout_mps > 0.0
+                or self.yaw_surface_high_speed_support_fadein_mps > 0.0):
+            low_knot = self.yaw_surface_speed_mps[0]
+            high_knot = self.yaw_surface_speed_mps[2]
+            low_margin = self.yaw_surface_low_speed_support_fadeout_mps
+            high_margin = self.yaw_surface_high_speed_support_fadein_mps
+            if low_margin > 0.0:
+                low_t = ca.fmin(ca.fmax(
+                    (speed - low_knot) / low_margin, 0.0), 1.0)
+                low_support = 1.0 - low_t * low_t * (3.0 - 2.0 * low_t)
+            else:
+                low_support = 0.0
+            if high_margin > 0.0:
+                high_t = ca.fmin(ca.fmax(
+                    (speed - (high_knot - high_margin)) / high_margin,
+                    0.0), 1.0)
+                high_support = high_t * high_t * (3.0 - 2.0 * high_t)
+            else:
+                high_support = 0.0
+            support = low_support + high_support
+        else:
+            support = 1.0
+        speed_blend = enter * leave * support
+        blend = self.yaw_surface_response_scale * q_blend * speed_blend
         return legacy + blend * (empirical - legacy)
 
     def steering_for_yaw_rate(self, speed: float, desired_yaw_rate: float,
                                path_curvature: float = 0.0) -> float:
-        angles = np.linspace(-self.max_steering_rad, self.max_steering_rad, 201)
+        # Match the production C inverse exactly: it evaluates 96 evenly
+        # spaced magnitudes in the requested turn direction, with zero as the
+        # initial candidate. This response surface is non-monotone, so a
+        # Newton inverse or a different grid can select another steering root.
+        direction = -1.0 if desired_yaw_rate < 0.0 else 1.0
+        angles = direction * self.max_steering_rad * (
+            np.arange(1, 97, dtype=np.float64) / 96.0)
         predicted = np.asarray([
             self.steady_yaw_rate(speed, float(angle), path_curvature)
             for angle in angles
         ])
-        return float(angles[int(np.argmin(np.abs(predicted - desired_yaw_rate)))])
+        errors = np.concatenate((
+            np.asarray([abs(desired_yaw_rate)]),
+            np.abs(predicted - desired_yaw_rate)))
+        best = int(np.argmin(errors))
+        return 0.0 if best == 0 else float(angles[best - 1])
 
     def provenance(self) -> dict[str, Any]:
         return {

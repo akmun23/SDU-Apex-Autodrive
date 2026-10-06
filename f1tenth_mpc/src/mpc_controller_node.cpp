@@ -222,10 +222,30 @@ public:
                 "yaw_rate_response_surface_blend_q_start", 0.60));
             const float blend_end = static_cast<float>(declare_parameter<double>(
                 "yaw_rate_response_surface_blend_q_end", 0.85));
+            const float speed_blend_margin = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_speed_blend_margin_mps", 0.50));
+            const float low_speed_blend_margin = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_low_speed_blend_margin_mps",
+                    speed_blend_margin));
+            const float low_speed_support_fadeout = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_low_speed_support_fadeout_mps", 0.0));
+            const float high_speed_support_fadein = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_high_speed_support_fadein_mps", 0.0));
             const auto share = ament_index_cpp::get_package_share_directory(
                 "f1tenth_mpc");
+            const auto configured_surface_path = declare_parameter<std::string>(
+                "yaw_rate_response_surface_file", "");
+            const auto surface_path = configured_surface_path.empty()
+                ? share + "/config/yaw_response_surface.csv"
+                : configured_surface_path;
             const auto surface = load_yaw_response_surface_csv(
-                share + "/config/yaw_response_surface.csv", blend_start, blend_end);
+                surface_path, blend_start, blend_end, speed_blend_margin,
+                low_speed_blend_margin, low_speed_support_fadeout,
+                high_speed_support_fadein);
             if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
                 throw std::runtime_error("invalid empirical yaw response surface");
             }
@@ -1323,7 +1343,16 @@ private:
         steering_feedback_age_s_ = feedback_age_s;
         steering_feedback_value_used_rad_ = feedback_steering;
         if (steering_feedback_used_) {
-            estimated_actual_steering_angle_rad_ = feedback_steering;
+            /* The simulator's Float32 steering feedback can exceed the
+             * configured mechanical limit by a few ulps at saturation (the
+             * recorded value was 1.2e-6 rad over).  Preserve the raw sample
+             * for diagnostics, but keep the model state inside the physical
+             * steering envelope so one representational overshoot cannot
+             * make every subsequent MPC nominal rollout invalid. */
+            estimated_actual_steering_angle_rad_ = clamp(
+                feedback_steering,
+                -rti_config_.model.max_steering_rad,
+                rti_config_.model.max_steering_rad);
             actual_steering_initialized_ = true;
         } else if (!actual_steering_initialized_) {
             const int64_t delayed_stamp_ns =

@@ -48,6 +48,8 @@ def main() -> int:
     parser.add_argument("--repo", type=Path,
                         default=Path(__file__).resolve().parents[4])
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--optimizer-config", type=Path, default=None,
+                        help="optimizer config used to load the matching Python plant model")
     parser.add_argument("--trajectory", type=Path, default=None)
     parser.add_argument("--training-bag", type=Path, default=None)
     parser.add_argument("--independent-holdout-bag", type=Path, default=None)
@@ -70,9 +72,10 @@ def main() -> int:
         _load_complete_speed_group_from_partial_run,
     )
 
-    config_doc = load_yaml(repo /
+    optimizer_config = (args.optimizer_config or repo /
         "SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/config/"
-        "autodrive_mintime_exact.yaml")
+        "autodrive_mintime_exact.yaml").resolve()
+    config_doc = load_yaml(optimizer_config)
     model = VehicleModel.from_repo(repo, config_doc)
     library = ctypes.CDLL(str(library_path))
     library.mpc_vehicle_model_step.argtypes = [
@@ -93,13 +96,14 @@ def main() -> int:
 
     with ProductionMpc(library_path, config, trajectory):
         yaw_errors = []
+        worst_yaw_probe = None
         dt = 0.025
         tau = 0.015
         retention = math.exp(-dt / tau)
-        speeds = (2.96341375, 3.47, 3.97178625, 4.5,
+        speeds = (2.40, 2.70, 2.96341375, 3.373, 3.47, 3.97178625, 4.5,
                   4.98502375, 5.8)
-        angles = (-0.50, -0.42, -0.30, -0.23, -0.21, -0.20, -0.15,
-                  0.15, 0.20, 0.21, 0.23, 0.30, 0.42, 0.50)
+        angles = (-0.50, -0.42, -0.40, -0.38, -0.30, -0.23, -0.21, -0.20, -0.15,
+                  0.15, 0.20, 0.21, 0.23, 0.30, 0.38, 0.40, 0.42, 0.50)
         curvatures = (0.0, 0.65)
         for speed in speeds:
             target = float(model.steady_target_speed(speed))
@@ -112,12 +116,25 @@ def main() -> int:
                         ctypes.byref(state), ctypes.byref(control), dt, curvature)
                     if not stage.valid:
                         raise RuntimeError("C vehicle model rejected a parity sample")
+                    # The production stage evaluates yaw at midpoint body
+                    # speed after applying the longitudinal model. Compare
+                    # like-for-like rather than using the input speed.
+                    speed_mid = 0.5 * (speed + float(stage.next.u))
                     expected = (1.0 - retention) * model.steady_yaw_rate(
-                        speed, angle, curvature)
-                    yaw_errors.append(abs(float(stage.next.r) - expected))
+                        speed_mid, angle, curvature)
+                    error = abs(float(stage.next.r) - expected)
+                    yaw_errors.append(error)
+                    if worst_yaw_probe is None or error > worst_yaw_probe[0]:
+                        worst_yaw_probe = (error, speed, angle, curvature,
+                                           float(stage.next.r), expected)
         max_yaw_error = max(yaw_errors)
         if max_yaw_error > 2.0e-5:
-            raise AssertionError(f"C/Python response mismatch: {max_yaw_error:.3g} rad/s")
+            raise AssertionError(
+                "C/Python response mismatch: "
+                f"{max_yaw_error:.3g} rad/s at "
+                f"u={worst_yaw_probe[1]:.3f}, delta={worst_yaw_probe[2]:.3f}, "
+                f"k={worst_yaw_probe[3]:.3f}; C={worst_yaw_probe[4]:.6g}, "
+                f"Python={worst_yaw_probe[5]:.6g}")
 
         feedforward_errors = []
         for speed, curvature in ((3.0, 0.35), (4.2, 0.65), (5.0, -0.45),

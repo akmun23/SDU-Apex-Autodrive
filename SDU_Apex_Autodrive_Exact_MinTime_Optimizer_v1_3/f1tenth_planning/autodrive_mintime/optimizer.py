@@ -56,6 +56,36 @@ class SolveTrackFailure(RuntimeError):
         self.candidate = candidate
 
 
+def _yaw_lag_interval_numeric(r0: float, target0: float, target1: float,
+                              dt: float, tau: float) -> tuple[float, float]:
+    """Exact first-order yaw-lag step for a linearly varying steady response.
+
+    Returns the interval-end yaw rate and its time integral.  The latter is
+    used by the Frenet heading equation, so yaw lag is not re-discretized by a
+    coarse spatial trapezoid.
+    """
+    h = dt / tau
+    decay = math.exp(-h)
+    one_minus_decay = -math.expm1(-h)
+    target1_weight = 1.0 - one_minus_decay / h
+    r1 = (decay * r0 + one_minus_decay * target0
+          + target1_weight * (target1 - target0))
+    yaw_integral = 0.5 * dt * (target0 + target1) - tau * (r1 - r0)
+    return r1, yaw_integral
+
+
+def _yaw_lag_interval_casadi(r0, target0, target1, dt, tau):
+    """CasADi equivalent of :func:`_yaw_lag_interval_numeric`."""
+    h = dt / tau
+    decay = ca.exp(-h)
+    one_minus_decay = 1.0 - decay
+    target1_weight = 1.0 - one_minus_decay / h
+    r1 = (decay * r0 + one_minus_decay * target0
+          + target1_weight * (target1 - target0))
+    yaw_integral = 0.5 * dt * (target0 + target1) - tau * (r1 - r0)
+    return r1, yaw_integral
+
+
 def _smooth_abs_np(x: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return np.sqrt(x * x + eps * eps)
 
@@ -95,6 +125,20 @@ def _optimizer_steering_rate_limit(model: VehicleModel,
         raise ValueError(
             "optimizer max_steering_rate_radps must be positive and no "
             "greater than the physical model limit")
+    return limit
+
+
+def _optimizer_steering_limit(model: VehicleModel,
+                              config: dict[str, Any]) -> float:
+    constraints = config.get("optimizer_constraints", {})
+    if not isinstance(constraints, dict):
+        raise ValueError("optimizer_constraints must be a mapping")
+    limit = float(constraints.get("max_steering_rad", model.max_steering_rad))
+    if (not math.isfinite(limit) or limit <= 0.0 or
+            limit > model.max_steering_rad):
+        raise ValueError(
+            "optimizer max_steering_rad must be positive and no greater "
+            "than the physical model limit")
     return limit
 
 
@@ -180,6 +224,7 @@ def _clip_offset_to_safe_corridor(track: Track, ey: np.ndarray,
 def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
                 config: dict[str, Any], mode: str = "center") -> Guess:
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
+    steering_limit = _optimizer_steering_limit(model, config)
     margin = _wall_clearance(config, model)
     nominal_extent = 0.5 * model.planning_footprint_width_m
     left_room = np.maximum(track.left - margin - nominal_extent, 0.01)
@@ -227,8 +272,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
                                     float(curvature))
         for speed, curvature in zip(u, kappa_path)
     ])
-    delta = np.clip(delta, -model.max_steering_rad * 0.98,
-                    model.max_steering_rad * 0.98)
+    delta = np.clip(delta, -steering_limit * 0.98, steering_limit * 0.98)
     r = kappa_path * u
     vt = np.asarray(model.steady_target_speed(u), dtype=float)
     vt = np.clip(vt, 0.0, model.max_command_speed_mps)
@@ -251,6 +295,7 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
                                     model: VehicleModel, envelope: LateralEnvelope,
                                     config: dict[str, Any]) -> Guess:
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
+    steering_limit = _optimizer_steering_limit(model, config)
     raw = []
     with open(warm_csv, "r", encoding="utf-8") as f:
         for line in f:
@@ -324,8 +369,8 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
                                         float(curvature))
             for speed, curvature in zip(u, kappa_path)
         ])
-        delta = np.clip(delta, -model.max_steering_rad * 0.98,
-                        model.max_steering_rad * 0.98)
+        delta = np.clip(delta, -steering_limit * 0.98,
+                        steering_limit * 0.98)
         ay_cap = envelope.numpy(u, delta)
         curve_cap = np.sqrt(np.maximum(
             ay_cap / np.maximum(np.abs(kappa_path), 1.0e-5),
@@ -342,8 +387,7 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
                                     float(curvature))
         for speed, curvature in zip(u, kappa_path)
     ])
-    delta = np.clip(delta, -model.max_steering_rad * 0.98,
-                    model.max_steering_rad * 0.98)
+    delta = np.clip(delta, -steering_limit * 0.98, steering_limit * 0.98)
     r = kappa_path * u
     vt = np.clip(model.steady_target_speed(u), 0.0, model.max_command_speed_mps)
     qdelta = np.clip((np.roll(delta, -1) - delta) / np.maximum(track.ds, 1e-6) * u,
@@ -448,6 +492,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     qdelta = np.asarray(solution.qdelta)
     qv = np.asarray(solution.qv)
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
+    steering_limit = _optimizer_steering_limit(model, config)
     wall_margin = _wall_clearance(config, model)
     min_den = float(config.get("numerics", {}).get("min_frenet_denominator", 0.25))
     min_progress = float(config.get("numerics", {}).get("min_progress_mps", 0.30))
@@ -473,13 +518,12 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
         model.steady_yaw_rate(float(speed), float(steering), float(curvature))
         for speed, steering, curvature in zip(u, delta, tr.kappa)
     ])
-    rdot = (r_ss - r) / model.yaw_tau_s
     safe_sdot = np.maximum(sdot, 1.0e-8)
     f = np.vstack([
         (u * np.sin(epsi) + body_v * np.cos(epsi)) / safe_sdot,
-        (r - tr.kappa * sdot) / safe_sdot,
+        np.zeros_like(r),
         raw_a / safe_sdot,
-        rdot / safe_sdot,
+        np.zeros_like(r),
         qv / safe_sdot,
         qdelta / safe_sdot,
     ])
@@ -488,12 +532,30 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     for k in range(tr.count):
         kp = (k + 1) % tr.count
         defects[:, k] = X[:, kp] - X[:, k] - 0.5 * tr.ds[k] * (f[:, k] + f[:, kp])
+        interval_dt = tr.ds[k] / max(0.5 * (safe_sdot[k] + safe_sdot[kp]), 1.0e-8)
+        yaw_end, yaw_integral = _yaw_lag_interval_numeric(
+            r[k], r_ss[k], r_ss[kp], interval_dt, model.yaw_tau_s)
+        defects[1, k] = (
+            epsi[kp] - epsi[k] - yaw_integral
+            + 0.5 * (tr.kappa[k] + tr.kappa[kp]) * tr.ds[k])
+        defects[3, k] = r[kp] - yaw_end
     scaled = defects / sx[:, None]
 
     footprint = _vehicle_lateral_extent(epsi, model)
     ay = u * r
     ay_cap = np.asarray(envelope.numpy(u, delta), dtype=float)
     brake = np.asarray(model.brake_limit(u), dtype=float)
+    combined = config.get("combined_acceleration", {})
+    if bool(combined.get("enabled", False)):
+        exponent = float(combined.get("exponent", 2.0))
+        ax_norm = np.where(raw_a >= 0.0,
+                           raw_a / model.accel_limit_mps2,
+                           -raw_a / brake)
+        ay_norm = _smooth_abs_np(ay) / ay_cap
+        combined_slack_min: float | None = float(np.nanmin(
+            1.0 - np.abs(ax_norm) ** exponent - np.abs(ay_norm) ** exponent))
+    else:
+        combined_slack_min = None
     return {
         "solver": _solver_summary(solution.solver_stats),
         "lap_time_s": float(solution.lap_time_s),
@@ -512,12 +574,13 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             "frenet_denominator": float(np.nanmin(den - min_den)),
             "progress_mps": float(np.nanmin(sdot - min_progress)),
             "lateral_accel_mps2": float(np.nanmin(ay_cap - np.abs(ay))),
+            "combined_acceleration": combined_slack_min,
             "accel_upper_mps2": float(np.nanmin(model.accel_limit_mps2 - raw_a)),
             "brake_lower_mps2": float(np.nanmin(raw_a + brake)),
             "left_body_clearance_m": float(np.nanmin(tr.left - wall_margin - footprint - ey)),
             "right_body_clearance_m": float(np.nanmin(tr.right - wall_margin - footprint + ey)),
             "heading_error_rad": float(max_heading - np.nanmax(np.abs(epsi))),
-            "steering_rad": float(model.max_steering_rad - np.nanmax(np.abs(delta))),
+            "steering_rad": float(steering_limit - np.nanmax(np.abs(delta))),
             "steering_rate_radps": float(steering_rate_limit - np.nanmax(np.abs(qdelta))),
             "target_rate_increase_mps2": float(model.max_target_speed_rate_increase_mps2 - np.nanmax(qv)),
             "target_rate_reduction_mps2": float(model.max_target_speed_rate_reduction_mps2 + np.nanmin(qv)),
@@ -553,8 +616,14 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
                 config: dict[str, Any], guess: Guess,
                 max_iter_override: int | None = None) -> Solution:
     n = track.count
+    solver = config.get("solver", {})
+    yaw_lag_exact_fraction = float(solver.get("yaw_lag_exact_fraction", 1.0))
+    if (not math.isfinite(yaw_lag_exact_fraction) or
+            not 0.0 <= yaw_lag_exact_fraction <= 1.0):
+        raise ValueError("solver.yaw_lag_exact_fraction must be within [0, 1]")
     opti = ca.Opti()
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
+    steering_limit = _optimizer_steering_limit(model, config)
 
     scales = config.get("scaling", {})
     sx = np.asarray([
@@ -604,6 +673,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     time_density = []
     accel_nodes = []
     sdot_nodes = []
+    yaw_response_nodes = []
     ay_nodes = []
     aycap_nodes = []
 
@@ -617,12 +687,13 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         raw_a = model.raw_longitudinal_accel(body_u[k], target_v[k], qv[k])
         r_ss = model.steady_yaw_rate_casadi(
             body_u[k], delta[k], float(track.kappa[k]))
-        rdot = (r_ss - yaw_r[k]) / model.yaw_tau_s
+        r_dot = (r_ss - yaw_r[k]) / model.yaw_tau_s
+        yaw_response_nodes.append(r_ss)
         f = ca.vertcat(
             (body_u[k] * ca.sin(epsi[k]) + body_v * ca.cos(epsi[k])) / sdot,
             (yaw_r[k] - float(track.kappa[k]) * sdot) / sdot,
             raw_a / sdot,
-            rdot / sdot,
+            r_dot / sdot,
             qv[k] / sdot,
             qdelta[k] / sdot,
         )
@@ -638,7 +709,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         # State/input limits.
         opti.subject_to(opti.bounded(model.min_speed_mps, body_u[k], model.max_body_speed_mps))
         opti.subject_to(opti.bounded(0.0, target_v[k], model.max_command_speed_mps))
-        opti.subject_to(opti.bounded(-model.max_steering_rad, delta[k], model.max_steering_rad))
+        opti.subject_to(opti.bounded(-steering_limit, delta[k], steering_limit))
         opti.subject_to(opti.bounded(-steering_rate_limit, qdelta[k], steering_rate_limit))
         opti.subject_to(opti.bounded(-model.max_target_speed_rate_reduction_mps2,
                                      qv[k], model.max_target_speed_rate_increase_mps2))
@@ -678,13 +749,36 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     for k in range(n):
         kp = (k + 1) % n
         ds = float(track.ds[k])
-        # Scale every dynamics equality by its physical state scale.  Variable
-        # scaling alone does not scale these mixed-unit collocation residuals,
-        # and the unscaled fine-mesh problem was observed to stall IPOPT.
-        dyn_defect = (
+        # The 15 ms yaw response is much faster than a 0.25 m spatial interval
+        # (about 60 ms at 4 m/s).  Trapezoidal integration is stable here but
+        # oscillatory when dt/tau > 2, which gives IPOPT a false alternating
+        # yaw mode.  Keep trapezoidal integration for the slower states and
+        # integrate yaw exactly for a linearly varying steady-response input.
+        trapezoid_defect = (
             X[:, kp] - X[:, k] - 0.5 * ds * (f_nodes[k] + f_nodes[kp])
         ) / ca.DM(sx)
-        opti.subject_to(dyn_defect == 0.0)
+        for state_index in (0, 2, 4, 5):
+            opti.subject_to(trapezoid_defect[state_index] == 0.0)
+
+        interval_sdot = 0.5 * (sdot_nodes[k] + sdot_nodes[kp])
+        interval_dt = ds / interval_sdot
+        yaw_end, yaw_integral = _yaw_lag_interval_casadi(
+            yaw_r[k], yaw_response_nodes[k], yaw_response_nodes[kp],
+            interval_dt, model.yaw_tau_s)
+        curvature_mid = 0.5 * (float(track.kappa[k]) + float(track.kappa[kp]))
+        exact_epsi_defect = (
+            epsi[kp] - epsi[k] - yaw_integral + curvature_mid * ds
+        ) / sx[1]
+        exact_yaw_defect = (yaw_r[kp] - yaw_end) / sx[3]
+        # Continue from the proven trapezoidal transcription to the exact
+        # first-order yaw-lag step. Intermediate fractions are homotopy
+        # constraints only; production candidate acceptance always uses 1.0.
+        opti.subject_to(
+            (1.0 - yaw_lag_exact_fraction) * trapezoid_defect[1]
+            + yaw_lag_exact_fraction * exact_epsi_defect == 0.0)
+        opti.subject_to(
+            (1.0 - yaw_lag_exact_fraction) * trapezoid_defect[3]
+            + yaw_lag_exact_fraction * exact_yaw_defect == 0.0)
         lap_time += 0.5 * ds * (time_density[k] + time_density[kp])
         reg_cost += 0.5 * ds * (
             float(reg.get("steering_rate", 1e-5)) * (qdelta[k] ** 2 * time_density[k] + qdelta[kp] ** 2 * time_density[kp])
@@ -695,7 +789,6 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     objective = lap_time + reg_cost
     opti.minimize(objective)
 
-    solver = config.get("solver", {})
     p_opts = {"expand": bool(solver.get("expand", True))}
     s_opts = {
         "max_iter": int(max_iter_override if max_iter_override is not None
@@ -703,12 +796,18 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         "tol": float(solver.get("tol", 1e-7)),
         "acceptable_tol": float(solver.get("acceptable_tol", 1e-5)),
         "acceptable_iter": int(solver.get("acceptable_iter", 15)),
+        "acceptable_constr_viol_tol": float(
+            solver.get("acceptable_constr_viol_tol", 1e-2)),
         "print_level": int(solver.get("print_level", 5)),
         "sb": "yes",
-        "nlp_scaling_method": "gradient-based",
+        "nlp_scaling_method": str(solver.get(
+            "nlp_scaling_method", "gradient-based")),
         "mu_strategy": str(solver.get("mu_strategy", "adaptive")),
         "linear_solver": str(solver.get("linear_solver", "mumps")),
     }
+    hessian_approximation = solver.get("hessian_approximation")
+    if hessian_approximation is not None:
+        s_opts["hessian_approximation"] = str(hessian_approximation)
     opti.solver("ipopt", p_opts, s_opts)
 
     start = time.perf_counter()
@@ -728,12 +827,28 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         lap_time_s=float(sol.value(lap_time)), objective=float(sol.value(objective)),
         solver_stats=stats, elapsed_s=elapsed, label=guess.label, converged=converged,
     )
+    diagnostic_error = None
+    if converged and yaw_lag_exact_fraction >= 1.0:
+        diagnostic = diagnose_solution(result, model, envelope, config)
+        defect = diagnostic["max_abs_scaled_collocation_defect"]
+        bad_slacks = {
+            name: value for name, value in diagnostic["minimum_slacks"].items()
+            if value is not None and value < -1.0e-3
+        }
+        if defect > 1.0e-4 or bad_slacks:
+            result.converged = False
+            converged = False
+            diagnostic_error = (
+                f"independent post-solve gate failed: scaled_defect={defect:.3g}, "
+                f"negative_slacks={bad_slacks}"
+            )
     if not converged:
         summary = _solver_summary(stats)
         raise SolveTrackFailure(
             f"IPOPT did not converge: status={summary['return_status']} "
             f"iter={summary['iter_count']} inf_pr={summary['final_inf_pr']} "
-            f"inf_du={summary['final_inf_du']}",
+            f"inf_du={summary['final_inf_du']}"
+            + (f"; {diagnostic_error}" if diagnostic_error else ""),
             result,
         )
     return result
@@ -963,9 +1078,9 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
     s_actual = s_actual_closed[:-1]
     L_actual = float(s_actual_closed[-1])
 
-    # Export exactly the heading and curvature state the OCP solved for.
+    # Keep the optimizer's body heading/yaw-derived curvature for independent
+    # diagnostics, but do not label those states as the geometry of the path.
     psi_opt = tr.psi + epsi
-    psi_opt_wrapped = np.arctan2(np.sin(psi_opt), np.cos(psi_opt))
     kappa_dynamic = r / np.maximum(u, 1.0e-6)
     accel = np.asarray(model.raw_longitudinal_accel(u, vt, qv), dtype=float)
 
@@ -995,10 +1110,11 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
     # it cannot change the solved geometry or create the curvature spikes that
     # caused the old dense cubic export to be rejected.
     export_s = s_actual
+    export_parameter_s = s_actual
     export_x = x
     export_y = y
-    export_heading = psi_opt_wrapped
-    export_curvature = kappa_dynamic
+    export_heading = np.arctan2(np.sin(psi_geom), np.cos(psi_geom))
+    export_curvature = kappa_geom
     export_speed = u
     export_accel = accel
     export_left = left_approx
@@ -1009,7 +1125,8 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
             raise ValueError("output_spacing_m must be finite and positive")
         if spacing < float(np.mean(seg)):
             export_count = max(3, int(np.ceil(L_actual / spacing)))
-            export_s = np.arange(export_count, dtype=float) * L_actual / export_count
+            export_parameter_s = (
+                np.arange(export_count, dtype=float) * L_actual / export_count)
             source_s = np.r_[s_actual, L_actual]
 
             def periodic_linear(values: np.ndarray, closure_value: float | None = None) -> np.ndarray:
@@ -1022,20 +1139,43 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
                 if closure_value is None:
                     closure_value = float(values[0])
                 return np.interp(
-                    export_s, source_s, np.r_[values, closure_value])
+                    export_parameter_s, source_s,
+                    np.r_[values, closure_value])
 
-            export_x = periodic_linear(x)
-            export_y = periodic_linear(y)
-            heading_closure = float(psi_opt_unwrapped[0]) + 2.0 * np.pi * round(
-                (float(psi_opt_unwrapped[-1]) - float(psi_opt_unwrapped[0])) /
-                (2.0 * np.pi))
-            export_heading = periodic_linear(
-                psi_opt_unwrapped, closure_value=heading_closure)
-            export_curvature = periodic_linear(kappa_dynamic)
+            # Geometry fields must describe the same periodic path as x/y.
+            # Previously the CSV combined linearly densified x/y with heading
+            # states and r/u as "path curvature". The production MPC consumes
+            # curvature directly in its Frenet propagation, so that mismatch
+            # can manufacture horizon corridor failures even when the path
+            # points themselves are unchanged.
+            export_x = np.asarray(sxg(export_parameter_s), dtype=float)
+            export_y = np.asarray(syg(export_parameter_s), dtype=float)
+            dx_export = sxg(export_parameter_s, 1)
+            dy_export = syg(export_parameter_s, 1)
+            ddx_export = sxg(export_parameter_s, 2)
+            ddy_export = syg(export_parameter_s, 2)
+            export_heading = np.arctan2(dy_export, dx_export)
+            export_curvature = (
+                dx_export * ddy_export - dy_export * ddx_export
+            ) / np.maximum(
+                (dx_export * dx_export + dy_export * dy_export) ** 1.5,
+                1.0e-12)
+
             export_speed = periodic_linear(u)
             export_accel = periodic_linear(accel)
             export_left = periodic_linear(left_approx)
             export_right = periodic_linear(right_approx)
+
+    # CSV station follows the emitted geometry's actual sampled arc length,
+    # including any shape change from periodic-spline densification.
+    export_xy_closed = np.vstack([
+        np.column_stack([export_x, export_y]),
+        [export_x[0], export_y[0]],
+    ])
+    export_segment_lengths = np.linalg.norm(
+        np.diff(export_xy_closed, axis=0), axis=1)
+    export_path_length = float(np.sum(export_segment_lengths))
+    export_s = np.r_[0.0, np.cumsum(export_segment_lengths)[:-1]]
 
     traj_path = out / "autodrive_mintime_raceline.csv"
     with traj_path.open("w", encoding="utf-8") as f:
@@ -1079,16 +1219,19 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
         "track": {
             **tr.to_dict(),
             "optimized_path_length_m": L_actual,
+            "exported_path_length_m": export_path_length,
             "output_points": int(len(export_s)),
-            "export_spacing_mean_m": float(L_actual / len(export_s)),
+            "export_spacing_mean_m": float(export_path_length / len(export_s)),
             "export_mode": (
                 "optimizer_nodes"
                 if len(export_s) == tr.count else
-                "periodic_linear_controller_densification"),
+                "periodic_cubic_geometry_controller_densification"),
         },
         "vehicle_model": model.to_dict(),
         "vehicle_provenance": model.provenance(),
         "optimizer_constraints": {
+            "max_steering_rad": _optimizer_steering_limit(model, config),
+            "physical_model_max_steering_rad": model.max_steering_rad,
             "max_steering_rate_radps": _optimizer_steering_rate_limit(
                 model, config),
             "physical_model_steering_rate_radps": model.max_steering_rate_radps,
@@ -1109,6 +1252,8 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
             "wall_distance_columns": "reference-normal approximation; top-level runner raycasts map and overwrites final file",
         },
         "geometry_consistency": {
+            "trajectory_heading_source": "periodic cubic spline tangent of exported x/y",
+            "trajectory_curvature_source": "periodic cubic spline curvature of exported x/y",
             "heading_abs_error_p95_rad": q(np.abs(heading_err), 0.95),
             "heading_abs_error_max_rad": float(np.max(np.abs(heading_err))),
             "dynamic_curvature_abs_max_m_inv": float(np.max(np.abs(kappa_dynamic))),
