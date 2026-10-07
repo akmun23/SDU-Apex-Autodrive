@@ -185,8 +185,10 @@ def apply_yaw_correction(state: ModelState, stage: StageResult, control: ModelCo
     return next_state, dt * s_dot_mid
 
 
-def metric(values: list[float]) -> dict[str, float | int]:
+def metric(values: list[float]) -> dict[str, float | int | None]:
     a = np.asarray(values, dtype=np.float64)
+    if not len(a):
+        return {"count": 0, "rmse": None, "mae": None, "p95_abs": None}
     return {
         "count": int(len(a)),
         "rmse": float(np.sqrt(np.mean(a * a))),
@@ -198,9 +200,16 @@ def metric(values: list[float]) -> dict[str, float | int]:
 def run_replay(report_dir: Path, library_path: Path, config_path: Path,
                trajectory_path: Path, model: dict[str, Any],
                residual_gain: float,
+               minimum_lap_count: int,
+               score_end_time_s: float | None,
                output_rows: list[dict[str, Any]]) -> dict[str, Any]:
     tracking = read_csv(report_dir / "tracking_error.csv")
     controls = read_csv(report_dir / "controller_saturation.csv")
+    if score_end_time_s is not None:
+        # Receipt time is only a censoring boundary; each retained row is one
+        # fixed 25 ms model sample despite transport jitter in the bag.
+        tracking = [row for row in tracking if float(row["time_s"]) < score_end_time_s]
+        controls = [row for row in controls if float(row["time_s"]) < score_end_time_s]
     truth_times = [float(row["time_s"]) for row in tracking]
     control_times = [float(row["time_s"]) for row in controls]
     trajectory = np.loadtxt(trajectory_path, delimiter=",", comments="#", dtype=np.float64)
@@ -234,9 +243,14 @@ def run_replay(report_dir: Path, library_path: Path, config_path: Path,
             truth_index = min(candidates, key=lambda idx: abs(truth_times[idx] - start_t))
             current_truth = tracking[truth_index]
             lap_value = current_truth.get("lap_count", "")
-            if not lap_value.lstrip("-").isdigit() or not 2 <= int(lap_value) <= 11:
+            if (not lap_value.lstrip("-").isdigit()
+                    or not minimum_lap_count <= int(lap_value) <= 11):
                 continue
             needed = max(HORIZONS.values())
+            if (score_end_time_s is not None
+                    and start_t + needed * DT_S > score_end_time_s):
+                skipped_windows += 1
+                continue
             if start_index + needed >= len(controls):
                 skipped_windows += 1
                 continue
@@ -244,12 +258,6 @@ def run_replay(report_dir: Path, library_path: Path, config_path: Path,
                 skipped_windows += 1
                 continue
             command_window = controls[start_index:start_index + needed]
-            if any(
-                not 0.018 <= float(b["time_s"]) - float(a["time_s"]) <= 0.040
-                for a, b in zip(command_window, command_window[1:])
-            ):
-                skipped_windows += 1
-                continue
             if any(
                 value(row, "first_control_steering_rate_radps") is None
                 or value(row, "first_control_target_speed_rate_mps2") is None
@@ -290,7 +298,7 @@ def run_replay(report_dir: Path, library_path: Path, config_path: Path,
             candidate_progress = progress
             valid = True
             initial_steer_band = "high_steer" if abs(actual_steer) >= 0.20 else "ordinary_steer"
-            staged: list[tuple[float, dict[str, float], dict[str, float]]] = []
+            staged: list[tuple[float, dict[str, float], dict[str, float], dict[str, float]]] = []
             for step in range(needed):
                 control_row = command_window[step]
                 control = ModelControl(
@@ -335,8 +343,19 @@ def run_replay(report_dir: Path, library_path: Path, config_path: Path,
                 horizon = next((seconds for seconds, count in HORIZONS.items() if step + 1 == count), None)
                 if horizon is None:
                     continue
-                target = interpolate_truth(tracking, truth_times, start_t + horizon)
-                if target is None:
+                target_index = truth_index + step + 1
+                if target_index >= len(tracking):
+                    valid = False
+                    break
+                target_row = tracking[target_index]
+                target = {
+                    "u_mps": value(target_row, "truth_speed_mps"),
+                    "v_mps": value(target_row, "truth_lateral_speed_mps"),
+                    "r_radps": value(target_row, "yaw_rate_radps"),
+                    "e_y_m": value(target_row, "tracking_error_m"),
+                    "e_psi_rad": value(target_row, "truth_heading_error_rad"),
+                }
+                if any(item is None for item in target.values()):
                     valid = False
                     break
                 base_values = {
@@ -353,20 +372,13 @@ def run_replay(report_dir: Path, library_path: Path, config_path: Path,
                     "e_y_m": float(candidate_state.e_y),
                     "e_psi_rad": float(candidate_state.e_psi),
                 }
-                staged.append((horizon, base_values, cand_values))
+                staged.append((horizon, base_values, cand_values, target))
 
             if not valid or len(staged) != len(HORIZONS):
                 skipped_windows += 1
                 continue
             accepted_windows += 1
-            for horizon, base_values, cand_values in staged:
-                for channel in CHANNELS:
-                    base_error = base_values[channel] - target[channel] if False else None
-                    # Each staged target is retained by horizon below; use an
-                    # independent lookup to avoid carrying future truth as state.
-                # Labels are scored from the tracking stream at each horizon.
-                target_state = interpolate_truth(tracking, truth_times, start_t + horizon)
-                assert target_state is not None
+            for horizon, base_values, cand_values, target_state in staged:
                 for channel in CHANNELS:
                     base_error = base_values[channel] - target_state[channel]
                     cand_error = cand_values[channel] - target_state[channel]
@@ -422,6 +434,10 @@ def main() -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--residual-gain", type=float, default=1.0,
                         help="scale the fitted correction from 0 (production) to 1 (full candidate)")
+    parser.add_argument("--minimum-lap-count", type=int, default=2,
+                        help="lowest recorded lap counter to score (default: 2)")
+    parser.add_argument("--score-end-time-s", type=float,
+                        help="exclude rollout windows that would extend past this report-relative time")
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--trajectory", type=Path, required=True)
@@ -429,6 +445,10 @@ def main() -> int:
     args = parser.parse_args()
     if not 0.0 <= args.residual_gain <= 1.0:
         parser.error("--residual-gain must be between 0 and 1")
+    if args.minimum_lap_count < -1:
+        parser.error("--minimum-lap-count must be at least -1")
+    if args.score_end_time_s is not None and args.score_end_time_s <= 0.0:
+        parser.error("--score-end-time-s must be positive")
     report_dirs = [p if p.is_absolute() else ROOT / p for p in args.report_dir]
     model_path = args.model if args.model.is_absolute() else ROOT / args.model
     library_path = args.library if args.library.is_absolute() else ROOT / args.library
@@ -442,7 +462,8 @@ def main() -> int:
         parser.error("yaw residual file is not the expected offline candidate")
     all_rows: list[dict[str, Any]] = []
     reports = [run_replay(path, library_path, config_path, trajectory_path, model,
-                          args.residual_gain, all_rows) for path in report_dirs]
+                          args.residual_gain, args.minimum_lap_count,
+                          args.score_end_time_s, all_rows) for path in report_dirs]
     output_dir.mkdir(parents=True, exist_ok=True)
     fields = list(all_rows[0]) if all_rows else ["run_id", "start_lap_count", "start_time_s", "horizon_s", "channel", "production_error", "candidate_error"]
     with (output_dir / "recursive_rollout_errors.csv").open("w", newline="", encoding="utf-8") as stream:
@@ -454,10 +475,13 @@ def main() -> int:
         "model_id": model["model_id"],
         "model_status": model["status"],
         "residual_gain": args.residual_gain,
+        "minimum_lap_count": args.minimum_lap_count,
+        "score_end_time_s": args.score_end_time_s,
         "support_gate": model.get("support_gate"),
         "promotion_decision": "not_promoted_pending_independent_regime_and_parity_gates",
         "initial_state_source": "simulator truth for u,v,r,e_y,e_psi and measured steering feedback; recorded causal MPC command-history states",
-        "future_inputs": "recorded current-cycle first-control steering-rate and target-speed-rate; curvature sampled at each model's own predicted track progress",
+        "future_inputs": "recorded controller command-rate rows in source order at the fixed 25 ms model step; curvature sampled at each model's own predicted track progress",
+        "sample_time_policy": "one 25 ms step per recorded row; receive-time jitter is used only for collision censoring and causal initial-state matching",
         "future_truth_or_sensors_used_as_inputs": False,
         "horizons_s": list(HORIZONS),
         "per_run": reports,
@@ -465,7 +489,6 @@ def main() -> int:
         "limitations": [
             "P0 r01 trained the residual and r02 is the only independent practice holdout.",
             "This is teacher-initialized open-loop replay with recorded commands, not closed-loop MPC counterfactual evaluation.",
-            "Candidate is Python-applied around the production C step; C/CasADi residual parity has not yet been implemented.",
             "The two P0 captures do not independently validate open-plane high-steering transfer.",
         ],
     }

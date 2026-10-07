@@ -138,6 +138,18 @@ class SpeedControllerConfig:
     throttle_rise_regime_speed_max_mps: float = 0.0
     throttle_rise_regime_min_abs_steering_rad: float = math.pi
     throttle_rise_regime_max_abs_steering_rad: float = math.pi
+    # Optional one-shot shaping for a measured positive-throttle action. The
+    # event is matched on the requested increment at its start, then latched
+    # until its original target is reached or the request/sensor validity
+    # makes continuing it unsafe.
+    throttle_rise_event_enabled: bool = False
+    throttle_rise_event_rate_per_sec: float = 10.0
+    throttle_rise_event_speed_min_mps: float = 0.0
+    throttle_rise_event_speed_max_mps: float = 0.0
+    throttle_rise_event_min_abs_steering_rad: float = 0.0
+    throttle_rise_event_max_abs_steering_rad: float = 0.0
+    throttle_rise_event_increment_min: float = 0.0
+    throttle_rise_event_increment_max: float = 0.0
 
     def validate(self) -> None:
         scalars = (
@@ -149,6 +161,13 @@ class SpeedControllerConfig:
             self.throttle_rise_regime_speed_max_mps,
             self.throttle_rise_regime_min_abs_steering_rad,
             self.throttle_rise_regime_max_abs_steering_rad,
+            self.throttle_rise_event_rate_per_sec,
+            self.throttle_rise_event_speed_min_mps,
+            self.throttle_rise_event_speed_max_mps,
+            self.throttle_rise_event_min_abs_steering_rad,
+            self.throttle_rise_event_max_abs_steering_rad,
+            self.throttle_rise_event_increment_min,
+            self.throttle_rise_event_increment_max,
             self.stop_speed_threshold_mps,
             self.overspeed_coast_threshold_mps,
             self.speed_hold_error_deadband_mps,
@@ -178,6 +197,18 @@ class SpeedControllerConfig:
                 self.throttle_rise_regime_max_abs_steering_rad <
                 self.throttle_rise_regime_min_abs_steering_rad):
             raise ValueError("invalid regime-conditioned throttle-rise limits")
+        if (self.throttle_rise_event_rate_per_sec <= 0.0 or
+                self.throttle_rise_event_speed_min_mps < 0.0 or
+                self.throttle_rise_event_speed_max_mps <
+                self.throttle_rise_event_speed_min_mps or
+                self.throttle_rise_event_min_abs_steering_rad < 0.0 or
+                self.throttle_rise_event_max_abs_steering_rad <
+                self.throttle_rise_event_min_abs_steering_rad or
+                self.throttle_rise_event_increment_min < 0.0 or
+                self.throttle_rise_event_increment_max <
+                self.throttle_rise_event_increment_min or
+                self.throttle_rise_event_increment_max > self.throttle_max_forward):
+            raise ValueError("invalid event-conditioned throttle-rise policy")
         if self.stop_speed_threshold_mps < 0.0:
             raise ValueError("stop_speed_threshold_mps must be >= 0")
         if self.overspeed_coast_threshold_mps < 0.0:
@@ -561,6 +592,7 @@ class TargetSpeedController:
         self._downshift_below_band_elapsed = 0.0
         self._active_throttle_rise_rate_per_sec = (
             config.throttle_rise_rate_per_sec)
+        self._throttle_rise_event_target: float | None = None
         self.last_command = LongitudinalCommand(LongitudinalMode.STOP, 0.0)
 
     def reset(self) -> None:
@@ -577,6 +609,7 @@ class TargetSpeedController:
         self._downshift_below_band_elapsed = 0.0
         self._active_throttle_rise_rate_per_sec = (
             self.config.throttle_rise_rate_per_sec)
+        self._throttle_rise_event_target = None
         self.last_command = LongitudinalCommand(LongitudinalMode.STOP, 0.0)
 
     def reconfigure(self, config: SpeedControllerConfig) -> None:
@@ -614,7 +647,59 @@ class TargetSpeedController:
         )
         return self.last_output
 
-    def _drive(self, desired: float, dt_seconds: float) -> LongitudinalCommand:
+    def _drive(
+        self,
+        desired: float,
+        dt_seconds: float,
+        measured_speed_mps: float,
+        steering_angle_rad: float,
+        measurement_fresh: bool,
+    ) -> LongitudinalCommand:
+        event_config = self.config
+        event_target = self._throttle_rise_event_target
+        if event_target is not None:
+            # Keep the measured action rate fixed for the duration of the
+            # event. Do not reclassify small speed/steering changes each tick.
+            if (not measurement_fresh or desired < self.last_output - 1.0e-6):
+                self._throttle_rise_event_target = None
+                event_target = None
+            else:
+                self._active_throttle_rise_rate_per_sec = (
+                    event_config.throttle_rise_event_rate_per_sec)
+        elif (
+            event_config.throttle_rise_event_enabled and measurement_fresh and
+            event_config.throttle_rise_event_speed_min_mps <=
+                measured_speed_mps <=
+                event_config.throttle_rise_event_speed_max_mps and
+            event_config.throttle_rise_event_min_abs_steering_rad <=
+                abs(steering_angle_rad) <=
+                event_config.throttle_rise_event_max_abs_steering_rad
+        ):
+            requested_increment = desired - self.last_output
+            if (
+                event_config.throttle_rise_event_increment_min - 1.0e-6 <=
+                requested_increment <=
+                event_config.throttle_rise_event_increment_max + 1.0e-6
+            ):
+                self._throttle_rise_event_target = desired
+                event_target = desired
+                self._active_throttle_rise_rate_per_sec = (
+                    event_config.throttle_rise_event_rate_per_sec)
+
+        if event_target is not None:
+            self.last_output = min(
+                event_target,
+                self.last_output +
+                self._active_throttle_rise_rate_per_sec * dt_seconds,
+            )
+            if self.last_output >= event_target - 1.0e-9:
+                self.last_output = event_target
+                self._throttle_rise_event_target = None
+            command = LongitudinalCommand(
+                LongitudinalMode.DRIVE, self.last_output)
+            self.last_command = command
+            return command
+
         command = LongitudinalCommand(
             LongitudinalMode.DRIVE,
             self._slew_to(desired, dt_seconds),
@@ -626,6 +711,7 @@ class TargetSpeedController:
         # Zero is an active brake command in the measured simulator actuator.
         # Do not pass it through the falling throttle slew ramp.
         self.last_output = 0.0
+        self._throttle_rise_event_target = None
         command = LongitudinalCommand(LongitudinalMode.BRAKE, 0.0)
         self.last_command = command
         return command
@@ -754,6 +840,8 @@ class TargetSpeedController:
                 self._last_target_speed is not None and
                 target < self._last_target_speed - max(
                     0.05, self.config.speed_hold_entry_margin_mps))
+            if downshift:
+                self._throttle_rise_event_target = None
             self._hold_approach = False
             self._hold_reentry_requires_speed = False
             self.integral = 0.0
@@ -805,7 +893,9 @@ class TargetSpeedController:
                     self._downshift_below_band_elapsed = 0.0
                     self.integral = 0.0
                     self.acceleration_controller.reset()
-                    return self._drive(self.feedforward(target), dt_seconds)
+                    return self._drive(
+                        self.feedforward(target), dt_seconds, measured,
+                        steering_angle_rad, measurement_fresh)
                 self._downshift_stable_elapsed = 0.0
                 self._downshift_below_band_elapsed = 0.0
                 self.integral = 0.0
@@ -843,7 +933,9 @@ class TargetSpeedController:
             if measured <= target + self.config.speed_downshift_band_mps:
                 self._downshift_catch = False
             else:
-                return self._drive(self.feedforward(target), dt_seconds)
+                return self._drive(
+                    self.feedforward(target), dt_seconds, measured,
+                    steering_angle_rad, measurement_fresh)
 
         # A large target crossing is not a situation where actuator slew is
         # useful. The competition interface exposes forward throttle and
@@ -903,7 +995,7 @@ class TargetSpeedController:
             desired = self.feedforward(target)
             return self._drive(
                 clamp(desired, 0.0, self.config.throttle_max_forward),
-                dt_seconds,
+                dt_seconds, measured, steering_angle_rad, measurement_fresh,
             )
 
         if error >= self.config.speed_boost_error_mps:
@@ -919,7 +1011,7 @@ class TargetSpeedController:
             self.acceleration_controller.reset()
             return self._drive(
                 clamp(desired, 0.0, self.config.throttle_max_forward),
-                dt_seconds,
+                dt_seconds, measured, steering_angle_rad, measurement_fresh,
             )
 
         candidate_integral = clamp(
@@ -965,4 +1057,6 @@ class TargetSpeedController:
         ):
             self.integral = candidate_integral
         # The speed abstraction owns its actuator slew limits.
-        return self._drive(desired, dt_seconds)
+        return self._drive(
+            desired, dt_seconds, measured, steering_angle_rad,
+            measurement_fresh)

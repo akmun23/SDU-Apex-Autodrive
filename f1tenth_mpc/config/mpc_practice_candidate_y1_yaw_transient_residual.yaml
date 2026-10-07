@@ -1,0 +1,30 @@
+/**:
+  ros__parameters:
+    # GT-trained, opt-in yaw residual on top of the configured production C
+    # model (including Y1 when layered over mpc_competition.yaml). Training
+    # sources: P0 r01 + open-plane yaw-transient r01; held-out sources: P0 r02
+    # + open-plane yaw-transient validation r01. Current and next yaw labels
+    # come from simulator rigid-body truth; odometry is not a training target.
+    # Whole-run one-step GT yaw RMSE: 0.818 -> 0.488 rad/s, driven by the
+    # supported open-plane transient set; P0 remains unchanged outside support.
+    # The offline C implementation matches the fitted gated correction within
+    # 4.3e-6 rad/s over 4,241 held-out probes. Recursive rollout and a practice
+    # MPC run are still required. This does not alter simulator physics.
+    yaw_rate_residual_enabled: true
+    yaw_rate_residual_gain: 1.0
+    yaw_rate_residual_clip_radps2: 107.17946214767456
+    yaw_rate_residual_feature_mean: [4.375456232361242, -0.5908713781749799, -0.05645056447310015, 0.000624682583041314, -0.0870161289670748, -0.1727212973878418, 0.32589838355065603, 0.000007862785510317247, -0.04061851452021191, -0.01312472296919623, -0.01777160853575073, 0.07363376654889701, -0.11945949912660178]
+    yaw_rate_residual_feature_scale: [1.2568578113495341, 1.2774933157898547, 0.1902577707900455, 0.6566436889143299, 0.15079761359356367, 0.30156340260464215, 2.7151890131437986, 2.5615118060814916, 0.21562027632065747, 0.11555184985173052, 0.03287307799033411, 0.30676721907288557, 0.2009777841013797]
+    yaw_rate_residual_coefficients: [0.3870146664743658, -0.059922264426074234, -7.005855028346366, 10.120445750199584, -0.7861617241948436, 8.808080715529748, -4.853629192559534, 0.6839686578952403, 0.12123348970693586, -33.74480833345395, -1.0547880627705575, 7.896977644895095, -1.5900498822441531, -0.6206214748088954]
+    yaw_rate_residual_target_speed_zero_mps: 3.40
+    yaw_rate_residual_target_speed_full_mps: 3.50
+    yaw_rate_residual_speed_deficit_full_mps: 0.50
+    yaw_rate_residual_speed_deficit_zero_mps: 0.80
+    yaw_rate_residual_abs_steering_zero_rad: 0.28
+    yaw_rate_residual_abs_steering_full_rad: 0.30
+    yaw_rate_residual_actual_speed_zero_mps: 3.40
+    yaw_rate_residual_actual_speed_full_mps: 3.45
+    yaw_rate_residual_actual_speed_upper_full_mps: 4.00
+    yaw_rate_residual_actual_speed_upper_zero_mps: 4.05
+    yaw_rate_residual_abs_steering_upper_full_rad: 0.42
+    yaw_rate_residual_abs_steering_upper_zero_rad: 0.45

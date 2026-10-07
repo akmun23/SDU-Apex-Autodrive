@@ -1,0 +1,16 @@
+# Model-only overlay for Python/CasADi optimizer parity checks. This does not
+# alter the production optimizer config or any raceline.
+vehicle_model_overrides:
+  yaw_surface_enabled: true
+  yaw_surface_response_scale: 1.0
+  yaw_surface_csv: f1tenth_mpc/config/yaw_response_surface_y1.csv
+  yaw_surface_blend_q_start: 0.30
+  yaw_surface_blend_q_end: 0.70
+  yaw_surface_speed_blend_margin_mps: 0.10
+  yaw_surface_low_speed_blend_margin_mps: 0.10
+  yaw_surface_low_speed_support_fadeout_mps: 0.0
+  yaw_surface_high_speed_support_fadein_mps: 0.0
+  yaw_surface_steering_blend_start_rad: 0.29
+  yaw_surface_steering_blend_full_start_rad: 0.30
+  yaw_surface_steering_blend_full_end_rad: 0.42
+  yaw_surface_steering_blend_end_rad: 0.45

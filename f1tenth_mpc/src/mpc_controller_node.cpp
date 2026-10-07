@@ -235,6 +235,27 @@ public:
             const float high_speed_support_fadein = static_cast<float>(
                 declare_parameter<double>(
                     "yaw_rate_response_surface_high_speed_support_fadein_mps", 0.0));
+            const float steering_blend_start = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_steering_blend_start_rad", 0.0));
+            const float steering_blend_full_start = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_steering_blend_full_start_rad", 0.0));
+            const float steering_blend_full_end = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_steering_blend_full_end_rad", 0.0));
+            const float steering_blend_end = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_steering_blend_end_rad", 0.0));
+            const float hold_response_time_constant = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_hold_time_constant_s", 0.0));
+            const float hold_rate_full = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_hold_rate_full_radps", 0.0));
+            const float hold_rate_zero = static_cast<float>(
+                declare_parameter<double>(
+                    "yaw_rate_response_surface_hold_rate_zero_radps", 0.0));
             const auto share = ament_index_cpp::get_package_share_directory(
                 "f1tenth_mpc");
             const auto configured_surface_path = declare_parameter<std::string>(
@@ -245,7 +266,10 @@ public:
             const auto surface = load_yaw_response_surface_csv(
                 surface_path, blend_start, blend_end, speed_blend_margin,
                 low_speed_blend_margin, low_speed_support_fadeout,
-                high_speed_support_fadein);
+                high_speed_support_fadein, steering_blend_start,
+                steering_blend_full_start, steering_blend_full_end,
+                steering_blend_end, hold_response_time_constant,
+                hold_rate_full, hold_rate_zero);
             if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
                 throw std::runtime_error("invalid empirical yaw response surface");
             }
@@ -293,6 +317,18 @@ public:
                 declare_parameter<double>("yaw_rate_residual_abs_steering_zero_rad", 0.18));
             yaw_residual_model.abs_steering_full_rad = static_cast<float>(
                 declare_parameter<double>("yaw_rate_residual_abs_steering_full_rad", 0.20));
+            yaw_residual_model.actual_speed_zero_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_actual_speed_zero_mps", 0.0));
+            yaw_residual_model.actual_speed_full_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_actual_speed_full_mps", 0.0));
+            yaw_residual_model.actual_speed_upper_full_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_actual_speed_upper_full_mps", 0.0));
+            yaw_residual_model.actual_speed_upper_zero_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_actual_speed_upper_zero_mps", 0.0));
+            yaw_residual_model.abs_steering_upper_full_rad = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_abs_steering_upper_full_rad", 0.0));
+            yaw_residual_model.abs_steering_upper_zero_rad = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_abs_steering_upper_zero_rad", 0.0));
         }
         if (!vehicle_model_set_yaw_rate_residual_model(&yaw_residual_model))
             throw std::runtime_error("invalid yaw-rate residual model parameters");

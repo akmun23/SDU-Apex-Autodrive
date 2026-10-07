@@ -150,6 +150,10 @@ class VehicleModel:
     yaw_surface_response_scale: float
     yaw_surface_blend_q_start: float
     yaw_surface_blend_q_end: float
+    yaw_surface_steering_blend_start_rad: float
+    yaw_surface_steering_blend_full_start_rad: float
+    yaw_surface_steering_blend_full_end_rad: float
+    yaw_surface_steering_blend_end_rad: float
     yaw_surface_speed_blend_margin_mps: float
     yaw_surface_low_speed_blend_margin_mps: float
     yaw_surface_low_speed_support_fadeout_mps: float
@@ -226,6 +230,10 @@ class VehicleModel:
             "yaw_surface_csv",
             "yaw_surface_blend_q_start",
             "yaw_surface_blend_q_end",
+            "yaw_surface_steering_blend_start_rad",
+            "yaw_surface_steering_blend_full_start_rad",
+            "yaw_surface_steering_blend_full_end_rad",
+            "yaw_surface_steering_blend_end_rad",
             "yaw_surface_speed_blend_margin_mps",
             "yaw_surface_low_speed_blend_margin_mps",
             "yaw_surface_low_speed_support_fadeout_mps",
@@ -294,6 +302,19 @@ class VehicleModel:
         surface_blend_q_end = float(vehicle_model_overrides.get(
             "yaw_surface_blend_q_end",
             mpc_params.get("yaw_rate_response_surface_blend_q_end", 0.85)))
+        surface_steering_start = float(vehicle_model_overrides.get(
+            "yaw_surface_steering_blend_start_rad",
+            mpc_params.get("yaw_rate_response_surface_steering_blend_start_rad", 0.0)))
+        surface_steering_full_start = float(vehicle_model_overrides.get(
+            "yaw_surface_steering_blend_full_start_rad",
+            mpc_params.get(
+                "yaw_rate_response_surface_steering_blend_full_start_rad", 0.0)))
+        surface_steering_full_end = float(vehicle_model_overrides.get(
+            "yaw_surface_steering_blend_full_end_rad",
+            mpc_params.get("yaw_rate_response_surface_steering_blend_full_end_rad", 0.0)))
+        surface_steering_end = float(vehicle_model_overrides.get(
+            "yaw_surface_steering_blend_end_rad",
+            mpc_params.get("yaw_rate_response_surface_steering_blend_end_rad", 0.0)))
         surface_speed_blend_margin = float(vehicle_model_overrides.get(
             "yaw_surface_speed_blend_margin_mps",
             mpc_params.get("yaw_rate_response_surface_speed_blend_margin_mps", 0.50)))
@@ -321,6 +342,10 @@ class VehicleModel:
                 raise ValueError("yaw_surface_csv must be inside the repository") from exc
         if (not math.isfinite(surface_blend_q_start)
                 or not math.isfinite(surface_blend_q_end)
+                or not math.isfinite(surface_steering_start)
+                or not math.isfinite(surface_steering_full_start)
+                or not math.isfinite(surface_steering_full_end)
+                or not math.isfinite(surface_steering_end)
                 or not math.isfinite(surface_speed_blend_margin)
                 or not math.isfinite(surface_low_speed_blend_margin)
                 or not math.isfinite(surface_low_speed_support_fadeout)
@@ -336,6 +361,17 @@ class VehicleModel:
                 or ((surface_low_speed_support_fadeout > 0.0) !=
                     (surface_high_speed_support_fadein > 0.0))):
             raise ValueError("invalid yaw-response-surface blend override")
+        steering_gate_values = (surface_steering_start,
+                                surface_steering_full_start,
+                                surface_steering_full_end,
+                                surface_steering_end)
+        if any(value != 0.0 for value in steering_gate_values) and (
+                surface_steering_start < 0.0
+                or surface_steering_full_start <= surface_steering_start
+                or surface_steering_full_end < surface_steering_full_start
+                or surface_steering_end <= surface_steering_full_end
+                or surface_steering_end > 0.523599):
+            raise ValueError("invalid yaw-response-surface steering support window")
         surface_speeds: list[float] = []
         surface_q: list[list[list[float]]] = []
         surface_rates: list[list[list[float]]] = []
@@ -473,6 +509,10 @@ class VehicleModel:
             yaw_surface_response_scale=surface_response_scale,
             yaw_surface_blend_q_start=surface_blend_q_start,
             yaw_surface_blend_q_end=surface_blend_q_end,
+            yaw_surface_steering_blend_start_rad=surface_steering_start,
+            yaw_surface_steering_blend_full_start_rad=surface_steering_full_start,
+            yaw_surface_steering_blend_full_end_rad=surface_steering_full_end,
+            yaw_surface_steering_blend_end_rad=surface_steering_end,
             yaw_surface_speed_blend_margin_mps=surface_speed_blend_margin,
             yaw_surface_low_speed_blend_margin_mps=surface_low_speed_blend_margin,
             yaw_surface_low_speed_support_fadeout_mps=(
@@ -567,6 +607,7 @@ class VehicleModel:
                           (self.yaw_surface_blend_q_end - self.yaw_surface_blend_q_start),
                           0.0), 1.0)
         q_blend = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        steering_blend = self._yaw_surface_steering_blend_numeric(steering)
         low, high = self.yaw_surface_speed_mps[0], self.yaw_surface_speed_mps[-1]
         low_margin = self.yaw_surface_low_speed_blend_margin_mps
         high_margin = self.yaw_surface_speed_blend_margin_mps
@@ -581,8 +622,20 @@ class VehicleModel:
         else:
             leave = 1.0
         speed_blend = enter * leave * self._yaw_surface_speed_support(speed)
-        blend = self.yaw_surface_response_scale * q_blend * speed_blend
+        blend = self.yaw_surface_response_scale * q_blend * steering_blend * speed_blend
         return legacy + blend * (empirical - legacy)
+
+    def _yaw_surface_steering_blend_numeric(self, steering: float) -> float:
+        start = self.yaw_surface_steering_blend_start_rad
+        full_start = self.yaw_surface_steering_blend_full_start_rad
+        full_end = self.yaw_surface_steering_blend_full_end_rad
+        end = self.yaw_surface_steering_blend_end_rad
+        if start == 0.0 and full_start == 0.0 and full_end == 0.0 and end == 0.0:
+            return 1.0
+        magnitude = abs(steering)
+        enter = self._smoothstep_numeric(magnitude, start, full_start)
+        leave = 1.0 - self._smoothstep_numeric(magnitude, full_end, end)
+        return enter * leave
 
     def _yaw_surface_speed_support(self, speed: float) -> float:
         low_margin = self.yaw_surface_low_speed_support_fadeout_mps
@@ -636,6 +689,19 @@ class VehicleModel:
             (q - self.yaw_surface_blend_q_start) /
             (self.yaw_surface_blend_q_end - self.yaw_surface_blend_q_start), 0.0), 1.0)
         q_blend = blend_t * blend_t * (3.0 - 2.0 * blend_t)
+        if self.yaw_surface_steering_blend_end_rad > 0.0:
+            steering_magnitude = ca.fabs(steering)
+            steering_enter = self._smoothstep_casadi(
+                steering_magnitude,
+                self.yaw_surface_steering_blend_start_rad,
+                self.yaw_surface_steering_blend_full_start_rad)
+            steering_leave = 1.0 - self._smoothstep_casadi(
+                steering_magnitude,
+                self.yaw_surface_steering_blend_full_end_rad,
+                self.yaw_surface_steering_blend_end_rad)
+            steering_blend = steering_enter * steering_leave
+        else:
+            steering_blend = 1.0
         low, high = self.yaw_surface_speed_mps[0], self.yaw_surface_speed_mps[-1]
         low_margin = self.yaw_surface_low_speed_blend_margin_mps
         high_margin = self.yaw_surface_speed_blend_margin_mps
@@ -672,7 +738,7 @@ class VehicleModel:
         else:
             support = 1.0
         speed_blend = enter * leave * support
-        blend = self.yaw_surface_response_scale * q_blend * speed_blend
+        blend = self.yaw_surface_response_scale * q_blend * steering_blend * speed_blend
         return legacy + blend * (empirical - legacy)
 
     @staticmethod

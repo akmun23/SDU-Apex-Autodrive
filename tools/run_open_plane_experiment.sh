@@ -31,6 +31,8 @@ usage() {
     "isolated_highsteer_multispeed repeats that grid at 2.5, 4.5, and 6.5 m/s." \
     "race_domain_dynamic_steering records continuous signed steering transitions at 4.5, 6.5, and 7.5 m/s." \
     "race_domain_low_speed_highsteer_transients captures reset-matched 2.5/3.0/3.5 m/s high-steer turn-in, unwind, and reversal." \
+    "yaw_atlas_interpolation_validation tests randomized, reset-matched off-grid speed/steering points twice in both turn directions." \
+    "yaw_low_angle_rate_surface pairs one-tick steering steps with 0.30 s ramps over low steering and a selected 4.25/6.25/8.25/10.25 m/s speed." \
     "race_domain_dynamic_coupled_{train,validation,final} records randomized waveforms across the supported 5–11.1 m/s envelope." \
     "subnet_highsteer_transients records reset-isolated 7.5 m/s turn-in/unwind throttle transients at 0.30/0.42 rad." \
     "Resume a partial surface with SDU_APEX_EXPERIMENT_RESUME_ANALYSIS pointing to its closed analysis JSON." \
@@ -80,6 +82,12 @@ elif [[ "${profile}" == subnet_highsteer_transients ]]; then
   default_timeout_s=600
 elif [[ "${profile}" == race_domain_low_speed_highsteer_transients ]]; then
   default_timeout_s=600
+elif [[ "${profile}" == race_domain_yaw_transition_transients ]]; then
+  default_timeout_s=600
+elif [[ "${profile}" == yaw_atlas_interpolation_validation ]]; then
+  default_timeout_s=1200
+elif [[ "${profile}" == yaw_low_angle_rate_surface ]]; then
+  default_timeout_s=1200
 elif [[ "${profile}" == race_domain_swerve_throttle_slew_train ||
         "${profile}" == race_domain_swerve_throttle_slew_validation ||
         "${profile}" == race_domain_swerve_throttle_slew_frontier_validation ||
@@ -134,6 +142,9 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == race_domain_swerve_throttle_rate_race_domain_train ||
       "${profile}" == race_domain_swerve_throttle_rate_race_domain_validation ||
       "${profile}" == race_domain_low_speed_highsteer_transients ||
+      "${profile}" == race_domain_yaw_transition_transients ||
+      "${profile}" == yaw_atlas_interpolation_validation ||
+      "${profile}" == yaw_low_angle_rate_surface ||
       "${profile}" == subnet_highsteer_transients ]]; then
   dev_sim_reset_enabled=1
 fi
@@ -162,6 +173,9 @@ case "${profile}" in
   race_domain_dynamic_coupled_train|race_domain_dynamic_coupled_validation|\
   race_domain_dynamic_coupled_final|\
   race_domain_low_speed_highsteer_transients|\
+  race_domain_yaw_transition_transients|\
+  yaw_atlas_interpolation_validation|\
+  yaw_low_angle_rate_surface|\
   race_domain_swerve_throttle_slew_train|\
   race_domain_swerve_throttle_slew_validation|\
   race_domain_swerve_throttle_slew_frontier_validation|\

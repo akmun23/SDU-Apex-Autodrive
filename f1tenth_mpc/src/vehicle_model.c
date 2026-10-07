@@ -151,7 +151,41 @@ int vehicle_model_set_yaw_rate_response_surface(
         !isfinite(surface->high_speed_support_fadein_mps) ||
         surface->high_speed_support_fadein_mps < 0.0f ||
         ((surface->low_speed_support_fadeout_mps > 0.0f) !=
-         (surface->high_speed_support_fadein_mps > 0.0f))) {
+         (surface->high_speed_support_fadein_mps > 0.0f)) ||
+        !isfinite(surface->steering_blend_start_rad) ||
+        !isfinite(surface->steering_blend_full_start_rad) ||
+        !isfinite(surface->steering_blend_full_end_rad) ||
+        !isfinite(surface->steering_blend_end_rad) ||
+        !isfinite(surface->hold_response_time_constant_s) ||
+        !isfinite(surface->hold_rate_full_radps) ||
+        !isfinite(surface->hold_rate_zero_radps)) {
+        return 0;
+    }
+    const int steering_gate_enabled =
+        surface->steering_blend_start_rad != 0.0f ||
+        surface->steering_blend_full_start_rad != 0.0f ||
+        surface->steering_blend_full_end_rad != 0.0f ||
+        surface->steering_blend_end_rad != 0.0f;
+    if (steering_gate_enabled &&
+        (surface->steering_blend_start_rad < 0.0f ||
+         surface->steering_blend_full_start_rad <=
+             surface->steering_blend_start_rad ||
+         surface->steering_blend_full_end_rad <
+             surface->steering_blend_full_start_rad ||
+         surface->steering_blend_end_rad <=
+             surface->steering_blend_full_end_rad ||
+         surface->steering_blend_end_rad > active_parameters.max_steering_angle)) {
+        return 0;
+    }
+    if (surface->hold_response_time_constant_s > 0.0f) {
+        if (!finite_positive(surface->hold_rate_zero_radps) ||
+            surface->hold_rate_full_radps < 0.0f ||
+            surface->hold_rate_zero_radps <= surface->hold_rate_full_radps) {
+            return 0;
+        }
+    } else if (surface->hold_response_time_constant_s < 0.0f ||
+               surface->hold_rate_full_radps != 0.0f ||
+               surface->hold_rate_zero_radps != 0.0f) {
         return 0;
     }
     if (surface->speed_count < 3 ||
@@ -210,8 +244,38 @@ int vehicle_model_set_yaw_rate_residual_model(
         model->speed_deficit_zero_mps <= model->speed_deficit_full_mps ||
         !isfinite(model->abs_steering_zero_rad) ||
         !isfinite(model->abs_steering_full_rad) ||
+        !isfinite(model->actual_speed_zero_mps) ||
+        !isfinite(model->actual_speed_full_mps) ||
+        !isfinite(model->actual_speed_upper_full_mps) ||
+        !isfinite(model->actual_speed_upper_zero_mps) ||
+        !isfinite(model->abs_steering_upper_full_rad) ||
+        !isfinite(model->abs_steering_upper_zero_rad) ||
         model->abs_steering_zero_rad < 0.0f ||
         model->abs_steering_full_rad <= model->abs_steering_zero_rad) {
+        return 0;
+    }
+    const int actual_speed_window_enabled =
+        model->actual_speed_zero_mps != 0.0f ||
+        model->actual_speed_full_mps != 0.0f ||
+        model->actual_speed_upper_full_mps != 0.0f ||
+        model->actual_speed_upper_zero_mps != 0.0f;
+    if (actual_speed_window_enabled &&
+        (model->actual_speed_zero_mps < 0.0f ||
+         model->actual_speed_full_mps <= model->actual_speed_zero_mps ||
+         model->actual_speed_upper_full_mps < model->actual_speed_full_mps ||
+         model->actual_speed_upper_zero_mps <=
+             model->actual_speed_upper_full_mps)) {
+        return 0;
+    }
+    const int steering_upper_gate_enabled =
+        model->abs_steering_upper_full_rad != 0.0f ||
+        model->abs_steering_upper_zero_rad != 0.0f;
+    if (steering_upper_gate_enabled &&
+        (model->abs_steering_upper_full_rad <= model->abs_steering_full_rad ||
+         model->abs_steering_upper_zero_rad <=
+             model->abs_steering_upper_full_rad ||
+         model->abs_steering_upper_zero_rad >
+             active_parameters.max_steering_angle)) {
         return 0;
     }
     for (int i = 0; i < MPC_YAW_RESIDUAL_FEATURES; ++i) {
@@ -267,11 +331,25 @@ static float yaw_residual_rate_scalar(
     const float tracking_gate = 1.0f - smoothstep_scalar(deficit,
         active_yaw_rate_residual.speed_deficit_full_mps,
         active_yaw_rate_residual.speed_deficit_zero_mps);
-    const float steering_gate = smoothstep_scalar(abs_delta,
+    float steering_gate = smoothstep_scalar(abs_delta,
         active_yaw_rate_residual.abs_steering_zero_rad,
         active_yaw_rate_residual.abs_steering_full_rad);
+    if (active_yaw_rate_residual.abs_steering_upper_zero_rad > 0.0f) {
+        steering_gate *= 1.0f - smoothstep_scalar(abs_delta,
+            active_yaw_rate_residual.abs_steering_upper_full_rad,
+            active_yaw_rate_residual.abs_steering_upper_zero_rad);
+    }
+    float actual_speed_gate = 1.0f;
+    if (active_yaw_rate_residual.actual_speed_upper_zero_mps > 0.0f) {
+        actual_speed_gate = smoothstep_scalar(state->u,
+            active_yaw_rate_residual.actual_speed_zero_mps,
+            active_yaw_rate_residual.actual_speed_full_mps) *
+            (1.0f - smoothstep_scalar(state->u,
+                active_yaw_rate_residual.actual_speed_upper_full_mps,
+                active_yaw_rate_residual.actual_speed_upper_zero_mps));
+    }
     return active_yaw_rate_residual.gain * correction * target_gate *
-        tracking_gate * steering_gate;
+        tracking_gate * steering_gate * actual_speed_gate;
 }
 
 float vehicle_model_yaw_rate_gain_for_curvature(float curvature_radpm)
@@ -474,14 +552,56 @@ static MpcYawSurfaceValue_t yaw_surface_value(
         q_slope * fmaxf(speed_mps, 0.0f) * secant_squared};
 }
 
-static float yaw_surface_blend_weight(float demand_q)
+static float smoothstep_scalar(float value, float start, float end);
+
+static float yaw_surface_steering_blend_weight(float steering_rad)
+{
+    const float start = active_yaw_rate_surface.steering_blend_start_rad;
+    const float full_start =
+        active_yaw_rate_surface.steering_blend_full_start_rad;
+    const float full_end = active_yaw_rate_surface.steering_blend_full_end_rad;
+    const float end = active_yaw_rate_surface.steering_blend_end_rad;
+    if (start == 0.0f && full_start == 0.0f &&
+        full_end == 0.0f && end == 0.0f) return 1.0f;
+    const float magnitude = fabsf(steering_rad);
+    const float enter = smoothstep_scalar(magnitude, start, full_start);
+    const float leave = 1.0f - smoothstep_scalar(magnitude, full_end, end);
+    return enter * leave;
+}
+
+static float yaw_surface_steering_blend_slope(float steering_rad)
+{
+    const float start = active_yaw_rate_surface.steering_blend_start_rad;
+    const float full_start =
+        active_yaw_rate_surface.steering_blend_full_start_rad;
+    const float full_end = active_yaw_rate_surface.steering_blend_full_end_rad;
+    const float end = active_yaw_rate_surface.steering_blend_end_rad;
+    if (start == 0.0f && full_start == 0.0f &&
+        full_end == 0.0f && end == 0.0f) return 0.0f;
+    const float magnitude = fabsf(steering_rad);
+    const float enter = smoothstep_scalar(magnitude, start, full_start);
+    const float leave = 1.0f - smoothstep_scalar(magnitude, full_end, end);
+    const float enter_t = clampf_local(
+        (magnitude - start) / (full_start - start), 0.0f, 1.0f);
+    const float leave_t = clampf_local(
+        (magnitude - full_end) / (end - full_end), 0.0f, 1.0f);
+    const float enter_slope = (enter_t > 0.0f && enter_t < 1.0f)
+        ? 6.0f * enter_t * (1.0f - enter_t) / (full_start - start) : 0.0f;
+    const float leave_slope = (leave_t > 0.0f && leave_t < 1.0f)
+        ? -6.0f * leave_t * (1.0f - leave_t) / (end - full_end) : 0.0f;
+    return (steering_rad < 0.0f ? -1.0f : 1.0f) *
+        (enter_slope * leave + enter * leave_slope);
+}
+
+static float yaw_surface_blend_weight(float demand_q, float steering_rad)
 {
     const float width = active_yaw_rate_surface.blend_q_end -
         active_yaw_rate_surface.blend_q_start;
     const float t = clampf_local(
         (demand_q - active_yaw_rate_surface.blend_q_start) / width,
         0.0f, 1.0f);
-    return t * t * (3.0f - 2.0f * t);
+    return t * t * (3.0f - 2.0f * t) *
+        yaw_surface_steering_blend_weight(steering_rad);
 }
 
 static float yaw_surface_blend_slope(float demand_q)
@@ -601,7 +721,7 @@ static float yaw_steady_response(
 
     const float demand_q = fmaxf(speed_mps, 0.0f) *
         fabsf(tanf(steering_rad));
-    const float blend = yaw_surface_blend_weight(demand_q) *
+    const float blend = yaw_surface_blend_weight(demand_q, steering_rad) *
         yaw_surface_speed_blend_weight(speed_mps);
     const float empirical = yaw_surface_value(speed_mps, steering_rad).yaw_rate_rps;
     return legacy + blend * (empirical - legacy);
@@ -640,16 +760,16 @@ float vehicle_model_steering_for_curvature_at_speed(
 
 static float yaw_rate_response(
     float speed_mps, float steering_rad, float yaw_rate_radps, float time_step,
-    float path_curvature)
+    float path_curvature, float physical_steering_rate_radps)
 {
     /* Use the identified first-order source-response map directly.  The
      * newer tanh/u^2 saturation looked plausible offline but failed the live
      * authority A/B at the first high-curvature transition: it caused the
      * N30 steering solution to reverse near s=34.6 m.  This is a Unity
      * response fit, not a real-car tire or friction model. */
-    const float steady_yaw_rate = yaw_steady_response(
+    float steady_yaw_rate = yaw_steady_response(
         speed_mps, steering_rad, path_curvature);
-    const float response_time_constant =
+    float response_time_constant =
         active_yaw_rate_parameters.low_speed_response_time_constant_s > 0.0f
         ? active_yaw_rate_parameters.response_time_constant_s +
             (active_yaw_rate_parameters.low_speed_response_time_constant_s -
@@ -657,6 +777,30 @@ static float yaw_rate_response(
             expf(-fmaxf(speed_mps, 0.0f) /
                 active_yaw_rate_parameters.low_speed_transition_speed_mps)
         : active_yaw_rate_parameters.response_time_constant_s;
+    if (active_yaw_rate_surface.enabled &&
+        active_yaw_rate_surface.hold_response_time_constant_s > 0.0f) {
+        const float demand_q = fmaxf(speed_mps, 0.0f) *
+            fabsf(tanf(steering_rad));
+        const float phase_t = clampf_local(
+            (fabsf(physical_steering_rate_radps) -
+             active_yaw_rate_surface.hold_rate_full_radps) /
+            (active_yaw_rate_surface.hold_rate_zero_radps -
+             active_yaw_rate_surface.hold_rate_full_radps), 0.0f, 1.0f);
+        const float moving_weight = phase_t * phase_t * (3.0f - 2.0f * phase_t);
+        const float hold_weight = 1.0f - moving_weight;
+        const float support = yaw_surface_blend_weight(demand_q, steering_rad) *
+            yaw_surface_speed_blend_weight(speed_mps);
+        /* The equilibrium map was validated on held steering, not active
+         * turn-in/unwind. Fade its contribution with the same causal phase
+         * gate as the fitted hold time constant. */
+        const float legacy_steady_yaw_rate = legacy_yaw_steady_response(
+            speed_mps, steering_rad, path_curvature);
+        steady_yaw_rate = legacy_steady_yaw_rate + hold_weight *
+            (steady_yaw_rate - legacy_steady_yaw_rate);
+        response_time_constant += support * hold_weight *
+            (active_yaw_rate_surface.hold_response_time_constant_s -
+             response_time_constant);
+    }
     const float retention = expf(-time_step / response_time_constant);
     return retention * yaw_rate_radps +
         (1.0f - retention) * steady_yaw_rate;
@@ -959,13 +1103,29 @@ static MpcJet_t yaw_residual_rate_jet(
     const MpcJet_t tracking_gate = jet_subtract(jet_constant(1.0f),
         jet_smoothstep(speed_deficit, model->speed_deficit_full_mps,
             model->speed_deficit_zero_mps, stage, linearization));
-    const MpcJet_t steering_gate = jet_smoothstep(abs_delta,
+    MpcJet_t steering_gate = jet_smoothstep(abs_delta,
         model->abs_steering_zero_rad, model->abs_steering_full_rad,
         stage, linearization);
+    if (model->abs_steering_upper_zero_rad > 0.0f) {
+        const MpcJet_t steering_upper_gate = jet_subtract(jet_constant(1.0f),
+            jet_smoothstep(abs_delta, model->abs_steering_upper_full_rad,
+                model->abs_steering_upper_zero_rad, stage, linearization));
+        steering_gate = jet_multiply(steering_gate, steering_upper_gate);
+    }
+    MpcJet_t actual_speed_gate = jet_constant(1.0f);
+    if (model->actual_speed_upper_zero_mps > 0.0f) {
+        actual_speed_gate = jet_multiply(
+            jet_smoothstep(x[2], model->actual_speed_zero_mps,
+                model->actual_speed_full_mps, stage, linearization),
+            jet_subtract(jet_constant(1.0f),
+                jet_smoothstep(x[2], model->actual_speed_upper_full_mps,
+                    model->actual_speed_upper_zero_mps, stage, linearization)));
+    }
     return jet_multiply(jet_constant(model->gain),
         jet_multiply(correction,
             jet_multiply(target_gate,
-                jet_multiply(tracking_gate, steering_gate))));
+                jet_multiply(tracking_gate,
+                    jet_multiply(steering_gate, actual_speed_gate)))));
 }
 
 static unsigned int mask_popcount(uint16_t mask)
@@ -1061,7 +1221,7 @@ static int vehicle_model_step_scalar(
     const float u_mid = 0.5f * (u0 + u_next);
 
     const float r_next = yaw_rate_response(
-        u_mid, actual_next, state->r, dt, path_curvature) + dt *
+        u_mid, actual_next, state->r, dt, path_curvature, actual_rate) + dt *
         yaw_residual_rate_scalar(state, control, path_curvature, acceleration);
     const float r_mid = 0.5f * (state->r + r_next);
     const float denominator0 = 1.0f - path_curvature * state->e_y;
@@ -1204,23 +1364,22 @@ static int vehicle_model_step_impl(
         MPC_STAGE_CLIPPED_BODY_SPEED, stage, linearization);
     MpcJet_t u_mid = jet_multiply(jet_constant(0.5f), jet_add(u0, u_next));
 
+    MpcJet_t yaw_response_time_constant;
     MpcJet_t yaw_retention;
     if (active_yaw_rate_parameters.low_speed_response_time_constant_s > 0.0f) {
         const MpcJet_t speed_decay = jet_exponential(jet_multiply(
             jet_constant(-1.0f /
                 active_yaw_rate_parameters.low_speed_transition_speed_mps),
             u_mid));
-        const MpcJet_t response_time_constant = jet_add(
+        yaw_response_time_constant = jet_add(
             jet_constant(active_yaw_rate_parameters.response_time_constant_s),
             jet_multiply(jet_constant(
                 active_yaw_rate_parameters.low_speed_response_time_constant_s -
                 active_yaw_rate_parameters.response_time_constant_s),
                 speed_decay));
-        yaw_retention = jet_exponential(jet_divide(
-            jet_constant(-dt), response_time_constant));
     } else {
-        yaw_retention = jet_constant(expf(
-            -dt / active_yaw_rate_parameters.response_time_constant_s));
+        yaw_response_time_constant = jet_constant(
+            active_yaw_rate_parameters.response_time_constant_s);
     }
     const float steering_start = active_yaw_rate_parameters.steering_gain_start_rad;
     const float steering_end = active_yaw_rate_parameters.steering_gain_end_rad;
@@ -1232,6 +1391,20 @@ static int vehicle_model_step_impl(
         actual_next, jet_constant(steering_end), steering_end, linearization);
     mark_nonsmooth_difference(
         actual_next, jet_constant(-steering_end), steering_end, linearization);
+    if (active_yaw_rate_surface.enabled &&
+        active_yaw_rate_surface.steering_blend_end_rad > 0.0f) {
+        const float boundaries[] = {
+            active_yaw_rate_surface.steering_blend_start_rad,
+            active_yaw_rate_surface.steering_blend_full_start_rad,
+            active_yaw_rate_surface.steering_blend_full_end_rad,
+            active_yaw_rate_surface.steering_blend_end_rad};
+        for (size_t i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); ++i) {
+            mark_nonsmooth_difference(actual_next,
+                jet_constant(boundaries[i]), boundaries[i], linearization);
+            mark_nonsmooth_difference(actual_next,
+                jet_constant(-boundaries[i]), boundaries[i], linearization);
+        }
+    }
     const float path_gain = vehicle_model_yaw_rate_gain_for_curvature(path_curvature);
     const float steering_magnitude = fabsf(actual_next.value);
     MpcJet_t yaw_gain = jet_constant(
@@ -1284,29 +1457,74 @@ static int vehicle_model_step_impl(
             }
         }
 
-        const float q_blend = yaw_surface_blend_weight(demand_q);
+        const float q_width = active_yaw_rate_surface.blend_q_end -
+            active_yaw_rate_surface.blend_q_start;
+        const float q_t = clampf_local(
+            (demand_q - active_yaw_rate_surface.blend_q_start) / q_width,
+            0.0f, 1.0f);
+        const float q_blend = q_t * q_t * (3.0f - 2.0f * q_t);
+        const float steering_blend =
+            yaw_surface_steering_blend_weight(actual_next.value);
         const float speed_blend = yaw_surface_speed_blend_weight(u_mid.value);
-        MpcJet_t blend = jet_constant(q_blend * speed_blend);
+        MpcJet_t blend = jet_constant(
+            q_blend * steering_blend * speed_blend);
         blend.differentiated = demand_q_jet.differentiated ||
-            u_mid.differentiated;
+            u_mid.differentiated || actual_next.differentiated;
         if (blend.differentiated) {
             const float q_blend_slope = yaw_surface_blend_slope(demand_q);
+            const float steering_blend_slope =
+                yaw_surface_steering_blend_slope(actual_next.value);
             const float speed_blend_slope =
                 yaw_surface_speed_blend_slope(u_mid.value);
             for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
-                blend.derivative[i] = speed_blend * q_blend_slope *
-                    demand_q_jet.derivative[i] + q_blend * speed_blend_slope *
-                    u_mid.derivative[i];
+                blend.derivative[i] = speed_blend * steering_blend *
+                    q_blend_slope * demand_q_jet.derivative[i] +
+                    speed_blend * q_blend * steering_blend_slope *
+                        actual_next.derivative[i] +
+                    q_blend * steering_blend * speed_blend_slope *
+                        u_mid.derivative[i];
             }
         }
+        MpcJet_t response_blend = blend;
+        if (active_yaw_rate_surface.hold_response_time_constant_s > 0.0f) {
+            const float rate_t = clampf_local(
+                (fabsf(actual_rate.value) -
+                 active_yaw_rate_surface.hold_rate_full_radps) /
+                (active_yaw_rate_surface.hold_rate_zero_radps -
+                 active_yaw_rate_surface.hold_rate_full_radps),
+                0.0f, 1.0f);
+            const float moving_weight = rate_t * rate_t * (3.0f - 2.0f * rate_t);
+            MpcJet_t hold_weight = jet_constant(1.0f - moving_weight);
+            hold_weight.differentiated = actual_rate.differentiated;
+            if (hold_weight.differentiated && rate_t > 0.0f && rate_t < 1.0f) {
+                const float rate_sign = actual_rate.value < 0.0f ? -1.0f : 1.0f;
+                const float derivative = -6.0f * rate_t * (1.0f - rate_t) /
+                    (active_yaw_rate_surface.hold_rate_zero_radps -
+                     active_yaw_rate_surface.hold_rate_full_radps) * rate_sign;
+                for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+                    hold_weight.derivative[i] = derivative * actual_rate.derivative[i];
+            }
+            response_blend = jet_multiply(blend, hold_weight);
+            const MpcJet_t hold_tau_delta = jet_subtract(jet_constant(
+                active_yaw_rate_surface.hold_response_time_constant_s),
+                yaw_response_time_constant);
+            yaw_response_time_constant = jet_add(yaw_response_time_constant,
+                jet_multiply(response_blend, hold_tau_delta));
+        }
+        yaw_retention = jet_exponential(jet_divide(
+            jet_constant(-dt), yaw_response_time_constant));
         yaw_steady = jet_add(legacy_yaw_steady, jet_multiply(
-            blend, jet_subtract(empirical, legacy_yaw_steady)));
+            response_blend, jet_subtract(empirical, legacy_yaw_steady)));
 
         for (int i = 1; i < active_yaw_rate_surface.speed_count; ++i) {
             mark_nonsmooth_difference(u_mid,
                 jet_constant(active_yaw_rate_surface.speed_mps[i]),
                 active_yaw_rate_surface.speed_mps[i], linearization);
         }
+    }
+    if (!active_yaw_rate_surface.enabled) {
+        yaw_retention = jet_exponential(jet_divide(
+            jet_constant(-dt), yaw_response_time_constant));
     }
     MpcJet_t r_next = jet_add(
         jet_multiply(yaw_retention, x[4]),

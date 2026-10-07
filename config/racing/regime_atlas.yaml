@@ -1,0 +1,429 @@
+schema_version: 1
+atlas_date: 2026-10-07
+purpose: >-
+  Evidence index for mechanism-specific vehicle specialists. This file is not
+  a runtime router, model fit, capability envelope, or optimizer constraint.
+
+policy:
+  shared_skeleton: config/racing/racing_vehicle_model.json
+  trusted_racing_baseline:
+    run_ids:
+      - practice_9g_parent_reproduced_20261006_r01
+      - practice_9g_parent_reproduced_20261006_r02
+    scored_laps: 20
+    best_lap_s: 5.7378
+    pooled_mean_lap_s: 5.7904
+    trajectory_sha256: a3c9cda87f5f2d809cd1c684f98e2af6d1fa43a7530c1af2d8fa38290bef4910
+  route_policy: >-
+    No specialist router is enabled by this atlas. Unsupported conditions do
+    not inherit a fabricated capability limit; production remains unchanged.
+  test_policy: >-
+    Prefer existing bags and offline replay. No new open-plane runs without a
+    specific data-gap finding and explicit user permission. Practice-track
+    batch runs are authorized for isolated candidate validation, using the
+    established recorder/watcher-first procedure and immediate abort on any
+    collision.
+  untouched_partitions: >-
+    Do not open or score held-out test/final-test rows. One combined archive's
+    arrays were materialized during schema inspection; no row values were
+    inspected or scored, but that archive is not a blind holdout.
+
+specialists:
+  - id: S0
+    mechanism: Shared actuator and discrete kinematic transition
+    status: trusted_baseline_equation_parity
+    runtime_status: production_baseline
+    support:
+      time_step_s: 0.025
+      wheelbase_m: 0.324
+      max_steering_rad: 0.523598
+      steering_rate_limit_rad_s: 3.2
+      steering_command_delay_steps: 1
+      measured_components:
+        - steering command queue and delay
+        - physical steering rate limit
+        - target-speed state and slew
+        - body-state and Frenet pose/progress transition
+      variables: [u, v, yaw_rate, physical_steering, steering_command, target_speed, curvature]
+      limits: >-
+        C/Python/CasADi parity establishes equation agreement, not truth
+        accuracy or a full-lap plant model.
+    partitions:
+      train: production constants and frozen implementation
+      validation: existing parity and stage-audit artifacts
+      test: not applicable to equation parity; no new test run
+    evidence:
+      - config/racing/racing_vehicle_model.json
+      - live_runs/racing_model_diagnostics_20261006/model_parity_shared_transition_v1.json
+
+  - id: Y0
+    mechanism: Ordinary P0 yaw response
+    status: trusted_baseline
+    runtime_status: production_baseline_keep_unchanged
+    support:
+      domain: P0 practice trajectory and its completed scored laps
+      joint_gap: No P0 samples at truth speed >= 6 m/s and |physical steering| >= 0.2 rad.
+      variables: [u, v, yaw_rate, physical_steering, reference_curvature, actuator_state]
+    partitions:
+      train: P0 r01 is used by some offline candidates; not a universal training set
+      validation: P0 r02 is opened for candidate replay
+      test: no untouched P0 candidate result established
+    evidence:
+      - live_runs/practice_9g_parent_reproduced_20261006_r01/run_manifest.json
+      - live_runs/practice_9g_parent_reproduced_20261006_r02/run_manifest.json
+      - docs/development/SUB5_LIMIT_PUSH_PROGRESS_20261006.md
+
+  - id: Y1
+    mechanism: Low-speed, high-steering front-authority collapse
+    status: fitted_and_whole_run_validated_candidate
+    runtime_status: default_mpc_enabled_behind_measured_support_gates
+    support:
+      measured_speed_knots_mps: [2.5, 3.0, 3.5]
+      full_weight_steering_magnitude_rad: [0.30, 0.42]
+      runtime_steering_taper_rad: [0.29, 0.30, 0.42, 0.45]
+      full_weight_hold_steering_rate_abs_max_rad_s: 0.05
+      hold_rate_fade_to_baseline_rad_s: 0.15
+      hold_time_constant_s: 0.1293144252
+      independent_validation:
+        - run_id: race_validation_r04
+          supported_samples: 610
+          baseline_yaw_rmse_rad_s: 1.8724
+          candidate_yaw_rmse_rad_s: 0.2111
+          reduction_fraction: 0.8872
+        - run_id: race_validation_r05
+          supported_samples: 619
+          baseline_yaw_rmse_rad_s: 1.8664
+          candidate_yaw_rmse_rad_s: 0.1730
+          reduction_fraction: 0.9073
+      practice_transfer:
+        p0_screen:
+          run_id: practice_y1_authority_loss_p0_screen_r01_20261007
+          scored_laps: 1
+          lap_time_s: 5.8388
+          collisions: 0
+          materially_active_samples: 0
+          truth_samples: 559
+          interpretation: "No Y1 exposure; this is not a Y1 lap-time result."
+        disabled_control_replay:
+          run_id: practice_y1_authority_loss_highsteer_control_r01_20261007
+          materially_active_samples: 3
+          active_yaw_rmse_rad_s: {baseline: 1.0999, candidate: 0.8446}
+          whole_preimpact_samples: 283
+          whole_preimpact_yaw_rmse_rad_s: {baseline: 0.4445, candidate: 0.5425}
+          interpretation: "Sparse active-sample improvement; whole-run one-step score regressed."
+        live_highsteer_pair:
+          control_run_id: practice_y1_authority_loss_highsteer_control_r01_20261007
+          treatment_run_id: practice_y1_authority_loss_highsteer_candidate_r01_20261007
+          control_first_collision_s: 7.5017
+          treatment_first_collision_s: 7.5731
+          control_collision_count_delta: 1
+          treatment_collision_count_delta: 2
+          completed_laps: 0
+          interpretation: "No demonstrated driveability or lap-time gain; watcher observed two increments in treatment bag."
+        failure_timeline:
+          classification: ODOM_WHEEL_BURST
+          run_ids:
+            - practice_y1_authority_loss_highsteer_control_r01_20261007
+            - practice_y1_authority_loss_highsteer_candidate_r01_20261007
+          interpretation: "Threshold/event signature only; not established crash causality."
+      lower_steering_edge:
+        conclusion: "response below 0.30 rad is non-constant, speed-dependent, and non-monotone in training captures"
+        validation_support: "dense at 0.15/0.30/0.42 rad; sparse near 0.20-0.25 rad"
+        runtime_policy: "baseline through 0.29 rad; 0.29-0.30 is a continuity taper, not a learned claim"
+      variables: [u, v, yaw_rate, physical_steering, steering_rate, phase, throttle_feedback, rear_wheel_speeds]
+      transition_model: "r_next = r_eq(u, steering) + (r-r_eq)*exp(-dt/tau)"
+      phase_policy: "hold tau is runtime-active; sparse turn-in/unwind tau fits remain diagnostic"
+      unsupported_regions: "legacy response is retained outside measured speed/steering/rate support"
+    partitions:
+      train:
+        - y1_targeted_retry
+        - race_train_r02
+        - race_train_r03
+      validation:
+        - race_validation_r04
+        - race_validation_r05
+      test: "test/final-test partitions not opened"
+    evidence:
+      - live_runs/racing_model_diagnostics_20261007/y1_authority_loss_fit/report.json
+      - live_runs/racing_model_diagnostics_20261007/y1_authority_loss_fit/yaw_response_surface_y1.csv
+      - live_runs/racing_model_diagnostics_20261007/y1_authority_loss_fit/practice_transfer_existing_r02/report.json
+      - f1tenth_mpc/config/mpc_practice_candidate_y1_authority_loss.yaml
+      - f1tenth_mpc/config/mpc_competition.yaml
+      - f1tenth_mpc/config/yaw_response_surface_y1.csv
+      - config/racing/y1_authority_loss_optimizer_candidate.yaml
+      - live_runs/racing_model_diagnostics_20261007/y1_authority_loss_fit/current_source_control_replay_r01/report.json
+      - live_runs/racing_candidate_failure_atlas_y1_20261007/failure_atlas.json
+      - docs/development/REGIME_ATLAS_20261007.md
+
+  - id: Y2
+    mechanism: Moderate/high-speed, low/moderate-steering yaw response
+    status: diagnostic_mismatch_evidence_candidate_boundary_unresolved
+    runtime_status: not_integrated
+    support:
+      observed_practice_failure:
+        speed_mps_approx: [6.0, 6.1]
+        physical_steering_rad_approx: 0.13
+        predicted_yaw_rate_rad_s_approx: 2.12
+        measured_yaw_rate_rad_s_approx: 1.4
+      other_inputs: [u, v, yaw_rate, physical_steering, steering_rate, longitudinal_acceleration, yaw_history]
+      boundary: The failure observation is one joint point, not a numeric regime threshold.
+    partitions:
+      train:
+        - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/highspeed_verified_steering_training_final_20261002/manifest.json
+        - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/dynamic_steering_r02_continuous_train_20261002/manifest.json
+      validation:
+        - open-plane high-speed response captures summarized in the cited response atlas
+        - pre-impact practice candidate runs are diagnostics, not independent candidate validation
+      test: no untouched Y2 candidate score
+    evidence:
+      - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/highspeed_verified_steering_response_atlas_20261002/response_atlas.json
+      - live_runs/racing_model_diagnostics_20261006/openplane_yaw_residual_multispeed_r05_gated_v3.json
+      - live_runs/racing_model_diagnostics_20261006/openplane_yaw_residual_multispeed_r07_gated_v3.json
+      - live_runs/practice_queue_candidate_envelope1p0_fullband_yaw_empirical_r03_20261006/run_manifest.json
+      - docs/development/SUB5_LIMIT_PUSH_PROGRESS_20261006.md
+
+  - id: Y3
+    mechanism: Steering reversal, turn-in, unwind, and yaw-rate memory
+    status: candidate_data_present_no_specialist_fit
+    runtime_status: not_integrated
+    support:
+      exact_source_capture:
+        run_id: openplane_race_domain_dynamic_steering_train_r02_20261002
+        samples: 2022
+        observed_u_rear_mps: [0.0, 7.7801]
+        observed_physical_steering_rad: [-0.5236, 0.5236]
+        observed_yaw_rate_rad_s: [-1.9513, 1.9511]
+        observed_throttle_feedback: [0.0, 0.5]
+      phase_sources:
+        - openplane_subnet_highsteer_transients_train_r02_20261004
+        - openplane_subnet_highsteer_transients_train_r03_20261004
+        - openplane_subnet_highsteer_transients_validation_r01_20261004
+        - openplane_subnet_highsteer_transients_validation_r02_20261004
+        - openplane_subnet_highsteer_transients_validation_r03_20261004
+      joint_support_warning: >-
+        Per-channel extrema are marginal and must not be combined as if they
+        occurred together. The one dynamic-steering capture is train-only.
+      boundary: No response-derived Y3 boundary has been published.
+    partitions:
+      train:
+        - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/dynamic_steering_r02_continuous_train_20261002/manifest.json
+        - high-steering transient training captures listed above
+      validation: high-steering transient validation captures listed above
+      test: no untouched Y3 candidate score
+    evidence:
+      - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/dynamic_steering_r02_continuous_train_20261002/manifest.json
+      - docs/development/SUBNET_REFERENCE_BODY_MODEL_PROGRESS_20261004.md
+      - docs/development/SUB5_LIMIT_PUSH_PROGRESS_20261006.md
+
+  - id: Y4
+    mechanism: High-speed, high-steering response
+    status: diagnostic_only
+    runtime_status: not_integrated
+    support:
+      environment: open_plane_only
+      observed_joint_support:
+        speed_mps: [7.0, 9.0]
+        abs_physical_steering_rad_min: 0.30
+        count_in_one_training_run: 695
+        count_with_abs_steering_rad_at_least_0_40: 326
+      independent_validation:
+        target_speed_mps: 7.5
+        abs_steering_targets_rad: [0.30, 0.42]
+        observed_speed_max_mps: 8.072
+        samples_at_speed_ge_7_5_and_abs_steering_ge_0_40_per_capture: 316
+        capture_count: 2
+      limitation: >-
+        Open-plane support only. It does not establish practice transfer,
+        production odometry accuracy, or a safe capability limit.
+    partitions:
+      train:
+        - openplane_highsteer_75_train_r02
+        - openplane_highsteer_75_train_r03_20261004
+      validation:
+        - openplane_highsteer_75_validation_r01
+        - openplane_highsteer_75_validation_r02
+        - openplane_highsteer_75_validation_r03_20261004
+      test: no untouched Y4 candidate score
+    evidence:
+      - docs/development/SUBNET_REFERENCE_BODY_MODEL_PROGRESS_20261004.md
+      - live_runs/openplane_highsteer_75_train_r02/run/run_0.db3
+      - live_runs/openplane_highsteer_75_validation_r01/run/run_0.db3
+      - live_runs/openplane_highsteer_75_validation_r02/run/run_0.db3
+      - live_runs/openplane_highsteer_75_train_r03_20261004/run/run_0.db3
+      - live_runs/openplane_highsteer_75_validation_r03_20261004/run/run_0.db3
+      - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/highsteer_75_heldout_validation_source_20261002/manifest.json
+
+  - id: Y5
+    mechanism: Very-high-speed, low-steering frontier response
+    status: diagnostic_only
+    runtime_status: not_integrated
+    support:
+      paired_frontier_targets:
+        speed_and_steering_magnitudes_rad:
+          - {speed_mps: 9.5, abs_steering_rad: [0.14, 0.18, 0.20]}
+          - {speed_mps: 10.5, abs_steering_rad: [0.14, 0.18, 0.20]}
+          - {speed_mps: 11.1, abs_steering_rad: [0.12, 0.16, 0.20]}
+        turns: [left, right]
+        action: bounded_throttle_reduction_step_vs_ramp
+      replication: Three independent 11.1 m/s replication captures exist.
+      limitation: These are open-plane throttle-reduction interventions, not a yaw model or track-feasibility surface.
+    partitions:
+      train: earlier high-speed response captures
+      validation: frontier_validation_ext r01-r03 and 11mps replication captures
+      test: no untouched Y5 candidate score
+    evidence:
+      - docs/development/SWERVE_THROTTLE_CONTROL_AND_MODEL_PROGRESS_20261006.md
+      - live_runs/derived_dynamics_learning_20260928/swerve_throttle_slew_20261006/frontier_validation_ext_all3_pair_analysis.json
+      - live_runs/derived_dynamics_learning_20260928/swerve_throttle_slew_20261006/frontier_validation_11mps_all3_pair_analysis.json
+
+  - id: L0
+    mechanism: Ordinary steady longitudinal drive
+    status: trusted_production_baseline
+    runtime_status: production_baseline
+    support:
+      source_experiment: openplane_throttle_5pct_5deg_20260930_r04 and r05_resume
+      conditions: 754 fixed-steering/throttle condition keys, two reset-isolated repeats per key
+      variables: [throttle_command, throttle_feedback, u, rear_left_wheel_speed, rear_right_wheel_speed, steering]
+      limitation: >-
+        Fixed-steering transition coverage is not a recursively accurate plant;
+        the previously reported held-out-steering endpoint-speed fit was poor.
+    partitions:
+      train: r04 and r05 source sweeps are development evidence
+      validation: prior held-out-steering fit was opened and failed to generalize
+      test: no new test opened
+    evidence:
+      - docs/development/VEHICLE_DATA_INVENTORY_AND_ACTIONABLE_RESULTS_20261007.md
+      - live_runs/openplane_throttle_5pct_5deg_20260930_r04/throttle_transition_analysis.json
+      - live_runs/openplane_throttle_5pct_5deg_20260930_r05_resume/throttle_transition_analysis.json
+
+  - id: L1
+    mechanism: Narrow positive-throttle pickup and wheelspin transient
+    status: offline_response_candidate_not_full_plant
+    runtime_status: disabled_no_action_shaper_promotion
+    support:
+      fitted_response: paired step-minus-ramp effect in exact measured conditions
+      training_pairs: 333
+      training_capture_count: 13
+      training_run_ids:
+        - openplane_swerve_throttle_slew_train_r01_20261006
+        - openplane_swerve_throttle_slew_train_r02_20261006
+        - openplane_swerve_throttle_slew_train_r03_20261006
+        - openplane_swerve_throttle_slew_train_r04_20261006
+        - openplane_swerve_throttle_slew_train_r05_20261006
+        - openplane_swerve_throttle_up_frontier_train_r01_20261007
+        - openplane_swerve_throttle_up_frontier_train_r02_20261007
+        - openplane_swerve_throttle_rate_racedomain_train_v4p5_r01_20261007
+        - openplane_swerve_throttle_rate_racedomain_train_v4p5_r02_20261007
+        - openplane_swerve_throttle_rate_racedomain_train_v6p5_r01_20261007
+        - openplane_swerve_throttle_rate_racedomain_train_v6p5_r02_20261007
+        - openplane_swerve_throttle_rate_racedomain_train_v7p5_r01_20261007
+        - openplane_swerve_throttle_rate_racedomain_train_v7p5_r02_20261007
+      held_out_validation_pairs: 96
+      held_out_validation_capture_count: 4
+      validation_run_ids:
+        - openplane_swerve_throttle_rate_racedomain_validation_v6p5_r01_20261007
+        - openplane_swerve_throttle_rate_racedomain_validation_v6p5_r02_20261007
+        - openplane_swerve_throttle_rate_racedomain_validation_v7p5_r01_20261007
+        - openplane_swerve_throttle_rate_racedomain_validation_v7p5_r02_20261007
+      held_out_response_rmse:
+        rear_wheel_body_mismatch_mps: {exact_lookup: 0.01375, coarse_baseline: 0.13327}
+        early_mismatch_0_10_to_0_35_s_mps: {exact_lookup: 0.04174, coarse_baseline: 0.20101}
+        early_wheel_slip_proxy_0_10_to_0_35: {exact_lookup: 0.00603, coarse_baseline: 0.02542}
+        integrated_longitudinal_acceleration_mps2: {exact_lookup: 0.06394, coarse_baseline: 0.44399, gain_confirmed: false}
+      example_condition:
+        speed_mps: 6.5
+        abs_steering_rad: 0.08
+        throttle_increment: 0.08
+        ramp_duration_s: 0.15
+        validation: two independent captures matched the training action direction
+      outputs: [rear_wheel_body_speed_mismatch, wheel_slip_proxy, longitudinal_acceleration]
+      features: [speed_target_mps, throttle_delta_direction, throttle_delta_norm, throttle_rise_rate_norm_per_sec, abs_steering_command_rad, turn_direction]
+      limitation: >-
+        Predicts a local action contrast, not absolute state evolution. The
+        acceleration result is not a demonstrated general gain; practice
+        transfer has not improved lap time.
+    partitions:
+      train: 333 paired interventions in 13 captures
+      validation: 96 paired interventions in 4 held-out captures; opened for confirmatory scoring
+      test: sealed splits were not loaded for this artifact
+    evidence:
+      - live_runs/derived_dynamics_learning_20260928/swerve_throttle_slew_20261007/empirical_throttle_response_confirmatory_20261007.json
+      - docs/development/VEHICLE_DATA_INVENTORY_AND_ACTIONABLE_RESULTS_20261007.md
+      - docs/development/LOWSTEER_THROTTLE_SLEW_VALIDATION_20261007.md
+
+  - id: L2
+    mechanism: High-steering positive-throttle action cost
+    status: offline_action_table_only
+    runtime_status: not_integrated
+    support:
+      measured_conditions: >-
+        Paired swerve/throttle changes span 4.5, 6.5, 7.5, and 8.0 m/s
+        experiments; steering conditions include 0.30 and 0.42 rad in the
+        high-steer cohorts, both turn signs, and multiple throttle increments
+        and ramp durations. Consult exact capture/cell rows in the referenced
+        analysis artifacts; do not merge them into one global throttle law.
+      measured_outputs: [wheel_body_mismatch, encoder_slip_proxy, body_acceleration, roll, roll_rate]
+      transition_evidence: >-
+        At 8 m/s and a +0.08 throttle change with a 0.30 s ramp, the body
+        acceleration contrast changes sign between 0.30 and 0.42 rad steering.
+        This is an observed bracket, not a continuous steering threshold.
+    partitions:
+      train: paired intervention training captures
+      validation: separate whole-capture cohorts exist and are opened in saved analyses
+      test: sealed for the confirmatory response artifact
+    evidence:
+      - docs/development/LOWSTEER_THROTTLE_SLEW_VALIDATION_20261007.md
+      - docs/development/SWERVE_THROTTLE_CONTROL_AND_MODEL_PROGRESS_20261006.md
+      - live_runs/derived_dynamics_learning_20260928/swerve_throttle_slew_20261007/all_approved_train_validation_response_surface.csv
+
+  - id: L3
+    mechanism: Active braking and brake release
+    status: dedicated_train_validation_fixtures_model_gate_pending
+    runtime_status: separate_from_drive_specialists
+    support:
+      fixture_count: 14
+      splits: {train: 7, validation: 7}
+      observed_fixture_speed_before_brake_mps: [7.0139, 11.0741]
+      observed_commanded_steering_rad: [-0.14, 0.14]
+      events: [active_brake, release]
+      semantics: Zero normalized throttle is active braking in this interface; it is not a coast command.
+      limitation: Fixtures exist, but plant replay/scoring against them remains pending.
+    partitions:
+      train: openplane_race_domain_moderate_braking_train_r01
+      validation: openplane_race_domain_moderate_braking_validation_r01
+      test: held-out test rows remain sealed
+    evidence:
+      - live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/braking_wheel_regression_fixtures_v1.json
+      - docs/development/MASTER_VEHICLE_MODEL_ODOM_MPC_PROGRESS_20261001.md
+
+  - id: L4
+    mechanism: Very-high-speed throttle reduction response
+    status: diagnostic_only
+    runtime_status: not_integrated
+    support:
+      speed_and_steering_magnitudes_rad:
+        - {speed_mps: 9.5, abs_steering_rad: [0.14, 0.18, 0.20]}
+        - {speed_mps: 10.5, abs_steering_rad: [0.14, 0.18, 0.20]}
+        - {speed_mps: 11.1, abs_steering_rad: [0.12, 0.16, 0.20]}
+      turns: [left, right]
+      intervention: matched throttle-reduction step_vs_ramp, reset-isolated
+      repeated_11_1mps_captures: 3
+      limitation: Not a general drive/brake model or a proven lap-time policy.
+    partitions:
+      train: earlier throttle frontier captures
+      validation: three independent extended frontier captures plus three 11.1 m/s replication captures
+      test: no untouched L4 policy score
+    evidence:
+      - docs/development/SWERVE_THROTTLE_CONTROL_AND_MODEL_PROGRESS_20261006.md
+      - live_runs/derived_dynamics_learning_20260928/swerve_throttle_slew_20261006/frontier_validation_ext_all3_pair_analysis.json
+      - live_runs/derived_dynamics_learning_20260928/swerve_throttle_slew_20261006/frontier_validation_11mps_all3_pair_analysis.json
+
+artifact_integrity:
+  combined_archive:
+    path: live_runs/derived_dynamics_learning_20260928/full_modeling_reset_20261001/replacement_offline_sim_raceline_20261002/replacement_teacher_dataset_v2_20261004/openplane_dynamics.npz
+    disposition: not_blind_after_schema_introspection
+    reason: >-
+      The archive includes train, validation, test, and final_test run labels
+      in shared arrays. Shape inspection materialized NPZ arrays; no row-level
+      test values were inspected, filtered, or scored. Do not use its held-out
+      rows as sealed evidence.

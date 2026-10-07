@@ -31,6 +31,13 @@ class ActuatorInterface(Node):
         "throttle_rise_regime_speed_max_mps",
         "throttle_rise_regime_min_abs_steering_rad",
         "throttle_rise_regime_max_abs_steering_rad",
+        "throttle_rise_event_enabled", "throttle_rise_event_rate_per_sec",
+        "throttle_rise_event_speed_min_mps",
+        "throttle_rise_event_speed_max_mps",
+        "throttle_rise_event_min_abs_steering_rad",
+        "throttle_rise_event_max_abs_steering_rad",
+        "throttle_rise_event_increment_min",
+        "throttle_rise_event_increment_max",
         "stop_speed_threshold_mps", "overspeed_coast_threshold_mps",
         "speed_hold_error_deadband_mps",
         "speed_hold_recovery_error_mps",
@@ -206,6 +213,14 @@ class ActuatorInterface(Node):
         self.declare_parameter("throttle_rise_regime_speed_max_mps", 0.0)
         self.declare_parameter("throttle_rise_regime_min_abs_steering_rad", 3.141592653589793)
         self.declare_parameter("throttle_rise_regime_max_abs_steering_rad", 3.141592653589793)
+        self.declare_parameter("throttle_rise_event_enabled", False)
+        self.declare_parameter("throttle_rise_event_rate_per_sec", 10.0)
+        self.declare_parameter("throttle_rise_event_speed_min_mps", 0.0)
+        self.declare_parameter("throttle_rise_event_speed_max_mps", 0.0)
+        self.declare_parameter("throttle_rise_event_min_abs_steering_rad", 0.0)
+        self.declare_parameter("throttle_rise_event_max_abs_steering_rad", 0.0)
+        self.declare_parameter("throttle_rise_event_increment_min", 0.0)
+        self.declare_parameter("throttle_rise_event_increment_max", 0.0)
         self.declare_parameter("stop_speed_threshold_mps", 0.02)
         # Small overshoots must be corrected with the calibrated throttle
         # feedback.  Zero throttle is active braking in this simulator, so
@@ -299,6 +314,24 @@ class ActuatorInterface(Node):
             throttle_rise_regime_max_abs_steering_rad=float(
                 self.get_parameter(
                     "throttle_rise_regime_max_abs_steering_rad").value),
+            throttle_rise_event_enabled=bool(
+                self.get_parameter("throttle_rise_event_enabled").value),
+            throttle_rise_event_rate_per_sec=float(
+                self.get_parameter("throttle_rise_event_rate_per_sec").value),
+            throttle_rise_event_speed_min_mps=float(
+                self.get_parameter("throttle_rise_event_speed_min_mps").value),
+            throttle_rise_event_speed_max_mps=float(
+                self.get_parameter("throttle_rise_event_speed_max_mps").value),
+            throttle_rise_event_min_abs_steering_rad=float(
+                self.get_parameter(
+                    "throttle_rise_event_min_abs_steering_rad").value),
+            throttle_rise_event_max_abs_steering_rad=float(
+                self.get_parameter(
+                    "throttle_rise_event_max_abs_steering_rad").value),
+            throttle_rise_event_increment_min=float(
+                self.get_parameter("throttle_rise_event_increment_min").value),
+            throttle_rise_event_increment_max=float(
+                self.get_parameter("throttle_rise_event_increment_max").value),
             stop_speed_threshold_mps=float(self.get_parameter("stop_speed_threshold_mps").value),
             overspeed_coast_threshold_mps=float(
                 self.get_parameter("overspeed_coast_threshold_mps").value),
@@ -356,7 +389,10 @@ class ActuatorInterface(Node):
         if any(p.name in {"feedforward_speed_mps", "feedforward_throttle"} for p in parameters):
             return SetParametersResult(
                 successful=False, reason="feedforward table changes require restart")
-        changes = {p.name: float(p.value) for p in parameters if p.name in self.TUNABLE}
+        changes = {
+            p.name: (bool(p.value) if isinstance(p.value, bool) else float(p.value))
+            for p in parameters if p.name in self.TUNABLE
+        }
         if not changes:
             return SetParametersResult(successful=True)
         try:

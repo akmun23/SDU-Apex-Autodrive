@@ -6,10 +6,13 @@
 #define MPC_MODEL_NU 2
 
 #ifdef MPC_ENABLE_FD_ORACLE
+/* Steering-state perturbations are smaller because the measured yaw surface
+ * has narrow, smooth support gates; 1e-3 rad crosses enough of a gate to make
+ * the central-difference oracle a poor local-derivative check. */
 static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f};
+    1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
+    1.0e-4f, 1.0e-4f};
 static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 #endif
 

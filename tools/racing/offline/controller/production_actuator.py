@@ -72,6 +72,19 @@ class ProductionActuator:
         }
         for name, default in optional_regime_defaults.items():
             values[name] = float(params.get(name, default))
+        values["throttle_rise_event_enabled"] = bool(
+            params.get("throttle_rise_event_enabled", False))
+        optional_event_defaults = {
+            "throttle_rise_event_rate_per_sec": 10.0,
+            "throttle_rise_event_speed_min_mps": 0.0,
+            "throttle_rise_event_speed_max_mps": 0.0,
+            "throttle_rise_event_min_abs_steering_rad": 0.0,
+            "throttle_rise_event_max_abs_steering_rad": 0.0,
+            "throttle_rise_event_increment_min": 0.0,
+            "throttle_rise_event_increment_max": 0.0,
+        }
+        for name, default in optional_event_defaults.items():
+            values[name] = float(params.get(name, default))
         self.config = SpeedControllerConfig(**values)
         self.config.validate()
         self.speed_controller = TargetSpeedController(self.config)

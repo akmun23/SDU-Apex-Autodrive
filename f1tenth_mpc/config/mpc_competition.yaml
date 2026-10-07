@@ -50,22 +50,25 @@
     yaw_rate_curvature_gain_end_per_m: 0.40
     yaw_rate_low_speed_response_time_constant_s: 0.0
     yaw_rate_low_speed_transition_speed_mps: 2.0
-    # Keep the practice/open-plane steady-state surface out of the default MPC
-    # until a history-conditioned version passes closed-loop validation. In
-    # r09 it predicted only ~1.2-1.5 rad/s at high demand where the racing car
-    # sustained ~2.8-3.2 rad/s, drove steering from ~0.2 to ~0.32 rad on the
-    # same opening corner, then rejected the rollout and collided at 4.93 s.
-    # The surface remains available through an explicit development overlay.
-    yaw_rate_response_surface_enabled: false
-    yaw_rate_response_surface_blend_q_start: 0.55
-    yaw_rate_response_surface_blend_q_end: 1.40
-    # Keep this measured 3–5 m/s surface from being clamped and applied as if
-    # it were valid at unrelated speeds. The smooth taper is inactive while
-    # the surface itself is disabled.
-    yaw_rate_response_surface_speed_blend_margin_mps: 0.50
-    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.50
+    # Y1 measured low-speed/high-steering response specialist. Independent
+    # whole-run captures improved supported one-step yaw RMSE by 88.7%/90.7%,
+    # and C/Python/CasADi parity passed. Keep the model strictly inside its
+    # measured steering/speed/hold support; ordinary steering stays on legacy.
+    yaw_rate_response_surface_enabled: true
+    yaw_rate_response_surface_file: /workspace/src/f1tenth_mpc/config/yaw_response_surface_y1.csv
+    yaw_rate_response_surface_blend_q_start: 0.30
+    yaw_rate_response_surface_blend_q_end: 0.70
+    yaw_rate_response_surface_speed_blend_margin_mps: 0.10
+    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.10
     yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.0
     yaw_rate_response_surface_high_speed_support_fadein_mps: 0.0
+    yaw_rate_response_surface_steering_blend_start_rad: 0.29
+    yaw_rate_response_surface_steering_blend_full_start_rad: 0.30
+    yaw_rate_response_surface_steering_blend_full_end_rad: 0.42
+    yaw_rate_response_surface_steering_blend_end_rad: 0.45
+    yaw_rate_response_surface_hold_time_constant_s: 0.1293144252
+    yaw_rate_response_surface_hold_rate_full_radps: 0.05
+    yaw_rate_response_surface_hold_rate_zero_radps: 0.15
 
     # Closed-loop authority profile: strong speed tracking, moderate lateral
     # tracking, low heading cost, and the BachelorProject lateral-velocity term.

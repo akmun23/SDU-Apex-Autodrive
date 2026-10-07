@@ -17,7 +17,14 @@ inline MpcYawRateResponseSurface_t load_yaw_response_surface_csv(
     const std::string & path, float blend_q_start, float blend_q_end,
     float speed_blend_margin_mps, float low_speed_blend_margin_mps,
     float low_speed_support_fadeout_mps = 0.0f,
-    float high_speed_support_fadein_mps = 0.0f)
+    float high_speed_support_fadein_mps = 0.0f,
+    float steering_blend_start_rad = 0.0f,
+    float steering_blend_full_start_rad = 0.0f,
+    float steering_blend_full_end_rad = 0.0f,
+    float steering_blend_end_rad = 0.0f,
+    float hold_response_time_constant_s = 0.0f,
+    float hold_rate_full_radps = 0.0f,
+    float hold_rate_zero_radps = 0.0f)
 {
     static constexpr std::array<float, MPC_YAW_SURFACE_Q_KNOTS> kSteeringKnots{
         0.15f, 0.20f, 0.21f, 0.22f, 0.23f,
@@ -34,6 +41,13 @@ inline MpcYawRateResponseSurface_t load_yaw_response_surface_csv(
     result.low_speed_blend_margin_mps = low_speed_blend_margin_mps;
     result.low_speed_support_fadeout_mps = low_speed_support_fadeout_mps;
     result.high_speed_support_fadein_mps = high_speed_support_fadein_mps;
+    result.steering_blend_start_rad = steering_blend_start_rad;
+    result.steering_blend_full_start_rad = steering_blend_full_start_rad;
+    result.steering_blend_full_end_rad = steering_blend_full_end_rad;
+    result.steering_blend_end_rad = steering_blend_end_rad;
+    result.hold_response_time_constant_s = hold_response_time_constant_s;
+    result.hold_rate_full_radps = hold_rate_full_radps;
+    result.hold_rate_zero_radps = hold_rate_zero_radps;
 
     std::string line;
     bool header_seen = false;

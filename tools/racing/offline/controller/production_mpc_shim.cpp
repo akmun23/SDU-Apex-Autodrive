@@ -123,25 +123,119 @@ MpcRtiCycleConfiguration_t load_config(const std::string & path,
         "yaw_rate_response_surface_low_speed_support_fadeout_mps", 0.0f);
     const float high_speed_support_fadein = fparam(params,
         "yaw_rate_response_surface_high_speed_support_fadein_mps", 0.0f);
+    const float steering_blend_start = fparam(params,
+        "yaw_rate_response_surface_steering_blend_start_rad", 0.0f);
+    const float steering_blend_full_start = fparam(params,
+        "yaw_rate_response_surface_steering_blend_full_start_rad", 0.0f);
+    const float steering_blend_full_end = fparam(params,
+        "yaw_rate_response_surface_steering_blend_full_end_rad", 0.0f);
+    const float steering_blend_end = fparam(params,
+        "yaw_rate_response_surface_steering_blend_end_rad", 0.0f);
+    const float hold_response_time_constant = fparam(params,
+        "yaw_rate_response_surface_hold_time_constant_s", 0.0f);
+    const float hold_rate_full = fparam(params,
+        "yaw_rate_response_surface_hold_rate_full_radps", 0.0f);
+    const float hold_rate_zero = fparam(params,
+        "yaw_rate_response_surface_hold_rate_zero_radps", 0.0f);
     const auto configured_surface_path = read_param<std::string>(
         params, "yaw_rate_response_surface_file", "");
     auto surface_path = std::filesystem::path(path).parent_path() /
         "yaw_response_surface.csv";
     if (!configured_surface_path.empty()) {
       const std::filesystem::path configured(configured_surface_path);
-      surface_path = configured.is_absolute()
-          ? configured : std::filesystem::path(path).parent_path() / configured;
+      if (configured.is_absolute()) {
+        surface_path = configured;
+        /* Runtime YAML uses the container mount path. When the same config is
+         * evaluated by this native offline shim on the host, resolve that
+         * mount-relative asset against the checked-out repository. */
+        constexpr const char * kWorkspaceSourcePrefix = "/workspace/src/";
+        const std::string configured_string = configured.string();
+        if (!std::filesystem::exists(surface_path) &&
+            configured_string.rfind(kWorkspaceSourcePrefix, 0) == 0) {
+          auto repository_root = std::filesystem::path(path).parent_path();
+          while (!repository_root.empty() &&
+                 !(std::filesystem::exists(repository_root / "f1tenth_mpc") &&
+                   std::filesystem::exists(repository_root / "live_runs"))) {
+            const auto parent = repository_root.parent_path();
+            if (parent == repository_root) break;
+            repository_root = parent;
+          }
+          const auto host_surface = repository_root /
+              configured_string.substr(std::char_traits<char>::length(
+                  kWorkspaceSourcePrefix));
+          if (std::filesystem::exists(host_surface)) surface_path = host_surface;
+        }
+      } else {
+        surface_path = std::filesystem::path(path).parent_path() / configured;
+      }
     }
     const auto surface = f1tenth_mpc::load_yaw_response_surface_csv(
         surface_path.string(), blend_start, blend_end, speed_blend_margin,
         low_speed_blend_margin, low_speed_support_fadeout,
-        high_speed_support_fadein);
+        high_speed_support_fadein, steering_blend_start,
+        steering_blend_full_start, steering_blend_full_end,
+        steering_blend_end, hold_response_time_constant,
+        hold_rate_full, hold_rate_zero);
     if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
       throw std::runtime_error("invalid production yaw-rate response surface");
     }
   } else {
     const MpcYawRateResponseSurface_t disabled_surface{};
     (void)vehicle_model_set_yaw_rate_response_surface(&disabled_surface);
+  }
+
+  MpcYawRateResidualModel_t yaw_residual =
+      vehicle_model_default_yaw_rate_residual_model();
+  yaw_residual.enabled = read_param<bool>(
+      params, "yaw_rate_residual_enabled", false) ? 1 : 0;
+  if (yaw_residual.enabled) {
+    yaw_residual.gain = fparam(params, "yaw_rate_residual_gain", 1.0f);
+    yaw_residual.correction_clip_radps2 = fparam(
+        params, "yaw_rate_residual_clip_radps2", 254.631492f);
+    const auto copy_float_sequence = [&params](
+        const char * name, float * destination, std::size_t expected) {
+      const auto values = params[name];
+      if (!values || !values.IsSequence() || values.size() != expected) {
+        throw std::runtime_error(std::string(name) +
+            " must have exactly " + std::to_string(expected) + " values");
+      }
+      for (std::size_t i = 0; i < expected; ++i) {
+        destination[i] = values[i].as<float>();
+      }
+    };
+    copy_float_sequence("yaw_rate_residual_feature_mean",
+        yaw_residual.feature_mean, MPC_YAW_RESIDUAL_FEATURES);
+    copy_float_sequence("yaw_rate_residual_feature_scale",
+        yaw_residual.feature_scale, MPC_YAW_RESIDUAL_FEATURES);
+    copy_float_sequence("yaw_rate_residual_coefficients",
+        yaw_residual.coefficients, MPC_YAW_RESIDUAL_COEFFICIENTS);
+    yaw_residual.target_speed_zero_mps = fparam(params,
+        "yaw_rate_residual_target_speed_zero_mps", 6.48f);
+    yaw_residual.target_speed_full_mps = fparam(params,
+        "yaw_rate_residual_target_speed_full_mps", 6.50f);
+    yaw_residual.speed_deficit_full_mps = fparam(params,
+        "yaw_rate_residual_speed_deficit_full_mps", 0.10f);
+    yaw_residual.speed_deficit_zero_mps = fparam(params,
+        "yaw_rate_residual_speed_deficit_zero_mps", 0.20f);
+    yaw_residual.abs_steering_zero_rad = fparam(params,
+        "yaw_rate_residual_abs_steering_zero_rad", 0.18f);
+    yaw_residual.abs_steering_full_rad = fparam(params,
+        "yaw_rate_residual_abs_steering_full_rad", 0.20f);
+    yaw_residual.actual_speed_zero_mps = fparam(params,
+        "yaw_rate_residual_actual_speed_zero_mps", 0.0f);
+    yaw_residual.actual_speed_full_mps = fparam(params,
+        "yaw_rate_residual_actual_speed_full_mps", 0.0f);
+    yaw_residual.actual_speed_upper_full_mps = fparam(params,
+        "yaw_rate_residual_actual_speed_upper_full_mps", 0.0f);
+    yaw_residual.actual_speed_upper_zero_mps = fparam(params,
+        "yaw_rate_residual_actual_speed_upper_zero_mps", 0.0f);
+    yaw_residual.abs_steering_upper_full_rad = fparam(params,
+        "yaw_rate_residual_abs_steering_upper_full_rad", 0.0f);
+    yaw_residual.abs_steering_upper_zero_rad = fparam(params,
+        "yaw_rate_residual_abs_steering_upper_zero_rad", 0.0f);
+  }
+  if (!vehicle_model_set_yaw_rate_residual_model(&yaw_residual)) {
+    throw std::runtime_error("invalid production yaw-rate residual model");
   }
 
   MpcRtiCycleConfiguration_t config{};

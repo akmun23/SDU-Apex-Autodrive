@@ -171,10 +171,35 @@ SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES = (
 LOW_SPEED_TRANSIENT_PROFILE = "race_domain_low_speed_highsteer_transients"
 LOW_SPEED_TRANSIENT_SPEEDS_MPS = (2.5, 3.0, 3.5)
 LOW_SPEED_TRANSIENT_STEERING_RAD = (0.30, 0.35, 0.40, 0.42)
+YAW_TRANSIENT_PROFILE = "race_domain_yaw_transition_transients"
+YAW_TRANSIENT_SPEEDS_MPS = (3.5, 3.75, 4.0)
+YAW_TRANSIENT_STEERING_RAD = (0.30, 0.35, 0.42)
+YAW_ATLAS_INTERPOLATION_PROFILE = "yaw_atlas_interpolation_validation"
+YAW_ATLAS_INTERPOLATION_POINTS = (
+    (4.25, 0.0875), (4.25, 0.2625), (6.75, 0.1625),
+    (7.75, 0.1625), (8.75, 0.0125), (10.25, 0.0375),
+)
+YAW_ATLAS_INTERPOLATION_REPEATS = 2
+YAW_LOW_ANGLE_RATE_PROFILE = "yaw_low_angle_rate_surface"
+YAW_LOW_ANGLE_RATE_SPEEDS_MPS = (4.25, 6.25, 8.25, 10.25)
+YAW_LOW_ANGLE_RATE_STEERING_RAD = (0.05, 0.075, 0.10, 0.125)
+YAW_LOW_ANGLE_RATE_MODES = (("step", 0.025), ("ramp", 0.30))
+YAW_LOW_ANGLE_RATE_REPEATS = 2
+YAW_TRANSIENT_PROFILES = (
+    LOW_SPEED_TRANSIENT_PROFILE, YAW_TRANSIENT_PROFILE,
+    YAW_ATLAS_INTERPOLATION_PROFILE, YAW_LOW_ANGLE_RATE_PROFILE,
+)
+
+
+def _is_yaw_transient_approach(label: str) -> bool:
+    return label.startswith(("approach_lowdyn_", "approach_yawdyn_",
+                             "approach_atlas_", "approach_lowyaw_"))
+
+
 RACE_DOMAIN_SPEED_GOVERNED_PROFILES = (
     *DYNAMIC_COUPLED_PROFILES,
     *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
-    LOW_SPEED_TRANSIENT_PROFILE,
+    *YAW_TRANSIENT_PROFILES,
 )
 SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD = (
     (4.5, (0.30, 0.42)),
@@ -1179,36 +1204,56 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     validate_speed=False,
                 ))
         return phases
-    if profile == LOW_SPEED_TRANSIENT_PROFILE:
+    if profile in YAW_TRANSIENT_PROFILES:
         # Static holds already cover these angles. This fills the transient
         # turn-in/unwind/reversal gap exposed by the practice collision, with
-        # a fresh spawn and matched speed for every signed condition.
+        # a fresh spawn and matched speed for every signed condition. The new
+        # yaw profile isolates the 3.5-4.0 m/s gap while leaving the established
+        # low-speed schedule byte-for-byte unchanged.
         rng = random.Random(seed)
-        speeds = list(LOW_SPEED_TRANSIENT_SPEEDS_MPS)
-        rng.shuffle(speeds)
-        for speed in speeds:
+        if profile == YAW_LOW_ANGLE_RATE_PROFILE:
+            if transition_speed_mps not in YAW_LOW_ANGLE_RATE_SPEEDS_MPS:
+                raise ValueError(
+                    f"{profile} supports only {YAW_LOW_ANGLE_RATE_SPEEDS_MPS}")
             conditions = [
-                (angle, sign)
-                for angle in LOW_SPEED_TRANSIENT_STEERING_RAD
-                for sign in (-1, 1)
+                (repeat, angle, rate_name, ramp_s, sign)
+                for repeat in range(1, YAW_LOW_ANGLE_RATE_REPEATS + 1)
+                for angle in YAW_LOW_ANGLE_RATE_STEERING_RAD
+                for rate_name, ramp_s in YAW_LOW_ANGLE_RATE_MODES
+                for sign in (-1.0, 1.0)
             ]
             rng.shuffle(conditions)
-            for angle, sign in conditions:
-                condition = f"v{speed:.1f}_a{angle:.2f}_turn{sign:+d}"
+            speed = transition_speed_mps
+            for repeat, angle, rate_name, ramp_s, sign in conditions:
+                condition = (
+                    f"r{repeat:02d}_v{speed:.2f}_a{angle:.4f}_"
+                    f"rate{rate_name}_turn{sign:+.0f}")
+                if rate_name == "step":
+                    turn_in, unwind, reversal = (
+                        PERIOD_SEC, PERIOD_SEC, PERIOD_SEC)
+                else:
+                    turn_in, unwind, reversal = ramp_s, ramp_s, ramp_s
+                turn_in_end = turn_in
+                hold_end = 0.70
+                unwind_end = hold_end + unwind
+                neutral_end = 1.20
+                reversal_end = neutral_end + reversal
+                reverse_hold_end = 1.95
+                return_end = reverse_hold_end + unwind
                 phases.extend((
                     Phase(
-                        f"approach_lowdyn_{condition}", 10.0, speed,
+                        f"approach_lowyaw_{condition}", 10.0, speed,
                         throttle_mode="race_domain_approach",
                         reach_speed_target=True,
                         condition_pair_id=condition,
                     ),
                     Phase(
-                        f"settle_lowdyn_{condition}", 0.75, speed,
+                        f"settle_lowyaw_{condition}", 0.75, speed,
                         throttle_mode="race_domain_hold",
                         condition_pair_id=condition,
                     ),
                     Phase(
-                        f"lowdyn_{condition}", 1.50, speed,
+                        f"lowyaw_{condition}", 2.75, speed,
                         throttle_mode="race_domain_hold",
                         validate_samples=True,
                         validate_speed=False,
@@ -1218,13 +1263,124 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                         steering_amplitude_rad=angle,
                         steering_waypoints=(
                             (0.00, 0.0),
-                            (0.15, sign * angle),
-                            (0.50, sign * angle),
-                            (0.80, 0.0),
-                            (1.00, -sign * 0.30),
-                            (1.25, -sign * 0.30),
-                            (1.45, 0.0),
+                            (turn_in_end, sign * angle),
+                            (hold_end, sign * angle),
+                            (unwind_end, 0.0),
+                            (neutral_end, 0.0),
+                            (reversal_end, -sign * angle),
+                            (reverse_hold_end, -sign * angle),
+                            (return_end, 0.0),
+                            (2.75, 0.0),
                         ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_ATLAS_INTERPOLATION_PROFILE:
+            conditions = [
+                (repeat, speed, angle, sign)
+                for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
+                for speed, angle in YAW_ATLAS_INTERPOLATION_POINTS
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for repeat, speed, angle, sign in conditions:
+                condition = (
+                    f"r{repeat:02d}_v{speed:.2f}_a{angle:.4f}_turn{sign:+.0f}")
+                phases.extend((
+                    Phase(
+                        f"approach_atlas_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_atlas_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"atlas_{condition}", 2.75, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.20, sign * angle),
+                            (0.70, sign * angle),
+                            (0.95, 0.0),
+                            (1.30, 0.0),
+                            (1.45, -sign * angle),
+                            (2.10, -sign * angle),
+                            (2.35, 0.0),
+                            (2.75, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        yaw_targeted = profile == YAW_TRANSIENT_PROFILE
+        speeds = list(YAW_TRANSIENT_SPEEDS_MPS if yaw_targeted
+                      else LOW_SPEED_TRANSIENT_SPEEDS_MPS)
+        steering_angles = (YAW_TRANSIENT_STEERING_RAD if yaw_targeted
+                           else LOW_SPEED_TRANSIENT_STEERING_RAD)
+        label_prefix = "yawdyn" if yaw_targeted else "lowdyn"
+        rng.shuffle(speeds)
+        for speed in speeds:
+            conditions = [
+                (angle, sign)
+                for angle in steering_angles
+                for sign in (-1, 1)
+            ]
+            rng.shuffle(conditions)
+            for angle, sign in conditions:
+                speed_label = f"{speed:.2f}" if yaw_targeted else f"{speed:.1f}"
+                condition = f"v{speed_label}_a{angle:.2f}_turn{sign:+d}"
+                steering_waypoints = (
+                    (
+                        (0.00, 0.0),
+                        (0.15, sign * angle),
+                        (0.75, sign * angle),
+                        (1.00, 0.0),
+                        (1.60, 0.0),
+                        (1.75, -sign * min(angle, 0.30)),
+                        (2.35, -sign * min(angle, 0.30)),
+                        (2.60, 0.0),
+                    ) if yaw_targeted else (
+                        (0.00, 0.0),
+                        (0.15, sign * angle),
+                        (0.50, sign * angle),
+                        (0.80, 0.0),
+                        (1.00, -sign * 0.30),
+                        (1.25, -sign * 0.30),
+                        (1.45, 0.0),
+                    )
+                )
+                phases.extend((
+                    Phase(
+                        f"approach_{label_prefix}_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_{label_prefix}_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"{label_prefix}_{condition}",
+                        2.75 if yaw_targeted else 1.50, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=steering_waypoints,
                     ),
                 ))
         return phases
@@ -1940,9 +2096,9 @@ class OpenPlaneExcitation:
             if timeout_s < required:
                 raise ValueError(
                     f"{profile} requires --timeout-s >= {required:g}")
-        if profile == LOW_SPEED_TRANSIENT_PROFILE:
+        if profile in YAW_TRANSIENT_PROFILES:
             reset_cycles = sum(
-                phase.label.startswith("approach_lowdyn_")
+                _is_yaw_transient_approach(phase.label)
                 for phase in phases)
             required = (
                 sum(phase.duration_s for phase in phases)
@@ -2080,7 +2236,7 @@ class OpenPlaneExcitation:
             + (len(self.dynamic_coupled_plan)
                if self.dynamic_coupled_plan else 0)
             + self.subnet_transient_reset_count
-            + sum(phase.label.startswith("approach_lowdyn_")
+            + sum(_is_yaw_transient_approach(phase.label)
                   for phase in self.phases)
             + sum(phase.label.startswith("approach_swerve_pair_")
                   for phase in self.phases)
@@ -2776,8 +2932,8 @@ class OpenPlaneExcitation:
               and next_phase.label.startswith("approach_subnet_")):
             self._begin_sim_reset(
                 now, f"completed {previous_phase.condition_pair_id}")
-        elif (self.profile == LOW_SPEED_TRANSIENT_PROFILE
-              and next_phase.label.startswith("approach_lowdyn_")):
+        elif (self.profile in YAW_TRANSIENT_PROFILES
+              and _is_yaw_transient_approach(next_phase.label)):
             self._begin_sim_reset(
                 now, f"completed {previous_phase.condition_pair_id}")
         elif (self.profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES
@@ -2906,6 +3062,9 @@ def main() -> int:
                                                "isolated_highsteer_multispeed",
                                                "race_domain_dynamic_steering",
                                                LOW_SPEED_TRANSIENT_PROFILE,
+                                               YAW_TRANSIENT_PROFILE,
+                                               YAW_ATLAS_INTERPOLATION_PROFILE,
+                                               YAW_LOW_ANGLE_RATE_PROFILE,
                                                "isolated_3to5_response_surface",
                                                "isolated_highspeed_crossfactor",
                                                "isolated_highspeed_tail",
@@ -3037,11 +3196,11 @@ def main() -> int:
         if args.timeout_s < required:
             parser.error(
                 f"race_domain_dynamic_steering requires --timeout-s >= {required:g}")
-    if args.profile == LOW_SPEED_TRANSIENT_PROFILE:
+    if args.profile in YAW_TRANSIENT_PROFILES:
         schedule = build_schedule(args.seed, args.profile,
                                   args.transition_speed_mps)
         reset_cycles = sum(
-            phase.label.startswith("approach_lowdyn_")
+            _is_yaw_transient_approach(phase.label)
             for phase in schedule)
         required = (
             sum(phase.duration_s for phase in schedule)
@@ -3050,7 +3209,7 @@ def main() -> int:
         )
         if args.timeout_s < required:
             parser.error(
-                f"{LOW_SPEED_TRANSIENT_PROFILE} requires --timeout-s >= {required:g}")
+                f"{args.profile} requires --timeout-s >= {required:g}")
 
     rclpy.init()
     if (not math.isfinite(args.transition_speed_mps)
@@ -3083,7 +3242,7 @@ def main() -> int:
             args.profile in ("full_input_excitation", "grid",
                              *DYNAMIC_COUPLED_PROFILES,
                              SUBNET_TRANSIENT_PROFILE,
-                             LOW_SPEED_TRANSIENT_PROFILE,
+                             *YAW_TRANSIENT_PROFILES,
                              *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES)):
         parser.error("--probe-dwell-s is unsupported for this fixed capture profile")
     experiment = OpenPlaneExcitation(args.seed, args.timeout_s, args.profile,

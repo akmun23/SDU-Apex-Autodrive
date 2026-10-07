@@ -13,6 +13,17 @@ from open_plane_excitation import (
     LOW_SPEED_TRANSIENT_PROFILE,
     LOW_SPEED_TRANSIENT_SPEEDS_MPS,
     LOW_SPEED_TRANSIENT_STEERING_RAD,
+    YAW_TRANSIENT_PROFILE,
+    YAW_TRANSIENT_SPEEDS_MPS,
+    YAW_TRANSIENT_STEERING_RAD,
+    YAW_ATLAS_INTERPOLATION_PROFILE,
+    YAW_ATLAS_INTERPOLATION_POINTS,
+    YAW_ATLAS_INTERPOLATION_REPEATS,
+    YAW_LOW_ANGLE_RATE_PROFILE,
+    YAW_LOW_ANGLE_RATE_SPEEDS_MPS,
+    YAW_LOW_ANGLE_RATE_STEERING_RAD,
+    YAW_LOW_ANGLE_RATE_MODES,
+    YAW_LOW_ANGLE_RATE_REPEATS,
     SWERVE_THROTTLE_SLEW_PROFILES,
     SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE,
     SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD,
@@ -54,6 +65,7 @@ from open_plane_excitation import (
     SIM_RESET_TIMEOUT_SEC,
     PROBE_START_TIMEOUT_SEC,
     _phase_steering_command,
+    _is_yaw_transient_approach,
     _slew_probe_command,
     build_schedule,
 )
@@ -169,6 +181,156 @@ class LowSpeedHighSteeringTransientScheduleTest(unittest.TestCase):
         second = labels(202610072)
         self.assertEqual(set(first), set(second))
         self.assertNotEqual(first, second)
+
+
+class YawTransitionScheduleTest(unittest.TestCase):
+    def test_targeted_speed_steering_matrix_has_matched_reset_approaches(self) -> None:
+        phases = build_schedule(202610071, YAW_TRANSIENT_PROFILE)
+        manoeuvres = [phase for phase in phases
+                      if phase.label.startswith("yawdyn_")]
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_yawdyn_")]
+        self.assertEqual(len(manoeuvres), 18)
+        self.assertEqual(len(approaches), 18)
+        expected = {
+            (speed, angle, sign)
+            for speed in YAW_TRANSIENT_SPEEDS_MPS
+            for angle in YAW_TRANSIENT_STEERING_RAD
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("yawdyn_"):
+                continue
+            condition = phase.condition_pair_id
+            self.assertIsNotNone(condition)
+            speed, angle, sign = condition.split("_")
+            observed.add((float(speed[1:]), float(angle[1:]), int(sign[4:])))
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_yawdyn_{condition}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_yawdyn_{condition}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertEqual(phase.duration_s, 2.75)
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertEqual(phase.steering_waypoints[0], (0.0, 0.0))
+            self.assertEqual(phase.steering_waypoints[-1], (2.60, 0.0))
+        self.assertEqual(observed, expected)
+
+    def test_seed_randomizes_order_without_changing_coverage(self) -> None:
+        def labels(seed: int) -> list[str]:
+            return [phase.label for phase in build_schedule(
+                seed, YAW_TRANSIENT_PROFILE)
+                    if phase.label.startswith("yawdyn_")]
+
+        first = labels(202610071)
+        second = labels(202610072)
+        self.assertEqual(set(first), set(second))
+        self.assertNotEqual(first, second)
+
+
+class YawAtlasInterpolationScheduleTest(unittest.TestCase):
+    def test_off_grid_points_are_reset_isolated_and_repeated_both_directions(self) -> None:
+        phases = build_schedule(202610071, YAW_ATLAS_INTERPOLATION_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("atlas_")]
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_atlas_")]
+        expected = {
+            (repeat, speed, angle, sign)
+            for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
+            for speed, angle in YAW_ATLAS_INTERPOLATION_POINTS
+            for sign in (-1, 1)
+        }
+        self.assertEqual(len(probes), len(expected))
+        self.assertEqual(len(approaches), len(expected))
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("atlas_"):
+                continue
+            condition = phase.condition_pair_id
+            self.assertIsNotNone(condition)
+            repeat, speed, angle, sign = condition.split("_")
+            observed.add((int(repeat[1:]), float(speed[1:]),
+                          float(angle[1:]), int(sign[4:])))
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_atlas_{condition}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_atlas_{condition}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertTrue(_is_yaw_transient_approach(
+                phases[index - 2].label))
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertEqual(phase.steering_waypoints[0], (0.0, 0.0))
+            self.assertEqual(phase.steering_waypoints[-1], (2.75, 0.0))
+        self.assertEqual(observed, expected)
+
+    def test_seed_randomizes_condition_order_without_changing_the_matrix(self) -> None:
+        def labels(seed: int) -> list[str]:
+            return [phase.label for phase in build_schedule(
+                seed, YAW_ATLAS_INTERPOLATION_PROFILE)
+                    if phase.label.startswith("atlas_")]
+
+        first = labels(202610071)
+        second = labels(202610072)
+        self.assertEqual(set(first), set(second))
+        self.assertNotEqual(first, second)
+
+
+class YawLowAngleRateScheduleTest(unittest.TestCase):
+    def test_reset_isolated_pair_matrix_covers_step_ramp_both_signs(self) -> None:
+        speed = 4.25
+        phases = build_schedule(202610071, YAW_LOW_ANGLE_RATE_PROFILE, speed)
+        probes = [phase for phase in phases if phase.label.startswith("lowyaw_")]
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_lowyaw_")]
+        expected = {
+            (repeat, speed, angle, mode, sign)
+            for repeat in range(1, YAW_LOW_ANGLE_RATE_REPEATS + 1)
+            for angle in YAW_LOW_ANGLE_RATE_STEERING_RAD
+            for mode, _ in YAW_LOW_ANGLE_RATE_MODES
+            for sign in (-1, 1)
+        }
+        self.assertEqual(len(probes), len(expected))
+        self.assertEqual(len(approaches), len(expected))
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("lowyaw_"):
+                continue
+            self.assertTrue(phase.condition_pair_id)
+            repeat, speed_token, angle_token, rate_token, turn_token = (
+                phase.condition_pair_id.split("_"))
+            condition = (int(repeat[1:]), float(speed_token[1:]),
+                         float(angle_token[1:]), rate_token[4:],
+                         int(turn_token[4:]))
+            observed.add(condition)
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_lowyaw_{phase.condition_pair_id}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_lowyaw_{phase.condition_pair_id}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertEqual(phase.duration_s, 2.75)
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            first_turn_duration = phase.steering_waypoints[1][0]
+            self.assertEqual(first_turn_duration,
+                             0.025 if rate_token == "ratestep" else 0.30)
+            self.assertEqual(phase.steering_waypoints[0], (0.0, 0.0))
+            self.assertEqual(phase.steering_waypoints[-1], (2.75, 0.0))
+        self.assertEqual(observed, expected)
+
+    def test_speed_blocks_are_explicit_and_invalid_speed_is_rejected(self) -> None:
+        self.assertIn(4.25, YAW_LOW_ANGLE_RATE_SPEEDS_MPS)
+        for speed in (4.25, 6.25, 8.25, 10.25):
+            self.assertEqual(len(build_schedule(
+                202610071, YAW_LOW_ANGLE_RATE_PROFILE, speed)), 96)
+        with self.assertRaises(ValueError):
+            build_schedule(202610071, YAW_LOW_ANGLE_RATE_PROFILE, 5.25)
 
 
 class HighSpeedSteeringFrontierScheduleTest(unittest.TestCase):

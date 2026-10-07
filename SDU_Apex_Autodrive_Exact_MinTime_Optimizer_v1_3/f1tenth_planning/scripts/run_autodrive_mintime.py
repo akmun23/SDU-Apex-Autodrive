@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="AutoDRIVE-specific minimum-lap-time optimizer")
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument(
+        "--vehicle-model-overlay", type=Path, default=None,
+        help="Partial repository YAML containing vehicle_model_overrides only.")
     parser.add_argument("--centerline", type=Path, default=None,
                         help="Prepared centerline CSV. If absent, map->centerline is run using existing repo code.")
     parser.add_argument("--map", type=Path, default=None)
@@ -86,6 +90,30 @@ def main() -> int:
                     f"optimizer bundle ({tool_root}) or repository ({root})"
                 )
     cfg = load_yaml(config_path)
+    vehicle_model_overlay_path = None
+    vehicle_model_overlay_sha256 = None
+    if args.vehicle_model_overlay is not None:
+        vehicle_model_overlay_path = args.vehicle_model_overlay.resolve()
+        if not vehicle_model_overlay_path.is_file():
+            parser.error(
+                f"vehicle-model overlay does not exist: {vehicle_model_overlay_path}")
+        try:
+            vehicle_model_overlay_path.relative_to(root.resolve())
+        except ValueError:
+            parser.error("vehicle-model overlay must be inside the repository")
+        overlay_cfg = load_yaml(vehicle_model_overlay_path)
+        if set(overlay_cfg) != {"vehicle_model_overrides"}:
+            parser.error(
+                "vehicle-model overlay must contain only vehicle_model_overrides")
+        overlay = overlay_cfg["vehicle_model_overrides"]
+        if not isinstance(overlay, dict) or not overlay:
+            parser.error("vehicle_model_overrides overlay must be a nonempty mapping")
+        base_overrides = cfg.setdefault("vehicle_model_overrides", {})
+        if not isinstance(base_overrides, dict):
+            parser.error("base vehicle_model_overrides must be a mapping")
+        base_overrides.update(overlay)
+        vehicle_model_overlay_sha256 = hashlib.sha256(
+            vehicle_model_overlay_path.read_bytes()).hexdigest()
     if args.yaw_lag_exact_fraction is not None:
         cfg.setdefault("solver", {})["yaw_lag_exact_fraction"] = (
             args.yaw_lag_exact_fraction)
@@ -175,6 +203,13 @@ def main() -> int:
         "repo_root": str(root),
         "tool_root": str(tool_root),
         "config_path": str(config_path),
+        "vehicle_model_overlay": (
+            {
+                "path": str(vehicle_model_overlay_path),
+                "sha256": vehicle_model_overlay_sha256,
+            }
+            if vehicle_model_overlay_path is not None else None
+        ),
         "centerline": str(centerline),
         "map": str(map_path),
         "warm_raceline": str(warm) if warm else None,

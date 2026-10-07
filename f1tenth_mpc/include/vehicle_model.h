@@ -90,6 +90,14 @@ typedef struct
     float speed_deficit_zero_mps;
     float abs_steering_zero_rad;
     float abs_steering_full_rad;
+    /* Optional measured support window. Zero fields preserve the historical
+     * target-speed/steering lower gates without adding these upper/floor fades. */
+    float actual_speed_zero_mps;
+    float actual_speed_full_mps;
+    float actual_speed_upper_full_mps;
+    float actual_speed_upper_zero_mps;
+    float abs_steering_upper_full_rad;
+    float abs_steering_upper_zero_rad;
 } MpcYawRateResidualModel_t;
 
 enum
@@ -125,6 +133,18 @@ typedef struct
     float yaw_rate_abs_rps[MPC_YAW_SURFACE_SPEED_KNOTS]
                           [MPC_YAW_SURFACE_TURN_DIRECTIONS]
                           [MPC_YAW_SURFACE_Q_KNOTS];
+    /* Optional bounded steering support window. All zero preserves the
+     * historical q-only blend. The response ramps in from start to full-start,
+     * stays active through full-end, then fades to zero at end. */
+    float steering_blend_start_rad;
+    float steering_blend_full_start_rad;
+    float steering_blend_full_end_rad;
+    float steering_blend_end_rad;
+    /* Optional hold-phase response time constant. It is blended only within
+     * the same measured speed/steering support as the empirical surface. */
+    float hold_response_time_constant_s;
+    float hold_rate_full_radps;
+    float hold_rate_zero_radps;
 } MpcYawRateResponseSurface_t;
 
 enum
