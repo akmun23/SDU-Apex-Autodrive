@@ -68,6 +68,32 @@ typedef struct
 
 enum
 {
+    MPC_YAW_RESIDUAL_FEATURES = 13,
+    MPC_YAW_RESIDUAL_COEFFICIENTS = MPC_YAW_RESIDUAL_FEATURES + 1,
+};
+
+/* Optional, data-fitted residual acceleration correction. The runtime model
+ * consumes only the current legal MPC state and current control; the fitted
+ * coefficient vector and support gate are supplied by an explicit profile.
+ * It is disabled unless configured. */
+typedef struct
+{
+    int enabled;
+    float gain;
+    float correction_clip_radps2;
+    float feature_mean[MPC_YAW_RESIDUAL_FEATURES];
+    float feature_scale[MPC_YAW_RESIDUAL_FEATURES];
+    float coefficients[MPC_YAW_RESIDUAL_COEFFICIENTS];
+    float target_speed_zero_mps;
+    float target_speed_full_mps;
+    float speed_deficit_full_mps;
+    float speed_deficit_zero_mps;
+    float abs_steering_zero_rad;
+    float abs_steering_full_rad;
+} MpcYawRateResidualModel_t;
+
+enum
+{
     MPC_YAW_SURFACE_SPEED_KNOTS = 5,
     MPC_YAW_SURFACE_TURN_DIRECTIONS = 2,
     MPC_YAW_SURFACE_Q_KNOTS = 10,
@@ -110,6 +136,7 @@ enum
     MPC_STAGE_CLIPPED_ACCELERATION = 1u << 4,
     MPC_STAGE_CLIPPED_BODY_SPEED = 1u << 5,
     MPC_STAGE_CLIPPED_ACTUAL_STEERING = 1u << 6,
+    MPC_STAGE_CLIPPED_YAW_RESIDUAL = 1u << 7,
 };
 
 typedef struct
@@ -143,6 +170,9 @@ int vehicle_model_set_yaw_rate_parameters(
     const MpcYawRateModelParameters_t *parameters);
 int vehicle_model_set_yaw_rate_response_surface(
     const MpcYawRateResponseSurface_t *surface);
+MpcYawRateResidualModel_t vehicle_model_default_yaw_rate_residual_model(void);
+int vehicle_model_set_yaw_rate_residual_model(
+    const MpcYawRateResidualModel_t *model);
 
 /* Identified Unity steering relation used by both prediction and feed-forward. */
 float vehicle_model_yaw_rate_gain(float steering_rad);

@@ -83,6 +83,13 @@ def _setup(context):
     map_override = LaunchConfiguration("map_yaml").perform(context).strip()
     trajectory_override = LaunchConfiguration(
         "trajectory_file").perform(context).strip()
+    actuator_parameter_overlay = LaunchConfiguration(
+        "actuator_parameter_overlay").perform(context).strip()
+    if (actuator_parameter_overlay and
+            not os.path.isfile(actuator_parameter_overlay)):
+        raise RuntimeError(
+            "actuator parameter overlay does not exist: "
+            f"{actuator_parameter_overlay}")
     if bool(map_override) != bool(trajectory_override):
         raise RuntimeError(
             "map_yaml and trajectory_file must be overridden as a matching pair")
@@ -274,6 +281,8 @@ def _setup(context):
         output="screen",
         parameters=[
             os.path.join(integration, "config", "actuator_interface.yaml"),
+            *([actuator_parameter_overlay]
+              if actuator_parameter_overlay else []),
             {"input_topic": "/cmd/speed", "external_stop_topic": ""},
         ],
     ))
@@ -321,6 +330,10 @@ def generate_launch_description():
             "mpc_parameter_overlay", default_value="",
             description=("Development-only ROS parameter YAML layered over "
                          "the competition MPC defaults.")),
+        DeclareLaunchArgument(
+            "actuator_parameter_overlay", default_value="",
+            description=("Development-only ROS parameter YAML layered over "
+                         "the actuator defaults.")),
         DeclareLaunchArgument(
             "mpc_start_delay_sec", default_value="2.0",
             description="Delay MPC startup after AMCL process start."),

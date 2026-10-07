@@ -1,0 +1,14 @@
+/**:
+  ros__parameters:
+    # First-collision evidence shows yaw prediction begins to overstate
+    # response near q ~= 0.9 and is badly wrong by q ~= 1.0. Keep the
+    # measured surface inactive below that transition and fully applied by
+    # q=1.15; this is a narrow practice candidate, not the production config.
+    yaw_rate_response_surface_enabled: true
+    yaw_rate_response_surface_file: /workspace/src/live_runs/raceline_candidates/practice_10g_yaw_knee_q080_086_20261006/yaw_response_surface_low_speed.csv
+    yaw_rate_response_surface_blend_q_start: 0.85
+    yaw_rate_response_surface_blend_q_end: 1.15
+    yaw_rate_response_surface_speed_blend_margin_mps: 0.10
+    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.60
+    yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.0
+    yaw_rate_response_surface_high_speed_support_fadein_mps: 0.0

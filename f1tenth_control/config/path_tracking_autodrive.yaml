@@ -23,9 +23,9 @@ pure_pursuit_node:
     min_lookahead: 0.75
     max_lookahead: 1.10
     lookahead_gain: 0.05
-    # Keep the measured runtime envelope while tuning the path/controller
-    # pair. These terms reduce demand before the steering actuator saturates;
-    # they do not stop PP when CTE briefly grows.
+    # Legacy scalar for curvature-based speed shaping, retained unchanged for
+    # the stable runtime baseline. It is not a measured vehicle capability
+    # limit and does not describe speed/steering/transient coupling.
     cte_speed_factor: 1.50
     cte_speed_floor_ratio: 0.55
     max_lateral_accel: 8.0

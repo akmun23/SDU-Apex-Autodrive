@@ -36,6 +36,10 @@ def main() -> int:
                         help="Offline transcription continuation: 0=trapezoidal, 1=exact first-order yaw lag.")
     parser.add_argument("--yaw-surface-response-scale", type=float, default=None,
                         help="Offline continuation scale for the empirical yaw residual, in [0, 1].")
+    parser.add_argument("--empirical-curvature-envelope", type=Path, default=None,
+                        help="Use the whole-run-train sustained-curvature envelope CSV.")
+    parser.add_argument("--yaw-residual-candidate", type=Path, default=None,
+                        help="Apply a held-out-screened yaw residual in the spatial MPC model.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -88,6 +92,29 @@ def main() -> int:
     if args.yaw_surface_response_scale is not None:
         cfg.setdefault("vehicle_model_overrides", {})[
             "yaw_surface_response_scale"] = args.yaw_surface_response_scale
+    if args.empirical_curvature_envelope is not None:
+        envelope_path = args.empirical_curvature_envelope.resolve()
+        try:
+            envelope_relative = envelope_path.relative_to(root)
+        except ValueError:
+            parser.error("empirical curvature envelope must be inside the repository")
+        envelope_cfg = cfg.setdefault("lateral_envelope", {})
+        for key in ("speed_mps", "steering_abs_rad", "ay_max_mps2"):
+            envelope_cfg.pop(key, None)
+        envelope_cfg["empirical_curvature_csv"] = envelope_relative.as_posix()
+        envelope_cfg["empirical_curvature_split"] = "train"
+        envelope_cfg["scale"] = 1.0
+    if args.yaw_residual_candidate is not None:
+        residual_path = args.yaw_residual_candidate.resolve()
+        try:
+            residual_relative = residual_path.relative_to(root)
+        except ValueError:
+            parser.error("yaw residual candidate must be inside the repository")
+        cfg.setdefault("vehicle_model_overrides", {})[
+            "yaw_residual_candidate_json"] = residual_relative.as_posix()
+        # The fitted residual is relative to the competition legacy-yaw model;
+        # stacking the independent steady-yaw table would double-correct it.
+        cfg["vehicle_model_overrides"]["yaw_surface_enabled"] = False
     model = VehicleModel.from_repo(root, cfg)
     envelope = LateralEnvelope.from_repo(root, model, cfg)
 

@@ -39,17 +39,24 @@ required wall clearance     = 0.150 m per side
 
 The `0.300 m` planning footprint is intentionally wider than the physical `0.273 m` body because it is the safety footprint already used by the repository's existing `optimize_trajectory.py`.
 
-### Validated current lateral operating envelope
+### Legacy scalar curvature-speed setting — not a vehicle capability model
 
 Source: `f1tenth_control/config/path_tracking_autodrive.yaml`
 
-Current value:
+The historical design read this scalar from the Pure Pursuit configuration.
+The current checkout contains `8.0`; an earlier v1.3 snapshot recorded `6.50`.
+Neither value establishes a measured vehicle limit or a speed/steering/history-
+conditioned response surface. They are legacy curvature-based speed-shaping
+settings retained to reproduce the runtime baseline, not validated physical
+capabilities.
 
 ```text
-max_lateral_accel = 6.50 m/s^2
+max_lateral_accel = 8.0 m/s^2 (current YAML; scalar setting only)
 ```
 
-This is the current repository's measured/runtime envelope and replaces the older 7.3 m/s² planning/bootstrap value. It remains an empirical operating limit that should later be refined from new high-speed closed-loop data, but v1.3 does not invent a different tire model.
+This setting must not be interpreted as a measured lateral-acceleration limit.
+The previous constant-cap retiming experiment is rejected. New optimization
+requires a speed/steering/transient response model validated on whole runs.
 
 ### Explicitly not used by the v1.3 vehicle OCP
 
@@ -292,7 +299,7 @@ Any violation of the required wall clearance is a hard failure.
 
 ## Tuning loop
 
-1. Solve using the current repository's identified dynamics and 6.50 m/s² validated lateral envelope.
+1. Historical v1.3 solves used a 6.50 m/s² scalar setting. Their solve results do not validate that scalar as a vehicle capability; current work must use a validated speed/steering/transient response model before ranking a new raceline.
 2. Verify actual-map wall clearance.
 3. Inspect `report.json` and `solution_nodes.csv`.
 4. Track at reduced speed with MPC.

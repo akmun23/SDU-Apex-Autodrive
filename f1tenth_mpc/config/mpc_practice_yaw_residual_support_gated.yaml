@@ -1,0 +1,19 @@
+/**:
+  ros__parameters:
+    # Experimental, data-fitted 13-feature yaw-acceleration residual.
+    # This profile is opt-in and is not included in mpc_competition.yaml.
+    # Fit/validation artifact:
+    # live_runs/racing_model_diagnostics_20261006/yaw_residual_support_gated_v3/
+    #   yaw_residual_candidate.json
+    yaw_rate_residual_enabled: true
+    yaw_rate_residual_gain: 1.0
+    yaw_rate_residual_clip_radps2: 254.63149203491213
+    yaw_rate_residual_feature_mean: [5.219689162691871, -0.11038279455925994, -0.010488389857948217, -0.000015854791460823655, -0.016337155605899243, -0.03243291629098673, -0.5681128511239453, 0.0000014764425008774482, -0.0077249307446054525, -0.0025384253658149634, -0.0033342532286809905, -0.21664264242082085, -0.022431628258536954]
+    yaw_rate_residual_feature_scale: [1.916887173640865, 1.2163193900342815, 0.36007067674762033, 0.09185341838887497, 0.07684418498229552, 0.14705918199354423, 1.3375722035468443, 1.1099832283255506, 0.8891987428310001, 0.012586821874823307, 0.01827175807702902, 0.28760382464204326, 0.09879855700925196]
+    yaw_rate_residual_coefficients: [0.3336610392811597, -4.067304983343735, -13.764191804070949, -48.46688828826267, 3.916369590831089, 85.49418447807173, -71.59539038637509, 3.623579108959584, -3.5878948574181595, -13.356080687841946, 1.5499588425494288, 14.607556804483105, -8.334988714572594, -15.060619581629414]
+    yaw_rate_residual_target_speed_zero_mps: 6.48
+    yaw_rate_residual_target_speed_full_mps: 6.50
+    yaw_rate_residual_speed_deficit_full_mps: 0.10
+    yaw_rate_residual_speed_deficit_zero_mps: 0.20
+    yaw_rate_residual_abs_steering_zero_rad: 0.18
+    yaw_rate_residual_abs_steering_full_rad: 0.20

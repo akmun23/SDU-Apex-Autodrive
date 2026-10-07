@@ -1,0 +1,12 @@
+/**:
+  ros__parameters:
+    # Practice-only measured 2.96-4.99 m/s response surface and broad smooth
+    # transition across its observed high-steer saturation knee.
+    yaw_rate_response_surface_enabled: true
+    yaw_rate_response_surface_file: /workspace/src/live_runs/raceline_candidates/practice_10g_yaw_knee_q080_086_20261006/yaw_response_surface_low_speed.csv
+    yaw_rate_response_surface_blend_q_start: 0.72
+    yaw_rate_response_surface_blend_q_end: 0.90
+    yaw_rate_response_surface_speed_blend_margin_mps: 0.10
+    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.60
+    yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.0
+    yaw_rate_response_surface_high_speed_support_fadein_mps: 0.0

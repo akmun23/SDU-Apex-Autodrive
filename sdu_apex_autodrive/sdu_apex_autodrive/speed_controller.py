@@ -131,12 +131,25 @@ class SpeedControllerConfig:
         0.055, 0.056, 0.058, 0.060, 0.062, 0.064,
         0.066, 0.068, 0.070,
     )
+    # Disabled unless an explicit development overlay defines a measured
+    # speed/steering regime. Defaults preserve the established actuator path.
+    throttle_rise_regime_rate_per_sec: float = 10.0
+    throttle_rise_regime_speed_min_mps: float = 0.0
+    throttle_rise_regime_speed_max_mps: float = 0.0
+    throttle_rise_regime_min_abs_steering_rad: float = math.pi
+    throttle_rise_regime_max_abs_steering_rad: float = math.pi
 
     def validate(self) -> None:
         scalars = (
             self.kp, self.ki, self.ka, self.integral_limit,
             self.throttle_max_forward, self.throttle_rise_rate_per_sec,
-            self.throttle_fall_rate_per_sec, self.stop_speed_threshold_mps,
+            self.throttle_fall_rate_per_sec,
+            self.throttle_rise_regime_rate_per_sec,
+            self.throttle_rise_regime_speed_min_mps,
+            self.throttle_rise_regime_speed_max_mps,
+            self.throttle_rise_regime_min_abs_steering_rad,
+            self.throttle_rise_regime_max_abs_steering_rad,
+            self.stop_speed_threshold_mps,
             self.overspeed_coast_threshold_mps,
             self.speed_hold_error_deadband_mps,
             self.speed_hold_recovery_error_mps,
@@ -157,6 +170,14 @@ class SpeedControllerConfig:
             raise ValueError("throttle_max_forward must be in (0, 1]")
         if self.throttle_rise_rate_per_sec <= 0.0 or self.throttle_fall_rate_per_sec <= 0.0:
             raise ValueError("throttle slew rates must be > 0")
+        if (self.throttle_rise_regime_rate_per_sec <= 0.0 or
+                self.throttle_rise_regime_speed_min_mps < 0.0 or
+                self.throttle_rise_regime_speed_max_mps <
+                self.throttle_rise_regime_speed_min_mps or
+                self.throttle_rise_regime_min_abs_steering_rad < 0.0 or
+                self.throttle_rise_regime_max_abs_steering_rad <
+                self.throttle_rise_regime_min_abs_steering_rad):
+            raise ValueError("invalid regime-conditioned throttle-rise limits")
         if self.stop_speed_threshold_mps < 0.0:
             raise ValueError("stop_speed_threshold_mps must be >= 0")
         if self.overspeed_coast_threshold_mps < 0.0:
@@ -538,6 +559,8 @@ class TargetSpeedController:
         self._downshift_catch = False
         self._downshift_stable_elapsed = 0.0
         self._downshift_below_band_elapsed = 0.0
+        self._active_throttle_rise_rate_per_sec = (
+            config.throttle_rise_rate_per_sec)
         self.last_command = LongitudinalCommand(LongitudinalMode.STOP, 0.0)
 
     def reset(self) -> None:
@@ -552,6 +575,8 @@ class TargetSpeedController:
         self._downshift_catch = False
         self._downshift_stable_elapsed = 0.0
         self._downshift_below_band_elapsed = 0.0
+        self._active_throttle_rise_rate_per_sec = (
+            self.config.throttle_rise_rate_per_sec)
         self.last_command = LongitudinalCommand(LongitudinalMode.STOP, 0.0)
 
     def reconfigure(self, config: SpeedControllerConfig) -> None:
@@ -577,7 +602,7 @@ class TargetSpeedController:
     def _slew_to(self, desired: float, dt_seconds: float) -> float:
         """Apply the speed-loop slew limit to a DRIVE throttle target."""
         rate = (
-            self.config.throttle_rise_rate_per_sec
+            self._active_throttle_rise_rate_per_sec
             if desired >= self.last_output
             else self.config.throttle_fall_rate_per_sec
         )
@@ -667,6 +692,7 @@ class TargetSpeedController:
         dt_seconds: float,
         measured_accel_mps2: float = 0.0,
         measurement_fresh: bool = True,
+        steering_angle_rad: float = 0.0,
     ) -> float:
         """Return the legacy normalized throttle value.
 
@@ -680,6 +706,7 @@ class TargetSpeedController:
             dt_seconds,
             measured_accel_mps2,
             measurement_fresh,
+            steering_angle_rad,
         ).throttle_normalized
 
     def update_command(
@@ -690,15 +717,30 @@ class TargetSpeedController:
         dt_seconds: float,
         measured_accel_mps2: float = 0.0,
         measurement_fresh: bool = True,
+        steering_angle_rad: float = 0.0,
     ) -> LongitudinalCommand:
         if not all(math.isfinite(v) for v in (
             target_speed_mps, measured_speed_mps, requested_accel_mps2,
-            dt_seconds, measured_accel_mps2,
+            dt_seconds, measured_accel_mps2, steering_angle_rad,
         )) or dt_seconds <= 0.0:
             raise ValueError("invalid speed-controller input")
 
         target = max(0.0, target_speed_mps)
         measured = max(0.0, measured_speed_mps)
+        self._active_throttle_rise_rate_per_sec = (
+            self.config.throttle_rise_rate_per_sec)
+        if (
+            self.config.throttle_rise_regime_speed_max_mps >
+                self.config.throttle_rise_regime_speed_min_mps
+            and self.config.throttle_rise_regime_speed_min_mps <= measured <=
+                self.config.throttle_rise_regime_speed_max_mps
+            and abs(steering_angle_rad) >=
+                self.config.throttle_rise_regime_min_abs_steering_rad
+            and abs(steering_angle_rad) <=
+                self.config.throttle_rise_regime_max_abs_steering_rad
+        ):
+            self._active_throttle_rise_rate_per_sec = (
+                self.config.throttle_rise_regime_rate_per_sec)
         if target <= self.config.stop_speed_threshold_mps:
             self.reset()
             return self.last_command

@@ -26,6 +26,11 @@ class ActuatorInterface(Node):
     TUNABLE = {
         "kp", "ki", "ka", "integral_limit", "throttle_max_forward",
         "throttle_rise_rate_per_sec", "throttle_fall_rate_per_sec",
+        "throttle_rise_regime_rate_per_sec",
+        "throttle_rise_regime_speed_min_mps",
+        "throttle_rise_regime_speed_max_mps",
+        "throttle_rise_regime_min_abs_steering_rad",
+        "throttle_rise_regime_max_abs_steering_rad",
         "stop_speed_threshold_mps", "overspeed_coast_threshold_mps",
         "speed_hold_error_deadband_mps",
         "speed_hold_recovery_error_mps",
@@ -196,6 +201,11 @@ class ActuatorInterface(Node):
         self.declare_parameter("throttle_max_forward", 1.0)
         self.declare_parameter("throttle_rise_rate_per_sec", 10.0)
         self.declare_parameter("throttle_fall_rate_per_sec", 10.0)
+        self.declare_parameter("throttle_rise_regime_rate_per_sec", 10.0)
+        self.declare_parameter("throttle_rise_regime_speed_min_mps", 0.0)
+        self.declare_parameter("throttle_rise_regime_speed_max_mps", 0.0)
+        self.declare_parameter("throttle_rise_regime_min_abs_steering_rad", 3.141592653589793)
+        self.declare_parameter("throttle_rise_regime_max_abs_steering_rad", 3.141592653589793)
         self.declare_parameter("stop_speed_threshold_mps", 0.02)
         # Small overshoots must be corrected with the calibrated throttle
         # feedback.  Zero throttle is active braking in this simulator, so
@@ -277,6 +287,18 @@ class ActuatorInterface(Node):
             throttle_max_forward=float(self.get_parameter("throttle_max_forward").value),
             throttle_rise_rate_per_sec=float(self.get_parameter("throttle_rise_rate_per_sec").value),
             throttle_fall_rate_per_sec=float(self.get_parameter("throttle_fall_rate_per_sec").value),
+            throttle_rise_regime_rate_per_sec=float(
+                self.get_parameter("throttle_rise_regime_rate_per_sec").value),
+            throttle_rise_regime_speed_min_mps=float(
+                self.get_parameter("throttle_rise_regime_speed_min_mps").value),
+            throttle_rise_regime_speed_max_mps=float(
+                self.get_parameter("throttle_rise_regime_speed_max_mps").value),
+            throttle_rise_regime_min_abs_steering_rad=float(
+                self.get_parameter(
+                    "throttle_rise_regime_min_abs_steering_rad").value),
+            throttle_rise_regime_max_abs_steering_rad=float(
+                self.get_parameter(
+                    "throttle_rise_regime_max_abs_steering_rad").value),
             stop_speed_threshold_mps=float(self.get_parameter("stop_speed_threshold_mps").value),
             overspeed_coast_threshold_mps=float(
                 self.get_parameter("overspeed_coast_threshold_mps").value),
@@ -536,7 +558,8 @@ class ActuatorInterface(Node):
                  self.last_controller_odom_source_stamp_ns))
             command = self.speed_controller.update_command(
                 target_speed, self.speed, 0.0, dt, self.acceleration,
-                measurement_fresh=fresh_odom)
+                measurement_fresh=fresh_odom,
+                steering_angle_rad=steering_angle)
             throttle = command.throttle_normalized
             self.last_longitudinal_mode = command.mode
             self.last_controller_odom_time = self.odom_time

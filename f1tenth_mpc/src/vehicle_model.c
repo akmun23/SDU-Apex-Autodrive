@@ -39,6 +39,7 @@ static MpcYawRateModelParameters_t active_yaw_rate_parameters = {
     .low_speed_transition_speed_mps = 2.0f,
 };
 static MpcYawRateResponseSurface_t active_yaw_rate_surface = {0};
+static MpcYawRateResidualModel_t active_yaw_rate_residual = {0};
 
 static float clampf_local(float value, float lower, float upper)
 {
@@ -183,6 +184,94 @@ int vehicle_model_set_yaw_rate_response_surface(
     }
     active_yaw_rate_surface = *surface;
     return 1;
+}
+
+MpcYawRateResidualModel_t vehicle_model_default_yaw_rate_residual_model(void)
+{
+    return (MpcYawRateResidualModel_t){0};
+}
+
+int vehicle_model_set_yaw_rate_residual_model(
+    const MpcYawRateResidualModel_t *model)
+{
+    if (model == NULL) return 0;
+    if (!model->enabled) {
+        active_yaw_rate_residual = (MpcYawRateResidualModel_t){0};
+        return 1;
+    }
+    if (model->enabled != 1 || !isfinite(model->gain) ||
+        model->gain < 0.0f || model->gain > 1.0f ||
+        !finite_positive(model->correction_clip_radps2) ||
+        !isfinite(model->target_speed_zero_mps) ||
+        !isfinite(model->target_speed_full_mps) ||
+        model->target_speed_full_mps <= model->target_speed_zero_mps ||
+        !isfinite(model->speed_deficit_full_mps) ||
+        !isfinite(model->speed_deficit_zero_mps) ||
+        model->speed_deficit_zero_mps <= model->speed_deficit_full_mps ||
+        !isfinite(model->abs_steering_zero_rad) ||
+        !isfinite(model->abs_steering_full_rad) ||
+        model->abs_steering_zero_rad < 0.0f ||
+        model->abs_steering_full_rad <= model->abs_steering_zero_rad) {
+        return 0;
+    }
+    for (int i = 0; i < MPC_YAW_RESIDUAL_FEATURES; ++i) {
+        if (!isfinite(model->feature_mean[i]) ||
+            !finite_positive(model->feature_scale[i])) return 0;
+    }
+    for (int i = 0; i < MPC_YAW_RESIDUAL_COEFFICIENTS; ++i) {
+        if (!isfinite(model->coefficients[i])) return 0;
+    }
+    active_yaw_rate_residual = *model;
+    return 1;
+}
+
+static float smoothstep_scalar(float value, float start, float end)
+{
+    const float t = clampf_local((value - start) / (end - start), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float yaw_residual_rate_scalar(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float curvature,
+    float acceleration)
+{
+    if (!active_yaw_rate_residual.enabled) return 0.0f;
+    const float delta = state->actual_steering_angle;
+    const float q_delta = clampf_local(control->steering_rate,
+        -active_parameters.steering_rate_radps,
+        active_parameters.steering_rate_radps);
+    const float q_speed = clampf_local(control->target_speed_rate,
+        -active_parameters.maximum_target_speed_rate_reduction_mps2,
+        active_parameters.maximum_target_speed_rate_increase_mps2);
+    const float abs_delta = fabsf(delta);
+    const float features[MPC_YAW_RESIDUAL_FEATURES] = {
+        state->u, state->r, delta, q_delta, state->v, curvature,
+        acceleration, q_speed, state->u * delta * abs_delta,
+        delta * fabsf(q_delta), state->v * abs_delta,
+        abs_delta * acceleration, delta * fabsf(q_speed)};
+    float correction = active_yaw_rate_residual.coefficients[0];
+    for (int i = 0; i < MPC_YAW_RESIDUAL_FEATURES; ++i) {
+        correction += active_yaw_rate_residual.coefficients[i + 1] *
+            ((features[i] - active_yaw_rate_residual.feature_mean[i]) /
+             active_yaw_rate_residual.feature_scale[i]);
+    }
+    correction = clampf_local(correction,
+        -active_yaw_rate_residual.correction_clip_radps2,
+        active_yaw_rate_residual.correction_clip_radps2);
+    const float target_gate = smoothstep_scalar(state->target_speed,
+        active_yaw_rate_residual.target_speed_zero_mps,
+        active_yaw_rate_residual.target_speed_full_mps);
+    const float deficit = state->target_speed - state->u;
+    const float tracking_gate = 1.0f - smoothstep_scalar(deficit,
+        active_yaw_rate_residual.speed_deficit_full_mps,
+        active_yaw_rate_residual.speed_deficit_zero_mps);
+    const float steering_gate = smoothstep_scalar(abs_delta,
+        active_yaw_rate_residual.abs_steering_zero_rad,
+        active_yaw_rate_residual.abs_steering_full_rad);
+    return active_yaw_rate_residual.gain * correction * target_gate *
+        tracking_gate * steering_gate;
 }
 
 float vehicle_model_yaw_rate_gain_for_curvature(float curvature_radpm)
@@ -800,6 +889,85 @@ static MpcJet_t jet_clip(
     return input;
 }
 
+static MpcJet_t jet_absolute(MpcJet_t input,
+                             MpcStageLinearization_t *linearization)
+{
+    mark_nonsmooth_difference(input, jet_constant(0.0f), 0.0f, linearization);
+    MpcJet_t result = jet_constant(fabsf(input.value));
+    result.differentiated = input.differentiated;
+    if (input.differentiated) {
+        const float sign = input.value < 0.0f ? -1.0f :
+            input.value > 0.0f ? 1.0f : 0.0f;
+        for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
+            result.derivative[i] = sign * input.derivative[i];
+    }
+    return result;
+}
+
+static MpcJet_t jet_smoothstep(
+    MpcJet_t input, float start, float end,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization)
+{
+    MpcJet_t t = jet_divide(
+        jet_subtract(input, jet_constant(start)), jet_constant(end - start));
+    t = jet_clip(t, jet_constant(0.0f), jet_constant(1.0f), 0u,
+        stage, linearization);
+    MpcJet_t t2 = jet_multiply(t, t);
+    return jet_multiply(t2, jet_subtract(jet_constant(3.0f),
+        jet_multiply(jet_constant(2.0f), t)));
+}
+
+static MpcJet_t yaw_residual_rate_jet(
+    MpcJet_t x[MPC_MODEL_NX],
+    MpcJet_t q_delta,
+    MpcJet_t q_speed,
+    MpcJet_t curvature,
+    MpcJet_t acceleration,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization)
+{
+    if (!active_yaw_rate_residual.enabled) return jet_constant(0.0f);
+    const MpcYawRateResidualModel_t *model = &active_yaw_rate_residual;
+    const MpcJet_t delta = x[9];
+    const MpcJet_t abs_delta = jet_absolute(delta, linearization);
+    const MpcJet_t abs_q_delta = jet_absolute(q_delta, linearization);
+    const MpcJet_t abs_q_speed = jet_absolute(q_speed, linearization);
+    MpcJet_t features[MPC_YAW_RESIDUAL_FEATURES] = {
+        x[2], x[4], delta, q_delta, x[3], curvature, acceleration, q_speed,
+        jet_multiply(jet_multiply(x[2], delta), abs_delta),
+        jet_multiply(delta, abs_q_delta),
+        jet_multiply(x[3], abs_delta),
+        jet_multiply(abs_delta, acceleration),
+        jet_multiply(delta, abs_q_speed)};
+    MpcJet_t correction = jet_constant(model->coefficients[0]);
+    for (int i = 0; i < MPC_YAW_RESIDUAL_FEATURES; ++i) {
+        const MpcJet_t normalized = jet_divide(
+            jet_subtract(features[i], jet_constant(model->feature_mean[i])),
+            jet_constant(model->feature_scale[i]));
+        correction = jet_add(correction, jet_multiply(
+            jet_constant(model->coefficients[i + 1]), normalized));
+    }
+    correction = jet_clip(correction,
+        jet_constant(-model->correction_clip_radps2),
+        jet_constant(model->correction_clip_radps2),
+        MPC_STAGE_CLIPPED_YAW_RESIDUAL, stage, linearization);
+    const MpcJet_t target_gate = jet_smoothstep(x[5],
+        model->target_speed_zero_mps, model->target_speed_full_mps,
+        stage, linearization);
+    const MpcJet_t speed_deficit = jet_subtract(x[5], x[2]);
+    const MpcJet_t tracking_gate = jet_subtract(jet_constant(1.0f),
+        jet_smoothstep(speed_deficit, model->speed_deficit_full_mps,
+            model->speed_deficit_zero_mps, stage, linearization));
+    const MpcJet_t steering_gate = jet_smoothstep(abs_delta,
+        model->abs_steering_zero_rad, model->abs_steering_full_rad,
+        stage, linearization);
+    return jet_multiply(jet_constant(model->gain),
+        jet_multiply(correction,
+            jet_multiply(target_gate,
+                jet_multiply(tracking_gate, steering_gate))));
+}
+
 static unsigned int mask_popcount(uint16_t mask)
 {
     unsigned int count = 0;
@@ -893,7 +1061,8 @@ static int vehicle_model_step_scalar(
     const float u_mid = 0.5f * (u0 + u_next);
 
     const float r_next = yaw_rate_response(
-        u_mid, actual_next, state->r, dt, path_curvature);
+        u_mid, actual_next, state->r, dt, path_curvature) + dt *
+        yaw_residual_rate_scalar(state, control, path_curvature, acceleration);
     const float r_mid = 0.5f * (state->r + r_next);
     const float denominator0 = 1.0f - path_curvature * state->e_y;
     if (fabsf(denominator0) < 0.05f) return 0;
@@ -1143,6 +1312,10 @@ static int vehicle_model_step_impl(
         jet_multiply(yaw_retention, x[4]),
         jet_multiply(jet_subtract(jet_constant(1.0f), yaw_retention),
             yaw_steady));
+    r_next = jet_add(r_next, jet_multiply(jet_constant(dt),
+        yaw_residual_rate_jet(x, q_delta, q_speed,
+            jet_constant(path_curvature), acceleration,
+            stage, linearization)));
     MpcJet_t r_mid = jet_multiply(jet_constant(0.5f), jet_add(x[4], r_next));
 
     MpcJet_t denominator0 = jet_subtract(jet_constant(1.0f),

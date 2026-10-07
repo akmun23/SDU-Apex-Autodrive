@@ -111,6 +111,128 @@ DYNAMIC_COUPLED_PROFILES = (
     "race_domain_dynamic_coupled_validation",
     "race_domain_dynamic_coupled_final",
 )
+SWERVE_THROTTLE_SLEW_PROFILES = (
+    "race_domain_swerve_throttle_slew_train",
+    "race_domain_swerve_throttle_slew_validation",
+)
+SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE = (
+    "race_domain_swerve_throttle_slew_frontier_validation")
+SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE = (
+    "race_domain_swerve_throttle_slew_11mps_replication")
+SWERVE_THROTTLE_SLEW_MODERATE_PROFILE = (
+    "race_domain_swerve_throttle_slew_moderate_validation")
+SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE = (
+    "race_domain_swerve_throttle_slew_lowsteer_validation")
+SWERVE_THROTTLE_RATE_SWEEP_PROFILE = (
+    "race_domain_swerve_throttle_rate_sweep_validation")
+SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE = (
+    "race_domain_swerve_throttle_rate_sweep_highsteer_validation")
+SWERVE_THROTTLE_RATE_FACTORIAL_PROFILE = (
+    "race_domain_swerve_throttle_rate_factorial_validation")
+SWERVE_THROTTLE_RATE_FACTORIAL_4P5_PROFILE = (
+    "race_domain_swerve_throttle_rate_factorial_4p5_validation")
+SWERVE_THROTTLE_RATE_FACTORIAL_6P5_PROFILE = (
+    "race_domain_swerve_throttle_rate_factorial_6p5_validation")
+SWERVE_THROTTLE_RATE_FACTORIAL_7P5_PROFILE = (
+    "race_domain_swerve_throttle_rate_factorial_7p5_validation")
+SWERVE_THROTTLE_RATE_FRONTIER_UP_TRAIN_PROFILE = (
+    "race_domain_swerve_throttle_slew_up_frontier_train")
+SWERVE_THROTTLE_RATE_FRONTIER_UP_VALIDATION_PROFILE = (
+    "race_domain_swerve_throttle_slew_up_frontier_validation")
+SWERVE_THROTTLE_RATE_FRONTIER_UP_PROFILES = (
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_TRAIN_PROFILE,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_VALIDATION_PROFILE,
+)
+SWERVE_THROTTLE_RATE_FRONTIER_UP_PROFILE = (
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_VALIDATION_PROFILE)
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_TRAIN_PROFILE = (
+    "race_domain_swerve_throttle_rate_race_domain_train")
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_VALIDATION_PROFILE = (
+    "race_domain_swerve_throttle_rate_race_domain_validation")
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_PROFILES = (
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_TRAIN_PROFILE,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_VALIDATION_PROFILE,
+)
+SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES = (
+    *SWERVE_THROTTLE_SLEW_PROFILES,
+    SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE,
+    SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE,
+    SWERVE_THROTTLE_SLEW_MODERATE_PROFILE,
+    SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE,
+    SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
+    SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_4P5_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_6P5_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_7P5_PROFILE,
+    *SWERVE_THROTTLE_RATE_FRONTIER_UP_PROFILES,
+    *SWERVE_THROTTLE_RATE_RACE_DOMAIN_PROFILES,
+)
+LOW_SPEED_TRANSIENT_PROFILE = "race_domain_low_speed_highsteer_transients"
+LOW_SPEED_TRANSIENT_SPEEDS_MPS = (2.5, 3.0, 3.5)
+LOW_SPEED_TRANSIENT_STEERING_RAD = (0.30, 0.35, 0.40, 0.42)
+RACE_DOMAIN_SPEED_GOVERNED_PROFILES = (
+    *DYNAMIC_COUPLED_PROFILES,
+    *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
+    LOW_SPEED_TRANSIENT_PROFILE,
+)
+SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD = (
+    (4.5, (0.30, 0.42)),
+    (6.5, (0.30, 0.42)),
+    (7.5, (0.30, 0.42)),
+    (9.5, (0.08, 0.14)),
+    (11.1, (0.06, 0.12)),
+)
+SWERVE_THROTTLE_SLEW_APPROACH_S = {
+    4.5: 8.0,
+    6.5: 9.0,
+    7.5: 10.0,
+    9.0: 11.0,
+    9.5: 11.0,
+    10.0: 12.0,
+    10.5: 12.0,
+    11.1: 12.0,
+}
+SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD = (
+    (9.5, (0.14, 0.18, 0.20)),
+    (10.5, (0.14, 0.18, 0.20)),
+    (11.1, (0.12, 0.16, 0.20)),
+)
+SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_SPEED_STEERING_RAD = (
+    (11.1, (0.12, 0.16, 0.20)),
+)
+SWERVE_THROTTLE_SLEW_MODERATE_SPEED_STEERING_RAD = (
+    (4.5, (0.12, 0.20)),
+    (6.5, (0.12, 0.20)),
+    (7.5, (0.12, 0.20)),
+)
+SWERVE_THROTTLE_SLEW_LOWSTEER_SPEED_STEERING_RAD = (
+    (4.5, (0.08, 0.10)),
+    (6.5, (0.08, 0.10)),
+    (7.5, (0.08, 0.10)),
+)
+SWERVE_THROTTLE_SLEW_DELTA_NORM = 0.08
+SWERVE_THROTTLE_SLEW_PHASE_S = 1.85
+SWERVE_THROTTLE_RATE_SWEEP_SPEED_MPS = 8.0
+SWERVE_THROTTLE_RATE_SWEEP_STEERING_RAD = (0.30, 0.42)
+SWERVE_THROTTLE_RATE_SWEEP_RAMP_DURATIONS_S = (0.15, 0.30, 0.60)
+SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_RAMP_DURATIONS_S = (0.15, 0.30)
+SWERVE_THROTTLE_RATE_FACTORIAL_DELTAS_NORM = (0.08, 0.12)
+SWERVE_THROTTLE_RATE_FACTORIAL_4P5_SPEED_MPS = 4.5
+SWERVE_THROTTLE_RATE_FACTORIAL_6P5_SPEED_MPS = 6.5
+SWERVE_THROTTLE_RATE_FACTORIAL_7P5_SPEED_MPS = 7.5
+SWERVE_THROTTLE_RATE_FACTORIAL_RATES_NORM_PER_SEC = (
+    0.13333333333333333, 0.26666666666666666, 0.5333333333333333)
+SWERVE_THROTTLE_RATE_FRONTIER_UP_SPEED_STEERING_RAD = (
+    (9.0, (0.12, 0.20)),
+    (10.0, (0.08, 0.14)),
+)
+SWERVE_THROTTLE_RATE_FRONTIER_UP_DELTA_NORM = 0.04
+SWERVE_THROTTLE_RATE_FRONTIER_UP_RAMP_DURATIONS_S = (0.15, 0.30)
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_STEERING_RAD = (0.08, 0.14, 0.20)
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_DELTAS_NORM = (0.04, 0.08)
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_RAMP_DURATIONS_S = (0.15, 0.30)
+SWERVE_THROTTLE_RATE_RACE_DOMAIN_SPEEDS_MPS = (4.5, 6.5, 7.5)
 SUBNET_TRANSIENT_PROFILE = "subnet_highsteer_transients"
 SUBNET_TRANSIENT_SPEED_MPS = HIGH_STEER_VALIDATION_SPEED_MPS
 SUBNET_TRANSIENT_STEERING_RAD = (0.30, 0.42)
@@ -152,6 +274,7 @@ class Phase:
     steering_waypoints: tuple[tuple[float, float], ...] = ()
     steering_prbs_levels_normalized: tuple[float, ...] = ()
     steering_dwell_s: float = 0.0
+    require_speed_target_match: bool = False
 
 
 def _slew_probe_command(phase: Phase, elapsed_s: float) -> float:
@@ -482,8 +605,387 @@ def _subnet_highsteer_transient_phases(seed: int) -> list[Phase]:
     return phases
 
 
+def _race_domain_swerve_throttle_slew_phases(
+        seed: int,
+        speed_steering_rad: tuple[tuple[float, tuple[float, ...]], ...]
+        = SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD,
+        reset_before_each_probe: bool = False) -> list[Phase]:
+    """Pair throttle shapes during matched bidirectional s-curves.
+
+    ``reset_before_each_probe`` gives both members the same spawn and speed
+    approach, avoiding carry-over when a swerve leaves lateral/yaw motion.
+    """
+    rng = random.Random(seed)
+    speeds = list(speed_steering_rad)
+    rng.shuffle(speeds)
+    phases: list[Phase] = []
+    for speed, steering_levels in speeds:
+        nominal = race_domain_feedforward(speed, _nominal_feedforward(speed))
+        delta = min(
+            SWERVE_THROTTLE_SLEW_DELTA_NORM,
+            nominal,
+            MAX_THROTTLE - nominal,
+        )
+        if delta <= 0.0:
+            raise ValueError(f"no symmetric throttle headroom at {speed:g} m/s")
+        conditions = [
+            (steering, turn_sign, throttle_sign)
+            for steering in steering_levels
+            for turn_sign in (-1.0, 1.0)
+            # At the 9.5/11.1 m/s frontier, an upward step immediately reaches
+            # the established 11.2 m/s governor and would compare the safety
+            # override rather than the requested throttle shape. Existing
+            # throttle-surface captures already cover the high-throttle side;
+            # this swerve study tests bounded reductions there.
+            for throttle_sign in ((-1.0,) if speed >= 9.5 else (-1.0, 1.0))
+        ]
+        rng.shuffle(conditions)
+        for steering, turn_sign, throttle_sign in conditions:
+            pair_id = (
+                f"v{speed:.1f}_a{steering:.3f}_"
+                f"turn{turn_sign:+.0f}_throttle{throttle_sign:+.0f}")
+            if not reset_before_each_probe:
+                phases.append(Phase(
+                    f"approach_swerve_pair_{pair_id}",
+                    SWERVE_THROTTLE_SLEW_APPROACH_S[speed],
+                    speed,
+                    throttle_mode="race_domain_approach",
+                    reach_speed_target=True,
+                    condition_pair_id=pair_id,
+                ))
+            shapes = ["ramp", "step"]
+            rng.shuffle(shapes)
+            throttle_end = nominal + throttle_sign * delta
+            waypoints = (
+                (0.00, 0.00),
+                (0.30, turn_sign * steering),
+                (0.60, turn_sign * steering),
+                (0.95, 0.00),
+                (1.25, -turn_sign * steering),
+                (1.60, -turn_sign * steering),
+                (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+            )
+            for shape in shapes:
+                if reset_before_each_probe:
+                    # The legacy profiles collect the two paired treatments
+                    # back-to-back and require the prior swerve to settle.
+                    # The low-steer validation is specifically intended to
+                    # characterize potentially unrecoverable transients, so
+                    # reset to the same spawn and rebuild target speed before
+                    # each member of the ramp/step pair.
+                    phases.append(Phase(
+                        f"approach_swerve_pair_{pair_id}_{shape}",
+                        SWERVE_THROTTLE_SLEW_APPROACH_S[speed],
+                        speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=pair_id,
+                    ))
+                phases.append(Phase(
+                    f"swerve_slew_{pair_id}_{shape}",
+                    SWERVE_THROTTLE_SLEW_PHASE_S,
+                    speed,
+                    throttle_mode="slew_probe",
+                    validate_samples=True,
+                    validate_speed=False,
+                    validate_steering=False,
+                    settle_before_probe=True,
+                    throttle_profile=shape,
+                    throttle_start_norm=nominal,
+                    throttle_end_norm=throttle_end,
+                    throttle_stimulus_delay_s=0.60,
+                    throttle_ramp_duration_s=0.30,
+                    condition_pair_id=pair_id,
+                    steering_profile="waypoints",
+                    steering_amplitude_rad=steering,
+                    steering_waypoints=waypoints,
+                ))
+    return phases
+
+
+def _highsteer_throttle_rate_sweep_phases(
+        seed: int, throttle_delta_norm: float,
+        highsteer_validation: bool = False) -> list[Phase]:
+    """Compare positive-throttle ramps with reset-matched steps at 8 m/s."""
+    speed = SWERVE_THROTTLE_RATE_SWEEP_SPEED_MPS
+    nominal = race_domain_feedforward(speed, _nominal_feedforward(speed))
+    if (not math.isfinite(throttle_delta_norm)
+            or throttle_delta_norm <= 0.0
+            or throttle_delta_norm > MAX_THROTTLE - nominal):
+        raise ValueError(
+            f"requested throttle delta exceeds available headroom at {speed:g} m/s")
+    delta = throttle_delta_norm
+
+    rng = random.Random(seed)
+    steering_angles = (
+        (0.42,) if highsteer_validation
+        else SWERVE_THROTTLE_RATE_SWEEP_STEERING_RAD)
+    ramp_durations = (
+        SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_RAMP_DURATIONS_S
+        if highsteer_validation
+        else SWERVE_THROTTLE_RATE_SWEEP_RAMP_DURATIONS_S)
+    conditions = [
+        (angle, turn, ramp_duration)
+        for angle in steering_angles
+        for turn in (-1.0, 1.0)
+        for ramp_duration in ramp_durations
+    ]
+    rng.shuffle(conditions)
+    phases: list[Phase] = []
+    for angle, turn, ramp_duration in conditions:
+        pair_id = (
+            f"v{speed:.1f}_a{angle:.3f}_turn{turn:+.0f}_up_"
+            f"d{delta:.3f}_"
+            f"ramp{ramp_duration:.2f}")
+        waypoints = (
+            (0.00, 0.00),
+            (0.30, turn * angle),
+            (0.60, turn * angle),
+            (0.95, 0.00),
+            (1.25, -turn * angle),
+            (1.60, -turn * angle),
+            (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+        )
+        shapes = ["ramp", "step"]
+        rng.shuffle(shapes)
+        for shape in shapes:
+            # Reset and rebuild the same speed/state for each paired member.
+            phases.append(Phase(
+                f"approach_swerve_pair_{pair_id}_{shape}",
+                10.0,
+                speed,
+                throttle_mode="race_domain_approach",
+                reach_speed_target=True,
+                condition_pair_id=pair_id,
+            ))
+            phases.append(Phase(
+                f"swerve_slew_{pair_id}_{shape}",
+                SWERVE_THROTTLE_SLEW_PHASE_S,
+                speed,
+                throttle_mode="slew_probe",
+                validate_samples=True,
+                validate_speed=False,
+                validate_steering=False,
+                settle_before_probe=True,
+                throttle_profile=shape,
+                throttle_start_norm=nominal,
+                throttle_end_norm=nominal + delta,
+                throttle_stimulus_delay_s=0.60,
+                throttle_ramp_duration_s=ramp_duration,
+                condition_pair_id=pair_id,
+                steering_profile="waypoints",
+                steering_amplitude_rad=angle,
+                steering_waypoints=waypoints,
+            ))
+    return phases
+
+
+def _highsteer_throttle_rate_factorial_phases(
+        seed: int, speed: float = SWERVE_THROTTLE_RATE_SWEEP_SPEED_MPS
+        ) -> list[Phase]:
+    """Cross throttle-change size with matched rise rates at high steering."""
+    nominal = race_domain_feedforward(speed, _nominal_feedforward(speed))
+    conditions = [
+        (angle, turn, delta, delta / rise_rate)
+        for angle in SWERVE_THROTTLE_RATE_SWEEP_STEERING_RAD
+        for turn in (-1.0, 1.0)
+        for delta in SWERVE_THROTTLE_RATE_FACTORIAL_DELTAS_NORM
+        for rise_rate in SWERVE_THROTTLE_RATE_FACTORIAL_RATES_NORM_PER_SEC
+    ]
+    if any(nominal + delta > MAX_THROTTLE for _angle, _turn, delta, _duration
+           in conditions):
+        raise ValueError("factorial throttle target exceeds the command limit")
+
+    rng = random.Random(seed)
+    rng.shuffle(conditions)
+    phases: list[Phase] = []
+    for angle, turn, delta, ramp_duration in conditions:
+        rise_rate = delta / ramp_duration
+        pair_id = (
+            f"v{speed:.1f}_a{angle:.3f}_turn{turn:+.0f}_up_"
+            f"d{delta:.3f}_rate{rise_rate:.3f}")
+        waypoints = (
+            (0.00, 0.00),
+            (0.30, turn * angle),
+            (0.60, turn * angle),
+            (0.95, 0.00),
+            (1.25, -turn * angle),
+            (1.60, -turn * angle),
+            (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+        )
+        shapes = ["ramp", "step"]
+        rng.shuffle(shapes)
+        for shape in shapes:
+            phases.append(Phase(
+                f"approach_swerve_pair_{pair_id}_{shape}",
+                10.0,
+                speed,
+                throttle_mode="race_domain_approach",
+                reach_speed_target=True,
+                condition_pair_id=pair_id,
+            ))
+            phases.append(Phase(
+                f"swerve_slew_{pair_id}_{shape}",
+                SWERVE_THROTTLE_SLEW_PHASE_S,
+                speed,
+                throttle_mode="slew_probe",
+                validate_samples=True,
+                validate_speed=False,
+                validate_steering=False,
+                settle_before_probe=True,
+                throttle_profile=shape,
+                throttle_start_norm=nominal,
+                throttle_end_norm=nominal + delta,
+                throttle_stimulus_delay_s=0.60,
+                throttle_ramp_duration_s=ramp_duration,
+                condition_pair_id=pair_id,
+                steering_profile="waypoints",
+                steering_amplitude_rad=angle,
+                steering_waypoints=waypoints,
+            ))
+    return phases
+
+
+def _frontier_throttle_up_swerve_phases(seed: int) -> list[Phase]:
+    """Pair positive throttle steps/ramps in the missing 9–10 m/s swerve cells."""
+    rng = random.Random(seed)
+    conditions = [
+        (speed, steering, turn, duration)
+        for speed, steering_levels in SWERVE_THROTTLE_RATE_FRONTIER_UP_SPEED_STEERING_RAD
+        for steering in steering_levels
+        for turn in (-1.0, 1.0)
+        for duration in SWERVE_THROTTLE_RATE_FRONTIER_UP_RAMP_DURATIONS_S
+    ]
+    rng.shuffle(conditions)
+    phases: list[Phase] = []
+    for speed, steering, turn, ramp_duration in conditions:
+        nominal = race_domain_feedforward(speed, _nominal_feedforward(speed))
+        final_throttle = nominal + SWERVE_THROTTLE_RATE_FRONTIER_UP_DELTA_NORM
+        if final_throttle >= MAX_THROTTLE:
+            raise ValueError(
+                f"frontier throttle target exceeds headroom at {speed:g} m/s")
+        rate = SWERVE_THROTTLE_RATE_FRONTIER_UP_DELTA_NORM / ramp_duration
+        pair_id = (
+            f"v{speed:.1f}_a{steering:.3f}_turn{turn:+.0f}_up_"
+            f"d{SWERVE_THROTTLE_RATE_FRONTIER_UP_DELTA_NORM:.3f}_"
+            f"rate{rate:.3f}")
+        waypoints = (
+            (0.00, 0.00),
+            (0.30, turn * steering),
+            (0.60, turn * steering),
+            (0.95, 0.00),
+            (1.25, -turn * steering),
+            (1.60, -turn * steering),
+            (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+        )
+        shapes = ["ramp", "step"]
+        rng.shuffle(shapes)
+        for shape in shapes:
+            # Each pair member starts from a fresh reset and the same measured
+            # speed approach. This prevents the first swerve contaminating the
+            # matched initial wheel/body slip state of the second.
+            phases.append(Phase(
+                f"approach_swerve_pair_{pair_id}_{shape}",
+                SWERVE_THROTTLE_SLEW_APPROACH_S[speed],
+                speed,
+                throttle_mode="race_domain_approach",
+                reach_speed_target=True,
+                condition_pair_id=pair_id,
+            ))
+            phases.append(Phase(
+                f"swerve_slew_{pair_id}_{shape}",
+                SWERVE_THROTTLE_SLEW_PHASE_S,
+                speed,
+                throttle_mode="slew_probe",
+                validate_samples=True,
+                validate_speed=False,
+                validate_steering=False,
+                settle_before_probe=True,
+                throttle_profile=shape,
+                throttle_start_norm=nominal,
+                throttle_end_norm=final_throttle,
+                throttle_stimulus_delay_s=0.60,
+                throttle_ramp_duration_s=ramp_duration,
+                condition_pair_id=pair_id,
+                steering_profile="waypoints",
+                steering_amplitude_rad=steering,
+                steering_waypoints=waypoints,
+            ))
+    return phases
+
+
+def _race_domain_throttle_rate_phases(seed: int, speed: float) -> list[Phase]:
+    """Measure matched throttle slew in the practiced speed/steering range."""
+    if speed not in SWERVE_THROTTLE_RATE_RACE_DOMAIN_SPEEDS_MPS:
+        raise ValueError(
+            "race-domain throttle-rate speed must be one of "
+            f"{SWERVE_THROTTLE_RATE_RACE_DOMAIN_SPEEDS_MPS}")
+    nominal = race_domain_feedforward(speed, _nominal_feedforward(speed))
+    conditions = [
+        (steering, turn, delta, duration)
+        for steering in SWERVE_THROTTLE_RATE_RACE_DOMAIN_STEERING_RAD
+        for turn in (-1.0, 1.0)
+        for delta in SWERVE_THROTTLE_RATE_RACE_DOMAIN_DELTAS_NORM
+        for duration in SWERVE_THROTTLE_RATE_RACE_DOMAIN_RAMP_DURATIONS_S
+    ]
+    if any(nominal + delta > MAX_THROTTLE
+           for _steering, _turn, delta, _duration in conditions):
+        raise ValueError(f"race-domain throttle target exceeds limit at {speed:g} m/s")
+
+    rng = random.Random(seed)
+    rng.shuffle(conditions)
+    phases: list[Phase] = []
+    for steering, turn, delta, ramp_duration in conditions:
+        rate = delta / ramp_duration
+        pair_id = (
+            f"v{speed:.1f}_a{steering:.3f}_turn{turn:+.0f}_up_"
+            f"d{delta:.3f}_rate{rate:.3f}")
+        waypoints = (
+            (0.00, 0.00),
+            (0.30, turn * steering),
+            (0.60, turn * steering),
+            (0.95, 0.00),
+            (1.25, -turn * steering),
+            (1.60, -turn * steering),
+            (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+        )
+        shapes = ["ramp", "step"]
+        rng.shuffle(shapes)
+        for shape in shapes:
+            phases.append(Phase(
+                f"approach_swerve_pair_{pair_id}_{shape}",
+                SWERVE_THROTTLE_SLEW_APPROACH_S[speed],
+                speed,
+                throttle_mode="race_domain_approach",
+                reach_speed_target=True,
+                condition_pair_id=pair_id,
+            ))
+            phases.append(Phase(
+                f"swerve_slew_{pair_id}_{shape}",
+                SWERVE_THROTTLE_SLEW_PHASE_S,
+                speed,
+                throttle_mode="slew_probe",
+                validate_samples=True,
+                validate_speed=False,
+                validate_steering=False,
+                settle_before_probe=True,
+                throttle_profile=shape,
+                throttle_start_norm=nominal,
+                throttle_end_norm=nominal + delta,
+                throttle_stimulus_delay_s=0.60,
+                throttle_ramp_duration_s=ramp_duration,
+                condition_pair_id=pair_id,
+                steering_profile="waypoints",
+                steering_amplitude_rad=steering,
+                steering_waypoints=waypoints,
+            ))
+    return phases
+
+
 def build_schedule(seed: int, profile: str = "high_angle_boundary",
-                  transition_speed_mps: float = 4.5) -> list[Phase]:
+                  transition_speed_mps: float = 4.5,
+                  throttle_rate_sweep_delta_norm: float =
+                  SWERVE_THROTTLE_SLEW_DELTA_NORM) -> list[Phase]:
     """Build repeatable speed blocks and signed steering probes."""
     rng = random.Random(seed)
     phases: list[Phase] = []
@@ -603,6 +1105,39 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
             settle_before_probe=True,
         ) for block in build_high_steer_validation_plan(seed))
         return phases
+    if profile == "isolated_highsteer_multispeed":
+        # The single 7.5 m/s high-steer domain exposed a large yaw-model
+        # mismatch, while the resulting global residual failed P0 transfer.
+        # Cover the same steering grid at low, middle, and upper racing speed
+        # so a regime-conditioned fit is supported by whole speed bands rather
+        # than one operating point. Each probe is settled before measurement;
+        # speed and signed-angle order are independently randomized.
+        speeds = [2.5, 4.5, 6.5]
+        rng.shuffle(speeds)
+        angles = (0.20, 0.25, 0.30, 0.35, 0.42, 0.46, 0.50, 0.5236)
+        for target_speed in speeds:
+            phases.extend((
+                Phase(f"approach_multispeed_v{target_speed:.1f}", 12.0,
+                      target_speed, throttle_mode="approach",
+                      reach_speed_target=True,
+                      require_speed_target_match=True),
+                Phase(f"settle_multispeed_v{target_speed:.1f}", 1.0,
+                      target_speed),
+            ))
+            conditions = [0.0]
+            conditions.extend(sign * angle for angle in angles
+                              for sign in (-1.0, 1.0))
+            rng.shuffle(conditions)
+            phases.extend(Phase(
+                f"multispeed_v{target_speed:.1f}_r1_steer_{steering:+.4f}",
+                7.5,
+                target_speed,
+                steering_rad=steering,
+                validate_samples=True,
+                validate_speed=False,
+                settle_before_probe=True,
+            ) for steering in conditions)
+        return phases
     if profile == "race_domain_dynamic_steering":
         # The static speed/steering surfaces already cover steady response.
         # This compact whole-run sequence adds matched-speed steering
@@ -644,8 +1179,94 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     validate_speed=False,
                 ))
         return phases
+    if profile == LOW_SPEED_TRANSIENT_PROFILE:
+        # Static holds already cover these angles. This fills the transient
+        # turn-in/unwind/reversal gap exposed by the practice collision, with
+        # a fresh spawn and matched speed for every signed condition.
+        rng = random.Random(seed)
+        speeds = list(LOW_SPEED_TRANSIENT_SPEEDS_MPS)
+        rng.shuffle(speeds)
+        for speed in speeds:
+            conditions = [
+                (angle, sign)
+                for angle in LOW_SPEED_TRANSIENT_STEERING_RAD
+                for sign in (-1, 1)
+            ]
+            rng.shuffle(conditions)
+            for angle, sign in conditions:
+                condition = f"v{speed:.1f}_a{angle:.2f}_turn{sign:+d}"
+                phases.extend((
+                    Phase(
+                        f"approach_lowdyn_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_lowdyn_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"lowdyn_{condition}", 1.50, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.15, sign * angle),
+                            (0.50, sign * angle),
+                            (0.80, 0.0),
+                            (1.00, -sign * 0.30),
+                            (1.25, -sign * 0.30),
+                            (1.45, 0.0),
+                        ),
+                    ),
+                ))
+        return phases
     if profile == SUBNET_TRANSIENT_PROFILE:
         return _subnet_highsteer_transient_phases(seed)
+    if profile in (SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
+                   SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE):
+        return _highsteer_throttle_rate_sweep_phases(
+            seed, throttle_rate_sweep_delta_norm,
+            highsteer_validation=(
+                profile == SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE))
+    if profile == SWERVE_THROTTLE_RATE_FACTORIAL_PROFILE:
+        return _highsteer_throttle_rate_factorial_phases(seed)
+    if profile == SWERVE_THROTTLE_RATE_FACTORIAL_4P5_PROFILE:
+        return _highsteer_throttle_rate_factorial_phases(
+            seed, SWERVE_THROTTLE_RATE_FACTORIAL_4P5_SPEED_MPS)
+    if profile == SWERVE_THROTTLE_RATE_FACTORIAL_6P5_PROFILE:
+        return _highsteer_throttle_rate_factorial_phases(
+            seed, SWERVE_THROTTLE_RATE_FACTORIAL_6P5_SPEED_MPS)
+    if profile == SWERVE_THROTTLE_RATE_FACTORIAL_7P5_PROFILE:
+        return _highsteer_throttle_rate_factorial_phases(
+            seed, SWERVE_THROTTLE_RATE_FACTORIAL_7P5_SPEED_MPS)
+    if profile in SWERVE_THROTTLE_RATE_FRONTIER_UP_PROFILES:
+        return _frontier_throttle_up_swerve_phases(seed)
+    if profile in SWERVE_THROTTLE_RATE_RACE_DOMAIN_PROFILES:
+        return _race_domain_throttle_rate_phases(
+            seed, transition_speed_mps)
+    if profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES:
+        speed_steering = (
+            SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD
+            if profile == SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE else
+            SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_SPEED_STEERING_RAD
+            if profile == SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE else
+            SWERVE_THROTTLE_SLEW_MODERATE_SPEED_STEERING_RAD
+            if profile == SWERVE_THROTTLE_SLEW_MODERATE_PROFILE else
+            SWERVE_THROTTLE_SLEW_LOWSTEER_SPEED_STEERING_RAD
+            if profile == SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE else
+            SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD)
+        return _race_domain_swerve_throttle_slew_phases(
+            seed, speed_steering,
+            reset_before_each_probe=(
+                profile == SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE))
     if profile in DYNAMIC_COUPLED_PROFILES:
         for condition in build_dynamic_coupled_plan(seed):
             condition_id = condition.condition_id
@@ -1250,7 +1871,9 @@ class OpenPlaneExcitation:
                  speed_hold_kp: float = 0.04,
                  speed_hold_ki: float = 0.0,
                  speed_median_gate_mps: float = MAX_SPEED_MEDIAN_ERROR_MPS,
-                 speed_p95_gate_mps: float = MAX_SPEED_P95_ERROR_MPS) -> None:
+                 speed_p95_gate_mps: float = MAX_SPEED_P95_ERROR_MPS,
+                 throttle_rate_sweep_delta_norm: float =
+                 SWERVE_THROTTLE_SLEW_DELTA_NORM) -> None:
         if not math.isfinite(speed_hold_kp) or speed_hold_kp < 0.0:
             raise ValueError("speed-hold proportional gain must be finite and nonnegative")
         if not math.isfinite(speed_hold_ki) or speed_hold_ki < 0.0:
@@ -1260,11 +1883,15 @@ class OpenPlaneExcitation:
                 not math.isfinite(speed_p95_gate_mps) or
                 speed_p95_gate_mps <= 0.0):
             raise ValueError("speed-error gates must be finite and positive")
+        if (not math.isfinite(throttle_rate_sweep_delta_norm)
+                or throttle_rate_sweep_delta_norm <= 0.0
+                or throttle_rate_sweep_delta_norm > MAX_THROTTLE):
+            raise ValueError("rate-sweep throttle delta must be in (0, 0.50]")
         if not math.isfinite(probe_dwell_s) or not 0.0 <= probe_dwell_s <= 15.0:
             raise ValueError("probe dwell must be finite and in [0, 15] seconds")
         if probe_dwell_s > 0.0 and profile in (
                 "full_input_excitation", "grid", *DYNAMIC_COUPLED_PROFILES,
-                SUBNET_TRANSIENT_PROFILE):
+                SUBNET_TRANSIENT_PROFILE, *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES):
             raise ValueError("probe dwell override is unsupported for this fixed capture protocol")
         self.dynamic_coupled_plan = (
             build_dynamic_coupled_plan(seed)
@@ -1277,7 +1904,9 @@ class OpenPlaneExcitation:
             build_race_domain_plan(
                 seed, boundary_speed_mps=RACE_DOMAIN_BOUNDARY_SPEED_MPS)
             if profile == "race_domain_continuous" else ())
-        phases = build_schedule(seed, profile, transition_speed_mps)
+        phases = build_schedule(
+            seed, profile, transition_speed_mps,
+            throttle_rate_sweep_delta_norm)
         self.subnet_transient_reset_count = (
             sum(phase.label.startswith("approach_subnet_")
                 for phase in phases)
@@ -1306,6 +1935,41 @@ class OpenPlaneExcitation:
                 sum(phase.duration_s for phase in phases)
                 + self.subnet_transient_reset_count
                 * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+                + 5.0
+            )
+            if timeout_s < required:
+                raise ValueError(
+                    f"{profile} requires --timeout-s >= {required:g}")
+        if profile == LOW_SPEED_TRANSIENT_PROFILE:
+            reset_cycles = sum(
+                phase.label.startswith("approach_lowdyn_")
+                for phase in phases)
+            required = (
+                sum(phase.duration_s for phase in phases)
+                + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+                + 5.0
+            )
+            if timeout_s < required:
+                raise ValueError(
+                    f"{profile} requires --timeout-s >= {required:g}")
+        if profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES:
+            required = (
+                sum(phase.duration_s for phase in phases)
+                + sum(phase.settle_before_probe for phase in phases)
+                * PROBE_START_TIMEOUT_SEC
+                + sum(phase.label.startswith("approach_swerve_pair_")
+                      for phase in phases)
+                * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+                + 5.0
+            )
+            if timeout_s < required:
+                raise ValueError(
+                    f"{profile} requires --timeout-s >= {required:g}")
+        if profile == "isolated_highsteer_multispeed":
+            required = (
+                sum(phase.duration_s for phase in phases)
+                + sum(phase.settle_before_probe for phase in phases)
+                * PROBE_START_TIMEOUT_SEC
                 + 5.0
             )
             if timeout_s < required:
@@ -1400,7 +2064,7 @@ class OpenPlaneExcitation:
             self.node.create_publisher(Bool, RESET_COMMAND_TOPIC, 1)
             if (profile == "race_domain_steering_frontier"
                 or profile == SUBNET_TRANSIENT_PROFILE
-                or profile in DYNAMIC_COUPLED_PROFILES) else None
+                or profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES) else None
         )
         self.collision_sub = self.node.create_subscription(
             Int32, COLLISION_TOPIC, self._on_collision, sensor_qos)
@@ -1416,6 +2080,10 @@ class OpenPlaneExcitation:
             + (len(self.dynamic_coupled_plan)
                if self.dynamic_coupled_plan else 0)
             + self.subnet_transient_reset_count
+            + sum(phase.label.startswith("approach_lowdyn_")
+                  for phase in self.phases)
+            + sum(phase.label.startswith("approach_swerve_pair_")
+                  for phase in self.phases)
         ) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
         self.node.get_logger().info(
             f"waiting for source odom and zero collision count; profile={profile}, seed={seed}, "
@@ -1677,14 +2345,14 @@ class OpenPlaneExcitation:
                 return
         if ((self.profile == "race_domain_steering_frontier"
              or self.profile == SUBNET_TRANSIENT_PROFILE
-             or self.profile in DYNAMIC_COUPLED_PROFILES)
+             or self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES)
                 and (self.reset_pub is None
                      or self.reset_pub.get_subscription_count() == 0)):
             return
         self.started_at = now
         if (self.profile == "race_domain_steering_frontier"
                 or self.profile == SUBNET_TRANSIENT_PROFILE
-                or self.profile in DYNAMIC_COUPLED_PROFILES):
+                or self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES):
             self._begin_sim_reset(now, "initial reset to spawn")
         else:
             self._start_phase(now)
@@ -1819,7 +2487,7 @@ class OpenPlaneExcitation:
                                            "race_domain_brake_boundary",
                                            "race_domain_moderate_braking",
                                            "race_domain_steering_frontier",
-                                           *DYNAMIC_COUPLED_PROFILES)
+                                           *RACE_DOMAIN_SPEED_GOVERNED_PROFILES)
                        else SUBNET_TRANSIENT_MAX_SPEED_MPS
                        if self.profile == SUBNET_TRANSIENT_PROFILE
                        else EMERGENCY_SPEED_MPS)
@@ -1872,7 +2540,9 @@ class OpenPlaneExcitation:
                 # stable, so its starting conditions remain comparable.
                 self._publish(0.0, self._speed_hold_command(
                     phase.speed_target_mps,
-                    race_domain=phase.throttle_mode == "race_domain_hold"))
+                    race_domain=(
+                        phase.throttle_mode == "race_domain_hold"
+                        or self.profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES)))
                 return
 
         phase_elapsed = now - self.phase_started_at
@@ -1887,6 +2557,7 @@ class OpenPlaneExcitation:
                 "phase_index": self.phase_index,
                 "phase_count": len(self.phases),
                 "phase_elapsed_s": phase_elapsed,
+                "phase_duration_s": phase.duration_s,
                 "label": phase.label,
                 "target_speed_mps": phase.speed_target_mps,
                 "steering_command_rad": phase.steering_rad,
@@ -1983,7 +2654,8 @@ class OpenPlaneExcitation:
                 "throttle_profile": phase.throttle_profile,
                 "throttle_start_norm": phase.throttle_start_norm,
                 "throttle_end_norm": phase.throttle_end_norm,
-                "steering_command_rad": phase.steering_rad,
+                "steering_command_rad": _phase_steering_command(
+                    phase, phase_elapsed),
                 "speed_mps": self.speed_mps,
                 "vx_mps": self.vx_mps,
                 "vy_mps": self.vy_mps,
@@ -1994,7 +2666,12 @@ class OpenPlaneExcitation:
                 "monotonic_ns": time.monotonic_ns(),
             })
             self.phase_stimulus_published = True
-        if phase.reach_speed_target and self.speed_mps >= phase.speed_target_mps - 0.10:
+        speed_target_reached = (
+            abs(self.speed_mps - phase.speed_target_mps) <= 0.10
+            if phase.require_speed_target_match
+            else self.speed_mps >= phase.speed_target_mps - 0.10
+        )
+        if phase.reach_speed_target and speed_target_reached:
             self.node.get_logger().info(
                 f"phase complete: {phase.label}, measured_speed={self.speed_mps:.3f}m/s")
             self._next_phase(now)
@@ -2064,7 +2741,7 @@ class OpenPlaneExcitation:
                 self.speed_mps >= EXCITATION_SPEED_GOVERNOR_MPS and throttle > 0.0):
             throttle = 0.0
             self.phase_governor_ticks += 1
-        if (self.profile in DYNAMIC_COUPLED_PROFILES
+        if (self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES
                 and self.speed_mps >= RACE_DOMAIN_GOVERNOR_MPS
                 and throttle > 0.0):
             # Keep the captured motion inside the handoff's 11.2 m/s support;
@@ -2097,6 +2774,14 @@ class OpenPlaneExcitation:
                 now, f"completed {previous_phase.condition_pair_id}")
         elif (self.profile == SUBNET_TRANSIENT_PROFILE
               and next_phase.label.startswith("approach_subnet_")):
+            self._begin_sim_reset(
+                now, f"completed {previous_phase.condition_pair_id}")
+        elif (self.profile == LOW_SPEED_TRANSIENT_PROFILE
+              and next_phase.label.startswith("approach_lowdyn_")):
+            self._begin_sim_reset(
+                now, f"completed {previous_phase.condition_pair_id}")
+        elif (self.profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES
+              and next_phase.label.startswith("approach_swerve_pair_")):
             self._begin_sim_reset(
                 now, f"completed {previous_phase.condition_pair_id}")
         else:
@@ -2218,7 +2903,9 @@ def main() -> int:
                                                "isolated_force_5mps",
                                                "isolated_highspeed_surface",
                                                "isolated_highsteer_75_long",
+                                               "isolated_highsteer_multispeed",
                                                "race_domain_dynamic_steering",
+                                               LOW_SPEED_TRANSIENT_PROFILE,
                                                "isolated_3to5_response_surface",
                                                "isolated_highspeed_crossfactor",
                                                "isolated_highspeed_tail",
@@ -2235,6 +2922,7 @@ def main() -> int:
                                                "transient_transition_4mps_fixedthrottle",
                                                "transient_transition_dwell_4mps_fixedthrottle",
                                                "throttle_slew_pair",
+                                               *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
                                                "full_input_excitation",
                                                "race_domain_continuous",
                                                "race_domain_brake_boundary",
@@ -2260,6 +2948,9 @@ def main() -> int:
     parser.add_argument("--speed-p95-gate-mps", type=float,
                         default=MAX_SPEED_P95_ERROR_MPS,
                         help="maximum per-phase p95 speed error")
+    parser.add_argument("--throttle-rate-sweep-delta-norm", type=float,
+                        default=SWERVE_THROTTLE_SLEW_DELTA_NORM,
+                        help="positive throttle increment for the high-steer rate-sweep profile")
     args = parser.parse_args()
     if not math.isfinite(args.timeout_s) or not 0.0 < args.timeout_s <= 1200.0:
         parser.error("--timeout-s must be greater than 0 and no more than 1200")
@@ -2304,6 +2995,23 @@ def main() -> int:
         if args.timeout_s < required:
             parser.error(
                 f"{args.profile} requires --timeout-s >= {required:g}")
+    if args.profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES:
+        schedule = build_schedule(args.seed, args.profile,
+                                  args.transition_speed_mps,
+                                  args.throttle_rate_sweep_delta_norm)
+        reset_cycles = sum(
+            phase.label.startswith("approach_swerve_pair_")
+            for phase in schedule)
+        required = (
+            sum(phase.duration_s for phase in schedule)
+            + sum(phase.settle_before_probe for phase in schedule)
+            * PROBE_START_TIMEOUT_SEC
+            + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        if args.timeout_s < required:
+            parser.error(
+                f"{args.profile} requires --timeout-s >= {required:g}")
     if args.profile == "isolated_highsteer_75_long":
         schedule = build_schedule(args.seed, args.profile,
                                   args.transition_speed_mps)
@@ -2313,12 +3021,36 @@ def main() -> int:
         if args.timeout_s < required:
             parser.error(
                 f"isolated_highsteer_75_long requires --timeout-s >= {required:g}")
+    if args.profile == "isolated_highsteer_multispeed":
+        schedule = build_schedule(args.seed, args.profile,
+                                  args.transition_speed_mps)
+        required = (sum(phase.duration_s for phase in schedule)
+                    + sum(phase.settle_before_probe for phase in schedule)
+                    * PROBE_START_TIMEOUT_SEC + 5.0)
+        if args.timeout_s < required:
+            parser.error(
+                "isolated_highsteer_multispeed requires "
+                f"--timeout-s >= {required:g}")
     if args.profile == "race_domain_dynamic_steering":
         required = sum(phase.duration_s for phase in build_schedule(
             args.seed, args.profile, args.transition_speed_mps)) + 5.0
         if args.timeout_s < required:
             parser.error(
                 f"race_domain_dynamic_steering requires --timeout-s >= {required:g}")
+    if args.profile == LOW_SPEED_TRANSIENT_PROFILE:
+        schedule = build_schedule(args.seed, args.profile,
+                                  args.transition_speed_mps)
+        reset_cycles = sum(
+            phase.label.startswith("approach_lowdyn_")
+            for phase in schedule)
+        required = (
+            sum(phase.duration_s for phase in schedule)
+            + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        if args.timeout_s < required:
+            parser.error(
+                f"{LOW_SPEED_TRANSIENT_PROFILE} requires --timeout-s >= {required:g}")
 
     rclpy.init()
     if (not math.isfinite(args.transition_speed_mps)
@@ -2340,13 +3072,19 @@ def main() -> int:
             not math.isfinite(args.speed_p95_gate_mps) or
             args.speed_p95_gate_mps <= 0.0):
         parser.error("speed controller gains must be nonnegative and speed gates positive")
+    if (not math.isfinite(args.throttle_rate_sweep_delta_norm)
+            or args.throttle_rate_sweep_delta_norm <= 0.0
+            or args.throttle_rate_sweep_delta_norm > MAX_THROTTLE):
+        parser.error("--throttle-rate-sweep-delta-norm must be in (0, 0.50]")
     if (not math.isfinite(args.probe_dwell_s) or
             not 0.0 <= args.probe_dwell_s <= 15.0):
         parser.error("--probe-dwell-s must be in [0, 15]")
     if (args.probe_dwell_s > 0.0 and
             args.profile in ("full_input_excitation", "grid",
                              *DYNAMIC_COUPLED_PROFILES,
-                             SUBNET_TRANSIENT_PROFILE)):
+                             SUBNET_TRANSIENT_PROFILE,
+                             LOW_SPEED_TRANSIENT_PROFILE,
+                             *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES)):
         parser.error("--probe-dwell-s is unsupported for this fixed capture profile")
     experiment = OpenPlaneExcitation(args.seed, args.timeout_s, args.profile,
                                     args.transition_speed_mps,
@@ -2354,7 +3092,8 @@ def main() -> int:
                                     args.speed_hold_kp,
                                     args.speed_hold_ki,
                                     args.speed_median_gate_mps,
-                                    args.speed_p95_gate_mps)
+                                    args.speed_p95_gate_mps,
+                                    args.throttle_rate_sweep_delta_norm)
     interrupted = False
 
     def stop_on_signal(_signum, _frame):

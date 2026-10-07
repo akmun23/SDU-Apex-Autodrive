@@ -180,6 +180,11 @@ struct OdometryEstimate
   double stamp_s{0.0};
   double dt_s{0.0};
   double speed_pred_mps{0.0};
+  // Causal speed reference immediately before this packet's wheel measurement
+  // is applied. Invalid on reset/turn-entry packets where the transition
+  // already consumes the current wheel sample.
+  double pre_wheel_update_speed_mps{0.0};
+  bool pre_wheel_update_speed_valid{false};
   double speed_mps{0.0};
   double body_u_mps{0.0};
   double body_v_mps{0.0};
@@ -252,6 +257,8 @@ private:
   double x_m_{0.0};
   double y_m_{0.0};
   double last_speed_pred_mps_{0.0};
+  double last_pre_wheel_update_speed_mps_{0.0};
+  bool last_pre_wheel_update_speed_valid_{false};
   double last_wheel_raw_mps_{0.0};
   double last_wheel_mapped_mps_{0.0};
   double last_wheel_packet_mps_{0.0};

@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    # Practice-only regime correction. Existing 3-5 m/s measurements show
+    # yaw-rate saturation at high steering demand; the q gate leaves the
+    # previously failing low-demand region unchanged.
+    yaw_rate_response_surface_enabled: true
+    yaw_rate_response_surface_file: /workspace/src/live_runs/raceline_candidates/highspeed_yaw_surface_supportgate_v01_20261006/yaw_response_surface_combined.csv
+    yaw_rate_response_surface_blend_q_start: 1.00
+    yaw_rate_response_surface_blend_q_end: 1.20
+    yaw_rate_response_surface_speed_blend_margin_mps: 0.10
+    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.60
+    yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.0
+    yaw_rate_response_surface_high_speed_support_fadein_mps: 0.0

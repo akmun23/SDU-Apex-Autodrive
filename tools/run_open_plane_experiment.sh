@@ -7,7 +7,20 @@ usage() {
     "Runs the development-only open-plane experiment against the Explore simulator." \
     "Start it separately with: SDU_APEX_SIM_TRACK=explore SDU_APEX_SIM_MODE=batchmode ./tools/start_simulator.sh" \
     "Configure with SDU_APEX_EXPERIMENT_PROFILE, SDU_APEX_EXPERIMENT_RUN_ID, and related SDU_APEX_EXPERIMENT_* variables." \
+    "For a side-by-side sensor-odometry comparison, start tools/run_explore_sensor_odometry.sh and set SDU_APEX_EXPERIMENT_CAPTURE_SENSOR_ODOM=1." \
     "New paired throttle-slew profile: throttle_slew_pair at 4.5 or 6.5 m/s." \
+    "race_domain_swerve_throttle_slew_{train,validation} pairs throttle steps/ramps during reset-isolated steering reversals." \
+    "race_domain_swerve_throttle_slew_frontier_validation pairs ramp/step throttle reductions at 9.5–11.1 m/s and 0.12–0.20 rad." \
+    "race_domain_swerve_throttle_slew_11mps_replication repeats only the 11.1 m/s frontier (0.12/0.16/0.20 rad, both turn directions)." \
+    "race_domain_swerve_throttle_slew_moderate_validation adds paired throttle up/down tests at 4.5/6.5/7.5 m/s and 0.12/0.20 rad." \
+    "race_domain_swerve_throttle_slew_lowsteer_validation tests paired throttle up/down at 4.5/6.5/7.5 m/s and 0.08/0.10 rad." \
+    "race_domain_swerve_throttle_rate_sweep_validation compares three throttle-rise ramps with reset-matched steps at 8 m/s and 0.30/0.42 rad." \
+    "race_domain_swerve_throttle_rate_sweep_highsteer_validation repeats only the governor-clean 0.42 rad cells at 8 m/s (0.15/0.30 s ramps)." \
+    "race_domain_swerve_throttle_rate_factorial_validation crosses +0.08/+0.12 throttle increments with 0.133/0.267/0.533 normalized/s ramps at 8 m/s and 0.30/0.42 rad." \
+    "race_domain_swerve_throttle_rate_factorial_{4p5,6p5,7p5}_validation repeat that crossed matrix at the named initial speed." \
+    "race_domain_swerve_throttle_slew_up_frontier_validation pairs positive throttle steps/ramps during swerves at 9/10 m/s and measured moderate-steering cells." \
+    "race_domain_swerve_throttle_rate_race_domain_{train,validation} crosses +0.04/+0.08 throttle changes and 0.15/0.30 s ramps at 4.5/6.5/7.5 m/s and 0.08/0.14/0.20 rad." \
+    "Set SDU_APEX_EXPERIMENT_THROTTLE_RATE_SWEEP_DELTA_NORM to compare a different positive throttle increment." \
     "Use throttle_reset_smoke before the reset-isolated throttle transition surface." \
     "Throttle transition surface uses randomized, reset-isolated throttle transitions." \
     "race_domain_continuous records one uninterrupted 0–12 m/s speed/steering/braking sequence." \
@@ -15,7 +28,9 @@ usage() {
     "race_domain_moderate_braking adds 9–11.1 m/s turn-in, throttle reduction, active braking and release." \
     "race_domain_steering_frontier maps reset-isolated steering response at 9.5, 10.5, and 11.1 m/s." \
     "isolated_highsteer_75_long repeats the observed 7.5 m/s high-steering envelope with 8 s holds." \
+    "isolated_highsteer_multispeed repeats that grid at 2.5, 4.5, and 6.5 m/s." \
     "race_domain_dynamic_steering records continuous signed steering transitions at 4.5, 6.5, and 7.5 m/s." \
+    "race_domain_low_speed_highsteer_transients captures reset-matched 2.5/3.0/3.5 m/s high-steer turn-in, unwind, and reversal." \
     "race_domain_dynamic_coupled_{train,validation,final} records randomized waveforms across the supported 5–11.1 m/s envelope." \
     "subnet_highsteer_transients records reset-isolated 7.5 m/s turn-in/unwind throttle transients at 0.30/0.42 rad." \
     "Resume a partial surface with SDU_APEX_EXPERIMENT_RESUME_ANALYSIS pointing to its closed analysis JSON." \
@@ -59,10 +74,36 @@ elif [[ "${profile}" == race_domain_steering_frontier ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == isolated_highsteer_75_long ]]; then
   default_timeout_s=240
+elif [[ "${profile}" == isolated_highsteer_multispeed ]]; then
+  default_timeout_s=720
 elif [[ "${profile}" == subnet_highsteer_transients ]]; then
   default_timeout_s=600
+elif [[ "${profile}" == race_domain_low_speed_highsteer_transients ]]; then
+  default_timeout_s=600
+elif [[ "${profile}" == race_domain_swerve_throttle_slew_train ||
+        "${profile}" == race_domain_swerve_throttle_slew_validation ||
+        "${profile}" == race_domain_swerve_throttle_slew_frontier_validation ||
+        "${profile}" == race_domain_swerve_throttle_slew_11mps_replication ||
+        "${profile}" == race_domain_swerve_throttle_slew_moderate_validation ||
+        "${profile}" == race_domain_swerve_throttle_slew_lowsteer_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_sweep_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_sweep_highsteer_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_factorial_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_factorial_4p5_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_factorial_6p5_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_factorial_7p5_validation ||
+        "${profile}" == race_domain_swerve_throttle_slew_up_frontier_train ||
+        "${profile}" == race_domain_swerve_throttle_slew_up_frontier_validation ||
+        "${profile}" == race_domain_swerve_throttle_rate_race_domain_train ||
+        "${profile}" == race_domain_swerve_throttle_rate_race_domain_validation ]]; then
+  default_timeout_s=1200
 fi
 timeout_s="${SDU_APEX_EXPERIMENT_TIMEOUT_S:-${default_timeout_s}}"
+capture_sensor_odom="${SDU_APEX_EXPERIMENT_CAPTURE_SENSOR_ODOM:-0}"
+if [[ "${capture_sensor_odom}" != 0 && "${capture_sensor_odom}" != 1 ]]; then
+  echo "SDU_APEX_EXPERIMENT_CAPTURE_SENSOR_ODOM must be 0 or 1." >&2
+  exit 2
+fi
 steering_angles_rad="${SDU_APEX_EXPERIMENT_STEERING_ANGLES_RAD:-0.0}"
 throttle_target_step_percent="${SDU_APEX_EXPERIMENT_THROTTLE_TARGET_STEP_PERCENT:-5}"
 throttle_baseline_step_percent="${SDU_APEX_EXPERIMENT_THROTTLE_BASELINE_STEP_PERCENT:-10}"
@@ -76,6 +117,23 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == race_domain_dynamic_coupled_train ||
       "${profile}" == race_domain_dynamic_coupled_validation ||
       "${profile}" == race_domain_dynamic_coupled_final ||
+      "${profile}" == race_domain_swerve_throttle_slew_train ||
+      "${profile}" == race_domain_swerve_throttle_slew_validation ||
+      "${profile}" == race_domain_swerve_throttle_slew_frontier_validation ||
+      "${profile}" == race_domain_swerve_throttle_slew_11mps_replication ||
+      "${profile}" == race_domain_swerve_throttle_slew_moderate_validation ||
+      "${profile}" == race_domain_swerve_throttle_slew_lowsteer_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_sweep_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_sweep_highsteer_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_factorial_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_factorial_4p5_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_factorial_6p5_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_factorial_7p5_validation ||
+      "${profile}" == race_domain_swerve_throttle_slew_up_frontier_train ||
+      "${profile}" == race_domain_swerve_throttle_slew_up_frontier_validation ||
+      "${profile}" == race_domain_swerve_throttle_rate_race_domain_train ||
+      "${profile}" == race_domain_swerve_throttle_rate_race_domain_validation ||
+      "${profile}" == race_domain_low_speed_highsteer_transients ||
       "${profile}" == subnet_highsteer_transients ]]; then
   dev_sim_reset_enabled=1
 fi
@@ -84,6 +142,7 @@ speed_hold_kp="${SDU_APEX_EXPERIMENT_SPEED_HOLD_KP:-0.04}"
 speed_hold_ki="${SDU_APEX_EXPERIMENT_SPEED_HOLD_KI:-0.0}"
 speed_median_gate_mps="${SDU_APEX_EXPERIMENT_SPEED_MEDIAN_GATE_MPS:-0.12}"
 speed_p95_gate_mps="${SDU_APEX_EXPERIMENT_SPEED_P95_GATE_MPS:-0.20}"
+throttle_rate_sweep_delta_norm="${SDU_APEX_EXPERIMENT_THROTTLE_RATE_SWEEP_DELTA_NORM:-0.08}"
 domain_id="${SDU_APEX_EXPERIMENT_DOMAIN_ID:-61}"
 resume_analysis_input="${SDU_APEX_EXPERIMENT_RESUME_ANALYSIS:-}"
 resume_analysis_container=""
@@ -99,8 +158,26 @@ case "${profile}" in
   high_angle_boundary|isolated_boundary|isolated_speed_sweep|isolated_force_3mps|\
   isolated_force_4mps|isolated_force_5mps|isolated_highspeed_surface|\
   isolated_highsteer_75_long|race_domain_dynamic_steering|\
+  isolated_highsteer_multispeed|\
   race_domain_dynamic_coupled_train|race_domain_dynamic_coupled_validation|\
-  race_domain_dynamic_coupled_final|subnet_highsteer_transients|\
+  race_domain_dynamic_coupled_final|\
+  race_domain_low_speed_highsteer_transients|\
+  race_domain_swerve_throttle_slew_train|\
+  race_domain_swerve_throttle_slew_validation|\
+  race_domain_swerve_throttle_slew_frontier_validation|\
+  race_domain_swerve_throttle_slew_11mps_replication|\
+  race_domain_swerve_throttle_slew_moderate_validation|subnet_highsteer_transients|\
+  race_domain_swerve_throttle_slew_lowsteer_validation|\
+  race_domain_swerve_throttle_rate_sweep_validation|\
+  race_domain_swerve_throttle_rate_sweep_highsteer_validation|\
+  race_domain_swerve_throttle_rate_factorial_validation|\
+  race_domain_swerve_throttle_rate_factorial_4p5_validation|\
+  race_domain_swerve_throttle_rate_factorial_6p5_validation|\
+  race_domain_swerve_throttle_rate_factorial_7p5_validation|\
+  race_domain_swerve_throttle_slew_up_frontier_train|\
+  race_domain_swerve_throttle_slew_up_frontier_validation|\
+  race_domain_swerve_throttle_rate_race_domain_train|\
+  race_domain_swerve_throttle_rate_race_domain_validation|\
   isolated_3to5_response_surface|\
   isolated_highspeed_crossfactor|isolated_highspeed_tail|\
   isolated_transition_65mps|isolated_transition_45mps|\
@@ -167,6 +244,7 @@ echo "Waiting for the explore simulator at 127.0.0.1:4567..."
   -e "EXPERIMENT_SEED=${seed}" \
   -e "EXPERIMENT_SPEED_MPS=${SDU_APEX_EXPERIMENT_SPEED_MPS:-4.5}" \
   -e "EXPERIMENT_TIMEOUT_S=${timeout_s}" \
+  -e "CAPTURE_SENSOR_ODOM=${capture_sensor_odom}" \
   -e "EXPERIMENT_STEERING_ANGLES_RAD=${steering_angles_rad}" \
   -e "EXPERIMENT_THROTTLE_TARGET_STEP_PERCENT=${throttle_target_step_percent}" \
   -e "EXPERIMENT_THROTTLE_BASELINE_STEP_PERCENT=${throttle_baseline_step_percent}" \
@@ -179,6 +257,7 @@ echo "Waiting for the explore simulator at 127.0.0.1:4567..."
   -e "EXPERIMENT_SPEED_HOLD_KI=${speed_hold_ki}" \
   -e "EXPERIMENT_SPEED_MEDIAN_GATE_MPS=${speed_median_gate_mps}" \
   -e "EXPERIMENT_SPEED_P95_GATE_MPS=${speed_p95_gate_mps}" \
+  -e "EXPERIMENT_THROTTLE_RATE_SWEEP_DELTA_NORM=${throttle_rate_sweep_delta_norm}" \
   -e "EXPERIMENT_RESUME_ANALYSIS=${resume_analysis_container}" \
   -v "${repo_root}:/workspace/src:rw" \
   --entrypoint /bin/bash "${image}" -lc '
@@ -307,6 +386,23 @@ echo "Waiting for the explore simulator at 127.0.0.1:4567..."
       /autodrive/roboracer_1/bridge_timing_fault
       /open_plane_experiment/phase
     )
+    if [[ "${CAPTURE_SENSOR_ODOM}" == 1 ]]; then
+      odom_topics_ready=0
+      for attempt in $(seq 1 100); do
+        topics="$(ros2 topic list --no-daemon 2>/dev/null || true)"
+        if grep -Fxq /explore_sensor_odom <<<"${topics}" &&
+           grep -Fxq /explore_sensor_odom/diagnostics <<<"${topics}"; then
+          odom_topics_ready=1
+          break
+        fi
+        sleep 0.1
+      done
+      if [[ "${odom_topics_ready}" != 1 ]]; then
+        echo "Requested sensor-odometry capture, but its sidecar topics were not discovered." >&2
+        exit 1
+      fi
+      record_topics+=(/explore_sensor_odom /explore_sensor_odom/diagnostics)
+    fi
     if [[ "${SDU_APEX_DEV_SIM_RESET_ENABLED}" == 1 ]]; then
       record_topics+=(/autodrive/reset_command)
     fi
@@ -369,6 +465,7 @@ echo "Waiting for the explore simulator at 127.0.0.1:4567..."
         --speed-hold-ki "${EXPERIMENT_SPEED_HOLD_KI}" \
         --speed-median-gate-mps "${EXPERIMENT_SPEED_MEDIAN_GATE_MPS}" \
         --speed-p95-gate-mps "${EXPERIMENT_SPEED_P95_GATE_MPS}" \
+        --throttle-rate-sweep-delta-norm "${EXPERIMENT_THROTTLE_RATE_SWEEP_DELTA_NORM}" \
         --timeout-s "${EXPERIMENT_TIMEOUT_S}" \
         >"${experiment_log}" 2>&1 &
     fi

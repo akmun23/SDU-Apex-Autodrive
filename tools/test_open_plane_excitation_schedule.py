@@ -10,9 +10,63 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from open_plane_excitation import (
     DYNAMIC_COUPLED_PROFILES,
+    LOW_SPEED_TRANSIENT_PROFILE,
+    LOW_SPEED_TRANSIENT_SPEEDS_MPS,
+    LOW_SPEED_TRANSIENT_STEERING_RAD,
+    SWERVE_THROTTLE_SLEW_PROFILES,
+    SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE,
+    SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD,
+    SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE,
+    SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_SPEED_STEERING_RAD,
+    SWERVE_THROTTLE_SLEW_MODERATE_PROFILE,
+    SWERVE_THROTTLE_SLEW_MODERATE_SPEED_STEERING_RAD,
+    SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE,
+    SWERVE_THROTTLE_SLEW_LOWSTEER_SPEED_STEERING_RAD,
+    SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
+    SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_4P5_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_4P5_SPEED_MPS,
+    SWERVE_THROTTLE_RATE_FACTORIAL_6P5_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_6P5_SPEED_MPS,
+    SWERVE_THROTTLE_RATE_FACTORIAL_7P5_PROFILE,
+    SWERVE_THROTTLE_RATE_FACTORIAL_7P5_SPEED_MPS,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_PROFILE,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_TRAIN_PROFILE,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_VALIDATION_PROFILE,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_SPEED_STEERING_RAD,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_DELTA_NORM,
+    SWERVE_THROTTLE_RATE_FRONTIER_UP_RAMP_DURATIONS_S,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_TRAIN_PROFILE,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_VALIDATION_PROFILE,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_STEERING_RAD,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_DELTAS_NORM,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_RAMP_DURATIONS_S,
+    SWERVE_THROTTLE_RATE_RACE_DOMAIN_SPEEDS_MPS,
+    SWERVE_THROTTLE_RATE_FACTORIAL_DELTAS_NORM,
+    SWERVE_THROTTLE_RATE_FACTORIAL_RATES_NORM_PER_SEC,
+    SWERVE_THROTTLE_RATE_SWEEP_SPEED_MPS,
+    SWERVE_THROTTLE_RATE_SWEEP_STEERING_RAD,
+    SWERVE_THROTTLE_RATE_SWEEP_RAMP_DURATIONS_S,
+    SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD,
+    SWERVE_THROTTLE_SLEW_APPROACH_S,
+    SIM_RESET_HOLD_SEC,
+    SIM_RESET_TIMEOUT_SEC,
+    PROBE_START_TIMEOUT_SEC,
     _phase_steering_command,
     _slew_probe_command,
     build_schedule,
+)
+from analyze_throttle_slew_pairs import (
+    SWERVE_EXPECTED_PAIRS_BY_PROFILE,
+    SWERVE_EXPECTED_RESETS_BY_PROFILE,
+    SWERVE_PROFILES,
+    _average_rear_contact_speeds_by_sequence,
+    _mean_window,
+    _pair_match,
+    _response_surface_rows,
+    _rigid_body_acceleration_by_sequence,
+    _sample_values,
 )
 from race_domain_dynamic_coupled_plan import (
     DYNAMIC_STEERING_FREQUENCIES_HZ,
@@ -67,6 +121,54 @@ class DynamicSteeringScheduleTest(unittest.TestCase):
             self.assertEqual(following.label, f"settle_{speed:.1f}mps")
             self.assertEqual(following.speed_target_mps, speed)
             self.assertFalse(following.reach_speed_target)
+
+
+class LowSpeedHighSteeringTransientScheduleTest(unittest.TestCase):
+    def test_full_signed_speed_angle_matrix_has_matched_reset_approaches(self) -> None:
+        phases = build_schedule(202610071, LOW_SPEED_TRANSIENT_PROFILE)
+        manoeuvres = [phase for phase in phases
+                      if phase.label.startswith("lowdyn_")]
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_lowdyn_")]
+        self.assertEqual(len(manoeuvres), 24)
+        self.assertEqual(len(approaches), 24)
+        expected = {
+            (speed, angle, sign)
+            for speed in LOW_SPEED_TRANSIENT_SPEEDS_MPS
+            for angle in LOW_SPEED_TRANSIENT_STEERING_RAD
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("lowdyn_"):
+                continue
+            condition = phase.condition_pair_id
+            self.assertIsNotNone(condition)
+            speed, angle, sign = condition.split("_")
+            observed.add((float(speed[1:]), float(angle[1:]), int(sign[4:])))
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_lowdyn_{condition}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_lowdyn_{condition}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertEqual(phase.duration_s, 1.50)
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertEqual(phase.steering_waypoints[0], (0.0, 0.0))
+            self.assertEqual(phase.steering_waypoints[-1], (1.45, 0.0))
+        self.assertEqual(observed, expected)
+
+    def test_seed_randomizes_order_without_changing_coverage(self) -> None:
+        def labels(seed: int) -> list[str]:
+            return [phase.label for phase in build_schedule(
+                seed, LOW_SPEED_TRANSIENT_PROFILE)
+                    if phase.label.startswith("lowdyn_")]
+
+        first = labels(202610071)
+        second = labels(202610072)
+        self.assertEqual(set(first), set(second))
+        self.assertNotEqual(first, second)
 
 
 class HighSpeedSteeringFrontierScheduleTest(unittest.TestCase):
@@ -278,6 +380,824 @@ class DynamicCoupledScheduleTest(unittest.TestCase):
         duration_s = sum(phase.duration_s for phase in phases)
         reset_budget_s = len(build_dynamic_coupled_plan(seed)) * (0.90 + 4.0)
         self.assertLess(duration_s + reset_budget_s + 5.0, 600.0)
+
+
+class SwerveThrottleSlewScheduleTest(unittest.TestCase):
+    def test_rate_factorial_crosses_delta_and_rate_independently(self):
+        profiles = (
+            (SWERVE_THROTTLE_RATE_FACTORIAL_4P5_PROFILE,
+             SWERVE_THROTTLE_RATE_FACTORIAL_4P5_SPEED_MPS),
+            (SWERVE_THROTTLE_RATE_FACTORIAL_PROFILE, 8.0),
+            (SWERVE_THROTTLE_RATE_FACTORIAL_6P5_PROFILE,
+             SWERVE_THROTTLE_RATE_FACTORIAL_6P5_SPEED_MPS),
+            (SWERVE_THROTTLE_RATE_FACTORIAL_7P5_PROFILE,
+             SWERVE_THROTTLE_RATE_FACTORIAL_7P5_SPEED_MPS),
+        )
+        for profile, expected_speed in profiles:
+            with self.subTest(profile=profile):
+                phases = build_schedule(20261010, profile)
+                approaches = [phase for phase in phases
+                              if phase.label.startswith("approach_swerve_pair_")]
+                probes = [phase for phase in phases
+                          if phase.label.startswith("swerve_slew_")]
+                self.assertEqual(len(approaches), 48)
+                self.assertEqual(len(probes), 48)
+                self.assertEqual({phase.speed_target_mps for phase in probes},
+                                 {expected_speed})
+                groups = {}
+                for phase in probes:
+                    groups.setdefault(phase.condition_pair_id, []).append(phase)
+                self.assertEqual(len(groups), 24)
+                actual = set()
+                for pair in groups.values():
+                    self.assertEqual({phase.throttle_profile for phase in pair},
+                                     {"ramp", "step"})
+                    ramp = next(phase for phase in pair
+                                if phase.throttle_profile == "ramp")
+                    turn = 1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0
+                    measured_rate = (
+                        ramp.throttle_end_norm - ramp.throttle_start_norm
+                    ) / ramp.throttle_ramp_duration_s
+                    actual.add((ramp.steering_amplitude_rad, turn,
+                                round(ramp.throttle_end_norm
+                                      - ramp.throttle_start_norm, 3),
+                                round(measured_rate, 3)))
+                expected = {
+                    (angle, turn, delta, rate)
+                    for angle in SWERVE_THROTTLE_RATE_SWEEP_STEERING_RAD
+                    for turn in (-1.0, 1.0)
+                    for delta in SWERVE_THROTTLE_RATE_FACTORIAL_DELTAS_NORM
+                    for rate in (round(value, 3) for value in
+                                 SWERVE_THROTTLE_RATE_FACTORIAL_RATES_NORM_PER_SEC)
+                }
+                self.assertEqual(actual, expected)
+                self.assertEqual(SWERVE_EXPECTED_PAIRS_BY_PROFILE[profile], 24)
+                self.assertEqual(SWERVE_EXPECTED_RESETS_BY_PROFILE[profile], 48)
+                self.assertEqual(SWERVE_PROFILES[profile], "validation")
+
+    def test_highsteer_rate_sweep_isolates_governor_clean_large_step_cells(self):
+        phases = build_schedule(
+            20261009, SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE,
+            throttle_rate_sweep_delta_norm=0.16)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        self.assertEqual(len(approaches), 8)
+        self.assertEqual(len(probes), 8)
+        groups = {}
+        for phase in probes:
+            groups.setdefault(phase.condition_pair_id, []).append(phase)
+        self.assertEqual(len(groups), 4)
+        self.assertEqual(
+            {(pair[0].steering_amplitude_rad,
+              1.0 if pair[0].steering_waypoints[1][1] > 0 else -1.0,
+              pair[0].throttle_ramp_duration_s)
+             for pair in groups.values()},
+            {(0.42, turn, duration)
+             for turn in (-1.0, 1.0) for duration in (0.15, 0.30)})
+        self.assertTrue(all({phase.throttle_profile for phase in pair}
+                            == {"ramp", "step"}
+                            for pair in groups.values()))
+        self.assertEqual(SWERVE_EXPECTED_PAIRS_BY_PROFILE[
+            SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE], 4)
+        self.assertEqual(SWERVE_EXPECTED_RESETS_BY_PROFILE[
+            SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE], 8)
+        self.assertEqual(SWERVE_PROFILES[
+            SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE], "validation")
+
+    def test_highsteer_rate_sweep_pairs_three_ramps_with_reset_matched_steps(self):
+        seed = 20261008
+        phases = build_schedule(seed, SWERVE_THROTTLE_RATE_SWEEP_PROFILE)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        self.assertEqual(len(approaches), 24)
+        self.assertEqual(len(probes), 24)
+
+        expected = {
+            (SWERVE_THROTTLE_RATE_SWEEP_SPEED_MPS, angle, turn, ramp_duration)
+            for angle in SWERVE_THROTTLE_RATE_SWEEP_STEERING_RAD
+            for turn in (-1.0, 1.0)
+            for ramp_duration in SWERVE_THROTTLE_RATE_SWEEP_RAMP_DURATIONS_S
+        }
+        grouped = {}
+        for phase in probes:
+            grouped.setdefault(phase.condition_pair_id, []).append(phase)
+        self.assertEqual(len(grouped), 12)
+        actual = set()
+        for pair_id, pair in grouped.items():
+            self.assertEqual(len(pair), 2)
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"ramp", "step"})
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            step = next(phase for phase in pair
+                        if phase.throttle_profile == "step")
+            self.assertEqual(ramp.steering_waypoints, step.steering_waypoints)
+            self.assertEqual(ramp.speed_target_mps,
+                             SWERVE_THROTTLE_RATE_SWEEP_SPEED_MPS)
+            self.assertTrue(all(phase.settle_before_probe for phase in pair))
+            turn = 1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0
+            actual.add((ramp.speed_target_mps, ramp.steering_amplitude_rad,
+                        turn, ramp.throttle_ramp_duration_s))
+            for phase in pair:
+                matching = [approach for approach in approaches
+                            if approach.condition_pair_id == pair_id
+                            and approach.label.endswith(
+                                f"_{phase.throttle_profile}")]
+                self.assertEqual(len(matching), 1)
+                self.assertTrue(matching[0].reach_speed_target)
+            self.assertAlmostEqual(
+                _slew_probe_command(
+                    ramp, ramp.throttle_stimulus_delay_s
+                    + ramp.throttle_ramp_duration_s),
+                ramp.throttle_end_norm,
+            )
+        self.assertEqual(actual, expected)
+        self.assertEqual(SWERVE_EXPECTED_PAIRS_BY_PROFILE[
+            SWERVE_THROTTLE_RATE_SWEEP_PROFILE], 12)
+        self.assertEqual(SWERVE_EXPECTED_RESETS_BY_PROFILE[
+            SWERVE_THROTTLE_RATE_SWEEP_PROFILE], 24)
+        self.assertEqual(SWERVE_PROFILES[SWERVE_THROTTLE_RATE_SWEEP_PROFILE],
+                         "validation")
+
+        larger_delta = build_schedule(
+            seed, SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
+            throttle_rate_sweep_delta_norm=0.16)
+        larger_ramp = next(
+            phase for phase in larger_delta
+            if phase.label.startswith("swerve_slew_")
+            and phase.throttle_profile == "ramp")
+        self.assertAlmostEqual(
+            larger_ramp.throttle_end_norm - larger_ramp.throttle_start_norm,
+            0.16)
+        self.assertLessEqual(larger_ramp.throttle_end_norm, 0.50)
+        with self.assertRaises(ValueError):
+            build_schedule(seed, SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
+                           throttle_rate_sweep_delta_norm=0.18)
+
+    def test_low_steering_validation_covers_practice_line_cells(self):
+        seed = 20261008
+        profile = SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE
+        phases = build_schedule(seed, profile)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        self.assertEqual(len(approaches), 48)
+        self.assertEqual(len(probes), 48)
+        expected = {
+            (speed, angle, turn, throttle_direction)
+            for speed, angles in SWERVE_THROTTLE_SLEW_LOWSTEER_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+            for throttle_direction in (-1.0, 1.0)
+        }
+        grouped = {}
+        for phase in probes:
+            grouped.setdefault(phase.condition_pair_id, []).append(phase)
+        actual = set()
+        for pair_id, pair in grouped.items():
+            self.assertEqual(len(pair), 2)
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"ramp", "step"})
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            step = next(phase for phase in pair
+                        if phase.throttle_profile == "step")
+            self.assertEqual(ramp.steering_waypoints, step.steering_waypoints)
+            self.assertTrue(all(phase.settle_before_probe for phase in pair))
+            for phase in pair:
+                matching_approaches = [approach for approach in approaches
+                                       if approach.condition_pair_id == pair_id
+                                       and approach.label.endswith(
+                                           f"_{phase.throttle_profile}")]
+                self.assertEqual(len(matching_approaches), 1)
+                self.assertTrue(matching_approaches[0].reach_speed_target)
+            turn = 1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0
+            throttle_direction = (
+                1.0 if ramp.throttle_end_norm > ramp.throttle_start_norm else -1.0)
+            actual.add((ramp.speed_target_mps, ramp.steering_amplitude_rad,
+                        turn, throttle_direction))
+            self.assertTrue(any(phase.condition_pair_id == pair_id
+                                for phase in approaches))
+        self.assertEqual(actual, expected)
+        self.assertEqual(SWERVE_EXPECTED_PAIRS_BY_PROFILE[profile], 24)
+        self.assertEqual(SWERVE_EXPECTED_RESETS_BY_PROFILE[profile], 48)
+        self.assertEqual(SWERVE_PROFILES[profile], "validation")
+        required = (
+            sum(phase.duration_s for phase in phases)
+            + sum(phase.settle_before_probe for phase in phases)
+            * PROBE_START_TIMEOUT_SEC
+            + len(approaches) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        self.assertLess(required, 1200.0)
+
+    def test_moderate_steering_validation_fills_missing_paired_cells(self):
+        seed = 20261007
+        phases = build_schedule(seed, SWERVE_THROTTLE_SLEW_MODERATE_PROFILE)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        self.assertEqual(len(approaches), 24)
+        self.assertEqual(len(probes), 48)
+        self.assertEqual(
+            {phase.speed_target_mps for phase in approaches},
+            {speed for speed, _angles
+             in SWERVE_THROTTLE_SLEW_MODERATE_SPEED_STEERING_RAD},
+        )
+        grouped = {}
+        for phase in probes:
+            grouped.setdefault(phase.condition_pair_id, []).append(phase)
+        expected = {
+            (speed, angle, turn, throttle_direction)
+            for speed, angles in SWERVE_THROTTLE_SLEW_MODERATE_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+            for throttle_direction in (-1.0, 1.0)
+        }
+        actual = set()
+        for pair_id, pair in grouped.items():
+            self.assertEqual(len(pair), 2)
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"ramp", "step"})
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            step = next(phase for phase in pair
+                        if phase.throttle_profile == "step")
+            self.assertEqual(ramp.steering_waypoints, step.steering_waypoints)
+            self.assertTrue(all(phase.settle_before_probe for phase in pair))
+            speed = ramp.speed_target_mps
+            angle = ramp.steering_amplitude_rad
+            turn = 1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0
+            throttle_direction = (
+                1.0 if ramp.throttle_end_norm > ramp.throttle_start_norm else -1.0)
+            actual.add((speed, angle, turn, throttle_direction))
+            self.assertTrue(any(
+                approach.condition_pair_id == pair_id
+                for approach in approaches))
+        self.assertEqual(actual, expected)
+        required = (
+            sum(phase.duration_s for phase in phases)
+            + sum(phase.settle_before_probe for phase in phases)
+            * PROBE_START_TIMEOUT_SEC
+            + len(approaches) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        self.assertLess(required, 1200.0)
+
+    def test_train_and_validation_pair_the_full_measured_swerve_domain(self):
+        seed = 20261006
+        for profile in SWERVE_THROTTLE_SLEW_PROFILES:
+            with self.subTest(profile=profile):
+                phases = build_schedule(seed, profile)
+                approaches = [phase for phase in phases
+                              if phase.label.startswith("approach_swerve_pair_")]
+                probes = [phase for phase in phases
+                          if phase.label.startswith("swerve_slew_")]
+                self.assertEqual(len(approaches), 32)
+                self.assertEqual(len(probes), 64)
+                self.assertEqual(
+                    {phase.speed_target_mps for phase in approaches},
+                    {speed for speed, _angles
+                     in SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD},
+                )
+                grouped = {}
+                for phase in probes:
+                    grouped.setdefault(phase.condition_pair_id, []).append(phase)
+                self.assertEqual(len(grouped), 32)
+                expected = {
+                    (speed, angle, turn, throttle_direction)
+                    for speed, angles in SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD
+                    for angle in angles
+                    for turn in (-1.0, 1.0)
+                    for throttle_direction in (
+                        (-1.0,) if speed >= 9.5 else (-1.0, 1.0))
+                }
+                actual = set()
+                for pair_id, pair in grouped.items():
+                    self.assertEqual({phase.throttle_profile for phase in pair},
+                                     {"ramp", "step"})
+                    ramp = next(phase for phase in pair
+                                if phase.throttle_profile == "ramp")
+                    step = next(phase for phase in pair
+                                if phase.throttle_profile == "step")
+                    self.assertEqual(ramp.steering_waypoints,
+                                     step.steering_waypoints)
+                    self.assertTrue(all(phase.settle_before_probe
+                                        for phase in pair))
+                    self.assertTrue(all(phase.validate_samples
+                                        and not phase.validate_speed
+                                        and not phase.validate_steering
+                                        for phase in pair))
+                    self.assertEqual(ramp.duration_s, 1.85)
+                    self.assertEqual(ramp.throttle_start_norm,
+                                     step.throttle_start_norm)
+                    self.assertEqual(ramp.throttle_end_norm,
+                                     step.throttle_end_norm)
+                    self.assertLessEqual(abs(
+                        ramp.throttle_end_norm-ramp.throttle_start_norm),
+                        0.08 + 1e-12)
+                    self.assertAlmostEqual(
+                        _slew_probe_command(ramp, 0.75),
+                        (ramp.throttle_start_norm+ramp.throttle_end_norm)/2)
+                    self.assertEqual(
+                        _slew_probe_command(step, 0.75),
+                        step.throttle_end_norm)
+                    speed = ramp.speed_target_mps
+                    angle = ramp.steering_amplitude_rad
+                    turn = 1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0
+                    throttle_direction = (
+                        1.0 if ramp.throttle_end_norm > ramp.throttle_start_norm
+                        else -1.0)
+                    actual.add((speed, angle, turn, throttle_direction))
+                    self.assertTrue(pair_id in next(
+                        approach.label for approach in approaches
+                        if approach.condition_pair_id == pair_id))
+                    for phase in pair:
+                        for tick in range(int(phase.duration_s * 40) + 1):
+                            self.assertLessEqual(
+                                abs(_phase_steering_command(phase, tick/40.0)),
+                                angle + 1e-9)
+                self.assertEqual(actual, expected)
+
+    def test_each_matched_condition_is_spawn_isolated_and_budgeted(self):
+        phases = build_schedule(17061, SWERVE_THROTTLE_SLEW_PROFILES[0])
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        self.assertEqual(len(approaches), 32)
+        self.assertTrue(all(phase.reach_speed_target
+                            and phase.throttle_mode == "race_domain_approach"
+                            and phase.duration_s == SWERVE_THROTTLE_SLEW_APPROACH_S[
+                                phase.speed_target_mps]
+                            for phase in approaches))
+        required = (
+            sum(phase.duration_s for phase in phases)
+            + sum(phase.settle_before_probe for phase in phases)
+            * PROBE_START_TIMEOUT_SEC
+            + len(approaches) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        self.assertLess(required, 1200.0)
+        self.assertGreater(required, 750.0)
+
+    def test_seed_randomizes_pair_order_and_step_ramp_order_reproducibly(self):
+        profile = SWERVE_THROTTLE_SLEW_PROFILES[0]
+        first = build_schedule(17071, profile)
+        repeat = build_schedule(17071, profile)
+        other = build_schedule(17072, profile)
+        self.assertEqual(first, repeat)
+        self.assertNotEqual(first, other)
+        first_shapes = [phase.throttle_profile for phase in first
+                        if phase.label.startswith("swerve_slew_")]
+        other_shapes = [phase.throttle_profile for phase in other
+                        if phase.label.startswith("swerve_slew_")]
+        self.assertNotEqual(first_shapes, other_shapes)
+
+    def test_high_speed_frontier_extension_covers_each_steer_turn_pair(self):
+        seed = 202610107
+        phases = build_schedule(seed, SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        self.assertEqual(len(approaches), 18)
+        self.assertEqual(len(probes), 36)
+        self.assertEqual(
+            {phase.speed_target_mps for phase in approaches},
+            {speed for speed, _angles
+             in SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD},
+        )
+        grouped = {}
+        for phase in probes:
+            grouped.setdefault(phase.condition_pair_id, []).append(phase)
+        expected = {
+            (speed, angle, turn)
+            for speed, angles in SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+        }
+        actual = set()
+        for pair_id, pair in grouped.items():
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"ramp", "step"})
+            self.assertTrue(all(phase.settle_before_probe
+                                and phase.validate_samples
+                                and not phase.validate_speed
+                                for phase in pair))
+            self.assertTrue(pair_id in next(
+                approach.label for approach in approaches
+                if approach.condition_pair_id == pair_id))
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            turn = (1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0)
+            actual.add((ramp.speed_target_mps,
+                        ramp.steering_amplitude_rad, turn))
+            self.assertLess(ramp.throttle_end_norm,
+                            ramp.throttle_start_norm)
+        self.assertEqual(actual, expected)
+        required = (
+            sum(phase.duration_s for phase in phases)
+            + sum(phase.settle_before_probe for phase in phases)
+            * PROBE_START_TIMEOUT_SEC
+            + len(approaches) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        self.assertLess(required, 1200.0)
+        self.assertEqual(
+            SWERVE_EXPECTED_PAIRS_BY_PROFILE[
+                SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE], 18)
+        self.assertEqual(SWERVE_PROFILES[
+            SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE], "validation")
+
+    def test_frontier_extension_order_is_seeded_and_has_random_ramp_step_order(self):
+        profile = SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE
+        first = build_schedule(202610107, profile)
+        repeat = build_schedule(202610107, profile)
+        other = build_schedule(202610108, profile)
+        self.assertEqual(first, repeat)
+        self.assertNotEqual(first, other)
+        first_shapes = [phase.throttle_profile for phase in first
+                        if phase.label.startswith("swerve_slew_")]
+        other_shapes = [phase.throttle_profile for phase in other
+                        if phase.label.startswith("swerve_slew_")]
+        self.assertNotEqual(first_shapes, other_shapes)
+
+    def test_11mps_replication_is_limited_to_ambiguous_frontier_cells(self):
+        profile = SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE
+        phases = build_schedule(202610207, profile)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        expected = {
+            (11.1, angle, turn)
+            for _speed, angles
+            in SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+        }
+        actual = set()
+        self.assertEqual(len(approaches), 6)
+        self.assertEqual(len(probes), 12)
+        for pair_id in {phase.condition_pair_id for phase in probes}:
+            pair = [phase for phase in probes
+                    if phase.condition_pair_id == pair_id]
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"ramp", "step"})
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            self.assertEqual(ramp.speed_target_mps, 11.1)
+            self.assertLess(ramp.throttle_end_norm,
+                            ramp.throttle_start_norm)
+            turn = (1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0)
+            actual.add((ramp.speed_target_mps,
+                        ramp.steering_amplitude_rad, turn))
+        self.assertEqual(actual, expected)
+        self.assertEqual(SWERVE_EXPECTED_PAIRS_BY_PROFILE[profile], 6)
+        self.assertEqual(SWERVE_PROFILES[profile], "validation")
+
+    def test_11mps_replication_order_is_seeded_and_randomized(self):
+        profile = SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE
+        first = build_schedule(202610207, profile)
+        self.assertEqual(first, build_schedule(202610207, profile))
+        self.assertNotEqual(first, build_schedule(202610208, profile))
+
+
+class FrontierThrottleUpSwerveScheduleTest(unittest.TestCase):
+    def test_positive_throttle_frontier_covers_only_the_missing_cells(self):
+        for profile in (SWERVE_THROTTLE_RATE_FRONTIER_UP_TRAIN_PROFILE,
+                        SWERVE_THROTTLE_RATE_FRONTIER_UP_VALIDATION_PROFILE):
+            with self.subTest(profile=profile):
+                self._assert_profile_schedule(profile)
+
+    def _assert_profile_schedule(self, profile):
+        phases = build_schedule(20261007, profile)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("swerve_slew_")]
+        self.assertEqual(len(approaches), 32)
+        self.assertEqual(len(probes), 32)
+
+        grouped = {}
+        for phase in probes:
+            grouped.setdefault(phase.condition_pair_id, []).append(phase)
+        self.assertEqual(len(grouped), 16)
+        expected = {
+            (speed, angle, turn, duration)
+            for speed, angles in SWERVE_THROTTLE_RATE_FRONTIER_UP_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+            for duration in SWERVE_THROTTLE_RATE_FRONTIER_UP_RAMP_DURATIONS_S
+        }
+        actual = set()
+        for pair_id, pair in grouped.items():
+            self.assertEqual(len(pair), 2)
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"ramp", "step"})
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            step = next(phase for phase in pair
+                        if phase.throttle_profile == "step")
+            self.assertEqual(ramp.speed_target_mps, step.speed_target_mps)
+            self.assertEqual(ramp.steering_waypoints, step.steering_waypoints)
+            self.assertEqual(ramp.throttle_start_norm,
+                             step.throttle_start_norm)
+            self.assertEqual(ramp.throttle_end_norm, step.throttle_end_norm)
+            self.assertAlmostEqual(
+                ramp.throttle_end_norm - ramp.throttle_start_norm,
+                SWERVE_THROTTLE_RATE_FRONTIER_UP_DELTA_NORM)
+            self.assertTrue(ramp.settle_before_probe)
+            turn = 1.0 if ramp.steering_waypoints[1][1] > 0 else -1.0
+            actual.add((ramp.speed_target_mps,
+                        ramp.steering_amplitude_rad, turn,
+                        ramp.throttle_ramp_duration_s))
+            for member in pair:
+                matched_approach = [phase for phase in approaches
+                                    if phase.condition_pair_id == pair_id
+                                    and phase.label.endswith(
+                                        f"_{member.throttle_profile}")]
+                self.assertEqual(len(matched_approach), 1)
+                self.assertTrue(matched_approach[0].reach_speed_target)
+        self.assertEqual(actual, expected)
+        self.assertEqual(SWERVE_EXPECTED_PAIRS_BY_PROFILE[profile], 16)
+        self.assertEqual(SWERVE_EXPECTED_RESETS_BY_PROFILE[profile], 32)
+        self.assertEqual(SWERVE_PROFILES[profile],
+                         "train" if profile.endswith("_train")
+                         else "validation")
+
+    def test_seed_randomizes_condition_and_ramp_step_order(self):
+        profile = SWERVE_THROTTLE_RATE_FRONTIER_UP_PROFILE
+        first = build_schedule(20261007, profile)
+        self.assertEqual(first, build_schedule(20261007, profile))
+        self.assertNotEqual(first, build_schedule(20261008, profile))
+        first_shapes = [phase.throttle_profile for phase in first
+                        if phase.label.startswith("swerve_slew_")]
+        other_shapes = [phase.throttle_profile for phase in build_schedule(
+            20261008, profile) if phase.label.startswith("swerve_slew_")]
+        self.assertNotEqual(first_shapes, other_shapes)
+
+
+class RaceDomainThrottleRateScheduleTest(unittest.TestCase):
+    def test_race_domain_factorial_is_complete_matched_and_within_timeout(self):
+        for profile in (SWERVE_THROTTLE_RATE_RACE_DOMAIN_TRAIN_PROFILE,
+                        SWERVE_THROTTLE_RATE_RACE_DOMAIN_VALIDATION_PROFILE):
+            for speed in SWERVE_THROTTLE_RATE_RACE_DOMAIN_SPEEDS_MPS:
+                with self.subTest(profile=profile, speed=speed):
+                    phases = build_schedule(20261008, profile, speed)
+                    approaches = [phase for phase in phases
+                                  if phase.label.startswith(
+                                      "approach_swerve_pair_")]
+                    probes = [phase for phase in phases
+                              if phase.label.startswith("swerve_slew_")]
+                    self.assertEqual(len(approaches), 48)
+                    self.assertEqual(len(probes), 48)
+                    grouped = {}
+                    for phase in probes:
+                        grouped.setdefault(phase.condition_pair_id, []).append(phase)
+                    expected = {
+                        (angle, turn, delta, duration)
+                        for angle in SWERVE_THROTTLE_RATE_RACE_DOMAIN_STEERING_RAD
+                        for turn in (-1.0, 1.0)
+                        for delta in SWERVE_THROTTLE_RATE_RACE_DOMAIN_DELTAS_NORM
+                        for duration in SWERVE_THROTTLE_RATE_RACE_DOMAIN_RAMP_DURATIONS_S
+                    }
+                    actual = set()
+                    for pair_id, pair in grouped.items():
+                        self.assertEqual(len(pair), 2)
+                        self.assertEqual({phase.throttle_profile for phase in pair},
+                                         {"ramp", "step"})
+                        ramp = next(phase for phase in pair
+                                    if phase.throttle_profile == "ramp")
+                        step = next(phase for phase in pair
+                                    if phase.throttle_profile == "step")
+                        self.assertEqual(ramp.speed_target_mps, speed)
+                        self.assertEqual(ramp.steering_waypoints,
+                                         step.steering_waypoints)
+                        self.assertEqual(ramp.throttle_start_norm,
+                                         step.throttle_start_norm)
+                        self.assertEqual(ramp.throttle_end_norm,
+                                         step.throttle_end_norm)
+                        self.assertTrue(ramp.settle_before_probe)
+                        self.assertTrue(step.settle_before_probe)
+                        turn = (1.0 if ramp.steering_waypoints[1][1] > 0
+                                else -1.0)
+                        delta = ramp.throttle_end_norm - ramp.throttle_start_norm
+                        actual.add((ramp.steering_amplitude_rad, turn,
+                                    round(delta, 3),
+                                    ramp.throttle_ramp_duration_s))
+                        for member in pair:
+                            matching = [phase for phase in approaches
+                                        if phase.condition_pair_id == pair_id
+                                        and phase.label.endswith(
+                                            f"_{member.throttle_profile}")]
+                            self.assertEqual(len(matching), 1)
+                            self.assertTrue(matching[0].reach_speed_target)
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(len(grouped), 24)
+                    self.assertEqual(
+                        SWERVE_EXPECTED_PAIRS_BY_PROFILE[profile], 24)
+                    self.assertEqual(
+                        SWERVE_EXPECTED_RESETS_BY_PROFILE[profile], 48)
+                    self.assertEqual(
+                        SWERVE_PROFILES[profile],
+                        "train" if profile.endswith("_train") else "validation")
+                    required = (
+                        sum(phase.duration_s for phase in phases)
+                        + sum(phase.settle_before_probe for phase in phases)
+                        * PROBE_START_TIMEOUT_SEC
+                        + len(approaches)
+                        * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+                        + 5.0)
+                    self.assertLess(required, 1200.0)
+
+    def test_seed_randomizes_order_and_invalid_speed_is_rejected(self):
+        profile = SWERVE_THROTTLE_RATE_RACE_DOMAIN_TRAIN_PROFILE
+        first = build_schedule(20261008, profile, 6.5)
+        self.assertEqual(first, build_schedule(20261008, profile, 6.5))
+        self.assertNotEqual(first, build_schedule(20261009, profile, 6.5))
+        with self.assertRaisesRegex(ValueError, "speed must be one of"):
+            build_schedule(20261008, profile, 5.5)
+
+
+class SwerveThrottleSlewPairAnalysisTest(unittest.TestCase):
+    def test_whole_response_score_is_a_time_window_mean(self):
+        samples = [
+            (0.10, {"residual": 0.10}),
+            (0.35, {"residual": 0.20}),
+            (0.70, {"residual": 0.40}),
+            (1.00, {"residual": 9.00}),
+        ]
+        mean, count = _mean_window(samples, (0.10, 1.00))
+        self.assertEqual(count, 3)
+        self.assertAlmostEqual(mean["residual"], (0.10 + 0.20 + 0.40) / 3)
+
+    @staticmethod
+    def _phase(profile: str, steering_commands: tuple[float, float, float]):
+        windows = ("0.10_0.35s", "0.35_0.65s", "0.65_1.00s")
+        return {
+            "profile": profile,
+            "phase_valid": True,
+            "command_profile_pass": True,
+            "feedback_profile_pass": True,
+            "fixed_packet_timebase_pass": True,
+            "steering_profile": "waypoints",
+            "steering_waypoints": [[0.0, 0.0], [0.3, 0.42], [0.6, 0.42],
+                                   [0.95, 0.0], [1.25, -0.42], [1.6, -0.42],
+                                   [1.85, 0.0]],
+            "steering_command_rad": 0.0,
+            "throttle_start_norm": 0.25,
+            "throttle_end_norm": 0.33 if profile == "ramp" else 0.33,
+            "stimulus_state": {
+                "speed_mps": 6.5,
+                "steering_feedback_rad": 0.31,
+                "steering_command_rad": 0.42,
+                "vy_mps": 0.2,
+                "yaw_rate_rps": 0.5,
+                "throttle_feedback_norm": 0.25,
+            },
+            "pre_window": {"median": {
+                "common_rear_wheel_residual_mps": 0.0,
+                "rear_wheel_residual_asymmetry_mps": 0.0,
+            }},
+            "post_windows": {
+                window: {"median": {"steering_command_rad": command}}
+                for window, command in zip(windows, steering_commands)
+            },
+        }
+
+    def test_matched_swerve_accepts_expected_nonzero_steering_at_stimulus(self):
+        ramp = self._phase("ramp", (0.42, 0.21, -0.42))
+        step = self._phase("step", (0.42, 0.21, -0.42))
+        matched, _differences, _pre_differences, failures = _pair_match(ramp, step)
+        self.assertTrue(matched, failures)
+
+    def test_pair_rejects_a_different_steering_command_trace(self):
+        ramp = self._phase("ramp", (0.42, 0.21, -0.42))
+        step = self._phase("step", (0.30, 0.21, -0.42))
+        matched, _differences, _pre_differences, failures = _pair_match(ramp, step)
+        self.assertFalse(matched)
+        self.assertIn("steering_command_waveform_mismatch_0.10_0.35s", failures)
+
+    def test_pair_rejects_unmatched_initial_rear_wheel_speed_residual(self):
+        ramp = self._phase("ramp", (0.42, 0.21, -0.42))
+        step = self._phase("step", (0.42, 0.21, -0.42))
+        step["pre_window"]["median"]["common_rear_wheel_residual_mps"] = 0.90
+
+        matched, _differences, pre_differences, failures = _pair_match(ramp, step)
+
+        self.assertFalse(matched)
+        self.assertAlmostEqual(pre_differences["left_rear_wheel_residual_mps"], 0.90)
+        self.assertAlmostEqual(pre_differences["right_rear_wheel_residual_mps"], 0.90)
+        self.assertIn("pre_left_rear_wheel_residual_mps_mismatch", failures)
+        self.assertIn("pre_right_rear_wheel_residual_mps_mismatch", failures)
+
+    def test_response_surface_uses_runs_as_uncertainty_units(self):
+        keys = {
+            "condition_pair_id": "cell-1",
+            "capture_profile": "factorial",
+            "speed_target_mps": 8.0,
+            "throttle_delta_direction": "up",
+            "throttle_delta_norm": 0.08,
+            "throttle_rise_rate_norm_per_sec": 0.267,
+            "abs_steering_command_rad": 0.42,
+            "turn_direction": "left",
+        }
+        residual_metric = (
+            "step_minus_ramp_mean_abs_rear_wheel_residual_mps_change_0.10_1.00s")
+        proxy_metric = (
+            "step_minus_ramp_mean_abs_rear_wheel_longitudinal_slip_ratio_proxy_change_0.10_1.00s")
+        acceleration_metric = (
+            "step_minus_ramp_rigid_body_longitudinal_acceleration_mps2_change_0.10_1.00s")
+        pairs = []
+        for run_id, residual in (("r1", 0.1), ("r1", 0.3), ("r2", 0.5)):
+            pairs.append({
+                **keys, "run_id": run_id, "valid": True,
+                residual_metric: residual, proxy_metric: residual / 10,
+                acceleration_metric: -residual,
+            })
+        pairs.append({**keys, "run_id": "bad", "valid": False})
+
+        [row] = _response_surface_rows(pairs)
+
+        self.assertEqual(row["valid_pair_count"], 3)
+        self.assertEqual(row["run_count"], 2)
+        self.assertAlmostEqual(
+            row["wheel_residual_step_minus_ramp_mps_mean"], 0.35)
+        self.assertAlmostEqual(
+            row["wheel_residual_step_minus_ramp_mps_run_min"], 0.2)
+        self.assertAlmostEqual(
+            row["wheel_residual_step_minus_ramp_mps_run_max"], 0.5)
+
+    def test_imu_roll_and_roll_rate_are_extracted_as_features(self):
+        from types import SimpleNamespace
+
+        sample = SimpleNamespace(
+            state=(6.5, 0.1, 0.2),
+            rear_wheel_surface_mps=(6.5, 6.5),
+            actuators=(0.3, 0.3, 0.3, 0.6),
+            imu_roll_pitch_rad=(0.04, -0.02),
+            imu_roll_pitch_rate_rps=(0.30, -0.01),
+            imu_acceleration_mps2=None,
+        )
+
+        values = _sample_values(sample, (6.0, 6.0))
+
+        self.assertAlmostEqual(values["imu_roll_rad"], 0.04)
+        self.assertAlmostEqual(values["abs_imu_roll_rad"], 0.04)
+        self.assertAlmostEqual(values["imu_roll_rate_rps"], 0.30)
+        self.assertAlmostEqual(values["abs_imu_roll_rate_rps"], 0.30)
+
+    def test_rigid_acceleration_uses_rotating_body_frame_terms(self):
+        from types import SimpleNamespace
+
+        com_x = 0.15532
+        samples = []
+        for sequence in range(3):
+            time_s = 0.025 * sequence
+            u = 1.0 + 2.0 * time_s
+            v_com = 0.2 + 3.0 * time_s
+            yaw_rate = 0.5 + time_s
+            v_rear = v_com - com_x * yaw_rate
+            sample = SimpleNamespace(state=(u, v_rear, yaw_rate))
+            samples.append((sequence, sample))
+        acceleration = _rigid_body_acceleration_by_sequence(samples)[1]
+        self.assertAlmostEqual(
+            acceleration["rigid_body_longitudinal_acceleration_mps2"],
+            2.0 - 0.525 * 0.275)
+        self.assertAlmostEqual(
+            acceleration["rigid_body_lateral_acceleration_mps2"],
+            3.0 + 0.525 * 1.05)
+        self.assertAlmostEqual(
+            acceleration["rigid_body_yaw_acceleration_rps2"], 1.0)
+
+    def test_encoder_speed_reference_averages_matching_four_packet_window(self):
+        from types import SimpleNamespace
+
+        samples = [
+            (sequence, SimpleNamespace(
+                state=(1.0 + 4.0 * (0.025 * sequence), 0.0, 0.0)))
+            for sequence in range(5)
+        ]
+        averages = _average_rear_contact_speeds_by_sequence(samples)
+        self.assertEqual(sorted(averages), [4])
+        self.assertAlmostEqual(averages[4][0], 1.2)
+        self.assertAlmostEqual(averages[4][1], 1.2)
+
+    def test_encoder_speed_reference_does_not_bridge_packet_gaps(self):
+        from types import SimpleNamespace
+
+        samples = [
+            (sequence, SimpleNamespace(state=(2.0, 0.0, 0.0)))
+            for sequence in (0, 1, 3, 4)
+        ]
+        self.assertEqual(
+            _average_rear_contact_speeds_by_sequence(samples), {})
 
 
 if __name__ == "__main__":

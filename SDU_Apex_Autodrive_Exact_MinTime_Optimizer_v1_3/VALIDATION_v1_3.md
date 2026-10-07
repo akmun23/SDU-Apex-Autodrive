@@ -23,14 +23,17 @@ longitudinal accel cap            6.0 m/s^2
 brake envelope                    5.36267417 + 0.27655518*u m/s^2
 max command speed                16.0 m/s
 target-speed slew                +3 / -8 m/s^2
-current lateral envelope          6.50 m/s^2
+historical scalar setting          6.50 m/s^2 (not a verified vehicle limit)
 ```
 
-The optimizer reads these from the current repository; they are documented here only to show the reviewed state.
+The optimizer read these from the reviewed repository snapshot. The 6.50 value
+was a scalar curvature-speed setting, not an experimentally verified
+speed/steering/transient capability envelope; the current YAML value is 8.0.
 
 ## Real-centerline continuation test
 
-With the current 6.50 m/s² lateral envelope and the repository's 0.30 m planning footprint + 0.15 m wall-clearance rule:
+In this historical solve, with a 6.50 m/s² scalar shaping setting and the
+repository's 0.30 m planning footprint + 0.15 m wall-clearance rule:
 
 ```text
 mesh       IPOPT iterations     predicted lap

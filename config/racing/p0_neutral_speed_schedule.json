@@ -1,0 +1,18 @@
+{
+  "candidate_id": "p0_neutral_roundtrip",
+  "parent": "P0_5p789",
+  "speed_scale": {
+    "corner_a": 1.0,
+    "straight_a": 1.0,
+    "corner_b": 1.0,
+    "straight_b": 1.0
+  },
+  "brake_phase_shift_m": {
+    "corner_a": 0.0,
+    "corner_b": 0.0
+  },
+  "exit_accel_phase_shift_m": {
+    "corner_a": 0.0,
+    "corner_b": 0.0
+  }
+}

@@ -1,0 +1,10 @@
+autodrive_actuator_interface:
+  ros__parameters:
+    # Isolated follow-up candidate from the replicated low-steering practice
+    # transfer: retain baseline throttle rise below 6 m/s, and apply the
+    # measured 0.267 normalized/s cap only in the 6-7.5 m/s, >=0.08 rad band.
+    # Development-only; not loaded by default or by the competition runtime.
+    throttle_rise_regime_rate_per_sec: 0.267
+    throttle_rise_regime_speed_min_mps: 6.0
+    throttle_rise_regime_speed_max_mps: 7.5
+    throttle_rise_regime_min_abs_steering_rad: 0.08

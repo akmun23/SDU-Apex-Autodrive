@@ -29,6 +29,27 @@ struct SensorPacket
   }
 };
 
+struct SensorPacketAssemblerDiagnostics
+{
+  // latest_seen is the maximum source stamp received on any input stream.
+  // last_emitted is the source stamp of the last completed packet callback.
+  int64_t latest_seen_source_stamp_ns{0};
+  int64_t last_emitted_source_stamp_ns{0};
+  // Reversal compares with the preceding emitted packet. Duplicate counts a
+  // consecutive equal emitted stamp. Late completion compares with the
+  // greatest source stamp emitted so far.
+  std::uint64_t source_reversal_count{0};
+  std::uint64_t duplicate_source_count{0};
+  std::uint64_t late_completed_packet_count{0};
+  // The current assembler does not discard incomplete packets; this remains
+  // zero until an explicit drop policy exists.
+  std::uint64_t incomplete_packet_drop_count{0};
+  // Number and source-time span of incomplete earlier packets bypassed while
+  // emitting a later complete packet.
+  std::uint64_t maximum_reorder_depth{0};
+  int64_t maximum_reorder_time_ns{0};
+};
+
 class SensorPacketAssembler final
 {
 public:
@@ -44,6 +65,7 @@ public:
 
   std::uint64_t packet_drop_count() const noexcept;
   std::uint64_t packet_coherence_fault_count() const noexcept;
+  const SensorPacketAssemblerDiagnostics & diagnostics() const noexcept;
 
 private:
   void process_ready_packets();
@@ -59,6 +81,8 @@ private:
   bool has_processed_packet_{false};
   std::uint64_t packet_drop_count_{0};
   std::uint64_t packet_coherence_fault_count_{0};
+  SensorPacketAssemblerDiagnostics diagnostics_;
+  int64_t highest_emitted_source_stamp_ns_{0};
   PacketCallback packet_callback_;
 };
 

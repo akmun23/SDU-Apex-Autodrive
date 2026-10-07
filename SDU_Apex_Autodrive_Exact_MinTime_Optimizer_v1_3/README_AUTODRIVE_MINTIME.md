@@ -12,7 +12,7 @@ V1.3 reads the checked-out repository at runtime.
 | yaw response, longitudinal response, brake envelope, steering/rate, target-speed slew, max command speed | `f1tenth_mpc/include/mpc_types.h` |
 | actual car geometry | `f1tenth_planning/config/autodrive_sim_vehicle.yaml` |
 | planning footprint + wall clearance | `f1tenth_planning/config/autodrive_sim_vehicle.yaml:mintime` |
-| current validated lateral acceleration envelope | `f1tenth_control/config/path_tracking_autodrive.yaml:max_lateral_accel` |
+| legacy scalar for curvature-speed shaping only (not a vehicle capability model) | `f1tenth_control/config/path_tracking_autodrive.yaml:max_lateral_accel` |
 
 The optimizer does **not** use Pacejka coefficients, TUM's double-track vehicle,
 old cornering stiffness values, or a generic friction coefficient.
@@ -26,7 +26,7 @@ required wall clearance:  0.150 m from the planning/physical side envelope
 minimum aligned centre→wall distance: 0.300 m
 steering:                  ±0.5235987756 rad
 steering rate:             ±3.2 rad/s
-validated lateral accel:   6.50 m/s²
+legacy scalar speed-shaping setting: 8.0 m/s² (current YAML; not a verified limit)
 command speed ceiling:     16.0 m/s
 target-speed slew:         +3 / -8 m/s²
 ```

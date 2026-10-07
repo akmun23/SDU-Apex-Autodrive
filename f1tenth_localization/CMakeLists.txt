@@ -87,4 +87,17 @@ install(TARGETS ${LOCALIZATION_INSTALL_TARGETS}
   DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_sensor_packet_assembler
+    test/test_sensor_packet_assembler.cpp
+    src/sensor_packet_assembler.cpp)
+  target_include_directories(test_sensor_packet_assembler PRIVATE include)
+
+  ament_add_gtest(test_odometry_observer_diagnostics
+    test/test_odometry_observer_diagnostics.cpp
+    src/odometry_observer.cpp)
+  target_include_directories(test_odometry_observer_diagnostics PRIVATE include)
+endif()
+
 ament_package()

@@ -102,6 +102,8 @@ void OdometryObserver::reset() noexcept
   x_m_ = 0.0;
   y_m_ = 0.0;
   last_speed_pred_mps_ = 0.0;
+  last_pre_wheel_update_speed_mps_ = 0.0;
+  last_pre_wheel_update_speed_valid_ = false;
   last_wheel_raw_mps_ = 0.0;
   last_wheel_mapped_mps_ = 0.0;
   last_wheel_packet_mps_ = 0.0;
@@ -251,6 +253,8 @@ OdometryEstimate OdometryObserver::estimate(
   output.stamp_s = observation.stamp_s;
   output.dt_s = initialized_ ? observation.stamp_s - previous_stamp_s_ : 0.0;
   output.speed_pred_mps = last_speed_pred_mps_;
+  output.pre_wheel_update_speed_mps = last_pre_wheel_update_speed_mps_;
+  output.pre_wheel_update_speed_valid = last_pre_wheel_update_speed_valid_;
   output.speed_mps = speed_mps_;
   output.body_u_mps = body_u_mps_;
   output.body_v_mps = body_v_mps_;
@@ -312,6 +316,7 @@ void OdometryObserver::update_turn(
 OdometryEstimate OdometryObserver::update(
   const OdometryObservation & observation) noexcept
 {
+  last_pre_wheel_update_speed_valid_ = false;
   if (!finite(observation.stamp_s) || !finite(observation.left_angle_rad) ||
     !finite(observation.right_angle_rad) || !finite(observation.ax_mps2) ||
     !finite(observation.ay_mps2) || !finite(observation.yaw_rate_radps) ||
@@ -333,6 +338,8 @@ OdometryEstimate OdometryObserver::update(
     body_v_mps_ = 0.0;
     speed_mps_ = 0.0;
     last_speed_pred_mps_ = 0.0;
+    last_pre_wheel_update_speed_mps_ = 0.0;
+    last_pre_wheel_update_speed_valid_ = false;
     last_wheel_raw_mps_ = 0.0;
     last_wheel_mapped_mps_ = 0.0;
     last_wheel_packet_mps_ = 0.0;
@@ -386,6 +393,8 @@ OdometryEstimate OdometryObserver::update(
     previous_pose_body_u_mps_ = 0.0;
     previous_pose_body_v_mps_ = 0.0;
     last_speed_pred_mps_ = 0.0;
+    last_pre_wheel_update_speed_mps_ = 0.0;
+    last_pre_wheel_update_speed_valid_ = false;
     last_wheel_raw_mps_ = 0.0;
     last_wheel_mapped_mps_ = 0.0;
     last_wheel_packet_mps_ = 0.0;
@@ -620,6 +629,7 @@ OdometryEstimate OdometryObserver::update(
     imu_acceleration_reference_x;
   const double ay_origin = observation.ay_mps2 - yaw_alpha * imu_acceleration_reference_x;
 
+  const bool turn_mode_at_interval_start = turn_mode_;
   if (!turn_mode_ &&
     (std::abs(observation.yaw_rate_radps) >= config_.turn_enter_yaw_rate_radps ||
     std::abs(observation.ay_mps2) >= config_.turn_enter_abs_ay_mps2))
@@ -754,6 +764,8 @@ OdometryEstimate OdometryObserver::update(
       config_.wheel_burst_disagreement_mps;
     const bool wheel_ok = !wheel_burst_rejected_ && !wheel_dropout_active_ &&
       (wheel_speed_is_valid(speed_mps_) || wheel_coherent);
+    last_pre_wheel_update_speed_mps_ = std::hypot(body_u_mps_, body_v_mps_);
+    last_pre_wheel_update_speed_valid_ = turn_mode_at_interval_start;
     if (wheel_ok) {
       body_u_mps_ = turn_wheel_mapped;
       wheel_update_used = true;
@@ -901,6 +913,8 @@ OdometryEstimate OdometryObserver::update(
         ax_effective, config_.wheel_dropout_positive_ax_max_mps2);
     }
     speed_pred = std::max(0.0, speed_mps_ + ax_effective * dt_s);
+    last_pre_wheel_update_speed_mps_ = speed_pred;
+    last_pre_wheel_update_speed_valid_ = true;
     speed_mps_ = speed_pred;
     // Timing degradation is diagnostic only. Use the paired encoder sample
     // regardless of the source interval; no packet-age horizon discards it.

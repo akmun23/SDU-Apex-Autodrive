@@ -21,7 +21,9 @@ It resolves the current checked-out project at runtime:
   - existing planning footprint `optimizer_width_m = 0.30 m`
   - existing `wall_clearance_m = 0.15 m`
 - `f1tenth_control/config/path_tracking_autodrive.yaml`
-  - current measured runtime `max_lateral_accel = 6.50 m/s^2`
+  - historical scalar `max_lateral_accel = 6.50 m/s^2`, previously mislabeled
+    as measured; the current YAML is 8.0 and neither scalar is a verified
+    speed/steering/transient vehicle capability model
 
 The optimizer explicitly does **not** read TUM/Pacejka tire dynamics, `mu`,
 BachelorProject cornering stiffness, or the physical-reference double-track

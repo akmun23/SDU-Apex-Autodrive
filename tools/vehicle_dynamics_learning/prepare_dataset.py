@@ -80,6 +80,8 @@ def _split_for_name(name: str) -> str:
         return "exclude_source_player_mismatch"
     if "replay" in lowered:
         return "exclude_replay"
+    if lowered.startswith("openplane_swerve_throttle_slew_validation_"):
+        return "validation"
     if lowered.startswith("practice_model_validation_"):
         return "validation"
     if "validation_20260928" in lowered:
@@ -131,7 +133,20 @@ def _attitude_frame(sample: body.MotionSample) -> np.ndarray | None:
             and np.isfinite(values).all() else None)
 
 
-def _quality(capture: body.Capture) -> tuple[bool, list[str]]:
+def _packet_sequence_gaps(capture: body.Capture) -> int:
+    packet_ids = [
+        int(sample.packet_sequence)
+        if sample.packet_sequence is not None else -1
+        for sequence in capture.sequences for sample in sequence]
+    gaps = sum(packet_id < 0 for packet_id in packet_ids)
+    matched = [packet_id for packet_id in packet_ids if packet_id >= 0]
+    gaps += sum(current != previous + 1
+                for previous, current in zip(matched, matched[1:]))
+    return int(gaps)
+
+
+def _quality(capture: body.Capture,
+             fixed_packet_timebase: bool = False) -> tuple[bool, list[str]]:
     failures: list[str] = []
     if capture.aborted:
         failures.append("experiment_aborted")
@@ -143,8 +158,12 @@ def _quality(capture: body.Capture) -> tuple[bool, list[str]]:
         capture.packet_sequence_matched_samples
         / capture.packet_sequence_total_samples
         if capture.packet_sequence_total_samples else 0.0)
-    if packet_match_fraction < 0.999:
+    packet_gaps = _packet_sequence_gaps(capture)
+    if packet_match_fraction < 0.999 and not (
+            fixed_packet_timebase and packet_gaps == 0):
         failures.append("packet_sequence_alignment_below_99_9_percent")
+    if fixed_packet_timebase and packet_gaps:
+        failures.append("simulator_packet_sequence_not_contiguous")
     streams = capture.phase_stream_stats or capture.stream_stats
     command_topics = set(body.COMMAND_STREAM_TOPICS)
     for topic in body.STREAM_TOPICS:
@@ -154,7 +173,13 @@ def _quality(capture: body.Capture) -> tuple[bool, list[str]]:
             continue
         rate, p95_gap, max_gap = stats
         max_allowed = 120.0 if topic in command_topics else 60.0
-        if rate < 38.0 or p95_gap > 35.0 or max_gap > max_allowed:
+        receipt_gap_fails = max_gap > max_allowed
+        if fixed_packet_timebase and topic not in command_topics:
+            # The simulator packet sequence is the physics clock. When it is
+            # complete and every state topic joins it exactly, a delayed bag
+            # receipt is network/recorder jitter, not a longer integration dt.
+            receipt_gap_fails = False
+        if rate < 38.0 or p95_gap > 35.0 or receipt_gap_fails:
             failures.append(f"stream_quality:{topic}")
     if not capture.sequences:
         failures.append("no_valid_aligned_sequences")
@@ -425,7 +450,8 @@ def _race_domain_capture_admission(path: Path) -> dict[str, Any]:
 def _extract(path: Path, coalesce_contiguous_phases: bool = False,
              practice_active_interval: bool = False,
              include_nonvalid_phases: bool = False,
-             continuous_whole_run: bool = False) -> tuple[
+             continuous_whole_run: bool = False,
+             fixed_packet_timebase: bool = False) -> tuple[
         dict[str, Any], list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
@@ -445,7 +471,8 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
             capture = body.load_capture(path, include_nonvalid_phases=True)
     run_id = path.parents[1].name
     reset_topic_present, reset_epoch_starts_ns = _reset_epoch_starts(path)
-    clean, failures = _quality(capture)
+    clean, failures = _quality(capture, fixed_packet_timebase)
+    packet_sequence_gaps = _packet_sequence_gaps(capture)
     packet_match_fraction = (
         capture.packet_sequence_matched_samples
         / capture.packet_sequence_total_samples
@@ -642,6 +669,8 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         "quality_gate_scope": ("complete_lap_0_to_12_active_interval"
                                if active_interval is not None else "whole_bag"),
         "continuous_whole_run_export": continuous_whole_run,
+        "fixed_packet_timebase_quality_mode": fixed_packet_timebase,
+        "simulator_packet_sequence_gap_count": int(packet_sequence_gaps),
         "practice_active_interval_validation": active_interval_report,
         "unscored_race_domain_capture_admission": race_domain_admission,
         "active_interval_receipt_ns": list(active_interval)
@@ -699,6 +728,11 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
                    "gap_max_ms": float(stats[2])}
             for name, stats in stream_stats.items()
         },
+        "receipt_jitter_overrides": sorted(
+            name for name, (rate, p95, maximum) in stream_stats.items()
+            if fixed_packet_timebase
+            and name not in body.COMMAND_STREAM_TOPICS
+            and rate >= 38.0 and p95 <= 35.0 and maximum > 60.0),
     }
     return record, extracted
 
@@ -823,7 +857,10 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             additional_bags: list[Path] | None = None,
             split_overrides: dict[str, str] | None = None,
             practice_active_interval: bool = False,
-            continuous_whole_run: bool = False) -> dict[str, Any]:
+            continuous_whole_run: bool = False,
+            fixed_packet_timebase: bool = False) -> dict[str, Any]:
+    if fixed_packet_timebase and not continuous_whole_run:
+        raise ValueError("fixed packet timebase quality mode requires continuous whole-run capture")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -846,7 +883,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         try:
             record, sequences = _extract(
                 path, coalesce_contiguous_phases, practice_active_interval,
-                continuous_whole_run=continuous_whole_run)
+                continuous_whole_run=continuous_whole_run,
+                fixed_packet_timebase=fixed_packet_timebase)
             override = (split_overrides or {}).get(run_id)
             if override is not None:
                 record["suggested_split"] = override
@@ -1074,9 +1112,13 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
                          "phase/lap segments retained separately")
                       ),
         "plant_continuity_mode": bool(coalesce_contiguous_phases),
+        "fixed_packet_timebase_quality_mode": bool(fixed_packet_timebase),
         "practice_active_interval_mode": bool(practice_active_interval),
         "split_policy": "whole-run split; validation_20260928=validation; validation_20260929=final_test; named holdouts=test; exact fingerprint collisions take the most conservative split",
-        "stream_gate": ">=38 Hz, p95 gap<=35 ms, sensor max gap<=60 ms, command max gap<=120 ms, zero collision count and zero bridge timing faults",
+        "stream_gate": (
+            ">=38 Hz, p95 gap<=35 ms, zero collisions/faults; sensor receipt-gap max<=60 ms and command max<=120 ms"
+            if not fixed_packet_timebase else
+            ">=38 Hz and p95 gap<=35 ms, zero collisions/faults, exact complete simulator packet sequence required; sensor receipt-gap maxima are recorded but do not change the fixed 25 ms physics dt; command max gap<=120 ms"),
         "feature_names": list(FEATURE_NAMES),
         "packet_sequence_policy": (
             "Each /odom source stamp is joined exactly to bridge_packet_timing; "
@@ -1135,6 +1177,8 @@ def main() -> int:
                         help="for plant identification, join contiguous fragments but break at packet gaps and recorded reset events")
     parser.add_argument("--continuous-whole-run", action="store_true",
                         help="for a quality-gated phase-marked capture, export the complete causal sensor/command stream, including phase boundaries")
+    parser.add_argument("--fixed-packet-timebase", action="store_true",
+                        help="use the simulator's exact 25 ms packet sequence instead of rejecting sensor streams solely for receipt-time jitter; requires complete contiguous packet IDs, exact state-topic joins, and retains rate/p95/command/collision/fault gates")
     parser.add_argument("--practice-active-interval", action="store_true",
                         help="allow only 12-lap practice captures that pass lap, collision, active 40 Hz and post-run fault checks; crop to active laps")
     parser.add_argument("--output-dir", type=Path, required=True,
@@ -1155,7 +1199,8 @@ def main() -> int:
                            args.coalesce_contiguous_phases,
                            args.additional_bag, split_overrides,
                            args.practice_active_interval,
-                           args.continuous_whole_run)
+                           args.continuous_whole_run,
+                           args.fixed_packet_timebase)
     except (OSError, ValueError) as exc:
         print(f"dataset preparation failed: {exc}", file=sys.stderr)
         return 2

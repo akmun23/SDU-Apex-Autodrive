@@ -491,7 +491,10 @@ private:
   void process_packet(const f1tenth_localization::SensorPacket & packet)
   {
     auto processed_packet = packet;
-    if (processed_packet.stamp_ns <= last_processed_stamp_ns_) {
+    const auto source_stamp_ns = processed_packet.stamp_ns;
+    const auto previous_source_stamp_ns = last_processed_source_stamp_ns_;
+    const bool was_retimestamped = processed_packet.stamp_ns <= last_processed_stamp_ns_;
+    if (was_retimestamped) {
       // Source-time reversals are delivered at callback time rather than
       // discarded. Keep the original sensor values and use a strictly newer
       // local ROS stamp only to define the next causal integration interval.
@@ -499,8 +502,10 @@ private:
       if (receive_stamp_ns <= last_processed_stamp_ns_)
         receive_stamp_ns = last_processed_stamp_ns_ + 1;
       processed_packet.stamp_ns = receive_stamp_ns;
+      ++retimestamped_packet_count_;
     }
     last_processed_stamp_ns_ = processed_packet.stamp_ns;
+    last_processed_source_stamp_ns_ = source_stamp_ns;
 
     f1tenth_localization::OdometryObservation observation;
     observation.stamp_s = static_cast<double>(processed_packet.stamp_ns) * 1.0e-9;
@@ -512,14 +517,20 @@ private:
     observation.yaw_rad = continuous_yaw(processed_packet);
 
     const auto estimate = observer_.update(observation);
-    publish_estimate(estimate, processed_packet.stamp_ns);
+    publish_estimate(
+      estimate, processed_packet.stamp_ns, source_stamp_ns, previous_source_stamp_ns,
+      was_retimestamped, retimestamped_packet_count_);
   }
 
   void publish_estimate(
     const f1tenth_localization::OdometryEstimate & estimate,
-    int64_t source_stamp_ns)
+    int64_t published_stamp_ns,
+    int64_t packet_source_stamp_ns,
+    int64_t previous_packet_source_stamp_ns,
+    bool was_retimestamped,
+    std::uint64_t retimestamped_packet_count)
   {
-    const rclcpp::Time stamp(source_stamp_ns, RCL_ROS_TIME);
+    const rclcpp::Time stamp(published_stamp_ns, RCL_ROS_TIME);
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = stamp;
     odom.header.frame_id = odom_frame_;
@@ -549,11 +560,11 @@ private:
 
     std_msgs::msg::Float64MultiArray diagnostics;
     diagnostics.layout.dim.resize(1);
-    diagnostics.layout.dim[0].label = "deterministic_odometry_v5";
-    diagnostics.layout.dim[0].size = 28;
-    diagnostics.layout.dim[0].stride = 28;
+    diagnostics.layout.dim[0].label = "deterministic_odometry_v7";
+    diagnostics.layout.dim[0].size = 42;
+    diagnostics.layout.dim[0].stride = 42;
     diagnostics.data = {
-      5.0,
+      7.0,
       estimate.stamp_s,
       estimate.dt_s,
       estimate.wheel_raw_mps,
@@ -580,7 +591,21 @@ private:
       estimate.imu_yaw_rad,
       estimate.wheel_packet_mps,
       estimate.wheel_burst_rejected ? 1.0 : 0.0,
-      estimate.turn_speed_bias_mps};
+      estimate.turn_speed_bias_mps,
+      static_cast<double>(packet_source_stamp_ns) * 1.0e-9,
+      static_cast<double>(previous_packet_source_stamp_ns) * 1.0e-9,
+      was_retimestamped ? 1.0 : 0.0,
+      static_cast<double>(retimestamped_packet_count),
+      static_cast<double>(packet_assembler_.diagnostics().latest_seen_source_stamp_ns) * 1.0e-9,
+      static_cast<double>(packet_assembler_.diagnostics().last_emitted_source_stamp_ns) * 1.0e-9,
+      static_cast<double>(packet_assembler_.diagnostics().source_reversal_count),
+      static_cast<double>(packet_assembler_.diagnostics().duplicate_source_count),
+      static_cast<double>(packet_assembler_.diagnostics().late_completed_packet_count),
+      static_cast<double>(packet_assembler_.diagnostics().incomplete_packet_drop_count),
+      static_cast<double>(packet_assembler_.diagnostics().maximum_reorder_depth),
+      static_cast<double>(packet_assembler_.diagnostics().maximum_reorder_time_ns) * 1.0e-9,
+      estimate.pre_wheel_update_speed_mps,
+      estimate.pre_wheel_update_speed_valid ? 1.0 : 0.0};
     diagnostics_pub_->publish(diagnostics);
 
     if (publish_tf_) {
@@ -608,6 +633,8 @@ private:
 
   std::mutex mutex_;
   int64_t last_processed_stamp_ns_{0};
+  int64_t last_processed_source_stamp_ns_{0};
+  std::uint64_t retimestamped_packet_count_{0};
 
   bool yaw_initialized_{false};
   double yaw_reference_rad_{0.0};

@@ -27,6 +27,7 @@ class Guess:
     qdelta: np.ndarray
     qv: np.ndarray
     label: str
+    actual_delta: np.ndarray | None = None
 
 
 @dataclass
@@ -46,6 +47,10 @@ class Solution:
     elapsed_s: float
     label: str
     converged: bool = True
+    # When present, ``delta`` is physical steering and this stores the
+    # rate-controlled command. Legacy solutions keep the original single
+    # steering state and leave this unset.
+    steering_command: np.ndarray | None = None
 
 
 class SolveTrackFailure(RuntimeError):
@@ -54,6 +59,10 @@ class SolveTrackFailure(RuntimeError):
     def __init__(self, message: str, candidate: Solution):
         super().__init__(message)
         self.candidate = candidate
+
+
+def _optimizer_speed_limit(model: VehicleModel, envelope: LateralEnvelope) -> float:
+    return min(model.max_body_speed_mps, envelope.max_supported_speed_mps)
 
 
 def _yaw_lag_interval_numeric(r0: float, target0: float, target1: float,
@@ -111,6 +120,70 @@ def _wall_clearance(config: dict[str, Any], model: VehicleModel) -> float:
     return (model.required_wall_clearance_m
             + float(track.get("extra_wall_clearance_m", 0.0))
             + float(track.get("optimizer_geometry_buffer_m", 0.0)))
+
+
+def _steering_actuator_config(config: dict[str, Any]) -> tuple[bool, float]:
+    section = config.get("steering_actuator", {})
+    if not isinstance(section, dict):
+        raise ValueError("steering_actuator must be a mapping")
+    enabled = bool(section.get("model_command_queue", False))
+    delay_s = float(section.get("command_delay_s", 0.025))
+    if enabled and (not math.isfinite(delay_s) or delay_s <= 0.0 or delay_s > 0.1):
+        raise ValueError("steering_actuator.command_delay_s must be in (0, 0.1]")
+    return enabled, delay_s
+
+
+def _delayed_steering_command_casadi(
+    track: Track,
+    command,
+    qdelta,
+    sdot: list[Any],
+    delay_s: float,
+    max_progress_mps: float,
+) -> list[Any]:
+    """Interpolate the command one fixed-time interval behind each OCP node.
+
+    The command is represented on the spatial mesh. A cubic Hermite segment
+    uses the OCP command state and its time-rate-derived spatial slope, so the
+    delayed signal is C1 at mesh boundaries. The lag distance uses the
+    trapezoidal progress-rate estimate over the command delay.
+    """
+    n = track.count
+    min_ds = float(np.min(track.ds))
+    max_back_m = delay_s * max_progress_mps
+    segments = max(1, int(math.ceil(max_back_m / min_ds)) + 1)
+    if segments >= n:
+        raise ValueError("steering delay window spans the entire OCP lap")
+    spatial_slopes = [qdelta[i] / sdot[i] for i in range(n)]
+    result = []
+    for k in range(n):
+        previous = (k - 1) % n
+        query = track.s[k] - 0.5 * delay_s * (sdot[k] + sdot[previous])
+        candidates: list[tuple[float, Any]] = []
+        travelled = 0.0
+        for offset in range(1, segments + 1):
+            lo = (k - offset) % n
+            hi = (lo + 1) % n
+            width = float(track.ds[lo])
+            s_hi = float(track.s[k]) - travelled
+            s_lo = s_hi - width
+            t = (query - s_lo) / width
+            t2, t3 = t * t, t * t * t
+            h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+            h10 = t3 - 2.0 * t2 + t
+            h01 = -2.0 * t3 + 3.0 * t2
+            h11 = t3 - t2
+            value = (
+                h00 * command[lo] + h10 * width * spatial_slopes[lo]
+                + h01 * command[hi] + h11 * width * spatial_slopes[hi]
+            )
+            candidates.append((s_lo, value))
+            travelled += width
+        delayed = command[(k - segments) % n]
+        for s_lo, value in reversed(candidates):
+            delayed = ca.if_else(query >= s_lo, value, delayed)
+        result.append(delayed)
+    return result
 
 
 def _optimizer_steering_rate_limit(model: VehicleModel,
@@ -226,6 +299,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     steering_limit = _optimizer_steering_limit(model, config)
     margin = _wall_clearance(config, model)
+    speed_limit = _optimizer_speed_limit(model, envelope)
     nominal_extent = 0.5 * model.planning_footprint_width_m
     left_room = np.maximum(track.left - margin - nominal_extent, 0.01)
     right_room = np.maximum(track.right - margin - nominal_extent, 0.01)
@@ -249,7 +323,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         track, ey, model, config)
     # Fixed-point speed estimate because the measured envelope depends on both
     # speed and steering demand.
-    u = np.full(track.count, min(6.0, model.max_body_speed_mps))
+    u = np.full(track.count, min(6.0, speed_limit))
     for _ in range(10):
         delta = np.asarray([
             model.steering_for_yaw_rate(float(speed), float(curvature * speed),
@@ -259,9 +333,10 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         ay_cap = envelope.numpy(u, delta)
         curve_speed = np.sqrt(np.maximum(ay_cap / np.maximum(np.abs(kappa_path), 1e-4),
                                          model.min_speed_mps ** 2))
-        u_new = np.minimum(curve_speed, model.max_body_speed_mps)
+        u_new = np.minimum(curve_speed, speed_limit)
         u_new = np.maximum(u_new, model.min_speed_mps)
-        u_new = _repair_speed_periodic(u_new, track.ds, model)
+        u_new = np.minimum(
+            _repair_speed_periodic(u_new, track.ds, model), speed_limit)
         if np.max(np.abs(u_new - u)) < 1e-3:
             u = u_new
             break
@@ -275,7 +350,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     delta = np.clip(delta, -steering_limit * 0.98, steering_limit * 0.98)
     r = kappa_path * u
     vt = np.asarray(model.steady_target_speed(u), dtype=float)
-    vt = np.clip(vt, 0.0, model.max_command_speed_mps)
+    vt = np.clip(vt, 0.0, min(model.max_command_speed_mps, speed_limit))
 
     # Convert spatial changes into time rates using local ds/dt ≈ u.
     def periodic_rate(z, clip_lo, clip_hi):
@@ -356,7 +431,8 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
         return np.interp(track.s, s_ext, v_ext)
 
     ey = pinterp(eyu)
-    u = np.clip(pinterp(uu), model.min_speed_mps, model.max_body_speed_mps)
+    speed_limit = _optimizer_speed_limit(model, envelope)
+    u = np.clip(pinterp(uu), model.min_speed_mps, speed_limit)
 
     # The production line is only an initializer. Re-project it into V1.3's
     # stricter repo-derived wall corridor and rebuild all dependent states so
@@ -375,8 +451,9 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
         curve_cap = np.sqrt(np.maximum(
             ay_cap / np.maximum(np.abs(kappa_path), 1.0e-5),
             model.min_speed_mps ** 2))
-        u_new = np.minimum(u, 0.995 * curve_cap)
+        u_new = np.minimum(u, np.minimum(0.995 * curve_cap, speed_limit))
         u_new = _repair_speed_periodic(u_new, track.ds, model, iterations=20)
+        u_new = np.minimum(u_new, speed_limit)
         if np.max(np.abs(u_new - u)) < 1.0e-4:
             u = u_new
             break
@@ -389,7 +466,8 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
     ])
     delta = np.clip(delta, -steering_limit * 0.98, steering_limit * 0.98)
     r = kappa_path * u
-    vt = np.clip(model.steady_target_speed(u), 0.0, model.max_command_speed_mps)
+    vt = np.clip(model.steady_target_speed(u), 0.0,
+                 min(model.max_command_speed_mps, speed_limit))
     qdelta = np.clip((np.roll(delta, -1) - delta) / np.maximum(track.ds, 1e-6) * u,
                      -steering_rate_limit, steering_rate_limit)
     qv = np.clip((np.roll(vt, -1) - vt) / np.maximum(track.ds, 1e-6) * u,
@@ -406,9 +484,13 @@ def _resample_solution_guess(sol: Solution, new_track: Track) -> Guess:
         s_ext = np.r_[old_s - L_old, old_s, old_s + L_old]
         v_ext = np.r_[v, v, v]
         return np.interp(q, s_ext, v_ext)
-    return Guess(interp(sol.ey), interp(sol.epsi), interp(sol.u), interp(sol.r),
-                 interp(sol.vt), interp(sol.delta), interp(sol.qdelta), interp(sol.qv),
-                 f"refined_from_{sol.label}")
+    steering_seed = (sol.steering_command
+                     if sol.steering_command is not None else sol.delta)
+    return Guess(
+        interp(sol.ey), interp(sol.epsi), interp(sol.u), interp(sol.r),
+        interp(sol.vt), interp(steering_seed), interp(sol.qdelta),
+        interp(sol.qv), f"refined_from_{sol.label}",
+        actual_delta=interp(sol.delta) if sol.steering_command is not None else None)
 
 
 def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
@@ -420,12 +502,18 @@ def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
         reader = csv.DictReader(stream)
         if reader.fieldnames is None or any(name not in reader.fieldnames for name in required):
             raise ValueError(f"{nodes_csv} does not contain optimizer state columns")
+        fields = list(required)
+        if "steering_command_rad" in reader.fieldnames:
+            fields.append("steering_command_rad")
         for row in reader:
-            rows.append({name: float(row[name]) for name in required})
+            rows.append({name: float(row[name]) for name in fields})
     if len(rows) < 20:
         raise ValueError(f"Optimizer state seed {nodes_csv} has too few rows")
     data = {name: np.asarray([row[name] for row in rows], dtype=float)
             for name in required}
+    # New queue-aware solutions export command and physical angle separately.
+    # Older production seeds only have delta_rad, which remains a valid
+    # initialization for both states.
     old_s = data["s_ref_m"]
     if (not all(np.all(np.isfinite(values)) for values in data.values()) or
             np.any(np.diff(old_s) <= 0.0) or old_s[0] < -1.0e-8):
@@ -443,9 +531,12 @@ def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
     return Guess(
         ey=periodic(data["ey_m"]), epsi=periodic(data["epsi_rad"]),
         u=periodic(data["u_mps"]), r=periodic(data["r_radps"]),
-        vt=periodic(data["target_mps"]), delta=periodic(data["delta_rad"]),
+        vt=periodic(data["target_mps"]),
+        delta=periodic(data.get("steering_command_rad", data["delta_rad"])),
         qdelta=periodic(data["qdelta_radps"]), qv=periodic(data["qv_mps2"]),
-        label="warm_solution_nodes")
+        label="warm_solution_nodes",
+        actual_delta=(periodic(data["delta_rad"])
+                      if "steering_command_rad" in data else None))
 
 
 def _periodic_spatial_derivative(z: np.ndarray, track: Track) -> np.ndarray:
@@ -489,10 +580,14 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     r = np.asarray(solution.r)
     vt = np.asarray(solution.vt)
     delta = np.asarray(solution.delta)
+    actuator_enabled, steering_delay_s = _steering_actuator_config(config)
+    command_delta = (np.asarray(solution.steering_command)
+                     if solution.steering_command is not None else delta)
     qdelta = np.asarray(solution.qdelta)
     qv = np.asarray(solution.qv)
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     steering_limit = _optimizer_steering_limit(model, config)
+    speed_limit = _optimizer_speed_limit(model, envelope)
     wall_margin = _wall_clearance(config, model)
     min_den = float(config.get("numerics", {}).get("min_frenet_denominator", 0.25))
     min_progress = float(config.get("numerics", {}).get("min_progress_mps", 0.30))
@@ -514,20 +609,68 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
               else np.zeros_like(u))
     sdot = (u * np.cos(epsi) - body_v * np.sin(epsi)) / np.maximum(den, 1.0e-9)
     raw_a = np.asarray(model.raw_longitudinal_accel(u, vt, qv), dtype=float)
+    if actuator_enabled:
+        delay_progress_rate = 0.5 * (sdot + np.roll(sdot, 1))
+        delay_query = tr.s - steering_delay_s * delay_progress_rate
+        s_extended = np.r_[tr.s - 2.0 * tr.length, tr.s - tr.length,
+                           tr.s, tr.s + tr.length, tr.s + 2.0 * tr.length]
+        command_extended = np.tile(command_delta, 5)
+        slope_extended = np.tile(qdelta / np.maximum(sdot, 1.0e-8), 5)
+        delayed_command = np.empty(tr.count, dtype=float)
+        for k, query in enumerate(delay_query):
+            interval = int(np.searchsorted(s_extended, query, side="right") - 1)
+            interval = min(max(interval, 0), len(s_extended) - 2)
+            width = s_extended[interval + 1] - s_extended[interval]
+            t = (query - s_extended[interval]) / width
+            t2, t3 = t * t, t * t * t
+            delayed_command[k] = (
+                (2.0 * t3 - 3.0 * t2 + 1.0) * command_extended[interval]
+                + (t3 - 2.0 * t2 + t) * width * slope_extended[interval]
+                + (-2.0 * t3 + 3.0 * t2) * command_extended[interval + 1]
+                + (t3 - t2) * width * slope_extended[interval + 1]
+            )
+        actual_rate = np.clip(
+            (delayed_command - delta) / steering_delay_s,
+            -steering_rate_limit, steering_rate_limit)
+    else:
+        actual_rate = np.zeros_like(delta)
+    yaw_residual_rate = np.asarray([
+        model.yaw_residual_rate_numeric(
+            float(speed), float(yaw), float(steering), float(rate),
+            float(model.lateral_velocity_numeric(speed, yaw)), float(curvature),
+            float(ax), float(speed_rate), float(target))
+        for speed, yaw, steering, rate, curvature, ax, speed_rate, target in zip(
+            u, r, delta, qdelta, tr.kappa, raw_a, qv, vt)
+    ])
     r_ss = np.asarray([
         model.steady_yaw_rate(float(speed), float(steering), float(curvature))
-        for speed, steering, curvature in zip(u, delta, tr.kappa)
+        + model.yaw_tau_s * float(residual)
+        for speed, steering, curvature, residual in zip(
+            u, delta, tr.kappa, yaw_residual_rate)
     ])
     safe_sdot = np.maximum(sdot, 1.0e-8)
-    f = np.vstack([
+    state_fields = [ey, epsi, u, r, vt]
+    derivative_fields = [
         (u * np.sin(epsi) + body_v * np.cos(epsi)) / safe_sdot,
         np.zeros_like(r),
         raw_a / safe_sdot,
         np.zeros_like(r),
         qv / safe_sdot,
-        qdelta / safe_sdot,
-    ])
-    X = np.vstack([ey, epsi, u, r, vt, delta])
+    ]
+    if actuator_enabled:
+        state_fields.extend([command_delta, delta])
+        derivative_fields.extend([qdelta / safe_sdot, actual_rate / safe_sdot])
+        state_scales = np.r_[sx, float(scales.get("actual_delta_rad",
+                                                scales.get("delta_rad", 0.5)))]
+        state_names = ("ey", "epsi", "u", "r", "target",
+                       "steering_command", "actual_steering")
+    else:
+        state_fields.append(delta)
+        derivative_fields.append(qdelta / safe_sdot)
+        state_scales = sx
+        state_names = ("ey", "epsi", "u", "r", "target", "delta")
+    f = np.vstack(derivative_fields)
+    X = np.vstack(state_fields)
     defects = np.zeros_like(X)
     for k in range(tr.count):
         kp = (k + 1) % tr.count
@@ -539,7 +682,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             epsi[kp] - epsi[k] - yaw_integral
             + 0.5 * (tr.kappa[k] + tr.kappa[kp]) * tr.ds[k])
         defects[3, k] = r[kp] - yaw_end
-    scaled = defects / sx[:, None]
+    scaled = defects / state_scales[:, None]
 
     footprint = _vehicle_lateral_extent(epsi, model)
     ay = u * r
@@ -561,18 +704,29 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
         "lap_time_s": float(solution.lap_time_s),
         "objective": float(solution.objective),
         "converged": bool(solution.converged),
+        "yaw_residual_candidate_id": (
+            model.yaw_residual_candidate.get("model_id")
+            if model.yaw_residual_candidate is not None else None),
+        "yaw_residual_rate_radps2": {
+            "active_node_count": int(np.count_nonzero(np.abs(yaw_residual_rate) > 1e-9)),
+            "max_abs": float(np.max(np.abs(yaw_residual_rate))),
+            "p95_abs": float(np.percentile(np.abs(yaw_residual_rate), 95)),
+        },
         "max_abs_scaled_collocation_defect": float(np.nanmax(np.abs(scaled))),
         "scaled_collocation_defect_by_state_max": {
             name: float(np.nanmax(np.abs(scaled[i])))
-            for i, name in enumerate(("ey", "epsi", "u", "r", "target", "delta"))
+            for i, name in enumerate(state_names)
         },
         "raw_collocation_defect_by_state_max": {
             name: float(np.nanmax(np.abs(defects[i])))
-            for i, name in enumerate(("ey", "epsi", "u", "r", "target", "delta"))
+            for i, name in enumerate(state_names)
         },
         "minimum_slacks": {
             "frenet_denominator": float(np.nanmin(den - min_den)),
             "progress_mps": float(np.nanmin(sdot - min_progress)),
+            "body_speed_upper_mps": float(speed_limit - np.nanmax(u)),
+            "target_speed_upper_mps": float(
+                min(model.max_command_speed_mps, speed_limit) - np.nanmax(vt)),
             "lateral_accel_mps2": float(np.nanmin(ay_cap - np.abs(ay))),
             "combined_acceleration": combined_slack_min,
             "accel_upper_mps2": float(np.nanmin(model.accel_limit_mps2 - raw_a)),
@@ -581,6 +735,8 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             "right_body_clearance_m": float(np.nanmin(tr.right - wall_margin - footprint + ey)),
             "heading_error_rad": float(max_heading - np.nanmax(np.abs(epsi))),
             "steering_rad": float(steering_limit - np.nanmax(np.abs(delta))),
+            "steering_command_rad": float(
+                steering_limit - np.nanmax(np.abs(command_delta))),
             "steering_rate_radps": float(steering_rate_limit - np.nanmax(np.abs(qdelta))),
             "target_rate_increase_mps2": float(model.max_target_speed_rate_increase_mps2 - np.nanmax(qv)),
             "target_rate_reduction_mps2": float(model.max_target_speed_rate_reduction_mps2 + np.nanmin(qv)),
@@ -595,15 +751,22 @@ def save_attempt_artifacts(solution: Solution, output_dir: str | Path,
     out.mkdir(parents=True, exist_ok=True)
     tr = solution.track
     node_path = out / f"{prefix}_nodes.csv"
+    fields = ["s_ref_m", "x_ref_m", "y_ref_m", "kappa_ref", "ey_m",
+              "epsi_rad", "u_mps", "r_radps", "target_mps", "delta_rad"]
+    if solution.steering_command is not None:
+        fields.append("steering_command_rad")
+    fields.extend(["qdelta_radps", "qv_mps2", "left_m", "right_m"])
     with node_path.open("w", encoding="utf-8") as f:
-        f.write("s_ref_m,x_ref_m,y_ref_m,kappa_ref,ey_m,epsi_rad,u_mps,r_radps,target_mps,delta_rad,qdelta_radps,qv_mps2,left_m,right_m\n")
+        f.write(",".join(fields) + "\n")
         for i in range(tr.count):
-            f.write(
-                f"{tr.s[i]:.8f},{tr.x[i]:.8f},{tr.y[i]:.8f},{tr.kappa[i]:.9f},"
-                f"{solution.ey[i]:.8f},{solution.epsi[i]:.9f},{solution.u[i]:.8f},{solution.r[i]:.8f},"
-                f"{solution.vt[i]:.8f},{solution.delta[i]:.9f},{solution.qdelta[i]:.9f},{solution.qv[i]:.8f},"
-                f"{tr.left[i]:.7f},{tr.right[i]:.7f}\n"
-            )
+            values = [tr.s[i], tr.x[i], tr.y[i], tr.kappa[i], solution.ey[i],
+                      solution.epsi[i], solution.u[i], solution.r[i],
+                      solution.vt[i], solution.delta[i]]
+            if solution.steering_command is not None:
+                values.append(solution.steering_command[i])
+            values.extend([solution.qdelta[i], solution.qv[i],
+                           tr.left[i], tr.right[i]])
+            f.write(",".join(f"{value:.9f}" for value in values) + "\n")
     diag = diagnose_solution(solution, model, envelope, config)
     diag["solution_label"] = solution.label
     diag["nodes_file"] = str(node_path)
@@ -624,32 +787,46 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     opti = ca.Opti()
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     steering_limit = _optimizer_steering_limit(model, config)
+    actuator_enabled, steering_delay_s = _steering_actuator_config(config)
 
     scales = config.get("scaling", {})
-    sx = np.asarray([
+    sx_values = [
         float(scales.get("ey_m", 0.5)),
         float(scales.get("epsi_rad", 0.5)),
         float(scales.get("u_mps", 10.0)),
         float(scales.get("r_radps", 10.0)),
         float(scales.get("target_mps", 10.0)),
         float(scales.get("delta_rad", 0.5)),
-    ], dtype=float)
+    ]
+    if actuator_enabled:
+        sx_values.append(float(scales.get("actual_delta_rad",
+                                         scales.get("delta_rad", 0.5))))
+    sx = np.asarray(sx_values, dtype=float)
     su = np.asarray([
         float(scales.get("qdelta_radps", steering_rate_limit)),
         float(scales.get("qv_mps2", model.max_target_speed_rate_reduction_mps2)),
     ], dtype=float)
 
-    Z = opti.variable(6, n)
+    state_count = 7 if actuator_enabled else 6
+    Z = opti.variable(state_count, n)
     W = opti.variable(2, n)
     X = ca.diag(ca.DM(sx)) @ Z
     U = ca.diag(ca.DM(su)) @ W
-    ey, epsi, body_u, yaw_r, target_v, delta = [X[i, :] for i in range(6)]
+    ey, epsi, body_u, yaw_r, target_v, delta_command = [X[i, :] for i in range(6)]
+    delta_actual = X[6, :] if actuator_enabled else delta_command
     qdelta, qv = U[0, :], U[1, :]
 
-    opti.set_initial(Z, np.vstack([
+    initial_rows = [
         guess.ey / sx[0], guess.epsi / sx[1], guess.u / sx[2], guess.r / sx[3],
         guess.vt / sx[4], guess.delta / sx[5],
-    ]))
+    ]
+    if actuator_enabled:
+        actual_seed = (np.asarray(guess.actual_delta, dtype=float)
+                       if guess.actual_delta is not None else
+                       guess.delta - 2.0 * steering_delay_s * guess.qdelta)
+        actual_seed = np.clip(actual_seed, -steering_limit, steering_limit)
+        initial_rows.append(actual_seed / sx[6])
+    opti.set_initial(Z, np.vstack(initial_rows))
     opti.set_initial(W, np.vstack([guess.qdelta / su[0], guess.qv / su[1]]))
 
     limits = config.get("limits", {})
@@ -669,47 +846,74 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
 
     long_extent = max(model.rear_axle_to_front_bumper_m, model.rear_overhang_m)
 
+    speed_limit = _optimizer_speed_limit(model, envelope)
+    command_speed_limit = min(model.max_command_speed_mps, speed_limit)
+    body_v_nodes = []
+    sdot_nodes = []
+    for k in range(n):
+        den = 1.0 - float(track.kappa[k]) * ey[k]
+        body_v = (model.lateral_velocity_casadi(body_u[k], yaw_r[k])
+                  if use_lateral_velocity else 0.0)
+        sdot = (body_u[k] * ca.cos(epsi[k]) - body_v * ca.sin(epsi[k])) / den
+        body_v_nodes.append(body_v)
+        sdot_nodes.append(sdot)
+    delayed_command_nodes = (
+        _delayed_steering_command_casadi(
+            track, delta_command, qdelta, sdot_nodes, steering_delay_s,
+            (model.max_body_speed_mps + model.lateral_velocity_max_mps)
+            / min_frenet_den)
+        if actuator_enabled else None
+    )
+
     f_nodes = []
     time_density = []
     accel_nodes = []
-    sdot_nodes = []
     yaw_response_nodes = []
     ay_nodes = []
     aycap_nodes = []
 
     for k in range(n):
         den = 1.0 - float(track.kappa[k]) * ey[k]
-        body_v = (model.lateral_velocity_casadi(body_u[k], yaw_r[k])
-                  if use_lateral_velocity else 0.0)
-        sdot = (
-            body_u[k] * ca.cos(epsi[k]) - body_v * ca.sin(epsi[k])
-        ) / den
+        body_v = body_v_nodes[k]
+        sdot = sdot_nodes[k]
         raw_a = model.raw_longitudinal_accel(body_u[k], target_v[k], qv[k])
-        r_ss = model.steady_yaw_rate_casadi(
-            body_u[k], delta[k], float(track.kappa[k]))
+        r_ss_base = model.steady_yaw_rate_casadi(
+            body_u[k], delta_actual[k], float(track.kappa[k]))
+        residual_lateral_v = model.lateral_velocity_casadi(body_u[k], yaw_r[k])
+        yaw_residual = model.yaw_residual_rate_casadi(
+            body_u[k], yaw_r[k], delta_actual[k], qdelta[k], residual_lateral_v,
+            float(track.kappa[k]), raw_a, qv[k], target_v[k])
+        r_ss = r_ss_base + model.yaw_tau_s * yaw_residual
         r_dot = (r_ss - yaw_r[k]) / model.yaw_tau_s
         yaw_response_nodes.append(r_ss)
-        f = ca.vertcat(
+        f_components = [
             (body_u[k] * ca.sin(epsi[k]) + body_v * ca.cos(epsi[k])) / sdot,
             (yaw_r[k] - float(track.kappa[k]) * sdot) / sdot,
             raw_a / sdot,
             r_dot / sdot,
             qv[k] / sdot,
             qdelta[k] / sdot,
-        )
+        ]
+        if actuator_enabled:
+            actual_rate = ca.fmin(ca.fmax(
+                (delayed_command_nodes[k] - delta_actual[k]) / steering_delay_s,
+                -steering_rate_limit), steering_rate_limit)
+            f_components.append(actual_rate / sdot)
+        f = ca.vertcat(*f_components)
         f_nodes.append(f)
         time_density.append(1.0 / sdot)
         accel_nodes.append(raw_a)
-        sdot_nodes.append(sdot)
         ay = body_u[k] * yaw_r[k]
-        aycap = ay_fun(body_u[k], delta[k])
+        aycap = ay_fun(body_u[k], delta_actual[k])
         ay_nodes.append(ay)
         aycap_nodes.append(aycap)
 
         # State/input limits.
-        opti.subject_to(opti.bounded(model.min_speed_mps, body_u[k], model.max_body_speed_mps))
-        opti.subject_to(opti.bounded(0.0, target_v[k], model.max_command_speed_mps))
-        opti.subject_to(opti.bounded(-steering_limit, delta[k], steering_limit))
+        opti.subject_to(opti.bounded(model.min_speed_mps, body_u[k], speed_limit))
+        opti.subject_to(opti.bounded(0.0, target_v[k], command_speed_limit))
+        opti.subject_to(opti.bounded(-steering_limit, delta_command[k], steering_limit))
+        if actuator_enabled:
+            opti.subject_to(opti.bounded(-steering_limit, delta_actual[k], steering_limit))
         opti.subject_to(opti.bounded(-steering_rate_limit, qdelta[k], steering_rate_limit))
         opti.subject_to(opti.bounded(-model.max_target_speed_rate_reduction_mps2,
                                      qv[k], model.max_target_speed_rate_increase_mps2))
@@ -757,7 +961,8 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         trapezoid_defect = (
             X[:, kp] - X[:, k] - 0.5 * ds * (f_nodes[k] + f_nodes[kp])
         ) / ca.DM(sx)
-        for state_index in (0, 2, 4, 5):
+        state_indices = (0, 2, 4, 5, 6) if actuator_enabled else (0, 2, 4, 5)
+        for state_index in state_indices:
             opti.subject_to(trapezoid_defect[state_index] == 0.0)
 
         interval_sdot = 0.5 * (sdot_nodes[k] + sdot_nodes[kp])
@@ -823,9 +1028,10 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     result = Solution(
         track=track,
         ey=values(ey), epsi=values(epsi), u=values(body_u), r=values(yaw_r),
-        vt=values(target_v), delta=values(delta), qdelta=values(qdelta), qv=values(qv),
+        vt=values(target_v), delta=values(delta_actual), qdelta=values(qdelta), qv=values(qv),
         lap_time_s=float(sol.value(lap_time)), objective=float(sol.value(objective)),
         solver_stats=stats, elapsed_s=elapsed, label=guess.label, converged=converged,
+        steering_command=(values(delta_command) if actuator_enabled else None),
     )
     diagnostic_error = None
     if converged and yaw_lag_exact_fraction >= 1.0:
@@ -1188,14 +1394,20 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
                 f"{export_left[i]:.6f},{export_right[i]:.6f}\n")
 
     node_path = out / "solution_nodes.csv"
+    node_fields = ["s_ref_m", "x_ref_m", "y_ref_m", "kappa_ref", "ey_m",
+                   "epsi_rad", "u_mps", "r_radps", "target_mps", "delta_rad"]
+    if solution.steering_command is not None:
+        node_fields.append("steering_command_rad")
+    node_fields.extend(["qdelta_radps", "qv_mps2", "left_m", "right_m"])
     with node_path.open("w", encoding="utf-8") as f:
-        f.write("s_ref_m,x_ref_m,y_ref_m,kappa_ref,ey_m,epsi_rad,u_mps,r_radps,target_mps,delta_rad,qdelta_radps,qv_mps2,left_m,right_m\n")
+        f.write(",".join(node_fields) + "\n")
         for i in range(tr.count):
-            f.write(
-                f"{tr.s[i]:.8f},{tr.x[i]:.8f},{tr.y[i]:.8f},{tr.kappa[i]:.9f},"
-                f"{ey[i]:.8f},{epsi[i]:.9f},{u[i]:.8f},{r[i]:.8f},"
-                f"{vt[i]:.8f},{delta[i]:.9f},{qdelta[i]:.9f},{qv[i]:.8f},"
-                f"{tr.left[i]:.7f},{tr.right[i]:.7f}\n")
+            values = [tr.s[i], tr.x[i], tr.y[i], tr.kappa[i], ey[i], epsi[i],
+                      u[i], r[i], vt[i], delta[i]]
+            if solution.steering_command is not None:
+                values.append(solution.steering_command[i])
+            values.extend([qdelta[i], qv[i], tr.left[i], tr.right[i]])
+            f.write(",".join(f"{value:.9f}" for value in values) + "\n")
 
     time_recomputed = float(np.sum(seg / np.maximum(0.5 * (u + np.roll(u, -1)), 1e-3)))
     ay = u * r
@@ -1268,6 +1480,9 @@ def export_solution(solution: Solution, model: VehicleModel, envelope: LateralEn
             "target_speed_min_mps": float(np.min(vt)),
             "target_speed_max_mps": float(np.max(vt)),
             "steering_abs_max_rad": float(np.max(np.abs(delta))),
+            "steering_command_abs_max_rad": float(np.max(np.abs(
+                solution.steering_command if solution.steering_command is not None
+                else delta))),
             "steering_rate_abs_max_radps": float(np.max(np.abs(qdelta))),
             "target_rate_min_mps2": float(np.min(qv)),
             "target_rate_max_mps2": float(np.max(qv)),

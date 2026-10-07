@@ -14,6 +14,9 @@ fi
 if [[ "${SDU_APEX_BUILD_LOCALIZATION:-0}" == "1" ]]; then
   build_packages+=(f1tenth_localization)
 fi
+if [[ "${SDU_APEX_BUILD_INTEGRATION:-0}" == "1" ]]; then
+  build_packages+=(sdu_apex_autodrive)
+fi
 if [[ "${#build_packages[@]}" -gt 0 ]]; then
   echo "Building mounted workspace packages: ${build_packages[*]}"
   cd /workspace
@@ -81,5 +84,10 @@ if [[ "${controller}" == "mpc" ]]; then
       "mpc_parameter_overlay:=${SDU_APEX_MPC_PARAMETER_OVERLAY}"
     )
   fi
+fi
+if [[ -n "${SDU_APEX_ACTUATOR_PARAMETER_OVERLAY:-}" ]]; then
+  launch_args+=(
+    "actuator_parameter_overlay:=${SDU_APEX_ACTUATOR_PARAMETER_OVERLAY}"
+  )
 fi
 exec ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"

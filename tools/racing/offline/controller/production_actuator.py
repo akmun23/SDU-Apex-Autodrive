@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import yaml
@@ -25,9 +26,15 @@ class ActuatorOutput:
 class ProductionActuator:
     """Production Python speed controller with sensor-only odom/IMU inputs."""
 
-    def __init__(self, config_yaml: Path) -> None:
+    def __init__(self, config_yaml: Path,
+                 parameter_overlay_yaml: Path | None = None) -> None:
         raw = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
         params = raw["autodrive_actuator_interface"]["ros__parameters"]
+        if parameter_overlay_yaml is not None:
+            overlay = yaml.safe_load(
+                parameter_overlay_yaml.read_text(encoding="utf-8"))
+            params.update(
+                overlay["autodrive_actuator_interface"]["ros__parameters"])
         tuple_fields = {
             "feedforward_speed_mps", "feedforward_throttle",
             "max_acceleration_speed_mps", "max_acceleration_envelope_mps2",
@@ -56,6 +63,15 @@ class ProductionActuator:
         for name in names:
             value = params[name]
             values[name] = tuple(float(x) for x in value) if name in tuple_fields else float(value)
+        optional_regime_defaults = {
+            "throttle_rise_regime_rate_per_sec": 10.0,
+            "throttle_rise_regime_speed_min_mps": 0.0,
+            "throttle_rise_regime_speed_max_mps": 0.0,
+            "throttle_rise_regime_min_abs_steering_rad": math.pi,
+            "throttle_rise_regime_max_abs_steering_rad": math.pi,
+        }
+        for name, default in optional_regime_defaults.items():
+            values[name] = float(params.get(name, default))
         self.config = SpeedControllerConfig(**values)
         self.config.validate()
         self.speed_controller = TargetSpeedController(self.config)
@@ -111,7 +127,8 @@ class ProductionActuator:
         else:
             command = self.speed_controller.update_command(
                 target, self.speed_mps, 0.0, dt_s,
-                self.acceleration_mps2, measurement_fresh)
+                self.acceleration_mps2, measurement_fresh,
+                steering_angle_rad)
             throttle = command.throttle_normalized
             mode = command.mode
         return ActuatorOutput(float(steering_norm), float(throttle), mode)

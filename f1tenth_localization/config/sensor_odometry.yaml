@@ -211,12 +211,18 @@ sensor_odometry:
     twist_linear_variance: 0.04
     twist_yaw_variance: 0.04
 
-    # /odom/diagnostics is Float64MultiArray version 5:
-    # version, source_stamp_s, dt_s, raw_wheel_mps, mapped_wheel_mps,
+    # /odom/diagnostics is Float64MultiArray version 7 (42 values):
+    # version, published_stamp_s, dt_s, raw_wheel_mps, mapped_wheel_mps,
     # speed_pred_mps, speed_mps, body_u_mps, body_v_mps, ax_mps2, ay_mps2,
     # yaw_rate_radps, wheel_update_used, turn_mode, reset_epoch,
     # timing_degraded, packet_drop_count, packet_coherence_fault_count,
     # x_m, y_m, yaw_rad, sensor_outlier, left_angle_rad, right_angle_rad,
-    # imu_yaw_rad, packet_wheel_mps, wheel_burst_rejected, turn_speed_bias_mps. The last four values are the exact
-    # synchronized packet input/diagnostic values needed for replay and for
-    # diagnosing repeated cumulative-angle packets.
+    # imu_yaw_rad, packet_wheel_mps, wheel_burst_rejected, turn_speed_bias_mps,
+    # packet_source_stamp_s, previous_packet_source_stamp_s, was_retimestamped,
+    # retimestamped_packet_count, latest_seen_source_stamp_s,
+    # last_emitted_source_stamp_s, source_reversal_count, duplicate_source_count,
+    # late_completed_packet_count, incomplete_packet_drop_count,
+    # maximum_reorder_depth, maximum_reorder_time_s,
+    # pre_wheel_update_speed_mps, pre_wheel_update_speed_valid. Source-order
+    # and pre-wheel reference fields are diagnostics only; packet assembly and
+    # odometry integration are unchanged.

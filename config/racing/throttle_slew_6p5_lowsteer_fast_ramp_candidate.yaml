@@ -1,0 +1,10 @@
+autodrive_actuator_interface:
+  ros__parameters:
+    # Development-only transfer of the independently replicated 6.5 m/s,
+    # 0.08 rad, +0.08 throttle / 0.15 s ramp result. Keep the faster ramp
+    # inside its measured speed and steering cell; defaults remain unchanged.
+    throttle_rise_regime_rate_per_sec: 0.533
+    throttle_rise_regime_speed_min_mps: 6.3
+    throttle_rise_regime_speed_max_mps: 6.7
+    throttle_rise_regime_min_abs_steering_rad: 0.07
+    throttle_rise_regime_max_abs_steering_rad: 0.09

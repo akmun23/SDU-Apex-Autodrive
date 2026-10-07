@@ -1,0 +1,72 @@
+schema_version: 1
+map: practice_9g
+coordinate: canonical_centerline_track_s_m
+period_m: 30.79173974622894
+centerline_sha256: f5b528aeceb9c92833eb029b1b0142fdf52911cea43f19ea0705a576e6381edf
+parent_trajectory_sha256: a3c9cda87f5f2d809cd1c684f98e2af6d1fa43a7530c1af2d8fa38290bef4910
+parent: P0_5p789
+sector_definition_basis: >-
+  Boundaries follow the frozen P0 reference speed schedule's brake, minimum-speed,
+  exit-acceleration, and curvature transitions. This is a descriptive partition,
+  not a claim that the boundaries are dynamically optimal.
+sectors:
+  - id: corner_a_apex
+    start_track_s_m: 29.5
+    end_track_s_m: 1.5
+    phase: apex
+    wraps_zero: true
+  - id: corner_a_exit
+    start_track_s_m: 1.5
+    end_track_s_m: 5.5
+    phase: exit
+    wraps_zero: false
+  - id: straight_a_accel
+    start_track_s_m: 5.5
+    end_track_s_m: 10.5
+    phase: acceleration
+    wraps_zero: false
+  - id: corner_b_brake_turnin
+    start_track_s_m: 10.5
+    end_track_s_m: 14.8
+    phase: brake_turnin
+    wraps_zero: false
+  - id: corner_b_apex
+    start_track_s_m: 14.8
+    end_track_s_m: 16.5
+    phase: apex
+    wraps_zero: false
+  - id: corner_b_exit
+    start_track_s_m: 16.5
+    end_track_s_m: 20.5
+    phase: exit
+    wraps_zero: false
+  - id: straight_b_accel
+    start_track_s_m: 20.5
+    end_track_s_m: 25.2
+    phase: acceleration
+    wraps_zero: false
+  - id: corner_a_brake_turnin
+    start_track_s_m: 25.2
+    end_track_s_m: 29.5
+    phase: brake_turnin
+    wraps_zero: false
+optimization_groups:
+  - id: corner_a
+    sectors: [corner_a_apex, corner_a_exit, corner_a_brake_turnin]
+    speed_scale: 1.0
+  - id: straight_a
+    sectors: [straight_a_accel]
+    speed_scale: 1.0
+  - id: corner_b
+    sectors: [corner_b_brake_turnin, corner_b_apex, corner_b_exit]
+    speed_scale: 1.0
+  - id: straight_b
+    sectors: [straight_b_accel]
+    speed_scale: 1.0
+phase_groups:
+  - id: corner_a
+    brake_sectors: [corner_a_brake_turnin, corner_a_apex]
+    exit_accel_sectors: [corner_a_exit, straight_a_accel]
+  - id: corner_b
+    brake_sectors: [corner_b_brake_turnin, corner_b_apex]
+    exit_accel_sectors: [corner_b_exit, straight_b_accel]

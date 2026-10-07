@@ -73,7 +73,7 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(FILES config/mpc_competition.yaml config/yaw_response_surface.csv
+install(FILES config/mpc_competition.yaml config/mpc_practice_yaw_residual_support_gated.yaml config/yaw_response_surface.csv
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)

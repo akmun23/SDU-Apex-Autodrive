@@ -1,0 +1,9 @@
+autodrive_actuator_interface:
+  ros__parameters:
+    # Development-only candidate derived from matched ramp-vs-step captures.
+    # Leave the established rise/fall rates unchanged outside this measured
+    # speed/steering region; throttle reductions are not rate-limited by it.
+    throttle_rise_regime_rate_per_sec: 0.267
+    throttle_rise_regime_speed_min_mps: 4.5
+    throttle_rise_regime_speed_max_mps: 7.5
+    throttle_rise_regime_min_abs_steering_rad: 0.12

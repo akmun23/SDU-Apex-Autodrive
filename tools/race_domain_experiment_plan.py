@@ -282,22 +282,23 @@ def build_race_domain_moderate_braking_plan(
     return tuple(blocks)
 
 
-def build_high_steer_validation_plan(seed: int) -> tuple[CommandBlock, ...]:
+def build_high_steer_validation_plan(
+        seed: int,
+        target_speed_mps: float = HIGH_STEER_VALIDATION_SPEED_MPS,
+) -> tuple[CommandBlock, ...]:
     """Replicate the observed 7.7–7.9 m/s high-steer cells with long holds.
 
-    Existing held-out data reaches about 7.8 m/s at up to 0.524 rad, but the
-    condition fragments are too short for a 2 s context plus a 5 s free
-    rollout and the high-steer cells come from one run. Each capture performs
-    one randomized 7.5 s sweep of those observed angles at 7.5 m/s; independent
-    whole-run captures provide replication.
+    Each capture performs one randomized 7.5 s sweep of the observed angles
+    at the requested speed; independent whole-run captures provide
+    replication. The default preserves the established 7.5 m/s profile.
     """
     rng = random.Random(seed)
     conditions = [CommandBlock(
-        HIGH_STEER_VALIDATION_SPEED_MPS, 0.0,
+        target_speed_mps, 0.0,
         HIGH_STEER_VALIDATION_DWELL_S, "baseline_zero_steer")]
     conditions.extend(
         CommandBlock(
-            HIGH_STEER_VALIDATION_SPEED_MPS, sign * angle,
+            target_speed_mps, sign * angle,
             HIGH_STEER_VALIDATION_DWELL_S,
             f"steer_{sign:+.0f}_{angle:.4f}")
         for angle in HIGH_STEER_VALIDATION_ANGLES_RAD

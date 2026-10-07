@@ -253,6 +253,49 @@ public:
             const MpcYawRateResponseSurface_t disabled_surface{};
             (void)vehicle_model_set_yaw_rate_response_surface(&disabled_surface);
         }
+        MpcYawRateResidualModel_t yaw_residual_model =
+            vehicle_model_default_yaw_rate_residual_model();
+        yaw_residual_model.enabled = declare_parameter<bool>(
+            "yaw_rate_residual_enabled", false) ? 1 : 0;
+        if (yaw_residual_model.enabled) {
+            yaw_residual_model.gain = static_cast<float>(declare_parameter<double>(
+                "yaw_rate_residual_gain", 1.0));
+            yaw_residual_model.correction_clip_radps2 = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_clip_radps2", 254.63149203491213));
+            const auto means = declare_parameter<std::vector<double>>(
+                "yaw_rate_residual_feature_mean", std::vector<double>{});
+            const auto scales = declare_parameter<std::vector<double>>(
+                "yaw_rate_residual_feature_scale", std::vector<double>{});
+            const auto coefficients = declare_parameter<std::vector<double>>(
+                "yaw_rate_residual_coefficients", std::vector<double>{});
+            if (means.size() != MPC_YAW_RESIDUAL_FEATURES ||
+                scales.size() != MPC_YAW_RESIDUAL_FEATURES ||
+                coefficients.size() != MPC_YAW_RESIDUAL_COEFFICIENTS) {
+                throw std::runtime_error(
+                    "enabled yaw residual requires 13 means/scales and 14 coefficients");
+            }
+            for (std::size_t i = 0; i < means.size(); ++i) {
+                yaw_residual_model.feature_mean[i] = static_cast<float>(means[i]);
+                yaw_residual_model.feature_scale[i] = static_cast<float>(scales[i]);
+            }
+            for (std::size_t i = 0; i < coefficients.size(); ++i)
+                yaw_residual_model.coefficients[i] =
+                    static_cast<float>(coefficients[i]);
+            yaw_residual_model.target_speed_zero_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_target_speed_zero_mps", 6.48));
+            yaw_residual_model.target_speed_full_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_target_speed_full_mps", 6.50));
+            yaw_residual_model.speed_deficit_full_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_speed_deficit_full_mps", 0.10));
+            yaw_residual_model.speed_deficit_zero_mps = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_speed_deficit_zero_mps", 0.20));
+            yaw_residual_model.abs_steering_zero_rad = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_abs_steering_zero_rad", 0.18));
+            yaw_residual_model.abs_steering_full_rad = static_cast<float>(
+                declare_parameter<double>("yaw_rate_residual_abs_steering_full_rad", 0.20));
+        }
+        if (!vehicle_model_set_yaw_rate_residual_model(&yaw_residual_model))
+            throw std::runtime_error("invalid yaw-rate residual model parameters");
         /* Keep parameter fallbacks identical to the canonical competition YAML.
          * Otherwise a missing/renamed YAML silently selected the historical
          * BachelorProject objective while the offline replay and documented

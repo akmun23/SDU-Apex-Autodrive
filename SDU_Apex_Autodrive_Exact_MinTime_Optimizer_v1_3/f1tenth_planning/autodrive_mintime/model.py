@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import csv
+import json
 import math
 import re
 from typing import Any
@@ -177,8 +178,9 @@ class VehicleModel:
     planning_footprint_width_m: float
     required_wall_clearance_m: float
 
-    # Current validated controller/runtime operating envelope.
-    validated_lateral_accel_mps2: float
+    # Legacy scalar consumed by curvature-based speed shaping. It is not a
+    # speed/steering/history-conditioned vehicle capability model.
+    legacy_lateral_speed_shaping_mps2: float
 
     # Sensor-only rear-axle lateral-velocity model used by production odometry.
     # The optimizer enables it only in explicit candidate configs; its
@@ -191,6 +193,10 @@ class VehicleModel:
     # Numerical lower bound only; not a simulator physical constant.
     min_speed_mps: float
     max_body_speed_mps: float
+    # Optional offline teacher-derived one-step yaw-acceleration correction.
+    # This is never loaded by the production MPC unless an explicit optimizer
+    # candidate config names the artifact.
+    yaw_residual_candidate: dict[str, Any] | None = None
 
     @classmethod
     def from_repo(cls, repo_root: str | Path, config: dict[str, Any]) -> "VehicleModel":
@@ -224,12 +230,44 @@ class VehicleModel:
             "yaw_surface_low_speed_blend_margin_mps",
             "yaw_surface_low_speed_support_fadeout_mps",
             "yaw_surface_high_speed_support_fadein_mps",
+            "yaw_residual_candidate_json",
         }
         unknown_model_overrides = set(vehicle_model_overrides) - supported_model_overrides
         if unknown_model_overrides:
             raise ValueError(
                 "unsupported vehicle_model_overrides: "
                 + ", ".join(sorted(unknown_model_overrides)))
+
+        residual_candidate = None
+        residual_path_value = vehicle_model_overrides.get("yaw_residual_candidate_json")
+        if residual_path_value is not None:
+            if not isinstance(residual_path_value, str) or not residual_path_value.strip():
+                raise ValueError(
+                    "vehicle_model_overrides.yaw_residual_candidate_json must be a path")
+            residual_path = Path(residual_path_value)
+            if not residual_path.is_absolute():
+                residual_path = repo_root / residual_path
+            residual_path = residual_path.resolve()
+            try:
+                residual_path.relative_to(repo_root)
+            except ValueError as exc:
+                raise ValueError("yaw residual candidate must be inside the repository") from exc
+            residual_candidate = json.loads(residual_path.read_text(encoding="utf-8"))
+            means = residual_candidate.get("feature_mean", [])
+            scales = residual_candidate.get("feature_scale", [])
+            coefficients = residual_candidate.get("coefficients_with_intercept", [])
+            gate = residual_candidate.get("support_gate", {})
+            if (residual_candidate.get("schema_version") != 1
+                    or len(means) != 13 or len(scales) != 13
+                    or len(coefficients) != 14
+                    or any(not math.isfinite(float(value)) for value in
+                           (*means, *scales, *coefficients))
+                    or any(float(value) <= 0.0 for value in scales)
+                    or not math.isfinite(float(residual_candidate.get(
+                        "correction_clip_radps2", float("nan"))))
+                    or float(residual_candidate["correction_clip_radps2"]) <= 0.0
+                    or gate.get("kind") != "smoothstep_target_tracking_steering_v1"):
+                raise ValueError(f"invalid yaw residual candidate artifact: {residual_path}")
         odom_doc = _load_yaml(odom_path)
         odom_node = odom_doc.get("sensor_odometry", {})
         odom_params = (odom_node.get("ros__parameters", {})
@@ -244,6 +282,10 @@ class VehicleModel:
             surface_override if surface_override is not None else
             bool(mpc_params.get("yaw_rate_response_surface_enabled", False))
         )
+        if residual_candidate is not None and surface_enabled:
+            raise ValueError(
+                "the residual candidate was fit against the production legacy-yaw "
+                "transition; do not stack it with the empirical steady-yaw surface")
         surface_response_scale = float(vehicle_model_overrides.get(
             "yaw_surface_response_scale", 1.0))
         surface_blend_q_start = float(vehicle_model_overrides.get(
@@ -458,7 +500,7 @@ class VehicleModel:
             rear_axle_to_front_bumper_m=car_length - rear_overhang,
             planning_footprint_width_m=float(mintime["optimizer_width_m"]),
             required_wall_clearance_m=float(mintime["wall_clearance_m"]),
-            validated_lateral_accel_mps2=float(pp["max_lateral_accel"]),
+            legacy_lateral_speed_shaping_mps2=float(pp["max_lateral_accel"]),
             lateral_velocity_yaw_rate_gain_m=float(
                 odom_params["lateral_velocity_yaw_rate_gain_m"]),
             lateral_velocity_speed_yaw_rate_gain_s=float(
@@ -468,6 +510,7 @@ class VehicleModel:
                 odom_params["lateral_velocity_reference_forward_offset_m"]),
             min_speed_mps=float(limits.get("min_body_speed_mps", 0.8)),
             max_body_speed_mps=constants["MPC_MAX_COMMAND_SPEED_MPS"],
+            yaw_residual_candidate=residual_candidate,
         )
         if model.planning_footprint_width_m < model.car_width_m:
             raise ValueError(
@@ -480,6 +523,9 @@ class VehicleModel:
         result = asdict(self)
         result.pop("yaw_surface_q")
         result.pop("yaw_surface_rate_rps")
+        residual = result.pop("yaw_residual_candidate")
+        result["yaw_residual_candidate_id"] = (
+            residual.get("model_id") if residual is not None else None)
         result["yaw_response_surface_samples"] = sum(
             len(row) for speed_rows in self.yaw_surface_q for row in speed_rows)
         return result
@@ -629,6 +675,91 @@ class VehicleModel:
         blend = self.yaw_surface_response_scale * q_blend * speed_blend
         return legacy + blend * (empirical - legacy)
 
+    @staticmethod
+    def _smoothstep_casadi(value, low: float, high: float):
+        t = ca.fmin(ca.fmax((value - low) / (high - low), 0.0), 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    def yaw_residual_rate_numeric(self, speed: float, yaw_rate: float,
+                                  steering: float, steering_rate: float,
+                                  lateral_speed: float, path_curvature: float,
+                                  longitudinal_accel: float,
+                                  target_speed_rate: float,
+                                  target_speed: float) -> float:
+        candidate = self.yaw_residual_candidate
+        if candidate is None:
+            return 0.0
+        delta = float(steering)
+        qdelta = float(steering_rate)
+        qv = float(target_speed_rate)
+        v = float(lateral_speed)
+        ax = float(longitudinal_accel)
+        features = np.asarray((
+            speed, yaw_rate, delta, qdelta, v, path_curvature, ax, qv,
+            speed * delta * abs(delta), delta * abs(qdelta),
+            v * abs(delta), abs(delta) * ax, delta * abs(qv),
+        ), dtype=float)
+        correction = (float(candidate["coefficients_with_intercept"][0])
+                      + float(np.dot(
+                          (features - np.asarray(candidate["feature_mean"], dtype=float))
+                          / np.asarray(candidate["feature_scale"], dtype=float),
+                          np.asarray(candidate["coefficients_with_intercept"][1:],
+                                     dtype=float))))
+        clip = float(candidate["correction_clip_radps2"])
+        correction = float(np.clip(correction, -clip, clip))
+        gate = candidate["support_gate"]
+        target_gate = self._smoothstep_numeric(
+            float(target_speed), float(gate["target_speed_zero_mps"]),
+            float(gate["target_speed_full_mps"]))
+        deficit = float(target_speed) - float(speed)
+        tracking_gate = 1.0 - self._smoothstep_numeric(
+            deficit, float(gate["speed_deficit_full_mps"]),
+            float(gate["speed_deficit_zero_mps"]))
+        steering_gate = self._smoothstep_numeric(
+            abs(delta), float(gate["abs_steering_zero_rad"]),
+            float(gate["abs_steering_full_rad"]))
+        return (float(candidate.get("gain", 1.0)) * correction
+                * target_gate * tracking_gate * steering_gate)
+
+    def yaw_residual_rate_casadi(self, speed, yaw_rate, steering, steering_rate,
+                                 lateral_speed, path_curvature,
+                                 longitudinal_accel, target_speed_rate,
+                                 target_speed):
+        candidate = self.yaw_residual_candidate
+        if candidate is None:
+            return ca.MX(0.0)
+        delta, qdelta, qv = steering, steering_rate, target_speed_rate
+        features = ca.vertcat(
+            speed, yaw_rate, delta, qdelta, lateral_speed, path_curvature,
+            longitudinal_accel, qv, speed * delta * ca.fabs(delta),
+            delta * ca.fabs(qdelta), lateral_speed * ca.fabs(delta),
+            ca.fabs(delta) * longitudinal_accel, delta * ca.fabs(qv),
+        )
+        means = ca.DM(candidate["feature_mean"])
+        scales = ca.DM(candidate["feature_scale"])
+        coefficients = ca.DM(candidate["coefficients_with_intercept"])
+        normalized = (features - means) / scales
+        correction = coefficients[0] + ca.dot(coefficients[1:], normalized)
+        clip = float(candidate["correction_clip_radps2"])
+        correction = ca.fmin(ca.fmax(correction, -clip), clip)
+        gate = candidate["support_gate"]
+        target_gate = self._smoothstep_casadi(
+            target_speed, float(gate["target_speed_zero_mps"]),
+            float(gate["target_speed_full_mps"]))
+        tracking_gate = 1.0 - self._smoothstep_casadi(
+            target_speed - speed, float(gate["speed_deficit_full_mps"]),
+            float(gate["speed_deficit_zero_mps"]))
+        steering_gate = self._smoothstep_casadi(
+            ca.fabs(delta), float(gate["abs_steering_zero_rad"]),
+            float(gate["abs_steering_full_rad"]))
+        return (float(candidate.get("gain", 1.0)) * correction
+                * target_gate * tracking_gate * steering_gate)
+
+    @staticmethod
+    def _smoothstep_numeric(value: float, low: float, high: float) -> float:
+        t = min(1.0, max(0.0, (value - low) / (high - low)))
+        return t * t * (3.0 - 2.0 * t)
+
     def steering_for_yaw_rate(self, speed: float, desired_yaw_rate: float,
                                path_curvature: float = 0.0) -> float:
         # Match the production C inverse exactly: it evaluates 96 evenly
@@ -653,7 +784,11 @@ class VehicleModel:
             "dynamics": "f1tenth_mpc/include/mpc_types.h (held-out AutoDRIVE identified model)",
             "geometry": "f1tenth_planning/config/autodrive_sim_vehicle.yaml:geometry",
             "planning_footprint_and_wall_clearance": "f1tenth_planning/config/autodrive_sim_vehicle.yaml:mintime",
-            "lateral_accel": "f1tenth_control/config/path_tracking_autodrive.yaml:max_lateral_accel",
+            "legacy_lateral_speed_shaping": (
+                "f1tenth_control/config/path_tracking_autodrive.yaml:"
+                "max_lateral_accel; scalar baseline only, not a verified "
+                "vehicle capability envelope"
+            ),
             "rear_axle_lateral_velocity": (
                 "f1tenth_localization/config/sensor_odometry.yaml:"
                 "lateral_velocity_* (causal wheel-speed/IMU-yaw model)"
@@ -722,6 +857,7 @@ class LateralEnvelope:
     ay_max_mps2: np.ndarray
     source: str
     scale: float = 1.0
+    max_supported_speed_mps: float = math.inf
 
     @classmethod
     def from_repo(cls, repo_root: str | Path, model: VehicleModel,
@@ -739,7 +875,82 @@ class LateralEnvelope:
                 "lateral_envelope profiles require speed_mps, "
                 "steering_abs_rad, and ay_max_mps2 together"
             )
-        if all(profile_present):
+        max_supported_speed = model.max_body_speed_mps
+        empirical_curvature_csv = section.get("empirical_curvature_csv")
+        if empirical_curvature_csv is not None:
+            if any(profile_present):
+                raise ValueError(
+                    "specify empirical_curvature_csv or explicit lateral profile, not both")
+            if not isinstance(empirical_curvature_csv, str) or not empirical_curvature_csv.strip():
+                raise ValueError("lateral_envelope.empirical_curvature_csv must be a path")
+            source_path = Path(empirical_curvature_csv)
+            if not source_path.is_absolute():
+                source_path = Path(repo_root) / source_path
+            source_path = source_path.resolve()
+            try:
+                source_path.relative_to(Path(repo_root).resolve())
+            except ValueError as exc:
+                raise ValueError("empirical curvature CSV must be inside the repository") from exc
+            split = str(section.get("empirical_curvature_split", "train"))
+            minimum_runs = int(section.get("empirical_curvature_min_runs", 3))
+            minimum_conditions = int(section.get("empirical_curvature_min_conditions", 3))
+            if split != "train":
+                raise ValueError("optimizer capability fitting must use whole-run train split")
+            if minimum_runs < 1 or minimum_conditions < 1:
+                raise ValueError("empirical curvature support thresholds must be positive")
+            supported: dict[tuple[float, float], dict[str, float]] = {}
+            with source_path.open("r", encoding="utf-8", newline="") as stream:
+                for row in csv.DictReader(stream):
+                    if row.get("split") != split or row.get("planner_support_gate", "").lower() != "true":
+                        continue
+                    label = str(row.get("speed_bin", ""))
+                    try:
+                        lower, upper = (float(value) for value in label.split("-", 1))
+                        curvature = float(row["conservative_curvature_m_inv"])
+                        runs = int(row["capability_supported_runs"])
+                        conditions = int(row["capability_supported_conditions"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    direction = str(row.get("turn_direction", ""))
+                    if (direction not in {"left", "right"} or not math.isfinite(curvature)
+                            or curvature <= 0.0 or runs < minimum_runs
+                            or conditions < minimum_conditions):
+                        continue
+                    supported.setdefault((lower, upper), {})[direction] = curvature
+            if not supported:
+                raise ValueError(f"no supported curvature rows in {source_path}")
+            intervals: list[tuple[float, float, float]] = []
+            for (lower, upper), directions in sorted(supported.items()):
+                if {"left", "right"} <= set(directions):
+                    intervals.append((lower, upper,
+                                      min(directions["left"], directions["right"])))
+            if not intervals or abs(intervals[0][0]) > 1e-8:
+                raise ValueError("supported curvature data must cover speed starting at zero")
+            max_supported_speed = intervals[-1][1]
+            if any(abs(intervals[i][1] - intervals[i + 1][0]) > 1e-8
+                   for i in range(len(intervals) - 1)):
+                raise ValueError("supported curvature speed bins must be contiguous")
+            spacing = float(section.get("empirical_curvature_speed_spacing_mps", 0.25))
+            if not math.isfinite(spacing) or spacing <= 0.0:
+                raise ValueError("empirical curvature speed spacing must be positive")
+            speed_mps = np.arange(0.0, max_supported_speed + spacing * 0.5,
+                                  spacing, dtype=float)
+            speed_mps[-1] = max_supported_speed
+            kappas = []
+            for speed in speed_mps:
+                active = [cap for lower, upper, cap in intervals
+                          if lower - 1e-9 <= speed <= upper + 1e-9]
+                if not active:
+                    raise ValueError(f"curvature support does not cover {speed:.3f} m/s")
+                kappas.append(min(active))
+            ay_by_speed = np.maximum(1e-6, np.asarray(kappas) * speed_mps ** 2)
+            steering_abs_rad = np.asarray([0.0, model.max_steering_rad])
+            ay_max_mps2 = np.repeat(ay_by_speed[:, None], 2, axis=1)
+            source = (
+                f"{source_path.relative_to(Path(repo_root).resolve())}: whole-run train "
+                f"sustained curvature inner capability; min(left,right), "
+                f"support >= {minimum_runs} runs and {minimum_conditions} conditions")
+        elif all(profile_present):
             speed_mps = np.asarray(section["speed_mps"], dtype=float)
             steering_abs_rad = np.asarray(section["steering_abs_rad"], dtype=float)
             ay_max_mps2 = np.asarray(section["ay_max_mps2"], dtype=float)
@@ -760,15 +971,17 @@ class LateralEnvelope:
                     "invalid speed/steering lateral-envelope profile or coverage"
                 )
             source = str(section.get("source", "candidate speed/steering profile"))
+            max_supported_speed = float(speed_mps[-1])
         else:
-            cap = model.validated_lateral_accel_mps2
+            cap = model.legacy_lateral_speed_shaping_mps2
             speed_mps = np.asarray([0.0, model.max_body_speed_mps], dtype=float)
             steering_abs_rad = np.asarray(
                 [0.0, model.max_steering_rad], dtype=float)
             ay_max_mps2 = np.full((2, 2), cap, dtype=float)
             source = (
                 "f1tenth_control/config/path_tracking_autodrive.yaml:max_lateral_accel "
-                "(current measured runtime envelope)"
+                "(legacy scalar speed-shaping fallback; not an empirical "
+                "speed/steering/transient capability model)"
             )
         return cls(
             speed_mps=speed_mps,
@@ -776,6 +989,7 @@ class LateralEnvelope:
             ay_max_mps2=ay_max_mps2,
             source=source,
             scale=scale,
+            max_supported_speed_mps=max_supported_speed,
         )
 
     def casadi_function(self) -> ca.Function:
@@ -832,6 +1046,7 @@ class LateralEnvelope:
             "ay_max_mps2": self.ay_max_mps2.tolist(),
             "source": self.source,
             "scale": self.scale,
+            "max_supported_speed_mps": self.max_supported_speed_mps,
         }
 
 

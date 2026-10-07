@@ -657,6 +657,8 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
             "lap_progress_m": lap_progress, "s_m": ref.s_m,
             "x_m": float(pose_of(row.message).position.x), "y_m": float(pose_of(row.message).position.y),
             "truth_speed_mps": u, "truth_lateral_speed_mps": v,
+            "truth_yaw_rad": yaw_of(pose_of(row.message).orientation),
+            "truth_heading_error_rad": ref.heading_error_rad,
             "reference_speed_mps": reference_speed_mps, "speed_error_mps": u - reference_speed_mps if math.isfinite(reference_speed_mps) else math.nan,
             "ax_mps2": ax, "ay_body_mps2": ay_body, "ay_proxy_mps2": ay_proxy,
             "yaw_rate_radps": yaw_rate, "actual_curvature_inv_m": yaw_rate / max(abs(u), 0.25),
@@ -841,6 +843,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     saturation_rows = []
     for row, source_ns, data in diagnostics:
         action = data.get("first_action") or []
+        state = data.get("state") or []
         command_stamp = int(data.get("control_ros_stamp_ns") or source_ns)
         steering_cmd = steering_command_rad_at(
             streams, scalar_stamps, command_stamp, args.steering_limit_rad)
@@ -855,6 +858,12 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
             "solver_us": (data.get("solver") or {}).get("solve_us"),
             "first_action_steering_rad": action[0] if len(action) > 0 else None,
             "first_action_speed_mps": action[1] if len(action) > 1 else None,
+            "first_control_steering_rate_radps": action[2] if len(action) > 2 else None,
+            "first_control_target_speed_rate_mps2": action[3] if len(action) > 3 else None,
+            "state_target_speed_mps": state[5] if len(state) > 5 else None,
+            "state_steering_command_rad": state[6] if len(state) > 6 else None,
+            "state_delayed_steering_command_1_rad": state[7] if len(state) > 7 else None,
+            "state_delayed_steering_command_2_rad": state[8] if len(state) > 8 else None,
             "steering_command_rad": steering_cmd, "steering_feedback_rad": steering_actual,
             "steering_limit_fraction": abs(steering_actual) / args.steering_limit_rad if steering_actual is not None else None,
             "steering_near_configured_limit": bool(steering_actual is not None and abs(steering_actual) >= 0.98 * args.steering_limit_rad),
