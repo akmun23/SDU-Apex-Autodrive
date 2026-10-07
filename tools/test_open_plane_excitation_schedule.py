@@ -22,6 +22,11 @@ from open_plane_excitation import (
     YAW_ATLAS_OFFGRID_FINAL_POINTS,
     YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
     YAW_ATLAS_EXTRATREES_FINAL_POINTS,
+    YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
+    YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_POINTS,
+    YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
+    YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_POINTS,
+    YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS,
     YAW_ATLAS_INTERPOLATION_REPEATS,
     YAW_FULLBAND_GAPFILL_PROFILE,
     YAW_FULLBAND_GAPFILL_POINTS,
@@ -359,6 +364,67 @@ class YawAtlasInterpolationScheduleTest(unittest.TestCase):
                              f"settle_atlas_{phase.condition_pair_id}")
             self.assertTrue(phases[index - 2].reach_speed_target)
         self.assertEqual(len(probes), 24)
+        self.assertEqual(observed, expected)
+
+    def test_extratrees_highsteer_final_points_are_supported_and_offgrid(self) -> None:
+        points = set(YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_POINTS)
+        self.assertEqual(len(points), 4)
+        self.assertTrue(all(8.0 < speed < 10.0 and 0.30 <= angle <= 0.43
+                            for speed, angle in points))
+        phases = build_schedule(
+            202610078, YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("atlas_")]
+        expected = {
+            (repeat, speed, angle, sign)
+            for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
+            for speed, angle in YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_POINTS
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for phase in probes:
+            repeat, speed, angle, sign = phase.condition_pair_id.split("_")
+            observed.add((int(repeat[1:]), float(speed[1:]),
+                          float(angle[1:]), int(sign[4:])))
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+        self.assertEqual(len(probes), 16)
+        self.assertEqual(observed, expected)
+
+    def test_highsteer_speed_surface_train_covers_full_steering_edge(self) -> None:
+        points = set(YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_POINTS)
+        self.assertEqual(len(points), 12)
+        self.assertEqual({angle for _, angle in points},
+                         {0.350, 0.425, 0.475, 0.500})
+        self.assertEqual({speed for speed, _ in points},
+                         {8.25, 8.75, 9.25})
+        phases = build_schedule(
+            202610079, YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("atlas_")]
+        expected = {
+            (repeat, speed, angle, sign)
+            for repeat in range(1, YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS + 1)
+            for speed, angle in points
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("atlas_"):
+                continue
+            repeat, speed, angle, sign = phase.condition_pair_id.split("_")
+            observed.add((int(repeat[1:]), float(speed[1:]),
+                          float(angle[1:]), int(sign[4:])))
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_atlas_{phase.condition_pair_id}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_atlas_{phase.condition_pair_id}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+        self.assertEqual(len(probes), 48)
         self.assertEqual(observed, expected)
 
 

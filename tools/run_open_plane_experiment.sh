@@ -34,6 +34,8 @@ usage() {
     "yaw_atlas_interpolation_validation tests randomized, reset-matched off-grid speed/steering points twice in both turn directions." \
     "yaw_atlas_offgrid_final tests a separate frozen set of low-angle speed/steering points for final generalization scoring." \
     "yaw_atlas_extratrees_final tests six new off-grid points supported by the frozen ExtraTrees atlas, both turn directions and two reset-isolated repeats." \
+    "yaw_atlas_extratrees_highsteer_final tests four new high-speed, high-steering off-grid points in supported steady-response cells, both directions and two reset-isolated repeats." \
+    "yaw_highsteer_speed_surface_train fills the missing >=8 m/s, 0.35–0.50 rad yaw-response region at 8.25/8.75/9.25 m/s, both directions, two reset-isolated repeats." \
     "yaw_fullband_gapfill_train adds two independent signed high-speed low-angle captures at exact atlas cells that the sealed final test found unsupported or inaccurate." \
     "yaw_unwind_throttle_slew_train pairs a 0.12 throttle cut (one-tick step vs 0.30 s ramp) with 8.75 m/s signed steering unwind through ±0.025 rad." \
     "yaw_frontier_throttle_slew_train pairs step/ramp cuts at 9.5 m/s and 0.14/0.18/0.20 rad, matching the held-out high-speed deceleration maneuvers." \
@@ -93,6 +95,8 @@ elif [[ "${profile}" == race_domain_yaw_transition_transients ]]; then
 elif [[ "${profile}" == yaw_atlas_interpolation_validation ||
         "${profile}" == yaw_atlas_offgrid_final ||
         "${profile}" == yaw_atlas_extratrees_final ||
+        "${profile}" == yaw_atlas_extratrees_highsteer_final ||
+        "${profile}" == yaw_highsteer_speed_surface_train ||
         "${profile}" == yaw_fullband_gapfill_train ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == yaw_low_angle_rate_surface ]]; then
@@ -161,6 +165,8 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == yaw_atlas_interpolation_validation ||
       "${profile}" == yaw_atlas_offgrid_final ||
       "${profile}" == yaw_atlas_extratrees_final ||
+      "${profile}" == yaw_atlas_extratrees_highsteer_final ||
+      "${profile}" == yaw_highsteer_speed_surface_train ||
       "${profile}" == yaw_fullband_gapfill_train ||
       "${profile}" == yaw_unwind_throttle_slew_train ||
       "${profile}" == yaw_frontier_throttle_slew_train ||
@@ -198,6 +204,8 @@ case "${profile}" in
   yaw_atlas_interpolation_validation|\
   yaw_atlas_offgrid_final|\
   yaw_atlas_extratrees_final|\
+  yaw_atlas_extratrees_highsteer_final|\
+  yaw_highsteer_speed_surface_train|\
   yaw_fullband_gapfill_train|\
   yaw_unwind_throttle_slew_train|\
   yaw_frontier_throttle_slew_train|\

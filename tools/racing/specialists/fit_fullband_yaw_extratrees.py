@@ -30,7 +30,8 @@ except ModuleNotFoundError:  # Importable both as a script and as a repo module.
 
 
 ROOT = Path(__file__).resolve().parents[3]
-MODEL_FAMILY = "run_balanced_extra_trees_yaw_increment"
+MODEL_FAMILY_V1 = "run_balanced_extra_trees_yaw_increment"
+MODEL_FAMILY_V2 = "run_balanced_extra_trees_yaw_increment_lagged_history"
 N_ESTIMATORS = 120
 MAX_DEPTH = 5
 MIN_SAMPLES_LEAF = 4
@@ -42,12 +43,16 @@ INCLUDE_COMMAND_RATES = True
 INCLUDE_REAR_WHEEL_SPLIT = False
 
 
-def _feature_schema() -> tuple[tuple[str, ...], np.ndarray]:
+def _feature_schema(include_lagged_history: bool = False
+                    ) -> tuple[tuple[str, ...], np.ndarray]:
     names = atlas.FEATURE_NAMES + atlas.COMMAND_ERROR_FEATURE_NAMES
     scales = np.concatenate((atlas.FEATURE_SCALES,
                              atlas.COMMAND_ERROR_FEATURE_SCALES))
     names += atlas.COMMAND_RATE_FEATURE_NAMES
     scales = np.concatenate((scales, atlas.COMMAND_RATE_FEATURE_SCALES))
+    if include_lagged_history:
+        names += atlas.LAGGED_HISTORY_FEATURE_NAMES
+        scales = np.concatenate((scales, atlas.LAGGED_HISTORY_FEATURE_SCALES))
     return names, scales.astype(np.float64, copy=False)
 
 
@@ -88,20 +93,22 @@ def _fit_cell(job: tuple[tuple[int, int, int], np.ndarray,
     }
 
 
-def fit_candidate(output_dir: Path, workers: int = 12) -> dict[str, Any]:
+def fit_candidate(output_dir: Path, workers: int = 12,
+                  include_lagged_history: bool = False) -> dict[str, Any]:
     if workers < 1:
         raise ValueError("workers must be positive")
     run_series, source_audit = atlas._discover_run_series()
     train_series = [series for series in run_series if series.split == "train"]
     if not train_series:
         raise RuntimeError("clean whole-run training captures are required")
-    feature_names, feature_scales = _feature_schema()
+    feature_names, feature_scales = _feature_schema(include_lagged_history)
     parts = [atlas._make_rows(
         series,
         PHASE_THRESHOLD,
         INCLUDE_COMMAND_ERRORS,
         INCLUDE_COMMAND_RATES,
         INCLUDE_REAR_WHEEL_SPLIT,
+        include_lagged_history,
     ) for series in train_series]
     x = np.concatenate([part[0] for part in parts], axis=0)
     target_delta = np.concatenate([part[1] for part in parts], axis=0)
@@ -143,9 +150,19 @@ def fit_candidate(output_dir: Path, workers: int = 12) -> dict[str, Any]:
             print(f"fit {done}/{len(jobs)} exact phase-cells", flush=True)
 
     training_run_ids = sorted(series.run_id for series in train_series)
+    version = 2 if include_lagged_history else 1
+    model_family = MODEL_FAMILY_V2 if include_lagged_history else MODEL_FAMILY_V1
+    model_filename = ("yaw_extratrees_fullband_v2_history.joblib"
+                      if include_lagged_history else
+                      "yaw_extratrees_fullband_v1.joblib")
+    manifest_filename = ("yaw_extratrees_fullband_v2_history_manifest.json"
+                         if include_lagged_history else
+                         "yaw_extratrees_fullband_v1_manifest.json")
     package = {
-        "format_version": 1,
-        "model_family": MODEL_FAMILY,
+        "format_version": version,
+        "model_family": model_family,
+        "manifest_file": manifest_filename,
+        "include_lagged_history": include_lagged_history,
         "sample_period_s": atlas.DT_S,
         "phase_threshold_rad2_per_s": PHASE_THRESHOLD,
         "feature_names": list(feature_names),
@@ -178,15 +195,15 @@ def fit_candidate(output_dir: Path, workers: int = 12) -> dict[str, Any]:
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / "yaw_extratrees_fullband_v1.joblib"
+    model_path = output_dir / model_filename
     joblib.dump(package, model_path, compress=3)
     digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
     metadata = {
         "title": "Research-only exact-cell ExtraTrees yaw-transition atlas",
         "model_file": model_path.name,
         "model_sha256": digest,
-        "model_family": MODEL_FAMILY,
-        "format_version": 1,
+        "model_family": model_family,
+        "format_version": version,
         "python_sklearn_version": sklearn.__version__,
         "model_cells": len(fitted),
         "training_run_count": len(training_run_ids),
@@ -194,6 +211,7 @@ def fit_candidate(output_dir: Path, workers: int = 12) -> dict[str, Any]:
         "training_archives": package["training_archives"],
         "training_rows": package["training_rows"],
         "feature_names": list(feature_names),
+        "include_lagged_history": include_lagged_history,
         "estimator_config": package["estimator_config"],
         "source_audit": {
             "selected_runs": source_audit["selected_runs"],
@@ -209,7 +227,7 @@ def fit_candidate(output_dir: Path, workers: int = 12) -> dict[str, Any]:
         "recursive_plant_validated": False,
         "runtime_integration": "none",
     }
-    metadata_path = output_dir / "yaw_extratrees_fullband_v1_manifest.json"
+    metadata_path = output_dir / manifest_filename
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n",
                              encoding="utf-8")
     print(f"model: {model_path}")
@@ -241,8 +259,10 @@ def main() -> int:
                 "fullband_yaw_regime_atlas_v11_lowangle_unwind",
     )
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--include-lagged-history", action="store_true",
+                        help="append prior yaw, steering-rate, and throttle-rate samples")
     args = parser.parse_args()
-    fit_candidate(args.output_dir, args.workers)
+    fit_candidate(args.output_dir, args.workers, args.include_lagged_history)
     return 0
 
 

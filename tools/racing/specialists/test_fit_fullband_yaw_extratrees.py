@@ -34,6 +34,15 @@ class FullbandYawExtraTreesTest(unittest.TestCase):
         self.assertEqual(scales.shape, (14,))
         self.assertIn("steering_command_rate_radps", names)
         self.assertNotIn("future", " ".join(names).lower())
+        history_names, history_scales = _feature_schema(
+            include_lagged_history=True)
+        self.assertEqual(len(history_names), 17)
+        self.assertEqual(history_scales.shape, (17,))
+        self.assertEqual(history_names[-3:], (
+            "previous_yaw_rate_increment_radps",
+            "previous_steering_rate_radps",
+            "previous_throttle_rate_per_s",
+        ))
 
     def test_exact_supported_key_predicts_and_missing_key_abstains(self) -> None:
         estimator = _FixedDeltaEstimator()

@@ -53,6 +53,14 @@ COMMAND_RATE_FEATURE_NAMES = (
     "throttle_command_rate_per_s",
 )
 REAR_WHEEL_SPLIT_FEATURE_NAME = "rear_left_minus_right_surface_mps"
+LAGGED_HISTORY_FEATURE_NAMES = (
+    "previous_yaw_rate_increment_radps",
+    "previous_steering_rate_radps",
+    "previous_throttle_rate_per_s",
+)
+LAGGED_HISTORY_FEATURE_SCALES = np.asarray((0.1, 1.6, 1.0), dtype=np.float64)
+IMU_ROLL_FEATURE_NAMES = ("current_imu_roll_rad", "current_imu_roll_rate_rps")
+IMU_ROLL_FEATURE_SCALES = np.asarray((0.05, 0.2), dtype=np.float64)
 # Fixed physical scales avoid amplifying near-constant command/feedback
 # differences by dividing by a tiny per-cell standard deviation.
 FEATURE_SCALES = np.asarray((1.0, 0.1, 0.25, 0.0125, 1.6,
@@ -71,6 +79,8 @@ class RunSeries:
     frames: np.ndarray
     rigid: np.ndarray
     bounds: np.ndarray
+    imu_attitude: np.ndarray | None = None
+    imu_attitude_valid: np.ndarray | None = None
 
 
 def _clean_run(row: dict[str, Any], split: str) -> bool:
@@ -152,6 +162,12 @@ def _discover_run_series() -> tuple[list[RunSeries], dict[str, Any]]:
                 frames = np.asarray(archive["frames"], dtype=np.float32)
                 rigid = np.asarray(archive["simulator_rigid_state"], dtype=np.float32)
                 bounds = np.asarray(archive["sequence_bounds"], dtype=np.int64)
+                imu_attitude = (
+                    np.asarray(archive["imu_attitude_frames"], dtype=np.float32)
+                    if "imu_attitude_frames" in archive.files else None)
+                imu_attitude_valid = (
+                    np.asarray(archive["imu_attitude_valid"], dtype=bool)
+                    if "imu_attitude_valid" in archive.files else None)
                 dt = (np.asarray(archive["dt_s"], dtype=np.float32)
                       if "dt_s" in archive.files else np.empty(0))
                 sequence_run_index = (
@@ -168,6 +184,12 @@ def _discover_run_series() -> tuple[list[RunSeries], dict[str, Any]]:
                 or not np.isfinite(frames).all()
                 or not np.isfinite(rigid).all()):
             skipped["invalid_array_schema"] += 1
+            continue
+        if (imu_attitude is not None
+                and (imu_attitude.shape != (len(frames), 4)
+                     or imu_attitude_valid is None
+                     or imu_attitude_valid.shape != (len(frames),))):
+            skipped["invalid_imu_attitude_schema"] += 1
             continue
         if sequence_run_index is not None and len(sequence_run_index) != len(bounds):
             skipped["sequence_run_index_mismatch"] += 1
@@ -189,6 +211,7 @@ def _discover_run_series() -> tuple[list[RunSeries], dict[str, Any]]:
                             if sequence_run_index is None else
                             np.flatnonzero(sequence_run_index == run_index))
             local_frames, local_rigid, local_bounds = [], [], []
+            local_attitude, local_attitude_valid = [], []
             cursor = 0
             for sequence_id in sequence_ids:
                 begin, end = map(int, bounds[int(sequence_id)])
@@ -196,6 +219,9 @@ def _discover_run_series() -> tuple[list[RunSeries], dict[str, Any]]:
                     continue
                 local_frames.append(frames[begin:end])
                 local_rigid.append(rigid[begin:end])
+                if imu_attitude is not None:
+                    local_attitude.append(imu_attitude[begin:end])
+                    local_attitude_valid.append(imu_attitude_valid[begin:end])
                 local_bounds.append((cursor, cursor + end - begin))
                 cursor += end - begin
             if not local_frames:
@@ -204,7 +230,10 @@ def _discover_run_series() -> tuple[list[RunSeries], dict[str, Any]]:
             output.append(RunSeries(
                 run_id, split, str(npz_path.relative_to(ROOT)),
                 np.concatenate(local_frames), np.concatenate(local_rigid),
-                np.asarray(local_bounds, dtype=np.int64)))
+                np.asarray(local_bounds, dtype=np.int64),
+                (np.concatenate(local_attitude) if local_attitude else None),
+                (np.concatenate(local_attitude_valid)
+                 if local_attitude_valid else None)))
             seen_run_ids.add(run_id)
             if fingerprint:
                 seen_fingerprints.add(fingerprint)
@@ -229,7 +258,10 @@ def _rear_lateral_velocity(rigid: np.ndarray) -> np.ndarray:
 def _make_rows(series: RunSeries, phase_threshold: float = 0.05,
                include_command_errors: bool = False,
                include_command_rates: bool = False,
-               include_rear_wheel_split: bool = False):
+               include_rear_wheel_split: bool = False,
+               include_lagged_history: bool = False,
+               include_imu_roll: bool = False,
+               require_imu_roll: bool = False):
     if phase_threshold < 0.0 or not math.isfinite(phase_threshold):
         raise ValueError("phase threshold must be finite and non-negative")
     frames = series.frames.astype(np.float64, copy=False)
@@ -237,11 +269,21 @@ def _make_rows(series: RunSeries, phase_threshold: float = 0.05,
     speed = np.hypot(rigid[:, 7], rigid[:, 8])
     yaw = rigid[:, 12]
     lateral = _rear_lateral_velocity(rigid)
+    if require_imu_roll and (series.imu_attitude is None
+                             or series.imu_attitude_valid is None):
+        raise ValueError(f"{series.run_id} has no IMU attitude stream")
     features, targets, cells, phases, ids, sequence_ids, frame_indices = (
         [], [], [], [], [], [], [])
     for sequence_index, (begin_raw, end_raw) in enumerate(series.bounds):
         begin, end = int(begin_raw), int(end_raw)
         for k in range(begin + 2, end - 1):
+            attitude_ok = (
+                series.imu_attitude is not None
+                and series.imu_attitude_valid is not None
+                and bool(series.imu_attitude_valid[k])
+                and np.isfinite(series.imu_attitude[k, (0, 2)]).all())
+            if (require_imu_roll or include_imu_roll) and not attitude_ok:
+                continue
             v = float(speed[k])
             delta = float(frames[k, 3])
             if not (0.0 <= v < 12.0 and -0.525 <= delta <= 0.525):
@@ -279,6 +321,15 @@ def _make_rows(series: RunSeries, phase_threshold: float = 0.05,
                 )
             if include_rear_wheel_split:
                 feature += (float(frames[k, 5] - frames[k, 6]),)
+            if include_lagged_history:
+                feature += (
+                    float(yaw[k - 1] - yaw[k - 2]),
+                    float(frames[k - 1, 3] - frames[k - 2, 3]) / DT_S,
+                    float(frames[k - 1, 4] - frames[k - 2, 4]) / DT_S,
+                )
+            if include_imu_roll:
+                feature += (float(series.imu_attitude[k, 0]),
+                            float(series.imu_attitude[k, 2]))
             features.append(feature)
             targets.append(float(yaw[k + 1] - yaw[k]))
             cells.append((speed_cell, steer_cell))

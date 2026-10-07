@@ -70,6 +70,59 @@ class YawRegimeAtlasMathTest(unittest.TestCase):
         np.testing.assert_allclose(x[0, -4:], (0.05, 0.1, 0.0, 0.0))
         np.testing.assert_allclose(x[1, -2:], (12.0, 6.0))
 
+    def test_lagged_history_features_use_only_prior_25ms_samples(self) -> None:
+        frames = np.zeros((7, 9), dtype=np.float64)
+        frames[:, 0] = 4.0
+        frames[:, 3] = (0.0, 0.01, 0.03, 0.06, 0.10, 0.15, 0.21)
+        frames[:, 4] = (0.0, 0.10, 0.20, 0.35, 0.50, 0.65, 0.80)
+        frames[:, 5:7] = 4.0
+        rigid = np.zeros((7, 13), dtype=np.float64)
+        rigid[:, 6] = 1.0
+        rigid[:, 7] = 4.0
+        rigid[:, 12] = (0.0, 0.01, 0.04, 0.09, 0.16, 0.25, 0.36)
+        series = RunSeries("synthetic", "train", "synthetic",
+                           frames, rigid, np.asarray(((0, 7),)))
+
+        features, *_ = _make_rows(series, include_lagged_history=True)
+
+        # First row corresponds to k=2: all appended inputs come from k-1/k-2.
+        np.testing.assert_allclose(features[0, -3:], (0.01, 0.4, 4.0))
+
+    def test_current_imu_roll_features_are_aligned_and_invalid_rows_are_skipped(self) -> None:
+        frames = np.zeros((7, 9), dtype=np.float64)
+        frames[:, 0] = 4.0
+        frames[:, 3] = 0.1
+        frames[:, 4] = 0.2
+        frames[:, 5:7] = 4.0
+        rigid = np.zeros((7, 13), dtype=np.float64)
+        rigid[:, 6] = 1.0
+        rigid[:, 7] = 4.0
+        rigid[:, 12] = np.arange(7) * 0.01
+        attitude = np.zeros((7, 4), dtype=np.float64)
+        attitude[:, 0] = np.arange(7) * 0.02
+        attitude[:, 2] = np.arange(7) * 0.1
+        valid = np.ones(7, dtype=bool)
+        valid[3] = False
+        series = RunSeries("synthetic", "train", "synthetic", frames,
+                           rigid, np.asarray(((0, 7),)), attitude, valid)
+
+        features, _, _, _, _, _, indices = _make_rows(
+            series, include_imu_roll=True, require_imu_roll=True)
+
+        # k=3 is excluded; all retained values come from the current frame.
+        np.testing.assert_array_equal(indices, (2, 4, 5))
+        np.testing.assert_allclose(features[:, -2:],
+                                   ((0.04, 0.2), (0.08, 0.4), (0.10, 0.5)))
+
+    def test_roll_features_require_an_attitude_stream(self) -> None:
+        frames = np.zeros((6, 9), dtype=np.float64)
+        rigid = np.zeros((6, 13), dtype=np.float64)
+        series = RunSeries("synthetic", "train", "synthetic", frames,
+                           rigid, np.asarray(((0, 6),)))
+
+        with self.assertRaisesRegex(ValueError, "no IMU attitude"):
+            _make_rows(series, require_imu_roll=True)
+
     def test_signed_rear_wheel_difference_is_not_averaged_away(self) -> None:
         frames = np.zeros((6, 9), dtype=np.float64)
         frames[:, 0] = 4.0

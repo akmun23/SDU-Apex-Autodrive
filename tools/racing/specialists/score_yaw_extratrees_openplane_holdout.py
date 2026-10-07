@@ -43,13 +43,18 @@ def score(model_path: Path, dataset_dir: Path, output_path: Path) -> dict[str, A
     output_path = output_path.resolve()
     model_bytes = model_path.read_bytes()
     package = joblib.load(model_path)
-    metadata_path = model_path.with_name("yaw_extratrees_fullband_v1_manifest.json")
+    metadata_path = model_path.with_name(package.get(
+        "manifest_file", "yaw_extratrees_fullband_v1_manifest.json"))
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     model_hash = hashlib.sha256(model_bytes).hexdigest()
     if metadata.get("model_sha256") != model_hash:
         raise ValueError("candidate model hash does not match its frozen manifest")
-    if (package.get("format_version") != 1
-            or package.get("model_family") != "run_balanced_extra_trees_yaw_increment"
+    supported_families = {
+        "run_balanced_extra_trees_yaw_increment",
+        "run_balanced_extra_trees_yaw_increment_lagged_history",
+    }
+    if (package.get("format_version") not in (1, 2)
+            or package.get("model_family") not in supported_families
             or package.get("runtime_integration") != "none"):
         raise ValueError("unsupported or incorrectly identified model artifact")
 
@@ -62,6 +67,7 @@ def score(model_path: Path, dataset_dir: Path, output_path: Path) -> dict[str, A
         include_command_errors=True,
         include_command_rates=True,
         include_rear_wheel_split=False,
+        include_lagged_history=bool(package.get("include_lagged_history", False)),
     )
     all_errors: dict[str, list[float]] = defaultdict(list)
     by_sequence: dict[str, dict[str, list[float]]] = defaultdict(

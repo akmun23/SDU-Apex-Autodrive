@@ -33,6 +33,38 @@ from fit_fullband_yaw_regime_atlas import (
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _phase_window_packet_ids(phase_samples) -> set[int]:
+    """Return packet IDs inside the labeled interval, excluding history context."""
+    return {
+        int(sample.packet_sequence)
+        for sample in phase_samples
+        if sample.packet_sequence >= 0 and sample.time_s >= 0.0
+    }
+
+
+def _expected_atlas_labels(run_id: str) -> set[str]:
+    """Return the frozen probe matrix for the supported final profiles."""
+    if "yaw_atlas_extratrees_highsteer_final" in run_id:
+        points = ((8.37, 0.302), (8.62, 0.427),
+                  (9.12, 0.302), (9.37, 0.427))
+        return {
+            f"atlas_r{repeat:02d}_v{speed:.2f}_a{angle:.4f}_turn{sign:+.0f}"
+            for repeat in (1, 2)
+            for speed, angle in points
+            for sign in (-1.0, 1.0)
+        }
+    if "yaw_atlas_extratrees_final" in run_id:
+        return {
+            f"atlas_r{repeat:02d}_v{speed:.2f}_a{angle:.4f}_turn{sign:+.0f}"
+            for repeat in (1, 2)
+            for speed, angle in (
+                (4.62, 0.108), (6.62, 0.083), (7.62, 0.133),
+                (8.12, 0.058), (8.62, 0.058), (10.62, 0.033))
+            for sign in (-1.0, 1.0)
+        }
+    raise ValueError(f"unrecognized frozen yaw-atlas final profile: {run_id}")
+
+
 def _load_final_test(dataset_dir: Path):
     manifest_path = dataset_dir / "manifest.json"
     archive_path = dataset_dir / "openplane_dynamics.npz"
@@ -119,8 +151,10 @@ def _load_final_test(dataset_dir: Path):
                                           capture.sequences):
         if not phase_label.startswith("atlas_"):
             continue
-        packet_ids = {int(sample.packet_sequence) for sample in phase_samples
-                      if sample.packet_sequence >= 0}
+        # load_capture prepends 500 ms of causal history to each labeled phase.
+        # The archive intentionally omits negative phase-time rows, so the
+        # join gate and score window must omit that same context as well.
+        packet_ids = _phase_window_packet_ids(phase_samples)
         matched = {packet_to_reset[packet_id] for packet_id in packet_ids
                    if packet_id in packet_to_reset}
         if not packet_ids or len(matched) != 1:
@@ -138,9 +172,15 @@ def _load_final_test(dataset_dir: Path):
         for sequence_id in reset_to_sequences[reset_epoch]:
             labels_by_sequence[sequence_id] = phase_label
         phase_packets[phase_label] = packet_ids
-    if len(phase_packets) != 24 or len(set(labels_by_sequence.values())) != 24:
+    expected_labels = _expected_atlas_labels(str(row.get("run_id", "")))
+    if (set(phase_packets) != expected_labels
+            or len(set(labels_by_sequence.values())) != len(expected_labels)):
+        missing = sorted(expected_labels - set(phase_packets))
+        extra = sorted(set(phase_packets) - expected_labels)
         raise ValueError(
-            f"expected 24 reset-isolated atlas probes, found {len(phase_packets)}")
+            "final-test reset-isolated probe matrix mismatch: "
+            f"expected {len(expected_labels)}, got {len(phase_packets)}, "
+            f"missing={missing}, extra={extra}")
     return series, labels_by_sequence, phase_packets, packets, row
 
 

@@ -46,26 +46,31 @@ effort.
   minimum.
 - **Done:** independent r02 also passed; combined measured-data support is 59
   and 61 samples in the two target unwind cells, across two runs.
-- **Done:** v11 exact-target-cell assessment and a full-atlas nonlinear
-  ExtraTrees comparison on the same whole-run validation set.
-- **Finding:** the tree model materially improves one-step yaw prediction on
-  supported validation samples, but has a large worst-case error and the
-  validation set has now been used for model-family comparison.
-- **In progress:** make the candidate reproducible/loadable, then run one new
-  frozen off-grid Explore capture and score it without refitting. Keep
-  recursive plant accuracy and runtime integration as separate gates.
-- **Next:** if the new off-grid result transfers, test free recursive yaw
-  rollout with predicted state only; otherwise diagnose the failing regimes
-  from that capture. Do not integrate into MPC/odometry until these gates pass.
+- **Done:** v11 exact-target-cell assessment, full-atlas nonlinear ExtraTrees
+  comparison on whole-run validation, and one unseen off-grid Explore final
+  capture scored against frozen v11/v1.
+- **Finding:** ExtraTrees improves supported whole-run and new-capture one-step
+  yaw scores; near-target windows are not uniformly better and unsupported
+  cells still abstain.
+- **Done:** four-fold grouped train-only comparison of the 14-feature tree
+  against a causal 17-feature lagged-history version. Added history does not
+  produce a reliable run-level improvement.
+- **Done:** current IMU roll and roll rate failed as a global yaw-model
+  extension; isolated cell wins were inconsistent across direction.
+- **In progress:** preparing a distinct high-speed/high-steering off-grid
+  holdout. Current v1 has low-angle unseen-speed evidence only.
+- **Next:** measure performance from actual odometry state inputs, then develop
+  a production-state-compatible yaw transition candidate for offline MPC and
+  odom replay. No direct runtime integration until this input contract is
+  validated.
 
 ## Current machine/run state (2026-10-07, latest check)
 
-- The pinned Explore simulator is running in its established batch-mode
-  container. r01/r02 captures and combined dataset export are complete; the
-  v11 fit and full-atlas tree sweep are complete; no analysis or recorder is
-  active. The host has 16 logical CPUs, about 8.7 GiB memory available, and
-  125 GiB disk free. The Explore batch container remains up; no second
-  simulator or legacy experiment process is running.
+- The pinned Explore simulator was stopped after the final capture because no
+  simulator or recorder work was active. The r01/r02 captures, combined
+  dataset export, v11 fit, full-atlas tree sweep, history CV, and roll CV are
+  complete. No analysis or recording process is active. The host has 16
+  logical CPUs, about 7.8 GiB memory available, and 125 GiB disk free.
 - Both `openplane_yaw_fullband_gapfill_train_20261007_r01_fixed` and
   `openplane_yaw_fullband_gapfill_train_20261007_r02_fixed` completed 108/108
   phases (36 reset-isolated maneuvers each), with zero collisions, aborted
@@ -891,11 +896,11 @@ frozen report is
 [`v11 linear atlas`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/fullband_yaw_regime_atlas_report.json);
 the complete-atlas comparison is
 [`ExtraTrees vs v11`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/extratrees_full_atlas_comparison.json).
-The candidate has a reproducible saved model/scorer and is undergoing one new
-unopened off-grid Explore holdout. After that, the key gate is a free recursive
-rollout using predicted state only; the one-step score does not establish an
-offline lap simulator. Simulator physics, runtime code, and the reference
-trajectory remain unchanged.
+The candidate has a reproducible saved model/scorer and completed one new
+off-grid Explore final holdout. The next key gate is a free recursive rollout
+using predicted state only; the one-step score does not establish an offline
+lap simulator. Simulator physics, runtime code, and the reference trajectory
+remain unchanged.
 
 The frozen v1 ExtraTrees checkpoint is
 [`yaw_extratrees_fullband_v1.joblib`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/yaw_extratrees_fullband_v1.joblib)
@@ -907,16 +912,110 @@ six final-test points have direct model support for both signs and both
 turn-in/unwind phases.
 
 The independent capture
-`openplane_yaw_atlas_extratrees_final_20261007_r01` is now running against the
-already-running pinned Explore batch simulator. It uses the established 40 Hz
-bridge and minimal dynamics bag, with no MPC or runtime-code changes. The API
-container was selected by its local image ID, which has the exact repo digest
-used by the runner; this avoids a local Docker digest-inspect parser error
-without changing image contents. The randomized schedule has 24 reset-isolated
-scored maneuvers / 72 phases, six off-grid points `(4.62,0.108)`,
-`(6.62,0.083)`, `(7.62,0.133)`, `(8.12,0.058)`, `(8.62,0.058)`,
-`(10.62,0.033)` in m/s and rad, both turn directions and two repetitions. At
-the latest live check, the bridge and recorder were connected and two
-speed-approach phases had completed; no score or data-quality result is
-claimed until the bag closes and passes its gates. The capture is reserved as
-a new `final_test`; it will not be used for fitting or selection.
+`openplane_yaw_atlas_extratrees_final_20261007_r01` completed 72/72 phases /
+24/24 maneuvers with zero harness quality failures, collisions, or timing
+faults and 39.71 Hz command output. Closed-bag audit: 5,821/5,821 packet
+joins, zero packet gaps, 39.949 Hz state/feedback streams, 39.998 Hz command
+streams, state p95 receipt gaps 25.82–25.89 ms, and zero collision-count
+changes. Whole-bag receipt rate is 34.76 Hz only because it includes reset
+boundaries; active phase rates remain about 39.95 Hz. The API container used
+the local image ID whose repo digest exactly matches the runner's pinned
+image, avoiding a local Docker digest-inspect parser error without changing
+image contents. The clean bag was assigned `final_test` and was not used for
+fitting.
+
+The scorer initially counted its prepended 500 ms phase-history context as
+part of the test interval, while the dataset correctly exports only
+non-negative phase-time samples. The observed in-window packet coverage is at
+least 98.13% for every point. The scorer now uses the same labeled interval;
+the existing 98% gate was not weakened. A focused test protects this rule.
+The complete reset-separated archive is
+[`yaw_extratrees_final_holdout_r01_dataset`](../../live_runs/racing_model_diagnostics_20261007/yaw_extratrees_final_holdout_r01_dataset/manifest.json);
+the phase-window scoring view is
+[`yaw_extratrees_final_holdout_r01_scoring_view_dataset`](../../live_runs/racing_model_diagnostics_20261007/yaw_extratrees_final_holdout_r01_scoring_view_dataset/manifest.json).
+
+On the 2,136 supported final-test transitions, ExtraTrees v1 scores RMSE
+0.03555 rad/s, MAE 0.01685, p95 0.06243, and 97.99% below 0.1 rad/s. Frozen
+v11 direct-phase scores those exact same samples at RMSE 0.04889, MAE 0.01713,
+p95 0.10040, and 94.99% below 0.1; persistence is 0.10189 rad/s on the same
+support. Both direct atlases abstain on the same 410 other transitions. At the
+full maneuver-window level, ExtraTrees has lower RMSE in all 24 conditions.
+Within the narrower near-target windows it wins 20/24; the four losses are
+the two repeats and both turn signs at 8.62 m/s / about ±0.058 rad (roughly
+0.035 vs 0.009 rad/s RMSE). This is one independent capture, so no run-level
+confidence interval is claimed. Frozen scores:
+[`ExtraTrees r01`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/yaw_extratrees_final_holdout_r01_score.json)
+and [`v11 r01`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/v11_final_holdout_r01_score.json).
+
+### 2026-10-07 — grouped test of lagged yaw/command history
+
+Ran four-fold `GroupKFold` by whole capture using the 32 clean training
+captures only (215,304 rows). The existing 14-feature tree and 17-feature
+variant adding the prior yaw increment, steering rate, and throttle rate were
+evaluated on the same 181,465 out-of-fold transitions and 438 supported
+speed/steering/phase keys. The fit gates remain 40 samples and two contributing
+runs per cell. Validation was discovered for split auditing but not used in
+fold fitting/scoring; test and final-test arrays were not read.
+
+| Predictor | RMSE | MAE | p95 absolute | fraction <0.1 rad/s |
+|---|---:|---:|---:|---:|
+| 14-feature ExtraTrees v1 | 0.056484 | 0.013554 | 0.05842 | 97.177% |
+| + lagged history | 0.056587 | 0.013464 | 0.05745 | 97.296% |
+| Huber-ridge comparator | 0.078130 | 0.019093 | 0.08630 | 95.736% |
+
+The history-v1 paired run-macro RMSE difference is +0.000063 rad/s (15 wins,
+17 losses; bootstrap 95% CI [−0.000168, +0.000315]), so history is not a
+repeatable improvement and is not promoted. The original tree beats the linear
+comparator on 30/32 runs (mean difference −0.02071 rad/s; 95% CI
+[−0.02504, −0.01634]). This is still one-step truth-conditioned prediction,
+not free recursive rollout. Full speed-band metrics and per-run values are in
+[`yaw_history_grouped_cv.json`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/yaw_history_grouped_cv.json).
+
+The focused diagnostics use `imu_attitude_frames` already present in the clean
+dynamics archives (roll and roll-rate are valid for 7,863/7,865 samples in the
+recent combined capture). Four-fold grouped CV evaluated current-sample roll
+and roll-rate against v1 on identical train-fold rows: 181,221 transitions,
+437 supported cells. Baseline v1 RMSE is 0.057098 rad/s; roll-augmented RMSE is
+0.057358, MAE 0.013848 versus 0.013586, and p95 0.05882 versus 0.05965. The
+paired run-macro RMSE difference is +0.000230 (10 wins, 22 losses; bootstrap
+95% CI [−0.0000003, +0.0004563]). Roll does not improve the full supported
+domain. A few +turn-in cells improve, but nearby opposite-sign cells regress;
+the effects are too sparse and asymmetric to support a regime-specific rule.
+Reports:
+[`roll grouped CV`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/yaw_imu_roll_grouped_cv.json)
+and [`roll by exact cell`](../../live_runs/racing_model_diagnostics_20261007/fullband_yaw_regime_atlas_v11_lowangle_unwind/yaw_imu_roll_grouped_cv_by_cell.json).
+
+### Unseen-speed evidence and current gap
+
+The only final-test speed-transfer run so far tested six unseen speed values
+(4.62, 6.62, 7.62, 8.12, 8.62, 10.62 m/s), but at low steering only
+(0.033–0.133 rad). The exact-cell tree improves the one-step score over v11 on
+2,136 supported transitions (RMSE 0.03555 vs 0.04889 rad/s); one 7.62 m/s,
+0.133-rad negative-turn sequence is materially worse than neighboring points
+(0.0639 RMSE, 0.363 max error). The final run is one capture and cannot
+establish broad speed transfer.
+
+The atlas is not continuous across speed cells: each prediction selects one
+exact 0.5 m/s × 0.025 rad × response-phase cell, with only within-cell speed
+and steering offsets as features. A frozen-support audit found 12 high-angle
+(|steering|≥0.20 rad), steady cells between 8.0 and 10.25 m/s, but no
+supported high-angle turn-in/unwind cells above 7.75 m/s. A separate final
+holdout schedule now probes four off-grid high-speed/high-angle steady points
+(8.37/0.302, 8.62/0.427, 9.12/0.302, 9.37/0.427 m/s/rad), both directions and
+two repeats. Schedule/shell checks pass (57 schedule tests); capture and
+scoring are pending.
+
+### Production input compatibility — next implementation gate
+
+The tree v1 feature builder currently computes speed, yaw rate, lateral speed,
+and speed rate from simulator rigid-state truth. This is acceptable for a
+one-step plant-identification diagnostic but is not a deployable odom/MPC
+feature contract. The dataset also records the contemporaneous odometry state
+`[u,v,r]` and permitted actuator/encoder/IMU inputs. Next, fit and whole-run
+cross-validate an observer-compatible variant using only those current-time
+signals and GT only as the label. Then check an MPC-state/control-only model
+separately; MPC rollout must not consume future recorded sensors. Only after
+these input-compatible variants beat their production baselines on grouped
+whole runs and a new sealed capture should they be wired into runtime code.
+The current one-step truth-feature tree has **not** been integrated into either
+odometry or MPC.

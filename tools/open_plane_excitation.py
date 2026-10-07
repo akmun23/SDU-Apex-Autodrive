@@ -201,6 +201,20 @@ YAW_ATLAS_EXTRATREES_FINAL_POINTS = (
     (4.62, 0.108), (6.62, 0.083), (7.62, 0.133),
     (8.12, 0.058), (8.62, 0.058), (10.62, 0.033),
 )
+YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE = (
+    "yaw_atlas_extratrees_highsteer_final")
+YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_POINTS = (
+    (8.37, 0.302), (8.62, 0.427),
+    (9.12, 0.302), (9.37, 0.427),
+)
+YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE = (
+    "yaw_highsteer_speed_surface_train")
+YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_POINTS = tuple(
+    (speed, angle)
+    for speed in (8.25, 8.75, 9.25)
+    for angle in (0.350, 0.425, 0.475, 0.500)
+)
+YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS = 2
 YAW_ATLAS_INTERPOLATION_REPEATS = 2
 YAW_FULLBAND_GAPFILL_PROFILE = "yaw_fullband_gapfill_train"
 YAW_FULLBAND_GAPFILL_POINTS = (
@@ -227,6 +241,8 @@ YAW_TRANSIENT_PROFILES = (
     LOW_SPEED_TRANSIENT_PROFILE, YAW_TRANSIENT_PROFILE,
     YAW_ATLAS_INTERPOLATION_PROFILE, YAW_ATLAS_OFFGRID_FINAL_PROFILE,
     YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
+    YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
+    YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
     YAW_FULLBAND_GAPFILL_PROFILE, YAW_UNWIND_THROTTLE_PROFILE,
     YAW_LOW_ANGLE_RATE_PROFILE,
 )
@@ -1453,7 +1469,9 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
             return phases
         if profile in (YAW_ATLAS_INTERPOLATION_PROFILE,
                        YAW_ATLAS_OFFGRID_FINAL_PROFILE,
-                       YAW_ATLAS_EXTRATREES_FINAL_PROFILE):
+                       YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
+                       YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
+                       YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE):
             points = {
                 YAW_ATLAS_INTERPOLATION_PROFILE:
                     YAW_ATLAS_INTERPOLATION_POINTS,
@@ -1461,10 +1479,17 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     YAW_ATLAS_OFFGRID_FINAL_POINTS,
                 YAW_ATLAS_EXTRATREES_FINAL_PROFILE:
                     YAW_ATLAS_EXTRATREES_FINAL_POINTS,
+                YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE:
+                    YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_POINTS,
+                YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE:
+                    YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_POINTS,
             }[profile]
+            repeats = (YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS
+                       if profile == YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE
+                       else YAW_ATLAS_INTERPOLATION_REPEATS)
             conditions = [
                 (repeat, speed, angle, sign)
-                for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
+                for repeat in range(1, repeats + 1)
                 for speed, angle in points
                 for sign in (-1.0, 1.0)
             ]
@@ -3261,6 +3286,8 @@ def main() -> int:
                                                YAW_ATLAS_INTERPOLATION_PROFILE,
                                                YAW_ATLAS_OFFGRID_FINAL_PROFILE,
                                                YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
+                                               YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
+                                               YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
                                                YAW_FULLBAND_GAPFILL_PROFILE,
                                                YAW_UNWIND_THROTTLE_PROFILE,
                                                YAW_LOW_ANGLE_RATE_PROFILE,
