@@ -18,7 +18,26 @@ from open_plane_excitation import (
     YAW_TRANSIENT_STEERING_RAD,
     YAW_ATLAS_INTERPOLATION_PROFILE,
     YAW_ATLAS_INTERPOLATION_POINTS,
+    YAW_ATLAS_OFFGRID_FINAL_PROFILE,
+    YAW_ATLAS_OFFGRID_FINAL_POINTS,
+    YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
+    YAW_ATLAS_EXTRATREES_FINAL_POINTS,
     YAW_ATLAS_INTERPOLATION_REPEATS,
+    YAW_FULLBAND_GAPFILL_PROFILE,
+    YAW_FULLBAND_GAPFILL_POINTS,
+    YAW_FULLBAND_GAPFILL_REPEATS,
+    YAW_UNWIND_THROTTLE_PROFILE,
+    YAW_UNWIND_THROTTLE_SPEED_MPS,
+    YAW_UNWIND_THROTTLE_STEERING_RAD,
+    YAW_UNWIND_THROTTLE_START_NORM,
+    YAW_UNWIND_THROTTLE_END_NORM,
+    YAW_UNWIND_THROTTLE_REPEATS,
+    YAW_UNWIND_THROTTLE_MODES,
+    YAW_FRONTIER_THROTTLE_SLEW_PROFILE,
+    YAW_FRONTIER_THROTTLE_SLEW_SPEED_STEERING_RAD,
+    YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE,
+    YAW_FRONTIER_LOWANGLE_UNWIND_REPEATS,
+    YAW_FRONTIER_LOWANGLE_UNWIND_SPEED_STEERING_RAD,
     YAW_LOW_ANGLE_RATE_PROFILE,
     YAW_LOW_ANGLE_RATE_SPEEDS_MPS,
     YAW_LOW_ANGLE_RATE_STEERING_RAD,
@@ -280,6 +299,68 @@ class YawAtlasInterpolationScheduleTest(unittest.TestCase):
         self.assertEqual(set(first), set(second))
         self.assertNotEqual(first, second)
 
+    def test_final_offgrid_points_are_distinct_reset_isolated_and_both_signed(self) -> None:
+        self.assertTrue(set(YAW_ATLAS_OFFGRID_FINAL_POINTS).isdisjoint(
+            YAW_ATLAS_INTERPOLATION_POINTS))
+        phases = build_schedule(202610073, YAW_ATLAS_OFFGRID_FINAL_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("atlas_")]
+        expected = {
+            (repeat, speed, angle, sign)
+            for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
+            for speed, angle in YAW_ATLAS_OFFGRID_FINAL_POINTS
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("atlas_"):
+                continue
+            repeat, speed, angle, sign = phase.condition_pair_id.split("_")
+            observed.add((int(repeat[1:]), float(speed[1:]),
+                          float(angle[1:]), int(sign[4:])))
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_atlas_{phase.condition_pair_id}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_atlas_{phase.condition_pair_id}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+        self.assertEqual(len(probes), 24)
+        self.assertEqual(observed, expected)
+
+    def test_extratrees_final_points_are_new_and_reset_isolated(self) -> None:
+        points = set(YAW_ATLAS_EXTRATREES_FINAL_POINTS)
+        self.assertEqual(len(points), 6)
+        self.assertTrue(points.isdisjoint(YAW_ATLAS_INTERPOLATION_POINTS))
+        self.assertTrue(points.isdisjoint(YAW_ATLAS_OFFGRID_FINAL_POINTS))
+        phases = build_schedule(202610077, YAW_ATLAS_EXTRATREES_FINAL_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("atlas_")]
+        expected = {
+            (repeat, speed, angle, sign)
+            for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
+            for speed, angle in YAW_ATLAS_EXTRATREES_FINAL_POINTS
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("atlas_"):
+                continue
+            repeat, speed, angle, sign = phase.condition_pair_id.split("_")
+            observed.add((int(repeat[1:]), float(speed[1:]),
+                          float(angle[1:]), int(sign[4:])))
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_atlas_{phase.condition_pair_id}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_atlas_{phase.condition_pair_id}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+        self.assertEqual(len(probes), 24)
+        self.assertEqual(observed, expected)
+
 
 class YawLowAngleRateScheduleTest(unittest.TestCase):
     def test_reset_isolated_pair_matrix_covers_step_ramp_both_signs(self) -> None:
@@ -331,6 +412,256 @@ class YawLowAngleRateScheduleTest(unittest.TestCase):
                 202610071, YAW_LOW_ANGLE_RATE_PROFILE, speed)), 96)
         with self.assertRaises(ValueError):
             build_schedule(202610071, YAW_LOW_ANGLE_RATE_PROFILE, 5.25)
+
+
+class YawFullbandGapfillScheduleTest(unittest.TestCase):
+    def test_gapfill_uses_exact_supported_cell_centers_and_randomized_pairs(self) -> None:
+        phases = build_schedule(202610074, YAW_FULLBAND_GAPFILL_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("yawgap_")]
+        expected = {
+            (repeat, speed, angle, sign)
+            for repeat in range(1, YAW_FULLBAND_GAPFILL_REPEATS + 1)
+            for speed, angle in YAW_FULLBAND_GAPFILL_POINTS
+            for sign in (-1, 1)
+        }
+        observed = set()
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("yawgap_"):
+                continue
+            repeat, speed, angle, sign = phase.condition_pair_id.split("_")
+            observed.add((int(repeat[1:]), float(speed[1:]),
+                          float(angle[1:]), int(sign[4:])))
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_yawgap_{phase.condition_pair_id}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_yawgap_{phase.condition_pair_id}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertEqual(phase.steering_amplitude_rad, float(angle[1:]))
+            self.assertEqual(phase.steering_waypoints[0], (0.0, 0.0))
+            self.assertEqual(phase.steering_waypoints[-1], (2.75, 0.0))
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+        self.assertEqual(len(probes), len(expected))
+        self.assertEqual(observed, expected)
+
+    def test_order_changes_by_seed_without_changing_gapfill_matrix(self) -> None:
+        def labels(seed: int) -> list[str]:
+            return [phase.label for phase in build_schedule(
+                seed, YAW_FULLBAND_GAPFILL_PROFILE)
+                    if phase.label.startswith("yawgap_")]
+
+        first, second = labels(202610074), labels(202610075)
+        self.assertEqual(set(first), set(second))
+        self.assertNotEqual(first, second)
+
+
+class YawUnwindThrottleScheduleTest(unittest.TestCase):
+    def test_step_ramp_pairs_cover_both_steering_directions_and_repeats(self) -> None:
+        phases = build_schedule(202610076, YAW_UNWIND_THROTTLE_PROFILE)
+        probes = [phase for phase in phases
+                  if phase.label.startswith("yawbrake_")]
+        expected = {
+            (repeat, mode, sign)
+            for repeat in range(1, YAW_UNWIND_THROTTLE_REPEATS + 1)
+            for mode in YAW_UNWIND_THROTTLE_MODES
+            for sign in (-1, 1)
+        }
+        observed = set()
+        self.assertEqual(len(probes), len(expected))
+        self.assertEqual(len(phases), 3 * len(expected))
+        for index, phase in enumerate(phases):
+            if not phase.label.startswith("yawbrake_"):
+                continue
+            repeat_token, mode, turn_token = phase.condition_pair_id.split("_")
+            observed.add((int(repeat_token[1:]), mode, int(turn_token[4:])))
+            self.assertEqual(phases[index - 2].label,
+                             f"approach_yawbrake_{phase.condition_pair_id}")
+            self.assertEqual(phases[index - 1].label,
+                             f"settle_yawbrake_{phase.condition_pair_id}")
+            self.assertTrue(phases[index - 2].reach_speed_target)
+            self.assertEqual(phase.speed_target_mps,
+                             YAW_UNWIND_THROTTLE_SPEED_MPS)
+            self.assertEqual(phase.duration_s, 4.0)
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertTrue(phase.settle_before_probe)
+            self.assertTrue(phase.probe_race_domain)
+            self.assertEqual(phase.throttle_mode, "slew_probe")
+            self.assertEqual(phase.throttle_start_norm,
+                             YAW_UNWIND_THROTTLE_START_NORM)
+            self.assertEqual(phase.throttle_end_norm,
+                             YAW_UNWIND_THROTTLE_END_NORM)
+            self.assertEqual(phase.throttle_profile, mode)
+            self.assertEqual(phase.throttle_stimulus_delay_s, 0.70)
+            self.assertEqual(phase.throttle_ramp_duration_s,
+                             0.30 if mode == "ramp" else 0.0)
+            self.assertEqual(phase.steering_amplitude_rad,
+                             YAW_UNWIND_THROTTLE_STEERING_RAD)
+            self.assertEqual(phase.steering_waypoints[0], (0.0, 0.0))
+            self.assertEqual(phase.steering_waypoints[-1], (4.0, 0.0))
+        self.assertEqual(observed, expected)
+
+    def test_pair_order_is_randomized_by_seed(self) -> None:
+        def labels(seed: int) -> list[str]:
+            return [phase.label for phase in build_schedule(
+                seed, YAW_UNWIND_THROTTLE_PROFILE)
+                    if phase.label.startswith("yawbrake_")]
+
+        first = labels(202610076)
+        second = labels(202610077)
+        self.assertEqual(set(first), set(second))
+        self.assertNotEqual(first, second)
+
+    def test_step_and_ramp_apply_the_same_final_throttle(self) -> None:
+        phases = [phase for phase in build_schedule(
+            202610076, YAW_UNWIND_THROTTLE_PROFILE)
+                  if phase.label.startswith("yawbrake_")]
+        step = next(phase for phase in phases if phase.throttle_profile == "step")
+        ramp = next(phase for phase in phases if phase.throttle_profile == "ramp")
+        self.assertEqual(_slew_probe_command(step, 0.675),
+                         YAW_UNWIND_THROTTLE_START_NORM)
+        self.assertEqual(_slew_probe_command(step, 0.725),
+                         YAW_UNWIND_THROTTLE_END_NORM)
+        self.assertEqual(_slew_probe_command(ramp, 0.675),
+                         YAW_UNWIND_THROTTLE_START_NORM)
+        self.assertAlmostEqual(
+            _slew_probe_command(ramp, 0.85),
+            0.5 * (YAW_UNWIND_THROTTLE_START_NORM
+                   + YAW_UNWIND_THROTTLE_END_NORM),
+        )
+        self.assertEqual(_slew_probe_command(ramp, 1.0),
+                         YAW_UNWIND_THROTTLE_END_NORM)
+
+
+class YawFrontierThrottleSlewScheduleTest(unittest.TestCase):
+    def test_frontier_capture_matches_the_held_out_9p5mps_matrix(self) -> None:
+        phases = build_schedule(202610071, YAW_FRONTIER_THROTTLE_SLEW_PROFILE)
+        approaches = [p for p in phases
+                      if p.label.startswith("approach_swerve_pair_")]
+        probes = [p for p in phases if p.label.startswith("swerve_slew_")]
+        expected = {
+            (speed, angle, turn)
+            for speed, angles in YAW_FRONTIER_THROTTLE_SLEW_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+        }
+        observed = set()
+        self.assertEqual(len(approaches), 6)
+        self.assertEqual(len(probes), 12)
+        self.assertEqual(len(phases), 18)
+        for phase in probes:
+            pair_id = phase.condition_pair_id
+            pair = [p for p in probes if p.condition_pair_id == pair_id]
+            self.assertEqual({p.throttle_profile for p in pair}, {"step", "ramp"})
+            self.assertTrue(phase.settle_before_probe)
+            self.assertTrue(phase.validate_samples)
+            self.assertFalse(phase.validate_speed)
+            self.assertFalse(phase.validate_steering)
+            self.assertEqual(phase.duration_s, 1.85)
+            self.assertEqual(phase.throttle_stimulus_delay_s, 0.60)
+            self.assertEqual(phase.throttle_ramp_duration_s, 0.30)
+            self.assertAlmostEqual(
+                phase.throttle_start_norm - phase.throttle_end_norm, 0.08)
+            if phase.throttle_profile == "step":
+                self.assertEqual(_slew_probe_command(phase, 0.626),
+                                 phase.throttle_end_norm)
+            else:
+                self.assertAlmostEqual(
+                    _slew_probe_command(phase, 0.75),
+                    0.5 * (phase.throttle_start_norm
+                           + phase.throttle_end_norm))
+            self.assertTrue(any(a.condition_pair_id == pair_id
+                                and a.reach_speed_target
+                                and a.speed_target_mps == 9.5
+                                for a in approaches))
+            turn = 1.0 if phase.steering_waypoints[1][1] > 0.0 else -1.0
+            observed.add((phase.speed_target_mps,
+                          phase.steering_amplitude_rad, turn))
+            self.assertEqual(phase.steering_waypoints, (
+                (0.00, 0.00), (0.30, turn * phase.steering_amplitude_rad),
+                (0.60, turn * phase.steering_amplitude_rad), (0.95, 0.00),
+                (1.25, -turn * phase.steering_amplitude_rad),
+                (1.60, -turn * phase.steering_amplitude_rad), (1.85, 0.00),
+            ))
+        self.assertEqual(observed, expected)
+
+    def test_frontier_profile_order_is_seeded_and_randomized(self) -> None:
+        def signature(seed: int):
+            return [(p.condition_pair_id, p.throttle_profile)
+                    for p in build_schedule(
+                        seed, YAW_FRONTIER_THROTTLE_SLEW_PROFILE)
+                    if p.label.startswith("swerve_slew_")]
+
+        self.assertEqual(signature(202610071), signature(202610071))
+        self.assertNotEqual(signature(202610071), signature(202610072))
+
+
+class YawFrontierLowangleUnwindScheduleTest(unittest.TestCase):
+    def test_repeats_and_targets_the_missing_speed_steering_phase_cell(self) -> None:
+        phases = build_schedule(202610081,
+                                YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE)
+        approaches = [p for p in phases
+                      if p.label.startswith("approach_swerve_pair_")]
+        probes = [p for p in phases if p.label.startswith("swerve_slew_")]
+        expected_pairs = {
+            (speed, angle, turn, repeat)
+            for speed, angles in YAW_FRONTIER_LOWANGLE_UNWIND_SPEED_STEERING_RAD
+            for angle in angles
+            for turn in (-1.0, 1.0)
+            for repeat in range(1, YAW_FRONTIER_LOWANGLE_UNWIND_REPEATS + 1)
+        }
+        self.assertEqual(len(approaches), len(expected_pairs))
+        self.assertEqual(len(probes), 2 * len(expected_pairs))
+        self.assertEqual(len(phases), 3 * len(expected_pairs))
+        self.assertEqual(len({p.condition_pair_id for p in approaches}),
+                         len(expected_pairs))
+        for phase in probes:
+            pair_id = phase.condition_pair_id
+            pair = [p for p in probes if p.condition_pair_id == pair_id]
+            self.assertEqual({p.throttle_profile for p in pair}, {"step", "ramp"})
+            self.assertTrue(any(a.condition_pair_id == pair_id
+                                and a.reach_speed_target
+                                and a.speed_target_mps == 9.5
+                                for a in approaches))
+            self.assertEqual(phase.duration_s, 1.85)
+            self.assertEqual(phase.throttle_stimulus_delay_s, 0.60)
+            self.assertEqual(phase.throttle_ramp_duration_s, 0.30)
+            self.assertAlmostEqual(
+                phase.throttle_start_norm - phase.throttle_end_norm, 0.08)
+            turn = 1.0 if phase.steering_waypoints[1][1] > 0.0 else -1.0
+            self.assertEqual(phase.steering_waypoints, (
+                (0.00, 0.00),
+                (0.30, turn * phase.steering_amplitude_rad),
+                (0.60, turn * phase.steering_amplitude_rad),
+                (0.70, turn * 0.030),
+                (0.80, turn * 0.015),
+                (0.90, 0.00),
+                (1.15, 0.00),
+                (1.40, -turn * phase.steering_amplitude_rad),
+                (1.60, -turn * phase.steering_amplitude_rad),
+                (1.85, 0.00),
+            ))
+            # The measured step enters 8.5–9.0 m/s near this part of the
+            # maneuver; the low-angle segment now spans several 25 ms ticks.
+            self.assertAlmostEqual(
+                _phase_steering_command(phase, 0.725), turn * 0.02625)
+            self.assertAlmostEqual(
+                _phase_steering_command(phase, 0.750), turn * 0.02250)
+            self.assertAlmostEqual(
+                _phase_steering_command(phase, 0.775), turn * 0.01875)
+
+    def test_repeated_lowangle_capture_order_is_seeded(self) -> None:
+        def signature(seed: int):
+            return [(p.condition_pair_id, p.throttle_profile)
+                    for p in build_schedule(
+                        seed, YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE)
+                    if p.label.startswith("swerve_slew_")]
+
+        self.assertEqual(signature(202610081), signature(202610081))
+        self.assertNotEqual(signature(202610081), signature(202610082))
 
 
 class HighSpeedSteeringFrontierScheduleTest(unittest.TestCase):

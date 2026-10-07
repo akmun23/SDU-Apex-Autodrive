@@ -32,6 +32,12 @@ usage() {
     "race_domain_dynamic_steering records continuous signed steering transitions at 4.5, 6.5, and 7.5 m/s." \
     "race_domain_low_speed_highsteer_transients captures reset-matched 2.5/3.0/3.5 m/s high-steer turn-in, unwind, and reversal." \
     "yaw_atlas_interpolation_validation tests randomized, reset-matched off-grid speed/steering points twice in both turn directions." \
+    "yaw_atlas_offgrid_final tests a separate frozen set of low-angle speed/steering points for final generalization scoring." \
+    "yaw_atlas_extratrees_final tests six new off-grid points supported by the frozen ExtraTrees atlas, both turn directions and two reset-isolated repeats." \
+    "yaw_fullband_gapfill_train adds two independent signed high-speed low-angle captures at exact atlas cells that the sealed final test found unsupported or inaccurate." \
+    "yaw_unwind_throttle_slew_train pairs a 0.12 throttle cut (one-tick step vs 0.30 s ramp) with 8.75 m/s signed steering unwind through ±0.025 rad." \
+    "yaw_frontier_throttle_slew_train pairs step/ramp cuts at 9.5 m/s and 0.14/0.18/0.20 rad, matching the held-out high-speed deceleration maneuvers." \
+    "yaw_frontier_lowangle_unwind_train repeats the 9.5 m/s paired cut four times per steering/sign condition and aligns low-angle unwind with the 8.5–9.0 m/s band." \
     "yaw_low_angle_rate_surface pairs one-tick steering steps with 0.30 s ramps over low steering and a selected 4.25/6.25/8.25/10.25 m/s speed." \
     "race_domain_dynamic_coupled_{train,validation,final} records randomized waveforms across the supported 5–11.1 m/s envelope." \
     "subnet_highsteer_transients records reset-isolated 7.5 m/s turn-in/unwind throttle transients at 0.30/0.42 rad." \
@@ -84,9 +90,18 @@ elif [[ "${profile}" == race_domain_low_speed_highsteer_transients ]]; then
   default_timeout_s=600
 elif [[ "${profile}" == race_domain_yaw_transition_transients ]]; then
   default_timeout_s=600
-elif [[ "${profile}" == yaw_atlas_interpolation_validation ]]; then
+elif [[ "${profile}" == yaw_atlas_interpolation_validation ||
+        "${profile}" == yaw_atlas_offgrid_final ||
+        "${profile}" == yaw_atlas_extratrees_final ||
+        "${profile}" == yaw_fullband_gapfill_train ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == yaw_low_angle_rate_surface ]]; then
+  default_timeout_s=1200
+elif [[ "${profile}" == yaw_unwind_throttle_slew_train ]]; then
+  default_timeout_s=600
+elif [[ "${profile}" == yaw_frontier_throttle_slew_train ]]; then
+  default_timeout_s=600
+elif [[ "${profile}" == yaw_frontier_lowangle_unwind_train ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == race_domain_swerve_throttle_slew_train ||
         "${profile}" == race_domain_swerve_throttle_slew_validation ||
@@ -144,6 +159,12 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == race_domain_low_speed_highsteer_transients ||
       "${profile}" == race_domain_yaw_transition_transients ||
       "${profile}" == yaw_atlas_interpolation_validation ||
+      "${profile}" == yaw_atlas_offgrid_final ||
+      "${profile}" == yaw_atlas_extratrees_final ||
+      "${profile}" == yaw_fullband_gapfill_train ||
+      "${profile}" == yaw_unwind_throttle_slew_train ||
+      "${profile}" == yaw_frontier_throttle_slew_train ||
+      "${profile}" == yaw_frontier_lowangle_unwind_train ||
       "${profile}" == yaw_low_angle_rate_surface ||
       "${profile}" == subnet_highsteer_transients ]]; then
   dev_sim_reset_enabled=1
@@ -175,6 +196,12 @@ case "${profile}" in
   race_domain_low_speed_highsteer_transients|\
   race_domain_yaw_transition_transients|\
   yaw_atlas_interpolation_validation|\
+  yaw_atlas_offgrid_final|\
+  yaw_atlas_extratrees_final|\
+  yaw_fullband_gapfill_train|\
+  yaw_unwind_throttle_slew_train|\
+  yaw_frontier_throttle_slew_train|\
+  yaw_frontier_lowangle_unwind_train|\
   yaw_low_angle_rate_surface|\
   race_domain_swerve_throttle_slew_train|\
   race_domain_swerve_throttle_slew_validation|\

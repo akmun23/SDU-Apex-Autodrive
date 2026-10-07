@@ -44,10 +44,22 @@ FEATURE_NAMES = (
     "rear_axle_lateral_speed_mps",
     "body_speed_rate_mps2",
 )
+COMMAND_ERROR_FEATURE_NAMES = (
+    "steering_command_minus_feedback_rad",
+    "throttle_command_minus_feedback_norm",
+)
+COMMAND_RATE_FEATURE_NAMES = (
+    "steering_command_rate_radps",
+    "throttle_command_rate_per_s",
+)
+REAR_WHEEL_SPLIT_FEATURE_NAME = "rear_left_minus_right_surface_mps"
 # Fixed physical scales avoid amplifying near-constant command/feedback
 # differences by dividing by a tiny per-cell standard deviation.
 FEATURE_SCALES = np.asarray((1.0, 0.1, 0.25, 0.0125, 1.6,
                              0.25, 1.0, 0.5, 0.5, 2.0), dtype=np.float64)
+COMMAND_ERROR_FEATURE_SCALES = np.asarray((0.10, 0.10), dtype=np.float64)
+COMMAND_RATE_FEATURE_SCALES = np.asarray((1.6, 1.0), dtype=np.float64)
+REAR_WHEEL_SPLIT_FEATURE_SCALE = 0.5
 PHASES = (-1, 0, 1)  # unwind, steady/transition-neutral, turn-in
 
 
@@ -214,7 +226,10 @@ def _rear_lateral_velocity(rigid: np.ndarray) -> np.ndarray:
     return rigid[:, 8] - COM_X_M * rigid[:, 12]
 
 
-def _make_rows(series: RunSeries, phase_threshold: float = 0.05):
+def _make_rows(series: RunSeries, phase_threshold: float = 0.05,
+               include_command_errors: bool = False,
+               include_command_rates: bool = False,
+               include_rear_wheel_split: bool = False):
     if phase_threshold < 0.0 or not math.isfinite(phase_threshold):
         raise ValueError("phase threshold must be finite and non-negative")
     frames = series.frames.astype(np.float64, copy=False)
@@ -252,6 +267,18 @@ def _make_rows(series: RunSeries, phase_threshold: float = 0.05):
                 float(lateral[k]),
                 speed_rate,
             )
+            if include_command_errors:
+                feature += (
+                    float(frames[k, 7] - frames[k, 3]),
+                    float(frames[k, 8] - frames[k, 4]),
+                )
+            if include_command_rates:
+                feature += (
+                    float((frames[k, 7] - frames[k - 1, 7]) / DT_S),
+                    float((frames[k, 8] - frames[k - 1, 8]) / DT_S),
+                )
+            if include_rear_wheel_split:
+                feature += (float(frames[k, 5] - frames[k, 6]),)
             features.append(feature)
             targets.append(float(yaw[k + 1] - yaw[k]))
             cells.append((speed_cell, steer_cell))
@@ -286,7 +313,14 @@ def _metrics(errors: np.ndarray) -> dict[str, Any]:
 
 
 def _fit_model(x: np.ndarray, target_delta: np.ndarray, run_ids: np.ndarray,
-               min_samples: int = MIN_CELL_SAMPLES) -> dict[str, Any] | None:
+               min_samples: int = MIN_CELL_SAMPLES,
+               feature_scales: np.ndarray = FEATURE_SCALES
+               ) -> dict[str, Any] | None:
+    feature_scales = np.asarray(feature_scales, dtype=np.float64)
+    if (feature_scales.shape != (x.shape[1],)
+            or not np.isfinite(feature_scales).all()
+            or np.any(feature_scales <= 0.0)):
+        raise ValueError("feature scales must be finite, positive, and match x")
     run_counts = Counter(run_ids.tolist())
     supported_runs = sorted(run_id for run_id, count in run_counts.items()
                             if count >= MIN_SAMPLES_PER_RUN)
@@ -295,7 +329,7 @@ def _fit_model(x: np.ndarray, target_delta: np.ndarray, run_ids: np.ndarray,
     if len(x) < min_samples or len(supported_runs) < MIN_CELL_RUNS:
         return None
     mean = np.mean(x, axis=0)
-    z = (x - mean) / FEATURE_SCALES
+    z = (x - mean) / feature_scales
     design = np.column_stack((np.ones(len(z)), z))
     run_weight = np.zeros(len(run_ids), dtype=np.float64)
     for run_id in supported_runs:
@@ -322,6 +356,7 @@ def _fit_model(x: np.ndarray, target_delta: np.ndarray, run_ids: np.ndarray,
     return {
         "mean": mean,
         "coefficients": coefficients,
+        "feature_scales": feature_scales,
         "training_samples": int(len(x)),
         "training_runs": len(supported_runs),
         "training_run_ids": supported_runs,
@@ -329,7 +364,9 @@ def _fit_model(x: np.ndarray, target_delta: np.ndarray, run_ids: np.ndarray,
 
 
 def _predict(model: dict[str, Any], x: np.ndarray) -> float:
-    z = (x - model["mean"]) / FEATURE_SCALES
+    scales = np.asarray(model.get("feature_scales", FEATURE_SCALES),
+                        dtype=np.float64)
+    z = (x - model["mean"]) / scales
     delta = float(model["coefficients"][0] +
                   np.dot(model["coefficients"][1:], z))
     return float(x[0] + delta)
@@ -355,7 +392,10 @@ def _bilinear(models: dict[tuple[int, ...], dict[str, Any]], x: np.ndarray,
     return float((1.0 - fd) * low + fd * high)
 
 
-def run(output: Path, phase_threshold: float = 0.05) -> dict[str, Any]:
+def run(output: Path, phase_threshold: float = 0.05,
+        include_command_errors: bool = False,
+        include_command_rates: bool = False,
+        include_rear_wheel_split: bool = False) -> dict[str, Any]:
     if phase_threshold < 0.0 or not math.isfinite(phase_threshold):
         raise ValueError("phase threshold must be finite and non-negative")
     run_series, source_audit = _discover_run_series()
@@ -363,8 +403,28 @@ def run(output: Path, phase_threshold: float = 0.05) -> dict[str, Any]:
     validation_series = [row for row in run_series if row.split == "validation"]
     if not train_series or not validation_series:
         raise RuntimeError("clean whole-run train and validation captures are required")
-    train_parts = [_make_rows(row, phase_threshold) for row in train_series]
-    valid_parts = [_make_rows(row, phase_threshold) for row in validation_series]
+    feature_names = (FEATURE_NAMES + COMMAND_ERROR_FEATURE_NAMES
+                     if include_command_errors else FEATURE_NAMES)
+    feature_scales = (np.concatenate((FEATURE_SCALES,
+                                      COMMAND_ERROR_FEATURE_SCALES))
+                      if include_command_errors else FEATURE_SCALES)
+    if include_command_rates:
+        feature_names += COMMAND_RATE_FEATURE_NAMES
+        feature_scales = np.concatenate((feature_scales,
+                                         COMMAND_RATE_FEATURE_SCALES))
+    if include_rear_wheel_split:
+        feature_names += (REAR_WHEEL_SPLIT_FEATURE_NAME,)
+        feature_scales = np.concatenate((
+            feature_scales,
+            np.asarray((REAR_WHEEL_SPLIT_FEATURE_SCALE,), dtype=np.float64)))
+    train_parts = [_make_rows(row, phase_threshold, include_command_errors,
+                              include_command_rates,
+                              include_rear_wheel_split)
+                   for row in train_series]
+    valid_parts = [_make_rows(row, phase_threshold, include_command_errors,
+                              include_command_rates,
+                              include_rear_wheel_split)
+                   for row in validation_series]
 
     def combine(parts):
         return tuple(np.concatenate([part[i] for part in parts], axis=0)
@@ -381,12 +441,14 @@ def run(output: Path, phase_threshold: float = 0.05) -> dict[str, Any]:
         mask = (tc[:, 0] == s) & (tc[:, 1] == d)
         train_count[s, d] = int(mask.sum())
         train_runs[s, d] = len(set(tr[mask].tolist()))
-        model = _fit_model(tx[mask], ty[mask], tr[mask])
+        model = _fit_model(tx[mask], ty[mask], tr[mask],
+                           feature_scales=feature_scales)
         if model is not None:
             keys_unphased[(s, d)] = model
         for phase in PHASES:
             pmask = mask & (tp == phase)
-            model = _fit_model(tx[pmask], ty[pmask], tr[pmask])
+            model = _fit_model(tx[pmask], ty[pmask], tr[pmask],
+                               feature_scales=feature_scales)
             if model is not None:
                 keys_phased[(s, d, phase)] = model
     for s, d in set(map(tuple, vc.tolist())):
@@ -559,7 +621,7 @@ def run(output: Path, phase_threshold: float = 0.05) -> dict[str, Any]:
                 "training_runs": model["training_runs"],
                 "training_run_ids": model["training_run_ids"],
                 "feature_mean": model["mean"].tolist(),
-                "feature_scales": FEATURE_SCALES.tolist(),
+                "feature_scales": feature_scales.tolist(),
                 "coefficients_on_delta_yaw_rate": model["coefficients"].tolist(),
             })
 
@@ -584,8 +646,11 @@ def run(output: Path, phase_threshold: float = 0.05) -> dict[str, Any]:
             "phase": {"-1": "steering unwind", "0": "near-steady or low steering-rate transition",
                       "1": "steering turn-in"},
             "phase_threshold_rad2_per_s": phase_threshold,
-            "feature_names": list(FEATURE_NAMES),
-            "feature_scales": FEATURE_SCALES.tolist(),
+            "feature_names": list(feature_names),
+            "feature_scales": feature_scales.tolist(),
+            "command_tracking_errors_included": bool(include_command_errors),
+            "command_slew_rates_included": bool(include_command_rates),
+            "rear_wheel_split_included": bool(include_rear_wheel_split),
             "features_at_k_only": True,
             "future_truth_used_as_input": False,
             "runtime_integration": "none",
@@ -645,8 +710,18 @@ def main() -> int:
                 "fullband_yaw_regime_atlas_v3",
     )
     parser.add_argument("--phase-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--include-command-errors", action="store_true",
+        help="add current steering/throttle command-minus-feedback errors as causal features")
+    parser.add_argument(
+        "--include-command-rates", action="store_true",
+        help="add the current one-step steering/throttle command slew as causal features")
+    parser.add_argument(
+        "--include-rear-wheel-split", action="store_true",
+        help="add signed left-minus-right rear-wheel surface-speed difference")
     args = parser.parse_args()
-    run(args.output, args.phase_threshold)
+    run(args.output, args.phase_threshold, args.include_command_errors,
+        args.include_command_rates, args.include_rear_wheel_split)
     return 0
 
 

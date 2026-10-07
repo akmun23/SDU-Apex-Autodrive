@@ -47,6 +47,48 @@ class YawRegimeAtlasMathTest(unittest.TestCase):
         np.testing.assert_array_equal(sequence_ids, (0, 0, 0))
         np.testing.assert_array_equal(frame_indices, (2, 3, 4))
 
+    def test_command_tracking_errors_are_current_sample_features(self) -> None:
+        frames = np.zeros((6, 9), dtype=np.float64)
+        frames[:, 0] = 4.0
+        frames[:, 3] = 0.1
+        frames[:, 4] = 0.2
+        frames[:, 5:7] = 4.0
+        frames[:, 7] = 0.15
+        frames[:, 8] = 0.3
+        frames[3:, 7:9] = 0.45
+        rigid = np.zeros((6, 13), dtype=np.float64)
+        rigid[:, 6] = 1.0
+        rigid[:, 7] = 4.0
+        rigid[:, 12] = np.linspace(0.0, 0.5, 6)
+        series = RunSeries("synthetic", "train", "synthetic",
+                           frames, rigid, np.asarray(((0, 6),)))
+
+        x, *_ = _make_rows(series, include_command_errors=True,
+                           include_command_rates=True)
+
+        self.assertEqual(x.shape, (3, 14))
+        np.testing.assert_allclose(x[0, -4:], (0.05, 0.1, 0.0, 0.0))
+        np.testing.assert_allclose(x[1, -2:], (12.0, 6.0))
+
+    def test_signed_rear_wheel_difference_is_not_averaged_away(self) -> None:
+        frames = np.zeros((6, 9), dtype=np.float64)
+        frames[:, 0] = 4.0
+        frames[:, 3] = 0.1
+        frames[:, 4] = 0.2
+        frames[:, 5] = 4.2
+        frames[:, 6] = 3.8
+        rigid = np.zeros((6, 13), dtype=np.float64)
+        rigid[:, 6] = 1.0
+        rigid[:, 7] = 4.0
+        rigid[:, 12] = np.linspace(0.0, 0.5, 6)
+        series = RunSeries("synthetic", "train", "synthetic",
+                           frames, rigid, np.asarray(((0, 6),)))
+
+        x, *_ = _make_rows(series, include_rear_wheel_split=True)
+
+        self.assertEqual(x.shape, (3, 11))
+        np.testing.assert_allclose(x[:, -1], 0.4)
+
     def test_fixed_feature_scales_prevent_tiny_variance_amplification(self) -> None:
         x = np.zeros((80, 10), dtype=np.float64)
         x[:, 0] = np.linspace(-0.5, 0.5, len(x))

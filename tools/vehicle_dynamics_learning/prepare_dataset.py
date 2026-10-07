@@ -134,14 +134,18 @@ def _attitude_frame(sample: body.MotionSample) -> np.ndarray | None:
 
 
 def _packet_sequence_gaps(capture: body.Capture) -> int:
-    packet_ids = [
-        int(sample.packet_sequence)
-        if sample.packet_sequence is not None else -1
-        for sequence in capture.sequences for sample in sequence]
-    gaps = sum(packet_id < 0 for packet_id in packet_ids)
-    matched = [packet_id for packet_id in packet_ids if packet_id >= 0]
-    gaps += sum(current != previous + 1
-                for previous, current in zip(matched, matched[1:]))
+    # Capture sequences are intentionally split at resets and phase gaps. A
+    # packet-ID jump between two such sequences is not a dropped sample; only
+    # gaps inside an exported sequence violate its fixed simulator timebase.
+    gaps = 0
+    for sequence in capture.sequences:
+        packet_ids = [
+            int(sample.packet_sequence)
+            if sample.packet_sequence is not None else -1
+            for sample in sequence]
+        gaps += sum(packet_id < 0 for packet_id in packet_ids)
+        gaps += sum(current != previous + 1
+                    for previous, current in zip(packet_ids, packet_ids[1:]))
     return int(gaps)
 
 
@@ -859,8 +863,6 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             practice_active_interval: bool = False,
             continuous_whole_run: bool = False,
             fixed_packet_timebase: bool = False) -> dict[str, Any]:
-    if fixed_packet_timebase and not continuous_whole_run:
-        raise ValueError("fixed packet timebase quality mode requires continuous whole-run capture")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1118,7 +1120,7 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         "stream_gate": (
             ">=38 Hz, p95 gap<=35 ms, zero collisions/faults; sensor receipt-gap max<=60 ms and command max<=120 ms"
             if not fixed_packet_timebase else
-            ">=38 Hz and p95 gap<=35 ms, zero collisions/faults, exact complete simulator packet sequence required; sensor receipt-gap maxima are recorded but do not change the fixed 25 ms physics dt; command max gap<=120 ms"),
+            ">=38 Hz and p95 gap<=35 ms, zero collisions/faults, exact contiguous simulator packet IDs required within every exported sequence; sequence boundaries may represent resets or excluded phase gaps; sensor receipt-gap maxima are recorded but do not change the fixed 25 ms physics dt; command max gap<=120 ms"),
         "feature_names": list(FEATURE_NAMES),
         "packet_sequence_policy": (
             "Each /odom source stamp is joined exactly to bridge_packet_timing; "
@@ -1178,7 +1180,7 @@ def main() -> int:
     parser.add_argument("--continuous-whole-run", action="store_true",
                         help="for a quality-gated phase-marked capture, export the complete causal sensor/command stream, including phase boundaries")
     parser.add_argument("--fixed-packet-timebase", action="store_true",
-                        help="use the simulator's exact 25 ms packet sequence instead of rejecting sensor streams solely for receipt-time jitter; requires complete contiguous packet IDs, exact state-topic joins, and retains rate/p95/command/collision/fault gates")
+                        help="use the simulator's exact 25 ms packet sequence instead of rejecting sensor streams solely for receipt-time jitter; requires contiguous packet IDs within every exported sequence and retains rate/p95/command/collision/fault gates")
     parser.add_argument("--practice-active-interval", action="store_true",
                         help="allow only 12-lap practice captures that pass lap, collision, active 40 Hz and post-run fault checks; crop to active laps")
     parser.add_argument("--output-dir", type=Path, required=True,

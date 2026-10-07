@@ -116,6 +116,18 @@ class FixedPacketQualityTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertIn("simulator_packet_sequence_not_contiguous", failures)
 
+    def test_reset_separated_sequences_do_not_look_like_packet_loss(self):
+        capture = self._capture([100, 101, 102, 103])
+        capture.sequences = [
+            [SimpleNamespace(packet_sequence=value) for value in (100, 101)],
+            [SimpleNamespace(packet_sequence=value) for value in (900, 901)],
+        ]
+
+        accepted, failures = _quality(capture, fixed_packet_timebase=True)
+
+        self.assertTrue(accepted)
+        self.assertEqual(failures, [])
+
     def test_unmatched_edge_samples_do_not_invent_an_internal_time_gap(self):
         capture = self._capture(list(range(100, 110)), total_samples=12)
 

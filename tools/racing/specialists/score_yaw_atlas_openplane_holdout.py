@@ -52,7 +52,8 @@ def _load_final_test(dataset_dir: Path):
         raise ValueError("final-test capture failed the frozen clean-run gate")
     with np.load(archive_path, allow_pickle=False) as data:
         required = ("run_ids", "run_splits", "frames", "simulator_rigid_state",
-                    "sequence_bounds", "sequence_labels", "dt_s")
+                    "sequence_bounds", "sequence_labels", "sequence_reset_index",
+                    "frame_reset_index", "dt_s")
         missing = [name for name in required if name not in data.files]
         if missing:
             raise ValueError(f"holdout archive is missing arrays: {missing}")
@@ -64,6 +65,8 @@ def _load_final_test(dataset_dir: Path):
         rigid = np.asarray(data["simulator_rigid_state"], dtype=np.float32)
         bounds = np.asarray(data["sequence_bounds"], dtype=np.int64)
         labels = [str(x) for x in data["sequence_labels"]]
+        sequence_reset = np.asarray(data["sequence_reset_index"], dtype=np.int64)
+        frame_reset = np.asarray(data["frame_reset_index"], dtype=np.int64)
         dt = np.asarray(data["dt_s"], dtype=np.float32)
         if "packet_sequence" not in data.files:
             raise ValueError("holdout archive lacks packet identities")
@@ -71,7 +74,9 @@ def _load_final_test(dataset_dir: Path):
     if (frames.ndim != 2 or frames.shape[1] != 9
             or rigid.shape != (len(frames), 13)
             or bounds.ndim != 2 or bounds.shape[1] != 2
-            or len(labels) != len(bounds) or len(dt) != len(frames)
+            or len(labels) != len(bounds)
+            or sequence_reset.shape != (len(bounds),)
+            or frame_reset.shape != (len(frames),) or len(dt) != len(frames)
             or not np.allclose(dt, DT_S, rtol=0.0, atol=1.0e-7)
             or not np.isfinite(frames).all() or not np.isfinite(rigid).all()):
         raise ValueError("holdout arrays do not match the frozen 40 Hz schema")
@@ -93,11 +98,21 @@ def _load_final_test(dataset_dir: Path):
             or capture.collision_count_end != 0 or capture.timing_faults):
         raise ValueError("raw final-test bag failed its clean-run gate")
     packet_to_reset: dict[int, int] = {}
+    reset_to_packets: dict[int, set[int]] = defaultdict(set)
+    reset_to_sequences: dict[int, list[int]] = defaultdict(list)
     for reset_id, (begin, end) in enumerate(bounds):
-        for packet_id in packets[int(begin):int(end)]:
+        begin, end = int(begin), int(end)
+        local_reset_ids = np.unique(frame_reset[begin:end])
+        if (len(local_reset_ids) != 1
+                or int(local_reset_ids[0]) != int(sequence_reset[reset_id])):
+            raise ValueError("holdout sequence crosses or mislabels a reset epoch")
+        reset_epoch = int(local_reset_ids[0])
+        reset_to_sequences[reset_epoch].append(reset_id)
+        for packet_id in packets[begin:end]:
             if int(packet_id) in packet_to_reset:
                 raise ValueError("packet identity occurs in multiple reset sequences")
-            packet_to_reset[int(packet_id)] = reset_id
+            packet_to_reset[int(packet_id)] = reset_epoch
+            reset_to_packets[reset_epoch].add(int(packet_id))
     phase_packets: dict[str, set[int]] = {}
     labels_by_sequence: dict[int, str] = {}
     for phase_label, phase_samples in zip(capture.sequence_labels,
@@ -111,17 +126,19 @@ def _load_final_test(dataset_dir: Path):
         if not packet_ids or len(matched) != 1:
             raise ValueError(
                 f"phase {phase_label} does not map to exactly one reset sequence")
-        reset_id = next(iter(matched))
-        if reset_id in labels_by_sequence or phase_label in phase_packets:
+        reset_epoch = next(iter(matched))
+        if phase_label in phase_packets or any(
+                sequence_id in labels_by_sequence
+                for sequence_id in reset_to_sequences[reset_epoch]):
             raise ValueError("holdout phase/reset mapping is not one-to-one")
-        exported_packets = set(map(int, packets[int(bounds[reset_id, 0]):
-                                               int(bounds[reset_id, 1])]))
+        exported_packets = reset_to_packets[reset_epoch]
         overlap = packet_ids & exported_packets
         if len(overlap) / len(packet_ids) < 0.98:
             raise ValueError(f"phase packet join coverage too low: {phase_label}")
-        labels_by_sequence[reset_id] = phase_label
+        for sequence_id in reset_to_sequences[reset_epoch]:
+            labels_by_sequence[sequence_id] = phase_label
         phase_packets[phase_label] = packet_ids
-    if len(phase_packets) != 24 or len(labels_by_sequence) != 24:
+    if len(phase_packets) != 24 or len(set(labels_by_sequence.values())) != 24:
         raise ValueError(
             f"expected 24 reset-isolated atlas probes, found {len(phase_packets)}")
     return series, labels_by_sequence, phase_packets, packets, row
@@ -134,6 +151,8 @@ def _restore_models(report: dict[str, Any]):
             "mean": np.asarray(row["feature_mean"], dtype=np.float64),
             "coefficients": np.asarray(
                 row["coefficients_on_delta_yaw_rate"], dtype=np.float64),
+            "feature_scales": np.asarray(
+                row["feature_scales"], dtype=np.float64),
         }
         if row["family"] == "cell":
             unphased[(int(row["speed_cell"]), int(row["steering_cell"]))] = model
@@ -153,8 +172,15 @@ def score(model_path: Path, dataset_dir: Path, output_path: Path) -> dict[str, A
         _load_final_test(dataset_dir))
     phase_threshold = float(model_report["model"].get(
         "phase_threshold_rad2_per_s", 0.05))
+    include_command_errors = bool(model_report["model"].get(
+        "command_tracking_errors_included", False))
+    include_command_rates = bool(model_report["model"].get(
+        "command_slew_rates_included", False))
+    include_rear_wheel_split = bool(model_report["model"].get(
+        "rear_wheel_split_included", False))
     x, delta, cells, phases, _, sequence_ids, frame_indices = _make_rows(
-        series, phase_threshold)
+        series, phase_threshold, include_command_errors,
+        include_command_rates, include_rear_wheel_split)
     unphased, phased = _restore_models(model_report)
 
     all_errors: dict[str, list[float]] = defaultdict(list)
@@ -240,7 +266,8 @@ def score(model_path: Path, dataset_dir: Path, output_path: Path) -> dict[str, A
         "source_manifest_run": manifest_run,
         "phase_packet_join": {
             "atlas_conditions": len(phase_packets),
-            "reset_sequences_matched_one_to_one": len(labels_by_sequence),
+            "reset_epochs_matched_one_to_one": len(phase_packets),
+            "archive_sequences_joined": len(labels_by_sequence),
             "samples_scored_only_inside_marked_maneuver_phases": True,
         },
         "scored_new_point_sequences": len(per_sequence),

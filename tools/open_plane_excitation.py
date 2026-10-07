@@ -123,6 +123,16 @@ SWERVE_THROTTLE_SLEW_MODERATE_PROFILE = (
     "race_domain_swerve_throttle_slew_moderate_validation")
 SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE = (
     "race_domain_swerve_throttle_slew_lowsteer_validation")
+YAW_FRONTIER_THROTTLE_SLEW_PROFILE = "yaw_frontier_throttle_slew_train"
+YAW_FRONTIER_THROTTLE_SLEW_SPEED_STEERING_RAD = (
+    (9.5, (0.14, 0.18, 0.20)),
+)
+YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE = (
+    "yaw_frontier_lowangle_unwind_train")
+YAW_FRONTIER_LOWANGLE_UNWIND_REPEATS = 4
+YAW_FRONTIER_LOWANGLE_UNWIND_SPEED_STEERING_RAD = (
+    (9.5, (0.14, 0.18, 0.20)),
+)
 SWERVE_THROTTLE_RATE_SWEEP_PROFILE = (
     "race_domain_swerve_throttle_rate_sweep_validation")
 SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE = (
@@ -159,6 +169,8 @@ SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES = (
     SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE,
     SWERVE_THROTTLE_SLEW_MODERATE_PROFILE,
     SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE,
+    YAW_FRONTIER_THROTTLE_SLEW_PROFILE,
+    YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE,
     SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
     SWERVE_THROTTLE_RATE_SWEEP_HIGHSTEER_PROFILE,
     SWERVE_THROTTLE_RATE_FACTORIAL_PROFILE,
@@ -179,7 +191,33 @@ YAW_ATLAS_INTERPOLATION_POINTS = (
     (4.25, 0.0875), (4.25, 0.2625), (6.75, 0.1625),
     (7.75, 0.1625), (8.75, 0.0125), (10.25, 0.0375),
 )
+YAW_ATLAS_OFFGRID_FINAL_PROFILE = "yaw_atlas_offgrid_final"
+YAW_ATLAS_OFFGRID_FINAL_POINTS = (
+    (4.75, 0.0625), (4.75, 0.1125), (6.75, 0.0875),
+    (8.75, 0.0625), (8.75, 0.1125), (10.75, 0.0875),
+)
+YAW_ATLAS_EXTRATREES_FINAL_PROFILE = "yaw_atlas_extratrees_final"
+YAW_ATLAS_EXTRATREES_FINAL_POINTS = (
+    (4.62, 0.108), (6.62, 0.083), (7.62, 0.133),
+    (8.12, 0.058), (8.62, 0.058), (10.62, 0.033),
+)
 YAW_ATLAS_INTERPOLATION_REPEATS = 2
+YAW_FULLBAND_GAPFILL_PROFILE = "yaw_fullband_gapfill_train"
+YAW_FULLBAND_GAPFILL_POINTS = (
+    (4.75, 0.125),
+    (8.75, 0.05), (8.75, 0.075), (8.75, 0.10), (8.75, 0.125),
+    (10.75, 0.05), (10.75, 0.075), (10.75, 0.10), (10.75, 0.125),
+)
+YAW_FULLBAND_GAPFILL_REPEATS = 2
+YAW_UNWIND_THROTTLE_PROFILE = "yaw_unwind_throttle_slew_train"
+YAW_UNWIND_THROTTLE_SPEED_MPS = 8.75
+YAW_UNWIND_THROTTLE_STEERING_RAD = 0.075
+# Prior clean captures at this speed measured a steady throttle feedback near
+# 0.361; pairing the probe to 0.35 settled below the intended speed cell.
+YAW_UNWIND_THROTTLE_START_NORM = 0.361
+YAW_UNWIND_THROTTLE_END_NORM = 0.241
+YAW_UNWIND_THROTTLE_REPEATS = 2
+YAW_UNWIND_THROTTLE_MODES = ("step", "ramp")
 YAW_LOW_ANGLE_RATE_PROFILE = "yaw_low_angle_rate_surface"
 YAW_LOW_ANGLE_RATE_SPEEDS_MPS = (4.25, 6.25, 8.25, 10.25)
 YAW_LOW_ANGLE_RATE_STEERING_RAD = (0.05, 0.075, 0.10, 0.125)
@@ -187,13 +225,18 @@ YAW_LOW_ANGLE_RATE_MODES = (("step", 0.025), ("ramp", 0.30))
 YAW_LOW_ANGLE_RATE_REPEATS = 2
 YAW_TRANSIENT_PROFILES = (
     LOW_SPEED_TRANSIENT_PROFILE, YAW_TRANSIENT_PROFILE,
-    YAW_ATLAS_INTERPOLATION_PROFILE, YAW_LOW_ANGLE_RATE_PROFILE,
+    YAW_ATLAS_INTERPOLATION_PROFILE, YAW_ATLAS_OFFGRID_FINAL_PROFILE,
+    YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
+    YAW_FULLBAND_GAPFILL_PROFILE, YAW_UNWIND_THROTTLE_PROFILE,
+    YAW_LOW_ANGLE_RATE_PROFILE,
 )
 
 
 def _is_yaw_transient_approach(label: str) -> bool:
     return label.startswith(("approach_lowdyn_", "approach_yawdyn_",
-                             "approach_atlas_", "approach_lowyaw_"))
+                             "approach_atlas_", "approach_yawgap_",
+                             "approach_yawbrake_",
+                             "approach_lowyaw_"))
 
 
 RACE_DOMAIN_SPEED_GOVERNED_PROFILES = (
@@ -285,6 +328,7 @@ class Phase:
     validate_speed: bool = True
     validate_steering: bool = True
     settle_before_probe: bool = False
+    probe_race_domain: bool = False
     throttle_profile: str | None = None
     throttle_start_norm: float | None = None
     throttle_end_norm: float | None = None
@@ -634,12 +678,16 @@ def _race_domain_swerve_throttle_slew_phases(
         seed: int,
         speed_steering_rad: tuple[tuple[float, tuple[float, ...]], ...]
         = SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD,
-        reset_before_each_probe: bool = False) -> list[Phase]:
+        reset_before_each_probe: bool = False,
+        repetitions: int = 1,
+        align_lowangle_unwind: bool = False) -> list[Phase]:
     """Pair throttle shapes during matched bidirectional s-curves.
 
     ``reset_before_each_probe`` gives both members the same spawn and speed
     approach, avoiding carry-over when a swerve leaves lateral/yaw motion.
     """
+    if repetitions < 1:
+        raise ValueError("throttle-slew repetitions must be positive")
     rng = random.Random(seed)
     speeds = list(speed_steering_rad)
     rng.shuffle(speeds)
@@ -654,7 +702,7 @@ def _race_domain_swerve_throttle_slew_phases(
         if delta <= 0.0:
             raise ValueError(f"no symmetric throttle headroom at {speed:g} m/s")
         conditions = [
-            (steering, turn_sign, throttle_sign)
+            (steering, turn_sign, throttle_sign, repetition)
             for steering in steering_levels
             for turn_sign in (-1.0, 1.0)
             # At the 9.5/11.1 m/s frontier, an upward step immediately reaches
@@ -663,12 +711,16 @@ def _race_domain_swerve_throttle_slew_phases(
             # throttle-surface captures already cover the high-throttle side;
             # this swerve study tests bounded reductions there.
             for throttle_sign in ((-1.0,) if speed >= 9.5 else (-1.0, 1.0))
+            for repetition in range(1, repetitions + 1)
         ]
         rng.shuffle(conditions)
-        for steering, turn_sign, throttle_sign in conditions:
+        for steering, turn_sign, throttle_sign, repetition in conditions:
+            repetition_suffix = (f"_rep{repetition:02d}"
+                                 if repetitions > 1 else "")
             pair_id = (
                 f"v{speed:.1f}_a{steering:.3f}_"
-                f"turn{turn_sign:+.0f}_throttle{throttle_sign:+.0f}")
+                f"turn{turn_sign:+.0f}_throttle{throttle_sign:+.0f}"
+                f"{repetition_suffix}")
             if not reset_before_each_probe:
                 phases.append(Phase(
                     f"approach_swerve_pair_{pair_id}",
@@ -681,15 +733,34 @@ def _race_domain_swerve_throttle_slew_phases(
             shapes = ["ramp", "step"]
             rng.shuffle(shapes)
             throttle_end = nominal + throttle_sign * delta
-            waypoints = (
-                (0.00, 0.00),
-                (0.30, turn_sign * steering),
-                (0.60, turn_sign * steering),
-                (0.95, 0.00),
-                (1.25, -turn_sign * steering),
-                (1.60, -turn_sign * steering),
-                (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
-            )
+            if align_lowangle_unwind:
+                # In the observed step response, speed enters 8.5–9.0 m/s
+                # around 0.73 s after the throttle cut. Hold the unwind near
+                # +/-0.025 rad during that exact interval so the training
+                # sequences contain the previously missing speed/angle/phase
+                # cell, rather than passing it only after speed has fallen.
+                waypoints = (
+                    (0.00, 0.00),
+                    (0.30, turn_sign * steering),
+                    (0.60, turn_sign * steering),
+                    (0.70, turn_sign * 0.030),
+                    (0.80, turn_sign * 0.015),
+                    (0.90, 0.00),
+                    (1.15, 0.00),
+                    (1.40, -turn_sign * steering),
+                    (1.60, -turn_sign * steering),
+                    (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+                )
+            else:
+                waypoints = (
+                    (0.00, 0.00),
+                    (0.30, turn_sign * steering),
+                    (0.60, turn_sign * steering),
+                    (0.95, 0.00),
+                    (1.25, -turn_sign * steering),
+                    (1.60, -turn_sign * steering),
+                    (SWERVE_THROTTLE_SLEW_PHASE_S, 0.00),
+                )
             for shape in shapes:
                 if reset_before_each_probe:
                     # The legacy profiles collect the two paired treatments
@@ -1211,6 +1282,111 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
         # yaw profile isolates the 3.5-4.0 m/s gap while leaving the established
         # low-speed schedule byte-for-byte unchanged.
         rng = random.Random(seed)
+        if profile == YAW_FULLBAND_GAPFILL_PROFILE:
+            conditions = [
+                (repeat, speed, angle, sign)
+                for repeat in range(1, YAW_FULLBAND_GAPFILL_REPEATS + 1)
+                for speed, angle in YAW_FULLBAND_GAPFILL_POINTS
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for repeat, speed, angle, sign in conditions:
+                condition = (
+                    f"r{repeat:02d}_v{speed:.2f}_a{angle:.4f}_turn{sign:+.0f}")
+                phases.extend((
+                    Phase(
+                        f"approach_yawgap_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawgap_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"yawgap_{condition}", 2.75, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.20, sign * angle),
+                            (0.70, sign * angle),
+                            (0.95, 0.0),
+                            (1.30, 0.0),
+                            (1.45, -sign * angle),
+                            (2.10, -sign * angle),
+                            (2.35, 0.0),
+                            (2.75, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_UNWIND_THROTTLE_PROFILE:
+            conditions = [
+                (repeat, mode, sign)
+                for repeat in range(1, YAW_UNWIND_THROTTLE_REPEATS + 1)
+                for mode in YAW_UNWIND_THROTTLE_MODES
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for repeat, mode, sign in conditions:
+                condition = f"r{repeat:02d}_{mode}_turn{sign:+.0f}"
+                phases.extend((
+                    Phase(
+                        f"approach_yawbrake_{condition}", 10.0,
+                        YAW_UNWIND_THROTTLE_SPEED_MPS,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawbrake_{condition}", 0.75,
+                        YAW_UNWIND_THROTTLE_SPEED_MPS,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"yawbrake_{condition}", 4.0,
+                        YAW_UNWIND_THROTTLE_SPEED_MPS,
+                        throttle_mode="slew_probe",
+                        throttle_start_norm=YAW_UNWIND_THROTTLE_START_NORM,
+                        throttle_end_norm=YAW_UNWIND_THROTTLE_END_NORM,
+                        throttle_profile=mode,
+                        throttle_stimulus_delay_s=0.70,
+                        throttle_ramp_duration_s=(0.30 if mode == "ramp" else 0.0),
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        settle_before_probe=True,
+                        probe_race_domain=True,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=YAW_UNWIND_THROTTLE_STEERING_RAD,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.20, sign * YAW_UNWIND_THROTTLE_STEERING_RAD),
+                            (0.45, sign * YAW_UNWIND_THROTTLE_STEERING_RAD),
+                            (0.70, sign * 0.025),
+                            (1.30, sign * 0.025),
+                            (1.50, 0.0),
+                            (1.70, 0.0),
+                            (1.95, -sign * YAW_UNWIND_THROTTLE_STEERING_RAD),
+                            (2.20, -sign * YAW_UNWIND_THROTTLE_STEERING_RAD),
+                            (2.45, -sign * 0.025),
+                            (3.05, -sign * 0.025),
+                            (3.25, 0.0),
+                            (4.00, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
         if profile == YAW_LOW_ANGLE_RATE_PROFILE:
             if transition_speed_mps not in YAW_LOW_ANGLE_RATE_SPEEDS_MPS:
                 raise ValueError(
@@ -1275,11 +1451,21 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     ),
                 ))
             return phases
-        if profile == YAW_ATLAS_INTERPOLATION_PROFILE:
+        if profile in (YAW_ATLAS_INTERPOLATION_PROFILE,
+                       YAW_ATLAS_OFFGRID_FINAL_PROFILE,
+                       YAW_ATLAS_EXTRATREES_FINAL_PROFILE):
+            points = {
+                YAW_ATLAS_INTERPOLATION_PROFILE:
+                    YAW_ATLAS_INTERPOLATION_POINTS,
+                YAW_ATLAS_OFFGRID_FINAL_PROFILE:
+                    YAW_ATLAS_OFFGRID_FINAL_POINTS,
+                YAW_ATLAS_EXTRATREES_FINAL_PROFILE:
+                    YAW_ATLAS_EXTRATREES_FINAL_POINTS,
+            }[profile]
             conditions = [
                 (repeat, speed, angle, sign)
                 for repeat in range(1, YAW_ATLAS_INTERPOLATION_REPEATS + 1)
-                for speed, angle in YAW_ATLAS_INTERPOLATION_POINTS
+                for speed, angle in points
                 for sign in (-1.0, 1.0)
             ]
             rng.shuffle(conditions)
@@ -1410,6 +1596,9 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
             seed, transition_speed_mps)
     if profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES:
         speed_steering = (
+            YAW_FRONTIER_THROTTLE_SLEW_SPEED_STEERING_RAD
+            if profile in (YAW_FRONTIER_THROTTLE_SLEW_PROFILE,
+                           YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE) else
             SWERVE_THROTTLE_SLEW_FRONTIER_SPEED_STEERING_RAD
             if profile == SWERVE_THROTTLE_SLEW_FRONTIER_PROFILE else
             SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_SPEED_STEERING_RAD
@@ -1422,7 +1611,12 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
         return _race_domain_swerve_throttle_slew_phases(
             seed, speed_steering,
             reset_before_each_probe=(
-                profile == SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE))
+                profile == SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE),
+            repetitions=(YAW_FRONTIER_LOWANGLE_UNWIND_REPEATS
+                         if profile == YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE
+                         else 1),
+            align_lowangle_unwind=(
+                profile == YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE))
     if profile in DYNAMIC_COUPLED_PROFILES:
         for condition in build_dynamic_coupled_plan(seed):
             condition_id = condition.condition_id
@@ -2698,6 +2892,7 @@ class OpenPlaneExcitation:
                     phase.speed_target_mps,
                     race_domain=(
                         phase.throttle_mode == "race_domain_hold"
+                        or phase.probe_race_domain
                         or self.profile in SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES)))
                 return
 
@@ -3064,6 +3259,10 @@ def main() -> int:
                                                LOW_SPEED_TRANSIENT_PROFILE,
                                                YAW_TRANSIENT_PROFILE,
                                                YAW_ATLAS_INTERPOLATION_PROFILE,
+                                               YAW_ATLAS_OFFGRID_FINAL_PROFILE,
+                                               YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
+                                               YAW_FULLBAND_GAPFILL_PROFILE,
+                                               YAW_UNWIND_THROTTLE_PROFILE,
                                                YAW_LOW_ANGLE_RATE_PROFILE,
                                                "isolated_3to5_response_surface",
                                                "isolated_highspeed_crossfactor",
