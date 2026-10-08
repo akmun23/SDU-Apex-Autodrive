@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "candidate_id": "yaw_highspeed_highsteer_scheduled_20261007",
+  "status": "offline_candidate_not_runtime_enabled",
+  "mechanism": "steady_and_short_transient_yaw_response_at_high_speed_high_steering",
+  "sign_rule": "sign(steering) * yaw_rate_magnitude",
+  "equilibrium_surface": {
+    "interpolation": "shape_preserving_cubic_in_speed_and_absolute_steering",
+    "speed_mps": [8.1704, 8.7315, 9.2216],
+    "abs_steering_rad": [0.3498, 0.4252, 0.4749, 0.5],
+    "yaw_rate_magnitude_radps_by_speed_then_steering": [
+      [0.7831, 0.83145, 0.888475, 0.92775],
+      [0.746025, 0.7932, 0.85045, 0.8877],
+      [0.71705, 0.76205, 0.818075, 0.85325]
+    ]
+  },
+  "response_dynamics": {
+    "type": "first_order",
+    "time_constant_s": 0.0119551,
+    "transition": "r_next = exp(-dt/tau)*r + (1-exp(-dt/tau))*signed_equilibrium_yaw_rate"
+  },
+  "joint_support": {
+    "speed_mps": [8.1704, 9.2216],
+    "abs_steering_rad": [0.3498, 0.5],
+    "outside_support": "use existing production yaw model; no extrapolation is validated",
+    "low_angle_turn_in_below_support_validated": false,
+    "practice_track_transfer_validated": false,
+    "full_lap_prediction_validated": false
+  },
+  "training_source": {
+    "bag": "live_runs/openplane_yaw_highsteer_speed_surface_train_20261007_r01/run/run_0.db3",
+    "sha256": "692edd43c396a1feea1ae9145aa16349057062f03d95f4c9bd74db5b78a42d4f",
+    "conditions": 48,
+    "design": "3 speed anchors x 4 absolute steering levels x 2 turn signs x 2 repeats",
+    "sensor_odometry_join_coverage": 1.0
+  },
+  "heldout_source": {
+    "bag": "live_runs/openplane_yaw_atlas_extratrees_highsteer_final_20261007_r01/run/run_0.db3",
+    "sha256": "7634b90742c53bdf738c30251a6aa88a00f596023f8e935e28f127a38bedd3b9",
+    "sensor_odometry_replay": "live_runs/racing_model_diagnostics_20261007/yaw_sensor_state_candidate/highsteer_final_sensor_odom_replay/replayed/replayed_0.db3",
+    "sensor_odometry_replay_sha256": "0fa6158a398561423f3d5897d847c4d4c6ad5ab42dd0c329dcaac1df2e8868d9",
+    "capture_sequences": 4,
+    "sequence_independent_runs": false,
+    "holdout_qualification": "separate from this fit, but previously used for ExtraTrees final-test work; not an unopened model-family holdout"
+  },
+  "validation": {
+    "leave_middle_speed_anchor_out_rmse_radps": 0.002285,
+    "leave_steering_0_425_rad_out_rmse_radps": 0.00398,
+    "leave_steering_0_475_rad_out_rmse_radps": 0.00137,
+    "heldout_equilibrium_rmse_radps": 0.0023,
+    "heldout_equilibrium_p95_abs_radps": 0.00416,
+    "heldout_one_step_rmse_radps": 0.0078,
+    "heldout_one_step_persistence_rmse_radps": 0.011,
+    "heldout_one_step_production_c_rmse_radps": 6.832,
+    "heldout_recursive_production_rmse_radps_by_horizon": {
+      "100ms": 3.022,
+      "250ms": 8.304,
+      "500ms": 8.287,
+      "750ms": 9.176,
+      "1500ms": 8.286,
+      "2000ms": 8.286
+    },
+    "heldout_recursive_rmse_radps_by_horizon": {
+      "250ms": 0.02125,
+      "500ms": 0.00648,
+      "750ms": 0.00299,
+      "1500ms": 0.02286,
+      "2000ms": 0.00598
+    },
+    "confidence_interval": "not_estimated; holdout phases are nested within one capture"
+  },
+  "promotion_gates_remaining": [
+    "validate transition into and out of the supported steering region",
+    "verify C model and optimizer/CasADi parity without replacing Y1",
+    "test on practice-track data and then a collision-watched opt-in practice run",
+    "show whole-run improvement before any production default change"
+  ]
+}

@@ -168,6 +168,57 @@ def _rate(receipts_ns: list[int]) -> tuple[float | None, float | None, float | N
     return rate_hz, _percentile(gaps_ms, 0.95), max(gaps_ms) if gaps_ms else None
 
 
+def _phase_segmented_rate(
+    receipts_ns: list[int], intervals_ns: list[tuple[int, int]],
+) -> tuple[float | None, float | None, float | None, int, int, float]:
+    """Measure cadence only during active phases, excluding reset pauses.
+
+    A bag intentionally has long gaps between reset-isolated probes. Including
+    those gaps in one whole-bag average makes a healthy 40 Hz stream look slow.
+    Gaps *inside* a phase remain in the cadence distribution and can still fail
+    the existing maximum-gap gate.
+    """
+    gap_ms: list[float] = []
+    active_duration_s = 0.0
+    active_gap_count = 0
+    for start_ns, end_ns in sorted(intervals_ns):
+        first = bisect.bisect_left(receipts_ns, start_ns)
+        last = bisect.bisect_right(receipts_ns, end_ns)
+        segment = receipts_ns[first:last]
+        if len(segment) < 2:
+            continue
+        positive_gaps = [
+            (right - left) / 1e6
+            for left, right in zip(segment, segment[1:])
+            if right > left
+        ]
+        gap_ms.extend(positive_gaps)
+        active_gap_count += len(positive_gaps)
+        active_duration_s += (segment[-1] - segment[0]) / 1e9
+
+    rate_hz = (
+        active_gap_count / active_duration_s
+        if active_duration_s > 0.0 else None
+    )
+    excluded_gaps = max(0, len(receipts_ns) - 1 - active_gap_count)
+    return (
+        rate_hz,
+        _percentile(gap_ms, 0.95),
+        max(gap_ms) if gap_ms else None,
+        sum(gap > MAX_STREAM_GAP_MS for gap in gap_ms),
+        excluded_gaps,
+        active_duration_s,
+    )
+
+
+def _is_probe_phase(label: str) -> bool:
+    """Identify measurement phases across legacy and yaw-error schedules."""
+    return label.startswith((
+        "boundary_", "isolated_", "sweep_", "steer_", "throttle_",
+        "probe_yawerr_",
+    ))
+
+
 def _nearest_scalar(rows: list[Any], times: list[int], target_ns: int,
                     max_offset_ns: int = ALIGNMENT_LIMIT_NS) -> Any | None:
     index = bisect.bisect_left(times, target_ns)
@@ -417,9 +468,16 @@ def analyze(path: Path) -> int:
     print("stream rates (receipt-time):")
     stream_cadence_ok = True
     for name, values in topic_receipts.items():
-        rate, p95_gap, max_gap = _rate(values)
-        print(f"  {name}: n={len(values)}, rate={rate:.3f} Hz, "
-              f"gap_p95={p95_gap:.2f} ms, gap_max={max_gap:.2f} ms")
+        rate, p95_gap, max_gap, over_limit_gaps, excluded_gaps, active_s = (
+            _phase_segmented_rate(
+                values,
+                [(phase.start_ns, phase.end_ns) for phase in phases],
+            )
+        )
+        print(f"  {name}: n={len(values)}, active={active_s:.1f} s, "
+              f"rate={rate:.3f} Hz, gap_p95={p95_gap:.2f} ms, "
+              f"gap_max={max_gap:.2f} ms, >{MAX_STREAM_GAP_MS:g}ms={over_limit_gaps}, "
+              f"excluded_between_phase_gaps={excluded_gaps}")
         stream_cadence_ok &= (
             rate is not None and rate >= MIN_STREAM_RATE_HZ
             and p95_gap is not None and p95_gap <= MAX_STREAM_P95_GAP_MS
@@ -546,9 +604,7 @@ def analyze(path: Path) -> int:
                       f"|difference| p50/p95={statistics.median(odom_encoder_errors):.3f}/"
                       f"{_percentile(odom_encoder_errors, 0.95):.3f} m/s")
 
-    probe_phases = [phase for phase in phases
-                    if phase.label.startswith(("boundary_", "isolated_", "sweep_",
-                                               "steer_", "throttle_"))]
+    probe_phases = [phase for phase in phases if _is_probe_phase(phase.label)]
     isolated_phases = [phase for phase in probe_phases
                        if phase.label.startswith(("isolated_", "throttle_"))]
     matched_starts = 0
@@ -585,13 +641,11 @@ def analyze(path: Path) -> int:
     slip_observations: list[tuple[float, float]] = []
     high_angle_predictors: list[tuple[float, ...]] = []
     paired_sweeps: dict[tuple[int, int, int, int], dict[str, dict[str, float]]] = defaultdict(dict)
-    probe_phases = [phase for phase in phases
-                    if phase.label.startswith(("boundary_", "isolated_", "sweep_",
-                                               "steer_", "throttle_"))]
-    for phase in phases:
-        if not phase.label.startswith(("boundary_", "isolated_", "sweep_",
-                                      "steer_", "throttle_")):
-            continue
+    phase_block_labels = ("boundary_", "isolated_", "sweep_", "steer_",
+                          "throttle_")
+    phase_block_phases = [
+        phase for phase in phases if phase.label.startswith(phase_block_labels)]
+    for phase in phase_block_phases:
         start = phase.start_ns + PHASE_SETTLE_NS
         low = bisect.bisect_left(odom_times, start)
         high = bisect.bisect_left(odom_times, phase.end_ns)
@@ -956,19 +1010,25 @@ def analyze(path: Path) -> int:
     print("interpretation: phase statistics characterize yaw authority and slip; "
           "they do not identify per-wheel force coefficients without contact-force data.")
 
-    good = (
-        experiment_end.get("aborted") is False
-        and not experiment_end.get("quality_failures")
-        and len(phases) == int(experiment_end.get("phase_count", len(phases)))
-        and probe_phases
-        and all(phase.valid is True for phase in probe_phases)
-        and (not isolated_phases or matched_starts == len(isolated_phases))
-        and stream_cadence_ok
-        and fixed_throttle_ok
-        and collision_values
-        and max(collision_values) == 0
-        and not any(fault_values)
-    )
+    quality_gates = {
+        "runner_completed": experiment_end.get("aborted") is False,
+        "no_runner_quality_failures": not experiment_end.get("quality_failures"),
+        "phase_count_complete": (
+            len(phases) == int(experiment_end.get("phase_count", len(phases)))),
+        "probe_phases_present": bool(probe_phases),
+        "all_probe_phases_valid": bool(probe_phases)
+        and all(phase.valid is True for phase in probe_phases),
+        "isolated_probe_start_state": (
+            not isolated_phases or matched_starts == len(isolated_phases)),
+        "active_stream_cadence": stream_cadence_ok,
+        "fixed_throttle_fidelity": fixed_throttle_ok,
+        "zero_collisions": bool(collision_values) and max(collision_values) == 0,
+        "zero_bridge_timing_faults": not any(fault_values),
+    }
+    failed_gates = [name for name, passed in quality_gates.items() if not passed]
+    print("quality gates: " + ("PASS" if not failed_gates else
+                              "FAIL " + ", ".join(failed_gates)))
+    good = not failed_gates
     return 0 if good else 1
 
 

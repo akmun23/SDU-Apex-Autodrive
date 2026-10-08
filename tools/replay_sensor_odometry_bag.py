@@ -302,6 +302,7 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
            start_offset_s: float | None = None,
            duration_wall_s: float | None = None,
            source_sequence_index: int | None = None,
+           build_mounted_workspace: bool = False,
            ) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     bag = bag.resolve()
@@ -339,7 +340,16 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
             raise ValueError(f"{name} must be finite and nonnegative")
 
     docker_env = _docker_environment(repo_root)
-    image_id = _verify_image_sources(image, repo_root, docker_env)
+    if build_mounted_workspace:
+        image_id = _docker(
+            image, ["image", "inspect", "--format", "{{.Id}}", image],
+            docker_env, capture_output=True,
+        ).stdout.strip()
+        source_mode = (
+            "read-only worktree mounted; f1tenth_localization rebuilt in isolated replay container")
+    else:
+        image_id = _verify_image_sources(image, repo_root, docker_env)
+        source_mode = "installed image sources hash-verified against worktree"
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir()
     print(f"Replay image: {image} ({image_id})", flush=True)
@@ -372,13 +382,25 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         "--mount",
         f"type=bind,source={repo_root / SOURCE_FILES[-1]},"
         "target=/tmp/sensor_odometry.yaml,readonly",
-        "--entrypoint", "/bin/bash", image, "-lc",
-        _container_script(integrate_lateral_acceleration_in_turn,
-                          wheel_burst_catchup_accel_mps2,
-                          turn_speed_bias_yaw_rate_abs_mps,
-                          turn_speed_bias_max_mps,
-                          start_offset_s, duration_wall_s),
     ]
+    replay_script = _container_script(
+        integrate_lateral_acceleration_in_turn,
+        wheel_burst_catchup_accel_mps2,
+        turn_speed_bias_yaw_rate_abs_mps,
+        turn_speed_bias_max_mps,
+        start_offset_s, duration_wall_s)
+    if build_mounted_workspace:
+        command.extend([
+            "-e", "SDU_APEX_BUILD_LOCALIZATION=1",
+            "--mount", f"type=bind,source={repo_root},target=/workspace/src,readonly",
+            "--entrypoint", "/bin/bash", image, "-lc",
+            "/bin/bash /workspace/src/docker/development_entrypoint.sh /bin/bash -lc " +
+            shlex.quote(replay_script),
+        ])
+    else:
+        command.extend([
+            "--entrypoint", "/bin/bash", image, "-lc", replay_script,
+        ])
     _docker(image, command, docker_env)
     replay_bag = output_dir / "replayed" / "replayed_0.db3"
     if (integrate_lateral_acceleration_in_turn or
@@ -392,6 +414,11 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
     metadata = {
         "image": image,
         "image_id": image_id,
+        "localization_source_mode": source_mode,
+        "localization_source_sha256": {
+            relative: _sha256(repo_root / relative)
+            for relative in SOURCE_FILES
+        },
         "input_bag": str(bag),
         "input_bag_sha256": _sha256(bag),
         "playback_rate": rate,
@@ -430,6 +457,12 @@ def main() -> int:
                         help="existing Humble development image with matching source")
     parser.add_argument("--rate", type=float, default=1.0,
                         help="rosbag playback rate (validated maximum: 4x)")
+    parser.add_argument(
+        "--build-mounted-workspace", action="store_true",
+        help=("mount this worktree read-only and rebuild f1tenth_localization "
+              "inside the isolated replay container when the image's installed "
+              "sources do not match"),
+    )
     parser.add_argument("--domain-id", type=int, default=96,
                         help="isolated ROS domain for the offline replay")
     parser.add_argument("--integrate-lateral-acceleration-in-turn", action="store_true",
@@ -454,7 +487,8 @@ def main() -> int:
                args.turn_speed_bias_yaw_rate_abs_mps,
                args.turn_speed_bias_max_mps,
                args.start_offset_s, args.duration_wall_s,
-               args.source_sequence_index)
+               args.source_sequence_index,
+               args.build_mounted_workspace)
     except (OSError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         parser.exit(2, f"sensor-odometry replay failed: {exc}\n")
     return 0

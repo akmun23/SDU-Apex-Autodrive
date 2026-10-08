@@ -41,6 +41,24 @@ usage() {
     "yaw_frontier_throttle_slew_train pairs step/ramp cuts at 9.5 m/s and 0.14/0.18/0.20 rad, matching the held-out high-speed deceleration maneuvers." \
     "yaw_frontier_lowangle_unwind_train repeats the 9.5 m/s paired cut four times per steering/sign condition and aligns low-angle unwind with the 8.5–9.0 m/s band." \
     "yaw_low_angle_rate_surface pairs one-tick steering steps with 0.30 s ramps over low steering and a selected 4.25/6.25/8.25/10.25 m/s speed." \
+    "yaw_mismatch_transition_train repeats matched 5.0 m/s steering onset and 3.5 m/s ±0.42 rad reversal, step versus 0.30 s ramp, both signs." \
+    "yaw_cell_mismatch_transition_train targets the held-out 6.995 m/s, ±0.1042 rad command-feedback gap with paired step/ramp transitions in both signs." \
+    "yaw_error_steering_event_gapfill randomizes 5.0 m/s turn-in and 3.5 m/s high-steer reversal age, direction, and step/ramp profile." \
+    "yaw_error_command_gap_gapfill repeats the measured 6.5–9.5 m/s small-angle command/feedback mismatch cells at two event ages." \
+    "yaw_error_command_gap_lowspeed_gapfill covers the same mismatch waveform at 4.5 and 5.5 m/s, where held-out residuals also exceed 0.1 rad/s." \
+    "yaw_error_midspeed_steering_gapfill pairs turn-in/reversal step and ramp responses at 4.5/6.5 m/s and 0.15/0.20 rad." \
+    "yaw_error_lowspeed_steering_gapfill pairs high-steer turn-in/reversal at 1.5/2.5 m/s and 0.35/0.50 rad." \
+    "yaw_error_highspeed_steering_gapfill pairs turn-in/unwind at 10.5/11.1 m/s inside the existing measured steering frontier." \
+    "yaw_error_wheelspin_gapfill pairs throttle step/ramp-up and cuts during matched 8.5–11 m/s low-angle swerves." \
+    "yaw_error_lowspeed_wheelspin_gapfill pairs throttle step/ramp increases at measured low-speed/high-steering wheel-slip error strata." \
+    "yaw_error_midspeed_throttle_gapfill pairs throttle steps/ramps at 2.5/4.5/6.5/8.0 m/s in sparse throttle-gap interactions." \
+    "yaw_error_residual_steering_grid_gapfill fills ten held-out failing speed/steering cells with randomized onset/reversal, both signs, step/ramp and two event ages." \
+    "yaw_error_lowspeed_highsteer_replication adds independent 1.5/2.5/3.5 m/s, 0.35/0.42/0.50 rad onset/reversal runs." \
+    "yaw_error_highsteer_reversal_gapfill adds a measured 3.0–4.0 m/s high-steer onset/unwind/reversal matrix with 25/100/300 ms transitions." \
+    "yaw_error_crawl_throttle_calibration measures 1–5% fixed throttle at 0/±0.20/±0.35/±0.50 rad, randomized and reset-isolated." \
+    "yaw_error_crawl_steering_gapfill covers sparse 0.60/1.00 m/s, 0.20/0.35/0.50 rad onset/reversal bins." \
+    "yaw_error_crawl_fine_gapfill covers the sparse 0.35–1.45 m/s by 0.10–0.50 rad steering rectangle with signed onset/reversal, step/ramp, and two response ages." \
+    "yaw_error_subcrawl_steering_gapfill targets the remaining <0.5 m/s steering gap using calibrated 0.24/0.49 m/s speeds, 0.25/0.40/0.50 rad angles, and signed onset/unwind/reversal events." \
     "race_domain_dynamic_coupled_{train,validation,final} records randomized waveforms across the supported 5–11.1 m/s envelope." \
     "subnet_highsteer_transients records reset-isolated 7.5 m/s turn-in/unwind throttle transients at 0.30/0.42 rad." \
     "Resume a partial surface with SDU_APEX_EXPERIMENT_RESUME_ANALYSIS pointing to its closed analysis JSON." \
@@ -97,7 +115,27 @@ elif [[ "${profile}" == yaw_atlas_interpolation_validation ||
         "${profile}" == yaw_atlas_extratrees_final ||
         "${profile}" == yaw_atlas_extratrees_highsteer_final ||
         "${profile}" == yaw_highsteer_speed_surface_train ||
-        "${profile}" == yaw_fullband_gapfill_train ]]; then
+        "${profile}" == yaw_fullband_gapfill_train ||
+        "${profile}" == yaw_mismatch_transition_train ||
+        "${profile}" == yaw_cell_mismatch_transition_train ||
+        "${profile}" == yaw_error_steering_event_gapfill ||
+        "${profile}" == yaw_error_command_gap_gapfill ||
+        "${profile}" == yaw_error_command_gap_lowspeed_gapfill ||
+        "${profile}" == yaw_error_midspeed_steering_gapfill ||
+        "${profile}" == yaw_error_highspeed_steering_gapfill ||
+        "${profile}" == yaw_error_lowspeed_steering_gapfill ||
+        "${profile}" == yaw_error_wheelspin_gapfill ||
+        "${profile}" == yaw_error_lowspeed_wheelspin_gapfill ||
+        "${profile}" == yaw_error_midspeed_throttle_gapfill ||
+        "${profile}" == yaw_error_residual_steering_grid_gapfill ||
+        "${profile}" == yaw_error_lowspeed_highsteer_replication ||
+        "${profile}" == yaw_error_crawl_steering_gapfill ]]; then
+  default_timeout_s=3600
+elif [[ "${profile}" == yaw_error_crawl_fine_gapfill ]]; then
+  default_timeout_s=9000
+elif [[ "${profile}" == yaw_error_highsteer_reversal_gapfill ]]; then
+  default_timeout_s=6000
+elif [[ "${profile}" == yaw_error_crawl_throttle_calibration ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == yaw_low_angle_rate_surface ]]; then
   default_timeout_s=1200
@@ -168,6 +206,24 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == yaw_atlas_extratrees_highsteer_final ||
       "${profile}" == yaw_highsteer_speed_surface_train ||
       "${profile}" == yaw_fullband_gapfill_train ||
+      "${profile}" == yaw_mismatch_transition_train ||
+      "${profile}" == yaw_cell_mismatch_transition_train ||
+      "${profile}" == yaw_error_steering_event_gapfill ||
+      "${profile}" == yaw_error_command_gap_gapfill ||
+      "${profile}" == yaw_error_command_gap_lowspeed_gapfill ||
+      "${profile}" == yaw_error_midspeed_steering_gapfill ||
+      "${profile}" == yaw_error_highspeed_steering_gapfill ||
+      "${profile}" == yaw_error_lowspeed_steering_gapfill ||
+      "${profile}" == yaw_error_wheelspin_gapfill ||
+      "${profile}" == yaw_error_lowspeed_wheelspin_gapfill ||
+      "${profile}" == yaw_error_midspeed_throttle_gapfill ||
+      "${profile}" == yaw_error_residual_steering_grid_gapfill ||
+      "${profile}" == yaw_error_lowspeed_highsteer_replication ||
+      "${profile}" == yaw_error_highsteer_reversal_gapfill ||
+      "${profile}" == yaw_error_crawl_throttle_calibration ||
+      "${profile}" == yaw_error_crawl_steering_gapfill ||
+      "${profile}" == yaw_error_crawl_fine_gapfill ||
+      "${profile}" == yaw_error_subcrawl_steering_gapfill ||
       "${profile}" == yaw_unwind_throttle_slew_train ||
       "${profile}" == yaw_frontier_throttle_slew_train ||
       "${profile}" == yaw_frontier_lowangle_unwind_train ||
@@ -207,6 +263,24 @@ case "${profile}" in
   yaw_atlas_extratrees_highsteer_final|\
   yaw_highsteer_speed_surface_train|\
   yaw_fullband_gapfill_train|\
+  yaw_mismatch_transition_train|\
+  yaw_cell_mismatch_transition_train|\
+  yaw_error_steering_event_gapfill|\
+  yaw_error_command_gap_gapfill|\
+  yaw_error_command_gap_lowspeed_gapfill|\
+  yaw_error_midspeed_steering_gapfill|\
+  yaw_error_highspeed_steering_gapfill|\
+  yaw_error_lowspeed_steering_gapfill|\
+  yaw_error_wheelspin_gapfill|\
+  yaw_error_lowspeed_wheelspin_gapfill|\
+  yaw_error_midspeed_throttle_gapfill|\
+  yaw_error_residual_steering_grid_gapfill|\
+  yaw_error_lowspeed_highsteer_replication|\
+  yaw_error_highsteer_reversal_gapfill|\
+  yaw_error_crawl_throttle_calibration|\
+  yaw_error_crawl_steering_gapfill|\
+  yaw_error_crawl_fine_gapfill|\
+  yaw_error_subcrawl_steering_gapfill|\
   yaw_unwind_throttle_slew_train|\
   yaw_frontier_throttle_slew_train|\
   yaw_frontier_lowangle_unwind_train|\

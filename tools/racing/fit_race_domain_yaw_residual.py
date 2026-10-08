@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Fit a low-order yaw-rate residual and hold out complete runs.
 
-This is an offline screening tool only. It never changes the deployed vehicle
-model. Body-state features and yaw-rate targets come from simulator truth, not
-the derived odometry estimator. Practice truth samples are paired by source
-order at the fixed 25 ms model step; packet receipt timestamps only associate
-the current truth row with its controller command. Future truth is a training
-label only and is never a runtime model input.
+Simulator truth is only the one-step training label. When a state topic is
+provided, model inputs come from that source-stamp-aligned odometry estimate,
+matching the state the MPC can actually receive. The candidate remains
+offline until recursive and closed-loop checks pass.
 """
 
 from __future__ import annotations
@@ -18,6 +16,7 @@ import ctypes
 import hashlib
 import json
 import math
+import re
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -56,6 +55,10 @@ FEATURES = (
     "delta_abs_ax",
     "delta_abs_qv",
 )
+ATLAS_LABEL = re.compile(
+    r"atlas_r(?P<replicate>\d+)_v(?P<speed>[0-9.]+)_a(?P<steering>[0-9.]+)_turn(?P<direction>[+-]\d+)"
+)
+STATE_STAMP_TOLERANCE_NS = 1_000
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -83,12 +86,33 @@ def sector_for(track_s: float, sectors: list[dict[str, Any]], period: float) -> 
     raise ValueError(f"canonical sector map has a gap at {position:.6f} m")
 
 
+def _nearest_state_for_source_time(
+        states: dict[int, np.ndarray], sorted_stamps: list[int],
+        source_time_s: float | None) -> tuple[np.ndarray | None, int | None]:
+    """Join to the same sensor packet, tolerating only CSV float rounding."""
+    if source_time_s is None or not math.isfinite(source_time_s):
+        return None, None
+    stamp_ns = int(round(source_time_s * 1.0e9))
+    index = bisect.bisect_left(sorted_stamps, stamp_ns)
+    candidates = [sorted_stamps[i] for i in (index - 1, index)
+                  if 0 <= i < len(sorted_stamps)]
+    if not candidates:
+        return None, None
+    matched_stamp = min(candidates, key=lambda stamp: abs(stamp - stamp_ns))
+    delta_ns = abs(matched_stamp - stamp_ns)
+    if delta_ns > STATE_STAMP_TOLERANCE_NS:
+        return None, delta_ns
+    return states[matched_stamp], delta_ns
+
+
 def load_run(report_dir: Path, projection: TrackProjection,
              sectors: list[dict[str, Any]], period: float,
              library_path: Path, config_path: Path,
              trajectory_path: Path, steering_rate_limit_radps: float,
              target_speed_rate_increase_mps2: float,
-             target_speed_rate_reduction_mps2: float) -> list[dict[str, Any]]:
+             target_speed_rate_reduction_mps2: float, *,
+             state_topic: str | None = None,
+             state_bag_path: Path | None = None) -> list[dict[str, Any]]:
     tracking = read_csv(report_dir / "tracking_error.csv")
     control = read_csv(report_dir / "controller_saturation.csv")
     times = [float(row["time_s"]) for row in tracking]
@@ -99,6 +123,15 @@ def load_run(report_dir: Path, projection: TrackProjection,
         ctypes.POINTER(ModelState), ctypes.POINTER(ModelControl), ctypes.c_float, ctypes.c_float]
     model_library.mpc_vehicle_model_step.restype = StageResult
     selected: list[dict[str, Any]] = []
+    state_samples: dict[int, np.ndarray] = {}
+    state_stamps: list[int] = []
+    state_lookup_total = 0
+    state_lookup_matched = 0
+    if state_topic:
+        if state_bag_path is None:
+            state_bag_path = report_dir.resolve().parents[1] / "run/run_0.db3"
+        state_samples = body._read_replayed_states(state_bag_path, state_topic)
+        state_stamps = sorted(state_samples)
     with ProductionMpc(library_path, config_path, trajectory_path) as production_model:
         lap_length = production_model.lap_length_m
         for control_row in control:
@@ -124,6 +157,16 @@ def load_run(report_dir: Path, projection: TrackProjection,
             qv = finite(control_row, "first_control_target_speed_rate_mps2")
             v = finite(current, "truth_lateral_speed_mps")
             curvature = finite(current, "reference_curvature_inv_m")
+            state_match_delta_ns = None
+            if state_topic:
+                state_lookup_total += 1
+                estimate, state_match_delta_ns = _nearest_state_for_source_time(
+                    state_samples, state_stamps,
+                    finite(current, "source_time_s"))
+                if estimate is None:
+                    continue
+                state_lookup_matched += 1
+                u, v, r = map(float, estimate)
             # The simulator advances one model sample per 25 ms. Receipt and
             # header timestamps can be bursty, so do not time-interpolate the
             # label: the next source-ordered truth row is the next model step.
@@ -212,7 +255,16 @@ def load_run(report_dir: Path, projection: TrackProjection,
                 "model_control": (float(qdelta), float(qv)),
                 "model_curvature_inv_m": float(model_curvature),
                 "modeled_longitudinal_accel_mps2": modeled_ax,
+                "state_feature_source": state_topic or "simulator_truth",
+                "state_source_stamp_match_delta_ns": state_match_delta_ns,
             })
+    if state_topic:
+        coverage = state_lookup_matched / state_lookup_total if state_lookup_total else 0.0
+        if coverage < 0.98:
+            raise ValueError(
+                f"{state_topic} matched only {state_lookup_matched}/"
+                f"{state_lookup_total} eligible practice rows ({coverage:.2%}); "
+                "need at least 98% source-stamp coverage")
     return selected
 
 
@@ -221,7 +273,9 @@ def load_open_plane_run(bag_path: Path, library_path: Path,
                         steering_rate_limit_radps: float,
                         target_speed_rate_increase_mps2: float,
                         target_speed_rate_reduction_mps2: float, *,
-                        dataset_name: str = "openplane_highsteer_train"
+                        dataset_name: str = "openplane_highsteer_train",
+                        state_topic: str | None = None,
+                        state_bag_path: Path | None = None,
                         ) -> list[dict[str, Any]]:
     """Create one-step labels from complete isolated open-plane captures."""
     capture = body.load_capture(bag_path)
@@ -229,6 +283,12 @@ def load_open_plane_run(bag_path: Path, library_path: Path,
             or capture.collision_count_end != capture.collision_count_start
             or capture.timing_faults != 0 or capture.invalid_phase_count != 0):
         raise ValueError(f"open-plane training capture failed quality gates: {bag_path}")
+    if state_topic:
+        capture, state_coverage = body._attach_feature_states(
+            capture, state_bag_path or bag_path, state_topic)
+        if state_coverage < 0.98:
+            raise ValueError(
+                f"{state_topic} source-stamp coverage is only {state_coverage:.2%}")
     phases = []
     for label, sequence in zip(capture.sequence_labels, capture.sequences):
         if label.startswith("multispeed_v"):
@@ -239,6 +299,8 @@ def load_open_plane_run(bag_path: Path, library_path: Path,
             target_speed_mps = float(label.split("_", 2)[1][1:])
         elif label.startswith("yawdyn_v"):
             target_speed_mps = float(label.split("_", 2)[1][1:])
+        elif ATLAS_LABEL.fullmatch(label):
+            target_speed_mps = float(ATLAS_LABEL.fullmatch(label)["speed"])
         else:
             continue
         phases.append((label, sequence, target_speed_mps))
@@ -246,6 +308,13 @@ def load_open_plane_run(bag_path: Path, library_path: Path,
         expected_phase_count = 18
     elif any(label.startswith("lowdyn_v") for label, _, _ in phases):
         expected_phase_count = 24
+    elif any(ATLAS_LABEL.fullmatch(label) for label, _, _ in phases):
+        if "speed_surface_train" in bag_path.as_posix():
+            expected_phase_count = 48
+        elif "highsteer_final" in bag_path.as_posix():
+            expected_phase_count = 16
+        else:
+            expected_phase_count = len(phases)
     else:
         expected_phase_count = 51 if any(
             label.startswith("multispeed_v") for label, _, _ in phases) else 17
@@ -293,17 +362,25 @@ def load_open_plane_run(bag_path: Path, library_path: Path,
                         or not np.isfinite(future_rigid).all()):
                     continue
 
-                u, v_com, r = float(rigid[7]), float(rigid[8]), float(rigid[12])
-                v_rear = v_com - COM_X_M * r
+                if state_topic:
+                    if (current.feature_state is None or
+                            not np.isfinite(current.feature_state).all()):
+                        continue
+                    u, v_rear, r = map(float, current.feature_state)
+                    state_feature_source = state_topic
+                else:
+                    u, v_com, r = float(rigid[7]), float(rigid[8]), float(rigid[12])
+                    v_rear = v_com - COM_X_M * r
+                    state_feature_source = "simulator_truth"
                 delta = float(current.actuators[0])
                 command = float(current.actuator_history[2])
-                command_next = float(following.actuator_history[2])
-                q_delta = (command_next - command) / DT_S
+                command_previous = float(previous.actuator_history[2])
+                q_delta = (command - command_previous) / DT_S
                 q_delta = max(-steering_rate_limit_radps,
                               min(steering_rate_limit_radps, q_delta))
                 q_speed = 0.0
                 if not all(math.isfinite(value) for value in
-                           (u, v_rear, r, delta, command, command_next)):
+                           (u, v_rear, r, delta, command, command_previous)):
                     continue
 
                 initial = ModelState(
@@ -357,6 +434,8 @@ def load_open_plane_run(bag_path: Path, library_path: Path,
                     "model_control": (q_delta, q_speed),
                     "model_curvature_inv_m": 0.0,
                     "modeled_longitudinal_accel_mps2": modeled_ax,
+                    "state_feature_source": state_feature_source,
+                    "state_source_stamp_match_delta_ns": None,
                 })
     if not selected:
         raise ValueError(f"no aligned open-plane training samples: {bag_path}")
@@ -466,9 +545,42 @@ def support_weights(rows: list[dict[str, Any]], gate: dict[str, Any] | None) -> 
     return np.asarray(weights, dtype=np.float64)
 
 
+def candidate_overlay_parameters(model: dict[str, Any]) -> dict[str, Any]:
+    """Serialize the fitted candidate to the exact production MPC parameter names."""
+    gate = model.get("support_gate")
+    if gate is None:
+        raise ValueError("a runtime MPC candidate requires an explicit support gate")
+    params: dict[str, Any] = {
+        "yaw_rate_residual_enabled": True,
+        "yaw_rate_residual_gain": float(model["gain"]),
+        "yaw_rate_residual_clip_radps2": float(model["correction_clip_radps2"]),
+        "yaw_rate_residual_feature_mean": model["feature_mean"],
+        "yaw_rate_residual_feature_scale": model["feature_scale"],
+        "yaw_rate_residual_coefficients": model["coefficients_with_intercept"],
+    }
+    gate_fields = (
+        "target_speed_zero_mps", "target_speed_full_mps",
+        "speed_deficit_full_mps", "speed_deficit_zero_mps",
+        "abs_steering_zero_rad", "abs_steering_full_rad",
+        "actual_speed_zero_mps", "actual_speed_full_mps",
+        "actual_speed_upper_full_mps", "actual_speed_upper_zero_mps",
+        "abs_steering_upper_full_rad", "abs_steering_upper_zero_rad",
+    )
+    for suffix in gate_fields:
+        if suffix in gate:
+            params[f"yaw_rate_residual_{suffix}"] = float(gate[suffix])
+    return params
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-report-dir", type=Path, required=True)
+    parser.add_argument(
+        "--train-state-topic",
+        help="optional legal odometry input topic from the matching train bag, e.g. /odom",
+    )
+    parser.add_argument("--train-state-bag", type=Path,
+                        help="state bag override; defaults to the run bag beside the report")
     parser.add_argument(
         "--train-openplane-bag", type=Path, action="append", default=[],
         help="optional complete speed-held high-steer training bag; may be repeated",
@@ -477,6 +589,26 @@ def main() -> int:
         "--validation-openplane-bag", type=Path, action="append", default=[],
         help="optional complete held-out open-plane bag; never used for fitting",
     )
+    parser.add_argument(
+        "--train-openplane-state-topic",
+        help="timestamp-aligned odometry topic for open-plane training bags",
+    )
+    parser.add_argument(
+        "--train-openplane-state-bag", type=Path,
+        help="state bag override for open-plane training (e.g. replayed observer output)",
+    )
+    parser.add_argument(
+        "--validation-openplane-state-topic",
+        help="timestamp-aligned odometry topic for open-plane validation bags",
+    )
+    parser.add_argument(
+        "--validation-openplane-state-bag", type=Path,
+        help="state bag override for open-plane validation (e.g. replayed observer output)",
+    )
+    parser.add_argument("--validation-state-topic",
+                        help="optional legal odometry input topic from the matching validation bag")
+    parser.add_argument("--validation-state-bag", type=Path,
+                        help="state bag override; defaults to the run bag beside the report")
     parser.add_argument("--validation-report-dir", type=Path, required=True)
     parser.add_argument("--sectors", type=Path, required=True)
     parser.add_argument("--centerline", type=Path, required=True)
@@ -629,7 +761,12 @@ def main() -> int:
                      library_path, config_path, trajectory_path,
                      steering_rate_limit_radps,
                      target_speed_rate_increase_mps2,
-                     target_speed_rate_reduction_mps2)
+                     target_speed_rate_reduction_mps2,
+                     state_topic=args.train_state_topic,
+                     state_bag_path=(
+                         args.train_state_bag if args.train_state_bag is None or
+                         args.train_state_bag.is_absolute() else
+                         ROOT / args.train_state_bag))
     openplane_train: list[dict[str, Any]] = []
     openplane_hashes: dict[str, str] = {}
     for bag_path in openplane_bags:
@@ -638,7 +775,13 @@ def main() -> int:
         rows = load_open_plane_run(
             bag_path, library_path, config_path, trajectory_path,
             steering_rate_limit_radps, target_speed_rate_increase_mps2,
-            target_speed_rate_reduction_mps2)
+            target_speed_rate_reduction_mps2,
+            state_topic=args.train_openplane_state_topic,
+            state_bag_path=(
+                args.train_openplane_state_bag
+                if args.train_openplane_state_bag is None or
+                args.train_openplane_state_bag.is_absolute() else
+                ROOT / args.train_openplane_state_bag))
         openplane_train.extend(rows)
         openplane_hashes[str(bag_path)] = sha256_file(bag_path)
     train.extend(openplane_train)
@@ -646,7 +789,12 @@ def main() -> int:
         validation_dir, projection, sector_config["sectors"], period,
         library_path, config_path, trajectory_path,
         steering_rate_limit_radps, target_speed_rate_increase_mps2,
-        target_speed_rate_reduction_mps2)
+        target_speed_rate_reduction_mps2,
+        state_topic=args.validation_state_topic,
+        state_bag_path=(
+            args.validation_state_bag if args.validation_state_bag is None or
+            args.validation_state_bag.is_absolute() else
+            ROOT / args.validation_state_bag))
     validation_openplane_hashes: dict[str, str] = {}
     for bag_path in validation_openplane_bags:
         if not bag_path.is_file():
@@ -656,6 +804,12 @@ def main() -> int:
             steering_rate_limit_radps, target_speed_rate_increase_mps2,
             target_speed_rate_reduction_mps2,
             dataset_name="openplane_highsteer_validation",
+            state_topic=args.validation_openplane_state_topic,
+            state_bag_path=(
+                args.validation_openplane_state_bag
+                if args.validation_openplane_state_bag is None or
+                args.validation_openplane_state_bag.is_absolute() else
+                ROOT / args.validation_openplane_state_bag),
         )
         validation.extend(rows)
         validation_openplane_hashes[str(bag_path)] = sha256_file(bag_path)
@@ -757,6 +911,10 @@ def main() -> int:
     )
     corrections = selected_gain * raw_validation_corrections * validation_gate_weights
     validation_metrics = metrics(validation, corrections)
+    training_state_sources = Counter(
+        row["state_feature_source"] for row in train)
+    validation_state_sources = Counter(
+        row["state_feature_source"] for row in validation)
     validation_metrics_by_run: dict[str, Any] = {}
     for run_id in sorted(validation_ids):
         indexes = [index for index, row in enumerate(validation)
@@ -773,6 +931,8 @@ def main() -> int:
     model = {
         "schema_version": 1,
         "model_id": (
+            "sensor_state_ridge_yaw_residual_candidate"
+            if args.train_state_topic or args.train_openplane_state_topic else
             "GT_support_only_ridge_yaw_residual_candidate"
             if args.fit_only_within_support else
             "P0_plus_openplane_steering_transient_ridge_yaw_residual_candidate"
@@ -787,6 +947,8 @@ def main() -> int:
         },
         "gain": selected_gain,
         "training_run_ids": sorted(train_ids),
+        "training_state_feature_sources": dict(sorted(training_state_sources.items())),
+        "validation_state_feature_sources": dict(sorted(validation_state_sources.items())),
         "fit_run_ids": fit_run_ids,
         "fit_only_within_support": args.fit_only_within_support,
         "fit_sample_count": int(np.count_nonzero(fit_mask)),
@@ -804,23 +966,30 @@ def main() -> int:
         "correction_clip_radps2": correction_limit,
         "sample_period_s": DT_S,
         "ground_truth_provenance": {
-            "practice_source": "/autodrive/roboracer_1/odom simulator truth stream",
-            "open_plane_source": "simulator rigid-body state in the captured truth packet",
-            "derived_odometry_estimator_used_as_truth": False,
+            "practice_target": "next source-ordered simulator-truth yaw rate",
+            "open_plane_target": "next source-ordered simulator-truth yaw rate",
+            "runtime_or_feature_inputs_use_truth": False,
             "runtime_ground_truth_input": False,
         },
         "source_input_policy": (
-            "current simulator-ground-truth body state and physical steering are "
-            "offline training features; next source-ordered simulator-truth sample "
-            "is the yaw-rate label at the fixed 25 ms step; packet receipt time is "
-            "used only to associate current truth with recorded MPC commands; "
-            "derived odometry is not used as plant truth; no future sensor inputs"
+            "current timestamp-aligned legal odometry state, current steering "
+            "feedback, actuator state, and current MPC control are features when "
+            "a state topic is configured; next source-ordered simulator-truth "
+            "yaw rate is only the label at the fixed 25 ms step; no future truth "
+            "or future sensor values are model inputs"
+            if args.train_state_topic or args.train_openplane_state_topic else
+            "current simulator-truth body state and physical steering are offline "
+            "training features; next source-ordered simulator-truth sample is the "
+            "yaw-rate label at the fixed 25 ms step; no future sensor inputs"
         ),
     }
     if support_gate is not None:
         model["model_id"] += "_support_gated_v1"
         model["support_gate"] = support_gate
     (output_dir / "yaw_residual_candidate.json").write_text(json.dumps(model, indent=2) + "\n", encoding="utf-8")
+    overlay = {"/**": {"ros__parameters": candidate_overlay_parameters(model)}}
+    (output_dir / "candidate_overlay.yaml").write_text(
+        yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
 
     validation_rows: list[dict[str, Any]] = []
     for index, (row, correction) in enumerate(zip(validation, corrections)):

@@ -237,6 +237,135 @@ YAW_LOW_ANGLE_RATE_SPEEDS_MPS = (4.25, 6.25, 8.25, 10.25)
 YAW_LOW_ANGLE_RATE_STEERING_RAD = (0.05, 0.075, 0.10, 0.125)
 YAW_LOW_ANGLE_RATE_MODES = (("step", 0.025), ("ramp", 0.30))
 YAW_LOW_ANGLE_RATE_REPEATS = 2
+YAW_MISMATCH_TRANSITION_PROFILE = "yaw_mismatch_transition_train"
+YAW_MISMATCH_TRANSITION_REPEATS = 2
+YAW_MISMATCH_TRANSITION_MODES = ("step", "ramp")
+YAW_MISMATCH_ONSET_SPEED_MPS = 5.0
+YAW_MISMATCH_ONSET_STEERING_RAD = 0.28
+YAW_MISMATCH_REVERSAL_SPEED_MPS = 3.5
+YAW_MISMATCH_REVERSAL_STEERING_RAD = 0.42
+YAW_MISMATCH_RAMP_S = 0.30
+YAW_CELL_MISMATCH_TRANSITION_PROFILE = "yaw_cell_mismatch_transition_train"
+YAW_CELL_MISMATCH_STEP_REPEATS = 20
+YAW_CELL_MISMATCH_RAMP_REPEATS = 2
+YAW_CELL_MISMATCH_SPEED_MPS = 6.995
+YAW_CELL_MISMATCH_STEERING_RAD = 0.1042
+YAW_CELL_MISMATCH_COMMAND_RAD = 0.0142
+YAW_CELL_MISMATCH_RAMP_S = 0.30
+YAW_ERROR_STEERING_EVENT_PROFILE = "yaw_error_steering_event_gapfill"
+YAW_ERROR_STEERING_EVENT_MODES = (("step", 0.025), ("ramp", 0.30))
+YAW_ERROR_STEERING_EVENT_DELAYS_S = (0.25, 0.75)
+YAW_ERROR_COMMAND_GAP_PROFILE = "yaw_error_command_gap_gapfill"
+YAW_ERROR_COMMAND_GAP_LOW_SPEED_PROFILE = "yaw_error_command_gap_lowspeed_gapfill"
+YAW_ERROR_MIDSPEED_STEERING_PROFILE = "yaw_error_midspeed_steering_gapfill"
+YAW_ERROR_MIDSPEED_STEERING_SPEEDS_MPS = (4.5, 6.5)
+YAW_ERROR_MIDSPEED_STEERING_ANGLES_RAD = (0.15, 0.20)
+YAW_ERROR_HIGHSPEED_STEERING_PROFILE = "yaw_error_highspeed_steering_gapfill"
+YAW_ERROR_HIGHSPEED_STEERING_POINTS = (
+    (10.5, 0.14), (10.5, 0.20), (11.1, 0.12), (11.1, 0.18),
+)
+YAW_ERROR_LOWSPEED_STEERING_PROFILE = "yaw_error_lowspeed_steering_gapfill"
+YAW_ERROR_LOWSPEED_STEERING_POINTS = (
+    (1.5, 0.35), (1.5, 0.50), (2.5, 0.35), (2.5, 0.50),
+)
+YAW_ERROR_COMMAND_GAP_MODES = (("step", 0.025), ("ramp", 0.30))
+YAW_ERROR_COMMAND_GAP_DELAYS_S = (0.25, 0.75)
+YAW_ERROR_COMMAND_GAP_POINTS = (
+    (6.5, 0.104), (7.0, 0.104),
+    (8.5, 0.075), (8.5, 0.104),
+    (9.5, 0.075), (9.5, 0.104),
+)
+YAW_ERROR_COMMAND_GAP_LOW_SPEED_POINTS = (
+    (4.5, 0.075), (4.5, 0.104),
+    (5.5, 0.075), (5.5, 0.104),
+)
+YAW_ERROR_WHEELSPIN_PROFILE = "yaw_error_wheelspin_gapfill"
+YAW_ERROR_WHEELSPIN_POINTS = (
+    (8.5, 0.06), (8.5, 0.10),
+    (9.5, 0.06), (9.5, 0.10),
+    (11.0, 0.06), (11.0, 0.10),
+)
+YAW_ERROR_WHEELSPIN_MODES = (("step", 0.0), ("ramp", 0.30))
+YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE = (
+    "yaw_error_lowspeed_wheelspin_gapfill")
+YAW_ERROR_MIDSPEED_THROTTLE_PROFILE = (
+    "yaw_error_midspeed_throttle_gapfill")
+YAW_ERROR_LOWSPEED_WHEELSPIN_POINTS = (
+    (0.75, 0.35), (0.75, 0.50),
+    (1.25, 0.20), (1.25, 0.42),
+    (1.75, 0.35), (1.75, 0.50),
+    (2.50, 0.25), (2.50, 0.35),
+    (2.50, 0.42), (2.50, 0.50),
+    (3.50, 0.20), (3.50, 0.35),
+)
+YAW_ERROR_LOWSPEED_WHEELSPIN_DELTAS = (0.05, 0.10, 0.20)
+YAW_LOW_SPEED_THROTTLE_CALIBRATION = (
+    # First five points are final-two-second truth-speed medians from the
+    # reset-isolated 1--5% calibration capture. The last preserves the prior
+    # nominal 2.5 m/s feedforward anchor. Pair throttle fraction with speed.
+    (0.244, 0.01), (0.489, 0.02), (0.732, 0.03),
+    (0.974, 0.04), (1.213, 0.05), (2.5, 0.10),
+)
+YAW_ERROR_MIDSPEED_THROTTLE_POINTS = (
+    (2.5, 0.15),
+    (4.5, 0.275), (4.5, 0.42),
+    (6.5, 0.15), (6.5, 0.275), (6.5, 0.42),
+    (8.0, 0.42),
+)
+YAW_ERROR_MIDSPEED_THROTTLE_DELTAS = (0.04, 0.08)
+YAW_ERROR_MIDSPEED_THROTTLE_DIRECTIONS = ("up", "down")
+YAW_ERROR_RESIDUAL_GRID_PROFILE = "yaw_error_residual_steering_grid_gapfill"
+YAW_ERROR_RESIDUAL_GRID_POINTS = (
+    (1.5, 0.15), (1.5, 0.25),
+    (3.5, 0.15), (3.5, 0.25),
+    (4.5, 0.42),
+    (6.5, 0.25), (6.5, 0.42),
+    (8.5, 0.15), (8.5, 0.25), (8.5, 0.42),
+)
+YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE = (
+    "yaw_error_lowspeed_highsteer_replication")
+YAW_ERROR_LOWSPEED_HIGHSTEER_POINTS = tuple(
+    (speed, angle)
+    for speed in (1.5, 2.5, 3.5)
+    for angle in (0.35, 0.42, 0.50)
+)
+YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE = (
+    "yaw_error_highsteer_reversal_gapfill")
+YAW_ERROR_HIGHSTEER_REVERSAL_POINTS = (
+    (3.0, 0.42), (3.0, 0.50),
+    (3.5, 0.42), (3.5, 0.50),
+    (4.0, 0.35), (4.0, 0.42),
+)
+YAW_ERROR_HIGHSTEER_REVERSAL_MODES = (
+    ("step", 0.025), ("ramp", 0.10), ("ramp", 0.30),
+)
+YAW_ERROR_CRAWL_THROTTLE_CALIBRATION_PROFILE = (
+    "yaw_error_crawl_throttle_calibration")
+YAW_ERROR_CRAWL_THROTTLE_LEVELS = (0.01, 0.02, 0.03, 0.04, 0.05)
+YAW_ERROR_CRAWL_THROTTLE_STEERING_RAD = (
+    0.0, -0.20, 0.20, -0.35, 0.35, -0.50, 0.50,
+)
+YAW_ERROR_CRAWL_THROTTLE_REPEATS = 2
+YAW_ERROR_CRAWL_THROTTLE_HOLD_S = 8.0
+YAW_ERROR_CRAWL_STEERING_PROFILE = "yaw_error_crawl_steering_gapfill"
+YAW_ERROR_CRAWL_STEERING_POINTS = tuple(
+    (speed, angle)
+    for speed in (0.60, 1.00)
+    for angle in (0.20, 0.35, 0.50)
+)
+YAW_ERROR_CRAWL_FINE_PROFILE = "yaw_error_crawl_fine_gapfill"
+YAW_ERROR_CRAWL_FINE_POINTS = tuple(
+    (speed, angle)
+    for speed in (0.35, 0.45, 0.65, 0.90, 1.20, 1.45)
+    for angle in (0.10, 0.20, 0.35, 0.50)
+)
+YAW_ERROR_SUBCRAWL_STEERING_PROFILE = (
+    "yaw_error_subcrawl_steering_gapfill")
+YAW_ERROR_SUBCRAWL_STEERING_POINTS = tuple(
+    (speed, angle)
+    for speed in (0.24, 0.49)
+    for angle in (0.25, 0.40, 0.50)
+)
 YAW_TRANSIENT_PROFILES = (
     LOW_SPEED_TRANSIENT_PROFILE, YAW_TRANSIENT_PROFILE,
     YAW_ATLAS_INTERPOLATION_PROFILE, YAW_ATLAS_OFFGRID_FINAL_PROFILE,
@@ -244,14 +373,34 @@ YAW_TRANSIENT_PROFILES = (
     YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
     YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
     YAW_FULLBAND_GAPFILL_PROFILE, YAW_UNWIND_THROTTLE_PROFILE,
-    YAW_LOW_ANGLE_RATE_PROFILE,
+    YAW_LOW_ANGLE_RATE_PROFILE, YAW_MISMATCH_TRANSITION_PROFILE,
+    YAW_CELL_MISMATCH_TRANSITION_PROFILE,
+    YAW_ERROR_STEERING_EVENT_PROFILE,
+    YAW_ERROR_COMMAND_GAP_PROFILE,
+    YAW_ERROR_COMMAND_GAP_LOW_SPEED_PROFILE,
+    YAW_ERROR_MIDSPEED_STEERING_PROFILE,
+    YAW_ERROR_HIGHSPEED_STEERING_PROFILE,
+    YAW_ERROR_LOWSPEED_STEERING_PROFILE,
+    YAW_ERROR_WHEELSPIN_PROFILE,
+    YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE,
+    YAW_ERROR_MIDSPEED_THROTTLE_PROFILE,
+    YAW_ERROR_RESIDUAL_GRID_PROFILE,
+    YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE,
+    YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE,
+    YAW_ERROR_CRAWL_THROTTLE_CALIBRATION_PROFILE,
+    YAW_ERROR_CRAWL_STEERING_PROFILE,
+    YAW_ERROR_CRAWL_FINE_PROFILE,
+    YAW_ERROR_SUBCRAWL_STEERING_PROFILE,
 )
 
 
 def _is_yaw_transient_approach(label: str) -> bool:
     return label.startswith(("approach_lowdyn_", "approach_yawdyn_",
                              "approach_atlas_", "approach_yawgap_",
-                             "approach_yawbrake_",
+                             "approach_yawbrake_", "approach_yawmis_",
+                             "approach_yawmisgap_",
+                             "approach_yawerr_",
+                             "approach_yawerr_crawl_throttle_",
                              "approach_lowyaw_"))
 
 
@@ -259,6 +408,26 @@ RACE_DOMAIN_SPEED_GOVERNED_PROFILES = (
     *DYNAMIC_COUPLED_PROFILES,
     *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
     *YAW_TRANSIENT_PROFILES,
+)
+EXPERIMENT_PROFILE_CHOICES = (
+    "high_angle_boundary", "isolated_boundary", "isolated_speed_sweep",
+    "isolated_force_3mps", "isolated_force_4mps", "isolated_force_5mps",
+    "isolated_highspeed_surface", "isolated_highsteer_75_long",
+    "isolated_highsteer_multispeed", "race_domain_dynamic_steering",
+    *YAW_TRANSIENT_PROFILES,
+    "isolated_3to5_response_surface", "isolated_highspeed_crossfactor",
+    "isolated_highspeed_tail", "isolated_transition_65mps",
+    "isolated_transition_45mps", "isolated_transition_speed_surface",
+    "isolated_transition_support", "isolated_transition_bridge",
+    "isolated_transition_low_support", "isolated_transition_full_surface",
+    "transient_4mps", "transient_fullsteer_4mps",
+    "transient_transition_4mps", "transient_transition_4mps_fixedthrottle",
+    "transient_transition_dwell_4mps_fixedthrottle", "throttle_slew_pair",
+    *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
+    "full_input_excitation", "race_domain_continuous",
+    "race_domain_brake_boundary", "race_domain_moderate_braking",
+    "race_domain_steering_frontier", *DYNAMIC_COUPLED_PROFILES,
+    "subnet_highsteer_transients", "grid",
 )
 SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD = (
     (4.5, (0.30, 0.42)),
@@ -447,6 +616,24 @@ def _nominal_feedforward(speed_mps: float) -> float:
             fraction = (speed_mps - low_speed) / (high_speed - low_speed)
             return low_throttle + fraction * (high_throttle - low_throttle)
     return THROTTLE_FEEDFORWARD[-1]
+
+
+def _low_speed_wheelspin_feedforward(speed_mps: float) -> float:
+    """Interpolate the measured low-speed throttle/speed calibration.
+
+    This is only experiment-controller feedforward for matched low-speed
+    steering/slip probes. It does not alter simulator physics or production
+    odometry/MPC behavior.
+    """
+    anchors = YAW_LOW_SPEED_THROTTLE_CALIBRATION
+    if speed_mps <= anchors[0][0]:
+        return anchors[0][1] * max(0.0, speed_mps) / anchors[0][0]
+    for (low_speed, low_throttle), (high_speed, high_throttle) in zip(
+            anchors, anchors[1:]):
+        if speed_mps <= high_speed:
+            fraction = (speed_mps - low_speed) / (high_speed - low_speed)
+            return low_throttle + fraction * (high_throttle - low_throttle)
+    return _nominal_feedforward(speed_mps)
 
 
 def _steering_waypoints(
@@ -1094,6 +1281,70 @@ def _race_domain_throttle_rate_phases(seed: int, speed: float) -> list[Phase]:
     return phases
 
 
+def _yaw_error_steering_transition_phases(
+        seed: int, label_family: str,
+        points: tuple[tuple[float, float], ...],
+        event_families: tuple[str, ...],
+        validate_speed: bool = False,
+        transition_modes: tuple[tuple[str, float], ...] =
+        YAW_ERROR_COMMAND_GAP_MODES,
+        response_delays: tuple[float, ...] =
+        YAW_ERROR_COMMAND_GAP_DELAYS_S) -> list[Phase]:
+    """Build paired turn-in/unwind/reversal probes for one error region."""
+    allowed_events = {"onset", "unwind", "reversal"}
+    if not event_families or not set(event_families) <= allowed_events:
+        raise ValueError("unsupported yaw steering event family")
+    conditions = [
+        (family, speed, angle, sign, mode, ramp_s, delay_s)
+        for family in event_families
+        for speed, angle in points
+        for sign in (-1.0, 1.0)
+        for mode, ramp_s in transition_modes
+        for delay_s in response_delays
+    ]
+    random.Random(seed).shuffle(conditions)
+    phases: list[Phase] = []
+    for family, speed, angle, sign, mode, ramp_s, delay_s in conditions:
+        if family == "onset":
+            start, target = 0.0, sign * angle
+        elif family == "unwind":
+            start, target = sign * angle, 0.0
+        else:
+            start, target = sign * angle, -sign * angle
+        pair_id = (
+            f"{family}_v{speed:.2f}_a{angle:.3f}_"
+            f"turn{sign:+.0f}_delay{delay_s:.2f}")
+        mode_name = f"{mode}{ramp_s:.3f}s"
+        transition_end = delay_s + (0.025 if mode == "step" else ramp_s)
+        probe_duration = delay_s + 1.50
+        phases.extend((
+            Phase(
+                f"approach_yawerr_{label_family}_{pair_id}_{mode_name}",
+                10.0, speed, throttle_mode="race_domain_approach",
+                reach_speed_target=True, condition_pair_id=pair_id),
+            Phase(
+                f"settle_yawerr_{label_family}_{pair_id}_{mode_name}",
+                0.75, speed, steering_rad=start,
+                throttle_mode="race_domain_hold",
+                condition_pair_id=pair_id),
+            Phase(
+                f"probe_yawerr_{label_family}_{pair_id}_{mode_name}",
+                probe_duration, speed, throttle_mode="race_domain_hold",
+                validate_samples=True, validate_speed=validate_speed,
+                validate_steering=False, condition_pair_id=pair_id,
+                steering_profile="waypoints",
+                steering_amplitude_rad=angle,
+                steering_waypoints=(
+                    (0.00, start), (delay_s, start),
+                    (transition_end, target),
+                    (delay_s + 1.25, target),
+                    (probe_duration, 0.0),
+                ),
+            ),
+        ))
+    return phases
+
+
 def build_schedule(seed: int, profile: str = "high_angle_boundary",
                   transition_speed_mps: float = 4.5,
                   throttle_rate_sweep_delta_norm: float =
@@ -1399,6 +1650,549 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                             (3.05, -sign * 0.025),
                             (3.25, 0.0),
                             (4.00, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_MISMATCH_TRANSITION_PROFILE:
+            conditions = [
+                (repeat, manoeuvre, mode, sign)
+                for repeat in range(1, YAW_MISMATCH_TRANSITION_REPEATS + 1)
+                for manoeuvre in ("onset", "reversal")
+                for mode in YAW_MISMATCH_TRANSITION_MODES
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for repeat, manoeuvre, mode, sign in conditions:
+                is_reversal = manoeuvre == "reversal"
+                speed = (YAW_MISMATCH_REVERSAL_SPEED_MPS if is_reversal
+                         else YAW_MISMATCH_ONSET_SPEED_MPS)
+                angle = (YAW_MISMATCH_REVERSAL_STEERING_RAD if is_reversal
+                         else YAW_MISMATCH_ONSET_STEERING_RAD)
+                condition = (
+                    f"r{repeat:02d}_{manoeuvre}_v{speed:.2f}_a{angle:.3f}_"
+                    f"{mode}_turn{sign:+.0f}")
+                if is_reversal:
+                    probe_duration = 2.30
+                    start_value = sign * angle
+                    end_value = -start_value
+                    if mode == "step":
+                        waypoints = (
+                            (0.00, start_value), (0.70, start_value),
+                            (0.725, end_value), (1.50, end_value),
+                            (1.525, 0.0), (probe_duration, 0.0),
+                        )
+                    else:
+                        waypoints = (
+                            (0.00, start_value), (0.70, start_value),
+                            (0.70 + YAW_MISMATCH_RAMP_S, end_value),
+                            (1.50, end_value),
+                            (1.50 + YAW_MISMATCH_RAMP_S, 0.0),
+                            (probe_duration, 0.0),
+                        )
+                    settle_steering = start_value
+                else:
+                    probe_duration = 2.00
+                    target = sign * angle
+                    if mode == "step":
+                        waypoints = (
+                            (0.00, 0.0), (0.20, 0.0), (0.225, target),
+                            (1.20, target), (1.225, 0.0),
+                            (probe_duration, 0.0),
+                        )
+                    else:
+                        waypoints = (
+                            (0.00, 0.0), (0.20, 0.0),
+                            (0.20 + YAW_MISMATCH_RAMP_S, target),
+                            (1.20, target),
+                            (1.20 + YAW_MISMATCH_RAMP_S, 0.0),
+                            (probe_duration, 0.0),
+                        )
+                    settle_steering = 0.0
+                phases.extend((
+                    Phase(
+                        f"approach_yawmis_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawmis_{condition}", 0.75, speed,
+                        steering_rad=settle_steering,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"yawmis_{condition}", probe_duration, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=waypoints,
+                    ),
+                ))
+            return phases
+        if profile == YAW_CELL_MISMATCH_TRANSITION_PROFILE:
+            # The held-out worst case is inside an existing speed/steering
+            # cell but has command-feedback mismatch absent from training.
+            # Start at the measured physical-steering state, then command
+            # just across zero. The signed target reproduces the observed
+            # +/-0.1184 rad mismatch; step and 0.30 s ramp separate actuator
+            # transition history from the steady yaw response.
+            conditions = [
+                (repeat, mode, sign)
+                for mode in ("step", "ramp")
+                for repeat in range(
+                    1,
+                    (YAW_CELL_MISMATCH_STEP_REPEATS if mode == "step"
+                     else YAW_CELL_MISMATCH_RAMP_REPEATS) + 1,
+                )
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for repeat, mode, sign in conditions:
+                start_steering = sign * YAW_CELL_MISMATCH_STEERING_RAD
+                target_command = -sign * YAW_CELL_MISMATCH_COMMAND_RAD
+                condition = (
+                    f"r{repeat:02d}_{mode}_v{YAW_CELL_MISMATCH_SPEED_MPS:.3f}_"
+                    f"a{YAW_CELL_MISMATCH_STEERING_RAD:.4f}_turn{sign:+.0f}")
+                if mode == "step":
+                    waypoints = (
+                        (0.00, start_steering), (0.20, start_steering),
+                        (0.225, target_command), (1.50, target_command),
+                    )
+                else:
+                    waypoints = (
+                        (0.00, start_steering), (0.20, start_steering),
+                        (0.20 + YAW_CELL_MISMATCH_RAMP_S, target_command),
+                        (1.50, target_command),
+                    )
+                phases.extend((
+                    Phase(
+                        f"approach_yawmisgap_{condition}", 10.0,
+                        YAW_CELL_MISMATCH_SPEED_MPS,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawmisgap_{condition}", 0.75,
+                        YAW_CELL_MISMATCH_SPEED_MPS,
+                        steering_rad=start_steering,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"yawmisgap_{condition}", 1.50,
+                        YAW_CELL_MISMATCH_SPEED_MPS,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=YAW_CELL_MISMATCH_STEERING_RAD,
+                        steering_waypoints=waypoints,
+                    ),
+                ))
+            return phases
+        if profile == YAW_ERROR_STEERING_EVENT_PROFILE:
+            # Held-out tails show that steady speed/angle support is not the
+            # missing dimension: command-transition age is. Randomize both
+            # onset/reversal dwell and step-vs-ramp response, while keeping
+            # each paired member reset-isolated and speed-matched.
+            conditions = []
+            for family, speed, angles in (
+                    ("onset", 5.0, (0.20, 0.28)),
+                    ("reversal", 3.5, (0.35, 0.42))):
+                for angle in angles:
+                    for sign in (-1.0, 1.0):
+                        for mode, ramp_s in YAW_ERROR_STEERING_EVENT_MODES:
+                            for delay_s in YAW_ERROR_STEERING_EVENT_DELAYS_S:
+                                conditions.append(
+                                    (family, speed, angle, sign, mode,
+                                     ramp_s, delay_s))
+            rng.shuffle(conditions)
+            for family, speed, angle, sign, mode, ramp_s, delay_s in conditions:
+                is_reversal = family == "reversal"
+                start = sign * angle if is_reversal else 0.0
+                target = -start if is_reversal else sign * angle
+                mode_name = f"{mode}{ramp_s:.3f}s"
+                pair_id = (
+                    f"{family}_v{speed:.2f}_a{angle:.3f}_"
+                    f"turn{sign:+.0f}_delay{delay_s:.2f}")
+                transition_end = delay_s + (
+                    0.025 if mode == "step" else ramp_s)
+                probe_duration = delay_s + 1.50
+                waypoints = (
+                    (0.00, start),
+                    (delay_s, start),
+                    (transition_end, target),
+                    (delay_s + 1.25, target),
+                    (probe_duration, 0.0),
+                )
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_steer_{pair_id}_{mode_name}",
+                        10.0, speed, throttle_mode="race_domain_approach",
+                        reach_speed_target=True, condition_pair_id=pair_id),
+                    Phase(
+                        f"settle_yawerr_steer_{pair_id}_{mode_name}",
+                        0.75, speed, steering_rad=start,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=pair_id),
+                    Phase(
+                        f"probe_yawerr_steer_{pair_id}_{mode_name}",
+                        probe_duration, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True, validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=pair_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=waypoints,
+                    ),
+                ))
+            return phases
+        if profile in (YAW_ERROR_COMMAND_GAP_PROFILE,
+                       YAW_ERROR_COMMAND_GAP_LOW_SPEED_PROFILE):
+            # Bracket the held-out 6.5–9.5 m/s small-angle command/feedback
+            # mismatch tail. Physical steering begins on one side; the
+            # requested command crosses just through zero. Two event ages
+            # probe whether the residual is tied to response phase.
+            points = (YAW_ERROR_COMMAND_GAP_LOW_SPEED_POINTS
+                      if profile == YAW_ERROR_COMMAND_GAP_LOW_SPEED_PROFILE
+                      else YAW_ERROR_COMMAND_GAP_POINTS)
+            conditions = [
+                (speed, angle, sign, mode, ramp_s, delay_s)
+                for speed, angle in points
+                for sign in (-1.0, 1.0)
+                for mode, ramp_s in YAW_ERROR_COMMAND_GAP_MODES
+                for delay_s in YAW_ERROR_COMMAND_GAP_DELAYS_S
+            ]
+            rng.shuffle(conditions)
+            for speed, angle, sign, mode, ramp_s, delay_s in conditions:
+                start = sign * angle
+                target = -sign * YAW_CELL_MISMATCH_COMMAND_RAD
+                pair_id = (
+                    f"v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}_"
+                    f"delay{delay_s:.2f}")
+                transition_end = delay_s + (
+                    0.025 if mode == "step" else ramp_s)
+                probe_duration = delay_s + 1.25
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_gap_{pair_id}_{mode}", 10.0,
+                        speed, throttle_mode="race_domain_approach",
+                        reach_speed_target=True, condition_pair_id=pair_id),
+                    Phase(
+                        f"settle_yawerr_gap_{pair_id}_{mode}", 0.75,
+                        speed, steering_rad=start,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=pair_id),
+                    Phase(
+                        f"probe_yawerr_gap_{pair_id}_{mode}",
+                        probe_duration, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True, validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=pair_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, start), (delay_s, start),
+                            (transition_end, target),
+                            (probe_duration, target),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_ERROR_MIDSPEED_STEERING_PROFILE:
+            # The expanded speed-by-steering audit found >0.1 rad/s tails in
+            # the 4–8 m/s, 0.1–0.2 rad band despite dense steady-state data.
+            # Pair turn-in and reversal with matched step/ramp timing so this
+            # captures transition/history support rather than more holds.
+            points = tuple(
+                (speed, angle)
+                for speed in YAW_ERROR_MIDSPEED_STEERING_SPEEDS_MPS
+                for angle in YAW_ERROR_MIDSPEED_STEERING_ANGLES_RAD)
+            return _yaw_error_steering_transition_phases(
+                seed, "mid", points, ("onset", "reversal"))
+        if profile == YAW_ERROR_HIGHSPEED_STEERING_PROFILE:
+            # The 10–12 m/s audit has residuals above 0.1 rad/s but its
+            # steering cells are thinner and transition timing is not
+            # represented by the existing captures. Use turn-in/unwind only,
+            # up to the measured 10.5/11.1 m/s steering-frontier angles.
+            return _yaw_error_steering_transition_phases(
+                seed, "high", YAW_ERROR_HIGHSPEED_STEERING_POINTS,
+                ("onset", "unwind"))
+        if profile == YAW_ERROR_LOWSPEED_STEERING_PROFILE:
+            # High residuals at 0–2 m/s have only a few independent training
+            # sequences. Add reset-isolated high-steer onset and reversal
+            # below 3 m/s, where the existing measured input envelope permits
+            # up to 0.5236 rad.
+            return _yaw_error_steering_transition_phases(
+                seed, "low", YAW_ERROR_LOWSPEED_STEERING_POINTS,
+                ("onset", "reversal"))
+        if profile == YAW_ERROR_RESIDUAL_GRID_PROFILE:
+            # The held-out speed-by-steering audit still has failing cells
+            # between the first targeted profiles. Fill those exact measured
+            # cells with paired onset/reversal tests; do not extrapolate the
+            # vehicle's steering frontier to make the grid look rectangular.
+            return _yaw_error_steering_transition_phases(
+                seed, "residual", YAW_ERROR_RESIDUAL_GRID_POINTS,
+                ("onset", "reversal"))
+        if profile == YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE:
+            # Replicate the remaining low-speed/high-steer tail, which still
+            # has few independent runs and large multi-step error after the
+            # first targeted fit. Keep populated mid/high-speed cells out of
+            # this schedule; they need model changes, not more repeated data.
+            return _yaw_error_steering_transition_phases(
+                seed, "lowhigh",
+                YAW_ERROR_LOWSPEED_HIGHSTEER_POINTS,
+                ("onset", "reversal"))
+        if profile == YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE:
+            # The largest held-out miss is a fast steering reversal around
+            # 3.5 m/s and +/-0.50 rad. Static bins are dense, but the exact
+            # reversal sequence has only nine training episodes. Add distinct
+            # 25/100/300 ms transitions at two response ages, both directions,
+            # and only at measured speed/steering combinations.
+            return _yaw_error_steering_transition_phases(
+                seed, "highsteer_reversal",
+                YAW_ERROR_HIGHSTEER_REVERSAL_POINTS,
+                ("onset", "unwind", "reversal"),
+                validate_speed=True,
+                transition_modes=YAW_ERROR_HIGHSTEER_REVERSAL_MODES)
+        if profile == YAW_ERROR_CRAWL_THROTTLE_CALIBRATION_PROFILE:
+            # Previous crawl probes did not hold their requested speeds.
+            # Measure the actual low-throttle speed surface directly rather
+            # than collecting another target-speed-labelled crawl matrix.
+            conditions = [
+                (throttle, steering, repetition)
+                for throttle in YAW_ERROR_CRAWL_THROTTLE_LEVELS
+                for steering in YAW_ERROR_CRAWL_THROTTLE_STEERING_RAD
+                for repetition in range(1,
+                                       YAW_ERROR_CRAWL_THROTTLE_REPEATS + 1)
+            ]
+            random.Random(seed).shuffle(conditions)
+            for throttle, steering, repetition in conditions:
+                condition_id = (
+                    f"t{throttle * 100:02.0f}_a{steering:+.3f}_r{repetition:02d}")
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_crawl_throttle_{condition_id}",
+                        0.50, 0.0, throttle_mode="fixed", throttle_norm=0.0,
+                        reach_speed_target=True, condition_pair_id=condition_id),
+                    Phase(
+                        f"settle_yawerr_crawl_throttle_{condition_id}",
+                        0.50, 0.0, steering_rad=steering,
+                        throttle_mode="fixed", throttle_norm=0.0,
+                        condition_pair_id=condition_id),
+                    Phase(
+                        f"probe_yawerr_crawl_throttle_{condition_id}",
+                        YAW_ERROR_CRAWL_THROTTLE_HOLD_S, 0.0,
+                        steering_rad=steering,
+                        throttle_mode="fixed", throttle_norm=throttle,
+                        validate_samples=True, validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition_id),
+                ))
+            return phases
+        if profile == YAW_ERROR_CRAWL_STEERING_PROFILE:
+            # The 0.5–1.5 m/s high-steer bins have only a handful of
+            # independent training sequences. Test them at stable crawl
+            # speeds; straight-line speed approaches do not cover these
+            # steering/speed combinations.
+            return _yaw_error_steering_transition_phases(
+                seed, "crawl", YAW_ERROR_CRAWL_STEERING_POINTS,
+                ("onset", "reversal"), validate_speed=True)
+        if profile == YAW_ERROR_CRAWL_FINE_PROFILE:
+            # The held-out audit identifies a contiguous low-speed support
+            # hole: below 0.5 m/s at nonzero steering, and 0.5–1.5 m/s across
+            # all steering bands. Cover that rectangle with signed onset and
+            # reversal, step/ramp, and two response ages; do not repeat the
+            # already well-populated 1.5–12 m/s operating region.
+            return _yaw_error_steering_transition_phases(
+                seed, "crawl_fine", YAW_ERROR_CRAWL_FINE_POINTS,
+                ("onset", "reversal"), validate_speed=True)
+        if profile == YAW_ERROR_SUBCRAWL_STEERING_PROFILE:
+            # The post-v5 audit still has only 5–6 independent training runs
+            # below 0.5 m/s at |steering| >= 0.2 rad, with held-out p95 yaw
+            # error above 0.1 rad/s. Use the measured 1%/2% throttle anchors
+            # and test turn-in, unwind, and reversal at matched crawl speed.
+            return _yaw_error_steering_transition_phases(
+                seed, "subcrawl", YAW_ERROR_SUBCRAWL_STEERING_POINTS,
+                ("onset", "unwind", "reversal"), validate_speed=True)
+        if profile == YAW_ERROR_WHEELSPIN_PROFILE:
+            # The remaining high-speed outliers often have near-zero steering
+            # command error but substantial rear-wheel/body-speed separation.
+            # Apply a paired throttle step/ramp only after a matched low-angle
+            # turn-in, then retain the measured feedback and wheel response.
+            conditions = [
+                (speed, angle, sign, direction, mode, ramp_s)
+                for speed, angle in YAW_ERROR_WHEELSPIN_POINTS
+                for sign in (-1.0, 1.0)
+                for direction in ("up", "cut")
+                for mode, ramp_s in YAW_ERROR_WHEELSPIN_MODES
+            ]
+            rng.shuffle(conditions)
+            for speed, angle, sign, direction, mode, ramp_s in conditions:
+                start_throttle = race_domain_feedforward(
+                    speed, _nominal_feedforward(speed))
+                delta = 0.03 if direction == "up" else -0.12
+                end_throttle = start_throttle + delta
+                if not 0.0 <= end_throttle <= MAX_THROTTLE:
+                    raise ValueError(
+                        f"yaw wheelspin target outside throttle range at {speed:g} m/s")
+                pair_id = (
+                    f"v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}_"
+                    f"{direction}_d{abs(delta):.3f}")
+                probe_duration = 2.50
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_wheel_{pair_id}_{mode}", 10.0,
+                        speed, throttle_mode="race_domain_approach",
+                        reach_speed_target=True, condition_pair_id=pair_id),
+                    Phase(
+                        f"probe_yawerr_wheel_{pair_id}_{mode}",
+                        probe_duration, speed,
+                        throttle_mode="slew_probe",
+                        validate_samples=True, validate_speed=False,
+                        validate_steering=False, settle_before_probe=True,
+                        probe_race_domain=True,
+                        throttle_profile=mode,
+                        throttle_start_norm=start_throttle,
+                        throttle_end_norm=end_throttle,
+                        throttle_stimulus_delay_s=0.80,
+                        throttle_ramp_duration_s=ramp_s,
+                        condition_pair_id=pair_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0), (0.20, 0.0),
+                            (0.45, sign * angle),
+                            (0.70, sign * angle),
+                            (1.80, sign * angle),
+                            (2.00, 0.0), (probe_duration, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE:
+            # Held-out failures include large wheel/body-speed mismatch at
+            # crawl-to-3.5 m/s and moderate/high steering, while several such
+            # joint strata have only tens to hundreds of training samples.
+            # Compare step/ramp increases to the same throttle endpoint after
+            # reaching matched speed and steering; retain actual feedback and
+            # wheel response to test the hypothesized slip mechanism.
+            conditions = [
+                (speed, angle, sign, delta, mode, ramp_s)
+                for speed, angle in YAW_ERROR_LOWSPEED_WHEELSPIN_POINTS
+                for sign in (-1.0, 1.0)
+                for delta in YAW_ERROR_LOWSPEED_WHEELSPIN_DELTAS
+                for mode, ramp_s in YAW_ERROR_WHEELSPIN_MODES
+            ]
+            rng.shuffle(conditions)
+            for speed, angle, sign, delta, mode, ramp_s in conditions:
+                start_throttle = _low_speed_wheelspin_feedforward(speed)
+                end_throttle = start_throttle + delta
+                if end_throttle > MAX_THROTTLE:
+                    raise ValueError(
+                        "low-speed yaw throttle target outside range at "
+                        f"{speed:g} m/s")
+                pair_id = (
+                    f"v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}_"
+                    f"up{delta:.3f}")
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_lowwheel_{pair_id}_{mode}",
+                        10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=pair_id),
+                    Phase(
+                        f"probe_yawerr_lowwheel_{pair_id}_{mode}",
+                        2.50, speed,
+                        throttle_mode="slew_probe",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        settle_before_probe=True,
+                        probe_race_domain=True,
+                        throttle_profile=mode,
+                        throttle_start_norm=start_throttle,
+                        throttle_end_norm=end_throttle,
+                        throttle_stimulus_delay_s=0.80,
+                        throttle_ramp_duration_s=ramp_s,
+                        condition_pair_id=pair_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0), (0.30, sign * angle),
+                            (0.60, sign * angle), (1.90, sign * angle),
+                            (2.10, 0.0), (2.50, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_ERROR_MIDSPEED_THROTTLE_PROFILE:
+            # Held-out joint cuts show a sparse 2–3 m/s, 0.1–0.2 rad throttle
+            # interaction plus 4–8 m/s moderate/high-steering throttle gaps.
+            # Pair up/down throttle steps with ramps at a matched endpoint;
+            # only add these runs if the frozen GRU/refit still fails those
+            # exact cells after the low-speed support capture.
+            conditions = [
+                (speed, angle, sign, direction, delta, mode, ramp_s)
+                for speed, angle in YAW_ERROR_MIDSPEED_THROTTLE_POINTS
+                for sign in (-1.0, 1.0)
+                for direction in YAW_ERROR_MIDSPEED_THROTTLE_DIRECTIONS
+                for delta in YAW_ERROR_MIDSPEED_THROTTLE_DELTAS
+                for mode, ramp_s in YAW_ERROR_WHEELSPIN_MODES
+            ]
+            rng.shuffle(conditions)
+            for speed, angle, sign, direction, delta, mode, ramp_s in conditions:
+                start_throttle = race_domain_feedforward(
+                    speed, _nominal_feedforward(speed))
+                signed_delta = delta if direction == "up" else -delta
+                end_throttle = start_throttle + signed_delta
+                if not 0.0 <= end_throttle <= MAX_THROTTLE:
+                    raise ValueError(
+                        "mid-speed yaw throttle target outside range at "
+                        f"{speed:g} m/s")
+                pair_id = (
+                    f"v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}_"
+                    f"{direction}_d{delta:.3f}")
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_midwheel_{pair_id}_{mode}",
+                        10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=pair_id),
+                    Phase(
+                        f"probe_yawerr_midwheel_{pair_id}_{mode}",
+                        2.50, speed,
+                        throttle_mode="slew_probe",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        settle_before_probe=True,
+                        probe_race_domain=True,
+                        throttle_profile=mode,
+                        throttle_start_norm=start_throttle,
+                        throttle_end_norm=end_throttle,
+                        throttle_stimulus_delay_s=0.80,
+                        throttle_ramp_duration_s=ramp_s,
+                        condition_pair_id=pair_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0), (0.30, sign * angle),
+                            (0.60, sign * angle), (1.90, sign * angle),
+                            (2.10, 0.0), (2.50, 0.0),
                         ),
                     ),
                 ))
@@ -2735,8 +3529,10 @@ class OpenPlaneExcitation:
         self.node.get_logger().info(
             f"experiment started at measured speed={self.speed_mps:.3f}m/s")
 
-    @staticmethod
-    def _feedforward(speed_target: float) -> float:
+    def _feedforward(self, speed_target: float) -> float:
+        if self.profile in (YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE,
+                            YAW_ERROR_SUBCRAWL_STEERING_PROFILE):
+            return _low_speed_wheelspin_feedforward(speed_target)
         return _nominal_feedforward(speed_target)
 
     def _phase_command(self, phase: Phase,
@@ -2824,7 +3620,25 @@ class OpenPlaneExcitation:
             return
         if self.started_at is None:
             if now - self.last_status_log >= 2.0:
-                self.node.get_logger().info("no actuator output until source odom arrives")
+                odom_age_s = (None if self.last_odom_at is None else
+                              max(0.0, now - self.last_odom_at))
+                collision_age_s = (
+                    None if self.last_collision_at is None else
+                    max(0.0, now - self.last_collision_at))
+                self.node.get_logger().info(
+                    "waiting for experiment readiness: "
+                    f"odom={self.speed_mps is not None} "
+                    f"odom_age_s={odom_age_s} "
+                    f"collision_baseline_safe={self.collision_baseline_safe} "
+                    f"collision_initial={self.collision_initial} "
+                    f"collision_age_s={collision_age_s} "
+                    f"steering_command_subscribers="
+                    f"{self.steering_pub.get_subscription_count()} "
+                    f"throttle_command_subscribers="
+                    f"{self.throttle_pub.get_subscription_count()} "
+                    f"reset_command_subscribers="
+                    f"{None if self.reset_pub is None else self.reset_pub.get_subscription_count()} "
+                    f"ready_since={self.ready_since}")
                 self.last_status_log = now
             return
         elapsed = now - self.started_at
@@ -3273,52 +4087,11 @@ def main() -> int:
         description="Development-only open-plane actuator excitation (explore simulator only).")
     parser.add_argument("--seed", type=int, default=20260926,
                         help="deterministic steering phase order (default: 20260926)")
-    parser.add_argument("--profile", choices=("high_angle_boundary", "isolated_boundary",
-                                               "isolated_speed_sweep", "isolated_force_3mps",
-                                               "isolated_force_4mps",
-                                               "isolated_force_5mps",
-                                               "isolated_highspeed_surface",
-                                               "isolated_highsteer_75_long",
-                                               "isolated_highsteer_multispeed",
-                                               "race_domain_dynamic_steering",
-                                               LOW_SPEED_TRANSIENT_PROFILE,
-                                               YAW_TRANSIENT_PROFILE,
-                                               YAW_ATLAS_INTERPOLATION_PROFILE,
-                                               YAW_ATLAS_OFFGRID_FINAL_PROFILE,
-                                               YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
-                                               YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
-                                               YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
-                                               YAW_FULLBAND_GAPFILL_PROFILE,
-                                               YAW_UNWIND_THROTTLE_PROFILE,
-                                               YAW_LOW_ANGLE_RATE_PROFILE,
-                                               "isolated_3to5_response_surface",
-                                               "isolated_highspeed_crossfactor",
-                                               "isolated_highspeed_tail",
-                                               "isolated_transition_65mps",
-                                               "isolated_transition_45mps",
-                                               "isolated_transition_speed_surface",
-                                               "isolated_transition_support",
-                                               "isolated_transition_bridge",
-                                               "isolated_transition_low_support",
-                                               "isolated_transition_full_surface",
-                                               "transient_4mps",
-                                               "transient_fullsteer_4mps",
-                                               "transient_transition_4mps",
-                                               "transient_transition_4mps_fixedthrottle",
-                                               "transient_transition_dwell_4mps_fixedthrottle",
-                                               "throttle_slew_pair",
-                                               *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
-                                               "full_input_excitation",
-                                               "race_domain_continuous",
-                                               "race_domain_brake_boundary",
-                                               "race_domain_moderate_braking",
-                                               "race_domain_steering_frontier",
-                                               *DYNAMIC_COUPLED_PROFILES,
-                                               SUBNET_TRANSIENT_PROFILE, "grid"),
+    parser.add_argument("--profile", choices=EXPERIMENT_PROFILE_CHOICES,
                         default="high_angle_boundary",
                         help="isolated profiles recover near-straight speed/yaw/lateral-velocity state before each probe")
     parser.add_argument("--timeout-s", type=float, default=150.0,
-                        help="whole experiment timeout, bounded to (0, 1200] seconds")
+                        help="whole experiment timeout, bounded by profile-specific limits")
     parser.add_argument("--transition-speed-mps", type=float, default=4.5,
                         help="speed for transition surface/support profiles (3–8 m/s)")
     parser.add_argument("--probe-dwell-s", type=float, default=0.0,
@@ -3337,8 +4110,24 @@ def main() -> int:
                         default=SWERVE_THROTTLE_SLEW_DELTA_NORM,
                         help="positive throttle increment for the high-steer rate-sweep profile")
     args = parser.parse_args()
-    if not math.isfinite(args.timeout_s) or not 0.0 < args.timeout_s <= 1200.0:
-        parser.error("--timeout-s must be greater than 0 and no more than 1200")
+    if args.profile == YAW_ERROR_CRAWL_FINE_PROFILE:
+        maximum_timeout_s = 9000.0
+    elif args.profile == YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE:
+        maximum_timeout_s = 6000.0
+    elif args.profile in (
+            YAW_ERROR_RESIDUAL_GRID_PROFILE, YAW_ERROR_CRAWL_STEERING_PROFILE,
+            YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE,
+            YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE,
+            YAW_ERROR_MIDSPEED_THROTTLE_PROFILE,
+            YAW_ERROR_SUBCRAWL_STEERING_PROFILE):
+        maximum_timeout_s = 3600.0
+    else:
+        maximum_timeout_s = 1200.0
+    if (not math.isfinite(args.timeout_s)
+            or not 0.0 < args.timeout_s <= maximum_timeout_s):
+        parser.error(
+            f"--timeout-s must be greater than 0 and no more than "
+            f"{maximum_timeout_s:g} for {args.profile}")
     if args.profile == "race_domain_continuous" and args.timeout_s < 265.0:
         parser.error("race_domain_continuous requires --timeout-s >= 265")
     if args.profile == "race_domain_brake_boundary":
@@ -3372,6 +4161,20 @@ def main() -> int:
         schedule = build_schedule(args.seed, args.profile,
                                   args.transition_speed_mps)
         reset_cycles = len(build_dynamic_coupled_plan(args.seed))
+        required = (
+            sum(phase.duration_s for phase in schedule)
+            + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        if args.timeout_s < required:
+            parser.error(
+                f"{args.profile} requires --timeout-s >= {required:g}")
+    if args.profile == YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE:
+        schedule = build_schedule(args.seed, args.profile)
+        reset_cycles = sum(
+            phase.label.startswith(
+                "approach_yawerr_highsteer_reversal_")
+            for phase in schedule)
         required = (
             sum(phase.duration_s for phase in schedule)
             + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
