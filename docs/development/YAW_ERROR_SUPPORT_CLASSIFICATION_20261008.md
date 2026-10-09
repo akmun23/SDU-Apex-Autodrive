@@ -578,8 +578,9 @@ pilot itself remains data, not a validated low-speed capture.
    plateau steering samples within 0.05 rad. Its exported archive has 34,799
    samples in 216 reset-isolated sequences, 39.949–39.950 Hz sensor streams
    (p95 gaps 25.84–25.92 ms), zero packet-sequence gaps, and 99.997% packet
-   matching. The v5 refit is complete with 58 training runs and 34 independent
-   validation runs; test/final-test arrays were not read. Paired run-level
+   matching. The v5 fit actually used 54 full training runs (four short
+   captures were excluded from horizon fitting) and 34 independent validation
+   runs; test/final-test arrays were not read. Paired run-level
    RMSE is worse for the current-only model at all six horizons; the history
    model is statistically unchanged only at 25 ms and worse at 100–1000 ms.
    Therefore do not collect high-steer r03 merely to add samples. The post-fit
@@ -622,9 +623,9 @@ pilot itself remains data, not a validated low-speed capture.
    zero). The intended throttle changes produced actual post-stimulus
    wheel/body mismatch; speed rose substantially after some steps, so those
    observations must be modeled against measured state and not treated as
-   steady target-speed points. This archive postdates v5 and has not yet been
-   included in a refit. Include it with the new sub-crawl run before deciding
-   whether this interaction needs another capture.
+   steady target-speed points. This archive postdates v5 and was not included
+   in v6; v7 must include it before deciding whether this interaction needs
+   another capture.
 5. **Conditional 2.5–8 m/s throttle-gap suite:** if the frozen GRU/refit still
    fails the sparse joint cells after admitting wheel-spin r03 and the
    sub-crawl capture, use the existing `yaw_error_midspeed_throttle_gapfill`
@@ -701,8 +702,8 @@ mean no single measured roll or acceleration threshold explains the tail.
 
 ## Current targeted captures and next gating
 
-The bounded paired throttle-gap capture has two clean training runs and an
-independent validation run now in progress. For r01, all 112/112 intended
+The bounded paired throttle-gap capture has two clean training runs and one
+independent validation run, all complete. For r01, all 112/112 intended
 throttle changes followed feedback with the correct sign and approximately
 1.0 gain; 56 step/ramp pairs began at matched speed (median difference
 0.00006 m/s; maximum 0.00303 m/s). Its export has 22,168 samples in 120
@@ -755,23 +756,137 @@ The subsequent r03 completed all 288 phases and 144 probes. Preserve the
 partial bags but exclude them as complete-run training captures; do not rerun
 the whole wheelspin matrix unless the post-v6 exact-cell audit still shows a
 gap. The completed r03 wheelspin archive and r04 sub-crawl archive were added
-to v6, whose broad pooled scores are already trending worse; targeted
-low-speed cell scores, not global improvement alone, decide whether either
-addition was useful.
+to v6. The strict held-out audit below shows no global one-step or multistep
+improvement; the wheelspin validation cell regressed slightly. These captures
+remain valid evidence, but do not justify claiming a teacher improvement.
 
 The wheelspin r03 is not merely a generic low-speed repeat: its audit has
 nine probes near 3.55–3.94 m/s at 0.20 rad steering, with rear-wheel/body
 speed mismatch p90 above 0.5 m/s in four probes and above 1 m/s in three
 (maximum 3.95 m/s). That directly exercises the previously thin 3–4 m/s,
 moderate-steering, high-slip/high-lateral-acceleration interaction. This
-should increase relevant training support in v6; whether it reduces held-out
-error remains to be measured.
+should increase relevant training support in v6; the measured held-out
+one-step and multistep results below show no global improvement.
 
-Next: finish v6 and compare exact 250 ms interaction bins against v5; finish
-the r03 validation and then update the finite
-capture list only for residual bins that are both repeatedly above threshold
-and support-limited. Dense residuals, especially 1–4 m/s high steering and
-the 4–12 m/s operating region, are model-limited until evidence shows
-otherwise. The IMU channels are already inputs, so the next model diagnosis
-should test a recursively predicted slip/response state or transition
-representation—not fit another isolated static angle/speed table.
+## 40 Hz odometry relevance and latest held-out audit (2026-10-08)
+
+For odometry, the relevant teacher is the 25 ms / one-step model. The v5
+`current` variant uses only the current encoder, steering/throttle feedback,
+IMU acceleration/yaw-rate/attitude, and command already issued; the separate
+`history_1p6s` variant adds past observations. Simulator truth yaw-rate is
+only the target. No future sensor values, simulator pose, or truth-derived
+speed/sideslip are model inputs. The longer-horizon direct
+forecasts are different tasks: their training examples include the recorded
+command sequence throughout the forecast window. Their errors should not be
+used as the per-tick odometry score.
+
+The strict v5/v6 audits froze training sources to each fit report, scored all
+34 fit-validation runs plus the new independent paired-throttle validation
+run r03, and did not read test/final-test arrays. At 25 ms, v5 scores
+323,635 held-out samples: RMSE 0.05992 rad/s, p95 0.12258 rad/s, and 93.40%
+within 0.1 rad/s. Carrying the current gyro rate forward gives RMSE 0.09630,
+p95 0.20350, and 90.19% within 0.1. V5 beats that baseline on all 35 held-out
+runs; the paired run-macro RMSE improvement is 0.0321 rad/s (95% bootstrap
+interval 0.0267–0.0375). V5 is a real improvement in one-step rate
+prediction, but not a near-zero-error model. V6, after adding the
+completed wheelspin and sub-crawl training captures, is worse: RMSE 0.06296,
+p95 0.12684, and 92.76% within 0.1. Its 250 ms RMSE is 0.1049 rad/s versus
+v5's 0.0973, and 17.29% of v6 samples exceed 0.1 rad/s at that horizon. More
+rows alone did not buy accuracy.
+
+Using truth speed/absolute steering only as offline diagnostic labels, and
+requiring at least 100 validation samples and p95 above 0.1 rad/s, the
+one-step speed×steering grid has 22 failing cells for v5 (16 dense by
+≥1,000 training rows and ≥10 runs; six lack that support) and 24 for v6
+(18 dense, five intermediate, one sparse). The 25 ms failures are not all
+data gaps. Joint conditioning on steering feedback gap, throttle gap,
+wheel/body-speed mismatch, lateral acceleration, roll rate, and sideslip
+reveals more failures, but those tables overlap and are diagnostic bins, not
+independent model scores. The worst measured marginal failures include
+3–4 m/s at 0.1–0.2 rad (v5 p95 0.234 rad/s, 21 training runs) and
+4–6 m/s at 0.1–0.2 rad (p95 0.223, 29 training runs). A few sub-crawl/high-
+steering cells remain run-diversity limited; the rest should first be tested
+with one-step regime specialists, not another generic sweep.
+
+An additional causal one-step replay numerically integrated predicted yaw
+rate over contiguous held-out sequences without IMU-orientation correction.
+Across 1,373 reset/gap-isolated blocks, the model's p95 absolute terminal
+heading drift was 3.96° (maximum 20.75°); carrying the measured gyro rate
+forward was 2.00° p95 (maximum 4.83°). On two continuous 260 s validation
+captures, model peak drift was 22.10° and 49.06°, compared with 2.97° and
+4.14° for gyro persistence. The model improves instantaneous RMSE but has
+temporally correlated residuals and is not safe to substitute as a standalone
+gyro integrator.
+
+That replay is not the production odometry path. The current node integrates
+measured IMU gyro rate and, when the IMU quaternion step is within its 0.30 rad
+gate, applies a 1.0-gain quaternion correction at each packet; large quaternion
+jumps take the gyro-only fallback. Therefore these yaw-teacher metrics do not
+prove an odometry pose improvement. Do not replace the production gyro or
+integrate this teacher yet. The useful next experiment is a one-step,
+sensor-only regime-specialist comparison on the frozen whole-run train/validation
+split, followed by replay through the actual quaternion-correction policy and
+run-level heading/position error. Route experts only with runtime-available
+signals; truth speed/steering bins may diagnose and score offline but must not
+be used as an online gate. Collect new data only if that comparison identifies
+a specific repeatedly failing regime with insufficient independent-run
+support. No simulator was launched for this audit, and no runtime odom, MPC,
+or physics code was changed.
+
+### Complete threshold census of the frozen v2 atlas (2026-10-08)
+
+The row-level held-out census is saved at
+[`yaw_large_error_audit_v1/sensor_yaw_large_error_audit.json`](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/sensor_yaw_large_error_audit.json)
+and its full 5,871-row `|error| > 0.1 rad/s` list is
+[`selected_atlas_errors_over_0p1.csv`](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/selected_atlas_errors_over_0p1.csv).
+It covers 299,242 one-step transitions from 36 whole-run validation captures;
+test/final-test data were not read for fitting or scoring. The model target is
+next-tick simulator-GT yaw rate; no production odometry target or GT-derived
+feature/selector was used. GT speed, current GT yaw, and wheel-minus-GT speed
+are post-fit diagnostics only.
+
+The census has 5,871/299,242 errors above 0.1 rad/s (1.962%), RMSE 0.03694,
+p95 0.04012, and maximum 1.35362 rad/s. The event breakdown is hold
+596/232,199 (0.26%); reversal 754/2,722 (27.70%); turn-in 1,300/35,276
+(3.69%); unwind 3,221/29,045 (11.09%). Unwind contributes the largest number
+of outliers, but reversal has the highest per-sample failure rate.
+
+Local experts cover 89.08% of rows. Of large errors, 2,973 use a local expert
+(1.12% of locally covered rows) and 2,898 use the global event fallback
+(8.87% of fallback rows). Fallback error rate is 31.21% for reversal and
+12.48% for unwind; local-expert error rate is 15.06% for reversal and 9.61%
+for unwind. Unsupported regimes therefore amplify the tail, especially
+reversal, but are not the only issue: unwind/turn-in errors also happen inside
+trained local experts, and supported reversal remains poor. Of the local
+expert outliers, 780 have fewer than 120 training rows and 135 come from
+experts with only two independent training runs.
+
+Among outliers, 51.5% have a steering command/feedback gap above 0.05 rad;
+this occurs in 78.5% of reversal and 55.6% of unwind outliers. Only 3.8% have
+current IMU yaw differing from same-tick GT by >0.1 rad/s, 8.3% have
+wheel-vs-GT speed mismatch >1 m/s, and 13.2% have throttle
+command/feedback mismatch >0.05. These signatures overlap and do not prove
+causality. There are 1,983 outliers that cross none of the five tested
+thresholds; stale IMU, wheelspin, or actuator mismatch alone cannot explain
+the full tail. Errors occur in every measured speed band; 4–6 m/s has the
+largest band rate in this split at 3.46%, not an exclusive failing region.
+
+The largest coherent groups remain steering-release yaw collapse and
+command reversal ahead of measured feedback. The smaller packet-phase class
+is real but not the dominant explanation across all validation rows. This is
+one-step yaw-rate error, not recursive heading drift, full odometry, or
+full-lap MPC accuracy. Do not feed GT or `/bridge_packet_timing` to a runtime
+selector. The two-packet law remains a local comparator: its exact-mode gain
+does not transfer to the indistinguishable three-packet branch, and blind
+whole-cell use regressed.
+
+Follow-up analysis separated support-gap repair from remaining transient
+error. A train-only neighborhood candidate reduced the whole-run held-out
+count above 0.1 from 5,871 to 3,814, mainly by reducing unwind errors
+(3,221 to 1,208); reversal changed only 754 to 710. The r03 timing join found
+higher unwind and reversal errors in 3-packet than matched 2-packet
+transitions, but many 2-packet errors remain. The available legal sensor
+history does not yet distinguish the timing branch before steering feedback
+moves, and the large candidate artifact is not production-ready. Full metrics,
+matched conditions, and the next deterministic-phase investigation are in
+[`YAW_RESPONSE_REGIME_MAP_20261008.md`](YAW_RESPONSE_REGIME_MAP_20261008.md).

@@ -36,6 +36,15 @@ usage() {
     "yaw_atlas_extratrees_final tests six new off-grid points supported by the frozen ExtraTrees atlas, both turn directions and two reset-isolated repeats." \
     "yaw_atlas_extratrees_highsteer_final tests four new high-speed, high-steering off-grid points in supported steady-response cells, both directions and two reset-isolated repeats." \
     "yaw_highsteer_speed_surface_train fills the missing >=8 m/s, 0.35–0.50 rad yaw-response region at 8.25/8.75/9.25 m/s, both directions, two reset-isolated repeats." \
+    "yaw_highsteer_speed_frontier_validation independently measures 9.75–11.25 m/s at 0.35–0.50 rad, both directions and two reset-isolated repeats; phase tilt/collision interlocks remain active." \
+    "yaw_exact_two_domain_gapfill sweeps both directions at speed-bin centers for all 50 unsupported exact-two selector cells (31 unique speed/magnitude points), with two randomized repeats." \
+    "yaw_exact_two_edge_gapfill samples 0.25, 11.35, and 11.60 m/s at signed 0.05–0.50 rad steering increments; only this profile raises the speed governor to 11.65 m/s (12.0 m/s hard abort)." \
+    "yaw_full_spectrum_grid tests both steering directions every 0.05 rad and speed targets every 0.5 m/s from 0.25 through 11.75 m/s, with reset-isolated onset/unwind/reversal." \
+    "yaw_full_spectrum_midpoint_validation tests the complementary 0.25 m/s × 0.025 rad points across both steering directions, with reset-isolated onset/unwind/reversal." \
+    "yaw_high_speed_envelope_gapfill reaches speed straight, then probes 38 signed >=10.5 m/s coverage conditions." \
+    "yaw_sparse_cell_support repeats the measured weak 0.25 and 10.25–11.75 m/s cells with turn-in, unwind, and reversal." \
+    "yaw_sparse_crawl_cell_support uses the measured 1% throttle anchor to fill weak 0.244 m/s signed-steering cells." \
+    "yaw_exact_two_support_replication repeats the 38 speed/magnitude points whose signed bins lack 20 exact-two rows in two independent captures." \
     "yaw_fullband_gapfill_train adds two independent signed high-speed low-angle captures at exact atlas cells that the sealed final test found unsupported or inaccurate." \
     "yaw_unwind_throttle_slew_train pairs a 0.12 throttle cut (one-tick step vs 0.30 s ramp) with 8.75 m/s signed steering unwind through ±0.025 rad." \
     "yaw_frontier_throttle_slew_train pairs step/ramp cuts at 9.5 m/s and 0.14/0.18/0.20 rad, matching the held-out high-speed deceleration maneuvers." \
@@ -55,6 +64,8 @@ usage() {
     "yaw_error_residual_steering_grid_gapfill fills ten held-out failing speed/steering cells with randomized onset/reversal, both signs, step/ramp and two event ages." \
     "yaw_error_lowspeed_highsteer_replication adds independent 1.5/2.5/3.5 m/s, 0.35/0.42/0.50 rad onset/reversal runs." \
     "yaw_error_highsteer_reversal_gapfill adds a measured 3.0–4.0 m/s high-steer onset/unwind/reversal matrix with 25/100/300 ms transitions." \
+    "yaw_error_highsteer_reversal_residual_train repeats only exact-two error pockets at normal 40-Hz command rate: 3–4 m/s high-steer reversal and unwind." \
+    "yaw_error_packet_phase_gapfill repeats failing reversal/unwind conditions with 200-Hz steering setpoint updates during probes; the simulator bridge remains 40 Hz and measured request-phase coverage gates interpretation." \
     "yaw_error_crawl_throttle_calibration measures 1–5% fixed throttle at 0/±0.20/±0.35/±0.50 rad, randomized and reset-isolated." \
     "yaw_error_crawl_steering_gapfill covers sparse 0.60/1.00 m/s, 0.20/0.35/0.50 rad onset/reversal bins." \
     "yaw_error_crawl_fine_gapfill covers the sparse 0.35–1.45 m/s by 0.10–0.50 rad steering rectangle with signed onset/reversal, step/ramp, and two response ages." \
@@ -115,7 +126,14 @@ elif [[ "${profile}" == yaw_atlas_interpolation_validation ||
         "${profile}" == yaw_atlas_extratrees_final ||
         "${profile}" == yaw_atlas_extratrees_highsteer_final ||
         "${profile}" == yaw_highsteer_speed_surface_train ||
+        "${profile}" == yaw_highsteer_speed_frontier_validation ||
+        "${profile}" == yaw_exact_two_domain_gapfill ||
+        "${profile}" == yaw_exact_two_edge_gapfill ||
         "${profile}" == yaw_fullband_gapfill_train ||
+        "${profile}" == yaw_high_speed_envelope_gapfill ||
+        "${profile}" == yaw_sparse_cell_support ||
+        "${profile}" == yaw_sparse_crawl_cell_support ||
+        "${profile}" == yaw_exact_two_support_replication ||
         "${profile}" == yaw_mismatch_transition_train ||
         "${profile}" == yaw_cell_mismatch_transition_train ||
         "${profile}" == yaw_error_steering_event_gapfill ||
@@ -135,6 +153,18 @@ elif [[ "${profile}" == yaw_error_crawl_fine_gapfill ]]; then
   default_timeout_s=9000
 elif [[ "${profile}" == yaw_error_highsteer_reversal_gapfill ]]; then
   default_timeout_s=6000
+elif [[ "${profile}" == yaw_error_highsteer_reversal_residual_train ]]; then
+  default_timeout_s=6000
+elif [[ "${profile}" == yaw_full_spectrum_grid ]]; then
+  default_timeout_s=12000
+elif [[ "${profile}" == yaw_full_spectrum_midpoint_validation ]]; then
+  default_timeout_s=28000
+elif [[ "${profile}" == yaw_sparse_cell_support ]]; then
+  default_timeout_s=3600
+elif [[ "${profile}" == yaw_exact_two_support_replication ]]; then
+  default_timeout_s=3600
+elif [[ "${profile}" == yaw_error_packet_phase_gapfill ]]; then
+  default_timeout_s=2400
 elif [[ "${profile}" == yaw_error_crawl_throttle_calibration ]]; then
   default_timeout_s=1200
 elif [[ "${profile}" == yaw_low_angle_rate_surface ]]; then
@@ -205,6 +235,15 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == yaw_atlas_extratrees_final ||
       "${profile}" == yaw_atlas_extratrees_highsteer_final ||
       "${profile}" == yaw_highsteer_speed_surface_train ||
+      "${profile}" == yaw_highsteer_speed_frontier_validation ||
+      "${profile}" == yaw_exact_two_domain_gapfill ||
+      "${profile}" == yaw_exact_two_edge_gapfill ||
+      "${profile}" == yaw_full_spectrum_grid ||
+      "${profile}" == yaw_full_spectrum_midpoint_validation ||
+      "${profile}" == yaw_high_speed_envelope_gapfill ||
+      "${profile}" == yaw_sparse_cell_support ||
+      "${profile}" == yaw_sparse_crawl_cell_support ||
+      "${profile}" == yaw_exact_two_support_replication ||
       "${profile}" == yaw_fullband_gapfill_train ||
       "${profile}" == yaw_mismatch_transition_train ||
       "${profile}" == yaw_cell_mismatch_transition_train ||
@@ -220,6 +259,8 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == yaw_error_residual_steering_grid_gapfill ||
       "${profile}" == yaw_error_lowspeed_highsteer_replication ||
       "${profile}" == yaw_error_highsteer_reversal_gapfill ||
+      "${profile}" == yaw_error_highsteer_reversal_residual_train ||
+      "${profile}" == yaw_error_packet_phase_gapfill ||
       "${profile}" == yaw_error_crawl_throttle_calibration ||
       "${profile}" == yaw_error_crawl_steering_gapfill ||
       "${profile}" == yaw_error_crawl_fine_gapfill ||
@@ -262,6 +303,15 @@ case "${profile}" in
   yaw_atlas_extratrees_final|\
   yaw_atlas_extratrees_highsteer_final|\
   yaw_highsteer_speed_surface_train|\
+  yaw_highsteer_speed_frontier_validation|\
+  yaw_exact_two_domain_gapfill|\
+  yaw_exact_two_edge_gapfill|\
+  yaw_full_spectrum_grid|\
+  yaw_full_spectrum_midpoint_validation|\
+  yaw_high_speed_envelope_gapfill|\
+  yaw_sparse_cell_support|\
+  yaw_sparse_crawl_cell_support|\
+  yaw_exact_two_support_replication|\
   yaw_fullband_gapfill_train|\
   yaw_mismatch_transition_train|\
   yaw_cell_mismatch_transition_train|\
@@ -277,6 +327,8 @@ case "${profile}" in
   yaw_error_residual_steering_grid_gapfill|\
   yaw_error_lowspeed_highsteer_replication|\
   yaw_error_highsteer_reversal_gapfill|\
+  yaw_error_highsteer_reversal_residual_train|\
+  yaw_error_packet_phase_gapfill|\
   yaw_error_crawl_throttle_calibration|\
   yaw_error_crawl_steering_gapfill|\
   yaw_error_crawl_fine_gapfill|\

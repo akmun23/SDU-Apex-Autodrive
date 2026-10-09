@@ -52,6 +52,16 @@ COMMAND_RATE_FEATURE_NAMES = (
     "steering_command_rate_radps",
     "throttle_command_rate_per_s",
 )
+COMMAND_HISTORY_FEATURE_NAMES = (
+    "previous_steering_command_rate_radps",
+    "previous_throttle_command_rate_per_s",
+    "previous_steering_command_minus_feedback_rad",
+    "previous_throttle_command_minus_feedback_norm",
+)
+ACTUATOR_PREDICTION_FEATURE_NAMES = (
+    "predicted_next_steering_feedback_change_rad",
+    "predicted_steering_magnitude_decrease",
+)
 REAR_WHEEL_SPLIT_FEATURE_NAME = "rear_left_minus_right_surface_mps"
 LAGGED_HISTORY_FEATURE_NAMES = (
     "previous_yaw_rate_increment_radps",
@@ -67,6 +77,9 @@ FEATURE_SCALES = np.asarray((1.0, 0.1, 0.25, 0.0125, 1.6,
                              0.25, 1.0, 0.5, 0.5, 2.0), dtype=np.float64)
 COMMAND_ERROR_FEATURE_SCALES = np.asarray((0.10, 0.10), dtype=np.float64)
 COMMAND_RATE_FEATURE_SCALES = np.asarray((1.6, 1.0), dtype=np.float64)
+COMMAND_HISTORY_FEATURE_SCALES = np.asarray(
+    (1.6, 1.0, 0.10, 0.10), dtype=np.float64)
+ACTUATOR_PREDICTION_FEATURE_SCALES = np.asarray((0.08, 1.0), dtype=np.float64)
 REAR_WHEEL_SPLIT_FEATURE_SCALE = 0.5
 PHASES = (-1, 0, 1)  # unwind, steady/transition-neutral, turn-in
 
@@ -261,9 +274,15 @@ def _make_rows(series: RunSeries, phase_threshold: float = 0.05,
                include_rear_wheel_split: bool = False,
                include_lagged_history: bool = False,
                include_imu_roll: bool = False,
-               require_imu_roll: bool = False):
+               require_imu_roll: bool = False,
+               include_command_history: bool = False,
+               include_predicted_steering_change: bool = False,
+               include_steering_release_indicator: bool = False,
+               steering_release_rule: str = "magnitude_decrease"):
     if phase_threshold < 0.0 or not math.isfinite(phase_threshold):
         raise ValueError("phase threshold must be finite and non-negative")
+    if steering_release_rule not in ("magnitude_decrease", "same_sign_release"):
+        raise ValueError("unsupported steering-release rule")
     frames = series.frames.astype(np.float64, copy=False)
     rigid = series.rigid.astype(np.float64, copy=False)
     speed = np.hypot(rigid[:, 7], rigid[:, 8])
@@ -319,6 +338,37 @@ def _make_rows(series: RunSeries, phase_threshold: float = 0.05,
                     float((frames[k, 7] - frames[k - 1, 7]) / DT_S),
                     float((frames[k, 8] - frames[k - 1, 8]) / DT_S),
                 )
+            if include_command_history:
+                feature += (
+                    float((frames[k - 1, 7] - frames[k - 2, 7]) / DT_S),
+                    float((frames[k - 1, 8] - frames[k - 2, 8]) / DT_S),
+                    float(frames[k - 1, 7] - frames[k - 1, 3]),
+                    float(frames[k - 1, 8] - frames[k - 1, 4]),
+                )
+            if (include_predicted_steering_change
+                    or include_steering_release_indicator):
+                # Probe data show asymmetric actuator behavior. The default
+                # rule follows a delayed command directly whenever it reduces
+                # steering magnitude, including some sign reversals; the
+                # legacy comparison rule only allows same-sign release.
+                current_steering = float(frames[k, 3])
+                delayed_target = float(frames[k - 1, 7])
+                if steering_release_rule == "same_sign_release":
+                    is_magnitude_release = (
+                        current_steering * delayed_target >= -1.0e-6
+                        and abs(delayed_target) + 0.001 < abs(current_steering))
+                else:
+                    is_magnitude_release = abs(delayed_target) < abs(current_steering)
+                if is_magnitude_release:
+                    next_steering = delayed_target
+                else:
+                    max_step = 3.2 * DT_S
+                    next_steering = current_steering + float(np.clip(
+                        delayed_target - current_steering, -max_step, max_step))
+                if include_predicted_steering_change:
+                    feature += (next_steering - current_steering,)
+                if include_steering_release_indicator:
+                    feature += (float(is_magnitude_release),)
             if include_rear_wheel_split:
                 feature += (float(frames[k, 5] - frames[k, 6]),)
             if include_lagged_history:
@@ -446,7 +496,11 @@ def _bilinear(models: dict[tuple[int, ...], dict[str, Any]], x: np.ndarray,
 def run(output: Path, phase_threshold: float = 0.05,
         include_command_errors: bool = False,
         include_command_rates: bool = False,
-        include_rear_wheel_split: bool = False) -> dict[str, Any]:
+        include_rear_wheel_split: bool = False,
+        include_command_history: bool = False,
+        include_predicted_steering_change: bool = False,
+        include_steering_release_indicator: bool = False,
+        steering_release_rule: str = "magnitude_decrease") -> dict[str, Any]:
     if phase_threshold < 0.0 or not math.isfinite(phase_threshold):
         raise ValueError("phase threshold must be finite and non-negative")
     run_series, source_audit = _discover_run_series()
@@ -463,6 +517,18 @@ def run(output: Path, phase_threshold: float = 0.05,
         feature_names += COMMAND_RATE_FEATURE_NAMES
         feature_scales = np.concatenate((feature_scales,
                                          COMMAND_RATE_FEATURE_SCALES))
+    if include_command_history:
+        feature_names += COMMAND_HISTORY_FEATURE_NAMES
+        feature_scales = np.concatenate((feature_scales,
+                                         COMMAND_HISTORY_FEATURE_SCALES))
+    if include_predicted_steering_change:
+        feature_names += (ACTUATOR_PREDICTION_FEATURE_NAMES[0],)
+        feature_scales = np.concatenate((feature_scales,
+                                         ACTUATOR_PREDICTION_FEATURE_SCALES[:1]))
+    if include_steering_release_indicator:
+        feature_names += (ACTUATOR_PREDICTION_FEATURE_NAMES[1],)
+        feature_scales = np.concatenate((feature_scales,
+                                         ACTUATOR_PREDICTION_FEATURE_SCALES[1:]))
     if include_rear_wheel_split:
         feature_names += (REAR_WHEEL_SPLIT_FEATURE_NAME,)
         feature_scales = np.concatenate((
@@ -470,11 +536,23 @@ def run(output: Path, phase_threshold: float = 0.05,
             np.asarray((REAR_WHEEL_SPLIT_FEATURE_SCALE,), dtype=np.float64)))
     train_parts = [_make_rows(row, phase_threshold, include_command_errors,
                               include_command_rates,
-                              include_rear_wheel_split)
+                              include_rear_wheel_split,
+                              include_command_history=include_command_history,
+                              include_predicted_steering_change=(
+                                  include_predicted_steering_change),
+                              include_steering_release_indicator=(
+                                  include_steering_release_indicator),
+                              steering_release_rule=steering_release_rule)
                    for row in train_series]
     valid_parts = [_make_rows(row, phase_threshold, include_command_errors,
                               include_command_rates,
-                              include_rear_wheel_split)
+                              include_rear_wheel_split,
+                              include_command_history=include_command_history,
+                              include_predicted_steering_change=(
+                                  include_predicted_steering_change),
+                              include_steering_release_indicator=(
+                                  include_steering_release_indicator),
+                              steering_release_rule=steering_release_rule)
                    for row in validation_series]
 
     def combine(parts):
@@ -701,6 +779,17 @@ def run(output: Path, phase_threshold: float = 0.05,
             "feature_scales": feature_scales.tolist(),
             "command_tracking_errors_included": bool(include_command_errors),
             "command_slew_rates_included": bool(include_command_rates),
+            "command_history_included": bool(include_command_history),
+            "predicted_steering_feedback_change_included": bool(
+                include_predicted_steering_change),
+            "predicted_steering_release_indicator_included": bool(
+                include_steering_release_indicator),
+            "steering_release_rule": steering_release_rule,
+            "steering_actuator_feature": (
+                ("one-packet-delayed command; direct if absolute steering "
+                 "magnitude decreases, including sign reversals; otherwise "
+                 "3.2 rad/s rate-limited")
+                if include_predicted_steering_change else None),
             "rear_wheel_split_included": bool(include_rear_wheel_split),
             "features_at_k_only": True,
             "future_truth_used_as_input": False,
@@ -768,11 +857,27 @@ def main() -> int:
         "--include-command-rates", action="store_true",
         help="add the current one-step steering/throttle command slew as causal features")
     parser.add_argument(
+        "--include-command-history", action="store_true",
+        help="add previous-sample command slew and command/feedback gaps")
+    parser.add_argument(
+        "--include-predicted-steering-change", action="store_true",
+        help="add a causal hybrid one-step steering-actuator prediction feature")
+    parser.add_argument(
+        "--include-steering-release-indicator", action="store_true",
+        help="separately flag the predicted actuator's direct-target mode")
+    parser.add_argument(
+        "--steering-release-rule",
+        choices=("magnitude_decrease", "same_sign_release"),
+        default="magnitude_decrease",
+        help="choose direct-target condition for the actuator feature")
+    parser.add_argument(
         "--include-rear-wheel-split", action="store_true",
         help="add signed left-minus-right rear-wheel surface-speed difference")
     args = parser.parse_args()
     run(args.output, args.phase_threshold, args.include_command_errors,
-        args.include_command_rates, args.include_rear_wheel_split)
+        args.include_command_rates, args.include_rear_wheel_split,
+        args.include_command_history, args.include_predicted_steering_change,
+        args.include_steering_release_indicator, args.steering_release_rule)
     return 0
 
 

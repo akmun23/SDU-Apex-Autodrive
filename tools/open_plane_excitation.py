@@ -215,6 +215,98 @@ YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_POINTS = tuple(
     for angle in (0.350, 0.425, 0.475, 0.500)
 )
 YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS = 2
+YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_PROFILE = (
+    "yaw_highsteer_speed_frontier_validation")
+YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_POINTS = tuple(
+    (speed, angle)
+    for speed in (9.75, 10.25, 10.75, 11.25)
+    for angle in (0.350, 0.425, 0.475, 0.500)
+)
+YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_REPEATS = 2
+YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE = "yaw_exact_two_domain_gapfill"
+# Selector bins with no fitted exact-two local expert in the frozen 2026-10-08
+# audit (speed bin, signed steering tenths). Probe each unique magnitude at the
+# speed-bin center and sweep both turn directions; the profile therefore fills
+# every listed signed gap without duplicating symmetric conditions.
+YAW_EXACT_TWO_DOMAIN_GAPFILL_SELECTOR_GAPS = (
+    (0, 4),
+    (1, -3), (1, 4),
+    (4, -5), (4, -3), (4, 5),
+    (5, -5), (5, -2), (5, -1), (5, 1), (5, 3), (5, 4), (5, 5),
+    (6, -5), (6, 3), (6, 5),
+    (7, -5), (7, -4), (7, -3), (7, -2), (7, -1),
+    (7, 1), (7, 2), (7, 3), (7, 5),
+    (8, -5), (8, -3), (8, 3), (8, 5),
+    (9, -5), (9, -4), (9, -3), (9, -2), (9, 2), (9, 3), (9, 5),
+    (10, -5), (10, -4), (10, -3), (10, 2), (10, 3), (10, 4), (10, 5),
+    (11, -5), (11, -4), (11, -3), (11, 2), (11, 3), (11, 4), (11, 5),
+)
+YAW_EXACT_TWO_DOMAIN_GAPFILL_POINTS = tuple(sorted({
+    (speed_bin + 0.5, abs(steering_tenths) / 10.0)
+    for speed_bin, steering_tenths
+    in YAW_EXACT_TWO_DOMAIN_GAPFILL_SELECTOR_GAPS
+}))
+YAW_EXACT_TWO_DOMAIN_GAPFILL_REPEATS = 2
+YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE = "yaw_exact_two_edge_gapfill"
+YAW_EXACT_TWO_EDGE_GAPFILL_SPEEDS_MPS = (0.25, 11.35, 11.60)
+YAW_EXACT_TWO_EDGE_GAPFILL_STEERING_RAD = tuple(
+    round(0.05 * index, 3) for index in range(1, 11))
+YAW_EXACT_TWO_EDGE_GAPFILL_REPEATS = 1
+# This experiment alone measures response close to the 12 m/s edge. At the
+# old 11.2 m/s governor the speed loop actively braked before the response
+# window, so its requested 11.5 m/s conditions never sampled that region.
+YAW_EXACT_TWO_EDGE_GAPFILL_GOVERNOR_MPS = 11.65
+YAW_EXACT_TWO_EDGE_GAPFILL_HARD_LIMIT_MPS = 12.0
+YAW_FULL_SPECTRUM_GRID_PROFILE = "yaw_full_spectrum_grid"
+YAW_FULL_SPECTRUM_GRID_SPEEDS_MPS = tuple(
+    round(0.25 + 0.50 * index, 2) for index in range(24))
+YAW_FULL_SPECTRUM_GRID_STEERING_RAD = tuple(
+    round(0.05 * index, 3) for index in range(1, 11))
+YAW_FULL_SPECTRUM_MIDPOINT_PROFILE = (
+    "yaw_full_spectrum_midpoint_validation")
+YAW_FULL_SPECTRUM_FINE_SPEEDS_MPS = tuple(
+    round(0.25 + 0.25 * index, 3) for index in range(47))
+YAW_FULL_SPECTRUM_FINE_STEERING_RAD = tuple(
+    round(0.025 * index, 3) for index in range(1, 21))
+YAW_FULL_SPECTRUM_GRID_GOVERNOR_MPS = 11.95
+YAW_FULL_SPECTRUM_GRID_HARD_LIMIT_MPS = 12.0
+YAW_HIGH_SPEED_ENVELOPE_PROFILE = "yaw_high_speed_envelope_gapfill"
+YAW_HIGH_SPEED_ENVELOPE_POINTS = (
+    (10.75, (0.35, 0.40, 0.45, 0.50)),
+    (11.25, (0.25, 0.30, 0.35, 0.40, 0.45, 0.50)),
+    (11.75, (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)),
+)
+YAW_HIGH_SPEED_ENVELOPE_APPROACH_S = 12.0
+YAW_HIGH_SPEED_ENVELOPE_SETTLE_S = 1.5
+YAW_HIGH_SPEED_ENVELOPE_PROBE_S = 2.75
+YAW_SPARSE_CELL_SUPPORT_PROFILE = "yaw_sparse_cell_support"
+YAW_SPARSE_CRAWL_CELL_SUPPORT_PROFILE = "yaw_sparse_crawl_cell_support"
+YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE = "yaw_exact_two_support_replication"
+YAW_SPARSE_CELL_SUPPORT_POINTS = (
+    (0.25, (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)),
+    (10.25, (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)),
+    (10.75, (0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)),
+    (11.25, (0.15, 0.20, 0.35)),
+    (11.75, (0.05, 0.35, 0.50)),
+)
+YAW_SPARSE_CRAWL_CELL_SUPPORT_POINTS = (
+    (0.244, (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)),
+)
+# These 38 reset-isolated speed/magnitude pairs cover all 72 signed cells in
+# the 2026-10-09 aggregate audit that had fewer than 20 exact-two rows in two
+# independent captures. One positive-start sequence probes both signs.
+YAW_EXACT_TWO_SUPPORT_REPLICATION_POINTS = (
+    (0.25, (0.05, 0.10, 0.15, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50)),
+    (6.75, (0.50,)),
+    (10.25, (0.20, 0.35, 0.40, 0.45, 0.50)),
+    (10.75, (0.05, 0.20, 0.25, 0.35, 0.40, 0.45, 0.50)),
+    (11.25, (0.05, 0.10, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50)),
+    (11.75, (0.05, 0.10, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50)),
+)
+YAW_SPARSE_CELL_SUPPORT_APPROACH_LOW_S = 8.0
+YAW_SPARSE_CELL_SUPPORT_APPROACH_HIGH_S = 12.0
+YAW_SPARSE_CELL_SUPPORT_SETTLE_S = 1.5
+YAW_SPARSE_CELL_SUPPORT_PROBE_S = 1.25
 YAW_ATLAS_INTERPOLATION_REPEATS = 2
 YAW_FULLBAND_GAPFILL_PROFILE = "yaw_fullband_gapfill_train"
 YAW_FULLBAND_GAPFILL_POINTS = (
@@ -339,6 +431,46 @@ YAW_ERROR_HIGHSTEER_REVERSAL_POINTS = (
 YAW_ERROR_HIGHSTEER_REVERSAL_MODES = (
     ("step", 0.025), ("ramp", 0.10), ("ramp", 0.30),
 )
+YAW_ERROR_RESIDUAL_REPEAT_PROFILE = (
+    "yaw_error_highsteer_reversal_residual_train")
+YAW_ERROR_RESIDUAL_REPEAT_COUNT = 4
+YAW_ERROR_RESIDUAL_REPEAT_DELAYS_S = (0.25, 0.75)
+YAW_ERROR_RESIDUAL_REPEAT_CONDITIONS = (
+    # Reversal failures cluster in the first 50 ms at these measured points.
+    ("reversal", 3.0, 0.42, "step", 0.025),
+    ("reversal", 3.0, 0.50, "step", 0.025),
+    ("reversal", 3.5, 0.42, "step", 0.025),
+    ("reversal", 3.5, 0.50, "step", 0.025),
+    ("reversal", 4.0, 0.35, "step", 0.025),
+    ("reversal", 4.0, 0.42, "step", 0.025),
+    # Unwind conditions retain separate step/ramp response shapes.
+    ("unwind", 3.0, 0.42, "ramp", 0.10),
+    ("unwind", 3.5, 0.42, "step", 0.025),
+    ("unwind", 3.5, 0.50, "ramp", 0.10),
+    ("unwind", 3.0, 0.50, "ramp", 0.30),
+)
+YAW_ERROR_PACKET_PHASE_PROFILE = "yaw_error_packet_phase_gapfill"
+YAW_ERROR_PACKET_PHASE_REPEATS = 2
+# r07's offsets aliased modulo 25 ms. r08 used distinct nominal offsets, but
+# the 40-Hz excitation tick quantized both command changes to 250 ms. The
+# packet-phase profile therefore publishes only its probe steering at 200 Hz;
+# the simulator bridge/telemetry remains fixed at 40 Hz.
+YAW_ERROR_PACKET_PHASE_DELAYS_S = (0.2375, 0.2500)
+YAW_ERROR_PACKET_PHASE_CONDITIONS = tuple(
+    (event, speed, angle, sign, mode, duration)
+    for event, speed, angle, mode, duration in (
+        ("reversal", 3.0, 0.42, "step", 0.025),
+        ("reversal", 3.0, 0.50, "step", 0.025),
+        ("reversal", 3.5, 0.50, "step", 0.025),
+        ("reversal", 4.0, 0.35, "step", 0.025),
+        ("reversal", 4.0, 0.42, "step", 0.025),
+        ("unwind", 3.0, 0.42, "ramp", 0.10),
+        ("unwind", 3.5, 0.42, "step", 0.025),
+        ("unwind", 3.5, 0.50, "ramp", 0.10),
+        ("unwind", 3.0, 0.50, "ramp", 0.30),
+    )
+    for sign in (-1.0, 1.0)
+)
 YAW_ERROR_CRAWL_THROTTLE_CALIBRATION_PROFILE = (
     "yaw_error_crawl_throttle_calibration")
 YAW_ERROR_CRAWL_THROTTLE_LEVELS = (0.01, 0.02, 0.03, 0.04, 0.05)
@@ -372,6 +504,15 @@ YAW_TRANSIENT_PROFILES = (
     YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
     YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
     YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
+    YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_PROFILE,
+    YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE,
+    YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE,
+    YAW_FULL_SPECTRUM_GRID_PROFILE,
+    YAW_FULL_SPECTRUM_MIDPOINT_PROFILE,
+    YAW_HIGH_SPEED_ENVELOPE_PROFILE,
+    YAW_SPARSE_CELL_SUPPORT_PROFILE,
+    YAW_SPARSE_CRAWL_CELL_SUPPORT_PROFILE,
+    YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE,
     YAW_FULLBAND_GAPFILL_PROFILE, YAW_UNWIND_THROTTLE_PROFILE,
     YAW_LOW_ANGLE_RATE_PROFILE, YAW_MISMATCH_TRANSITION_PROFILE,
     YAW_CELL_MISMATCH_TRANSITION_PROFILE,
@@ -387,6 +528,8 @@ YAW_TRANSIENT_PROFILES = (
     YAW_ERROR_RESIDUAL_GRID_PROFILE,
     YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE,
     YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE,
+    YAW_ERROR_RESIDUAL_REPEAT_PROFILE,
+    YAW_ERROR_PACKET_PHASE_PROFILE,
     YAW_ERROR_CRAWL_THROTTLE_CALIBRATION_PROFILE,
     YAW_ERROR_CRAWL_STEERING_PROFILE,
     YAW_ERROR_CRAWL_FINE_PROFILE,
@@ -397,6 +540,9 @@ YAW_TRANSIENT_PROFILES = (
 def _is_yaw_transient_approach(label: str) -> bool:
     return label.startswith(("approach_lowdyn_", "approach_yawdyn_",
                              "approach_atlas_", "approach_yawgap_",
+                             "approach_yawenv_",
+                             "approach_yawsupport_",
+                             "approach_yawsupportrep_",
                              "approach_yawbrake_", "approach_yawmis_",
                              "approach_yawmisgap_",
                              "approach_yawerr_",
@@ -1595,6 +1741,233 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     ),
                 ))
             return phases
+        if profile == YAW_HIGH_SPEED_ENVELOPE_PROFILE:
+            # The full-grid captures repeatedly missed only these upper-edge
+            # measured-state cells. Build speed at zero steering, settle, then
+            # step to the requested angle so the response window starts at the
+            # high-speed state instead of spending the approach circling and
+            # losing speed. This changes excitation history, not plant physics.
+            conditions = [
+                (speed, angle, sign)
+                for speed, angles in YAW_HIGH_SPEED_ENVELOPE_POINTS
+                for angle in angles
+                for sign in (-1.0, 1.0)
+            ]
+            # Start with lower combined speed/steering demand and increase
+            # monotonically, so the unchanged tilt/collision guards can stop
+            # at the first unsafe frontier without sampling the harshest cell
+            # first. Reset each condition, so order cannot carry vehicle state.
+            conditions.sort(key=lambda item: (
+                item[0] ** 2 * abs(math.tan(item[1])), item[0], item[1], item[2]))
+            for speed, angle, sign in conditions:
+                condition = f"v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}"
+                phases.extend((
+                    Phase(
+                        f"approach_yawenv_{condition}",
+                        YAW_HIGH_SPEED_ENVELOPE_APPROACH_S,
+                        speed,
+                        steering_rad=0.0,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawenv_{condition}",
+                        YAW_HIGH_SPEED_ENVELOPE_SETTLE_S,
+                        speed,
+                        steering_rad=0.0,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"probe_yawenv_{condition}",
+                        YAW_HIGH_SPEED_ENVELOPE_PROBE_S,
+                        speed,
+                        steering_rad=sign * angle,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                ))
+            return phases
+        if profile == YAW_SPARSE_CELL_SUPPORT_PROFILE:
+            # Repeat only measured-state cells that remain weak after the
+            # full-grid and high-speed envelope captures. Each condition
+            # traverses onset, unwind, reversal, and a second unwind in both
+            # steering directions while preserving the target speed. The
+            # positive-start reversal supplies the mirrored negative state,
+            # avoiding a duplicate reset/approach for each signed angle.
+            conditions = [
+                (speed, angle)
+                for speed, angles in YAW_SPARSE_CELL_SUPPORT_POINTS
+                for angle in angles
+            ]
+            conditions.sort(key=lambda item: (
+                item[0] ** 2 * abs(math.tan(item[1])), item[0], item[1]))
+            for speed, angle in conditions:
+                condition = f"v{speed:.2f}_a{angle:.3f}"
+                low_speed = speed < 1.0
+                approach_s = (YAW_SPARSE_CELL_SUPPORT_APPROACH_LOW_S
+                              if low_speed else
+                              YAW_SPARSE_CELL_SUPPORT_APPROACH_HIGH_S)
+                phases.extend((
+                    Phase(
+                        f"approach_yawsupport_{condition}", approach_s,
+                        speed, steering_rad=0.0,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        # At crawl speed the target is reached before 30
+                        # response samples accrue. Approach phases are only
+                        # speed setup, never yaw-response evidence.
+                        validate_samples=False,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawsupport_{condition}",
+                        YAW_SPARSE_CELL_SUPPORT_SETTLE_S, speed,
+                        steering_rad=0.0,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                ))
+                for index, (event, target) in enumerate((
+                        ("onset", angle),
+                        ("unwind", 0.0),
+                        ("reversal", -angle),
+                        ("unwind", 0.0))):
+                    phases.append(Phase(
+                        f"probe_yawsupport_{event}_v{speed:.2f}_"
+                        f"a{angle:.3f}_turn+1_rep01_idx{index}",
+                        YAW_SPARSE_CELL_SUPPORT_PROBE_S, speed,
+                        steering_rad=target,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ))
+            return phases
+        if profile == YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE:
+            # Replicate only measured cells with weak independent-capture
+            # support. Reset per condition, then probe onset, unwind,
+            # reversal, and a second unwind so each sign and transition class
+            # is represented. Crawl approaches use the measured low-throttle
+            # calibration; high-speed probes retain the 12 m/s safety cutoff.
+            conditions = [
+                (speed, angle)
+                for speed, angles in YAW_EXACT_TWO_SUPPORT_REPLICATION_POINTS
+                for angle in angles
+            ]
+            rng.shuffle(conditions)
+            for speed, angle in conditions:
+                condition = f"v{speed:.2f}_a{angle:.3f}"
+                low_speed = speed < 1.0
+                approach_s = (YAW_SPARSE_CELL_SUPPORT_APPROACH_LOW_S
+                              if low_speed else
+                              YAW_SPARSE_CELL_SUPPORT_APPROACH_HIGH_S)
+                approach = Phase(
+                    f"approach_yawsupportrep_{condition}", approach_s,
+                    speed, steering_rad=0.0,
+                    throttle_mode=("fixed" if low_speed
+                                   else "race_domain_approach"),
+                    throttle_norm=(_low_speed_wheelspin_feedforward(speed)
+                                   if low_speed else None),
+                    reach_speed_target=True,
+                    validate_samples=False,
+                    validate_speed=False,
+                    validate_steering=False,
+                    condition_pair_id=condition,
+                )
+                phases.extend((
+                    approach,
+                    Phase(
+                        f"settle_yawsupportrep_{condition}",
+                        YAW_SPARSE_CELL_SUPPORT_SETTLE_S, speed,
+                        steering_rad=0.0,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                ))
+                for index, (event, target) in enumerate((
+                        ("onset", angle),
+                        ("unwind", 0.0),
+                        ("reversal", -angle),
+                        ("unwind", 0.0))):
+                    phases.append(Phase(
+                        f"probe_yawsupportrep_{event}_{condition}_idx{index}",
+                        YAW_SPARSE_CELL_SUPPORT_PROBE_S, speed,
+                        steering_rad=target,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ))
+            return phases
+        if profile == YAW_SPARSE_CRAWL_CELL_SUPPORT_PROFILE:
+            # The broad sparse profile's normal speed-hold feedforward drifts
+            # upward from crawl. Use the measured 1% throttle calibration for
+            # this isolated 0.244 m/s band, and probe only cells still below
+            # the 20-row support threshold.
+            conditions = [
+                (speed, angle)
+                for speed, angles in YAW_SPARSE_CRAWL_CELL_SUPPORT_POINTS
+                for angle in angles
+            ]
+            rng.shuffle(conditions)
+            for speed, angle in conditions:
+                condition = f"v{speed:.2f}_a{angle:.3f}"
+                crawl_throttle = _low_speed_wheelspin_feedforward(speed)
+                phases.extend((
+                    Phase(
+                        f"approach_yawsupport_{condition}", 8.0, speed,
+                        throttle_mode="fixed", throttle_norm=crawl_throttle,
+                        reach_speed_target=True, validate_samples=False,
+                        validate_speed=False, validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_yawsupport_{condition}",
+                        YAW_SPARSE_CELL_SUPPORT_SETTLE_S, speed,
+                        steering_rad=0.0,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=False, validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                    ),
+                ))
+                for index, (event, target) in enumerate((
+                        ("onset", angle),
+                        ("unwind", 0.0),
+                        ("reversal", -angle),
+                        ("unwind", 0.0))):
+                    phases.append(Phase(
+                        f"probe_yawsupport_{event}_v{speed:.2f}_"
+                        f"a{angle:.3f}_turn+1_rep01_idx{index}",
+                        YAW_SPARSE_CELL_SUPPORT_PROBE_S, speed,
+                        steering_rad=target,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True, validate_speed=True,
+                        validate_steering=True,
+                        condition_pair_id=condition,
+                    ))
+            return phases
         if profile == YAW_UNWIND_THROTTLE_PROFILE:
             conditions = [
                 (repeat, mode, sign)
@@ -1966,6 +2339,108 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                 ("onset", "unwind", "reversal"),
                 validate_speed=True,
                 transition_modes=YAW_ERROR_HIGHSTEER_REVERSAL_MODES)
+        if profile == YAW_ERROR_PACKET_PHASE_PROFILE:
+            # Repeat only the held-out reversal/unwind conditions that still
+            # exceed 0.1 rad/s. This distinguishes sparse exact-condition
+            # support from response variability at nearly identical legal
+            # histories; it is not another full speed/steering sweep.
+            conditions = [
+                (repeat, event, speed, angle, sign, mode, duration, delay)
+                for repeat in range(1, YAW_ERROR_PACKET_PHASE_REPEATS + 1)
+                for event, speed, angle, sign, mode, duration
+                in YAW_ERROR_PACKET_PHASE_CONDITIONS
+                for delay in YAW_ERROR_PACKET_PHASE_DELAYS_S
+            ]
+            rng.shuffle(conditions)
+            for repeat, event, speed, angle, sign, mode, duration, delay in conditions:
+                if event == "reversal":
+                    start, target = sign * angle, -sign * angle
+                else:
+                    start, target = sign * angle, 0.0
+                condition_id = (
+                    f"r{repeat:02d}_{event}_v{speed:.2f}_a{angle:.3f}_"
+                    f"turn{sign:+.0f}_delay{delay:.4f}_{mode}{duration:.3f}s")
+                transition_end = delay + (0.025 if mode == "step" else duration)
+                probe_duration = delay + 1.50
+                phase_label = (
+                    f"packet_phase_r{repeat:02d}_{event}_v{speed:.2f}_a{angle:.3f}_"
+                    f"turn{sign:+.0f}_delay{delay:.4f}_"
+                    f"{mode}{duration:.3f}s_rep{repeat:02d}")
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_packet_phase_{condition_id}",
+                        10.0, speed, throttle_mode="race_domain_approach",
+                        reach_speed_target=True, condition_pair_id=condition_id),
+                    Phase(
+                        f"settle_yawerr_packet_phase_{condition_id}",
+                        0.75, speed, steering_rad=start,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition_id),
+                    Phase(
+                        f"probe_yawerr_{phase_label}", probe_duration, speed,
+                        throttle_mode="race_domain_hold",
+                        validate_samples=True, validate_speed=True,
+                        validate_steering=False,
+                        condition_pair_id=condition_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, start), (delay, start),
+                            (transition_end, target),
+                            (delay + 1.25, target), (probe_duration, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_ERROR_RESIDUAL_REPEAT_PROFILE:
+            # Repeat only the normal-40-Hz transition conditions that still
+            # fail exact-two-packet scoring. The 200-Hz packet-phase profile
+            # is intentionally not used here: this is production-rate input.
+            conditions = [
+                (repeat, event, speed, angle, sign, mode, duration, delay)
+                for repeat in range(1, YAW_ERROR_RESIDUAL_REPEAT_COUNT + 1)
+                for event, speed, angle, mode, duration
+                in YAW_ERROR_RESIDUAL_REPEAT_CONDITIONS
+                for sign in (-1.0, 1.0)
+                for delay in YAW_ERROR_RESIDUAL_REPEAT_DELAYS_S
+            ]
+            rng.shuffle(conditions)
+            for repeat, event, speed, angle, sign, mode, duration, delay in conditions:
+                start = sign * angle
+                target = -start if event == "reversal" else 0.0
+                transition_end = delay + (0.025 if mode == "step" else duration)
+                probe_duration = delay + 1.50
+                phase_label = (
+                    f"highsteer_reversal_repeat_{event}_v{speed:.2f}_"
+                    f"a{angle:.3f}_turn{sign:+.0f}_delay{delay:.2f}_"
+                    f"{mode}{duration:.3f}s_rep{repeat:02d}")
+                phases.extend((
+                    Phase(
+                        f"approach_yawerr_{phase_label}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=phase_label),
+                    Phase(
+                        f"settle_yawerr_{phase_label}", 0.75, speed,
+                        steering_rad=start,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=phase_label),
+                    Phase(
+                        f"probe_yawerr_{phase_label}", probe_duration,
+                        speed, throttle_mode="race_domain_hold",
+                        validate_samples=True, validate_speed=True,
+                        validate_steering=False,
+                        condition_pair_id=phase_label,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, start), (delay, start),
+                            (transition_end, target),
+                            (delay + 1.25, target), (probe_duration, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
         if profile == YAW_ERROR_CRAWL_THROTTLE_CALIBRATION_PROFILE:
             # Previous crawl probes did not hold their requested speeds.
             # Measure the actual low-throttle speed surface directly rather
@@ -2261,11 +2736,164 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     ),
                 ))
             return phases
+        if profile == YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE:
+            conditions = [
+                (repeat, speed, angle, sign)
+                for repeat in range(1, YAW_EXACT_TWO_EDGE_GAPFILL_REPEATS + 1)
+                for speed in YAW_EXACT_TWO_EDGE_GAPFILL_SPEEDS_MPS
+                for angle in YAW_EXACT_TWO_EDGE_GAPFILL_STEERING_RAD
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for repeat, speed, angle, sign in conditions:
+                condition = (
+                    f"r{repeat:02d}_v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}")
+                phases.extend((
+                    Phase(
+                        f"approach_atlas_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_atlas_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"atlas_{condition}", 2.75, speed,
+                        steering_rad=0.0,
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.20, sign * angle),
+                            (0.70, sign * angle),
+                            (0.95, 0.0),
+                            (1.30, 0.0),
+                            (1.45, -sign * angle),
+                            (2.10, -sign * angle),
+                            (2.35, 0.0),
+                            (2.75, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_FULL_SPECTRUM_GRID_PROFILE:
+            # Reset-isolated randomized 0.5 m/s × 0.05 rad coverage across
+            # both steering directions. The achieved GT state, never the
+            # command target, defines the cell represented by each sample.
+            conditions = [
+                (speed, angle, sign)
+                for speed in YAW_FULL_SPECTRUM_GRID_SPEEDS_MPS
+                for angle in YAW_FULL_SPECTRUM_GRID_STEERING_RAD
+                for sign in (-1.0, 1.0)
+            ]
+            rng.shuffle(conditions)
+            for speed, angle, sign in conditions:
+                condition = (
+                    f"r01_v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}")
+                phases.extend((
+                    Phase(
+                        f"approach_atlas_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_atlas_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"atlas_{condition}", 2.75, speed,
+                        steering_rad=0.0,
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.20, sign * angle),
+                            (0.70, sign * angle),
+                            (0.95, 0.0),
+                            (1.30, 0.0),
+                            (1.45, -sign * angle),
+                            (2.10, -sign * angle),
+                            (2.35, 0.0),
+                            (2.75, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_FULL_SPECTRUM_MIDPOINT_PROFILE:
+            # Validate the gaps between the established 0.5 m/s × 0.05 rad
+            # grid. Existing even/even lattice points are intentionally
+            # omitted; this capture is a strictly held-out midpoint sweep.
+            conditions = [
+                (speed, angle, sign)
+                for speed_index, speed in enumerate(
+                    YAW_FULL_SPECTRUM_FINE_SPEEDS_MPS)
+                for steering_index, angle in enumerate(
+                    YAW_FULL_SPECTRUM_FINE_STEERING_RAD, start=1)
+                if not (speed_index % 2 == 0 and steering_index % 2 == 0)
+                for sign in (-1.0, 1.0)
+            ]
+            if len(conditions) != 1400:
+                raise ValueError(
+                    "midpoint validation grid must contain 1,400 conditions")
+            rng.shuffle(conditions)
+            for speed, angle, sign in conditions:
+                condition = (
+                    f"r01_v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}")
+                phases.extend((
+                    Phase(
+                        f"approach_atlas_{condition}", 10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"settle_atlas_{condition}", 0.75, speed,
+                        throttle_mode="race_domain_hold",
+                        condition_pair_id=condition,
+                    ),
+                    Phase(
+                        f"atlas_{condition}", 2.75, speed,
+                        steering_rad=0.0,
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        condition_pair_id=condition,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0),
+                            (0.20, sign * angle),
+                            (0.70, sign * angle),
+                            (0.95, 0.0),
+                            (1.30, 0.0),
+                            (1.45, -sign * angle),
+                            (2.10, -sign * angle),
+                            (2.35, 0.0),
+                            (2.75, 0.0),
+                        ),
+                    ),
+                ))
+            return phases
         if profile in (YAW_ATLAS_INTERPOLATION_PROFILE,
                        YAW_ATLAS_OFFGRID_FINAL_PROFILE,
                        YAW_ATLAS_EXTRATREES_FINAL_PROFILE,
                        YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
-                       YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE):
+                       YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
+                       YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_PROFILE,
+                       YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE):
             points = {
                 YAW_ATLAS_INTERPOLATION_PROFILE:
                     YAW_ATLAS_INTERPOLATION_POINTS,
@@ -2277,10 +2905,19 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_POINTS,
                 YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE:
                     YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_POINTS,
+                YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_PROFILE:
+                    YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_POINTS,
+                YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE:
+                    YAW_EXACT_TWO_DOMAIN_GAPFILL_POINTS,
             }[profile]
-            repeats = (YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS
-                       if profile == YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE
-                       else YAW_ATLAS_INTERPOLATION_REPEATS)
+            repeats = {
+                YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE:
+                    YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_REPEATS,
+                YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_PROFILE:
+                    YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_REPEATS,
+                YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE:
+                    YAW_EXACT_TWO_DOMAIN_GAPFILL_REPEATS,
+            }.get(profile, YAW_ATLAS_INTERPOLATION_REPEATS)
             conditions = [
                 (repeat, speed, angle, sign)
                 for repeat in range(1, repeats + 1)
@@ -3193,6 +3830,7 @@ class OpenPlaneExcitation:
         self.phase_max_speed_mps = 0.0
         self.phase_max_tilt_rad = 0.0
         self.phase_governor_ticks = 0
+        self.packet_phase_steering_update_count = 0
         self.phase_start_published = False
         self.phase_stimulus_published = False
         self.published_count = 0
@@ -3238,6 +3876,10 @@ class OpenPlaneExcitation:
         self.collision_sub = self.node.create_subscription(
             Int32, COLLISION_TOPIC, self._on_collision, sensor_qos)
         self.timer = self.node.create_timer(PERIOD_SEC, self._tick)
+        self.packet_phase_steering_timer = (
+            self.node.create_timer(0.005, self._tick_packet_phase_steering)
+            if profile == YAW_ERROR_PACKET_PHASE_PROFILE else None
+        )
         nominal_schedule_s = sum(phase.duration_s for phase in self.phases)
         settle_budget_s = (
             sum(phase.settle_before_probe for phase in self.phases)
@@ -3269,12 +3911,34 @@ class OpenPlaneExcitation:
             f"timeout={timeout_s:.1f}s")
 
     def _publish(self, steering_rad: float, throttle_norm: float) -> None:
-        steering_rad = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, steering_rad))
+        self._publish_steering(steering_rad)
         throttle_norm = max(0.0, min(MAX_THROTTLE, throttle_norm))
-        # Simulator steering input is normalized; excitation limits are specified in radians.
-        self.steering_pub.publish(Float32(data=steering_rad / STEERING_LIMIT_RAD))
         self.throttle_pub.publish(Float32(data=throttle_norm))
         self.published_count += 1
+
+    def _publish_steering(self, steering_rad: float) -> None:
+        steering_rad = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, steering_rad))
+        # Simulator steering input is normalized; excitation limits are specified in radians.
+        self.steering_pub.publish(Float32(data=steering_rad / STEERING_LIMIT_RAD))
+
+    def _tick_packet_phase_steering(self) -> None:
+        """Publish sub-packet steering updates only during packet-phase probes.
+
+        The bridge remains at 40 Hz. A 200-Hz setpoint scheduler lets the
+        bridge sample command edges on either side of its 25-ms request
+        boundary instead of quantizing all requested offsets to the 40-Hz
+        experiment timer.
+        """
+        if (self.done or self.started_at is None or self.reset_state is not None
+                or self.phase_started_at is None
+                or self.phase_index >= len(self.phases)):
+            return
+        phase = self.phases[self.phase_index]
+        if not phase.label.startswith("probe_yawerr_packet_phase_"):
+            return
+        elapsed = max(0.0, time.monotonic() - self.phase_started_at)
+        self._publish_steering(_phase_steering_command(phase, elapsed))
+        self.packet_phase_steering_update_count += 1
 
     def _neutral(self, reason: str) -> None:
         self._publish(0.0, 0.0)
@@ -3319,7 +3983,9 @@ class OpenPlaneExcitation:
             f"finished: reason={self.finish_reason}, aborted={self.aborted}, "
             f"phases={self.phase_index}/{len(self.phases)}, "
             f"quality_failures={len(self.quality_failures)}, "
-            f"command_count={self.published_count}, command_rate={rate:.2f}Hz")
+            f"command_count={self.published_count}, command_rate={rate:.2f}Hz, "
+            f"packet_phase_steering_updates="
+            f"{self.packet_phase_steering_update_count}")
 
     def _on_odom(self, message: Odometry) -> None:
         vx = float(message.twist.twist.linear.x)
@@ -3513,14 +4179,20 @@ class OpenPlaneExcitation:
             if publisher.get_subscription_count() == 0:
                 return
         if ((self.profile == "race_domain_steering_frontier"
-             or self.profile == SUBNET_TRANSIENT_PROFILE
-             or self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES)
+                or self.profile == SUBNET_TRANSIENT_PROFILE
+                or self.profile == YAW_FULL_SPECTRUM_GRID_PROFILE
+                or self.profile == YAW_FULL_SPECTRUM_MIDPOINT_PROFILE
+                or self.profile == YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE
+                or self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES)
                 and (self.reset_pub is None
                      or self.reset_pub.get_subscription_count() == 0)):
             return
         self.started_at = now
         if (self.profile == "race_domain_steering_frontier"
                 or self.profile == SUBNET_TRANSIENT_PROFILE
+                or self.profile == YAW_FULL_SPECTRUM_GRID_PROFILE
+                or self.profile == YAW_FULL_SPECTRUM_MIDPOINT_PROFILE
+                or self.profile == YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE
                 or self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES):
             self._begin_sim_reset(now, "initial reset to spawn")
         else:
@@ -3531,7 +4203,9 @@ class OpenPlaneExcitation:
 
     def _feedforward(self, speed_target: float) -> float:
         if self.profile in (YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE,
-                            YAW_ERROR_SUBCRAWL_STEERING_PROFILE):
+                            YAW_ERROR_SUBCRAWL_STEERING_PROFILE,
+                            YAW_SPARSE_CRAWL_CELL_SUPPORT_PROFILE,
+                            YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE):
             return _low_speed_wheelspin_feedforward(speed_target)
         return _nominal_feedforward(speed_target)
 
@@ -3671,7 +4345,15 @@ class OpenPlaneExcitation:
                 aborted=True,
             )
             return
-        speed_limit = (RACE_DOMAIN_HARD_LIMIT_MPS
+        speed_limit = (YAW_EXACT_TWO_EDGE_GAPFILL_HARD_LIMIT_MPS
+                       if self.profile == YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE
+                       else YAW_FULL_SPECTRUM_GRID_HARD_LIMIT_MPS
+                       if self.profile in (YAW_FULL_SPECTRUM_GRID_PROFILE,
+                                           YAW_FULL_SPECTRUM_MIDPOINT_PROFILE,
+                                           YAW_HIGH_SPEED_ENVELOPE_PROFILE,
+                                           YAW_SPARSE_CELL_SUPPORT_PROFILE,
+                                           YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE)
+                       else RACE_DOMAIN_HARD_LIMIT_MPS
                        if self.profile in ("race_domain_continuous",
                                            "race_domain_brake_boundary",
                                            "race_domain_moderate_braking",
@@ -3931,12 +4613,22 @@ class OpenPlaneExcitation:
                 self.speed_mps >= EXCITATION_SPEED_GOVERNOR_MPS and throttle > 0.0):
             throttle = 0.0
             self.phase_governor_ticks += 1
+        speed_governor_mps = (
+            YAW_EXACT_TWO_EDGE_GAPFILL_GOVERNOR_MPS
+            if self.profile == YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE
+            else YAW_FULL_SPECTRUM_GRID_GOVERNOR_MPS
+            if self.profile in (YAW_FULL_SPECTRUM_GRID_PROFILE,
+                                YAW_FULL_SPECTRUM_MIDPOINT_PROFILE,
+                                YAW_HIGH_SPEED_ENVELOPE_PROFILE,
+                                YAW_SPARSE_CELL_SUPPORT_PROFILE,
+                                YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE)
+            else RACE_DOMAIN_GOVERNOR_MPS
+        )
         if (self.profile in RACE_DOMAIN_SPEED_GOVERNED_PROFILES
-                and self.speed_mps >= RACE_DOMAIN_GOVERNOR_MPS
+                and self.speed_mps >= speed_governor_mps
                 and throttle > 0.0):
-            # Keep the captured motion inside the handoff's 11.2 m/s support;
-            # retain the requested steering so the state at the boundary is
-            # still observed rather than replaced with an artificial straight.
+            # Use the profile's explicit governor while retaining its steering
+            # request; the hard speed abort remains a separate interlock.
             throttle = 0.0
             self.phase_governor_ticks += 1
         if (self.profile == SUBNET_TRANSIENT_PROFILE
@@ -4112,15 +4804,28 @@ def main() -> int:
     args = parser.parse_args()
     if args.profile == YAW_ERROR_CRAWL_FINE_PROFILE:
         maximum_timeout_s = 9000.0
-    elif args.profile == YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE:
+    elif args.profile in (YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE,
+                          YAW_ERROR_RESIDUAL_REPEAT_PROFILE):
         maximum_timeout_s = 6000.0
+    elif args.profile == YAW_ERROR_PACKET_PHASE_PROFILE:
+        maximum_timeout_s = 2400.0
     elif args.profile in (
             YAW_ERROR_RESIDUAL_GRID_PROFILE, YAW_ERROR_CRAWL_STEERING_PROFILE,
             YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE,
             YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE,
             YAW_ERROR_MIDSPEED_THROTTLE_PROFILE,
-            YAW_ERROR_SUBCRAWL_STEERING_PROFILE):
+            YAW_ERROR_SUBCRAWL_STEERING_PROFILE,
+            YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE,
+            YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE,
+            YAW_SPARSE_CELL_SUPPORT_PROFILE,
+            YAW_SPARSE_CRAWL_CELL_SUPPORT_PROFILE,
+            YAW_EXACT_TWO_SUPPORT_REPLICATION_PROFILE):
         maximum_timeout_s = 3600.0
+    elif args.profile == YAW_FULL_SPECTRUM_MIDPOINT_PROFILE:
+        maximum_timeout_s = 30_000.0
+    elif args.profile in (YAW_FULL_SPECTRUM_GRID_PROFILE,
+                          YAW_HIGH_SPEED_ENVELOPE_PROFILE):
+        maximum_timeout_s = 15000.0
     else:
         maximum_timeout_s = 1200.0
     if (not math.isfinite(args.timeout_s)
@@ -4169,11 +4874,24 @@ def main() -> int:
         if args.timeout_s < required:
             parser.error(
                 f"{args.profile} requires --timeout-s >= {required:g}")
-    if args.profile == YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE:
+    if args.profile in (YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE,
+                        YAW_ERROR_RESIDUAL_REPEAT_PROFILE):
         schedule = build_schedule(args.seed, args.profile)
         reset_cycles = sum(
-            phase.label.startswith(
-                "approach_yawerr_highsteer_reversal_")
+            phase.label.startswith("approach_yawerr_highsteer_reversal_")
+            for phase in schedule)
+        required = (
+            sum(phase.duration_s for phase in schedule)
+            + reset_cycles * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        if args.timeout_s < required:
+            parser.error(
+                f"{args.profile} requires --timeout-s >= {required:g}")
+    if args.profile == YAW_ERROR_PACKET_PHASE_PROFILE:
+        schedule = build_schedule(args.seed, args.profile)
+        reset_cycles = sum(
+            phase.label.startswith("approach_yawerr_packet_phase_")
             for phase in schedule)
         required = (
             sum(phase.duration_s for phase in schedule)

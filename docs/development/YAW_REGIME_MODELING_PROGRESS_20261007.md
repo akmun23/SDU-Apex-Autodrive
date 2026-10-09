@@ -2534,3 +2534,811 @@ actual speed gates pass.
 No production odom, MPC, vehicle-physics, or observer model was changed by
 this audit. Test-harness speed validation is the only implementation change;
 the current yaw teacher remains offline research-only.
+
+### 2026-10-08: regime-by-regime response status and unseen GRU scores
+
+Created the findings-only [`yaw response regime map`](YAW_RESPONSE_REGIME_MAP_20261008.md).
+The answer to “has every region been identified like the 8.17–9.22 m/s,
+0.35–0.50 rad fit?” is **no**. Two local time-constant laws are supported:
+Y1 hold at 2.5–3.5 m/s / 0.30–0.42 rad (`tau=0.129314 s`) and the high-speed,
+high-steer candidate at 8.170–9.222 m/s / 0.350–0.500 rad (`tau=0.0119551 s`).
+Turn-in/unwind constants in Y1 are too sparse for promotion. The crawl law
+`r=0.961264*u_odom*tan(delta)/0.324` is validated only for steady 0.237–1.25
+m/s, 1–5% throttle and tested angles; it gives no higher-speed boundary.
+
+The broad GT-conditioned exact-cell atlas is a different kind of result: 478
+supported cell/phase predictors on a 0.5 m/s × 0.025 rad grid, trained from
+628 occupied cells (578 have at least two training runs). On its matched
+whole-run validation support it covers 92.17% of transitions at RMSE 0.04396,
+p95 0.03789 rad/s, with 97.97% below 0.1; it still abstains on 7.83%, has a
+1.221 rad/s maximum, and observed speed reaches only 11.37 m/s. This is a
+useful broad one-step predictor, not a local time-constant model everywhere
+and not full 0–12 m/s Cartesian coverage.
+
+Scored the complete v2 GRU checkpoint on the two later validation captures
+excluded from checkpoint selection. Crawl r03 gives 25 ms RMSE/p95
+0.12591/0.26562 and 1 s 0.12955/0.27538 rad/s. Low-speed/high-steer r03 gives
+0.09709/0.22185 at 25 ms and 0.19037/0.35482 at 1 s. Within crawl r03 at
+25 ms, low steer (0.5–1.0 m/s, 0–0.1 rad) is 0.0961/0.1359 (n=85), while
+high steer (0.5–1.0 m/s, 0.35–0.525 rad) is 0.1982/0.3433 (n=63). This is
+evidence that the two steering regimes do not share the GRU's accuracy; it
+does not locate a sharp physical boundary. The GRU is command-conditioned on
+the recorded future command sequence, so these are offline forecast scores,
+not a sensor-only odometry result.
+
+The next analysis is to fit an event-conditioned next-yaw model from the
+existing high-steer reversal and low-speed/high-steer training captures, then
+verify exact joint-condition support in an independent existing validation
+run before scoring. Gather a new capture only if this support audit finds the
+required event/interaction strata missing. No simulator was launched and no
+runtime odometry/MPC/physics model was changed for this analysis.
+
+### 2026-10-08: crawl-law transfer boundary and targeted reversal validation
+
+Corrected a speed-coordinate mismatch in the first broad boundary calculation:
+the published crawl coefficient was identified using longitudinal odometry
+speed, so its frozen transfer score must use that same input. Refit the compact
+law on the clean crawl training capture, obtaining `k=0.961181` with odometry
+speed (matching the saved `0.961264`) and `k=0.938317` with truth speed. Then
+scored the published odometry-speed law against simulator-truth yaw on the
+existing clean validation runs, selecting steady rows with
+`|d(delta)/dt|<0.10 rad/s`, `|du_GT/dt|<0.25 m/s^2`, and
+`|dr_GT/dt|<2 rad/s^2`. This is a transfer diagnostic, not a new model fit.
+
+The most informative brackets are now: the fixed law remains close at 2.5–4.0
+m/s through 0.20–0.25 rad (273 samples / 2 runs, RMSE 0.024 rad/s), but fails
+by 0.30–0.35 rad (601 / 2, RMSE 1.908); at 4–6 m/s it remains close through
+0.10–0.15 rad (833 / 5, RMSE 0.031) but fails by 0.15–0.20 rad (391 / 4,
+RMSE 1.041); and at 6–8 m/s it is already degraded at 0.04–0.10 rad (2,341 /
+5, RMSE 0.262, p95 0.589). The exact cell support is uneven, so these are
+brackets, not sharp thresholds. Full counts and error summaries are in the
+[`regime map`](YAW_RESPONSE_REGIME_MAP_20261008.md). Its held-out runs were
+excluded from the crawl coefficient fit, but had been used in broader atlas
+development; do not treat them as final sealed evaluation.
+
+The prior support audit had only two high-steer-reversal training captures and
+no independent validation capture with adequate samples in the same joint
+event region. That gap has since been addressed by the completed
+`openplane_yaw_error_highsteer_reversal_validation_r03_20261008` run, described
+in the following 2026-10-08 update. The earlier “running” progress snapshot is
+historical and superseded by the completed-run record.
+
+Added [`score_frozen_yaw_atlas.py`](../../tools/racing/specialists/score_frozen_yaw_atlas.py)
+to replay a saved atlas's coefficients against one explicitly admitted
+whole-run validation capture, reporting direct-cell/direct-phase coverage and
+a persistence baseline on identical samples. Before using it on r03, replayed
+the frozen v11 report on its existing high-steer validation r03: all 4,643
+direct-phase predictions and RMSE/p95/max values matched the original report
+exactly (`0.04504985 / 0.01163422 / 0.65409992 rad/s`). This verifies the
+coefficient replay path, not a new vehicle-model gain.
+
+The completed-run quality gate, train-only v12/v13 refits, and r03 event scores
+are recorded in the following 2026-10-08 update. The model uses current
+truth-labelled motion plus current actuator/encoder values for offline
+identification; it is not an odometry or MPC runtime input contract. No
+production code has been changed.
+
+### 2026-10-08 follow-up: actuator prediction takes priority
+
+Following the new steering-reversal evidence, the immediate focus is the
+command-to-steering-feedback model rather than another broad yaw-feature fit.
+The latest 3–4 m/s / 0.30–0.525-rad actuator evaluation uses a one-step target
+`steering_feedback[k+1]`, the 25-ms packet grid, 48,144 train rows from 25
+clean train captures, and 13,735 r03 validation rows (10,072 within controlled
+onset/unwind/reversal probes). It explicitly compares command alignments
+k, k−1, and k−2, hold, the 3.2-rad/s limiter, and the release-or-limit hybrid.
+
+The one-packet command history is best among the three discrete alignments.
+The hybrid is the best simple model overall (RMSE 0.02738 rad), but has a
+0.919-rad worst error. The regime split is real: onset favors a 3.2-rad/s
+limit (0.00327-rad RMSE); unwind favors direct delayed-command following
+(0.01950 vs 0.04354 rad for the limiter); reversal remains mixed (0.04476-rad
+limiter RMSE, max 0.919 rad). In some held-out 25-ms full-angle reversals,
+steering feedback changes almost the full 1-rad span in one sample, while
+other reversal probes from similar settings are rate-limited.
+
+An ExtraTrees correction to the hybrid reduced pooled RMSE (0.02738→0.02176
+rad) and worst error (0.919→0.723 rad), but the paired condition analysis did
+not support keeping it: it worsened 179/216 condition RMSEs, improved 37, and
+mean condition-RMSE delta was +0.00174 rad (95% bootstrap CI
+[-0.00100,+0.00448]). It also made some held-out reversals predict the wrong
+steering sign. The candidate is rejected and no learned actuator artifact was
+saved.
+
+Two yaw-atlas changes—predicted next steering change (v14), then an explicit
+release flag (v15)—barely changed event RMSE; tails stayed at 0.68–1.04 rad/s.
+This confirms that adding continuous global features is not enough. The next
+modeling step is to classify/represent actuator onset, release, reversal, and
+command age as distinct states and fit the one-step feedback transition from
+training captures; score the frozen candidate on r03. Do not integrate a
+candidate until its reversal predictions no longer have near-full-range misses
+and it does not harm onset/unwind. If those states remain ambiguous at 25 ms,
+use the existing bag timing/command history to isolate the missing state before
+requesting more simulation. Production odometry, MPC, and physics remain
+unchanged.
+
+### 2026-10-08 actuator timing correction and frozen r03 replay
+
+This subsection supersedes the preliminary same-sign-release and timing
+interpretation immediately above. The actuator rule was corrected to allow a
+direct delayed-command target whenever steering magnitude decreases, including
+through a sign change. On the held-out r03 capture, this simple hybrid scored
+0.02136-rad one-step steering-feedback RMSE (p95 0.00020, max 0.99981) versus
+0.03095 for a fixed 3.2-rad/s limiter and 0.03546 for direct command following.
+Across 216 paired conditions, the hybrid reduced condition RMSE against the
+fixed limiter by 0.01344 rad (95% bootstrap CI 0.00909–0.01817), with 82
+conditions better and 22 worse. The gain is local to 2.5–4.5 m/s and
+|steering| 0.30–0.525 rad; the nearly 1-rad maximum reversal error remains.
+
+The learned ExtraTrees residual is rejected: it slightly lowers pooled RMSE
+to 0.02018 but worsens 186/216 paired conditions (mean condition-RMSE delta
++0.00370 rad, 95% CI +0.00250–+0.00497). A hand-coded extra-queue-on-new-sign-
+reversal rule is also rejected: it triggers for 26 r03 samples, but worsens
+paired condition performance (mean +0.00436 rad, 95% CI +0.00113–+0.00794),
+and reversal RMSE rises 0.03356→0.04753 rad. Neither candidate was integrated.
+
+Added [`analyze_steering_actuator_timing.py`](../../tools/racing/specialists/analyze_steering_actuator_timing.py)
+and retained machine-readable per-probe results under
+`live_runs/racing_model_diagnostics_20261008/yaw_highsteer_reversal_v11_v16_magnitude_release/`.
+Raw ROS receipt-time latency is recorded only as a transport diagnostic; it is
+not used as physical `dt`. Using packet sequence and the required fixed 25-ms
+interval, command-to-feedback onset counts were:
+
+- Train r01: 149/216 at 2 packets, 34 at 3, 25 at 1, and 8 at 0 or 4–7.
+- Train r02: 187/216 at 2, 23 at 3, and 6 at 1.
+- Held-out r03: 190/216 at 2, 24 at 3, and 2 at 1.
+
+All measured onset intervals were packet-sequence-contiguous. The current
+one-previous-command model therefore represents the dominant two-packet
+command-to-feedback onset; a minority takes one more packet, and r01 is much
+more variable. A global extra delay does not transfer.
+
+The corrected v16 yaw atlas was replayed on the same r03 holdout. On shared
+direct-phase support, yaw RMSE changed only 0.06500→0.06489 rad/s; onset,
+reversal, and unwind changes were similarly negligible. The maximum event
+errors remain roughly 0.68, 0.96, and 1.04 rad/s. No yaw improvement is claimed.
+
+The planned condition-only onset-mode check is complete; it did not predict
+minority modes. The bridge request records then exposed command-update age as
+a likely explanation for the extra packet, documented in the follow-up below.
+Next score the separated command-to-request and request-to-feedback stages on
+existing runs. No new simulation or production odometry/MPC/physics change was
+made.
+
+### 2026-10-08 onset-mode predictability check on existing captures
+
+Completed a first classifier check on the three existing 216-condition timing
+captures; no new run was started. A random forest trained on r01/r02 using the
+condition descriptors (event, speed, steering magnitude/sign, transition
+profile and duration) scored 87.04% accuracy / 0.330 balanced accuracy on r03.
+The always-two-packet baseline scored 87.96% / 0.333 balanced accuracy, so
+the fitted classifier did not predict the minority delay modes. ExtraTrees
+scored 82.87% / 0.326. The r03 outcomes are 190 two-packet, 24 three-packet,
+and 2 one-packet responses. Exact-condition onset-mode agreement was 62.0%
+between r01/r02 and 76.9% between r02/r03. Thus condition parameters alone do
+not determine the observed onset count across repetitions; this is compatible
+with unobserved packet-phase/state variability but does not identify its
+cause.
+
+The confirmed actuator fit is therefore limited to a local, one-step
+statistical gain over the fixed rate limiter; its near-1-rad worst cases and
+unpredictable transition tail still rule out runtime promotion. A coarse
+command-start packet-index phase check (modulo 2/3/4/5/8/10/20) did not predict
+the minority onset modes. A deeper join to each bag's bridge packet diagnostics
+then found that command-update age at request time does: on r03 the median was
+10.22 ms for the 190 two-packet cases and 22.30 ms for the 24 three-packet
+cases; r02 replicated the separation (10.27 vs 22.16 ms). Request/response
+latency did not separate them on r03 (26.41 vs 26.27 ms median).
+
+For r03, using a 0.01-rad command-change threshold, the first request carrying
+the changed command was one packet after the observed ROS command change for
+189/190 two-packet cases and two packets after it for 23/24 three-packet cases.
+Feedback then began moving one packet after the changed command was first
+included in a request in those cases. This strongly suggests the extra packet
+is command-update timing against the bridge's 25-ms send boundary, followed by
+an approximately one-packet actuator/feedback response—not a longer physical
+servo time constant. It is not definitive proof of Unity's apply tick because
+the bridge has no echoed applied-command ID or native frame counter; packet
+sequence is assigned locally on receipt. The MPC receives a Float32 steering
+feedback value and receive-age estimate, not the diagnostic packet ID or the
+request's command snapshot. So bags can align this path more precisely than
+the live permitted input stream currently can.
+
+Source inspection confirms the current runtime model uses a fixed 25-ms
+physical steering queue (`physical_steering_delay_s`) while
+`command_actuation_delay_s` is 0.0 in `mpc_competition.yaml`. That fixed queue
+models the approximately one-packet response after a request carries the new
+command; it does not model the extra 0/25-ms command-update-to-request phase
+seen in the bag join. Fresh measured steering feedback anchors the current
+physical angle, but the future MPC rollout still uses its fixed command queue.
+This identifies a plausible missing timing term, not yet a validated runtime
+fix: the legal steering feedback has no header/command ID, so exact request
+phase is not currently observable to MPC. No production code or parameters
+were changed.
+
+Next: score a split offline model—command update to bridge request, then
+feedback response after the carrying request—on the existing r01/r02/r03
+captures. Keep the bridge-side timing diagnostic out of competition MPC inputs
+unless an allowed runtime signal can provide equivalent causally available
+timing. No odom, MPC, or physics code was changed.
+
+### 2026-10-08 command-age feature check and two-packet counterfactual
+
+The bridge timing join already points to command-update phase relative to its
+25-ms request boundary as the main source of the one-/three-packet onset
+variation. I tested whether that phase could be approximated from only
+competition-visible causal history by adding time-since-change features for
+steering command/feedback and throttle command/feedback (25-ms fixed packet
+grid, 0.005 change threshold, 400-ms cap). The model remains research-only;
+simulator truth is only the next-step yaw target and scoring truth. No future
+sensor or GT inputs were added.
+
+The candidate was fitted on the same sealed 62 training runs and evaluated on
+the same 36 whole-run validation captures (299,242 rows). The baseline was the
+command-intent local atlas with 0/25/50/100-ms history. On the 266,562 common
+local-support rows:
+
+| Score | Existing v2 | Command-age v4 |
+|---|---:|---:|
+| Local one-step yaw RMSE | 0.028935 | 0.029139 rad/s |
+| p95 absolute error | 0.020700 | 0.020567 rad/s |
+| Maximum absolute error | 1.353620 | 1.375296 rad/s |
+| Fraction below 0.1 rad/s | 98.8847% | 98.8911% |
+
+Run-clustered v4-minus-v2 RMSE was +0.000330 rad/s, with a 95% bootstrap CI
+of +0.000043 to +0.000636; v4 improved 12/36 validation runs and worsened
+24/36. The tiny p95/fraction changes do not offset the significantly worse
+run-level RMSE and maximum tail. Reject v4; keep it as a comparator and do not
+integrate it into odometry or MPC. Its report and bundle are under
+`live_runs/racing_model_diagnostics_20261008/sensor_only_yaw_regime_atlas_command_age_v4/`.
+
+I also tested the “always two packets” counterfactual by joining all 216 r03
+probe-condition yaw scores to their measured packet-grid onset counts. The
+available controlled high-steer captures do not show 95% two-packet behavior:
+r01 was 149/216 (69.0%), r02 187/216 (86.6%), r03 190/216 (88.0%), and the
+combined 3-run total was 526/648 (81.2%). On r03, restricting evaluation to
+the 190 two-packet conditions changed the existing v16 yaw atlas RMSE only
+from 0.072695 to 0.072314 rad/s; the maximum stayed 1.037442 rad/s. That
+maximum occurs on a two-packet 4.0-m/s, 0.42-rad unwind condition, so the
+largest yaw miss is not explained by the exceptional packet count. The
+two-packet-only rows have 97.80% below 0.1 rad/s, but their >1-rad/s tail
+still violates the desired error bound. Filtering the other 12% of r03
+conditions therefore does not solve yaw prediction and would hide behavior
+the live system still encounters.
+
+There is positive evidence for the source of the actuator timing modes. In
+r03, command-update age at bridge request time had median 10.22 ms for
+two-packet cases versus 22.30 ms for three-packet cases, while request/response
+latency did not separate them. The changed command first appeared in a bridge
+request one packet after the ROS command update in 189/190 two-packet cases,
+and two packets after it in 23/24 three-packet cases; feedback then usually
+moved one packet after that request. This is consistent with command update
+landing on different sides of the bridge's periodic request boundary,
+followed by about one packet of feedback response. It is not proof of the
+Unity apply tick (no echoed command ID/native frame counter exists). The
+bridge-side timing topic was used only offline and is not a legal competition
+MPC input. Since sensor-only command-age features did not improve held-out yaw,
+this timing diagnosis does not justify a runtime change.
+
+The data-driven atlas is still not a full 0–12 m/s model: the 36 validation
+runs reach 11.299 m/s and 0.5236 rad; the 11.5–12.0 m/s training bin is empty.
+Among 640 validation speed/steering cells with at least 20 rows, 511 have a
+local expert and 46 supported cells fail the p95/95%-within-0.1-rad/s gate.
+Those cells do not imply every speed/steering combination is physically
+feasible. No simulator was launched and no production Odom/MPC code, physics,
+or tuning was changed. Next focus is the high-error unwind/reversal response
+that remains even when command-to-feedback onset is exactly two packets;
+continue using per-regime models, retain unsupported cells as unsupported,
+and evaluate on whole unseen runs before any promotion.
+
+### 2026-10-08 local unwind response under the fixed-two-packet hypothesis
+
+The exact worst high-steer yaw row was traced through neighboring fixed-grid
+samples. At 3.97 m/s and +0.42 rad, steering feedback stayed at 0.4199 rad
+while the command had already moved to zero. One packet later the feedback
+snapped to 0.0016 rad and GT yaw rate fell from 1.2816 to 0.2386 rad/s. A
+second capture contains the same response: current yaw 1.2816 to 0.2847.
+These are not one-/three-packet outliers; the r03 probe labels both as
+two-packet onset.
+
+I implemented
+[`fit_yaw_two_packet_release_specialist.py`](../../tools/racing/specialists/fit_yaw_two_packet_release_specialist.py)
+as a reproducible, narrow model fit. It uses the existing r01/r02 training
+captures, GT only as the next-yaw target, and the bridge timing reports only
+offline to isolate the hypothesized fixed-two-packet events. It fits a
+sign-symmetric first-order release law at 4.0–4.5 m/s wheel-speed proxy,
+±0.425-rad steering cells:
+
+`r[k+1] = 0.23116 * r[k]` when a near-zero steering command changed one
+25-ms packet ago, steering feedback is still stale, and yaw remains large.
+
+Five training events from r01/r02 give decay 0.76884. The untouched r03
+two-packet examples (three transitions, both steering signs) score RMSE
+0.03528 rad/s, maximum 0.05766, and 100% below 0.1. This supports a real,
+local nonlinear response description under the fixed-two-packet assumption.
+
+The counterexample is equally important: r03 has one sensor-history state
+that satisfies the same gate but takes three packets. Its yaw remains at
+-1.2798 rad/s rather than decaying, so the two-packet law errs by 0.98389
+rad/s. Bridge request timing identifies it as a three-packet response; the
+currently visible command/feedback history does not. Applying the override
+blindly over both signed cells worsens whole-cell validation RMSE
+0.11835→0.13089 and maximum error 0.63743→0.98389, even though the fraction
+below 0.1 rises 89.3%→92.2%. Therefore this candidate is saved as a conditional
+offline comparator, not wired into MPC or odometry. The generated model and
+full report are in
+`live_runs/racing_model_diagnostics_20261008/yaw_release_decay_two_packet_v1/`.
+
+This reconciles the “95%” premise with actual evidence. In these dedicated
+captures two-packet onset occurred in 526/648 probes overall (81.2%) and
+190/216 in r03 (88.0%), not 95%. The variable delay is strongly associated
+with command-update age at the bridge's periodic request boundary: median
+10.22 ms for two-packet versus 22.30 ms for three-packet cases, with no
+separating request/response latency. The controller must not consume the
+bridge diagnostic topic. No simulator or production runtime was changed.
+
+Next: extend this explicit response-law procedure to the other speed × signed
+steering × turn-in/unwind/reversal regions, first using existing captures.
+Keep packet-mode filtering strictly as an offline diagnostic; any model
+intended for the competition stack must also account for the observed
+three-packet branch through legal causal inputs or a deterministic command
+schedule. Do not claim full 0–12 m/s coverage: training has no 11.5–12.0 m/s
+samples, and several held-out local cells remain unsupported or above the
+0.1-rad/s criterion.
+
+### 2026-10-08 audit of the largest held-out errors
+
+I classified the atlas's 100 largest supported whole-run validation errors
+instead of treating them as one generic fit problem: 69 are unwind, 22 turn-in,
+6 hold, and 3 reversal. Nine of these 100 pair a stale/repeated archived IMU
+yaw value with a simulator-truth yaw that has already changed by more than
+0.1 rad/s. This is an input/label timing issue, not evidence that the raw bag
+or the simulator truth is corrupt.
+
+The worst example (dynamic-coupled validation r01, packet 6212) makes the
+mechanism explicit. The exported sensor frame contains IMU yaw -1.1286 rad/s,
+but same-packet simulator yaw is -0.1667 rad/s and next-packet truth is
++0.5554 rad/s. The raw IMU message has source stamp 1.83 ms before that packet
+and reports -0.1667 rad/s; it was received about 14 microseconds after the
+odometry callback. `load_capture` deliberately aligns IMU to odometry receipt
+time using `_causal_scalar`, so it selected the previous IMU packet. The
+fixed-25-ms exporter then pairs that receipt-causal input with same-packet
+truth. This faithfully represents “latest IMU at the odometry callback,” but
+mixes an input one packet old with a current-packet target. The correct model
+must either carry causal IMU source-age/packet phase as a feature or explicitly
+evaluate same-source-time alignment while accounting for what the runtime
+controller can have received. I am not dropping these samples or silently
+using future truth as an input.
+
+Most of the large unwind errors are different: the current IMU and truth agree,
+but yaw drops sharply when steering feedback reaches zero. In independent
+swerve validation r01/r03 around 6.34 m/s, feedback is about ±0.0419 rad and
+yaw about ±0.785 rad/s; after the command has been sent and the feedback snaps
+to zero, next-packet truth is about ±0.017 rad/s. The v2 atlas predicts about
+±0.35–0.54 rad/s. A neighboring sample with nearly the same yaw and steering
+still persists for one packet before the release. The same release signature
+appears in the 2026-10-08 mid-speed capture at constant throttle, so throttle
+cut is not a sufficient explanation. A dynamic-coupled sample at 8.44 m/s
+also changes from -1.232 to -0.103 rad/s as feedback releases from -0.0639 to
+-0.0016 rad, while the atlas predicts -1.213. This is a speed-dependent
+actuator/yaw release regime, not one isolated 6.3-m/s anomaly.
+
+Command age is correlated with the response but is not a sufficient selector.
+In low-steering unwind data, validation medians for next/current yaw retention
+are about 0.01–0.04 at 25-ms command age, versus about 0.50–0.67 at age zero
+in several 5.5–7.0-m/s wheel-speed cells. However, the response is bimodal
+within those broad groups. I tested a training-only, run-balanced retention
+law `r[k+1] = rho * r[k]`, stratified by 0.5-m/s wheel-speed, 0.05-rad
+absolute-steering, and 0/25-ms command-age cells. On the targeted 1,123
+held-out low-steer unwind rows it worsened RMSE 0.1489→0.1800 rad/s, p95
+0.3598→0.4199, and fraction below 0.1 from 74.2% to 63.5%; only 3 of 24
+validation runs improved. Simpler speed/age and steering/age versions were
+worse still. This experiment is rejected; the group median is not a safe
+replacement for a selector that resolves the two response modes.
+
+A distinct high-error class is command reversal before measured steering
+feedback reverses. In steering-validation r03 at 3.50 m/s, feedback is still
++0.3293 rad and yaw +0.877 rad/s while the command is -0.35 rad. The bridge
+request first carries the negative command on that packet; next-packet truth
+is -0.421 rad/s before feedback has caught up. The atlas predicts the old
+positive-yaw direction. This is a command-to-plant phase/reversal regime and
+must not be pooled with steady turn-in or release.
+
+The high-steering fixed-two-packet release law remains a useful local
+comparator, but the existing whole-cell counterexample still prevents blind
+runtime promotion. The new all-outlier audit adds a second caution: the yaw
+dataset itself needs explicit source-age accounting before its worst-tail
+metrics can be interpreted as pure vehicle-model error. No simulator was
+started and no odometry/MPC runtime, physics, or competition inputs changed.
+
+Next work: audit the raw timestamp/source-age join across the high-error
+validation examples, then fit separate release and pre-feedback reversal
+specialists using training captures only. Compare on whole unseen runs and
+report both the timing-stratified error and ordinary full-run error. Only a
+candidate that improves its intended regime without worsening the remaining
+run-level distribution is eligible for implementation.
+
+### 2026-10-08: GT-target clarification and census of every large error
+
+The fitting target is simulator ground-truth yaw rate at the next 25-ms tick,
+not production `/odom` and not a GT-derived approximation to production
+odometry. The frozen sensor-only atlas target is
+`GT_yaw_rate[k+1] - IMU_yaw_rate[k]`; adding its prediction to the current
+permitted gyro measurement yields the predicted next yaw rate. Its inputs and
+expert selector use only current/past competition-observable sensors,
+commands, measured wheel speed, measured steering, and a causal turn event.
+GT speed and current GT yaw appear only in the offline audit's diagnostic
+strata. A prior low-speed specialist draft briefly included GT-derived body
+speed features; that leakage was removed before its reported refit/evaluation.
+
+The frozen v2 atlas was rescored over 299,242 transitions from 36 whole-run
+validation captures; test/final-test data remained sealed. One-step error is
+0.03694 rad/s RMSE, 0.04012 rad/s p95, and 1.35362 rad/s maximum. There are
+5,871 samples above 0.1 rad/s (1.962%). The run-macro RMSE is 0.03330
+rad/s (median 0.03631; range 0.00167–0.05713), and the mean per-run fraction
+within 0.1 rad/s is 98.09% (range 96.16–100%). These are correlated
+25-ms samples and one-step rate scores, not independent trials, recursive
+rollout, odometry position, or full-lap accuracy.
+
+Error-event breakdown exposes a highly nonuniform failure distribution:
+
+| Event | Validation rows | >0.1 rad/s | Error rate | Local-expert rows / errors | Fallback rows / errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Hold | 232,199 | 596 | 0.26% | 229,163 / 551 | 3,036 / 45 |
+| Reversal | 2,722 | 754 | 27.70% | 591 / 89 | 2,131 / 665 |
+| Turn-in | 35,276 | 1,300 | 3.69% | 22,727 / 980 | 12,549 / 320 |
+| Unwind | 29,045 | 3,221 | 11.09% | 14,081 / 1,353 | 14,964 / 1,868 |
+
+Overall local-expert coverage is 89.08%. Large-error frequency is 2,973 / 266,562
+(1.12%) on rows with local experts, versus 2,898 / 32,680 (8.87%) on global
+event fallback rows. Thus unsupported regimes materially amplify the tail,
+especially reversals, but lack of a local expert is not the whole problem:
+unwind and turn-in also fail inside supported experts, and the supported
+reversal error rate is still 15.06%. Many local-error experts have limited
+support (780 of 2,973 outliers come from experts trained on fewer than 120
+examples; 135 have only two independent training runs).
+
+Across all 5,871 outliers, 3,221 are unwind, 1,300 turn-in, 754 reversal, and
+596 hold. Observable-condition flags overlap and are diagnostic associations,
+not causal proof: 3,022 (51.5%) have steering command/feedback gap >0.05 rad;
+221 (3.8%) have current IMU-vs-current-GT yaw disagreement >0.1 rad/s;
+485 (8.3%) have absolute rear-wheel/GT speed mismatch >1 m/s; and 775
+(13.2%) have throttle command/feedback gap >0.05. In particular, current
+IMU-vs-GT phase mismatch is not the dominant explanation for the full tail;
+most failures occur while those two rates agree within 0.1 rad/s. Steering
+transition state is much more common, especially reversal (592/754) and
+unwind (1,791/3,221), but 1,983 errors have none of the five audited threshold
+signatures. Those remain unresolved rather than being assigned a speculative
+physics cause.
+
+Speed-conditioned error rates are elevated at 4–6 m/s (1,283 / 37,048,
+3.46%), versus 1.44% at 6–8 and 1.71% at 10–12 m/s; however, every evaluated
+band contains large errors. This is not evidence for a speed cutoff or a
+single missing-data interval. The complete row-level audit, with the selected
+expert/fallback source, its training sample/run support, and GT values clearly
+marked as diagnostics, is in
+[`sensor_yaw_large_error_audit.json`](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/sensor_yaw_large_error_audit.json)
+and [`selected_atlas_errors_over_0p1.csv`](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/selected_atlas_errors_over_0p1.csv).
+
+The two-packet release fit remains GT-targeted but is not a production fix:
+conditional exact-two-packet validation is promising, yet its observable
+sensor history does not distinguish a matching three-packet case, and blind
+application worsens whole-cell RMSE 0.11835→0.13089 with maximum error
+0.63743→0.98389. Bridge packet timing remains offline-only and cannot be used
+as a competition controller selector. Do not replace GT labels with production
+odometry, and do not route the model using GT speed/yaw.
+
+Next: use the all-row census to fit/test a training-only specialist or model
+revision for unwind and command-ahead-of-feedback reversal, with particular
+attention to fallback-supported cells and low-run-count experts. Score the
+same whole-run validation captures and include event-specific and full-run
+metrics. No new simulation is justified by this audit alone; the existing
+captures contain the failure modes. No production Odom/MPC, physics, or
+trajectory files were changed, and no simulator was launched.
+
+One diagnostic response to the GT-target correction is a sensor-only
+low-speed combined-slip specialist. On its targeted three whole-run
+validation subset it changes yaw-rate RMSE 0.09081→0.08088 rad/s, p95
+0.21049→0.15211, maximum 0.88564→0.75918, and errors above 0.1 from 40 to
+30. It wins on two of three runs and loses on the crawl-steering run; the
+three-run bootstrap interval for run-macro RMSE improvement crosses zero
+([-0.08949, 0.00419]). Its unwind subset regresses (0.06852→0.11277 RMSE),
+so it is a bounded research candidate, not a universal solution or runtime
+promotion. A sensor-only 100-ms acceleration-corrected wheel-speed proxy
+barely changes pooled metrics and does not remove the tail; it is not adopted.
+The report and model are in
+[`yaw_low_speed_combined_slip_v1`](../../live_runs/racing_model_diagnostics_20261008/yaw_low_speed_combined_slip_v1/).
+
+I also compared the existing command-age v4 against v2 separately in every
+event, using the frozen GT-targeted whole-run validation reports. It gives a
+small reversal RMSE change (global 0.17279→0.16262, local 0.11955→0.11917
+rad/s), but the local p95 is essentially flat (0.25140→0.25166) and its
+maximum error worsens (1.35362→1.37530). It worsens unwind RMSE (global
+0.08273→0.08323; local 0.09192→0.09298) and turn-in local RMSE
+0.05246→0.05276. This does not solve the main tail and confirms that command
+age alone is not a useful release/reversal selector. Keep v4 rejected; do not
+promote it on the basis of its small event-average reversal change.
+
+### 2026-10-08 follow-up: unwind/reversal neighborhood and timing join
+
+A training-only adjacent-cell expert fit was evaluated across all 36
+whole-run validation captures. It reduced one-step GT-yaw RMSE from 0.03694
+to 0.03117 rad/s and the >0.1-rad/s count from 5,871 to 3,814. Unwind
+outliers fell 3,221→1,208, but reversal only fell 754→710 and the global
+maximum stayed 1.352 rad/s. The candidate's run-macro result beats the prior
+fallback-gap model on 31/36 runs (95% paired-run bootstrap CI for RMSE delta
+[-0.00388,-0.00220] rad/s). It is a substantive offline one-step improvement,
+not recursive-rollout or production odometry evidence; its 646 tree experts
+occupy about 176 MB and it is not integrated.
+
+I joined candidate errors in the held-out 216-condition high-steer r03 run to
+the measured 25-ms command-to-feedback onset. In matched probe conditions,
+three-packet response phases had higher candidate window RMSE than two-packet
+phases in 5/6 unwind pairs and 7/9 reversal pairs. Mean paired RMSE increases
+were 0.0480 (95% interval [0.0038,0.1021]) and 0.0531 ([0.0265,0.0794])
+rad/s. This timing effect is not a complete explanation: many two-packet
+rows still exceed 0.1. In the narrow full-steer unwind gate, nearly identical
+legal sensor/command states lead to next-GT yaw of about 0.25 versus 1.28
+rad/s depending on the measured response phase. Existing bridge diagnostics
+associate this branch with command update relative to the bridge request
+boundary, not variable request-response latency. The debug timing topic stays
+offline-only; current legal history does not yet identify the future branch.
+
+The row/phase join is reproducible with
+[`analyze_yaw_transition_timing_residuals.py`](../../tools/racing/specialists/analyze_yaw_transition_timing_residuals.py);
+the results are
+[`timing_residual_join.json`](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/unwind_reversal_neighborhood_v2_supported/timing_residual_join.json).
+
+### 2026-10-08 policy correction and exact-two-packet error diagnosis
+
+The packet-response assumption is now strict: **only an exactly two-packet
+response phase is valid. Every other count, including three packets, is
+invalid and excluded from yaw fitting, model selection, and validation.** The
+earlier historical notes above that compare or model three-packet responses
+are superseded; retain them only to explain how the old hypothesis arose, not
+as evidence or a target. The focused r09 evaluator selects only
+`reversal/2_packet` and `unwind/2_packet`, and states this policy in its output.
+Its dedicated collector excludes all other response phases before model
+selection/scoring and does not load the old two-versus-three-packet classifier.
+The regime map has the same warning at its top.
+
+The old candidate-selection reference for unwind was itself a
+`unwind/3_packet` comparison, so the prior mirror-augmentation selection is
+withdrawn. I recomputed plain-versus-mirrored model choice with leave-one
+training-capture-out folds using only exact-two-packet rows: mirroring lowered
+run-macro RMSE in all four folds for reversal (0.1676→0.1497 rad/s) and unwind
+(0.0526→0.0466). The fresh r09 holdout was not used to choose the model.
+
+I reran the candidate evaluation on whole-run r09 using only those two groups.
+There are 90 reversal rows and 162 unwind rows. The mirrored sensor-history
+ExtraTrees candidate improves over gyro persistence but still fails the
+0.1 rad/s maximum-error requirement:
+
+| Exact-two-packet group | Candidate RMSE / p95 / max (rad/s) | Rows over 0.1 | Persistence RMSE / max |
+|---|---:|---:|---:|
+| Reversal | 0.1373 / 0.3332 / 0.4478 | 27 / 90 | 0.5355 / 0.9810 |
+| Unwind | 0.1094 / 0.1927 / 0.8235 | 19 / 162 | 0.3180 / 0.9956 |
+
+The command-at-receipt versus bridge-request steering gap is not a complete
+cause: reversal error varies non-monotonically across gap bins, and unwind has
+12 errors above 0.1 among 119 rows whose gap is within 0.05 rad. The bridge
+diagnostic was used only offline. A causal next-steering estimate improves
+reversal RMSE 0.1393→0.1027 and lowers its >0.1 count 21→16, but max error is
+still 0.4326. It does not improve unwind (RMSE 0.1083→0.1077; >0.1 count
+15→20; max 0.7750→0.7881). Actuator prediction therefore explains part of
+reversal, not both groups.
+
+The high-error conditions are represented in training, but sparsely: the
+3.5 m/s, 0.42 rad step-unwind condition has 4–6 valid phases (16–24 scored
+rows) across 3–4 captures for the two turn signs. The worst reversal-step
+conditions also have multiple training captures. These are not empty bins,
+but the present model remains inaccurate there.
+
+I decomposed the target into current IMU-to-GT yaw mismatch plus the next
+25-ms GT yaw change. On all 90 reversal and 162 unwind rows, current yaw
+mismatch is exactly zero in the aligned data; the error is in predicting the
+physical next-step yaw change, not correcting current yaw. A model trained on
+that GT yaw-change target produces numerically identical held-out errors to
+the direct next-yaw residual target.
+
+As an information-upper-bound test, I added current GT body velocity,
+finite-difference body acceleration, sideslip angle, and rear-wheel/body speed
+mismatch to offline models. This did not help reversal (RMSE 0.1425→0.1482,
+errors >0.1: 32→33). For unwind, RMSE changed 0.1113→0.1048, but errors >0.1
+increased 18→21 and max remained 0.7938. These GT values are diagnostic only;
+they do not explain away the large error tail.
+
+The earlier r07 GT-body-state score is superseded: its selector checked each
+row's event but not the enclosing probe's event, mixing event-phase histories.
+The corrected r09 analysis gates both phase and row to the same event and
+exact-two-packet class.
+
+Current conclusion: these are genuine next-step yaw-dynamics errors.
+Command/feedback timing is a partial reversal factor; current GT u/v and their
+simple derivatives do not resolve the tail. No model was promoted or
+integrated into odometry/MPC, and no simulation was launched. Next, compare
+the high-error states against training examples using only the valid
+two-packet groups; do not fit, score, or draw conclusions about three-packet
+responses.
+Detailed interpretation and next step are in
+[`YAW_RESPONSE_REGIME_MAP_20261008.md`](YAW_RESPONSE_REGIME_MAP_20261008.md).
+
+### 2026-10-08 exact-two residual follow-up: age, history depth, and local experts
+
+This update supersedes the preceding note that r10 was still in progress. The
+finished 40-Hz r10 capture is
+`openplane_yaw_error_highsteer_reversal_residual_train_r10_20261008`. It ran
+480 scheduled phases, with 146 response phases passing the exact-two-packet
+gate. Of the classified response phases, 12 three-packet and 2 one-packet
+phases were excluded; no non-two-packet row was fitted or scored. The capture
+measured 39.60 Hz command delivery and had no collision or bridge fault. Its
+admitted dataset is
+[`r10 manifest`](../../live_runs/openplane_yaw_error_highsteer_reversal_residual_train_r10_20261008_dataset/manifest.json).
+The capture is training-only; r03 and r09 remain separate whole-run
+evaluations, and no test/final-test data were opened.
+
+All reported errors in this section are absolute one-step **yaw-rate** error
+in rad/s at the next fixed 25-ms packet sample—not yaw-angle radians. The
+exact-two collector is the only source for these tables. One-, three-, and
+all other packet counts are invalid and excluded.
+
+#### Where the held-out failures are
+
+After admitting r10 to training, the training-only-selected mirrored yaw
+candidate with the causal `hybrid_release_or_limit_k_minus_1` steering
+feature gives:
+
+| Whole-run holdout / event | Rows | Baseline mirrored >0.1 | Candidate >0.1 | Candidate RMSE / p95 / max (rad/s) |
+|---|---:|---:|---:|---:|
+| Ordinary 40-Hz r03, reversal | 156 | 13 | 7 | 0.1275 / 0.0861 / 0.8817 |
+| Ordinary 40-Hz r03, unwind | 538 | 3 | 2 | 0.0211 / 0.0260 / 0.3813 |
+| Packet-phase r09, reversal | 90 | 20 | 15 | 0.0902 / 0.2036 / 0.3690 |
+| Packet-phase r09, unwind | 162 | 17 | 18 | 0.1092 / 0.1769 / 0.8755 |
+
+The ordinary-rate reversal improvement is real but incomplete: 149/156 samples
+are within 0.1, while one sample is still 0.882 rad/s wrong. Its seven misses
+are at 3.0–4.0 m/s and 0.35–0.50 rad; six are 25–50 ms after the command
+transition and one is 50–150 ms. The two remaining r03 unwind misses are both
+from the 3.5 m/s, 0.42-rad, 100-ms ramp; they occur at about 99 and 125 ms.
+The candidate is accurate outside these short transition windows.
+
+The separate r09 packet-phase holdout is materially different. Reversal misses
+are all early: 5/26 in the first 25 ms and 10/23 from 25–50 ms, with none after
+50 ms. Unwind has 18/162 misses, including 13/60 from 50–150 ms and one
+0.876-rad/s miss at 26 ms. r09 uses a different setpoint/packet-phase stimulus
+and is not pooled with ordinary 40-Hz captures.
+
+The actual-next-steering experiment is an offline forbidden-input diagnostic,
+not a usable observer input. On ordinary r03, training with measured next
+steering as an oracle feature reduces the extended-history reversal result to
+0/156 above 0.1 (max 0.0939 rad/s). This indicates that next-steering
+forecast error is an important part of the ordinary-rate residual. However,
+the same oracle does not solve r09: it still has 14/90 reversal and 19/162
+unwind errors above 0.1 without symmetry. Therefore actuator forecast error is
+not the complete explanation; the packet-phase yaw response itself remains
+under-modelled.
+
+#### Falsification of two simple fixes
+
+First, I changed the offline evaluator to compare current/past histories through
+100 ms against the same histories through 500 ms. Left/right symmetry,
+training-only whole-capture folds, and exact-two filtering were retained.
+Longer history made no useful threshold improvement:
+
+| Holdout / event | 100-ms history: >0.1, max | 500-ms history: >0.1, max |
+|---|---:|---:|
+| r03 reversal | 7/156, 0.8817 | 7/156, 0.8798 |
+| r03 unwind | 2/538, 0.3813 | 3/538, 0.4418 |
+| r09 reversal | 15/90, 0.3690 | 14/90, 0.3425 |
+| r09 unwind | 18/162, 0.8755 | 21/162, 0.7757 |
+
+The r09 reversal change is only one sample and the unwind tail worsens. A
+longer raw history window alone is therefore not the missing state.
+
+Second, I tested separate measured-state experts for speed-only (3 bins),
+steering-only (3 bins), and joint speed×absolute-steering (9 bins), against one
+global event-specific model. Bins use current measured rear-wheel mean speed
+and current steering feedback; all models use the same causal steering
+feature and the same exact-two rows. The architecture was selected using only
+whole-capture training folds. The global candidate won for both events:
+
+| Event | Global LOCO misses | Speed-only | Steering-only | Joint 9-cell |
+|---|---:|---:|---:|---:|
+| Reversal | 80 | 102 | 85 | 91 |
+| Unwind | 56 | 77 | 71 | 94 |
+
+No cell fell back for lack of the minimum support in the two holdouts, so this
+is not a hidden coverage failure. The local bins sometimes lowered a single
+run's RMSE, but worsened training-fold threshold counts and did not transfer to
+r09. Current evidence rejects hard speed/steering bins as the fix for this
+particular transient residual; it does not reject regime-specific models in
+other operating regions.
+
+#### Current diagnosis and next action
+
+The high-steer ordinary-rate residual is a mixture: the yaw predictor can be
+close when next steering is known, but its causal next-steering forecast has
+rare large errors; a few residuals also remain even with the predicted
+steering feature. In the separate packet-phase stimulus, even oracle next
+steering leaves large yaw errors, so at least one additional dynamic state or
+response mode is missing. The data do not support explaining this with speed
+or steering alone, and simply extending sensor history from 100 to 500 ms did
+not cure it.
+
+The next model experiment should use a compact latent actuator/tire-response
+state driven only by current and past steering feedback/commands, wheel
+speeds, throttle, IMU, and timing. It must be selected by whole-capture
+training folds, then checked separately on r03 and r09; r09 must remain a
+different stimulus domain unless ordinary production setpoints match it. A
+causal event-age or actuator-state feature is the targeted hypothesis, not
+future measured steering or phase metadata. If that state cannot be inferred
+from existing captures, the minimum new-data design is paired exact-two
+reversal/unwind probes with identical current speed/steering/command state but
+deliberately varied pre-transition steering and throttle/wheel-speed history.
+Do not run another broad sweep. This update did not start a simulator, change
+odometry/MPC, alter physics, or admit a non-two-packet sample.
+
+Machine-readable results:
+
+- [short-history r03](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/predicted_next_steering_yaw_audit_r03_loco.json)
+- [short-history r09](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/predicted_next_steering_yaw_audit_r09_loco.json)
+- [500-ms-history r03](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/predicted_next_steering_yaw_audit_r03_extended_loco.json)
+- [500-ms-history r09](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/predicted_next_steering_yaw_audit_r09_extended_loco.json)
+- [measured-state local experts](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/exact2_speed_steering_local_model_audit.json)
+Existing data are enough to identify the phase mechanism; no additional
+open-plane run was made. A later real-sim test is justified only to evaluate a
+specific deterministic bridge/control-phase change or a causal phase estimate
+from permitted timestamps. Runtime odometry/MPC, simulator physics, and topic
+subscriptions remain unchanged.
+
+### 2026-10-08 exact-two-packet residual localization and targeted capture
+
+The acceptance rule for this analysis is strict: **only samples whose measured
+response is exactly two simulator packets are included**. One-, three-, and
+all other packet-count samples are invalid and excluded from fitting, model
+selection, and scoring. The residual target reported here is next-tick
+simulator-GT yaw-rate error in **rad/s** (not yaw-angle error in radians).
+
+The remaining error is concentrated in fast transients, not steady turning.
+On the ordinary 40-Hz-command r03 whole-run capture, the mirrored sensor-history
+candidate's reversal group has 16/156 samples above 0.1 rad/s (RMSE 0.1520,
+p95 0.4024, maximum 0.8656). Fourteen of its 16 threshold violations occur
+within 50 ms of the command transition (14/40 samples in that window); after
+50 ms only 2/116 samples exceed the threshold. The same candidate transfers
+substantially better on ordinary-rate unwind: 3/538 above 0.1 (RMSE 0.0203,
+maximum 0.3607), with all three outliers between 50 and 150 ms. On the
+200-Hz-setpoint packet-phase captures, both reversal and unwind degrade; those
+captures are kept as a separate stimulus context and are not pooled as if
+they represented 40-Hz commands.
+
+The error is in physical next-step yaw response: aligned current IMU yaw rate
+matches current simulator truth exactly on the audited samples. The existing
+legal sensor-history model and a causal predicted-next-steering feature do not
+remove the tail. Future-measured steering and bridge debug timing remain
+diagnostic only and are never predictor inputs. Therefore the current evidence
+does not justify a runtime correction yet.
+
+The 40-Hz open-plane run
+`openplane_yaw_error_highsteer_reversal_residual_train_r10_20261008` is in
+progress. It repeats only the poorly supported 3–4 m/s, 0.35–0.50 rad
+high-steering reversal and unwind pockets, with signed turns, randomized order,
+two transition ages, and reset isolation. This is a focused attempt to separate
+the early command/steering-response transient from the established later
+response, not another broad sweep. At the time of this update it is running
+without a reported collision; no r10 samples have been admitted to fitting or
+scoring yet. After completion, the bag must pass probe/capture checks, and only
+exactly-two-packet rows will be exported. The first evaluation will score the
+pre-existing frozen candidate on r10 before r10 is admitted to training. Any
+revised model must then improve held-out whole captures and reduce the
+phase-level maximum/tail; an average-RMSE gain alone is not sufficient for the
+requested 100% within-0.1 threshold.
+
+No odometry/MPC model, runtime topic, or simulator physics has been changed.
+
+The rerun now records response-count histograms so the exclusion is auditable.
+For example, it found 34 three-packet phases in r01, 23 in r02, 24 in r03,
+16 in r04, and 10 in r06; **all were excluded**, as were every other
+non-two-packet count. These are exclusion counts only, not evidence about a
+three-packet behavior or a regime. The report lists `packet_response_steps_included`
+as `[2]` for every capture:
+[`targeted_group_candidate_comparison_r09.json`](../../live_runs/racing_model_diagnostics_20261008/yaw_large_error_audit_v1/targeted_group_candidate_comparison_r09.json).

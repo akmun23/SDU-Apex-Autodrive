@@ -24,9 +24,10 @@ from tools.evaluate_open_plane_body_dynamics import (
 
 
 STEERING_EVENT_LABEL = re.compile(
-    r"^probe_yawerr_(crawl(?:_fine)?|highsteer_reversal|subcrawl)_"
+    r"^probe_yawerr_(crawl(?:_fine)?|highsteer_reversal(?:_repeat)?|subcrawl|"
+    r"packet_phase_r[0-9]+)_"
     r"(onset|unwind|reversal)_v([0-9.]+)_a([0-9.]+)_"
-    r"turn([+-]1)_delay([0-9.]+)_(step|ramp)([0-9.]+)s$"
+    r"turn([+-]1)_delay([0-9.]+)_(step|ramp)([0-9.]+)s(_rep[0-9]+)?$"
 )
 LOWWHEEL_LABEL = re.compile(
     r"^probe_yawerr_lowwheel_v([0-9.]+)_a([0-9.]+)_"
@@ -38,15 +39,21 @@ MIDWHEEL_LABEL = re.compile(
 )
 PROFILE_PREFIXES = (
     "probe_yawerr_crawl_", "probe_yawerr_highsteer_reversal_",
-    "probe_yawerr_subcrawl_", "probe_yawerr_lowwheel_",
+    "probe_yawerr_highsteer_reversal_repeat_",
+    "probe_yawerr_packet_phase_", "probe_yawerr_subcrawl_",
+    "probe_yawerr_lowwheel_",
     "probe_yawerr_midwheel_")
 SETTLE_PREFIXES = (
     "settle_yawerr_crawl_", "settle_yawerr_highsteer_reversal_",
+    "settle_yawerr_highsteer_reversal_repeat_",
     "settle_yawerr_subcrawl_")
 EXPECTED_PROBES_BY_FAMILY = {
     "crawl": 96,
     "crawl_fine": 384,
     "highsteer_reversal": 216,
+    "highsteer_reversal_repeat": 160,
+    "highsteer_reversal_packetphase": 84,
+    "highsteer_reversal_boundaryphase": 72,
     "subcrawl": 144,
     "lowwheel": 144,
     "midwheel": 112,
@@ -57,7 +64,15 @@ STEERING_TOLERANCE_RAD = 0.05
 def parse_label(label: str) -> dict[str, Any] | None:
     match = STEERING_EVENT_LABEL.fullmatch(label)
     if match is not None:
-        family, event, speed, angle, sign, delay, mode, duration = match.groups()
+        family, event, speed, angle, sign, delay, mode, duration, repeat = match.groups()
+        if family == "highsteer_reversal_repeat":
+            pass
+        elif (family.startswith("packet_phase_r") or
+                (repeat is not None and
+                 float(delay) in (0.237, 0.263))):
+            family = "highsteer_reversal_boundaryphase"
+        elif repeat is not None:
+            family = "highsteer_reversal_packetphase"
         transition_delay = float(delay)
         transition_duration = float(duration)
         throttle_delta = None
