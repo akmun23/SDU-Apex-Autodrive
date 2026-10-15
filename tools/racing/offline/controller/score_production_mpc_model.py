@@ -235,6 +235,8 @@ def score(benchmark_path: Path, registry_path: Path, bag_paths: dict[str, Path],
 
     run_index_by_name = {str(run_id): index
                          for index, run_id in enumerate(data["run_ids"])}
+    dataset_run_id_by_validation_run = benchmark.get(
+        "dataset_run_id_by_validation_run", {})
     projections: dict[str, dict[str, np.ndarray]] = {}
     local_index_by_global: dict[str, dict[int, int]] = {}
     command_values: dict[str, tuple[np.ndarray, np.ndarray]] = {}
@@ -243,7 +245,9 @@ def score(benchmark_path: Path, registry_path: Path, bag_paths: dict[str, Path],
         lap_length = controller.lap_length_m
         for report_run_id in reports:
             suffix = report_run_id.rsplit("_", 1)[-1]
-            dataset_run_id = f"practice_unseen_model_validation_20261001_{suffix}"
+            dataset_run_id = str(dataset_run_id_by_validation_run.get(
+                report_run_id,
+                f"practice_unseen_model_validation_20261001_{suffix}"))
             if dataset_run_id not in run_index_by_name:
                 raise ValueError(f"benchmark dataset lacks {dataset_run_id}")
             run_index = run_index_by_name[dataset_run_id]
@@ -263,6 +267,8 @@ def score(benchmark_path: Path, registry_path: Path, bag_paths: dict[str, Path],
                 data, run_index, commands_by_run[report_run_id], indices)
 
         by_run: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+            lambda: defaultdict(list))
+        stepwise_errors: dict[str, dict[str, list[np.ndarray]]] = defaultdict(
             lambda: defaultdict(list))
         by_category: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = defaultdict(
             lambda: defaultdict(lambda: defaultdict(list)))
@@ -331,6 +337,25 @@ def score(benchmark_path: Path, registry_path: Path, bag_paths: dict[str, Path],
             if not valid:
                 continue
             predicted_array = np.asarray(predicted, dtype=np.float64)
+            step_count = round(2.0 / DT_S)
+            step_future = slice(local_index + 1,
+                                local_index + 1 + step_count)
+            step_truth = np.column_stack((
+                values[step_future, 0],
+                values[step_future, 1],
+                values[step_future, 2],
+                project["e_y"][step_future],
+                project["e_psi"][step_future],
+                frames[step_future, 3],
+                target_speed[local_index + 1:local_index + 1 + step_count],
+                steering[local_index + 1:local_index + 1 + step_count],
+            ))
+            step_error = predicted_array[:step_count] - step_truth
+            step_error[:, 4] = np.arctan2(
+                np.sin(step_error[:, 4]), np.cos(step_error[:, 4]))
+            for channel, name in enumerate(STATE_NAMES):
+                stepwise_errors[dataset_run_id][name].append(
+                    step_error[:, channel].copy())
             horizon_rows = []
             for horizon in HORIZONS_S:
                 steps = round(horizon / DT_S)
@@ -397,6 +422,32 @@ def score(benchmark_path: Path, registry_path: Path, bag_paths: dict[str, Path],
                         name: float(np.mean([row[name]["rmse"] for row in rows]))
                         for name in STATE_NAMES}
 
+    stepwise_run_rmse: dict[str, dict[str, np.ndarray]] = {}
+    for run_id, channels in stepwise_errors.items():
+        stepwise_run_rmse[run_id] = {
+            name: np.sqrt(np.mean(np.square(np.stack(rows, axis=0)), axis=0))
+            for name, rows in channels.items() if rows
+        }
+    stepwise_report = []
+    for step in range(round(2.0 / DT_S)):
+        channel_report = {}
+        for name in STATE_NAMES:
+            per_run = {
+                run_id: float(values[name][step])
+                for run_id, values in stepwise_run_rmse.items()
+                if name in values
+            }
+            if per_run:
+                channel_report[name] = {
+                    "run_macro_rmse": float(np.mean(list(per_run.values()))),
+                    "per_run_rmse": dict(sorted(per_run.items())),
+                }
+        stepwise_report.append({
+            "step": step + 1,
+            "time_s": (step + 1) * DT_S,
+            "state_rmse": channel_report,
+        })
+
     result = {
         "schema_version": 1,
         "model_id": "MPC0_production_vehicle_model",
@@ -418,6 +469,9 @@ def score(benchmark_path: Path, registry_path: Path, bag_paths: dict[str, Path],
         "command_alignment": "latest recorded command at/before each 40 Hz source sample; finite-difference rate over fixed 25 ms step",
         "steering_command_alignment": "packet-aligned bridge steering feature; p99 absolute difference <=0.03 rad",
         "score_horizons_s": list(HORIZONS_S),
+        "stepwise_error_interval_s": DT_S,
+        "stepwise_error_through_s": 2.0,
+        "stepwise_run_macro_rmse": stepwise_report,
         "independent_run_count": len(per_run_report),
         "window_count_scored": len(all_start_rows),
         "nonlinear_rollout_failures": failures,

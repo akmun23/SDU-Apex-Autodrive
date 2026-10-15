@@ -21,6 +21,10 @@ from typing import Any
 
 import numpy as np
 
+from tools.vehicle_dynamics_learning.sealed_archive_guard import (
+    assert_no_sealed_runs_in_packed_archive,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -402,6 +406,7 @@ def build(bag_path: Path, base_path: Path, output_path: Path,
 
     if not candidates:
         raise ValueError("no continuous, sensor/ground-truth-valid unseen intervals")
+    assert_no_sealed_runs_in_packed_archive(base_path)
     with np.load(base_path, allow_pickle=False) as archive:
         base = {key: archive[key] for key in archive.files}
     if int(base["schema_version"][0]) != 8 or str(base["dataset_role"][0]) != "race_domain":

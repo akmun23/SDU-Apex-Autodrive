@@ -1,0 +1,27 @@
+sensor_odometry:
+  ros__parameters:
+    # 0.20-gain field-test profile for the training-run-fitted v6 expert.
+    # Explicit A/B replay overlay. The production YAML currently carries the
+    # same 0.20-gain parameters; this file keeps the candidate configuration
+    # inspectable without implying that it is a separate runtime profile.
+    use_high_steer_unity_actuator_u_expert: true
+    high_steer_unity_actuator_u_min_speed_mps: 3.2
+    high_steer_unity_actuator_u_max_speed_mps: 4.6
+    high_steer_unity_actuator_u_max_speed_low_throttle_mps: 3.4
+    high_steer_unity_actuator_u_throttle_split: 0.15
+    high_steer_unity_actuator_u_min_abs_steering_rad: 0.31
+    high_steer_unity_actuator_u_max_abs_steering_rad: 0.5
+    high_steer_unity_actuator_u_min_throttle_feedback: 0.11
+    high_steer_unity_actuator_u_max_throttle_feedback: 0.18
+    high_steer_unity_actuator_u_intercept_mps: -0.0550774641778664
+    high_steer_unity_actuator_u_coefficients: [
+      -0.08255814577376906, -0.06462385318455005, -0.03962646621941661, -0.002453107303265004,
+      -0.08516191190137458, 0.009605623993941126, 0.000441290554127197, -0.001017280876552422,
+      0.05125684586903146, -0.00974143444090551, 0.0137468887148953, -0.002373332385225677,
+      -0.01842135479097771, -0.0002585025551140647, 0.01235052756869933, 0.002406478585136288,
+      0.08532694910624328, 0.03685801228812844, 3.757758490225627e-17, 0.001244430931599904,
+      0.0006571077030322214, 0.2496924216470126, 0.2071665481394125, 0.0,
+      -0.001834591851801122, 0.003842610912709008, 0.0004444425930894277, -0.0001230439759541521,
+      0.0003431094572128157, 0.0003325427247266553, -0.00005323863619598558, 0.00003229931156264594,
+      0.004808672755832698, 0.0001099585858149435]
+

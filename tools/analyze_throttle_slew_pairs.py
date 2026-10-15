@@ -62,6 +62,10 @@ PRE_WINDOW_REAR_WHEEL_RESIDUAL_GATE_MPS = 0.20
 BOOTSTRAP_SEED = 20260928
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SWERVE_PROFILES = {
+    "yaw_highsteer_wheel_release_train": "train",
+    "yaw_highsteer_wheelspin_release_train": "train",
+    "yaw_highsteer_wheel_feedbackgap_train": "train",
+    "yaw_highsteer_wheel_feedback_upper_train": "train",
     "race_domain_swerve_throttle_slew_train": "train",
     "race_domain_swerve_throttle_slew_validation": "validation",
     "race_domain_swerve_throttle_slew_frontier_validation": "validation",
@@ -83,6 +87,10 @@ FIXED_STEERING_PROFILE = "throttle_slew_pair"
 FIXED_STEERING_EXPECTED_PAIRS = 24
 SWERVE_EXPECTED_PAIRS = 32
 SWERVE_EXPECTED_PAIRS_BY_PROFILE = {
+    "yaw_highsteer_wheel_release_train": 16,
+    "yaw_highsteer_wheelspin_release_train": 8,
+    "yaw_highsteer_wheel_feedbackgap_train": 8,
+    "yaw_highsteer_wheel_feedback_upper_train": 8,
     "race_domain_swerve_throttle_slew_train": SWERVE_EXPECTED_PAIRS,
     "race_domain_swerve_throttle_slew_validation": SWERVE_EXPECTED_PAIRS,
     "race_domain_swerve_throttle_slew_frontier_validation": 18,
@@ -102,6 +110,11 @@ SWERVE_EXPECTED_PAIRS_BY_PROFILE = {
 }
 SWERVE_EXPECTED_RESETS_BY_PROFILE = {
     **SWERVE_EXPECTED_PAIRS_BY_PROFILE,
+    # Both throttle treatments are separate reset-isolated exposures.
+    "yaw_highsteer_wheel_release_train": 32,
+    "yaw_highsteer_wheelspin_release_train": 16,
+    "yaw_highsteer_wheel_feedbackgap_train": 16,
+    "yaw_highsteer_wheel_feedback_upper_train": 16,
     # Low-steer probes are individually reset-isolated so that a swerve's
     # residual lateral velocity/yaw cannot contaminate the paired treatment.
     "race_domain_swerve_throttle_slew_lowsteer_validation": 48,
@@ -135,8 +148,11 @@ def _fixed_encoder_surface_by_source_stamp(
                 connection, topics, common.PACKET_TIMING):
             try:
                 row = json.loads(message.data)
-                packet_by_stamp[int(row["bridge_receive_ros_stamp_ns"])] = int(
-                    row["packet_sequence"])
+                source_stamp = row.get("bridge_request_ros_stamp_ns")
+                if not isinstance(source_stamp, int):
+                    source_stamp = row.get("bridge_receive_ros_stamp_ns")
+                if isinstance(source_stamp, int):
+                    packet_by_stamp[source_stamp] = int(row["packet_sequence"])
             except (TypeError, ValueError, KeyError, json.JSONDecodeError):
                 continue
         angles: list[dict[int, float]] = []

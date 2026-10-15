@@ -78,6 +78,24 @@ if [[ -n "${SDU_APEX_ACTUATOR_PARAMETER_OVERLAY:-}" ]]; then
   esac
 fi
 
+odom_parameter_overlay=""
+if [[ -n "${SDU_APEX_ODOM_PARAMETER_OVERLAY:-}" ]]; then
+  if [[ ! -f "${SDU_APEX_ODOM_PARAMETER_OVERLAY}" ]]; then
+    echo "SDU_APEX_ODOM_PARAMETER_OVERLAY does not exist: ${SDU_APEX_ODOM_PARAMETER_OVERLAY}" >&2
+    exit 1
+  fi
+  overlay_host_path="$(realpath -- "${SDU_APEX_ODOM_PARAMETER_OVERLAY}")"
+  case "${overlay_host_path}" in
+    "${repo_root}"/*)
+      odom_parameter_overlay="/workspace/src/${overlay_host_path#"${repo_root}"/}"
+      ;;
+    *)
+      echo "SDU_APEX_ODOM_PARAMETER_OVERLAY must be inside the repository bind mount." >&2
+      exit 1
+      ;;
+  esac
+fi
+
 ros_domain_args=()
 if [[ -n "${ROS_DOMAIN_ID:-}" ]]; then
   ros_domain_args+=(-e "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}")
@@ -134,6 +152,7 @@ exec docker run --rm --name "${container}" \
   -e SDU_APEX_BUILD_INTEGRATION="${SDU_APEX_BUILD_INTEGRATION:-0}" \
   -e "SDU_APEX_MPC_PARAMETER_OVERLAY=${mpc_parameter_overlay}" \
   -e "SDU_APEX_ACTUATOR_PARAMETER_OVERLAY=${actuator_parameter_overlay}" \
+  -e "SDU_APEX_ODOM_PARAMETER_OVERLAY=${odom_parameter_overlay}" \
   -e "SDU_APEX_MAP_YAML=${map_yaml_override}" \
   -e "SDU_APEX_TRAJECTORY_FILE=${trajectory_file_override}" \
   -v "${repo_root}:/workspace/src:rw" \

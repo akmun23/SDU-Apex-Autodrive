@@ -1,0 +1,3 @@
+sensor_odometry:
+  ros__parameters:
+    use_learned_u_residual_model: true

@@ -85,7 +85,9 @@ def _load_bridge_packet_timing(
                 "WHERE topic_id=? ORDER BY timestamp,id", (topic_id,)):
             record = json.loads(deserialize_message(
                 bytes(payload), message_class).data)
-            stamp = record.get("bridge_receive_ros_stamp_ns")
+            stamp = record.get("bridge_request_ros_stamp_ns")
+            if not isinstance(stamp, int):
+                stamp = record.get("bridge_receive_ros_stamp_ns")
             sent_norm = record.get("sent_steering_norm")
             if stamp is None or sent_norm is None:
                 invalid_records += 1

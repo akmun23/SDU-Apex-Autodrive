@@ -43,7 +43,9 @@ MPC = "/mpc/diagnostics"
 POSE_TOPICS = {
     "/amcl_pose": "map",
     "/current_map_pose": "map",
-    "/ekf_pose": "map",
+    # The production EKF pose endpoint publishes the same local odom-frame
+    # estimate as /ekf_odom, not a map-frame localization pose.
+    "/ekf_pose": "odom",
     "/odom": "odom",
     "/ekf_odom": "odom",
 }
@@ -58,6 +60,11 @@ MAX_JOIN_AGE_NS = 60_000_000
 SECTOR_COUNT = 8
 SPATIAL_BIN_M = 0.10
 CAR_HALF_WIDTH_M = 0.1365
+# The simulator truth pose is sampled at the rear-axle GPS transform, while
+# its IMU velocity is the Rigidbody COM velocity. Convert that velocity to
+# the rear-axle base_link point used by the controller/odometry before scoring
+# lateral motion. This offset is from the audited active F1TENTH prefab.
+TRUTH_COM_FORWARD_FROM_REAR_AXLE_M = 0.15532
 
 
 @dataclass
@@ -414,7 +421,11 @@ def map_svg(
 
 def body_values(message: Any) -> tuple[float, float, float]:
     twist = message.twist.twist
-    return float(twist.linear.x), float(twist.linear.y), float(twist.angular.z)
+    yaw_rate = float(twist.angular.z)
+    rear_axle_lateral = (
+        float(twist.linear.y) - yaw_rate * TRUTH_COM_FORWARD_FROM_REAR_AXLE_M
+    )
+    return float(twist.linear.x), rear_axle_lateral, yaw_rate
 
 
 def interpolated_truth(

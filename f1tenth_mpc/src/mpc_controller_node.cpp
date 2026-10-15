@@ -263,13 +263,15 @@ public:
             const auto surface_path = configured_surface_path.empty()
                 ? share + "/config/yaw_response_surface.csv"
                 : configured_surface_path;
-            const auto surface = load_yaw_response_surface_csv(
+            auto surface = load_yaw_response_surface_csv(
                 surface_path, blend_start, blend_end, speed_blend_margin,
                 low_speed_blend_margin, low_speed_support_fadeout,
                 high_speed_support_fadein, steering_blend_start,
                 steering_blend_full_start, steering_blend_full_end,
                 steering_blend_end, hold_response_time_constant,
                 hold_rate_full, hold_rate_zero);
+            surface.response_scale = static_cast<float>(declare_parameter<double>(
+                "yaw_rate_response_surface_response_scale", 1.0));
             if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
                 throw std::runtime_error("invalid empirical yaw response surface");
             }

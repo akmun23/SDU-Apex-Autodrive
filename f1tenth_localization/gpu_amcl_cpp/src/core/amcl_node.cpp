@@ -2089,16 +2089,6 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         pose_covariance_xy <= global_pose_covariance_xy_max_ &&
         pose_covariance_yaw <= global_pose_covariance_yaw_max_;
 
-    const double raceline_distance = raceline_distance_to_pose(est.x, est.y);
-    const double raceline_heading_error = raceline_heading_error_to_pose(
-        est.x, est.y, est.theta);
-    const bool global_pose_on_track =
-        !global_sensor_bootstrap ||
-        ((global_pose_max_track_distance_m_ <= 0.0 ||
-          raceline_distance <= global_pose_max_track_distance_m_) &&
-         (global_pose_max_track_heading_error_rad_ <= 0.0 ||
-          raceline_heading_error <= global_pose_max_track_heading_error_rad_));
-
     /* A circuit can contain multiple visually identical corridors. At race
      * startup the vehicle is required to be at the known first waypoint, so a
      * low-covariance alias elsewhere on the same raceline is not sufficient
@@ -2109,6 +2099,62 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         std::isfinite(global_start_anchor_x_m_) &&
         std::isfinite(global_start_anchor_y_m_) &&
         std::isfinite(global_start_anchor_yaw_rad_);
+    const bool global_odom_heading_available =
+        global_sensor_bootstrap &&
+        global_lock_use_odom_heading_ &&
+        global_start_odom_ready_ &&
+        explicit_start_anchor;
+    const double global_odom_heading = global_odom_heading_available ?
+        math_utils::normalize_angle(
+            global_start_anchor_yaw_rad_ + math_utils::angle_diff(
+                odom_theta_at_scan, global_start_odom_theta_)) :
+        est.theta;
+    const bool global_anchor_position_available =
+        global_sensor_bootstrap && global_lock_use_anchor_position_ &&
+        global_start_odom_ready_ && explicit_start_anchor;
+    PoseEstimate global_anchor_pose = est;
+    if (global_anchor_position_available) {
+        const double dx_from_start = odom_x_at_scan - global_start_odom_x_;
+        const double dy_from_start = odom_y_at_scan - global_start_odom_y_;
+        const double c_odom_start = std::cos(global_start_odom_theta_);
+        const double s_odom_start = std::sin(global_start_odom_theta_);
+        const double dx_robot =
+            dx_from_start * c_odom_start + dy_from_start * s_odom_start;
+        const double dy_robot =
+            -dx_from_start * s_odom_start + dy_from_start * c_odom_start;
+        const double c_anchor = std::cos(global_start_anchor_yaw_rad_);
+        const double s_anchor = std::sin(global_start_anchor_yaw_rad_);
+        global_anchor_pose.x = global_start_anchor_x_m_ +
+            c_anchor * dx_robot - s_anchor * dy_robot;
+        global_anchor_pose.y = global_start_anchor_y_m_ +
+            s_anchor * dx_robot + c_anchor * dy_robot;
+        global_anchor_pose.theta = global_odom_heading;
+    }
+    const double raceline_distance = raceline_distance_to_pose(est.x, est.y);
+    const double raceline_heading_error = raceline_heading_error_to_pose(
+        est.x, est.y, est.theta);
+    // In anchor-position startup mode, the scan cluster is used to confirm
+    // the map/start hypothesis, but the pose that is published is the saved
+    // start anchor propagated by causal odometry. Apply the raceline gate to
+    // that published pose, not to the raw cluster's known translation bias.
+    const double global_gate_x = global_anchor_position_available ?
+        global_anchor_pose.x : est.x;
+    const double global_gate_y = global_anchor_position_available ?
+        global_anchor_pose.y : est.y;
+    const double global_gate_yaw = global_anchor_position_available ?
+        global_anchor_pose.theta : est.theta;
+    const double global_gate_raceline_distance =
+        raceline_distance_to_pose(global_gate_x, global_gate_y);
+    const double global_gate_raceline_heading_error =
+        raceline_heading_error_to_pose(
+            global_gate_x, global_gate_y, global_gate_yaw);
+    const bool global_pose_on_track =
+        !global_sensor_bootstrap ||
+        ((global_pose_max_track_distance_m_ <= 0.0 ||
+          global_gate_raceline_distance <= global_pose_max_track_distance_m_) &&
+         (global_pose_max_track_heading_error_rad_ <= 0.0 ||
+          global_gate_raceline_heading_error <=
+              global_pose_max_track_heading_error_rad_));
     double start_distance = std::numeric_limits<double>::infinity();
     double start_heading_error = std::numeric_limits<double>::infinity();
     if (explicit_start_anchor) {
@@ -2132,16 +2178,6 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         global_lock_min_travel_m_ <= 0.0 ||
         global_start_travel >= global_lock_min_travel_m_;
 
-    // Startup anchor-position mode permits the scan cluster to carry a
-    // repeatable along-track translation bias. The published pose is replaced
-    // below by the scan-supported anchor propagated by odometry, so requiring
-    // the biased cluster itself to lie inside the anchor radius deadlocks this
-    // intended startup mode. The raw cluster still has to pass the map/
-    // raceline, heading, covariance, and stability gates.
-    const bool global_anchor_position_mode =
-        global_sensor_bootstrap && global_lock_use_anchor_position_ &&
-        global_start_odom_ready_ && explicit_start_anchor;
-
     // The saved start anchor is only a startup disambiguation prior. Once
     // the car has completed the slow-ramp travel gate, it must be allowed to
     // leave the anchor and accept a stable scan estimate elsewhere on the
@@ -2153,7 +2189,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         !global_start_anchor_enabled_ ||
         global_start_anchor_radius_m_ <= 0.0 ||
         start_distance <= global_start_anchor_radius_m_ ||
-        global_anchor_position_mode;
+        global_anchor_position_available;
     const bool global_heading_near_start =
         !global_sensor_bootstrap ||
         global_travel_enough ||
@@ -2217,45 +2253,12 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     // startup heading from the saved map-start heading plus the odometry
     // delta. Otherwise the scan bias is frozen into map->odom and becomes a
     // growing lateral position error as the car travels.
-    const bool global_odom_heading_available =
-        global_sensor_bootstrap &&
-        global_lock_use_odom_heading_ &&
-        global_start_odom_ready_ &&
-        explicit_start_anchor;
-    const double global_odom_heading = global_odom_heading_available ?
-        math_utils::normalize_angle(
-            global_start_anchor_yaw_rad_ + math_utils::angle_diff(
-                odom_theta_at_scan, global_start_odom_theta_)) :
-        est.theta;
-
     // The saved map-start pose is a measured map prior, not simulator truth.
     // When enabled, use it only to remove the fixed startup translation bias
     // observed in the first global scan match, then propagate the short slow
     // ramp with the timestamped odometry delta.  The scan cluster still has
     // to pass all global quality/track gates before this pose is published;
     // after global lock, normal local scan corrections remain active.
-    const bool global_anchor_position_available =
-        global_sensor_bootstrap && global_lock_use_anchor_position_ &&
-        global_start_odom_ready_ && explicit_start_anchor;
-    PoseEstimate global_anchor_pose = est;
-    if (global_anchor_position_available) {
-        const double dx_from_start = odom_x_at_scan - global_start_odom_x_;
-        const double dy_from_start = odom_y_at_scan - global_start_odom_y_;
-        const double c_odom_start = std::cos(global_start_odom_theta_);
-        const double s_odom_start = std::sin(global_start_odom_theta_);
-        const double dx_robot =
-            dx_from_start * c_odom_start + dy_from_start * s_odom_start;
-        const double dy_robot =
-            -dx_from_start * s_odom_start + dy_from_start * c_odom_start;
-        const double c_anchor = std::cos(global_start_anchor_yaw_rad_);
-        const double s_anchor = std::sin(global_start_anchor_yaw_rad_);
-        global_anchor_pose.x = global_start_anchor_x_m_ +
-            c_anchor * dx_robot - s_anchor * dy_robot;
-        global_anchor_pose.y = global_start_anchor_y_m_ +
-            s_anchor * dx_robot + c_anchor * dy_robot;
-        global_anchor_pose.theta = global_odom_heading;
-    }
-
     // Stationary scans on a closed track are often ambiguous. Resampling
     // them immediately can collapse the global cloud onto a wrong but
     // visually plausible corridor before motion provides disambiguation.
@@ -2427,21 +2430,25 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 start_heading_error, global_start_anchor_heading_tolerance_rad_);
         } else if (global_pose_confident && !global_pose_on_track &&
             global_pose_max_track_distance_m_ > 0.0 &&
-            raceline_distance > global_pose_max_track_distance_m_) {
+            global_gate_raceline_distance > global_pose_max_track_distance_m_) {
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 2000,
                 "Global AMCL candidate rejected at (%.3f, %.3f, %.3f): "
-                "distance to raceline %.3f m > %.3f m.",
+                "scan distance %.3f m, published-pose distance %.3f m "
+                "> %.3f m.",
                 est.x,
                 est.y,
                 est.theta,
                 raceline_distance,
+                global_gate_raceline_distance,
                 global_pose_max_track_distance_m_);
         } else if (global_pose_confident && !global_pose_on_track) {
             RCLCPP_INFO_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "Global AMCL candidate rejected: heading error %.3f rad > %.3f rad.",
+                "Global AMCL candidate rejected: scan heading error %.3f rad, "
+                "published-pose heading error %.3f rad > %.3f rad.",
                 raceline_heading_error,
+                global_gate_raceline_heading_error,
                 global_pose_max_track_heading_error_rad_);
         }
     }

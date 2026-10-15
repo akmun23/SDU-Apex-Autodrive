@@ -1,0 +1,4 @@
+sensor_odometry:
+  ros__parameters:
+    use_coherent_packet_velocity_for_pose: true
+    coherent_packet_pose_blend: 0.5

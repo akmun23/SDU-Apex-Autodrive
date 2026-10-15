@@ -98,6 +98,14 @@ sensor_odometry:
     # source step under the measured IMU braking envelope.  Smaller packets
     # remain dropout evidence instead of collapsing /odom to stale motion.
     turn_current_packet_max_decrease_mps: 0.50
+    # Above 7 m/s and during measured positive longitudinal acceleration,
+    # blend positive turn-mode wheel innovations with the causal rigid-body
+    # IMU prediction. The acceleration gate avoids a demonstrated regression
+    # in high-speed throttle-reduction phases; recursive replay is being checked.
+    turn_wheel_update_start_speed_mps: 7.0
+    turn_wheel_update_min_ax_mps2: 0.0
+    turn_wheel_update_innovation_threshold_mps: 0.0
+    turn_wheel_update_slip_beta: 0.125
     # Held-out high-speed turn calibration, fitted on train_r03 and evaluated
     # on independent validation_r01/r02 reset-isolated captures. It uses only
     # mapped encoder speed and IMU yaw rate at runtime. At >=7.5 m/s and
@@ -117,22 +125,37 @@ sensor_odometry:
     turn_speed_bias_max_mps: 0.15
     turn_speed_bias_start_speed_mps: 6.5
     turn_speed_bias_full_speed_mps: 7.5
-    # Practice-turn residual refinement: two independent collision-free runs
-    # repeat a +0.04--0.05 m/s forward-speed bias at 2--4 m/s and |yaw rate|>
-    # 1.5 rad/s, while the old slip correction overcorrects at 4--6 m/s. The
-    # speed-shaped gain and earlier fade reduced held-out u RMSE in both runs.
-    # Runtime inputs remain the mapped encoders and IMU yaw rate only.
+    # Paired practice and hard-turn validation supports gating this fitted
+    # high-speed correction by its training-selected lateral-demand proxy.
+    # It is suppressed below 3 m/s^2 and fully retained above 5 m/s^2.
+    use_turn_speed_bias_lateral_accel_gate: true
+    turn_speed_bias_lateral_accel_gate_start_mps2: 3.0
+    turn_speed_bias_lateral_accel_gate_full_mps2: 5.0
+    # Practice-turn residual refinement. Fixed-sensor, recursive A/B replay on
+    # two separate 12-lap practice captures showed that fading this correction
+    # from 4.0 to 4.5 m/s reduced forward-speed RMSE by 11% on both and
+    # one-alignment whole-run position RMSE by 16% and 31%. A subsequent
+    # collision-free 12-lap practice run with the current workspace stack
+    # confirmed the candidate is operational; paired replay on that exact run
+    # reduced u RMSE by 24% and one-alignment position RMSE by 40% versus the
+    # old fade. Lateral-speed RMSE changed by 0.00002 m/s. Runtime inputs remain
+    # encoders and IMU only; GT was used for offline scoring. See
+    # ODOM_ACCURACY_PROGRESS_20261013.md for scope and full metrics.
     turn_slip_speed_bias_lateral_accel_threshold_mps2: 4.0
     turn_slip_speed_bias_gain_mps_per_mps2: 0.05
     turn_slip_speed_bias_start_speed_mps: 2.0
     turn_slip_speed_bias_full_speed_mps: 2.8
-    turn_slip_speed_bias_fade_start_mps: 4.5
-    turn_slip_speed_bias_fade_end_mps: 5.5
-    # The rolling window remains the published speed estimate. When its
-    # current packet agrees with the window, use that newer packet only for
-    # turn-pose trapezoidal integration to remove transient window lag.
-    use_coherent_packet_velocity_for_pose: true
-    coherent_packet_pose_blend: 1.0
+    turn_slip_speed_bias_fade_start_mps: 4.0
+    turn_slip_speed_bias_fade_end_mps: 4.5
+    # WheelEncoder publishes cumulative quantized wheel angle. Its per-packet
+    # derivative is an interval-average wheel speed, not an endpoint body
+    # speed; blending it into trapezoidal endpoint pose integration double
+    # counts turn transients. Two full practice-capture replay comparisons
+    # improved relative-pose RMSE when pose used the observer body-speed state
+    # alone, while leaving published twist unchanged. Keep the old packet
+    # blend available only as an explicit replay comparator.
+    use_coherent_packet_velocity_for_pose: false
+    coherent_packet_pose_blend: 0.5
     # Reject an abrupt rolling wheel-rate change that is not compatible with
     # the causal body-speed estimate. This catches wheel slip even when the
     # rolling and current packet rates agree. A causal-speed release recovers.
@@ -177,14 +200,121 @@ sensor_odometry:
     # implicitly: the Unity lateral IMU acceleration is not a validated
     # replacement for the missing lateral state.
     integrate_lateral_acceleration_in_turn: false
+    # Research candidate: separately validated on an independent high-yaw
+    # capture; kept disabled until production-node held-out replay passes.
+    use_high_yaw_wheel_slip_observer: false
+    high_yaw_wheel_slip_enter_radps: 2.5
+    high_yaw_wheel_slip_exit_radps: 1.5
+    high_yaw_wheel_slip_exit_hold_s: 0.10
+    high_yaw_wheel_slip_innovation_mps: 2.0
+    # Previously deployed sensor-only longitudinal residual. Ground truth is
+    # used as an offline label only; this residual remains frozen underneath
+    # the source-grounded actuator correction below.
+    use_learned_u_residual_model: true
+    learned_u_residual_min_speed_mps: 2.0
+    learned_u_residual_max_speed_mps: 8.0
+    # Joint training support: 2-4 m/s to 0.30 rad, 4-6 m/s to 0.20 rad,
+    # and 6-8 m/s to 0.10 rad. Steering feedback is an allowed Odom input.
+    u_correction_support_speed_edges_mps: [2.0, 4.0, 6.0, 8.0]
+    u_correction_support_max_abs_steering_rad: [0.30, 0.20, 0.10]
+    learned_u_residual_intercept_mps: 0.060340928230651916
+    # Feature order is declared in fit_supported_practice_odom_u_residual.py.
+    learned_u_residual_coefficients: [-0.01123104527731476, -0.9252468532458303,
+      -0.0023773279467559755, -0.0008304085906844171,
+      -0.00922115794747585, 0.013095896837034868,
+      -0.127764062201128, 0.7369086293590875,
+      0.43005743300167854, 0.054493639178485584,
+      -0.06106141502377045, -0.022945993984350592,
+      -0.010203043671906347, -0.009358420157824551,
+      0.00494236405039215, 0.007354863850582028,
+      0.4276528797732827, -0.14567326853467916,
+      0.05938704203530415, 0.018871648829481173,
+      0.043191576713956605, -0.7051323076439538]
+    # Source-branch residual experts use the exact Unity zero-throttle brake
+    # versus nonzero motor-torque split. The completed 12-lap practice run
+    # validated this configuration; model-off replay on the same bag raised
+    # forward-speed RMSE 0.0146 -> 0.0443 m/s and position RMSE 0.121 ->
+    # 0.224 m. Runtime consumes only encoder, IMU, steering and throttle
+    # feedback; GT is used only for offline fit/scoring.
+    use_unity_actuator_u_experts: true
+    unity_actuator_u_min_speed_mps: 2.0
+    unity_actuator_u_max_speed_mps: 8.0
+    # Source-ground-truth-trained high-steer speed residual (v6), attenuated
+    # to 0.20 gain after recursive replay. Runtime features are sensor/actuator
+    # feedback only; supported region is intentionally narrow.
+    use_high_steer_unity_actuator_u_expert: true
+    high_steer_unity_actuator_u_min_speed_mps: 3.2
+    high_steer_unity_actuator_u_max_speed_mps: 4.6
+    high_steer_unity_actuator_u_max_speed_low_throttle_mps: 3.4
+    high_steer_unity_actuator_u_throttle_split: 0.15
+    high_steer_unity_actuator_u_min_abs_steering_rad: 0.31
+    high_steer_unity_actuator_u_max_abs_steering_rad: 0.50
+    high_steer_unity_actuator_u_min_throttle_feedback: 0.11
+    high_steer_unity_actuator_u_max_throttle_feedback: 0.18
+    high_steer_unity_actuator_u_intercept_mps: -0.0550774641778664
+    high_steer_unity_actuator_u_coefficients: [
+      -0.08255814577376906, -0.06462385318455005, -0.03962646621941661, -0.002453107303265004,
+      -0.08516191190137458, 0.009605623993941126, 0.000441290554127197, -0.001017280876552422,
+      0.05125684586903146, -0.00974143444090551, 0.0137468887148953, -0.002373332385225677,
+      -0.01842135479097771, -0.0002585025551140647, 0.01235052756869933, 0.002406478585136288,
+      0.08532694910624328, 0.03685801228812844, 3.757758490225627e-17, 0.001244430931599904,
+      0.0006571077030322214, 0.2496924216470126, 0.2071665481394125, 0.0,
+      -0.001834591851801122, 0.003842610912709008, 0.0004444425930894277, -0.0001230439759541521,
+      0.0003431094572128157, 0.0003325427247266553, -0.00005323863619598558, 0.00003229931156264594,
+      0.004808672755832698, 0.0001099585858149435]
+    # Let the paired steering/throttle feedback callbacks settle before the
+    # corresponding encoder/IMU sample is applied to this source-conditioned fit.
+    unity_actuator_feedback_settle_delay_ms: 1.0
+    unity_zero_throttle_intercept_mps: -6.774375728363093
+    unity_zero_throttle_coefficients: [-0.19956633724936604, 4.621753407001363,
+      -0.036151313711348894, -0.018350676653055127,
+      -0.19801865495725926, -1.4245208804017375,
+      -0.2573180926122167, -1.7868456970486284,
+      1.7868456971235078, 0.5442276319250072,
+      0.677754019276367, 0.12341537918339116,
+      0.9115084546363117, 0.1400312107276572,
+      0.08749227394474006, 0.038400268812670134,
+      0.1311994933381974, -0.4597950653235905,
+      -5.277830673763709e-16, 0.16634971377469204,
+      -0.0007131669977348846, -0.2723946365799561,
+      0.0, 6.755623262417533e-14, 0.0,
+      2.579069691843809, -0.005010809518716438,
+      0.6311618493549184, -0.9882925658893643,
+      0.0, -0.000052496637089859024,
+      -0.00005189949897922261, 0.0,
+      0.0014853631667216386]
+    unity_nonzero_throttle_intercept_mps: -0.021469336270137772
+    unity_nonzero_throttle_coefficients: [-0.25494029134313767,
+      -0.6613082254755517, -0.1720665487152228,
+      -0.15301624757318757, -0.2613222594335904,
+      -0.09745382739231591, -0.034845159393953516,
+      0.15675800604993767, -0.11064823449101267,
+      0.02136724801290145, 0.01512829569074524,
+      -0.012484567850864662, 0.011781087282569706,
+      0.0026996879916515435, 0.3826145105825199,
+      0.15656850408098053, 0.3068744468098723,
+      0.5382685178024849, 0.011977667034518169,
+      0.004574664968290135, 0.0021101404530979332,
+      0.05470816334323139, 1.029717648073839, 0.0,
+      0.0001270531564701221, -3.064422409976728,
+      0.04575435859904545, 0.01016299789990159,
+      0.6807989151092995, -0.0005926801122901654,
+      -0.0018330484728038019, 0.0017455143351065665,
+      0.006758067209070972, 0.005707071417827192]
     # This bounded sensor-only model estimates COM lateral velocity from
     # causal mapped wheel speed and IMU yaw rate. The result is transformed
     # geometrically to base_link (the Unity GPS/rear-axle reference point).
     use_kinematic_lateral_slip_model: true
-    # Retained COM-velocity model: v_com = yaw_rate *
-    # (0.167 - 0.0063 * mapped_wheel_speed), bounded to 0.35 m/s.
-    lateral_velocity_yaw_rate_gain_m: 0.167
-    lateral_velocity_speed_yaw_rate_gain_s: -0.0063
+    # Training-only refit of the COM lateral-velocity model. It reduced
+    # lateral-speed RMSE on some held-out captures, but a later full practice
+    # run showed a small speed gain with slightly worse one-alignment position.
+    # Keep the coefficients provisional; do not claim a robust pose gain.
+    # Runtime inputs remain encoder/IMU speed and yaw only. See the progress
+    # report for run-level scores and prior validation.
+    # v_com = yaw_rate * (gain_m + gain_s * mapped_wheel_speed), bounded to
+    # 0.35 m/s, then shifted to the rear-axle base_link point below.
+    lateral_velocity_yaw_rate_gain_m: 0.181939
+    lateral_velocity_speed_yaw_rate_gain_s: -0.009656
     lateral_velocity_max_mps: 0.35
     # Source geometry, not a fit: the active F1TENTH prefab places its COM at
     # local z=-0.00468 m and GPS "Rear Axle Center" at z=-0.16000 m. Its lidar

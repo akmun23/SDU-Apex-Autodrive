@@ -163,13 +163,15 @@ def _matched_windows(path: Path) -> tuple[
 
 
 def run(checkpoint_path: Path = CHECKPOINT,
-        output_path: Path = OUTPUT) -> dict[str, Any]:
+        output_path: Path = OUTPUT,
+        dataset_path: Path = DATASET) -> dict[str, Any]:
     checkpoint_path = checkpoint_path.resolve()
     output_path = output_path.resolve()
+    dataset_path = dataset_path.resolve()
     if output_path.exists():
         raise FileExistsError(f"refusing to overwrite {output_path}")
     (data, windows, thresholds_by_run, feature_spreads_by_run,
-     feature_manifest) = _matched_windows(DATASET)
+     feature_manifest) = _matched_windows(dataset_path)
     torch, model, metadata = _load_model(checkpoint_path, "cpu")
     training_runs = set(metadata["training_runs"])
     if training_runs & RUNS:
@@ -192,8 +194,8 @@ def run(checkpoint_path: Path = CHECKPOINT,
         "study": "existing recurrent wheel/actuator plant on three-run high-steer holdout",
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
-        "dataset": str(DATASET.relative_to(ROOT)),
-        "dataset_sha256": sha256_file(DATASET),
+        "dataset": str(dataset_path.relative_to(ROOT)),
+        "dataset_sha256": sha256_file(dataset_path),
         "training_run_ids": sorted(training_runs),
         "heldout_run_ids": sorted(RUNS),
         "windows_per_run": {
@@ -225,8 +227,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     parser.add_argument("--output", type=Path, default=OUTPUT)
+    parser.add_argument("--dataset", type=Path, default=DATASET)
     args = parser.parse_args()
-    result = run(args.checkpoint, args.output)
+    result = run(args.checkpoint, args.output, args.dataset)
     print(json.dumps({
         "report": str(args.output.resolve()),
         "window_count": result["metrics_by_command_offset"]["-1"][

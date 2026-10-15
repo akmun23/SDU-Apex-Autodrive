@@ -223,6 +223,35 @@ YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_POINTS = tuple(
     for angle in (0.350, 0.425, 0.475, 0.500)
 )
 YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_REPEATS = 2
+YAW_HIGHSTEER_WHEEL_RELEASE_PROFILE = (
+    "yaw_highsteer_wheel_release_train")
+YAW_HIGHSTEER_WHEEL_RELEASE_CONDITIONS = tuple(
+    (speed, angle)
+    for speed in (8.0, 8.2)
+    for angle in (0.46, 0.50)
+)
+YAW_HIGHSTEER_WHEEL_RELEASE_REPEATS = 2
+YAW_HIGHSTEER_WHEEL_RELEASE_DELAY_S = 2.65
+YAW_HIGHSTEER_WHEEL_RELEASE_RAMP_S = 0.30
+YAW_HIGHSTEER_WHEEL_RELEASE_DURATION_S = 5.20
+YAW_HIGHSTEER_WHEELSPIN_RELEASE_PROFILE = (
+    "yaw_highsteer_wheelspin_release_train")
+YAW_HIGHSTEER_WHEELSPIN_RELEASE_CONDITIONS = tuple(
+    (speed, 0.50) for speed in (8.0, 8.2))
+YAW_HIGHSTEER_WHEELSPIN_RELEASE_REPEATS = 2
+YAW_HIGHSTEER_WHEELSPIN_RELEASE_DELAY_S = 0.55
+YAW_HIGHSTEER_WHEELSPIN_RELEASE_RAMP_S = 0.30
+YAW_HIGHSTEER_WHEELSPIN_RELEASE_DURATION_S = 3.25
+YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_PROFILE = (
+    "yaw_highsteer_wheel_feedbackgap_train")
+YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_CONDITIONS = tuple(
+    (speed, 0.50) for speed in (6.8, 7.0))
+YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_REPEATS = 2
+YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_PROFILE = (
+    "yaw_highsteer_wheel_feedback_upper_train")
+YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_CONDITIONS = tuple(
+    (speed, 0.50) for speed in (7.4, 7.6))
+YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_REPEATS = 2
 YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE = "yaw_exact_two_domain_gapfill"
 # Selector bins with no fitted exact-two local expert in the frozen 2026-10-08
 # audit (speed bin, signed steering tenths). Probe each unique magnitude at the
@@ -421,6 +450,8 @@ YAW_ERROR_LOWSPEED_HIGHSTEER_POINTS = tuple(
     for speed in (1.5, 2.5, 3.5)
     for angle in (0.35, 0.42, 0.50)
 )
+YAW_ODOM_HIGHSTEER_LIVE_PROFILE = "odom_highsteer_live_validation"
+YAW_ODOM_HIGHSTEER_LIVE_POINTS = ((3.5, 0.42), (3.5, 0.50))
 YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE = (
     "yaw_error_highsteer_reversal_gapfill")
 YAW_ERROR_HIGHSTEER_REVERSAL_POINTS = (
@@ -505,6 +536,10 @@ YAW_TRANSIENT_PROFILES = (
     YAW_ATLAS_EXTRATREES_HIGHSTEER_FINAL_PROFILE,
     YAW_HIGHSTEER_SPEED_SURFACE_TRAIN_PROFILE,
     YAW_HIGHSTEER_SPEED_FRONTIER_VALIDATION_PROFILE,
+    YAW_HIGHSTEER_WHEEL_RELEASE_PROFILE,
+    YAW_HIGHSTEER_WHEELSPIN_RELEASE_PROFILE,
+    YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_PROFILE,
+    YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_PROFILE,
     YAW_EXACT_TWO_DOMAIN_GAPFILL_PROFILE,
     YAW_EXACT_TWO_EDGE_GAPFILL_PROFILE,
     YAW_FULL_SPECTRUM_GRID_PROFILE,
@@ -527,6 +562,7 @@ YAW_TRANSIENT_PROFILES = (
     YAW_ERROR_MIDSPEED_THROTTLE_PROFILE,
     YAW_ERROR_RESIDUAL_GRID_PROFILE,
     YAW_ERROR_LOWSPEED_HIGHSTEER_PROFILE,
+    YAW_ODOM_HIGHSTEER_LIVE_PROFILE,
     YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE,
     YAW_ERROR_RESIDUAL_REPEAT_PROFILE,
     YAW_ERROR_PACKET_PHASE_PROFILE,
@@ -547,6 +583,10 @@ def _is_yaw_transient_approach(label: str) -> bool:
                              "approach_yawmisgap_",
                              "approach_yawerr_",
                              "approach_yawerr_crawl_throttle_",
+                             "approach_yawwheelrelease_",
+                             "approach_yawspinrelease_",
+                             "approach_yawfeedbackgap_",
+                             "approach_yawfeedbackupper_",
                              "approach_lowyaw_"))
 
 
@@ -1491,6 +1531,55 @@ def _yaw_error_steering_transition_phases(
     return phases
 
 
+def _highsteer_wheelspin_release_phases(
+        rng: random.Random, *, label_prefix: str,
+        conditions: tuple[tuple[float, float], ...],
+        repeats: int) -> list[Phase]:
+    """Build reset-isolated paired throttle-cut probes at high steering."""
+    trials = [
+        (repeat, speed, angle, sign, treatment)
+        for repeat in range(1, repeats + 1)
+        for speed, angle in conditions
+        for sign in (-1.0, 1.0)
+        for treatment in ("step", "ramp")
+    ]
+    rng.shuffle(trials)
+    phases: list[Phase] = []
+    for repeat, speed, angle, sign, treatment in trials:
+        pair_id = (
+            f"r{repeat:02d}_v{speed:.2f}_a{angle:.3f}_turn{sign:+.0f}")
+        phases.extend((
+            Phase(
+                f"approach_{label_prefix}_{pair_id}_{treatment}",
+                10.0, speed, throttle_mode="race_domain_approach",
+                reach_speed_target=True, condition_pair_id=pair_id),
+            Phase(
+                f"probe_{label_prefix}_{pair_id}_{treatment}",
+                YAW_HIGHSTEER_WHEELSPIN_RELEASE_DURATION_S,
+                speed, throttle_mode="slew_probe", validate_samples=True,
+                validate_speed=False, validate_steering=False,
+                probe_race_domain=True, throttle_profile=treatment,
+                throttle_start_norm=MAX_THROTTLE,
+                throttle_end_norm=0.0,
+                throttle_stimulus_delay_s=(
+                    YAW_HIGHSTEER_WHEELSPIN_RELEASE_DELAY_S),
+                throttle_ramp_duration_s=(
+                    YAW_HIGHSTEER_WHEELSPIN_RELEASE_RAMP_S),
+                condition_pair_id=pair_id,
+                steering_profile="waypoints",
+                steering_amplitude_rad=angle,
+                steering_waypoints=(
+                    (0.00, sign * angle),
+                    (YAW_HIGHSTEER_WHEELSPIN_RELEASE_DELAY_S,
+                     sign * angle),
+                    (YAW_HIGHSTEER_WHEELSPIN_RELEASE_DURATION_S,
+                     sign * angle),
+                ),
+            ),
+        ))
+    return phases
+
+
 def build_schedule(seed: int, profile: str = "high_angle_boundary",
                   transition_speed_mps: float = 4.5,
                   throttle_rate_sweep_delta_norm: float =
@@ -2327,6 +2416,27 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                 seed, "lowhigh",
                 YAW_ERROR_LOWSPEED_HIGHSTEER_POINTS,
                 ("onset", "reversal"))
+        if profile == YAW_ODOM_HIGHSTEER_LIVE_PROFILE:
+            # One fresh, short validation of the deployed high-steer Odom
+            # residual at the requested transition speed. This lets a
+            # targeted live check stay inside the model's measured Odom-speed
+            # gate instead of testing only at its boundary. Repeat both turn
+            # signs and supported steering magnitudes; this is validation,
+            # not another broad identification sweep.
+            phases = []
+            points = tuple(
+                (transition_speed_mps, steering)
+                for _, steering in YAW_ODOM_HIGHSTEER_LIVE_POINTS)
+            for repeat in range(2):
+                phases.extend(_yaw_error_steering_transition_phases(
+                    seed + repeat,
+                    f"odomlive_r{repeat + 1}",
+                    points,
+                    ("onset",),
+                    transition_modes=(("step", 0.025),),
+                    response_delays=(0.25,),
+                ))
+            return phases
         if profile == YAW_ERROR_HIGHSTEER_REVERSAL_PROFILE:
             # The largest held-out miss is a fast steering reversal around
             # 3.5 m/s and +/-0.50 rad. Static bins are dense, but the exact
@@ -2556,6 +2666,94 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                     ),
                 ))
             return phases
+        if profile == YAW_HIGHSTEER_WHEEL_RELEASE_PROFILE:
+            # The held-out raw-wheel mismatch is concentrated at high speed,
+            # high steering, and zero-throttle braking, a joint region with
+            # almost no history-valid training transitions. Compare an
+            # immediate cut against a 0.30 s ramp at matched speed/steering.
+            # Each exposure is reset-isolated; treatment order is randomized.
+            trials = [
+                (repeat, speed, angle, sign, treatment)
+                for repeat in range(1, YAW_HIGHSTEER_WHEEL_RELEASE_REPEATS + 1)
+                for speed, angle in YAW_HIGHSTEER_WHEEL_RELEASE_CONDITIONS
+                for sign in (-1.0, 1.0)
+                for treatment in ("step", "ramp")
+            ]
+            rng.shuffle(trials)
+            for repeat, speed, angle, sign, treatment in trials:
+                pair_id = (
+                    f"r{repeat:02d}_v{speed:.2f}_a{angle:.3f}_"
+                    f"turn{sign:+.0f}")
+                start_throttle = race_domain_feedforward(
+                    speed, _nominal_feedforward(speed))
+                phases.extend((
+                    Phase(
+                        f"approach_yawwheelrelease_{pair_id}_{treatment}",
+                        10.0, speed,
+                        throttle_mode="race_domain_approach",
+                        reach_speed_target=True,
+                        condition_pair_id=pair_id),
+                    Phase(
+                        f"probe_yawwheelrelease_{pair_id}_{treatment}",
+                        YAW_HIGHSTEER_WHEEL_RELEASE_DURATION_S,
+                        speed,
+                        throttle_mode="slew_probe",
+                        validate_samples=True,
+                        validate_speed=False,
+                        validate_steering=False,
+                        settle_before_probe=True,
+                        probe_race_domain=True,
+                        throttle_profile=treatment,
+                        throttle_start_norm=start_throttle,
+                        throttle_end_norm=0.0,
+                        throttle_stimulus_delay_s=(
+                            YAW_HIGHSTEER_WHEEL_RELEASE_DELAY_S),
+                        throttle_ramp_duration_s=(
+                            YAW_HIGHSTEER_WHEEL_RELEASE_RAMP_S),
+                        condition_pair_id=pair_id,
+                        steering_profile="waypoints",
+                        steering_amplitude_rad=angle,
+                        steering_waypoints=(
+                            (0.00, 0.0), (0.20, 0.0),
+                            (0.45, sign * angle),
+                            (YAW_HIGHSTEER_WHEEL_RELEASE_DELAY_S,
+                             sign * angle),
+                            (YAW_HIGHSTEER_WHEEL_RELEASE_DURATION_S,
+                             sign * angle),
+                        ),
+                    ),
+                ))
+            return phases
+        if profile == YAW_HIGHSTEER_WHEELSPIN_RELEASE_PROFILE:
+            # Validation exposes a high-speed/high-steering, zero-command
+            # cell with large encoder/body mismatch. Its prior training rows
+            # contain little mismatch support. Build that state with the
+            # simulator's full allowed throttle, then compare matched cuts.
+            # This is narrowly scoped to 8.0-8.2 m/s and 0.50 rad; every
+            # treatment is reset-isolated and order-randomized.
+            return _highsteer_wheelspin_release_phases(
+                rng, label_prefix="yawspinrelease",
+                conditions=YAW_HIGHSTEER_WHEELSPIN_RELEASE_CONDITIONS,
+                repeats=YAW_HIGHSTEER_WHEELSPIN_RELEASE_REPEATS)
+        if profile == YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_PROFILE:
+            # The held-out error is not the wheel-lock state from the first
+            # probe: it has positive wheel/body overspeed while throttle
+            # feedback remains high after a zero command. Approach at a lower
+            # speed so the 0.55 s full-throttle prelude reaches that same
+            # 8.0-8.3 m/s post-cut interval. The measurements decide whether
+            # this actually fills the gap; the target alone is not evidence.
+            return _highsteer_wheelspin_release_phases(
+                rng, label_prefix="yawfeedbackgap",
+                conditions=YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_CONDITIONS,
+                repeats=YAW_HIGHSTEER_WHEEL_FEEDBACK_GAP_REPEATS)
+        if profile == YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_PROFILE:
+            # The first capture reproduced the high-feedback overspeed state
+            # only through 8.55 m/s. Held-out rows extend to 9.22 m/s, so this
+            # replicate moves the matched cut to that unsupported upper band.
+            return _highsteer_wheelspin_release_phases(
+                rng, label_prefix="yawfeedbackupper",
+                conditions=YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_CONDITIONS,
+                repeats=YAW_HIGHSTEER_WHEEL_FEEDBACK_UPPER_REPEATS)
         if profile == YAW_ERROR_LOWSPEED_WHEELSPIN_PROFILE:
             # Held-out failures include large wheel/body-speed mismatch at
             # crawl-to-3.5 m/s and moderate/high steering, while several such

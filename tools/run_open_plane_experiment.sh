@@ -57,8 +57,13 @@ usage() {
     "yaw_error_command_gap_lowspeed_gapfill covers the same mismatch waveform at 4.5 and 5.5 m/s, where held-out residuals also exceed 0.1 rad/s." \
     "yaw_error_midspeed_steering_gapfill pairs turn-in/reversal step and ramp responses at 4.5/6.5 m/s and 0.15/0.20 rad." \
     "yaw_error_lowspeed_steering_gapfill pairs high-steer turn-in/reversal at 1.5/2.5 m/s and 0.35/0.50 rad." \
+    "odom_highsteer_live_validation is a short fresh Odom-candidate check at 3.3 m/s and 0.42/0.50 rad, both turn directions, two repeats." \
     "yaw_error_highspeed_steering_gapfill pairs turn-in/unwind at 10.5/11.1 m/s inside the existing measured steering frontier." \
     "yaw_error_wheelspin_gapfill pairs throttle step/ramp-up and cuts during matched 8.5–11 m/s low-angle swerves." \
+    "yaw_highsteer_wheel_release_train pairs an immediate throttle cut with a 0.30 s ramp at 8.0/8.2 m/s and ±0.46/±0.50 rad, with each exposure reset-isolated." \
+    "yaw_highsteer_wheelspin_release_train applies full allowed throttle at 8.0/8.2 m/s and ±0.50 rad, then compares step/ramp cuts in both turn directions." \
+    "yaw_highsteer_wheel_feedbackgap_train starts at 6.8/7.0 m/s and tests whether a zero-command cut reproduces the held-out 8.0–8.3 m/s wheel-overspeed/high-feedback state." \
+    "yaw_highsteer_wheel_feedback_upper_train repeats that test from 7.4/7.6 m/s to cover the unsupported 8.55–9.22 m/s held-out band." \
     "yaw_error_lowspeed_wheelspin_gapfill pairs throttle step/ramp increases at measured low-speed/high-steering wheel-slip error strata." \
     "yaw_error_midspeed_throttle_gapfill pairs throttle steps/ramps at 2.5/4.5/6.5/8.0 m/s in sparse throttle-gap interactions." \
     "yaw_error_residual_steering_grid_gapfill fills ten held-out failing speed/steering cells with randomized onset/reversal, both signs, step/ramp and two event ages." \
@@ -111,6 +116,8 @@ elif [[ "${profile}" == race_domain_dynamic_coupled_train ||
   default_timeout_s=600
 elif [[ "${profile}" == race_domain_steering_frontier ]]; then
   default_timeout_s=1200
+elif [[ "${profile}" == odom_highsteer_live_validation ]]; then
+  default_timeout_s=1200
 elif [[ "${profile}" == isolated_highsteer_75_long ]]; then
   default_timeout_s=240
 elif [[ "${profile}" == isolated_highsteer_multispeed ]]; then
@@ -143,6 +150,10 @@ elif [[ "${profile}" == yaw_atlas_interpolation_validation ||
         "${profile}" == yaw_error_highspeed_steering_gapfill ||
         "${profile}" == yaw_error_lowspeed_steering_gapfill ||
         "${profile}" == yaw_error_wheelspin_gapfill ||
+        "${profile}" == yaw_highsteer_wheel_release_train ||
+        "${profile}" == yaw_highsteer_wheelspin_release_train ||
+        "${profile}" == yaw_highsteer_wheel_feedbackgap_train ||
+        "${profile}" == yaw_highsteer_wheel_feedback_upper_train ||
         "${profile}" == yaw_error_lowspeed_wheelspin_gapfill ||
         "${profile}" == yaw_error_midspeed_throttle_gapfill ||
         "${profile}" == yaw_error_residual_steering_grid_gapfill ||
@@ -194,6 +205,11 @@ elif [[ "${profile}" == race_domain_swerve_throttle_slew_train ||
   default_timeout_s=1200
 fi
 timeout_s="${SDU_APEX_EXPERIMENT_TIMEOUT_S:-${default_timeout_s}}"
+experiment_speed_mps="${SDU_APEX_EXPERIMENT_SPEED_MPS:-4.5}"
+if [[ "${profile}" == odom_highsteer_live_validation &&
+      -z "${SDU_APEX_EXPERIMENT_SPEED_MPS:-}" ]]; then
+  experiment_speed_mps=3.3
+fi
 capture_sensor_odom="${SDU_APEX_EXPERIMENT_CAPTURE_SENSOR_ODOM:-0}"
 if [[ "${capture_sensor_odom}" != 0 && "${capture_sensor_odom}" != 1 ]]; then
   echo "SDU_APEX_EXPERIMENT_CAPTURE_SENSOR_ODOM must be 0 or 1." >&2
@@ -253,7 +269,12 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == yaw_error_midspeed_steering_gapfill ||
       "${profile}" == yaw_error_highspeed_steering_gapfill ||
       "${profile}" == yaw_error_lowspeed_steering_gapfill ||
+      "${profile}" == odom_highsteer_live_validation ||
       "${profile}" == yaw_error_wheelspin_gapfill ||
+        "${profile}" == yaw_highsteer_wheel_release_train ||
+      "${profile}" == yaw_highsteer_wheelspin_release_train ||
+      "${profile}" == yaw_highsteer_wheel_feedbackgap_train ||
+      "${profile}" == yaw_highsteer_wheel_feedback_upper_train ||
       "${profile}" == yaw_error_lowspeed_wheelspin_gapfill ||
       "${profile}" == yaw_error_midspeed_throttle_gapfill ||
       "${profile}" == yaw_error_residual_steering_grid_gapfill ||
@@ -321,7 +342,12 @@ case "${profile}" in
   yaw_error_midspeed_steering_gapfill|\
   yaw_error_highspeed_steering_gapfill|\
   yaw_error_lowspeed_steering_gapfill|\
+  odom_highsteer_live_validation|\
   yaw_error_wheelspin_gapfill|\
+  yaw_highsteer_wheel_release_train|\
+  yaw_highsteer_wheelspin_release_train|\
+  yaw_highsteer_wheel_feedbackgap_train|\
+  yaw_highsteer_wheel_feedback_upper_train|\
   yaw_error_lowspeed_wheelspin_gapfill|\
   yaw_error_midspeed_throttle_gapfill|\
   yaw_error_residual_steering_grid_gapfill|\
@@ -417,7 +443,7 @@ echo "Waiting for the explore simulator at 127.0.0.1:4567..."
   -e "RUN_ID=${run_id}" \
   -e "PROFILE=${profile}" \
   -e "EXPERIMENT_SEED=${seed}" \
-  -e "EXPERIMENT_SPEED_MPS=${SDU_APEX_EXPERIMENT_SPEED_MPS:-4.5}" \
+  -e "EXPERIMENT_SPEED_MPS=${experiment_speed_mps}" \
   -e "EXPERIMENT_TIMEOUT_S=${timeout_s}" \
   -e "CAPTURE_SENSOR_ODOM=${capture_sensor_odom}" \
   -e "EXPERIMENT_STEERING_ANGLES_RAD=${steering_angles_rad}" \
@@ -520,7 +546,10 @@ echo "Waiting for the explore simulator at 127.0.0.1:4567..."
     bridge_pid=$!
 
     bridge_ready=0
-    for attempt in $(seq 1 300); do
+    # A cold Explore player can spend over a minute loading its Unity scene
+    # before its Socket.IO client connects. Keep the bridge alive through that
+    # startup instead of treating the old 30 s wait as a failed simulation.
+    for attempt in $(seq 1 1800); do
       if ! kill -0 "${bridge_pid}" 2>/dev/null; then
         echo "Bridge exited before simulator connection." >&2
         tail -80 "${bridge_log}" >&2 || true

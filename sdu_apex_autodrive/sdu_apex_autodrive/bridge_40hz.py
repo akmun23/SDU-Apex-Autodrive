@@ -1,10 +1,10 @@
 """Run the official AutoDRIVE bridge with competition-compatible pacing.
 
 The competition image exposes no Unity source clock or response sequence.
-Accordingly, this adapter uses the unrequested connect-time packet as a
-handshake and associates matching responses by FIFO order. ROS headers use
-local receive time; host monotonic time measures transport intervals for
-diagnostics only. Delayed samples are not rejected, retimed, or repeated.
+Accordingly, this adapter associates requested responses by FIFO order,
+rejects packets that arrive with no pending request, and stamps ROS headers at
+the local Bridge-request boundary. Receive and monotonic times remain available
+in diagnostics; delayed matched samples are not discarded or repeated.
 
 Packet callbacks are serialized so response association and message stamping
 remain consistent while the official decoder publishes each packet.
@@ -49,8 +49,9 @@ TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 DEV_SIM_RESET_ENABLE_ENV = "SDU_APEX_DEV_SIM_RESET_ENABLED"
 DEV_SIM_RESET_TOPIC = "/autodrive/reset_command"
 
-# Requests are paced on a 25 ms host-clock grid. Actual response/arrival times
-# are retained; response age and packet gaps never stop or reject the stream.
+# Requests are paced on a 25 ms host-clock grid. Receive times remain in
+# diagnostics, while source headers use request time so network jitter does
+# not masquerade as simulator sample spacing.
 MIN_REQUEST_SPACING_S = 0.024
 
 
@@ -84,6 +85,9 @@ _latest_command: dict[str, str] = {
     "V1 Publish LIDAR Intensity": "False",
 }
 _latest_steering_update_monotonic_ns: int | None = None
+_packet_command_profile: tuple[tuple[float, float], ...] | None = None
+_packet_command_profile_first_request: int | None = None
+_packet_command_profile_finished = False
 _reset_level = False
 _reset_deadline_monotonic: float | None = None
 _RESET_HOLD_SEC = 0.75
@@ -209,6 +213,67 @@ def _next_request_sequence() -> int:
     with _pending_request_lock:
         _bridge_request_sequence += 1
         return _bridge_request_sequence
+
+
+def _load_packet_command_profile() -> None:
+    """Load an explicit development-only command sequence for parity replay."""
+    global _packet_command_profile, _packet_command_profile_first_request
+    path = os.environ.get("SDU_APEX_PACKET_COMMAND_PROFILE")
+    if not path:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        first_request = int(payload["target_first_request_sequence"])
+        raw_commands = payload["commands"]
+        commands = tuple((float(row["steering_norm"]),
+                          float(row["throttle_norm"]))
+                         for row in raw_commands)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid packet command profile {path}: {exc}") from exc
+    if first_request < 1 or len(commands) < 100:
+        raise RuntimeError("packet command profile has an invalid start or is too short")
+    if any(not math.isfinite(value) or abs(value) > 1.0
+           for pair in commands for value in pair):
+        raise RuntimeError("packet command profile values must be finite and normalized")
+    if any(abs(value) > 1.0e-6 for value in commands[0]):
+        raise RuntimeError("packet command profile must begin at neutral")
+    _packet_command_profile = commands
+    _packet_command_profile_first_request = first_request
+    print(
+        "[autodrive_bridge_40hz] development packet command profile loaded: "
+        f"{len(commands)} request samples starting at request {first_request}",
+        flush=True,
+    )
+
+
+def _command_for_request(command: dict[str, str], request_sequence: int
+                         ) -> dict[str, str]:
+    """Select a replay sample at the Bridge request boundary, without ROS lag."""
+    global _packet_command_profile_finished
+    profile = _packet_command_profile
+    first_request = _packet_command_profile_first_request
+    if profile is None or first_request is None:
+        return command
+    index = request_sequence - first_request
+    if index < 0:
+        steering, throttle = 0.0, 0.0
+    elif index < len(profile):
+        steering, throttle = profile[index]
+    else:
+        steering, throttle = 0.0, 0.0
+        if not _packet_command_profile_finished:
+            _packet_command_profile_finished = True
+            print(
+                "[autodrive_bridge_40hz] development packet command profile "
+                f"complete after {len(profile)} request samples; neutral latched",
+                flush=True,
+            )
+    command = dict(command)
+    command["V1 Steering"] = str(steering)
+    command["V1 Throttle"] = str(throttle)
+    command["V1 Reset"] = "False"
+    return command
 
 
 def _reset_request_pipeline() -> None:
@@ -411,9 +476,8 @@ def _on_reset_command(message: Bool) -> None:
             time.monotonic() + _RESET_HOLD_SEC if _reset_level else None)
         _latest_command["V1 Reset"] = "True" if _reset_level else "False"
     if changed and next_level:
-        # Do not publish packets while reset is asserted. The first packet
-        # after release uses its actual bridge receive time; no simulator
-        # source-time epoch is needed.
+        # Do not publish packets while reset is asserted. The first matched
+        # packet after release starts a fresh request-time epoch.
         with _pending_request_lock:
             _first_valid_packet = False
             _last_packet_arrival_ns = None
@@ -428,13 +492,10 @@ def _on_reset_command(message: Bool) -> None:
 def _capture_competition_packet(data: Any) -> bool:
     """Pair a stock-image telemetry packet with the oldest pending request.
 
-    The first packet after Socket.IO connect is the simulator's unsolicited
-    bootstrap sample. It only opens the request gate and is never published.
-    Responses with a matching request are associated by FIFO order. If a
-    packet arrives without a pending request, it is still published using
-    receive time and the latest command; timing jitter is diagnostic, not a
-    reason to discard sensor data. No Unity clock, frame counter, or echoed
-    request identifier is read.
+    Responses with a matching request are associated by FIFO order. An
+    unsolicited bootstrap/stale packet has no causal command or request time,
+    so it is rejected before any sensor publisher sees it. No Unity clock,
+    frame counter, or echoed request identifier is read.
     """
     global _active_request_stamp, _active_packet_stamp
     global _active_request_monotonic_ns, _active_packet_arrival_ns
@@ -491,13 +552,15 @@ def _capture_competition_packet(data: Any) -> bool:
         else:
             bootstrap_packet = False
 
-    if bootstrap_packet:
-        _bootstrap_packet_seen.set()
-        print(
-            "[autodrive_bridge_40hz] competition bootstrap received; "
-            "starting request stream and publishing available sensor data",
-            flush=True,
-        )
+    if not has_pending_request:
+        if bootstrap_packet:
+            _bootstrap_packet_seen.set()
+            print(
+                "[autodrive_bridge_40hz] dropping unsolicited connection "
+                "bootstrap packet; publishing starts with a paced Bridge request",
+                flush=True,
+            )
+        return False
 
     node = getattr(official_bridge, "autodrive_bridge", None)
     if node is None:
@@ -546,18 +609,10 @@ def _capture_competition_packet(data: Any) -> bool:
     })
 
     with _pending_request_lock:
-        if not _pending_requests:
-            request_stamp = None
-            request_ns = None
-            slot_pool = None
-            request_sequence = -1
-            command = {}
-            steering_update_monotonic_ns = None
-        else:
-            (request_stamp, request_ns, slot_pool, _, request_sequence,
-             command, steering_update_monotonic_ns) = _pending_requests.popleft()
-            _pending_request_started_ns = (
-                _pending_requests[0][1] if _pending_requests else None)
+        (request_stamp, request_ns, slot_pool, _, request_sequence,
+         command, steering_update_monotonic_ns) = _pending_requests.popleft()
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
         _active_request_slot_pool = slot_pool
         _active_request_stamp = request_stamp
         _active_packet_stamp = receive_stamp
@@ -639,6 +694,7 @@ def _record_packet_arrival() -> None:
         simulator_packet = dict(_active_simulator_packet)
         connection_generation = _connection_generation
         receive_stamp = _active_packet_stamp
+        request_stamp = _active_request_stamp
     with _packet_timing_lock:
         _packet_sequence += 1
         sequence = _packet_sequence
@@ -647,12 +703,15 @@ def _record_packet_arrival() -> None:
         return
     message = String()
     message.data = json.dumps({
-        "schema_version": 3,
+        "schema_version": 4,
         "packet_sequence": sequence,
         "bridge_arrival_monotonic_ns": arrival_ns,
         "bridge_receive_ros_stamp_ns": (
             None if receive_stamp is None else
             int(receive_stamp.sec) * 1_000_000_000 + int(receive_stamp.nanosec)),
+        "bridge_request_ros_stamp_ns": (
+            None if request_stamp is None else
+            int(request_stamp.sec) * 1_000_000_000 + int(request_stamp.nanosec)),
         "request_monotonic_ns": request_ns,
         "request_sequence": request_sequence,
         "steering_command_update_age_ms": (
@@ -681,7 +740,7 @@ def _record_packet_arrival() -> None:
 
 
 def _install_packet_timestamp_patch() -> None:
-    """Stamp every ROS message from a packet with its local receive time."""
+    """Stamp packet messages at the associated Bridge request boundary."""
     global _packet_timestamp_patch_installed
     if _packet_timestamp_patch_installed:
         return
@@ -695,7 +754,9 @@ def _install_packet_timestamp_patch() -> None:
             with _packet_stamp_lock:
                 if _packet_stamp is None:
                     with _pending_request_lock:
-                        pending = _active_packet_stamp
+                        pending = (_active_request_stamp
+                                   if _active_request_stamp is not None
+                                   else _active_packet_stamp)
                     _packet_stamp = _copy_stamp(
                         pending if pending is not None else message.header.stamp)
                 message.header.stamp = _copy_stamp(_packet_stamp)
@@ -780,6 +841,7 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             command["V1 Reset"] = "True" if _reset_level else "False"
 
         request_sequence = _next_request_sequence()
+        command = _command_for_request(command, request_sequence)
         if not _set_pending_request(
                 None, generation, request_sequence, command,
                 steering_update_monotonic_ns):
@@ -832,11 +894,12 @@ def _install_packet_contract(publish_camera: bool) -> None:
     def _packet_handler_body(sid: Any, data: Any) -> Any:
         global _handler_timing_count, _handler_timing_total_ns
         handler_start_ns = time.monotonic_ns()
-        _capture_competition_packet(data)
         try:
             if _shutdown_requested:
                 return None
             if _timing_fault:
+                return None
+            if not _capture_competition_packet(data):
                 return None
             if not _validate_received_packet():
                 return None
@@ -1119,6 +1182,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     rate_hz = _rate_hz()
+    _load_packet_command_profile()
     _handler_timing_enabled = _env_enabled(
         "AUTODRIVE_BRIDGE_LOG_HANDLER_TIMING", False)
     _publication_diagnostic_enabled = _env_enabled(

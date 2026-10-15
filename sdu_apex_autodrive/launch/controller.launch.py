@@ -90,6 +90,12 @@ def _setup(context):
         raise RuntimeError(
             "actuator parameter overlay does not exist: "
             f"{actuator_parameter_overlay}")
+    odom_parameter_overlay = LaunchConfiguration(
+        "odom_parameter_overlay").perform(context).strip()
+    if odom_parameter_overlay and not os.path.isfile(odom_parameter_overlay):
+        raise RuntimeError(
+            "odometry parameter overlay does not exist: "
+            f"{odom_parameter_overlay}")
     if bool(map_override) != bool(trajectory_override):
         raise RuntimeError(
             "map_yaml and trajectory_file must be overridden as a matching pair")
@@ -138,7 +144,10 @@ def _setup(context):
         executable="sensor_odometry_node",
         name="sensor_odometry",
         output="screen",
-        parameters=[os.path.join(localization, "config", "sensor_odometry.yaml")],
+        parameters=[
+            os.path.join(localization, "config", "sensor_odometry.yaml"),
+            *([odom_parameter_overlay] if odom_parameter_overlay else []),
+        ],
         remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
     )
     actions = [SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
@@ -334,6 +343,10 @@ def generate_launch_description():
             "actuator_parameter_overlay", default_value="",
             description=("Development-only ROS parameter YAML layered over "
                          "the actuator defaults.")),
+        DeclareLaunchArgument(
+            "odom_parameter_overlay", default_value="",
+            description=("Development-only ROS parameter YAML layered over "
+                         "the sensor-odometry defaults.")),
         DeclareLaunchArgument(
             "mpc_start_delay_sec", default_value="2.0",
             description="Delay MPC startup after AMCL process start."),

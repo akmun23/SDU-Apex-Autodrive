@@ -31,6 +31,7 @@ from tools.racing.verify_optimizer_mpc_model_parity import (
     check_source_config,
     configure_c_yaw_residual,
     python_step,
+    VehicleModel,
 )
 from tools.racing.offline.controller.production_mpc import ProductionMpc
 
@@ -112,8 +113,70 @@ def build_lookup(name: str, s: np.ndarray, values: np.ndarray,
     return ca.interpolant(name, "linear", [grid], data)
 
 
+def interpolate_casadi(query: Any, knots: list[float], values: list[Any]) -> Any:
+    """Clamped piecewise-linear interpolation with explicit CasADi branches."""
+    if len(knots) < 2 or len(knots) != len(values):
+        raise ValueError("piecewise-linear interpolation needs matching knot/value arrays")
+    if (not all(math.isfinite(value) for value in knots)
+            or any(right <= left for left, right in zip(knots, knots[1:]))):
+        raise ValueError("interpolation knots must be finite and strictly increasing")
+    bounded = ca.fmin(ca.fmax(query, knots[0]), knots[-1])
+    result = values[-1]
+    for index in reversed(range(len(knots) - 1)):
+        fraction = (bounded - knots[index]) / (knots[index + 1] - knots[index])
+        segment = values[index] + fraction * (values[index + 1] - values[index])
+        result = ca.if_else(bounded <= knots[index + 1], segment, result)
+    return result
+
+
+def build_lateral_envelope(envelope: dict[str, Any]):
+    """Build a validated bilinear speed/steering limit from measured support."""
+    speeds = [float(value) for value in envelope["speed_mps"]]
+    steerings = [float(value) for value in envelope["steering_abs_rad"]]
+    table = [[float(value) for value in row]
+             for row in envelope["ay_max_mps2"]]
+    if (len(table) != len(speeds)
+            or any(len(row) != len(steerings) for row in table)
+            or not all(math.isfinite(value) and value > 0.0
+                       for row in table for value in row)):
+        raise ValueError("lateral envelope must be a positive rectangular speed/steering table")
+    scale = float(envelope.get("scale", 1.0))
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("lateral envelope scale must be finite and positive")
+    # Validate axes once during construction, not for every horizon stage.
+    interpolate_casadi(ca.MX(0.0), speeds, [ca.MX(0.0)] * len(speeds))
+    interpolate_casadi(ca.MX(0.0), steerings, [ca.MX(0.0)] * len(steerings))
+
+    def evaluate(speed: Any, steering: Any) -> Any:
+        steering_rows = [
+            interpolate_casadi(steering, steerings, row) for row in table
+        ]
+        return scale * interpolate_casadi(speed, speeds, steering_rows)
+
+    return evaluate
+
+
+def complete_vehicle_geometry(optimizer_config: dict[str, Any],
+                               source_model: VehicleModel) -> dict[str, float]:
+    """Use configured geometry, filling absent fields from repository vehicle data."""
+    geometry = dict(optimizer_config.get("vehicle_model", {}))
+    required = (
+        "required_wall_clearance_m", "planning_footprint_width_m", "car_width_m",
+        "rear_axle_to_front_bumper_m", "rear_overhang_m",
+    )
+    for name in required:
+        geometry.setdefault(name, float(getattr(source_model, name)))
+    if any(not math.isfinite(float(geometry[name])) for name in required):
+        raise ValueError("vehicle geometry must be finite")
+    optimizer_config["vehicle_model"] = geometry
+    return geometry
+
+
 def desired_steady_yaw(speed: float, steering: float, curvature: float,
-                       p: dict[str, Any]) -> float:
+                       p: dict[str, Any],
+                       source_model: VehicleModel | None = None) -> float:
+    if source_model is not None:
+        return source_model.steady_yaw_rate(speed, steering, curvature)
     steer_reduction = p["yaw_steering_gain_reduction_per_rad"] * min(
         max(abs(steering) - p["yaw_steering_gain_start_rad"], 0.0),
         p["yaw_steering_gain_end_rad"] - p["yaw_steering_gain_start_rad"],
@@ -127,9 +190,23 @@ def desired_steady_yaw(speed: float, steering: float, curvature: float,
 
 
 def steering_for_yaw(speed: float, yaw_rate: float, curvature: float,
-                     p: dict[str, Any]) -> float:
+                     p: dict[str, Any],
+                     source_model: VehicleModel | None = None) -> float:
     limit = float(p["max_steering_angle_rad"])
     target = float(yaw_rate)
+    if source_model is not None:
+        direction = -1.0 if target < 0.0 else 1.0
+        best_steering = 0.0
+        best_error = abs(target)
+        for index in range(1, 97):
+            steering = direction * limit * index / 96.0
+            response = source_model.steady_yaw_rate(
+                speed, steering, curvature)
+            error = abs(response - target)
+            if error < best_error:
+                best_error = error
+                best_steering = steering
+        return best_steering
     lo, hi = -limit, limit
     lo_value = desired_steady_yaw(speed, lo, curvature, p)
     hi_value = desired_steady_yaw(speed, hi, curvature, p)
@@ -175,7 +252,8 @@ def production_c_step(library: Any, state: np.ndarray, control: np.ndarray,
 
 def initial_guess(track: dict[str, Any], model: dict[str, Any],
                   steps: int,
-                  yaw_residual_model: dict[str, Any] | None = None
+                  yaw_residual_model: dict[str, Any] | None = None,
+                  source_model: VehicleModel | None = None,
                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     p = model["parameters"]
     length = float(track["length"])
@@ -195,7 +273,8 @@ def initial_guess(track: dict[str, Any], model: dict[str, Any],
         initial_curvature = float(periodic_linear(
             0.0, source_s, source_kappa, length))
         initial_delta = steering_for_yaw(
-            initial_speed, initial_speed * initial_curvature, initial_curvature, p)
+            initial_speed, initial_speed * initial_curvature, initial_curvature,
+            p, source_model)
         initial_target = np.clip(
             initial_speed - (p["longitudinal_response_bias_mps2"]
                              + p["longitudinal_speed_coefficient_per_s"] * initial_speed)
@@ -204,7 +283,8 @@ def initial_guess(track: dict[str, Any], model: dict[str, Any],
         )
         state = np.asarray((
             0.0, 0.0, initial_speed, 0.0,
-            desired_steady_yaw(initial_speed, initial_delta, initial_curvature, p),
+            desired_steady_yaw(initial_speed, initial_delta, initial_curvature,
+                               p, source_model),
             initial_target, initial_delta, initial_delta, initial_delta, initial_delta,
         ), dtype=np.float64)
         progress = np.zeros(steps + 1, dtype=np.float64)
@@ -238,7 +318,8 @@ def initial_guess(track: dict[str, Any], model: dict[str, Any],
                 - 4.0 * float(state[1]) - 2.0 * float(state[0])
             )
             desired_delta = steering_for_yaw(
-                max(float(state[2]), 0.8), desired_r, future_kappa, p)
+                max(float(state[2]), 0.8), desired_r, future_kappa, p,
+                source_model)
             qdelta = float(np.clip(
                 (desired_delta - state[6]) / DT,
                 -p["steering_rate_radps"], p["steering_rate_radps"],
@@ -246,7 +327,7 @@ def initial_guess(track: dict[str, Any], model: dict[str, Any],
             controls[:, k] = (qdelta, qv)
             state_next, delta_s, _ = python_step(
                 model, state, controls[:, k], DT, current_kappa,
-                yaw_residual_model)
+                yaw_residual_model, source_model)
             progress[k + 1] = s_now + delta_s
             states[:, k + 1] = state_next
             state = state_next
@@ -318,7 +399,8 @@ def solve_horizon(steps: int, track: dict[str, Any], model: dict[str, Any],
                   warm: dict[str, np.ndarray] | None,
                   max_iter: int,
                   hessian_approximation: str,
-                  yaw_residual_model: dict[str, Any] | None = None
+                  yaw_residual_model: dict[str, Any] | None = None,
+                  source_model: VehicleModel | None = None,
                   ) -> dict[str, Any]:
     p = model["parameters"]
     length = float(track["length"])
@@ -344,7 +426,7 @@ def solve_horizon(steps: int, track: dict[str, Any], model: dict[str, Any],
 
     if warm is None:
         s_guess, x_guess, u_guess = initial_guess(
-            track, model, steps, yaw_residual_model)
+            track, model, steps, yaw_residual_model, source_model)
     else:
         s_guess, x_guess, u_guess = interpolate_warm_start(warm, steps)
     opti.set_initial(z, x_guess / sx[:, None])
@@ -376,9 +458,16 @@ def solve_horizon(steps: int, track: dict[str, Any], model: dict[str, Any],
     planning_half_width = 0.5 * float(vehicle["planning_footprint_width_m"])
     front_extent = max(float(vehicle["rear_axle_to_front_bumper_m"]),
                        float(vehicle["rear_overhang_m"]))
-    ay_base = max(float(value) for row in envelope_cfg.get("ay_max_mps2", [[8.0]])
-                  for value in (row if isinstance(row, list) else [row]))
-    ay_cap = ay_base * float(envelope_cfg.get("scale", 1.0))
+    envelope_has_grid = all(
+        key in envelope_cfg for key in ("speed_mps", "steering_abs_rad", "ay_max_mps2"))
+    if envelope_has_grid:
+        lateral_limit = build_lateral_envelope(envelope_cfg)
+        ay_cap = None
+    else:
+        ay_base = max(float(value) for row in envelope_cfg.get("ay_max_mps2", [[8.0]])
+                      for value in (row if isinstance(row, list) else [row]))
+        ay_cap = ay_base * float(envelope_cfg.get("scale", 1.0))
+        lateral_limit = None
     combined_enabled = bool(combined_cfg.get("enabled", False))
     combined_exponent = float(combined_cfg.get("exponent", 2.0))
 
@@ -428,6 +517,8 @@ def solve_horizon(steps: int, track: dict[str, Any], model: dict[str, Any],
             opti.subject_to(delta_s >= DT * min_progress_mps)
             opti.subject_to((S[k + 1] - S[k] - delta_s) / 0.10 == 0.0)
             ay = xk[2] * xk[4]
+            ay_cap_k = (lateral_limit(xk[2], ca.fabs(xk[9]))
+                        if lateral_limit is not None else ay_cap)
             if combined_enabled:
                 brake = (p["brake_deceleration_intercept_mps2"]
                          + p["brake_deceleration_speed_slope_per_s"] * xk[2])
@@ -436,13 +527,13 @@ def solve_horizon(steps: int, track: dict[str, Any], model: dict[str, Any],
                     acceleration / p["longitudinal_acceleration_limit_mps2"],
                     -acceleration / brake,
                 )
-                ay_norm = ay / ay_cap
+                ay_norm = ay / ay_cap_k
                 opti.subject_to(
                     ca.power(ax_norm, combined_exponent)
                     + ca.power(ay_norm, combined_exponent) <= 1.0
                 )
             else:
-                opti.subject_to(ca.fabs(ay) <= ay_cap)
+                opti.subject_to(ca.fabs(ay) <= ay_cap_k)
             # The horizon is fixed-step, so this cost selects a smooth
             # center-tracking schedule among feasible solutions. Lap time is
             # compared only as steps * DT, never inferred from this objective.
@@ -708,11 +799,15 @@ def main() -> int:
         json.loads(args.yaw_residual_candidate.read_text(encoding="utf-8"))
         if args.yaw_residual_candidate else None)
     optimizer_config = yaml.safe_load(args.optimizer_config.read_text(encoding="utf-8"))
+    raw_optimizer_config = optimizer_config.get("config", optimizer_config)
+    source_model = VehicleModel.from_repo(ROOT, raw_optimizer_config, args.mpc_config)
+    vehicle_geometry = complete_vehicle_geometry(optimizer_config, source_model)
+    model["parameters"]["yaw_response_surface_enabled"] = source_model.yaw_surface_enabled
     yaml_match = check_source_config(model, args.mpc_config)
     header_match = check_header_contract(model, ROOT / "f1tenth_mpc/include/mpc_types.h")
     if not yaml_match["matches"] or not header_match["matches"]:
         raise ValueError(f"Production transition parameter mismatch: {yaml_match}, {header_match}")
-    dynamic = casadi_function(model, yaw_residual_model)
+    dynamic = casadi_function(model, yaw_residual_model, source_model)
     c_library = ctypes.CDLL(str(args.library.resolve()))
     setup_c_library(c_library)
     warm: dict[str, np.ndarray] | None = None
@@ -728,7 +823,7 @@ def main() -> int:
             result = solve_horizon(
                 steps, track, model, optimizer_config, dynamic, warm,
                 args.max_iter, args.hessian_approximation,
-                yaw_residual_model)
+                yaw_residual_model, source_model)
             if not result["success"]:
                 failure = {
                     "steps": steps,
@@ -748,9 +843,8 @@ def main() -> int:
             extra_wall_clearance = float(
                 optimizer_config.get("config", optimizer_config)
                 .get("track", {}).get("extra_wall_clearance_m", 0.10))
-            vehicle = optimizer_config.get("vehicle_model", {})
             replay = replay_with_production_c(
-                c_library, result, track, model, vehicle, extra_wall_clearance,
+                c_library, result, track, model, vehicle_geometry, extra_wall_clearance,
                 yaw_residual_model)
             if replay["status"] != "passed":
                 failure = {
@@ -793,6 +887,14 @@ def main() -> int:
             if yaw_residual_model is not None else None),
         "production_config_matches": yaml_match["matches"],
         "production_header_matches": header_match["matches"],
+        "production_yaw_surface": {
+            "enabled": source_model.yaw_surface_enabled,
+            "response_scale": source_model.yaw_surface_response_scale,
+            "speed_knots_mps": list(source_model.yaw_surface_speed_mps),
+            "hold_tau_s": source_model.yaw_surface_hold_time_constant_s,
+            "hold_rate_full_radps": source_model.yaw_surface_hold_rate_full_radps,
+            "hold_rate_zero_radps": source_model.yaw_surface_hold_rate_zero_radps,
+        },
         "horizons": all_reports,
         "simulator_started": False,
     }

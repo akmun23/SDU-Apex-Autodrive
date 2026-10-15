@@ -15,6 +15,7 @@ import ctypes
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,11 @@ from tools.racing.offline.controller.production_mpc import ProductionMpc
 
 
 ROOT = Path(__file__).resolve().parents[2]
+OPTIMIZER_ROOT = ROOT / "SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3"
+if str(OPTIMIZER_ROOT) not in sys.path:
+    sys.path.insert(0, str(OPTIMIZER_ROOT))
+from f1tenth_planning.autodrive_mintime.model import VehicleModel  # noqa: E402
+
 NX = 10
 NU = 2
 
@@ -150,7 +156,9 @@ def configure_c_yaw_residual(library: ctypes.CDLL,
 
 def python_step(model: dict[str, Any], state: np.ndarray, control: np.ndarray,
                 dt: float, curvature: float,
-                residual_model: dict[str, Any] | None = None) -> tuple[np.ndarray, float, float]:
+                residual_model: dict[str, Any] | None = None,
+                source_model: VehicleModel | None = None
+                ) -> tuple[np.ndarray, float, float]:
     p = model["parameters"]
     ey, epsi, u, v, r, target, steer_cmd, delay1, delay2, actual = map(float, state)
     q_delta = clamp(float(control[0]), -p["steering_rate_radps"], p["steering_rate_radps"])
@@ -175,18 +183,22 @@ def python_step(model: dict[str, Any], state: np.ndarray, control: np.ndarray,
     u_next = clamp(u0 + dt * accel, 0.0, p["max_speed_mps"])
     u_mid = 0.5 * (u0 + u_next)
 
-    steer_reduction = p["yaw_steering_gain_reduction_per_rad"] * clamp(
-        abs(actual_next) - p["yaw_steering_gain_start_rad"], 0.0,
-        p["yaw_steering_gain_end_rad"] - p["yaw_steering_gain_start_rad"])
-    curvature_reduction = p["yaw_curvature_gain_reduction_per_inv_m"] * clamp(
-        abs(curvature) - p["yaw_curvature_gain_start_inv_m"], 0.0,
-        p["yaw_curvature_gain_end_inv_m"] - p["yaw_curvature_gain_start_inv_m"])
-    steady_r = u_mid * math.tan(actual_next) * (
-        p["yaw_steering_gain_per_m"] - steer_reduction - curvature_reduction)
-    tau = p["yaw_response_time_constant_s"]
-    if p["yaw_low_speed_response_time_constant_s"] > 0.0:
-        tau += (p["yaw_low_speed_response_time_constant_s"] - tau) * math.exp(
-            -max(u_mid, 0.0) / p["yaw_low_speed_transition_speed_mps"])
+    if source_model is not None:
+        steady_r, tau = source_model.yaw_transition_terms_numeric(
+            u_mid, actual_next, curvature, actual_rate)
+    else:
+        steer_reduction = p["yaw_steering_gain_reduction_per_rad"] * clamp(
+            abs(actual_next) - p["yaw_steering_gain_start_rad"], 0.0,
+            p["yaw_steering_gain_end_rad"] - p["yaw_steering_gain_start_rad"])
+        curvature_reduction = p["yaw_curvature_gain_reduction_per_inv_m"] * clamp(
+            abs(curvature) - p["yaw_curvature_gain_start_per_m"], 0.0,
+            p["yaw_curvature_gain_end_per_m"] - p["yaw_curvature_gain_start_per_m"])
+        steady_r = u_mid * math.tan(actual_next) * (
+            p["yaw_steering_gain_per_m"] - steer_reduction - curvature_reduction)
+        tau = p["yaw_response_time_constant_s"]
+        if p["yaw_low_speed_response_time_constant_s"] > 0.0:
+            tau += (p["yaw_low_speed_response_time_constant_s"] - tau) * math.exp(
+                -max(u_mid, 0.0) / p["yaw_low_speed_transition_speed_mps"])
     retention = math.exp(-dt / tau)
     r_next = retention * r + (1.0 - retention) * steady_r
     if residual_model is not None:
@@ -224,7 +236,8 @@ def python_step(model: dict[str, Any], state: np.ndarray, control: np.ndarray,
 
 
 def casadi_function(model: dict[str, Any],
-                    residual_model: dict[str, Any] | None = None) -> ca.Function:
+                    residual_model: dict[str, Any] | None = None,
+                    source_model: VehicleModel | None = None) -> ca.Function:
     p = model["parameters"]
     x = ca.SX.sym("x", NX)
     w = ca.SX.sym("w", NU)
@@ -266,6 +279,9 @@ def casadi_function(model: dict[str, Any],
     if p["yaw_low_speed_response_time_constant_s"] > 0.0:
         tau += (p["yaw_low_speed_response_time_constant_s"] - tau) * ca.exp(
             -ca.fmax(umid, 0.0) / p["yaw_low_speed_transition_speed_mps"])
+    if source_model is not None:
+        steady_r, tau = source_model.yaw_transition_terms_casadi(
+            umid, actual_next, kappa, actual_rate)
     retention = ca.exp(-dt / tau)
     rnext = retention * x[4] + (1.0 - retention) * steady_r
     if residual_model is not None:
@@ -438,6 +454,8 @@ def main() -> int:
     args = parser.parse_args()
 
     model = json.loads(args.model.read_text(encoding="utf-8"))
+    source_model = VehicleModel.from_repo(ROOT, {}, args.mpc_config)
+    model["parameters"]["yaw_response_surface_enabled"] = source_model.yaw_surface_enabled
     residual_model = (json.loads(args.yaw_residual_candidate.read_text(encoding="utf-8"))
                       if args.yaw_residual_candidate else None)
     if residual_model is not None and residual_model.get("support_gate", {}).get("kind") != \
@@ -453,10 +471,15 @@ def main() -> int:
         ctypes.POINTER(ModelState), ctypes.POINTER(ModelControl), ctypes.c_float,
         ctypes.c_float, ctypes.POINTER(StageResult), ctypes.POINTER(StageLinearization)]
     library.mpc_vehicle_model_step_with_jacobian.restype = ctypes.c_int
-    casadi_step = casadi_function(model, residual_model)
+    casadi_step = casadi_function(model, residual_model, source_model)
     max_state_error = max_distance_error = max_accel_error = max_jac_error = 0.0
     max_state_error_by_channel = np.zeros(NX, dtype=np.float64)
+    max_normalized_jacobian_error = 0.0
     all_smooth = 0
+    worst_python_case: dict[str, Any] = {"error": 0.0}
+    worst_casadi_case: dict[str, Any] = {"error": 0.0}
+    worst_jacobian_case: dict[str, Any] = {"error": 0.0}
+    worst_normalized_jacobian_case: dict[str, Any] = {"error": 0.0}
 
     # Loading the real runtime YAML configures the C yaw parameters exactly as
     # the production controller does; no simulator/controller process starts.
@@ -486,18 +509,48 @@ def main() -> int:
                 steering, delay1,
                 rng.uniform(-p["max_steering_angle_rad"], p["max_steering_angle_rad"]),
                 actual,
-            ), dtype=np.float64)
-            control = np.asarray((rng.uniform(-2.5, 2.5), rng.uniform(-2.0, 2.0)))
-            dt = float(model["sample_period_s"])
-            curvature = float(rng.uniform(-1.2, 1.2))
+            ), dtype=np.float32).astype(np.float64)
+            control = np.asarray((rng.uniform(-2.5, 2.5), rng.uniform(-2.0, 2.0)),
+                                 dtype=np.float32).astype(np.float64)
+            # The production C ABI is float32. Quantize shared inputs before
+            # evaluating Python/CasADi so differences measure the transition
+            # equations, not the caller's conversion at the ABI boundary.
+            dt = float(np.float32(model["sample_period_s"]))
+            curvature = float(np.float32(rng.uniform(-1.2, 1.2)))
             py_next, py_ds, py_ax = python_step(
-                model, state, control, dt, curvature, residual_model)
+                model, state, control, dt, curvature, residual_model,
+                source_model)
             c_next, c_ds, c_ax, c_jac, flags, _ = c_step(
                 library, state, control, dt, curvature)
             ca_result = casadi_step(state, control, dt, curvature)
             ca_next = np.asarray(ca_result[0]).reshape(-1).astype(np.float64)
             ca_ds, ca_ax = float(ca_result[1]), float(ca_result[2])
             ca_jac = np.asarray(ca_result[3], dtype=np.float64)
+            case_inputs = {
+                "case": case_index,
+                "state": state.tolist(),
+                "control": control.tolist(),
+                "dt_s": dt,
+                "curvature_inv_m": curvature,
+            }
+            py_diff = np.abs(py_next - c_next)
+            ca_diff = np.abs(ca_next - c_next)
+            py_channel = int(np.argmax(py_diff))
+            ca_channel = int(np.argmax(ca_diff))
+            if float(py_diff[py_channel]) > worst_python_case["error"]:
+                worst_python_case = {
+                    **case_inputs, "error": float(py_diff[py_channel]),
+                    "channel": model["state_order"][py_channel],
+                    "python_value": float(py_next[py_channel]),
+                    "c_value": float(c_next[py_channel]),
+                }
+            if float(ca_diff[ca_channel]) > worst_casadi_case["error"]:
+                worst_casadi_case = {
+                    **case_inputs, "error": float(ca_diff[ca_channel]),
+                    "channel": model["state_order"][ca_channel],
+                    "casadi_value": float(ca_next[ca_channel]),
+                    "c_value": float(c_next[ca_channel]),
+                }
             max_state_error = max(max_state_error,
                                   float(np.max(np.abs(py_next - c_next))),
                                   float(np.max(np.abs(ca_next - c_next))))
@@ -508,12 +561,51 @@ def main() -> int:
             max_accel_error = max(max_accel_error, abs(py_ax - c_ax), abs(ca_ax - c_ax))
             if flags[0] == 0 and flags[1] == 0:
                 all_smooth += 1
-                max_jac_error = max(max_jac_error,
-                                     float(np.max(np.abs(c_jac - ca_jac))))
+                jac_error = float(np.max(np.abs(c_jac - ca_jac)))
+                if jac_error > worst_jacobian_case["error"]:
+                    row, col = np.unravel_index(
+                        int(np.argmax(np.abs(c_jac - ca_jac))), c_jac.shape)
+                    worst_jacobian_case = {
+                        **case_inputs, "error": jac_error,
+                        "row": int(row), "column": int(col),
+                        "c_derivative": float(c_jac[row, col]),
+                        "casadi_derivative": float(ca_jac[row, col]),
+                        "branch_flags": int(flags[0]),
+                        "nonsmooth_columns": int(flags[1]),
+                    }
+                max_jac_error = max(max_jac_error, jac_error)
+                jacobian_relative = np.abs(c_jac - ca_jac) / (1.0 + np.abs(c_jac))
+                max_normalized_jacobian_error = max(
+                    max_normalized_jacobian_error,
+                    float(np.max(jacobian_relative)))
+                normalized_row, normalized_col = np.unravel_index(
+                    int(np.argmax(jacobian_relative)), jacobian_relative.shape)
+                normalized_error = float(jacobian_relative[
+                    normalized_row, normalized_col])
+                if normalized_error > worst_normalized_jacobian_case["error"]:
+                    worst_normalized_jacobian_case = {
+                        **case_inputs, "error": normalized_error,
+                        "row": int(normalized_row), "column": int(normalized_col),
+                        "c_derivative": float(c_jac[normalized_row, normalized_col]),
+                        "casadi_derivative": float(ca_jac[
+                            normalized_row, normalized_col]),
+                        "absolute_error": float(abs(
+                            c_jac[normalized_row, normalized_col]
+                            - ca_jac[normalized_row, normalized_col])),
+                        "branch_flags": int(flags[0]),
+                        "nonsmooth_columns": int(flags[1]),
+                    }
 
     yaml_match = check_source_config(model, args.mpc_config)
     header_match = check_header_contract(model, ROOT / "f1tenth_mpc/include/mpc_types.h")
-    state_tolerance = 1.0e-4 if residual_model is not None else 2.0e-5
+    state_tolerances = {name: 2.0e-5 for name in model["state_order"]}
+    state_passed = all(
+        max_state_error_by_channel[index] <= state_tolerances[name]
+        for index, name in enumerate(model["state_order"]))
+    # The production analytic Jacobian is evaluated in float32; normalize by
+    # 1 + |C derivative| so the gate remains meaningful for both steep and
+    # near-zero entries without imposing an absolute threshold in one scale.
+    jacobian_relative_tolerance = 1.0e-3
     report = {
         "schema_version": 1,
         "model_id": model["model_id"],
@@ -529,49 +621,52 @@ def main() -> int:
             },
             "max_delta_s_abs_error_m": max_distance_error,
             "max_body_accel_abs_error_mps2": max_accel_error,
+            "worst_python_state_case": worst_python_case,
+            "worst_casadi_state_case": worst_casadi_case,
+            "worst_smooth_jacobian_case": worst_jacobian_case,
+            "worst_normalized_smooth_jacobian_case": worst_normalized_jacobian_case,
             "acceptance_tolerances": {
-                "state_abs": state_tolerance,
+                "state_abs_by_channel": state_tolerances,
                 "delta_s_abs_m": 2.0e-5,
                 "body_accel_abs_mps2": 2.0e-5,
-                "jacobian_abs": 2.0e-3,
+                "jacobian_relative_normalized": jacobian_relative_tolerance,
             },
+            "max_casadi_jacobian_abs_error": max_jac_error,
+            "max_casadi_jacobian_normalized_error": max_normalized_jacobian_error,
             "jacobian_cases_without_branch_or_nonsmooth_flags": all_smooth,
-            "max_c_vs_casadi_jacobian_abs_error": max_jac_error,
-            "passed": max_state_error < state_tolerance and max_distance_error < 2e-5
-                and max_accel_error < 2e-5 and max_jac_error < 2e-3,
+            "passed": state_passed and max_distance_error < 2e-5
+                and max_accel_error < 2e-5
+                and max_normalized_jacobian_error < jacobian_relative_tolerance,
         },
         "production_config_matches_shared_spec": yaml_match,
         "compiled_c_header_matches_shared_spec": header_match,
-        "optimizer_contract": {
-            "status": "continuous_spatial_candidate_fails_recursive_parity",
-            "optimizer_model": "custom continuous spatial source-command model",
-            "optimizer_states": [
-                "e_y_m", "e_psi_rad", "body_u_mps", "yaw_rate_radps",
-                "target_speed_mps", "steering_command_rad (queue-aware option)",
-                "actual_steering_angle_rad (queue-aware option)",
-            ],
-            "optimizer_controls": [
-                "steering_rate_radps", "target_speed_rate_mps2",
-            ],
-            "mpc_states": model["state_order"],
-            "mpc_controls": model["control_order"],
-            "known_stage_differences": [
-                "queue-aware optimizer mode separates command and actual steering, but reconstructs the 25 ms history with continuous spatial Hermite interpolation rather than the exact discrete queue transition",
-                "optimizer recomputes lateral velocity algebraically from speed and yaw rate; production MPC holds the current lateral-velocity state through each prediction stage",
-                "optimizer uses continuous spatial collocation and exact continuous yaw-lag integration; production MPC uses a 25 ms discrete stage with midpoint speed and next-step physical steering",
-                "the queue-aware candidate's recursive production-C replay departed by more than 0.05 rad heading after 4 stages and the production model rejected the rollout at 12.22 m; see p0_steering_queue_20261006/retry_from_failed_iterate/stage_audit.json",
-            ],
-            "parity_passed": False,
+        "production_yaw_surface": {
+            "enabled": source_model.yaw_surface_enabled,
+            "response_scale": source_model.yaw_surface_response_scale,
+            "speed_knots_mps": list(source_model.yaw_surface_speed_mps),
+            "hold_tau_s": source_model.yaw_surface_hold_time_constant_s,
+            "hold_rate_full_radps": source_model.yaw_surface_hold_rate_full_radps,
+            "hold_rate_zero_radps": source_model.yaw_surface_hold_rate_zero_radps,
         },
-        "handoff_h2_passed": False,
-        "interpretation": "Production C/Python/CasADi transition parity passes, but active optimizer stage parity does not. See the active-optimizer stage audit for a trajectory-conditioned estimate of the remaining discrepancy.",
+        "transition_input_precision": "float32 production C ABI values shared by Python, C, and CasADi",
+        "optimizer_contract": {
+            "status": "not_evaluated_by_this_transition_parity_run",
+            "optimizer_model": "discrete 25 ms production-transition candidate",
+            "optimizer_states": model["state_order"],
+            "optimizer_controls": model["control_order"],
+            "stage_parity": "not_evaluated; requires recursive candidate replay",
+        },
+        "handoff_h2_passed": None,
+        "interpretation": (
+            "This report evaluates one-step production C/Python/CasADi parity only. "
+            "It does not assert optimizer-stage or full-lap parity; those require "
+            "the candidate's independent recursive production-C replay."
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
-    if residual_model is not None:
-        return 0 if report["production_transition_parity"]["passed"] else 1
-    return 0 if report["handoff_h2_passed"] else 1
+    return 0 if report["production_transition_parity"]["passed"] else 1
 
 
 if __name__ == "__main__":

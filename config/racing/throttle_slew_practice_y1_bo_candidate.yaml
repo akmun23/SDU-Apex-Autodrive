@@ -1,0 +1,11 @@
+autodrive_actuator_interface:
+  ros__parameters:
+    # Evidence-bounded candidate: intermediate ramp rate within the existing
+    # 6.5-7.5 m/s, 0.08-0.20 rad paired throttle-slew study domain.
+    # It only shapes positive throttle rise; it does not alter braking or the
+    # optimizer's vehicle physics. Promote only from measured practice results.
+    throttle_rise_regime_rate_per_sec: 0.4
+    throttle_rise_regime_speed_min_mps: 6.5
+    throttle_rise_regime_speed_max_mps: 7.5
+    throttle_rise_regime_min_abs_steering_rad: 0.08
+    throttle_rise_regime_max_abs_steering_rad: 0.20

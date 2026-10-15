@@ -60,7 +60,9 @@ def _active_packet_alignment(path: Path, start_ns: int,
                 item = json.loads(message.data)
             except (TypeError, json.JSONDecodeError):
                 continue
-            stamp = item.get("bridge_receive_ros_stamp_ns")
+            stamp = item.get("bridge_request_ros_stamp_ns")
+            if not isinstance(stamp, int):
+                stamp = item.get("bridge_receive_ros_stamp_ns")
             sequence = item.get("packet_sequence")
             if isinstance(stamp, int) and isinstance(sequence, int):
                 packet_by_stamp[stamp] = sequence

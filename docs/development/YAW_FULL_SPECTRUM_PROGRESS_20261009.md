@@ -1889,6 +1889,21 @@ yaw and yaw rate directly; replacing that measurement with a next-step learned
 mapping would be inappropriate. Recursive use for future plant prediction is
 not yet validated.
 
+#### Re-audit of the regional candidate's remaining tail
+
+A gate-filtered re-count of the saved error CSV (only r02/r04, the exact
+8–12 m/s and `abs(steering)<0.25 rad` gate, duplicate rows removed) confirms
+419 samples over 0.1 rad/s: 38 on r02 and 381 on r04. Of these, 251 are
+unwinds, 123 turn-ins, and 45 holds; 66 have the wrong predicted yaw-residual
+sign. The age distribution is concentrated in late response: 140 errors are
+at 200–250 ms after event onset, where the largest error is 1.00055 rad/s.
+This quantifies the branch problem more precisely than the all-gate CSV total,
+which also contains rows from other steering/speed gates and the older
+high-speed validation capture. It does not reveal a feature that separates
+the branches; the existing 500 ms, acceleration-interaction, and target
+reparameterization ablations remain negative. No new model is promoted from
+this re-count.
+
 Machine-readable cross-fold/held-out scores and all candidate >0.1 errors:
 `live_runs/racing_model_diagnostics_20261009/continued_error_reduction_20261009/highspeed_regional_surface_transfer/report.json` and
 `.../highspeed_specialist_errors_over_0p1.csv`. The reproducible fitter and

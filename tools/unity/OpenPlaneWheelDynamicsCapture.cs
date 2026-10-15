@@ -10,7 +10,7 @@ using UnityEngine;
 // from VehicleController.FixedUpdate after actuator and wheel-pose updates.
 internal static class OpenPlaneWheelDynamicsCapture
 {
-    private const int Capacity = 180000;
+    private const int Capacity = 300000;
     private const long UnixEpochTicks = 621355968000000000L;
 
     private struct WheelSample
@@ -52,7 +52,9 @@ internal static class OpenPlaneWheelDynamicsCapture
         {
             Samples = new Sample[Capacity];
             double realtime = Time.realtimeSinceStartupAsDouble;
-            long utcNowUnixNs = (DateTime.UtcNow.Ticks - UnixEpochTicks) * 10L;
+            // DateTime ticks are 100 ns each; convert to nanoseconds before
+            // subtracting Unity's realtime clock origin.
+            long utcNowUnixNs = (DateTime.UtcNow.Ticks - UnixEpochTicks) * 100L;
             _unixNsAtRealtimeZero = utcNowUnixNs - (long)(realtime * 1.0e9);
             _runId = Environment.GetEnvironmentVariable("SDU_APEX_DYNAMICS_RUN_ID");
             if (string.IsNullOrEmpty(_runId))

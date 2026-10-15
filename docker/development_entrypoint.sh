@@ -90,4 +90,9 @@ if [[ -n "${SDU_APEX_ACTUATOR_PARAMETER_OVERLAY:-}" ]]; then
     "actuator_parameter_overlay:=${SDU_APEX_ACTUATOR_PARAMETER_OVERLAY}"
   )
 fi
+if [[ -n "${SDU_APEX_ODOM_PARAMETER_OVERLAY:-}" ]]; then
+  launch_args+=(
+    "odom_parameter_overlay:=${SDU_APEX_ODOM_PARAMETER_OVERLAY}"
+  )
+fi
 exec ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"

@@ -140,6 +140,8 @@ int vehicle_model_set_yaw_rate_response_surface(
     }
     if (!isfinite(surface->blend_q_start) ||
         !isfinite(surface->blend_q_end) ||
+        !isfinite(surface->response_scale) ||
+        surface->response_scale < 0.0f || surface->response_scale > 1.0f ||
         surface->blend_q_start < 0.0f ||
         surface->blend_q_end <= surface->blend_q_start ||
         !isfinite(surface->speed_blend_margin_mps) ||
@@ -721,7 +723,8 @@ static float yaw_steady_response(
 
     const float demand_q = fmaxf(speed_mps, 0.0f) *
         fabsf(tanf(steering_rad));
-    const float blend = yaw_surface_blend_weight(demand_q, steering_rad) *
+    const float blend = active_yaw_rate_surface.response_scale *
+        yaw_surface_blend_weight(demand_q, steering_rad) *
         yaw_surface_speed_blend_weight(speed_mps);
     const float empirical = yaw_surface_value(speed_mps, steering_rad).yaw_rate_rps;
     return legacy + blend * (empirical - legacy);
@@ -1513,8 +1516,12 @@ static int vehicle_model_step_impl(
         }
         yaw_retention = jet_exponential(jet_divide(
             jet_constant(-dt), yaw_response_time_constant));
+        const MpcJet_t yaw_surface_response_blend = jet_multiply(
+            response_blend,
+            jet_constant(active_yaw_rate_surface.response_scale));
         yaw_steady = jet_add(legacy_yaw_steady, jet_multiply(
-            response_blend, jet_subtract(empirical, legacy_yaw_steady)));
+            yaw_surface_response_blend,
+            jet_subtract(empirical, legacy_yaw_steady)));
 
         for (int i = 1; i < active_yaw_rate_surface.speed_count; ++i) {
             mark_nonsmooth_difference(u_mid,

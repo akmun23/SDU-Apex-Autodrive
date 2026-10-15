@@ -433,7 +433,11 @@ def _practice_mpc_timing_audit(run_id: str) -> dict[str, Any]:
             if (request_ns <= 0 or arrival_ns <= 0 or receive_ros_ns <= 0
                     or observed_age is None):
                 continue
-            request_ros_ns = receive_ros_ns - (arrival_ns - request_ns)
+            explicit_request_ros_ns = item.get("bridge_request_ros_stamp_ns")
+            request_ros_ns = (
+                int(explicit_request_ros_ns)
+                if isinstance(explicit_request_ros_ns, int)
+                else receive_ros_ns - (arrival_ns - request_ns))
             event_index = int(np.searchsorted(
                 events, request_ros_ns, side="right") - 1)
             if event_index < 0:

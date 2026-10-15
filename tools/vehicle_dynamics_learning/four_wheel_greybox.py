@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Differentiable, guide-structured four-wheel grey-box plant experiment.
+"""Differentiable, source-informed four-wheel grey-box plant experiment.
 
-The model is offline-only. Geometry, mass, tire slip definitions, and the
-piecewise tire-force landmarks come from AutoDRIVE's published vehicle guide.
-Unreported tire spline tangents, wheel inertia, effective load-transfer
-height, drivetrain scale, and drag are shared trainable parameters. Rear
-wheel speed is supervised; front wheel speed is a latent propagated state.
-Actuator feedback is supplied as a *measured conditioning input* in this
-identification experiment, so this is not yet a command-only plant.
+This is offline-only. Geometry and actuator laws come from Unity source;
+the documented AutoDRIVE tire-force slip coordinates and tire-force landmarks
+are retained. Unity WheelHit slip telemetry is a separate diagnostic signal,
+not a replacement force-curve input. Unreported tire spline tangents, wheel
+inertia, effective load-transfer height, drivetrain scale, and drag are
+shared trainable parameters. Rear wheel speed is supervised; front wheel
+speed is a latent propagated state. Future rollout inputs are commands only.
+By default actuator parameters are fitted; an explicit option instead uses
+the source CAWD/CAWB laws and 1 kHz internal integration.
 """
 
 from __future__ import annotations
@@ -30,6 +32,13 @@ from tools.vehicle_dynamics_learning.family_condition_sampler import (
 from tools.vehicle_dynamics_learning.experiment_artifacts import (
     write_standard_artifacts,
 )
+from tools.vehicle_dynamics_learning.unity_vehicle_mechanics import (
+    MOTOR_TORQUE_NM as UNITY_MOTOR_TORQUE_NM,
+    STEERING_LIMIT_RAD as UNITY_STEERING_LIMIT_RAD,
+    STEERING_RATE_RADPS as UNITY_STEERING_RATE_RADPS,
+    WHEEL_X_M as UNITY_WHEEL_X_M,
+    WHEEL_Y_M as UNITY_WHEEL_Y_M,
+)
 
 
 DT_S = 0.025
@@ -40,12 +49,12 @@ TRACK_M = 0.236
 WHEEL_RADIUS_M = 0.059
 COM_X_M = 0.15532
 COM_Z_M = 0.01434
-FRONT_X_M = WHEELBASE_M - COM_X_M
-REAR_X_M = -COM_X_M
-HALF_TRACK_M = TRACK_M / 2.0
-WHEEL_X = (FRONT_X_M, FRONT_X_M, REAR_X_M, REAR_X_M)
-WHEEL_Y = (HALF_TRACK_M, -HALF_TRACK_M,
-           HALF_TRACK_M, -HALF_TRACK_M)
+WHEEL_X = UNITY_WHEEL_X_M
+WHEEL_Y = UNITY_WHEEL_Y_M
+# The guide's slip definitions divide by longitudinal contact speed. Keep a
+# finite low-speed floor for numerical integration; above this speed the
+# tire-force input is exactly the documented equation.
+SLIP_SPEED_FLOOR_MPS = 0.5
 LONGITUDINAL_KNOTS = (0.15, 0.72, 0.25, 0.464)
 LATERAL_KNOTS = (0.01, 1.00, 0.10, 0.500)
 OUTPUT_NAMES = (
@@ -61,7 +70,12 @@ def _logit(value: float) -> float:
     return math.log(value / (1.0 - value))
 
 
-def _physical_model(torch, nn, use_tire_relaxation: bool = True):
+def _physical_model(torch, nn, use_tire_relaxation: bool = True,
+                    exact_unity_actuators: bool = False,
+                    integration_substeps: int = 1):
+    if integration_substeps < 1:
+        raise ValueError("integration_substeps must be positive")
+
     class FourWheelGreyBox(nn.Module):
         """Planar rigid body plus four driven wheel-rotation states."""
 
@@ -115,8 +129,20 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
         def __init__(self) -> None:
             super().__init__()
             self.use_tire_relaxation = use_tire_relaxation
+            self.exact_unity_actuators = exact_unity_actuators
+            self.integration_substeps = integration_substeps
+            self.parameter_names = tuple(
+                name for name in self.PARAMETER_BOUNDS
+                if not exact_unity_actuators or name not in {
+                    "motor_torque_scale", "idle_brake_torque_nm",
+                    "front_drive_fraction", "steering_lag_time_constant_s",
+                    "steering_rate_limit_radps",
+                    "throttle_lag_time_constant_s",
+                    "throttle_rate_limit_normps",
+                })
             initial = []
-            for name, (low, high) in self.PARAMETER_BOUNDS.items():
+            for name in self.parameter_names:
+                low, high = self.PARAMETER_BOUNDS[name]
                 fraction = (self.INITIAL[name] - low) / (high - low)
                 initial.append(_logit(fraction))
             self.raw_parameters = nn.Parameter(
@@ -135,8 +161,8 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
 
         def physical_parameters(self) -> dict[str, Any]:
             result = {}
-            for index, (name, (low, high)) in enumerate(
-                    self.PARAMETER_BOUNDS.items()):
+            for index, name in enumerate(self.parameter_names):
+                low, high = self.PARAMETER_BOUNDS[name]
                 result[name] = low + (high - low) * torch.sigmoid(
                     self.raw_parameters[index])
             return result
@@ -173,6 +199,25 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
             # confirmed by the existing bridge/static-transform audit.
             return torch.stack((formula_right, formula_left), dim=-1)
 
+        @staticmethod
+        def _tire_slips(surface_speed, forward_speed, lateral_speed):
+            """Compute the guide's tire-force slip coordinates.
+
+            These are deliberately distinct from Unity WheelHit's reported
+            forwardSlip/sidewaysSlip telemetry. The AutoDRIVE force-curve
+            inputs are Sx=(R*omega-vx)/vx and Sy=vy/abs(vx); the reported
+            WheelHit values are diagnostic observations, not substitutes for
+            those force-curve inputs.
+            """
+            speed_magnitude = torch.clamp(
+                torch.abs(forward_speed), min=SLIP_SPEED_FLOOR_MPS)
+            longitudinal_denominator = torch.where(
+                forward_speed < 0.0, -speed_magnitude, speed_magnitude)
+            longitudinal = ((surface_speed - forward_speed)
+                            / longitudinal_denominator)
+            lateral = lateral_speed / speed_magnitude
+            return longitudinal, lateral
+
         def _wheel_loads(self, load_ax, load_ay, params):
             transfer_long = (MASS_KG * load_ax
                              * params["effective_load_transfer_height_m"]
@@ -201,10 +246,8 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
             wheel_vx = cosine * wheel_vx_body + sine * wheel_vy_body
             wheel_vy = -sine * wheel_vx_body + cosine * wheel_vy_body
             surface = WHEEL_RADIUS_M * omega
-            slip_x_target = ((surface - wheel_vx)
-                             / torch.clamp(torch.abs(wheel_vx), min=0.5))
-            slip_y_target = (wheel_vy
-                             / torch.clamp(torch.abs(wheel_vx), min=0.5))
+            slip_x_target, slip_y_target = self._tire_slips(
+                surface, wheel_vx, wheel_vy)
             if self.use_tire_relaxation:
                 slip_x, slip_y = state[:, 7:11], state[:, 11:15]
                 slip_x_dot = ((slip_x_target - slip_x)
@@ -230,18 +273,25 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
             fy_body_wheel = sine * fx_local + cosine * fy_local
             fx_tire = fx_body_wheel.sum(dim=-1)
             fy_tire = fy_body_wheel.sum(dim=-1)
-            drive_front = (p["motor_torque_scale"] * throttle
-                           * p["front_drive_fraction"] / 2.0)
-            drive_rear = (p["motor_torque_scale"] * throttle
-                          * (1.0 - p["front_drive_fraction"]) / 2.0)
-            drive_torque = torch.stack((drive_front, drive_front,
-                                        drive_rear, drive_rear), dim=-1)
-            idle_torque = (p["idle_brake_torque_nm"]
-                           * (1.0 - torch.clamp(
-                               torch.abs(throttle), 0.0, 1.0))[:, None]
-                           * torch.tanh(omega / 0.5))
-            omega_dot = (drive_torque - WHEEL_RADIUS_M * fx_local
-                         - idle_torque - p["wheel_damping_nms"] * omega)
+            if self.exact_unity_actuators:
+                throttle = torch.clamp(throttle, -1.0, 1.0)
+                drive_torque = (UNITY_MOTOR_TORQUE_NM * throttle / 4.0)[:, None]
+                omega_dot = (drive_torque
+                             - WHEEL_RADIUS_M * fx_local
+                             - p["wheel_damping_nms"] * omega)
+            else:
+                drive_front = (p["motor_torque_scale"] * throttle
+                               * p["front_drive_fraction"] / 2.0)
+                drive_rear = (p["motor_torque_scale"] * throttle
+                              * (1.0 - p["front_drive_fraction"]) / 2.0)
+                drive_torque = torch.stack((drive_front, drive_front,
+                                            drive_rear, drive_rear), dim=-1)
+                idle_torque = (p["idle_brake_torque_nm"]
+                               * (1.0 - torch.clamp(
+                                   torch.abs(throttle), 0.0, 1.0))[:, None]
+                               * torch.tanh(omega / 0.5))
+                omega_dot = (drive_torque - WHEEL_RADIUS_M * fx_local
+                             - idle_torque - p["wheel_damping_nms"] * omega)
             omega_dot = omega_dot / p["wheel_inertia_kgm2"]
             fx_drag = (p["rolling_resistance_n"] * torch.tanh(u / 0.1)
                        + p["quadratic_drag_n_per_mps2"] * u * torch.abs(u))
@@ -262,6 +312,17 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
             return derivative, acceleration
 
         def _advance_actuator(self, current, command, dt):
+            if self.exact_unity_actuators:
+                steering_target = torch.clamp(
+                    command[:, 0], -UNITY_STEERING_LIMIT_RAD,
+                    UNITY_STEERING_LIMIT_RAD)
+                max_steering_change = UNITY_STEERING_RATE_RADPS * dt
+                steering_change = torch.clamp(
+                    steering_target - current[:, 0],
+                    -max_steering_change, max_steering_change)
+                throttle = torch.clamp(command[:, 1], -1.0, 1.0)
+                return torch.stack((current[:, 0] + steering_change,
+                                    throttle), dim=-1)
             p = self.physical_parameters()
             tau = torch.stack((p["steering_lag_time_constant_s"],
                                p["throttle_lag_time_constant_s"]))
@@ -280,18 +341,44 @@ def _physical_model(torch, nn, use_tire_relaxation: bool = True):
             """Advance from commands; actuator state remains internal."""
             actuator = state[:, 17:19]
             delayed_command = state[:, 19:21]
-            actuator_next = self._advance_actuator(
-                actuator, delayed_command, dt)
-            actuator_mid = 0.5 * (actuator + actuator_next)
-            derivative0, _ = self._forces_and_derivatives(
-                state[:, :17], actuator[:, 0], actuator[:, 1])
-            physical_mid = state[:, :17] + (0.5 * dt) * derivative0
-            derivative_mid, acceleration_mid = self._forces_and_derivatives(
-                physical_mid, actuator_mid[:, 0], actuator_mid[:, 1])
-            following_physical = state[:, :17] + dt * derivative_mid
+            substep_dt = dt / self.integration_substeps
+            physical = state[:, :17]
+            p = self.physical_parameters()
+            acceleration_sum = torch.zeros(
+                (state.shape[0], 3), dtype=state.dtype, device=state.device)
+            for _ in range(self.integration_substeps):
+                actuator_next = self._advance_actuator(
+                    actuator, delayed_command, substep_dt)
+                actuator_mid = 0.5 * (actuator + actuator_next)
+                derivative0, _ = self._forces_and_derivatives(
+                    physical, actuator[:, 0], delayed_command[:, 1]
+                    if self.exact_unity_actuators else actuator[:, 1])
+                physical_mid = physical + (0.5 * substep_dt) * derivative0
+                derivative_mid, acceleration_mid = self._forces_and_derivatives(
+                    physical_mid, actuator_mid[:, 0], delayed_command[:, 1]
+                    if self.exact_unity_actuators else actuator_mid[:, 1])
+                physical = physical + substep_dt * derivative_mid
+                if self.exact_unity_actuators:
+                    brake_active = delayed_command[:, 1] == 0.0
+                    brake_delta = (
+                        UNITY_MOTOR_TORQUE_NM * substep_dt
+                        / p["wheel_inertia_kgm2"])
+                    stopped_wheels = (torch.sign(physical[:, 3:7])
+                                      * torch.clamp(
+                                          torch.abs(physical[:, 3:7])
+                                          - brake_delta, min=0.0))
+                    wheel_state = torch.where(
+                        brake_active[:, None], stopped_wheels,
+                        physical[:, 3:7])
+                    physical = torch.cat((physical[:, :3], wheel_state,
+                                          physical[:, 7:]), dim=-1)
+                actuator = actuator_next
+                acceleration_sum = acceleration_sum + acceleration_mid
+            following_physical = physical
+            acceleration_mean = acceleration_sum / self.integration_substeps
             following = torch.cat((following_physical, actuator_next, command),
                                   dim=-1)
-            return following, acceleration_mid
+            return following, acceleration_mean
 
         def rollout(self, initial_state, commands):
             """Roll out commands causally; no future feedback is supplied."""
@@ -385,9 +472,13 @@ def _initial_state(data: dict[str, Any], start: int,
                 + np.sin(steering_values) * wheel_vy_body)
     wheel_vy = (-np.sin(steering_values) * wheel_vx_body
                 + np.cos(steering_values) * wheel_vy_body)
-    slip_denominator = np.maximum(np.abs(wheel_vx), 0.5)
-    initial_slip_x = (WHEEL_RADIUS_M * omega_values - wheel_vx) / slip_denominator
-    initial_slip_y = wheel_vy / slip_denominator
+    surface_speed = WHEEL_RADIUS_M * omega_values
+    slip_speed = np.maximum(np.abs(wheel_vx), SLIP_SPEED_FLOOR_MPS)
+    slip_x_denominator = np.where(wheel_vx < 0.0, -slip_speed, slip_speed)
+    slip_x = (surface_speed - wheel_vx) / slip_x_denominator
+    slip_y = wheel_vy / slip_speed
+    initial_slip_x = slip_x
+    initial_slip_y = slip_y
     if data.get("sensor_frames") is not None:
         # IMU is a legal causal initial signal for the latent load-transfer
         # state. It is not read after the rollout starts.
@@ -547,6 +638,7 @@ def _evaluate(torch, model, data, physical_state, acceleration, groups,
 def train(dataset_path: Path, output_dir: Path, *, device_name: str,
           horizon_seconds: float, shooting_seconds: float,
           use_tire_relaxation: bool,
+          exact_unity_actuators: bool, integration_substeps: int,
           batch_size: int, max_steps: int,
           eval_every: int, patience: int, max_eval_windows_per_run: int,
           seed: int, score_test: bool) -> dict[str, Any]:
@@ -588,7 +680,9 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
     acceleration_scale = np.maximum(
         np.nanstd(acceleration[train_indices], axis=0),
         [0.5, 0.5, 0.5]).astype(np.float32)
-    model_type = _physical_model(torch, nn, use_tire_relaxation)
+    model_type = _physical_model(
+        torch, nn, use_tire_relaxation, exact_unity_actuators,
+        integration_substeps)
     model = model_type().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=2.0e-3,
                                   weight_decay=1.0e-5)
@@ -661,11 +755,24 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
                                           for i in sorted(groups["train"])],
                         "horizon_steps": horizon_steps,
                         "actuator_feedback_is_conditioned_input": False,
-                        "actuator_response_is_fitted_and_command_driven": True,
+                        "actuator_response_is_fitted_and_command_driven": (
+                            not exact_unity_actuators),
+                        "exact_unity_actuators": exact_unity_actuators,
+                        "integration_substeps": integration_substeps,
                         "front_wheel_speeds_are_latent": True,
                         "tire_relaxation_state_enabled": use_tire_relaxation,
                         "physics_source": (
-                            "AutoDRIVE vehicle dynamics guide section 1.3.2"),
+                            "Unity wheel geometry and AutoDRIVE guide "
+                            "tire-force equations/landmarks; actuator "
+                            "response parameters are fitted in this trainer"),
+                        "slip_coordinates": (
+                            "AutoDRIVE guide force inputs: "
+                            "Sx=(R*omega-vx)/vx and Sy=vy/abs(vx), with "
+                            "0.5 m/s numerical floor at the low-speed "
+                            "singularity; distinct from WheelHit telemetry"),
+                        "exact_zero_throttle_brake": (
+                            "per-substep unilateral wheel-speed stop when exact "
+                            "Unity actuators are enabled"),
                     },
                 }, output_dir / "best_four_wheel_greybox.pt")
             else:
@@ -726,6 +833,8 @@ def train(dataset_path: Path, output_dir: Path, *, device_name: str,
          "horizon_seconds": horizon_steps * DT_S,
          "shooting_seconds": shooting_steps * DT_S,
          "tire_relaxation_state_enabled": use_tire_relaxation,
+         "exact_unity_actuators": exact_unity_actuators,
+         "integration_substeps": integration_substeps,
          "batch_size": batch_size, "max_steps": max_steps,
          "eval_every": eval_every, "patience": patience,
          "max_eval_windows_per_run": max_eval_windows_per_run,
@@ -744,6 +853,12 @@ def main() -> int:
     parser.add_argument("--horizon-seconds", type=float, default=2.0)
     parser.add_argument("--shooting-seconds", type=float, default=0.5)
     parser.add_argument("--no-tire-relaxation", action="store_true")
+    parser.add_argument(
+        "--exact-unity-actuators", action="store_true",
+        help="use source CAWD/CAWB torque and steering laws instead of fitted actuator parameters")
+    parser.add_argument(
+        "--integration-substeps", type=int, default=1,
+        help="internal RK2 substeps per 25 ms training transition (25 = 1 kHz)")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-steps", type=int, default=3000)
     parser.add_argument("--eval-every", type=int, default=100)
@@ -757,6 +872,8 @@ def main() -> int:
         horizon_seconds=args.horizon_seconds,
         shooting_seconds=args.shooting_seconds,
         use_tire_relaxation=not args.no_tire_relaxation,
+        exact_unity_actuators=args.exact_unity_actuators,
+        integration_substeps=args.integration_substeps,
         batch_size=args.batch_size,
         max_steps=args.max_steps, eval_every=args.eval_every,
         patience=args.patience,

@@ -56,6 +56,7 @@
     # measured steering/speed/hold support; ordinary steering stays on legacy.
     yaw_rate_response_surface_enabled: true
     yaw_rate_response_surface_file: /workspace/src/f1tenth_mpc/config/yaw_response_surface_y1.csv
+    yaw_rate_response_surface_response_scale: 1.0
     yaw_rate_response_surface_blend_q_start: 0.30
     yaw_rate_response_surface_blend_q_end: 0.70
     yaw_rate_response_surface_speed_blend_margin_mps: 0.10

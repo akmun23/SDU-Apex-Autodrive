@@ -193,9 +193,8 @@ def _load_packet_timing(connection: sqlite3.Connection,
             raise ValueError("bridge packet lacks receive/arrival sequence fields")
         if (not isinstance(request, int) or not isinstance(request_id, int)
                 or request_id < 0):
-            # The bridge intentionally publishes a response even if no request
-            # is pending. Such a response has no defensible control-time key;
-            # retain it in the audit count but do not invent a timestamp.
+            # Legacy bags may contain a response without a pending request.
+            # It has no defensible control-time key and is excluded.
             unmatched_response_count += 1
             if len(unmatched_response_examples) < 5:
                 unmatched_response_examples.append({
@@ -213,7 +212,27 @@ def _load_packet_timing(connection: sqlite3.Connection,
         request_ns.append(request)
         packet_sequence.append(sequence)
         request_sequence.append(request_id)
-    if len(packets) < 1000:
+    # New bridge captures stamp sensor headers at the request boundary;
+    # legacy captures use receive time. Index both identities to the same
+    # packet so the exporter remains compatible with either bag generation.
+    if request_ns:
+        request_ros_offset_ns = int(np.median(
+            np.asarray(receive_ns, dtype=np.int64)
+            - np.asarray(arrival_ns, dtype=np.int64)))
+        for receive, row, request in zip(receive_ns,
+                                         (packets[value] for value in receive_ns),
+                                         request_ns):
+            explicit_request_ros = row.get("bridge_request_ros_stamp_ns")
+            source_stamp = (
+                int(explicit_request_ros)
+                if isinstance(explicit_request_ros, int)
+                else int(request) + request_ros_offset_ns)
+            if source_stamp != receive:
+                if source_stamp in packets:
+                    raise ValueError(
+                        f"duplicate bridge request stamp: {source_stamp}")
+                packets[source_stamp] = row
+    if len(receive_ns) < 1000:
         raise ValueError("bridge_packet_timing has too few decoded packets")
 
     def intervals(values: list[int]) -> np.ndarray:
@@ -230,7 +249,7 @@ def _load_packet_timing(connection: sqlite3.Connection,
         np.asarray(receive_ns, dtype=np.int64)
         - np.asarray(arrival_ns, dtype=np.int64)).astype(np.float64) / 1e6
     report = {
-        "packet_count": len(packets),
+        "packet_count": len(receive_ns),
         "bridge_timing_message_count": message_count,
         "unmatched_response_count": unmatched_response_count,
         "unmatched_response_examples": unmatched_response_examples,

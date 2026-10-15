@@ -28,7 +28,7 @@ from tools.vehicle_dynamics_learning.train_nssm import _load_dataset, _torch
 
 
 HISTORY_STEPS = 80
-HORIZONS_S = (0.25, 0.5, 0.75, 1.0, 2.0, 5.0)
+HORIZONS_S = (0.025, 0.050, 0.100, 0.250, 0.500, 0.750, 1.0, 2.0, 5.0)
 BODY_NAMES = ("u_com_mps", "v_com_mps", "yaw_rate_rps")
 STATE_NAMES = BODY_NAMES + (
     "rear_left_surface_mps", "rear_right_surface_mps",
@@ -202,7 +202,9 @@ def score(checkpoint_path: Path, dataset_path: Path, output_path: Path,
         raise ValueError(f"selected runs are not held out: {invalid_splits}")
 
     model_type = _physical_model(
-        torch, nn, bool(metadata["tire_relaxation_state_enabled"]))
+        torch, nn, bool(metadata["tire_relaxation_state_enabled"]),
+        bool(metadata.get("exact_unity_actuators", False)),
+        int(metadata.get("integration_substeps", 1)))
     model = model_type().to(device)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.eval()

@@ -169,13 +169,15 @@ MpcRtiCycleConfiguration_t load_config(const std::string & path,
         surface_path = std::filesystem::path(path).parent_path() / configured;
       }
     }
-    const auto surface = f1tenth_mpc::load_yaw_response_surface_csv(
+    auto surface = f1tenth_mpc::load_yaw_response_surface_csv(
         surface_path.string(), blend_start, blend_end, speed_blend_margin,
         low_speed_blend_margin, low_speed_support_fadeout,
         high_speed_support_fadein, steering_blend_start,
         steering_blend_full_start, steering_blend_full_end,
         steering_blend_end, hold_response_time_constant,
         hold_rate_full, hold_rate_zero);
+    surface.response_scale = fparam(
+        params, "yaw_rate_response_surface_response_scale", 1.0f);
     if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
       throw std::runtime_error("invalid production yaw-rate response surface");
     }

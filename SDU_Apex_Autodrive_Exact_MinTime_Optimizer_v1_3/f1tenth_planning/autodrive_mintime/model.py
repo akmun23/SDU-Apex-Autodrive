@@ -139,6 +139,8 @@ class VehicleModel:
     max_steering_rad: float
     max_steering_rate_radps: float
     yaw_tau_s: float
+    yaw_low_speed_response_time_constant_s: float
+    yaw_low_speed_transition_speed_mps: float
     yaw_gain_per_m: float
     yaw_gain_reduction_per_rad: float
     yaw_gain_start_rad: float
@@ -148,6 +150,9 @@ class VehicleModel:
     yaw_curvature_gain_end_per_m: float
     yaw_surface_enabled: bool
     yaw_surface_response_scale: float
+    yaw_surface_hold_time_constant_s: float
+    yaw_surface_hold_rate_full_radps: float
+    yaw_surface_hold_rate_zero_radps: float
     yaw_surface_blend_q_start: float
     yaw_surface_blend_q_end: float
     yaw_surface_steering_blend_start_rad: float
@@ -203,10 +208,16 @@ class VehicleModel:
     yaw_residual_candidate: dict[str, Any] | None = None
 
     @classmethod
-    def from_repo(cls, repo_root: str | Path, config: dict[str, Any]) -> "VehicleModel":
+    def from_repo(cls, repo_root: str | Path, config: dict[str, Any],
+                  mpc_config_path: str | Path | None = None) -> "VehicleModel":
         repo_root = Path(repo_root).resolve()
         header = repo_root / "f1tenth_mpc/include/mpc_types.h"
-        mpc_yaml_path = repo_root / "f1tenth_mpc/config/mpc_competition.yaml"
+        mpc_yaml_path = (Path(mpc_config_path).resolve() if mpc_config_path else
+                         repo_root / "f1tenth_mpc/config/mpc_competition.yaml")
+        try:
+            mpc_yaml_path.relative_to(repo_root)
+        except ValueError as exc:
+            raise ValueError("MPC configuration must be inside the repository") from exc
         surface_csv_path = repo_root / "f1tenth_mpc/config/yaw_response_surface.csv"
         sim_profile_path = repo_root / "f1tenth_planning/config/autodrive_sim_vehicle.yaml"
         pp_path = repo_root / "f1tenth_control/config/path_tracking_autodrive.yaml"
@@ -234,6 +245,9 @@ class VehicleModel:
             "yaw_surface_steering_blend_full_start_rad",
             "yaw_surface_steering_blend_full_end_rad",
             "yaw_surface_steering_blend_end_rad",
+            "yaw_surface_hold_time_constant_s",
+            "yaw_surface_hold_rate_full_radps",
+            "yaw_surface_hold_rate_zero_radps",
             "yaw_surface_speed_blend_margin_mps",
             "yaw_surface_low_speed_blend_margin_mps",
             "yaw_surface_low_speed_support_fadeout_mps",
@@ -340,6 +354,59 @@ class VehicleModel:
                 surface_csv_path.relative_to(repo_root)
             except ValueError as exc:
                 raise ValueError("yaw_surface_csv must be inside the repository") from exc
+        else:
+            configured_surface = mpc_params.get("yaw_rate_response_surface_file")
+            if configured_surface:
+                configured_path = Path(str(configured_surface))
+                workspace_prefix = Path("/workspace/src")
+                if configured_path.is_absolute():
+                    try:
+                        relative_surface = configured_path.relative_to(workspace_prefix)
+                    except ValueError:
+                        try:
+                            relative_surface = configured_path.relative_to(repo_root)
+                        except ValueError as exc:
+                            raise ValueError(
+                                "yaw_rate_response_surface_file must resolve inside "
+                                "the repository workspace") from exc
+                else:
+                    relative_surface = configured_path
+                surface_csv_path = (repo_root / relative_surface).resolve()
+                try:
+                    surface_csv_path.relative_to(repo_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        "yaw_rate_response_surface_file escapes the repository") from exc
+        surface_hold_tau = float(mpc_params.get(
+            "yaw_rate_response_surface_hold_time_constant_s", 0.0))
+        surface_hold_tau = float(vehicle_model_overrides.get(
+            "yaw_surface_hold_time_constant_s", surface_hold_tau))
+        surface_hold_rate_full = float(mpc_params.get(
+            "yaw_rate_response_surface_hold_rate_full_radps", 0.0))
+        surface_hold_rate_full = float(vehicle_model_overrides.get(
+            "yaw_surface_hold_rate_full_radps", surface_hold_rate_full))
+        surface_hold_rate_zero = float(mpc_params.get(
+            "yaw_rate_response_surface_hold_rate_zero_radps", 0.0))
+        surface_hold_rate_zero = float(vehicle_model_overrides.get(
+            "yaw_surface_hold_rate_zero_radps", surface_hold_rate_zero))
+        if not all(math.isfinite(value) for value in (
+                surface_hold_tau, surface_hold_rate_full, surface_hold_rate_zero)):
+            raise ValueError("yaw-response surface hold settings must be finite")
+        if surface_hold_tau > 0.0:
+            if (surface_hold_rate_full < 0.0
+                    or surface_hold_rate_zero <= surface_hold_rate_full):
+                raise ValueError("invalid yaw-response surface steering-hold gate")
+        elif surface_hold_tau < 0.0 or surface_hold_rate_full != 0.0 or surface_hold_rate_zero != 0.0:
+            raise ValueError("disabled yaw-response surface hold must have zero gate values")
+        low_speed_tau = float(mpc_params.get(
+            "yaw_rate_low_speed_response_time_constant_s", 0.0))
+        low_speed_transition = float(mpc_params.get(
+            "yaw_rate_low_speed_transition_speed_mps", 2.0))
+        if (not math.isfinite(low_speed_tau)
+                or not math.isfinite(low_speed_transition)
+                or low_speed_tau < 0.0
+                or (low_speed_tau > 0.0 and low_speed_transition <= 0.0)):
+            raise ValueError("invalid low-speed yaw response settings")
         if (not math.isfinite(surface_blend_q_start)
                 or not math.isfinite(surface_blend_q_end)
                 or not math.isfinite(surface_steering_start)
@@ -421,7 +488,7 @@ class VehicleModel:
             if (surface_low_speed_support_fadeout > 0.0
                     and surface_low_speed_support_fadeout +
                     surface_high_speed_support_fadein >=
-                    surface_speeds[2] - surface_speeds[0]):
+                    surface_speeds[-1] - surface_speeds[0]):
                 raise ValueError(
                     "yaw response support fades overlap the measured low/high speed bands")
 
@@ -495,6 +562,8 @@ class VehicleModel:
             max_steering_rad=constants["SOURCE_MAX_STEERING_RAD"],
             max_steering_rate_radps=constants["SOURCE_STEERING_RATE_RADPS"],
             yaw_tau_s=yaw_tau,
+            yaw_low_speed_response_time_constant_s=low_speed_tau,
+            yaw_low_speed_transition_speed_mps=low_speed_transition,
             yaw_gain_per_m=constants["MPC_YAW_RATE_STEERING_GAIN_PER_M"],
             yaw_gain_reduction_per_rad=yaw_gain_reduction,
             yaw_gain_start_rad=yaw_gain_start,
@@ -507,6 +576,9 @@ class VehicleModel:
                 "yaw_rate_curvature_gain_end_per_m", 0.40)),
             yaw_surface_enabled=surface_enabled,
             yaw_surface_response_scale=surface_response_scale,
+            yaw_surface_hold_time_constant_s=surface_hold_tau,
+            yaw_surface_hold_rate_full_radps=surface_hold_rate_full,
+            yaw_surface_hold_rate_zero_radps=surface_hold_rate_zero,
             yaw_surface_blend_q_start=surface_blend_q_start,
             yaw_surface_blend_q_end=surface_blend_q_end,
             yaw_surface_steering_blend_start_rad=surface_steering_start,
@@ -584,9 +656,16 @@ class VehicleModel:
 
     def steady_yaw_rate(self, speed: float, steering: float,
                         path_curvature: float = 0.0) -> float:
+        legacy, empirical, blend = self.yaw_surface_components_numeric(
+            speed, steering, path_curvature)
+        return legacy + self.yaw_surface_response_scale * blend * (empirical - legacy)
+
+    def yaw_surface_components_numeric(self, speed: float, steering: float,
+                                       path_curvature: float = 0.0
+                                       ) -> tuple[float, float, float]:
         legacy = self._legacy_yaw_rate_numeric(speed, steering, path_curvature)
-        if not self.yaw_surface_enabled or self.yaw_surface_response_scale <= 0.0:
-            return legacy
+        if not self.yaw_surface_enabled:
+            return legacy, legacy, 0.0
         speed_nonnegative = max(speed, 0.0)
         q = speed_nonnegative * abs(math.tan(steering))
         sign_index = 0 if steering < 0.0 else 1
@@ -622,8 +701,7 @@ class VehicleModel:
         else:
             leave = 1.0
         speed_blend = enter * leave * self._yaw_surface_speed_support(speed)
-        blend = self.yaw_surface_response_scale * q_blend * steering_blend * speed_blend
-        return legacy + blend * (empirical - legacy)
+        return legacy, empirical, q_blend * steering_blend * speed_blend
 
     def _yaw_surface_steering_blend_numeric(self, steering: float) -> float:
         start = self.yaw_surface_steering_blend_start_rad
@@ -643,7 +721,7 @@ class VehicleModel:
         if low_margin <= 0.0 and high_margin <= 0.0:
             return 1.0
         low_knot = self.yaw_surface_speed_mps[0]
-        high_knot = self.yaw_surface_speed_mps[2]
+        high_knot = self.yaw_surface_speed_mps[-1]
         low_t = min(max((speed - low_knot) / low_margin, 0.0), 1.0) \
             if low_margin > 0.0 else 0.0
         high_t = min(max((speed - (high_knot - high_margin)) / high_margin,
@@ -653,6 +731,11 @@ class VehicleModel:
         return low_weight + high_weight
 
     def steady_yaw_rate_casadi(self, speed, steering, path_curvature):
+        legacy, empirical, blend = self.yaw_surface_components_casadi(
+            speed, steering, path_curvature)
+        return legacy + self.yaw_surface_response_scale * blend * (empirical - legacy)
+
+    def yaw_surface_components_casadi(self, speed, steering, path_curvature):
         steer_delta = ca.fmin(ca.fmax(
             ca.fabs(steering) - self.yaw_gain_start_rad, 0.0),
             self.yaw_gain_end_rad - self.yaw_gain_start_rad)
@@ -663,8 +746,8 @@ class VehicleModel:
         path_gain = self.yaw_gain_per_m - self.yaw_curvature_gain_reduction_per_m * curvature_delta
         legacy = speed * ca.tan(steering) * (
             steering_gain - self.yaw_gain_per_m + path_gain)
-        if not self.yaw_surface_enabled or self.yaw_surface_response_scale <= 0.0:
-            return legacy
+        if not self.yaw_surface_enabled:
+            return legacy, legacy, 0.0
 
         query_speed = ca.fmax(speed, 0.0)
         q = query_speed * ca.fabs(ca.tan(steering))
@@ -718,7 +801,7 @@ class VehicleModel:
         if (self.yaw_surface_low_speed_support_fadeout_mps > 0.0
                 or self.yaw_surface_high_speed_support_fadein_mps > 0.0):
             low_knot = self.yaw_surface_speed_mps[0]
-            high_knot = self.yaw_surface_speed_mps[2]
+            high_knot = self.yaw_surface_speed_mps[-1]
             low_margin = self.yaw_surface_low_speed_support_fadeout_mps
             high_margin = self.yaw_surface_high_speed_support_fadein_mps
             if low_margin > 0.0:
@@ -738,8 +821,59 @@ class VehicleModel:
         else:
             support = 1.0
         speed_blend = enter * leave * support
-        blend = self.yaw_surface_response_scale * q_blend * steering_blend * speed_blend
-        return legacy + blend * (empirical - legacy)
+        return legacy, empirical, q_blend * steering_blend * speed_blend
+
+    def yaw_transition_terms_numeric(self, speed: float, steering: float,
+                                     path_curvature: float,
+                                     actual_steering_rate: float
+                                     ) -> tuple[float, float]:
+        """Production yaw steady response and time constant for one step."""
+        legacy, empirical, blend = self.yaw_surface_components_numeric(
+            speed, steering, path_curvature)
+        base_tau = self.yaw_tau_s
+        if self.yaw_low_speed_response_time_constant_s > 0.0:
+            base_tau += (
+                self.yaw_low_speed_response_time_constant_s - base_tau
+            ) * math.exp(-max(speed, 0.0) /
+                         self.yaw_low_speed_transition_speed_mps)
+        response_blend = blend
+        tau = base_tau
+        if self.yaw_surface_hold_time_constant_s > 0.0:
+            moving = self._smoothstep_numeric(
+                abs(actual_steering_rate),
+                self.yaw_surface_hold_rate_full_radps,
+                self.yaw_surface_hold_rate_zero_radps)
+            response_blend *= 1.0 - moving
+            tau += response_blend * (
+                self.yaw_surface_hold_time_constant_s - base_tau)
+        steady = legacy + self.yaw_surface_response_scale * response_blend * (
+            empirical - legacy)
+        return steady, tau
+
+    def yaw_transition_terms_casadi(self, speed, steering, path_curvature,
+                                   actual_steering_rate):
+        """CasADi production yaw terms, including the measured hold response."""
+        legacy, empirical, blend = self.yaw_surface_components_casadi(
+            speed, steering, path_curvature)
+        base_tau = self.yaw_tau_s
+        if self.yaw_low_speed_response_time_constant_s > 0.0:
+            base_tau += (
+                self.yaw_low_speed_response_time_constant_s - base_tau
+            ) * ca.exp(-ca.fmax(speed, 0.0) /
+                       self.yaw_low_speed_transition_speed_mps)
+        response_blend = blend
+        tau = base_tau
+        if self.yaw_surface_hold_time_constant_s > 0.0:
+            moving = self._smoothstep_casadi(
+                ca.fabs(actual_steering_rate),
+                self.yaw_surface_hold_rate_full_radps,
+                self.yaw_surface_hold_rate_zero_radps)
+            response_blend *= 1.0 - moving
+            tau += response_blend * (
+                self.yaw_surface_hold_time_constant_s - base_tau)
+        steady = legacy + self.yaw_surface_response_scale * response_blend * (
+            empirical - legacy)
+        return steady, tau
 
     @staticmethod
     def _smoothstep_casadi(value, low: float, high: float):

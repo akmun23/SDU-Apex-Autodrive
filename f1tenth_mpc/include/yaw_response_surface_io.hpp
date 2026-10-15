@@ -35,6 +35,7 @@ inline MpcYawRateResponseSurface_t load_yaw_response_surface_csv(
 
     MpcYawRateResponseSurface_t result{};
     result.enabled = 1;
+    result.response_scale = 1.0f;
     result.blend_q_start = blend_q_start;
     result.blend_q_end = blend_q_end;
     result.speed_blend_margin_mps = speed_blend_margin_mps;

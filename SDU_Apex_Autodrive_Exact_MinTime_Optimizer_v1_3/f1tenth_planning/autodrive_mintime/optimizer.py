@@ -51,6 +51,7 @@ class Solution:
     # rate-controlled command. Legacy solutions keep the original single
     # steering state and leave this unset.
     steering_command: np.ndarray | None = None
+    solver_constraint_diagnostics: dict[str, Any] | None = None
 
 
 class SolveTrackFailure(RuntimeError):
@@ -61,8 +62,21 @@ class SolveTrackFailure(RuntimeError):
         self.candidate = candidate
 
 
-def _optimizer_speed_limit(model: VehicleModel, envelope: LateralEnvelope) -> float:
-    return min(model.max_body_speed_mps, envelope.max_supported_speed_mps)
+def _optimizer_speed_limit(model: VehicleModel, envelope: LateralEnvelope,
+                           config: dict[str, Any] | None = None) -> float:
+    limit = min(model.max_body_speed_mps, envelope.max_supported_speed_mps)
+    configured_limit = (config or {}).get("limits", {}).get(
+        "max_body_speed_mps")
+    if configured_limit is not None:
+        configured_limit = float(configured_limit)
+        if (not math.isfinite(configured_limit)
+                or configured_limit <= model.min_speed_mps
+                or configured_limit > model.max_body_speed_mps):
+            raise ValueError(
+                "limits.max_body_speed_mps must be finite, above the model "
+                "minimum speed, and no greater than the physical model limit")
+        limit = min(limit, configured_limit)
+    return limit
 
 
 def _yaw_lag_interval_numeric(r0: float, target0: float, target1: float,
@@ -120,6 +134,163 @@ def _wall_clearance(config: dict[str, Any], model: VehicleModel) -> float:
     return (model.required_wall_clearance_m
             + float(track.get("extra_wall_clearance_m", 0.0))
             + float(track.get("optimizer_geometry_buffer_m", 0.0)))
+
+
+def _yaw_phase_response_config(config: dict[str, Any],
+                               model: VehicleModel) -> dict[str, float] | None:
+    raw = config.get("yaw_phase_response", {})
+    if not isinstance(raw, dict):
+        raise ValueError("yaw_phase_response must be a mapping")
+    if not bool(raw.get("enabled", False)):
+        return None
+    if not model.yaw_surface_enabled:
+        raise ValueError("yaw phase response requires the fitted yaw surface")
+    threshold = float(raw.get("phase_rate_threshold_radps", 0.05))
+    full = float(raw.get("phase_rate_full_radps", 0.15))
+    taus = {
+        "turnin": float(raw.get("turnin_time_constant_s", float("nan"))),
+        "hold": float(raw.get("hold_time_constant_s",
+                              model.yaw_surface_hold_time_constant_s)),
+        "unwind": float(raw.get("unwind_time_constant_s", float("nan"))),
+    }
+    if (not math.isfinite(threshold) or threshold < 0.0
+            or not math.isfinite(full) or full <= threshold
+            or any(not math.isfinite(value) or value <= 0.0
+                   for value in taus.values())):
+        raise ValueError("invalid yaw phase response rates or time constants")
+    return {"phase_rate_threshold_radps": threshold,
+            "phase_rate_full_radps": full, **taus}
+
+
+def _smoothstep_numeric(value: float, start: float, end: float) -> float:
+    t = min(max((value - start) / (end - start), 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _smoothstep_casadi(value, start: float, end: float):
+    t = ca.fmin(ca.fmax((value - start) / (end - start), 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _yaw_transition_terms_numeric(model: VehicleModel, config: dict[str, Any],
+                                  speed: float, steering: float,
+                                  path_curvature: float,
+                                  steering_rate: float) -> tuple[float, float]:
+    phase = _yaw_phase_response_config(config, model)
+    if phase is None:
+        return model.yaw_transition_terms_numeric(
+            speed, steering, path_curvature, steering_rate)
+
+    legacy, empirical, surface_blend = model.yaw_surface_components_numeric(
+        speed, steering, path_curvature)
+    magnitude_rate = (1.0 if steering >= 0.0 else -1.0) * steering_rate
+    threshold = phase["phase_rate_threshold_radps"]
+    full = phase["phase_rate_full_radps"]
+    turnin_weight = _smoothstep_numeric(magnitude_rate, threshold, full)
+    unwind_weight = _smoothstep_numeric(-magnitude_rate, threshold, full)
+    hold_weight = max(0.0, 1.0 - turnin_weight - unwind_weight)
+    phase_tau = (turnin_weight * phase["turnin"]
+                 + hold_weight * phase["hold"]
+                 + unwind_weight * phase["unwind"])
+    base_tau = model.yaw_tau_s
+    if model.yaw_low_speed_response_time_constant_s > 0.0:
+        base_tau += (model.yaw_low_speed_response_time_constant_s - base_tau) * math.exp(
+            -max(speed, 0.0) / model.yaw_low_speed_transition_speed_mps)
+    tau = base_tau + surface_blend * (phase_tau - base_tau)
+    steady = legacy + model.yaw_surface_response_scale * surface_blend * (
+        empirical - legacy)
+    return steady, tau
+
+
+def _yaw_transition_terms_casadi(model: VehicleModel, config: dict[str, Any],
+                                 speed, steering, path_curvature,
+                                 steering_rate):
+    phase = _yaw_phase_response_config(config, model)
+    if phase is None:
+        return model.yaw_transition_terms_casadi(
+            speed, steering, path_curvature, steering_rate)
+
+    legacy, empirical, surface_blend = model.yaw_surface_components_casadi(
+        speed, steering, path_curvature)
+    magnitude_rate = ca.if_else(
+        steering < 0.0, -steering_rate, steering_rate)
+    threshold = phase["phase_rate_threshold_radps"]
+    full = phase["phase_rate_full_radps"]
+    turnin_weight = _smoothstep_casadi(magnitude_rate, threshold, full)
+    unwind_weight = _smoothstep_casadi(-magnitude_rate, threshold, full)
+    hold_weight = ca.fmax(0.0, 1.0 - turnin_weight - unwind_weight)
+    phase_tau = (turnin_weight * phase["turnin"]
+                 + hold_weight * phase["hold"]
+                 + unwind_weight * phase["unwind"])
+    base_tau = model.yaw_tau_s
+    if model.yaw_low_speed_response_time_constant_s > 0.0:
+        base_tau += (model.yaw_low_speed_response_time_constant_s - base_tau) * ca.exp(
+            -ca.fmax(speed, 0.0) / model.yaw_low_speed_transition_speed_mps)
+    tau = base_tau + surface_blend * (phase_tau - base_tau)
+    steady = legacy + model.yaw_surface_response_scale * surface_blend * (
+        empirical - legacy)
+    return steady, tau
+
+
+def _steering_robustness_config(config: dict[str, Any],
+                                steering_limit: float
+                                ) -> dict[str, float] | None:
+    raw = config.get("steering_robustness")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("steering_robustness must be a mapping")
+    if not bool(raw.get("enabled", True)):
+        return None
+    perturbation = float(raw.get("perturbation_rad", float("nan")))
+    weight = float(raw.get("yaw_response_weight_s_per_radps2", float("nan")))
+    if (not math.isfinite(perturbation) or perturbation <= 0.0
+            or perturbation > steering_limit
+            or not math.isfinite(weight) or weight < 0.0):
+        raise ValueError("invalid steering robustness perturbation or weight")
+    if weight == 0.0:
+        return None
+    return {"perturbation_rad": perturbation,
+            "yaw_response_weight_s_per_radps2": weight}
+
+
+def _steering_robustness_node_cost(nominal, minus, plus, weight: float):
+    """Expected squared yaw-response change under symmetric steering error."""
+    return 0.5 * weight * ((minus - nominal) ** 2 + (plus - nominal) ** 2)
+
+
+def _yaw_output_casadi(model: VehicleModel, config: dict[str, Any], speed,
+                       yaw_rate, steering, steering_command_rate,
+                       physical_steering_rate, path_curvature,
+                       longitudinal_acceleration, target_speed_rate,
+                       target_speed):
+    steady, tau = _yaw_transition_terms_casadi(
+        model, config, speed, steering, path_curvature,
+        physical_steering_rate)
+    lateral_velocity = model.lateral_velocity_casadi(speed, yaw_rate)
+    residual = model.yaw_residual_rate_casadi(
+        speed, yaw_rate, steering, steering_command_rate, lateral_velocity,
+        path_curvature, longitudinal_acceleration, target_speed_rate,
+        target_speed)
+    return steady + tau * residual
+
+
+def _yaw_output_numeric(model: VehicleModel, config: dict[str, Any],
+                        speed: float, yaw_rate: float, steering: float,
+                        steering_command_rate: float,
+                        physical_steering_rate: float,
+                        path_curvature: float,
+                        longitudinal_acceleration: float,
+                        target_speed_rate: float, target_speed: float) -> float:
+    steady, tau = _yaw_transition_terms_numeric(
+        model, config, speed, steering, path_curvature,
+        physical_steering_rate)
+    lateral_velocity = model.lateral_velocity_numeric(speed, yaw_rate)
+    residual = model.yaw_residual_rate_numeric(
+        speed, yaw_rate, steering, steering_command_rate, lateral_velocity,
+        path_curvature, longitudinal_acceleration, target_speed_rate,
+        target_speed)
+    return steady + tau * residual
 
 
 def _steering_actuator_config(config: dict[str, Any]) -> tuple[bool, float]:
@@ -299,7 +470,7 @@ def build_guess(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     steering_limit = _optimizer_steering_limit(model, config)
     margin = _wall_clearance(config, model)
-    speed_limit = _optimizer_speed_limit(model, envelope)
+    speed_limit = _optimizer_speed_limit(model, envelope, config)
     nominal_extent = 0.5 * model.planning_footprint_width_m
     left_room = np.maximum(track.left - margin - nominal_extent, 0.01)
     right_room = np.maximum(track.right - margin - nominal_extent, 0.01)
@@ -431,7 +602,7 @@ def _project_warm_raceline_to_track(track: Track, warm_csv: str | Path,
         return np.interp(track.s, s_ext, v_ext)
 
     ey = pinterp(eyu)
-    speed_limit = _optimizer_speed_limit(model, envelope)
+    speed_limit = _optimizer_speed_limit(model, envelope, config)
     u = np.clip(pinterp(uu), model.min_speed_mps, speed_limit)
 
     # The production line is only an initializer. Re-project it into V1.3's
@@ -494,7 +665,14 @@ def _resample_solution_guess(sol: Solution, new_track: Track) -> Guess:
 
 
 def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
-    """Resample a previous OCP solution, preserving its dynamic-state seed."""
+    """Resample a previous OCP solution onto a possibly changed centerline.
+
+    ``e_y`` is relative to the source centerline, not an absolute path offset.
+    Copying it unchanged onto an edited centerline shifts the initialized path a
+    second time and can put the IPOPT start outside the corridor. When source
+    coordinates are present, preserve the solved world-space path instead and
+    project its Frenet state relative to the new centerline.
+    """
     required = ("s_ref_m", "ey_m", "epsi_rad", "u_mps", "r_radps",
                 "target_mps", "delta_rad", "qdelta_radps", "qv_mps2")
     rows: list[dict[str, float]] = []
@@ -505,12 +683,22 @@ def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
         fields = list(required)
         if "steering_command_rad" in reader.fieldnames:
             fields.append("steering_command_rad")
+        if {"x_ref_m", "y_ref_m"}.issubset(reader.fieldnames):
+            fields.extend(("x_ref_m", "y_ref_m"))
         for row in reader:
             rows.append({name: float(row[name]) for name in fields})
     if len(rows) < 20:
         raise ValueError(f"Optimizer state seed {nodes_csv} has too few rows")
     data = {name: np.asarray([row[name] for row in rows], dtype=float)
             for name in required}
+    has_reference_xy = all(
+        name in rows[0] for name in ("x_ref_m", "y_ref_m"))
+    if has_reference_xy:
+        reference_x = np.asarray([row["x_ref_m"] for row in rows], dtype=float)
+        reference_y = np.asarray([row["y_ref_m"] for row in rows], dtype=float)
+        if not (np.all(np.isfinite(reference_x)) and
+                np.all(np.isfinite(reference_y))):
+            raise ValueError(f"Optimizer state seed {nodes_csv} has invalid reference coordinates")
     # New queue-aware solutions export command and physical angle separately.
     # Older production seeds only have delta_rad, which remains a valid
     # initialization for both states.
@@ -528,8 +716,38 @@ def _load_solution_nodes_guess(track: Track, nodes_csv: str | Path) -> Guess:
                          np.r_[old_s - old_length, old_s, old_s + old_length],
                          np.r_[values, values, values])
 
+    ey = periodic(data["ey_m"])
+    epsi = periodic(data["epsi_rad"])
+    if has_reference_xy:
+        old_s_closed = np.r_[old_s, old_length]
+        old_x_closed = np.r_[reference_x, reference_x[0]]
+        old_y_closed = np.r_[reference_y, reference_y[0]]
+        reference_x_spline = CubicSpline(
+            old_s_closed, old_x_closed, bc_type="periodic")
+        reference_y_spline = CubicSpline(
+            old_s_closed, old_y_closed, bc_type="periodic")
+        old_reference_heading = np.arctan2(
+            reference_y_spline(old_s, 1), reference_x_spline(old_s, 1))
+        old_path_x = reference_x - data["ey_m"] * np.sin(old_reference_heading)
+        old_path_y = reference_y + data["ey_m"] * np.cos(old_reference_heading)
+        path_x_spline = CubicSpline(
+            old_s_closed, np.r_[old_path_x, old_path_x[0]], bc_type="periodic")
+        path_y_spline = CubicSpline(
+            old_s_closed, np.r_[old_path_y, old_path_y[0]], bc_type="periodic")
+        path_x = path_x_spline(query)
+        path_y = path_y_spline(query)
+        path_heading = np.arctan2(
+            path_y_spline(query, 1), path_x_spline(query, 1))
+        normal_x = -np.sin(track.psi)
+        normal_y = np.cos(track.psi)
+        ey = ((path_x - track.x) * normal_x
+              + (path_y - track.y) * normal_y)
+        epsi = np.arctan2(
+            np.sin(path_heading - track.psi),
+            np.cos(path_heading - track.psi))
+
     return Guess(
-        ey=periodic(data["ey_m"]), epsi=periodic(data["epsi_rad"]),
+        ey=ey, epsi=epsi,
         u=periodic(data["u_mps"]), r=periodic(data["r_radps"]),
         vt=periodic(data["target_mps"]),
         delta=periodic(data.get("steering_command_rad", data["delta_rad"])),
@@ -570,6 +788,45 @@ def _solver_summary(stats: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _solver_constraint_diagnostics(opti, sol, limit: int = 12) -> dict[str, Any]:
+    """Report the actual largest NLP constraint violations at IPOPT's iterate.
+
+    The independent vehicle diagnostics below cover the intended dynamics and
+    physical limits, but IPOPT's primal infeasibility can also include a
+    transcription constraint omitted by those summaries. Preserve its exact
+    constraint index and CasADi description to make failed solves actionable.
+    """
+    g = np.asarray(sol.value(opti.g), dtype=float).reshape(-1)
+    lower = np.asarray(sol.value(opti.lbg), dtype=float).reshape(-1)
+    upper = np.asarray(sol.value(opti.ubg), dtype=float).reshape(-1)
+    violation = np.maximum(lower - g, 0.0) + np.maximum(g - upper, 0.0)
+    order = np.argsort(violation)[::-1]
+    items = []
+    for raw_index in order[:limit]:
+        index = int(raw_index)
+        if not np.isfinite(violation[index]) or violation[index] <= 0.0:
+            break
+        try:
+            description = str(opti.debug.g_describe(index))
+        except Exception:
+            description = ""
+        items.append({
+            "index": index,
+            "description": description,
+            "value": float(g[index]),
+            "lower_bound": (float(lower[index])
+                            if np.isfinite(lower[index]) else None),
+            "upper_bound": (float(upper[index])
+                            if np.isfinite(upper[index]) else None),
+            "violation": float(violation[index]),
+        })
+    return {
+        "constraint_count": int(g.size),
+        "max_violation": float(np.max(violation)) if violation.size else 0.0,
+        "top_violations": items,
+    }
+
+
 def diagnose_solution(solution: Solution, model: VehicleModel,
                       envelope: LateralEnvelope, config: dict[str, Any]) -> dict[str, Any]:
     """Independent numerical diagnostics for solved or failed IPOPT iterates."""
@@ -587,7 +844,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
     qv = np.asarray(solution.qv)
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     steering_limit = _optimizer_steering_limit(model, config)
-    speed_limit = _optimizer_speed_limit(model, envelope)
+    speed_limit = _optimizer_speed_limit(model, envelope, config)
     wall_margin = _wall_clearance(config, model)
     min_den = float(config.get("numerics", {}).get("min_frenet_denominator", 0.25))
     min_progress = float(config.get("numerics", {}).get("min_progress_mps", 0.30))
@@ -633,7 +890,7 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             (delayed_command - delta) / steering_delay_s,
             -steering_rate_limit, steering_rate_limit)
     else:
-        actual_rate = np.zeros_like(delta)
+        actual_rate = qdelta.copy()
     yaw_residual_rate = np.asarray([
         model.yaw_residual_rate_numeric(
             float(speed), float(yaw), float(steering), float(rate),
@@ -642,12 +899,15 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
         for speed, yaw, steering, rate, curvature, ax, speed_rate, target in zip(
             u, r, delta, qdelta, tr.kappa, raw_a, qv, vt)
     ])
-    r_ss = np.asarray([
-        model.steady_yaw_rate(float(speed), float(steering), float(curvature))
-        + model.yaw_tau_s * float(residual)
-        for speed, steering, curvature, residual in zip(
-            u, delta, tr.kappa, yaw_residual_rate)
-    ])
+    yaw_tau = np.empty_like(u)
+    r_ss = np.empty_like(u)
+    for index, (speed, steering, curvature, steering_rate, residual) in enumerate(
+            zip(u, delta, tr.kappa, actual_rate, yaw_residual_rate)):
+        steady_rate, response_tau = _yaw_transition_terms_numeric(
+            model, config,
+            float(speed), float(steering), float(curvature), float(steering_rate))
+        yaw_tau[index] = response_tau
+        r_ss[index] = steady_rate + response_tau * float(residual)
     safe_sdot = np.maximum(sdot, 1.0e-8)
     state_fields = [ey, epsi, u, r, vt]
     derivative_fields = [
@@ -677,7 +937,8 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
         defects[:, k] = X[:, kp] - X[:, k] - 0.5 * tr.ds[k] * (f[:, k] + f[:, kp])
         interval_dt = tr.ds[k] / max(0.5 * (safe_sdot[k] + safe_sdot[kp]), 1.0e-8)
         yaw_end, yaw_integral = _yaw_lag_interval_numeric(
-            r[k], r_ss[k], r_ss[kp], interval_dt, model.yaw_tau_s)
+            r[k], r_ss[k], r_ss[kp], interval_dt,
+            0.5 * (yaw_tau[k] + yaw_tau[kp]))
         defects[1, k] = (
             epsi[kp] - epsi[k] - yaw_integral
             + 0.5 * (tr.kappa[k] + tr.kappa[kp]) * tr.ds[k])
@@ -699,8 +960,49 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             1.0 - np.abs(ax_norm) ** exponent - np.abs(ay_norm) ** exponent))
     else:
         combined_slack_min = None
+    robustness_config = _steering_robustness_config(config, steering_limit)
+    if robustness_config is None:
+        robustness_diagnostics: dict[str, Any] = {"enabled": False}
+    else:
+        perturbation = robustness_config["perturbation_rad"]
+        response_change = np.empty((2, tr.count), dtype=float)
+        for index in range(tr.count):
+            for row, direction in enumerate((-1.0, 1.0)):
+                perturbed_steering = float(np.clip(
+                    delta[index] + direction * perturbation,
+                    -steering_limit, steering_limit))
+                response_change[row, index] = (
+                    _yaw_output_numeric(
+                        model, config, float(u[index]), float(r[index]),
+                        perturbed_steering, float(qdelta[index]),
+                        float(actual_rate[index]), float(tr.kappa[index]),
+                        float(raw_a[index]), float(qv[index]), float(vt[index]))
+                    - r_ss[index])
+        node_cost = np.asarray([
+            _steering_robustness_node_cost(
+                r_ss[index], response_change[0, index],
+                response_change[1, index],
+                robustness_config["yaw_response_weight_s_per_radps2"])
+            for index in range(tr.count)
+        ], dtype=float)
+        time_density = 1.0 / np.maximum(safe_sdot, 1.0e-8)
+        robustness_cost = float(np.sum(
+            0.5 * tr.ds * (node_cost * time_density
+                           + np.roll(node_cost * time_density, -1))))
+        max_change = np.max(np.abs(response_change), axis=0)
+        robustness_diagnostics = {
+            "enabled": True,
+            "perturbation_rad": perturbation,
+            "yaw_response_weight_s_per_radps2": robustness_config[
+                "yaw_response_weight_s_per_radps2"],
+            "p95_abs_yaw_response_change_radps": float(
+                np.percentile(max_change, 95)),
+            "max_abs_yaw_response_change_radps": float(np.max(max_change)),
+            "integrated_penalty_s": robustness_cost,
+        }
     return {
         "solver": _solver_summary(solution.solver_stats),
+        "solver_constraint_diagnostics": solution.solver_constraint_diagnostics,
         "lap_time_s": float(solution.lap_time_s),
         "objective": float(solution.objective),
         "converged": bool(solution.converged),
@@ -712,6 +1014,12 @@ def diagnose_solution(solution: Solution, model: VehicleModel,
             "max_abs": float(np.max(np.abs(yaw_residual_rate))),
             "p95_abs": float(np.percentile(np.abs(yaw_residual_rate), 95)),
         },
+        "yaw_response_time_constant_s": {
+            "min": float(np.min(yaw_tau)),
+            "median": float(np.median(yaw_tau)),
+            "max": float(np.max(yaw_tau)),
+        },
+        "steering_robustness": robustness_diagnostics,
         "max_abs_scaled_collocation_defect": float(np.nanmax(np.abs(scaled))),
         "scaled_collocation_defect_by_state_max": {
             name: float(np.nanmax(np.abs(scaled[i])))
@@ -787,6 +1095,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     opti = ca.Opti()
     steering_rate_limit = _optimizer_steering_rate_limit(model, config)
     steering_limit = _optimizer_steering_limit(model, config)
+    steering_robustness = _steering_robustness_config(config, steering_limit)
     actuator_enabled, steering_delay_s = _steering_actuator_config(config)
 
     scales = config.get("scaling", {})
@@ -846,7 +1155,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
 
     long_extent = max(model.rear_axle_to_front_bumper_m, model.rear_overhang_m)
 
-    speed_limit = _optimizer_speed_limit(model, envelope)
+    speed_limit = _optimizer_speed_limit(model, envelope, config)
     command_speed_limit = min(model.max_command_speed_mps, speed_limit)
     body_v_nodes = []
     sdot_nodes = []
@@ -864,11 +1173,20 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
             / min_frenet_den)
         if actuator_enabled else None
     )
+    physical_steering_rate_nodes = [
+        ca.fmin(ca.fmax(
+            (delayed_command_nodes[k] - delta_actual[k]) / steering_delay_s,
+            -steering_rate_limit), steering_rate_limit)
+        if actuator_enabled else qdelta[k]
+        for k in range(n)
+    ]
 
     f_nodes = []
     time_density = []
     accel_nodes = []
     yaw_response_nodes = []
+    yaw_time_constant_nodes = []
+    steering_robustness_nodes = []
     ay_nodes = []
     aycap_nodes = []
 
@@ -877,15 +1195,35 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         body_v = body_v_nodes[k]
         sdot = sdot_nodes[k]
         raw_a = model.raw_longitudinal_accel(body_u[k], target_v[k], qv[k])
-        r_ss_base = model.steady_yaw_rate_casadi(
-            body_u[k], delta_actual[k], float(track.kappa[k]))
+        r_ss_base, yaw_tau = _yaw_transition_terms_casadi(
+            model, config,
+            body_u[k], delta_actual[k], float(track.kappa[k]),
+            physical_steering_rate_nodes[k])
         residual_lateral_v = model.lateral_velocity_casadi(body_u[k], yaw_r[k])
         yaw_residual = model.yaw_residual_rate_casadi(
             body_u[k], yaw_r[k], delta_actual[k], qdelta[k], residual_lateral_v,
             float(track.kappa[k]), raw_a, qv[k], target_v[k])
-        r_ss = r_ss_base + model.yaw_tau_s * yaw_residual
-        r_dot = (r_ss - yaw_r[k]) / model.yaw_tau_s
+        r_ss = r_ss_base + yaw_tau * yaw_residual
+        robustness_node = ca.MX(0.0)
+        if steering_robustness is not None:
+            perturbation = steering_robustness["perturbation_rad"]
+            perturbed_responses = []
+            for direction in (-1.0, 1.0):
+                perturbed_steering = ca.fmin(
+                    ca.fmax(delta_actual[k] + direction * perturbation,
+                            -steering_limit), steering_limit)
+                perturbed_responses.append(_yaw_output_casadi(
+                    model, config, body_u[k], yaw_r[k], perturbed_steering,
+                    qdelta[k], physical_steering_rate_nodes[k],
+                    float(track.kappa[k]), raw_a, qv[k], target_v[k]))
+            robustness_node = _steering_robustness_node_cost(
+                r_ss, perturbed_responses[0], perturbed_responses[1],
+                steering_robustness[
+                    "yaw_response_weight_s_per_radps2"])
+        r_dot = (r_ss - yaw_r[k]) / yaw_tau
         yaw_response_nodes.append(r_ss)
+        yaw_time_constant_nodes.append(yaw_tau)
+        steering_robustness_nodes.append(robustness_node)
         f_components = [
             (body_u[k] * ca.sin(epsi[k]) + body_v * ca.cos(epsi[k])) / sdot,
             (yaw_r[k] - float(track.kappa[k]) * sdot) / sdot,
@@ -895,10 +1233,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
             qdelta[k] / sdot,
         ]
         if actuator_enabled:
-            actual_rate = ca.fmin(ca.fmax(
-                (delayed_command_nodes[k] - delta_actual[k]) / steering_delay_s,
-                -steering_rate_limit), steering_rate_limit)
-            f_components.append(actual_rate / sdot)
+            f_components.append(physical_steering_rate_nodes[k] / sdot)
         f = ca.vertcat(*f_components)
         f_nodes.append(f)
         time_density.append(1.0 / sdot)
@@ -950,6 +1285,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     # Trapezoidal direct collocation in centerline arc length; last interval wraps to node 0.
     lap_time = 0
     reg_cost = 0
+    steering_robustness_cost = 0
     for k in range(n):
         kp = (k + 1) % n
         ds = float(track.ds[k])
@@ -969,7 +1305,8 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         interval_dt = ds / interval_sdot
         yaw_end, yaw_integral = _yaw_lag_interval_casadi(
             yaw_r[k], yaw_response_nodes[k], yaw_response_nodes[kp],
-            interval_dt, model.yaw_tau_s)
+            interval_dt, 0.5 * (yaw_time_constant_nodes[k]
+                                + yaw_time_constant_nodes[kp]))
         curvature_mid = 0.5 * (float(track.kappa[k]) + float(track.kappa[kp]))
         exact_epsi_defect = (
             epsi[kp] - epsi[k] - yaw_integral + curvature_mid * ds
@@ -990,8 +1327,11 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
             + float(reg.get("target_speed_rate", 1e-6)) * (qv[k] ** 2 * time_density[k] + qv[kp] ** 2 * time_density[kp])
             + float(reg.get("heading_error", 1e-6)) * (epsi[k] ** 2 * time_density[k] + epsi[kp] ** 2 * time_density[kp])
         )
+        steering_robustness_cost += 0.5 * ds * (
+            steering_robustness_nodes[k] * time_density[k]
+            + steering_robustness_nodes[kp] * time_density[kp])
 
-    objective = lap_time + reg_cost
+    objective = lap_time + reg_cost + steering_robustness_cost
     opti.minimize(objective)
 
     p_opts = {"expand": bool(solver.get("expand", True))}
@@ -1024,6 +1364,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
     stats = opti.stats()
     values = lambda expr: np.asarray(sol.value(expr), dtype=float).reshape(-1)
     converged = bool(stats.get("success", False))
+    constraint_diagnostics = _solver_constraint_diagnostics(opti, sol)
 
     result = Solution(
         track=track,
@@ -1032,6 +1373,7 @@ def solve_track(track: Track, model: VehicleModel, envelope: LateralEnvelope,
         lap_time_s=float(sol.value(lap_time)), objective=float(sol.value(objective)),
         solver_stats=stats, elapsed_s=elapsed, label=guess.label, converged=converged,
         steering_command=(values(delta_command) if actuator_enabled else None),
+        solver_constraint_diagnostics=constraint_diagnostics,
     )
     diagnostic_error = None
     if converged and yaw_lag_exact_fraction >= 1.0:

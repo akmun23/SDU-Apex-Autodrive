@@ -1,0 +1,59 @@
+limits:
+  min_body_speed_mps: 0.8
+  max_heading_error_rad: 0.75
+
+track:
+  prep_smoothing_s: 6.0
+  extra_wall_clearance_m: 0.10
+  heading_aware_physical_footprint: true
+  export_optimizer_nodes: true
+  export_spacing_m: 0.02
+
+lateral_envelope:
+  scale: 1.125
+  source: "9.0 m/s^2 comparison envelope, evaluated with the current production Y1 model"
+
+lateral_dynamics:
+  use_odometry_lateral_velocity: true
+
+combined_acceleration:
+  enabled: true
+  exponent: 2.0
+
+vehicle_model_overrides: {}
+
+solver:
+  mesh_schedule_m: [0.25]
+  coarse_multistart: [solution_nodes]
+  stop_after_first_coarse_success: true
+  refinement_starts: [previous]
+  stop_after_first_refinement_success: true
+  allow_best_coarse_fallback: false
+  coarse_max_iter: 2000
+  refinement_max_iter: 1200
+  tol: 1.0e-7
+  acceptable_tol: 1.0e-5
+  acceptable_iter: 15
+  print_level: 0
+  expand: true
+  mu_strategy: adaptive
+  linear_solver: mumps
+
+scaling:
+  ey_m: 0.5
+  epsi_rad: 0.5
+  u_mps: 10.0
+  r_radps: 10.0
+  target_mps: 10.0
+  delta_rad: 0.5
+  qdelta_radps: 3.2
+  qv_mps2: 8.0
+
+regularization:
+  steering_rate: 1.0e-5
+  target_speed_rate: 1.0e-6
+  heading_error: 1.0e-6
+
+numerics:
+  min_progress_mps: 0.30
+  min_frenet_denominator: 0.25

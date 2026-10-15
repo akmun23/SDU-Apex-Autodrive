@@ -130,6 +130,7 @@ def generate_vehicle_contract(
     centerline: Path | None,
     config_hashes: dict[str, str],
     overlay_hash: str | None,
+    actuator_overlay_hash: str | None,
 ) -> tuple[Path, str]:
     """Save the resolved candidate vehicle model and the source hashes it depends on."""
     optimizer_cfg = yaml.safe_load(optimizer_config.read_text(encoding="utf-8")) or {}
@@ -178,7 +179,11 @@ def generate_vehicle_contract(
         },
         "runtime_config_sha256": config_hashes,
         "mpc_overlay_sha256": overlay_hash,
-        "optimizer_settings": optimizer_cfg,
+        "actuator_overlay_sha256": actuator_overlay_hash,
+        # Record the settings actually consumed after CLI overrides, not just
+        # the source YAML. Keep the source separately for traceability.
+        "optimizer_settings": resolved_cfg.get("config", optimizer_cfg),
+        "optimizer_source_settings": optimizer_cfg,
     }
     contract_path.write_text(
         json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -231,6 +236,15 @@ def create_manifest(args: argparse.Namespace) -> dict[str, Any]:
     overlay_hash = None
     if args.mpc_overlay:
         overlay_hash = sha256(within_repo(args.mpc_overlay))
+    actuator_overlay_env = os.environ.get(
+        "SDU_APEX_ACTUATOR_PARAMETER_OVERLAY", "")
+    actuator_overlay_path = (
+        within_repo(Path(actuator_overlay_env)) if actuator_overlay_env else None)
+    actuator_overlay_hash = (
+        sha256(actuator_overlay_path) if actuator_overlay_path else None)
+    odom_overlay_env = os.environ.get("SDU_APEX_ODOM_PARAMETER_OVERLAY", "")
+    odom_overlay_path = within_repo(Path(odom_overlay_env)) if odom_overlay_env else None
+    odom_overlay_hash = sha256(odom_overlay_path) if odom_overlay_path else None
 
     optimizer_config = within_repo(args.optimizer_config) if args.optimizer_config else None
     resolved_optimizer_config = (
@@ -251,6 +265,7 @@ def create_manifest(args: argparse.Namespace) -> dict[str, Any]:
             centerline=centerline,
             config_hashes=config_hashes,
             overlay_hash=overlay_hash,
+            actuator_overlay_hash=actuator_overlay_hash,
         )
 
     simulator_image_id, simulator_digest = image_fingerprint(args.simulator_image)
@@ -284,6 +299,16 @@ def create_manifest(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "vehicle_profile_sha256": sha256(ROOT / VEHICLE_PROFILE),
         "mpc_overlay_sha256": overlay_hash,
+        "actuator_parameter_overlay": (
+            actuator_overlay_path.relative_to(ROOT).as_posix()
+            if actuator_overlay_path else None
+        ),
+        "actuator_parameter_overlay_sha256": actuator_overlay_hash,
+        "odom_parameter_overlay": (
+            odom_overlay_path.relative_to(ROOT).as_posix()
+            if odom_overlay_path else None
+        ),
+        "odom_parameter_overlay_sha256": odom_overlay_hash,
         "optimizer_config_sha256": sha256(optimizer_config) if optimizer_config else None,
         "resolved_optimizer_config_sha256": (
             sha256(resolved_optimizer_config) if resolved_optimizer_config else None
@@ -307,6 +332,10 @@ def create_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "simulator_mode": os.environ.get("SDU_APEX_SIM_MODE", "batchmode"),
             "build_mpc": os.environ.get("SDU_APEX_BUILD_MPC", "1"),
             "build_localization": os.environ.get("SDU_APEX_BUILD_LOCALIZATION", "0"),
+            "odom_parameter_overlay": os.environ.get(
+                "SDU_APEX_ODOM_PARAMETER_OVERLAY", ""
+            ),
+            "actuator_parameter_overlay": actuator_overlay_env,
             "controller_max_speed_mps": os.environ.get(
                 "SDU_APEX_CONTROLLER_MAX_SPEED", "16.0"
             ),

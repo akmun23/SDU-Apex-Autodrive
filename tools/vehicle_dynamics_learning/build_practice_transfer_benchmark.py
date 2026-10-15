@@ -11,6 +11,11 @@ from typing import Any
 
 import numpy as np
 
+try:
+    from .sealed_archive_guard import assert_no_sealed_runs_in_packed_archive
+except ImportError:
+    from sealed_archive_guard import assert_no_sealed_runs_in_packed_archive
+
 
 DT_S = 0.025
 CONTEXT_STEPS = 80
@@ -166,6 +171,7 @@ def build(dataset_path: Path, validation_reports: list[Path],
             "bag_sha256": report["bag_sha256"],
         }
 
+    assert_no_sealed_runs_in_packed_archive(dataset_path)
     with np.load(dataset_path, allow_pickle=False) as archive:
         if (int(archive["schema_version"][0]) != 8
                 or str(archive["dataset_role"][0]) != "race_domain"):

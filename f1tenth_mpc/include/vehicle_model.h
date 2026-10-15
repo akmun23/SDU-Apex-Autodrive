@@ -115,6 +115,10 @@ typedef struct
 {
     int enabled;
     int speed_count;
+    /* Scales only the empirical steady-response correction, matching the
+     * optimizer's yaw_surface_response_scale. Hold-time-constant gating is
+     * intentionally not scaled. */
+    float response_scale;
     float blend_q_start;
     float blend_q_end;
     /* Smoothly disable the empirical table outside its measured speed knots. */

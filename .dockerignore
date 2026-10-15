@@ -21,3 +21,6 @@ SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3
 f1tenth_planning/global_racetrajectory_optimization
 f1tenth_planning/scripts
 f1tenth_planning/config/autodrive_sim_vehicle.yaml
+
+# Archived full Unity project is used for offline source analysis, not runtime.
+external/autodrive-unity-source

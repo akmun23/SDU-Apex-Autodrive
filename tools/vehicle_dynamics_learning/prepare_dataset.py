@@ -455,7 +455,8 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
              practice_active_interval: bool = False,
              include_nonvalid_phases: bool = False,
              continuous_whole_run: bool = False,
-             fixed_packet_timebase: bool = False) -> tuple[
+             fixed_packet_timebase: bool = False,
+             practice_expected_laps: int = 12) -> tuple[
         dict[str, Any], list[tuple[str, np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray, np.ndarray, np.ndarray,
@@ -484,8 +485,8 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
     active_interval = None
     active_interval_report = None
     if practice_active_interval and run_id.startswith("practice_"):
-        # The practice recorder can report its expected socket disconnect just
-        # after lap 12. Validate the complete active interval independently,
+        # The practice recorder can report an expected socket disconnect just
+        # after a completed run. Validate the active interval independently,
         # then exclude all pre-run/post-run samples without weakening the
         # normal OpenPlane quality gate.
         try:
@@ -493,10 +494,14 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
                 from .evaluate_sensor_observer_practice import _receipt_gates
             except ImportError:
                 from evaluate_sensor_observer_practice import _receipt_gates
-            active_interval_report = _receipt_gates(path)
+            if practice_expected_laps < 1:
+                raise ValueError("practice expected laps must be positive")
+            active_interval_report = _receipt_gates(
+                path, expected_laps=practice_expected_laps,
+                allow_post_run_disconnect=(practice_expected_laps == 12))
             active_interval = (
                 int(active_interval_report["active_start_receipt_ns"]),
-                int(active_interval_report["lap12_receipt_ns"]))
+                int(active_interval_report["active_end_receipt_ns"]))
         except (OSError, ValueError, sqlite3.Error) as exc:
             active_interval_report = {"error": f"{type(exc).__name__}: {exc}"}
         if active_interval is not None:
@@ -670,8 +675,9 @@ def _extract(path: Path, coalesce_contiguous_phases: bool = False,
         "suggested_split": split,
         "clean_stream_and_collision_gate": clean,
         "whole_bag_quality_failures": failures,
-        "quality_gate_scope": ("complete_lap_0_to_12_active_interval"
-                               if active_interval is not None else "whole_bag"),
+        "quality_gate_scope": (
+            f"complete_lap_0_to_{practice_expected_laps}_active_interval"
+            if active_interval is not None else "whole_bag"),
         "continuous_whole_run_export": continuous_whole_run,
         "fixed_packet_timebase_quality_mode": fixed_packet_timebase,
         "simulator_packet_sequence_gap_count": int(packet_sequence_gaps),
@@ -862,7 +868,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             split_overrides: dict[str, str] | None = None,
             practice_active_interval: bool = False,
             continuous_whole_run: bool = False,
-            fixed_packet_timebase: bool = False) -> dict[str, Any]:
+            fixed_packet_timebase: bool = False,
+            practice_expected_laps: int = 12) -> dict[str, Any]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -886,7 +893,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
             record, sequences = _extract(
                 path, coalesce_contiguous_phases, practice_active_interval,
                 continuous_whole_run=continuous_whole_run,
-                fixed_packet_timebase=fixed_packet_timebase)
+                fixed_packet_timebase=fixed_packet_timebase,
+                practice_expected_laps=practice_expected_laps)
             override = (split_overrides or {}).get(run_id)
             if override is not None:
                 record["suggested_split"] = override
@@ -1116,6 +1124,8 @@ def prepare(root: Path, output_dir: Path, explicit_bags: list[Path],
         "plant_continuity_mode": bool(coalesce_contiguous_phases),
         "fixed_packet_timebase_quality_mode": bool(fixed_packet_timebase),
         "practice_active_interval_mode": bool(practice_active_interval),
+        "practice_active_expected_laps": (
+            practice_expected_laps if practice_active_interval else None),
         "split_policy": "whole-run split; validation_20260928=validation; validation_20260929=final_test; named holdouts=test; exact fingerprint collisions take the most conservative split",
         "stream_gate": (
             ">=38 Hz, p95 gap<=35 ms, zero collisions/faults; sensor receipt-gap max<=60 ms and command max<=120 ms"
@@ -1182,10 +1192,14 @@ def main() -> int:
     parser.add_argument("--fixed-packet-timebase", action="store_true",
                         help="use the simulator's exact 25 ms packet sequence instead of rejecting sensor streams solely for receipt-time jitter; requires contiguous packet IDs within every exported sequence and retains rate/p95/command/collision/fault gates")
     parser.add_argument("--practice-active-interval", action="store_true",
-                        help="allow only 12-lap practice captures that pass lap, collision, active 40 Hz and post-run fault checks; crop to active laps")
+                        help="allow only practice captures that pass lap, collision, active 40 Hz and post-run fault checks; crop to the active interval")
+    parser.add_argument("--practice-expected-laps", type=int, default=12,
+                        help="completed lap-count target for --practice-active-interval; non-12 runs reject all post-run timing faults")
     parser.add_argument("--output-dir", type=Path, required=True,
                         help="new or empty directory for compressed dataset and manifest")
     args = parser.parse_args()
+    if args.practice_expected_laps < 1:
+        parser.error("--practice-expected-laps must be positive")
     split_overrides = {}
     for value in args.split_override:
         if "=" not in value:
@@ -1202,7 +1216,8 @@ def main() -> int:
                            args.additional_bag, split_overrides,
                            args.practice_active_interval,
                            args.continuous_whole_run,
-                           args.fixed_packet_timebase)
+                           args.fixed_packet_timebase,
+                           args.practice_expected_laps)
     except (OSError, ValueError) as exc:
         print(f"dataset preparation failed: {exc}", file=sys.stderr)
         return 2

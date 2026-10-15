@@ -51,6 +51,45 @@ class FourWheelGreyboxTest(unittest.TestCase):
         self.assertEqual(tuple(acceleration.shape), (1, 3))
         self.assertAlmostEqual(WHEELBASE_M, 0.324, places=6)
 
+    def test_tire_force_slips_match_documented_equations(self) -> None:
+        torch, nn = _torch()
+        model = _physical_model(torch, nn)()
+        longitudinal, lateral = model._tire_slips(
+            torch.tensor([[12.0]]), torch.tensor([[8.0]]),
+            torch.tensor([[3.0]]))
+        self.assertAlmostEqual(float(longitudinal[0, 0]), 0.5, places=6)
+        self.assertAlmostEqual(float(lateral[0, 0]), 3.0 / 8.0, places=6)
+
+    def test_tire_force_slips_remain_finite_at_zero_contact_speed(self) -> None:
+        torch, nn = _torch()
+        model = _physical_model(torch, nn)()
+        longitudinal, lateral = model._tire_slips(
+            torch.tensor([[0.6]]), torch.tensor([[0.0]]),
+            torch.tensor([[0.3]]))
+        self.assertAlmostEqual(float(longitudinal[0, 0]), 1.2, places=6)
+        self.assertAlmostEqual(float(lateral[0, 0]), 0.6, places=6)
+
+    def test_exact_zero_throttle_brake_cannot_reverse_wheel_speed(self) -> None:
+        torch, nn = _torch()
+        model = _physical_model(torch, nn, exact_unity_actuators=True)()
+        state = torch.zeros((1, 21), dtype=torch.float32)
+        state[0, 3:7] = torch.tensor([100.0, -100.0, 0.01, -0.01])
+        following, _ = model.step(state, torch.zeros((1, 2)))
+        np.testing.assert_allclose(following[0, 3:7].detach().numpy(),
+                                   np.zeros(4), atol=1.0e-6)
+
+    def test_exact_unity_cawd_applies_428_nm_as_107_nm_per_wheel(self) -> None:
+        torch, nn = _torch()
+        model = _physical_model(torch, nn, exact_unity_actuators=True)()
+        state = torch.zeros((1, 17), dtype=torch.float32)
+        derivative, _ = model._forces_and_derivatives(
+            state, torch.zeros(1), torch.ones(1))
+        wheel_inertia = model.physical_parameters()["wheel_inertia_kgm2"]
+        expected = 107.0 / wheel_inertia
+        np.testing.assert_allclose(
+            derivative[0, 3:7].detach().numpy(),
+            np.full(4, float(expected.detach())), rtol=1e-5, atol=1e-2)
+
     def test_short_recursive_rollout_is_finite(self) -> None:
         torch, nn = _torch()
         torch.set_num_threads(1)

@@ -46,6 +46,10 @@ DEFAULT_CENTERLINE = Path(
     "live_runs/raceline_candidates/practice_exact_84cap_clearance035_20261004/"
     "track_prep/SmoothCenterline.csv"
 )
+# Simulator truth's IMU/Rigidbody lateral velocity is reported at the COM,
+# whereas odometry's body velocity is at the rear axle. Keep this aligned with
+# analyze_race_run.py and the audited active vehicle prefab when comparing them.
+TRUTH_COM_FORWARD_FROM_REAR_AXLE_M = 0.15532
 ODOM_FIELDS = {
     "version": 0, "published_stamp_s": 1, "packet_dt_s": 2,
     "wheel_raw_mps": 3, "wheel_mapped_mps": 4,
@@ -119,6 +123,18 @@ def nearest_prior(rows: list[Row], stamps: list[int], target_ns: int) -> Row | N
     return rows[index]
 
 
+def nearest_source(rows: list[Row], stamps: list[int], target_ns: int,
+                   tolerance_ns: int = 2_000) -> Row | None:
+    """Join packet-derived streams by source time, not callback arrival order."""
+    index = bisect.bisect_left(stamps, target_ns)
+    candidates = [candidate for candidate in (index - 1, index)
+                  if 0 <= candidate < len(stamps)]
+    if not candidates:
+        return None
+    match = min(candidates, key=lambda candidate: abs(stamps[candidate] - target_ns))
+    return rows[match] if abs(stamps[match] - target_ns) <= tolerance_ns else None
+
+
 def float_value(rows: list[Row], stamps: list[int], target_ns: int) -> float | None:
     row = nearest_prior(rows, stamps, target_ns)
     return None if row is None else float(row.message.data)
@@ -173,6 +189,31 @@ def parse_odom_diagnostic(row: Row | None) -> dict[str, float | None]:
         name: float(values[index]) if index < len(values) else None
         for name, index in ODOM_FIELDS.items()
     }
+
+
+def odom_source_stamp_ns(row: Row) -> int:
+    """Return the sensor-packet stamp carried in the Odom diagnostics."""
+    values = list(row.message.data)
+    if len(values) > 28 and values[0] >= 6.0 and math.isfinite(values[28]):
+        stamp = int(round(values[28] * 1e9))
+        if stamp > 0:
+            return stamp
+    if len(values) > 1 and math.isfinite(values[1]):
+        stamp = int(round(values[1] * 1e9))
+        if stamp > 0:
+            return stamp
+    return row.receipt_ns
+
+
+def mpc_source_stamp_ns(row: Row) -> int:
+    """Return the source Odom stamp attached to the MPC diagnostic JSON."""
+    try:
+        value = json.loads(row.message.data).get("source_stamp_ns")
+    except (TypeError, json.JSONDecodeError):
+        value = None
+    if isinstance(value, int) and value > 0:
+        return value
+    return row.receipt_ns
 
 
 def parse_mpc(row: Row | None) -> dict[str, Any]:
@@ -496,11 +537,21 @@ def classify_first_event(
             or (speed_pred_error is not None and abs(speed_pred_error) > thresholds.get("speed_error_mps", math.inf))
         ):
             checks.append((True, "ODOM_SOURCE_ORDER", "source timestamp reversed in received sensor/packet order", None))
-        if persistent(index, lambda sample: sample.get("wheel_body_mismatch_mps"), wheel_threshold) or (
-            bool(odom.get("wheel_burst_rejected")) and raw_mapped is not None
-            and abs(raw_mapped) > thresholds.get("wheel_raw_mapped_delta_mps", math.inf)
+        if persistent(
+            index, lambda sample: sample.get("wheel_body_mismatch_mps"),
+            wheel_threshold,
         ):
-            checks.append((True, "ODOM_WHEEL_BURST", "wheel/body mismatch or observer burst-reject diagnostic", wheel_mismatch))
+            checks.append((
+                True, "ODOM_ENCODER_BODY_SPEED_MISMATCH",
+                "mapped encoder rate disagreed with truth body speed beyond clean-run p99",
+                wheel_mismatch))
+        if (bool(odom.get("wheel_burst_rejected")) and raw_mapped is not None
+                and abs(raw_mapped) > thresholds.get(
+                    "wheel_raw_mapped_delta_mps", math.inf)):
+            checks.append((
+                True, "ODOM_ENCODER_BURST_REJECTED",
+                "observer rejected a raw-to-mapped encoder-rate jump beyond clean-run p99",
+                raw_mapped))
         if persistent(index, lambda sample: sample.get("localization_normal_error_m"), thresholds.get("normal_error_m", math.inf)):
             checks.append((True, "LOCALIZATION_NORMAL_ERROR", "map-pose normal error exceeded P0 p99", normal))
         if persistent(index, lambda sample: sample.get("localization_tangential_error_m"), thresholds.get("tangential_error_m", math.inf)):
@@ -559,7 +610,8 @@ def classify_first_event(
         # Source-order and sensor evidence precede downstream controller symptoms
         # only when they occur on the same sample; otherwise chronology dominates.
         checks.sort(key=lambda item: [
-            "ODOM_SOURCE_ORDER", "ODOM_WHEEL_BURST",
+            "ODOM_SOURCE_ORDER", "ODOM_ENCODER_BODY_SPEED_MISMATCH",
+            "ODOM_ENCODER_BURST_REJECTED",
             "LOCALIZATION_NORMAL_ERROR", "LOCALIZATION_TANGENTIAL_ERROR",
             "MODEL_OVER_YAW", "MODEL_UNDER_YAW",
             "STEERING_MAG_SAT", "STEERING_RATE_SAT", "BRAKING_OVERSHOOT",
@@ -611,13 +663,16 @@ def analyze_run(
     truth = [row for row in streams[TRUTH] if row.stamp_ns > 0]
     truth.sort(key=lambda row: row.receipt_ns)
     truth_receipts = [row.receipt_ns for row in truth]
+    truth_by_source = sorted(truth, key=lambda row: row.stamp_ns)
+    truth_sources = [row.stamp_ns for row in truth_by_source]
     map_rows = [row for row in streams[MAP_POSE] if row.stamp_ns > 0]
-    map_rows.sort(key=lambda row: row.receipt_ns)
-    map_receipts = [row.receipt_ns for row in map_rows]
-    odom_rows = streams[ODOM_DIAG]
-    odom_receipts = [row.receipt_ns for row in odom_rows]
-    mpc_rows = streams[MPC_DIAG]
-    mpc_receipts = [row.receipt_ns for row in mpc_rows]
+    map_rows.sort(key=lambda row: row.stamp_ns)
+    map_sources = [row.stamp_ns for row in map_rows]
+    odom_received_rows = streams[ODOM_DIAG]
+    odom_rows = sorted(odom_received_rows, key=odom_source_stamp_ns)
+    odom_sources = [odom_source_stamp_ns(row) for row in odom_rows]
+    mpc_rows = sorted(streams[MPC_DIAG], key=mpc_source_stamp_ns)
+    mpc_sources = [mpc_source_stamp_ns(row) for row in mpc_rows]
     scalar_rows = {
         name: sorted(streams[name], key=lambda row: row.receipt_ns)
         for name in (STEERING, STEERING_COMMAND, THROTTLE, THROTTLE_COMMAND)
@@ -632,7 +687,8 @@ def analyze_run(
         LEFT_ENCODER: source_order(source_scope(streams[LEFT_ENCODER])),
         RIGHT_ENCODER: source_order(source_scope(streams[RIGHT_ENCODER])),
         ODOM_DIAG: source_order(
-            source_scope(odom_rows), vector_stamp_index=1, current_vector_stamp_index=28),
+            source_scope(odom_received_rows), vector_stamp_index=1,
+            current_vector_stamp_index=28),
     }
     all_reversal_receipts = sorted(
         receipt
@@ -663,7 +719,8 @@ def analyze_run(
             continue
 
         target = truth_row.receipt_ns
-        map_row = nearest_prior(map_rows, map_receipts, target)
+        source_target = truth_row.stamp_ns
+        map_row = nearest_prior(map_rows, map_sources, source_target)
         map_normal = map_tangent = map_yaw_error = None
         map_lateral = None
         if map_row is not None:
@@ -679,13 +736,14 @@ def analyze_run(
             map_yaw_error = wrap_angle(quat_yaw(estimate.orientation) - quat_yaw(pose.orientation))
             map_lateral = map_projection.lateral_offset_m
 
-        odom_row = nearest_prior(odom_rows, odom_receipts, target)
+        odom_row = nearest_source(odom_rows, odom_sources, source_target)
         odom = parse_odom_diagnostic(odom_row)
-        mpc_row = nearest_prior(mpc_rows, mpc_receipts, target)
+        mpc_row = nearest_source(mpc_rows, mpc_sources, source_target)
         mpc = parse_mpc(mpc_row)
         truth_u = float(truth_row.message.twist.twist.linear.x)
-        truth_v = float(truth_row.message.twist.twist.linear.y)
+        truth_v_com = float(truth_row.message.twist.twist.linear.y)
         truth_r = float(truth_row.message.twist.twist.angular.z)
+        truth_v = truth_v_com - truth_r * TRUTH_COM_FORWARD_FROM_REAR_AXLE_M
         source_reversal = any(abs(target - reversal_ns) <= 25_000_000 for reversal_ns in all_reversal_receipts)
         left_clearance = projection.left_width_m - projection.lateral_offset_m - 0.1365
         right_clearance = projection.right_width_m + projection.lateral_offset_m - 0.1365
@@ -699,6 +757,7 @@ def analyze_run(
             "truth_lateral_m": projection.lateral_offset_m,
             "truth_u_mps": truth_u,
             "truth_v_mps": truth_v,
+            "truth_v_com_mps": truth_v_com,
             "truth_speed_mps": math.hypot(truth_u, truth_v),
             "truth_yaw_rate_radps": truth_r,
             "truth_yaw_rad": quat_yaw(pose.orientation),
@@ -719,10 +778,11 @@ def analyze_run(
                 for value in order.values()
             ),
         }
-        future_index = bisect.bisect_left(truth_receipts, target + 25_000_000)
-        if future_index < len(truth):
-            future_row = truth[future_index]
-            if future_row.receipt_ns - (target + 25_000_000) <= 60_000_000:
+        future_index = bisect.bisect_left(
+            truth_sources, source_target + 25_000_000)
+        if future_index < len(truth_by_source):
+            future_row = truth_by_source[future_index]
+            if future_row.stamp_ns - (source_target + 25_000_000) <= 60_000_000:
                 row["truth_yaw_rate_25ms_radps"] = float(future_row.message.twist.twist.angular.z)
             else:
                 row["truth_yaw_rate_25ms_radps"] = None

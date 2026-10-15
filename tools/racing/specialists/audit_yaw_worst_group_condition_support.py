@@ -108,7 +108,9 @@ def _bridge_request_age(series: Any, rows: dict[str, Any]
                 (topic_id,)):
             message = response.deserialize_message(bytes(payload), message_type)
             debug = json.loads(message.data)
-            stamp = debug.get("bridge_receive_ros_stamp_ns")
+            stamp = debug.get("bridge_request_ros_stamp_ns")
+            if not isinstance(stamp, int):
+                stamp = debug.get("bridge_receive_ros_stamp_ns")
             age = debug.get("steering_command_update_age_ms")
             if stamp is None:
                 continue
@@ -126,7 +128,9 @@ def _bridge_request_age(series: Any, rows: dict[str, Any]
         "yaw_rows": int(len(source_stamps)),
         "exact_source_stamp_rows_with_age": int(np.count_nonzero(np.isfinite(aligned))),
         "rows_without_exact_bridge_age": int(np.count_nonzero(~np.isfinite(aligned))),
-        "source_stamp_alignment": "exact bridge_receive_ros_stamp_ns == odometry source/header stamp",
+        "source_stamp_alignment": (
+            "exact bridge request ROS stamp (legacy bags: receive ROS stamp) "
+            "== odometry source/header stamp"),
         "use": "offline causal-factor diagnostic only; prohibited input for runtime model",
     }
     return aligned, audit

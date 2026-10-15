@@ -25,12 +25,14 @@ from typing import Any
 import numpy as np
 
 try:
+    from .sealed_archive_guard import assert_no_sealed_runs_in_packed_archive
     from .family_condition_sampler import (
         FamilyConditionSampler,
         build_sequence_sampler,
         run_family_labels,
     )
 except ImportError:
+    from sealed_archive_guard import assert_no_sealed_runs_in_packed_archive
     from family_condition_sampler import (
         FamilyConditionSampler,
         build_sequence_sampler,
@@ -193,6 +195,7 @@ def _model_type(torch, nn, hidden_size: int, architecture: str,
 
 
 def _load_dataset(path: Path, include_throttle_variation: bool = False) -> dict[str, Any]:
+    assert_no_sealed_runs_in_packed_archive(path)
     data = np.load(path, allow_pickle=False)
     required = {"schema_version", "feature_names", "frames", "dt_s",
                 "sequence_bounds", "sequence_run_index", "run_ids", "run_splits"}

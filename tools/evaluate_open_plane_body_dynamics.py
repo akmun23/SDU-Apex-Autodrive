@@ -122,6 +122,30 @@ class Model:
     include_actuator_history: bool = False
 
 
+def simulator_truth_rear_axle_twist(rigid_state: np.ndarray) -> np.ndarray:
+    """Convert Unity bridge rigid-state truth to rear-axle ``[u, v, r]``.
+
+    ``rigid_state`` stores body-frame COM velocity and angular velocity in
+    columns 7:10 and 10:13. This deliberately sources the rigid-state packet
+    rather than ``MotionSample.state``. The latter mirrors the documented
+    simulator ``/autodrive/roboracer_1/odom`` development oracle; parity is
+    checked separately so the two representations cannot silently diverge.
+    Forward velocity is invariant to the longitudinal COM offset; lateral
+    velocity shifts by ``v_rear = v_com - COM_X_M * r``.
+    """
+    rigid = np.asarray(rigid_state, dtype=np.float64)
+    if rigid.ndim not in (1, 2) or rigid.shape[-1] != 13:
+        raise ValueError(
+            f"simulator rigid state must have shape (13,) or (N, 13), got {rigid.shape}")
+    if not np.isfinite(rigid).all():
+        raise ValueError("simulator rigid state contains non-finite truth values")
+    return np.stack((
+        rigid[..., 7],
+        rigid[..., 8] - COM_X_M * rigid[..., 12],
+        rigid[..., 12],
+    ), axis=-1)
+
+
 def _read_scalar(connection: sqlite3.Connection, topics: dict,
                  topic: str) -> tuple[list[analysis.ScalarRow], list[int]]:
     rows = [analysis.ScalarRow(receipt, receipt, float(message.data))
@@ -279,7 +303,9 @@ def load_capture(path: Path,
                 packet = json.loads(message.data)
             except (TypeError, json.JSONDecodeError):
                 continue
-            source_stamp = packet.get("bridge_receive_ros_stamp_ns")
+            source_stamp = packet.get("bridge_request_ros_stamp_ns")
+            if not isinstance(source_stamp, int):
+                source_stamp = packet.get("bridge_receive_ros_stamp_ns")
             packet_sequence = packet.get("packet_sequence")
             if (isinstance(source_stamp, int)
                     and isinstance(packet_sequence, int)):

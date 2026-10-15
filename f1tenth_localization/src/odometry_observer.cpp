@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <stdexcept>
 
 
 namespace f1tenth_localization
@@ -46,12 +47,15 @@ OdometryObserverConfig deployment_observer_config()
   config.turn_speed_bias_max_mps = 0.15;
   config.turn_speed_bias_start_speed_mps = 6.5;
   config.turn_speed_bias_full_speed_mps = 7.5;
+  config.use_turn_speed_bias_lateral_accel_gate = true;
+  config.turn_speed_bias_lateral_accel_gate_start_mps2 = 3.0;
+  config.turn_speed_bias_lateral_accel_gate_full_mps2 = 5.0;
   config.turn_slip_speed_bias_lateral_accel_threshold_mps2 = 4.0;
   config.turn_slip_speed_bias_gain_mps_per_mps2 = 0.05;
   config.turn_slip_speed_bias_start_speed_mps = 2.0;
   config.turn_slip_speed_bias_full_speed_mps = 2.8;
-  config.turn_slip_speed_bias_fade_start_mps = 4.5;
-  config.turn_slip_speed_bias_fade_end_mps = 5.5;
+  config.turn_slip_speed_bias_fade_start_mps = 4.0;
+  config.turn_slip_speed_bias_fade_end_mps = 4.5;
   config.use_coherent_packet_velocity_for_pose = true;
   config.coherent_packet_pose_blend = 1.0;
   config.wheel_speed_slew_limit_mps2 = 40.0;
@@ -68,9 +72,41 @@ OdometryObserverConfig deployment_observer_config()
   config.turn_exit_hold_s = 0.5;
   config.turn_wheel_braking_ax_mps2 = -1.0;
   config.integrate_lateral_acceleration_in_turn = false;
+  config.turn_wheel_update_start_speed_mps = 7.0;
+  config.turn_wheel_update_min_ax_mps2 = 0.0;
+  config.turn_wheel_update_innovation_threshold_mps = 0.0;
+  config.turn_wheel_update_slip_beta = 0.125;
+  config.use_high_yaw_wheel_slip_observer = false;
+  config.high_yaw_wheel_slip_enter_radps = 2.5;
+  config.high_yaw_wheel_slip_exit_radps = 1.5;
+  config.high_yaw_wheel_slip_exit_hold_s = 0.10;
+  config.high_yaw_wheel_slip_innovation_mps = 2.0;
+  config.use_learned_u_residual_model = false;
+  config.learned_u_residual_min_speed_mps = 2.0;
+  config.learned_u_residual_max_speed_mps = 8.0;
+  config.u_correction_support_speed_edges_mps = {2.0, 4.0, 6.0, 8.0};
+  config.u_correction_support_max_abs_steering_rad = {0.30, 0.20, 0.10};
+  config.learned_u_residual_intercept_mps = 0.060340928230651916;
+  config.learned_u_residual_coefficients = {
+    -0.01123104527731476, -0.9252468532458303,
+    -0.0023773279467559755, -0.0008304085906844171,
+    -0.00922115794747585, 0.013095896837034868,
+    -0.127764062201128, 0.7369086293590875,
+    0.43005743300167854, 0.054493639178485584,
+    -0.06106141502377045, -0.022945993984350592,
+    -0.010203043671907322, -0.009358420157824551,
+    0.00494236405039215, 0.007354863850582028,
+    0.4276528797732827, -0.14567326853467916,
+    0.05938704203530415, 0.018871648829481173,
+    0.043191576713956605, -0.7051323076439538};
+  config.use_unity_actuator_u_experts = false;
+  config.unity_actuator_u_min_speed_mps = 2.0;
+  config.unity_actuator_u_max_speed_mps = 8.0;
+  config.unity_zero_throttle_intercept_mps = 0.0;
+  config.unity_nonzero_throttle_intercept_mps = 0.0;
   config.use_kinematic_lateral_slip_model = true;
-  config.lateral_velocity_yaw_rate_gain_m = 0.167;
-  config.lateral_velocity_speed_yaw_rate_gain_s = -0.0063;
+  config.lateral_velocity_yaw_rate_gain_m = 0.181939;
+  config.lateral_velocity_speed_yaw_rate_gain_s = -0.009656;
   config.lateral_velocity_reference_forward_offset_m = 0.15532;
   config.lateral_velocity_max_mps = 0.35;
   config.max_imu_ax_abs_mps2 = 30.0;
@@ -81,6 +117,88 @@ OdometryObserverConfig deployment_observer_config()
 OdometryObserver::OdometryObserver(OdometryObserverConfig config)
 : config_(config)
 {
+  if (config_.use_learned_u_residual_model &&
+    (config_.learned_u_residual_coefficients.size() != 22 ||
+    !std::isfinite(config_.learned_u_residual_min_speed_mps) ||
+    !std::isfinite(config_.learned_u_residual_max_speed_mps) ||
+    config_.learned_u_residual_min_speed_mps >=
+    config_.learned_u_residual_max_speed_mps ||
+    !std::isfinite(config_.learned_u_residual_intercept_mps) ||
+    !std::all_of(
+      config_.learned_u_residual_coefficients.begin(),
+      config_.learned_u_residual_coefficients.end(),
+      [](double value) {return std::isfinite(value);})))
+  {
+    throw std::invalid_argument("invalid enabled Odom-u residual model parameters");
+  }
+  if (config_.use_unity_actuator_u_experts &&
+    (config_.unity_zero_throttle_coefficients.size() != 34 ||
+    config_.unity_nonzero_throttle_coefficients.size() != 34 ||
+    !std::isfinite(config_.unity_actuator_u_min_speed_mps) ||
+    !std::isfinite(config_.unity_actuator_u_max_speed_mps) ||
+    config_.unity_actuator_u_min_speed_mps >=
+    config_.unity_actuator_u_max_speed_mps ||
+    !std::isfinite(config_.unity_zero_throttle_intercept_mps) ||
+    !std::isfinite(config_.unity_nonzero_throttle_intercept_mps) ||
+    !std::all_of(
+      config_.unity_zero_throttle_coefficients.begin(),
+      config_.unity_zero_throttle_coefficients.end(),
+      [](double value) {return std::isfinite(value);}) ||
+    !std::all_of(
+      config_.unity_nonzero_throttle_coefficients.begin(),
+      config_.unity_nonzero_throttle_coefficients.end(),
+      [](double value) {return std::isfinite(value); })))
+  {
+    throw std::invalid_argument("invalid enabled Unity actuator Odom model parameters");
+  }
+  if (config_.use_high_steer_unity_actuator_u_expert &&
+    (config_.high_steer_unity_actuator_u_coefficients.size() != 34 ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_min_speed_mps) ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_max_speed_mps) ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_max_speed_low_throttle_mps) ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_throttle_split) ||
+    config_.high_steer_unity_actuator_u_min_speed_mps >=
+    config_.high_steer_unity_actuator_u_max_speed_mps ||
+    config_.high_steer_unity_actuator_u_max_speed_low_throttle_mps <=
+    config_.high_steer_unity_actuator_u_min_speed_mps ||
+    config_.high_steer_unity_actuator_u_max_speed_low_throttle_mps >
+    config_.high_steer_unity_actuator_u_max_speed_mps ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_min_abs_yaw_rate_radps) ||
+    config_.high_steer_unity_actuator_u_min_abs_yaw_rate_radps < 0.0 ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_min_abs_steering_rad) ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_max_abs_steering_rad) ||
+    config_.high_steer_unity_actuator_u_min_abs_steering_rad >=
+    config_.high_steer_unity_actuator_u_max_abs_steering_rad ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_min_throttle_feedback) ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_max_throttle_feedback) ||
+    config_.high_steer_unity_actuator_u_min_throttle_feedback >
+    config_.high_steer_unity_actuator_u_max_throttle_feedback ||
+    config_.high_steer_unity_actuator_u_throttle_split <
+    config_.high_steer_unity_actuator_u_min_throttle_feedback ||
+    config_.high_steer_unity_actuator_u_throttle_split >
+    config_.high_steer_unity_actuator_u_max_throttle_feedback ||
+    !std::isfinite(config_.high_steer_unity_actuator_u_intercept_mps) ||
+    !std::all_of(
+      config_.high_steer_unity_actuator_u_coefficients.begin(),
+      config_.high_steer_unity_actuator_u_coefficients.end(),
+      [](double value) {return std::isfinite(value);})))
+  {
+    throw std::invalid_argument("invalid enabled high-steer Odom-u expert parameters");
+  }
+  const auto & support_edges = config_.u_correction_support_speed_edges_mps;
+  const auto & support_steering = config_.u_correction_support_max_abs_steering_rad;
+  if (support_edges.size() != support_steering.size() + 1 ||
+    support_edges.size() < 2 ||
+    !std::all_of(support_edges.begin(), support_edges.end(),
+      [](double value) {return std::isfinite(value);}) ||
+    !std::all_of(support_steering.begin(), support_steering.end(),
+      [](double value) {return std::isfinite(value) && value > 0.0;}) ||
+    !std::is_sorted(support_edges.begin(), support_edges.end()) ||
+    std::adjacent_find(support_edges.begin(), support_edges.end(),
+      [](double lhs, double rhs) {return lhs >= rhs;}) != support_edges.end())
+  {
+    throw std::invalid_argument("invalid joint speed/steering support for Odom-u corrections");
+  }
   reset();
 }
 
@@ -89,6 +207,10 @@ void OdometryObserver::reset() noexcept
   initialized_ = false;
   turn_mode_ = false;
   turn_calm_time_s_ = 0.0;
+  high_yaw_wheel_slip_active_ = false;
+  high_yaw_wheel_slip_calm_time_s_ = 0.0;
+  high_yaw_latent_u_mps_ = 0.0;
+  high_yaw_latent_v_mps_ = 0.0;
   previous_stamp_s_ = 0.0;
   previous_left_angle_rad_ = 0.0;
   previous_right_angle_rad_ = 0.0;
@@ -108,6 +230,9 @@ void OdometryObserver::reset() noexcept
   last_wheel_mapped_mps_ = 0.0;
   last_wheel_packet_mps_ = 0.0;
   last_turn_speed_bias_mps_ = 0.0;
+  previous_actuator_steering_rad_ = 0.0;
+  previous_actuator_throttle_ = 0.0;
+  actuator_history_valid_ = false;
   stationary_time_s_ = 0.0;
   wheel_dropout_active_ = false;
   wheel_burst_rejected_ = false;
@@ -218,7 +343,20 @@ double OdometryObserver::turn_speed_bias_mps(
     config_.turn_slip_speed_bias_gain_mps_per_mps2 * std::max(
       0.0, lateral_accel_proxy -
         config_.turn_slip_speed_bias_lateral_accel_threshold_mps2));
-  return high_speed_gate * bounded_bias -
+  double lateral_accel_gate = 1.0;
+  if (config_.use_turn_speed_bias_lateral_accel_gate) {
+    const double gate_span =
+      config_.turn_speed_bias_lateral_accel_gate_full_mps2 -
+      config_.turn_speed_bias_lateral_accel_gate_start_mps2;
+    const double gate_ramp = gate_span > 0.0 ? std::clamp(
+      (lateral_accel_proxy -
+      config_.turn_speed_bias_lateral_accel_gate_start_mps2) / gate_span,
+      0.0, 1.0) :
+      (lateral_accel_proxy >=
+      config_.turn_speed_bias_lateral_accel_gate_full_mps2 ? 1.0 : 0.0);
+    lateral_accel_gate = gate_ramp * gate_ramp * (3.0 - 2.0 * gate_ramp);
+  }
+  return high_speed_gate * bounded_bias * lateral_accel_gate -
     slip_gate_in_smooth * slip_gate_out * slip_correction;
 }
 
@@ -273,6 +411,7 @@ OdometryEstimate OdometryObserver::estimate(
   output.ay_mps2 = observation.ay_mps2;
   output.yaw_rate_radps = observation.yaw_rate_radps;
   output.turn_mode = turn_mode_;
+  output.high_yaw_wheel_slip_active = high_yaw_wheel_slip_active_;
   output.valid = initialized_;
   return output;
 }
@@ -317,11 +456,34 @@ OdometryEstimate OdometryObserver::update(
   const OdometryObservation & observation) noexcept
 {
   last_pre_wheel_update_speed_valid_ = false;
+  constexpr double kUnityPhysicsPacketPeriodS = 0.025;
+  double steering_rate_feedback_radps = 0.0;
+  double throttle_rate_feedback_per_s = 0.0;
+  const bool actuator_feedback_valid = observation.actuator_feedback_valid &&
+    finite(observation.steering_feedback_rad) &&
+    finite(observation.throttle_feedback);
+  if (actuator_feedback_valid) {
+    if (actuator_history_valid_) {
+      steering_rate_feedback_radps =
+        (observation.steering_feedback_rad - previous_actuator_steering_rad_) /
+        kUnityPhysicsPacketPeriodS;
+      throttle_rate_feedback_per_s =
+        (observation.throttle_feedback - previous_actuator_throttle_) /
+        kUnityPhysicsPacketPeriodS;
+    }
+    previous_actuator_steering_rad_ = observation.steering_feedback_rad;
+    previous_actuator_throttle_ = observation.throttle_feedback;
+    actuator_history_valid_ = true;
+  } else {
+    actuator_history_valid_ = false;
+  }
   if (!finite(observation.stamp_s) || !finite(observation.left_angle_rad) ||
     !finite(observation.right_angle_rad) || !finite(observation.ax_mps2) ||
     !finite(observation.ay_mps2) || !finite(observation.yaw_rate_radps) ||
     !finite(observation.yaw_rad))
   {
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
     auto output = estimate(observation);
     output.timing_degraded = true;
     return output;
@@ -334,6 +496,10 @@ OdometryEstimate OdometryObserver::update(
     previous_right_angle_rad_ = observation.right_angle_rad;
     previous_yaw_rad_ = observation.yaw_rad;
     previous_yaw_rate_radps_ = observation.yaw_rate_radps;
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
+    high_yaw_latent_u_mps_ = 0.0;
+    high_yaw_latent_v_mps_ = 0.0;
     body_u_mps_ = 0.0;
     body_v_mps_ = 0.0;
     speed_mps_ = 0.0;
@@ -363,6 +529,8 @@ OdometryEstimate OdometryObserver::update(
     previous_right_angle_rad_ = observation.right_angle_rad;
     previous_yaw_rad_ = observation.yaw_rad;
     previous_yaw_rate_radps_ = observation.yaw_rate_radps;
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
     encoder_history_.clear();
     encoder_history_.push_back({
       observation.stamp_s, observation.left_angle_rad, observation.right_angle_rad});
@@ -371,6 +539,8 @@ OdometryEstimate OdometryObserver::update(
     output.timing_degraded = true;
     return output;
   }
+
+  const double previous_feature_wheel_mapped_mps = last_wheel_mapped_mps_;
 
   // Preserve the state at the beginning of this source-time interval. The
   // pose update at the end uses it with the newly estimated velocity.
@@ -387,6 +557,10 @@ OdometryEstimate OdometryObserver::update(
     previous_yaw_rate_radps_ = observation.yaw_rate_radps;
     turn_mode_ = false;
     turn_calm_time_s_ = 0.0;
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
+    high_yaw_latent_u_mps_ = 0.0;
+    high_yaw_latent_v_mps_ = 0.0;
     speed_mps_ = 0.0;
     body_u_mps_ = 0.0;
     body_v_mps_ = 0.0;
@@ -574,6 +748,8 @@ OdometryEstimate OdometryObserver::update(
     previous_right_angle_rad_ = observation.right_angle_rad;
     previous_yaw_rad_ = observation.yaw_rad;
     previous_yaw_rate_radps_ = observation.yaw_rate_radps;
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
     last_speed_pred_mps_ = speed_mps_;
     stationary_time_s_ = 0.0;
     auto output = estimate(observation);
@@ -602,6 +778,10 @@ OdometryEstimate OdometryObserver::update(
     body_v_mps_ = 0.0;
     turn_mode_ = false;
     turn_calm_time_s_ = 0.0;
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
+    high_yaw_latent_u_mps_ = 0.0;
+    high_yaw_latent_v_mps_ = 0.0;
     last_speed_pred_mps_ = 0.0;
     update_pose(
       dt_s, observation.yaw_rad,
@@ -628,6 +808,8 @@ OdometryEstimate OdometryObserver::update(
     observation.yaw_rate_radps * observation.yaw_rate_radps *
     imu_acceleration_reference_x;
   const double ay_origin = observation.ay_mps2 - yaw_alpha * imu_acceleration_reference_x;
+  const double prior_body_u_mps = body_u_mps_;
+  const double prior_body_v_mps = body_v_mps_;
 
   const bool turn_mode_at_interval_start = turn_mode_;
   if (!turn_mode_ &&
@@ -744,6 +926,8 @@ OdometryEstimate OdometryObserver::update(
     const bool wheel_recovery = window_wheel_recovery ||
       packet_wheel_recovery || long_interval_wheel_recovery ||
       coherent_burst_recovery;
+    const bool rolling_wheel_recovery = window_wheel_recovery ||
+      coherent_burst_recovery;
     const bool burst_window_catchup =
       wheel_burst_recovery_pending_ && !wheel_recovery &&
       !launch_wheel_spin(speed_mps_) &&
@@ -770,7 +954,7 @@ OdometryEstimate OdometryObserver::update(
       body_u_mps_ = turn_wheel_mapped;
       wheel_update_used = true;
     } else if (wheel_recovery) {
-      body_u_mps_ = window_wheel_recovery ?
+      body_u_mps_ = rolling_wheel_recovery ?
         turn_wheel_mapped : turn_wheel_packet_mapped;
       wheel_dropout_active_ = false;
       wheel_burst_recovery_pending_ = false;
@@ -853,7 +1037,7 @@ OdometryEstimate OdometryObserver::update(
         // interval's IMU acceleration. Otherwise a delayed-encoder burst
         // creates an artificial under-speed step immediately after recovery.
         body_u_mps_ = wheel_recovery ?
-          (window_wheel_recovery ? turn_wheel_mapped : turn_wheel_packet_mapped) :
+          (rolling_wheel_recovery ? turn_wheel_mapped : turn_wheel_packet_mapped) :
           turn_wheel_mapped;
       }
     } else {
@@ -864,6 +1048,36 @@ OdometryEstimate OdometryObserver::update(
       // is allowed here because it uses only causal wheel speed and yaw rate.
       body_v_mps_ = kinematic_base_lateral_velocity(
         observation.yaw_rate_radps, body_u_mps_);
+    }
+    if (wheel_update_used && turn_mode_at_interval_start &&
+      prior_body_u_mps >= config_.turn_wheel_update_start_speed_mps &&
+      observation.ax_mps2 > config_.turn_wheel_update_min_ax_mps2 &&
+      config_.turn_wheel_update_innovation_threshold_mps >= 0.0 &&
+      config_.turn_wheel_update_slip_beta >= 0.0)
+    {
+      // A one-step screen on 64 valid training phases selected this correction
+      // only above 7 m/s. Propagate the prior body state with rigid-body
+      // acceleration, then blend positive wheel innovations with 0.125 wheel
+      // weight. Negative innovations retain the direct encoder correction.
+      double turn_ax = observation.ax_mps2;
+      if (turn_ax < config_.decel_detect_ax_mps2) {
+        turn_ax = config_.decel_ax_scale * turn_ax +
+          config_.decel_ax_offset_mps2;
+      }
+      turn_ax += observation.yaw_rate_radps * observation.yaw_rate_radps *
+        imu_acceleration_reference_x;
+      const double imu_predicted_u = std::max(
+        0.0, prior_body_u_mps +
+        (turn_ax + observation.yaw_rate_radps * prior_body_v_mps) * dt_s);
+      const double positive_wheel_innovation = body_u_mps_ - imu_predicted_u;
+      if (positive_wheel_innovation >
+        config_.turn_wheel_update_innovation_threshold_mps)
+      {
+        const double wheel_beta = std::clamp(
+          config_.turn_wheel_update_slip_beta, 0.0, 1.0);
+        body_u_mps_ = (1.0 - wheel_beta) * imu_predicted_u +
+          wheel_beta * body_u_mps_;
+      }
     }
     const bool coherent_current_packet =
       wheel_update_used && !wheel_burst_rejected_ &&
@@ -962,6 +1176,8 @@ OdometryEstimate OdometryObserver::update(
         (!window_wheel_recovery &&
         (packet_wheel_recovery || long_interval_wheel_recovery ||
         coherent_burst_recovery));
+      const bool rolling_wheel_recovery = window_wheel_recovery ||
+        coherent_burst_recovery;
       const bool burst_window_catchup =
         wheel_burst_recovery_pending_ && !wheel_recovery &&
         !launch_wheel_spin(speed_pred) &&
@@ -984,7 +1200,7 @@ OdometryEstimate OdometryObserver::update(
         config_.wheel_burst_disagreement_mps)) : wheel_recovery);
     if (wheel_ok) {
       if (wheel_recovery) {
-        speed_mps_ = window_wheel_recovery ? wheel_mapped : wheel_packet_mapped;
+          speed_mps_ = rolling_wheel_recovery ? wheel_mapped : wheel_packet_mapped;
         wheel_dropout_active_ = false;
         wheel_burst_recovery_pending_ = false;
         if (!window_wheel_recovery) {
@@ -1011,6 +1227,240 @@ OdometryEstimate OdometryObserver::update(
     pose_body_v_mps = body_v_mps_;
   }
 
+  double high_yaw_published_u_mps = body_u_mps_;
+  bool high_yaw_wheel_slip_replaced_u = false;
+  double learned_u_published_mps = 0.0;
+  bool learned_u_residual_applied = false;
+  if (config_.use_high_yaw_wheel_slip_observer &&
+    config_.high_yaw_wheel_slip_enter_radps > 0.0 &&
+    config_.high_yaw_wheel_slip_exit_radps >= 0.0 &&
+    config_.high_yaw_wheel_slip_exit_radps <
+    config_.high_yaw_wheel_slip_enter_radps &&
+    config_.high_yaw_wheel_slip_exit_hold_s > 0.0 &&
+    config_.high_yaw_wheel_slip_innovation_mps > 0.0)
+  {
+    const double abs_yaw_rate = std::abs(observation.yaw_rate_radps);
+    if (!high_yaw_wheel_slip_active_ &&
+      abs_yaw_rate >= config_.high_yaw_wheel_slip_enter_radps)
+    {
+      high_yaw_wheel_slip_active_ = true;
+      high_yaw_wheel_slip_calm_time_s_ = 0.0;
+      high_yaw_latent_u_mps_ = prior_body_u_mps;
+      high_yaw_latent_v_mps_ = prior_body_v_mps;
+    }
+
+    if (high_yaw_wheel_slip_active_) {
+      high_yaw_wheel_slip_calm_time_s_ =
+        abs_yaw_rate < config_.high_yaw_wheel_slip_exit_radps ?
+        high_yaw_wheel_slip_calm_time_s_ + dt_s : 0.0;
+      if (high_yaw_wheel_slip_calm_time_s_ >=
+        config_.high_yaw_wheel_slip_exit_hold_s)
+      {
+        high_yaw_wheel_slip_active_ = false;
+        high_yaw_wheel_slip_calm_time_s_ = 0.0;
+      } else {
+        // Integrate a private body-frame state using rigid-body equations.
+        // Its lateral component is not promoted to published odometry.
+        const double latent_du = ax_origin +
+          observation.yaw_rate_radps * high_yaw_latent_v_mps_;
+        const double latent_dv = ay_origin -
+          observation.yaw_rate_radps * high_yaw_latent_u_mps_;
+        const double latent_u_mid = high_yaw_latent_u_mps_ +
+          0.5 * dt_s * latent_du;
+        const double latent_v_mid = high_yaw_latent_v_mps_ +
+          0.5 * dt_s * latent_dv;
+        high_yaw_latent_u_mps_ += dt_s * (ax_origin +
+          observation.yaw_rate_radps * latent_v_mid);
+        high_yaw_latent_v_mps_ += dt_s * (ay_origin -
+          observation.yaw_rate_radps * latent_u_mid);
+        high_yaw_latent_u_mps_ = std::clamp(high_yaw_latent_u_mps_, -30.0, 30.0);
+        high_yaw_latent_v_mps_ = std::clamp(high_yaw_latent_v_mps_, -30.0, 30.0);
+
+        if (finite(wheel_mapped) &&
+          wheel_mapped - high_yaw_latent_u_mps_ >
+          config_.high_yaw_wheel_slip_innovation_mps)
+        {
+          high_yaw_published_u_mps = high_yaw_latent_u_mps_;
+          high_yaw_wheel_slip_replaced_u = true;
+        }
+      }
+    }
+  } else {
+    high_yaw_wheel_slip_active_ = false;
+    high_yaw_wheel_slip_calm_time_s_ = 0.0;
+  }
+
+  if (high_yaw_wheel_slip_replaced_u) {
+    // Keep the established odometry v estimator and internal wheel fusion
+    // untouched; use the corrected u only for the published twist and pose.
+    pose_body_u_mps = high_yaw_published_u_mps;
+  }
+
+  bool u_correction_in_supported_region = false;
+  if (actuator_feedback_valid && finite(high_yaw_published_u_mps) &&
+    finite(observation.steering_feedback_rad))
+  {
+    const auto & speed_edges = config_.u_correction_support_speed_edges_mps;
+    const auto upper_edge = std::upper_bound(
+      speed_edges.begin(), speed_edges.end(), high_yaw_published_u_mps);
+    if (upper_edge != speed_edges.begin() && upper_edge != speed_edges.end()) {
+      const std::size_t region = static_cast<std::size_t>(
+        std::distance(speed_edges.begin(), upper_edge) - 1);
+      u_correction_in_supported_region =
+        std::abs(observation.steering_feedback_rad) <=
+        config_.u_correction_support_max_abs_steering_rad[region];
+    }
+  }
+
+  if (config_.use_learned_u_residual_model &&
+    u_correction_in_supported_region &&
+    high_yaw_published_u_mps >= config_.learned_u_residual_min_speed_mps &&
+    high_yaw_published_u_mps < config_.learned_u_residual_max_speed_mps)
+  {
+    const double u = high_yaw_published_u_mps;
+    const double v = body_v_mps_;
+    const double yaw_rate = observation.yaw_rate_radps;
+    const std::array<double, 22> features{
+      u,
+      v,
+      last_wheel_mapped_mps_,
+      last_wheel_packet_mps_,
+      last_pre_wheel_update_speed_mps_,
+      observation.ax_mps2,
+      observation.ay_mps2,
+      yaw_rate,
+      std::abs(yaw_rate),
+      yaw_rate * yaw_rate,
+      u * std::abs(yaw_rate),
+      u * yaw_rate * yaw_rate,
+      observation.ax_mps2 * std::abs(yaw_rate),
+      observation.ay_mps2 * std::abs(yaw_rate),
+      last_wheel_mapped_mps_ - u,
+      last_wheel_packet_mps_ - last_wheel_mapped_mps_,
+      last_pre_wheel_update_speed_mps_ - u,
+      dt_s,
+      turn_mode_ ? 1.0 : 0.0,
+      wheel_update_used ? 1.0 : 0.0,
+      wheel_burst_rejected_ ? 1.0 : 0.0,
+      last_turn_speed_bias_mps_};
+    double residual_mps = config_.learned_u_residual_intercept_mps;
+    for (std::size_t index = 0; index < features.size(); ++index) {
+      residual_mps += config_.learned_u_residual_coefficients[index] * features[index];
+    }
+    // This fit predicts the current published-state residual of the baseline
+    // observer. Do not feed its correction into that observer's latent state:
+    // doing so applies the same residual again on later packets and caused
+    // recursive error growth in held-out replay.
+    learned_u_published_mps = high_yaw_published_u_mps + residual_mps;
+    learned_u_residual_applied = true;
+    pose_body_u_mps = learned_u_published_mps;
+  }
+
+  double unity_actuator_published_u_mps = learned_u_residual_applied ?
+    learned_u_published_mps : high_yaw_published_u_mps;
+  bool unity_actuator_model_applied = false;
+  const double abs_steering = std::abs(observation.steering_feedback_rad);
+  const double high_steer_u_max_speed_mps =
+    observation.throttle_feedback <
+    config_.high_steer_unity_actuator_u_throttle_split ?
+    config_.high_steer_unity_actuator_u_max_speed_low_throttle_mps :
+    config_.high_steer_unity_actuator_u_max_speed_mps;
+  const bool unity_actuator_expert_active =
+    config_.use_unity_actuator_u_experts && actuator_feedback_valid &&
+    u_correction_in_supported_region &&
+    unity_actuator_published_u_mps >= config_.unity_actuator_u_min_speed_mps &&
+    unity_actuator_published_u_mps < config_.unity_actuator_u_max_speed_mps;
+  const bool high_steer_unity_actuator_expert_active =
+    config_.use_high_steer_unity_actuator_u_expert && actuator_feedback_valid &&
+    unity_actuator_published_u_mps >=
+    config_.high_steer_unity_actuator_u_min_speed_mps &&
+    unity_actuator_published_u_mps <= high_steer_u_max_speed_mps &&
+    std::abs(observation.yaw_rate_radps) >=
+    config_.high_steer_unity_actuator_u_min_abs_yaw_rate_radps &&
+    abs_steering > config_.high_steer_unity_actuator_u_min_abs_steering_rad &&
+    abs_steering <= config_.high_steer_unity_actuator_u_max_abs_steering_rad &&
+    observation.throttle_feedback >=
+    config_.high_steer_unity_actuator_u_min_throttle_feedback &&
+    observation.throttle_feedback <=
+    config_.high_steer_unity_actuator_u_max_throttle_feedback;
+  if (unity_actuator_expert_active || high_steer_unity_actuator_expert_active) {
+  const double u = unity_actuator_published_u_mps;
+  const double v = body_v_mps_;
+  const double yaw_rate = observation.yaw_rate_radps;
+  const std::array<double, 34> model_features{
+      u,
+      v,
+      last_wheel_mapped_mps_,
+      last_wheel_packet_mps_,
+      last_pre_wheel_update_speed_mps_,
+      observation.ax_mps2,
+      observation.ay_mps2,
+      yaw_rate,
+      std::abs(yaw_rate),
+      yaw_rate * yaw_rate,
+      u * std::abs(yaw_rate),
+      u * yaw_rate * yaw_rate,
+      observation.ax_mps2 * std::abs(yaw_rate),
+      observation.ay_mps2 * std::abs(yaw_rate),
+      last_wheel_mapped_mps_ - u,
+      last_wheel_packet_mps_ - last_wheel_mapped_mps_,
+      last_pre_wheel_update_speed_mps_ - u,
+      dt_s,
+      turn_mode_ ? 1.0 : 0.0,
+      wheel_update_used ? 1.0 : 0.0,
+      wheel_burst_rejected_ ? 1.0 : 0.0,
+      last_turn_speed_bias_mps_,
+      observation.throttle_feedback == 0.0 ? 0.0 :
+        85.6 * observation.throttle_feedback / 4.0,
+      observation.throttle_feedback == 0.0 ? 85.6 : 0.0,
+      observation.throttle_feedback == 0.0 ? 0.0 :
+        85.6 * throttle_rate_feedback_per_s / 4.0,
+      observation.steering_feedback_rad,
+      steering_rate_feedback_radps,
+      u * u * std::tan(observation.steering_feedback_rad) / 0.324,
+      std::tan(observation.steering_feedback_rad) / 0.324,
+      (observation.throttle_feedback == 0.0 ? 0.0 :
+        85.6 * observation.throttle_feedback / 4.0) *
+        (last_wheel_mapped_mps_ / 0.059),
+      (last_wheel_mapped_mps_ - previous_feature_wheel_mapped_mps) /
+        kUnityPhysicsPacketPeriodS,
+      (last_wheel_mapped_mps_ - previous_feature_wheel_mapped_mps) /
+        kUnityPhysicsPacketPeriodS -
+        (observation.ax_mps2 + 0.15532 * yaw_rate * yaw_rate),
+      (observation.throttle_feedback == 0.0 ? 0.0 :
+        85.6 * observation.throttle_feedback / 4.0) *
+        (last_wheel_mapped_mps_ - u),
+      (u * u * std::tan(observation.steering_feedback_rad) / 0.324) *
+        (last_wheel_mapped_mps_ - u)};
+  if (unity_actuator_expert_active)
+  {
+    const auto & coefficients = observation.throttle_feedback == 0.0 ?
+      config_.unity_zero_throttle_coefficients :
+      config_.unity_nonzero_throttle_coefficients;
+    double correction_mps = observation.throttle_feedback == 0.0 ?
+      config_.unity_zero_throttle_intercept_mps :
+      config_.unity_nonzero_throttle_intercept_mps;
+    for (std::size_t index = 0; index < model_features.size(); ++index) {
+      correction_mps += coefficients[index] * model_features[index];
+    }
+    unity_actuator_published_u_mps += correction_mps;
+    unity_actuator_model_applied = true;
+    pose_body_u_mps = unity_actuator_published_u_mps;
+  }
+
+  if (high_steer_unity_actuator_expert_active)
+  {
+    double correction_mps = config_.high_steer_unity_actuator_u_intercept_mps;
+    for (std::size_t index = 0; index < model_features.size(); ++index) {
+      correction_mps += config_.high_steer_unity_actuator_u_coefficients[index] *
+        model_features[index];
+    }
+    unity_actuator_published_u_mps += correction_mps;
+    unity_actuator_model_applied = true;
+    pose_body_u_mps = unity_actuator_published_u_mps;
+  }
+  }
+
   last_speed_pred_mps_ = speed_pred;
   update_pose(
     dt_s, observation.yaw_rad,
@@ -1027,6 +1477,19 @@ OdometryEstimate OdometryObserver::update(
   auto output = estimate(observation);
   output.dt_s = dt_s;
   output.wheel_update_used = wheel_update_used;
+  if (high_yaw_wheel_slip_replaced_u) {
+    output.body_u_mps = high_yaw_published_u_mps;
+    output.speed_mps = std::hypot(high_yaw_published_u_mps, output.body_v_mps);
+    output.wheel_update_used = false;
+  }
+  if (learned_u_residual_applied) {
+    output.body_u_mps = learned_u_published_mps;
+    output.speed_mps = std::hypot(learned_u_published_mps, output.body_v_mps);
+  }
+  if (unity_actuator_model_applied) {
+    output.body_u_mps = unity_actuator_published_u_mps;
+    output.speed_mps = std::hypot(unity_actuator_published_u_mps, output.body_v_mps);
+  }
   output.timing_degraded = dt_s > config_.normal_packet_dt_max_s;
   return output;
 }

@@ -34,18 +34,6 @@ ROOT = Path(__file__).resolve().parents[3]
 DT_S = 0.025
 MPC_TOPIC = "/mpc/diagnostics"
 COLLISION_TOPIC = "/autodrive/roboracer_1/collision_count"
-YAW_TRANSITION_RESIDUAL_BAND = {
-    "speed_lower_start_mps": 3.40,
-    "speed_lower_full_mps": 3.45,
-    "speed_upper_full_mps": 4.00,
-    "speed_upper_end_mps": 4.05,
-    "steering_lower_start_rad": 0.28,
-    "steering_lower_full_rad": 0.30,
-    "steering_upper_full_rad": 0.42,
-    "steering_upper_end_rad": 0.45,
-}
-
-
 class ModelState(ctypes.Structure):
     _fields_ = [(name, ctypes.c_float) for name in (
         "e_y", "e_psi", "u", "v", "r", "target_speed",
@@ -166,10 +154,53 @@ def _surface_gate(speed: float, steering: float, steering_rate: float) -> float:
     return q_gate * steering_gate * speed_gate * rate_gate
 
 
-def _band_gate(value: float, lower_start: float, lower_full: float,
-               upper_full: float, upper_end: float) -> float:
-    return (_smoothstep(value, lower_start, lower_full)
-            * (1.0 - _smoothstep(value, upper_full, upper_end)))
+def _residual_support_gate(state: ModelState,
+                           model: dict[str, Any]) -> float:
+    """Apply the support rule declared by this offline candidate."""
+    support = model.get("support_gate")
+    if not isinstance(support, dict):
+        raise ValueError("yaw residual candidate lacks its C support_gate")
+
+    kind = support.get("kind")
+    if kind == "smoothstep_speed_abs_steering_v1":
+        gate = _smoothstep(float(state.u), float(support["speed_zero_mps"]),
+                           float(support["speed_full_mps"]))
+    elif kind == "smoothstep_target_tracking_steering_v1":
+        gate = _smoothstep(
+            float(state.target_speed), float(support["target_speed_zero_mps"]),
+            float(support["target_speed_full_mps"]))
+        gate *= 1.0 - _smoothstep(
+            float(state.target_speed - state.u),
+            float(support["speed_deficit_full_mps"]),
+            float(support["speed_deficit_zero_mps"]))
+    else:
+        raise ValueError(f"unsupported yaw residual support gate: {kind}")
+
+    steer_abs = abs(float(state.actual_steering_angle))
+    steer_zero = float(support["abs_steering_zero_rad"])
+    steer_full = float(support["abs_steering_full_rad"])
+    gate *= _smoothstep(steer_abs, steer_zero, steer_full)
+    steer_upper_full = support.get("abs_steering_upper_full_rad")
+    steer_upper_zero = support.get("abs_steering_upper_zero_rad")
+    if steer_upper_zero is not None and float(steer_upper_zero) > 0.0:
+        if steer_upper_full is None:
+            raise ValueError("yaw residual upper steering gate is incomplete")
+        gate *= 1.0 - _smoothstep(
+            steer_abs, float(steer_upper_full), float(steer_upper_zero))
+
+    actual_zero = support.get("actual_speed_zero_mps")
+    actual_upper_zero = support.get("actual_speed_upper_zero_mps")
+    if actual_upper_zero is not None and float(actual_upper_zero) > 0.0:
+        actual_full = support.get("actual_speed_full_mps")
+        actual_upper_full = support.get("actual_speed_upper_full_mps")
+        if actual_zero is None or actual_full is None or actual_upper_full is None:
+            raise ValueError("yaw residual actual-speed gate is incomplete")
+        gate *= _smoothstep(float(state.u), float(actual_zero),
+                            float(actual_full))
+        gate *= 1.0 - _smoothstep(
+            float(state.u), float(actual_upper_full),
+            float(actual_upper_zero))
+    return gate
 
 
 def _residual_features(state: ModelState, control: ModelControl,
@@ -227,7 +258,6 @@ def _merge_config(base_path: Path, overlay_path: Path) -> dict[str, Any]:
 def _score_bag(path: Path, label: str, library: Any,
                candidate_surface: YawResponseSurface,
                residual_model: dict[str, Any] | None = None,
-               residual_band: dict[str, float] | None = None,
                ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         diagnostic_rows = _topic_rows(db, MPC_TOPIC)
@@ -363,30 +393,19 @@ def _score_bag(path: Path, label: str, library: Any,
                 state, control, path_curvature,
                 float(candidate_stage.body_accel_mps2))
             residual_rate = _residual_rate(residual_model, features)
-            residual_gate = 1.0
-            if residual_band is not None:
-                residual_gate = (
-                    _band_gate(speed,
-                               residual_band["speed_lower_start_mps"],
-                               residual_band["speed_lower_full_mps"],
-                               residual_band["speed_upper_full_mps"],
-                               residual_band["speed_upper_end_mps"])
-                    * _band_gate(abs(steering),
-                                 residual_band["steering_lower_start_rad"],
-                                 residual_band["steering_lower_full_rad"],
-                                 residual_band["steering_upper_full_rad"],
-                                 residual_band["steering_upper_end_rad"]))
-            unbounded_yaw = candidate_yaw_next + DT_S * residual_rate
+            residual_gate = _residual_support_gate(state, residual_model)
+            correction = residual_rate * float(residual_model.get("gain", 1.0))
+            unbounded_yaw = candidate_yaw_next + DT_S * correction
             bandlimited_yaw = candidate_yaw_next + (
-                DT_S * residual_rate * residual_gate)
+                DT_S * correction * residual_gate)
             sample.update({
                 "yaw_residual_rate_radps2": residual_rate,
-                "yaw_residual_band_gate": residual_gate,
-                "y1_plus_residual_unbounded_yaw_next_radps": unbounded_yaw,
-                "y1_plus_residual_unbounded_error_radps": (
+                "yaw_residual_support_gate": residual_gate,
+                "y1_plus_residual_ungated_yaw_next_radps": unbounded_yaw,
+                "y1_plus_residual_ungated_error_radps": (
                     unbounded_yaw - truth_yaw_next),
-                "y1_plus_residual_bandlimited_yaw_next_radps": bandlimited_yaw,
-                "y1_plus_residual_bandlimited_error_radps": (
+                "y1_plus_residual_supported_yaw_next_radps": bandlimited_yaw,
+                "y1_plus_residual_supported_error_radps": (
                     bandlimited_yaw - truth_yaw_next),
             })
         samples.append(sample)
@@ -399,10 +418,17 @@ def _score_bag(path: Path, label: str, library: Any,
         "supported_high_steering": select(lambda sample:
             2.40 <= sample["speed_mps"] <= 3.60
             and 0.30 <= abs(sample["steering_rad"]) <= 0.45),
-        "yaw_transition_band": select(lambda sample:
-            sample.get("yaw_residual_band_gate", 0.0) >= 0.05),
-        "outside_yaw_transition_band": select(lambda sample:
-            sample.get("yaw_residual_band_gate", 0.0) < 0.05),
+        "target_low_mid_steer_regime": select(lambda sample:
+            3.30 <= sample["speed_mps"] <= 4.60
+            and 0.12 <= abs(sample["steering_rad"]) <= 0.26),
+        "target_regime_with_turn_rate": select(lambda sample:
+            3.30 <= sample["speed_mps"] <= 4.60
+            and 0.12 <= abs(sample["steering_rad"]) <= 0.26
+            and abs(sample["truth_yaw_next_radps"]) >= 1.0),
+        "yaw_residual_support": select(lambda sample:
+            sample.get("yaw_residual_support_gate", 0.0) >= 0.05),
+        "outside_yaw_residual_support": select(lambda sample:
+            sample.get("yaw_residual_support_gate", 0.0) < 0.05),
         "candidate_materially_active": select(lambda sample:
             sample["surface_gate"] >= 0.05),
         "below_0p30_rad": select(lambda sample:
@@ -440,14 +466,14 @@ def _score_bag(path: Path, label: str, library: Any,
                     np.asarray([row["candidate_yaw_next_radps"] for row in group]),
                     np.asarray([row["truth_yaw_next_radps"] for row in group])),
                 **({
-                    "y1_plus_residual_unbounded": _metrics(
+                    "y1_plus_residual_ungated": _metrics(
                         np.asarray([row[
-                            "y1_plus_residual_unbounded_yaw_next_radps"]
+                            "y1_plus_residual_ungated_yaw_next_radps"]
                             for row in group]),
                         np.asarray([row["truth_yaw_next_radps"] for row in group])),
-                    "y1_plus_residual_bandlimited": _metrics(
+                    "y1_plus_residual_supported": _metrics(
                         np.asarray([row[
-                            "y1_plus_residual_bandlimited_yaw_next_radps"]
+                            "y1_plus_residual_supported_yaw_next_radps"]
                             for row in group]),
                         np.asarray([row["truth_yaw_next_radps"] for row in group])),
                 } if residual_model is not None else {}),
@@ -491,13 +517,11 @@ def main() -> int:
         raise ValueError("practice bag labels must be unique")
 
     residual_model = None
-    residual_band = None
     if args.residual_model is not None:
         residual_path = args.residual_model.resolve()
         residual_model = json.loads(residual_path.read_text(encoding="utf-8"))
         if residual_model.get("sample_period_s") != DT_S:
             raise ValueError("yaw residual sample period does not match fixed 25 ms")
-        residual_band = dict(YAW_TRANSITION_RESIDUAL_BAND)
 
     merged_config = _merge_config(args.base_config.resolve(),
                                   args.overlay_config.resolve())
@@ -520,7 +544,7 @@ def main() -> int:
         for label, bag_path in bags:
             report, samples = _score_bag(
                 bag_path, label, library, candidate_surface,
-                residual_model, residual_band)
+                residual_model)
             reports.append(report)
             all_samples.extend(samples)
 
@@ -529,11 +553,18 @@ def main() -> int:
         "supported_high_steering": lambda row: (
             2.40 <= row["speed_mps"] <= 3.60
             and 0.30 <= abs(row["steering_rad"]) <= 0.45),
+        "target_low_mid_steer_regime": lambda row: (
+            3.30 <= row["speed_mps"] <= 4.60
+            and 0.12 <= abs(row["steering_rad"]) <= 0.26),
+        "target_regime_with_turn_rate": lambda row: (
+            3.30 <= row["speed_mps"] <= 4.60
+            and 0.12 <= abs(row["steering_rad"]) <= 0.26
+            and abs(row["truth_yaw_next_radps"]) >= 1.0),
         "candidate_materially_active": lambda row: row["surface_gate"] >= 0.05,
-        "yaw_transition_band": lambda row: (
-            row.get("yaw_residual_band_gate", 0.0) >= 0.05),
-        "outside_yaw_transition_band": lambda row: (
-            row.get("yaw_residual_band_gate", 0.0) < 0.05),
+        "yaw_residual_support": lambda row: (
+            row.get("yaw_residual_support_gate", 0.0) >= 0.05),
+        "outside_yaw_residual_support": lambda row: (
+            row.get("yaw_residual_support_gate", 0.0) < 0.05),
     }
     macro: dict[str, Any] = {}
     for name, predicate in groups.items():
@@ -552,10 +583,10 @@ def main() -> int:
                 }
                 if residual_model is not None:
                     for prediction_name, output_name in (
-                        ("unbounded_residual_rmse_radps",
-                         "y1_plus_residual_unbounded_yaw_next_radps"),
-                        ("bandlimited_residual_rmse_radps",
-                         "y1_plus_residual_bandlimited_yaw_next_radps"),
+                        ("ungated_residual_rmse_radps",
+                         "y1_plus_residual_ungated_yaw_next_radps"),
+                        ("supported_residual_rmse_radps",
+                         "y1_plus_residual_supported_yaw_next_radps"),
                     ):
                         per_run_row[prediction_name] = _metrics(
                             np.asarray([row[output_name] for row in group]),
@@ -582,7 +613,9 @@ def main() -> int:
         "yaw_residual_model_sha256": (
             None if args.residual_model is None else
             hashlib.sha256(args.residual_model.resolve().read_bytes()).hexdigest()),
-        "yaw_residual_band": residual_band,
+        "yaw_residual_support_gate": (
+            None if residual_model is None else
+            residual_model.get("support_gate")),
         "runs": reports,
         "macro_by_run": macro,
         "limitations": [

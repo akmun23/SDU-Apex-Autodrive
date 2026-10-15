@@ -1,0 +1,88 @@
+limits:
+  min_body_speed_mps: 0.8
+  max_body_speed_mps: 7.5
+  max_heading_error_rad: 0.75
+
+track:
+  prep_smoothing_s: 6.0
+  extra_wall_clearance_m: 0.10
+  optimizer_geometry_buffer_m: 0.03
+  heading_aware_physical_footprint: true
+  export_optimizer_nodes: true
+  export_spacing_m: 0.02
+
+# Preserve the existing runtime scalar speed-shaping cap. It is not treated
+# as a measured tire-force envelope or scaled upward in this candidate.
+lateral_envelope:
+  scale: 1.0
+
+lateral_dynamics:
+  use_odometry_lateral_velocity: true
+
+combined_acceleration:
+  enabled: true
+  exponent: 2.0
+
+vehicle_model_overrides:
+  yaw_gain_reduction_per_rad: 35.6
+  yaw_gain_start_rad: 0.41
+  yaw_gain_end_rad: 0.46
+  yaw_surface_enabled: true
+  yaw_surface_response_scale: 1.0
+  yaw_surface_csv: live_runs/raceline_candidates/highspeed_yaw_surface_supportgate_v01_20261006/yaw_response_surface_combined.csv
+  yaw_surface_blend_q_start: 0.78
+  yaw_surface_blend_q_end: 0.90
+  yaw_surface_speed_blend_margin_mps: 0.10
+  yaw_surface_low_speed_blend_margin_mps: 0.60
+  yaw_surface_low_speed_support_fadeout_mps: 0.0
+  yaw_surface_high_speed_support_fadein_mps: 0.0
+  # The high-speed table is demand-conditioned; do not inherit the Y1-only
+  # steering gate, which makes the table inactive below 0.29 rad.
+  yaw_surface_steering_blend_start_rad: 0.0
+  yaw_surface_steering_blend_full_start_rad: 0.0
+  yaw_surface_steering_blend_full_end_rad: 0.0
+  yaw_surface_steering_blend_end_rad: 0.0
+
+optimizer_constraints:
+  max_steering_rad: 0.42
+  max_steering_rate_radps: 3.2
+
+solver:
+  mesh_schedule_m: [0.25, 0.18]
+  # Rebuild the full-state warm guess with this model; prior solution nodes
+  # came from a different yaw surface and proved a poor primal start.
+  coarse_multistart: [warm, "wave:1.57079632679", right, center]
+  stop_after_first_coarse_success: true
+  refinement_starts: [previous]
+  stop_after_first_refinement_success: true
+  allow_best_coarse_fallback: false
+  coarse_max_iter: 2000
+  refinement_max_iter: 1400
+  tol: 1.0e-7
+  acceptable_tol: 1.0e-5
+  acceptable_constr_viol_tol: 1.0e-4
+  acceptable_iter: 15
+  print_level: 0
+  expand: true
+  mu_strategy: adaptive
+  linear_solver: mumps
+  yaw_lag_exact_fraction: 1.0
+
+scaling:
+  ey_m: 0.5
+  epsi_rad: 0.5
+  u_mps: 10.0
+  r_radps: 10.0
+  target_mps: 10.0
+  delta_rad: 0.5
+  qdelta_radps: 3.2
+  qv_mps2: 8.0
+
+regularization:
+  steering_rate: 1.0e-5
+  target_speed_rate: 1.0e-6
+  heading_error: 1.0e-6
+
+numerics:
+  min_progress_mps: 0.30
+  min_frenet_denominator: 0.25

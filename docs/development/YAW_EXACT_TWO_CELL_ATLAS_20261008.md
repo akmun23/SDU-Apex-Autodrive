@@ -251,7 +251,8 @@ Adding IMU roll and roll rate instead gives reversal CV RMSE 0.172 versus 0.168 
 Simulator-truth body-motion information was also tested only as an
 offline diagnostic, never as a predictor input. On the independent
 packet-phase validation capture, adding GT body u/v did not improve
-reversal RMSE (0.142→0.150 rad/s) or unwind RMSE (0.111→0.107 rad/s). Thus wheel/body speed mismatch and roll are not established as the missing universal cause. The best-supported explanation so far is a transition-phase/steering-response mismatch, with an incomplete causal event router; it is not yet a fully solved physical law.
+reversal RM
+SE (0.142→0.150 rad/s) or unwind RMSE (0.111→0.107 rad/s). Thus wheel/body speed mismatch and roll are not established as the missing universal cause. The best-supported explanation so far is a transition-phase/steering-response mismatch, with an incomplete causal event router; it is not yet a fully solved physical law.
 
 ## Coverage and angle-error interpretation
 

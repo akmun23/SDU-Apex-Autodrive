@@ -35,11 +35,24 @@ def main() -> int:
                         help="Existing raceline CSV used only as an IPOPT initial guess.")
     parser.add_argument("--warm-solution-nodes", type=Path, default=None,
                         help="Prior optimizer solution_nodes.csv used as a full-state initial guess.")
+    parser.add_argument(
+        "--coarse-start", action="append", default=None,
+        help=("Override coarse_multistart. Repeat for ordered starts; "
+              "supported modes include warm, solution_nodes, center, left, right, and wave:<phase>.")
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--yaw-lag-exact-fraction", type=float, default=None,
                         help="Offline transcription continuation: 0=trapezoidal, 1=exact first-order yaw lag.")
     parser.add_argument("--yaw-surface-response-scale", type=float, default=None,
                         help="Offline continuation scale for the empirical yaw residual, in [0, 1].")
+    parser.add_argument("--yaw-surface-hold-time-constant-s", type=float, default=None,
+                        help="Override the measured hold-state tau for staged offline continuation.")
+    parser.add_argument("--lateral-envelope-scale", type=float, default=None,
+                        help="Scale the configured lateral capability envelope for a controlled search trial.")
+    parser.add_argument("--steering-robustness-weight", type=float, default=None,
+                        help="Override the steering-sensitivity cost weight; 0 disables that cost.")
+    parser.add_argument("--disable-yaw-phase-response", action="store_true",
+                        help="Use the repository MPC yaw-transition parameters without optimizer-only phase taus.")
     parser.add_argument("--empirical-curvature-envelope", type=Path, default=None,
                         help="Use the whole-run-train sustained-curvature envelope CSV.")
     parser.add_argument("--yaw-residual-candidate", type=Path, default=None,
@@ -90,6 +103,25 @@ def main() -> int:
                     f"optimizer bundle ({tool_root}) or repository ({root})"
                 )
     cfg = load_yaml(config_path)
+    if args.coarse_start is not None:
+        cfg.setdefault("solver", {})["coarse_multistart"] = args.coarse_start
+    if args.disable_yaw_phase_response:
+        cfg.pop("yaw_phase_response", None)
+    if args.lateral_envelope_scale is not None:
+        if not (0.0 < args.lateral_envelope_scale < float("inf")):
+            parser.error("--lateral-envelope-scale must be finite and positive")
+        cfg.setdefault("lateral_envelope", {})["scale"] = (
+            args.lateral_envelope_scale)
+    if args.steering_robustness_weight is not None:
+        if not (0.0 <= args.steering_robustness_weight < float("inf")):
+            parser.error("--steering-robustness-weight must be finite and nonnegative")
+        robustness = cfg.setdefault("steering_robustness", {})
+        robustness.setdefault("enabled", True)
+        robustness.setdefault("perturbation_rad", 0.04)
+        robustness["yaw_response_weight_s_per_radps2"] = (
+            args.steering_robustness_weight)
+        if args.steering_robustness_weight == 0.0:
+            robustness["enabled"] = False
     vehicle_model_overlay_path = None
     vehicle_model_overlay_sha256 = None
     if args.vehicle_model_overlay is not None:
@@ -120,6 +152,13 @@ def main() -> int:
     if args.yaw_surface_response_scale is not None:
         cfg.setdefault("vehicle_model_overrides", {})[
             "yaw_surface_response_scale"] = args.yaw_surface_response_scale
+    if args.yaw_surface_hold_time_constant_s is not None:
+        model_overrides = cfg.setdefault("vehicle_model_overrides", {})
+        model_overrides["yaw_surface_hold_time_constant_s"] = (
+            args.yaw_surface_hold_time_constant_s)
+        if args.yaw_surface_hold_time_constant_s == 0.0:
+            model_overrides["yaw_surface_hold_rate_full_radps"] = 0.0
+            model_overrides["yaw_surface_hold_rate_zero_radps"] = 0.0
     if args.empirical_curvature_envelope is not None:
         envelope_path = args.empirical_curvature_envelope.resolve()
         try:

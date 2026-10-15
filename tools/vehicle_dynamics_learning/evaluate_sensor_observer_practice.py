@@ -189,6 +189,71 @@ def _metric_rows(error: np.ndarray) -> dict[str, Any]:
             "p95_abs": np.quantile(np.abs(error), 0.95, axis=0).tolist()}
 
 
+def _integrated_motion_metrics(states: np.ndarray, truth: np.ndarray,
+                              samples: list[body.MotionSample],
+                              score_steps: int) -> dict[str, Any]:
+    """Compare short unanchored body-twist integration within each score window."""
+    if len(samples) != len(states) or len(states) % score_steps:
+        raise ValueError("integrated-motion inputs do not align to score windows")
+    window_count = len(states) // score_steps
+    state_windows = states.reshape(window_count, score_steps, 3).astype(np.float64)
+    truth_windows = truth.reshape(window_count, score_steps, 3).astype(np.float64)
+    pose_rows = [sample.simulator_pose_xyyaw for sample in samples]
+    if any(value is None or not np.isfinite(value).all() for value in pose_rows):
+        raise ValueError("simulator truth pose is missing from a scored sample")
+    poses = np.stack(pose_rows).reshape(window_count, score_steps, 3)
+    dt = np.stack([
+        np.r_[0.0, np.diff([
+            sample.time_s for sample in samples[i * score_steps:(i + 1) * score_steps]
+        ])]
+        for i in range(window_count)
+    ])
+    if np.any(dt[:, 1:] <= 0.0) or np.any(dt[:, 1:] > 0.075):
+        raise ValueError("scored motion window contains a non-causal time gap")
+
+    estimated_xy = np.zeros((window_count, score_steps, 2), dtype=np.float64)
+    estimated_yaw = np.repeat(poses[:, :1, 2], score_steps, axis=1)
+    truth_xy = poses[:, :, :2] - poses[:, :1, :2]
+    truth_yaw = np.arctan2(
+        np.sin(poses[:, :, 2] - poses[:, :1, 2]),
+        np.cos(poses[:, :, 2] - poses[:, :1, 2]))
+    for index in range(1, score_steps):
+        u = 0.5 * (state_windows[:, index - 1, 0] + state_windows[:, index, 0])
+        v = 0.5 * (state_windows[:, index - 1, 1] + state_windows[:, index, 1])
+        r = 0.5 * (state_windows[:, index - 1, 2] + state_windows[:, index, 2])
+        step_dt = dt[:, index]
+        mid_yaw = estimated_yaw[:, index - 1] + 0.5 * r * step_dt
+        estimated_xy[:, index, 0] = estimated_xy[:, index - 1, 0] + (
+            u * np.cos(mid_yaw) - v * np.sin(mid_yaw)) * step_dt
+        estimated_xy[:, index, 1] = estimated_xy[:, index - 1, 1] + (
+            u * np.sin(mid_yaw) + v * np.cos(mid_yaw)) * step_dt
+        estimated_yaw[:, index] = estimated_yaw[:, index - 1] + r * step_dt
+
+    position_error = estimated_xy - truth_xy
+    estimated_yaw_relative = np.arctan2(
+        np.sin(estimated_yaw - poses[:, :1, 2]),
+        np.cos(estimated_yaw - poses[:, :1, 2]))
+    yaw_error = np.arctan2(np.sin(estimated_yaw_relative - truth_yaw),
+                           np.cos(estimated_yaw_relative - truth_yaw))
+    endpoint = np.linalg.norm(position_error[:, -1], axis=1)
+    return {
+        "windows": window_count,
+        "window_duration_s_median": float(np.median(np.sum(dt[:, 1:], axis=1))),
+        "truth_reset_relative_position_rmse_m": float(np.sqrt(
+            np.mean(np.sum(position_error ** 2, axis=2)))),
+        "truth_reset_relative_position_endpoint_rmse_m": float(np.sqrt(
+            np.mean(endpoint ** 2))),
+        "truth_reset_relative_position_endpoint_p95_m": float(
+            np.quantile(endpoint, 0.95)),
+        "integrated_relative_yaw_rmse_rad": float(np.sqrt(np.mean(yaw_error ** 2))),
+        "integrated_relative_yaw_p95_abs_rad": float(np.quantile(
+            np.abs(yaw_error), 0.95)),
+        "initial_pose_policy": "truth pose used only to set each window's origin and heading",
+        "yaw_source_policy": "gyro yaw-rate is passed through unchanged",
+        "truth_pose_source": "packet-aligned simulator pose, offline label only",
+    }
+
+
 def _score_arrays(capture: body.Capture, start_ns: int, end_ns: int,
                   odom_rows: list[tuple[int, np.ndarray]],
                   burn_in: int, score_steps: int):
@@ -266,7 +331,10 @@ def _score_arrays(capture: body.Capture, start_ns: int, end_ns: int,
 
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
-    quality = _receipt_gates(args.bag)
+    expected_laps = getattr(args, "expected_laps", 12)
+    quality = _receipt_gates(
+        args.bag, expected_laps=expected_laps,
+        allow_post_run_disconnect=(expected_laps == 12))
     capture = body.load_capture(args.bag)
     checkpoint_payload = None
     report = json.loads(args.training_report.read_text(encoding="utf-8"))
@@ -294,7 +362,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     odom_rows = _load_team_odom(args.bag)
     burn_in, score_steps = WINDOW_STEPS
     arrays = _score_arrays(capture, quality["active_start_receipt_ns"],
-                           quality["lap12_receipt_ns"], odom_rows,
+                           quality[f"lap{expected_laps}_receipt_ns"], odom_rows,
                            burn_in, score_steps)
     (x, y, score_samples, team_values, team_offsets,
      invalid_sensor_samples, unscored_samples) = arrays
@@ -322,6 +390,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
 
     matched = np.isfinite(team_values).all(axis=1)
     production_error = (team_values[matched] - truth[matched])
+    observer_motion = _integrated_motion_metrics(
+        observer, truth, score_samples, score_steps)
+    production_motion = _integrated_motion_metrics(
+        team_values, truth, score_samples, score_steps)
     by_lap = {}
     lap_ids = np.asarray([sample.lap_count for sample in score_samples], dtype=object)
     for lap in sorted({value for value in lap_ids if value is not None}):
@@ -379,6 +451,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "observer_rmse_u_v_r": _metric_rows(observer_error),
         "encoder_zero_v_gyro_baseline_rmse_u_v_r": _metric_rows(baseline_error),
         "production_odom_rmse_u_v_r": _metric_rows(production_error),
+        "truth_reset_relative_motion": {
+            "observer": observer_motion,
+            "recorded_production_odom": production_motion,
+        },
         "operating_regions": regimes,
         "lapwise": by_lap,
         "interpretation": (
@@ -400,12 +476,13 @@ def main() -> int:
     parser.add_argument("--training-report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--expected-laps", type=int, default=12)
     args = parser.parse_args()
     result = evaluate(args)
     print(json.dumps({key: result[key] for key in (
         "bag", "quality_gate", "data", "observer_rmse_u_v_r",
         "encoder_zero_v_gyro_baseline_rmse_u_v_r", "production_odom_rmse_u_v_r",
-        "operating_regions")}, indent=2, sort_keys=True))
+        "truth_reset_relative_motion", "operating_regions")}, indent=2, sort_keys=True))
     return 0
 
 

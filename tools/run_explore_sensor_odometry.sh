@@ -7,6 +7,22 @@ source "${repo_root}/tools/docker_env.sh"
 image="${SDU_APEX_IMAGE:-sdu-apex-autodrive:practice-lowfade060-20261006}"
 container="${SDU_APEX_ODOM_SIDECAR_CONTAINER:-sdu_apex_explore_sensor_odometry}"
 domain_id="${SDU_APEX_EXPERIMENT_DOMAIN_ID:-${ROS_DOMAIN_ID:-61}}"
+odom_parameter_args=(
+  --params-file /workspace/src/f1tenth_localization/config/sensor_odometry.yaml
+)
+if [[ -n "${SDU_APEX_ODOM_PARAMETER_OVERLAY:-}" ]]; then
+  overlay_path="$(realpath -- "${SDU_APEX_ODOM_PARAMETER_OVERLAY}")"
+  case "${overlay_path}" in
+    "${repo_root}"/*) ;;
+    *) echo "Odom parameter overlay must be inside the workspace." >&2; exit 2 ;;
+  esac
+  if [[ ! -s "${overlay_path}" ]]; then
+    echo "Odom parameter overlay is missing or empty: ${overlay_path}" >&2
+    exit 2
+  fi
+  overlay_relative="${overlay_path#"${repo_root}"/}"
+  odom_parameter_args+=(--params-file "/workspace/src/${overlay_relative}")
+fi
 
 if ! docker image inspect "${image}" >/dev/null 2>&1; then
   echo "Odometry sidecar image is not available locally: ${image}" >&2
@@ -30,7 +46,7 @@ exec docker run --rm --name "${container}" \
   --entrypoint /bin/bash \
   "${image}" /workspace/src/docker/development_entrypoint.sh \
   ros2 run f1tenth_localization sensor_odometry_node --ros-args \
-    --params-file /workspace/src/f1tenth_localization/config/sensor_odometry.yaml \
+    "${odom_parameter_args[@]}" \
     -p odom_topic:=/explore_sensor_odom \
     -p diagnostics_topic:=/explore_sensor_odom/diagnostics \
     -p publish_tf:=false
