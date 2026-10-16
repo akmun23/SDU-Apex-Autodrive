@@ -149,7 +149,8 @@ def _active_stream_stats(times_by_topic: dict[str, array],
     return result
 
 
-def analyze(bag: Path, output: Path) -> dict[str, Any]:
+def analyze(bag: Path, output: Path, *, allow_partial: bool = False
+            ) -> dict[str, Any]:
     if not bag.is_file():
         raise ValueError(f"bag does not exist: {bag}")
     connection = sqlite3.connect(bag.resolve().as_uri() + "?mode=ro", uri=True)
@@ -161,7 +162,10 @@ def analyze(bag: Path, output: Path) -> dict[str, Any]:
             raise ValueError("missing bag topics: " + ", ".join(missing))
         starts, ends, stimuli, reset_events, experiment_end = _decode_events(
             connection, topics)
-        if experiment_end.get("profile") != "throttle_transition_surface":
+        observed_profile = experiment_end.get("profile")
+        if observed_profile is None and allow_partial and starts:
+            observed_profile = next(iter(starts.values()))[1].get("profile")
+        if observed_profile != "throttle_transition_surface":
             raise ValueError("bag is not a throttle_transition_surface capture")
 
         throttle_times, throttle_values = _load_scalar(
@@ -334,6 +338,13 @@ def analyze(bag: Path, output: Path) -> dict[str, Any]:
 
     steering_angles = [float(value) for value in
                        experiment_end.get("steering_angles_rad", [])]
+    if not steering_angles and allow_partial and starts:
+        steering_angles = sorted({
+            float(start.get("steering_command_rad", math.nan))
+            for _, start in starts.values()
+        })
+        steering_angles = [value for value in steering_angles
+                           if math.isfinite(value)]
     design = experiment_end.get("design", {})
     scheduled = design.get("scheduled_conditions") if design else None
     if scheduled is not None:
@@ -444,6 +455,8 @@ def analyze(bag: Path, output: Path) -> dict[str, Any]:
     )
     summary = {
         "profile": "throttle_transition_surface",
+        "capture_status": (
+            "closed" if experiment_end else "partial_experiment_end_missing"),
         "bag": str(bag.resolve()),
         "passed_integrity_gates": passed,
         "experiment_end": experiment_end,
@@ -516,10 +529,14 @@ def main() -> int:
     parser.add_argument("bag", type=Path, help="closed rosbag2 run_0.db3")
     parser.add_argument("--output", type=Path,
                         help="summary path (default: beside the bag)")
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help=("analyze completed phases when the run stopped before its "
+              "experiment_end event; integrity status remains failed"))
     args = parser.parse_args()
     output = args.output or args.bag.parent.parent / "throttle_transition_analysis.json"
     try:
-        summary = analyze(args.bag, output)
+        summary = analyze(args.bag, output, allow_partial=args.allow_partial)
     except (OSError, ValueError, sqlite3.Error) as exc:
         parser.error(str(exc))
     print(json.dumps({

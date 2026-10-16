@@ -18,6 +18,11 @@ import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
 
+from tools.vehicle_dynamics_learning.unity_vehicle_mechanics import (
+    WHEEL_COLLIDER_TRANSFORM_POSITION_BODY_M,
+    WHEEL_COLLIDER_TRANSFORM_ROTATION_BODY_XYZW,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 TRAIN = ROOT / (
@@ -40,15 +45,9 @@ SERIALIZED_SPRING_NPM = 500.0
 SERIALIZED_DAMPER_NSPM = 100.0
 DERIVATIVE_WINDOW = 11
 GROUND_PLANE_Y_M = 0.0
-WHEEL_TRANSFORM = {
-    # Local transforms from Assets/Prefabs/F1TENTH/F1TENTH.prefab.
-    "fl": ((-0.118, 0.06, 0.17), (0.0, 0.0, -math.sin(math.radians(2.5)),
-                                  math.cos(math.radians(2.5)))),
-    "fr": ((0.118, 0.06, 0.17), (0.0, 0.0, math.sin(math.radians(2.5)),
-                                 math.cos(math.radians(2.5)))),
-    "rl": ((-0.118, 0.05, -0.16), (0.0, 0.0, 0.0, 1.0)),
-    "rr": ((0.118, 0.05, -0.16), (0.0, 0.0, 0.0, 1.0)),
-}
+WHEEL_TRANSFORM = dict(zip(
+    WHEELS, zip(WHEEL_COLLIDER_TRANSFORM_POSITION_BODY_M,
+                WHEEL_COLLIDER_TRANSFORM_ROTATION_BODY_XYZW)))
 
 
 def _rotate_vector(quaternion: tuple[float, float, float, float],

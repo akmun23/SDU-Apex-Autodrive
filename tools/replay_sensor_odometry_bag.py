@@ -102,6 +102,7 @@ def _verify_image_sources(image: str, repo_root: Path,
 def _container_script(integrate_lateral_acceleration_in_turn: bool = False,
                       wheel_burst_catchup_accel_mps2: float | None = None,
                       wheel_speed_window_s: float | None = None,
+                      wheel_update_beta: float | None = None,
                       turn_current_packet_max_decrease_mps: float | None = None,
                       turn_speed_bias_yaw_rate_abs_mps: float | None = None,
                       turn_speed_bias_max_mps: float | None = None,
@@ -137,6 +138,10 @@ def _container_script(integrate_lateral_acceleration_in_turn: bool = False,
         "  -p wheel_speed_window_s:="
         f"{float(wheel_speed_window_s)!r} \\\n"
         if wheel_speed_window_s is not None else "")
+    wheel_update_override = (
+        "  -p wheel_update_beta:="
+        f"{float(wheel_update_beta)!r} \\\n"
+        if wheel_update_beta is not None else "")
     decel_model_override = ""
     if decel_ax_scale is not None:
         decel_model_override += (
@@ -318,7 +323,7 @@ trap cleanup EXIT
   --ros-args --params-file /tmp/sensor_odometry.yaml \\
   -p publish_tf:=false -p odom_topic:=/replayed_odom \\
   -p diagnostics_topic:=/replayed_odom_diagnostics \\
-{lateral_override}{catchup_override}{wheel_window_override}{decel_model_override}{turn_packet_decrease_override}{turn_bias_override}{turn_slip_fade_override}{lateral_gate_override}{pose_velocity_override}{pose_blend_override}{high_yaw_slip_override}{lateral_velocity_model_override}{learned_u_residual_override}{unity_actuator_u_override}{unity_actuator_u_disable_override}{high_steer_u_override}  >/results/observer.log 2>&1 &
+{lateral_override}{catchup_override}{wheel_window_override}{wheel_update_override}{decel_model_override}{turn_packet_decrease_override}{turn_bias_override}{turn_slip_fade_override}{lateral_gate_override}{pose_velocity_override}{pose_blend_override}{high_yaw_slip_override}{lateral_velocity_model_override}{learned_u_residual_override}{unity_actuator_u_override}{unity_actuator_u_disable_override}{high_steer_u_override}  >/results/observer.log 2>&1 &
 node_pid=$!
 sleep 2
 if ! kill -0 "$node_pid" 2>/dev/null; then
@@ -474,6 +479,7 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
            disable_unity_actuator_u_experts: bool = False,
            high_steer_u_model_path: Path | None = None,
            high_steer_u_gain_scale: float = 1.0,
+           wheel_update_beta: float | None = None,
            ) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     bag = bag.resolve()
@@ -611,6 +617,10 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
     if (wheel_speed_window_s is not None and
             (not math.isfinite(wheel_speed_window_s) or wheel_speed_window_s < 0.0)):
         raise ValueError("wheel speed window must be finite and nonnegative")
+    if (wheel_update_beta is not None and
+            (not math.isfinite(wheel_update_beta) or
+             not 0.0 <= wheel_update_beta <= 1.0)):
+        raise ValueError("wheel update beta must be finite and in [0, 1]")
     if any(value is not None and not math.isfinite(value)
            for value in (decel_ax_scale, decel_ax_offset_mps2)):
         raise ValueError("deceleration model overrides must be finite")
@@ -691,6 +701,9 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
     if wheel_speed_window_s is not None:
         print("Offline-only encoder-window override: "
               f"wheel_speed_window_s={wheel_speed_window_s:g} s", flush=True)
+    if wheel_update_beta is not None:
+        print("Offline-only wheel-fusion override: "
+              f"wheel_update_beta={wheel_update_beta:g}", flush=True)
     if decel_ax_scale is not None or decel_ax_offset_mps2 is not None:
         print("Offline-only deceleration-model override: "
               f"scale={decel_ax_scale}, offset={decel_ax_offset_mps2} m/s^2",
@@ -739,6 +752,7 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
         integrate_lateral_acceleration_in_turn=integrate_lateral_acceleration_in_turn,
         wheel_burst_catchup_accel_mps2=wheel_burst_catchup_accel_mps2,
         wheel_speed_window_s=wheel_speed_window_s,
+        wheel_update_beta=wheel_update_beta,
         decel_ax_scale=decel_ax_scale,
         decel_ax_offset_mps2=decel_ax_offset_mps2,
         turn_current_packet_max_decrease_mps=turn_current_packet_max_decrease_mps,
@@ -781,6 +795,7 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
     elif (integrate_lateral_acceleration_in_turn or
             wheel_burst_catchup_accel_mps2 is not None or
             wheel_speed_window_s is not None or
+            wheel_update_beta is not None or
             decel_ax_scale is not None or decel_ax_offset_mps2 is not None or
             turn_current_packet_max_decrease_mps is not None or
             turn_speed_bias_yaw_rate_abs_mps is not None or
@@ -833,6 +848,8 @@ def replay(bag: Path, output_dir: Path, image: str, rate: float,
                if wheel_burst_catchup_accel_mps2 is not None else {}),
             **({"wheel_speed_window_s": wheel_speed_window_s}
                if wheel_speed_window_s is not None else {}),
+            **({"wheel_update_beta": wheel_update_beta}
+               if wheel_update_beta is not None else {}),
             **({"decel_ax_scale": decel_ax_scale}
                if decel_ax_scale is not None else {}),
             **({"decel_ax_offset_mps2": decel_ax_offset_mps2}
@@ -932,6 +949,8 @@ def main() -> int:
                         help="offline-only parameter override for controlled burst-recovery replay")
     parser.add_argument("--wheel-speed-window-s", type=float,
                         help="offline-only encoder-angle window override for an Odom replay")
+    parser.add_argument("--wheel-update-beta", type=float,
+                        help="offline-only straight-speed wheel/IMU fusion override in [0, 1]")
     parser.add_argument("--decel-ax-scale", type=float,
                         help="offline-only longitudinal deceleration scale override")
     parser.add_argument("--decel-ax-offset-mps2", type=float,
@@ -1046,7 +1065,8 @@ def main() -> int:
                args.unity_actuator_feedback_settle_delay_ms,
                args.disable_unity_actuator_u_experts,
                args.high_steer_u_model_json,
-               args.high_steer_u_gain_scale)
+               args.high_steer_u_gain_scale,
+               args.wheel_update_beta)
     except (OSError, ValueError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         parser.exit(2, f"sensor-odometry replay failed: {exc}\n")
     return 0

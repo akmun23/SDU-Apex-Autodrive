@@ -836,17 +836,17 @@ class VehicleModel:
                 self.yaw_low_speed_response_time_constant_s - base_tau
             ) * math.exp(-max(speed, 0.0) /
                          self.yaw_low_speed_transition_speed_mps)
-        response_blend = blend
+        hold_response_blend = blend
         tau = base_tau
         if self.yaw_surface_hold_time_constant_s > 0.0:
             moving = self._smoothstep_numeric(
                 abs(actual_steering_rate),
                 self.yaw_surface_hold_rate_full_radps,
                 self.yaw_surface_hold_rate_zero_radps)
-            response_blend *= 1.0 - moving
-            tau += response_blend * (
+            hold_response_blend *= 1.0 - moving
+            tau += hold_response_blend * (
                 self.yaw_surface_hold_time_constant_s - base_tau)
-        steady = legacy + self.yaw_surface_response_scale * response_blend * (
+        steady = legacy + self.yaw_surface_response_scale * blend * (
             empirical - legacy)
         return steady, tau
 
@@ -861,17 +861,17 @@ class VehicleModel:
                 self.yaw_low_speed_response_time_constant_s - base_tau
             ) * ca.exp(-ca.fmax(speed, 0.0) /
                        self.yaw_low_speed_transition_speed_mps)
-        response_blend = blend
+        hold_response_blend = blend
         tau = base_tau
         if self.yaw_surface_hold_time_constant_s > 0.0:
             moving = self._smoothstep_casadi(
                 ca.fabs(actual_steering_rate),
                 self.yaw_surface_hold_rate_full_radps,
                 self.yaw_surface_hold_rate_zero_radps)
-            response_blend *= 1.0 - moving
-            tau += response_blend * (
+            hold_response_blend *= 1.0 - moving
+            tau += hold_response_blend * (
                 self.yaw_surface_hold_time_constant_s - base_tau)
-        steady = legacy + self.yaw_surface_response_scale * response_blend * (
+        steady = legacy + self.yaw_surface_response_scale * blend * (
             empirical - legacy)
         return steady, tau
 

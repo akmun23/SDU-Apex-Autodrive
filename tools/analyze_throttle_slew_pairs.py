@@ -72,6 +72,7 @@ SWERVE_PROFILES = {
     "race_domain_swerve_throttle_slew_11mps_replication": "validation",
     "race_domain_swerve_throttle_slew_moderate_validation": "validation",
     "race_domain_swerve_throttle_slew_lowsteer_validation": "validation",
+    "race_domain_straight_throttle_downshift_train": "train",
     "race_domain_swerve_throttle_rate_sweep_validation": "validation",
     "race_domain_swerve_throttle_rate_sweep_highsteer_validation": "validation",
     "race_domain_swerve_throttle_rate_factorial_validation": "validation",
@@ -97,6 +98,7 @@ SWERVE_EXPECTED_PAIRS_BY_PROFILE = {
     "race_domain_swerve_throttle_slew_11mps_replication": 6,
     "race_domain_swerve_throttle_slew_moderate_validation": 24,
     "race_domain_swerve_throttle_slew_lowsteer_validation": 24,
+    "race_domain_straight_throttle_downshift_train": 6,
     "race_domain_swerve_throttle_rate_sweep_validation": 12,
     "race_domain_swerve_throttle_rate_sweep_highsteer_validation": 4,
     "race_domain_swerve_throttle_rate_factorial_validation": 24,
@@ -118,6 +120,7 @@ SWERVE_EXPECTED_RESETS_BY_PROFILE = {
     # Low-steer probes are individually reset-isolated so that a swerve's
     # residual lateral velocity/yaw cannot contaminate the paired treatment.
     "race_domain_swerve_throttle_slew_lowsteer_validation": 48,
+    "race_domain_straight_throttle_downshift_train": 12,
     "race_domain_swerve_throttle_rate_sweep_validation": 24,
     "race_domain_swerve_throttle_rate_sweep_highsteer_validation": 8,
     "race_domain_swerve_throttle_rate_factorial_validation": 48,
@@ -797,6 +800,12 @@ def _response_surface_rows(
     return rows
 
 
+def _turn_direction(steering_rad: float) -> str:
+    if abs(steering_rad) <= 1.0e-9:
+        return "straight"
+    return "left" if steering_rad > 0.0 else "right"
+
+
 def _write_response_surface_csv(pair_rows: list[dict[str, Any]],
                                 phase_rows: list[dict[str, Any]],
                                 output: Path) -> None:
@@ -872,9 +881,8 @@ def analyze(bag_paths: list[Path], output: Path,
                     ramp["steering_amplitude_rad"]
                     if ramp["steering_amplitude_rad"] is not None
                     else abs(ramp["steering_command_rad"])),
-                "turn_direction": (
-                    "left" if ramp["stimulus_state"]["steering_command_rad"] > 0
-                    else "right"),
+                "turn_direction": _turn_direction(
+                    float(ramp["stimulus_state"]["steering_command_rad"])),
                 "throttle_delta_direction": ("up" if ramp["throttle_end_norm"] > ramp["throttle_start_norm"] else "down"),
                 "throttle_ramp_duration_s": ramp["throttle_ramp_duration_s"],
                 "throttle_delta_norm": abs(
@@ -1137,7 +1145,9 @@ def analyze(bag_paths: list[Path], output: Path,
                     for steering in sorted({
                             float(row["abs_steering_command_rad"])
                             for row in profile_rows}):
-                        for turn in ("left", "right"):
+                        turns = (("straight",) if steering <= 1.0e-9
+                                 else ("left", "right"))
+                        for turn in turns:
                             selected = [row for row in profile_rows
                                         if math.isclose(
                                             float(row["abs_steering_command_rad"]),
@@ -1183,7 +1193,9 @@ def analyze(bag_paths: list[Path], output: Path,
                 for row in profile_rows
                 if math.isclose(float(row["speed_target_mps"]), speed)})
             for steering in steering_levels:
-                for turn_direction in ("left", "right"):
+                turn_directions = (("straight",) if steering <= 1.0e-9
+                                   else ("left", "right"))
+                for turn_direction in turn_directions:
                     for throttle_direction in ("up", "down"):
                         selected = [
                             row for row in profile_rows

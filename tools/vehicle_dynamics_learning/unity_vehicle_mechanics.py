@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from tools.vehicle_dynamics_learning.unity_vehicle_controller_source import (
+    step_autonomous_steering_deg,
+)
+
 
 WHEEL_NAMES = ("front_left", "front_right", "rear_left", "rear_right")
 STEERING_LIMIT_RAD = math.radians(30.0)
@@ -35,10 +39,25 @@ WHEEL_SUSPENSION_DAMPER_NSPM = 100.0
 WHEEL_COLLIDER_CENTER_Y_M = 0.025
 WHEEL_SPRUNG_MASSES_KG = (0.817168832, 0.8160193,
                            0.9189912, 0.9178206)
+WHEEL_COLLIDER_TARGET_TRAVEL_M = (
+    WHEEL_SUSPENSION_TARGET_POSITION * WHEEL_SUSPENSION_DISTANCE_M)
+WHEEL_FORWARD_FRICTION_CURVE = (0.15, 0.9, 0.25, 0.58, 0.8)
+WHEEL_SIDEWAYS_FRICTION_CURVE = (0.01, 1.0, 0.1, 0.5, 1.0)
+# F1TENTH.prefab WheelCollider transform mounts and their static local
+# orientations. Quaternions are xyzw; front toe/camber is +/-5 degrees.
+WHEEL_COLLIDER_TRANSFORM_POSITION_BODY_M = (
+    (-0.118, 0.06, 0.17), (0.118, 0.06, 0.17),
+    (-0.118, 0.05, -0.16), (0.118, 0.05, -0.16))
+RIGIDBODY_CENTER_OF_MASS_BODY_M = (-0.00008, 0.06434, -0.00468)
+WHEEL_COLLIDER_TRANSFORM_ROTATION_BODY_XYZW = (
+    (0.0, 0.0, -math.sin(math.radians(2.5)), math.cos(math.radians(2.5))),
+    (0.0, 0.0, math.sin(math.radians(2.5)), math.cos(math.radians(2.5))),
+    (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0))
 # Derived from the serialized COM height and the mean captured tire contact
 # height on the flat open-plane player. This is not a serialized Unity field.
 CAPTURED_COM_HEIGHT_ABOVE_ROAD_M = 0.07434
 GRAVITY_MPS2 = 9.80665
+UNITY_PHYSICS_GRAVITY_MPS2 = 9.81
 
 # Coordinates are x-forward/y-left. These moment arms use the serialized
 # WheelCollider centers relative to the configured Rigidbody COM, not the
@@ -67,20 +86,11 @@ def step_steering(steering_feedback_rad: float,
     values = (steering_feedback_rad, steering_command_rad, dt_s)
     if not all(math.isfinite(value) for value in values) or dt_s <= 0.0:
         raise ValueError("steering state, command and positive dt must be finite")
-    command = max(-1.0, min(1.0,
-                            steering_command_rad / STEERING_LIMIT_RAD))
-    steering_angle_degrees = -math.degrees(steering_feedback_rad)
-    target_degrees = -command * 30.0
-    increment = math.degrees(STEERING_RATE_RADPS) * dt_s
-    if command > steering_angle_degrees / 30.0:
-        steering_angle_degrees -= increment
-        if steering_angle_degrees <= target_degrees:
-            steering_angle_degrees = target_degrees
-    else:
-        steering_angle_degrees += increment
-        if steering_angle_degrees >= target_degrees:
-            steering_angle_degrees = target_degrees
-    return -math.radians(steering_angle_degrees)
+    command_norm = steering_command_rad / STEERING_LIMIT_RAD
+    internal_angle = -math.degrees(steering_feedback_rad)
+    next_internal_angle = step_autonomous_steering_deg(
+        internal_angle, internal_angle, command_norm, dt_s)
+    return -math.radians(next_internal_angle)
 
 
 def ackermann_angles(center_steering_rad: float

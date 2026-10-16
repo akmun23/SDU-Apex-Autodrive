@@ -793,13 +793,11 @@ static float yaw_rate_response(
         const float hold_weight = 1.0f - moving_weight;
         const float support = yaw_surface_blend_weight(demand_q, steering_rad) *
             yaw_surface_speed_blend_weight(speed_mps);
-        /* The equilibrium map was validated on held steering, not active
-         * turn-in/unwind. Fade its contribution with the same causal phase
-         * gate as the fitted hold time constant. */
-        const float legacy_steady_yaw_rate = legacy_yaw_steady_response(
-            speed_mps, steering_rad, path_curvature);
-        steady_yaw_rate = legacy_steady_yaw_rate + hold_weight *
-            (steady_yaw_rate - legacy_steady_yaw_rate);
+        /* The surface describes the supported speed/steering equilibrium.
+         * Steering phase gates only the separately fitted held-response time
+         * constant; suppressing the equilibrium correction during turn-in
+         * would restore the legacy model exactly where the surface reports
+         * reduced high-steering yaw authority. */
         response_time_constant += support * hold_weight *
             (active_yaw_rate_surface.hold_response_time_constant_s -
              response_time_constant);
@@ -1488,7 +1486,7 @@ static int vehicle_model_step_impl(
                         u_mid.derivative[i];
             }
         }
-        MpcJet_t response_blend = blend;
+        MpcJet_t hold_response_blend = blend;
         if (active_yaw_rate_surface.hold_response_time_constant_s > 0.0f) {
             const float rate_t = clampf_local(
                 (fabsf(actual_rate.value) -
@@ -1507,17 +1505,17 @@ static int vehicle_model_step_impl(
                 for (int i = 0; i < MPC_JET_DERIVATIVES; ++i)
                     hold_weight.derivative[i] = derivative * actual_rate.derivative[i];
             }
-            response_blend = jet_multiply(blend, hold_weight);
+            hold_response_blend = jet_multiply(blend, hold_weight);
             const MpcJet_t hold_tau_delta = jet_subtract(jet_constant(
                 active_yaw_rate_surface.hold_response_time_constant_s),
                 yaw_response_time_constant);
             yaw_response_time_constant = jet_add(yaw_response_time_constant,
-                jet_multiply(response_blend, hold_tau_delta));
+                jet_multiply(hold_response_blend, hold_tau_delta));
         }
         yaw_retention = jet_exponential(jet_divide(
             jet_constant(-dt), yaw_response_time_constant));
         const MpcJet_t yaw_surface_response_blend = jet_multiply(
-            response_blend,
+            blend,
             jet_constant(active_yaw_rate_surface.response_scale));
         yaw_steady = jet_add(legacy_yaw_steady, jet_multiply(
             yaw_surface_response_blend,

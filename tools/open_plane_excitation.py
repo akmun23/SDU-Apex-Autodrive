@@ -123,6 +123,11 @@ SWERVE_THROTTLE_SLEW_MODERATE_PROFILE = (
     "race_domain_swerve_throttle_slew_moderate_validation")
 SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE = (
     "race_domain_swerve_throttle_slew_lowsteer_validation")
+STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE = (
+    "race_domain_straight_throttle_downshift_train")
+STRAIGHT_THROTTLE_DOWNSHIFT_SPEEDS_MPS = (4.5, 6.5, 8.5)
+STRAIGHT_THROTTLE_DOWNSHIFT_REPEATS = 2
+STRAIGHT_THROTTLE_DOWNSHIFT_DELTA_NORM = 0.08
 YAW_FRONTIER_THROTTLE_SLEW_PROFILE = "yaw_frontier_throttle_slew_train"
 YAW_FRONTIER_THROTTLE_SLEW_SPEED_STEERING_RAD = (
     (9.5, (0.14, 0.18, 0.20)),
@@ -169,6 +174,7 @@ SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES = (
     SWERVE_THROTTLE_SLEW_11MPS_REPLICATION_PROFILE,
     SWERVE_THROTTLE_SLEW_MODERATE_PROFILE,
     SWERVE_THROTTLE_SLEW_LOWSTEER_PROFILE,
+    STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE,
     YAW_FRONTIER_THROTTLE_SLEW_PROFILE,
     YAW_FRONTIER_LOWANGLE_UNWIND_PROFILE,
     SWERVE_THROTTLE_RATE_SWEEP_PROFILE,
@@ -593,6 +599,7 @@ def _is_yaw_transient_approach(label: str) -> bool:
 RACE_DOMAIN_SPEED_GOVERNED_PROFILES = (
     *DYNAMIC_COUPLED_PROFILES,
     *SWERVE_THROTTLE_SLEW_CAPTURE_PROFILES,
+    STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE,
     *YAW_TRANSIENT_PROFILES,
 )
 EXPERIMENT_PROFILE_CHOICES = (
@@ -613,6 +620,7 @@ EXPERIMENT_PROFILE_CHOICES = (
     "full_input_excitation", "race_domain_continuous",
     "race_domain_brake_boundary", "race_domain_moderate_braking",
     "race_domain_steering_frontier", *DYNAMIC_COUPLED_PROFILES,
+    STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE,
     "subnet_highsteer_transients", "grid",
 )
 SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD = (
@@ -626,6 +634,7 @@ SWERVE_THROTTLE_SLEW_APPROACH_S = {
     4.5: 8.0,
     6.5: 9.0,
     7.5: 10.0,
+    8.5: 11.0,
     9.0: 11.0,
     9.5: 11.0,
     10.0: 12.0,
@@ -1188,6 +1197,58 @@ def _race_domain_swerve_throttle_slew_phases(
     return phases
 
 
+def _straight_throttle_downshift_phases(seed: int) -> list[Phase]:
+    """Reset-matched straight-line positive-throttle reductions.
+
+    Each step/ramp member starts from the same spawn and speed approach. The
+    throttle remains positive throughout; the experiment therefore isolates
+    reduced motor torque from Unity's exact-zero active-brake branch.
+    """
+    rng = random.Random(seed)
+    conditions = [
+        (speed, repetition)
+        for speed in STRAIGHT_THROTTLE_DOWNSHIFT_SPEEDS_MPS
+        for repetition in range(1, STRAIGHT_THROTTLE_DOWNSHIFT_REPEATS + 1)
+    ]
+    rng.shuffle(conditions)
+    phases: list[Phase] = []
+    for speed, repetition in conditions:
+        start = race_domain_feedforward(speed, _nominal_feedforward(speed))
+        end = start - STRAIGHT_THROTTLE_DOWNSHIFT_DELTA_NORM
+        if end <= 0.0:
+            raise ValueError(
+                f"positive-throttle downshift at {speed:g} m/s reaches zero")
+        pair_id = f"straight_v{speed:.1f}_rep{repetition:02d}"
+        shapes = ["step", "ramp"]
+        rng.shuffle(shapes)
+        for shape in shapes:
+            phases.extend((
+                Phase(
+                    f"approach_swerve_pair_{pair_id}_{shape}",
+                    SWERVE_THROTTLE_SLEW_APPROACH_S[speed], speed,
+                    throttle_mode="race_domain_approach",
+                    reach_speed_target=True,
+                    condition_pair_id=pair_id,
+                ),
+                Phase(
+                    f"straight_downshift_{pair_id}_{shape}",
+                    SWERVE_THROTTLE_SLEW_PHASE_S, speed,
+                    throttle_mode="slew_probe",
+                    validate_samples=True,
+                    validate_speed=False,
+                    validate_steering=False,
+                    settle_before_probe=True,
+                    throttle_profile=shape,
+                    throttle_start_norm=start,
+                    throttle_end_norm=end,
+                    throttle_stimulus_delay_s=0.60,
+                    throttle_ramp_duration_s=0.30,
+                    condition_pair_id=pair_id,
+                ),
+            ))
+    return phases
+
+
 def _highsteer_throttle_rate_sweep_phases(
         seed: int, throttle_delta_norm: float,
         highsteer_validation: bool = False) -> list[Phase]:
@@ -1655,6 +1716,8 @@ def build_schedule(seed: int, profile: str = "high_angle_boundary",
                         condition_pair_id=pair_id,
                     ))
         return phases
+    if profile == STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE:
+        return _straight_throttle_downshift_phases(seed)
     if profile == "full_input_excitation":
         # Randomized factorial actuator excitation. Each replicate contains
         # every signed steering level (including exact zero) crossed with all

@@ -35,19 +35,39 @@ def _read_json(path: Path) -> dict[str, Any]:
 def build_profile(source_profile: dict[str, Any], result: dict[str, Any],
                   capture_path: Path, *, spatial: bool = False,
                   progress_distance_scale: float = 3.0,
-                  scored_horizon_commands: int = 360
+                  captured_control_updates: int | None = None,
+                  scored_horizon_commands: int | None = None
                   ) -> dict[str, Any]:
-    if source_profile.get("raceline_feedback_control") is not True:
-        raise ValueError("source profile is not a Unity raceline-feedback run")
+    feedback_source = source_profile.get("raceline_feedback_control") is True
+    spatial_source = source_profile.get("spatial_command_lookup") is True
     warmup_count = int(source_profile.get("warmup_command_count", 0))
-    scored_count = int(result.get("scored_control_updates", 0))
+    available_scored_count = int(result.get(
+        "scored_control_updates",
+        source_profile.get("scored_horizon_commands", 0)))
+    captured_count = (available_scored_count
+                      if captured_control_updates is None
+                      else captured_control_updates)
+    horizon_count = int(source_profile.get(
+        "scored_horizon_commands", available_scored_count))
+    if scored_horizon_commands is not None:
+        horizon_count = scored_horizon_commands
     ticks = int(source_profile.get("physics_ticks_per_command", 0))
     fixed_dt = float(source_profile.get("fixed_delta_time_s", 0.0))
     commands = source_profile.get("commands")
-    if (warmup_count <= 0 or scored_count <= 0 or ticks != TICKS_PER_COMMAND
+    if (not (feedback_source or (spatial_source and spatial)) or
+            warmup_count <= 0 or captured_count <= 0 or
+            horizon_count <= 0 or ticks != TICKS_PER_COMMAND
             or abs(fixed_dt - FIXED_DT_S) > 1e-9
             or not isinstance(commands, list) or len(commands) <= warmup_count):
         raise ValueError("source profile/result has an invalid 1 ms / 25 ms schedule")
+    if captured_control_updates is not None:
+        if (captured_control_updates <= 0 or
+                captured_control_updates > available_scored_count):
+            raise ValueError(
+                "captured control count must be positive and no greater than the "
+                "captured command count")
+    if horizon_count < captured_count:
+        raise ValueError("simulation horizon cannot be shorter than route samples")
 
     with capture_path.open("r", encoding="utf-8", newline="") as stream:
         header = next((line for line in stream if not line.startswith("#")), None)
@@ -75,7 +95,7 @@ def build_profile(source_profile: dict[str, Any], result: dict[str, Any],
         raise ValueError("capture timestamps do not map cleanly to physics-step indices")
 
     first_scored_step = warmup_count * ticks
-    sample_indices = first_scored_step + np.arange(scored_count) * ticks
+    sample_indices = first_scored_step + np.arange(captured_count) * ticks
     if sample_indices[-1] >= len(values):
         raise ValueError("capture ends before the full scored control sequence")
     if abs(times[first_scored_step] - first_time - first_scored_step * FIXED_DT_S) > 2e-6:
@@ -118,14 +138,12 @@ def build_profile(source_profile: dict[str, Any], result: dict[str, Any],
         "commands": output_commands,
     }
     if spatial:
-        if (not np.isfinite(progress_distance_scale) or
-                progress_distance_scale < 0.0 or
-                scored_horizon_commands <= 0):
+        if not np.isfinite(progress_distance_scale) or progress_distance_scale < 0.0:
             raise ValueError("invalid spatial progress scale or command horizon")
         profile.update({
             "spatial_progress_distance_scale": progress_distance_scale,
             "warmup_command_count": warmup_count,
-            "scored_horizon_commands": scored_horizon_commands,
+            "scored_horizon_commands": horizon_count,
         })
     return profile
 
@@ -133,21 +151,40 @@ def build_profile(source_profile: dict[str, Any], result: dict[str, Any],
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, default=DEFAULT_RUN)
+    parser.add_argument(
+        "--source-profile", type=Path,
+        help="use an existing profile as the warm-up/spatial-route source")
+    parser.add_argument(
+        "--capture", type=Path,
+        help="use this Unity dynamics capture instead of resolving it from --run")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spatial", action="store_true",
                         help="attach each command to its captured Unity position")
     parser.add_argument("--progress-distance-scale", type=float, default=3.0)
-    parser.add_argument("--scored-horizon-commands", type=int, default=360)
+    parser.add_argument(
+        "--captured-control-updates", type=int, default=None,
+        help="number of recorded 40 Hz samples used as route/control points")
+    parser.add_argument("--scored-horizon-commands", type=int, default=None)
     args = parser.parse_args()
-    run = args.run.resolve()
-    source = _read_json(run / "raceline_feedback_profile.json")
-    result = _read_json(run / "dynamics/offline_result.json")
-    capture = run / "dynamics" / "wheel_dynamics_feedback_mintime_20261014_r115.csv"
-    if not capture.is_file():
-        matches = sorted((run / "dynamics").glob("wheel_dynamics_*.csv"))
-        if len(matches) != 1:
-            raise FileNotFoundError(f"could not identify one dynamics capture in {run}")
-        capture = matches[0]
+    if args.source_profile is not None:
+        if args.capture is None:
+            parser.error("--source-profile requires --capture")
+        source = _read_json(args.source_profile.resolve())
+        result: dict[str, Any] = {}
+        capture = args.capture.resolve()
+    else:
+        if args.capture is not None:
+            parser.error("--capture requires --source-profile")
+        run = args.run.resolve()
+        source = _read_json(run / "raceline_feedback_profile.json")
+        result = _read_json(run / "dynamics/offline_result.json")
+        capture = run / "dynamics" / "wheel_dynamics_feedback_mintime_20261014_r115.csv"
+        if not capture.is_file():
+            matches = sorted((run / "dynamics").glob("wheel_dynamics_*.csv"))
+            if len(matches) != 1:
+                raise FileNotFoundError(
+                    f"could not identify one dynamics capture in {run}")
+            capture = matches[0]
     output = args.output.resolve()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite {output}")
@@ -155,13 +192,19 @@ def main() -> int:
     profile = build_profile(
         source, result, capture, spatial=args.spatial,
         progress_distance_scale=args.progress_distance_scale,
+        captured_control_updates=args.captured_control_updates,
         scored_horizon_commands=args.scored_horizon_commands)
     output.write_text(json.dumps(profile, separators=(",", ":")) + "\n",
                       encoding="utf-8")
     print(json.dumps({
         "output": str(output),
         "warmup_commands": int(source["warmup_command_count"]),
-        "scored_commands": int(result["scored_control_updates"]),
+        "scored_route_control_points": (
+            len(profile["commands"]) - int(source["warmup_command_count"])),
+        "scored_horizon_commands": int(profile.get(
+            "scored_horizon_commands",
+            result.get("scored_control_updates",
+                         source.get("scored_horizon_commands", 0)))),
         "total_commands": len(profile["commands"]),
         "sample_interval_ms": TICKS_PER_COMMAND,
         "feedback_controller_removed": True,

@@ -1367,6 +1367,12 @@ OdometryEstimate OdometryObserver::update(
     config_.high_steer_unity_actuator_u_max_speed_mps;
   const bool unity_actuator_expert_active =
     config_.use_unity_actuator_u_experts && actuator_feedback_valid &&
+    // The fitted source-branch residual is supported only when the current
+    // encoder packet was accepted. On the r26 practice screen it overrode a
+    // near-exact IMU-propagated speed during repeated-angle/burst rejection,
+    // turning a 5.6 m/s state into <1 m/s. Do not treat a rejected wheel
+    // measurement as usable evidence for this wheel/actuator residual.
+    wheel_update_used &&
     u_correction_in_supported_region &&
     unity_actuator_published_u_mps >= config_.unity_actuator_u_min_speed_mps &&
     unity_actuator_published_u_mps < config_.unity_actuator_u_max_speed_mps;

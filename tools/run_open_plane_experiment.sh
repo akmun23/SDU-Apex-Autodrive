@@ -20,6 +20,7 @@ usage() {
     "race_domain_swerve_throttle_rate_factorial_{4p5,6p5,7p5}_validation repeat that crossed matrix at the named initial speed." \
     "race_domain_swerve_throttle_slew_up_frontier_validation pairs positive throttle steps/ramps during swerves at 9/10 m/s and measured moderate-steering cells." \
     "race_domain_swerve_throttle_rate_race_domain_{train,validation} crosses +0.04/+0.08 throttle changes and 0.15/0.30 s ramps at 4.5/6.5/7.5 m/s and 0.08/0.14/0.20 rad." \
+    "race_domain_straight_throttle_downshift_train reset-matches positive-throttle step/ramp reductions at 4.5/6.5/8.5 m/s with zero steering." \
     "Set SDU_APEX_EXPERIMENT_THROTTLE_RATE_SWEEP_DELTA_NORM to compare a different positive throttle increment." \
     "Use throttle_reset_smoke before the reset-isolated throttle transition surface." \
     "Throttle transition surface uses randomized, reset-isolated throttle transitions." \
@@ -186,6 +187,8 @@ elif [[ "${profile}" == yaw_frontier_throttle_slew_train ]]; then
   default_timeout_s=600
 elif [[ "${profile}" == yaw_frontier_lowangle_unwind_train ]]; then
   default_timeout_s=1200
+elif [[ "${profile}" == race_domain_straight_throttle_downshift_train ]]; then
+  default_timeout_s=360
 elif [[ "${profile}" == race_domain_swerve_throttle_slew_train ||
         "${profile}" == race_domain_swerve_throttle_slew_validation ||
         "${profile}" == race_domain_swerve_throttle_slew_frontier_validation ||
@@ -244,6 +247,7 @@ if [[ "${profile}" == throttle_reset_smoke ||
       "${profile}" == race_domain_swerve_throttle_slew_up_frontier_validation ||
       "${profile}" == race_domain_swerve_throttle_rate_race_domain_train ||
       "${profile}" == race_domain_swerve_throttle_rate_race_domain_validation ||
+      "${profile}" == race_domain_straight_throttle_downshift_train ||
       "${profile}" == race_domain_low_speed_highsteer_transients ||
       "${profile}" == race_domain_yaw_transition_transients ||
       "${profile}" == yaw_atlas_interpolation_validation ||
@@ -379,6 +383,7 @@ case "${profile}" in
   race_domain_swerve_throttle_slew_up_frontier_validation|\
   race_domain_swerve_throttle_rate_race_domain_train|\
   race_domain_swerve_throttle_rate_race_domain_validation|\
+  race_domain_straight_throttle_downshift_train|\
   isolated_3to5_response_surface|\
   isolated_highspeed_crossfactor|isolated_highspeed_tail|\
   isolated_transition_65mps|isolated_transition_45mps|\

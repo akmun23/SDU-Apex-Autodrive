@@ -174,9 +174,10 @@ def _track_clearance_summary(capture_path: Path, start_s: float,
     }
     if reference_path is not None and len(reference_path) > 1:
         nearest = cKDTree(reference_path).query(xz[selection], k=1)[1]
-        nearest = np.maximum.accumulate(nearest)
+        nearest = _unwrap_closed_route_indices(nearest, len(reference_path))
         sectors = np.minimum(
-            (nearest * sector_count / len(reference_path)).astype(int),
+            ((nearest - nearest[0]) * sector_count /
+             len(reference_path)).astype(int),
             sector_count - 1)
         result["track_clearance_sector_min_m"] = [
             (float(np.min(clearance[sectors == sector]))
@@ -187,6 +188,21 @@ def _track_clearance_summary(capture_path: Path, start_s: float,
              if np.any(sectors == sector) else None)
             for sector in range(sector_count)]
     return result
+
+
+def _unwrap_closed_route_indices(indices: np.ndarray, route_count: int
+                                 ) -> np.ndarray:
+    """Unwrap nearest-point indices across the route seam in lap order."""
+    indices = np.asarray(indices, dtype=np.int64)
+    if (indices.ndim != 1 or len(indices) == 0 or route_count < 2 or
+            np.any(indices < 0) or np.any(indices >= route_count)):
+        raise ValueError("route indices must be a non-empty in-range vector")
+    delta = np.diff(indices)
+    wraps = np.cumsum(np.where(
+        delta < -route_count / 2.0, 1,
+        np.where(delta > route_count / 2.0, -1, 0)))
+    unwrapped = np.r_[indices[0], indices[1:] + wraps * route_count]
+    return np.maximum.accumulate(unwrapped)
 
 
 def propose(rows: list[dict[str, object]], seed: int,

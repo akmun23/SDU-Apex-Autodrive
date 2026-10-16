@@ -146,6 +146,10 @@ from open_plane_excitation import (
     SWERVE_THROTTLE_RATE_SWEEP_RAMP_DURATIONS_S,
     SWERVE_THROTTLE_SLEW_SPEED_STEERING_RAD,
     SWERVE_THROTTLE_SLEW_APPROACH_S,
+    STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE,
+    STRAIGHT_THROTTLE_DOWNSHIFT_SPEEDS_MPS,
+    STRAIGHT_THROTTLE_DOWNSHIFT_REPEATS,
+    STRAIGHT_THROTTLE_DOWNSHIFT_DELTA_NORM,
     SIM_RESET_HOLD_SEC,
     SIM_RESET_TIMEOUT_SEC,
     PROBE_START_TIMEOUT_SEC,
@@ -2397,6 +2401,76 @@ class SwerveThrottleSlewScheduleTest(unittest.TestCase):
         other_shapes = [phase.throttle_profile for phase in other
                         if phase.label.startswith("swerve_slew_")]
         self.assertNotEqual(first_shapes, other_shapes)
+
+
+class StraightThrottleDownshiftScheduleTest(unittest.TestCase):
+    def test_positive_step_ramp_pairs_are_straight_reset_matched_and_bounded(self):
+        seed = 2026101501
+        phases = build_schedule(seed, STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE)
+        approaches = [phase for phase in phases
+                      if phase.label.startswith("approach_swerve_pair_")]
+        probes = [phase for phase in phases
+                  if phase.label.startswith("straight_downshift_")]
+        expected_conditions = len(STRAIGHT_THROTTLE_DOWNSHIFT_SPEEDS_MPS) * \
+            STRAIGHT_THROTTLE_DOWNSHIFT_REPEATS
+        self.assertEqual(len(probes), 2 * expected_conditions)
+        self.assertEqual(len(approaches), len(probes))
+        self.assertEqual(
+            SWERVE_EXPECTED_PAIRS_BY_PROFILE[
+                STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE],
+            expected_conditions)
+        self.assertEqual(
+            SWERVE_EXPECTED_RESETS_BY_PROFILE[
+                STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE],
+            len(probes))
+        self.assertEqual(SWERVE_PROFILES[STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE],
+                         "train")
+
+        grouped = {}
+        for phase in probes:
+            grouped.setdefault(phase.condition_pair_id, []).append(phase)
+            self.assertAlmostEqual(phase.steering_rad, 0.0)
+            self.assertIsNone(phase.steering_profile)
+            self.assertTrue(phase.settle_before_probe)
+            self.assertGreater(phase.throttle_start_norm,
+                               phase.throttle_end_norm)
+            self.assertGreater(phase.throttle_end_norm, 0.0)
+            self.assertAlmostEqual(
+                phase.throttle_start_norm - phase.throttle_end_norm,
+                STRAIGHT_THROTTLE_DOWNSHIFT_DELTA_NORM)
+        self.assertEqual(len(grouped), expected_conditions)
+        for pair in grouped.values():
+            self.assertEqual({phase.throttle_profile for phase in pair},
+                             {"step", "ramp"})
+            self.assertEqual({phase.speed_target_mps for phase in pair},
+                             {pair[0].speed_target_mps})
+            self.assertEqual({phase.throttle_start_norm for phase in pair},
+                             {pair[0].throttle_start_norm})
+            self.assertEqual({phase.throttle_end_norm for phase in pair},
+                             {pair[0].throttle_end_norm})
+            ramp = next(phase for phase in pair
+                        if phase.throttle_profile == "ramp")
+            step = next(phase for phase in pair
+                        if phase.throttle_profile == "step")
+            self.assertEqual(_slew_probe_command(step, 0.64),
+                             step.throttle_end_norm)
+            self.assertAlmostEqual(
+                _slew_probe_command(ramp, 0.75),
+                0.5 * (ramp.throttle_start_norm + ramp.throttle_end_norm))
+
+        second = build_schedule(seed, STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE)
+        other = build_schedule(seed + 1, STRAIGHT_THROTTLE_DOWNSHIFT_PROFILE)
+        self.assertEqual(phases, second)
+        self.assertNotEqual(phases, other)
+        required = (
+            sum(phase.duration_s for phase in phases)
+            + sum(phase.settle_before_probe for phase in phases)
+            * PROBE_START_TIMEOUT_SEC
+            + len(approaches) * (SIM_RESET_HOLD_SEC + SIM_RESET_TIMEOUT_SEC)
+            + 5.0
+        )
+        self.assertLess(required, 300.0)
+        self.assertGreater(required, 200.0)
 
     def test_high_speed_frontier_extension_covers_each_steer_turn_pair(self):
         seed = 202610107

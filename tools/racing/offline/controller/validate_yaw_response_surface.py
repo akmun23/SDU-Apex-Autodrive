@@ -266,23 +266,12 @@ def main() -> int:
                     raise RuntimeError("C vehicle model rejected a steering-phase probe")
                 speed_mid = 0.5 * (speed + float(stage.next.u))
                 steering_next = steering + signed_rate * dt
-                hold_weight = (1.0 - smoothstep(
-                    steering_rate,
-                    float(runtime_params.get(
-                        "yaw_rate_response_surface_hold_rate_full_radps", 0.0)),
-                    float(runtime_params.get(
-                        "yaw_rate_response_surface_hold_rate_zero_radps", 0.0)))
-                    if float(runtime_params.get(
-                        "yaw_rate_response_surface_hold_rate_zero_radps", 0.0)) >
-                        float(runtime_params.get(
-                            "yaw_rate_response_surface_hold_rate_full_radps", 0.0))
-                    else 1.0)
                 mapped_steady = model.steady_yaw_rate(
                     speed_mid, steering_next, 0.0)
-                legacy_steady = model._legacy_yaw_rate_numeric(
-                    speed_mid, steering_next, 0.0)
-                expected_steady = legacy_steady + hold_weight * (
-                    mapped_steady - legacy_steady)
+                # Steering phase gates only the fitted hold time constant;
+                # the supported empirical equilibrium map remains active
+                # during turn-in and unwind.
+                expected_steady = mapped_steady
                 effective_tau = expected_response_tau(
                     speed_mid, steering_next, steering_rate)
                 expected = (1.0 - math.exp(-dt / effective_tau)) * expected_steady
