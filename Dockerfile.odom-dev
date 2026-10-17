@@ -1,0 +1,8 @@
+# Reuse the already-built practice stack for online Odom iteration. The full
+# competition Dockerfile installs this dependency in its normal build layer.
+FROM sdu-apex-autodrive:practice-y1-full-model-20261014
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nlohmann-json3-dev \
+    && rm -rf /var/lib/apt/lists/*

@@ -16,6 +16,7 @@ from tools.racing.optimize_unity_wheel_raceline import (
 from SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3.f1tenth_planning.autodrive_mintime.optimizer_unity_wheels import (
     _normalize_gate_state_anchor,
     DEFAULT_TIME_TRUST_REGION_FACTORS,
+    should_retain_diagnostic_iterate,
     validate_time_trust_region_factors,
     validate_minimum_wheel_normal_load,
 )
@@ -215,3 +216,11 @@ def test_minimum_wheel_normal_load_is_between_old_floor_and_static_load():
     for invalid in (0.049, float("nan"), 8.0):
         with pytest.raises(ValueError, match="below every static wheel load"):
             validate_minimum_wheel_normal_load(invalid, static_loads)
+
+
+def test_failed_ipopt_iterate_is_retained_only_for_bounded_diagnostics():
+    assert should_retain_diagnostic_iterate(False, False, 0.06) is False
+    assert should_retain_diagnostic_iterate(True, True, 0.0) is False
+    assert should_retain_diagnostic_iterate(True, False, 0.0637) is True
+    assert should_retain_diagnostic_iterate(True, False, 0.1001) is False
+    assert should_retain_diagnostic_iterate(True, False, float("nan")) is False

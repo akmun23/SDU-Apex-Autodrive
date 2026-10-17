@@ -14,14 +14,41 @@ static int finite_nonnegative(float value)
 
 static int finite_rti_state(const MpcRtiState_t *state)
 {
-    return state && isfinite(state->plant.e_y) &&
+    if (!(state && isfinite(state->plant.e_y) &&
         isfinite(state->plant.e_psi) && isfinite(state->plant.u) &&
         isfinite(state->plant.v) && isfinite(state->plant.r) &&
         isfinite(state->plant.target_speed) &&
         isfinite(state->plant.steering_command) &&
         isfinite(state->plant.actual_steering_angle) &&
+        isfinite(state->plant.delayed_throttle_command_1) &&
+        isfinite(state->plant.delayed_throttle_command_2) &&
         isfinite(state->previous_steering_rate) &&
-        isfinite(state->previous_target_speed_rate);
+        isfinite(state->previous_target_speed_rate))) return 0;
+    if (state->plant.delayed_throttle_command_1 < 0.0f ||
+        state->plant.delayed_throttle_command_1 > 1.0f ||
+        state->plant.delayed_throttle_command_2 < 0.0f ||
+        state->plant.delayed_throttle_command_2 > 1.0f) return 0;
+    if (state->plant.source_plant_initialized ||
+        state->plant.source_imu_state_initialized) {
+        if (!isfinite(state->plant.source_throttle_command) ||
+            !isfinite(state->plant.source_last_target_speed) ||
+            !isfinite(state->plant.source_actuator_speed_mps) ||
+            !isfinite(state->plant.source_actuator_acceleration_mps2) ||
+            !isfinite(state->plant.source_actuator_integral) ||
+            !isfinite(state->plant.source_overspeed_elapsed) ||
+            !isfinite(state->plant.source_downshift_stable_elapsed))
+            return 0;
+        if (state->plant.source_actuator_acceleration_history_count > 5U ||
+            state->plant.source_actuator_acceleration_history_next >= 5U)
+            return 0;
+        for (int index = 0; index < UNITY_SOURCE_PLANT_STATE_SIZE; ++index)
+            if (!isfinite(state->plant.source_plant_state[index])) return 0;
+        for (int index = 0; index < 5; ++index)
+            if (!isfinite(
+                    state->plant.source_actuator_acceleration_history[index]))
+                return 0;
+    }
+    return 1;
 }
 
 static int finite_reference(const MpcRtiReference_t *reference)
@@ -103,6 +130,8 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
 
 static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
 {
+    MpcModelState_t prepared_plant = state->plant;
+    (void)vehicle_model_initialize_source_plant_state(&prepared_plant);
     x[MPC_RTI_IDX_EY] = state->plant.e_y;
     x[MPC_RTI_IDX_EPSI] = state->plant.e_psi;
     x[MPC_RTI_IDX_U] = state->plant.u;
@@ -116,6 +145,15 @@ static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
         state->plant.delayed_steering_command_2;
     x[MPC_RTI_IDX_ACTUAL_STEERING_ANGLE] =
         state->plant.actual_steering_angle;
+    x[MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_1] =
+        state->plant.delayed_throttle_command_1;
+    x[MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_2] =
+        state->plant.delayed_throttle_command_2;
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        x[MPC_RTI_IDX_WHEEL_OMEGA_FL + wheel] = (float)
+            prepared_plant.source_plant_state[
+                UNITY_SOURCE_WHEEL_OMEGA_FL + wheel];
+    }
     x[MPC_RTI_IDX_PREVIOUS_STEERING_RATE] = state->previous_steering_rate;
     x[MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE] =
         state->previous_target_speed_rate;
@@ -408,6 +446,22 @@ static int first_action_inside_exact_corridor(
         configuration, margin);
 }
 
+static int rejected_action_inside_nominal_trust_region(
+    const MpcModelControl_t *action,
+    const MpcModelControl_t *nominal,
+    const MpcRtiCycleConfiguration_t *configuration)
+{
+    if (!action || !nominal || !configuration ||
+        !isfinite(action->steering_rate) ||
+        !isfinite(action->target_speed_rate) ||
+        !isfinite(nominal->steering_rate) ||
+        !isfinite(nominal->target_speed_rate)) return 0;
+    return fabsf(action->steering_rate - nominal->steering_rate) <=
+            configuration->rti2_steering_rate_correction_trigger_radps &&
+        fabsf(action->target_speed_rate - nominal->target_speed_rate) <=
+            configuration->rti2_target_speed_rate_correction_trigger_mps2;
+}
+
 static int valid_previous_nominal(
     const MpcRtiNominal_t *nominal,
     int horizon)
@@ -474,6 +528,14 @@ static int set_state_bounds_with_corridor(
         -configuration->max_steering_rad;
     upper[MPC_RTI_IDX_ACTUAL_STEERING_ANGLE] =
         configuration->max_steering_rad;
+    lower[MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_1] = 0.0f;
+    upper[MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_1] = 1.0f;
+    lower[MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_2] = 0.0f;
+    upper[MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_2] = 1.0f;
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        lower[MPC_RTI_IDX_WHEEL_OMEGA_FL + wheel] = -350.0f;
+        upper[MPC_RTI_IDX_WHEEL_OMEGA_FL + wheel] = 350.0f;
+    }
     return 1;
 }
 
@@ -557,6 +619,8 @@ int mpc_rti_build_ltv_qp_with_schedule(
 
     memset(problem, 0, sizeof(*problem));
     problem->horizon = horizon;
+    problem->linearization_failure_stage = -1;
+    problem->linearization_failure_index = -1;
     serialize_state(&nominal_states[0], problem->x0);
 
     for (int k = 0; k < horizon; ++k) {
@@ -576,6 +640,11 @@ int mpc_rti_build_ltv_qp_with_schedule(
             references[k].path_curvature, &plant_linearization);
 #endif
         if (!linearized) {
+            problem->linearization_failure_stage = k;
+            problem->linearization_failure_reason =
+                plant_linearization.failure_reason;
+            problem->linearization_failure_index =
+                plant_linearization.failure_index;
             return 0;
         }
         problem->nonsmooth_jacobian_columns +=
@@ -1191,6 +1260,9 @@ typedef struct
     float maximum_regularization;
     int regularization_count;
     int nonsmooth_columns;
+    int linearization_failure_stage;
+    int linearization_failure_reason;
+    int linearization_failure_index;
     int nonlinear_failure_stage;
     int nonlinear_failure_reason;
     MpcRtiRolloutFailure_t nonlinear_failure;
@@ -1425,13 +1497,23 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     pass->status = MPC_RTI_CYCLE_REJECTED_INPUT;
     pass->nonlinear_failure_stage = -1;
     pass->nonlinear_failure_reason = -1;
+    pass->linearization_failure_stage = -1;
+    pass->linearization_failure_index = -1;
     pass->nonlinear_objective = INFINITY;
     pass->minimum_corridor_slack = -INFINITY;
     const double start_us = monotonic_microseconds();
-    MpcRtiProblem_t problem;
+    MpcRtiProblem_t problem = {0};
+    problem.linearization_failure_stage = -1;
+    problem.linearization_failure_index = -1;
     if (!mpc_rti_build_ltv_qp_with_schedule(nominal->states,
             nominal->controls, references, horizon, prediction_dt,
             &configuration->model, schedule, &problem)) {
+        pass->linearization_failure_stage =
+            problem.linearization_failure_stage;
+        pass->linearization_failure_reason =
+            problem.linearization_failure_reason;
+        pass->linearization_failure_index =
+            problem.linearization_failure_index;
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
@@ -1755,6 +1837,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->r2_nonlinear_failure_reason = -1;
         result->r1_nonlinear_failure_stage = -1;
         result->r2_nonlinear_failure_stage = -1;
+        result->linearization_failure_stage = -1;
+        result->linearization_failure_index = -1;
         result->r1_nonlinear_objective = NAN;
         result->r2_nonlinear_objective = NAN;
         result->r1_min_corridor_slack = NAN;
@@ -1778,6 +1862,13 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         !isfinite(prediction_dt) || prediction_dt <= 0.0f) {
         return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
     }
+
+    MpcRtiState_t prepared_current_state = *current_state;
+    if (!vehicle_model_initialize_source_plant_state(
+            &prepared_current_state.plant)) {
+        return reject_cycle(memory, result, MPC_RTI_CYCLE_REJECTED_INPUT);
+    }
+    current_state = &prepared_current_state;
 
     const double cycle_start_us = monotonic_microseconds();
     MpcRtiNominal_t nominal;
@@ -1829,6 +1920,9 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         &corridor_schedule, memory, &r1);
     result->rti_iterations_used = 1;
     result->r1_status = (int)r1_status;
+    result->linearization_failure_stage = r1.linearization_failure_stage;
+    result->linearization_failure_reason = r1.linearization_failure_reason;
+    result->linearization_failure_index = r1.linearization_failure_index;
     result->r1_nonlinear_failure_reason = r1.nonlinear_failure_reason;
     result->r1_nonlinear_failure_stage = r1.nonlinear_failure_stage;
     result->r1_nonlinear_failure = r1.nonlinear_failure;
@@ -2137,13 +2231,15 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->nonlinear_failure_stage = selected.nonlinear_failure_stage;
     result->nonlinear_failure_reason = selected.nonlinear_failure_reason;
     if (best_effort_action_published &&
-        !first_action_inside_exact_corridor(current_state, current_progress,
+        (!first_action_inside_exact_corridor(current_state, current_progress,
             &selected.first_action, trajectory, trajectory_count, lap_length,
-            prediction_dt, &configuration->model)) {
-        /* A rejected horizon is not a license to publish an unverified first
-         * step. Backtrack only that action toward the last shifted nominal;
-         * accept it only when the exact model predicts the same hard
-         * footprint corridor used by full-horizon validation. */
+            prediction_dt, &configuration->model) ||
+         !rejected_action_inside_nominal_trust_region(&selected.first_action,
+            &nominal.controls[0], configuration))) {
+        /* A rejected horizon is not a license to publish an unverified or
+         * discontinuous first step. Backtrack toward the shifted nominal;
+         * accept only an action that passes both the exact one-step footprint
+         * corridor and the same action-correction limits that trigger RTI2. */
         static const float alpha[] = {
             1.0f, 0.75f, 0.50f, 0.25f, 0.125f, 0.0625f, 0.0f};
         int repaired = 0;
@@ -2167,7 +2263,9 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 if (!first_action_inside_exact_corridor(current_state,
                         current_progress, &trial, trajectory,
                         trajectory_count, lap_length, prediction_dt,
-                        &configuration->model)) continue;
+                        &configuration->model) ||
+                    !rejected_action_inside_nominal_trust_region(&trial,
+                        &nominal.controls[0], configuration)) continue;
                 selected.first_action = trial;
                 result->best_effort_action_repaired =
                     candidate_index != 0 || i != 0;

@@ -27,6 +27,16 @@
     # a stalled feedback stream.
     steering_feedback_topic: /autodrive/roboracer_1/steering
     steering_feedback_max_age_s: 0.075
+    # The actuator interface publishes its normalized output command. The
+    # plant rollout uses it to start each horizon from the throttle actually
+    # presented to the simulator, then predicts the speed-loop state forward.
+    throttle_command_topic: /autodrive/roboracer_1/throttle_command
+    throttle_command_max_age_s: 0.075
+    left_encoder_topic: /autodrive/roboracer_1/left_encoder
+    right_encoder_topic: /autodrive/roboracer_1/right_encoder
+    wheel_encoder_max_age_s: 0.075
+    imu_topic: /autodrive/roboracer_1/imu
+    imu_feedback_max_age_s: 0.075
     pose_odom_max_skew_s: 0.12
     source_dt_min_s: 0.001
     source_dt_max_s: 0.250
@@ -107,6 +117,7 @@
 
     admm_rho: 7.0
     admm_rho_input: 7.0
+    adaptive_rho_update_period: 5
     adaptive_rho: true
     admm_over_relaxation: 1.6
     solver_tolerance: 0.01

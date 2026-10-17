@@ -28,6 +28,43 @@ TEST(OdometryObserverDiagnostics, SeparatesPreWheelPredictionFromFusedSpeed)
   EXPECT_GT(estimate.speed_mps, estimate.pre_wheel_update_speed_mps + 0.5);
 }
 
+TEST(OdometryObserverDiagnostics, UsesPhysxForwardVelocityIndependentlyOfLateralBlend)
+{
+  OdometryObserverConfig baseline_config;
+  baseline_config.physx_velocity_blend = 0.0;
+  baseline_config.physx_low_speed_velocity_blend = 0.0;
+  baseline_config.physx_forward_velocity_blend = 0.0;
+  baseline_config.wheel_speed_slew_limit_mps2 = 0.0;
+  OdometryObserverConfig candidate_config = baseline_config;
+  candidate_config.physx_forward_velocity_blend = 1.0;
+  OdometryObserver baseline(baseline_config);
+  OdometryObserver candidate(candidate_config);
+
+  OdometryObservation sample;
+  sample.stamp_s = 1.0;
+  sample.physx_velocity_valid = true;
+  sample.physx_forward_velocity_mps = 2.5;
+  sample.physx_lateral_velocity_mps = 0.20;
+  baseline.update(sample);
+  candidate.update(sample);
+
+  sample.actuator_feedback_valid = true;
+  sample.throttle_feedback = 0.4;
+  sample.steering_feedback_rad = 0.0;
+  sample.ax_mps2 = 0.0;
+  const double steady_wheel_step = 3.0 * 0.025 / baseline_config.wheel_radius_m;
+  sample.stamp_s += 0.025;
+  sample.left_angle_rad += steady_wheel_step;
+  sample.right_angle_rad += steady_wheel_step;
+  sample.physx_forward_velocity_mps = 3.5;
+  sample.physx_lateral_velocity_mps = -0.25;
+  const auto baseline_estimate = baseline.update(sample);
+  const auto candidate_estimate = candidate.update(sample);
+  EXPECT_NEAR(candidate_estimate.body_u_mps, 3.5, 1.0e-12);
+  EXPECT_NEAR(candidate_estimate.body_v_mps, baseline_estimate.body_v_mps, 1.0e-12);
+  EXPECT_NE(baseline_estimate.body_u_mps, candidate_estimate.body_u_mps);
+}
+
 TEST(OdometryObserverDiagnostics, InvalidatesReferenceOnTurnEntry)
 {
   OdometryObserver observer;

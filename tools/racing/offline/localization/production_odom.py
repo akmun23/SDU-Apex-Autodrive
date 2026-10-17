@@ -15,7 +15,8 @@ _OUTPUT_NAMES = (
     "wheel_mapped_mps", "wheel_packet_mps", "turn_speed_bias_mps",
     "ax_mps2", "ay_mps2", "yaw_rate_radps", "wheel_update_used",
     "wheel_burst_rejected", "turn_mode", "reset_epoch", "timing_degraded",
-    "sensor_outlier", "valid",
+    "sensor_outlier", "valid", "actuator_feedback_valid",
+    "steering_feedback_rad", "throttle_feedback", "source_stamp_s",
 )
 
 
@@ -60,13 +61,17 @@ class ProductionOdometry:
         lib.offline_odom_create.restype = ctypes.c_void_p
         lib.offline_odom_destroy.argtypes = [ctypes.c_void_p]
         lib.offline_odom_reset.argtypes = [ctypes.c_void_p]
+        lib.offline_odom_advance_time.argtypes = [ctypes.c_void_p, ctypes.c_int64]
         lib.offline_odom_add_left.argtypes = [ctypes.c_void_p, ctypes.c_int64,
-                                               ctypes.c_double]
+                                               ctypes.c_int64, ctypes.c_double]
         lib.offline_odom_add_right.argtypes = [ctypes.c_void_p, ctypes.c_int64,
-                                                ctypes.c_double]
+                                                ctypes.c_int64, ctypes.c_double]
         lib.offline_odom_add_imu.argtypes = [ctypes.c_void_p, ctypes.c_int64,
+                                              ctypes.c_int64,
                                               ctypes.c_double, ctypes.c_double,
                                               ctypes.c_double, ctypes.c_double]
+        lib.offline_odom_add_actuator.argtypes = [ctypes.c_void_p, ctypes.c_int64,
+                                                   ctypes.c_double, ctypes.c_int]
         lib.offline_odom_get_output.argtypes = [ctypes.c_void_p,
                                                  ctypes.POINTER(ctypes.c_double),
                                                  ctypes.c_size_t]
@@ -80,19 +85,37 @@ class ProductionOdometry:
     def reset(self) -> None:
         self.library.offline_odom_reset(self._handle)
 
-    def add_left_encoder(self, stamp_ns: int, cumulative_angle_rad: float) -> None:
-        self.library.offline_odom_add_left(self._handle, int(stamp_ns),
-                                           float(cumulative_angle_rad))
+    def advance_time(self, receive_ns: int) -> None:
+        """Advance replay receive time and release packets past settle delay."""
+        self.library.offline_odom_advance_time(self._handle, int(receive_ns))
 
-    def add_right_encoder(self, stamp_ns: int, cumulative_angle_rad: float) -> None:
-        self.library.offline_odom_add_right(self._handle, int(stamp_ns),
-                                            float(cumulative_angle_rad))
+    def add_left_encoder(self, stamp_ns: int, cumulative_angle_rad: float,
+                         receive_ns: int | None = None) -> None:
+        self.library.offline_odom_add_left(
+            self._handle, int(stamp_ns if receive_ns is None else receive_ns),
+            int(stamp_ns), float(cumulative_angle_rad))
+
+    def add_right_encoder(self, stamp_ns: int, cumulative_angle_rad: float,
+                          receive_ns: int | None = None) -> None:
+        self.library.offline_odom_add_right(
+            self._handle, int(stamp_ns if receive_ns is None else receive_ns),
+            int(stamp_ns), float(cumulative_angle_rad))
 
     def add_imu(self, stamp_ns: int, ax_mps2: float, ay_mps2: float,
-                yaw_rate_radps: float, yaw_rad: float) -> None:
+                yaw_rate_radps: float, yaw_rad: float,
+                receive_ns: int | None = None) -> None:
         self.library.offline_odom_add_imu(
-            self._handle, int(stamp_ns), float(ax_mps2), float(ay_mps2),
+            self._handle, int(stamp_ns if receive_ns is None else receive_ns),
+            int(stamp_ns), float(ax_mps2), float(ay_mps2),
             float(yaw_rate_radps), float(yaw_rad))
+
+    def add_steering_feedback(self, receive_ns: int, steering_rad: float) -> None:
+        self.library.offline_odom_add_actuator(
+            self._handle, int(receive_ns), float(steering_rad), 1)
+
+    def add_throttle_feedback(self, receive_ns: int, throttle: float) -> None:
+        self.library.offline_odom_add_actuator(
+            self._handle, int(receive_ns), float(throttle), 0)
 
     def snapshot(self) -> OdometryState | None:
         output = (ctypes.c_double * len(_OUTPUT_NAMES))()

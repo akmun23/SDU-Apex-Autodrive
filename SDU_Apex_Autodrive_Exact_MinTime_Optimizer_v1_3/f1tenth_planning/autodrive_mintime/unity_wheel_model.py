@@ -385,6 +385,47 @@ def _physx_applied_torque_slips_casadi(long_speed, lateral_speed,
     return long_slip, lateral_slip
 
 
+def physx_no_drive_wheel_speed_interval_casadi(
+        omega, drive_torque, raw_brake_torque, tire_torque,
+        moment_of_inertia, damping_rate, duration_s,
+        physics_step_s: float = 0.001,
+        substeps_per_physics_step: int = 1):
+    """Advance wheel speed with PhysX NoDrive's implicit Euler rule.
+
+    For constant torque over an interval this is the closed-form composition
+    of PhysX ``integrateNoDriveWheelSpeeds`` at the internal vehicle
+    substep. ``physics_step_s`` is Unity's outer fixed step; PhysX divides it
+    by ``substeps_per_physics_step``. Integer internal-step counts are
+    source-equivalent; the fractional final step is smoothly extended so
+    CasADi can differentiate through the optimizer's variable segment
+    duration. Tire torque is held at the supplied interval average.
+
+    PhysX applies the raw brake torque against the current wheel direction,
+    then locks the wheel if the integrated speed changes sign while braking.
+    """
+    if physics_step_s <= 0.0 or substeps_per_physics_step < 1:
+        raise ValueError("physics step and vehicle substep count must be positive")
+    internal_step_s = physics_step_s / substeps_per_physics_step
+    dt_over_inertia = duration_s / moment_of_inertia
+    signed_brake = ca.if_else(
+        omega > 0.0, -raw_brake_torque,
+        ca.if_else(omega < 0.0, raw_brake_torque, 0.0))
+    total_torque = drive_torque + tire_torque + signed_brake
+    damping_step = damping_rate * internal_step_s / moment_of_inertia
+    step_ratio = 1.0 / (1.0 + damping_step)
+    step_count = duration_s / internal_step_s
+    decay = ca.exp(step_count * ca.log(step_ratio))
+    equilibrium = total_torque / damping_rate
+    undamped_result = omega + dt_over_inertia * total_torque
+    result = ca.if_else(
+        damping_rate > 0.0,
+        decay * omega + (1.0 - decay) * equilibrium,
+        undamped_result)
+    braking_crossed_zero = ca.logic_and(
+        raw_brake_torque > 0.0, omega * result <= 0.0)
+    return ca.if_else(braking_crossed_zero, 0.0, result)
+
+
 def _wheel_surface_speed_from_physx_long_slip(long_speed, long_slip):
     """Invert the applied-torque slip equation for forward-driving seeds."""
     speed = np.asarray(long_speed, dtype=np.float64)
@@ -397,6 +438,13 @@ def _wheel_surface_speed_from_physx_long_slip(long_speed, long_slip):
         slip >= 0.0,
         (speed + offset * slip) / (1.0 - slip),
         speed + slip * (np.abs(speed) + offset))
+
+
+def _wheel_surface_speed_from_autodrive_guide_slip(long_speed, long_slip):
+    """Invert the legacy guide coordinate Sx=(R*omega-vx)/max(vx, 0.5)."""
+    speed = np.asarray(long_speed, dtype=np.float64)
+    slip = np.asarray(long_slip, dtype=np.float64)
+    return speed + slip * np.maximum(speed, 0.5)
 
 
 def tire_forces_casadi(model: UnityWheelModel, u, v, yaw_rate, steering,

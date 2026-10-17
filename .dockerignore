@@ -24,3 +24,11 @@ f1tenth_planning/config/autodrive_sim_vehicle.yaml
 
 # Archived full Unity project is used for offline source analysis, not runtime.
 external/autodrive-unity-source
+
+# The localization runtime links the source-parity PhysX stepper. Keep only
+# that one tool source in the build context.
+!tools/
+tools/*
+!tools/vehicle_dynamics_learning/
+tools/vehicle_dynamics_learning/*
+!tools/vehicle_dynamics_learning/physx_native_vehicle_step.cpp

@@ -19,6 +19,7 @@ find_package(rclcpp_components REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(ackermann_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 # BachelorProject Riccati-ADMM core.  The package deliberately contains one
@@ -27,6 +28,8 @@ find_package(std_msgs REQUIRED)
 add_library(mpc_core STATIC
   src/mpc_reference.c
   src/vehicle_model.c
+  src/unity_source_plant.cpp
+  src/unity_source_plant_c.cpp
   src/mpc_linearization.c
   src/mpc_rti.c
   src/riccati_solver.c)
@@ -62,22 +65,40 @@ ament_target_dependencies(mpc_controller_node
   nav_msgs
   geometry_msgs
   ackermann_msgs
+  sensor_msgs
   std_msgs)
 target_include_directories(mpc_controller_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcControllerNode")
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_unity_source_plant
+    test/test_unity_source_plant.cpp
+    src/unity_source_plant.cpp)
+  target_include_directories(test_unity_source_plant PRIVATE include)
+  ament_add_gtest(test_vehicle_model_source_rollout
+    test/test_vehicle_model_source_rollout.cpp)
+  target_link_libraries(test_vehicle_model_source_rollout mpc_core)
+  target_include_directories(test_vehicle_model_source_rollout PRIVATE include)
+  ament_add_gtest(test_mpc_control_time_predictor
+    test/test_mpc_control_time_predictor.cpp)
+  target_link_libraries(test_mpc_control_time_predictor mpc_control_time)
+  target_include_directories(test_mpc_control_time_predictor PRIVATE include)
+endif()
+
 install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(FILES config/mpc_competition.yaml config/mpc_practice_yaw_residual_support_gated.yaml config/yaw_response_surface.csv
+install(FILES config/mpc_competition.yaml config/mpc_practice_yaw_residual_support_gated.yaml config/yaw_response_surface.csv config/yaw_response_surface_y1.csv
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)
 ament_export_libraries(mpc_core)
 ament_export_dependencies(ament_index_cpp rclcpp rclcpp_components nav_msgs geometry_msgs
-  ackermann_msgs std_msgs)
+  ackermann_msgs sensor_msgs std_msgs)
+
 ament_package()

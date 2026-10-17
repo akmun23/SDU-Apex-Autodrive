@@ -3,6 +3,7 @@
 
 #include "mpc_reference.h"
 #include "mpc_state_synchronizer.hpp"
+#include "vehicle_model.h"
 
 #include <array>
 #include <cstddef>
@@ -66,12 +67,21 @@ struct MpcControlTimePredictorConfig {
 struct MpcControlTimePrediction {
     MpcSynchronizedState state{};
     MpcPathProjection_t projection{};
+    MpcModelState_t plant_state{};
+    bool plant_state_valid{};
+    MpcModelState_t plant_handoff_state{};
+    bool plant_handoff_state_valid{};
+    int64_t plant_handoff_stamp_ns{};
+    double plant_handoff_progress_m{};
     double progress_m{};
     double age_s{};
     double target_speed_mps{};
     double steering_command_rad{};
     double previous_steering_rate_radps{};
     double previous_target_speed_rate_mps2{};
+    int64_t plant_source_stamp_ns{};
+    bool sensor_state_fused{};
+    double plant_to_sensor_s{};
     std::size_t command_changes_used{};
     std::array<int64_t, kMpcCommandHistoryCapacity + 1>
         command_event_stamps_ns{};
@@ -90,6 +100,9 @@ MpcControlTimeStatus predict_to_control_time(
     double lap_length_m,
     std::size_t previous_segment,
     const MpcPathProjection_t *known_source_projection,
+    const MpcModelState_t *source_plant_state,
+    int64_t source_plant_stamp_ns,
+    double source_plant_progress_m,
     const MpcControlTimePredictorConfig &config,
     MpcControlTimePrediction *prediction);
 

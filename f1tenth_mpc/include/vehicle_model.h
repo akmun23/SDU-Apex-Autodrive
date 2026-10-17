@@ -14,6 +14,7 @@
 #define VEHICLE_MODEL_H
 
 #include "mpc_types.h"
+#include "unity_source_plant_c.h"
 
 typedef struct
 {
@@ -33,7 +34,55 @@ typedef struct
      * delayed commanded target. This state is estimated causally by the
      * controller; it is not a simulator-only runtime input. */
     float actual_steering_angle;
+    /* Bridge output reaches the Unity vehicle dynamics two 40 Hz packets
+     * after it is sent. Keep both pending throttle commands in the optimized
+     * state so the RTI Jacobian propagates their delayed effect. */
+    float delayed_throttle_command_1;
+    float delayed_throttle_command_2;
+    /* Recursive source-physics state retained across nonlinear horizon
+     * rollouts. The optimizer linearizes the tracking/actuator/command states;
+     * this internal plant state carries four wheel speeds, sprung-body
+     * motion, and suspension history so slip and load transfer are not reset
+     * at each 25 ms stage. It is initialized from permitted runtime sensors
+     * (or rolling kinematics at cold start), never simulator truth. */
+    double source_plant_state[UNITY_SOURCE_PLANT_STATE_SIZE];
+    /* Rear-wheel angular speed from the permitted left/right encoder-angle
+     * streams. Correct only the first source-plant stage; later stages
+     * propagate wheel spin from the source equations. */
+    float source_rear_wheel_omega_feedback_radps[2];
+    int source_rear_wheel_omega_feedback_valid;
+    float source_throttle_command;
+    float source_last_target_speed;
+    float source_actuator_speed_mps;
+    float source_actuator_acceleration_mps2;
+    float source_actuator_acceleration_history[5];
+    float source_actuator_integral;
+    float source_overspeed_elapsed;
+    float source_downshift_stable_elapsed;
+    /* Diagnostics for the bounded Y1 equilibrium-response correction applied
+     * on top of the source-derived wheel plant; these are not optimized states. */
+    float source_yaw_surface_blend;
+    float source_yaw_surface_target_radps;
+    double source_longitudinal_slip[4];
+    double source_lateral_slip[4];
+    double source_normal_load_n[4];
+    unsigned int source_actuator_acceleration_history_count;
+    unsigned int source_actuator_acceleration_history_next;
+    int source_plant_initialized;
+    int source_suspension_history_initialized;
+    int source_imu_state_initialized;
+    int source_target_initialized;
+    int source_downshift_guard;
+    int source_actuator_speed_initialized;
+    int source_hold_approach;
+    int source_hold_reentry_requires_speed;
+    int source_downshift_catch;
 } MpcModelState_t;
+
+/* Materialize a causal source-plant initial state and consume any fresh rear
+ * encoder sample into its wheel-spin state. The MPC calls this once before
+ * building the RTI state vector so wheel speed is an explicit Markov state. */
+int vehicle_model_initialize_source_plant_state(MpcModelState_t *state);
 
 typedef struct
 {
@@ -161,6 +210,8 @@ enum
     MPC_STAGE_CLIPPED_BODY_SPEED = 1u << 5,
     MPC_STAGE_CLIPPED_ACTUAL_STEERING = 1u << 6,
     MPC_STAGE_CLIPPED_YAW_RESIDUAL = 1u << 7,
+    MPC_STAGE_ACTIVE_BRAKE = 1u << 8,
+    MPC_STAGE_PLANT_BRAKE = 1u << 9,
 };
 
 typedef struct

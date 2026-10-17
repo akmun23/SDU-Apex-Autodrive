@@ -3,6 +3,20 @@ sensor_odometry:
     left_encoder_topic: /autodrive/roboracer_1/left_encoder
     right_encoder_topic: /autodrive/roboracer_1/right_encoder
     imu_topic: /autodrive/roboracer_1/imu
+    steering_command_topic: /autodrive/roboracer_1/steering_command
+    throttle_command_topic: /autodrive/roboracer_1/throttle_command
+    # The reset-initialized, source-parity PhysX plant advances 25 fixed 1 ms
+    # steps per sensor packet, using reported steering/throttle feedback.
+    # Whole-run held-out practice replays showed 0.004-0.005 m/s forward-speed
+    # RMSE from that plant versus 0.045-0.048 m/s sensor-only. Keep lateral
+    # fusion separately conservative: it has not transferred with equal
+    # accuracy.
+    use_physx_odom_velocity: true
+    physx_forward_velocity_blend: 1.0
+    physx_velocity_blend: 0.10
+    # Retain the established low-speed schedule for lateral velocity only.
+    physx_low_speed_velocity_blend: 0.45
+    physx_low_speed_blend_transition_mps: 1.5
     odom_topic: /odom
     diagnostics_topic: /odom/diagnostics
     odom_frame: odom

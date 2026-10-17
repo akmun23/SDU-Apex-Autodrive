@@ -209,8 +209,10 @@ def main() -> int:
         )
 
         # Integrate-frame odometry starts at an arbitrary origin and heading.
-        # Align that frame once at the first sample, then report the residual
-        # drift against IPS without refitting the transform around the lap.
+        # Align that frame once, then score against bridge truth at the same
+        # source timestamp. IPS has no header stamp: pairing it by bag receive
+        # time can compare different simulation instants when bridge packets
+        # arrive in batches, falsely appearing as Odom position jumps.
         initial_pair = None
         for row in odom:
             source = stamp_ns(row[1].header.stamp)
@@ -222,24 +224,19 @@ def main() -> int:
                 continue
             best = min(candidates, key=lambda i: abs(truth_source_times[i] - source))
             if abs(truth_source_times[best] - source) <= MAX_ALIGN_NS:
-                ips_index = bisect.bisect_left([stamp for stamp, _ in ips], row[0])
-                ips_candidates = [i for i in (ips_index - 1, ips_index) if 0 <= i < len(ips)]
-                if ips_candidates:
-                    ips_best = min(ips_candidates, key=lambda i: abs(ips[i][0] - row[0]))
-                    initial_pair = (row, truth_by_source[best][1][1], ips[ips_best][1])
-                    break
+                initial_pair = (row, truth_by_source[best][1][1])
+                break
         if initial_pair is None:
-            raise ValueError("could not align initial odom, truth odom, and IPS samples")
+            raise ValueError("could not align initial Odom and truth samples")
 
         first_odom = initial_pair[0][1]
         first_truth = initial_pair[1]
-        first_ips = initial_pair[2]
         rotation = wrap_angle(
             yaw_from_quaternion(first_truth.pose.pose.orientation) -
             yaw_from_quaternion(first_odom.pose.pose.orientation))
         cos_r, sin_r = math.cos(rotation), math.sin(rotation)
         odom_origin = first_odom.pose.pose.position
-        ips_origin_x, ips_origin_y = float(first_ips.x), float(first_ips.y)
+        truth_origin = first_truth.pose.pose.position
 
         odom_position_errors: list[tuple[float, float]] = []
         odom_offsets: list[float] = []
@@ -259,29 +256,25 @@ def main() -> int:
             source_offset = truth_time - source
             if abs(source_offset) > MAX_ALIGN_NS:
                 continue
-            ips_index = bisect.bisect_left([stamp for stamp, _ in ips], receipt)
-            ips_candidates = [i for i in (ips_index - 1, ips_index) if 0 <= i < len(ips)]
-            if not ips_candidates:
-                continue
-            ips_best = min(ips_candidates, key=lambda i: abs(ips[i][0] - receipt))
-            ips_time, truth_point = ips[ips_best]
-            if abs(ips_time - receipt) > MAX_ALIGN_NS:
-                continue
-
             position = estimate.pose.pose.position
             dx = float(position.x - odom_origin.x)
             dy = float(position.y - odom_origin.y)
-            aligned_x = ips_origin_x + cos_r * dx - sin_r * dy
-            aligned_y = ips_origin_y + sin_r * dx + cos_r * dy
-            error = (aligned_x - float(truth_point.x), aligned_y - float(truth_point.y))
+            aligned_x = float(truth_origin.x) + cos_r * dx - sin_r * dy
+            aligned_y = float(truth_origin.y) + sin_r * dx + cos_r * dy
+            truth_position = truth.pose.pose.position
+            error = (
+                aligned_x - float(truth_position.x),
+                aligned_y - float(truth_position.y),
+            )
             odom_position_errors.append(error)
-            odom_offsets.append((ips_time - receipt) / 1e6)
+            odom_offsets.append(source_offset / 1e6)
             lap_index = bisect.bisect_right(lap_times, receipt) - 1
             lap = lap_values[max(0, lap_index)]
             odom_error_by_lap.setdefault(lap, []).append(math.hypot(*error))
 
-        position_error_report("Integrated /odom vs IPS after one initial SE(2) alignment",
-                              odom_position_errors, odom_offsets)
+        position_error_report(
+            "Integrated /odom vs source-time bridge truth after one initial SE(2) alignment",
+            odom_position_errors, odom_offsets)
         print("Integrated odom position error p95 by lap (initial alignment held fixed):")
         for lap, errors in sorted(odom_error_by_lap.items()):
             print(f"  lap_count={lap}: n={len(errors)}, p95={fmt(percentile(errors, 95))} m, "
@@ -294,6 +287,7 @@ def main() -> int:
             errors_v: list[float] = []
             errors_r: list[float] = []
             offsets: list[float] = []
+            twist_error_by_lap: dict[int, dict[str, list[float]]] = {}
             for receipt, estimate in stream:
                 source = stamp_ns(estimate.header.stamp)
                 if source is None:
@@ -311,10 +305,20 @@ def main() -> int:
                 truth_twist = truth.twist.twist
                 truth_vy_rear = float(truth_twist.linear.y) - float(
                     truth_twist.angular.z) * COM_X_M
-                errors_u.append(float(estimate_twist.linear.x) - float(truth_twist.linear.x))
-                errors_v.append(float(estimate_twist.linear.y) - truth_vy_rear)
-                errors_r.append(float(estimate_twist.angular.z) - float(truth_twist.angular.z))
+                error_u = float(estimate_twist.linear.x) - float(truth_twist.linear.x)
+                error_v = float(estimate_twist.linear.y) - truth_vy_rear
+                error_r = float(estimate_twist.angular.z) - float(truth_twist.angular.z)
+                errors_u.append(error_u)
+                errors_v.append(error_v)
+                errors_r.append(error_r)
                 offsets.append(offset / 1e6)
+                lap_index = bisect.bisect_right(lap_times, receipt) - 1
+                lap = lap_values[max(0, lap_index)]
+                per_lap = twist_error_by_lap.setdefault(
+                    lap, {"u": [], "v": [], "r": []})
+                per_lap["u"].append(error_u)
+                per_lap["v"].append(error_v)
+                per_lap["r"].append(error_r)
             if errors_u:
                 print(
                     f"{topic} body-twist error vs truth at rear axle: n={len(errors_u)}, "
@@ -323,6 +327,15 @@ def main() -> int:
                     f"r RMSE={math.sqrt(statistics.fmean(x*x for x in errors_r)):.4f} rad/s; "
                     f"offset abs-p95={fmt(percentile([abs(x) for x in offsets], 95), 2)} ms"
                 )
+                print(f"{topic} body-twist RMSE / absolute p95 by lap:")
+                for lap, state_errors in sorted(twist_error_by_lap.items()):
+                    state_metrics = []
+                    for state, values in state_errors.items():
+                        state_metrics.append(
+                            f"{state}={math.sqrt(statistics.fmean(x*x for x in values)):.4f}/"
+                            f"{fmt(percentile([abs(x) for x in values], 95))}")
+                    print(f"  lap_count={lap}: n={len(state_errors['u'])}; "
+                          + " ".join(state_metrics))
     finally:
         connection.close()
 

@@ -18,6 +18,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3.f1tenth_planning.autodrive_mintime.optimizer_unity_wheels import (
+    DIAGNOSTIC_ITERATE_CHECKPOINT_MAX_VIOLATION,
     FEASIBILITY_MAX_ITERATIONS,
     NEAR_FEASIBLE_WARM_START_MAX_VIOLATION,
     TIME_OPTIMIZATION_MAX_ITERATIONS,
@@ -34,6 +35,7 @@ from SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3.f1tenth_planning.autodrive_
 from SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3.f1tenth_planning.autodrive_mintime.unity_wheel_model import (
     ROOT,
     UnityWheelModel,
+    _wheel_surface_speed_from_autodrive_guide_slip,
     _wheel_surface_speed_from_physx_long_slip,
 )
 from tools.racing.track_projection import TrackProjection
@@ -559,17 +561,31 @@ def candidate_state_initial_guess(candidate_dir: Path, track: Track,
                                   model: UnityWheelModel
                                   ) -> tuple[dict[str, np.ndarray], np.ndarray,
                                              np.ndarray, dict]:
-    """Load a feasible or explicitly bounded near-feasible OCP warm start."""
+    """Load a feasible OCP candidate or explicit diagnostic continuation point."""
     report_path = candidate_dir / "optimizer_report.json"
+    diagnostic_path = candidate_dir / "diagnostic_restart.json"
     states_path = candidate_dir / "unity_wheel_hybrid_states.csv"
-    if not report_path.is_file() or not states_path.is_file():
+    is_diagnostic_iterate = False
+    if report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        is_diagnostic_iterate = bool(report.get("diagnostic_iterate_only", False))
+    elif diagnostic_path.is_file():
+        report = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+        is_diagnostic_iterate = True
+    else:
         raise FileNotFoundError(
-            f"warm-start candidate requires {report_path} and {states_path}")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+            f"warm start requires {report_path} or {diagnostic_path}")
+    if not is_diagnostic_iterate and not states_path.is_file():
+        raise FileNotFoundError(f"warm-start candidate requires {states_path}")
+    slip_coordinate = str(report.get("unity_vehicle_model", {}).get(
+        "tire_slip_coordinates", ""))
     prior_violation = report.get("nlp_diagnostics", {}).get(
         "max_constraint_violation")
+    allowed_violation = (
+        DIAGNOSTIC_ITERATE_CHECKPOINT_MAX_VIOLATION
+        if is_diagnostic_iterate else NEAR_FEASIBLE_WARM_START_MAX_VIOLATION)
     if (prior_violation is None or not np.isfinite(float(prior_violation)) or
-            float(prior_violation) > NEAR_FEASIBLE_WARM_START_MAX_VIOLATION):
+            float(prior_violation) > allowed_violation):
         raise ValueError(
             "warm-start candidate exceeds the allowed NLP constraint residual")
     phase_reports = report.get("brake_phase_seed_ranges_and_modes", [])
@@ -580,6 +596,75 @@ def candidate_state_initial_guess(candidate_dir: Path, track: Track,
             or not np.isclose(np.sum(phase_lengths), track.length,
                               rtol=0.0, atol=1.0e-5)):
         raise ValueError("warm-start candidate has invalid phase metadata")
+
+    if is_diagnostic_iterate:
+        diagnostic = report.get("diagnostic_iterate")
+        if not isinstance(diagnostic, dict):
+            raise ValueError("diagnostic warm start is missing its state arrays")
+        node_count = track.count
+        seed_s = np.asarray(diagnostic.get("s_ref_m"), dtype=np.float64)
+        phase_modes: list[str] = []
+        phase_node_counts: list[int] = []
+        expected_s = []
+        phase_offset = 0.0
+        for phase, length in zip(phase_reports, phase_lengths):
+            count = int(phase["optimized_mesh_nodes"])
+            phase_modes.append(str(phase["mode"]))
+            phase_node_counts.append(count)
+            expected_s.extend(phase_offset + length * np.arange(count) / count)
+            phase_offset += float(length)
+        if seed_s.shape != (node_count,) or not np.allclose(
+                seed_s, np.asarray(expected_s), rtol=0.0, atol=2.0e-7):
+            raise ValueError("diagnostic iterate stations do not match its phase mesh")
+
+        def state_array(name: str, shape: tuple[int, ...]) -> np.ndarray:
+            values = np.asarray(diagnostic.get(name), dtype=np.float64)
+            if values.shape != shape or not np.isfinite(values).all():
+                raise ValueError(
+                    f"diagnostic iterate {name} must have shape {shape} and be finite")
+            return values
+
+        seed = {
+            "ey_m": state_array("ey_m", (node_count,)),
+            "epsi_rad": state_array("epsi_rad", (node_count,)),
+            "u_mps": state_array("speed_mps", (node_count,)),
+            "v_mps": state_array("lateral_speed_mps", (node_count,)),
+            "yaw_rate_radps": state_array("yaw_rate_radps", (node_count,)),
+            "wheel_omega_radps": state_array(
+                "wheel_omega_radps", (4, node_count)),
+            "steering_rad": state_array("steering_rad", (node_count,)),
+            "steering_rate_radps": state_array(
+                "steering_rate_radps", (node_count,)),
+            "throttle_norm": state_array("throttle_norm", (node_count,)),
+            "ax_mps2": state_array("ax_mps2", (node_count,)),
+            "ay_mps2": state_array("ay_mps2", (node_count,)),
+            "normal_load_n": state_array("normal_load_n", (4, node_count)),
+            "body_height_m": state_array("body_height_m", (node_count,)),
+            "body_height_rate_mps": state_array(
+                "body_height_rate_mps", (node_count,)),
+            "roll_rad": state_array("roll_rad", (node_count,)),
+            "roll_rate_radps": state_array("roll_rate_radps", (node_count,)),
+            "pitch_rad": state_array("pitch_rad", (node_count,)),
+            "pitch_rate_radps": state_array("pitch_rate_radps", (node_count,)),
+        }
+        load_model_id = report.get("unity_vehicle_model", {}).get("load_model_id")
+        return seed, seed_s, phase_lengths, {
+            "source_candidate": str(candidate_dir),
+            "diagnostic_iterate_only": True,
+            "source_max_constraint_violation": float(prior_violation),
+            "node_count": node_count,
+            "phase_lengths_m": phase_lengths.tolist(),
+            "phase_modes": phase_modes,
+            "phase_node_counts": phase_node_counts,
+            "seed_reconstructed_wheel_speed": False,
+            "model_consistent_seed": (
+                load_model_id ==
+                "unity_sprung_mass_spring_damper_heave_roll_pitch_v1"),
+            "body_state_seed_available": True,
+            "source_load_model_id": load_model_id,
+            "minimum_trust_region_reference": report.get(
+                "feasibility_objective_reference"),
+        }
 
     with states_path.open(newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream)
@@ -626,10 +711,17 @@ def candidate_state_initial_guess(candidate_dir: Path, track: Track,
         vy = values["lateral_speed_mps"] + values["yaw_rate_radps"] * WHEEL_X_M[index]
         forward = np.cos(steer_wheel) * vx + np.sin(steer_wheel) * vy
         slip = values[f"slipx_{wheel_name}"]
-        surface_speed = _wheel_surface_speed_from_physx_long_slip(
-            forward, slip)
+        if slip_coordinate.startswith("AutoDRIVE guide Sx="):
+            surface_speed = _wheel_surface_speed_from_autodrive_guide_slip(
+                forward, slip)
+        elif slip_coordinate.startswith("PhysX 4.1 applied-torque branch"):
+            surface_speed = _wheel_surface_speed_from_physx_long_slip(
+                forward, slip)
+        else:
+            raise ValueError(
+                "warm-start tire slip convention is absent or unsupported: "
+                f"{slip_coordinate!r}")
         omega = surface_speed / (model.wheel_radius_m * model.wheel_radius_scale)
-        omega[values["throttle_norm"] == 0.0] = 0.0
         wheel_omega.append(omega)
 
     seed = {
@@ -1204,6 +1296,7 @@ def main() -> int:
             json.dumps({
                 "solver": report["solver"],
                 "nlp_diagnostics": report["nlp_diagnostics"],
+                "solve_stages": report.get("solve_stages", []),
                 "track": report["track"],
                 "model": report["unity_vehicle_model"],
                 "initial_state_seed": state_seed_summary,
@@ -1212,11 +1305,32 @@ def main() -> int:
                 "empirical_path_bias_model": tracking_bias_report,
             }, indent=2, sort_keys=True) + "\n",
             encoding="utf-8")
+        diagnostic_restart_path = None
+        if (report.get("diagnostic_iterate_only", False)
+                and candidate_is_finite and candidate_violation is not None
+                and float(candidate_violation)
+                <= DIAGNOSTIC_ITERATE_CHECKPOINT_MAX_VIOLATION):
+            diagnostic_restart = dict(report)
+            diagnostic_restart["diagnostic_iterate_only"] = True
+            diagnostic_restart["diagnostic_iterate_warning"] = (
+                "Infeasible IPOPT iterate for explicit solver continuation only. "
+                "Not a raceline, candidate, or validation result.")
+            diagnostic_restart["diagnostic_iterate"] = {
+                name: np.asarray(values, dtype=np.float64).tolist()
+                for name, values in candidate.items()
+            }
+            diagnostic_restart_path = output / "diagnostic_restart.json"
+            diagnostic_restart_path.write_text(
+                json.dumps(diagnostic_restart, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
         print(json.dumps({
             "status": "no_feasible_free_geometry_candidate",
             "solver": report["solver"],
             "nlp_diagnostics": report["nlp_diagnostics"],
             "diagnostic_report": str(output / "solver_failure.json"),
+            "diagnostic_restart": (str(diagnostic_restart_path)
+                                   if diagnostic_restart_path is not None
+                                   else None),
         }, indent=2, sort_keys=True))
         return 2
     write_candidate(candidate, report, track, centerline, output)

@@ -18,6 +18,7 @@ from .unity_wheel_model import (
     suspension_loads_numpy,
     suspension_travel_casadi,
     tire_forces_casadi,
+    physx_no_drive_wheel_speed_interval_casadi,
 )
 from tools.vehicle_dynamics_learning.unity_vehicle_mechanics import (
     GRAVITY_MPS2,
@@ -25,6 +26,11 @@ from tools.vehicle_dynamics_learning.unity_vehicle_mechanics import (
     WHEEL_X_M,
     WHEEL_Y_M,
     ackermann_angles,
+)
+from tools.vehicle_dynamics_learning.physx_no_drive_source import (
+    UNITY_NO_DRIVE_HIGH_SPEED_SUBSTEPS,
+    UNITY_NO_DRIVE_LOW_SPEED_SUBSTEPS,
+    UNITY_NO_DRIVE_SUBSTEP_THRESHOLD_MPS,
 )
 from tools.racing.mpc_vehicle_geometry import (
     footprint_half_width_casadi,
@@ -35,7 +41,20 @@ FEASIBILITY_MAX_ITERATIONS = 600
 TIME_OPTIMIZATION_MAX_ITERATIONS = 2000
 NLP_FEASIBILITY_TOLERANCE = 1.0e-3
 NEAR_FEASIBLE_WARM_START_MAX_VIOLATION = 5.0e-3
+DIAGNOSTIC_ITERATE_CHECKPOINT_MAX_VIOLATION = 0.1
 DEFAULT_TIME_TRUST_REGION_FACTORS = (4.0, 8.0, 16.0, 1.0e6)
+
+
+def should_retain_diagnostic_iterate(
+        finite: bool, feasible_incumbent: bool,
+        max_constraint_violation: float | None) -> bool:
+    """Retain a bounded failed iterate only for explicit solver continuation."""
+    return bool(
+        finite and not feasible_incumbent
+        and max_constraint_violation is not None
+        and math.isfinite(float(max_constraint_violation))
+        and float(max_constraint_violation)
+        <= DIAGNOSTIC_ITERATE_CHECKPOINT_MAX_VIOLATION)
 
 
 def validate_time_trust_region_factors(
@@ -658,26 +677,38 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
         seed_ax = -model.drag_per_s * seed_u
         seed_ay = seed_u * seed_yaw
 
-    seed_load = np.column_stack([
+    computed_seed_load = np.column_stack([
         suspension_loads_numpy(
             model, seed_body_height[k], seed_body_height_rate[k],
             seed_roll[k], seed_roll_rate[k], seed_pitch[k],
             seed_pitch_rate[k])
         for k in range(n)])
+    if (initial_state_seed is not None
+            and initial_state_seed_is_model_consistent):
+        # Preserve the algebraic load variables when resuming a solver
+        # iterate. Recomputing them from the body states changes the saved
+        # point whenever its spring/damper equalities retain a small residual.
+        seed_load = sample_periodic(seed_values["normal_load_n"])
+        if (seed_load.shape != (4, n) or not np.isfinite(seed_load).all()
+                or np.any(seed_load <= 0.0)):
+            raise ValueError("model-consistent normal-load seed is invalid")
+    else:
+        seed_load = computed_seed_load
     suspension_seed_summary = {
         "method": "warm-start body state",
         "periodic_laps": 0,
         "fixed_point_residual_scaled": None,
     }
 
-    # The phase-switch constraints reset wheel speed at the first node on
-    # either side of a CAWB/CAWD transition. Match that hybrid boundary in
-    # the initializer as well as throughout the brake phase.
+    # For a fresh guess, initialize locked brake/transition wheel states at
+    # zero. A model-consistent solver checkpoint instead retains its exact
+    # wheel and throttle variables, including any small current NLP defect.
     mode_transition_nodes = brake_modes_array != np.roll(brake_modes_array, 1)
-    seed_omega[:, brake_modes_array | mode_transition_nodes] = 0.0
-    seed_throttle[brake_modes_array] = 0.0
-    seed_throttle[~brake_modes_array] = np.maximum(
-        0.015, seed_throttle[~brake_modes_array])
+    if not initial_state_seed_is_model_consistent:
+        seed_omega[:, brake_modes_array | mode_transition_nodes] = 0.0
+        seed_throttle[brake_modes_array] = 0.0
+        seed_throttle[~brake_modes_array] = np.maximum(
+            0.015, seed_throttle[~brake_modes_array])
     if gate_state_anchor is not None:
         anchored_wheels = np.asarray(
             gate_state_anchor["wheel_omega_radps"], dtype=np.float64)
@@ -759,7 +790,7 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
     slip_x_nodes = []
     slip_y_nodes = []
     force_nodes = []
-    wheel_spin_equilibrium_omega = []
+    wheel_tire_torque_nodes = []
     body_path_heading_error_nodes = []
     for k in range(n):
         station = station_nodes[k]
@@ -799,9 +830,6 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
                        f"right_track_boundary_k{k}")
         if brake_modes_array[k]:
             add_constraint(throttle[k] == 0.0, "unity_exact_zero_cawb_brake")
-            for i in range(4):
-                add_constraint(wheel_omega[i][k] == 0.0,
-                               f"unity_brake_locked_wheel_w{i}")
         else:
             add_constraint(opti.bounded(0.015, throttle[k], 1.0),
                            "unity_positive_cawd_drive")
@@ -835,16 +863,11 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
                 0.0, suspension_travel[i], model.suspension_distance_m),
                 f"unity_suspension_travel_w{i}")
 
-        # VehicleController assigns one quarter of common CAWD motor torque
-        # to each wheel. Wheel angular speed is dynamic: motor torque, tire
-        # reaction torque, and measured effective wheel inertia determine its
-        # acceleration. The old algebraic torque-balance constraint erased
-        # wheelspin transients and made throttle/slip physics impossible.
-        motor_torque_per_wheel = model.motor_torque_nm * throttle[k] / 4.0
-        wheel_spin_equilibrium_omega.append(tuple(
-            (motor_torque_per_wheel - model.wheel_radius_m * fx_w[i])
-            / model.wheel_damping_nms
-            for i in range(4)))
+        # Unity's tire callback returns wheel reaction torque as -Fx*R.
+        # Retain it at each collocation node for the source-derived wheel
+        # angular-momentum update below.
+        wheel_tire_torque_nodes.append(tuple(
+            -model.wheel_radius_m * fx_w[i] for i in range(4)))
 
         longitudinal_dot = ax + yaw_rate[k] * v[k]
         lateral_dot = ay - yaw_rate[k] * u[k]
@@ -954,6 +977,21 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
     spatial_state_scales = ca.DM((
         0.25, 0.35, 2.0, 1.0, 2.0, 0.35,
         0.02, 1.0, 0.12, 2.0, 0.10, 2.0))
+
+    def source_wheel_update(omega, drive_torque, brake_torque, tire_torque,
+                            duration_s, forward_speed):
+        low_speed_result = physx_no_drive_wheel_speed_interval_casadi(
+            omega, drive_torque, brake_torque, tire_torque,
+            model.wheel_inertia_kgm2, model.wheel_damping_nms, duration_s,
+            substeps_per_physics_step=UNITY_NO_DRIVE_LOW_SPEED_SUBSTEPS)
+        high_speed_result = physx_no_drive_wheel_speed_interval_casadi(
+            omega, drive_torque, brake_torque, tire_torque,
+            model.wheel_inertia_kgm2, model.wheel_damping_nms, duration_s,
+            substeps_per_physics_step=UNITY_NO_DRIVE_HIGH_SPEED_SUBSTEPS)
+        return ca.if_else(
+            ca.fabs(forward_speed) < UNITY_NO_DRIVE_SUBSTEP_THRESHOLD_MPS,
+            low_speed_result, high_speed_result)
+
     for k in range(n):
         kp = (k + 1) % n
         xk = ca.vertcat(*[x[index, k] for index in dynamic_indices])
@@ -971,28 +1009,55 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
                 throttle[kp] - throttle[k]
                 >= -throttle_fall_rate_limit_norm_per_s * segment_time,
                 f"positive_throttle_fall_rate_k{k}")
-        if not brake_modes_array[k] and not brake_modes_array[kp]:
-            wheel_dt = ds / (
-                (u[kp] * ca.cos(epsi[kp]) - v[kp] * ca.sin(epsi[kp]))
-                / (1.0 - interp["kappa"](station_nodes[kp]) * ey[kp]))
-            wheel_decay = ca.exp(
-                -model.wheel_damping_nms * wheel_dt
-                / model.wheel_inertia_kgm2)
-            for i in range(4):
-                add_constraint(
-                    (wheel_omega[i][kp]
-                     - (wheel_decay * wheel_omega[i][k]
-                        + (1.0 - wheel_decay)
-                        * wheel_spin_equilibrium_omega[kp][i])) / 100.0 == 0,
-                    f"periodic_exponential_{WHEEL_STATE_NAMES[i]}_k{k}")
-        elif brake_modes_array[k] != brake_modes_array[kp]:
-            # The source controller applies CAWB at 428 N m and source
-            # captures show all four WheelCollider RPM values reach exactly
-            # zero by the following 1 ms sample. Preserve that measured mode
-            # switch instead of inventing an unobserved brake transient.
-            for i in range(4):
-                add_constraint(wheel_omega[i][kp] == 0.0,
-                               f"unity_brake_mode_transition_wheel_{i}_k{k}")
+        segment_time = 0.5 * ds * (time_density[k] + time_density[kp])
+        interval_start_forward_speed = x[0, k]
+        for i in range(4):
+            # Unity's controller chooses CAWD quarter-torque for any nonzero
+            # throttle and CAWB's full configured brake torque per wheel at
+            # exact zero. Reproduce PhysX's speed-dependent 5/1 internal
+            # substeps, implicit-Euler wheel update, finite brake torque, and
+            # zero-crossing lock. PhysX selects its 5/1 count once from the
+            # outer tick's start-of-step longitudinal speed; the collocation
+            # interval's start state is the closest represented equivalent.
+            # A spatial interval spanning the 5 m/s threshold remains a
+            # discretization approximation. A phase boundary is split into
+            # drive then brake (or vice versa), not snapped to zero wheel RPM.
+            wheel_state = wheel_omega[i][k]
+            tire_torque = 0.5 * (
+                wheel_tire_torque_nodes[k][i]
+                + wheel_tire_torque_nodes[kp][i])
+            if brake_modes_array[k] != brake_modes_array[kp]:
+                half_time = 0.5 * segment_time
+                if brake_modes_array[k]:
+                    wheel_state = source_wheel_update(
+                        wheel_state, 0.0, model.motor_torque_nm,
+                        tire_torque, half_time, interval_start_forward_speed)
+                    wheel_state = source_wheel_update(
+                        wheel_state,
+                        model.motor_torque_nm * throttle[kp] / 4.0, 0.0,
+                        tire_torque, half_time, interval_start_forward_speed)
+                else:
+                    wheel_state = source_wheel_update(
+                        wheel_state,
+                        model.motor_torque_nm * throttle[k] / 4.0, 0.0,
+                        tire_torque, half_time, interval_start_forward_speed)
+                    wheel_state = source_wheel_update(
+                        wheel_state, 0.0, model.motor_torque_nm,
+                        tire_torque, half_time, interval_start_forward_speed)
+            elif brake_modes_array[k]:
+                wheel_state = source_wheel_update(
+                    wheel_state, 0.0, model.motor_torque_nm, tire_torque,
+                    segment_time, interval_start_forward_speed)
+            else:
+                average_drive_torque = (
+                    model.motor_torque_nm * 0.5
+                    * (throttle[k] + throttle[kp]) / 4.0)
+                wheel_state = source_wheel_update(
+                    wheel_state, average_drive_torque, 0.0, tire_torque,
+                    segment_time, interval_start_forward_speed)
+            add_constraint(
+                (wheel_omega[i][kp] - wheel_state) / 100.0 == 0,
+                f"physx_implicit_wheel_update_{WHEEL_STATE_NAMES[i]}_k{k}")
         lap_time += 0.5 * ds * (time_density[k] + time_density[kp])
 
     # Reconcile tire force, acceleration, and drive torque at the initial
@@ -1441,18 +1506,24 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
             "brake_phase_order_and_count": "seeded from measured training run; switch locations and durations are free",
         },
         "wheel_spin_discretization": {
-            "method": "exponential torque/damping update at spatial mesh endpoints",
+            "method": (
+                "closed-form composition of PhysX implicit-Euler internal wheel "
+                "substeps; 5 x 0.2 ms below 5 m/s, 1 x 1 ms at/above 5 m/s"),
             "time_constant_s": (
                 model.wheel_inertia_kgm2 / model.wheel_damping_nms),
             "reason": (
-                "the source-derived wheel inertia and damping define a short "
-                "wheel response; this continuous exponential approximation "
-                "holds tire reaction at the endpoint over each spatial "
-                "interval and is not PhysX's discrete 1 ms/substep update"),
+                "integer internal-step damping exactly composes "
+                "integrateNoDriveWheelSpeeds for held torque; the substep "
+                "branch is selected from interval-start forward speed, matching "
+                "the outer vehicle tick as represented by the spatial mesh; "
+                "a spatial interval crossing 5 m/s cannot reproduce per-tick "
+                "branch changes. Variable intervals use a smooth fractional-"
+                "step extension and trapezoidal tire-reaction torque"),
             "physx_source_status": (
-                "reference float32 PxVehicleNoDrive update implemented in "
-                "tools/vehicle_dynamics_learning/physx_no_drive_source.py; "
-                "not yet used by this spatial OCP"),
+                "source wheel torque split, speed-dependent 5/1 internal "
+                "substeps, finite CAWB brake torque, implicit damping, and "
+                "zero-crossing wheel lock are connected to the spatial OCP; "
+                "wheel reaction torque is averaged over each spatial interval"),
             "body_state_discretization": "trapezoidal spatial collocation",
             "spatial_state_defect_scales": [
                 0.25, 0.35, 2.0, 1.0, 2.0, 0.35,
@@ -1530,18 +1601,26 @@ def solve_bottom_up(track: Track, model: UnityWheelModel,
         "limits_and_caveats": [
             "The optimizer is a new free-geometry path-and-speed OCP, not a speed-scaled reference trajectory.",
             "The measured capture seeds only the number/order of drive and exact-zero brake phases; IPOPT optimizes every phase length.",
-            "Public Unity VehicleController, active serialized vehicle values, source capture friction curves, and source-derived rigid-body equations are used; the native WheelCollider solver remains unavailable.",
+            "Public Unity VehicleController, active serialized vehicle values, source capture friction curves, and source-derived rigid-body equations are used; the native WheelCollider contact solver is not embedded in the differentiable OCP.",
             "The configured Unity friction curves and native tire-force callback equations are source-translated, but contact velocity, changing raycast hit/load, surface friction pair, and full body/contact solve are not reproduced end-to-end. The horizontal plane and spring/damper states remain optimizer assumptions.",
-            "Drive-mode wheel spin uses a continuous exponential spatial approximation with source CAWD torque split, source-derived wheel inertia/damping, and endpoint tire reaction. It is not the discrete PhysX no-drive integrator; zero-throttle CAWB phases pin wheel speed to zero instead of integrating the finite brake transient. A float32 source-reference integrator is implemented but not yet connected to this OCP.",
+            "Wheel spin uses the closed-form PhysX implicit-Euler composition with the source 5/1 substep branch selected from interval-start forward speed, matching the outer vehicle tick represented by the spatial mesh; spatial intervals crossing 5 m/s, fractional durations, interval-averaged tire reaction, and exact native 1 ms contact/tire recomputation remain OCP discretization approximations. Zero-throttle CAWB phases use finite configured brake torque and the PhysX zero-crossing wheel lock.",
             "IPOPT establishes a local solution only; the objective is not a global-minimum or Unity lap-time guarantee.",
         ],
     }
     warm_startable_iterate = bool(
         finite and max_violation <= NEAR_FEASIBLE_WARM_START_MAX_VIOLATION)
-    if not feasible_incumbent and not warm_startable_iterate:
+    diagnostic_iterate_only = should_retain_diagnostic_iterate(
+        finite, feasible_incumbent, max_violation)
+    if (not feasible_incumbent and not warm_startable_iterate
+            and not diagnostic_iterate_only):
         return {}, report
     if warm_startable_iterate and not feasible_incumbent:
         report["near_feasible_warm_start_only"] = True
+    elif diagnostic_iterate_only:
+        report["diagnostic_iterate_only"] = True
+        report["diagnostic_iterate_warning"] = (
+            "This infeasible iterate may only be used for bounded solver "
+            "continuation. It is not a raceline or accepted warm start.")
 
     states = value(x)
     loads = value(normal_load)

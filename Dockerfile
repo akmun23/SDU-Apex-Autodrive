@@ -13,7 +13,7 @@ ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64
 COPY --from=cuda_toolkit /usr/local/cuda-12.6 /usr/local/cuda-12.6
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake libeigen3-dev \
+    build-essential cmake libeigen3-dev nlohmann-json3-dev \
     python3-colcon-common-extensions \
     ros-humble-ackermann-msgs ros-humble-ament-cmake-python \
     ros-humble-nav2-lifecycle-manager ros-humble-nav2-map-server \

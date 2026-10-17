@@ -5,14 +5,20 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct
 {
     float A[MPC_MODEL_NX][MPC_MODEL_NX];
     float B[MPC_MODEL_NX][2];
     float d[MPC_MODEL_NX];
     unsigned int nominal_branch_flags;
-    uint16_t nonsmooth_column_mask;
+    uint32_t nonsmooth_column_mask;
     int nonsmooth_column_count;
+    int failure_reason;
+    int failure_index;
     int valid;
 } MpcStageLinearization_t;
 
@@ -42,5 +48,9 @@ int mpc_vehicle_model_step_with_jacobian(
     float path_curvature,
     MpcStageResult_t *stage,
     MpcStageLinearization_t *linearization);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

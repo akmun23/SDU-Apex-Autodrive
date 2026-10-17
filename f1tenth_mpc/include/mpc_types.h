@@ -14,10 +14,9 @@
  * Defines
  *===========================================================================*/
 
-/* Riccati dimensions. The active RTI wrapper uses a 12-state augmented
- * problem and two rate inputs. Two states are the causal 40 Hz steering
- * command queue required by the Unity source-side actuator model. */
-#define RICCATI_MAX_NX  12                               /* Maximum Riccati state dimension; active RTI uses 12. */
+/* Riccati dimensions. The active RTI wrapper uses a 12-state plant and two
+ * previous-input memory states, augmented with two throttle-delay states. */
+#define RICCATI_MAX_NX  18                               /* Plant, four wheel-spin states, and two prior-input states. */
 #define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and speed slew). */
 
 /* Math and timing */
@@ -30,7 +29,7 @@
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30                            /* 30 commands at 40 Hz = 0.75 s. */
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
-#define MPC_MODEL_NX 10                                  /* Frenet/body model states, including two delayed steering targets. */
+#define MPC_MODEL_NX 16                                  /* Tracking/actuator states plus four explicit wheel-spin states. */
 
 /* Solver and model safeguards */
 #define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
@@ -147,6 +146,9 @@ typedef struct
     float tolerance;
     int max_iterations;
     int adaptive_rho;
+    /* Re-factor only every Nth ADMM iteration when adapting rho; zero keeps
+     * the historical per-iteration update cadence. */
+    int adaptive_rho_update_period;
     int shared_rho;
     /* ADMM over-relaxation in [1, 2]; zero selects the unrelaxed baseline. */
     float over_relaxation;

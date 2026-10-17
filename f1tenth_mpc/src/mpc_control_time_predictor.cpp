@@ -11,6 +11,7 @@ namespace f1tenth_mpc {
 namespace {
 
 constexpr double kNsToSeconds = 1.0e-9;
+constexpr int64_t kUnityPhysicsTickNs = 1000000;
 
 double wrap_angle(double angle)
 {
@@ -52,18 +53,36 @@ bool project_predicted_map_pose(MpcControlTimePrediction *prediction,
 
 bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
                              int64_t start_ns, int64_t end_ns,
+                             int64_t grid_origin_ns,
+                             int64_t *integrated_elapsed_ns,
                              double integration_step_s,
                              const MpcTrajectorySample_t *trajectory,
                              std::size_t trajectory_count,
                              double lap_length_m)
 {
-    if (end_ns < start_ns) return false;
-    int64_t cursor_ns = start_ns;
-    while (cursor_ns < end_ns) {
-        const double remaining_s = static_cast<double>(end_ns - cursor_ns) *
-            kNsToSeconds;
-        const float dt = static_cast<float>(
-            std::min(integration_step_s, remaining_s));
+    if (end_ns < start_ns || !integrated_elapsed_ns ||
+        start_ns < grid_origin_ns || end_ns < grid_origin_ns) return false;
+
+    /* The source vehicle advances on Unity's fixed 1 ms physics grid. Bridge
+     * header stamps are receive-time stamps and commonly contain fractional
+     * milliseconds, so passing the raw final remainder to the plant makes it
+     * reject an otherwise valid rollout. Quantize event boundaries relative
+     * to this prediction's source stamp and preserve that phase across command
+     * segments; this discards at most one sub-millisecond tail for the whole
+     * propagation, not one tail per command event. */
+    const int64_t target_ticks = (end_ns - grid_origin_ns) /
+        kUnityPhysicsTickNs;
+    int64_t integrated_ticks = *integrated_elapsed_ns /
+        kUnityPhysicsTickNs;
+    if (target_ticks < integrated_ticks) return false;
+    const int64_t configured_ticks = static_cast<int64_t>(std::llround(
+        integration_step_s * 1000.0));
+    if (configured_ticks <= 0) return false;
+
+    while (integrated_ticks < target_ticks) {
+        const int64_t step_ticks = std::min(
+            configured_ticks, target_ticks - integrated_ticks);
+        const float dt = static_cast<float>(step_ticks) * 0.001f;
         MpcTrajectorySample_t sample{};
         if (!(dt > 0.0f) || !mpc_trajectory_sample(trajectory,
                 trajectory_count, lap_length_m, *progress_m, &sample))
@@ -74,10 +93,8 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         if (!result.valid) return false;
         *state = result.next;
         *progress_m += result.delta_s_m;
-        const int64_t step_ns = std::min<int64_t>(end_ns - cursor_ns,
-            std::max<int64_t>(1, static_cast<int64_t>(std::llround(
-                static_cast<double>(dt) * 1.0e9))));
-        cursor_ns += step_ns;
+        integrated_ticks += step_ticks;
+        *integrated_elapsed_ns = integrated_ticks * kUnityPhysicsTickNs;
     }
     return true;
 }
@@ -172,6 +189,9 @@ MpcControlTimeStatus predict_to_control_time(
     double lap_length_m,
     std::size_t previous_segment,
     const MpcPathProjection_t *known_source_projection,
+    const MpcModelState_t *source_plant_state,
+    int64_t source_plant_stamp_ns,
+    double source_plant_progress_m,
     const MpcControlTimePredictorConfig &config,
     MpcControlTimePrediction *prediction)
 {
@@ -189,7 +209,10 @@ MpcControlTimeStatus predict_to_control_time(
         config.maximum_command_speed_mps <= 0.0 ||
         config.maximum_command_speed_mps > MPC_MAX_COMMAND_SPEED_MPS ||
         !std::isfinite(config.command_actuation_delay_s) ||
-        config.command_actuation_delay_s < 0.0)
+        config.command_actuation_delay_s < 0.0 ||
+        (source_plant_state && (source_plant_stamp_ns <= 0 ||
+            source_plant_stamp_ns > target_stamp_ns ||
+            !std::isfinite(source_plant_progress_m))))
         return MpcControlTimeStatus::kInvalidInput;
     const double age_s = static_cast<double>(target_stamp_ns -
         source_state.source_stamp_ns) * kNsToSeconds;
@@ -309,20 +332,46 @@ MpcControlTimeStatus predict_to_control_time(
                 lap_length_m, result.projection.segment))
             return MpcControlTimeStatus::kProjectionFailed;
     } else if (mode == MpcControlTimeMode::kAcceptedModelCommandHistory) {
-        MpcModelState_t plant{};
-        plant.e_y = static_cast<float>(result.projection.lateral_error);
-        plant.e_psi = static_cast<float>(result.projection.heading_error);
-        plant.u = static_cast<float>(std::max(0.0, source_state.u));
-        plant.v = static_cast<float>(source_state.v);
-        plant.r = static_cast<float>(source_state.yaw_rate);
+        MpcModelState_t plant = source_plant_state ? *source_plant_state :
+            MpcModelState_t{};
+        const int64_t plant_stamp_ns = source_plant_state ?
+            source_plant_stamp_ns : source_state.source_stamp_ns;
+        const double initial_progress_m = source_plant_state ?
+            source_plant_progress_m : result.projection.s;
+        result.plant_source_stamp_ns = plant_stamp_ns;
+        result.plant_to_sensor_s = static_cast<double>(
+            source_state.source_stamp_ns - plant_stamp_ns) * kNsToSeconds;
+        result.progress_m = initial_progress_m;
+
+        /* Keep a newly received encoder sample aside until the model reaches
+         * that sample's timestamp. Applying it to the previous nominal state
+         * would move a future measurement backwards in time. */
+        const bool wheel_feedback_valid =
+            plant.source_rear_wheel_omega_feedback_valid != 0;
+        const float wheel_feedback[2] = {
+            plant.source_rear_wheel_omega_feedback_radps[0],
+            plant.source_rear_wheel_omega_feedback_radps[1]};
+        plant.source_rear_wheel_omega_feedback_valid = 0;
+
+        if (!source_plant_state || (!plant.source_plant_initialized &&
+                plant_stamp_ns == source_state.source_stamp_ns)) {
+            plant.e_y = static_cast<float>(result.projection.lateral_error);
+            plant.e_psi = static_cast<float>(result.projection.heading_error);
+            plant.u = static_cast<float>(std::max(0.0, source_state.u));
+            plant.v = static_cast<float>(source_state.v);
+            plant.r = static_cast<float>(source_state.yaw_rate);
+        }
+
         MpcCommandHistoryEntry active_command{};
         if (causal_command_history->latest_at_or_before(
-                source_state.source_stamp_ns, &active_command)) {
+                plant_stamp_ns, &active_command)) {
             record_command_event(active_command);
-            plant.target_speed = static_cast<float>(active_command.target_speed_mps);
-            plant.steering_command =
-                static_cast<float>(active_command.steering_command_rad);
-        } else {
+            plant.target_speed = static_cast<float>(std::clamp(
+                active_command.target_speed_mps, 0.0,
+                config.maximum_command_speed_mps));
+            plant.steering_command = static_cast<float>(
+                active_command.steering_command_rad);
+        } else if (!source_plant_state) {
             plant.target_speed = static_cast<float>(std::clamp(source_state.u,
                 0.0, config.maximum_command_speed_mps));
             result.used_command_fallback = true;
@@ -330,20 +379,23 @@ MpcControlTimeStatus predict_to_control_time(
         result.target_speed_mps = plant.target_speed;
         result.steering_command_rad = plant.steering_command;
 
-        int64_t cursor_ns = source_state.source_stamp_ns;
+        int64_t cursor_ns = plant_stamp_ns;
+        int64_t integrated_elapsed_ns = 0;
         std::size_t guard = 0;
-        while (cursor_ns < target_stamp_ns) {
-            MpcCommandHistoryEntry next_command{};
-            const bool has_next = causal_command_history->next_after(cursor_ns,
-                target_stamp_ns, &next_command);
-            const int64_t segment_end_ns = has_next ? next_command.stamp_ns :
-                target_stamp_ns;
-            if (!propagate_model_segment(&plant, &result.progress_m, cursor_ns,
-                    segment_end_ns, config.model_integration_step_s, trajectory,
-                    trajectory_count, lap_length_m))
-                return MpcControlTimeStatus::kInvalidModelStep;
-            cursor_ns = segment_end_ns;
-            if (has_next) {
+        auto propagate_until = [&](int64_t end_ns) {
+            while (cursor_ns < end_ns) {
+                MpcCommandHistoryEntry next_command{};
+                const bool has_next = causal_command_history->next_after(
+                    cursor_ns, end_ns, &next_command);
+                const int64_t segment_end_ns = has_next ?
+                    next_command.stamp_ns : end_ns;
+                if (!propagate_model_segment(&plant, &result.progress_m,
+                        cursor_ns, segment_end_ns, plant_stamp_ns,
+                        &integrated_elapsed_ns,
+                        config.model_integration_step_s, trajectory,
+                        trajectory_count, lap_length_m)) return false;
+                cursor_ns = segment_end_ns;
+                if (!has_next) break;
                 record_command_event(next_command);
                 plant.target_speed = static_cast<float>(std::clamp(
                     next_command.target_speed_mps, 0.0,
@@ -353,12 +405,62 @@ MpcControlTimeStatus predict_to_control_time(
                 result.target_speed_mps = plant.target_speed;
                 result.steering_command_rad = plant.steering_command;
                 ++result.command_changes_used;
-            } else {
-                break;
+                if (++guard > kMpcCommandHistoryCapacity) return false;
             }
-            if (++guard > kMpcCommandHistoryCapacity)
-                return MpcControlTimeStatus::kInvalidInput;
+            return true;
+        };
+
+        if (source_state.source_stamp_ns >= plant_stamp_ns) {
+            if (!propagate_until(source_state.source_stamp_ns))
+                return MpcControlTimeStatus::kInvalidModelStep;
+
+            /* Re-anchor observable body state at its own source timestamp,
+             * while retaining the propagated hidden wheel/suspension and
+             * actuator history. The wrapped track coordinate is unwrapped
+             * nearest the propagated progress to preserve lap count. */
+            const double unwrapped_observed_progress = result.projection.s +
+                std::round((result.progress_m - result.projection.s) /
+                    lap_length_m) * lap_length_m;
+            result.progress_m = unwrapped_observed_progress;
+            plant.e_y = static_cast<float>(result.projection.lateral_error);
+            plant.e_psi = static_cast<float>(result.projection.heading_error);
+            plant.u = static_cast<float>(std::max(0.0, source_state.u));
+            plant.v = static_cast<float>(source_state.v);
+            plant.r = static_cast<float>(source_state.yaw_rate);
+            if (wheel_feedback_valid) {
+                plant.source_rear_wheel_omega_feedback_radps[0] =
+                    wheel_feedback[0];
+                plant.source_rear_wheel_omega_feedback_radps[1] =
+                    wheel_feedback[1];
+                if (plant.source_plant_initialized) {
+                    plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL] =
+                        wheel_feedback[0];
+                    plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RR] =
+                        wheel_feedback[1];
+                    plant.source_rear_wheel_omega_feedback_valid = 0;
+                } else {
+                    /* The first model step will seed Unity's hidden plant from
+                     * the observed body state and consume these wheel speeds. */
+                    plant.source_rear_wheel_omega_feedback_valid = 1;
+                }
+            }
+            result.sensor_state_fused = true;
         }
+
+        /* Persist the hidden plant at the newest measurement epoch, not at
+         * the future control epoch. At 40 Hz, a legal observation commonly
+         * arrives with a source stamp about 5 ms before the previous
+         * control-time prediction. Carrying the latter makes every following
+         * observation appear retroactive and silently disables state fusion.
+         * The caller carries this snapshot to the next callback; plant_state
+         * below remains the separate copy advanced to the control instant. */
+        result.plant_handoff_state = plant;
+        result.plant_handoff_state_valid = true;
+        result.plant_handoff_stamp_ns = cursor_ns;
+        result.plant_handoff_progress_m = result.progress_m;
+
+        if (!propagate_until(target_stamp_ns))
+            return MpcControlTimeStatus::kInvalidModelStep;
 
         MpcTrajectorySample_t final_sample{};
         if (!mpc_trajectory_sample(trajectory, trajectory_count, lap_length_m,
@@ -379,6 +481,8 @@ MpcControlTimeStatus predict_to_control_time(
         /* Keep the accepted model's integrated along-track state; projection
          * is wrapped and used only for local segment/cross-track diagnostics. */
         result.progress_m = integrated_progress_m;
+        result.plant_state = plant;
+        result.plant_state_valid = true;
     }
 
     *prediction = result;

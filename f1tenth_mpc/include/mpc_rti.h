@@ -11,8 +11,8 @@ extern "C" {
 
 enum
 {
-    MPC_RTI_PLANT_NX = 10,
-    MPC_RTI_NX = 12,
+    MPC_RTI_PLANT_NX = 16,
+    MPC_RTI_NX = 18,
     MPC_RTI_NU = 2,
     MPC_RTI_IDX_EY = 0,
     MPC_RTI_IDX_EPSI = 1,
@@ -24,8 +24,14 @@ enum
     MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1 = 7,
     MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2 = 8,
     MPC_RTI_IDX_ACTUAL_STEERING_ANGLE = 9,
-    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 10,
-    MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE = 11
+    MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_1 = 10,
+    MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_2 = 11,
+    MPC_RTI_IDX_WHEEL_OMEGA_FL = 12,
+    MPC_RTI_IDX_WHEEL_OMEGA_FR = 13,
+    MPC_RTI_IDX_WHEEL_OMEGA_RL = 14,
+    MPC_RTI_IDX_WHEEL_OMEGA_RR = 15,
+    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 16,
+    MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE = 17
 };
 
 typedef struct
@@ -159,6 +165,9 @@ typedef struct
     float x0[RICCATI_MAX_NX];
     int horizon;
     int nonsmooth_jacobian_columns;
+    int linearization_failure_stage;
+    int linearization_failure_reason;
+    int linearization_failure_index;
 } MpcRtiProblem_t;
 
 typedef struct
@@ -280,7 +289,7 @@ typedef struct
     double r1_solve_us;
     double r2_solve_us;
     double total_rti_us;
-    int selected_candidate; /* 1=R1, 2=R2, 3=exact corridor repair. */
+    int selected_candidate; /* 1=R1, 2=R2, 3=corridor repair. */
     int corridor_repair_used;
     /* Exact-feasible candidate retained despite an ADMM residual limit. */
     int residual_candidate_published;
@@ -305,6 +314,9 @@ typedef struct
     float lateral_accel_proxy_mps2;
     int lateral_accel_proxy_stage;
     float lateral_accel_proxy_by_stage_mps2[PREDICTION_HORIZON + 1];
+    int linearization_failure_stage;
+    int linearization_failure_reason;
+    int linearization_failure_index;
     int recovery_active;
     int recovery_not_found;
     int recovery_reentry_stage;

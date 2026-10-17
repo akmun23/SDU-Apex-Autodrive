@@ -145,6 +145,17 @@ struct OdometryObserverConfig
   // IMU Transform offset used for TF (imu_x_m): Unity differentiates the
   // vehicle Rigidbody velocity at its configured COM.
   double imu_acceleration_reference_x_m{0.15532};
+  // Bounded weight for the source-parity PhysX lateral-velocity prediction.
+  // Forward velocity has a separate weight because the PhysX plant predicts
+  // longitudinal wheel spin and braking while its lateral model has not yet
+  // transferred with comparable accuracy.
+  double physx_velocity_blend{0.0};
+  // Weight for the 1 kHz source-parity PhysX forward-speed prediction.
+  double physx_forward_velocity_blend{0.0};
+  // Lateral PhysX blend schedule: at launch, the coarse cumulative encoder
+  // angle under-resolves movement, so fade this weight to physx_velocity_blend.
+  double physx_low_speed_velocity_blend{0.45};
+  double physx_low_speed_blend_transition_mps{1.5};
   // The simulator's lateral IMU acceleration contains enough bias/noise to
   // create a persistent pose error when integrated at native 20 Hz.  The
   // default car model therefore uses wheel speed plus IMU yaw only (a
@@ -232,6 +243,11 @@ struct OdometryObservation
   double steering_feedback_rad{0.0};
   double throttle_feedback{0.0};
   bool actuator_feedback_valid{false};
+  double physx_forward_velocity_mps{0.0};
+  // Native PhysX reports lateral speed at the Rigidbody COM; update() shifts
+  // it to the rear-axle/base_link reference before fusion.
+  double physx_lateral_velocity_mps{0.0};
+  bool physx_velocity_valid{false};
 };
 
 struct OdometryEstimate

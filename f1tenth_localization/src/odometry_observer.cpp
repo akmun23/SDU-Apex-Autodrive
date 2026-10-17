@@ -111,12 +111,33 @@ OdometryObserverConfig deployment_observer_config()
   config.lateral_velocity_max_mps = 0.35;
   config.max_imu_ax_abs_mps2 = 30.0;
   config.imu_acceleration_reference_x_m = 0.15532;
+  config.physx_velocity_blend = 0.0;
   return config;
 }
 
 OdometryObserver::OdometryObserver(OdometryObserverConfig config)
 : config_(config)
 {
+  if (!std::isfinite(config_.physx_velocity_blend) ||
+    config_.physx_velocity_blend < 0.0 ||
+    config_.physx_velocity_blend > 1.0)
+  {
+    throw std::invalid_argument("PhysX Odom velocity blend must be in [0, 1]");
+  }
+  if (!std::isfinite(config_.physx_forward_velocity_blend) ||
+    config_.physx_forward_velocity_blend < 0.0 ||
+    config_.physx_forward_velocity_blend > 1.0)
+  {
+    throw std::invalid_argument("PhysX forward velocity blend must be in [0, 1]");
+  }
+  if (!std::isfinite(config_.physx_low_speed_velocity_blend) ||
+    config_.physx_low_speed_velocity_blend < 0.0 ||
+    config_.physx_low_speed_velocity_blend > 1.0 ||
+    !std::isfinite(config_.physx_low_speed_blend_transition_mps) ||
+    config_.physx_low_speed_blend_transition_mps <= 0.0)
+  {
+    throw std::invalid_argument("invalid low-speed PhysX Odom blend schedule");
+  }
   if (config_.use_learned_u_residual_model &&
     (config_.learned_u_residual_coefficients.size() != 22 ||
     !std::isfinite(config_.learned_u_residual_min_speed_mps) ||
@@ -1467,6 +1488,33 @@ OdometryEstimate OdometryObserver::update(
   }
   }
 
+  const bool physx_velocity_available = observation.physx_velocity_valid &&
+    finite(observation.physx_forward_velocity_mps) &&
+    finite(observation.physx_lateral_velocity_mps);
+  const double physx_blend_speed_fraction = std::clamp(
+    std::abs(unity_actuator_published_u_mps) /
+    config_.physx_low_speed_blend_transition_mps, 0.0, 1.0);
+  const double configured_physx_blend =
+    config_.physx_low_speed_velocity_blend + physx_blend_speed_fraction *
+    (config_.physx_velocity_blend - config_.physx_low_speed_velocity_blend);
+  const double physx_blend = physx_velocity_available ? configured_physx_blend : 0.0;
+  const double physx_u_blend = physx_velocity_available ?
+    config_.physx_forward_velocity_blend : 0.0;
+  const double physx_rear_axle_v_mps = observation.physx_lateral_velocity_mps -
+    observation.yaw_rate_radps * config_.imu_acceleration_reference_x_m;
+  const double fused_body_u_mps =
+    (1.0 - physx_u_blend) * unity_actuator_published_u_mps +
+    physx_u_blend * observation.physx_forward_velocity_mps;
+  const double fused_body_v_mps =
+    (1.0 - physx_blend) * body_v_mps_ + physx_blend * physx_rear_axle_v_mps;
+  if (physx_u_blend > 0.0 || physx_blend > 0.0) {
+    // Keep the encoder/IMU observer latent state independent: this is a
+    // bounded per-packet correction, not a replacement that can recursively
+    // propagate unobserved PhysX state error.
+    pose_body_u_mps = fused_body_u_mps;
+    pose_body_v_mps = fused_body_v_mps;
+  }
+
   last_speed_pred_mps_ = speed_pred;
   update_pose(
     dt_s, observation.yaw_rad,
@@ -1483,16 +1531,20 @@ OdometryEstimate OdometryObserver::update(
   auto output = estimate(observation);
   output.dt_s = dt_s;
   output.wheel_update_used = wheel_update_used;
-  if (high_yaw_wheel_slip_replaced_u) {
+  if (physx_u_blend > 0.0 || physx_blend > 0.0) {
+    output.body_u_mps = fused_body_u_mps;
+    output.body_v_mps = fused_body_v_mps;
+    output.speed_mps = std::hypot(fused_body_u_mps, fused_body_v_mps);
+  } else if (high_yaw_wheel_slip_replaced_u) {
     output.body_u_mps = high_yaw_published_u_mps;
     output.speed_mps = std::hypot(high_yaw_published_u_mps, output.body_v_mps);
     output.wheel_update_used = false;
   }
-  if (learned_u_residual_applied) {
+  else if (learned_u_residual_applied) {
     output.body_u_mps = learned_u_published_mps;
     output.speed_mps = std::hypot(learned_u_published_mps, output.body_v_mps);
   }
-  if (unity_actuator_model_applied) {
+  else if (unity_actuator_model_applied) {
     output.body_u_mps = unity_actuator_published_u_mps;
     output.speed_mps = std::hypot(unity_actuator_published_u_mps, output.body_v_mps);
   }

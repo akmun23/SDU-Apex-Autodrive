@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -20,7 +21,10 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include <ament_index_cpp/get_package_prefix.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include "f1tenth_localization/odometry_observer.hpp"
+#include "f1tenth_localization/physx_odom_runtime.hpp"
 #include "f1tenth_localization/sensor_packet_assembler.hpp"
 
 namespace
@@ -73,6 +77,11 @@ public:
     declare_parameter("imu_topic", "/autodrive/roboracer_1/imu");
     declare_parameter("steering_feedback_topic", "/autodrive/roboracer_1/steering");
     declare_parameter("throttle_feedback_topic", "/autodrive/roboracer_1/throttle");
+    declare_parameter(
+      "steering_command_topic", "/autodrive/roboracer_1/steering_command");
+    declare_parameter(
+      "throttle_command_topic", "/autodrive/roboracer_1/throttle_command");
+    declare_parameter("use_physx_odom_velocity", false);
     declare_parameter("odom_topic", "/odom");
     declare_parameter("diagnostics_topic", "/odom/diagnostics");
 
@@ -90,6 +99,15 @@ public:
     declare_parameter(
       "imu_acceleration_reference_x_m",
       observer_defaults.imu_acceleration_reference_x_m);
+    declare_parameter("physx_velocity_blend", observer_defaults.physx_velocity_blend);
+    declare_parameter(
+      "physx_forward_velocity_blend", observer_defaults.physx_forward_velocity_blend);
+    declare_parameter(
+      "physx_low_speed_velocity_blend",
+      observer_defaults.physx_low_speed_velocity_blend);
+    declare_parameter(
+      "physx_low_speed_blend_transition_mps",
+      observer_defaults.physx_low_speed_blend_transition_mps);
     declare_parameter("imu_orientation_correction_gain", 1.0);
     declare_parameter("max_imu_orientation_step_rad", 0.30);
     declare_parameter("pose_xy_variance", 0.01);
@@ -327,6 +345,31 @@ public:
 
     observer_config_ = load_observer_config();
     observer_ = f1tenth_localization::OdometryObserver(observer_config_);
+    use_physx_odom_velocity_ = get_parameter("use_physx_odom_velocity").as_bool();
+    if (use_physx_odom_velocity_) {
+      const std::filesystem::path prefix(
+        ament_index_cpp::get_package_prefix("f1tenth_localization"));
+      const std::filesystem::path share(
+        ament_index_cpp::get_package_share_directory("f1tenth_localization"));
+      const auto executable = prefix / "lib/f1tenth_localization/physx_native_vehicle_step";
+      const auto initial_state = share / "config/physx_odom_reset_initial.json";
+      const auto shape_audit = share / "config/physx_odom_vehicle_shapes.json";
+      if (!std::filesystem::is_regular_file(executable) ||
+        !std::filesystem::is_regular_file(initial_state) ||
+        !std::filesystem::is_regular_file(shape_audit))
+      {
+        throw std::runtime_error("installed PhysX Odom runtime asset is missing");
+      }
+      physx_odom_runtime_ = std::make_unique<f1tenth_localization::PhysxOdomRuntime>(
+        executable.string(), initial_state.string(), shape_audit.string());
+      RCLCPP_INFO(
+        get_logger(),
+        "PhysX Odom predictor enabled: 25 x 1 ms steps, forward-velocity blend %.3f; lateral blend %.3f (low-speed %.3f fading by %.2f m/s)",
+        observer_config_.physx_forward_velocity_blend,
+        observer_config_.physx_velocity_blend,
+        observer_config_.physx_low_speed_velocity_blend,
+        observer_config_.physx_low_speed_blend_transition_mps);
+    }
     actuator_feedback_settle_delay_ms_ = get_parameter(
       "unity_actuator_feedback_settle_delay_ms").as_double();
     if (!std::isfinite(actuator_feedback_settle_delay_ms_) ||
@@ -408,6 +451,16 @@ public:
       get_parameter("throttle_feedback_topic").as_string(), sensor_qos,
       [this](std_msgs::msg::Float32::ConstSharedPtr msg) {
         actuator_feedback_callback(*msg, false);
+      });
+    steering_command_sub_ = create_subscription<std_msgs::msg::Float32>(
+      get_parameter("steering_command_topic").as_string(), sensor_qos,
+      [this](std_msgs::msg::Float32::ConstSharedPtr msg) {
+        actuator_command_callback(*msg, true);
+      });
+    throttle_command_sub_ = create_subscription<std_msgs::msg::Float32>(
+      get_parameter("throttle_command_topic").as_string(), sensor_qos,
+      [this](std_msgs::msg::Float32::ConstSharedPtr msg) {
+        actuator_command_callback(*msg, false);
       });
     if (publish_tf_) {
       publish_static_transforms();
@@ -612,6 +665,13 @@ private:
       "lateral_velocity_reference_forward_offset_m").as_double();
     config.imu_acceleration_reference_x_m = get_parameter(
       "imu_acceleration_reference_x_m").as_double();
+    config.physx_velocity_blend = get_parameter("physx_velocity_blend").as_double();
+    config.physx_forward_velocity_blend = get_parameter(
+      "physx_forward_velocity_blend").as_double();
+    config.physx_low_speed_velocity_blend = get_parameter(
+      "physx_low_speed_velocity_blend").as_double();
+    config.physx_low_speed_blend_transition_mps = get_parameter(
+      "physx_low_speed_blend_transition_mps").as_double();
     config.max_imu_ax_abs_mps2 = get_parameter("max_imu_ax_abs_mps2").as_double();
     return config;
   }
@@ -684,11 +744,34 @@ private:
     }
   }
 
+  void actuator_command_callback(
+    const std_msgs::msg::Float32 & msg, bool steering)
+  {
+    const double value = static_cast<double>(msg.data);
+    if (!std::isfinite(value)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(actuator_command_mutex_);
+    if (steering) {
+      latest_steering_command_norm_ = value;
+    } else {
+      latest_throttle_command_norm_ = value;
+    }
+  }
+
   void queue_packet_for_feedback_settle(
     const f1tenth_localization::SensorPacket & packet)
   {
+    PendingPacket pending;
+    pending.packet = packet;
+    pending.queued_at = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> command_lock(actuator_command_mutex_);
+      pending.steering_command_norm = latest_steering_command_norm_;
+      pending.throttle_command_norm = latest_throttle_command_norm_;
+    }
     std::lock_guard<std::mutex> lock(pending_packets_mutex_);
-    pending_packets_.push_back({packet, std::chrono::steady_clock::now()});
+    pending_packets_.push_back(std::move(pending));
   }
 
   void process_settled_packets()
@@ -710,7 +793,9 @@ private:
         pending = std::move(pending_packets_.front());
         pending_packets_.pop_front();
       }
-      process_packet(pending.packet);
+      process_packet(
+        pending.packet, pending.steering_command_norm,
+        pending.throttle_command_norm);
     }
   }
 
@@ -752,6 +837,20 @@ private:
   }
 
   void process_packet(const f1tenth_localization::SensorPacket & packet)
+  {
+    double steering_command = 0.0;
+    double throttle_command = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(actuator_command_mutex_);
+      steering_command = latest_steering_command_norm_;
+      throttle_command = latest_throttle_command_norm_;
+    }
+    process_packet(packet, steering_command, throttle_command);
+  }
+
+  void process_packet(
+    const f1tenth_localization::SensorPacket & packet,
+    double steering_command, double throttle_command)
   {
     auto processed_packet = packet;
     const auto source_stamp_ns = processed_packet.stamp_ns;
@@ -801,6 +900,17 @@ private:
         observation.steering_feedback_rad = latest_steering_feedback_rad_;
         observation.throttle_feedback = latest_throttle_feedback_;
       }
+    }
+
+    if (physx_odom_runtime_) {
+      const auto velocity = physx_odom_runtime_->advance(
+        steering_command, throttle_command,
+        observation.actuator_feedback_valid,
+        observation.steering_feedback_rad,
+        observation.throttle_feedback);
+      observation.physx_forward_velocity_mps = velocity.u_mps;
+      observation.physx_lateral_velocity_mps = velocity.v_mps;
+      observation.physx_velocity_valid = true;
     }
 
     auto estimate = observer_.update(observation);
@@ -929,15 +1039,20 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_feedback_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr throttle_feedback_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_command_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr throttle_command_sub_;
   rclcpp::TimerBase::SharedPtr actuator_settle_timer_;
 
   std::mutex mutex_;
   std::mutex actuator_feedback_mutex_;
+  std::mutex actuator_command_mutex_;
   std::mutex pending_packets_mutex_;
   struct PendingPacket
   {
     f1tenth_localization::SensorPacket packet;
     std::chrono::steady_clock::time_point queued_at;
+    double steering_command_norm{0.0};
+    double throttle_command_norm{0.0};
   };
   std::deque<PendingPacket> pending_packets_;
   double actuator_feedback_settle_delay_ms_{0.0};
@@ -947,6 +1062,10 @@ private:
   std::chrono::steady_clock::time_point latest_throttle_feedback_received_{};
   bool have_steering_feedback_{false};
   bool have_throttle_feedback_{false};
+  double latest_steering_command_norm_{0.0};
+  double latest_throttle_command_norm_{0.0};
+  bool use_physx_odom_velocity_{false};
+  std::unique_ptr<f1tenth_localization::PhysxOdomRuntime> physx_odom_runtime_;
   int64_t last_processed_stamp_ns_{0};
   int64_t last_processed_source_stamp_ns_{0};
   int64_t observer_stamp_ns_{0};

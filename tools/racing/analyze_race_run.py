@@ -459,6 +459,10 @@ def interpolated_truth(
     return {
         "u_mps": u, "v_mps": v, "r_radps": r,
         "progress_m": progress, "lateral_m": lateral,
+        "heading_error_rad": wrap_angle(
+            before_projection.heading_error_rad + ratio * wrap_angle(
+                after_projection.heading_error_rad -
+                before_projection.heading_error_rad)),
     }
 
 
@@ -707,35 +711,117 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
             row["localization_normal_error_m"] = map_errors[match_index]["normal_error_m"]
     print(f"scored state and localization streams in {time.monotonic() - started:.1f}s", flush=True)
 
-    # First prediction node is exactly one documented MPC step (25 ms). Compare
-    # it to interpolated simulator truth at that future stamp, never to a later
-    # estimator measurement. This is offline model scoring only.
+    # Score each published MPC rollout node against future simulator truth;
+    # truth is used only offline and is never fed back to a runtime component.
     model_rows: list[dict[str, Any]] = []
+    horizon_rows: list[dict[str, Any]] = []
     for _, start_ns, data in diagnostics:
         prediction_list = data.get("predictions") or []
-        first = next((item for item in prediction_list if int(item.get("n", -1)) == 1), None)
-        if not first:
+        # MPC state is synchronized/extrapolated to control_ros_stamp_ns before
+        # solving. Diagnostics publish after the solve, so their bag receipt
+        # timestamp is later than the state the prediction started from.
+        # Compare against truth at control-time + n*dt, not diagnostic receipt
+        # time + n*dt (which would incorrectly add solver latency).
+        prediction_start_ns = int(data.get("control_ros_stamp_ns") or start_ns)
+        initial_state = data.get("state") or []
+        initial_progress = float(data.get("progress_m", math.nan))
+        actual_start = interpolated_truth(
+            prediction_start_ns, truth_rows, truth_stamps, truth_projection,
+            trajectory)
+        if actual_start is None or len(initial_state) < 5 or not math.isfinite(initial_progress):
             continue
-        future_ns = start_ns + int(PREDICTION_DT_S * 1e9)
-        actual = interpolated_truth(future_ns, truth_rows, truth_stamps, truth_projection, trajectory)
-        state = first.get("state") or []
-        if actual is None or len(state) < 5:
-            continue
-        predicted_s = float(first.get("s_m", math.nan))
-        predicted_ey = float(state[0])
-        model_rows.append({
-            "run_id": args.run_id, "time_s": (start_ns - run_start_ns) / 1e9,
-            "progress_m": float(data.get("progress_m", math.nan)),
-            "predicted_s_m": predicted_s, "actual_s_m": actual["progress_m"],
-            "progress_error_m": shortest_delta(predicted_s, actual["progress_m"], trajectory.total_length),
-            "predicted_e_y_m": predicted_ey, "actual_e_y_m": actual["lateral_m"],
-            "lateral_error_m": predicted_ey - actual["lateral_m"],
-            "predicted_u_mps": float(state[2]), "actual_u_mps": actual["u_mps"],
-            "speed_error_mps": float(state[2]) - actual["u_mps"],
-            "predicted_r_radps": float(state[4]), "actual_r_radps": actual["r_radps"],
-            "yaw_rate_error_radps": float(state[4]) - actual["r_radps"],
-            "status": data.get("status", ""),
-        })
+        for prediction in prediction_list:
+            step = int(prediction.get("n", -1))
+            state = prediction.get("state") or []
+            if step < 1 or len(state) < 5:
+                continue
+            future_ns = prediction_start_ns + int(
+                round(step * PREDICTION_DT_S * 1e9))
+            actual = interpolated_truth(
+                future_ns, truth_rows, truth_stamps, truth_projection,
+                trajectory)
+            if actual is None:
+                continue
+            predicted_s = float(prediction.get("s_m", math.nan))
+            predicted_ey = float(state[0])
+            predicted_epsi = float(state[1])
+            predicted_u = float(state[2])
+            predicted_v = float(state[3])
+            predicted_r = float(state[4])
+            predicted_progress_delta = shortest_delta(
+                predicted_s, initial_progress, trajectory.total_length)
+            actual_progress_delta = shortest_delta(
+                actual["progress_m"], actual_start["progress_m"],
+                trajectory.total_length)
+            predicted_heading_delta = wrap_angle(
+                predicted_epsi - float(initial_state[1]))
+            actual_heading_delta = wrap_angle(
+                actual["heading_error_rad"] -
+                actual_start["heading_error_rad"])
+            row = {
+                "run_id": args.run_id,
+                "time_s": (prediction_start_ns - run_start_ns) / 1e9,
+                "horizon_steps": step,
+                "horizon_ms": int(round(step * PREDICTION_DT_S * 1000.0)),
+                "progress_m": float(data.get("progress_m", math.nan)),
+                "predicted_s_m": predicted_s,
+                "actual_s_m": actual["progress_m"],
+                "progress_error_m": shortest_delta(
+                    predicted_s, actual["progress_m"], trajectory.total_length),
+                "motion_progress_error_m":
+                    predicted_progress_delta - actual_progress_delta,
+                "predicted_e_y_m": predicted_ey,
+                "actual_e_y_m": actual["lateral_m"],
+                "lateral_error_m": predicted_ey - actual["lateral_m"],
+                "motion_lateral_error_m":
+                    (predicted_ey - float(initial_state[0])) -
+                    (actual["lateral_m"] - actual_start["lateral_m"]),
+                "predicted_e_psi_rad": predicted_epsi,
+                "actual_e_psi_rad": actual["heading_error_rad"],
+                "heading_error_rad": wrap_angle(
+                    predicted_epsi - actual["heading_error_rad"]),
+                "motion_heading_error_rad": wrap_angle(
+                    predicted_heading_delta - actual_heading_delta),
+                "predicted_u_mps": predicted_u,
+                "actual_u_mps": actual["u_mps"],
+                "speed_error_mps": predicted_u - actual["u_mps"],
+                "motion_forward_speed_error_mps":
+                    (predicted_u - float(initial_state[2])) -
+                    (actual["u_mps"] - actual_start["u_mps"]),
+                "predicted_v_mps": predicted_v,
+                "actual_v_mps": actual["v_mps"],
+                "lateral_speed_error_mps": predicted_v - actual["v_mps"],
+                "motion_lateral_speed_error_mps":
+                    (predicted_v - float(initial_state[3])) -
+                    (actual["v_mps"] - actual_start["v_mps"]),
+                "predicted_r_radps": predicted_r,
+                "actual_r_radps": actual["r_radps"],
+                "yaw_rate_error_radps": predicted_r - actual["r_radps"],
+                "motion_yaw_rate_error_radps":
+                    (predicted_r - float(initial_state[4])) -
+                    (actual["r_radps"] - actual_start["r_radps"]),
+                "status": data.get("status", ""),
+            }
+            horizon_rows.append(row)
+            if step == 1:
+                model_rows.append({
+                    "run_id": args.run_id,
+                    "time_s": row["time_s"],
+                    "progress_m": row["progress_m"],
+                    "predicted_s_m": predicted_s,
+                    "actual_s_m": actual["progress_m"],
+                    "progress_error_m": row["progress_error_m"],
+                    "predicted_e_y_m": predicted_ey,
+                    "actual_e_y_m": actual["lateral_m"],
+                    "lateral_error_m": row["lateral_error_m"],
+                    "predicted_u_mps": predicted_u,
+                    "actual_u_mps": actual["u_mps"],
+                    "speed_error_mps": row["speed_error_mps"],
+                    "predicted_r_radps": predicted_r,
+                    "actual_r_radps": actual["r_radps"],
+                    "yaw_rate_error_radps": row["yaw_rate_error_radps"],
+                    "status": row["status"],
+                })
 
     sector_rows: list[dict[str, Any]] = []
     sector_length = trajectory.total_length / SECTOR_COUNT
@@ -902,6 +988,9 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     csv_write(outdir / "sector_metrics.csv", list(sector_rows[0].keys()) if sector_rows else ["run_id"], sector_rows)
     csv_write(outdir / "spatial_metrics.csv", list(spatial_rows[0].keys()) if spatial_rows else ["run_id"], spatial_rows)
     csv_write(outdir / "model_prediction_error.csv", list(model_rows[0].keys()) if model_rows else ["run_id"], model_rows)
+    csv_write(outdir / "horizon_prediction_error.csv",
+              list(horizon_rows[0].keys()) if horizon_rows else ["run_id"],
+              horizon_rows)
 
     lap_rows = []
     for event_index, (stamp, count) in enumerate(lap_events):
@@ -996,6 +1085,49 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     scored_map_localization = [row for row in scored_localization if row["stream"] == "/current_map_pose"]
     yaw_residuals = [abs(float(row["yaw_rate_error_radps"])) for row in model_rows]
     speed_residuals = [abs(float(row["speed_error_mps"])) for row in model_rows]
+    horizon_summary: dict[str, dict[str, Any]] = {}
+    for horizon_ms in sorted({int(row["horizon_ms"]) for row in horizon_rows}):
+        samples = [row for row in horizon_rows
+                   if int(row["horizon_ms"]) == horizon_ms]
+        horizon_summary[str(horizon_ms)] = {
+            "sample_count": len(samples),
+            "abs_progress_error_p95_m": percentile(
+                [abs(float(row["progress_error_m"])) for row in samples], 95),
+            "abs_lateral_error_p95_m": percentile(
+                [abs(float(row["lateral_error_m"])) for row in samples], 95),
+            "abs_heading_error_p95_rad": percentile(
+                [abs(float(row["heading_error_rad"])) for row in samples], 95),
+            "abs_forward_speed_error_p95_mps": percentile(
+                [abs(float(row["speed_error_mps"])) for row in samples], 95),
+            "abs_lateral_speed_error_p95_mps": percentile(
+                [abs(float(row["lateral_speed_error_mps"])) for row in samples], 95),
+            "abs_yaw_rate_error_p95_radps": percentile(
+                [abs(float(row["yaw_rate_error_radps"])) for row in samples], 95),
+            "rms_position_error_m": math.sqrt(statistics.fmean(
+                float(row["progress_error_m"]) ** 2 +
+                float(row["lateral_error_m"]) ** 2 for row in samples)),
+            "rms_forward_speed_error_mps": math.sqrt(statistics.fmean(
+                float(row["speed_error_mps"]) ** 2 for row in samples)),
+            "rms_lateral_speed_error_mps": math.sqrt(statistics.fmean(
+                float(row["lateral_speed_error_mps"]) ** 2 for row in samples)),
+            "rms_yaw_rate_error_radps": math.sqrt(statistics.fmean(
+                float(row["yaw_rate_error_radps"]) ** 2 for row in samples)),
+            "motion_progress_error_p95_m": percentile(
+                [abs(float(row["motion_progress_error_m"])) for row in samples], 95),
+            "motion_lateral_error_p95_m": percentile(
+                [abs(float(row["motion_lateral_error_m"])) for row in samples], 95),
+            "motion_heading_error_p95_rad": percentile(
+                [abs(float(row["motion_heading_error_rad"])) for row in samples], 95),
+            "motion_forward_speed_error_p95_mps": percentile(
+                [abs(float(row["motion_forward_speed_error_mps"])) for row in samples], 95),
+            "motion_lateral_speed_error_p95_mps": percentile(
+                [abs(float(row["motion_lateral_speed_error_mps"])) for row in samples], 95),
+            "motion_yaw_rate_error_p95_radps": percentile(
+                [abs(float(row["motion_yaw_rate_error_radps"])) for row in samples], 95),
+            "motion_position_rmse_m": math.sqrt(statistics.fmean(
+                float(row["motion_progress_error_m"]) ** 2 +
+                float(row["motion_lateral_error_m"]) ** 2 for row in samples)),
+        }
     summary = {
         "schema_version": 1, "run_id": args.run_id, "bag": str(args.bag),
         "trajectory": str(args.trajectory), "track": str(args.track),
@@ -1050,6 +1182,7 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
             "abs_lateral_error_p95_m": percentile([abs(float(row["lateral_error_m"])) for row in model_rows], 95),
             "abs_progress_error_p95_m": percentile([abs(float(row["progress_error_m"])) for row in model_rows], 95),
         },
+        "mpc_horizon_model_error": horizon_summary,
         "mpc_status_counts": dict(mpc_status),
         "data_coverage": {
             "truth_samples": len(truth_rows), "map_pose_samples": len(streams["/current_map_pose"]),
@@ -1061,7 +1194,8 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
         "collision_topics_recorded": bool(streams[COLLISION_COUNT]),
         "report_files": ["summary.md", "summary.json", "lap_times.csv", "sector_metrics.csv",
                          "localization_error.csv", "tracking_error.csv", "controller_saturation.csv",
-                         "spatial_metrics.csv", "model_prediction_error.csv", "plots/"],
+                         "spatial_metrics.csv", "model_prediction_error.csv",
+                         "horizon_prediction_error.csv", "plots/"],
     }
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     top_losses = loss_bars[:5]
@@ -1078,6 +1212,33 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
     ]
     for row in lap_rows:
         lines.append(f"| {row['lap_count']} | {row['lap_role']} | {row['lap_time_s'] if row['lap_time_s'] is not None else 'incomplete'} |")
+    lines.extend(["", "## MPC planned-horizon comparison with future simulator truth", "",
+                  "These are MPC prediction nodes compared with the later closed-loop run. The controller replans every 25 ms, so horizons beyond the first step are not an open-loop replay of the displayed plan. The comparison includes changing future commands and is not a pure plant-model accuracy score. Simulator truth is used offline only.",
+                  "", "| Horizon | Samples | |Δs| p95 (m) | |Δey| p95 (m) | |Δheading| p95 (rad) | |Δu| p95 (m/s) | |Δv| p95 (m/s) | |Δyaw rate| p95 (rad/s) |",
+                  "|---:|---:|---:|---:|---:|---:|---:|---:|"])
+    for horizon_ms, metrics in sorted(
+            horizon_summary.items(), key=lambda item: int(item[0])):
+        lines.append(
+            f"| {horizon_ms} ms | {metrics['sample_count']} | "
+            f"{metrics['abs_progress_error_p95_m']:.4f} | "
+            f"{metrics['abs_lateral_error_p95_m']:.4f} | "
+            f"{metrics['abs_heading_error_p95_rad']:.4f} | "
+            f"{metrics['abs_forward_speed_error_p95_mps']:.4f} | "
+            f"{metrics['abs_lateral_speed_error_p95_mps']:.4f} | "
+            f"{metrics['abs_yaw_rate_error_p95_radps']:.4f} |")
+    lines.extend(["", "The next table subtracts the starting prediction/truth difference and compares state changes over the same interval. This removes the initial state offset, but it still includes future command changes caused by 25 ms replanning; it must not be read as open-loop plant-only error.",
+                  "", "| Horizon | |δs| p95 (m) | |δey| p95 (m) | |δheading| p95 (rad) | |δu| p95 (m/s) | |δv| p95 (m/s) | |δyaw rate| p95 (rad/s) |",
+                  "|---:|---:|---:|---:|---:|---:|---:|"])
+    for horizon_ms, metrics in sorted(
+            horizon_summary.items(), key=lambda item: int(item[0])):
+        lines.append(
+            f"| {horizon_ms} ms | "
+            f"{metrics['motion_progress_error_p95_m']:.4f} | "
+            f"{metrics['motion_lateral_error_p95_m']:.4f} | "
+            f"{metrics['motion_heading_error_p95_rad']:.4f} | "
+            f"{metrics['motion_forward_speed_error_p95_mps']:.4f} | "
+            f"{metrics['motion_lateral_speed_error_p95_mps']:.4f} | "
+            f"{metrics['motion_yaw_rate_error_p95_radps']:.4f} |")
     def list_section(title: str, rows: list[dict[str, Any]], fmt: Any) -> None:
         lines.extend(["", f"## {title}", ""])
         lines.extend([f"- {fmt(row)}" for row in rows] or ["- No supported rows."])

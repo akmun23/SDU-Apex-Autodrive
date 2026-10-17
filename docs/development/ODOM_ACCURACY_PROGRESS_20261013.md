@@ -895,3 +895,647 @@ and no material regression in integrated position. Position is considered
 effectively neutral, not improved. Do not repeat this validation. Proceed to
 Stage 2 (raceline optimization); full-spectrum Odom and practice-line transfer
 remain known limitations, not claims of completion.
+
+### Source-plant Odom investigation — 2026-10-16
+
+This is a new, source-derived Odom investigation; it does not undo the prior
+bounded Stage 1 review and is not a claim that deployed Odom is now complete.
+It tests the proposed architecture directly: hold each known 40 Hz actuator
+command for 25 Unity physics ticks, propagate the source-grounded plant at
+1 kHz, and use permitted current sensor state to anchor the estimate.
+Simulator truth is used only offline for initialization and scoring.
+
+Two separate official Unity batch-mode captures were replayed with the native
+PhysX plant, source vehicle parameters/shapes, and reconstructed
+`VehicleController` equations. Future capture states were not included in the
+rollout inputs:
+
+| Unity capture | Coverage | Recursive rollout position RMSE / p95 | Yaw RMSE | Forward-speed RMSE |
+|---|---|---:|---:|---:|
+| `unity_source_time_indexed_baseline_20261014_r01`, 13.875 s | two lap crossings; mean 4.08 m/s, peak 7.79 m/s, peak physical steer 17.63° | 0.267 / 0.610 mm | 0.0000395 rad | 0.00000462 m/s |
+| `unity_r13_empirical_full_lap_focus_k3_20261015_r01`, 14.700 s | two lap crossings; mean 3.94 m/s, peak 7.90 m/s, peak physical steer 31.99°; source run reports zero collisions | 0.436 / 0.854 mm | 0.000101 rad | 0.0000195 m/s |
+
+These are strong whole-run plant-parity results for the tested motion, not
+production Odom results: both runs initialize from the captured complete
+vehicle state and the Unity batch captures provide the exact 40 Hz command
+holds. They establish that this source-derived plant can recursively predict
+body motion and wheel spin in those runs without a learned force fit.
+
+The command clock is critical. On the aggressive capture, an offline replay
+that deliberately delayed each command by one 25 ms packet changed position
+RMSE from 0.436 mm to 105 mm, yaw RMSE from 0.000101 to 0.0367 rad, and
+forward-speed RMSE from 0.0000195 to 0.0893 m/s. This diagnostic perturbation
+is not a proposed runtime delay. It confirms that the simulator command
+active for each physics interval must be paired causally; a generic
+latest-value snapshot or late actuator feedback is not a safe substitute.
+
+On the existing 42.75 s reset-centered `r12g` capture, command-aligned native
+rollout errors are 0.183 m position RMSE (0.293 m p95), 0.00351 rad yaw RMSE,
+0.00362 m/s forward-speed RMSE, and 0.000832 m/s lateral-speed RMSE. The
+largest instantaneous yaw residual is a near-stop, four-wheel-braked steering
+transient; it is sparse and does not explain the full position drift. For a
+bounded fusion test, native predicted body velocities were integrated at the
+40 Hz packet boundaries using the allowed IMU orientation as the yaw anchor.
+This gives 18.8 mm position RMSE, 31.2 mm p95, and 34.5 mm maximum over
+42.75 s, versus 239.1 mm RMSE for the current production sensor Odom replay
+on the same window. A denser 1 kHz integration variant was worse (32.6 mm
+RMSE), so it is not selected. This is an offline candidate result, not a
+production change or a live confirmation.
+
+The same yaw-anchored integration was then repeated with the ordinary ROS
+`steering_command` and `throttle_command` streams only—without using the
+packet-timing debug topic to choose the command for each simulator request.
+That candidate scores 76.1 mm position RMSE, 100.0 mm p95, and 103.6 mm
+maximum; its one-step plant forward-speed RMSE is 0.00940 m/s and lateral
+speed RMSE is 0.00272 m/s. Against the production replay's 239.1 mm position,
+0.1408 m/s forward-speed, and 0.00795 m/s lateral-speed RMSE, this is a
+promising offline reduction of 68%, 93%, and 66%, respectively. It still does
+not meet the requested near-zero/full-run accuracy, and its 7.6 cm pose error
+is not a deployable result by itself. The stronger 18.8 mm result requires
+offline request-aligned command reconstruction; it is a diagnostic upper
+bound, not a permissible runtime input path.
+
+Artifacts are in
+`live_runs/odom_physx_observer_stage1_20261016/`; native rollout inputs and
+metrics retain each exact command sequence and scoring result. The
+`packet_aligned` experiment uses `/bridge_packet_timing` strictly as an
+offline-only diagnostic to reconstruct the legal command sent on each
+simulator request. That topic is not subscribed to by Odom, MPC, AMCL, or EKF
+at runtime.
+
+**Current Odom conclusion:** the Unity-source plant is demonstrably useful
+for predicting full-run motion when its initial state and command phase are
+correct. The remaining task is to make that information available causally
+to production Odom using only permitted inputs, initialize/correct hidden
+wheel and suspension state from permitted sensors, and verify the result in a
+real ROS-driven simulator run. Until that is implemented and validated on an
+independent practice run, no new production Odom improvement is claimed and
+no work has moved to MPC or raceline optimization.
+
+### Streamed-plant and permitted-IMU follow-up — 2026-10-16
+
+The command/feedback/response streams were separated rather than treating
+feedback as the command that drove the same physics tick. On the existing
+`r12g` bag, each ordinary ROS command topic was sampled causally at the bridge
+request time and compared offline with the bridge's exact sent-command
+diagnostic. Within `0.001` normalized units, the ROS steering and throttle
+topics match the sent command on 99.97% and 99.98% of requests, respectively.
+The bridge packet topic was used only for this offline audit; it is not an
+input to the candidate evaluator or production Odom. Reported actuator
+feedback is a distinct, later response measurement and must not replace the
+command timeline in a forward plant rollout.
+
+The native public-PhysX replay was extended with a persistent line-streaming
+mode in `tools/vehicle_dynamics_learning/physx_native_vehicle_step.cpp`. A
+250-step, 1 ms stream was compared state-by-state against the existing batch
+run from the same reset and command inputs: body position, orientation,
+linear/angular velocity, and all wheel angular speeds matched exactly
+(maximum absolute delta `0`). The process completed 250 ms of plant time in
+29.4 ms wall time (`8.51x` real time), including process startup and scene
+construction. The parity record is
+`live_runs/odom_physx_observer_stage1_20261016/physx_streaming_batch_parity_250ms.json`.
+This demonstrates a feasible persistent calculation core; it is not yet
+linked into the ROS Odom node or the competition image.
+
+The 42.75 s command-only rollout was then scored with the actual ROS IMU
+orientation stream instead of substituting the source-capture quaternion.
+`tools/vehicle_dynamics_learning/analyze_physx_odom_imu_anchor.py` samples the
+latest IMU message causally, consumes only the two legal ROS command topics
+and `/imu`, and uses the source capture only for offline scoring. On this run:
+
+| State/result | Recursive source-plant candidate | Existing production Odom replay |
+|---|---:|---:|
+| Forward-speed RMSE | 0.00905 m/s | 0.14078 m/s |
+| Lateral-speed RMSE | 0.00388 m/s | 0.00795 m/s |
+| Position RMSE using actual ROS IMU yaw | 0.1603 m | 0.2391 m |
+| Position p95 using actual ROS IMU yaw | 0.3054 m | 0.3011 m |
+
+The actual-IMU-yaw position RMSE is 33% lower, but its p95 is not improved;
+this is a mixed result, not a production-ready odometry win. The source plant's
+own yaw has `0.00358 rad` RMSE against source truth, but integrating its yaw
+alone gives `0.1971 m` position RMSE. The measured IMU yaw has `0.0636 rad`
+RMSE and a `0.383 rad` maximum discrepancy; the bag contains a reset-period
+gap with 35 of 1,710 scored samples older than 50 ms (maximum age 0.919 s).
+The sensor is stationary during that reset gap, but the initial heading
+transient must be explicitly handled and independently checked.
+
+A convex blend of model and IMU yaw with gain `0.55`, selected on only the
+first half by integrated position error, scores `0.1371 m` full-run position
+RMSE and `0.1767 m` on the second-half temporal holdout; p95 full-run error is
+`0.2425 m`. This is a promising **offline candidate**, not a promoted
+production change: it is selected and evaluated on only one run, the holdout
+is from that same run, and startup state is still the explicit reset seed
+rather than a fully sensor-initialized PhysX state. A different gain chosen
+only to minimize first-half yaw error is zero, so position and yaw metrics
+select different fusion behavior. That conflict is why the gain is not being
+silently installed in Odom.
+
+The detailed reproducible output is
+`live_runs/odom_physx_observer_stage1_20261016/r12g_ros_imu_anchored_odometry_metrics.json`.
+The next Odom implementation step is to host the persistent plant behind a
+bounded 40 Hz interface, initialize it from reset plus permitted live sensors,
+and replay it against an independent held-out practice bag. Only after that
+passes should its body velocity/yaw feed the production pose integrator. No
+MPC or optimizer work has started.
+
+### Practice-stack Odom score and handoff to MPC — 2026-10-16
+
+The user's acceptance criterion is now explicit: AMCL may continue correcting
+global pose; Odom is useful if its speed and yaw-rate outputs are accurate
+enough for control. Odom is not required to remain globally drift-free by
+itself. This supersedes the earlier AMCL-free pose requirement for this
+assessment. I rescored the already-recorded production-stack run on the
+current working practice raceline; no simulator was launched.
+
+Run provenance and score:
+
+- Bag: [`run_0.db3`](../../live_runs/practice_y1_reference_current_runtime_20261014/run/run_0.db3)
+- Raceline: `y1_matched_9g_20261012_r04_025/autodrive_mintime_raceline_wallchecked.csv`
+- Runtime image: `sdu-apex-autodrive:practice-y1-full-model-20261014`
+- The run completed eight scored laps (mean `5.7583 s`, best `5.6118 s`) and
+  then recorded one collision. Only pre-collision scored-lap samples are used
+  for the speed/yaw assessment below.
+
+Across the 1,840 scored-lap samples, production `/odom` has forward-speed
+RMSE `0.0307 m/s` and rear-axle lateral-speed RMSE `0.0157 m/s`; per-lap
+RMSE ranges are `0.0205–0.0383 m/s` and `0.0089–0.0191 m/s`, respectively.
+Its yaw-rate residual is numerically zero in this
+bag because `/odom` reports the IMU gyro yaw rate; that is a direct measured
+signal, not a learned yaw predictor. It is useful evidence for the present
+state estimate in this practice regime, but not for the accuracy of a
+future-yaw rollout.
+
+AMCL remains active and materially improves the pose supplied to MPC. Over
+the same bag, raw `/amcl_pose` has `0.182 m` position-error p95 against
+bridge truth, while `/current_map_pose` (the controller's pose input) has
+`0.159 m` p95. Integrated `/odom`, after one initial frame alignment held
+fixed, has `0.267 m` p95 over the run; its per-lap p95 rises to about
+`0.24–0.27 m` in the later completed laps. Thus AMCL correction is important
+and the observed run supports the user's criterion: velocity/yaw-rate
+estimation is useful even though dead-reckoned position is not precise enough
+to replace AMCL. The eight-lap run is not collision-free and does not validate
+the full 10-lap objective.
+
+Independent review accepted moving to MPC work under this clarified criterion.
+The acceptance is deliberately limited to useful Odom motion-state output on
+this recorded practice line; it does not certify full-envelope Odom accuracy,
+sensor-only long-horizon plant prediction, or a collision-free racing run.
+
+This is a measurement of the production stack from the October 14 image, not a
+live validation of the current unintegrated PhysX candidate. The manifest's
+Odom node source hash matches the current node file, but its `odometry_observer`
+hash does not match the current worktree, so any current-source claim still
+needs an actual rebuilt-stack run. The source-derived plant's practice replay
+is a separate result: on two captured closed-course windows it predicts the
+recorded motion to sub-millimetre position error, but it starts from captured
+body/wheel truth and uses the recorded command sequence. It has not been
+installed as production Odom and this is not a fair sensor-only A/B against
+the production run.
+
+The exact-window, teacher-forced 1 ms diagnostic on reset trials 4 and 5
+separates local equation error from recursive drift. It resets to the captured
+full state every 1 ms and uses captured per-wheel actuation and wheel pose;
+therefore it is a physics diagnostic only, not an Odom result. At or above
+`5 m/s`, the norm of the one-step angular-velocity residual has p95
+`0.00073/0.00080 rad/s` for trials 4/5; trial 4 has one sparse
+`0.0528 rad/s` spike, while trial 5's maximum is `0.00233 rad/s`. Yet the
+corresponding recursive source-plant rollouts still reach yaw-rate RMSE
+`0.0178/0.0125 rad/s`, p95 `0.00636/0.00551 rad/s`, with maxima
+`0.295/0.169 rad/s`. This points away from a broad per-step mismatch and
+toward rare transients plus state/history accumulation; the precise cause is
+not yet isolated. Exact-window summaries are in
+[`trial_04`](../../live_runs/odom_physx_observer_stage1_20261016/r12g_reset_trials/trial_04/one_step_metrics_40hz.json)
+and
+[`trial_05`](../../live_runs/odom_physx_observer_stage1_20261016/r12g_reset_trials/trial_05/one_step_metrics_40hz.json).
+
+The next blocker is now MPC rollout/actuation, not another broad Odom fit.
+The deployed MPC has an 8-state plant (`e_y`, `e_psi`, `u`, `v`, `r`,
+`target_speed`, steering command and delayed/physical steering states),
+augmented to 12 solver states; its controls are steering-rate and
+target-speed-rate. It publishes Ackermann speed targets with acceleration
+zero, and a separate actuator interface converts the target speed into the
+normalized throttle command. The model therefore does not optimize the actual
+throttle channel or its wheel-spin response. On this same practice run, the
+logged one-step MPC/truth error has p95 `0.151 m/s` speed and
+`0.277 rad/s` yaw rate; the largest yaw-rate error is `1.592 rad/s`. This is
+direct evidence to replace the speed-slew abstraction with a throttle-aware
+rollout and relevant vehicle states, not to tune weights first.
+
+Next work, using the existing bags before requesting any new run:
+
+1. Treat current Odom speed and IMU yaw-rate as the accepted practical state
+   baseline; preserve AMCL fusion for pose. Do not claim the separate PhysX
+   plant is production-ready.
+2. Build and score a causal MPC candidate whose longitudinal decision is
+   normalized throttle (with its actuator state/history) rather than target
+   speed rate, and whose rollout carries the vehicle states needed to explain
+   speed, wheel spin, lateral velocity and yaw. Keep permitted runtime inputs
+   separate from simulator-truth labels used only offline.
+3. Compare current and candidate rollout errors on the same whole practice
+   captures, by horizon and by run, before live promotion. Retain the current
+   controller as a reference; do not accept a model solely on a one-step score.
+4. Use the validated rollout in the source-based raceline optimizer only
+   after its multi-step practice transfer is demonstrated; then test a separate
+   faster candidate on the practice simulator with the established batchmode
+   procedure and collision watcher.
+
+No runtime Odom, MPC, AMCL, EKF, physics, or raceline was changed in this
+assessment. No new simulator run was started.
+
+The saved MPC-error trace was then paired with the controller/throttle trace
+by nearest timestamp (within 40 ms) to localize the failure region. Of 2,090
+prediction samples, 559 have measured steering-feedback magnitude in
+`0.20–0.30 rad`; that band has yaw-rate absolute-error p95 `0.330 rad/s`
+and includes the run's maximum. At `t=53.3266 s`, the vehicle is at
+`u=4.321 m/s`, feedback steering `-0.256 rad`, and throttle command/feedback
+`0.189/0.179`; MPC predicts `-2.869 rad/s` while truth is `-1.278 rad/s`.
+This is a specific, measured yaw-rollout overprediction in the ordinary
+practice steering range, not a generic high-speed failure. The active Y1
+response surface begins blending at `0.29 rad`, so it does not cover this
+sample; simply increasing its iterations cannot correct it.
+
+The command/feedback distinction remains important: the MPC publishes a
+desired speed, the actuator interface computes the normalized throttle
+command, the simulator later reports throttle feedback, and the body/gyro
+signals report the resulting vehicle response. A same-time command-feedback
+difference is therefore a timing/actuator diagnostic, not a direct physical
+slip label. The next candidate must optimize the actual throttle command and
+propagate a causal throttle/wheel-spin state, while scoring against later
+measured motion.
+
+#### Reset IMU-age diagnosis and evaluation guard — 2026-10-16
+
+The IMU-yaw outlier list now includes the source row and causal sample age.
+All large yaw residuals in this capture are the same held ROS IMU orientation
+(`-0.38293 rad`) while the source-truth heading is approximately zero; its age
+increases from 43.7 ms to 893.6 ms across the dropout. This identifies stale
+orientation reuse across the reset-period sensor gap, not a repeatable vehicle
+yaw-response regime. It does not establish that the production node has the
+same failure: its packet assembler and gyro propagation are different, and no
+runtime code was changed.
+
+The offline evaluator now records the input-state provenance and rejects an
+input that does not explicitly declare the reset-state initialization contract.
+The scored plant state is therefore clearly labeled as reset-initialized, not
+initialized from live Odom sensors. A 50 ms freshness-gated blend was also
+scored, selecting its blend gain on the first half only. It selected `0.55`
+and produced `0.13715 m` full-run position RMSE / `0.24255 m` p95, effectively
+the same as the ungated `0.13712 m` / `0.24253 m`; freshness gating alone did
+not materially improve this run. The fused yaw is less accurate than plant yaw
+on the second half (`0.0149 rad` vs `0.00266 rad` RMSE), so this remains a
+position-only offline tradeoff, not a generally better yaw observer.
+
+The next required Odom step remains sensor-state initialization (permitted IMU,
+left/right encoders, and current commands only), followed by an independent
+held-out bag comparison using common timestamps and the same reset/pose frame.
+Until that exists, the low plant velocity errors and position blend are not
+production Odom improvements. No simulator was launched in this continuation.
+
+#### Source-built live Odom fusion comparison — 2026-10-16
+
+This section supersedes the earlier statement that the PhysX observer had only
+offline/replay evidence. The implementation was built from the current
+workspace and run in the practice simulator, then compared against a second
+live run using the same source build with the PhysX fusion explicitly disabled.
+Both used the practice map, the same working raceline, MPC setup, and simulator
+physics. Each run completed three laps without collision; the candidate's
+recorded lap times were 7.5876 s (warmup), 5.6768 s, and 5.6448 s. The
+source-only baseline is a separate run, not a deterministic same-seed replay.
+
+The production `sensor_odometry_node` now supports a bounded fusion weight
+`physx_velocity_blend`. With the PhysX predictor enabled, it advances 25 x 1 ms
+steps between nominal 40 Hz observations and blends the resulting forward and
+lateral velocities with the existing encoder/IMU observer at 0.10. The
+predictor's lateral velocity is at the Rigidbody COM; before fusion it is
+shifted to the rear-axle `base_link` reference using
+`v_rear = v_com - r * 0.15532 m`. The encoder/IMU latent observer remains
+independent and is not recursively overwritten by the PhysX prediction. The
+runtime subscriptions remain the permitted encoders, IMU, and steering/throttle
+commands; simulator truth/IPS is used only after recording for evaluation.
+
+| Live workspace-source run | Forward-speed RMSE vs truth | Lateral-speed RMSE | Integrated position p95 |
+| --- | ---: | ---: | ---: |
+| Sensor-only (`physx_velocity_blend=0`) | 0.0997 m/s | 0.0171 m/s | 0.1482 m |
+| PhysX fusion (`physx_velocity_blend=0.10`) | 0.0447 m/s | 0.0159 m/s | 0.1075 m |
+
+On these runs, forward-speed RMSE was lower by 55%, lateral-speed RMSE by 7%,
+and integrated-position p95 by 27%. Candidate integrated-position p50/p95/p99
+was 0.0640/0.1075/0.1252 m, after one initial SE(2) alignment held fixed for
+the run. Position error p95 was 0.1047 m and 0.0711 m on the first two lap
+segments and 0.1055 m on the next; the final recorded segment was partial.
+Yaw rate is passed through from the IMU in both configurations, so this change
+does not claim a yaw-rate improvement. The position result is a drift/trajectory
+comparison, not absolute global localization accuracy; AMCL remains active.
+
+The comparison bags are:
+
+- `live_runs/odom_physx_fused_online_practice_20261016/run/run_0.db3`
+- `live_runs/odom_sensor_only_source_online_practice_20261016/run/run_0.db3`
+
+The candidate bag also replays through the source-built sensor-only observer:
+that counterfactual gave 0.0955 m/s forward-speed RMSE and 0.1274 m position
+p95, versus the recorded fused run's 0.0447 m/s and 0.1075 m. This is useful
+paired evidence on identical sensor/truth samples, but it is a replay, not a
+second live A/B. The candidate's 25 ms displacement RMSE was 2.993 mm versus
+3.060 mm in that replay, only a 2% improvement; the stronger demonstrated
+benefit is velocity estimation, not a dramatic per-step position-increment
+change.
+
+Important limitation: an earlier run using an older installed binary (without
+the new workspace parameters) scored better than the source-only comparison
+here: 0.0382 m/s forward-speed RMSE and 0.0903 m position p95. That binary was
+not a source-matched control and its exact implementation/configuration was
+not established. Therefore this is evidence that the new workspace
+implementation improves on the current workspace's sensor-only configuration
+in the tested practice run; it is not evidence that it beats every historical
+prebuilt runtime. Rebuild/deployment provenance must be checked before
+replacing any competition image.
+
+The two source-built live bags were received at approximately 40 Hz, with no
+collision and no MPC failure. The candidate report is reproducible with
+`python3 tools/analyze_practice_state_accuracy.py <bag/run_0.db3>`; IPS and
+simulator bridge odometry are used only by this offline scorer. Runtime topic
+policy passed before launch. No MPC, AMCL, EKF, physics, or raceline behavior
+was changed. This is a real, bounded Odom implementation improvement, not a
+claim of a perfect observer or proof of multi-map/general-regime performance;
+another independent source-built practice run is still needed to establish
+repeatability before calling the blend a generally reliable production default.
+
+The persistent server was then exercised over the full existing `r12g` reset
+segment rather than only the earlier 250 ms parity slice. The new
+`tools/vehicle_dynamics_learning/stream_physx_recursive_rollout.py` harness
+sent 42,750 1 ms command steps to one retained PhysX process and emitted 1,710
+40 Hz states. All emitted x/z positions, quaternion components, and world
+velocities matched the batch rollout exactly (maximum delta `0`); the 42.75 s
+plant rollout took 4.29 s wall time (`9.96x` real time). Results are in
+`live_runs/odom_physx_observer_stage1_20261016/r12g_ros_command_streaming_parity_42p75s.json`,
+with the compact prediction stream in
+`live_runs/odom_physx_observer_stage1_20261016/r12g_ros_command_streaming_40hz_predictions.csv`.
+This removes the concern that only a short streaming slice was tested. It
+still validates the research executable against its batch implementation,
+not integration with the ROS Odom process or Unity's private PhysX plugin.
+
+The existing production-observer bag replay was also run from before the
+sensor gap so its encoder-epoch detector could observe both sides. In the 70 s
+window it emitted two `reset_epoch` events; at the second event, the first
+complete post-gap sample had zero mapped wheel speed and zero forward/lateral
+observer speed. This event is at bag-relative `67.732 s`, about `0.906 s`
+after the last pre-gap sensor messages. Under the current source/bag clock
+pairing, the corresponding Unity reset capture has zero wheel RPM and
+near-zero horizontal speed. The replay confirms the existing observer
+recognizes the large encoder-count reset when messages resume. The 70 s
+aggregate position score is invalid across these teleports because the
+observer has no new absolute pose from encoder/IMU inputs alone; it is not
+treated as a continuous-run accuracy score. Event details are in
+`live_runs/odom_physx_observer_stage1_20261016/current_odom_r12g_reset_transition_70s/report.json`.
+
+Around that reset, the ordinary throttle command changes from `0.27` to `0.0`
+at bag-relative `66.824 s` while reported throttle feedback remains `0.27`;
+IMU and encoder messages then stop for about `0.906 s`. Those are stale
+pre-reset measurements, not proof that zero throttle physically maintained the
+old wheel speed. This supports using command topics as plant inputs and
+treating actuator feedback/sensors only as measurements from their actual
+sample epoch. It does not yet establish a general runtime reset detector
+without using the restricted reset/debug topics.
+
+#### Low-speed PhysX fusion schedule: production implementation and repeat check — 2026-10-16
+
+The production observer now uses a speed-scheduled PhysX velocity weight. The
+existing sensor-only estimate was notably weak during launch, while the
+reset-initialized plant is most useful near zero speed. The observer therefore
+fades the PhysX weight linearly from `0.45` at sensor-estimated `|u|=0` to the
+previously validated `0.10` by `1.5 m/s`, then holds `0.10`. This is a bounded
+output/pose correction; the sensor observer's latent state remains independent.
+It consumes only legal encoder/IMU inputs and steering/throttle commands. No
+simulator truth, IPS, AMCL, or other debug topic is read at runtime.
+
+The parameters are `physx_low_speed_velocity_blend` and
+`physx_low_speed_blend_transition_mps` in
+[`sensor_odometry.yaml`](../../f1tenth_localization/config/sensor_odometry.yaml).
+The change was built into the development image and the node log confirmed
+`25 x 1 ms` integration, `0.100` normal-speed weight, and `0.450` low-speed
+weight fading by `1.50 m/s`. Runtime topic policy passed before launch.
+
+The first source-built practice run produced 912 aligned samples over
+`22.787 s` (about 40 Hz), three scored laps, and zero collisions. Versus the
+source-only replay of that exact bag, the deployed schedule improved forward
+speed RMSE from `0.04352` to `0.02901 m/s` (33%) and integrated position p95
+from `0.09460` to `0.05187 m` (45%). A paired reconstruction against fixed
+`0.10` on the same packet stream gave forward-speed RMSE `0.03241` and
+integrated-position p95 `0.07412 m`; the scheduled values were `0.02901` and
+`0.05020 m`. Lateral-speed RMSE remained approximately `0.0119 m/s`, so this
+change is not a lateral-model gain. These comparisons hold the initial SE(2)
+alignment fixed and use truth only offline.
+
+A fresh source-built repeat used the same practice map and working trajectory,
+completed two further laps with zero collisions, and recorded 413 Odom samples
+over `10.29 s` at approximately 40 Hz. Its forward/lateral velocity RMSE was
+`0.0309/0.0119 m/s`; yaw rate is the IMU signal and is not an independent
+PhysX-model improvement. The run began after the simulator had already
+reached lap 1, so it is a repeat check of the moving regime, not an independent
+launch-weight validation. Its initial integrated-position p95 score of
+`0.1612 m` was invalid: the evaluator paired headerless IPS to Odom by bag
+receive time, and this bag contains a roughly `300 ms` delivery burst in which
+about 13 source-stamped Odom samples arrived within `2 ms`. That compared
+different simulator instants. The evaluator now compares integrated Odom
+against bridge truth at matching source/header stamps, with the initial SE(2)
+alignment held fixed. The corrected repeat position p95 is `0.1005 m`
+(`0.0672/0.1005/0.1083/0.1294 m` p50/p95/p99/max), versus `0.0519 m` p95 in
+the initial run. Per-lap repeat p95 is `0.0700 m` for lap 1, `0.0900 m` for
+lap 2, and `0.1099 m` on partial lap 3. The run-to-run position difference
+remains after correcting the timing artifact; aligned Odom yaw matches bridge
+truth because yaw is IMU-fed, not because PhysX independently predicts yaw.
+AMCL remains active and its corrections were not disabled.
+
+The two practice bags also contain development-only `bridge_packet_timing`
+records, used here only for offline diagnosis. Across both independent runs,
+throttle feedback at request sequence `k` equals sent throttle command at
+`k-2` exactly (`906/906` and `412/412` matched pairs). Steering feedback at
+`k` equals command at `k-2` converted to physical radians (`command * 30 deg`)
+within `0.0001 rad`; same-request steering mismatch is `0.0125 rad` RMSE in
+the first capture. This is a two-request phase relation in the development
+captures, not a runtime subscription or a change to competition topic policy.
+Production PhysX had been advancing with the newest command captured for the
+current sensor packet, although the simulator-reported actuator state was two
+requests behind it. That is a source-supported phase mismatch, especially
+during throttle and steering transitions.
+
+Production PhysX integration now uses the already-subscribed fresh actuator
+feedback when available: throttle feedback drives the Unity CAWD/CAWB torque
+branch, and measured steering feedback is converted back to Unity's internal
+center-angle sign and interpolated across the 25 internal 1 ms steps. This
+uses the measured actuator trajectory between 40 Hz observations. Normalized
+commands remain the startup fallback until both feedback channels are fresh.
+
+#### Online validation of actuator-feedback-driven PhysX — 2026-10-16
+
+Two independent source-built practice runs used the same map and reference
+trajectory. The installed localization package had to be rebuilt inside each
+ephemeral development container; a preflight caught and excluded a launch
+that did not expose the new PhysX parameters. For both scored runs, the node
+log confirmed the predictor enabled and the runtime parameter readback
+confirmed `use_physx_odom_velocity=True`. The standard runtime topic-policy
+check passed. The simulator was launched via the established Xvfb batch-mode
+path; the recorder and collision/lap watcher were armed before connecting it.
+Each run completed three laps with zero collisions.
+
+The runs produced 825 and 823 matching `/odom` samples. Sensor source-time
+interval medians were `25.063 ms` and `24.961 ms` (p95 `25.697 ms` and
+`25.676 ms`); the actuator feedback streams also had 825/823 samples. The
+first run's Odom receive latency relative to source time was 4.91 ms median,
+6.01 ms p95, with no accumulating cadence loss. Thus the native 1 kHz PhysX
+process completed its 25 internal steps without reducing the live sensor rate.
+
+| Run | Forward velocity RMSE | Lateral velocity RMSE | Integrated Odom position p95 | Position max | Collisions |
+|---|---:|---:|---:|---:|---:|
+| Feedback PhysX r01 | `0.02814 m/s` | `0.00918 m/s` | `0.0753 m` | `0.0816 m` | 0 |
+| Feedback PhysX r02 | `0.03358 m/s` | `0.00946 m/s` | `0.0854 m` | `0.0900 m` | 0 |
+| Earlier low-speed-blend run | `0.02901 m/s` | `0.01185 m/s` | `0.0519 m` | — | 0 |
+| Earlier low-speed-blend repeat | `0.03091 m/s` | `0.01191 m/s` | `0.1005 m` | `0.1294 m` | 0 |
+
+Across the two new runs, lateral-speed RMSE is consistently about 20–23%
+lower than in the earlier pair. Forward-speed RMSE is mixed (one better, one
+worse), and integrated position p95 falls between the earlier run-to-run
+results. Therefore this is a demonstrated lateral-velocity improvement and a
+safe online integration, but **not yet a consistent overall Odom-accuracy
+gain** and not near-perfect accuracy. Yaw rate remains the measured IMU value;
+its zero error against simulator truth is not a PhysX prediction result.
+
+The largest repeatable forward errors are now localized to launch/low speed
+(`0–3 m/s`, low steering: about `0.051–0.052 m/s` RMSE in both new runs) and
+moderate steering at `3–5 m/s` (about `0.041–0.050 m/s` for `0.1–0.2 rad`).
+At `3–5 m/s` and `0.2–0.3 rad`, lateral-speed RMSE remains `0.015–0.016 m/s`.
+These are the next model-diagnosis targets; changing the fusion weights without
+separating the predictor, encoder, and actuator-input residuals would be
+premature.
+
+Artifacts:
+
+- [`r01 bag`](../../live_runs/odom_physx_actuator_feedback_practice_20261016_r01/run/run_0.db3)
+- [`r01 state score`](../../live_runs/odom_physx_actuator_feedback_practice_20261016_r01/analysis/)
+- [`r02 bag`](../../live_runs/odom_physx_actuator_feedback_practice_20261016_r02/run/run_0.db3)
+- [`combined regime comparison`](../../live_runs/odom_physx_actuator_feedback_practice_20261016_r01/analysis/combined_regimes.json)
+
+Next: use these closed bags to separate launch and moderate-turn velocity
+residuals into sensor-only observer, PhysX state, and actuator-phase
+contributions. Keep feedback-driven PhysX enabled as the source-consistent
+production path while retaining the old values as comparators; do not claim
+forward-speed or full-pose improvement until a paired comparison shows it.
+
+The largest remaining forward-speed residuals in the first capture are short
+encoder-burst rejection episodes: 106/912 samples, with `0.0611 m/s` RMSE
+versus `0.0215 m/s` on non-rejected samples. The two largest residuals are
+about `-0.218` and `-0.212 m/s` at `4.6–4.9 m/s`; they clear within the next
+two packets. A separate hard-braking burst has about `0.15 m/s` error for
+roughly six samples. The burst gate is driven by an implausibly abrupt rolling
+wheel-rate change and packet/window inconsistency; accepting such a reading
+without testing risks turning a delayed cumulative-angle update into false
+vehicle acceleration. Existing paired analysis also shows the native PhysX
+predictor is substantially less accurate in these bursts than the observer;
+the burst-only optimal fusion weights are uncertain (`about 0.055–0.134`
+across captures). I did not raise the PhysX weight or relax the encoder
+rejection rule on this evidence.
+
+The repeated-run artifact is
+[`run_0.db3`](../../live_runs/odom_physx_low_speed_blend_practice_20261016_repeat/run/run_0.db3);
+the initial scheduled run is
+[`run_0.db3`](../../live_runs/odom_physx_low_speed_blend_practice_20261016/run/run_0.db3).
+The repeat was rescored with `python3 tools/analyze_practice_state_accuracy.py`
+after fixing its timestamp pairing. The sim, stack, recorder, and watcher were
+stopped by the established lap watcher. The next validation is a source-built
+practice run of the actuator-feedback-driven PhysX predictor, with immediate
+collision abort and the same source-time state scoring.
+
+#### Full forward-PhysX production fusion and first live prefix — 2026-10-16
+
+The production observer now takes forward body speed directly from the 1 kHz
+PhysX shadow (`physx_forward_velocity_blend: 1.0`) while keeping the existing
+sensor-based lateral estimate (`physx_velocity_blend: 0.10`). This replaces the
+previous small forward blend and reactive encoder-burst-only correction. The
+native plant returns wheel angular speed and WheelHit longitudinal slip for
+diagnosis; its predicted chassis forward speed is what Odom integrates. No
+Unity physics, map, reference trajectory, or runtime topic policy changed.
+
+The basis is the known VehicleController branch, not a fitted throttle gain:
+`DriveTorque = ThrottleLimit * AutonomousThrottle * MotorTorque`; at exactly
+zero drive torque it sets motor torque to zero and applies `MotorTorque` as
+brake torque to the configured wheels. Otherwise the torque is apportioned to
+the active drive wheels. PhysX then determines tire force from wheel/contact
+slip and load; commanded torque is not itself chassis acceleration. The native
+shadow advances this branch and its wheel/contact dynamics in 25 consecutive
+1 ms steps per Odom packet. The active sim-racing scene overrides the public
+F1TENTH prefab default and uses `MotorTorque=428 N·m`, CAWD/CAWB: at 50%
+throttle this is `53.5 N·m` drive torque per wheel, at 30% it is `32.1 N·m`
+per wheel, and at exactly zero it is `428 N·m` brake torque per wheel. Thus a
+50%→30% transition reduces drive torque but does not apply brakes; only the
+exact-zero branch switches to the brake torque.
+
+Two existing independent practice captures confirm a consistent two-sample
+command-to-feedback phase: reported throttle at sample `k` matches the
+recorded command at `k-2` with RMSE `0.00029` and `0.00027`, while same-index
+command/feedback RMSE is `0.03622` and `0.03597`. This is a 50 ms relationship
+on the 25 ms recorded grid. It is not evidence of a 50 ms tire-force or
+WheelCollider response constant: `VehicleController.CurrentThrottle` sets the
+autonomous input, and `FixedUpdate` consumes it in the torque branch. The
+production PhysX shadow uses fresh reported actuator feedback, which reflects
+the input actually active in Unity, rather than pretending the latest local
+command has already reached the vehicle. This avoids advancing the model with
+a command that is ahead of the observed actuator state.
+
+An online run used the rebuilt production localization package and the
+unchanged practice controller/trajectory. Topic-policy preflight passed; the
+established batch simulator, recorder, and immediate collision watcher were
+used. A collision occurred about `1.099 s` after the first moving truth sample,
+so the watcher stopped the run and there are zero scored laps. The bag has no
+`/mpc/diagnostics` topic, so it cannot establish the controller's internal
+reasoning. On the 44 pre-impact matched samples, the newly published Odom had
+forward-speed RMSE `0.0033 m/s` and position RMSE `0.0041 m` after one initial
+pose alignment. This is direct online-prefix evidence of accurate forward
+tracking, but not full-run validation.
+
+The bag also records a large accepted AMCL scan correction immediately before
+the collision: after 22 rejected scans and no previous accepted correction,
+the first accepted correction at `1.053 s` applied `0.384 m` of translation
+and `0.052 rad` of yaw correction; the map pose consequently jumped about
+`0.39 m` while simulator truth and Odom remained continuous. The collision
+followed at `1.099 s`. This chronology makes localization/controller
+interaction a concrete confound, not a proven collision cause. The available
+prefix is too short to classify the collision or establish that the Odom
+change caused or prevented it. The bag and extracted collision-prefix table
+are preserved under
+[`odom_physx_forward100_online_practice_20261016_r01`](../../live_runs/odom_physx_forward100_online_practice_20261016_r01/).
+
+The command/feedback timing supports using the known torque input to predict
+wheel spin versus body motion before encoder deltas arrive. In production this
+is realized by the feedback-driven 1 ms PhysX state propagation, now fused
+fully for forward speed. On the two independent captures, the predicted rear
+wheel/body speed gap also correlates with encoder-versus-truth error two
+packets later (`r=0.952` and `0.950` overall; `0.950` and `0.928` on rejected
+wheel bursts). During throttle drops greater than 5%, predicted rear slip is
+near `0.98`; the median measured encoder/truth gap grows from `1.16/1.21 m/s`
+at the event to about `3.25 m/s` two packets later. This is direct evidence
+that the model identifies when wheel speed is no longer a valid proxy for
+body speed, before the delayed encoder discrepancy reaches its maximum.
+
+The same two captures give PhysX forward-speed RMSE `0.0044/0.0050 m/s`,
+versus sensor-only replay `0.0452/0.0482 m/s`; using PhysX forward speed with
+sensor lateral speed and yaw gives integrated-position RMSE `0.0140/0.0144 m`
+versus `0.0720/0.0718 m` for sensor-only replay. These are offline replay
+comparisons on independent captures, not a full-lap production claim.
+
+The remaining distinction is temporal: current Odom must estimate the vehicle
+state that has actually occurred, so it should use the actuator input actually
+active during that interval; future-command preview is a separate forward
+prediction and must honor the measured two-packet command-to-actuator phase.
+Do not substitute the newest command for fresh feedback or call the 50 ms
+phase a tire dynamic.
+
+Current conclusion: the earlier modest PhysX fusion did leave a large
+available Odom gain unused. The full forward-PhysX implementation is now in
+production code and matches truth closely over the live prefix as well as the
+two independent offline captures (`u` RMSE `0.0044` and `0.0050 m/s`). It is
+not yet proven over a complete collision-free live run. Before another lap
+test, resolve the evidence gap around the accepted large first AMCL correction
+and capture MPC diagnostics; do not weaken the collision-abort rule. Keep
+lateral fusion and yaw unchanged while this forward-speed candidate is
+evaluated.

@@ -171,10 +171,10 @@ def validate_capture(path: Path) -> dict[str, object]:
         "method_limit": (
             "Captured slip and suspension force are current-step validation "
             "inputs; held constant across internal substeps. Only the >=5 "
-            "m/s one-substep band avoids within-step force holding. This "
-            "reconstruction assumes drivable-surface friction multiplier 1 "
-            "because Unity's player wrapper surface-pair value is not in the "
-            "capture schema."),
+            "m/s one-substep band avoids within-step force holding. The "
+            "UnityPlayer VehicleConfig allocates/configures one tire and one "
+            "surface type; PhysX initializes its sole friction-pair value "
+            "to 1.0."),
         "bands": {},
     }
     bands: dict[str, object] = {}

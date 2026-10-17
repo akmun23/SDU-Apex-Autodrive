@@ -26,6 +26,23 @@ find_package(tf2_ros REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+set(PHYSX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../external/physx-4.1-source/physx")
+set(PHYSX_SHARED_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../external/physx-4.1-source/pxshared")
+set(PHYSX_RELEASE_LIBDIR "${PHYSX_ROOT}/bin/linux.clang/release")
+set(PHYSX_NATIVE_LIBS
+  "${PHYSX_RELEASE_LIBDIR}/libPhysXVehicle_static_64.a"
+  "${PHYSX_RELEASE_LIBDIR}/libPhysXExtensions_static_64.a"
+  "${PHYSX_RELEASE_LIBDIR}/libPhysXCooking_static_64.a"
+  "${PHYSX_RELEASE_LIBDIR}/libPhysX_static_64.a"
+  "${PHYSX_RELEASE_LIBDIR}/libPhysXCommon_static_64.a"
+  "${PHYSX_RELEASE_LIBDIR}/libPhysXFoundation_static_64.a"
+  "${PHYSX_RELEASE_LIBDIR}/libPhysXPvdSDK_static_64.a")
+foreach(PHYSX_LIBRARY IN LISTS PHYSX_NATIVE_LIBS)
+  if(NOT EXISTS "${PHYSX_LIBRARY}")
+    message(FATAL_ERROR "Missing required PhysX source-parity library: ${PHYSX_LIBRARY}")
+  endif()
+endforeach()
+
 if(BUILD_GPU_AMCL)
   find_package(CUDAToolkit REQUIRED)
 
@@ -66,10 +83,22 @@ endif()
 add_executable(sensor_odometry_node
   src/sensor_odometry_node.cpp
   src/odometry_observer.cpp
-  src/sensor_packet_assembler.cpp)
+  src/sensor_packet_assembler.cpp
+  src/physx_odom_runtime.cpp)
 target_include_directories(sensor_odometry_node PRIVATE include)
 ament_target_dependencies(sensor_odometry_node
-  rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros)
+  ament_index_cpp rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros)
+
+add_executable(physx_native_vehicle_step
+  "${CMAKE_CURRENT_SOURCE_DIR}/../tools/vehicle_dynamics_learning/physx_native_vehicle_step.cpp"
+  src/physx_glibc_compat.cpp)
+target_include_directories(physx_native_vehicle_step PRIVATE
+  "${PHYSX_ROOT}/include"
+  "${PHYSX_SHARED_ROOT}/include"
+  "${PHYSX_ROOT}/source/physxvehicle/src")
+target_compile_definitions(physx_native_vehicle_step PRIVATE PX_PHYSX_STATIC_LIB)
+target_link_libraries(physx_native_vehicle_step PRIVATE
+  -Wl,--start-group ${PHYSX_NATIVE_LIBS} -Wl,--end-group dl pthread)
 
 add_executable(ekf_localization_node
   gpu_amcl_cpp/src/main_ekf.cpp
@@ -79,7 +108,8 @@ target_link_libraries(ekf_localization_node Eigen3::Eigen)
 ament_target_dependencies(ekf_localization_node
   rclcpp nav_msgs geometry_msgs tf2_ros)
 
-set(LOCALIZATION_INSTALL_TARGETS sensor_odometry_node ekf_localization_node)
+set(LOCALIZATION_INSTALL_TARGETS
+  sensor_odometry_node physx_native_vehicle_step ekf_localization_node)
 if(BUILD_GPU_AMCL)
   list(APPEND LOCALIZATION_INSTALL_TARGETS gpu_amcl_cpp_node)
 endif()

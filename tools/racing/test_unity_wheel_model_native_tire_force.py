@@ -11,6 +11,7 @@ from SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3.f1tenth_planning.autodrive_
     _unity_tire_force_shader_casadi,
     _physx_applied_torque_slips_casadi,
     _physx_filtered_tire_load_casadi,
+    _wheel_surface_speed_from_autodrive_guide_slip,
     _wheel_surface_speed_from_physx_long_slip,
     suspension_loads_casadi,
     suspension_travel_casadi,
@@ -183,3 +184,14 @@ def test_physx_long_slip_inverse_reconstructs_forward_wheel_speed(
     reconstructed = _wheel_surface_speed_from_physx_long_slip(
         long_speed, long_slip)
     assert reconstructed == pytest.approx(wheel_surface_speed)
+
+
+@pytest.mark.parametrize(
+    ("long_speed", "guide_slip", "expected_surface_speed"),
+    ((5.0, 1.2, 11.0), (5.0, -1.0, 0.0), (0.2, -0.4, 0.0)),
+)
+def test_legacy_guide_slip_inverse_matches_recorded_convention(
+        long_speed, guide_slip, expected_surface_speed):
+    reconstructed = _wheel_surface_speed_from_autodrive_guide_slip(
+        long_speed, guide_slip)
+    assert reconstructed == pytest.approx(expected_surface_speed)

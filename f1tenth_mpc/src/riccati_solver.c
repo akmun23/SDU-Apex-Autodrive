@@ -1144,6 +1144,9 @@ static RiccatiStatus_t riccati_admm_solve_core(
      * residual instead; the RTI layer has a separate, explicit degraded gate. */
     const float residual_tolerance = (tolerance > 1e-6f) ? tolerance : 1e-6f;
     const int adaptive_rho = config ? config->adaptive_rho : 1;
+    const int adaptive_rho_update_period = config &&
+        config->adaptive_rho_update_period > 0
+        ? config->adaptive_rho_update_period : 1;
     const int shared_rho = config ? config->shared_rho : 0;
     const int use_prefactorization =
         config ? config->use_prefactorization : 0;
@@ -1438,7 +1441,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
         }
 
         /*--- Adaptive rho (aligned with FPGA HLS solver) ---*/
-        if (adaptive_rho && iter > 0) {
+        if (adaptive_rho && iter > 0 &&
+            iter % adaptive_rho_update_period == 0) {
             const float rho_before_adaptation = rho;
             const float rho_u_before_adaptation = rho_u;
             const float adapt_ratio_state = 2.0f;

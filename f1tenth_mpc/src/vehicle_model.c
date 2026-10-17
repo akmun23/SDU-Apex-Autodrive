@@ -17,6 +17,12 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Unity's Rigidbody velocity is measured at its COM. The MPC state and
+ * /odom twist are referenced to base_link at the rear axle. The source
+ * vehicle geometry puts COM 0.15532 m forward of that axle (see
+ * tools/racing/analyze_race_run.py). */
+static const double kComForwardFromRearAxleM = 0.15532;
+
 static VehicleParameters_t active_parameters = {
     .steering_wheelbase_m = SOURCE_STEERING_WHEELBASE_M,
     .max_steering_angle = SOURCE_MAX_STEERING_RAD,
@@ -809,13 +815,40 @@ static float yaw_rate_response(
 
 static int finite_mpc_state(const MpcModelState_t *state)
 {
-    return state && isfinite(state->e_y) && isfinite(state->e_psi) &&
+    if (!(state && isfinite(state->e_y) && isfinite(state->e_psi) &&
         isfinite(state->u) && isfinite(state->v) && isfinite(state->r) &&
         isfinite(state->target_speed) && isfinite(state->steering_command) &&
-        isfinite(state->actual_steering_angle);
+        isfinite(state->actual_steering_angle) &&
+        isfinite(state->source_rear_wheel_omega_feedback_radps[0]) &&
+        isfinite(state->source_rear_wheel_omega_feedback_radps[1]) &&
+        isfinite(state->delayed_throttle_command_1) &&
+        isfinite(state->delayed_throttle_command_2) &&
+        isfinite(state->source_throttle_command) &&
+        isfinite(state->source_last_target_speed) &&
+        isfinite(state->source_actuator_speed_mps) &&
+        isfinite(state->source_actuator_acceleration_mps2) &&
+        isfinite(state->source_actuator_integral) &&
+        isfinite(state->source_overspeed_elapsed) &&
+        isfinite(state->source_downshift_stable_elapsed) &&
+        isfinite(state->source_yaw_surface_blend) &&
+        isfinite(state->source_yaw_surface_target_radps))) return 0;
+    if (state->delayed_throttle_command_1 < 0.0f ||
+        state->delayed_throttle_command_1 > 1.0f ||
+        state->delayed_throttle_command_2 < 0.0f ||
+        state->delayed_throttle_command_2 > 1.0f) return 0;
+    if (state->source_actuator_acceleration_history_count > 5U ||
+        state->source_actuator_acceleration_history_next >= 5U) return 0;
+    for (int index = 0; index < 5; ++index)
+        if (!isfinite(state->source_actuator_acceleration_history[index]))
+            return 0;
+    if (state->source_plant_initialized || state->source_imu_state_initialized) {
+        for (int index = 0; index < UNITY_SOURCE_PLANT_STATE_SIZE; ++index)
+            if (!isfinite(state->source_plant_state[index])) return 0;
+    }
+    return 1;
 }
 
-enum { MPC_JET_DERIVATIVES = 12 };
+enum { MPC_JET_DERIVATIVES = MPC_MODEL_NX + 2 };
 
 typedef struct
 {
@@ -982,13 +1015,15 @@ static void mark_nonsmooth_crossing(
      * set only when that column's oracle probe could cross this branch. */
     static const float probe_epsilon[MPC_JET_DERIVATIVES] = {
         1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-        1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-2f};
+        1.0e-3f, 1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-4f,
+        1.0e-3f, 1.0e-3f, 1.0e-2f, 1.0e-2f, 1.0e-2f,
+        1.0e-2f, 1.0e-3f, 1.0e-2f};
     const float roundoff = 2.0e-7f * fmaxf(1.0f, fabsf(boundary_scale));
     for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
         const float reach = probe_epsilon[i] *
             fabsf(boundary_difference.derivative[i]);
         if (fabsf(boundary_difference.value) <= reach + roundoff)
-            linearization->nonsmooth_column_mask |= (uint16_t)(1u << i);
+            linearization->nonsmooth_column_mask |= (uint32_t)(1u << i);
     }
 }
 
@@ -1002,14 +1037,16 @@ static void mark_nonsmooth_difference(
         !(lhs.differentiated || rhs.differentiated)) return;
     static const float probe_epsilon[MPC_JET_DERIVATIVES] = {
         1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-        1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-2f};
+        1.0e-3f, 1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-4f,
+        1.0e-3f, 1.0e-3f, 1.0e-2f, 1.0e-2f, 1.0e-2f,
+        1.0e-2f, 1.0e-3f, 1.0e-2f};
     const float difference = lhs.value - rhs.value;
     const float roundoff = 2.0e-7f * fmaxf(1.0f, fabsf(boundary_scale));
     for (int i = 0; i < MPC_JET_DERIVATIVES; ++i) {
         const float reach = probe_epsilon[i] * fabsf(
             lhs.derivative[i] - rhs.derivative[i]);
         if (fabsf(difference) <= reach + roundoff)
-            linearization->nonsmooth_column_mask |= (uint16_t)(1u << i);
+            linearization->nonsmooth_column_mask |= (uint32_t)(1u << i);
     }
 }
 
@@ -1129,7 +1166,7 @@ static MpcJet_t yaw_residual_rate_jet(
                     jet_multiply(steering_gate, actual_speed_gate)))));
 }
 
-static unsigned int mask_popcount(uint16_t mask)
+static unsigned int mask_popcount(uint32_t mask)
 {
     unsigned int count = 0;
     while (mask != 0u) {
@@ -1139,11 +1176,431 @@ static unsigned int mask_popcount(uint16_t mask)
     return count;
 }
 
-/* Nonlinear rollouts dominate each RTI cycle. They do not need derivatives,
- * so keep them on a scalar path instead of constructing nine-component jets
- * and multiplying their zero derivative slots. The equations intentionally
- * mirror vehicle_model_step_impl() below; the differentiated path remains the
- * single source for the analytic Jacobian. */
+static double source_feedforward_throttle(double target_speed_mps)
+{
+    /* The production speed controller's measured feed-forward map. */
+    static const double speed_mps[] = {
+        0.0, 0.7537, 1.5008, 2.4883, 3.7113,
+        4.9226, 7.3138, 9.6633, 11.9725, 15.3610};
+    static const double throttle[] = {
+        0.0, 0.030, 0.060, 0.100, 0.150,
+        0.200, 0.300, 0.400, 0.500, 0.650};
+    const int count = (int)(sizeof(speed_mps) / sizeof(speed_mps[0]));
+    if (target_speed_mps <= speed_mps[0]) return throttle[0];
+    if (target_speed_mps >= speed_mps[count - 1]) return throttle[count - 1];
+    for (int upper = 1; upper < count; ++upper) {
+        if (target_speed_mps <= speed_mps[upper]) {
+            const double ratio = (target_speed_mps - speed_mps[upper - 1]) /
+                (speed_mps[upper] - speed_mps[upper - 1]);
+            return throttle[upper - 1] + ratio *
+                (throttle[upper] - throttle[upper - 1]);
+        }
+    }
+    return throttle[count - 1];
+}
+
+static double source_move_toward(double value, double target, double limit)
+{
+    if (fabs(target - value) <= limit) return target;
+    return value + copysign(limit, target - value);
+}
+
+static double source_linear_table(
+    double value, const double *x, const double *y, int count)
+{
+    if (value <= x[0]) return y[0];
+    if (value >= x[count - 1]) return y[count - 1];
+    for (int upper = 1; upper < count; ++upper) {
+        if (value <= x[upper]) {
+            const double ratio = (value - x[upper - 1]) /
+                (x[upper] - x[upper - 1]);
+            return y[upper - 1] + ratio * (y[upper] - y[upper - 1]);
+        }
+    }
+    return y[count - 1];
+}
+
+static double source_throttle_per_acceleration(double speed_mps)
+{
+    static const double speed[] = {
+        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0};
+    static const double throttle_gain[] = {
+        0.055, 0.056, 0.058, 0.060, 0.062, 0.064, 0.066, 0.068, 0.070};
+    return source_linear_table(speed_mps, speed, throttle_gain, 9);
+}
+
+static double source_maximum_acceleration(double speed_mps)
+{
+    static const double speed[] = {
+        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0};
+    static const double envelope[] = {
+        5.5, 4.4, 4.4, 3.568, 3.175, 2.562, 2.043, 1.565, 0.956};
+    const double base_throttle = source_feedforward_throttle(speed_mps);
+    const double gain = source_throttle_per_acceleration(speed_mps);
+    const double headroom = fmax(0.0, (1.0 - base_throttle) / gain);
+    return fmin(5.5, fmin(
+        source_linear_table(speed_mps, speed, envelope, 9), headroom));
+}
+
+static void source_update_actuator_measurement(
+    const MpcModelState_t *state,
+    double raw_speed_mps,
+    double dt,
+    MpcModelState_t *next_state)
+{
+    const double measured = fmax(0.0, raw_speed_mps);
+    if (!state->source_actuator_speed_initialized) {
+        next_state->source_actuator_speed_mps = (float)measured;
+        next_state->source_actuator_acceleration_mps2 = 0.0f;
+        next_state->source_actuator_acceleration_history_count = 0U;
+        next_state->source_actuator_acceleration_history_next = 0U;
+        memset(next_state->source_actuator_acceleration_history, 0,
+               sizeof(next_state->source_actuator_acceleration_history));
+        next_state->source_actuator_speed_initialized = 1;
+        return;
+    }
+
+    const double previous_speed = state->source_actuator_speed_mps;
+    const double filtered_speed = 0.75 * measured + 0.25 * previous_speed;
+    double acceleration_sample = clampf_local((float)(
+        (filtered_speed - previous_speed) / dt), -25.0f, 25.0f);
+    const unsigned int slot =
+        state->source_actuator_acceleration_history_next % 5U;
+    next_state->source_actuator_acceleration_history[slot] =
+        (float)acceleration_sample;
+    next_state->source_actuator_acceleration_history_next = (slot + 1U) % 5U;
+    if (next_state->source_actuator_acceleration_history_count < 5U)
+        ++next_state->source_actuator_acceleration_history_count;
+
+    double ordered[5];
+    const unsigned int count =
+        next_state->source_actuator_acceleration_history_count;
+    for (unsigned int index = 0; index < count; ++index)
+        ordered[index] = next_state->source_actuator_acceleration_history[index];
+    for (unsigned int index = 1; index < count; ++index) {
+        const double value = ordered[index];
+        unsigned int position = index;
+        while (position > 0U && ordered[position - 1U] > value) {
+            ordered[position] = ordered[position - 1U];
+            --position;
+        }
+        ordered[position] = value;
+    }
+    acceleration_sample = ordered[count / 2U];
+    next_state->source_actuator_speed_mps = (float)filtered_speed;
+    next_state->source_actuator_acceleration_mps2 = (float)(
+        0.20 * acceleration_sample +
+        0.80 * state->source_actuator_acceleration_mps2);
+    next_state->source_actuator_speed_initialized = 1;
+}
+
+static void seed_source_physics(
+    const MpcModelState_t *state,
+    UnitySourcePlantInputC *input)
+{
+    memset(input, 0, sizeof(*input));
+    input->state[UNITY_SOURCE_U] = state->u;
+    input->state[UNITY_SOURCE_V] =
+        state->v + state->r * kComForwardFromRearAxleM;
+    input->state[UNITY_SOURCE_YAW_RATE] = state->r;
+    input->state[UNITY_SOURCE_BODY_HEIGHT] = 0.00464804098;
+    input->state[UNITY_SOURCE_PHYSICAL_STEERING] =
+        state->actual_steering_angle;
+
+    /* Seed wheel rates from rolling contact kinematics. Later control cycles
+     * retain the recursively predicted wheel-spin and suspension state. */
+    const double radius = 0.059;
+    const double wheel_x[4] = {
+        0.174679994338, 0.174679994338,
+        -0.155320003629, -0.155320003629};
+    const double wheel_y[4] = {
+        0.115741111338, -0.115901105106,
+        0.117920003832, -0.118079997599};
+    const double tangent = tan(state->actual_steering_angle);
+    const double numerator = 2.0 * 0.324 * tangent;
+    const double steer[4] = {
+        atan2(numerator, 2.0 * 0.324 - 0.236 * tangent),
+        atan2(numerator, 2.0 * 0.324 + 0.236 * tangent), 0.0, 0.0};
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        const double vx = state->u - state->r * wheel_y[wheel];
+        const double vy = input->state[UNITY_SOURCE_V] +
+            state->r * wheel_x[wheel];
+        input->state[UNITY_SOURCE_WHEEL_OMEGA_FL + wheel] =
+            (cos(steer[wheel]) * vx + sin(steer[wheel]) * vy) / radius;
+    }
+}
+
+int vehicle_model_initialize_source_plant_state(MpcModelState_t *state)
+{
+    if (!state) return 0;
+    if (!state->source_plant_initialized) {
+        UnitySourcePlantInputC input;
+        seed_source_physics(state, &input);
+        if (state->source_imu_state_initialized) {
+            input.state[UNITY_SOURCE_ROLL] =
+                state->source_plant_state[UNITY_SOURCE_ROLL];
+            input.state[UNITY_SOURCE_ROLL_RATE] =
+                state->source_plant_state[UNITY_SOURCE_ROLL_RATE];
+            input.state[UNITY_SOURCE_PITCH] =
+                state->source_plant_state[UNITY_SOURCE_PITCH];
+            input.state[UNITY_SOURCE_PITCH_RATE] =
+                state->source_plant_state[UNITY_SOURCE_PITCH_RATE];
+        }
+        memcpy(state->source_plant_state, input.state,
+               sizeof(state->source_plant_state));
+        state->source_plant_initialized = 1;
+        state->source_suspension_history_initialized =
+            input.suspension_history_initialized;
+    }
+
+    if (state->source_rear_wheel_omega_feedback_valid) {
+        state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL] =
+            state->source_rear_wheel_omega_feedback_radps[0];
+        state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RR] =
+            state->source_rear_wheel_omega_feedback_radps[1];
+    }
+    state->source_rear_wheel_omega_feedback_valid = 0;
+    for (int index = 0; index < UNITY_SOURCE_PLANT_STATE_SIZE; ++index) {
+        if (!isfinite(state->source_plant_state[index])) return 0;
+    }
+    return 1;
+}
+
+static double source_actuator_throttle(
+    const MpcModelState_t *state,
+    double target_speed_mps,
+    double dt,
+    MpcModelState_t *next_state,
+    unsigned int *branch_flags)
+{
+    const double raw_speed = fmax(0.0, state->u);
+    const double measured_speed =
+        next_state->source_actuator_speed_mps;
+    const double measured_acceleration =
+        next_state->source_actuator_acceleration_mps2;
+    const double target_change_threshold = 0.15;
+    const double downshift_band = 0.10;
+
+    if (target_speed_mps <= 0.02) {
+        next_state->source_throttle_command = 0.0f;
+        next_state->source_last_target_speed = 0.0f;
+        next_state->source_actuator_integral = 0.0f;
+        next_state->source_overspeed_elapsed = 0.0f;
+        next_state->source_downshift_stable_elapsed = 0.0f;
+        next_state->source_target_initialized = 0;
+        next_state->source_downshift_guard = 0;
+        next_state->source_hold_approach = 0;
+        next_state->source_hold_reentry_requires_speed = 0;
+        next_state->source_downshift_catch = 0;
+        if (branch_flags) *branch_flags |= MPC_STAGE_ACTIVE_BRAKE;
+        return 0.0;
+    }
+
+    const int target_changed = !state->source_target_initialized ||
+        fabs(target_speed_mps - state->source_last_target_speed) >
+            target_change_threshold;
+    if (target_changed) {
+        const int downshift = state->source_target_initialized &&
+            target_speed_mps < state->source_last_target_speed -
+                target_change_threshold;
+        next_state->source_actuator_integral = 0.0f;
+        next_state->source_overspeed_elapsed = 0.0f;
+        next_state->source_downshift_stable_elapsed = 0.0f;
+        next_state->source_downshift_guard = downshift &&
+            measured_speed > target_speed_mps +
+                fmax(downshift_band, target_change_threshold);
+        next_state->source_hold_approach = 0;
+        next_state->source_hold_reentry_requires_speed = 0;
+        next_state->source_downshift_catch = 0;
+    }
+    next_state->source_last_target_speed = (float)target_speed_mps;
+    next_state->source_target_initialized = 1;
+
+    if (next_state->source_downshift_guard) {
+        if (measured_speed > target_speed_mps + downshift_band) {
+            const double predicted_speed = measured_speed +
+                fmin(0.0, measured_acceleration) * 0.35;
+            if (measured_acceleration < 0.0 &&
+                predicted_speed <= target_speed_mps + downshift_band) {
+                next_state->source_downshift_guard = 0;
+                next_state->source_downshift_catch = 1;
+                next_state->source_hold_approach = 1;
+                next_state->source_downshift_stable_elapsed = 0.0f;
+                next_state->source_actuator_integral = 0.0f;
+                const double desired = source_feedforward_throttle(
+                    target_speed_mps);
+                next_state->source_throttle_command = (float)source_move_toward(
+                    state->source_throttle_command, desired, 10.0 * dt);
+                return next_state->source_throttle_command;
+            }
+            next_state->source_downshift_stable_elapsed = 0.0f;
+            next_state->source_throttle_command = 0.0f;
+            if (branch_flags) *branch_flags |= MPC_STAGE_ACTIVE_BRAKE;
+            return 0.0;
+        } else if (measured_speed <
+                   fmax(0.0, target_speed_mps - downshift_band)) {
+            next_state->source_downshift_guard = 0;
+            next_state->source_downshift_stable_elapsed = 0.0f;
+        } else {
+            next_state->source_downshift_stable_elapsed += (float)dt;
+            if (next_state->source_downshift_stable_elapsed < 0.20f) {
+                next_state->source_actuator_integral = 0.0f;
+                next_state->source_throttle_command = 0.0f;
+                if (branch_flags)
+                    *branch_flags |= MPC_STAGE_ACTIVE_BRAKE;
+                return 0.0;
+            } else {
+                next_state->source_downshift_guard = 0;
+                next_state->source_hold_approach = 1;
+            }
+        }
+    }
+
+    if (next_state->source_downshift_catch) {
+        next_state->source_actuator_integral = 0.0f;
+        if (measured_speed <= target_speed_mps + downshift_band) {
+            next_state->source_downshift_catch = 0;
+        } else {
+            const double desired = source_feedforward_throttle(target_speed_mps);
+            next_state->source_throttle_command = (float)source_move_toward(
+                state->source_throttle_command, desired, 10.0 * dt);
+            return next_state->source_throttle_command;
+        }
+    }
+
+    if (raw_speed - target_speed_mps >= 0.50) {
+        next_state->source_actuator_integral = 0.0f;
+        next_state->source_hold_approach = 0;
+        next_state->source_hold_reentry_requires_speed = 0;
+        next_state->source_overspeed_elapsed = 0.0f;
+        next_state->source_throttle_command = 0.0f;
+        if (branch_flags) *branch_flags |= MPC_STAGE_ACTIVE_BRAKE;
+        return 0.0;
+    }
+
+    const double overspeed_limit = fmin(
+        1.0, fmax(0.15, 0.10 * target_speed_mps));
+    if (measured_speed - target_speed_mps > overspeed_limit) {
+        next_state->source_overspeed_elapsed += (float)dt;
+    } else {
+        next_state->source_overspeed_elapsed = 0.0f;
+    }
+    if (next_state->source_overspeed_elapsed >= 0.05f ||
+        measured_speed - target_speed_mps > 1.0) {
+        next_state->source_actuator_integral = 0.0f;
+        next_state->source_hold_approach = 0;
+        next_state->source_hold_reentry_requires_speed = 0;
+        next_state->source_throttle_command = 0.0f;
+        if (branch_flags) *branch_flags |= MPC_STAGE_ACTIVE_BRAKE;
+        return 0.0;
+    }
+
+    const double error = target_speed_mps - measured_speed;
+    if (next_state->source_hold_approach && error > 0.75) {
+        next_state->source_hold_approach = 0;
+        next_state->source_hold_reentry_requires_speed = 1;
+    }
+    if (!next_state->source_hold_approach) {
+        const double entry_speed = fmax(0.0, target_speed_mps - 0.15);
+        if (next_state->source_hold_reentry_requires_speed)
+            next_state->source_hold_reentry_requires_speed =
+                measured_speed < entry_speed;
+        if (!next_state->source_hold_reentry_requires_speed) {
+            /* Match SpeedController._predicted_positive_acceleration(): the
+             * allowed measured-acceleration signal is combined with the
+             * acceleration implied by the current throttle above the
+             * measured-speed feed-forward operating point. Using only the
+             * measured derivative delays the production hold handoff when
+             * throttle is already above steady demand. */
+            double predicted_acceleration = fmax(0.0, measured_acceleration);
+            const double measured_feedforward = source_feedforward_throttle(
+                measured_speed);
+            if (state->source_throttle_command > measured_feedforward) {
+                const double throttle_acceleration =
+                    (state->source_throttle_command - measured_feedforward) /
+                    source_throttle_per_acceleration(measured_speed);
+                predicted_acceleration = fmax(
+                    predicted_acceleration, throttle_acceleration);
+            }
+            predicted_acceleration = fmin(
+                predicted_acceleration,
+                source_maximum_acceleration(measured_speed));
+            const double predicted_speed = measured_speed +
+                predicted_acceleration * 0.35;
+            if (measured_speed >= entry_speed || predicted_speed >= entry_speed)
+                next_state->source_hold_approach = 1;
+        }
+    }
+
+    double desired;
+    if (next_state->source_hold_approach) {
+        next_state->source_actuator_integral = 0.0f;
+        desired = source_feedforward_throttle(target_speed_mps);
+    } else {
+        const double candidate_integral = fmax(-1.0, fmin(1.0,
+            state->source_actuator_integral + error * dt));
+        const double unsaturated = source_feedforward_throttle(
+                target_speed_mps) + 0.003 * error + 0.0001 * candidate_integral;
+        desired = fmax(0.0, fmin(1.0, unsaturated));
+        if ((unsaturated > 0.0 && unsaturated < 1.0) ||
+            (unsaturated >= 1.0 && error < 0.0) ||
+            (unsaturated <= 0.0 && error > 0.0))
+            next_state->source_actuator_integral = (float)candidate_integral;
+    }
+    next_state->source_throttle_command = (float)source_move_toward(
+        state->source_throttle_command, desired,
+        10.0 * dt);
+    return next_state->source_throttle_command;
+}
+
+/* The path-coordinate integration depends on the vehicle transition only
+ * through its next body velocities. Keeping it separate makes derivatives
+ * of e_y/e_psi inexpensive without replaying the 1 ms wheel-contact model. */
+static int vehicle_model_tracking_step(
+    const MpcModelState_t *state,
+    float u_next,
+    float v_next,
+    float r_next,
+    float dt,
+    float path_curvature,
+    float *e_y_next,
+    float *e_psi_next,
+    float *delta_s)
+{
+    if (!state || !e_y_next || !e_psi_next || !delta_s) return 0;
+    const float u_mid = 0.5f * (state->u + u_next);
+    const float v_mid = 0.5f * (state->v + v_next);
+    const float r_mid = 0.5f * (state->r + r_next);
+    const float denominator0 = 1.0f - path_curvature * state->e_y;
+    if (fabsf(denominator0) < 0.05f) return 0;
+    const float s_dot0 =
+        (state->u * cosf(state->e_psi) - state->v * sinf(state->e_psi)) /
+        denominator0;
+    const float e_y_dot0 =
+        state->u * sinf(state->e_psi) + state->v * cosf(state->e_psi);
+    const float e_psi_dot0 = state->r - path_curvature * s_dot0;
+    const float e_y_mid = state->e_y + 0.5f * dt * e_y_dot0;
+    const float e_psi_mid = state->e_psi + 0.5f * dt * e_psi_dot0;
+    const float denominator_mid = 1.0f - path_curvature * e_y_mid;
+    if (fabsf(denominator_mid) < 0.05f) return 0;
+    const float s_dot_mid =
+        (u_mid * cosf(e_psi_mid) - v_mid * sinf(e_psi_mid)) /
+        denominator_mid;
+    const float e_y_dot_mid =
+        u_mid * sinf(e_psi_mid) + v_mid * cosf(e_psi_mid);
+    const float e_psi_dot_mid = r_mid - path_curvature * s_dot_mid;
+    const float e_psi_raw = state->e_psi + dt * e_psi_dot_mid;
+    *e_y_next = state->e_y + dt * e_y_dot_mid;
+    *e_psi_next = atan2f(sinf(e_psi_raw), cosf(e_psi_raw));
+    *delta_s = dt * s_dot_mid;
+    return isfinite(*e_y_next) && isfinite(*e_psi_next) &&
+        isfinite(*delta_s);
+}
+
+/* Nonlinear rollouts use the 1 ms source-derived four-wheel plant. The compact
+ * RTI state tracks path/body/controller variables, while this carried state
+ * preserves wheel spin, sprung-body motion, and suspension history across
+ * every stage of the horizon. */
 static int vehicle_model_step_scalar(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
@@ -1177,90 +1634,159 @@ static int vehicle_model_step_scalar(
     if (delta_next != delta_raw)
         stage->branch_flags |= MPC_STAGE_CLIPPED_STEERING_COMMAND;
 
-    /* VehicleController keeps a physical steering angle separate from the
-     * autonomous target. Held-out command/feedback captures identify one
-     * 40 Hz queue interval before the physical angle follows the target.
-     * Using delta_next directly would make a reversal instantaneous. */
-    const float actual_rate_raw =
-        (state->delayed_steering_command_1 -
-            state->actual_steering_angle) / dt;
-    const float actual_rate = clampf_local(actual_rate_raw,
-        -parameters.steering_rate_radps, parameters.steering_rate_radps);
-    const float actual_raw = state->actual_steering_angle + dt * actual_rate;
-    const float actual_next = clampf_local(actual_raw,
-        -parameters.max_steering_angle, parameters.max_steering_angle);
-    if (actual_rate != actual_rate_raw || actual_next != actual_raw)
-        stage->branch_flags |= MPC_STAGE_CLIPPED_ACTUAL_STEERING;
-
     const float target_raw = state->target_speed + dt * q_speed;
     const float target_next = clampf_local(target_raw,
         0.0f, active_target_speed_ceiling_mps);
     if (target_next != target_raw)
         stage->branch_flags |= MPC_STAGE_CLIPPED_TARGET_SPEED;
-    const float target_mid = 0.5f * (state->target_speed + target_next);
 
-    const float u0 = clampf_local(state->u, 0.0f,
-        parameters.maximum_command_speed_mps);
-    float acceleration = MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 +
-        MPC_LONGITUDINAL_SPEED_COEFF_PER_S * u0 +
-        MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S * (target_mid - u0) +
-        MPC_LONGITUDINAL_TARGET_RATE_COEFF * q_speed;
-    const float braking_limit =
-        MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 +
-        MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV * u0;
-    const float unclipped_acceleration = acceleration;
-    acceleration = clampf_local(acceleration, -braking_limit,
-        MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2);
-    if (acceleration != unclipped_acceleration)
-        stage->branch_flags |= MPC_STAGE_CLIPPED_ACCELERATION;
+    MpcModelState_t next = *state;
+    UnitySourcePlantInputC source_input;
+    if (state->source_plant_initialized) {
+        memset(&source_input, 0, sizeof(source_input));
+        memcpy(source_input.state, state->source_plant_state,
+               sizeof(source_input.state));
+    } else {
+        seed_source_physics(state, &source_input);
+        if (state->source_imu_state_initialized) {
+            source_input.state[UNITY_SOURCE_ROLL] =
+                state->source_plant_state[UNITY_SOURCE_ROLL];
+            source_input.state[UNITY_SOURCE_ROLL_RATE] =
+                state->source_plant_state[UNITY_SOURCE_ROLL_RATE];
+            source_input.state[UNITY_SOURCE_PITCH] =
+                state->source_plant_state[UNITY_SOURCE_PITCH];
+            source_input.state[UNITY_SOURCE_PITCH_RATE] =
+                state->source_plant_state[UNITY_SOURCE_PITCH_RATE];
+        }
+    }
+    if (state->source_rear_wheel_omega_feedback_valid) {
+        source_input.state[UNITY_SOURCE_WHEEL_OMEGA_RL] =
+            state->source_rear_wheel_omega_feedback_radps[0];
+        source_input.state[UNITY_SOURCE_WHEEL_OMEGA_RR] =
+            state->source_rear_wheel_omega_feedback_radps[1];
+    }
+    /* This is a measured initial condition, not a constant horizon input. */
+    next.source_rear_wheel_omega_feedback_valid = 0;
+    source_update_actuator_measurement(state, state->u, dt, &next);
+    source_input.state[UNITY_SOURCE_U] = state->u;
+    source_input.state[UNITY_SOURCE_V] =
+        state->v + state->r * kComForwardFromRearAxleM;
+    source_input.state[UNITY_SOURCE_YAW_RATE] = state->r;
+    source_input.state[UNITY_SOURCE_PHYSICAL_STEERING] =
+        state->actual_steering_angle;
+    source_input.steering_target_rad = state->delayed_steering_command_1;
+    const float generated_throttle = (float)source_actuator_throttle(
+        state, target_next, dt, &next, &stage->branch_flags);
+    source_input.throttle_normalized = state->delayed_throttle_command_1;
+    next.delayed_throttle_command_1 = state->delayed_throttle_command_2;
+    next.delayed_throttle_command_2 = generated_throttle;
+    if (source_input.throttle_normalized == 0.0f)
+        stage->branch_flags |= MPC_STAGE_PLANT_BRAKE;
+    source_input.suspension_history_initialized =
+        state->source_suspension_history_initialized;
 
-    const float u_raw = u0 + dt * acceleration;
-    const float u_next = clampf_local(u_raw, 0.0f,
-        parameters.maximum_command_speed_mps);
-    if (u_next != u_raw)
-        stage->branch_flags |= MPC_STAGE_CLIPPED_BODY_SPEED;
-    const float u_mid = 0.5f * (u0 + u_next);
+    UnitySourcePlantOutputC source_output;
+    if (!unity_source_plant_step_c(
+            &source_input, dt, &source_output)) return 0;
+    memcpy(next.source_longitudinal_slip, source_output.longitudinal_slip,
+           sizeof(next.source_longitudinal_slip));
+    memcpy(next.source_lateral_slip, source_output.lateral_slip,
+           sizeof(next.source_lateral_slip));
+    memcpy(next.source_normal_load_n, source_output.normal_load_n,
+           sizeof(next.source_normal_load_n));
+    next.source_yaw_surface_blend = 0.0f;
+    next.source_yaw_surface_target_radps = 0.0f;
+    if (active_yaw_rate_surface.enabled &&
+        active_yaw_rate_surface.response_scale > 0.0f &&
+        active_yaw_rate_surface.hold_response_time_constant_s > 0.0f) {
+        const float speed_mid = 0.5f * (
+            state->u + (float)source_output.state[UNITY_SOURCE_U]);
+        const float steering_next = (float)
+            source_output.state[UNITY_SOURCE_PHYSICAL_STEERING];
+        const float steering_rate =
+            (steering_next - state->actual_steering_angle) / dt;
+        const float demand_q = fmaxf(speed_mid, 0.0f) *
+            fabsf(tanf(steering_next));
+        const MpcYawSurfaceValue_t empirical = yaw_surface_value(
+            speed_mid, steering_next);
+        const float measured_response_support =
+            yaw_surface_blend_weight(demand_q, steering_next) *
+            yaw_surface_speed_blend_weight(speed_mid);
+        const float equilibrium_gate = 1.0f - smoothstep_scalar(
+            fabsf(state->r - empirical.yaw_rate_rps), 0.15f, 0.25f);
+        const float steering_rate_gate = 1.0f - smoothstep_scalar(
+            fabsf(steering_rate),
+            active_yaw_rate_surface.hold_rate_full_radps,
+            active_yaw_rate_surface.hold_rate_zero_radps);
+        const float applied_throttle = state->delayed_throttle_command_1;
+        const float throttle_magnitude_gate = smoothstep_scalar(
+            applied_throttle, 0.05f, 0.10f);
+        const float throttle_slew_gate = 1.0f - smoothstep_scalar(
+            fabsf(state->delayed_throttle_command_2 - applied_throttle),
+            0.01f, 0.03f);
+        const float correction_weight = active_yaw_rate_surface.response_scale *
+            measured_response_support * equilibrium_gate *
+            steering_rate_gate * throttle_magnitude_gate * throttle_slew_gate;
 
-    const float r_next = yaw_rate_response(
-        u_mid, actual_next, state->r, dt, path_curvature, actual_rate) + dt *
-        yaw_residual_rate_scalar(state, control, path_curvature, acceleration);
-    const float r_mid = 0.5f * (state->r + r_next);
-    const float denominator0 = 1.0f - path_curvature * state->e_y;
-    if (fabsf(denominator0) < 0.05f) return 0;
-    const float s_dot0 =
-        (u0 * cosf(state->e_psi) - state->v * sinf(state->e_psi)) /
-        denominator0;
-    const float e_y_dot0 =
-        u0 * sinf(state->e_psi) + state->v * cosf(state->e_psi);
-    const float e_psi_dot0 = state->r - path_curvature * s_dot0;
-    const float e_y_mid = state->e_y + 0.5f * dt * e_y_dot0;
-    const float e_psi_mid = state->e_psi + 0.5f * dt * e_psi_dot0;
-    const float denominator_mid = 1.0f - path_curvature * e_y_mid;
-    if (fabsf(denominator_mid) < 0.05f) return 0;
-    const float s_dot_mid =
-        (u_mid * cosf(e_psi_mid) - state->v * sinf(e_psi_mid)) /
-        denominator_mid;
-    const float e_y_dot_mid =
-        u_mid * sinf(e_psi_mid) + state->v * cosf(e_psi_mid);
-    const float e_psi_dot_mid = r_mid - path_curvature * s_dot_mid;
+        if (correction_weight > 0.0f) {
+            float response_tau =
+                active_yaw_rate_parameters.response_time_constant_s;
+            if (active_yaw_rate_parameters.low_speed_response_time_constant_s >
+                0.0f) {
+                response_tau += (
+                    active_yaw_rate_parameters.low_speed_response_time_constant_s -
+                    response_tau) * expf(-fmaxf(speed_mid, 0.0f) /
+                    active_yaw_rate_parameters.low_speed_transition_speed_mps);
+            }
+            const float hold_phase = steering_rate_gate;
+            response_tau += measured_response_support * hold_phase *
+                (active_yaw_rate_surface.hold_response_time_constant_s -
+                 response_tau);
+            const float retention = expf(-dt / response_tau);
+            const float empirical_next = retention * state->r +
+                (1.0f - retention) * empirical.yaw_rate_rps;
+            const float physical_yaw_rate = (float)
+                source_output.state[UNITY_SOURCE_YAW_RATE];
+            const float corrected_yaw_rate = physical_yaw_rate +
+                correction_weight * (empirical_next - physical_yaw_rate);
+            source_output.state[UNITY_SOURCE_YAW_RATE] = corrected_yaw_rate;
+            source_output.yaw_acceleration_radps2 =
+                (corrected_yaw_rate - state->r) / dt;
+            next.source_yaw_surface_blend = correction_weight;
+            next.source_yaw_surface_target_radps = empirical.yaw_rate_rps;
+        }
+    }
+    memcpy(next.source_plant_state, source_output.state,
+           sizeof(next.source_plant_state));
+    next.source_plant_initialized = 1;
+    next.source_suspension_history_initialized =
+        source_output.suspension_history_initialized;
 
-    stage->next = (MpcModelState_t){
-        .e_y = state->e_y + dt * e_y_dot_mid,
-        .e_psi = atan2f(sinf(state->e_psi + dt * e_psi_dot_mid),
-                        cosf(state->e_psi + dt * e_psi_dot_mid)),
-        .u = u_next,
-        /* The controller has no causal lateral-velocity input model beyond
-         * the current legal /odom state. Holding it through one prediction
-         * step is the least-assumptive map; an unvalidated decay fit caused
-         * no improvement in live authority and is intentionally not used. */
-        .v = state->v,
-        .r = r_next,
-        .target_speed = target_next,
-        .steering_command = delta_next,
-        .delayed_steering_command_1 = state->steering_command,
-        .delayed_steering_command_2 = state->delayed_steering_command_1,
-        .actual_steering_angle = actual_next};
-    stage->delta_s_m = dt * s_dot_mid;
+    const float u_next = (float)source_output.state[UNITY_SOURCE_U];
+    const float r_next = (float)source_output.state[UNITY_SOURCE_YAW_RATE];
+    const float v_next = (float)(
+        source_output.state[UNITY_SOURCE_V] -
+        r_next * kComForwardFromRearAxleM);
+    const float actual_next = (float)
+        source_output.state[UNITY_SOURCE_PHYSICAL_STEERING];
+    const float acceleration = (float)
+        source_output.longitudinal_acceleration_mps2;
+    if (!isfinite(u_next) || !isfinite(v_next) || !isfinite(r_next) ||
+        !isfinite(actual_next) ||
+        fabsf(u_next) > parameters.maximum_command_speed_mps) return 0;
+
+    if (!vehicle_model_tracking_step(
+            state, u_next, v_next, r_next, dt, path_curvature,
+            &next.e_y, &next.e_psi, &stage->delta_s_m)) return 0;
+    next.u = u_next;
+    next.v = v_next;
+    next.r = r_next;
+    next.target_speed = target_next;
+    next.steering_command = delta_next;
+    next.delayed_steering_command_1 = state->steering_command;
+    next.delayed_steering_command_2 = state->delayed_steering_command_1;
+    next.actual_steering_angle = actual_next;
+    stage->next = next;
     stage->body_accel_mps2 = acceleration;
     stage->valid = finite_mpc_state(&stage->next) &&
         isfinite(stage->delta_s_m) && isfinite(stage->body_accel_mps2);
@@ -1298,10 +1824,13 @@ static int vehicle_model_step_impl(
         jet_variable(state->steering_command, 6, differentiate),
         jet_variable(state->delayed_steering_command_1, 7, differentiate),
         jet_variable(state->delayed_steering_command_2, 8, differentiate),
-        jet_variable(state->actual_steering_angle, 9, differentiate)};
+        jet_variable(state->actual_steering_angle, 9, differentiate),
+        jet_variable(state->delayed_throttle_command_1, 10, differentiate),
+        jet_variable(state->delayed_throttle_command_2, 11, differentiate)};
     MpcJet_t w[2] = {
-        jet_variable(control->steering_rate, 10, differentiate),
-        jet_variable(control->target_speed_rate, 11, differentiate)};
+        jet_variable(control->steering_rate, MPC_MODEL_NX, differentiate),
+        jet_variable(control->target_speed_rate,
+                     MPC_MODEL_NX + 1, differentiate)};
 
     MpcJet_t q_delta = jet_clip(w[0],
         jet_constant(-parameters.steering_rate_radps),
@@ -1630,7 +2159,8 @@ static int vehicle_model_step_impl(
             for (int column = 0; column < MPC_MODEL_NX; ++column)
                 linearization->A[row][column] = next[row].derivative[column];
             for (int input = 0; input < 2; ++input)
-                linearization->B[row][input] = next[row].derivative[10 + input];
+                linearization->B[row][input] =
+                    next[row].derivative[MPC_MODEL_NX + input];
         }
         linearization->nominal_branch_flags = stage->branch_flags;
         linearization->nonsmooth_column_count =
@@ -1638,6 +2168,63 @@ static int vehicle_model_step_impl(
         linearization->valid = 1;
     }
     return 1;
+}
+
+static float mpc_state_component(const MpcModelState_t *state, int index)
+{
+    switch (index) {
+    case 0: return state->e_y;
+    case 1: return state->e_psi;
+    case 2: return state->u;
+    case 3: return state->v;
+    case 4: return state->r;
+    case 5: return state->target_speed;
+    case 6: return state->steering_command;
+    case 7: return state->delayed_steering_command_1;
+    case 8: return state->delayed_steering_command_2;
+    case 9: return state->actual_steering_angle;
+    case 10: return state->delayed_throttle_command_1;
+    case 11: return state->delayed_throttle_command_2;
+    case 12: return (float)state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL];
+    case 13: return (float)state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FR];
+    case 14: return (float)state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL];
+    case 15: return (float)state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RR];
+    default: return NAN;
+    }
+}
+
+static void mpc_state_perturb(MpcModelState_t *state, int index, float amount)
+{
+    switch (index) {
+    case 0: state->e_y += amount; break;
+    case 1: state->e_psi += amount; break;
+    case 2: state->u += amount; break;
+    case 3: state->v += amount; break;
+    case 4: state->r += amount; break;
+    case 5: state->target_speed += amount; break;
+    case 6: state->steering_command += amount; break;
+    case 7: state->delayed_steering_command_1 += amount; break;
+    case 8: state->delayed_steering_command_2 += amount; break;
+    case 9: state->actual_steering_angle += amount; break;
+    case 10: state->delayed_throttle_command_1 += amount; break;
+    case 11: state->delayed_throttle_command_2 += amount; break;
+    case 12: state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL] += amount; break;
+    case 13: state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FR] += amount; break;
+    case 14: state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL] += amount; break;
+    case 15: state->source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RR] += amount; break;
+    default: break;
+    }
+}
+
+static float mpc_stage_component(const MpcStageResult_t *stage, int index)
+{
+    return mpc_state_component(&stage->next, index);
+}
+
+static float mpc_component_delta(int row, float lhs, float rhs)
+{
+    return row == 1 ? remainderf(lhs - rhs, 6.2831853071795864769f)
+                    : lhs - rhs;
 }
 
 int mpc_vehicle_model_step_with_jacobian(
@@ -1648,8 +2235,192 @@ int mpc_vehicle_model_step_with_jacobian(
     MpcStageResult_t *stage,
     MpcStageLinearization_t *linearization)
 {
-    return vehicle_model_step_impl(
-        state, control, dt, path_curvature, stage, linearization, 1);
+    if (!state || !control || !stage || !linearization) return 0;
+    memset(linearization, 0, sizeof(*linearization));
+    linearization->failure_index = -1;
+    MpcModelState_t prepared_state = *state;
+    if (!vehicle_model_initialize_source_plant_state(&prepared_state)) {
+        linearization->failure_reason = 1;
+        return 0;
+    }
+    state = &prepared_state;
+    if (!vehicle_model_step_scalar(state, control, dt, path_curvature, stage)) {
+        linearization->failure_reason = 2;
+        return 0;
+    }
+    linearization->nominal_branch_flags = stage->branch_flags;
+
+    static const float state_epsilon[MPC_MODEL_NX] = {
+        1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
+        1.0e-3f, 1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-4f,
+        1.0e-3f, 1.0e-3f, 1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f};
+    static const float input_epsilon[2] = {1.0e-3f, 1.0e-2f};
+
+    /* These columns do not affect the Unity-source plant transition:
+     * - e_y/e_psi enter only the cheap Frenet integration below;
+     * - steering_command/steering_rate update the delayed command queue;
+     * - delayed_steering_command_2 is not consumed by this stage;
+     * - delayed_throttle_command_2 only shifts into queue slot 1.
+     * Fill these exact dependencies directly rather than finite-differencing
+     * the costly 1 ms tire/contact equations for every bookkeeping state. */
+    const VehicleParameters_t parameters = vehicle_model_get_parameters();
+    const float steering_rate = clampf_local(
+        control->steering_rate, -parameters.steering_rate_radps,
+        parameters.steering_rate_radps);
+    const float steering_raw = state->steering_command + dt * steering_rate;
+    const int steering_unsaturated =
+        steering_raw > -parameters.max_steering_angle &&
+        steering_raw < parameters.max_steering_angle;
+    linearization->A[6][6] = steering_unsaturated ? 1.0f : 0.0f;
+    linearization->A[7][6] = 1.0f;
+    linearization->B[6][0] =
+        steering_unsaturated && steering_rate == control->steering_rate
+        ? dt : 0.0f;
+    linearization->A[10][11] = 1.0f;
+    if (!steering_unsaturated) {
+        linearization->nonsmooth_column_mask |=
+            (uint32_t)(1u << 6);
+        ++linearization->nonsmooth_column_count;
+    }
+    if (steering_rate != control->steering_rate) {
+        linearization->nonsmooth_column_mask |=
+            (uint32_t)(1u << (MPC_MODEL_NX + 0));
+        ++linearization->nonsmooth_column_count;
+    }
+
+    /* Path-coordinate columns need only the already-computed body transition,
+     * so use symmetric differences of the exact same midpoint equations. */
+    for (int column = 0; column < 2; ++column) {
+        const float epsilon = state_epsilon[column];
+        MpcModelState_t state_plus = *state;
+        MpcModelState_t state_minus = *state;
+        mpc_state_perturb(&state_plus, column, epsilon);
+        mpc_state_perturb(&state_minus, column, -epsilon);
+        float plus_ey = 0.0f, plus_epsi = 0.0f, plus_ds = 0.0f;
+        float minus_ey = 0.0f, minus_epsi = 0.0f, minus_ds = 0.0f;
+        const int plus_valid = vehicle_model_tracking_step(
+            &state_plus, stage->next.u, stage->next.v, stage->next.r,
+            dt, path_curvature, &plus_ey, &plus_epsi, &plus_ds);
+        const int minus_valid = vehicle_model_tracking_step(
+            &state_minus, stage->next.u, stage->next.v, stage->next.r,
+            dt, path_curvature, &minus_ey, &minus_epsi, &minus_ds);
+        if (plus_valid && minus_valid) {
+            linearization->A[0][column] =
+                (plus_ey - minus_ey) / (2.0f * epsilon);
+            linearization->A[1][column] = mpc_component_delta(
+                1, plus_epsi, minus_epsi) / (2.0f * epsilon);
+        } else if (plus_valid) {
+            linearization->A[0][column] =
+                (plus_ey - stage->next.e_y) / epsilon;
+            linearization->A[1][column] = mpc_component_delta(
+                1, plus_epsi, stage->next.e_psi) / epsilon;
+            linearization->nonsmooth_column_mask |=
+                (uint32_t)(1u << column);
+            ++linearization->nonsmooth_column_count;
+        } else if (minus_valid) {
+            linearization->A[0][column] =
+                (stage->next.e_y - minus_ey) / epsilon;
+            linearization->A[1][column] = mpc_component_delta(
+                1, stage->next.e_psi, minus_epsi) / epsilon;
+            linearization->nonsmooth_column_mask |=
+                (uint32_t)(1u << column);
+            ++linearization->nonsmooth_column_count;
+        } else {
+            linearization->failure_reason = 3;
+            linearization->failure_index = column;
+            return 0;
+        }
+    }
+
+    for (int column = 0; column < MPC_MODEL_NX + 2; ++column) {
+        const int is_state = column < MPC_MODEL_NX;
+        const int index = is_state ? column : column - MPC_MODEL_NX;
+        const int analytic_column = is_state
+            ? (index == 0 || index == 1 || index == 6 || index == 8 || index == 11)
+            : index == 0;
+        if (analytic_column) continue;
+        const float epsilon = is_state
+            ? state_epsilon[index] : input_epsilon[index];
+        MpcModelState_t state_plus = *state;
+        MpcModelControl_t control_plus = *control;
+        if (is_state) {
+            mpc_state_perturb(&state_plus, index, epsilon);
+        } else if (index == 0) {
+            control_plus.steering_rate += epsilon;
+        } else {
+            control_plus.target_speed_rate += epsilon;
+        }
+        MpcStageResult_t plus = {0};
+        MpcStageResult_t minus = {0};
+        (void)vehicle_model_step_scalar(
+            &state_plus, &control_plus, dt, path_curvature, &plus);
+        const int plus_same_branch = plus.valid &&
+            plus.branch_flags == stage->branch_flags;
+
+        /* Use a forward difference in smooth regions; pay for the opposite
+         * side only when perturbation crosses a plant/model branch. */
+        int nonsmooth = !plus_same_branch;
+        if (!plus_same_branch) {
+            MpcModelState_t state_minus = *state;
+            MpcModelControl_t control_minus = *control;
+            if (is_state) {
+                mpc_state_perturb(&state_minus, index, -epsilon);
+            } else if (index == 0) {
+                control_minus.steering_rate -= epsilon;
+            } else {
+                control_minus.target_speed_rate -= epsilon;
+            }
+            (void)vehicle_model_step_scalar(
+                &state_minus, &control_minus, dt, path_curvature, &minus);
+        }
+        const int minus_same_branch = minus.valid &&
+            minus.branch_flags == stage->branch_flags;
+        for (int row = 0; row < MPC_MODEL_NX; ++row) {
+            const float base_value = mpc_stage_component(stage, row);
+            const float plus_value = mpc_stage_component(&plus, row);
+            const float minus_value = mpc_stage_component(&minus, row);
+            float derivative;
+            if (plus_same_branch) {
+                derivative = mpc_component_delta(
+                    row, plus_value, base_value) / epsilon;
+            } else if (minus_same_branch) {
+                derivative = mpc_component_delta(
+                    row, base_value, minus_value) / epsilon;
+            } else if (plus.valid && minus.valid) {
+                const unsigned int plus_distance = mask_popcount(
+                    (uint16_t)(plus.branch_flags ^ stage->branch_flags));
+                const unsigned int minus_distance = mask_popcount(
+                    (uint16_t)(minus.branch_flags ^ stage->branch_flags));
+                derivative = plus_distance <= minus_distance
+                    ? mpc_component_delta(row, plus_value, base_value) / epsilon
+                    : mpc_component_delta(row, base_value, minus_value) / epsilon;
+            } else if (plus.valid) {
+                derivative = mpc_component_delta(
+                    row, plus_value, base_value) / epsilon;
+            } else if (minus.valid) {
+                derivative = mpc_component_delta(
+                    row, base_value, minus_value) / epsilon;
+            } else {
+                linearization->failure_reason = 4;
+                linearization->failure_index = column;
+                return 0;
+            }
+            if (!isfinite(derivative)) {
+                linearization->failure_reason = 5;
+                linearization->failure_index = column;
+                return 0;
+            }
+            if (is_state) linearization->A[row][index] = derivative;
+            else linearization->B[row][index] = derivative;
+        }
+        if (nonsmooth) {
+            linearization->nonsmooth_column_mask |=
+                (uint32_t)(1u << column);
+            ++linearization->nonsmooth_column_count;
+        }
+    }
+    linearization->valid = 1;
+    return 1;
 }
 
 MpcStageResult_t mpc_vehicle_model_step(

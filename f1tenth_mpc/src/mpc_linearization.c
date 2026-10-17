@@ -12,12 +12,15 @@
 static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
     1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
-    1.0e-4f, 1.0e-4f};
+    1.0e-4f, 1.0e-4f, 1.0e-3f, 1.0e-3f,
+    1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f};
 static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 #endif
 
 static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
 {
+    MpcModelState_t prepared = *state;
+    (void)vehicle_model_initialize_source_plant_state(&prepared);
     x[0] = state->e_y;
     x[1] = state->e_psi;
     x[2] = state->u;
@@ -28,12 +31,19 @@ static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
     x[7] = state->delayed_steering_command_1;
     x[8] = state->delayed_steering_command_2;
     x[9] = state->actual_steering_angle;
+    x[10] = state->delayed_throttle_command_1;
+    x[11] = state->delayed_throttle_command_2;
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        x[12 + wheel] = (float)prepared.source_plant_state[
+            UNITY_SOURCE_WHEEL_OMEGA_FL + wheel];
+    }
 }
 
 #ifdef MPC_ENABLE_FD_ORACLE
-static MpcModelState_t array_to_state(const float x[MPC_MODEL_NX])
+static MpcModelState_t array_to_state(
+    const float x[MPC_MODEL_NX], const MpcModelState_t *base)
 {
-    MpcModelState_t state;
+    MpcModelState_t state = *base;
     state.e_y = x[0];
     state.e_psi = x[1];
     state.u = x[2];
@@ -44,6 +54,13 @@ static MpcModelState_t array_to_state(const float x[MPC_MODEL_NX])
     state.delayed_steering_command_1 = x[7];
     state.delayed_steering_command_2 = x[8];
     state.actual_steering_angle = x[9];
+    state.delayed_throttle_command_1 = x[10];
+    state.delayed_throttle_command_2 = x[11];
+    if (!vehicle_model_initialize_source_plant_state(&state)) return state;
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        state.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL + wheel] =
+            x[12 + wheel];
+    }
     return state;
 }
 #endif
@@ -177,8 +194,8 @@ int mpc_model_linearize_fd_oracle(
             u_minus[index] -= epsilon;
         }
 
-        const MpcModelState_t state_plus = array_to_state(x_plus);
-        const MpcModelState_t state_minus = array_to_state(x_minus);
+        const MpcModelState_t state_plus = array_to_state(x_plus, state);
+        const MpcModelState_t state_minus = array_to_state(x_minus, state);
         const MpcModelControl_t control_plus = array_to_control(u_plus);
         const MpcModelControl_t control_minus = array_to_control(u_minus);
         const MpcStageResult_t plus = mpc_vehicle_model_step(
@@ -201,7 +218,7 @@ int mpc_model_linearize_fd_oracle(
         }
         if (column_nonsmooth) {
             linearization->nonsmooth_column_mask |=
-                (uint16_t)(1u << column);
+                (uint32_t)(1u << column);
             ++linearization->nonsmooth_column_count;
         }
     }
@@ -213,7 +230,11 @@ int mpc_model_linearize_fd_oracle(
         for (int column = 0; column < MPC_MODEL_NU; ++column)
             affine -= linearization->B[row][column] * u0[column];
         linearization->d[row] = affine;
-        if (!isfinite(affine)) return 0;
+        if (!isfinite(affine)) {
+            linearization->failure_reason = 6;
+            linearization->failure_index = row;
+            return 0;
+        }
     }
     linearization->valid = 1;
     return 1;

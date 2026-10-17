@@ -1,0 +1,82 @@
+{
+  "mode": "interactive_recursive_server",
+  "initial": {
+    "capture_row": 0,
+    "time_s": 0.0,
+    "fixed_dt_s": 0.001,
+    "body": {
+      "position_world_m": [0.0, 0.01, 0.0],
+      "rotation_world_xyzw": [0.0, 0.0, 0.0, 1.0],
+      "linear_velocity_world_mps": [0.0, 0.0, 0.0],
+      "angular_velocity_world_radps": [0.0, 0.0, 0.0],
+      "mass_kg": 3.47,
+      "inertia_diagonal_kgm2": [0.09355539, 0.10023535, 0.0228063334],
+      "inertia_rotation_xyzw": [0.120662436, -0.00448889332, 0.019552242, 0.9924909],
+      "center_of_mass_body_m": [-0.00008, 0.06434, -0.00468]
+    },
+    "wheel_shapes": [
+      {"position_body_m": [-0.11582111133813858, 0.05990486122310161, 0.1699999945831299], "rotation_body_xyzw": [0.0, 0.0, 0.0, 1.0]},
+      {"position_body_m": [0.11582110510587693, 0.05990486122310161, 0.1699999945831299], "rotation_body_xyzw": [0.0, 0.0, 0.0, 1.0]},
+      {"position_body_m": [-0.11800000383138656, 0.0499999997729063, -0.16000000362873076], "rotation_body_xyzw": [0.0, 0.0, 0.0, 1.0]},
+      {"position_body_m": [0.11799999759912491, 0.0499999997729063, -0.16000000362873076], "rotation_body_xyzw": [0.0, 0.0, 0.0, 1.0]}
+    ],
+    "wheel_inputs": [
+      {
+        "radius_m": 0.059, "width_m": 0.1, "mass_kg": 0.109,
+        "moment_of_inertia_kgm2": 0.0001897145, "wheel_damping_rate_nms": 0.25,
+        "max_compression_m": 0.025, "max_droop_m": 0.025,
+        "spring_rate_npm": 500.0, "damper_rate_nspm": 100.0,
+        "sprung_mass_kg": 0.8172174,
+        "wheel_center_offset_com_body_m": [-0.11574111133813858, -0.004435138776898384, 0.17467999458312988],
+        "force_application_offset_com_body_m": [-0.11574111133813858, -0.0634351372718811, 0.17467999458312988],
+        "suspension_direction_body": [0.0, -1.0, 0.0],
+        "forward_curve": [0.15, 0.9, 0.25, 0.58, 0.8],
+        "sideways_curve": [0.01, 1.0, 0.1, 0.5, 1.0],
+        "wheel_omega_radps": 0.0, "wheel_rotation_angle_rad": 0.0,
+        "initial_pose_jounce_m": 0.0
+      },
+      {
+        "radius_m": 0.059, "width_m": 0.1, "mass_kg": 0.109,
+        "moment_of_inertia_kgm2": 0.0001897145, "wheel_damping_rate_nms": 0.25,
+        "max_compression_m": 0.025, "max_droop_m": 0.025,
+        "spring_rate_npm": 500.0, "damper_rate_nspm": 100.0,
+        "sprung_mass_kg": 0.8160214,
+        "wheel_center_offset_com_body_m": [0.11590110510587692, -0.004435138776898384, 0.17467999458312988],
+        "force_application_offset_com_body_m": [0.11590110510587692, -0.0634351372718811, 0.17467999458312988],
+        "suspension_direction_body": [0.0, -1.0, 0.0],
+        "forward_curve": [0.15, 0.9, 0.25, 0.58, 0.8],
+        "sideways_curve": [0.01, 1.0, 0.1, 0.5, 1.0],
+        "wheel_omega_radps": 0.0, "wheel_rotation_angle_rad": 0.0,
+        "initial_pose_jounce_m": 0.0
+      },
+      {
+        "radius_m": 0.059, "width_m": 0.1, "mass_kg": 0.109,
+        "moment_of_inertia_kgm2": 0.0001897145, "wheel_damping_rate_nms": 0.25,
+        "max_compression_m": 0.025, "max_droop_m": 0.025,
+        "spring_rate_npm": 500.0, "damper_rate_nspm": 100.0,
+        "sprung_mass_kg": 0.9189909,
+        "wheel_center_offset_com_body_m": [-0.11792000383138657, -0.014340000227093697, -0.15532000362873076],
+        "force_application_offset_com_body_m": [-0.11792000383138657, -0.07333999872207642, -0.15532000362873076],
+        "suspension_direction_body": [0.0, -1.0, 0.0],
+        "forward_curve": [0.15, 0.9, 0.25, 0.58, 0.8],
+        "sideways_curve": [0.01, 1.0, 0.1, 0.5, 1.0],
+        "wheel_omega_radps": 0.0, "wheel_rotation_angle_rad": 0.0,
+        "initial_pose_jounce_m": 0.0
+      },
+      {
+        "radius_m": 0.059, "width_m": 0.1, "mass_kg": 0.109,
+        "moment_of_inertia_kgm2": 0.0001897145, "wheel_damping_rate_nms": 0.25,
+        "max_compression_m": 0.025, "max_droop_m": 0.025,
+        "spring_rate_npm": 500.0, "damper_rate_nspm": 100.0,
+        "sprung_mass_kg": 0.9177702,
+        "wheel_center_offset_com_body_m": [0.11807999759912491, -0.014340000227093697, -0.15532000362873076],
+        "force_application_offset_com_body_m": [0.11807999759912491, -0.07333999872207642, -0.15532000362873076],
+        "suspension_direction_body": [0.0, -1.0, 0.0],
+        "forward_curve": [0.15, 0.9, 0.25, 0.58, 0.8],
+        "sideways_curve": [0.01, 1.0, 0.1, 0.5, 1.0],
+        "wheel_omega_radps": 0.0, "wheel_rotation_angle_rad": 0.0,
+        "initial_pose_jounce_m": 0.0
+      }
+    ]
+  }
+}
