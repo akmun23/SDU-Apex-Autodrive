@@ -730,6 +730,20 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
             trajectory)
         if actual_start is None or len(initial_state) < 5 or not math.isfinite(initial_progress):
             continue
+        steering_feedback = prior_value(
+            streams[SCALAR_TOPICS["steering_feedback"]],
+            scalar_stamps["steering_feedback"], prediction_start_ns)
+        steering_feedback_previous = prior_value(
+            streams[SCALAR_TOPICS["steering_feedback"]],
+            scalar_stamps["steering_feedback"],
+            prediction_start_ns - int(round(PREDICTION_DT_S * 1e9)))
+        throttle_feedback = prior_value(
+            streams[SCALAR_TOPICS["throttle_feedback"]],
+            scalar_stamps["throttle_feedback"], prediction_start_ns)
+        throttle_feedback_previous = prior_value(
+            streams[SCALAR_TOPICS["throttle_feedback"]],
+            scalar_stamps["throttle_feedback"],
+            prediction_start_ns - int(round(PREDICTION_DT_S * 1e9)))
         for prediction in prediction_list:
             step = int(prediction.get("n", -1))
             state = prediction.get("state") or []
@@ -797,6 +811,22 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
                 "predicted_r_radps": predicted_r,
                 "actual_r_radps": actual["r_radps"],
                 "yaw_rate_error_radps": predicted_r - actual["r_radps"],
+                "initial_u_mps": float(initial_state[2]),
+                "initial_yaw_rate_radps": float(initial_state[4]),
+                "steering_feedback_rad": steering_feedback,
+                "steering_feedback_rate_radps": (
+                    (steering_feedback - steering_feedback_previous) /
+                    PREDICTION_DT_S
+                    if steering_feedback is not None and
+                    steering_feedback_previous is not None else None
+                ),
+                "throttle_feedback": throttle_feedback,
+                "throttle_feedback_slew_per_s": (
+                    (throttle_feedback - throttle_feedback_previous) /
+                    PREDICTION_DT_S
+                    if throttle_feedback is not None and
+                    throttle_feedback_previous is not None else None
+                ),
                 "motion_yaw_rate_error_radps":
                     (predicted_r - float(initial_state[4])) -
                     (actual["r_radps"] - actual_start["r_radps"]),
@@ -820,6 +850,16 @@ def write_report(args: argparse.Namespace) -> dict[str, Any]:
                     "predicted_r_radps": predicted_r,
                     "actual_r_radps": actual["r_radps"],
                     "yaw_rate_error_radps": row["yaw_rate_error_radps"],
+                    "motion_yaw_rate_error_radps":
+                        row["motion_yaw_rate_error_radps"],
+                    "initial_u_mps": row["initial_u_mps"],
+                    "initial_yaw_rate_radps": row["initial_yaw_rate_radps"],
+                    "steering_feedback_rad": row["steering_feedback_rad"],
+                    "steering_feedback_rate_radps":
+                        row["steering_feedback_rate_radps"],
+                    "throttle_feedback": row["throttle_feedback"],
+                    "throttle_feedback_slew_per_s":
+                        row["throttle_feedback_slew_per_s"],
                     "status": row["status"],
                 })
 

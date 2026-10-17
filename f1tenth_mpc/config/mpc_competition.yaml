@@ -123,6 +123,13 @@
     solver_tolerance: 0.01
     solver_degraded_tolerance: 0.01
     max_solver_iterations: 100
+    # Bound RTI work to leave ~5 ms for synchronization, ROS scheduling, and
+    # publishing within the 25 ms 40 Hz period. R1/R2 are still checked by
+    # the exact nonlinear feasibility gate before any command is accepted.
+    rti_cycle_budget_ms: 20.0
+    # Four workers were faster in the complete practice timing capture than
+    # the 8-worker screen's tail; zero disables OpenMP parallelism.
+    jacobian_threads: 4
     solver_max_regularization: 0.01
     max_consecutive_degraded_solves: 3
     use_riccati_prefactorization: true

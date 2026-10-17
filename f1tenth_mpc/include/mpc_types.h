@@ -153,6 +153,9 @@ typedef struct
     /* ADMM over-relaxation in [1, 2]; zero selects the unrelaxed baseline. */
     float over_relaxation;
     int use_prefactorization;
+    /* Cooperative wall-time bound for one ADMM solve. Zero disables the
+     * bound. The solver checks after each complete primal/projection pass. */
+    double max_solve_time_us;
     int use_scaling;
     float state_scale[RICCATI_MAX_NX];
     float input_scale[RICCATI_MAX_NU];

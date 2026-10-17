@@ -2227,15 +2227,16 @@ static float mpc_component_delta(int row, float lhs, float rhs)
                     : lhs - rhs;
 }
 
-int mpc_vehicle_model_step_with_jacobian(
+static int vehicle_model_linearize_with_known_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
     float dt,
     float path_curvature,
-    MpcStageResult_t *stage,
+    const MpcStageResult_t *known_step,
+    MpcStageResult_t *stage_out,
     MpcStageLinearization_t *linearization)
 {
-    if (!state || !control || !stage || !linearization) return 0;
+    if (!state || !control || !stage_out || !linearization) return 0;
     memset(linearization, 0, sizeof(*linearization));
     linearization->failure_index = -1;
     MpcModelState_t prepared_state = *state;
@@ -2244,10 +2245,22 @@ int mpc_vehicle_model_step_with_jacobian(
         return 0;
     }
     state = &prepared_state;
-    if (!vehicle_model_step_scalar(state, control, dt, path_curvature, stage)) {
+    MpcStageResult_t known_storage = {0};
+    if (known_step) {
+        if (!known_step->valid ||
+            !finite_mpc_state(&known_step->next) ||
+            !isfinite(known_step->delta_s_m)) {
+            linearization->failure_reason = 2;
+            return 0;
+        }
+        known_storage = *known_step;
+    } else if (!vehicle_model_step_scalar(
+                   state, control, dt, path_curvature, &known_storage)) {
         linearization->failure_reason = 2;
         return 0;
     }
+    MpcStageResult_t *stage = &known_storage;
+    *stage_out = known_storage;
     linearization->nominal_branch_flags = stage->branch_flags;
 
     static const float state_epsilon[MPC_MODEL_NX] = {
@@ -2421,6 +2434,32 @@ int mpc_vehicle_model_step_with_jacobian(
     }
     linearization->valid = 1;
     return 1;
+}
+
+int mpc_vehicle_model_step_with_jacobian(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization)
+{
+    return vehicle_model_linearize_with_known_step(
+        state, control, dt, path_curvature, NULL, stage, linearization);
+}
+
+int mpc_vehicle_model_linearize_from_known_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    const MpcStageResult_t *known_step,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization)
+{
+    return vehicle_model_linearize_with_known_step(
+        state, control, dt, path_curvature, known_step, stage,
+        linearization);
 }
 
 MpcStageResult_t mpc_vehicle_model_step(

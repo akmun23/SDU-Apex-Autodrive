@@ -31,6 +31,27 @@ int mpc_model_linearize(
     float path_curvature,
     MpcStageLinearization_t *linearization);
 
+/* Reuse a previously computed exact nonlinear transition when linearizing
+ * its nominal state. This avoids simulating the same source-plant step twice.
+ */
+int mpc_model_linearize_from_known_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    const MpcStageResult_t *known_step,
+    MpcStageLinearization_t *linearization);
+
+/* Lower-level transition/Jacobian path used by the affine-map wrapper. */
+int mpc_vehicle_model_linearize_from_known_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    const MpcStageResult_t *known_step,
+    MpcStageResult_t *stage,
+    MpcStageLinearization_t *linearization);
+
 /* Finite-difference oracle retained for tests and offline parity checks. */
 int mpc_model_linearize_fd_oracle(
     const MpcModelState_t *state,

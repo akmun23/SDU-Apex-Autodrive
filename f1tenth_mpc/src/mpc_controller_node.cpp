@@ -443,10 +443,19 @@ public:
             declare_parameter<double>("recovery_steering_k_e_psi", 0.0));
         rti_config_.model.recovery_steering_k_r = static_cast<float>(
             declare_parameter<double>("recovery_steering_k_r", 0.0));
+        rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
+            declare_parameter<int>("jacobian_threads", 4), 0L, 16L));
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", 100);
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
             std::clamp(configured_iterations, 1, 100));
+        const double rti_cycle_budget_ms = declare_parameter<double>(
+            "rti_cycle_budget_ms", 20.0);
+        if (!std::isfinite(rti_cycle_budget_ms) || rti_cycle_budget_ms < 0.0) {
+            throw std::runtime_error(
+                "rti_cycle_budget_ms must be finite and nonnegative");
+        }
+        rti_config_.max_cycle_time_us = rti_cycle_budget_ms * 1000.0;
         rti_config_.solver.rho = static_cast<float>(
             declare_parameter<double>("admm_rho", 7.0));
         rti_config_.solver.rho_u = static_cast<float>(
@@ -1273,6 +1282,18 @@ private:
              << result.r2_solver_iterations
              << ",\"r1_solve_us\":" << result.r1_solve_us
              << ",\"r2_solve_us\":" << result.r2_solve_us
+             << ",\"r1_qp_build_us\":" << result.r1_qp_build_us
+             << ",\"r1_admm_us\":" << result.r1_admm_us
+             << ",\"r1_exact_rollout_us\":"
+             << result.r1_exact_rollout_us
+             << ",\"r1_nonlinear_validation_us\":"
+             << result.r1_nonlinear_validation_us
+             << ",\"r2_qp_build_us\":" << result.r2_qp_build_us
+             << ",\"r2_admm_us\":" << result.r2_admm_us
+             << ",\"r2_exact_rollout_us\":"
+             << result.r2_exact_rollout_us
+             << ",\"r2_nonlinear_validation_us\":"
+             << result.r2_nonlinear_validation_us
              << ",\"total_rti_us\":" << result.total_rti_us
             << ",\"selected_candidate\":\""
              << (result.selected_candidate == 3 ? "corridor_repair" :

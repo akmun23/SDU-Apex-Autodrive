@@ -272,3 +272,35 @@ int mpc_model_linearize(
     }
     return 1;
 }
+
+int mpc_model_linearize_from_known_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    const MpcStageResult_t *known_step,
+    MpcStageLinearization_t *linearization)
+{
+    if (!state || !control || !known_step || !linearization) return 0;
+    MpcStageResult_t stage;
+    if (!mpc_vehicle_model_linearize_from_known_step(
+            state, control, dt, path_curvature, known_step, &stage,
+            linearization)) return 0;
+
+    float x[MPC_MODEL_NX];
+    float u[MPC_MODEL_NU];
+    float f[MPC_MODEL_NX];
+    state_to_array(state, x);
+    control_to_array(control, u);
+    stage_to_array(&stage, f);
+    for (int row = 0; row < MPC_MODEL_NX; ++row) {
+        float affine = f[row];
+        for (int column = 0; column < MPC_MODEL_NX; ++column)
+            affine -= linearization->A[row][column] * x[column];
+        for (int input = 0; input < MPC_MODEL_NU; ++input)
+            affine -= linearization->B[row][input] * u[input];
+        if (!isfinite(affine)) return 0;
+        linearization->d[row] = affine;
+    }
+    return 1;
+}

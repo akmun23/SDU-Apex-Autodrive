@@ -282,6 +282,131 @@ TEST(VehicleModelSourceRollout,
             corrected.next.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL]);
 }
 
+TEST(RiccatiSolverDeadline, StopsOnlyAfterACompleteAdmmIteration)
+{
+  RiccatiStepData_t steps[PREDICTION_HORIZON] = {};
+  float terminal_q[RICCATI_MAX_NX] = {};
+  float terminal_x_lb[RICCATI_MAX_NX] = {};
+  float terminal_x_ub[RICCATI_MAX_NX] = {};
+  float x0[RICCATI_MAX_NX] = {};
+  for (int k = 0; k < PREDICTION_HORIZON; ++k) {
+    steps[k].A[0][0] = 1.0f;
+    steps[k].B[0][0] = 1.0f;
+    steps[k].Q_diag[0] = 1.0f;
+    steps[k].R_diag[0] = 1.0f;
+    steps[k].x_lb[0] = -0.05f;
+    steps[k].x_ub[0] = 0.05f;
+    steps[k].u_lb[0] = -1.0f;
+    steps[k].u_ub[0] = 1.0f;
+  }
+  terminal_q[0] = 1.0f;
+  terminal_x_lb[0] = -0.05f;
+  terminal_x_ub[0] = 0.05f;
+  x0[0] = 2.0f;
+
+  RiccatiAdmmConfig_t config{};
+  config.rho = 7.0f;
+  config.rho_u = 7.0f;
+  config.tolerance = 1.0e-9f;
+  config.max_iterations = 100;
+  config.over_relaxation = 1.0f;
+  config.use_prefactorization = 1;
+  config.max_solve_time_us = 0.001;
+
+  RiccatiAdmmState_t memory{};
+  RiccatiSolution_t solution{};
+  const RiccatiStatus_t status = riccati_admm_solve(
+      steps, terminal_q, terminal_q, terminal_x_lb, terminal_x_ub, x0,
+      1, 1, PREDICTION_HORIZON, &config, &memory, &solution);
+  EXPECT_EQ(status, RICCATI_STATUS_MAX_ITERATIONS);
+  EXPECT_GE(solution.iterations, 1);
+  EXPECT_LT(solution.iterations, config.max_iterations);
+  EXPECT_TRUE(memory.initialized);
+}
+
+TEST(MpcRtiStageParallelism, PreservesSerialStageJacobians)
+{
+  constexpr int horizon = 12;
+  MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1] = {};
+  MpcModelControl_t nominal_controls[PREDICTION_HORIZON] = {};
+  MpcRtiReference_t references[PREDICTION_HORIZON + 1] = {};
+  MpcRtiConfiguration_t config{};
+  config.weight_e_y = 1.0f;
+  config.weight_e_psi = 1.0f;
+  config.weight_u = 1.0f;
+  config.weight_target_speed_state = 1.0f;
+  config.weight_v = 1.0f;
+  config.weight_r = 1.0f;
+  config.weight_steering_command = 1.0f;
+  config.weight_steering_rate = 1.0f;
+  config.weight_target_speed_rate = 1.0f;
+  config.weight_steering_rate_change = 1.0f;
+  config.weight_target_speed_rate_change = 1.0f;
+  config.terminal_multiplier = 1.0f;
+  config.max_speed_mps = 16.0f;
+  config.active_speed_ceiling_mps = 10.0f;
+  config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
+  config.max_steering_rate_radps = SOURCE_STEERING_RATE_RADPS;
+  config.max_target_speed_rate_increase_mps2 =
+      MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2;
+  config.max_target_speed_rate_reduction_mps2 =
+      MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2;
+  config.corridor_margin_m = 0.05f;
+  config.first_prediction_corridor_margin_m = 0.05f;
+  config.corridor_preview_halfwidth_m = 0.10f;
+  config.nonlinear_corridor_tolerance_m = 0.01f;
+  config.recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
+  config.jacobian_threads = 8;
+
+  MpcModelState_t plant = turning_state();
+  plant.u = 5.0f;
+  plant.target_speed = 5.0f;
+  plant.actual_steering_angle = 0.25f;
+  for (int k = 0; k <= horizon; ++k) {
+    nominal_states[k].plant = plant;
+    references[k].u = plant.u;
+    references[k].target_speed = plant.target_speed;
+    references[k].steering_command = plant.steering_command;
+    references[k].left_bound = 1.0f;
+    references[k].right_bound = 1.0f;
+  }
+  for (int k = 0; k < horizon; ++k) {
+    nominal_controls[k].steering_rate = (k % 2 == 0) ? 0.1f : -0.1f;
+    nominal_controls[k].target_speed_rate = 0.2f;
+  }
+
+  ASSERT_TRUE(vehicle_model_set_active_target_speed_ceiling(
+      config.active_speed_ceiling_mps));
+  for (int k = 0; k < horizon; ++k) {
+    const MpcStageResult_t step = mpc_vehicle_model_step(
+        &nominal_states[k].plant, &nominal_controls[k],
+        PREDICTION_DT_SECONDS, references[k].path_curvature);
+    ASSERT_TRUE(step.valid);
+    nominal_states[k + 1].plant = step.next;
+    nominal_states[k + 1].incoming_branch_flags = step.branch_flags;
+    nominal_states[k + 1].incoming_transition_valid = 1;
+  }
+  MpcStageLinearization_t serial[PREDICTION_HORIZON] = {};
+  for (int k = 0; k < horizon; ++k) {
+    ASSERT_TRUE(mpc_model_linearize(&nominal_states[k].plant,
+        &nominal_controls[k], PREDICTION_DT_SECONDS,
+        references[k].path_curvature, &serial[k]));
+  }
+
+  MpcRtiProblem_t problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      references, horizon, PREDICTION_DT_SECONDS, &config, &problem));
+  for (int k = 0; k < horizon; ++k) {
+    for (int row = 0; row < MPC_MODEL_NX; ++row) {
+      EXPECT_EQ(std::memcmp(problem.steps[k].A[row], serial[k].A[row],
+                            sizeof(serial[k].A[row])), 0);
+      EXPECT_EQ(std::memcmp(problem.steps[k].B[row], serial[k].B[row],
+                            sizeof(serial[k].B[row])), 0);
+      EXPECT_FLOAT_EQ(problem.steps[k].d[row], serial[k].d[row]);
+    }
+  }
+}
+
 TEST(VehicleModelSourceRollout,
      Y1EquilibriumCorrectsOnlySupportedSteadySourceYaw)
 {

@@ -369,3 +369,136 @@ The strict 40 Hz compute deadline remains open. Continue from the witnessed
 low-speed/high-steering yaw underprediction and residual-rejection episode;
 preserve the current practice map and trajectory, and use collision-triggered
 abort for the next real run.
+
+### MPC compute optimization and 40 Hz live screen — 2026-10-17
+
+The MPC core already compiles with `-O3`; ordinary compiler optimization was
+not missing. The expensive repeated work was horizon-stage linearization:
+each stage's vehicle-model/Jacobian calculation is independent of other stages.
+The LTV-QP builder now computes those stage linearizations with up to four
+OpenMP workers, then assembles costs, bounds, and QP matrices serially in the
+original order. No vehicle equations, finite-difference perturbations,
+Jacobian formulas, horizon length, or per-stage acceptance checks were
+changed. A regression test compares the resulting stage matrices against
+serial evaluation. OpenMP is optional; builds without it retain the serial
+path.
+
+A separate cooperative 20 ms RTI-cycle budget was added to leave time for
+nonlinear validation and the ROS callback. ADMM checks its timer only after a
+complete iteration. Optional R2 refinement can be skipped when less than 8 ms
+remain. The existing residual, exact nonlinear rollout, and corridor checks
+remain mandatory before accepting an action. This budget is a deadline guard,
+not a same-work speedup: it can stop an iteration sequence early or omit
+optional refinement. The separate parallel stage computation is the
+same-calculation optimization.
+
+The package was rebuilt in the existing Humble development container from the
+workspace source; the competition-topic policy check passed. The focused MPC
+test targets passed, including tests for complete-iteration timeout behavior
+and serial/parallel stage-matrix agreement. One Xvfb batch-mode practice screen
+completed one lap without collision, then the established full practice
+validation completed one warmup, ten scored laps, and one extra lap without
+collision:
+
+| Measure | Full 12-crossing run |
+|---|---:|
+| Scored laps / collisions | 10 / 0 |
+| Best / mean lap | 6.027 / 6.083 s |
+| MPC full-pipeline p50 / p95 / p99 / max | 9.77 / 13.93 / 16.84 / 20.30 ms |
+| Cycles over 25 ms | 0 / 3,009 |
+| Bridge packet sequence gaps | 0 |
+| LiDAR header rate | 39.98 Hz |
+| R2 budget skips | 11 / 3,009 |
+
+The previous production capture had full-pipeline p95/max 25.08/46.36 ms,
+with 143/3,006 cycles over 25 ms. The new run is a strong live result for the
+combined parallelization and budget guard, but it is not a controlled timing
+A/B: the previous and new runs used different trajectory files, and the budget
+can reduce optional work. Thus it demonstrates that this build completed the
+observed 12-lap workload within 25 ms, not a hard real-time guarantee or an
+isolated OpenMP speedup. The OS can still schedule a callback late; separate
+bridge/LiDAR receipt intervals had occasional ~50 ms gaps despite ~40 Hz
+headers and no sequence gaps.
+
+The run does not establish high model accuracy. Its closed-loop planned-state
+versus future-truth comparison has 25 ms p95 absolute errors of 0.186 m/s in
+forward speed and 0.258 rad/s in yaw rate; at 750 ms these are 0.466 m/s and
+1.002 rad/s. These are not pure open-loop plant scores because MPC replans
+every 25 ms. The plant equations and model were not changed by the compute
+optimization. Unity/PhysX source access still does not reveal all runtime
+state to a 40 Hz observer: wheel/contact/suspension states evolve at 1 kHz,
+while competition inputs are sparse snapshots, and the exact Unity contact
+scene/engine execution is not reproduced merely by reading the equations.
+
+Next compute work should be profiling-guided, not another global rewrite. The
+largest remaining safe opportunity is to reduce repeated per-stage plant
+evaluations in Jacobian construction (for example, verified sensitivity
+propagation through the existing 1 ms substeps), preserving branch handling
+and comparing against the current Jacobian and live timing. Do not change the
+physics timestep, horizon, or model equations to claim a speedup. The next
+model-fidelity work remains diagnosis of the demonstrated speed/yaw regimes;
+do not treat deadline compliance as evidence that the rollout is accurate.
+
+## Continuation: cycle profiling and yaw residual audit — 2026-10-17
+
+The stage-Jacobian worker count is now a bounded `jacobian_threads` parameter (0–16; practice uses 4). An 8-worker screen had a 36.3 ms solve because a failed R1 corridor check still entered the optional multi-trial horizon repair after the cycle budget was spent. That recovery path is now budget-gated; exact feasibility checks remain. The post-fix four-worker 12-crossing practice run completed warmup + 10 scored + extra with zero collisions:
+
+| Measure | Result |
+|---|---:|
+| Scored laps / collisions | 10 / 0 |
+| Best / median / mean | 6.014 / 6.108 / 6.116 s |
+| MPC solve p50 / p95 / p99 / max | 9.48 / 13.89 / 16.81 / 20.62 ms |
+| Full callback pipeline p50 / p95 / p99 / max | 9.70 / 14.16 / 17.13 / 20.92 ms |
+| Solve or pipeline samples over 25 ms | 0 / 3,022 each |
+| LiDAR source-header rate | 39.980 Hz |
+
+No controller calculation exceeded 25 ms in that run. This is empirical deadline compliance, not a hard real-time guarantee. Source-header intervals reached 26.3 ms, packet-receipt intervals 50.4 ms, and bridge request-response p95 was 27.6 ms despite zero sequence gaps. Those are bridge/scheduling delays, distinct from MPC computation. Full report: `live_runs/mpc_jacobian4_budget_repair_practice_12lap_20261017_r02/analysis/`.
+
+Added per-pass timing diagnostics for QP/Jacobian build, ADMM, exact nonlinear rollout, and candidate validation. The short live profile screen (581 cycles; warmup + one scored lap; zero collisions) had solve p50/p95/p99/max 9.62/14.86/17.51/20.29 ms, with none over 25 ms. R1 phase times:
+
+| Phase | p50 | p95 | max |
+|---|---:|---:|---:|
+| QP/Jacobian construction | 2.26 ms | 3.57 ms | 9.96 ms |
+| ADMM | 0.32 ms | 1.14 ms | 4.28 ms |
+| Exact nonlinear rollout | 0.95 ms | 1.39 ms | 4.90 ms |
+| Nonlinear validation | 0.21 ms | 0.36 ms | 0.57 ms |
+
+The slowest R1 occurred at 1.76 m/s with 30 ADMM iterations: 9.64 ms QP/Jacobian build, 1.92 ms ADMM, 4.90 ms rollout, 0.43 ms validation, and 20.29 ms total RTI. R2 ran in 535/581 cycles. Iteration count alone is not the latency bottleneck; nominal construction and recovery/selection also account for cycle time outside those four per-pass phases. Do not reduce plant fidelity or ADMM checks on this evidence.
+
+The full 12-crossing bag was re-scored with steering/throttle feedback joined to each MPC prediction start. Yaw motion-increment error (initial prediction/truth difference removed) is p95 0.227 rad/s, RMSE 0.119 rad/s, max 0.459 rad/s. It is concentrated at medium speed/steering:
+
+| Region | Samples | Yaw-increment RMSE | Absolute p95 |
+|---|---:|---:|---:|
+| 0–2 m/s, all steering | 41 | 0.008 rad/s | 0.014 rad/s |
+| 3–4 m/s, all steering | 1,109 | 0.154 rad/s | 0.254 rad/s |
+| 5–7 m/s, all steering | 1,017 | 0.079 rad/s | 0.137 rad/s |
+| 3–5 m/s, steering magnitude 0.15–0.25 rad | 1,023 | 0.154 rad/s | 0.251 rad/s |
+
+That last region has +0.132 rad/s mean signed increment residual: for the dominant negative-steering samples, the predicted turn is generally too weak. This does not prove steering or throttle slew alone causes it; separating by steering rate did not remove the error. Absolute one-step yaw-rate p95 in the same full run is 0.247 rad/s. Joined signals are in that run's `analysis/race_metrics/model_prediction_error.csv`.
+
+Timing changes did not change plant equations or accuracy. The current plant already loops a 25 ms prediction interval as 25 source 1 ms outer steps; each uses five 0.2 ms vehicle substeps below 5 m/s or one 1 ms substep above it. A missing 25-to-1 ms loop is not the explanation. Documented structural gaps remain: the fast plant reconstructs WheelCollider ray/suspension/tire forces but omits ordinary rigid-body scene contacts from moving wheel-mesh colliders; the RTI optimized state omits heave/roll/pitch/suspension-jounce sensitivities although the nonlinear nominal carries those hidden states; and 40 Hz runtime inputs do not reveal all their 1 kHz initial values. See `PHYSX_41_WHEELCOLLIDER_SOURCE_PARITY_20261016.md`. Physics source code alone is neither a complete runtime state estimate nor a production MPC implementation.
+
+Next: use existing 1 kHz captures/native PhysX comparisons to check whether the medium-speed yaw residual coincides with wheel-mesh contact or a hidden-state/timing mismatch; do not globally raise yaw gain. Instrument nominal-build and recovery/selection time to complete the latency decomposition, then implement only the diagnosed correction and compare whole held-out runs plus practice. Keep 4 Jacobian workers and the 20 ms budget unless a controlled live comparison proves a faster alternative with the same feasibility and motion results. Native PhysX is not currently a drop-in horizon model: the measured 1 s replay took about 134 ms before candidate/Jacobian optimization.
+
+## Continuation: reuse of nominal transitions and 12-crossing timing — 2026-10-17
+
+One exact redundant plant evaluation was removed from LTV-QP linearization. The nominal rollout already evaluates each nonlinear stage transition, including its branch flags. That transition is now carried with the nominal stage and reused while constructing its Jacobian and affine defect; the old recompute path remains for caller-created states that have no cached transition. This does not alter the source-plant equations, finite-difference perturbations, Jacobian values, costs, or MPC acceptance logic. A focused test compares the cached and recomputed stage matrices, and the three source-plant / rollout / timing-predictor CTest targets pass.
+
+The code was rebuilt in the existing development image and run on the established practice map/trajectory in batch mode. The first attempted screen used the image's default map and trajectory rather than the practice overrides; it collided immediately and was stopped by the watcher. That capture is kept as an invalid setup diagnostic and is not scored. The corrected one-lap screen and full 12-crossing run used the explicit practice map and raceline. The 12-crossing run completed a warmup, ten scored laps, and the extra lap with no collision increment:
+
+| Measure | Correct practice 12-crossing run |
+|---|---:|
+| Scored laps / collision delta | 10 / 0 |
+| Best / median / mean lap | 6.0517 / 6.0747 / 6.0735 s |
+| CTE p95 | 0.200 m |
+| One-step speed-error p95 | 0.172 m/s |
+| One-step yaw-rate-error p95 | 0.234 rad/s |
+| 750 ms planned-vs-future-truth speed / yaw-rate p95 | 0.453 m/s / 0.941 rad/s |
+
+The recursive rollout is still inaccurate; MPC's 25 ms replanning means the 750 ms comparison also includes future command changes and is not a pure plant open-loop score. Faster linearization did not itself improve the physical model.
+
+For all 3,007 diagnostic cycles, solve time was p50/p95/p99/max 9.056/13.322/15.554/18.598 ms, and callback pipeline time was 9.298/13.592/15.839/18.973 ms. There were zero solve or pipeline samples over 25 ms. Compared with the earlier four-worker, budgeted 12-crossing capture, whose solve p95/max were 13.885/20.619 ms, this run measured about 4% lower p95 and 10% lower maximum. This is encouraging but not a controlled A/B and does not isolate the cached transition's causal contribution; phase timings were not recorded in that earlier bag. The new phase breakdown shows R1 QP/Jacobian construction p95 3.372 ms, exact rollout 1.382 ms, ADMM 0.643 ms, and nonlinear validation 0.378 ms. QP/Jacobian construction remains the largest measured phase.
+
+Input cadence was 39.979 Hz with zero packet-sequence gaps. This is not a hard end-to-end 25 ms guarantee: recorded bridge request/response p95 was 27.87 ms (max 30.69 ms), and receipt intervals had a 50.28 ms maximum. These bridge/scheduling metrics must be kept distinct from MPC computation; the controller itself stayed within 25 ms in every observed cycle.
+
+Next performance optimization should target the measured QP/Jacobian phase, not shorten the horizon or reduce the 1 ms source-plant integration. The current Jacobian still finite-differences many state/control directions by rerunning the substepped source plant. Any sparse/analytic sensitivity method must first match current Jacobians and branch behavior numerically, then show lower live p99/max without worsening exact nonlinear acceptance results. In parallel, model-fidelity work remains open: localize the medium-speed yaw residual and 750 ms drift using the existing training/held-out captures. No accuracy fix or hard-real-time guarantee is claimed yet.

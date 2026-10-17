@@ -284,6 +284,8 @@ MpcRtiCycleConfiguration_t load_config(const std::string & path,
   model.recovery_steering_k_e_y = fparam(params, "recovery_steering_k_e_y", 0.0f);
   model.recovery_steering_k_e_psi = fparam(params, "recovery_steering_k_e_psi", 0.0f);
   model.recovery_steering_k_r = fparam(params, "recovery_steering_k_r", 0.0f);
+  model.jacobian_threads = std::clamp(
+      iparam(params, "jacobian_threads", 4), 0, 16);
 #undef WEIGHT
 
   auto & solver = config.solver;
@@ -331,6 +333,8 @@ MpcRtiCycleConfiguration_t load_config(const std::string & path,
       params, "solver_max_regularization", 0.01f);
   config.max_consecutive_degraded_solves = iparam(
       params, "max_consecutive_degraded_solves", 3);
+  config.max_cycle_time_us = (double)fparam(
+      params, "rti_cycle_budget_ms", 20.0f) * 1000.0;
   return config;
 }
 

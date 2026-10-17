@@ -33,9 +33,21 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+static uint64_t riccati_monotonic_now_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+        (uint64_t)now.tv_nsec;
+}
 
 #ifdef MPC_ENABLE_RICCATI_PROFILE
-#include <time.h>
+static uint64_t riccati_profile_now_ns(void)
+{
+    return riccati_monotonic_now_ns();
+}
 #endif
 
 /* Debug flag: set to 1 from tests to print ADMM iteration details */
@@ -44,16 +56,6 @@ static RiccatiDebugInfo_t g_riccati_debug_last;
 static RiccatiDebugIterSample_t g_riccati_debug_trace[RICCATI_DEBUG_TRACE_MAX];
 static int g_riccati_debug_trace_count = 0;
 static int g_riccati_debug_trace_enabled = 0;
-
-#ifdef MPC_ENABLE_RICCATI_PROFILE
-static uint64_t riccati_profile_now_ns(void)
-{
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
-    return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
-        (uint64_t)now.tv_nsec;
-}
-#endif
 
 void riccati_debug_get_last(RiccatiDebugInfo_t *out)
 {
@@ -1150,6 +1152,12 @@ static RiccatiStatus_t riccati_admm_solve_core(
     const int shared_rho = config ? config->shared_rho : 0;
     const int use_prefactorization =
         config ? config->use_prefactorization : 0;
+    const double max_solve_time_us = config ? config->max_solve_time_us : 0.0;
+    if (!isfinite(max_solve_time_us) || max_solve_time_us < 0.0) {
+        solution->status = RICCATI_STATUS_ERROR;
+        return RICCATI_STATUS_ERROR;
+    }
+    const uint64_t solve_start_ns = riccati_monotonic_now_ns();
 
     memset(&g_riccati_debug_last, 0, sizeof(g_riccati_debug_last));
     g_riccati_debug_trace_count = 0;
@@ -1547,6 +1555,19 @@ static RiccatiStatus_t riccati_admm_solve_core(
             if (rho != rho_before_adaptation ||
                 rho_u != rho_u_before_adaptation) {
                 ++g_riccati_debug_last.rho_change_count;
+            }
+        }
+
+        /* Stop only between complete ADMM iterations. The caller may use the
+         * projected candidate only after its normal residual and nonlinear
+         * feasibility gates; a time limit never weakens those checks. */
+        if (max_solve_time_us > 0.0) {
+            const uint64_t now_ns = riccati_monotonic_now_ns();
+            const double elapsed_us = now_ns >= solve_start_ns
+                ? (double)(now_ns - solve_start_ns) * 1.0e-3 : 0.0;
+            if (elapsed_us >= max_solve_time_us) {
+                status = RICCATI_STATUS_MAX_ITERATIONS;
+                break;
             }
         }
     }

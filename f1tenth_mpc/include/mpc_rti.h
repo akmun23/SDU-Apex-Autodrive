@@ -39,6 +39,8 @@ typedef struct
     MpcModelState_t plant;
     float previous_steering_rate;
     float previous_target_speed_rate;
+    unsigned int incoming_branch_flags;
+    int incoming_transition_valid;
 } MpcRtiState_t;
 
 typedef struct
@@ -91,6 +93,8 @@ typedef struct
     float recovery_steering_k_e_y;
     float recovery_steering_k_e_psi;
     float recovery_steering_k_r;
+    /* Independent horizon-stage Jacobians; zero selects the serial fallback. */
+    int jacobian_threads;
 } MpcRtiConfiguration_t;
 
 enum
@@ -224,6 +228,10 @@ typedef struct
     float degraded_residual_limit;
     float maximum_regularization;
     int max_consecutive_degraded_solves;
+    /* Total RTI-cycle wall-time budget. Zero disables the budget. When the
+     * budget is tight, optional R2 refinement may be skipped; R1 is only
+     * retained if it passes the existing exact nonlinear validation. */
+    double max_cycle_time_us;
 } MpcRtiCycleConfiguration_t;
 
 typedef struct
@@ -288,6 +296,14 @@ typedef struct
     int r2_solver_iterations;
     double r1_solve_us;
     double r2_solve_us;
+    double r1_qp_build_us;
+    double r1_admm_us;
+    double r1_exact_rollout_us;
+    double r1_nonlinear_validation_us;
+    double r2_qp_build_us;
+    double r2_admm_us;
+    double r2_exact_rollout_us;
+    double r2_nonlinear_validation_us;
     double total_rti_us;
     int selected_candidate; /* 1=R1, 2=R2, 3=corridor repair. */
     int corridor_repair_used;

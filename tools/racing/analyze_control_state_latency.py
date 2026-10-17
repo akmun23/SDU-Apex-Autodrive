@@ -162,6 +162,44 @@ def analyze(bag: Path, output: Path) -> dict[str, Any]:
                 "pipeline_wall_us": pipeline_us,
                 "solver_us": as_float(solver.get("solve_us")),
                 "total_rti_us": as_float(data.get("total_rti_us")),
+                "r1_solve_us": as_float(data.get("r1_solve_us")),
+                "r2_solve_us": as_float(data.get("r2_solve_us")),
+                "r1_qp_build_us": as_float(data.get("r1_qp_build_us")),
+                "r1_admm_us": as_float(data.get("r1_admm_us")),
+                "r1_exact_rollout_us": as_float(data.get("r1_exact_rollout_us")),
+                "r1_nonlinear_validation_us": as_float(
+                    data.get("r1_nonlinear_validation_us")
+                ),
+                "r2_qp_build_us": as_float(data.get("r2_qp_build_us")),
+                "r2_admm_us": as_float(data.get("r2_admm_us")),
+                "r2_exact_rollout_us": as_float(data.get("r2_exact_rollout_us")),
+                "r2_nonlinear_validation_us": as_float(
+                    data.get("r2_nonlinear_validation_us")
+                ),
+                "rti2_triggered": bool(data.get("rti2_triggered", False)),
+                "rti2_trigger_reason_mask": int(
+                    data.get("rti2_trigger_reason_mask", 0)
+                ),
+                "rti2_budget_skipped": bool(
+                    data.get("rti2_budget_skipped", False)
+                ),
+                "r1_status": str(data.get("r1_status", "unknown")),
+                "r2_status": str(data.get("r2_status", "unknown")),
+                "r1_nonlinear_objective": as_float(
+                    data.get("r1_nonlinear_objective")
+                ),
+                "r2_nonlinear_objective": as_float(
+                    data.get("r2_nonlinear_objective")
+                ),
+                "r1_min_corridor_slack_m": as_float(
+                    data.get("r1_min_corridor_slack")
+                ),
+                "r2_min_corridor_slack_m": as_float(
+                    data.get("r2_min_corridor_slack")
+                ),
+                "selected_candidate": str(
+                    data.get("selected_candidate", "unknown")
+                ),
                 "solver_iterations": int(solver.get("iterations", 0)),
                 "progress_m": as_float(data.get("progress_m")),
                 "speed_mps": as_float(state[2]) if len(state) > 2 else math.nan,
@@ -182,6 +220,16 @@ def analyze(bag: Path, output: Path) -> dict[str, Any]:
             ("pipeline_wall_us", "us"),
             ("solver_us", "us"),
             ("total_rti_us", "us"),
+            ("r1_solve_us", "us"),
+            ("r2_solve_us", "us"),
+            ("r1_qp_build_us", "us"),
+            ("r1_admm_us", "us"),
+            ("r1_exact_rollout_us", "us"),
+            ("r1_nonlinear_validation_us", "us"),
+            ("r2_qp_build_us", "us"),
+            ("r2_admm_us", "us"),
+            ("r2_exact_rollout_us", "us"),
+            ("r2_nonlinear_validation_us", "us"),
         )
         for field, unit in sample_metrics:
             mpc_report[field] = numeric_summary(

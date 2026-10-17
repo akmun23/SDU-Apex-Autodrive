@@ -21,6 +21,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(ackermann_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(OpenMP QUIET COMPONENTS C)
 
 # BachelorProject Riccati-ADMM core.  The package deliberately contains one
 # prediction path.  Historic replay plants and report-pinned manifest checks
@@ -37,6 +38,9 @@ target_include_directories(mpc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(mpc_core PUBLIC m)
+if(OpenMP_C_FOUND)
+  target_link_libraries(mpc_core PUBLIC OpenMP::OpenMP_C)
+endif()
 target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
