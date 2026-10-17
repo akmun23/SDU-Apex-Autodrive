@@ -42,7 +42,6 @@ setup(
     entry_points={
         "console_scripts": [
             "actuator_interface = sdu_apex_autodrive.actuator_interface:main",
-            "lap_map_saver = sdu_apex_autodrive.lap_map_saver:main",
             "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
         ],
     },

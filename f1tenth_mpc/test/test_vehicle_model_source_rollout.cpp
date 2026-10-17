@@ -14,19 +14,13 @@ MpcModelState_t turning_state()
 {
   MpcModelState_t state{};
   state.u = 6.0f;
-  state.target_speed = 6.0f;
+  state.longitudinal_acceleration_mps2 = 6.0f;
   state.steering_command = 0.35f;
   state.delayed_steering_command_1 = 0.35f;
   state.delayed_steering_command_2 = 0.35f;
   state.actual_steering_angle = 0.35f;
   state.delayed_throttle_command_1 = 0.30f;
   state.delayed_throttle_command_2 = 0.30f;
-  state.source_throttle_command = 0.30f;
-  state.source_last_target_speed = 6.0f;
-  state.source_target_initialized = 1;
-  state.source_actuator_speed_mps = 6.0f;
-  state.source_actuator_speed_initialized = 1;
-  state.source_hold_approach = 1;
   return state;
 }
 
@@ -72,19 +66,13 @@ MpcModelState_t steady_y1_state(float steering, float throttle)
   MpcModelState_t state{};
   state.u = 3.0f;
   state.r = steering < 0.0f ? -2.0f : 2.0f;
-  state.target_speed = 3.0f;
+  state.longitudinal_acceleration_mps2 = 3.0f;
   state.steering_command = steering;
   state.delayed_steering_command_1 = steering;
   state.delayed_steering_command_2 = steering;
   state.actual_steering_angle = steering;
   state.delayed_throttle_command_1 = throttle;
   state.delayed_throttle_command_2 = throttle;
-  state.source_throttle_command = throttle;
-  state.source_last_target_speed = state.target_speed;
-  state.source_target_initialized = 1;
-  state.source_actuator_speed_mps = state.u;
-  state.source_actuator_speed_initialized = 1;
-  state.source_hold_approach = 1;
   state.source_plant_initialized = 1;
   state.source_suspension_history_initialized = 1;
   state.source_plant_state[UNITY_SOURCE_U] = state.u;
@@ -123,40 +111,32 @@ TEST(VehicleModelSourceRollout, ZeroThrottleUsesTheSourceBrakeBranch)
 {
   MpcModelState_t state{};
   state.u = 3.0f;
-  state.target_speed = 0.0f;
-  state.source_throttle_command = 0.2f;
+  state.longitudinal_acceleration_mps2 = 0.0f;
   const MpcModelControl_t control{};
   const MpcStageResult_t stage = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(stage.valid);
-  EXPECT_EQ(stage.next.source_throttle_command, 0.0f);
-  EXPECT_NE(stage.branch_flags & MPC_STAGE_ACTIVE_BRAKE, 0U);
+  EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_2, 0.0f);
+  EXPECT_NE(stage.branch_flags & MPC_STAGE_PLANT_BRAKE, 0U);
   EXPECT_LT(stage.next.u, state.u);
 }
 
 TEST(VehicleModelSourceRollout,
-     PredictsThrottleLeadWhenEnteringTheConfiguredSpeedHoldBand)
+     DirectThrottleCommandEntersTheTwoPacketPlantQueue)
 {
-  MpcModelState_t state{};
-  state.u = 4.5f;
-  state.target_speed = 5.0f;
-  state.delayed_throttle_command_1 = 0.40f;
-  state.delayed_throttle_command_2 = 0.40f;
-  state.source_throttle_command = 0.40f;
-  state.source_last_target_speed = 5.0f;
-  state.source_target_initialized = 1;
-  state.source_actuator_speed_mps = 4.5f;
-  state.source_actuator_speed_initialized = 1;
-
-  const MpcModelControl_t control{};
+  MpcModelState_t state = turning_state();
+  state.delayed_throttle_command_1 = 0.20f;
+  state.delayed_throttle_command_2 = 0.30f;
+  const MpcModelControl_t control{0.0f, 0.70f};
   const MpcStageResult_t stage = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(stage.valid);
-
-  /* Production predicts the near-term speed crossing from throttle already
-   * above its measured-speed feed-forward, even before the filtered odometry
-   * derivative has caught up. */
-  EXPECT_EQ(stage.next.source_hold_approach, 1);
+  /* The plant sees the already-delayed command; the optimizer's command is
+   * queued for the appropriate future packet instead of being converted to a
+   * speed target by an internal actuator controller. */
+  EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_1, 0.30f);
+  EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_2, 0.70f);
+  EXPECT_FLOAT_EQ(stage.next.source_plant_state[UNITY_SOURCE_U], stage.next.u);
 }
 
 TEST(VehicleModelSourceRollout,
@@ -232,8 +212,7 @@ TEST(VehicleModelSourceRollout, AppliesAndShiftsTheTwoPacketThrottleQueue)
   ASSERT_TRUE(immediate.valid);
   EXPECT_LT(delayed.next.u, immediate.next.u);
   EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_1, 0.30f);
-  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_2,
-                  delayed.next.source_throttle_command);
+  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_2, 0.0f);
 }
 
 TEST(VehicleModelSourceRollout,
@@ -334,23 +313,19 @@ TEST(MpcRtiStageParallelism, PreservesSerialStageJacobians)
   config.weight_e_y = 1.0f;
   config.weight_e_psi = 1.0f;
   config.weight_u = 1.0f;
-  config.weight_target_speed_state = 1.0f;
+  config.weight_longitudinal_acceleration = 1.0f;
   config.weight_v = 1.0f;
   config.weight_r = 1.0f;
   config.weight_steering_command = 1.0f;
   config.weight_steering_rate = 1.0f;
-  config.weight_target_speed_rate = 1.0f;
+  config.weight_throttle_command = 1.0f;
   config.weight_steering_rate_change = 1.0f;
-  config.weight_target_speed_rate_change = 1.0f;
+  config.weight_throttle_command_change = 1.0f;
   config.terminal_multiplier = 1.0f;
   config.max_speed_mps = 16.0f;
   config.active_speed_ceiling_mps = 10.0f;
   config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
   config.max_steering_rate_radps = SOURCE_STEERING_RATE_RADPS;
-  config.max_target_speed_rate_increase_mps2 =
-      MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2;
-  config.max_target_speed_rate_reduction_mps2 =
-      MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2;
   config.corridor_margin_m = 0.05f;
   config.first_prediction_corridor_margin_m = 0.05f;
   config.corridor_preview_halfwidth_m = 0.10f;
@@ -360,19 +335,18 @@ TEST(MpcRtiStageParallelism, PreservesSerialStageJacobians)
 
   MpcModelState_t plant = turning_state();
   plant.u = 5.0f;
-  plant.target_speed = 5.0f;
+  plant.longitudinal_acceleration_mps2 = 5.0f;
   plant.actual_steering_angle = 0.25f;
   for (int k = 0; k <= horizon; ++k) {
     nominal_states[k].plant = plant;
     references[k].u = plant.u;
-    references[k].target_speed = plant.target_speed;
     references[k].steering_command = plant.steering_command;
     references[k].left_bound = 1.0f;
     references[k].right_bound = 1.0f;
   }
   for (int k = 0; k < horizon; ++k) {
     nominal_controls[k].steering_rate = (k % 2 == 0) ? 0.1f : -0.1f;
-    nominal_controls[k].target_speed_rate = 0.2f;
+    nominal_controls[k].throttle_command = 0.2f;
   }
 
   ASSERT_TRUE(vehicle_model_set_active_target_speed_ceiling(

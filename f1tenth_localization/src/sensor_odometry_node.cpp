@@ -16,6 +16,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <sdu_apex_msgs/msg/unity_plant_state.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -84,6 +85,7 @@ public:
     declare_parameter("use_physx_odom_velocity", false);
     declare_parameter("odom_topic", "/odom");
     declare_parameter("diagnostics_topic", "/odom/diagnostics");
+    declare_parameter("unity_plant_state_topic", "/odom/unity_plant_state");
 
     declare_parameter("odom_frame", "odom");
     declare_parameter("base_frame", "base_link");
@@ -425,6 +427,9 @@ public:
       get_parameter("odom_topic").as_string(), derived_qos);
     diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
       get_parameter("diagnostics_topic").as_string(), derived_qos);
+    unity_plant_state_pub_ = create_publisher<sdu_apex_msgs::msg::UnityPlantState>(
+      get_parameter("unity_plant_state_topic").as_string(),
+      rclcpp::SensorDataQoS().keep_last(1));
 
     const auto sensor_qos = rclcpp::SensorDataQoS().keep_last(100);
     left_sub_ = create_subscription<sensor_msgs::msg::JointState>(
@@ -903,14 +908,19 @@ private:
     }
 
     if (physx_odom_runtime_) {
-      const auto velocity = physx_odom_runtime_->advance(
+      last_physx_plant_state_ = physx_odom_runtime_->advance(
         steering_command, throttle_command,
         observation.actuator_feedback_valid,
         observation.steering_feedback_rad,
         observation.throttle_feedback);
-      observation.physx_forward_velocity_mps = velocity.u_mps;
-      observation.physx_lateral_velocity_mps = velocity.v_mps;
+      last_physx_plant_state_valid_ = true;
+      observation.physx_forward_velocity_mps =
+        last_physx_plant_state_.state[0];
+      observation.physx_lateral_velocity_mps =
+        last_physx_plant_state_.state[1];
       observation.physx_velocity_valid = true;
+      last_steering_feedback_valid_ = observation.actuator_feedback_valid;
+      last_steering_feedback_rad_ = observation.steering_feedback_rad;
     }
 
     auto estimate = observer_.update(observation);
@@ -1015,6 +1025,68 @@ private:
       estimate.pre_wheel_update_speed_valid ? 1.0 : 0.0};
     diagnostics_pub_->publish(diagnostics);
 
+    if (unity_plant_state_pub_ && last_physx_plant_state_valid_) {
+      sdu_apex_msgs::msg::UnityPlantState plant_state;
+      plant_state.header = odom.header;
+      plant_state.state_schema_version = 2;
+      plant_state.state_origin = 1;
+      plant_state.suspension_history_initialized =
+        last_physx_plant_state_.suspension_history_initialized;
+      plant_state.longitudinal_velocity_mps = estimate.body_u_mps;
+      plant_state.lateral_velocity_com_mps = estimate.body_v_mps +
+        estimate.yaw_rate_radps *
+        observer_config_.imu_acceleration_reference_x_m;
+      plant_state.lateral_velocity_rear_axle_mps = estimate.body_v_mps;
+      plant_state.yaw_rate_radps = estimate.yaw_rate_radps;
+      plant_state.gyro_yaw_rate_radps = processed_packet.yaw_rate_radps;
+      plant_state.steering_command_normalized = steering_command;
+      plant_state.throttle_command_normalized = throttle_command;
+      plant_state.actuator_feedback_valid = observation.actuator_feedback_valid;
+      plant_state.steering_feedback_rad = observation.steering_feedback_rad;
+      plant_state.throttle_feedback_normalized = observation.throttle_feedback;
+      std::copy(last_physx_plant_state_.state.begin(),
+        last_physx_plant_state_.state.end(), plant_state.state.begin());
+      plant_state.state[0] = plant_state.longitudinal_velocity_mps;
+      plant_state.state[1] = plant_state.lateral_velocity_com_mps;
+      plant_state.state[2] = plant_state.yaw_rate_radps;
+      if (last_steering_feedback_valid_) {
+        plant_state.state[13] = last_steering_feedback_rad_;
+        plant_state.sensor_corrected_state_mask =
+          (1u << 0) | (1u << 1) | (1u << 2) | (1u << 13);
+      } else {
+        plant_state.sensor_corrected_state_mask =
+          (1u << 0) | (1u << 1) | (1u << 2);
+      }
+      std::copy(last_physx_plant_state_.longitudinal_slip.begin(),
+        last_physx_plant_state_.longitudinal_slip.end(),
+        plant_state.longitudinal_slip.begin());
+      std::copy(last_physx_plant_state_.lateral_slip.begin(),
+        last_physx_plant_state_.lateral_slip.end(),
+        plant_state.lateral_slip.begin());
+      std::copy(last_physx_plant_state_.normal_load_n.begin(),
+        last_physx_plant_state_.normal_load_n.end(),
+        plant_state.normal_load_n.begin());
+      std::copy(last_physx_plant_state_.suspension_force_n.begin(),
+        last_physx_plant_state_.suspension_force_n.end(),
+        plant_state.suspension_force_n.begin());
+      std::copy(last_physx_plant_state_.suspension_jounce_rate_mps.begin(),
+        last_physx_plant_state_.suspension_jounce_rate_mps.end(),
+        plant_state.suspension_jounce_rate_mps.begin());
+      std::copy(last_physx_plant_state_.tire_longitudinal_force_n.begin(),
+        last_physx_plant_state_.tire_longitudinal_force_n.end(),
+        plant_state.tire_longitudinal_force_n.begin());
+      std::copy(last_physx_plant_state_.tire_lateral_force_n.begin(),
+        last_physx_plant_state_.tire_lateral_force_n.end(),
+        plant_state.tire_lateral_force_n.begin());
+      plant_state.longitudinal_acceleration_mps2 =
+        last_physx_plant_state_.longitudinal_acceleration_mps2;
+      plant_state.lateral_acceleration_mps2 =
+        last_physx_plant_state_.lateral_acceleration_mps2;
+      plant_state.yaw_acceleration_radps2 =
+        last_physx_plant_state_.yaw_acceleration_radps2;
+      unity_plant_state_pub_->publish(plant_state);
+    }
+
     if (publish_tf_) {
       geometry_msgs::msg::TransformStamped transform;
       transform.header = odom.header;
@@ -1034,6 +1106,8 @@ private:
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr diagnostics_pub_;
+  rclcpp::Publisher<sdu_apex_msgs::msg::UnityPlantState>::SharedPtr
+    unity_plant_state_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
@@ -1066,6 +1140,10 @@ private:
   double latest_throttle_command_norm_{0.0};
   bool use_physx_odom_velocity_{false};
   std::unique_ptr<f1tenth_localization::PhysxOdomRuntime> physx_odom_runtime_;
+  f1tenth_localization::PredictedPlantState last_physx_plant_state_{};
+  bool last_physx_plant_state_valid_{false};
+  bool last_steering_feedback_valid_{false};
+  double last_steering_feedback_rad_{0.0};
   int64_t last_processed_stamp_ns_{0};
   int64_t last_processed_source_stamp_ns_{0};
   int64_t observer_stamp_ns_{0};

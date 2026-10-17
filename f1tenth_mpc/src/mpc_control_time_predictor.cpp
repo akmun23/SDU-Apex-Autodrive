@@ -58,7 +58,8 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
                              double integration_step_s,
                              const MpcTrajectorySample_t *trajectory,
                              std::size_t trajectory_count,
-                             double lap_length_m)
+                             double lap_length_m,
+                             double throttle_normalized)
 {
     if (end_ns < start_ns || !integrated_elapsed_ns ||
         start_ns < grid_origin_ns || end_ns < grid_origin_ns) return false;
@@ -87,7 +88,9 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         if (!(dt > 0.0f) || !mpc_trajectory_sample(trajectory,
                 trajectory_count, lap_length_m, *progress_m, &sample))
             return false;
-        const MpcModelControl_t held_command_rate{0.0f, 0.0f};
+        const MpcModelControl_t held_command_rate{
+            0.0f, static_cast<float>(std::clamp(
+                throttle_normalized, 0.0, 1.0))};
         const MpcStageResult_t result = mpc_vehicle_model_step(
             state, &held_command_rate, dt, static_cast<float>(sample.curvature));
         if (!result.valid) return false;
@@ -104,10 +107,9 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
 bool MpcCommandHistory::push(const MpcCommandHistoryEntry &entry)
 {
     if (entry.stamp_ns <= 0 || !std::isfinite(entry.steering_command_rad) ||
-        !std::isfinite(entry.target_speed_mps) ||
-        entry.target_speed_mps < 0.0 ||
-        entry.target_speed_mps > MPC_MAX_COMMAND_SPEED_MPS ||
-        std::abs(entry.steering_command_rad) > SOURCE_MAX_STEERING_RAD)
+        std::abs(entry.steering_command_rad) > SOURCE_MAX_STEERING_RAD ||
+        (entry.throttle_valid && (!std::isfinite(entry.throttle_normalized) ||
+            entry.throttle_normalized < 0.0 || entry.throttle_normalized > 1.0)))
         return false;
     if (size_ > 0) {
         MpcCommandHistoryEntry newest{};
@@ -205,9 +207,6 @@ MpcControlTimeStatus predict_to_control_time(
         config.maximum_state_age_s < 0.0 ||
         !std::isfinite(config.model_integration_step_s) ||
         !(config.model_integration_step_s > 0.0) ||
-        !std::isfinite(config.maximum_command_speed_mps) ||
-        config.maximum_command_speed_mps <= 0.0 ||
-        config.maximum_command_speed_mps > MPC_MAX_COMMAND_SPEED_MPS ||
         !std::isfinite(config.command_actuation_delay_s) ||
         config.command_actuation_delay_s < 0.0 ||
         (source_plant_state && (source_plant_stamp_ns <= 0 ||
@@ -238,7 +237,8 @@ MpcControlTimeStatus predict_to_control_time(
                 !effective_command_history.push({
                     entry.stamp_ns + delay_ns,
                     entry.steering_command_rad,
-                    entry.target_speed_mps})) {
+                    entry.throttle_normalized,
+                    entry.throttle_valid})) {
                 return MpcControlTimeStatus::kInvalidInput;
             }
         }
@@ -258,8 +258,9 @@ MpcControlTimeStatus predict_to_control_time(
     MpcCommandHistoryEntry command_at_target{};
     if (causal_command_history->latest_at_or_before(target_stamp_ns,
             &command_at_target)) {
-        result.target_speed_mps = command_at_target.target_speed_mps;
         result.steering_command_rad = command_at_target.steering_command_rad;
+        if (command_at_target.throttle_valid)
+            result.throttle_normalized = command_at_target.throttle_normalized;
         MpcCommandHistoryEntry previous_command{};
         for (std::size_t i = 1; i < causal_command_history->size(); ++i) {
             MpcCommandHistoryEntry candidate{};
@@ -277,14 +278,14 @@ MpcControlTimeStatus predict_to_control_time(
             result.previous_steering_rate_radps =
                 (command_at_target.steering_command_rad -
                  previous_command.steering_command_rad) / command_dt_s;
-            result.previous_target_speed_rate_mps2 =
-                (command_at_target.target_speed_mps -
-                 previous_command.target_speed_mps) / command_dt_s;
         }
-    } else {
-        result.target_speed_mps = std::clamp(source_state.u, 0.0,
-            config.maximum_command_speed_mps);
     }
+    result.previous_throttle_command = source_plant_state ?
+        std::clamp(static_cast<double>(
+            source_plant_state->delayed_throttle_command_2), 0.0, 1.0) :
+        result.throttle_normalized;
+    if (command_at_target.throttle_valid)
+        result.previous_throttle_command = command_at_target.throttle_normalized;
     if (known_source_projection) {
         if (!std::isfinite(known_source_projection->s) ||
             !std::isfinite(known_source_projection->lateral_error) ||
@@ -306,13 +307,15 @@ MpcControlTimeStatus predict_to_control_time(
         result.used_time_fallback = true;
         if (causal_command_history->latest_at_or_before(target_stamp_ns,
                 &command_at_target)) {
-            result.target_speed_mps = command_at_target.target_speed_mps;
             result.steering_command_rad =
                 command_at_target.steering_command_rad;
+            if (command_at_target.throttle_valid)
+                result.throttle_normalized = command_at_target.throttle_normalized;
+            if (command_at_target.throttle_valid)
+                result.previous_throttle_command =
+                    command_at_target.throttle_normalized;
             record_command_event(command_at_target);
         } else {
-            result.target_speed_mps = std::clamp(source_state.u, 0.0,
-                config.maximum_command_speed_mps);
             result.used_command_fallback = true;
         }
         *prediction = result;
@@ -334,6 +337,9 @@ MpcControlTimeStatus predict_to_control_time(
     } else if (mode == MpcControlTimeMode::kAcceptedModelCommandHistory) {
         MpcModelState_t plant = source_plant_state ? *source_plant_state :
             MpcModelState_t{};
+        double throttle_normalized = source_plant_state ?
+            std::clamp(static_cast<double>(plant.delayed_throttle_command_2), 0.0, 1.0) :
+            result.throttle_normalized;
         const int64_t plant_stamp_ns = source_plant_state ?
             source_plant_stamp_ns : source_state.source_stamp_ns;
         const double initial_progress_m = source_plant_state ?
@@ -366,18 +372,15 @@ MpcControlTimeStatus predict_to_control_time(
         if (causal_command_history->latest_at_or_before(
                 plant_stamp_ns, &active_command)) {
             record_command_event(active_command);
-            plant.target_speed = static_cast<float>(std::clamp(
-                active_command.target_speed_mps, 0.0,
-                config.maximum_command_speed_mps));
             plant.steering_command = static_cast<float>(
                 active_command.steering_command_rad);
+            if (active_command.throttle_valid)
+                throttle_normalized = active_command.throttle_normalized;
         } else if (!source_plant_state) {
-            plant.target_speed = static_cast<float>(std::clamp(source_state.u,
-                0.0, config.maximum_command_speed_mps));
             result.used_command_fallback = true;
         }
-        result.target_speed_mps = plant.target_speed;
         result.steering_command_rad = plant.steering_command;
+        result.throttle_normalized = throttle_normalized;
 
         int64_t cursor_ns = plant_stamp_ns;
         int64_t integrated_elapsed_ns = 0;
@@ -393,17 +396,17 @@ MpcControlTimeStatus predict_to_control_time(
                         cursor_ns, segment_end_ns, plant_stamp_ns,
                         &integrated_elapsed_ns,
                         config.model_integration_step_s, trajectory,
-                        trajectory_count, lap_length_m)) return false;
+                        trajectory_count, lap_length_m,
+                        throttle_normalized)) return false;
                 cursor_ns = segment_end_ns;
                 if (!has_next) break;
                 record_command_event(next_command);
-                plant.target_speed = static_cast<float>(std::clamp(
-                    next_command.target_speed_mps, 0.0,
-                    config.maximum_command_speed_mps));
                 plant.steering_command = static_cast<float>(
                     next_command.steering_command_rad);
-                result.target_speed_mps = plant.target_speed;
+                if (next_command.throttle_valid)
+                    throttle_normalized = next_command.throttle_normalized;
                 result.steering_command_rad = plant.steering_command;
+                result.throttle_normalized = throttle_normalized;
                 ++result.command_changes_used;
                 if (++guard > kMpcCommandHistoryCapacity) return false;
             }

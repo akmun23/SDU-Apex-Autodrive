@@ -5,8 +5,8 @@ on:
   pull_request:
 
 jobs:
-  odometry-cpu:
-    name: ROS 2 Humble CPU odometry
+  runtime-models-cpu:
+    name: ROS 2 Humble odometry and MPC models
     runs-on: ubuntu-22.04
     container: ros:humble-ros-base
     steps:
@@ -17,28 +17,19 @@ jobs:
           source /opt/ros/humble/setup.bash
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential cmake libeigen3-dev
+            build-essential cmake libeigen3-dev nlohmann-json3-dev \
+            ros-humble-ament-cmake-gtest
           colcon build --merge-install \
-            --packages-select f1tenth_localization \
+            --packages-up-to f1tenth_localization f1tenth_mpc \
             --cmake-args -DBUILD_GPU_AMCL=OFF
       - name: Run C++ tests
         shell: bash
         run: |
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
           ctest --test-dir build/f1tenth_localization --output-on-failure
-
-  python:
-    name: Python analysis and controller tests
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install test dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install numpy pandas pytest
-      - name: Run Python tests
-        run: |
-          PYTHONPATH=sdu_apex_autodrive pytest -q sdu_apex_autodrive/test
+          ctest --test-dir build/f1tenth_mpc --output-on-failure
       - name: Check whitespace and syntax
         run: |
           git diff --check
-          python3 -m compileall -q sdu_apex_autodrive/sdu_apex_autodrive
+          python3 -m compileall -q sdu_apex_autodrive/sdu_apex_autodrive sdu_apex_autodrive/launch

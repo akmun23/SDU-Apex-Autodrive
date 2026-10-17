@@ -5,17 +5,6 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${repo_root}/tools/docker_env.sh"
 cd "${repo_root}"
 
-controller="${SDU_APEX_CONTROLLER:-mpc}"
-launch_mode="${SDU_APEX_LAUNCH:-controller}"
-if [[ "${launch_mode}" != "controller" && "${launch_mode}" != "mapping" ]]; then
-  echo "SDU_APEX_LAUNCH must be controller or mapping." >&2
-  exit 2
-fi
-if [[ "${controller}" != "mpc" && "${controller}" != "pure_pursuit" && "${controller}" != "ftg" ]]; then
-  echo "SDU_APEX_CONTROLLER must be mpc, pure_pursuit, or ftg." >&2
-  exit 2
-fi
-
 image="${SDU_APEX_IMAGE:-sdu-apex-autodrive:dev}"
 container="${SDU_APEX_CONTAINER:-sdu_apex_autodrive_dev}"
 api_image="${AUTODRIVE_API_IMAGE:-autodriveecosystem/autodrive_roboracer_api@sha256:ce081910948c3f30898322358d682b79cf165aa287a3dc27128dbacae99178c7}"
@@ -25,19 +14,8 @@ if docker container inspect "${container}" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Starting the ROS 2 development/controller stack..."
-if [[ "${launch_mode}" == "mapping" ]]; then
-  map_name="${SDU_APEX_MAP_NAME:-track_map}"
-  if [[ ! "${map_name}" =~ ^[[:alnum:]_-]+$ ]]; then
-    echo "SDU_APEX_MAP_NAME may contain only letters, digits, underscores, and hyphens." >&2
-    exit 2
-  fi
-  echo "Launch: mapping (${map_name})"
-  echo "The bridge, odometry, SLAM mapper, mapping FTG, and actuator are one launch."
-else
-  echo "Controller: ${controller}"
-  echo "The bridge, odometry, localization, controller, and actuator are one launch."
-fi
+echo "Starting the ROS 2 MPC development stack..."
+echo "The bridge, PhysX odometry, localization, MPC, and direct actuator are one launch."
 echo "The simulator may already be connected or may connect while this starts."
 
 python3 tools/verify_runtime_topic_policy.py
@@ -127,9 +105,11 @@ for path_setting in SDU_APEX_MAP_YAML SDU_APEX_TRAJECTORY_FILE; do
   esac
 done
 
+build_mounted_source=1
 if [[ "${AUTODRIVE_REBUILD:-1}" == "1" ]]; then
   docker build --network=host \
     --build-arg "AUTODRIVE_API_IMAGE=${api_image}" -t "${image}" .
+  build_mounted_source=0
 elif ! docker image inspect "${image}" >/dev/null 2>&1; then
   echo "Image ${image} is not available locally; rebuild or choose an existing SDU_APEX_IMAGE." >&2
   exit 1
@@ -140,16 +120,10 @@ exec docker run --rm --name "${container}" \
   --log-opt max-size=10m --log-opt max-file=3 \
   "${ros_domain_args[@]}" \
   -e SDU_APEX_AUTOSTART=1 \
-  -e SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC="${SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC:-false}" \
-  -e "SDU_APEX_LAUNCH=${launch_mode}" \
-  -e "SDU_APEX_MAP_NAME=${SDU_APEX_MAP_NAME:-track_map}" \
-  -e SDU_APEX_CONTROLLER="${controller}" \
   -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
   -e SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
   -e "SDU_APEX_MPC_START_DELAY_SEC=${SDU_APEX_MPC_START_DELAY_SEC:-2.0}" \
-  -e SDU_APEX_BUILD_MPC="${SDU_APEX_BUILD_MPC:-1}" \
-  -e SDU_APEX_BUILD_LOCALIZATION="${SDU_APEX_BUILD_LOCALIZATION:-0}" \
-  -e SDU_APEX_BUILD_INTEGRATION="${SDU_APEX_BUILD_INTEGRATION:-0}" \
+  -e "SDU_APEX_BUILD_MOUNTED_SOURCE=${build_mounted_source}" \
   -e "SDU_APEX_MPC_PARAMETER_OVERLAY=${mpc_parameter_overlay}" \
   -e "SDU_APEX_ACTUATOR_PARAMETER_OVERLAY=${actuator_parameter_overlay}" \
   -e "SDU_APEX_ODOM_PARAMETER_OVERLAY=${odom_parameter_overlay}" \

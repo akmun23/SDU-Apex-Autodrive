@@ -144,7 +144,7 @@ PhysxOdomRuntime::PhysxOdomRuntime(
   // startup order starts this node before the simulator/vehicle begins moving.
   for (unsigned int index = 0; index < kInitialRestSettleSteps; ++index) {
     send_physics_step(0.0f);
-    (void)read_velocity();
+    (void)read_state();
   }
 }
 
@@ -166,7 +166,7 @@ PhysxOdomRuntime::~PhysxOdomRuntime()
   }
 }
 
-PredictedBodyVelocity PhysxOdomRuntime::advance(
+PredictedPlantState PhysxOdomRuntime::advance(
   double steering_command_norm, double throttle_command_norm,
   bool actuator_feedback_valid, double steering_feedback_rad,
   double throttle_feedback)
@@ -189,7 +189,7 @@ PredictedBodyVelocity PhysxOdomRuntime::advance(
     -static_cast<float>(steering_feedback_rad) * (180.0f / kPi),
     -kSteeringLimitDeg, kSteeringLimitDeg) : steering_start_deg;
 
-  PredictedBodyVelocity velocity;
+  PredictedPlantState plant;
   for (unsigned int index = 0; index < kPhysicsStepsPerPacket; ++index) {
     if (use_feedback) {
       const float fraction = static_cast<float>(index + 1) /
@@ -201,9 +201,9 @@ PredictedBodyVelocity PhysxOdomRuntime::advance(
         center_steering_angle_deg_, steering_command);
     }
     send_physics_step(throttle);
-    velocity = read_velocity();
+    plant = read_state();
   }
-  return velocity;
+  return plant;
 }
 
 void PhysxOdomRuntime::send_physics_step(float throttle_input)
@@ -236,7 +236,7 @@ void PhysxOdomRuntime::send_physics_step(float throttle_input)
   ++physics_step_index_;
 }
 
-PredictedBodyVelocity PhysxOdomRuntime::read_velocity()
+PredictedPlantState PhysxOdomRuntime::read_state()
 {
   char * line = nullptr;
   size_t capacity = 0;
@@ -264,8 +264,52 @@ PredictedBodyVelocity PhysxOdomRuntime::read_velocity()
       }
       return value;
     };
-  return {value_for("body_forward_velocity_mps"),
-          value_for("body_lateral_velocity_mps")};
+  const auto array_for = [&response](const char * key, double * output,
+                                     size_t expected_size) {
+      const std::string marker = std::string("\"") + key + "\":[";
+      const auto position = response.find(marker);
+      if (position == std::string::npos) {
+        throw std::runtime_error(std::string("PhysX Odom response lacks ") + key);
+      }
+      const char * cursor = response.c_str() + position + marker.size();
+      for (size_t index = 0; index < expected_size; ++index) {
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n') ++cursor;
+        char * end = nullptr;
+        output[index] = std::strtod(cursor, &end);
+        if (end == cursor || !std::isfinite(output[index])) {
+          throw std::runtime_error(
+                  std::string("PhysX Odom returned invalid array ") + key);
+        }
+        cursor = end;
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n') ++cursor;
+        if (index + 1 < expected_size) {
+          if (*cursor != ',')
+            throw std::runtime_error(
+                    std::string("PhysX Odom returned short array ") + key);
+          ++cursor;
+        }
+      }
+      if (*cursor != ']')
+        throw std::runtime_error(
+                std::string("PhysX Odom returned oversized array ") + key);
+    };
+
+  PredictedPlantState plant;
+  array_for("unity_source_state", plant.state.data(), plant.state.size());
+  array_for("longitudinal_slip", plant.longitudinal_slip.data(), 4);
+  array_for("lateral_slip", plant.lateral_slip.data(), 4);
+  array_for("normal_load_n", plant.normal_load_n.data(), 4);
+  array_for("suspension_force_n", plant.suspension_force_n.data(), 4);
+  array_for("suspension_jounce_rate_mps",
+            plant.suspension_jounce_rate_mps.data(), 4);
+  array_for("tire_longitudinal_force_n",
+            plant.tire_longitudinal_force_n.data(), 4);
+  array_for("tire_lateral_force_n", plant.tire_lateral_force_n.data(), 4);
+  plant.longitudinal_acceleration_mps2 =
+      value_for("longitudinal_acceleration_mps2");
+  plant.lateral_acceleration_mps2 = value_for("lateral_acceleration_mps2");
+  plant.yaw_acceleration_radps2 = value_for("yaw_acceleration_radps2");
+  return plant;
 }
 
 }  // namespace f1tenth_localization

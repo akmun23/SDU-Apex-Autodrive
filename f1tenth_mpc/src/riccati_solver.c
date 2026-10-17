@@ -1282,11 +1282,11 @@ static RiccatiStatus_t riccati_admm_solve_core(
             sample->rho = 0.0f;
             sample->rho_u = 0.0f;
             sample->u0_steer = solution->u[0][0];
-            sample->u0_target_speed_rate = solution->u[0][1];
+            sample->u0_throttle = solution->u[0][1];
             sample->z0_steer = z_u[0][0];
-            sample->z0_target_speed_rate = z_u[0][1];
+            sample->z0_throttle = z_u[0][1];
             sample->y0_steer = y_u[0][0];
-            sample->y0_target_speed_rate = y_u[0][1];
+            sample->y0_throttle = y_u[0][1];
         }
     }
 
@@ -1434,11 +1434,11 @@ static RiccatiStatus_t riccati_admm_solve_core(
             sample->rho = rho;
             sample->rho_u = rho_u;
             sample->u0_steer = solution->u[0][0];
-            sample->u0_target_speed_rate = solution->u[0][1];
+            sample->u0_throttle = solution->u[0][1];
             sample->z0_steer = z_u[0][0];
-            sample->z0_target_speed_rate = z_u[0][1];
+            sample->z0_throttle = z_u[0][1];
             sample->y0_steer = y_u[0][0];
-            sample->y0_target_speed_rate = y_u[0][1];
+            sample->y0_throttle = y_u[0][1];
             sample->scale_rho = 0;
             sample->scale_rho_u = 0;
         }

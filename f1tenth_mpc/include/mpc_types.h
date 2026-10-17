@@ -14,10 +14,10 @@
  * Defines
  *===========================================================================*/
 
-/* Riccati dimensions. The active RTI wrapper uses a 12-state plant and two
- * previous-input memory states, augmented with two throttle-delay states. */
-#define RICCATI_MAX_NX  18                               /* Plant, four wheel-spin states, and two prior-input states. */
-#define RICCATI_MAX_NU  2                                /* Maximum Riccati control dimension (steering-rate and speed slew). */
+/* Riccati dimensions. The RTI state contains the 26-coordinate tracking and
+ * Unity-derived plant state plus the two prior-input memory coordinates. */
+#define RICCATI_MAX_NX  28                               /* Full Unity-derived plant, tracking, and prior-input states. */
+#define RICCATI_MAX_NU  2                                /* Steering-rate and normalized throttle. */
 
 /* Math and timing */
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
@@ -29,7 +29,7 @@
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30                            /* 30 commands at 40 Hz = 0.75 s. */
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
-#define MPC_MODEL_NX 16                                  /* Tracking/actuator states plus four explicit wheel-spin states. */
+#define MPC_MODEL_NX 26                                  /* Tracking, actuator queues, and all 18 Unity source-plant states without duplicated body channels. */
 
 /* Solver and model safeguards */
 #define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
@@ -40,18 +40,9 @@
 #define SOURCE_STEERING_WHEELBASE_M 0.324f               /* VehicleController Wheelbase: 324 mm. */
 #define MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS 0.015f /* Practice-bag system identification: held-out 40 Hz yaw-rate steps across independent laps. */
 #define MPC_YAW_RATE_STEERING_GAIN_PER_M 2.95f          /* Held-out yaw-rate gain per u*tan(delta), distinct from source wheelbase. */
-#define MPC_LATERAL_ACCELERATION_LIMIT_BASE_MPS2 2.313214f /* Retained as identification metadata; the active authority model below does not impose this fitted saturation. */
-#define MPC_LATERAL_ACCELERATION_LIMIT_SPEED_GAIN_MPS 0.731701f /* Retained as identification metadata; not used as an artificial source-physics limit. */
-#define MPC_LONGITUDINAL_RESPONSE_BIAS_MPS2 (-0.37356440f) /* Last live-proven authority model; offline fit was rejected after closed-loop regression. */
-#define MPC_LONGITUDINAL_SPEED_COEFF_PER_S (-0.06389858f) /* Live-proven coefficient on predicted body speed. */
-#define MPC_LONGITUDINAL_TARGET_ERROR_GAIN_PER_S 9.11426915f /* Live-proven gain on target minus body speed. */
-#define MPC_LONGITUDINAL_TARGET_RATE_COEFF (-0.06687204f) /* Live-proven coefficient on commanded speed slew. */
-#define MPC_LONGITUDINAL_ACCEL_LIMIT_MPS2 6.0f           /* Recursive replay saturation, not a Unity force. */
-#define MPC_LONGITUDINAL_BRAKE_DECEL_INTERCEPT_MPS2 5.36267417f /* 12/14 m/s fit; independent 15.3 m/s holdout. */
-#define MPC_LONGITUDINAL_BRAKE_DECEL_SLOPE_S_INV 0.27655518f /* Measured full-brake envelope per current speed. */
 #define MPC_MAX_COMMAND_SPEED_MPS 16.0f                  /* Project command envelope, not simulator physics. */
-#define MPC_TARGET_SPEED_RATE_INCREASE_MAX_MPS2 3.8f   /* Matches the validated 3.8 m/s^2 machine-acceleration envelope. */
-#define MPC_TARGET_SPEED_RATE_REDUCTION_MAX_MPS2 8.0f  /* Output target-speed reduction policy. */
+#define MPC_THROTTLE_MIN 0.0f
+#define MPC_THROTTLE_MAX 1.0f
 
 /* AutoDRIVE vehicle footprint dimensions used for MPC corridor projection.
  * They are geometry only, not tire or vehicle-dynamics parameters. */
@@ -76,8 +67,6 @@ typedef struct
     float max_steering_angle;             /* Unity steering limit. */
     float steering_rate_radps;            /* Unity physical steering rate. */
     float maximum_command_speed_mps;      /* Project command ceiling. */
-    float maximum_target_speed_rate_increase_mps2; /* Controller output policy. */
-    float maximum_target_speed_rate_reduction_mps2;/* Controller output policy. */
 } VehicleParameters_t;
 
 /**

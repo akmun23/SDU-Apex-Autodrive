@@ -1,6 +1,6 @@
 """Immutable autonomous launch used by the competition container.
 
-This launch has no development switches, shadow controller, recorder, RViz,
+This launch has no development switches, recorder, RViz,
 or simulator telemetry input.  The repository bridge wrapper runs the
 official API bridge with the fixed numeric telemetry pacing required by the
 competition simulator; the team side consumes only allowed sensor topics and
@@ -123,7 +123,10 @@ def generate_launch_description():
         output="screen",
         parameters=[
             actuator_params,
-            {"input_topic": "/cmd/speed", "external_stop_topic": ""},
+            {
+                "drive_command_topic": "/mpc/drive_command",
+                "external_stop_topic": "",
+            },
         ],
     )
     mpc_component = ComposableNode(
@@ -138,14 +141,12 @@ def generate_launch_description():
                 "publish_diagnostics": False,
                 "odom_topic": "/odom",
                 "pose_topic": "/current_map_pose",
-                "command_topic": "/cmd/speed",
                 "diagnostics_topic": "/mpc/diagnostics",
             },
         ],
         remappings=[
             ("odom", "/odom"),
             ("pose", "/current_map_pose"),
-            ("drive", "/cmd/speed"),
         ],
     )
     mpc_container = ComposableNodeContainer(

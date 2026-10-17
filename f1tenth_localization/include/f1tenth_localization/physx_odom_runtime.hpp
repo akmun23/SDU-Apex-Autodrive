@@ -2,16 +2,27 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <array>
 #include <string>
 #include <sys/types.h>
 
 namespace f1tenth_localization
 {
 
-struct PredictedBodyVelocity
+struct PredictedPlantState
 {
-  double u_mps{0.0};
-  double v_mps{0.0};
+  std::array<double, 18> state{};
+  std::array<double, 4> longitudinal_slip{};
+  std::array<double, 4> lateral_slip{};
+  std::array<double, 4> normal_load_n{};
+  std::array<double, 4> suspension_force_n{};
+  std::array<double, 4> suspension_jounce_rate_mps{};
+  std::array<double, 4> tire_longitudinal_force_n{};
+  std::array<double, 4> tire_lateral_force_n{};
+  double longitudinal_acceleration_mps2{0.0};
+  double lateral_acceleration_mps2{0.0};
+  double yaw_acceleration_radps2{0.0};
+  bool suspension_history_initialized{true};
 };
 
 // Persistent 1 kHz public-PhysX source-parity process. Each 40 Hz sensor
@@ -30,14 +41,14 @@ public:
   PhysxOdomRuntime(const PhysxOdomRuntime &) = delete;
   PhysxOdomRuntime & operator=(const PhysxOdomRuntime &) = delete;
 
-  PredictedBodyVelocity advance(
+  PredictedPlantState advance(
     double steering_command_norm, double throttle_command_norm,
     bool actuator_feedback_valid, double steering_feedback_rad,
     double throttle_feedback);
 
 private:
   void send_physics_step(float throttle_input);
-  PredictedBodyVelocity read_velocity();
+  PredictedPlantState read_state();
 
   pid_t child_pid_{-1};
   std::FILE * child_input_{nullptr};

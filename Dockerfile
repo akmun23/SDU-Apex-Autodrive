@@ -15,10 +15,11 @@ COPY --from=cuda_toolkit /usr/local/cuda-12.6 /usr/local/cuda-12.6
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake libeigen3-dev nlohmann-json3-dev \
     python3-colcon-common-extensions \
-    ros-humble-ackermann-msgs ros-humble-ament-cmake-python \
+    ros-humble-ament-cmake-python \
+    ros-humble-rosidl-default-generators \
     ros-humble-nav2-lifecycle-manager ros-humble-nav2-map-server \
     ros-humble-rclc ros-humble-rclcpp-components \
-    ros-humble-slam-toolbox ros-humble-tf2-geometry-msgs \
+    ros-humble-tf2-geometry-msgs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -31,7 +32,7 @@ ENV SDU_APEX_TRAJECTORY_REL=${AUTODRIVE_TRAJECTORY_REL}
 
 RUN source /opt/ros/humble/setup.bash \
     && source /home/autodrive_devkit/install/setup.bash \
-    && CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build --parallel-workers 1 --merge-install --symlink-install \
+    && CMAKE_BUILD_PARALLEL_LEVEL=8 colcon build --parallel-workers 8 --merge-install --symlink-install \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
       -DCMAKE_CUDA_ARCHITECTURES="61;86;89"
 

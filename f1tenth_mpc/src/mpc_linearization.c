@@ -5,6 +5,17 @@
 
 #define MPC_MODEL_NU 2
 
+enum
+{
+    MPC_MODEL_IDX_BODY_HEIGHT = 16,
+    MPC_MODEL_IDX_BODY_HEIGHT_RATE,
+    MPC_MODEL_IDX_ROLL,
+    MPC_MODEL_IDX_ROLL_RATE,
+    MPC_MODEL_IDX_PITCH,
+    MPC_MODEL_IDX_PITCH_RATE,
+    MPC_MODEL_IDX_SUSPENSION_JOUNCE_FL,
+};
+
 #ifdef MPC_ENABLE_FD_ORACLE
 /* Steering-state perturbations are smaller because the measured yaw surface
  * has narrow, smooth support gates; 1e-3 rad crosses enough of a gate to make
@@ -13,7 +24,10 @@ static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
     1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
     1.0e-4f, 1.0e-4f, 1.0e-3f, 1.0e-3f,
-    1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f};
+    1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f,
+    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
+    1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
+    1.0e-4f, 1.0e-4f};
 static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 #endif
 
@@ -26,7 +40,7 @@ static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
     x[2] = state->u;
     x[3] = state->v;
     x[4] = state->r;
-    x[5] = state->target_speed;
+    x[5] = state->longitudinal_acceleration_mps2;
     x[6] = state->steering_command;
     x[7] = state->delayed_steering_command_1;
     x[8] = state->delayed_steering_command_2;
@@ -36,6 +50,22 @@ static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
     for (int wheel = 0; wheel < 4; ++wheel) {
         x[12 + wheel] = (float)prepared.source_plant_state[
             UNITY_SOURCE_WHEEL_OMEGA_FL + wheel];
+    }
+    x[MPC_MODEL_IDX_BODY_HEIGHT] = (float)prepared.source_plant_state[
+        UNITY_SOURCE_BODY_HEIGHT];
+    x[MPC_MODEL_IDX_BODY_HEIGHT_RATE] = (float)prepared.source_plant_state[
+        UNITY_SOURCE_BODY_HEIGHT_RATE];
+    x[MPC_MODEL_IDX_ROLL] = (float)prepared.source_plant_state[
+        UNITY_SOURCE_ROLL];
+    x[MPC_MODEL_IDX_ROLL_RATE] = (float)prepared.source_plant_state[
+        UNITY_SOURCE_ROLL_RATE];
+    x[MPC_MODEL_IDX_PITCH] = (float)prepared.source_plant_state[
+        UNITY_SOURCE_PITCH];
+    x[MPC_MODEL_IDX_PITCH_RATE] = (float)prepared.source_plant_state[
+        UNITY_SOURCE_PITCH_RATE];
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        x[MPC_MODEL_IDX_SUSPENSION_JOUNCE_FL + wheel] = (float)
+            prepared.source_plant_state[UNITY_SOURCE_SUSPENSION_JOUNCE_FL + wheel];
     }
 }
 
@@ -49,7 +79,7 @@ static MpcModelState_t array_to_state(
     state.u = x[2];
     state.v = x[3];
     state.r = x[4];
-    state.target_speed = x[5];
+    state.longitudinal_acceleration_mps2 = x[5];
     state.steering_command = x[6];
     state.delayed_steering_command_1 = x[7];
     state.delayed_steering_command_2 = x[8];
@@ -61,6 +91,18 @@ static MpcModelState_t array_to_state(
         state.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL + wheel] =
             x[12 + wheel];
     }
+    state.source_plant_state[UNITY_SOURCE_BODY_HEIGHT] =
+        x[MPC_MODEL_IDX_BODY_HEIGHT];
+    state.source_plant_state[UNITY_SOURCE_BODY_HEIGHT_RATE] =
+        x[MPC_MODEL_IDX_BODY_HEIGHT_RATE];
+    state.source_plant_state[UNITY_SOURCE_ROLL] = x[MPC_MODEL_IDX_ROLL];
+    state.source_plant_state[UNITY_SOURCE_ROLL_RATE] = x[MPC_MODEL_IDX_ROLL_RATE];
+    state.source_plant_state[UNITY_SOURCE_PITCH] = x[MPC_MODEL_IDX_PITCH];
+    state.source_plant_state[UNITY_SOURCE_PITCH_RATE] = x[MPC_MODEL_IDX_PITCH_RATE];
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        state.source_plant_state[UNITY_SOURCE_SUSPENSION_JOUNCE_FL + wheel] =
+            x[MPC_MODEL_IDX_SUSPENSION_JOUNCE_FL + wheel];
+    }
     return state;
 }
 #endif
@@ -69,7 +111,7 @@ static void control_to_array(const MpcModelControl_t *control,
                              float u[MPC_MODEL_NU])
 {
     u[0] = control->steering_rate;
-    u[1] = control->target_speed_rate;
+    u[1] = control->throttle_command;
 }
 
 #ifdef MPC_ENABLE_FD_ORACLE
@@ -77,7 +119,7 @@ static MpcModelControl_t array_to_control(const float u[MPC_MODEL_NU])
 {
     MpcModelControl_t control;
     control.steering_rate = u[0];
-    control.target_speed_rate = u[1];
+    control.throttle_command = u[1];
     return control;
 }
 #endif

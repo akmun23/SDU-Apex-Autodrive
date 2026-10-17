@@ -6,8 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Only the fixed competition launch is subject to this runtime input policy.
-# Development mapping and recording are deliberately outside this allowlist.
+# The maintained autonomous launch is subject to this runtime input policy.
 RUNTIME_FILES = (
     "sdu_apex_autodrive/launch/competition.launch.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py",

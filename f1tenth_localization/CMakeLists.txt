@@ -24,6 +24,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sdu_apex_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 set(PHYSX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../external/physx-4.1-source/physx")
@@ -87,16 +88,18 @@ add_executable(sensor_odometry_node
   src/physx_odom_runtime.cpp)
 target_include_directories(sensor_odometry_node PRIVATE include)
 ament_target_dependencies(sensor_odometry_node
-  ament_index_cpp rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros)
+  ament_index_cpp rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros
+  sdu_apex_msgs)
 
 add_executable(physx_native_vehicle_step
-  "${CMAKE_CURRENT_SOURCE_DIR}/../tools/vehicle_dynamics_learning/physx_native_vehicle_step.cpp"
+  src/physx_native_vehicle_step.cpp
   src/physx_glibc_compat.cpp)
 target_include_directories(physx_native_vehicle_step PRIVATE
   "${PHYSX_ROOT}/include"
   "${PHYSX_SHARED_ROOT}/include"
   "${PHYSX_ROOT}/source/physxvehicle/src")
-target_compile_definitions(physx_native_vehicle_step PRIVATE PX_PHYSX_STATIC_LIB)
+target_compile_definitions(physx_native_vehicle_step PRIVATE
+  PX_PHYSX_STATIC_LIB NDEBUG)
 target_link_libraries(physx_native_vehicle_step PRIVATE
   -Wl,--start-group ${PHYSX_NATIVE_LIBS} -Wl,--end-group dl pthread)
 

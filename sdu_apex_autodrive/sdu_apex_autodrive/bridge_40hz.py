@@ -12,8 +12,6 @@ remain consistent while the official decoder publishes each packet.
 
 from __future__ import annotations
 
-import base64
-import gzip
 import json
 import math
 import os
@@ -85,9 +83,6 @@ _latest_command: dict[str, str] = {
     "V1 Publish LIDAR Intensity": "False",
 }
 _latest_steering_update_monotonic_ns: int | None = None
-_packet_command_profile: tuple[tuple[float, float], ...] | None = None
-_packet_command_profile_first_request: int | None = None
-_packet_command_profile_finished = False
 _reset_level = False
 _reset_deadline_monotonic: float | None = None
 _RESET_HOLD_SEC = 0.75
@@ -141,20 +136,10 @@ _packet_timing_publisher: Any = None
 _timing_fault_publisher: Any = None
 _timing_fault_detail_publisher: Any = None
 _packet_sequence = 0
-_packet_schema_diagnostic_count = 0
-_encoder_probe_samples: list[dict[str, Any]] = []
 _packet_contract_installed = False
-_handler_timing_enabled = False
-_handler_timing_count = 0
-_handler_timing_total_ns = 0
-_publication_diagnostic_enabled = False
-_publication_diagnostic_count = 0
-_source_lidar_diagnostic_count = 0
 _timing_fault = False
 _timing_fault_reason = ""
 _shutdown_requested = False
-_timing_debug_count = 0
-_request_timing_debug_count = 0
 
 # Unity can emit one startup packet before its LiDAR range buffer has been
 # populated.  The official decoder treats that optional field as mandatory and
@@ -213,67 +198,6 @@ def _next_request_sequence() -> int:
     with _pending_request_lock:
         _bridge_request_sequence += 1
         return _bridge_request_sequence
-
-
-def _load_packet_command_profile() -> None:
-    """Load an explicit development-only command sequence for parity replay."""
-    global _packet_command_profile, _packet_command_profile_first_request
-    path = os.environ.get("SDU_APEX_PACKET_COMMAND_PROFILE")
-    if not path:
-        return
-    try:
-        with open(path, "r", encoding="utf-8") as stream:
-            payload = json.load(stream)
-        first_request = int(payload["target_first_request_sequence"])
-        raw_commands = payload["commands"]
-        commands = tuple((float(row["steering_norm"]),
-                          float(row["throttle_norm"]))
-                         for row in raw_commands)
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid packet command profile {path}: {exc}") from exc
-    if first_request < 1 or len(commands) < 100:
-        raise RuntimeError("packet command profile has an invalid start or is too short")
-    if any(not math.isfinite(value) or abs(value) > 1.0
-           for pair in commands for value in pair):
-        raise RuntimeError("packet command profile values must be finite and normalized")
-    if any(abs(value) > 1.0e-6 for value in commands[0]):
-        raise RuntimeError("packet command profile must begin at neutral")
-    _packet_command_profile = commands
-    _packet_command_profile_first_request = first_request
-    print(
-        "[autodrive_bridge_40hz] development packet command profile loaded: "
-        f"{len(commands)} request samples starting at request {first_request}",
-        flush=True,
-    )
-
-
-def _command_for_request(command: dict[str, str], request_sequence: int
-                         ) -> dict[str, str]:
-    """Select a replay sample at the Bridge request boundary, without ROS lag."""
-    global _packet_command_profile_finished
-    profile = _packet_command_profile
-    first_request = _packet_command_profile_first_request
-    if profile is None or first_request is None:
-        return command
-    index = request_sequence - first_request
-    if index < 0:
-        steering, throttle = 0.0, 0.0
-    elif index < len(profile):
-        steering, throttle = profile[index]
-    else:
-        steering, throttle = 0.0, 0.0
-        if not _packet_command_profile_finished:
-            _packet_command_profile_finished = True
-            print(
-                "[autodrive_bridge_40hz] development packet command profile "
-                f"complete after {len(profile)} request samples; neutral latched",
-                flush=True,
-            )
-    command = dict(command)
-    command["V1 Steering"] = str(steering)
-    command["V1 Throttle"] = str(throttle)
-    command["V1 Reset"] = "False"
-    return command
 
 
 def _reset_request_pipeline() -> None:
@@ -503,45 +427,10 @@ def _capture_competition_packet(data: Any) -> bool:
     global _active_steering_update_monotonic_ns
     global _active_simulator_packet, _active_request_slot_pool
     global _pending_request_started_ns
-    global _packet_schema_diagnostic_count
-    global _encoder_probe_samples
 
     if not isinstance(data, dict):
         _trigger_timing_fault("non-dictionary simulator packet")
         return False
-
-    if (_packet_schema_diagnostic_count < 3 and
-            _env_enabled("SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC", False)):
-        print(
-            "[autodrive_bridge_40hz] source packet schema: " +
-            json.dumps({
-                "packet_index": _packet_schema_diagnostic_count + 1,
-                "field_count": len(data),
-                "field_names": sorted(str(key) for key in data),
-            }, separators=(",", ":")),
-            flush=True,
-        )
-        _packet_schema_diagnostic_count += 1
-
-    if (len(_encoder_probe_samples) < 40 and
-            _env_enabled("SDU_APEX_PACKET_SCHEMA_DIAGNOSTIC", False)):
-        try:
-            feedback_throttle = float(data.get("V1 Throttle", 0.0))
-        except (TypeError, ValueError):
-            feedback_throttle = 0.0
-        if feedback_throttle > 0.02:
-            _encoder_probe_samples.append({
-                "arrival_monotonic_ns": time.monotonic_ns(),
-                "feedback_throttle": feedback_throttle,
-                "encoder_angles": data.get("V1 Encoder Angles"),
-                "encoder_ticks": data.get("V1 Encoder Ticks"),
-            })
-            if len(_encoder_probe_samples) == 40:
-                print(
-                    "[autodrive_bridge_40hz] encoder probe samples: " +
-                    json.dumps(_encoder_probe_samples, separators=(",", ":")),
-                    flush=True,
-                )
 
     with _pending_request_lock:
         has_pending_request = bool(_pending_requests)
@@ -799,7 +688,6 @@ def _rate_hz() -> float:
 def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
     """Keep the nominal request cadence without response-age stop gates."""
     global _connection_generation
-    global _request_timing_debug_count
     period = 1.0 / rate_hz
     next_send = time.monotonic()
     while not _stop_sender.is_set():
@@ -841,7 +729,6 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             command["V1 Reset"] = "True" if _reset_level else "False"
 
         request_sequence = _next_request_sequence()
-        command = _command_for_request(command, request_sequence)
         if not _set_pending_request(
                 None, generation, request_sequence, command,
                 steering_update_monotonic_ns):
@@ -858,21 +745,13 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
                 # timer oversleep into a permanently slower cadence.
                 next_send = _next_request_deadline(
                     next_send, emitted_at, period)
-            if (_env_enabled("AUTODRIVE_TIMING_DEBUG", False) and
-                    _request_timing_debug_count < 20):
-                _request_timing_debug_count += 1
-                print(
-                    "[autodrive_bridge_40hz] request sent: "
-                    f"sequence={request_sequence} monotonic={time.monotonic():.9f}",
-                    flush=True,
-                )
         except Exception as exc:
             _discard_pending_request()
             _trigger_timing_fault(f"Bridge request send failed: {exc}")
             return
 
 
-def _install_packet_contract(publish_camera: bool) -> None:
+def _install_packet_contract() -> None:
     """Accept both legacy and source-camera-disabled simulator packets."""
     global _packet_contract_installed
     if _packet_contract_installed:
@@ -892,8 +771,6 @@ def _install_packet_contract(publish_camera: bool) -> None:
             return _packet_handler_body(sid, data)
 
     def _packet_handler_body(sid: Any, data: Any) -> Any:
-        global _handler_timing_count, _handler_timing_total_ns
-        handler_start_ns = time.monotonic_ns()
         try:
             if _shutdown_requested:
                 return None
@@ -903,18 +780,13 @@ def _install_packet_contract(publish_camera: bool) -> None:
                 return None
             if not _validate_received_packet():
                 return None
-            if not publish_camera and isinstance(data, dict):
+            if isinstance(data, dict):
                 # The official bridge accesses this key unconditionally.
                 # Injecting an empty placeholder keeps its numeric decoder
                 # compatible with the source-disabled packet and replaces a
                 # legacy image field before base64/PIL work can happen.
                 data = dict(data)
                 data["V1 Front Camera Image"] = ""
-            if _publication_diagnostic_enabled and isinstance(data, dict):
-                _log_source_lidar_payload(data)
-            if (_env_enabled("AUTODRIVE_ALLOW_MISSING_LIDAR", False) and
-                    isinstance(data, dict)):
-                _inject_empty_lidar_packet(data)
             if isinstance(data, dict) and any(
                     key not in data for key in _STARTUP_REQUIRED_KEYS):
                 missing = ", ".join(
@@ -936,17 +808,6 @@ def _install_packet_contract(publish_camera: bool) -> None:
                     "simulator packet decode/publication failed: "
                     f"{type(exc).__name__}: {exc}")
                 return None
-            if _handler_timing_enabled:
-                duration_ns = time.monotonic_ns() - handler_start_ns
-                _handler_timing_count += 1
-                _handler_timing_total_ns += duration_ns
-                if _handler_timing_count % 40 == 0:
-                    average_ms = _handler_timing_total_ns / _handler_timing_count / 1e6
-                    print(
-                        "[autodrive_bridge_40hz] handler timing: "
-                        f"last={duration_ns / 1e6:.2f} ms average={average_ms:.2f} ms",
-                        flush=True,
-                    )
             return result
         finally:
             _finish_packet()
@@ -960,90 +821,6 @@ def _disable_camera_path() -> None:
     official_bridge.publish_camera_images = lambda *_args, **_kwargs: None
     official_bridge.Image.open = lambda *_args, **_kwargs: (
         official_bridge.np.empty((1, 1, 3), dtype=official_bridge.np.uint8))
-
-
-def _inject_empty_lidar_packet(data: dict[str, Any]) -> None:
-    """Satisfy the official decoder for the no-LiDAR model-ID scene."""
-    empty_ranges = base64.b64encode(gzip.compress(b"")).decode("ascii")
-    data.setdefault("V1 LIDAR Scan Rate", "40.0")
-    data.setdefault("V1 LIDAR Range Array", empty_ranges)
-    data.setdefault("V1 Lap Count", "0")
-    data.setdefault("V1 Lap Time", "0.0")
-    data.setdefault("V1 Last Lap Time", "0.0")
-    data.setdefault("V1 Best Lap Time", "0.0")
-    data.setdefault("V1 Collisions", "0")
-
-
-def _log_source_lidar_payload(data: dict[str, Any]) -> None:
-    """Compare source-packet ranges with the decoded ROS scan, only on request."""
-    global _source_lidar_diagnostic_count
-    _source_lidar_diagnostic_count += 1
-    if _source_lidar_diagnostic_count % 40 != 0:
-        return
-
-    encoded = data.get("V1 LIDAR Range Array")
-    payload_chars = len(encoded) if isinstance(encoded, (str, bytes)) else -1
-    try:
-        decoded = gzip.decompress(base64.b64decode(encoded))
-        values = official_bridge.np.fromstring(
-            decoded.decode("utf-8"), dtype=float, sep="\n")
-        finite_count = int(official_bridge.np.isfinite(values).sum())
-        print(
-            "[autodrive_bridge_40hz] source lidar payload: "
-            f"packet={_source_lidar_diagnostic_count} "
-            f"key_present={encoded is not None} payload_chars={payload_chars} "
-            f"decoded_ranges={len(values)} finite_ranges={finite_count}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(
-            "[autodrive_bridge_40hz] source lidar payload: "
-            f"packet={_source_lidar_diagnostic_count} "
-            f"key_present={encoded is not None} payload_chars={payload_chars} "
-            f"decode_error={type(exc).__name__}",
-            flush=True,
-        )
-
-
-def _install_publication_diagnostic() -> None:
-    """Optionally report whether decoded LaserScan messages reach DDS."""
-    global _publication_diagnostic_count
-    original_publish_lidar_scan = official_bridge.publish_lidar_scan
-
-    def diagnostic_publish(*args: Any, **kwargs: Any) -> Any:
-        global _publication_diagnostic_count
-        _publication_diagnostic_count += 1
-        result = original_publish_lidar_scan(*args, **kwargs)
-        if _publication_diagnostic_count % 40 == 0:
-            ranges = (args[1] if len(args) > 1 else
-                      kwargs.get("lidar_range_array", ()))
-            try:
-                range_count = len(ranges)
-                finite_count = sum(
-                    math.isfinite(float(value)) for value in ranges)
-            except (TypeError, ValueError):
-                range_count = -1
-                finite_count = -1
-            node = getattr(official_bridge, "autodrive_bridge", None)
-            publisher_count = "unknown"
-            publisher_qos = "unknown"
-            if node is not None:
-                try:
-                    lidar_publisher = official_bridge.publishers["pub_lidar"]
-                    publisher_count = str(lidar_publisher.get_subscription_count())
-                    publisher_qos = str(lidar_publisher.qos_profile)
-                except Exception as exc:
-                    publisher_count = f"error:{exc}"
-            print(
-                "[autodrive_bridge_40hz] lidar publication diagnostic: "
-                f"calls={_publication_diagnostic_count} subscribers={publisher_count} "
-                f"decoded_finite_ranges={finite_count}/{range_count} "
-                f"qos={publisher_qos}",
-                flush=True,
-            )
-        return result
-
-    official_bridge.publish_lidar_scan = diagnostic_publish
 
 
 def _force_ipv4_server() -> None:
@@ -1176,34 +953,19 @@ def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
 
 
 def main() -> None:
-    global _handler_timing_enabled, _publication_diagnostic_enabled
     global _shutdown_requested
     _shutdown_requested = False
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     rate_hz = _rate_hz()
-    _load_packet_command_profile()
-    _handler_timing_enabled = _env_enabled(
-        "AUTODRIVE_BRIDGE_LOG_HANDLER_TIMING", False)
-    _publication_diagnostic_enabled = _env_enabled(
-        "AUTODRIVE_BRIDGE_LOG_PUBLICATION", False)
     _force_ipv4_server()
     _install_packet_timestamp_patch()
-    publish_camera = _env_enabled("AUTODRIVE_BRIDGE_PUBLISH_CAMERA", False)
-    publish_lidar_intensity = _env_enabled(
-        "AUTODRIVE_BRIDGE_PUBLISH_LIDAR_INTENSITY", False)
     with _command_lock:
-        _latest_command["V1 Publish Camera"] = "True" if publish_camera else "False"
+        _latest_command["V1 Publish Camera"] = "False"
         _latest_command["V1 Publish Rear Camera"] = "False"
-        _latest_command["V1 Publish LIDAR Intensity"] = (
-            "True" if publish_lidar_intensity else "False")
-    _install_packet_contract(publish_camera)
-    if not publish_camera:
-        _disable_camera_path()
-        print("[autodrive_bridge_40hz] camera decode/publication disabled")
-    if _publication_diagnostic_enabled:
-        _install_publication_diagnostic()
-        print("[autodrive_bridge_40hz] publication diagnostic enabled")
+        _latest_command["V1 Publish LIDAR Intensity"] = "False"
+    _install_packet_contract()
+    _disable_camera_path()
     original_emit = official_bridge.sio.emit
 
     original_connect = official_bridge.sio.handlers.get("/", {}).get("connect")

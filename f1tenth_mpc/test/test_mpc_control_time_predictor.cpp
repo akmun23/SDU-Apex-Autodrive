@@ -55,7 +55,7 @@ TEST(MpcControlTimePredictor, HandlesFractionalMillisecondCommandAndSensorTimes)
   ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
   EXPECT_EQ(prediction.command_changes_used, 2U);
   EXPECT_NEAR(prediction.age_s, 0.0252, 1.0e-12);
-  EXPECT_NEAR(prediction.target_speed_mps, 1.9, 1.0e-6);
+  EXPECT_NEAR(prediction.speed_reference_mps, 1.9, 1.0e-6);
   EXPECT_TRUE(std::isfinite(prediction.state.u));
   EXPECT_TRUE(std::isfinite(prediction.state.map_x));
   EXPECT_TRUE(std::isfinite(prediction.state.map_y));
@@ -88,11 +88,6 @@ TEST(MpcControlTimePredictor, PreservesCarriedSteeringStateAcrossUpdates)
   carried.steering_command = -0.35f;
   carried.delayed_steering_command_1 = -0.35f;
   carried.delayed_steering_command_2 = -0.35f;
-  carried.source_throttle_command = 0.30f;
-  carried.source_last_target_speed = 5.0f;
-  carried.source_target_initialized = 1;
-  carried.source_actuator_speed_mps = 5.0f;
-  carried.source_actuator_speed_initialized = 1;
 
   f1tenth_mpc::MpcControlTimePredictorConfig config;
   f1tenth_mpc::MpcControlTimePrediction cold_prediction{};
@@ -138,14 +133,10 @@ TEST(MpcControlTimePredictor, ReturnsLatentPlantAtControlTime)
 
   MpcModelState_t source_plant{};
   source_plant.u = 2.0f;
-  source_plant.target_speed = 2.0f;
+  source_plant.longitudinal_acceleration_mps2 = 2.0f;
   source_plant.delayed_throttle_command_1 = 0.25f;
   source_plant.delayed_throttle_command_2 = 0.25f;
-  source_plant.source_throttle_command = 0.25f;
-  source_plant.source_target_initialized = 1;
-  source_plant.source_last_target_speed = 2.0f;
-  source_plant.source_actuator_speed_mps = 2.0f;
-  source_plant.source_actuator_speed_initialized = 1;
+  source_plant.delayed_throttle_command_2 = 0.25f;
   source_plant.source_rear_wheel_omega_feedback_radps[0] =
       2.0 / wheel_radius_m;
   source_plant.source_rear_wheel_omega_feedback_radps[1] =
@@ -198,12 +189,8 @@ TEST(MpcControlTimePredictor, PropagatesThenFusesAtObservedSensorEpoch)
 
   MpcModelState_t carried{};
   carried.u = 2.0f;
-  carried.target_speed = 2.0f;
-  carried.source_throttle_command = 0.25f;
-  carried.source_target_initialized = 1;
-  carried.source_last_target_speed = 2.0f;
-  carried.source_actuator_speed_mps = 2.0f;
-  carried.source_actuator_speed_initialized = 1;
+  carried.speed_reference_mps = 2.0f;
+  carried.delayed_throttle_command_2 = 0.25f;
   carried.source_plant_initialized = 1;
   carried.source_suspension_history_initialized = 1;
   carried.source_plant_state[UNITY_SOURCE_U] = 2.0;
@@ -290,7 +277,7 @@ TEST(MpcControlTimePredictor, DoesNotFuseObservationOlderThanCarriedPlant)
 
   MpcModelState_t carried{};
   carried.u = 2.0f;
-  carried.target_speed = 2.0f;
+  carried.speed_reference_mps = 2.0f;
   carried.source_rear_wheel_omega_feedback_radps[0] = 100.0f;
   carried.source_rear_wheel_omega_feedback_radps[1] = 100.0f;
   carried.source_rear_wheel_omega_feedback_valid = 1;

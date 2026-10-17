@@ -23,7 +23,8 @@ typedef struct
     float u;
     float v;
     float r;
-    float target_speed;
+    /* Body-forward acceleration from the source plant [m/s^2]. */
+    float longitudinal_acceleration_mps2;
     float steering_command;
     /* Preserve both causal command-history samples. The identified physical
      * steering target follows the newest queued sample (one 40 Hz interval);
@@ -39,26 +40,15 @@ typedef struct
      * state so the RTI Jacobian propagates their delayed effect. */
     float delayed_throttle_command_1;
     float delayed_throttle_command_2;
-    /* Recursive source-physics state retained across nonlinear horizon
-     * rollouts. The optimizer linearizes the tracking/actuator/command states;
-     * this internal plant state carries four wheel speeds, sprung-body
-     * motion, and suspension history so slip and load transfer are not reset
-     * at each 25 ms stage. It is initialized from permitted runtime sensors
-     * (or rolling kinematics at cold start), never simulator truth. */
+    /* Recursive Unity-derived state. The RTI vector includes the 10 internal
+     * coordinates not already represented above, so their effects and
+     * sensitivities propagate through the full horizon. */
     double source_plant_state[UNITY_SOURCE_PLANT_STATE_SIZE];
     /* Rear-wheel angular speed from the permitted left/right encoder-angle
      * streams. Correct only the first source-plant stage; later stages
      * propagate wheel spin from the source equations. */
     float source_rear_wheel_omega_feedback_radps[2];
     int source_rear_wheel_omega_feedback_valid;
-    float source_throttle_command;
-    float source_last_target_speed;
-    float source_actuator_speed_mps;
-    float source_actuator_acceleration_mps2;
-    float source_actuator_acceleration_history[5];
-    float source_actuator_integral;
-    float source_overspeed_elapsed;
-    float source_downshift_stable_elapsed;
     /* Diagnostics for the bounded Y1 equilibrium-response correction applied
      * on top of the source-derived wheel plant; these are not optimized states. */
     float source_yaw_surface_blend;
@@ -66,17 +56,9 @@ typedef struct
     double source_longitudinal_slip[4];
     double source_lateral_slip[4];
     double source_normal_load_n[4];
-    unsigned int source_actuator_acceleration_history_count;
-    unsigned int source_actuator_acceleration_history_next;
     int source_plant_initialized;
     int source_suspension_history_initialized;
     int source_imu_state_initialized;
-    int source_target_initialized;
-    int source_downshift_guard;
-    int source_actuator_speed_initialized;
-    int source_hold_approach;
-    int source_hold_reentry_requires_speed;
-    int source_downshift_catch;
 } MpcModelState_t;
 
 /* Materialize a causal source-plant initial state and consume any fresh rear
@@ -87,7 +69,9 @@ int vehicle_model_initialize_source_plant_state(MpcModelState_t *state);
 typedef struct
 {
     float steering_rate;
-    float target_speed_rate;
+    /* Normalized simulator throttle applied after the explicit two-packet
+     * command queue [0, 1]. Zero is Unity's brake branch. */
+    float throttle_command;
 } MpcModelControl_t;
 
 /*
@@ -114,40 +98,6 @@ typedef struct
     float low_speed_response_time_constant_s;
     float low_speed_transition_speed_mps;
 } MpcYawRateModelParameters_t;
-
-enum
-{
-    MPC_YAW_RESIDUAL_FEATURES = 13,
-    MPC_YAW_RESIDUAL_COEFFICIENTS = MPC_YAW_RESIDUAL_FEATURES + 1,
-};
-
-/* Optional, data-fitted residual acceleration correction. The runtime model
- * consumes only the current legal MPC state and current control; the fitted
- * coefficient vector and support gate are supplied by an explicit profile.
- * It is disabled unless configured. */
-typedef struct
-{
-    int enabled;
-    float gain;
-    float correction_clip_radps2;
-    float feature_mean[MPC_YAW_RESIDUAL_FEATURES];
-    float feature_scale[MPC_YAW_RESIDUAL_FEATURES];
-    float coefficients[MPC_YAW_RESIDUAL_COEFFICIENTS];
-    float target_speed_zero_mps;
-    float target_speed_full_mps;
-    float speed_deficit_full_mps;
-    float speed_deficit_zero_mps;
-    float abs_steering_zero_rad;
-    float abs_steering_full_rad;
-    /* Optional measured support window. Zero fields preserve the historical
-     * target-speed/steering lower gates without adding these upper/floor fades. */
-    float actual_speed_zero_mps;
-    float actual_speed_full_mps;
-    float actual_speed_upper_full_mps;
-    float actual_speed_upper_zero_mps;
-    float abs_steering_upper_full_rad;
-    float abs_steering_upper_zero_rad;
-} MpcYawRateResidualModel_t;
 
 enum
 {
@@ -203,9 +153,9 @@ typedef struct
 enum
 {
     MPC_STAGE_CLIPPED_STEERING_RATE = 1u << 0,
-    MPC_STAGE_CLIPPED_SPEED_RATE = 1u << 1,
+    MPC_STAGE_CLIPPED_THROTTLE = 1u << 1,
     MPC_STAGE_CLIPPED_STEERING_COMMAND = 1u << 2,
-    MPC_STAGE_CLIPPED_TARGET_SPEED = 1u << 3,
+    MPC_STAGE_CLIPPED_LONGITUDINAL_ACCELERATION = 1u << 3,
     MPC_STAGE_CLIPPED_ACCELERATION = 1u << 4,
     MPC_STAGE_CLIPPED_BODY_SPEED = 1u << 5,
     MPC_STAGE_CLIPPED_ACTUAL_STEERING = 1u << 6,
@@ -245,9 +195,6 @@ int vehicle_model_set_yaw_rate_parameters(
     const MpcYawRateModelParameters_t *parameters);
 int vehicle_model_set_yaw_rate_response_surface(
     const MpcYawRateResponseSurface_t *surface);
-MpcYawRateResidualModel_t vehicle_model_default_yaw_rate_residual_model(void);
-int vehicle_model_set_yaw_rate_residual_model(
-    const MpcYawRateResidualModel_t *model);
 
 /* Identified Unity steering relation used by both prediction and feed-forward. */
 float vehicle_model_yaw_rate_gain(float steering_rad);

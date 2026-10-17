@@ -7,21 +7,11 @@ source /opt/ros/humble/setup.bash
 source /home/autodrive_devkit/install/setup.bash
 source /workspace/install/setup.bash
 
-build_packages=()
-if [[ "${SDU_APEX_BUILD_MPC:-0}" == "1" ]]; then
-  build_packages+=(f1tenth_mpc)
-fi
-if [[ "${SDU_APEX_BUILD_LOCALIZATION:-0}" == "1" ]]; then
-  build_packages+=(f1tenth_localization)
-fi
-if [[ "${SDU_APEX_BUILD_INTEGRATION:-0}" == "1" ]]; then
-  build_packages+=(sdu_apex_autodrive)
-fi
-if [[ "${#build_packages[@]}" -gt 0 ]]; then
-  echo "Building mounted workspace packages: ${build_packages[*]}"
+if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
+  echo "Building the mounted runtime and its package dependencies"
   cd /workspace
   CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build \
-    --packages-select "${build_packages[@]}" \
+    --packages-up-to sdu_apex_autodrive \
     --parallel-workers 1 \
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
@@ -42,30 +32,12 @@ fi
 
 python3 /workspace/src/tools/verify_runtime_topic_policy.py
 
-launch_mode="${SDU_APEX_LAUNCH:-controller}"
-if [[ "${launch_mode}" == "mapping" ]]; then
-  map_name="${SDU_APEX_MAP_NAME:-track_map}"
-  if [[ ! "${map_name}" =~ ^[[:alnum:]_-]+$ ]]; then
-    echo "SDU_APEX_MAP_NAME may contain only letters, digits, underscores, and hyphens." >&2
-    exit 2
-  fi
-  exec ros2 launch sdu_apex_autodrive mapping.launch.py \
-    "map_output_directory:=/workspace/src/live_runs/maps" \
-    "map_name:=${map_name}"
-fi
-if [[ "${launch_mode}" != "controller" ]]; then
-  echo "SDU_APEX_LAUNCH must be controller or mapping." >&2
-  exit 2
-fi
-
-# Start exactly one official bridge and one selected team controller. MPC is
-# the normal local racing controller; explicitly enable its command publisher
+# Start the bridge and the single MPC/localization runtime. Explicitly enable
+# its command publisher
 # here so a GUI simulator only needs its Connect button after this container is
 # running. Diagnostics are limited to the live MPC publisher and remain off by
 # default so the normal 40 Hz path does not serialize JSON.
-controller="${SDU_APEX_CONTROLLER:-mpc}"
 launch_args=(
-  "controller:=${controller}"
   "with_rviz:=${SDU_APEX_WITH_RVIZ:-false}"
 )
 if [[ -n "${SDU_APEX_MAP_YAML:-}" ]]; then
@@ -74,16 +46,12 @@ fi
 if [[ -n "${SDU_APEX_TRAJECTORY_FILE:-}" ]]; then
   launch_args+=("trajectory_file:=${SDU_APEX_TRAJECTORY_FILE}")
 fi
-if [[ "${controller}" == "mpc" ]]; then
-  launch_args+=(
-    "mpc_publish_diagnostics:=${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}"
-    "mpc_start_delay_sec:=${SDU_APEX_MPC_START_DELAY_SEC:-2.0}"
-  )
-  if [[ -n "${SDU_APEX_MPC_PARAMETER_OVERLAY:-}" ]]; then
-    launch_args+=(
-      "mpc_parameter_overlay:=${SDU_APEX_MPC_PARAMETER_OVERLAY}"
-    )
-  fi
+launch_args+=(
+  "mpc_publish_diagnostics:=${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}"
+  "mpc_start_delay_sec:=${SDU_APEX_MPC_START_DELAY_SEC:-2.0}"
+)
+if [[ -n "${SDU_APEX_MPC_PARAMETER_OVERLAY:-}" ]]; then
+  launch_args+=("mpc_parameter_overlay:=${SDU_APEX_MPC_PARAMETER_OVERLAY}")
 fi
 if [[ -n "${SDU_APEX_ACTUATOR_PARAMETER_OVERLAY:-}" ]]; then
   launch_args+=(

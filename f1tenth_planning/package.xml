@@ -3,14 +3,11 @@
 <package format="3">
   <name>f1tenth_planning</name>
   <version>1.0.0</version>
-  <description>AutoDRIVE competition map and canonical raceline</description>
+  <description>Maintained AutoDRIVE map and raceline assets</description>
   <maintainer email="pabjo23@student.sdu.dk">Pascal</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
-
   <export>
     <build_type>ament_cmake</build_type>
   </export>

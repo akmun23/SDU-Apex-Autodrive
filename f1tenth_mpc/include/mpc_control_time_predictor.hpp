@@ -16,7 +16,8 @@ constexpr std::size_t kMpcCommandHistoryCapacity = 16;
 struct MpcCommandHistoryEntry {
     int64_t stamp_ns{};
     double steering_command_rad{};
-    double target_speed_mps{};
+    double throttle_normalized{};
+    bool throttle_valid{};
 };
 
 /* Fixed-capacity causal command history. Entries must be strictly ordered by
@@ -57,7 +58,6 @@ enum class MpcControlTimeStatus {
 struct MpcControlTimePredictorConfig {
     double maximum_state_age_s{0.120};
     double model_integration_step_s{0.025};
-    double maximum_command_speed_mps{16.0};
     /* Commands are timestamped when published by the controller, while the
      * simulator may apply them later after the bridge transport backlog. The
      * effective command timeline is shifted forward by this measured delay. */
@@ -75,10 +75,10 @@ struct MpcControlTimePrediction {
     double plant_handoff_progress_m{};
     double progress_m{};
     double age_s{};
-    double target_speed_mps{};
     double steering_command_rad{};
+    double throttle_normalized{};
+    double previous_throttle_command{};
     double previous_steering_rate_radps{};
-    double previous_target_speed_rate_mps2{};
     int64_t plant_source_stamp_ns{};
     bool sensor_state_fused{};
     double plant_to_sensor_s{};

@@ -18,9 +18,9 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(ackermann_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sdu_apex_msgs REQUIRED)
 find_package(OpenMP QUIET COMPONENTS C)
 
 # BachelorProject Riccati-ADMM core.  The package deliberately contains one
@@ -57,9 +57,8 @@ target_include_directories(mpc_control_time PUBLIC
 target_link_libraries(mpc_control_time PUBLIC mpc_core mpc_state_sync)
 set_target_properties(mpc_control_time PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# The only ROS layer in this package.  It converts the BachelorProject core's
-# target-speed command into the existing Ackermann command contract; it does
-# not add a second controller or consume simulator-only state.
+# The only ROS layer in this package. It publishes the MPC's steering and
+# normalized-throttle decision through the team actuator command message.
 add_library(mpc_controller_node SHARED src/mpc_controller_node.cpp)
 target_link_libraries(mpc_controller_node mpc_core mpc_state_sync mpc_control_time)
 ament_target_dependencies(mpc_controller_node
@@ -68,9 +67,9 @@ ament_target_dependencies(mpc_controller_node
   rclcpp_components
   nav_msgs
   geometry_msgs
-  ackermann_msgs
   sensor_msgs
-  std_msgs)
+  std_msgs
+  sdu_apex_msgs)
 target_include_directories(mpc_controller_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -97,12 +96,12 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(FILES config/mpc_competition.yaml config/mpc_practice_yaw_residual_support_gated.yaml config/yaw_response_surface.csv config/yaw_response_surface_y1.csv
+install(FILES config/mpc_competition.yaml config/yaw_response_surface_y1.csv
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)
 ament_export_libraries(mpc_core)
 ament_export_dependencies(ament_index_cpp rclcpp rclcpp_components nav_msgs geometry_msgs
-  ackermann_msgs sensor_msgs std_msgs)
+  sensor_msgs std_msgs sdu_apex_msgs)
 
 ament_package()

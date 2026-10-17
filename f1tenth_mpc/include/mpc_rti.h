@@ -11,15 +11,15 @@ extern "C" {
 
 enum
 {
-    MPC_RTI_PLANT_NX = 16,
-    MPC_RTI_NX = 18,
+    MPC_RTI_PLANT_NX = 26,
+    MPC_RTI_NX = 28,
     MPC_RTI_NU = 2,
     MPC_RTI_IDX_EY = 0,
     MPC_RTI_IDX_EPSI = 1,
     MPC_RTI_IDX_U = 2,
     MPC_RTI_IDX_V = 3,
     MPC_RTI_IDX_R = 4,
-    MPC_RTI_IDX_TARGET_SPEED = 5,
+    MPC_RTI_IDX_LONGITUDINAL_ACCELERATION = 5,
     MPC_RTI_IDX_STEERING_COMMAND = 6,
     MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1 = 7,
     MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2 = 8,
@@ -30,15 +30,25 @@ enum
     MPC_RTI_IDX_WHEEL_OMEGA_FR = 13,
     MPC_RTI_IDX_WHEEL_OMEGA_RL = 14,
     MPC_RTI_IDX_WHEEL_OMEGA_RR = 15,
-    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 16,
-    MPC_RTI_IDX_PREVIOUS_TARGET_SPEED_RATE = 17
+    MPC_RTI_IDX_BODY_HEIGHT = 16,
+    MPC_RTI_IDX_BODY_HEIGHT_RATE = 17,
+    MPC_RTI_IDX_ROLL = 18,
+    MPC_RTI_IDX_ROLL_RATE = 19,
+    MPC_RTI_IDX_PITCH = 20,
+    MPC_RTI_IDX_PITCH_RATE = 21,
+    MPC_RTI_IDX_SUSPENSION_JOUNCE_FL = 22,
+    MPC_RTI_IDX_SUSPENSION_JOUNCE_FR = 23,
+    MPC_RTI_IDX_SUSPENSION_JOUNCE_RL = 24,
+    MPC_RTI_IDX_SUSPENSION_JOUNCE_RR = 25,
+    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 26,
+    MPC_RTI_IDX_PREVIOUS_THROTTLE_COMMAND = 27
 };
 
 typedef struct
 {
     MpcModelState_t plant;
     float previous_steering_rate;
-    float previous_target_speed_rate;
+    float previous_throttle_command;
     unsigned int incoming_branch_flags;
     int incoming_transition_valid;
 } MpcRtiState_t;
@@ -51,8 +61,7 @@ typedef struct
     float v;
     float r;
     float steering_command;
-    float target_speed;
-    float target_speed_rate;
+    float longitudinal_acceleration_mps2;
     float path_curvature;
     float left_bound;
     float right_bound;
@@ -65,21 +74,19 @@ typedef struct
     float weight_u;
     /* Used only while the nominal state is above the raceline speed. */
     float weight_u_overspeed;
-    float weight_target_speed_state;
+    float weight_longitudinal_acceleration;
     float weight_v;
     float weight_r;
     float weight_steering_command;
     float weight_steering_rate;
-    float weight_target_speed_rate;
+    float weight_throttle_command;
     float weight_steering_rate_change;
-    float weight_target_speed_rate_change;
+    float weight_throttle_command_change;
     float terminal_multiplier;
     float max_speed_mps;
     float active_speed_ceiling_mps;
     float max_steering_rad;
     float max_steering_rate_radps;
-    float max_target_speed_rate_increase_mps2;
-    float max_target_speed_rate_reduction_mps2;
     float corridor_margin_m;
     /* Optional first predicted sample margin; default equals corridor_margin_m. */
     float first_prediction_corridor_margin_m;
@@ -217,7 +224,7 @@ typedef struct
     float rti2_bound_error_trigger_m;
     float rti2_min_corridor_slack_trigger_m;
     float rti2_steering_rate_correction_trigger_radps;
-    float rti2_target_speed_rate_correction_trigger_mps2;
+    float rti2_throttle_correction_trigger;
     float rti2_residual_imbalance_trigger;
     float rti2_lateral_load_trigger_mps2;
     int rti2_nonsmooth_columns_trigger;
@@ -259,13 +266,7 @@ typedef struct
     MpcModelControl_t nominal_first_control;
     MpcRtiCandidatePathDelta_t candidate_path_delta;
     float published_steering_command;
-    float published_target_speed;
-    /* A rejection-only policy guard.  It is deliberately separate from the
-     * accepted MPC candidate so the controller cannot silently turn a failed
-     * horizon into a faster-than-raceline command. */
-    float rejection_speed_guard_limit_mps;
-    float unguarded_published_target_speed_mps;
-    int rejection_speed_guard_applied;
+    float published_throttle;
     int solver_iterations;
     float primal_residual;
     float dual_residual;

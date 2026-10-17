@@ -1,13 +1,11 @@
-# AutoDRIVE integration
+# AutoDRIVE runtime integration
 
-This package owns the official bridge wrapper, legal sensor-derived odometry
-interface, actuator interface, and the three maintained local launch modes:
+This package contains the 40 Hz bridge wrapper and the direct actuator
+interface. The maintained launch is `controller.launch.py` for development
+and `competition.launch.py` for the fixed competition image. Both run the
+same PhysX odometry, EKF/AMCL localization, and throttle-output MPC.
 
-- `competition.launch.py`: fixed MPC-only competition path;
-- `controller.launch.py`: local MPC/PP/FTG selection;
-- `mapping.launch.py`: development-only FTG mapping from simulator pose and
-  LiDAR; team odometry still runs separately for comparison and offline analysis.
-
-The package contains no simulator-truth consumers, shadow controller, model
-identification recorder, or generated analysis data. Use
-`tools/verify_runtime_topic_policy.py` before starting a stack.
+The MPC actuator contract is `sdu_apex_msgs/DriveCommand`: steering angle in
+radians and normalized throttle in `[0, 1]`. There is no speed-controller or
+Ackermann target-speed path. Use `tools/verify_runtime_topic_policy.py` before
+starting either stack.

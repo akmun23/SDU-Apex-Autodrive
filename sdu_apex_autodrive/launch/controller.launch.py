@@ -1,10 +1,4 @@
-"""Local development launch for the legal AutoDRIVE controller stack.
-
-The launch exposes the three maintained driving modes: FTG for mapping,
-Pure Pursuit as a baseline, and the production MPC.  There is one installed
-raceline and no shadow controller, simulator-truth recorder, or parameter
-overlay.
-"""
+"""Development launch for the single production MPC/localization stack."""
 
 import math
 import os
@@ -42,313 +36,160 @@ def _bool(value: str) -> bool:
 
 
 def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
-    """Reject duplicate local publishers before starting a second stack."""
     try:
         result = subprocess.run(
-            ["ros2", "node", "list"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3.0,
-        )
+            ["ros2", "node", "list"], check=False, capture_output=True,
+            text=True, timeout=3.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("unable to verify that no previous stack is running") from exc
     if result.returncode != 0:
         raise RuntimeError(
-            "ros2 node list failed during controller preflight: "
-            f"{result.stderr.strip()}")
-    existing_names = {
+            "ros2 node list failed during preflight: " + result.stderr.strip())
+    names = {
         line.strip().rsplit("/", 1)[-1]
-        for line in result.stdout.splitlines()
-        if line.strip()
+        for line in result.stdout.splitlines() if line.strip()
     }
-    duplicates = sorted(expected_names.intersection(existing_names))
+    duplicates = sorted(expected_names.intersection(names))
     if duplicates:
         raise RuntimeError(
-            "controller preflight found existing runtime node(s): "
-            f"{', '.join(duplicates)}. Stop the previous stack first.")
+            "runtime node(s) already exist: " + ", ".join(duplicates))
 
 
 def _setup(context):
-    controller = LaunchConfiguration("controller").perform(context).lower()
-    if controller not in ("ftg", "pure_pursuit", "mpc"):
-        raise RuntimeError("controller must be ftg, pure_pursuit, or mpc")
-
     integration = get_package_share_directory("sdu_apex_autodrive")
     localization = get_package_share_directory("f1tenth_localization")
     planning = get_package_share_directory("f1tenth_planning")
-    control = get_package_share_directory("f1tenth_control")
     mpc = get_package_share_directory("f1tenth_mpc")
 
     map_override = LaunchConfiguration("map_yaml").perform(context).strip()
     trajectory_override = LaunchConfiguration(
         "trajectory_file").perform(context).strip()
-    actuator_parameter_overlay = LaunchConfiguration(
-        "actuator_parameter_overlay").perform(context).strip()
-    if (actuator_parameter_overlay and
-            not os.path.isfile(actuator_parameter_overlay)):
-        raise RuntimeError(
-            "actuator parameter overlay does not exist: "
-            f"{actuator_parameter_overlay}")
-    odom_parameter_overlay = LaunchConfiguration(
-        "odom_parameter_overlay").perform(context).strip()
-    if odom_parameter_overlay and not os.path.isfile(odom_parameter_overlay):
-        raise RuntimeError(
-            "odometry parameter overlay does not exist: "
-            f"{odom_parameter_overlay}")
     if bool(map_override) != bool(trajectory_override):
-        raise RuntimeError(
-            "map_yaml and trajectory_file must be overridden as a matching pair")
+        raise RuntimeError("map_yaml and trajectory_file must be overridden together")
     map_path = map_override or os.path.join(planning, "maps", MAP_NAME)
     trajectory = trajectory_override or os.path.join(
         planning, "trajectories", RACELINE_PATH)
-    with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
-    use_localization = _bool(
-        LaunchConfiguration("use_localization").perform(context))
-    force_localization = _bool(
-        LaunchConfiguration("force_localization").perform(context))
-    needs_localization = use_localization and (
-        controller != "ftg" or force_localization)
-    mpc_start_delay_sec = float(
-        LaunchConfiguration("mpc_start_delay_sec").perform(context))
-    if not math.isfinite(mpc_start_delay_sec) or mpc_start_delay_sec < 0.0:
-        raise RuntimeError("mpc_start_delay_sec must be finite and non-negative")
+    if not os.path.isfile(map_path) or not os.path.isfile(trajectory):
+        raise RuntimeError("the selected map/raceline pair is incomplete")
 
-    if needs_localization:
-        for path in (map_path, trajectory):
-            if not os.path.isfile(path):
-                raise RuntimeError(f"required installed file does not exist: {path}")
-
-    expected_names = {
-        "autodrive_bridge",
-        "sensor_odometry",
-        "controller_container",
-        "autodrive_actuator_interface",
+    overlays = {
+        "mpc_parameter_overlay": LaunchConfiguration(
+            "mpc_parameter_overlay").perform(context).strip(),
+        "odom_parameter_overlay": LaunchConfiguration(
+            "odom_parameter_overlay").perform(context).strip(),
+        "actuator_parameter_overlay": LaunchConfiguration(
+            "actuator_parameter_overlay").perform(context).strip(),
     }
-    if needs_localization:
-        expected_names.update({
-            "ekf_localization", "map_server", "lifecycle_manager_map",
-            "gpu_amcl_cpp",
-        })
-    _reject_existing_runtime_nodes(expected_names)
+    for name, path in overlays.items():
+        if path and not os.path.isfile(path):
+            raise RuntimeError(f"{name} does not exist: {path}")
+
+    start_delay = float(
+        LaunchConfiguration("mpc_start_delay_sec").perform(context))
+    if not math.isfinite(start_delay) or start_delay < 0.0:
+        raise RuntimeError("mpc_start_delay_sec must be finite and nonnegative")
+    with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
+    expected = {
+        "autodrive_bridge", "sensor_odometry", "ekf_localization",
+        "map_server", "lifecycle_manager_map", "gpu_amcl_cpp",
+        "controller_container", "autodrive_actuator_interface",
+    }
+    _reject_existing_runtime_nodes(expected)
 
     bridge = Node(
-        package="sdu_apex_autodrive",
-        executable="autodrive_bridge_40hz",
-        name="autodrive_bridge",
-        output="screen",
-        emulate_tty=True,
-    )
+        package="sdu_apex_autodrive", executable="autodrive_bridge_40hz",
+        name="autodrive_bridge", output="screen", emulate_tty=True)
     odometry = Node(
-        package="f1tenth_localization",
-        executable="sensor_odometry_node",
-        name="sensor_odometry",
-        output="screen",
+        package="f1tenth_localization", executable="sensor_odometry_node",
+        name="sensor_odometry", output="screen",
         parameters=[
             os.path.join(localization, "config", "sensor_odometry.yaml"),
-            *([odom_parameter_overlay] if odom_parameter_overlay else []),
-        ],
-        remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
-    )
-    actions = [SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-               bridge, odometry]
-    amcl_node = None
-
-    if needs_localization:
-        map_server = LifecycleNode(
-            package="nav2_map_server",
-            executable="map_server",
-            name="map_server",
-            namespace="",
-            output="screen",
-            parameters=[{"yaml_filename": map_path}],
-        )
-        actions.extend([
-            Node(
-                package="f1tenth_localization",
-                executable="ekf_localization_node",
-                name="ekf_localization",
-                output="screen",
-                parameters=[os.path.join(localization, "config", "ekf.yaml")],
-            ),
-            map_server,
-            Node(
-                package="nav2_lifecycle_manager",
-                executable="lifecycle_manager",
-                name="lifecycle_manager_map",
-                output="screen",
-                parameters=[{"autostart": True, "node_names": ["map_server"]}],
-            ),
-        ])
-        amcl_node = Node(
-            package="f1tenth_localization",
-            executable="gpu_amcl_cpp_node",
-            name="gpu_amcl_cpp",
-            output="screen",
-            parameters=[
-                os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
-                {
-                    "global_heading_trajectory_file": trajectory,
-                    "odom_topic": "/ekf_odom",
-                    "global_initialization": True,
-                    "global_pose_max_track_distance_m": 0.65,
-                    "initial_pose_heading_offset_rad": 0.0,
-                },
-            ],
-            remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
-        )
-        actions.append(amcl_node)
-
-    if controller == "ftg":
-        controller_component = ComposableNode(
-            package="f1tenth_control",
-            plugin="f1tenth_control::FTGNode",
-            name="ftg_node",
-            parameters=[
-                os.path.join(control, "config", "ftg_params.yaml"),
-                {"max_speed": 0.40},
-            ],
-            remappings=[
-                ("scan", "/autodrive/roboracer_1/lidar"),
-                ("drive", "/cmd/speed"),
-            ],
-        )
-    elif controller == "pure_pursuit":
-        controller_component = ComposableNode(
-            package="f1tenth_control",
-            plugin="f1tenth_control::PurePursuitNode",
-            name="pure_pursuit_node",
-            parameters=[
-                os.path.join(control, "config", "path_tracking_autodrive.yaml"),
-                {"trajectory_file": trajectory, "max_speed": 16.0},
-            ],
-        )
-    else:
-        mpc_parameter_files = [
-            os.path.join(mpc, "config", "mpc_competition.yaml")
-        ]
-        mpc_parameter_overlay = LaunchConfiguration(
-            "mpc_parameter_overlay").perform(context).strip()
-        if mpc_parameter_overlay:
-            if not os.path.isfile(mpc_parameter_overlay):
-                raise RuntimeError(
-                    "MPC parameter overlay does not exist: "
-                    f"{mpc_parameter_overlay}")
-            mpc_parameter_files.append(mpc_parameter_overlay)
-        controller_component = ComposableNode(
-            package="f1tenth_mpc",
-            plugin="f1tenth_mpc::MpcControllerNode",
-            name="mpc_controller_node",
-            parameters=mpc_parameter_files + [
-                {
-                    "trajectory_file": trajectory,
-                    "max_speed_mps": ParameterValue(
-                        LaunchConfiguration("controller_max_speed"),
-                        value_type=float),
-                    "diagnostics_topic": "/mpc/diagnostics",
-                    "publish_diagnostics": ParameterValue(
-                        LaunchConfiguration("mpc_publish_diagnostics"),
-                        value_type=bool),
-                },
-            ],
-            remappings=[
-                ("odom", "/odom"),
-                ("pose", "/current_map_pose"),
-                ("drive", "/cmd/speed"),
-            ],
-        )
-
-    controller_container = ComposableNodeContainer(
-        name="controller_container",
-        namespace="",
-        package="rclcpp_components",
-        executable="component_container",
-        composable_node_descriptions=[controller_component],
-        output="screen",
-    )
-    if controller == "mpc" and needs_localization and mpc_start_delay_sec > 0.0:
-        actions.insert(0, RegisterEventHandler(
-            OnProcessStart(
-                target_action=amcl_node,
-                on_start=[TimerAction(
-                    period=mpc_start_delay_sec,
-                    actions=[
-                        LogInfo(msg=(
-                            "AMCL warm-up complete; launching MPC after "
-                            f"{mpc_start_delay_sec:.2f} s")),
-                        controller_container,
-                    ],
-                )],
-            )))
-    else:
-        actions.append(controller_container)
-
-    actions.append(Node(
-        package="sdu_apex_autodrive",
-        executable="actuator_interface",
-        name="autodrive_actuator_interface",
-        output="screen",
+            *([overlays["odom_parameter_overlay"]]
+              if overlays["odom_parameter_overlay"] else []),
+        ], remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")])
+    ekf = Node(
+        package="f1tenth_localization", executable="ekf_localization_node",
+        name="ekf_localization", output="screen",
+        parameters=[os.path.join(localization, "config", "ekf.yaml")])
+    map_server = LifecycleNode(
+        package="nav2_map_server", executable="map_server",
+        name="map_server", namespace="", output="screen",
+        parameters=[{"yaml_filename": map_path}])
+    map_lifecycle = Node(
+        package="nav2_lifecycle_manager", executable="lifecycle_manager",
+        name="lifecycle_manager_map", output="screen",
+        parameters=[{"autostart": True, "node_names": ["map_server"]}])
+    amcl = Node(
+        package="f1tenth_localization", executable="gpu_amcl_cpp_node",
+        name="gpu_amcl_cpp", output="screen",
         parameters=[
-            os.path.join(integration, "config", "actuator_interface.yaml"),
-            *([actuator_parameter_overlay]
-              if actuator_parameter_overlay else []),
-            {"input_topic": "/cmd/speed", "external_stop_topic": ""},
-        ],
-    ))
+            os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
+            {
+                "global_heading_trajectory_file": trajectory,
+                "odom_topic": "/ekf_odom",
+                "global_initialization": True,
+                "global_pose_max_track_distance_m": 0.65,
+                "initial_pose_heading_offset_rad": 0.0,
+            },
+        ], remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")])
+
+    mpc_parameters = [os.path.join(mpc, "config", "mpc_competition.yaml")]
+    if overlays["mpc_parameter_overlay"]:
+        mpc_parameters.append(overlays["mpc_parameter_overlay"])
+    diagnostics = _bool(
+        LaunchConfiguration("mpc_publish_diagnostics").perform(context))
+    mpc_node = ComposableNode(
+        package="f1tenth_mpc", plugin="f1tenth_mpc::MpcControllerNode",
+        name="mpc_controller_node",
+        parameters=mpc_parameters + [{
+            "trajectory_file": trajectory,
+            "max_speed_mps": ParameterValue(
+                LaunchConfiguration("controller_max_speed"), value_type=float),
+            "publish_diagnostics": diagnostics,
+            "diagnostics_topic": "/mpc/diagnostics",
+        }], remappings=[
+            ("odom", "/odom"), ("pose", "/current_map_pose")])
+    controller = ComposableNodeContainer(
+        name="controller_container", namespace="",
+        package="rclcpp_components", executable="component_container",
+        composable_node_descriptions=[mpc_node], output="screen")
+    actuator_parameters = [
+        os.path.join(integration, "config", "actuator_interface.yaml")]
+    if overlays["actuator_parameter_overlay"]:
+        actuator_parameters.append(overlays["actuator_parameter_overlay"])
+    actuator = Node(
+        package="sdu_apex_autodrive", executable="actuator_interface",
+        name="autodrive_actuator_interface", output="screen",
+        parameters=actuator_parameters)
+
+    actions = [
+        SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        bridge, odometry, ekf, map_server, map_lifecycle, amcl, actuator,
+        RegisterEventHandler(OnProcessStart(
+            target_action=amcl,
+            on_start=[TimerAction(period=start_delay, actions=[
+                LogInfo(msg=f"Starting MPC after {start_delay:.2f}s AMCL warm-up"),
+                controller,
+            ])])),
+    ]
     if with_rviz:
         actions.append(Node(
-            package="rviz2",
-            executable="rviz2",
-            name="rviz",
-            output="screen",
-            remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")],
-        ))
-    actions.append(LogInfo(msg=(
-        f"controller={controller} localization={needs_localization} "
-        f"rviz={with_rviz}")))
+            package="rviz2", executable="rviz2", name="rviz",
+            output="screen", remappings=[("/tf", "/sdu/tf"),
+                                         ("/tf_static", "/sdu/tf_static")]))
     return actions
 
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument(
-            "controller", default_value="mpc",
-            description="Controller: mpc, pure_pursuit, or ftg."),
-        DeclareLaunchArgument(
-            "map_yaml", default_value="",
-            description="Development map YAML; empty selects the installed default."),
-        DeclareLaunchArgument(
-            "trajectory_file", default_value="",
-            description="Development raceline CSV; empty selects the installed default."),
-        DeclareLaunchArgument(
-            "with_rviz", default_value="false",
-            description="Start RViz on the team TF tree."),
-        DeclareLaunchArgument(
-            "use_localization", default_value="true",
-            description="Start the map, EKF, and AMCL chain."),
-        DeclareLaunchArgument(
-            "force_localization", default_value="false",
-            description="Also start localization when running FTG mapping diagnostics."),
-        DeclareLaunchArgument(
-            "controller_max_speed", default_value="16.0",
-            description="MPC/PP target-speed ceiling in m/s."),
-        DeclareLaunchArgument(
-            "mpc_publish_diagnostics", default_value="false",
-            description="Publish live MPC diagnostics; disabled on the normal 40 Hz path."),
-        DeclareLaunchArgument(
-            "mpc_parameter_overlay", default_value="",
-            description=("Development-only ROS parameter YAML layered over "
-                         "the competition MPC defaults.")),
-        DeclareLaunchArgument(
-            "actuator_parameter_overlay", default_value="",
-            description=("Development-only ROS parameter YAML layered over "
-                         "the actuator defaults.")),
-        DeclareLaunchArgument(
-            "odom_parameter_overlay", default_value="",
-            description=("Development-only ROS parameter YAML layered over "
-                         "the sensor-odometry defaults.")),
-        DeclareLaunchArgument(
-            "mpc_start_delay_sec", default_value="2.0",
-            description="Delay MPC startup after AMCL process start."),
+        DeclareLaunchArgument("map_yaml", default_value=""),
+        DeclareLaunchArgument("trajectory_file", default_value=""),
+        DeclareLaunchArgument("with_rviz", default_value="false"),
+        DeclareLaunchArgument("controller_max_speed", default_value="16.0"),
+        DeclareLaunchArgument("mpc_publish_diagnostics", default_value="false"),
+        DeclareLaunchArgument("mpc_start_delay_sec", default_value="2.0"),
+        DeclareLaunchArgument("mpc_parameter_overlay", default_value=""),
+        DeclareLaunchArgument("actuator_parameter_overlay", default_value=""),
+        DeclareLaunchArgument("odom_parameter_overlay", default_value=""),
         OpaqueFunction(function=_setup),
     ])

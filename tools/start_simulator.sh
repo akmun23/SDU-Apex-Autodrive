@@ -27,58 +27,6 @@ esac
 
 container_player_binary="./AutoDRIVE Simulator.x86_64"
 simulator_log_file="${SDU_APEX_SIM_LOG_FILE:--}"
-player_mount_args=()
-if [[ -n "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
-  player_dir="$(realpath -- "${SDU_APEX_SIM_PLAYER_DIR}")"
-  if [[ ! -x "${player_dir}/AutoDRIVE Simulator.x86_64" || \
-        ! -d "${player_dir}/AutoDRIVE Simulator_Data" ]]; then
-    echo "SDU_APEX_SIM_PLAYER_DIR must contain the Linux player and its _Data directory." >&2
-    exit 2
-  fi
-  container_player_binary="/tmp/sdu_apex_dev_player/AutoDRIVE Simulator.x86_64"
-  player_mount_args=(-v "${player_dir}:/tmp/sdu_apex_dev_player:ro")
-fi
-
-dynamics_mount_args=()
-if [[ -n "${SDU_APEX_SIM_DYNAMICS_DIR:-}" ]]; then
-  dynamics_dir="$(realpath -m -- "${SDU_APEX_SIM_DYNAMICS_DIR}")"
-  mkdir -p -- "${dynamics_dir}"
-  dynamics_run_id="${SDU_APEX_SIM_DYNAMICS_RUN_ID:-$(date -u +%Y%m%d_%H%M%S)}"
-  dynamics_mount_args=(
-    -v "${dynamics_dir}:/tmp/sdu_apex_dynamics:rw"
-    -e SDU_APEX_DYNAMICS_DIR=/tmp/sdu_apex_dynamics
-    -e "SDU_APEX_DYNAMICS_RUN_ID=${dynamics_run_id}"
-  )
-fi
-
-offline_profile_mount_args=()
-if [[ -n "${SDU_APEX_SIM_OFFLINE_COMMAND_PROFILE:-}" ]]; then
-  if [[ -z "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
-    echo "Offline command replay requires a source-built player via SDU_APEX_SIM_PLAYER_DIR." >&2
-    exit 2
-  fi
-  if [[ -z "${SDU_APEX_SIM_DYNAMICS_DIR:-}" ]]; then
-    echo "Offline command replay requires SDU_APEX_SIM_DYNAMICS_DIR for its capture/result." >&2
-    exit 2
-  fi
-  offline_profile_path="$(realpath -- "${SDU_APEX_SIM_OFFLINE_COMMAND_PROFILE}")"
-  if [[ ! -s "${offline_profile_path}" ]]; then
-    echo "Offline command profile is missing or empty: ${offline_profile_path}" >&2
-    exit 2
-  fi
-  offline_profile_mount_args=(
-    -v "${offline_profile_path}:/tmp/sdu_apex_offline_command_profile.json:ro"
-    -e SDU_APEX_OFFLINE_COMMAND_PROFILE=/tmp/sdu_apex_offline_command_profile.json
-    -e SDU_APEX_OFFLINE_RESULT_PATH=/tmp/sdu_apex_dynamics/offline_result.json
-  )
-  if [[ "${SDU_APEX_SIM_OFFLINE_PRACTICE_TRACK:-0}" == "1" ]]; then
-    offline_profile_mount_args+=(-e SDU_APEX_OFFLINE_PRACTICE_TRACK=1)
-  fi
-elif [[ "${SDU_APEX_SIM_OFFLINE_PRACTICE_TRACK:-0}" == "1" ]]; then
-  echo "Practice-track injection requires SDU_APEX_SIM_OFFLINE_COMMAND_PROFILE." >&2
-  exit 2
-fi
-
 case "${mode}" in
   gui)
     simulator_command="exec \"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
@@ -120,9 +68,6 @@ fi
 
 echo "Starting official ${track} simulator image in ${mode} mode: ${image}"
 echo "Unity log destination: ${simulator_log_file}"
-if [[ -n "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
-  echo "Development player overlay: ${player_dir}"
-fi
 exec docker run --rm --name "${container}" "${tty_args[@]}" \
   --log-opt max-size=10m --log-opt max-file=3 \
   --ulimit core=0 \
@@ -131,8 +76,5 @@ exec docker run --rm --name "${container}" "${tty_args[@]}" \
   ${DISPLAY:+-e DISPLAY} \
   "${xauthority_args[@]}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  "${player_mount_args[@]}" \
-  "${dynamics_mount_args[@]}" \
-  "${offline_profile_mount_args[@]}" \
   --entrypoint /bin/bash \
   "${image}" -lc "${simulator_command}"
