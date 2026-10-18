@@ -25,7 +25,7 @@ from map_track import MapGrid, map_to_track
 from native_validate import replay,export_mpc
 from transfer_correction import native_lateral_bias,candidate_warm_state
 from native_seed import generate as generate_native_seed
-from phase1_campaign import continue_phase1
+from phase1_campaign import continue_phase1, validate_restart_checkpoint
 from seed_projection import (load_native_seed, project_algebraics,
                              write_audit, validate_seed_provenance)
 
@@ -105,9 +105,12 @@ def run():
     ap.add_argument('--phase1-restarts',type=int,default=0,help='controlled Phase-I restarts from best hard-feasible but nonzero-defect checkpoint')
     ap.add_argument('--phase1-min-defect-improvement',type=float,default=1.e-5,help='minimum max-defect progress required to restart Phase I')
     ap.add_argument('--phase1-hessian', choices=('limited-memory','exact'), default='limited-memory', help='Use IPOPT L-BFGS for stiff/non-smooth Phase-I feasibility; original exact Hessian remains available')
-    ap.add_argument('--feasibility-trust-region',type=float,default=200.,help='legacy compatibility parameter; synthetic-seed Phase-I no longer enforces this artificial cap. Phase II retains its own trust regions')
+    ap.add_argument('--phase1-formulation', choices=('elastic','condensed','eliminated'), default='elastic', help='Choose historical elastic NLP or v2.4.2 reduced residual least-squares diagnostic; condensed NEVER certifies a lap')
+    ap.add_argument('--feasibility-trust-region',type=float,default=200.,help='Elastic Phase-I disables the seed-distance cap; condensed Phase-I uses four times this value as its hard numeric trust radius')
     ap.add_argument('--diagnose-initial-only',action='store_true',help='print initial constraint violations without running IPOPT or PhysX')
     ap.add_argument('--brake-zones',type=int,default=3,help='initial zero-throttle brake phase count; phase lengths optimized by IPOPT')
+    ap.add_argument('--phase1-warmstart-report', type=Path, default=None,
+                    help='Use a verified v2.4.2 Phase-I checkpoint to initialize eliminated Phase I')
     ap.add_argument('--seed-file',type=Path,default=None, help='Reuse a native_warmstart.npz for the same OCP mesh and map; skips driving warm-start')
     ap.add_argument('--no-seed-force-projection',action='store_true',help='Diagnostic: keep measured finite-difference acceleration and PhysX loads')
     ap.add_argument('--seed-backend',choices=('native','source','synthetic'),default='native',
@@ -139,7 +142,7 @@ def run():
         ap.error('invalid optimization bounds (mesh-spacing .12-.24, brake-zones 0-8, positive speed/time/iterations)')
     print('== Recover verified original IPOPT spatial min-time source ==',flush=True)
     old, wheel, track_mod, vendor, solver_overlay = load_modules(
-        args.repo_root, root, args.allow_history_fetch, args.phase1_hessian)
+        args.repo_root, root, args.allow_history_fetch, args.phase1_hessian, args.phase1_formulation)
     print(f'Original commit: {REF}',flush=True)
     print(f'Working CasADi solver: {Path(old.__file__)}',flush=True)
     print(f'Phase-I Hessian: {args.phase1_hessian}; historical source preserved: '
@@ -215,10 +218,32 @@ def run():
         run_info['warmstart_preflight']=seed_reports
         run_info['warmstart_state_path']=str(args.output/'warmstart_physx/native_warmstart.npz')
         (args.output/'provenance.json').write_text(json.dumps(run_info,indent=2)+'\n')
+    phase1_checkpoint_seed = None
+    if args.phase1_warmstart_report is not None:
+        if args.phase1_formulation != 'eliminated' or args.seed_file is None:
+            ap.error('--phase1-warmstart-report requires eliminated formulation and a matching --seed-file')
+        old_report = json.loads(args.phase1_warmstart_report.read_text())
+        if (old_report.get('phase1_strict_feasible') is not False
+                or old_report.get('solver', {}).get('feasible_incumbent') is not False
+                or old_report.get('phase1_restart_checkpoint') is None):
+            ap.error('Checkpoint source is not a verified failed Phase-I report')
+        if old_report.get('unity_vehicle_model') != json.loads(json.dumps(model.metadata())):
+            ap.error('Checkpoint source vehicle model differs from current source parameters')
+        source_track = old_report.get('track', {})
+        if (int(source_track.get('count', -1)) != track.count
+                or abs(float(source_track.get('length_m', -1)) - track.length) > 1.e-6):
+            ap.error('Checkpoint source track differs from current OCP')
+        expected_phases = int(np.count_nonzero(mask[1:] != mask[:-1])) + 1
+        phase1_checkpoint_seed = validate_restart_checkpoint(
+            old_report['phase1_restart_checkpoint'], track.count,
+            track.length, expected_phases)
+        print('== Reusing verified dynamics-infeasible checkpoint: max defect '
+              f'{phase1_checkpoint_seed[3]:.9g} (not a racing lap) ==', flush=True)
+
     print(f'== IPOPT OCP: {track.count} nodes, {int(mask.sum())} initial brake nodes, '
           f'{args.feasibility_iterations} feasibility + {args.iterations} time iterations, '
           f'Phase-I seed-distance cap=disabled, seed={args.seed_backend}, '
-          f'Phase-I elastic dynamics + safe spatial evaluations + simple bounds, '
+          f'Phase-I {args.phase1_formulation} dynamics + safe spatial evaluations + simple bounds, '
           f'Phase-I Hessian={args.phase1_hessian} ==',flush=True)
     previous_candidate=None;previous_report=None
     tracking_bias=np.zeros(track.count)
@@ -240,6 +265,15 @@ def run():
                 initial_state_seed_is_model_consistent=True,
                 phase_lengths_initial=np.asarray(previous_report['optimized_phase_lengths_m']),
                 tracking_bias_m=tracking_bias)
+        elif phase1_checkpoint_seed is not None:
+            cp_seed, cp_station, cp_lengths, cp_defect, _ = phase1_checkpoint_seed
+            kwargs.update(initial_state_seed=cp_seed,
+                          initial_state_seed_s=cp_station,
+                          phase_lengths_initial=cp_lengths,
+                          initial_state_seed_is_model_consistent=True,
+                          brake_mode_seed_source=(
+                              'v2.4.2 validated hard-safe checkpoint, '
+                              'strict dynamics infeasible (algebraic elimination)'))
         elif first_seed is not None:
             # The native measured differential state is not algebraically
             # consistent with the source-translated symbolic force model.

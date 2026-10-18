@@ -51,12 +51,26 @@ def restore(repo: Path, destination: Path, allow_fetch: bool = False) -> Path:
 
 
 def load_modules(repo: Path, package_root: Path, allow_fetch: bool = False,
-                 phase1_hessian: str = 'limited-memory'):
+                 phase1_hessian: str = 'limited-memory',
+                 phase1_formulation: str = 'elastic'):
     recovered = restore(repo, package_root/'_restored_git_history', allow_fetch)
-    from solver_overlay import prepare_working_solver
-    root, provenance = prepare_working_solver(
-        recovered, package_root / ('_working_solver_' + phase1_hessian.replace('-', '_')),
-        LEGACY, phase1_hessian)
+    if phase1_formulation == 'eliminated':
+        from solver_overlay_eliminated_v243 import prepare_working_solver_eliminated
+        root, provenance = prepare_working_solver_eliminated(
+            recovered, package_root / ('_working_solver_eliminated_' +
+                phase1_hessian.replace('-', '_')), LEGACY, phase1_hessian)
+    elif phase1_formulation == 'condensed':
+        from solver_overlay_condensed_v242 import prepare_working_solver_condensed
+        root, provenance = prepare_working_solver_condensed(
+            recovered, package_root / ('_working_solver_condensed_' +
+                phase1_hessian.replace('-', '_')), LEGACY, phase1_hessian)
+    elif phase1_formulation == 'elastic':
+        from solver_overlay import prepare_working_solver
+        root, provenance = prepare_working_solver(
+            recovered, package_root / ('_working_solver_' +
+                phase1_hessian.replace('-', '_')), LEGACY, phase1_hessian)
+    else:
+        raise ValueError('Unknown Phase-I formulation')
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     import importlib

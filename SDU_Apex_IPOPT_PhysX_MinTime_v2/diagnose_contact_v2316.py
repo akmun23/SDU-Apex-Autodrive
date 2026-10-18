@@ -146,8 +146,11 @@ def main():
     bind_current_wheel_moment_arms(root,solver,wheel)
     # Source-derived geometry: contact force-application points exactly one
     # wheel radius below wheel mount relative to Unity Rigidbody COM.
-    arm=np.array([wheel.RIGIDBODY_CENTER_OF_MASS_BODY_M[1]+model.wheel_radius_m
-                  -v[1] for v in model.suspension_base_xyz_body_m])
+    # Match the EXACT generated wheel-model expression, including the native
+    # suspension target travel between collider-ray base and loaded wheel.
+    arm=np.array([wheel.RIGIDBODY_CENTER_OF_MASS_BODY_M[1]
+                  + model.wheel_radius_m + model.suspension_target_travel_m[i]
+                  - v[1] for i,v in enumerate(model.suspension_base_xyz_body_m)])
     expected=np.array([0.0634351388,0.0634351388,0.07334,0.07334])
     if arm.shape!=(4,) or np.max(abs(arm-expected))>0.00002:
         raise RuntimeError('Unexpected native tire contact application arm geometry: '+repr(arm))
@@ -163,11 +166,13 @@ def main():
     if metrics['tire_lateral_force_n']['full_contact']['rms']>=0.3*metrics['tire_lateral_force_n']['planar']['rms']:
         raise RuntimeError('Full contact model did not improve measured tire lateral force at least 3x')
     out=a.output.resolve();out.mkdir(parents=True,exist_ok=True)
-    summary={'diagnostic':'v2316_actual_CasADi_full_contact_angular_velocity_parity',
+    summary={'diagnostic':'v241_actual_CasADi_native_contact_arm_and_angular_velocity_parity',
              'flying_lap_completed':True,'native_sample_count':len(records),
              'wheel_sample_count':len(per_wheel),
              'native_sampling_s':0.025,'saved_seed_nodes':len(seed['u_mps']),
              'source_contact_arm_down_m':arm.tolist(),
+             'source_contact_arm_target_travel_m':list(map(float,model.suspension_target_travel_m)),
+             'source_contact_arm_offset_fixed':provenance.get('source_contact_arm_25mm_offset_corrected',False),
              'saved_seed_phase_alignment':alignment,
              'per_wheel_error_metrics':metrics,
              'native_vs_measured_ay_mps2':accel,

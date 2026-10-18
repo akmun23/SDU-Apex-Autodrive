@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 
 #include "unity_source_plant.hpp"
 #include "f1tenth_localization/unity_wheel_encoder.hpp"
@@ -10,7 +11,15 @@ namespace f1tenth_localization
 
 struct PredictedPlantState
 {
+  // Source-plant state after the packet's 1 ms steps. Yaw rate in state[2]
+  // remains the uncorrected source-plant state. The causal corrected forecast
+  // is separate so it cannot silently alter other state estimates.
   std::array<double, 26> state{};
+  double raw_yaw_rate_prediction_radps{0.0};
+  double corrected_yaw_rate_prediction_radps{0.0};
+  double yaw_rate_prediction_correction_radps{0.0};
+  // 0 = raw plant, 1 = prior innovation, 2 = measured-rate trend.
+  std::uint8_t yaw_rate_prediction_mode{0};
   // Rear-axle point transformed from the actor pose after all 1 ms PhysX
   // scene steps, expressed in ROS map axes (forward, left).
   double rear_axle_x_m{0.0};
@@ -62,6 +71,18 @@ private:
   double yaw_rad_{0.0};
   double rear_axle_x_m_{0.0};
   double rear_axle_y_m_{0.0};
+  double last_raw_yaw_rate_prediction_radps_{0.0};
+  double previous_yaw_rate_prediction_residual_radps_{0.0};
+  double last_yaw_rate_measurement_radps_{0.0};
+  double previous_yaw_rate_measurement_radps_{0.0};
+  double last_steering_feedback_rad_{0.0};
+  double previous_steering_feedback_delta_rad_{0.0};
+  bool have_raw_yaw_rate_prediction_{false};
+  bool have_previous_yaw_rate_prediction_residual_{false};
+  bool have_yaw_rate_measurement_{false};
+  bool have_previous_yaw_rate_measurement_{false};
+  bool have_steering_feedback_{false};
+  bool have_steering_feedback_delta_{false};
 };
 
 }  // namespace f1tenth_localization

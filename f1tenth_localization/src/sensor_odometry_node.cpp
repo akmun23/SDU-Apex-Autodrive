@@ -498,16 +498,17 @@ private:
     std_msgs::msg::Float64MultiArray diagnostics;
     diagnostics.layout.dim.resize(1);
     diagnostics.layout.dim[0].label =
-      "sensor_corrected_source_derived_odom_v1";
-    diagnostics.layout.dim[0].size = 39;
-    diagnostics.layout.dim[0].stride = 39;
+      "sensor_corrected_source_derived_odom_v3";
+    diagnostics.layout.dim[0].size = 42;
+    diagnostics.layout.dim[0].stride = 42;
     diagnostics.data = {
       estimate.stamp_s, estimate.dt_s, estimate.body_u_mps,
       estimate.body_v_mps, estimate.body_v_com_mps,
       estimate.yaw_rate_radps, estimate.speed_mps,
       estimate.encoder_rear_axle_speed_mps,
       packet.ax_mps2, packet.ay_mps2,
-      raw_plant.state[0], raw_plant.state[1], raw_plant.state[2],
+      raw_plant.state[0], raw_plant.state[1],
+      raw_plant.raw_yaw_rate_prediction_radps,
       steering_command, throttle_command,
       static_cast<double>(packet_assembler_.packet_drop_count()),
       static_cast<double>(packet_assembler_.packet_coherence_fault_count()),
@@ -527,7 +528,10 @@ private:
       last_plant_.wheel_encoder_angle_prediction_rad[0],
       last_plant_.wheel_encoder_angle_prediction_rad[1],
       last_plant_.wheel_encoder_angle_prediction_rad[2],
-      last_plant_.wheel_encoder_angle_prediction_rad[3]};
+      last_plant_.wheel_encoder_angle_prediction_rad[3],
+      raw_plant.corrected_yaw_rate_prediction_radps,
+      raw_plant.yaw_rate_prediction_correction_radps,
+      static_cast<double>(raw_plant.yaw_rate_prediction_mode)};
     diagnostics_pub_->publish(diagnostics);
   }
 

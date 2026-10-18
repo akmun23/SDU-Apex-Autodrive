@@ -250,7 +250,7 @@ TEST(VehicleModelSourceRollout,
                   reference_output.state[UNITY_SOURCE_YAW_RATE] *
                       com_forward_from_rear_axle_m,
               1.0e-6);
-  constexpr int source_internal_index[MPC_PLANT_INTERNAL_STATE_COUNT] = {
+  constexpr int source_internal_index[MPC_OPT_PHYSICAL_NX - 6] = {
       UNITY_SOURCE_WHEEL_OMEGA_FL, UNITY_SOURCE_WHEEL_OMEGA_FR,
       UNITY_SOURCE_WHEEL_OMEGA_RL, UNITY_SOURCE_WHEEL_OMEGA_RR,
       UNITY_SOURCE_BODY_HEIGHT, UNITY_SOURCE_BODY_HEIGHT_RATE,
@@ -268,9 +268,14 @@ TEST(VehicleModelSourceRollout,
       UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FR,
       UNITY_SOURCE_LOW_SIDE_SPEED_TIME_RL,
       UNITY_SOURCE_LOW_SIDE_SPEED_TIME_RR};
-  for (int index = 0; index < MPC_PLANT_INTERNAL_STATE_COUNT; ++index) {
+  for (int index = 0; index < MPC_OPT_PHYSICAL_NX - 6; ++index) {
     EXPECT_DOUBLE_EQ(stage.next.source_plant_internal_state[index],
         reference_output.state[source_internal_index[index]]);
+  }
+  for (int wheel = 0; wheel < 4; ++wheel) {
+    EXPECT_DOUBLE_EQ(stage.next.source_plant_internal_state[
+                         MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL + wheel],
+        reference_output.wheel_rotation_angle_rad[wheel]);
   }
   for (int wheel = 0; wheel < 4; ++wheel) {
     EXPECT_DOUBLE_EQ(stage.output.longitudinal_slip[wheel],
@@ -664,8 +669,10 @@ TEST(MpcRtiStageParallelism, CondensesQueuedCommandsWithoutChangingPlantJacobian
     nominal_optimizer_state[3] = nominal_plant.v;
     nominal_optimizer_state[4] = nominal_plant.r;
     nominal_optimizer_state[5] = nominal_plant.actual_steering_angle;
-    for (int internal = 0; internal < MPC_PLANT_INTERNAL_STATE_COUNT;
-         ++internal) {
+    // The 4 accumulated wheel-rotation angles are plant outputs, not RTI
+    // coordinates. The physical optimizer vector carries the other 22
+    // internal states after its six path/body coordinates.
+    for (int internal = 0; internal < MPC_OPT_PHYSICAL_NX - 6; ++internal) {
       nominal_optimizer_state[6 + internal] = static_cast<float>(
           nominal_plant.source_plant_internal_state[internal]);
     }
@@ -1391,9 +1398,9 @@ TEST(VehicleModelSourceRollout, KeepsTheRealTimeRTIStateCompact)
   EXPECT_EQ(MPC_MODEL_NX, 32);
   EXPECT_EQ(MPC_RTI_NX, 30);
   EXPECT_EQ(RICCATI_HORIZON, PREDICTION_HORIZON + 2);
-  EXPECT_EQ(MPC_PLANT_INTERNAL_STATE_COUNT, 22);
-  EXPECT_EQ(UNITY_SOURCE_PLANT_STATE_SIZE,
-            MPC_PLANT_INTERNAL_STATE_COUNT + 4);
+  EXPECT_EQ(MPC_PLANT_INTERNAL_STATE_COUNT, 26);
+  EXPECT_EQ(MPC_OPT_PHYSICAL_NX, 28);
+  EXPECT_EQ(UNITY_SOURCE_PLANT_STATE_SIZE, 26);
 
   MpcModelState_t state = turning_state();
   const MpcModelControl_t control{0.0f, 0.0f};

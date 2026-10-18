@@ -1,3 +1,5 @@
+> **v2.4.1 contact-arm correction:** see [CHANGELOG_v2_4_1.md](CHANGELOG_v2_4_1.md). Run `bash run_convergence_campaign_v240.sh` after installing; its internal v240 names are retained. No IPOPT/native feasibility is claimed.
+
 ## v2.3.16 — Native full contact-point wheel slip
 
 The generated working CasADi wheel model now evaluates the velocity at each

@@ -13,8 +13,14 @@ namespace
 
 constexpr double kFixedStepS = 0.001;
 constexpr unsigned int kStepsPerPacket = 25;
+constexpr double kPacketPeriodS = 0.025;
 constexpr double kPi = 3.1415926535897932384626433832795;
 constexpr unsigned int kInitialRestSettleSteps = 1000;
+constexpr double kUnitySteeringRateRadps = 183.346 * kPi / 180.0;
+// Begin treating the prior innovation as stale once feedback has moved by
+// half the source-configured maximum steering travel in one sensor epoch.
+constexpr double kYawForecastSteeringTransitionRad =
+  0.5 * kUnitySteeringRateRadps * kPacketPeriodS;
 
 void copy_plant_state(
   const f1tenth_mpc::UnitySourcePlantState & input,
@@ -107,6 +113,9 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
       steering_feedback_rad, -UNITY_SOURCE_MAX_STEERING_RAD,
       UNITY_SOURCE_MAX_STEERING_RAD);
   }
+  const double steering_feedback_delta = steering_feedback_valid &&
+    have_steering_feedback_ ?
+    steering_feedback_rad - last_steering_feedback_rad_ : 0.0;
 
   const f1tenth_mpc::UnitySourcePlantInput input{
     f1tenth_mpc::unity_steering_command_normalized_to_physical_rad(
@@ -135,6 +144,71 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
   }
 
   copy_plant_state(plant_state_, &result.state);
+  result.raw_yaw_rate_prediction_radps = plant_state_.yaw_rate_radps;
+  result.corrected_yaw_rate_prediction_radps =
+    result.raw_yaw_rate_prediction_radps;
+  result.yaw_rate_prediction_mode = 0;
+  last_raw_yaw_rate_prediction_radps_ = result.raw_yaw_rate_prediction_radps;
+  have_raw_yaw_rate_prediction_ = true;
+  if (have_previous_yaw_rate_prediction_residual_) {
+    const bool steering_transition = steering_feedback_valid &&
+      have_steering_feedback_ &&
+      std::abs(steering_feedback_delta) >
+      kYawForecastSteeringTransitionRad;
+    const bool continuing_steering_ramp = steering_transition &&
+      have_steering_feedback_delta_ &&
+      std::abs(previous_steering_feedback_delta_rad_) >
+      kYawForecastSteeringTransitionRad &&
+      steering_feedback_delta * previous_steering_feedback_delta_rad_ > 0.0;
+    const bool settling_after_steering_transition =
+      steering_feedback_valid && have_steering_feedback_delta_ &&
+      !steering_transition &&
+      std::abs(previous_steering_feedback_delta_rad_) >
+      kYawForecastSteeringTransitionRad;
+
+    if (continuing_steering_ramp && have_yaw_rate_measurement_ &&
+      have_previous_yaw_rate_measurement_)
+    {
+      // In a sustained physical-steering ramp, carry the measured gyro-rate
+      // slope for one 25 ms step. The source plant remains the raw comparator;
+      // this causal trend is only the separately published yaw forecast.
+      result.corrected_yaw_rate_prediction_radps =
+        last_yaw_rate_measurement_radps_ +
+        (last_yaw_rate_measurement_radps_ -
+        previous_yaw_rate_measurement_radps_);
+      result.yaw_rate_prediction_mode = 2;
+    } else if (steering_transition || settling_after_steering_transition) {
+      // A residual learned in the preceding steering regime is stale during a
+      // reversal or the first packet after it. Keep the source-plant forecast.
+      result.yaw_rate_prediction_mode = 0;
+    } else {
+      // In a settled steering regime, cancel only the previous packet's
+      // measured source-model residual. Never inject this correction into the
+      // state propagated by the plant.
+      result.yaw_rate_prediction_correction_radps =
+        previous_yaw_rate_prediction_residual_radps_;
+      result.corrected_yaw_rate_prediction_radps -=
+        result.yaw_rate_prediction_correction_radps;
+      result.yaw_rate_prediction_mode = 1;
+    }
+    result.yaw_rate_prediction_correction_radps =
+      result.raw_yaw_rate_prediction_radps -
+      result.corrected_yaw_rate_prediction_radps;
+  }
+  if (steering_feedback_valid) {
+    if (have_steering_feedback_) {
+      previous_steering_feedback_delta_rad_ = steering_feedback_delta;
+      have_steering_feedback_delta_ = true;
+    } else {
+      previous_steering_feedback_delta_rad_ = 0.0;
+      have_steering_feedback_delta_ = false;
+    }
+    last_steering_feedback_rad_ = steering_feedback_rad;
+    have_steering_feedback_ = true;
+  } else {
+    have_steering_feedback_ = false;
+    have_steering_feedback_delta_ = false;
+  }
   result.rear_axle_x_m = rear_axle_x_m_;
   result.rear_axle_y_m = rear_axle_y_m_;
   result.wheel_rotation_angle_rad = plant_state_.wheel_rotation_angle_rad;
@@ -177,6 +251,20 @@ void SourceDerivedOdomRuntime::correct(
   {
     throw std::runtime_error("invalid sensor correction for source-derived odometry plant");
   }
+
+  if (have_raw_yaw_rate_prediction_) {
+    previous_yaw_rate_prediction_residual_radps_ =
+      last_raw_yaw_rate_prediction_radps_ - yaw_rate_radps;
+    have_previous_yaw_rate_prediction_residual_ = true;
+    have_raw_yaw_rate_prediction_ = false;
+  }
+
+  if (have_yaw_rate_measurement_) {
+    previous_yaw_rate_measurement_radps_ = last_yaw_rate_measurement_radps_;
+    have_previous_yaw_rate_measurement_ = true;
+  }
+  last_yaw_rate_measurement_radps_ = yaw_rate_radps;
+  have_yaw_rate_measurement_ = true;
 
   plant_state_.u_mps = body_u_mps;
   plant_state_.v_mps = body_v_com_mps;

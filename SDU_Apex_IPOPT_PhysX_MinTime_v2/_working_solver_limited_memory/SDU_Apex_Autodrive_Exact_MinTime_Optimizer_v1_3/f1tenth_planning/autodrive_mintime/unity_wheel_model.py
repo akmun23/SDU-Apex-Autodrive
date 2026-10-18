@@ -478,8 +478,13 @@ def tire_forces_casadi(model: UnityWheelModel, u, v, yaw_rate, steering,
         # angular_velocity x contact_arm, not the previous planar COM speed.
         # The tire-force application point is one radius below its wheel
         # centre; both mount Y and Rigidbody COM Y are Unity up-positive.
+        # The stored suspension base includes the +25 mm collider ray
+        # reference. PhysX's source tire-force application point instead uses
+        # the loaded wheel centre at target travel; otherwise roll/pitch slip
+        # velocities are computed with a contact arm 25 mm too short.
         contact_arm_down_m = (RIGIDBODY_CENTER_OF_MASS_BODY_M[1]
                               + model.wheel_radius_m
+                              + model.suspension_target_travel_m[index]
                               - model.suspension_base_xyz_body_m[index][1])
         # Body axes are forward, LEFT, up. A downward contact arm yields
         # forward correction -pitch_rate*depth and lateral +roll_rate*depth.

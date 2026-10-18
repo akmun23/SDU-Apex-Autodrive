@@ -21,7 +21,7 @@ for variant in unprojected projected; do
       --repo-root .. --mesh-spacing 0.20 --seed-backend native \
       --seed-file "$SEED" "${extras[@]}" \
       --brake-zones 0 --phase1-hessian limited-memory \
-      --feasibility-iterations 60 --phase1-restarts 2 \
+      --feasibility-iterations 500 --phase1-restarts 2 \
       --phase1-min-defect-improvement 0.00001 \
       --iterations 1 --native-correction-passes 0 --print-level 5 \
       --skip-native --physx-binary ./native_physx_vehicle_step \
@@ -43,7 +43,7 @@ if [[ "${V240_RUN_EXACT_HESSIAN:-0}" == 1 ]]; then
     --repo-root .. --mesh-spacing 0.20 --seed-backend native \
     --seed-file "$SEED" --no-seed-force-projection \
     --brake-zones 0 --phase1-hessian exact \
-    --feasibility-iterations 60 --phase1-restarts 2 \
+    --feasibility-iterations 500 --phase1-restarts 2 \
     --iterations 1 --native-correction-passes 0 --print-level 5 \
     --skip-native --physx-binary ./native_physx_vehicle_step \
     --output v240_phase1_exact --allow-history-fetch \
@@ -55,13 +55,14 @@ python3 summarize_campaign_v240.py
 # Preserve distinct directory paths; never silently overwrite same-named reports.
 zip -q -r -FS v240_review_results_upload.zip \
     v240_campaign_summary.json v240_campaign_summary.md \
-    v240_unprojected.log v240_projected.log \n    v240_unprojected.exit_status v240_projected.exit_status \
+    v240_unprojected.log v240_projected.log \
+    v240_unprojected.exit_status v240_projected.exit_status \
     v240_phase1_unprojected v240_phase1_projected \
     native_contact_v2316/summary.json \
     native_contact_v2316/per_wheel.csv \
     native_contact_v2316/per_sample.csv
 if [[ -d v240_phase1_exact ]]; then
-  zip -q -r -FS v240_review_results_upload.zip v240_phase1_exact v240_exact.log
+  zip -q -r v240_review_results_upload.zip v240_phase1_exact v240_exact.log
 fi
 printf '\nOutput: %s/v240_review_results_upload.zip\n' "$PWD"
 printf '%s\n' 'This package has NOT certified a strictly feasible minimum-time racing lap.'

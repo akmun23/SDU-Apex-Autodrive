@@ -624,18 +624,18 @@ def prepare_working_solver(recovered_root: Path, working_root: Path,
         raise FileNotFoundError('Incomplete solver cache: ' + str(dest))
     # Upgrade the source-matched wheel callback only in the GENERATED working
     # tree. Unknown local edits to either cached file fail before overwrite.
-    from wheel_model_overlay_v2316 import prepare_working_wheel_model
+    from wheel_model_overlay_v241 import prepare_working_wheel_model
     wheel_provenance = prepare_working_wheel_model(source_root, target_root,
                                                   legacy_name)
     if dest.read_text(encoding='utf-8') != patched:
         dest.write_text(patched, encoding='utf-8')
     return target_root, {
         'phase1_hessian': mode,
-        'phase1_method': 'v2.4.0 checkpointed multi-run Phase-I continuation on v2.3.16 contact-velocity physics',
+        'phase1_method': 'v2.4.1 contact-arm correction + v2.4.0 checkpointed Phase-I continuation',
         'numerical_guards_equal_on_physical_domain': True,
         'phase1_detect_simple_bounds': True,
         'physical_dynamics_changed': True,
-        'physical_dynamics_change': 'same as v2.3.16: wheel substep uses u=x[2,k] and 3-axis tire contact velocity with roll/pitch rates; v2.4.0 adds numerical checkpoint export, NO physical model changes',
+        'physical_dynamics_change': 'v2.4.1 fixes +0.025 m target travel in contact arm and preserves prior u=x[2,k] wheel substep, roll/pitch rate 3-axis contact velocities; v2.4.0 Phase-I checkpointing',
         'wheel_substep_selection': 'native-compatible forward speed <5m/s -> 5 substeps; >=5m/s -> 1',
         'phase1_checkpoint_continuation': True,
         'elastic_slack_bound_phase1': 1.0e5,

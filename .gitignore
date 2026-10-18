@@ -9,6 +9,7 @@ live_runs/
 **/build/
 **/install/
 **/log/
+SDU_Apex_IPOPT_PhysX_MinTime_v2/
 
 # Python and local tooling
 __pycache__/

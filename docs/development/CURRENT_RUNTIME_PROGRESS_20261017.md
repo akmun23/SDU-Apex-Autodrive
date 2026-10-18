@@ -1336,3 +1336,167 @@ accuracy objective nor the queue-condensing objective is complete.
   work must compare an in-process, source-derived candidate against these
   same captures and retain this result as the accuracy target; do not describe
   the existing external-process implementation as the requested port.
+
+### Runtime-cost optimization and held-out replay — 2026-10-18
+
+- Priority clarification: the objective is not to gain accuracy merely by
+  porting equations. Minimize prediction loss while keeping computation as
+  cheap as possible; retain only accuracy supported by measured captures.
+- Profiled the in-process source-derived odometry using its per-packet
+  diagnostics. Before optimization, plant advance p50/p95 was
+  `107.6/427.4 us` on `run/` and `83.5/403.5 us` on `run_1/`; whole-packet
+  processing p50/p95 was `278.7/638.8 us` and `199.6/595.9 us` respectively.
+- The measured hot path recomputed roll/pitch trigonometry and the same
+  unsteered ground-plane tire basis independently for each wheel. The source
+  plant now computes those values once per PhysX vehicle substep and reuses
+  them across all four wheel contacts and the gravity/body transforms. It does
+  not change parameters, forces, torque branches, substep size/count, or the
+  source equations. The shared slip-excess calculation uses the same cached
+  basis.
+- Built `f1tenth_localization` and `f1tenth_mpc` in Release. The focused source
+  plant and in-process odometry tests pass: 15 plant tests plus 2 runtime
+  tests. `tools/verify_runtime_topic_policy.py` passes. No simulator was
+  launched; only recorded high-speed data was replayed in isolated ROS domains.
+- The Release build exposed stale assertions and an out-of-bounds test copy in
+  the fixed-dimension MPC rollout test. Corrected its map to include the 22
+  dynamic internal optimizer coordinates while checking the four accumulated
+  wheel-rotation outputs separately. The affected rollout test now passes all
+  27 cases; production state dimensions and dynamics were not changed.
+- Replayed the same two held-out captures after the optimization, excluding
+  the recorded `/odom` and `/odom/diagnostics` inputs from playback so each bag
+  contains only one newly produced odometry stream. Clean outputs are retained
+  under `live_runs/odom_source_optimized_clean_replay_20261018/`. An initial
+  replay that accidentally merged the capture's old and new output topics was
+  invalid for accuracy scoring and has been removed; the original reference
+  captures were not changed.
+- The clean replay's accuracy summaries are unchanged from the pre-optimization
+  source-derived candidate to reported precision: `run/` has `u` RMSE
+  `0.0318 m/s`, `v` RMSE `0.0171 m/s`, relative pose endpoint error `0.072 m`;
+  `run_1/` has `u` RMSE `0.0287 m/s`, `v` RMSE `0.0211 m/s`, endpoint error
+  `0.096 m`. Both contain three laps with zero collisions and peak truth speed
+  above `8.0 m/s`. The estimator's yaw-rate output is gyro passthrough; the
+  uncorrected source model's yaw-rate RMSE remains `0.1605/0.1863 rad/s`, and
+  its IMU acceleration residuals remain material (`ax 0.629/0.641`, `ay
+  0.790/0.804 m/s^2`).
+- Post-optimization plant-advance p50/p95 is `37.0/72.2 us` and `39.9/233.4
+  us`; whole-packet p50/p95 is `75.9/129.0 us` and `85.9/355.3 us`. The
+  slower tail in the second capture is host/runtime variability, but is still
+  far below the 25 ms sensor period. One replayed command sample differed
+  slightly between two independent ROS replays because callback delivery is
+  not deterministic; aggregate held-out errors did not materially change.
+- This is a computation-cost improvement without a measured accuracy gain.
+  Against recorded v5 it improves forward-velocity and integrated-position
+  errors but slightly worsens lateral-velocity RMSE. Against the current
+  external-PhysX replay reference (`u` RMSE `0.0041/0.0055 m/s`, `v` RMSE
+  `0.0003/0.0006 m/s`, endpoint `0.003/0.012 m`), the source-derived path is
+  less accurate. It is therefore not described as a precision win or exact
+  PhysX replication; it is a faster in-process tradeoff that still needs
+  explicit acceptance against the project's required loss threshold and a
+  supervised live-simulation check before any final production sign-off.
+
+### Yaw-rate priority audit — 2026-10-18
+
+- Re-scored the two retained three-lap high-speed captures and their clean
+  source-plant replays in
+  `live_runs/odom_source_optimized_clean_replay_20261018/{run,run_1}/bag`.
+  No simulator was started. The capture has 811 and 805 matched 25 ms epochs,
+  respectively, and each completed three laps without collision.
+- Production `/odom` yaw rate is copied from the permitted IMU gyro, and its
+  heading is copied from the IMU orientation. In both replays the published
+  yaw-rate RMSE against the Unity bridge odometry is `0.0000 rad/s`; relative
+  yaw RMSE is also `0.0000 rad`. This confirms correct same-epoch sensor
+  routing on these captures, but it is not an independent physics-prediction
+  result: Unity's bridge odometry and IMU angular velocity originate from the
+  same Rigidbody state. Ground truth is not an input to the runtime.
+- The uncorrected source-plant yaw-rate forecast is not fixed to that level:
+  whole-run RMSE/bias is `0.1605/-0.0846 rad/s` and `0.1863/-0.0934 rad/s`.
+  For measured `|steering|=0.15–0.30 rad`, RMSE rises to `0.2515` and
+  `0.2798 rad/s`; the model overpredicts turn-rate magnitude. At
+  `|steering|<0.10 rad`, RMSE is `0.0470` and `0.0606 rad/s`; at 6–8 m/s it
+  is `0.0190` and `0.0213 rad/s`. Almost all high-steer samples are negative
+  steering in these two runs, so the opposite-turn transfer is not established.
+- This is predominantly sustained cornering error, not an onset-only effect:
+  781/810 and 759/804 samples meet the near-steady criterion
+  (`|steering rate| <= 0.5 rad/s`), and their yaw RMSE remains `0.163` and
+  `0.188 rad/s`. In the
+  high-steer subset, the model's lateral-acceleration residual has RMSE
+  `0.993/0.939 m/s^2` and signed bias `-0.857/-0.810 m/s^2`. Across each
+  complete run, yaw-rate and lateral-acceleration residuals correlate at
+  `0.75/0.80`. This supports excessive modeled lateral tire response/yaw
+  moment as the leading shared cause; it does not uniquely identify which
+  wheel-force component is wrong.
+- Source tracing confirms why a source-only exact correction is not yet
+  justified. The active prefab supplies the sideways curve points
+  (`0.01, 1.0, 0.1, 0.5`, stiffness `1`), but the production plant evaluates
+  them with a locally chosen cubic response. Unity documents a two-piece
+  spline and zero tangent at the extremum/asymptote, but does not publish the
+  native WheelCollider spline coefficients or contact-force implementation
+  [Unity `WheelFrictionCurve` API](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/WheelFrictionCurve.html).
+  Thus the curve endpoints are source-known; its exact runtime force response
+  remains Unity-specific and is not directly recoverable from these bags.
+- No force-law coefficient was changed. Scaling yaw independently would break
+  the force/moment relationship, while scaling all lateral forces could
+  regress the currently acceptable lateral-speed and position estimates.
+  The evidence is sufficient to target the sideways tire-force response next,
+  but not to claim its exact cause or safely select a correction yet. Preserve
+  the measured gyro/orientation path for odometry; evaluate any physically
+  interpretable tire-response candidate on training captures and at least one
+  whole held-out run, reporting yaw rate, lateral acceleration, `v`, and
+  position together. The odometry yaw output is accurate on the existing
+  replay evidence; the free-running yaw forecast is not.
+
+### Unity WheelCollider yaw-transient source audit — 2026-10-18
+
+- The user correctly rejected treating the prior-residual / gyro-trend forecast
+  as a PhysX fix. It is only an experimental one-step signal correction and
+  does not reproduce a Unity tire or rigid-body calculation.
+- Unity project timing is `Time.fixedDeltaTime = 0.001 s`. In
+  `VehicleController.FixedUpdate()`, `currentS` is sampled from the current
+  internal steering angle **before** `Steer()` updates the rate-limited rack
+  and writes Ackermann front-wheel angles; `currentT` is similarly sampled
+  before `Drive()` updates wheel torque/brakes. Thus the bridge's actuator
+  feedback is not the complete per-wheel actuation history for the interval.
+  The source rate is `183.346 deg/s` (about `0.0032 rad` per fixed step), and
+  the front-wheel angles are calculated separately from rack angle.
+- Unity's intended yaw mechanism is the sum of each wheel's tire/contact forces
+  and their moments about the Rigidbody COM, integrated by PhysX into body
+  velocity and angular velocity. `WheelCollider` performs ray-based wheel
+  contact, spring/damper support, and slip-based forward/sideways tire friction;
+  this behavior is described in Unity's official [WheelCollider friction
+  manual](https://docs.unity3d.com/cn/2023.2/Manual/wheel-colliders-friction.html)
+  and [WheelHit API](https://docs.unity3d.com/cn/6000.0/ScriptReference/WheelHit.html).
+  The current source plant already models per-wheel contact kinematics,
+  `v + omega x r`, wheel spin, slip, spring/damper load, tire-force curves,
+  force-application moments, and 1 ms propagation. Those equations are adapted
+  from public NVIDIA `PxVehicle` source; that public vehicle SDK is not proof
+  of an exact copy of Unity's private native `WheelCollider` implementation.
+- Existing practice data still lacks `WheelHit` slip/contact/load channels and
+  a Unity physics-step identifier. The bridge diagnostic schema also leaves
+  `simulation_physics_step`, applied command sequence, and simulation time
+  empty. On the practice capture, the source-plant yaw forecast at sample 798
+  predicts `-0.204 rad/s` versus GT `+0.289 rad/s`; across the preceding epoch,
+  measured yaw changes `+0.822 -> +0.289`, steering feedback
+  `+0.114 -> +0.037 rad`, and throttle feedback `0.149 -> 0.001`. This is a
+  braking-plus-steering-unwind transient where the modeled yaw reversal is too
+  strong; available channels do not identify whether the error is contact/slip,
+  combined tire force, normal load, or command/feedback timing.
+- Replayed the v3 diagnostic candidate on practice plus both held-out fast
+  captures. Practice raw forecast RMSE/p95/p99/max is
+  `0.0641/0.0871/0.3443/0.8496 rad/s`; the experimental trend/residual output
+  is `0.0424/0.0623/0.2298/0.4926`. The two fast captures' experimental RMSE is
+  `0.0197/0.0262 rad/s`, with maxima `0.1789/0.1946`. These are forecast-only
+  diagnostic results, not an odometry-output change and not validation of a
+  PhysX correction. The large practice tail remains unacceptable.
+- Required next step before changing tire-force equations: add a
+  development-only, non-physics-changing 1 kHz capture of each WheelCollider's
+  `GetGroundHit` result (`forwardSlip`, `sidewaysSlip`, normal/contact point,
+  and reported contact force), plus wheel RPM, `steerAngle`, motor/brake torque,
+  Rigidbody linear/angular velocity, and the exact fixed-step/command sequence.
+  `WheelHit` does not expose the two tire-force components directly, so compare
+  its measured slips and normal load first, then compare the aggregate
+  tire-force/moment implied by 1 kHz Rigidbody acceleration. Keep this
+  instrumentation offline/development-only: it must not become an odometry or
+  MPC input in the competition runtime. Use it to localize the first mismatch
+  (actuator timing, slip, load, force curve, application point, or integration)
+  before modifying production equations. No generic additional data campaign
+  is justified yet.

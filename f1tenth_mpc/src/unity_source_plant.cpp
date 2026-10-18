@@ -77,6 +77,16 @@ constexpr double kTireLoadFilterMaxValue = 3.0;
 
 using Vec3 = std::array<double, 3>;
 
+struct AttitudeBasis {
+  double sr{};
+  double cr{1.0};
+  double sp{};
+  double cp{1.0};
+  Vec3 ground_normal_body{};
+  Vec3 tire_longitudinal_unsteered_body{};
+  Vec3 tire_lateral_unsteered_body{};
+};
+
 Vec3 add(const Vec3 &a, const Vec3 &b)
 {
   return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
@@ -104,22 +114,52 @@ Vec3 cross(const Vec3 &a, const Vec3 &b)
           a[0] * b[1] - a[1] * b[0]};
 }
 
-Vec3 rotate_body_to_world(const UnitySourcePlantState &s, const Vec3 &v)
+Vec3 rotate_body_to_world(const AttitudeBasis &attitude, const Vec3 &v)
 {
-  const double sr = std::sin(s.roll_rad), cr = std::cos(s.roll_rad);
-  const double sp = std::sin(s.pitch_rad), cp = std::cos(s.pitch_rad);
-  return {cp * v[0] + sp * (sr * v[1] + cr * v[2]),
-          cr * v[1] - sr * v[2],
-          -sp * v[0] + cp * (sr * v[1] + cr * v[2])};
+  return {attitude.cp * v[0] + attitude.sp *
+            (attitude.sr * v[1] + attitude.cr * v[2]),
+          attitude.cr * v[1] - attitude.sr * v[2],
+          -attitude.sp * v[0] + attitude.cp *
+            (attitude.sr * v[1] + attitude.cr * v[2])};
 }
 
-Vec3 rotate_world_to_body(const UnitySourcePlantState &s, const Vec3 &v)
+Vec3 rotate_world_to_body(const AttitudeBasis &attitude, const Vec3 &v)
 {
-  const double sr = std::sin(s.roll_rad), cr = std::cos(s.roll_rad);
-  const double sp = std::sin(s.pitch_rad), cp = std::cos(s.pitch_rad);
-  return {cp * v[0] - sp * v[2],
-          sp * sr * v[0] + cr * v[1] + cp * sr * v[2],
-          sp * cr * v[0] - sr * v[1] + cp * cr * v[2]};
+  return {attitude.cp * v[0] - attitude.sp * v[2],
+          attitude.sp * attitude.sr * v[0] + attitude.cr * v[1] +
+            attitude.cp * attitude.sr * v[2],
+          attitude.sp * attitude.cr * v[0] - attitude.sr * v[1] +
+            attitude.cp * attitude.cr * v[2]};
+}
+
+bool make_attitude_basis(const UnitySourcePlantState &s,
+                         AttitudeBasis *attitude)
+{
+  if (!attitude) return false;
+  attitude->sr = std::sin(s.roll_rad);
+  attitude->cr = std::cos(s.roll_rad);
+  attitude->sp = std::sin(s.pitch_rad);
+  attitude->cp = std::cos(s.pitch_rad);
+  attitude->ground_normal_body = {
+    -attitude->sp, attitude->cp * attitude->sr,
+    attitude->cp * attitude->cr};
+
+  // This tire basis depends only on chassis attitude and the ground plane,
+  // not on the wheel. Compute it once per PhysX vehicle substep and reuse it
+  // for all four contacts.
+  const Vec3 chassis_lateral_world = rotate_body_to_world(
+      *attitude, Vec3{0.0, 1.0, 0.0});
+  const Vec3 world_up{0.0, 0.0, 1.0};
+  Vec3 long_raw_world = cross(chassis_lateral_world, world_up);
+  const double long_norm = std::sqrt(dot(long_raw_world, long_raw_world));
+  if (!(long_norm > 1.0e-8)) return false;
+  long_raw_world = scale(long_raw_world, 1.0 / long_norm);
+  const Vec3 lateral_raw_world = cross(world_up, long_raw_world);
+  attitude->tire_longitudinal_unsteered_body = rotate_world_to_body(
+      *attitude, long_raw_world);
+  attitude->tire_lateral_unsteered_body = rotate_world_to_body(
+      *attitude, lateral_raw_world);
+  return true;
 }
 
 struct WheelContactKinematics {
@@ -133,15 +173,11 @@ struct WheelContactKinematics {
 };
 
 bool wheel_contact_kinematics(const UnitySourcePlantState &s,
+                              const AttitudeBasis &attitude,
                               std::size_t wheel, double steering_rad,
                               WheelContactKinematics *out)
 {
   if (!out || wheel >= 4) return false;
-  const double sr = std::sin(s.roll_rad), cr = std::cos(s.roll_rad);
-  const double sp = std::sin(s.pitch_rad), cp = std::cos(s.pitch_rad);
-  // R_y(pitch) R_x(roll) maps the model body frame to the world frame. The
-  // ground normal expressed in the body frame is R^T * world-up.
-  const Vec3 normal_body{-sp, cp * sr, cp * cr};
   const Vec3 suspension_direction{0.0, 0.0, -1.0};
   const Vec3 wheel_center{kWheelX[wheel], kWheelY[wheel],
                           kWheelCenterZCom[wheel]};
@@ -151,13 +187,14 @@ bool wheel_contact_kinematics(const UnitySourcePlantState &s,
                         kComOffsetFromActorBody[1],
                         kComOffsetFromActorBody[2]};
   const double ray_direction_dot_normal =
-      dot(normal_body, suspension_direction);
+      dot(attitude.ground_normal_body, suspension_direction);
   if (std::abs(ray_direction_dot_normal) < 1.0e-8) return false;
 
   // Intersect PhysX's suspension ray with the flat racing surface. PhysX
   // defines jounce as (2*radius + maxCompression) minus ray travel.
   const double ray_travel = -(s.body_height_m +
-      dot(normal_body, com_offset) + dot(normal_body, ray_start)) /
+      dot(attitude.ground_normal_body, com_offset) +
+      dot(attitude.ground_normal_body, ray_start)) /
       ray_direction_dot_normal;
   const double rest_travel =
       2.0 * kWheelRadiusM + kSuspensionMaxCompressionM;
@@ -166,35 +203,28 @@ bool wheel_contact_kinematics(const UnitySourcePlantState &s,
       kSuspensionMaxCompressionM);
   out->contact_position_body = add(ray_start,
       scale(suspension_direction, rest_travel - out->jounce_m));
-  out->ground_normal_body = normal_body;
+  out->ground_normal_body = attitude.ground_normal_body;
 
   // PxVehicleUpdate computes wheel-bottom velocity as v_COM + omega x r,
   // then projects tire directions onto the hit plane. Use all three angular
   // rates and solve the same ground-plane tire basis in the current attitude.
   const double body_vertical_speed =
-      (s.body_height_rate_mps + sp * s.u_mps - cp * sr * s.v_mps) /
-      (cp * cr);
+      (s.body_height_rate_mps + attitude.sp * s.u_mps -
+       attitude.cp * attitude.sr * s.v_mps) /
+      (attitude.cp * attitude.cr);
   const Vec3 body_velocity{s.u_mps, s.v_mps, body_vertical_speed};
   const Vec3 angular_velocity{
       s.roll_rate_radps, s.pitch_rate_radps, s.yaw_rate_radps};
   const Vec3 wheel_bottom_velocity = add(
       body_velocity, cross(angular_velocity, out->contact_position_body));
 
-  const Vec3 chassis_lateral_world =
-      rotate_body_to_world(s, Vec3{0.0, 1.0, 0.0});
-  const Vec3 world_up{0.0, 0.0, 1.0};
-  Vec3 long_raw_world = cross(chassis_lateral_world, world_up);
-  const double long_norm = std::sqrt(dot(long_raw_world, long_raw_world));
-  if (!(long_norm > 1.0e-8)) return false;
-  long_raw_world = scale(long_raw_world, 1.0 / long_norm);
-  const Vec3 lateral_raw_world = cross(world_up, long_raw_world);
-  const Vec3 long_raw_body = rotate_world_to_body(s, long_raw_world);
-  const Vec3 lateral_raw_body = rotate_world_to_body(s, lateral_raw_world);
   const double cs = std::cos(steering_rad), sn = std::sin(steering_rad);
   out->tire_longitudinal_body = add(
-      scale(long_raw_body, cs), scale(lateral_raw_body, sn));
+      scale(attitude.tire_longitudinal_unsteered_body, cs),
+      scale(attitude.tire_lateral_unsteered_body, sn));
   out->tire_lateral_body = subtract(
-      scale(lateral_raw_body, cs), scale(long_raw_body, sn));
+      scale(attitude.tire_lateral_unsteered_body, cs),
+      scale(attitude.tire_longitudinal_unsteered_body, sn));
   out->forward_speed_mps = dot(wheel_bottom_velocity,
                                out->tire_longitudinal_body);
   out->lateral_speed_mps = dot(wheel_bottom_velocity,
@@ -266,10 +296,13 @@ bool source_slip_excess(
 {
   if (!slip || !excess_mps || !derivative_wheel_omega ||
       !finite_state(state)) return false;
+  AttitudeBasis attitude;
+  if (!make_attitude_basis(state, &attitude)) return false;
   const auto steer = wheel_steering_angles(state.physical_steering_rad);
   for (std::size_t i = 0; i < 4; ++i) {
     WheelContactKinematics contact;
-    if (!wheel_contact_kinematics(state, i, steer[i], &contact)) return false;
+    if (!wheel_contact_kinematics(state, attitude, i, steer[i], &contact))
+      return false;
     const double wheel_forward = contact.forward_speed_mps;
     const double wheel_surface = state.wheel_omega_radps[i] * kWheelRadiusM;
     const double denominator =
@@ -486,12 +519,14 @@ bool step(const UnitySourcePlantState &input_state,
   double ax = 0.0, ay = 0.0, yaw_accel = 0.0;
   std::array<double, 4> final_jounce_rate{};
   for (unsigned int substep = 0; substep < substep_count; ++substep) {
+    AttitudeBasis attitude;
+    if (!make_attitude_basis(s, &attitude)) return false;
     std::array<double, 4> jounce{};
     std::array<double, 4> jounce_rate{};
     Vec3 total_force_body{0.0, 0.0, 0.0};
     Vec3 total_torque_body{0.0, 0.0, 0.0};
     for (std::size_t i = 0; i < 4; ++i) {
-      if (!wheel_contact_kinematics(s, i, steer[i], &contacts[i]))
+      if (!wheel_contact_kinematics(s, attitude, i, steer[i], &contacts[i]))
         return false;
       jounce[i] = contacts[i].jounce_m;
       if (s.suspension_history_initialized) {
@@ -596,7 +631,7 @@ bool step(const UnitySourcePlantState &input_state,
     const Vec3 body_angular_velocity{
         s.roll_rate_radps, s.pitch_rate_radps, s.yaw_rate_radps};
     const Vec3 gravity_body = rotate_world_to_body(
-        s, Vec3{0.0, 0.0, -kGravity});
+        attitude, Vec3{0.0, 0.0, -kGravity});
     // This is inertial acceleration in body coordinates (what the IMU
     // measures); subtract omega x v separately when differentiating the
     // body-frame velocity state.
@@ -609,7 +644,7 @@ bool step(const UnitySourcePlantState &input_state,
     ax = inertial_acceleration_body[0];
     ay = inertial_acceleration_body[1];
     const double heave_accel =
-        rotate_body_to_world(s, inertial_acceleration_body)[2];
+        rotate_body_to_world(attitude, inertial_acceleration_body)[2];
 
     const auto angular_accel = angular_acceleration(
         total_torque_body);

@@ -281,7 +281,7 @@ def report_odom_diagnostics(
         return
     print("\nOdometry source breakdown (Unity truth is evaluation-only):")
     print(f"  diagnostic label: {diagnostics[0].get('label', '<missing>')}")
-    print("  fields: logged raw plant u/v/r, corrected output, encoder-derived speed")
+    print("  fields: raw source-plant u/v/r, gyro-corrected yaw forecast when available, encoder speed")
     # In this node diagnostics and odom are emitted once per synchronized
     # sensor packet. Use sequence pairing when counts agree; the diagnostics
     # array's internal stamp is a relative 25 ms clock, not the bag ROS stamp.
@@ -299,7 +299,7 @@ def report_odom_diagnostics(
             if gt is not None and est is not None:
                 aligned.append((gt, est, diag))
         rows = aligned
-    for gt, est, diag in rows:
+    for sample_index, (gt, est, diag) in enumerate(rows):
         values = diag.get("values", [])
         if len(values) < 35:
             continue
@@ -310,6 +310,7 @@ def report_odom_diagnostics(
         feedback_steer = nearest_by_stamp(steering_rows, gt["bag_time"])
         feedback_throttle = nearest_by_stamp(throttle_rows, gt["bag_time"])
         samples.append({
+            "sample_index": float(sample_index),
             "speed": speed,
             "steering": abs(float(feedback_steer["value"])) if feedback_steer else 0.0,
             "throttle": float(feedback_throttle["value"]) if feedback_throttle else 0.0,
@@ -318,6 +319,21 @@ def report_odom_diagnostics(
             "v_error": est["v"] - gt_rear_v,
             "raw_v_error": values[11] - (gt["v"]),
             "yaw_error": values[12] - gt["r"],
+            "corrected_yaw_error": (
+                values[39] - gt["r"] if len(values) >= 41 and
+                any(version in diag.get("label", "") for version in (
+                    "source_derived_odom_v2", "source_derived_odom_v3"))
+                else math.nan
+            ),
+            "gt_yaw_rate": gt["r"],
+            "raw_yaw_prediction": values[12],
+            "corrected_yaw_prediction": (
+                values[39] if len(values) >= 41 and
+                any(version in diag.get("label", "") for version in (
+                    "source_derived_odom_v2", "source_derived_odom_v3"))
+                else math.nan
+            ),
+            "yaw_prediction_mode": values[41] if len(values) >= 42 else -1.0,
             "encoder_speed": values[7],
             "encoder_u_error": values[7] - gt["u"],
             "wheel_body_mismatch": 0.059 * 0.5 * (values[22] + values[23]) - values[10],
@@ -334,10 +350,33 @@ def report_odom_diagnostics(
         print(f"  {label}: n={len(selected)}")
         for key, unit in (("u_error", "m/s"), ("raw_u_error", "m/s"),
                           ("encoder_u_error", "m/s"), ("v_error", "m/s"),
-                          ("yaw_error", "rad/s"), ("wheel_body_mismatch", "m/s")):
+                          ("wheel_body_mismatch", "m/s")):
             errors = [sample[key] for sample in selected]
             print(f"    {key}: bias={statistics.mean(errors):+.4f} "
                   f"RMSE={math.sqrt(statistics.mean(x*x for x in errors)):.4f} {unit}")
+        for label, key, prediction_key in (
+            ("raw_yaw_forecast", "yaw_error", "raw_yaw_prediction"),
+            ("corrected_yaw_forecast", "corrected_yaw_error",
+             "corrected_yaw_prediction"),
+        ):
+            valid = [s for s in selected if math.isfinite(s[key])]
+            errors = [s[key] for s in valid]
+            if not errors:
+                continue
+            worst = max(valid, key=lambda s: abs(s[key]))
+            absolute = [abs(error) for error in errors]
+            print(f"    {label}: bias={statistics.mean(errors):+.4f} "
+                  f"RMSE={math.sqrt(statistics.mean(x*x for x in errors)):.4f} "
+                  f"p95={percentile(absolute, 0.95):.4f} "
+                  f"p99={percentile(absolute, 0.99):.4f} "
+                  f"max={abs(worst[key]):.4f} rad/s at sample "
+                  f"{int(worst['sample_index'])} "
+                  f"(GT={worst['gt_yaw_rate']:+.3f}, "
+                  f"prediction={worst[prediction_key]:+.3f}, "
+                  f"speed={worst['speed']:.2f}m/s, "
+                  f"|steer|={worst['steering']:.3f}rad, "
+                  f"throttle={worst['throttle']:.3f}, "
+                  f"mode={int(worst['yaw_prediction_mode'])})")
         print(f"    raw_model_vs_IMU accel RMSE: ax={math.sqrt(statistics.mean(x['model_ax_error']**2 for x in selected)):.3f}, "
               f"ay={math.sqrt(statistics.mean(x['model_ay_error']**2 for x in selected)):.3f} m/s2")
     show("all", samples)
@@ -561,7 +600,8 @@ def report_imu_velocity_propagation(
         # the previous sensor-corrected production state.
         current_diag = odom_diagnostics[i] if len(odom_diagnostics) == len(common) else {}
         has_raw_plant = (
-            "odom_v6" in current_diag.get("label", "") and
+            ("odom_v6" in current_diag.get("label", "") or
+             "sensor_corrected_source_derived_odom_v" in current_diag.get("label", "")) and
             len(current_diag.get("values", [])) >= 35
         )
         raw_model_u = current_diag["values"][10] if has_raw_plant else odom_now["u"]
