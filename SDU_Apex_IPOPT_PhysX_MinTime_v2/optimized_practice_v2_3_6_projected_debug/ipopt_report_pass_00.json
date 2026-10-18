@@ -1,0 +1,472 @@
+{
+  "optimizer": "CasADi/IPOPT phase-switched spatial direct collocation",
+  "track": {
+    "count": 143,
+    "length_m": 28.410164690649342,
+    "spacing_m_mean": 0.19867248035419122,
+    "spacing_m_min": 0.19867248035419038,
+    "spacing_m_max": 0.19867248035419394,
+    "curvature_abs_max_m_inv": 0.8747620678707339,
+    "left_min_m": 0.4882486206901658,
+    "right_min_m": 0.425
+  },
+  "unity_vehicle_model": {
+    "source_capture": null,
+    "source_config": {
+      "active_prefab": "external/autodrive-unity-source/Assets/Prefabs/F1TENTH/F1TENTH.prefab",
+      "physx_source_commit": "a2c0428acab643e60618c681b501e86f7fd558cc"
+    },
+    "mass_kg": 3.47,
+    "yaw_inertia_kgm2": 0.100088306,
+    "wheel_radius_m": 0.059,
+    "wheel_radius_scale": 1.0,
+    "wheel_inertia_kgm2": 0.0001897145,
+    "wheel_inertia_derivation": "Unity WheelCollider::AddWheelToExistingVehicle sets PhysX mMOI=0.5*mMass*(effectiveRadius)^2; active F1TENTH prefab has mass 0.109 kg, radius 0.059 m, unit transform scale",
+    "wheel_damping_nms": 0.25,
+    "wheel_mass_kg": 0.109,
+    "sprung_masses_kg": [
+      0.8172174,
+      0.8160214,
+      0.9189909,
+      0.9177702
+    ],
+    "sprung_mass_derivation": "Unity WheelCollider::UpdateVehicleSpringCMOffsetsAndMasses passes transformed wheel-centre offsets, Rigidbody COM and mass to PxVehicleComputeSprungMasses(gravityDirection=1)",
+    "suspension_target_position": 0.5,
+    "wheel_spin_damping_time_constant_s": 0.000758858,
+    "steering_limit_rad": 0.5235987755982989,
+    "steering_rate_radps": 3.2,
+    "motor_torque_total_nm": 428.0,
+    "forward_curves": [
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ],
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ],
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ],
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ]
+    ],
+    "lateral_curves": [
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ],
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ],
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ],
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ]
+    ],
+    "tire_force_model": "Unity VehicleComputeTireForce from matching UnityPlayer symbol-bearing build; curve response and combined-slip ellipse are direct native-code translations",
+    "tire_load_filter": {
+      "points": [
+        0.0,
+        0.2308,
+        3.0,
+        3.0
+      ],
+      "rest_load_kg": [
+        0.9262174,
+        0.9250214,
+        1.0279909,
+        1.0267702
+      ],
+      "source": "PhysX 4.1 PxVehicleTireLoadFilterData default; rest load is wheel mass plus sprung mass"
+    },
+    "load_model": "PhysX 4.1 source spring/damper force for a flat horizontal contact plane; uses source ray direction, jounce, gravity projection, and contact-normal projection",
+    "load_model_id": "unity_sprung_mass_spring_damper_heave_roll_pitch_v1",
+    "suspension": {
+      "target_travel_m": [
+        0.025,
+        0.025,
+        0.025,
+        0.025
+      ],
+      "spring_n_per_m": [
+        500.0,
+        500.0,
+        500.0,
+        500.0
+      ],
+      "damper_ns_per_m": [
+        100.0,
+        100.0,
+        100.0,
+        100.0
+      ],
+      "travel_distance_m": 0.05,
+      "wheel_camber_rad": [
+        -0.08726646259971649,
+        0.08726646259971649,
+        0.0,
+        0.0
+      ],
+      "reference_body_height_m": 0.00464804098,
+      "inertia_pitch_kgm2": 0.0934206,
+      "inertia_roll_kgm2": 0.0228149127,
+      "force_application_point_distance_m": 0.0
+    },
+    "model_boundary": "Historical CasADi differential/algebraic tire+wheel+spring model; not native PhysX scene solver, collision impulses, wheel-contact recursion or exact 1 ms map. Mandatory native replay follows.",
+    "tire_slip_coordinates": "PhysX 4.1 applied-torque branch (Unity NoDrive has motor or brake torque at each optimizer node): longSlip=(R*omega-vx)/(max(abs(vx),abs(R*omega))+0.1m); lateralSlip=atan(vy/(abs(vx)+1m)). The remaining approximation is the planar contact-point/tire-axis velocity reconstruction; low-speed sticky constraints are not modeled.",
+    "source_origin": "f1tenth_mpc/src/unity_source_plant.cpp + f1tenth_localization/config/physx_odom_reset_initial.json"
+  },
+  "elapsed_s": 135.02409060599894,
+  "solver": {
+    "success": false,
+    "return_status": "Maximum_Iterations_Exceeded",
+    "ipopt_converged": false,
+    "iterations": 50,
+    "exception": null,
+    "feasible_incumbent": false
+  },
+  "solve_stages": [
+    {
+      "name": "elastic model-consistent initialization",
+      "initial_raw_max_defect": 4.055589628303518,
+      "initial_elastic_merit": 397.2896392200022,
+      "best_raw_max_defect": 12.311627532674281,
+      "best_elastic_merit": 260.53762002291444,
+      "strict_max_constraint_violation": 12.311627532674281,
+      "final_exact_physics_feasible": false,
+      "accepted_iterate": "ipopt_hard_feasible_backtrack",
+      "feasible_iteration_improvements": 5,
+      "accepted_hard_feasible_backtracks": 5,
+      "callback_errors": 0,
+      "ipopt_status": "Maximum_Iterations_Exceeded",
+      "ipopt_iterations": 50,
+      "solver_exception": null,
+      "worst_constraints": [
+        {
+          "label": "elastic_bound_lateral_force_balance_k7",
+          "index": 254,
+          "violation": 12.311627532674281,
+          "value": 12.311627532674281,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k9",
+          "index": 320,
+          "violation": 9.877798739761404,
+          "value": 9.877798739761404,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k134",
+          "index": 4445,
+          "violation": 5.435767046425016,
+          "value": -5.435767046425016,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k24",
+          "index": 815,
+          "violation": 5.386639313182462,
+          "value": -5.386639313182462,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k124",
+          "index": 4115,
+          "violation": 5.146032117436453,
+          "value": -5.146032117436453,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k122",
+          "index": 4049,
+          "violation": 4.904767830454365,
+          "value": -4.904767830454365,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k118",
+          "index": 3917,
+          "violation": 4.765437933076251,
+          "value": -4.765437933076251,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k26",
+          "index": 881,
+          "violation": 4.761673782445648,
+          "value": -4.761673782445648,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k5",
+          "index": 188,
+          "violation": 4.688287978587143,
+          "value": 4.688287978587143,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k136",
+          "index": 4511,
+          "violation": 4.64667033171894,
+          "value": -4.64667033171894,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k120",
+          "index": 3983,
+          "violation": 4.588600100279181,
+          "value": -4.588600100279181,
+          "lower": -0.0,
+          "upper": 0.0
+        },
+        {
+          "label": "elastic_bound_lateral_force_balance_k69",
+          "index": 2300,
+          "violation": 4.5790741894303375,
+          "value": 4.5790741894303375,
+          "lower": -0.0,
+          "upper": 0.0
+        }
+      ]
+    }
+  ],
+  "selected_stage": "elastic model-consistent initialization",
+  "nlp_diagnostics": {
+    "max_constraint_violation": 12.311627532674281,
+    "nonfinite_constraint_count": 0,
+    "worst_constraints": [
+      {
+        "label": "elastic_bound_lateral_force_balance_k7",
+        "index": 254,
+        "violation": 12.311627532674281,
+        "value": 12.311627532674281,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k9",
+        "index": 320,
+        "violation": 9.877798739761404,
+        "value": 9.877798739761404,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k134",
+        "index": 4445,
+        "violation": 5.435767046425016,
+        "value": -5.435767046425016,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k24",
+        "index": 815,
+        "violation": 5.386639313182462,
+        "value": -5.386639313182462,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k124",
+        "index": 4115,
+        "violation": 5.146032117436453,
+        "value": -5.146032117436453,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k122",
+        "index": 4049,
+        "violation": 4.904767830454365,
+        "value": -4.904767830454365,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k118",
+        "index": 3917,
+        "violation": 4.765437933076251,
+        "value": -4.765437933076251,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k26",
+        "index": 881,
+        "violation": 4.761673782445648,
+        "value": -4.761673782445648,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k5",
+        "index": 188,
+        "violation": 4.688287978587143,
+        "value": 4.688287978587143,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k136",
+        "index": 4511,
+        "violation": 4.64667033171894,
+        "value": -4.64667033171894,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k120",
+        "index": 3983,
+        "violation": 4.588600100279181,
+        "value": -4.588600100279181,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k69",
+        "index": 2300,
+        "violation": 4.5790741894303375,
+        "value": 4.5790741894303375,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k25",
+        "index": 848,
+        "violation": 4.531119170045164,
+        "value": -4.531119170045164,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k102",
+        "index": 3389,
+        "violation": 4.442345408122872,
+        "value": -4.442345408122872,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k100",
+        "index": 3323,
+        "violation": 4.248482967493225,
+        "value": -4.248482967493225,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k90",
+        "index": 2993,
+        "violation": 4.228388842217738,
+        "value": -4.228388842217738,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k0",
+        "index": 23,
+        "violation": 4.172530097589314,
+        "value": 4.172530097589314,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k15",
+        "index": 518,
+        "violation": 4.165204467549697,
+        "value": -4.165204467549697,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k98",
+        "index": 3257,
+        "violation": 4.069499747388835,
+        "value": -4.069499747388835,
+        "lower": -0.0,
+        "upper": 0.0
+      },
+      {
+        "label": "elastic_bound_lateral_force_balance_k91",
+        "index": 3026,
+        "violation": 4.031419395630447,
+        "value": -4.031419395630447,
+        "lower": -0.0,
+        "upper": 0.0
+      }
+    ],
+    "raw_max_dynamic_defect": 12.311627532674281,
+    "max_elastic_slack": 12.311627532674281,
+    "elastic_merit": 260.5376200229144,
+    "initial_guess": {
+      "max_constraint_violation": 0.0,
+      "nonfinite_constraint_count": 0,
+      "worst_constraints": []
+    },
+    "feasible_incumbent": false,
+    "solver_error": null
+  },
+  "phase1_exact_zero_slack_audited": true,
+  "phase1_strict_feasible": false,
+  "brake_mode_seed_source": "native-PhysX motion with symbolic algebraic projection",
+  "phase1_solver_overlay": {
+    "phase1_hessian": "limited-memory",
+    "phase1_method": "v2.3.6 native forward-speed wheel substep fix + v2.3.5 checkpoint backtracking",
+    "numerical_guards_equal_on_physical_domain": true,
+    "phase1_detect_simple_bounds": true,
+    "physical_dynamics_changed": true,
+    "physical_dynamics_change": "wheel substep count uses u=x[2,k], not ey=x[0,k]; historic source preserved",
+    "wheel_substep_selection": "native-compatible forward speed <5m/s -> 5 substeps; >=5m/s -> 1",
+    "elastic_slack_bound_phase1": 100000.0,
+    "elastic_slack_bound_final": 0.0,
+    "original_solver_sha256": "e647398e97775eb95779c76eb7abdfd10cc622e2e146bded4348c2e33e109057",
+    "working_solver_sha256": "58a405a59fe2d3b51e40433339f3f05bd2f0b19acf6806cfb4320ec2707785f3",
+    "source_untouched": true,
+    "working_solver_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py"
+  }
+}

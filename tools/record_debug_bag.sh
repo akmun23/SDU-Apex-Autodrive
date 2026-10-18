@@ -39,6 +39,13 @@ exec docker run --rm --name "${container}" \
     set -e
     source /opt/ros/humble/setup.bash
     source /home/autodrive_devkit/install/setup.bash
+    cd /workspace
+    CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build \
+      --packages-up-to sdu_apex_msgs \
+      --parallel-workers 1 \
+      --merge-install --symlink-install \
+      --event-handlers console_direct+ \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
     source /workspace/install/setup.bash
     exec ros2 bag record --max-cache-size 10485760 -o "${ROSBAG_OUTPUT}" \
       /autodrive/roboracer_1/lidar \
@@ -62,6 +69,8 @@ exec docker run --rm --name "${container}" \
       /autodrive/reset_command \
       /odom \
       /odom/diagnostics \
+      /odom/unity_plant_state \
+      /mpc/drive_command \
       /ekf_odom \
       /ekf_pose \
       /amcl_pose \
@@ -72,7 +81,6 @@ exec docker run --rm --name "${container}" \
       /amcl_gpu_timing \
       /amcl_timing \
       /current_map_pose \
-      /cmd/speed \
       /mpc/diagnostics \
       /map
   '

@@ -60,6 +60,16 @@ struct MpcSyncConfig {
     std::size_t odom_buffer_capacity{64};
 };
 
+/* A plant-state topic may be delivered one packet behind its matching odom
+ * callback because ROS topics are scheduled independently. Accept only a
+ * causal snapshot at or before both the current odom epoch and fused state,
+ * bounded by the caller's existing extrapolation-age limit. */
+bool is_causal_plant_state_usable(bool received,
+                                  int64_t plant_stamp_ns,
+                                  int64_t odom_stamp_ns,
+                                  int64_t synchronized_stamp_ns,
+                                  double maximum_age_s);
+
 class MpcStateSynchronizer {
 public:
     explicit MpcStateSynchronizer(const MpcSyncConfig &config = {});

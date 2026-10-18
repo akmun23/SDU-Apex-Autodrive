@@ -1,0 +1,421 @@
+{
+  "diagnostic": "v2314_generated_OCP_native_slip_coordinate_parity",
+  "native_flying_lap": {
+    "backend": "native",
+    "trial_speed_mps": 2.4,
+    "progress_m": 56.73051446281683,
+    "elapsed_s": 24.05,
+    "failure": null,
+    "flying_lap_samples": 481,
+    "min_clearance_beyond_margin_m": 0.04912100144036188,
+    "completed_flying_lap": true
+  },
+  "wheel_samples": 1924,
+  "native_data_temporal_resolution_s": 0.025,
+  "internal_physx_step_s": 0.001,
+  "actual_ipopt_solve_ran": false,
+  "physical_model_changed": true,
+  "sample_timing_caveat": "Measured native tire slips originate from the preceding vehicle update; body velocities and wheel angular speeds are sampled after PhysX scene integration. This 1 ms state staggering may bias slip error, especially due to stiff wheel damping.",
+  "metrics": {
+    "longitudinal_slip": {
+      "rms": 0.0006890103610237261,
+      "max_abs": 0.003384028828803204,
+      "signed_mean": 0.00011780478846875518
+    },
+    "lateral_slip": {
+      "rms": 0.0005468262985638182,
+      "max_abs": 0.002242479563321166,
+      "signed_mean": 0.00027945723553443006
+    },
+    "reconstructed_fx_n": {
+      "rms": 0.03767913746468791,
+      "max_abs": 0.19520391392238334,
+      "signed_mean": 0.006377092017412414
+    },
+    "reconstructed_fy_n": {
+      "rms": 0.5767185298751064,
+      "max_abs": 2.1140456944289,
+      "signed_mean": -0.2955071781718536
+    },
+    "callback_at_native_slip_fx_n": {
+      "rms": 1.4648539141301683e-07,
+      "max_abs": 8.838335459060431e-07,
+      "signed_mean": 2.9934378175190974e-08
+    },
+    "callback_at_native_slip_fy_n": {
+      "rms": 1.2112244519710511e-07,
+      "max_abs": 8.413991103850549e-07,
+      "signed_mean": -2.54183597130234e-08
+    }
+  },
+  "per_wheel": {
+    "fl": {
+      "longitudinal_slip": {
+        "rms": 0.0007133354820306009,
+        "max_abs": 0.0026814025627633215,
+        "signed_mean": 6.912314502365078e-05
+      },
+      "lateral_slip": {
+        "rms": 0.00041132583607934354,
+        "max_abs": 0.0009587594457448486,
+        "signed_mean": 0.0001950328851000345
+      },
+      "reconstructed_fx_n": {
+        "rms": 0.04378105407075791,
+        "max_abs": 0.19520391392238334,
+        "signed_mean": -0.00242485483453291
+      },
+      "reconstructed_fy_n": {
+        "rms": 0.5116067481137783,
+        "max_abs": 1.3445534669033536,
+        "signed_mean": -0.2588914087558003
+      },
+      "callback_at_native_slip_fx_n": {
+        "rms": 1.251384557086964e-07,
+        "max_abs": 7.322397674869308e-07,
+        "signed_mean": -2.7915240198837437e-08
+      },
+      "callback_at_native_slip_fy_n": {
+        "rms": 1.5897201845856025e-07,
+        "max_abs": 7.478833126128848e-07,
+        "signed_mean": -3.917564985980512e-08
+      }
+    },
+    "fr": {
+      "longitudinal_slip": {
+        "rms": 0.0007389601520524169,
+        "max_abs": 0.003384028828803204,
+        "signed_mean": 8.619904114331521e-05
+      },
+      "lateral_slip": {
+        "rms": 0.0004546414580446012,
+        "max_abs": 0.001099543971041059,
+        "signed_mean": 0.00023148744988754044
+      },
+      "reconstructed_fx_n": {
+        "rms": 0.03275215346516617,
+        "max_abs": 0.14620280658605722,
+        "signed_mean": 0.009746752086115487
+      },
+      "reconstructed_fy_n": {
+        "rms": 0.41519666669622407,
+        "max_abs": 1.0313026880339855,
+        "signed_mean": -0.19380884229212578
+      },
+      "callback_at_native_slip_fx_n": {
+        "rms": 1.4733660682159757e-07,
+        "max_abs": 5.84564961769729e-07,
+        "signed_mean": 7.052163578498171e-08
+      },
+      "callback_at_native_slip_fy_n": {
+        "rms": 1.740831240972527e-07,
+        "max_abs": 8.413991103850549e-07,
+        "signed_mean": -4.215421232523797e-08
+      }
+    },
+    "rl": {
+      "longitudinal_slip": {
+        "rms": 0.0006573916669425794,
+        "max_abs": 0.0025660363899740538,
+        "signed_mean": 0.00013438418806646575
+      },
+      "lateral_slip": {
+        "rms": 0.000582554077681224,
+        "max_abs": 0.0016643983961625204,
+        "signed_mean": 0.00030784280079800425
+      },
+      "reconstructed_fx_n": {
+        "rms": 0.042129789289855404,
+        "max_abs": 0.19183264606806416,
+        "signed_mean": 0.0037269260482376116
+      },
+      "reconstructed_fy_n": {
+        "rms": 0.7060546218028931,
+        "max_abs": 2.1140456944289,
+        "signed_mean": -0.38682842592375116
+      },
+      "callback_at_native_slip_fx_n": {
+        "rms": 9.706394070275402e-08,
+        "max_abs": 4.3635580082579395e-07,
+        "signed_mean": -8.69110828771137e-09
+      },
+      "callback_at_native_slip_fy_n": {
+        "rms": 4.055754047007932e-08,
+        "max_abs": 2.0981195802960428e-07,
+        "signed_mean": -1.1324316152497301e-08
+      }
+    },
+    "rr": {
+      "longitudinal_slip": {
+        "rms": 0.0006417691877781901,
+        "max_abs": 0.0029555291734254946,
+        "signed_mean": 0.00018151277964158888
+      },
+      "lateral_slip": {
+        "rms": 0.0006934110981097079,
+        "max_abs": 0.002242479563321166,
+        "signed_mean": 0.00038346580635214086
+      },
+      "reconstructed_fx_n": {
+        "rms": 0.030240142237948426,
+        "max_abs": 0.09160090418855305,
+        "signed_mean": 0.014459544769829464
+      },
+      "reconstructed_fy_n": {
+        "rms": 0.6306934160785092,
+        "max_abs": 1.7780388794344506,
+        "signed_mean": -0.34250003571573734
+      },
+      "callback_at_native_slip_fx_n": {
+        "rms": 1.9759241432325234e-07,
+        "max_abs": 8.838335459060431e-07,
+        "signed_mean": 8.5822225402331e-08
+      },
+      "callback_at_native_slip_fy_n": {
+        "rms": 3.821826899366964e-08,
+        "max_abs": 2.2778181563154476e-07,
+        "signed_mean": -9.019260514553207e-09
+      }
+    }
+  },
+  "worst_lateral_slip_samples": [
+    {
+      "time_s": 12.8,
+      "progress_m": 30.183814212091,
+      "wheel": "rr",
+      "native": -0.0014987828908488154,
+      "modeled": 0.0007436966724723507,
+      "difference": 0.002242479563321166
+    },
+    {
+      "time_s": 12.825000000000001,
+      "progress_m": 30.235365442853503,
+      "wheel": "rr",
+      "native": -0.0014844454126432538,
+      "modeled": 0.0007552226671022754,
+      "difference": 0.002239668079745529
+    },
+    {
+      "time_s": 12.850000000000001,
+      "progress_m": 30.29238459156923,
+      "wheel": "rr",
+      "native": -0.0014640293084084988,
+      "modeled": 0.0006467915648849695,
+      "difference": 0.002110820873293468
+    },
+    {
+      "time_s": 12.775,
+      "progress_m": 30.12650417714146,
+      "wheel": "rr",
+      "native": -0.0016252108616754413,
+      "modeled": 0.0002799138886226346,
+      "difference": 0.0019051247502980758
+    },
+    {
+      "time_s": 12.875,
+      "progress_m": 30.344826957545692,
+      "wheel": "rr",
+      "native": -0.0015665277605876327,
+      "modeled": 0.00027569172305744763,
+      "difference": 0.0018422194836450803
+    },
+    {
+      "time_s": 12.75,
+      "progress_m": 30.073707469716297,
+      "wheel": "rr",
+      "native": -0.001646437798626721,
+      "modeled": 0.00011766782730554861,
+      "difference": 0.0017641056259322695
+    },
+    {
+      "time_s": 12.9,
+      "progress_m": 30.402889593511826,
+      "wheel": "rr",
+      "native": -0.001587927108630538,
+      "modeled": 9.038231282560775e-05,
+      "difference": 0.0016783094214561458
+    },
+    {
+      "time_s": 12.825000000000001,
+      "progress_m": 30.235365442853503,
+      "wheel": "rl",
+      "native": -0.001024165190756321,
+      "modeled": 0.0006402332054061995,
+      "difference": 0.0016643983961625204
+    },
+    {
+      "time_s": 12.8,
+      "progress_m": 30.183814212091,
+      "wheel": "rl",
+      "native": -0.0010237946407869458,
+      "modeled": 0.0006279763583693487,
+      "difference": 0.0016517709991562945
+    },
+    {
+      "time_s": 12.850000000000001,
+      "progress_m": 30.29238459156923,
+      "wheel": "rl",
+      "native": -0.0010360055603086948,
+      "modeled": 0.0005529200131247216,
+      "difference": 0.0015889255734334163
+    },
+    {
+      "time_s": 12.925,
+      "progress_m": 30.45702178574128,
+      "wheel": "rr",
+      "native": -0.001645176438614726,
+      "modeled": -0.00014573589532485204,
+      "difference": 0.001499440543289874
+    },
+    {
+      "time_s": 13.025,
+      "progress_m": 30.688641431879816,
+      "wheel": "rr",
+      "native": -0.001317432033829391,
+      "modeled": 0.00016081473079594382,
+      "difference": 0.0014782467646253347
+    }
+  ],
+  "worst_force_samples": [
+    {
+      "time_s": 12.825000000000001,
+      "progress_m": 30.235365442853503,
+      "wheel": "rl",
+      "native_fy_n": 1.3156826496124268,
+      "modeled_fy_n": -0.7983630448164732,
+      "difference_fy_n": -2.1140456944289
+    },
+    {
+      "time_s": 12.850000000000001,
+      "progress_m": 30.29238459156923,
+      "wheel": "rl",
+      "native_fy_n": 1.3631888628005981,
+      "modeled_fy_n": -0.700489106112776,
+      "difference_fy_n": -2.063677968913374
+    },
+    {
+      "time_s": 12.8,
+      "progress_m": 30.183814212091,
+      "wheel": "rl",
+      "native_fy_n": 1.287896990776062,
+      "modeled_fy_n": -0.7660650204768934,
+      "difference_fy_n": -2.0539620112529553
+    },
+    {
+      "time_s": 12.875,
+      "progress_m": 30.344826957545692,
+      "wheel": "rl",
+      "native_fy_n": 1.5410575866699219,
+      "modeled_fy_n": -0.29661068860213474,
+      "difference_fy_n": -1.8376682752720566
+    },
+    {
+      "time_s": 12.825000000000001,
+      "progress_m": 30.235365442853503,
+      "wheel": "rr",
+      "native_fy_n": 1.1941485404968262,
+      "modeled_fy_n": -0.5838903389376243,
+      "difference_fy_n": -1.7780388794344506
+    },
+    {
+      "time_s": 12.850000000000001,
+      "progress_m": 30.29238459156923,
+      "wheel": "rr",
+      "native_fy_n": 1.244551181793213,
+      "modeled_fy_n": -0.5242516928984134,
+      "difference_fy_n": -1.7688028746916262
+    },
+    {
+      "time_s": 12.775,
+      "progress_m": 30.12650417714146,
+      "wheel": "rl",
+      "native_fy_n": 1.439555048942566,
+      "modeled_fy_n": -0.2787461238684703,
+      "difference_fy_n": -1.7183011728110362
+    },
+    {
+      "time_s": 12.9,
+      "progress_m": 30.402889593511826,
+      "wheel": "rl",
+      "native_fy_n": 1.607060194015503,
+      "modeled_fy_n": -0.09690115115294774,
+      "difference_fy_n": -1.7039613451684508
+    },
+    {
+      "time_s": 12.8,
+      "progress_m": 30.183814212091,
+      "wheel": "rr",
+      "native_fy_n": 1.1558566093444824,
+      "modeled_fy_n": -0.5457366525094377,
+      "difference_fy_n": -1.7015932618539202
+    },
+    {
+      "time_s": 12.75,
+      "progress_m": 30.073707469716297,
+      "wheel": "rl",
+      "native_fy_n": 1.49120032787323,
+      "modeled_fy_n": -0.11599800079508614,
+      "difference_fy_n": -1.607198328668316
+    },
+    {
+      "time_s": 12.875,
+      "progress_m": 30.344826957545692,
+      "wheel": "rr",
+      "native_fy_n": 1.360001564025879,
+      "modeled_fy_n": -0.22034463098713813,
+      "difference_fy_n": -1.580346195013017
+    },
+    {
+      "time_s": 12.925,
+      "progress_m": 30.45702178574128,
+      "wheel": "rl",
+      "native_fy_n": 1.715260624885559,
+      "modeled_fy_n": 0.1586556650708989,
+      "difference_fy_n": -1.5566049598146603
+    }
+  ],
+  "comparison_to_v2313": {
+    "lateral_slip": {
+      "before": {
+        "rms": 0.003827891064609367,
+        "max_abs": 0.01970431010684795
+      },
+      "after": {
+        "rms": 0.0005468262985638182,
+        "max_abs": 0.002242479563321166
+      }
+    },
+    "longitudinal_slip": {
+      "before": {
+        "rms": 0.0006890103610237261,
+        "max_abs": 0.003384028828803204
+      },
+      "after": {
+        "rms": 0.0006890103610237261,
+        "max_abs": 0.003384028828803204
+      }
+    },
+    "lateral_tire_force_n": {
+      "before": {
+        "rms": 3.7620469196806625,
+        "max_abs": 16.441083396044398
+      },
+      "after": {
+        "rms": 0.5767185298751064,
+        "max_abs": 2.1140456944289
+      }
+    },
+    "longitudinal_tire_force_n": {
+      "before": {
+        "rms": 0.03767913746468791,
+        "max_abs": 0.19520391392238334
+      },
+      "after": {
+        "rms": 0.03767913746468791,
+        "max_abs": 0.19520391392238334
+      }
+    }
+  },
+  "native_replay_ran": false,
+  "working_wheel_model_sha256": "22965c6220c82b09318ec592973acb1c2027d0554274e7706c0ba25963a548ab"
+}

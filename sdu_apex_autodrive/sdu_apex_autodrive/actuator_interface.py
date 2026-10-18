@@ -70,7 +70,10 @@ class ActuatorInterface(Node):
         if (not math.isfinite(steering) or not math.isfinite(throttle) or
                 not -self.max_steering <= steering <= self.max_steering or
                 not 0.0 <= throttle <= 1.0):
-            self.get_logger().error("Rejected invalid MPC actuator command")
+            self.get_logger().error(
+                f"Rejected invalid MPC actuator command: steering={steering:.9g} rad "
+                f"(limit={self.max_steering:.9g}), "
+                f"throttle={throttle:.9g} (range=[0,1])")
             return
         self.command = (steering, throttle)
         self.command_received_at = time.monotonic()

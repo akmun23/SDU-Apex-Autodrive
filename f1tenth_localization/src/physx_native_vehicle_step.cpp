@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "f1tenth_localization/unity_wheel_encoder.hpp"
 #include "PxPhysicsAPI.h"
 #include "extensions/PxDefaultAllocator.h"
 #include "extensions/PxDefaultCpuDispatcher.h"
@@ -136,6 +137,9 @@ struct TireCurveData {
 
 std::array<float, 4> g_tire_longitudinal_force_n{};
 std::array<float, 4> g_tire_lateral_force_n{};
+// Capture the post-filter load passed into the tire-force shader. It is not
+// interchangeable with PxWheelQueryResult::suspSpringForce.
+std::array<float, 4> g_tire_normal_load_n{};
 
 void unityCurveTireForce(
     const void* userData, const PxF32 tireFriction,
@@ -159,6 +163,7 @@ void unityCurveTireForce(
              * curve.lateral[4];
     g_tire_longitudinal_force_n[curve.wheel_index] = longForce;
     g_tire_lateral_force_n[curve.wheel_index] = latForce;
+    g_tire_normal_load_n[curve.wheel_index] = tireLoad;
     wheelTorque = -longForce * wheelRadius;
     aligningMoment = 0.0f;
     (void)wheelOmega;
@@ -202,6 +207,17 @@ std::array<double, 3> model_euler(const PxQuat& rotation)
         std::atan2(model[2][1], model[2][2]),
         std::asin(std::clamp(-model[2][0], -1.0, 1.0)),
         std::atan2(model[1][0], model[0][0])};
+}
+
+PxQuat model_orientation(double roll, double pitch, double yaw)
+{
+    // Model axes (forward/left/up) map to Unity/PhysX axes
+    // (forward->+Z, left->-X, up->+Y). Rotations are axial vectors, so the
+    // reflected basis maps positive model roll/pitch/yaw to (-Z,+X,-Y).
+    const PxQuat qRoll(static_cast<PxReal>(-roll), PxVec3(0.0f, 0.0f, 1.0f));
+    const PxQuat qPitch(static_cast<PxReal>(pitch), PxVec3(1.0f, 0.0f, 0.0f));
+    const PxQuat qYaw(static_cast<PxReal>(-yaw), PxVec3(0.0f, 1.0f, 0.0f));
+    return (qYaw * qPitch * qRoll).getNormalized();
 }
 
 double center_steering_from_ackermann(double front_left, double front_right)
@@ -295,6 +311,11 @@ json run(const json& input, const json& shapeAudit) {
     if (!batchQuery) throw std::runtime_error("batch query creation failed");
 
     const auto& body = first.at("body");
+    const auto& initialWheels = first.at("wheel_inputs");
+    const PxVec3 rearAxleOffsetActorLocal =
+        vec3(body.at("center_of_mass_body_m")) + 0.5f * (
+            vec3(initialWheels.at(2).at("wheel_center_offset_com_body_m")) +
+            vec3(initialWheels.at(3).at("wheel_center_offset_com_body_m")));
     const float mass = body.at("mass_kg").get<float>();
     PxRigidDynamic* actor = physics->createRigidDynamic(PxTransform(
         vec3(body.at("position_world_m")), quat(body.at("rotation_world_xyzw"))));
@@ -356,7 +377,6 @@ json run(const json& input, const json& shapeAudit) {
 
     PxVehicleWheelsSimData* simData = PxVehicleWheelsSimData::allocate(4);
     std::array<TireCurveData, 4> tireData{};
-    const auto& initialWheels = first.at("wheel_inputs");
     for (PxU32 i = 0; i < 4; ++i) {
         const auto& in = initialWheels.at(i);
         tireData[i].wheel_index = i;
@@ -419,6 +439,8 @@ json run(const json& input, const json& shapeAudit) {
     const PxReal dt = first.at("fixed_dt_s").get<float>();
     std::array<PxReal, 4> previousJounce{};
     PxVehicleWheels4DynData* wheelBlocks = nullptr;
+    std::array<f1tenth_localization::detail::UnityWheelEncoderPrediction, 4>
+        wheelEncoderPrediction{};
     if (recursive) {
         // PxVehicleWheelsDynData has no public jounce setter. The pinned 4.1
         // source stores its four-wheel block pointer as its first field; seed
@@ -437,8 +459,23 @@ json run(const json& input, const json& shapeAudit) {
                 i, wheel.at("wheel_omega_radps").get<float>());
             vehicle->mWheelsDynData.setWheelRotationAngle(
                 i, wheel.at("wheel_rotation_angle_rad").get<float>());
+            wheelBlocks[0].mTireLowForwardSpeedTimers[i] = wheel.value(
+                "low_forward_speed_time_s", 0.0f);
+            wheelBlocks[0].mTireLowSideSpeedTimers[i] = wheel.value(
+                "low_side_speed_time_s", 0.0f);
         }
     }
+    // Unity's IMU.FixedUpdate differentiates Rigidbody world velocity at each
+    // 1 ms fixed step, then expresses that inertial acceleration in the
+    // current body frame. Keep the same sample cadence here; using the
+    // 25 ms publication interval with the 1 ms divisor inflated acceleration
+    // by 25x and made the odometry residual correction inconsistent.
+    PxVec3 previous_imu_velocity_world = actor->getLinearVelocity();
+    PxReal previous_imu_yaw_rate_radps = 0.0f;
+    bool have_previous_imu_sample = false;
+    double imu_acceleration_forward_mps2 = 0.0;
+    double imu_acceleration_lateral_mps2 = 0.0;
+    double imu_yaw_acceleration_radps2 = 0.0;
     const auto resetRecursiveState = [&](const json& reset) {
         if (!recursive)
             throw std::runtime_error(
@@ -472,19 +509,28 @@ json run(const json& input, const json& shapeAudit) {
                 i, wheel.at("wheel_omega_radps").get<float>());
             vehicle->mWheelsDynData.setWheelRotationAngle(
                 i, wheel.at("wheel_rotation_angle_rad").get<float>());
+            wheelBlocks[0].mTireLowForwardSpeedTimers[i] = wheel.value(
+                "low_forward_speed_time_s", 0.0f);
+            wheelBlocks[0].mTireLowSideSpeedTimers[i] = wheel.value(
+                "low_side_speed_time_s", 0.0f);
+            wheelEncoderPrediction[i].reset();
             previousJounce[i] =
                 wheel.at("initial_pose_jounce_m").get<float>();
             wheelBlocks[0].mJounces[i] = previousJounce[i];
         }
         scene->resetFiltering(*actor);
         actor->wakeUp();
+        previous_imu_velocity_world = actor->getLinearVelocity();
+        previous_imu_yaw_rate_radps = 0.0f;
+        have_previous_imu_sample = false;
+        imu_acceleration_forward_mps2 = 0.0;
+        imu_acceleration_lateral_mps2 = 0.0;
+        imu_yaw_acceleration_radps2 = 0.0;
     };
     std::size_t stepIndex = 0;
-    bool have_previous_emitted_state = false;
-    double previous_emitted_u_mps = 0.0;
-    double previous_emitted_v_mps = 0.0;
-    double previous_emitted_yaw_rate_radps = 0.0;
     std::deque<json> pendingServerSteps;
+    std::array<PxReal, 4> stageMaximumPositiveLongitudinalSlip{};
+    std::array<PxReal, 4> stageMaximumLongitudinalSlipExcessMps{};
     while (server || stepIndex < steps.size()) {
         json serverStep;
         if (server) {
@@ -499,7 +545,68 @@ json run(const json& input, const json& shapeAudit) {
                     request.value("op", std::string());
                 if (operation == "shutdown")
                     break;
-                if (operation == "step") {
+                if (operation == "reset") {
+                    resetRecursiveState(request.at("initial"));
+                    std::cout << "{\"op\":\"reset\"}\n" << std::flush;
+                    continue;
+                }
+                if (operation == "correct") {
+                    const PxTransform previousPose = actor->getGlobalPose();
+                    const double yaw = request.at("yaw_rad").get<double>();
+                    const double roll = request.at("roll_rad").get<double>();
+                    const double pitch = request.at("pitch_rad").get<double>();
+                    const PxQuat correctedRotation =
+                        model_orientation(roll, pitch, yaw);
+                    actor->setGlobalPose(
+                        PxTransform(previousPose.p, correctedRotation), false);
+                    PxVec3 linearBody(
+                        static_cast<PxReal>(-
+                            request.at("body_lateral_velocity_com_mps").get<double>()),
+                        0.0f,
+                        static_cast<PxReal>(
+                            request.at("body_forward_velocity_mps").get<double>()));
+                    // State slot 8 is Unity's world-vertical Rigidbody
+                    // velocity. Preserve it while imposing measured body u/v;
+                    // setting local body-up to zero injects a false vertical
+                    // velocity whenever the body is pitched or rolled.
+                    const PxVec3 horizontalWorld =
+                        correctedRotation.rotate(linearBody);
+                    const PxVec3 bodyUpWorld =
+                        correctedRotation.rotate(PxVec3(0.0f, 1.0f, 0.0f));
+                    const PxReal verticalWorld = static_cast<PxReal>(
+                        request.at("body_vertical_velocity_world_mps").get<double>());
+                    linearBody.y = (verticalWorld - horizontalWorld.y) /
+                        bodyUpWorld.y;
+                    const PxVec3 angularBody(
+                        static_cast<PxReal>(
+                            request.at("pitch_rate_radps").get<double>()),
+                        static_cast<PxReal>(-
+                            request.at("yaw_rate_radps").get<double>()),
+                        static_cast<PxReal>(-
+                            request.at("roll_rate_radps").get<double>()));
+                    actor->setLinearVelocity(
+                        correctedRotation.rotate(linearBody), false);
+                    actor->setAngularVelocity(
+                        correctedRotation.rotate(angularBody), false);
+                    previous_imu_velocity_world = actor->getLinearVelocity();
+                    previous_imu_yaw_rate_radps = static_cast<PxReal>(
+                        request.at("yaw_rate_radps").get<double>());
+                    have_previous_imu_sample = true;
+                    const auto& wheelOmega = request.at("wheel_omega_radps");
+                    if (!wheelOmega.is_array() || wheelOmega.size() != 4)
+                        throw std::runtime_error(
+                            "sensor correction requires four wheel angular speeds");
+                    for (PxU32 wheel = 0; wheel < 4; ++wheel) {
+                        const double omega = wheelOmega.at(wheel).get<double>();
+                        if (!std::isfinite(omega))
+                            throw std::runtime_error(
+                                "sensor correction contains non-finite wheel speed");
+                        vehicle->mWheelsDynData.setWheelRotationSpeed(
+                            wheel, static_cast<PxReal>(omega));
+                    }
+                    std::cout << "{\"op\":\"corrected\"}\n" << std::flush;
+                    continue;
+                } else if (operation == "step") {
                     pendingServerSteps.push_back(request);
                 } else if (operation == "rollout") {
                     if (request.contains("initial"))
@@ -512,18 +619,17 @@ json run(const json& input, const json& shapeAudit) {
                     std::size_t stageIndex = 0;
                     std::size_t rolloutStepOffset = 0;
                     for (const auto& stage : stages) {
-                        constexpr std::size_t kTicksPerControl = 25;
                         const auto profile = stage.find(
                             "wheel_commands_by_tick");
                         const std::size_t ticks = profile != stage.end()
                             ? profile->size()
                             : stage.value("ticks", std::size_t{0});
-                        if (ticks != kTicksPerControl ||
+                        if (ticks == 0 || ticks > 250 ||
                             (profile != stage.end() && !profile->is_array()) ||
                             (profile == stage.end() &&
                                 !stage.contains("wheel_commands")))
                             throw std::runtime_error(
-                                "each rollout stage must provide exactly 25 1 ms wheel-command ticks");
+                                "each rollout stage must provide 1..250 1 ms wheel-command ticks");
                         const std::size_t captureRow = stage.value(
                             "capture_row", stepIndex + rolloutStepOffset);
                         const double timeS = stage.value(
@@ -539,6 +645,7 @@ json run(const json& input, const json& shapeAudit) {
                                 {"time_s", timeS + tick * dt},
                                 {"wheel_commands", commands},
                                 {"emit_result", tick + 1 == ticks},
+                                {"rollout_stage_first_tick", tick == 0},
                                 {"rollout_stage", stageIndex}
                             });
                         }
@@ -557,6 +664,10 @@ json run(const json& input, const json& shapeAudit) {
         const bool emitResult = server
             ? step.value("emit_result", true)
             : (stepIndex + 1) % outputStride == 0;
+        if (server && step.value("rollout_stage_first_tick", false)) {
+            stageMaximumPositiveLongitudinalSlip.fill(0.0f);
+            stageMaximumLongitudinalSlipExcessMps.fill(0.0f);
+        }
         if (!recursive) {
             const auto& b = step.at("body");
             actor->setGlobalPose(PxTransform(
@@ -588,6 +699,13 @@ json run(const json& input, const json& shapeAudit) {
                     w.at("steer_angle_rad").get<float>(),
                     vehicle->mWheelsDynData.getWheelRotationAngle(i)));
             }
+            // WheelEncoder.FixedUpdate reads Wheel.rpm before the following
+            // physics solve and accumulates that pre-solve rate for dt. Keep
+            // its measurement prediction separate from PhysX's wheel pose
+            // angle, which PxVehicle integrates after updating wheel speed.
+            const PxReal rpm = vehicle->mWheelsDynData.getWheelRotationSpeed(i) *
+                (30.0f / PxPi);
+            wheelEncoderPrediction[i].sample_pre_solve_rpm(rpm, dt);
             if (emitResult) {
                 const PxTransform shapePose = wheelShapes[i]->getLocalPose();
                 shapePosesUsed.push_back({
@@ -599,6 +717,50 @@ json run(const json& input, const json& shapeAudit) {
         }
         PxVehicleSuspensionRaycasts(batchQuery, 1, vehicles, 4,
                                     vehicleRayResults.data());
+        if (server) {
+            // Re-evaluate the exact public PhysX tire-slip input immediately
+            // before PxVehicleUpdates: contact-point rigid-body velocity,
+            // wheel angular speed/radius, hit normal, Ackermann angle, and the
+            // native non-tank torque-applied denominator branch.
+            const PxTransform chassisPose = actor->getGlobalPose();
+            const PxVec3 worldCom = chassisPose.transform(
+                actor->getCMassLocalPose().p);
+            const PxVec3 chassisRight =
+                chassisPose.q.rotate(PxVec3(1.0f, 0.0f, 0.0f));
+            const PxVec3 linear = actor->getLinearVelocity();
+            const PxVec3 angular = actor->getAngularVelocity();
+            for (PxU32 i = 0; i < 4; ++i) {
+                const auto& wheelCommand = step.at("wheel_commands").at(i);
+                if (!vehicleRayResults[i].hasBlock) continue;
+                const PxVec3 normal = vehicleRayResults[i].block.normal;
+                PxVec3 longRaw = chassisRight.cross(normal);
+                if (longRaw.magnitudeSquared() < 1.0e-12f) continue;
+                longRaw.normalize();
+                PxVec3 lateralRaw = normal.cross(longRaw);
+                if (lateralRaw.magnitudeSquared() < 1.0e-12f) continue;
+                lateralRaw.normalize();
+                const PxReal steer = wheelCommand.at("steer_angle_rad").get<float>();
+                const PxReal c = PxCos(steer);
+                const PxReal s = PxSin(steer);
+                const PxVec3 tireLong = longRaw * c + lateralRaw * s;
+                const PxVec3 contact = vehicleRayResults[i].block.position;
+                const PxVec3 contactVelocity =
+                    linear + angular.cross(contact - worldCom);
+                const PxReal longSpeed = contactVelocity.dot(tireLong);
+                const PxReal wheelSpeed =
+                    vehicle->mWheelsDynData.getWheelRotationSpeed(i) *
+                    initialWheels.at(i).at("radius_m").get<float>();
+                const PxReal denominator =
+                    std::max(PxAbs(longSpeed), PxAbs(wheelSpeed)) + 0.1f;
+                const PxReal difference = wheelSpeed - longSpeed;
+                const PxReal slip = difference / denominator;
+                stageMaximumPositiveLongitudinalSlip[i] = std::max(
+                    stageMaximumPositiveLongitudinalSlip[i], slip);
+                stageMaximumLongitudinalSlipExcessMps[i] = std::max(
+                    stageMaximumLongitudinalSlipExcessMps[i],
+                    PxMax(0.0f, PxAbs(difference) - 0.15f * denominator));
+            }
+        }
         json raycasts = json::array();
         if (emitResult) {
             for (const auto& ray : vehicleRayResults) {
@@ -619,8 +781,38 @@ json run(const json& input, const json& shapeAudit) {
         PxVehicleWheelQueryResult wheelQuery;
         wheelQuery.wheelQueryResults = wheelQueryResults.data();
         wheelQuery.nbWheelQueryResults = static_cast<PxU32>(wheelQueryResults.size());
+
+        // Match IMU.cs: (worldVelocity - previousWorldVelocity) / fixedDelta,
+        // then inverse-transform into the current vehicle frame. The Unity
+        // prefab enables gravity compensation, so no gravity vector is
+        // subtracted. This is intentionally sampled at each 1 ms fixed step,
+        // not derived from the less-frequent 25 ms ROS publication snapshots.
+        const PxTransform imuSamplePose = actor->getGlobalPose();
+        const PxVec3 imuSampleVelocityWorld = actor->getLinearVelocity();
+        const PxVec3 imuSampleAngularWorld = actor->getAngularVelocity();
+        const PxVec3 imuSampleAngularBody =
+            imuSamplePose.q.rotateInv(imuSampleAngularWorld);
+        const PxReal imuSampleYawRateRadps = -imuSampleAngularBody.y;
+        if (have_previous_imu_sample) {
+            const PxVec3 accelerationWorld =
+                (imuSampleVelocityWorld - previous_imu_velocity_world) / dt;
+            const PxVec3 accelerationBody =
+                imuSamplePose.q.rotateInv(accelerationWorld);
+            imu_acceleration_forward_mps2 = accelerationBody.z;
+            imu_acceleration_lateral_mps2 = -accelerationBody.x;
+            imu_yaw_acceleration_radps2 =
+                (imuSampleYawRateRadps - previous_imu_yaw_rate_radps) / dt;
+        } else {
+            imu_acceleration_forward_mps2 = 0.0;
+            imu_acceleration_lateral_mps2 = 0.0;
+            imu_yaw_acceleration_radps2 = 0.0;
+            have_previous_imu_sample = true;
+        }
+        previous_imu_velocity_world = imuSampleVelocityWorld;
+        previous_imu_yaw_rate_radps = imuSampleYawRateRadps;
         g_tire_longitudinal_force_n.fill(0.0f);
         g_tire_lateral_force_n.fill(0.0f);
+        g_tire_normal_load_n.fill(0.0f);
         PxVehicleUpdates(dt, PxVec3(0, -9.81f, 0), *frictionPairs,
                          1, vehicles, &wheelQuery);
         const PxVec3 vehicleLinear = emitResult
@@ -697,6 +889,8 @@ json run(const json& input, const json& shapeAudit) {
             if (server) {
                 const PxVec3 bodyLinear = pose.q.rotateInv(linear);
                 const PxVec3 bodyAngular = pose.q.rotateInv(angular);
+                const PxVec3 rearAxlePositionWorld =
+                    pose.transform(rearAxleOffsetActorLocal);
                 const auto euler = model_euler(pose.q);
                 const auto& frontCommands = step.at("wheel_commands");
                 const double yawRate = -bodyAngular.y;
@@ -708,64 +902,108 @@ json run(const json& input, const json& shapeAudit) {
                     center_steering_from_ackermann(
                         frontCommands.at(0).at("steer_angle_rad").get<double>(),
                         frontCommands.at(1).at("steer_angle_rad").get<double>()),
+                    0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
                     0.0, 0.0, 0.0, 0.0});
                 json longitudinalSlip = json::array();
+                json maximumPositiveLongitudinalSlip = json::array();
+                json maximumLongitudinalSlipExcess = json::array();
                 json lateralSlip = json::array();
                 json normalLoad = json::array();
                 json suspensionForce = json::array();
                 json jounceRate = json::array();
+                json wheelRotationAngle = json::array();
                 json tireLongitudinalForce = json::array();
                 json tireLateralForce = json::array();
                 for (std::size_t i = 0; i < 4; ++i) {
                     const auto& wheel = resultRow.at("wheels").at(i);
                     sourceState[3 + i] = wheel.at("omega_radps");
                     sourceState[14 + i] = wheel.at("jounce_m");
+                    // These are persistent PhysX vehicle states, not values
+                    // inferable from the latest encoder sample. The MPC uses
+                    // them to reproduce the source sticky-tire branch.
+                    sourceState[18 + i] =
+                        wheelBlocks[0].mTireLowForwardSpeedTimers[i];
+                    sourceState[22 + i] =
+                        wheelBlocks[0].mTireLowSideSpeedTimers[i];
+                    wheelRotationAngle.push_back(
+                        wheel.at("rotation_angle_rad"));
                     longitudinalSlip.push_back(wheel.at("longitudinal_slip"));
+                    maximumPositiveLongitudinalSlip.push_back(
+                        stageMaximumPositiveLongitudinalSlip[i]);
+                    maximumLongitudinalSlipExcess.push_back(
+                        stageMaximumLongitudinalSlipExcessMps[i]);
                     lateralSlip.push_back(wheel.at("lateral_slip"));
-                    const double suspension = wheel.at("suspension_force_n");
-                    normalLoad.push_back(suspension);
-                    suspensionForce.push_back(suspension);
+                    normalLoad.push_back(g_tire_normal_load_n[i]);
+                    suspensionForce.push_back(
+                        wheel.at("suspension_force_n"));
                     jounceRate.push_back(wheel.at("jounce_rate_mps"));
                     tireLongitudinalForce.push_back(
                         wheel.at("tire_longitudinal_force_n"));
                     tireLateralForce.push_back(wheel.at("tire_lateral_force_n"));
                 }
-                const double ax = have_previous_emitted_state
-                    ? (sourceState[0].get<double>() - previous_emitted_u_mps) / dt -
-                        sourceState[2].get<double>() * sourceState[1].get<double>()
-                    : 0.0;
-                const double ay = have_previous_emitted_state
-                    ? (sourceState[1].get<double>() - previous_emitted_v_mps) / dt +
-                        sourceState[2].get<double>() * sourceState[0].get<double>()
-                    : 0.0;
-                const double yawAcceleration = have_previous_emitted_state
-                    ? (sourceState[2].get<double>() -
-                        previous_emitted_yaw_rate_radps) / dt
-                    : 0.0;
                 json compact = {
                     {"capture_row", resultRow.at("capture_row")},
                     {"time_s", resultRow.at("time_s")},
                     {"position_world_m", resultRow.at("scene_solver_position_world_m")},
+                    {"rear_axle_position_world_m", {
+                        rearAxlePositionWorld.x,
+                        rearAxlePositionWorld.y,
+                        rearAxlePositionWorld.z}},
                     {"rotation_world_xyzw", resultRow.at("scene_solver_rotation_world_xyzw")},
                     {"linear_velocity_world_mps", resultRow.at("scene_solver_linear_velocity_world_mps")},
                     {"angular_velocity_world_radps", resultRow.at("scene_solver_angular_velocity_world_radps")},
                     {"body_forward_velocity_mps", bodyLinear.z},
                     {"body_lateral_velocity_mps", -bodyLinear.x},
                     {"unity_source_state", sourceState},
+                    {"wheel_rotation_angle_rad", wheelRotationAngle},
+                    {"wheel_encoder_angle_prediction_rad", {
+                        wheelEncoderPrediction[0].angle_rad,
+                        wheelEncoderPrediction[1].angle_rad,
+                        wheelEncoderPrediction[2].angle_rad,
+                        wheelEncoderPrediction[3].angle_rad}},
                     {"longitudinal_slip", longitudinalSlip},
+                    {"maximum_positive_longitudinal_slip",
+                        maximumPositiveLongitudinalSlip},
+                    {"maximum_longitudinal_slip_excess_mps",
+                        maximumLongitudinalSlipExcess},
                     {"lateral_slip", lateralSlip},
                     {"normal_load_n", normalLoad},
                     {"suspension_force_n", suspensionForce},
                     {"suspension_jounce_rate_mps", jounceRate},
                     {"tire_longitudinal_force_n", tireLongitudinalForce},
                     {"tire_lateral_force_n", tireLateralForce},
-                    {"longitudinal_acceleration_mps2", ax},
-                    {"lateral_acceleration_mps2", ay},
-                    {"yaw_acceleration_radps2", yawAcceleration},
+                    {"longitudinal_acceleration_mps2",
+                        imu_acceleration_forward_mps2},
+                    {"lateral_acceleration_mps2",
+                        imu_acceleration_lateral_mps2},
+                    {"yaw_acceleration_radps2",
+                        imu_yaw_acceleration_radps2},
                     {"rollout_stage", step.value("rollout_stage", -1)},
                     {"wheels", json::array()},
                     {"wheel_longitudinal_slip", longitudinalSlip}
                 };
+                // Opt-in decomposition of the two native stages. This lets
+                // the recorded-state replay distinguish PxVehicleUpdates
+                // (suspension/tire forces) from the subsequent ordinary
+                // PxScene contact solve without changing either stage or the
+                // production message/state path.
+                if (std::getenv("SDU_APEX_PHYSX_SOLVER_DIAGNOSTICS") != nullptr) {
+                    PxSimulationStatistics stats;
+                    scene->getSimulationStatistics(stats);
+                    compact["solver_diagnostics"] = {
+                        {"vehicle_update_linear_velocity_world_mps",
+                            resultRow.at("vehicle_stage_linear_velocity_world_mps")},
+                        {"scene_solve_linear_velocity_world_mps",
+                            resultRow.at("scene_solver_linear_velocity_world_mps")},
+                        {"vehicle_update_angular_velocity_world_radps",
+                            resultRow.at("vehicle_stage_angular_velocity_world_radps")},
+                        {"scene_solve_angular_velocity_world_radps",
+                            resultRow.at("scene_solver_angular_velocity_world_radps")},
+                        {"contact_pairs_with_contacts", stats.nbDiscreteContactPairsWithContacts},
+                        {"axis_solver_constraints", stats.nbAxisSolverConstraints}
+                    };
+                }
                 for (const auto& wheel : resultRow.at("wheels")) {
                     compact["wheels"].push_back({
                         {"omega_radps", wheel.at("omega_radps")},
@@ -775,10 +1013,6 @@ json run(const json& input, const json& shapeAudit) {
                     });
                 }
                 std::cout << compact.dump() << '\n' << std::flush;
-                previous_emitted_u_mps = sourceState[0].get<double>();
-                previous_emitted_v_mps = sourceState[1].get<double>();
-                previous_emitted_yaw_rate_radps = sourceState[2].get<double>();
-                have_previous_emitted_state = true;
             } else {
                 results.push_back(std::move(resultRow));
             }

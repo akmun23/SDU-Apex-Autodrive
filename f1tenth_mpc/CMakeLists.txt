@@ -18,7 +18,6 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sdu_apex_msgs REQUIRED)
 find_package(OpenMP QUIET COMPONENTS C)
@@ -67,7 +66,6 @@ ament_target_dependencies(mpc_controller_node
   rclcpp_components
   nav_msgs
   geometry_msgs
-  sensor_msgs
   std_msgs
   sdu_apex_msgs)
 target_include_directories(mpc_controller_node PUBLIC
@@ -89,6 +87,10 @@ if(BUILD_TESTING)
     test/test_mpc_control_time_predictor.cpp)
   target_link_libraries(test_mpc_control_time_predictor mpc_control_time)
   target_include_directories(test_mpc_control_time_predictor PRIVATE include)
+  ament_add_gtest(test_mpc_state_synchronizer
+    test/test_mpc_state_synchronizer.cpp)
+  target_link_libraries(test_mpc_state_synchronizer mpc_state_sync)
+  target_include_directories(test_mpc_state_synchronizer PRIVATE include)
 endif()
 
 install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
@@ -96,12 +98,12 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(FILES config/mpc_competition.yaml config/yaw_response_surface_y1.csv
+install(FILES config/mpc_competition.yaml
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)
 ament_export_libraries(mpc_core)
 ament_export_dependencies(ament_index_cpp rclcpp rclcpp_components nav_msgs geometry_msgs
-  sensor_msgs std_msgs sdu_apex_msgs)
+  std_msgs sdu_apex_msgs)
 
 ament_package()

@@ -1,0 +1,38 @@
+== Recover verified original IPOPT spatial min-time source ==
+Original commit: ca120e0cde7ae60e70082d38f86c5931f79f148f
+Working CasADi solver: /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py
+Phase-I Hessian: limited-memory; historical source preserved: True
+== Resolve current PhysX/Unity source parameters ==
+Map autodrive_practice_20260924_b.pgm | OCP length 28.410 m | nodes 143 | reference min clearance 0.438 m
+Motor 428.0 Nm; wheel radius 0.059 m; brake at exactly zero throttle; steering ±0.5236 rad
+WARNING: --brake-zones 0 prohibits ALL zero-throttle CAWB braking. With 428 Nm total motor torque, a drive-only periodic lap may be infeasible. For the Porto lap-time target use --brake-zones 3.
+== Reusing physics warm-start file: /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/optimized_practice_v2_3_0/warmstart_physx/native_warmstart.npz ==
+== IPOPT OCP: 143 nodes, 0 initial brake nodes, 100 feasibility + 1200 time iterations, Phase-I seed-distance cap=disabled, seed=native, Phase-I elastic dynamics + safe spatial evaluations + simple bounds, Phase-I Hessian=limited-memory ==
+== IPOPT feasibility -> minimum-time solve 1/2 ==
+Source-model seed projection audit: {"brake_locked_wheel_rpm_delta_max_radps": 0.0, "forced_full_brake_nodes_unseen_in_native": 0, "measured_to_symbolic_ax_max_abs_mps2": 1.821855283444254, "measured_to_symbolic_ay_max_abs_mps2": 0.9879504828415755, "measured_to_symbolic_ay_rms_mps2": 0.41038335415455546, "model_is_not_native_physx": true, "native_brake_nodes": 0, "native_throttle_min": 0.08608859521743148, "native_to_symbolic_load_max_abs_n": 6.5857222838974145, "native_to_symbolic_load_rms_n": 2.1738517150355645, "nodes": 143, "spatial_collocation_or_wheel_update_are_not_reconciled": true, "symbolic_force_balance_max_abs_after_projection": 0.0, "type": "algebraic_projection_only_not_model_consistent_rollout"}
+
+******************************************************************************
+This program contains Ipopt, a library for large-scale nonlinear optimization.
+ Ipopt is released as open source code under the Eclipse Public License (EPL).
+         For more information visit https://github.com/coin-or/Ipopt
+******************************************************************************
+
+This is Ipopt version 3.14.19, running with linear solver MUMPS 5.8.2.
+
+Number of nonzeros in equality constraint Jacobian...:    48620
+Number of nonzeros in inequality constraint Jacobian.:     7578
+Number of nonzeros in Lagrangian Hessian.............:        0
+
+Total number of variables............................:     6578
+                     variables with only lower bounds:     1145
+                variables with lower and upper bounds:     3861
+                     variables with only upper bounds:        0
+Total number of equality constraints.................:     3146
+Total number of inequality constraints...............:     1430
+        inequality constraints with only lower bounds:      285
+   inequality constraints with lower and upper bounds:      572
+        inequality constraints with only upper bounds:      573
+
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+   0  3.9728964e+02 0.00e+00 5.53e+00   0.0 0.00e+00    -  0.00e+00 0.00e+00   0
+   1  6.7611091e+02 7.49e+00 7.52e+02   2.0 1.62e+02    -  1.43e-01 9.25e-03f  1

@@ -19,6 +19,10 @@ struct SensorPacket
   double ay_mps2{0.0};
   double yaw_rate_radps{0.0};
   double imu_yaw_rad{0.0};
+  double roll_rad{0.0};
+  double pitch_rad{0.0};
+  double roll_rate_radps{0.0};
+  double pitch_rate_radps{0.0};
   bool have_left{false};
   bool have_right{false};
   bool have_imu{false};
@@ -60,7 +64,8 @@ public:
 
   void add_encoder_sample(int64_t source_stamp_ns, double angle, bool left);
   void add_imu_sample(
-    int64_t source_stamp_ns, double ax, double ay, double yaw_rate, double yaw);
+    int64_t source_stamp_ns, double ax, double ay, double yaw_rate, double yaw,
+    double roll, double pitch, double roll_rate, double pitch_rate);
   void reset();
 
   std::uint64_t packet_drop_count() const noexcept;
@@ -75,6 +80,7 @@ private:
   void update_packet(int64_t source_stamp_ns, Update && update);
 
   std::map<int64_t, SensorPacket> pending_;
+  static constexpr std::size_t kMaximumPendingPackets = 64;
   // Subscription startup can observe one sensor before the other two. Those
   // partial packets are expected until the first complete synchronized
   // packet; faults after that point are real stream-integrity failures.

@@ -41,8 +41,6 @@ private:
 };
 
 enum class MpcControlTimeMode {
-    kNoExtrapolation,
-    kConstantBodyTwist,
     kAcceptedModelCommandHistory,
 };
 
@@ -75,10 +73,6 @@ struct MpcControlTimePrediction {
     double plant_handoff_progress_m{};
     double progress_m{};
     double age_s{};
-    double steering_command_rad{};
-    double throttle_normalized{};
-    double previous_throttle_command{};
-    double previous_steering_rate_radps{};
     int64_t plant_source_stamp_ns{};
     bool sensor_state_fused{};
     double plant_to_sensor_s{};
@@ -86,8 +80,6 @@ struct MpcControlTimePrediction {
     std::array<int64_t, kMpcCommandHistoryCapacity + 1>
         command_event_stamps_ns{};
     std::size_t command_event_stamp_count{};
-    bool used_command_fallback{};
-    bool used_time_fallback{};
 };
 
 MpcControlTimeStatus predict_to_control_time(

@@ -1,0 +1,12 @@
+[
+  {
+    "backend": "native",
+    "trial_speed_mps": 2.4,
+    "progress_m": 56.73051446281683,
+    "elapsed_s": 24.05,
+    "failure": null,
+    "flying_lap_samples": 481,
+    "min_clearance_beyond_margin_m": 0.04912100144036188,
+    "completed_flying_lap": true
+  }
+]

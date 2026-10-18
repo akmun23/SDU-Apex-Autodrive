@@ -3,19 +3,6 @@
 #include <math.h>
 #include <string.h>
 
-#define MPC_MODEL_NU 2
-
-enum
-{
-    MPC_MODEL_IDX_BODY_HEIGHT = 16,
-    MPC_MODEL_IDX_BODY_HEIGHT_RATE,
-    MPC_MODEL_IDX_ROLL,
-    MPC_MODEL_IDX_ROLL_RATE,
-    MPC_MODEL_IDX_PITCH,
-    MPC_MODEL_IDX_PITCH_RATE,
-    MPC_MODEL_IDX_SUSPENSION_JOUNCE_FL,
-};
-
 #ifdef MPC_ENABLE_FD_ORACLE
 /* Steering-state perturbations are smaller because the measured yaw surface
  * has narrow, smooth support gates; 1e-3 rad crosses enough of a gate to make
@@ -23,49 +10,63 @@ enum
 static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
     1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
-    1.0e-4f, 1.0e-4f, 1.0e-3f, 1.0e-3f,
+    1.0e-4f, 1.0e-3f, 1.0e-3f,
     1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f,
     1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
     1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
-    1.0e-4f, 1.0e-4f};
+    1.0e-4f, 1.0e-4f,
+    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
+    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f};
 static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 #endif
 
 static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
 {
     MpcModelState_t prepared = *state;
-    (void)vehicle_model_initialize_source_plant_state(&prepared);
-    x[0] = state->e_y;
-    x[1] = state->e_psi;
-    x[2] = state->u;
-    x[3] = state->v;
-    x[4] = state->r;
-    x[5] = state->longitudinal_acceleration_mps2;
-    x[6] = state->steering_command;
-    x[7] = state->delayed_steering_command_1;
-    x[8] = state->delayed_steering_command_2;
-    x[9] = state->actual_steering_angle;
-    x[10] = state->delayed_throttle_command_1;
-    x[11] = state->delayed_throttle_command_2;
+    (void)vehicle_model_initialize_plant_state(&prepared);
+    x[MPC_STATE_IDX_EY] = state->e_y;
+    x[MPC_STATE_IDX_EPSI] = state->e_psi;
+    x[MPC_STATE_IDX_U] = state->u;
+    x[MPC_STATE_IDX_V] = state->v;
+    x[MPC_STATE_IDX_R] = state->r;
+    x[MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1] =
+        state->delayed_steering_command_1;
+    x[MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2] =
+        state->delayed_steering_command_2;
+    x[MPC_STATE_IDX_ACTUAL_STEERING_ANGLE] = state->actual_steering_angle;
+    x[MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1] =
+        state->delayed_throttle_command_1;
+    x[MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2] =
+        state->delayed_throttle_command_2;
     for (int wheel = 0; wheel < 4; ++wheel) {
-        x[12 + wheel] = (float)prepared.source_plant_state[
-            UNITY_SOURCE_WHEEL_OMEGA_FL + wheel];
+        x[MPC_STATE_IDX_WHEEL_OMEGA_FL + wheel] =
+            (float)prepared.source_plant_internal_state[
+                MPC_PLANT_STATE_WHEEL_OMEGA_FL + wheel];
     }
-    x[MPC_MODEL_IDX_BODY_HEIGHT] = (float)prepared.source_plant_state[
-        UNITY_SOURCE_BODY_HEIGHT];
-    x[MPC_MODEL_IDX_BODY_HEIGHT_RATE] = (float)prepared.source_plant_state[
-        UNITY_SOURCE_BODY_HEIGHT_RATE];
-    x[MPC_MODEL_IDX_ROLL] = (float)prepared.source_plant_state[
-        UNITY_SOURCE_ROLL];
-    x[MPC_MODEL_IDX_ROLL_RATE] = (float)prepared.source_plant_state[
-        UNITY_SOURCE_ROLL_RATE];
-    x[MPC_MODEL_IDX_PITCH] = (float)prepared.source_plant_state[
-        UNITY_SOURCE_PITCH];
-    x[MPC_MODEL_IDX_PITCH_RATE] = (float)prepared.source_plant_state[
-        UNITY_SOURCE_PITCH_RATE];
+    x[MPC_STATE_IDX_BODY_HEIGHT] = (float)prepared.source_plant_internal_state[
+        MPC_PLANT_STATE_BODY_HEIGHT];
+    x[MPC_STATE_IDX_BODY_HEIGHT_RATE] =
+        (float)prepared.source_plant_internal_state[
+            MPC_PLANT_STATE_BODY_HEIGHT_RATE];
+    x[MPC_STATE_IDX_ROLL] = (float)prepared.source_plant_internal_state[
+        MPC_PLANT_STATE_ROLL];
+    x[MPC_STATE_IDX_ROLL_RATE] = (float)prepared.source_plant_internal_state[
+        MPC_PLANT_STATE_ROLL_RATE];
+    x[MPC_STATE_IDX_PITCH] = (float)prepared.source_plant_internal_state[
+        MPC_PLANT_STATE_PITCH];
+    x[MPC_STATE_IDX_PITCH_RATE] =
+        (float)prepared.source_plant_internal_state[
+            MPC_PLANT_STATE_PITCH_RATE];
     for (int wheel = 0; wheel < 4; ++wheel) {
-        x[MPC_MODEL_IDX_SUSPENSION_JOUNCE_FL + wheel] = (float)
-            prepared.source_plant_state[UNITY_SOURCE_SUSPENSION_JOUNCE_FL + wheel];
+        x[MPC_STATE_IDX_SUSPENSION_JOUNCE_FL + wheel] = (float)
+            prepared.source_plant_internal_state[
+                MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL + wheel];
+        x[MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL + wheel] = (float)
+            prepared.source_plant_internal_state[
+                MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL + wheel];
+        x[MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL + wheel] = (float)
+            prepared.source_plant_internal_state[
+                MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL + wheel];
     }
 }
 
@@ -74,34 +75,48 @@ static MpcModelState_t array_to_state(
     const float x[MPC_MODEL_NX], const MpcModelState_t *base)
 {
     MpcModelState_t state = *base;
-    state.e_y = x[0];
-    state.e_psi = x[1];
-    state.u = x[2];
-    state.v = x[3];
-    state.r = x[4];
-    state.longitudinal_acceleration_mps2 = x[5];
-    state.steering_command = x[6];
-    state.delayed_steering_command_1 = x[7];
-    state.delayed_steering_command_2 = x[8];
-    state.actual_steering_angle = x[9];
-    state.delayed_throttle_command_1 = x[10];
-    state.delayed_throttle_command_2 = x[11];
-    if (!vehicle_model_initialize_source_plant_state(&state)) return state;
+    state.e_y = x[MPC_STATE_IDX_EY];
+    state.e_psi = x[MPC_STATE_IDX_EPSI];
+    state.u = x[MPC_STATE_IDX_U];
+    state.v = x[MPC_STATE_IDX_V];
+    state.r = x[MPC_STATE_IDX_R];
+    state.delayed_steering_command_1 =
+        x[MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1];
+    state.delayed_steering_command_2 =
+        x[MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2];
+    state.actual_steering_angle = x[MPC_STATE_IDX_ACTUAL_STEERING_ANGLE];
+    state.delayed_throttle_command_1 =
+        x[MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1];
+    state.delayed_throttle_command_2 =
+        x[MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2];
+    if (!vehicle_model_initialize_plant_state(&state)) return state;
     for (int wheel = 0; wheel < 4; ++wheel) {
-        state.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL + wheel] =
-            x[12 + wheel];
+        state.source_plant_internal_state[
+            MPC_PLANT_STATE_WHEEL_OMEGA_FL + wheel] =
+            x[MPC_STATE_IDX_WHEEL_OMEGA_FL + wheel];
     }
-    state.source_plant_state[UNITY_SOURCE_BODY_HEIGHT] =
-        x[MPC_MODEL_IDX_BODY_HEIGHT];
-    state.source_plant_state[UNITY_SOURCE_BODY_HEIGHT_RATE] =
-        x[MPC_MODEL_IDX_BODY_HEIGHT_RATE];
-    state.source_plant_state[UNITY_SOURCE_ROLL] = x[MPC_MODEL_IDX_ROLL];
-    state.source_plant_state[UNITY_SOURCE_ROLL_RATE] = x[MPC_MODEL_IDX_ROLL_RATE];
-    state.source_plant_state[UNITY_SOURCE_PITCH] = x[MPC_MODEL_IDX_PITCH];
-    state.source_plant_state[UNITY_SOURCE_PITCH_RATE] = x[MPC_MODEL_IDX_PITCH_RATE];
+    state.source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT] =
+        x[MPC_STATE_IDX_BODY_HEIGHT];
+    state.source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT_RATE] =
+        x[MPC_STATE_IDX_BODY_HEIGHT_RATE];
+    state.source_plant_internal_state[MPC_PLANT_STATE_ROLL] =
+        x[MPC_STATE_IDX_ROLL];
+    state.source_plant_internal_state[MPC_PLANT_STATE_ROLL_RATE] =
+        x[MPC_STATE_IDX_ROLL_RATE];
+    state.source_plant_internal_state[MPC_PLANT_STATE_PITCH] =
+        x[MPC_STATE_IDX_PITCH];
+    state.source_plant_internal_state[MPC_PLANT_STATE_PITCH_RATE] =
+        x[MPC_STATE_IDX_PITCH_RATE];
     for (int wheel = 0; wheel < 4; ++wheel) {
-        state.source_plant_state[UNITY_SOURCE_SUSPENSION_JOUNCE_FL + wheel] =
-            x[MPC_MODEL_IDX_SUSPENSION_JOUNCE_FL + wheel];
+        state.source_plant_internal_state[
+            MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL + wheel] =
+            x[MPC_STATE_IDX_SUSPENSION_JOUNCE_FL + wheel];
+        state.source_plant_internal_state[
+            MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL + wheel] =
+            x[MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL + wheel];
+        state.source_plant_internal_state[
+            MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL + wheel] =
+            x[MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL + wheel];
     }
     return state;
 }
@@ -110,7 +125,7 @@ static MpcModelState_t array_to_state(
 static void control_to_array(const MpcModelControl_t *control,
                              float u[MPC_MODEL_NU])
 {
-    u[0] = control->steering_rate;
+    u[0] = control->steering_target_rad;
     u[1] = control->throttle_command;
 }
 
@@ -118,7 +133,7 @@ static void control_to_array(const MpcModelControl_t *control,
 static MpcModelControl_t array_to_control(const float u[MPC_MODEL_NU])
 {
     MpcModelControl_t control;
-    control.steering_rate = u[0];
+    control.steering_target_rad = u[0];
     control.throttle_command = u[1];
     return control;
 }
@@ -259,8 +274,7 @@ int mpc_model_linearize_fd_oracle(
             else linearization->B[row][index] = derivative;
         }
         if (column_nonsmooth) {
-            linearization->nonsmooth_column_mask |=
-                (uint32_t)(1u << column);
+            linearization->nonsmooth_column_mask |= UINT64_C(1) << column;
             ++linearization->nonsmooth_column_count;
         }
     }

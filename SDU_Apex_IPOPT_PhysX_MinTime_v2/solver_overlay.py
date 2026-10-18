@@ -1,0 +1,648 @@
+"""v2.2.7 elastic-dynamics feasibility overlay for historical Unity-wheel IPOPT.
+
+The source model, tire laws, steering/braking and track safety remain intact.
+Only the numeric form of Phase I is altered: a dynamic equality F(z)=0 is
+represented by F(z)-e=0 with an elastic defect variable e. During Phase I,
+minimize the weighted squared defects. Phase II is strictly gated by e=0 and
+an explicit audit of the ORIGINAL dynamic residuals.
+
+The historical source in _restored_git_history is never edited.
+"""
+from __future__ import annotations
+import hashlib
+import shutil
+from pathlib import Path
+
+from solver_numerics import guard_solver
+
+from solver_overlay_v226 import (
+    HESSIAN_SITE, HESSIAN_ADDITION, OPTIMIZER_DECLARATION, CONSTRAINT_FN,
+    TRUST_SITE, INIT_SITE, FEASIBILITY_SITE, SOLVE_SITE,
+    STRICT_BOUND_DIAGNOSTICS_SITE, REPORT_SITE, STRICT_GATE_SITE,
+    _replace_once,
+)
+
+CONSTRAINT_ELASTIC = '''    def add_constraint(expression, label: str | list[str]) -> None:
+        count = int(expression.numel())
+        labels = ([label] * count if isinstance(label, str) else list(label))
+        if len(labels) != count:
+            raise ValueError("constraint labels do not match expression size")
+        physical_dynamic_labels = (
+            'periodic_collocation_state_', 'physx_implicit_wheel_update_',
+            'longitudinal_force_balance_', 'lateral_force_balance_',
+            'unity_spring_damper_load_',
+        )
+        if (expression.is_op(ca.OP_EQ) and all(any(
+                name.startswith(prefix) for prefix in physical_dynamic_labels)
+                for name in labels)):
+            # Introducing independent elastic variables makes the synthetic
+            # guess an EXACT feasible point for the modified dynamics while
+            # allowing the nonlinear solver to reduce their magnitude.
+            residual = expression.dep(0) - expression.dep(1)
+            elastic = opti.variable(residual.size1(), residual.size2())
+            elastic_pairs.append((elastic, residual))
+            elastic_vars.append(elastic)
+            scale = (10.0 if any(name.startswith((
+                'longitudinal_force_balance_', 'lateral_force_balance_'))
+                for name in labels) else 1.0)
+            elastic_scaled.append(ca.vec(elastic / scale))
+            # Record each equality at the original insertion site, preserving
+            # the ordering expected by the existing diagnostics.
+            opti.subject_to(residual - elastic == 0)
+            constraint_labels.extend(labels)
+            # This is a dynamic-only cap: 1e5 during Phase I, EXACTLY 0
+            # during Phase II. Never a relaxation of lane/footprint limits.
+            opti.subject_to(opti.bounded(-elastic_cap, elastic, elastic_cap))
+            constraint_labels.extend(['elastic_bound_' + label for label in labels])
+        else:
+            opti.subject_to(expression)
+            constraint_labels.extend(labels)
+'''
+
+INIT_ELASTIC = "    if not elastic_pairs:\n        raise RuntimeError('No dynamic equalities were selected for elastic initialization')\n    elastic_initial_values = {}\n    for elastic, residual in elastic_pairs:\n        values = np.asarray(opti.value(residual, opti.initial()), dtype=np.float64)\n        if not np.isfinite(values).all():\n            raise RuntimeError('Non-finite original vehicle dynamics in synthetic seed')\n        opti.set_initial(elastic, values)\n        elastic_initial_values[elastic] = values.copy()\n    # Initial point is now algebraically compatible with the relaxed\n    # dynamic equations. All safety and actuator constraints remain hard.\n    elastic_merit = ca.sumsqr(ca.vertcat(*elastic_scaled))\n    # Small regularizer prevents unlimited movement of unconstrained\n    # variables without pinning the solution to inaccurate seed dynamics.\n    opti.minimize(elastic_merit + 1.0e-4 * feasibility_objective)\n    opti.set_value(elastic_cap, 1.0e5)\n    try:\n        initial_constraints"
+
+SOLVE_ELASTIC_V233 = '    else:\n        # Solve ONE well-defined elastic feasibility problem instead of\n        # tightening tolerances around a synthetic iterate that never moves.\n        phase1_elastic_reports = []\n        stage1_solution = None\n        stage1_stats = {}\n        physical_vars = (x, qdelta, throttle, phase_lengths, normal_load,\n                         accel_xy, *elastic_vars)\n        # CasADi Opti.initial() reconstructs substitutions across the full\n        # 6,000+ variable graph. Calling it for each state, wheel, or defect\n        # cost minutes in the measured user traceback. Cache the numeric\n        # initialization and compile one vectorized equality evaluator.\n        def seed_matrix(var, values):\n            arr = np.asarray(values, dtype=np.float64)\n            if arr.size != int(var.numel()) or not np.isfinite(arr).all():\n                raise RuntimeError(\'Invalid numeric Phase-I warm-start variable\')\n            return arr.reshape((int(var.size1()), int(var.size2())),\n                               order=\'F\').copy()\n\n        last_snapshot = {\n            x: seed_matrix(x, seed_x_values),\n            qdelta: seed_matrix(qdelta, seed_qdelta),\n            throttle: seed_matrix(throttle, seed_throttle),\n            phase_lengths: seed_matrix(phase_lengths, phase_initial_lengths),\n            normal_load: seed_matrix(normal_load, seed_load),\n            accel_xy: seed_matrix(accel_xy, np.vstack((seed_ax, seed_ay))),\n        }\n        for elastic in elastic_vars:\n            last_snapshot[elastic] = seed_matrix(elastic,\n                                                  elastic_initial_values[elastic])\n        var_slices = {}\n        offset = 0\n        for var in physical_vars:\n            count = int(var.numel())\n            var_slices[var] = (offset, offset + count,\n                               int(var.size1()), int(var.size2()))\n            offset += count\n        if offset != int(opti.nx):\n            raise RuntimeError(\'Phase-I cache does not cover all Opti variables\')\n\n        def primal_vector(snapshot):\n            return np.concatenate([\n                snapshot[var].reshape(-1, order=\'F\') for var in physical_vars])\n\n        def snapshot_from_vector(values):\n            flat = np.asarray(values, dtype=np.float64).reshape(-1)\n            if flat.size != offset:\n                raise RuntimeError(\'Unexpected IPOPT primal vector length\')\n            return {var: flat[lo:hi].reshape((rows, cols), order=\'F\').copy()\n                    for var, (lo, hi, rows, cols) in var_slices.items()}\n\n        # Evaluate original g, original bounds and original dynamic residuals\n        # in one CasADi function. Bounds still come from the CURRENT parameters\n        # (the slack cap switches to strict zero before final acceptance).\n        numerical_phase1 = ca.Function(\n            \'phase1_vectorized_evaluation\', [opti.x, opti.p],\n            [opti.g, opti.lbg, opti.ubg,\n             ca.vertcat(*[ca.vec(residual) for _, residual in elastic_pairs]),\n             elastic_merit])\n        raw_shapes = [(var, int(var.numel())) for var in elastic_vars]\n\n        def numeric_evaluation(primal):\n            params = np.asarray(opti.value(opti.p),\n                                dtype=np.float64).reshape(-1)\n            g, low, high, raw, energy = numerical_phase1(primal, params)\n            return (np.asarray(g, dtype=np.float64).reshape(-1),\n                    np.asarray(low, dtype=np.float64).reshape(-1),\n                    np.asarray(high, dtype=np.float64).reshape(-1),\n                    np.asarray(raw, dtype=np.float64).reshape(-1),\n                    float(energy))\n\n        def snapshot_current(debug=False):\n            if debug:\n                # One Opti call per IPOPT callback, not one per variable.\n                return snapshot_from_vector(opti.debug.value(opti.x))\n            return {var: value.copy() for var, value in last_snapshot.items()}\n\n        def set_snapshot(snapshot):\n            for var, val in snapshot.items():\n                opti.set_initial(var, val)\n            last_snapshot.clear()\n            last_snapshot.update({var: np.asarray(val).copy()\n                                  for var, val in snapshot.items()})\n\n        def phase1_measure(debug=False):\n            try:\n                values = snapshot_current(debug=debug)\n                g, low, high, raw, energy = numeric_evaluation(\n                    primal_vector(values))\n                diag = _constraint_diagnostics(g, low, high, constraint_labels)\n                actual_elastic = np.concatenate([\n                    np.asarray(values[elastic]).reshape(-1, order=\'F\')\n                    for elastic in elastic_vars])\n                defect = float(np.max(np.abs(raw)))\n                elast_max = float(np.max(np.abs(actual_elastic)))\n                if not (np.isfinite(raw).all() and np.isfinite(actual_elastic).all()\n                        and np.isfinite(energy)):\n                    diag[\'max_constraint_violation\'] = None\n                diag.update(raw_max_dynamic_defect=defect,\n                            max_elastic_slack=elast_max,\n                            elastic_merit=energy)\n                return diag\n            except (RuntimeError, ValueError, OverflowError) as exc:\n                return {\'max_constraint_violation\': None,\n                        \'raw_max_dynamic_defect\': None,\n                        \'max_elastic_slack\': None,\n                        \'elastic_merit\': None,\n                        \'worst_constraints\': [], \'error\': str(exc)}\n\n        def eligible(diag):\n            violation = diag.get(\'max_constraint_violation\')\n            energy = diag.get(\'elastic_merit\')\n            return (violation is not None and energy is not None and\n                    np.isfinite(energy) and np.isfinite(violation) and\n                    violation <= NLP_FEASIBILITY_TOLERANCE)\n\n        initial_snapshot = snapshot_current()\n        initial_measure = phase1_measure()\n        print(\'Phase-I numeric seed diagnostics ready; starting IPOPT\', flush=True)\n        winning_snapshot = initial_snapshot if eligible(initial_measure) else None\n        winning_measure = initial_measure if eligible(initial_measure) else None\n        winning_origin = \'initial_elastic_guess\' if winning_snapshot else \'none\'\n        accepted_ipopt_iters = 0\n        callback_errors = 0\n        # Cache constraints from the same numerical evaluator, with exact\n        # current parameter values and without Opti.initial() substitutions.\n        _, low, high, _, _ = numeric_evaluation(primal_vector(initial_snapshot))\n        # Project each trial\'s ELASTIC VARIABLES onto its actual dynamic\n        # residuals before acceptance. Elastic e is a numerical artifact:\n        # an IPOPT trial with valid safety/actuator constraints and a better\n        # physical residual must not be discarded just because e differs\n        # slightly from F(z). No physical constraint is relaxed here.\n        elastic_physical_prefixes = (\n            \'periodic_collocation_state_\', \'physx_implicit_wheel_update_\',\n            \'longitudinal_force_balance_\', \'lateral_force_balance_\',\n            \'unity_spring_damper_load_\',\n        )\n        hard_indices = np.array([not (name.startswith(elastic_physical_prefixes)\n                           or name.startswith(\'elastic_bound_\'))\n                           for name in constraint_labels], dtype=bool)\n        dynamic_labels = [name for name in constraint_labels\n                          if name.startswith(elastic_physical_prefixes)]\n        def projected_trial():\n            # Evaluate the actual IPOPT primal once, then project only the\n            # numerical slack variables. Never relax physical hard bounds.\n            values = snapshot_current(debug=True)\n            g, _, _, all_raw, _ = numeric_evaluation(primal_vector(values))\n            if not np.isfinite(g).all() or not np.isfinite(all_raw).all():\n                return None, None\n            hard_viol = max(float(np.max(low[hard_indices]-g[hard_indices])),\n                            float(np.max(g[hard_indices]-high[hard_indices])), 0.)\n            if hard_viol > NLP_FEASIBILITY_TOLERANCE:\n                return None, None\n            energy = 0.0\n            max_defect = 0.0\n            label_offset = 0\n            raw_offset = 0\n            elastic_limit = float(opti.value(elastic_cap))\n            for elastic, residual in elastic_pairs:\n                size = int(elastic.numel())\n                raw = all_raw[raw_offset:raw_offset + size].reshape(\n                    (int(elastic.size1()), int(elastic.size2())), order=\'F\')\n                raw_offset += size\n                if float(np.max(np.abs(raw))) > elastic_limit:\n                    return None, None\n                labels = dynamic_labels[label_offset:label_offset + size]\n                label_offset += size\n                norm = 10.0 if any(label.startswith((\n                    \'longitudinal_force_balance_\', \'lateral_force_balance_\'))\n                    for label in labels) else 1.0\n                energy += float(np.sum((raw / norm) ** 2))\n                max_defect = max(max_defect, float(np.max(np.abs(raw))))\n                values[elastic] = raw.copy()\n            return values, {\'elastic_merit\': energy,\n                            \'raw_max_dynamic_defect\': max_defect,\n                            \'max_elastic_slack\': max_defect,\n                            \'max_constraint_violation\': hard_viol}\n\n        # An IPOPT trial is accepted only if *all nonelastic hard constraints*\n        # are satisfied and the projected dynamic slack improves the merit.\n        def save_feasible_iterate(iteration):\n            nonlocal winning_snapshot, winning_measure, winning_origin\n            nonlocal accepted_ipopt_iters, callback_errors\n            try:\n                candidate, diag = projected_trial()\n                if candidate is None:\n                    return\n                if (winning_measure is not None and diag[\'elastic_merit\'] >=\n                        winning_measure[\'elastic_merit\'] - 1.0e-8):\n                    return\n                winning_snapshot, winning_measure = candidate, diag\n                winning_origin = \'ipopt_projected_iteration\'\n                accepted_ipopt_iters += 1\n            except (RuntimeError, ValueError, OverflowError, KeyError):\n                callback_errors += 1\n\n        opti.callback(save_feasible_iterate)\n        try:\n            result = opti.solve_limited()\n            final_error = None\n        except RuntimeError as exc:\n            result = None\n            final_error = str(exc)\n            solver_error = final_error\n        stats = opti.stats()\n        try:\n            final_candidate, final_measure = projected_trial()\n            if (final_candidate is not None and\n                    (winning_measure is None or final_measure[\'elastic_merit\'] <\n                     winning_measure[\'elastic_merit\'] - 1.0e-8)):\n                winning_snapshot, winning_measure = final_candidate, final_measure\n                winning_origin = \'ipopt_projected_final\'\n        except (RuntimeError, ValueError, OverflowError):\n            final_measure = {\'max_constraint_violation\': None}\n        if winning_snapshot is None:\n            set_snapshot(initial_snapshot)\n        else:\n            set_snapshot(winning_snapshot)\n        # CRITICAL: force zero elastic slack bounds BEFORE any acceptance,\n        # before checking the legacy NLP and before switching to lap time.\n        opti.callback(lambda it: None)\n        opti.set_value(elastic_cap, 0.0)\n        strict_diag = phase1_measure()\n        strict_ok = (eligible(strict_diag) and\n                     strict_diag[\'raw_max_dynamic_defect\']\n                     <= NLP_FEASIBILITY_TOLERANCE and\n                     strict_diag[\'max_elastic_slack\']\n                     <= NLP_FEASIBILITY_TOLERANCE)\n        phase1_elastic_reports.append({\n            \'name\': \'elastic model-consistent initialization\',\n            \'initial_raw_max_defect\': initial_measure.get(\'raw_max_dynamic_defect\'),\n            \'initial_elastic_merit\': initial_measure.get(\'elastic_merit\'),\n            \'best_raw_max_defect\': (winning_measure or {}).get(\'raw_max_dynamic_defect\'),\n            \'best_elastic_merit\': (winning_measure or {}).get(\'elastic_merit\'),\n            \'strict_max_constraint_violation\': strict_diag.get(\'max_constraint_violation\'),\n            \'final_exact_physics_feasible\': bool(strict_ok),\n            \'accepted_iterate\': winning_origin,\n            \'feasible_iteration_improvements\': accepted_ipopt_iters,\n            \'callback_errors\': callback_errors,\n            \'ipopt_status\': stats.get(\'return_status\'),\n            \'ipopt_iterations\': stats.get(\'iter_count\'),\n            \'solver_exception\': final_error,\n            \'worst_constraints\': strict_diag.get(\'worst_constraints\', [])[:12],\n        })\n        print(\'Phase-I elastic dynamics: \'\n              f\'seed_defect={initial_measure.get("raw_max_dynamic_defect")}, \'\n              f\'best_defect={(winning_measure or {}).get("raw_max_dynamic_defect")}, \'\n              f\'strict_violation={strict_diag.get("max_constraint_violation")}, \'\n              f\'accepted={strict_ok}, source={winning_origin}\', flush=True)\n        stage1_stats = {\n            \'success\': bool(strict_ok),\n            \'return_status\': (\'Elastic_Exact_Dynamics_Feasible\' if strict_ok\n                              else stats.get(\'return_status\', \'Unknown\')),\n            \'iter_count\': stats.get(\'iter_count\', 0),\n            \'_initial_snapshot\': opti.initial() if strict_ok else None,\n        }\n        if not strict_ok:\n            stage1_stats[\'_phase1_elastic_strict_failed\'] = True\n\n    def stage_values'
+# v2.3.4: preserve strict Phase-I diagnostics without querying an unsolved Opti stack.
+SOLVE_ELASTIC = SOLVE_ELASTIC_V233.replace("        if not strict_ok:\n            stage1_stats['_phase1_elastic_strict_failed'] = True\n\n    def stage_values", "        if not strict_ok:\n            stage1_stats['_phase1_elastic_strict_failed'] = True\n            # The historical reporting path expects a solved Opti stack.\n            # An elastic Phase-I failure is *not* an Opti solution and must\n            # not fall through to Opti.value() or Opti.debug.value().\n            # We have already audited the same candidate against the strict\n            # zero-slack bounds using the cached, vectorized evaluator.\n            return {}, {\n                'optimizer': 'CasADi/IPOPT phase-switched spatial direct collocation',\n                'track': track.to_dict(),\n                'unity_vehicle_model': model.metadata(),\n                'elapsed_s': time.perf_counter() - started,\n                'solver': {\n                    'success': False,\n                    'return_status': stats.get('return_status', 'Unknown'),\n                    'ipopt_converged': False,\n                    'iterations': stats.get('iter_count', 0),\n                    'exception': final_error,\n                    'feasible_incumbent': False,\n                },\n                'solve_stages': phase1_elastic_reports,\n                'selected_stage': 'elastic model-consistent initialization',\n                'nlp_diagnostics': {\n                    **strict_diag,\n                    'initial_guess': initial_constraints,\n                    'feasible_incumbent': False,\n                    'solver_error': final_error,\n                },\n                'phase1_exact_zero_slack_audited': True,\n                'phase1_strict_feasible': False,\n                'brake_mode_seed_source': brake_mode_seed_source,\n            }\n\n    def stage_values", 1)
+
+
+
+# Preserve the byte-exact v2.3.4 generated solver for fail-closed cache upgrades.
+SOLVE_ELASTIC_V234 = SOLVE_ELASTIC
+
+# v2.3.5 Phase-I checkpointing: an IPOPT full step can have valid physical
+# directions but violate nonlinear track/actuator bounds before line search.
+# Evaluate shorter steps FROM THE LAST ACCEPTED hard-feasible candidate,
+# project ONLY the numerical elastic variables, and accept a point only when
+# every hard constraint still passes and the physical-defect merit decreases.
+# IPOPT's own iterate and optimization constraints are not changed.
+_old_projected_trial = '''        def projected_trial():
+            # Evaluate the actual IPOPT primal once, then project only the
+            # numerical slack variables. Never relax physical hard bounds.
+            values = snapshot_current(debug=True)'''
+_new_projected_trial = '''        def projected_trial(values=None):
+            # Evaluate the actual IPOPT primal once, then project only the
+            # numerical slack variables. Never relax physical hard bounds.
+            if values is None:
+                values = snapshot_current(debug=True)'''
+assert SOLVE_ELASTIC.count(_old_projected_trial)==1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_projected_trial, _new_projected_trial, 1)
+
+_old_callback = '''        # An IPOPT trial is accepted only if *all nonelastic hard constraints*
+        # are satisfied and the projected dynamic slack improves the merit.
+        def save_feasible_iterate(iteration):
+            nonlocal winning_snapshot, winning_measure, winning_origin
+            nonlocal accepted_ipopt_iters, callback_errors
+            try:
+                candidate, diag = projected_trial()
+                if candidate is None:
+                    return
+                if (winning_measure is not None and diag['elastic_merit'] >=
+                        winning_measure['elastic_merit'] - 1.0e-8):
+                    return
+                winning_snapshot, winning_measure = candidate, diag
+                winning_origin = 'ipopt_projected_iteration'
+                accepted_ipopt_iters += 1
+            except (RuntimeError, ValueError, OverflowError, KeyError):
+                callback_errors += 1'''
+_new_callback = '''        # A full IPOPT iterate may be outside safety bounds. Never accept it
+        # directly in that case, but examine shorter physical-variable steps
+        # from the last verified hard-feasible checkpoint. Slack is explicitly
+        # reprojected onto the original dynamics after each trial step.
+        checkpoint_alphas = (1., .5, .25, .125, .0625, .03125,
+                             .015625, .0078125, .00390625,
+                             .001953125, .0009765625, .00048828125)
+        accepted_backtracks = 0
+        def checked_checkpoint(trial, reference, reference_merit):
+            # Side-effect-free w.r.t. IPOPT; used only for recording candidate
+            # states and potential subsequent starts, never to certify physics.
+            for alpha in checkpoint_alphas:
+                if alpha == 1.:
+                    proposed = trial
+                else:
+                    proposed = {var: (reference[var] +
+                        alpha * (trial[var] - reference[var]))
+                        for var in physical_vars}
+                candidate, diag = projected_trial(proposed)
+                if candidate is None:
+                    continue
+                merit = diag['elastic_merit']
+                if (np.isfinite(merit) and
+                    (reference_merit is None or merit < reference_merit - 1.0e-8)):
+                    return candidate, diag, alpha
+            return None, None, None
+
+        def save_feasible_iterate(iteration):
+            nonlocal winning_snapshot, winning_measure, winning_origin
+            nonlocal accepted_ipopt_iters, callback_errors, accepted_backtracks
+            try:
+                trial = snapshot_current(debug=True)
+                reference = (winning_snapshot if winning_snapshot is not None
+                             else initial_snapshot)
+                base = (winning_measure['elastic_merit'] if winning_measure
+                        is not None else None)
+                candidate, diag, alpha = checked_checkpoint(trial, reference, base)
+                if candidate is None:
+                    return
+                winning_snapshot, winning_measure = candidate, diag
+                winning_origin = ('ipopt_projected_iteration' if alpha == 1.
+                                  else 'ipopt_hard_feasible_backtrack')
+                accepted_ipopt_iters += 1
+                if alpha != 1.:
+                    accepted_backtracks += 1
+            except (RuntimeError, ValueError, OverflowError, KeyError):
+                callback_errors += 1'''
+assert SOLVE_ELASTIC.count(_old_callback)==1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_callback, _new_callback, 1)
+_old_final = '''        try:
+            final_candidate, final_measure = projected_trial()
+            if (final_candidate is not None and
+                    (winning_measure is None or final_measure['elastic_merit'] <
+                     winning_measure['elastic_merit'] - 1.0e-8)):
+                winning_snapshot, winning_measure = final_candidate, final_measure
+                winning_origin = 'ipopt_projected_final'
+        except (RuntimeError, ValueError, OverflowError):
+            final_measure = {'max_constraint_violation': None}'''
+_new_final = '''        try:
+            final_trial = snapshot_current(debug=True)
+            final_ref = (winning_snapshot if winning_snapshot is not None
+                         else initial_snapshot)
+            final_base = (winning_measure['elastic_merit'] if winning_measure
+                          is not None else None)
+            final_candidate, final_measure, final_alpha = checked_checkpoint(
+                final_trial, final_ref, final_base)
+            if final_candidate is not None:
+                winning_snapshot, winning_measure = final_candidate, final_measure
+                winning_origin = ('ipopt_projected_final' if final_alpha == 1.
+                                  else 'ipopt_hard_feasible_final_backtrack')
+                if final_alpha != 1.:
+                    accepted_backtracks += 1
+        except (RuntimeError, ValueError, OverflowError):
+            final_measure = {'max_constraint_violation': None}'''
+assert SOLVE_ELASTIC.count(_old_final)==1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_final, _new_final, 1)
+_old_metric="            'feasible_iteration_improvements': accepted_ipopt_iters,\n"
+assert SOLVE_ELASTIC.count(_old_metric)==1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_metric,
+    _old_metric+"            'accepted_hard_feasible_backtracks': accepted_backtracks,\n",1)
+
+
+# v2.3.7: distinguish weighted-square merit from the maximum raw physical defect.
+# A projected backtrack that decreases L2 but increases L-infinity is NOT an
+# improvement toward the strict zero-slack acceptance criterion.
+SOLVE_ELASTIC_V236 = SOLVE_ELASTIC
+
+# Keep the exact generated v2.3.6 string above for fail-closed cache checks.
+# Under the new rule both physical worst-case error and IPOPT's merit improve.
+_old_checkpoint = """        def checked_checkpoint(trial, reference, reference_merit):
+            # Side-effect-free w.r.t. IPOPT; used only for recording candidate
+            # states and potential subsequent starts, never to certify physics.
+            for alpha in checkpoint_alphas:
+                if alpha == 1.:
+                    proposed = trial
+                else:
+                    proposed = {var: (reference[var] +
+                        alpha * (trial[var] - reference[var]))
+                        for var in physical_vars}
+                candidate, diag = projected_trial(proposed)
+                if candidate is None:
+                    continue
+                merit = diag['elastic_merit']
+                if (np.isfinite(merit) and
+                    (reference_merit is None or merit < reference_merit - 1.0e-8)):
+                    return candidate, diag, alpha
+            return None, None, None"""
+_new_checkpoint = """        rejected_merit_but_worse_max = [0]
+        def checked_checkpoint(trial, reference, reference_merit,
+                               reference_max_defect=None):
+            # A smaller sum of squares is insufficient when the largest actual
+            # vehicle-dynamics defect becomes worse. Require both measures to
+            # improve (up to floating point roundoff in the max norm).
+            for alpha in checkpoint_alphas:
+                if alpha == 1.:
+                    proposed = trial
+                else:
+                    proposed = {var: (reference[var] +
+                        alpha * (trial[var] - reference[var]))
+                        for var in physical_vars}
+                candidate, diag = projected_trial(proposed)
+                if candidate is None:
+                    continue
+                merit = diag['elastic_merit']
+                worst = diag['raw_max_dynamic_defect']
+                energy_ok = (np.isfinite(merit) and
+                    (reference_merit is None or merit < reference_merit - 1.0e-8))
+                max_ok = (np.isfinite(worst) and
+                    (reference_max_defect is None or
+                     worst <= reference_max_defect + 1.0e-10))
+                if energy_ok and max_ok:
+                    return candidate, diag, alpha
+                if energy_ok and not max_ok:
+                    rejected_merit_but_worse_max[0] += 1
+            return None, None, None"""
+assert SOLVE_ELASTIC.count(_old_checkpoint)==1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_checkpoint,_new_checkpoint,1)
+# v236 code computes 'base' as merit; add worst-case baseline.
+old = """                base = (winning_measure['elastic_merit'] if winning_measure
+                        is not None else None)
+                candidate, diag, alpha = checked_checkpoint(trial, reference, base)"""
+new = """                base = (winning_measure['elastic_merit'] if winning_measure
+                        is not None else None)
+                worst_base = (winning_measure['raw_max_dynamic_defect']
+                              if winning_measure is not None else None)
+                candidate, diag, alpha = checked_checkpoint(
+                    trial, reference, base, worst_base)"""
+assert SOLVE_ELASTIC.count(old)==1
+SOLVE_ELASTIC=SOLVE_ELASTIC.replace(old,new,1)
+old="""            final_base = (winning_measure['elastic_merit'] if winning_measure
+                          is not None else None)
+            final_candidate, final_measure, final_alpha = checked_checkpoint(
+                final_trial, final_ref, final_base)"""
+new="""            final_base = (winning_measure['elastic_merit'] if winning_measure
+                          is not None else None)
+            final_worst = (winning_measure['raw_max_dynamic_defect']
+                           if winning_measure is not None else None)
+            final_candidate, final_measure, final_alpha = checked_checkpoint(
+                final_trial, final_ref, final_base, final_worst)"""
+assert SOLVE_ELASTIC.count(old)==1
+SOLVE_ELASTIC=SOLVE_ELASTIC.replace(old,new,1)
+# Add raw-physical dynamic residual group diagnostics, based on the same CasADi
+# numerical evaluator and original g label order; no new physics model.
+needle="""        def phase1_measure(debug=False):
+"""
+insert="""        def defect_breakdown(raw):
+            # Dynamic labels are placed before their corresponding slack caps.
+            labels = [name for name in constraint_labels if
+                      name.startswith(('periodic_collocation_state_',
+                          'physx_implicit_wheel_update_',
+                          'longitudinal_force_balance_',
+                          'lateral_force_balance_',
+                          'unity_spring_damper_load_'))]
+            if len(labels) != len(raw):
+                # Unit-test surrogate programs may not use vehicle labels.
+                # Never fabricate wheel/state attributions in that case.
+                return [{'group': 'unlabeled_residual',
+                         'count': int(len(raw)),
+                         'max_abs': float(np.max(np.abs(raw))),
+                         'rms': float(np.sqrt(np.mean(raw * raw))),
+                         'worst_label': None, 'worst_signed_value': None}]
+            buckets = {}
+            for label, val in zip(labels, raw):
+                if label.startswith('periodic_collocation_state_'):
+                    group = label
+                elif label.startswith('physx_implicit_wheel_update_'):
+                    group = 'physx_implicit_wheel_update'
+                elif label.startswith('longitudinal_force_balance_'):
+                    group = 'longitudinal_force_balance'
+                elif label.startswith('lateral_force_balance_'):
+                    group = 'lateral_force_balance'
+                else:
+                    group = 'unity_spring_damper_load'
+                bucket = buckets.setdefault(group, [])
+                bucket.append((label, float(val)))
+            breakdown = []
+            for group, entries in buckets.items():
+                worst_label, worst_value = max(entries,
+                                                key=lambda item: abs(item[1]))
+                vec = np.fromiter((val for _, val in entries), dtype=float)
+                breakdown.append({
+                    'group': group, 'count': len(entries),
+                    'max_abs': abs(worst_value),
+                    'rms': float(np.sqrt(np.mean(vec * vec))),
+                    'worst_label': worst_label,
+                    'worst_signed_value': worst_value,
+                })
+            return sorted(breakdown, key=lambda item: -item['max_abs'])
+
+"""
+assert SOLVE_ELASTIC.count(needle)==1
+SOLVE_ELASTIC=SOLVE_ELASTIC.replace(needle,insert+needle,1)
+needle="                diag.update(raw_max_dynamic_defect=defect,\n                            max_elastic_slack=elast_max,\n                            elastic_merit=energy)"
+replacement="""                diag.update(raw_max_dynamic_defect=defect,
+                            max_elastic_slack=elast_max,
+                            elastic_merit=energy,
+                            raw_dynamic_breakdown=defect_breakdown(raw))"""
+assert SOLVE_ELASTIC.count(needle)==1
+SOLVE_ELASTIC=SOLVE_ELASTIC.replace(needle,replacement,1)
+# For accepted checkpoint, obtain full raw breakdown once, not per backtrack.
+needle="""        if winning_snapshot is None:
+            set_snapshot(initial_snapshot)
+        else:
+            set_snapshot(winning_snapshot)
+        # CRITICAL"""
+repl="""        if winning_snapshot is None:
+            set_snapshot(initial_snapshot)
+        else:
+            set_snapshot(winning_snapshot)
+        selected_pre_strict_measure = phase1_measure()
+        # CRITICAL"""
+assert SOLVE_ELASTIC.count(needle)==1
+SOLVE_ELASTIC=SOLVE_ELASTIC.replace(needle,repl,1)
+needle="            'accepted_hard_feasible_backtracks': accepted_backtracks,\n"
+repl="""            'accepted_hard_feasible_backtracks': accepted_backtracks,
+            'rejected_lower_merit_higher_max_defect': rejected_merit_but_worse_max[0],
+            'initial_dynamic_defect_breakdown': initial_measure.get('raw_dynamic_breakdown', []),
+            'selected_dynamic_defect_breakdown': selected_pre_strict_measure.get('raw_dynamic_breakdown', []),
+"""
+assert SOLVE_ELASTIC.count(needle)==1
+SOLVE_ELASTIC=SOLVE_ELASTIC.replace(needle,repl,1)
+
+from solver_overlay_v229_compat import SOLVE_ELASTIC_V229
+
+TRUST_ELASTIC = '''    # The synthetic starting profile is not measured capture data.
+    # Disable the capture-specific distance cap during feasibility; the
+    # original minimum-time continuation restores its own trust factors.
+    opti.set_value(trust_region_bound, 1.0e12)
+'''
+
+STRICT_DIAGNOSTICS_ELASTIC = '''    def stage_constraint_diagnostics(solution, stats):
+        try:
+            values = stage_values(solution, stats, opti.g).reshape(-1)
+            # ALWAYS read the strict zero-slack bounds from the live model.
+            lower = np.asarray(opti.value(opti.lbg, opti.initial()),
+                               dtype=np.float64).reshape(-1)
+            upper = np.asarray(opti.value(opti.ubg, opti.initial()),
+                               dtype=np.float64).reshape(-1)'''
+
+
+def transform_solver(source: str, mode: str, *, _numeric_guards: bool = True, _project_elastic_trials: bool = True, _fix_wheel_substep_speed: bool = True) -> str:
+    if mode not in ('limited-memory', 'exact'):
+        raise ValueError('Phase-I Hessian must be limited-memory or exact')
+    if mode == 'limited-memory':
+        source = _replace_once(source, HESSIAN_SITE, HESSIAN_ADDITION,
+                               'Phase-I Hessian')
+    source = _replace_once(source, OPTIMIZER_DECLARATION,
+        OPTIMIZER_DECLARATION +
+        '    elastic_pairs = []\n'
+        '    elastic_label_by_variable = {}\n'
+        '    elastic_vars = []\n'
+        '    elastic_scaled = []\n'
+        '    elastic_cap = opti.parameter()\n'
+        '    opti.set_value(elastic_cap, 1.0e5)\n', 'Opti construction')
+    source = _replace_once(source, CONSTRAINT_FN, CONSTRAINT_ELASTIC,
+                           'dynamic constraints')
+    source = _replace_once(source, TRUST_SITE, TRUST_ELASTIC,
+                           'synthetic seed captured-motion cap')
+    source = _replace_once(source, INIT_SITE, INIT_ELASTIC,
+                           'initialize elastic defects')
+    source = _replace_once(source, FEASIBILITY_SITE,
+                           '    initial_is_feasible = False',
+                           'strict model feasibility guard')
+    source = _replace_once(source, SOLVE_SITE,
+                           SOLVE_ELASTIC if _project_elastic_trials else SOLVE_ELASTIC_V229,
+                           'elastic solve with strict gate')
+    source = _replace_once(source, STRICT_BOUND_DIAGNOSTICS_SITE,
+                           STRICT_DIAGNOSTICS_ELASTIC,
+                           'strict bound diagnostics')
+    source = _replace_once(source, REPORT_SITE,
+                           REPORT_SITE + '    stage_reports.extend(phase1_elastic_reports)\n',
+                           'elastic reports')
+    source = _replace_once(source, STRICT_GATE_SITE,
+        '    if (strict_ok\n'
+        '            and stage1_diagnostics.get("max_constraint_violation") is not None\n'
+        '            and stage1_diagnostics["max_constraint_violation"]\n'
+        '            <= NLP_FEASIBILITY_TOLERANCE):', 'minimum-time strict gate')
+    return guard_solver(source, fix_wheel_substep_speed=_fix_wheel_substep_speed) if _numeric_guards else source
+
+
+def _remove_v231_only_declaration(code: str) -> str:
+    """Restore byte-exact older cache output without relaxing cache validation.
+
+    v2.3.1 added this unused symbol while incorporating its new projected-trial
+    handler. The legacy handlers never included it. Its presence meant the
+    existing v2.3.0 generated file was incorrectly classified as user-edited.
+    """
+    declaration = '    elastic_label_by_variable = {}\n'
+    if code.count(declaration) != 1:
+        raise RuntimeError('Cannot reconstruct historical overlay: unexpected declaration count')
+    return code.replace(declaration, '', 1)
+
+
+def _old_projected_seed_init(source: str) -> str:
+    """Restore historical elastic seed creation for verified old cache hashes."""
+    from solver_overlay_v232_compat import INIT_ELASTIC_V232
+    if source.count(INIT_ELASTIC) != 1:
+        raise RuntimeError('Unexpected elastic seed site in historical overlay')
+    return source.replace(INIT_ELASTIC, INIT_ELASTIC_V232, 1)
+
+
+def transform_solver_228(source: str, mode: str) -> str:
+    """Byte-exact previous v2.2.8 overlay for verified cache upgrades."""
+    return _remove_v231_only_declaration(_old_projected_seed_init(transform_solver(
+        source, mode, _numeric_guards=False, _project_elastic_trials=False)))
+
+
+def transform_solver_v229(source: str, mode: str) -> str:
+    """Byte-exact v2.2.9/v2.3.0 generated solver for safe in-place upgrade."""
+    return _remove_v231_only_declaration(_old_projected_seed_init(transform_solver(
+        source, mode, _project_elastic_trials=False, _fix_wheel_substep_speed=False)))
+
+
+def transform_solver_v234(source: str, mode: str) -> str:
+    """Byte-exact v2.3.4 generated solver for safe cache upgrade."""
+    latest = transform_solver(source, mode, _fix_wheel_substep_speed=False)
+    if latest.count(SOLVE_ELASTIC) != 1:
+        raise RuntimeError('Cannot reproduce v2.3.4 optimizer overlay')
+    return latest.replace(SOLVE_ELASTIC, SOLVE_ELASTIC_V234, 1)
+
+
+def transform_solver_v233(source: str, mode: str) -> str:
+    """Reconstruct the exact v2.3.3 generated solver before reporting fix."""
+    latest = transform_solver(source, mode, _fix_wheel_substep_speed=False)
+    if latest.count(SOLVE_ELASTIC) != 1:
+        raise RuntimeError('Cannot reproduce v2.3.3 optimizer overlay')
+    return latest.replace(SOLVE_ELASTIC, SOLVE_ELASTIC_V233, 1)
+
+
+def transform_solver_v232(source: str, mode: str) -> str:
+    """Reconstruct byte-exact v2.3.2 working solver for safe cache upgrade."""
+    from solver_overlay_v232_compat import INIT_ELASTIC_V232, SOLVE_ELASTIC_V232
+    latest = transform_solver(source, mode, _fix_wheel_substep_speed=False)
+    if latest.count(INIT_ELASTIC) != 1 or latest.count(SOLVE_ELASTIC) != 1:
+        raise RuntimeError('Cannot reproduce v2.3.2 optimizer overlay')
+    return latest.replace(INIT_ELASTIC, INIT_ELASTIC_V232, 1).replace(
+        SOLVE_ELASTIC, SOLVE_ELASTIC_V232, 1)
+
+
+def transform_solver_v236(source: str, mode: str) -> str:
+    """Byte-exact v2.3.6 cache, before max-defect-monotone checkpoint fix."""
+    latest = transform_solver(source, mode)
+    if latest.count(SOLVE_ELASTIC) != 1:
+        raise RuntimeError('Cannot reconstruct v2.3.6 generated solver')
+    return latest.replace(SOLVE_ELASTIC, SOLVE_ELASTIC_V236, 1)
+
+
+def transform_solver_v235(source: str, mode: str) -> str:
+    """Byte-exact v2.3.5 working solver, before forward-speed index repair."""
+    return transform_solver(source, mode, _fix_wheel_substep_speed=False)
+
+
+_CONTACT_SOLVER_CALL_OLD = '''        fx, fy, mz, fx_w, _, slip_x, slip_y = tire_forces_casadi(
+            model, u[k], v[k], yaw_rate[k], steering[k],
+            [wheel_omega[i][k] for i in range(4)], fz)'''
+_CONTACT_SOLVER_CALL_NEW = '''        fx, fy, mz, fx_w, _, slip_x, slip_y = tire_forces_casadi(
+            model, u[k], v[k], yaw_rate[k], steering[k],
+            [wheel_omega[i][k] for i in range(4)], fz,
+            roll_rate[k], pitch_rate[k])'''
+
+def transform_solver_v2316(source: str, mode: str) -> str:
+    """Pass OCP roll/pitch rate states to native tire contact velocity."""
+    patched=transform_solver(source,mode)
+    if '    def source_wheel_update(' not in source:
+        return patched  # Isolated historical toy fixture has no real OCP.
+    count=patched.count(_CONTACT_SOLVER_CALL_OLD)
+    if count != 1:
+        raise RuntimeError('Unexpected historical OCP tire contact site: '+str(count))
+    return patched.replace(_CONTACT_SOLVER_CALL_OLD,_CONTACT_SOLVER_CALL_NEW,1)
+
+
+
+# v2.4.0: preserve the best *nonzero-defect* Phase-I diagnostic state for
+# controlled solver continuation. This is never a physically feasible result.
+_PHASE1_FAILURE_MARKER = """        if not strict_ok:
+            stage1_stats['_phase1_elastic_strict_failed'] = True
+"""
+_PHASE1_RESTART_EXPORT = """        if not strict_ok:
+            stage1_stats['_phase1_elastic_strict_failed'] = True
+            # A selected checkpoint has satisfied ALL hard safety/actuator
+            # constraints; it is NOT certified against original dynamics.
+            # Export its entire state and optimized spatial mesh, so another
+            # Phase-I solve can start HERE rather than at the original native
+            # trajectory. Never export arbitrary/off-bounds IPOPT trial data.
+            phase1_restart_checkpoint = None
+            if (winning_snapshot is not None and winning_measure is not None
+                    and eligible(winning_measure)):
+                sx = np.asarray(winning_snapshot[x], dtype=np.float64)
+                loads = np.asarray(winning_snapshot[normal_load], dtype=np.float64)
+                accel = np.asarray(winning_snapshot[accel_xy], dtype=np.float64)
+                lengths = np.asarray(winning_snapshot[phase_lengths],
+                                     dtype=np.float64).reshape(-1)
+                beginnings = np.r_[0.0, np.cumsum(lengths[:-1])]
+                stations = np.concatenate([
+                    beginnings[i] + lengths[i] * np.arange(int(count)) / int(count)
+                    for i, count in enumerate(node_counts)])
+                if (sx.shape != (16, n) or loads.shape != (4, n)
+                        or accel.shape != (2, n) or stations.shape != (n,)
+                        or not np.isfinite(stations).all()
+                        or not np.all(np.diff(stations) > 0.0)
+                        or stations[0] < -1.0e-8 or stations[-1] >= track.length):
+                    raise RuntimeError('Invalid safe Phase-I restart mesh/state')
+                names = ('ey_m', 'epsi_rad', 'u_mps', 'v_mps',
+                         'yaw_rate_radps', 'steering_rad', 'body_height_m',
+                         'body_height_rate_mps', 'roll_rad', 'roll_rate_radps',
+                         'pitch_rad', 'pitch_rate_radps')
+                ixs = (0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15)
+                seed = {key: sx[idx].tolist() for key, idx in zip(names, ixs)}
+                seed.update({
+                    'wheel_omega_radps': sx[5:9, :].tolist(),
+                    'normal_load_n': loads.tolist(),
+                    'ax_mps2': accel[0].tolist(),
+                    'ay_mps2': accel[1].tolist(),
+                    'steering_rate_radps': np.asarray(
+                        winning_snapshot[qdelta], dtype=np.float64).reshape(-1).tolist(),
+                    'throttle_norm': np.asarray(
+                        winning_snapshot[throttle], dtype=np.float64).reshape(-1).tolist(),
+                })
+                phase1_restart_checkpoint = {
+                    'seed': seed,
+                    'station_nodes_m': stations.tolist(),
+                    'phase_lengths_m': lengths.tolist(),
+                    'raw_max_dynamic_defect': winning_measure['raw_max_dynamic_defect'],
+                    'elastic_merit': winning_measure['elastic_merit'],
+                    'hard_constraints_satisfied': True,
+                    'strict_original_dynamics_feasible': False,
+                    'origin': winning_origin,
+                }
+"""
+_PHASE1_REPORT_MARKER = """                'brake_mode_seed_source': brake_mode_seed_source,
+            }
+"""
+_PHASE1_REPORT_EXPORT = """                'brake_mode_seed_source': brake_mode_seed_source,
+                'phase1_restart_checkpoint': phase1_restart_checkpoint,
+            }
+"""
+
+def transform_solver_v240(source: str, mode: str) -> str:
+    """Consolidated Phase-I continuation for the v2.3.16 physics model."""
+    patched = transform_solver_v2316(source, mode)
+    # Exact historical tests may use stripped-down solver fixtures.
+    if '    def source_wheel_update(' not in source:
+        return patched
+    if patched.count(_PHASE1_FAILURE_MARKER) != 1:
+        raise RuntimeError('Unknown Phase-I failure site: refuse unsafe rewrite')
+    patched = patched.replace(_PHASE1_FAILURE_MARKER, _PHASE1_RESTART_EXPORT + '\n', 1)
+    if patched.count(_PHASE1_REPORT_MARKER) != 1:
+        raise RuntimeError('Unknown Phase-I failure report site')
+    return patched.replace(_PHASE1_REPORT_MARKER, _PHASE1_REPORT_EXPORT, 1)
+
+def prepare_working_solver(recovered_root: Path, working_root: Path,
+                           legacy_name: str,
+                           mode: str = 'limited-memory') -> tuple[Path, dict]:
+    source_root = Path(recovered_root).resolve()
+    target_root = Path(working_root).resolve()
+    original = (source_root / legacy_name /
+                'f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py')
+    if not original.is_file():
+        raise FileNotFoundError(original)
+    source_bytes = original.read_bytes()
+    raw = source_bytes.decode('utf-8')
+    patched = transform_solver_v240(raw, mode)
+    dest = (target_root / legacy_name /
+            'f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py')
+    if source_root == target_root:
+        raise ValueError('Refusing to patch the historical source directory')
+    if not target_root.exists():
+        shutil.copytree(source_root, target_root)
+    elif dest.is_file():
+        old_hessian = (raw.replace(HESSIAN_SITE, HESSIAN_ADDITION, 1)
+                       if mode == 'limited-memory' else raw)
+        from solver_overlay_v223 import transform_solver as v223
+        from solver_overlay_v224 import transform_solver as v224
+        from solver_overlay_v225 import transform_solver as v225
+        from solver_overlay_v226 import transform_solver as v226
+        # Permit upgrading the exact known v2.2.8 overlay, but refuse
+        # unexpected edits to the solver cache.
+        old_elastic = transform_solver_228(raw, mode)
+        known = (old_hessian, v223(raw, mode), v224(raw, mode),
+                 v225(raw, mode), v226(raw, mode), old_elastic,
+                 transform_solver_v229(raw, mode),
+                 transform_solver_v232(raw, mode),
+                 transform_solver_v233(raw, mode),
+                 transform_solver_v234(raw, mode),
+                 transform_solver_v235(raw, mode),
+                 transform_solver_v236(raw, mode),
+                 transform_solver(raw, mode), transform_solver_v2316(raw, mode),
+                 transform_solver_v240(raw,
+                     'exact' if mode == 'limited-memory' else 'limited-memory'),
+                 transform_solver_v2316(raw,
+                     'exact' if mode == 'limited-memory' else 'limited-memory'),
+                 patched)
+        if dest.read_text(encoding='utf-8') not in known:
+            raise RuntimeError('Working solver has unknown local edits; refusing to overwrite '
+                               + str(dest))
+    else:
+        raise FileNotFoundError('Incomplete solver cache: ' + str(dest))
+    # Upgrade the source-matched wheel callback only in the GENERATED working
+    # tree. Unknown local edits to either cached file fail before overwrite.
+    from wheel_model_overlay_v2316 import prepare_working_wheel_model
+    wheel_provenance = prepare_working_wheel_model(source_root, target_root,
+                                                  legacy_name)
+    if dest.read_text(encoding='utf-8') != patched:
+        dest.write_text(patched, encoding='utf-8')
+    return target_root, {
+        'phase1_hessian': mode,
+        'phase1_method': 'v2.4.0 checkpointed multi-run Phase-I continuation on v2.3.16 contact-velocity physics',
+        'numerical_guards_equal_on_physical_domain': True,
+        'phase1_detect_simple_bounds': True,
+        'physical_dynamics_changed': True,
+        'physical_dynamics_change': 'same as v2.3.16: wheel substep uses u=x[2,k] and 3-axis tire contact velocity with roll/pitch rates; v2.4.0 adds numerical checkpoint export, NO physical model changes',
+        'wheel_substep_selection': 'native-compatible forward speed <5m/s -> 5 substeps; >=5m/s -> 1',
+        'phase1_checkpoint_continuation': True,
+        'elastic_slack_bound_phase1': 1.0e5,
+        'elastic_slack_bound_final': 0.0,
+        'original_solver_sha256': hashlib.sha256(source_bytes).hexdigest(),
+        'working_solver_sha256': hashlib.sha256(patched.encode()).hexdigest(),
+        'source_untouched': original.read_bytes() == source_bytes,
+        'working_solver_path': str(dest),
+        **wheel_provenance,
+    }

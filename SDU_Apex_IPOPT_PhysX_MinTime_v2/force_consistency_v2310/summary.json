@@ -1,0 +1,108 @@
+{
+  "diagnostic": "scalar_tire_source_vs_native_seed_no_ipopt_no_native_replay",
+  "nodes": 143,
+  "unprojected_lateral_force_balance_max_abs_mps2": 1.0647761866538858,
+  "unprojected_lateral_force_balance_rms_mps2": 0.5097048213061814,
+  "unprojected_longitudinal_force_balance_max_abs_mps2": 0.4864395904584118,
+  "symbolic_load_model_max_abs_difference_n": 3.187344411310624,
+  "symbolic_load_model_max_scaled_residual": 0.3187344411310624,
+  "projected_force_balance_max_residual_mps2": 0.0,
+  "projected_ay_vs_native_max_abs_mps2": 1.0175080577629325,
+  "projected_ay_vs_native_rms_mps2": 0.48632193180550254,
+  "projected_input_force_vs_native_load_input_max_abs_n": 1.6925615218053291,
+  "original_vs_scalar_vector_projection_max_force_error_n": 3.552713678800501e-15,
+  "worst_unprojected_lateral_nodes": [
+    {
+      "k": 16,
+      "residual_mps2": -1.0647761866538858,
+      "native_ay_mps2": -3.1817430376477276,
+      "symbolic_ay_with_native_loads_mps2": -2.1169668509938417,
+      "symbolic_ay_with_symbolic_loads_mps2": -2.164234979884795
+    },
+    {
+      "k": 14,
+      "residual_mps2": -1.047014515344082,
+      "native_ay_mps2": -3.20284796409251,
+      "symbolic_ay_with_native_loads_mps2": -2.155833448748428,
+      "symbolic_ay_with_symbolic_loads_mps2": -2.2425822274671225
+    },
+    {
+      "k": 22,
+      "residual_mps2": -1.02262238275437,
+      "native_ay_mps2": -1.1222089691500692,
+      "symbolic_ay_with_native_loads_mps2": -0.09958658639569931,
+      "symbolic_ay_with_symbolic_loads_mps2": -0.11596429595415797
+    },
+    {
+      "k": 21,
+      "residual_mps2": -1.0189195281910641,
+      "native_ay_mps2": -1.6049694960506864,
+      "symbolic_ay_with_native_loads_mps2": -0.5860499678596224,
+      "symbolic_ay_with_symbolic_loads_mps2": -0.5970744176519626
+    },
+    {
+      "k": 86,
+      "residual_mps2": -1.0106759860358754,
+      "native_ay_mps2": -2.4337835973060455,
+      "symbolic_ay_with_native_loads_mps2": -1.4231076112701702,
+      "symbolic_ay_with_symbolic_loads_mps2": -1.4239218129307623
+    },
+    {
+      "k": 85,
+      "residual_mps2": -1.0102954589383206,
+      "native_ay_mps2": -2.5723105821350885,
+      "symbolic_ay_with_native_loads_mps2": -1.5620151231967678,
+      "symbolic_ay_with_symbolic_loads_mps2": -1.5767289577962138
+    },
+    {
+      "k": 15,
+      "residual_mps2": -1.0057508886215372,
+      "native_ay_mps2": -3.154347336670492,
+      "symbolic_ay_with_native_loads_mps2": -2.1485964480489548,
+      "symbolic_ay_with_symbolic_loads_mps2": -2.208385042664412
+    },
+    {
+      "k": 84,
+      "residual_mps2": -1.0028685663750179,
+      "native_ay_mps2": -2.7552463631791424,
+      "symbolic_ay_with_native_loads_mps2": -1.7523777968041245,
+      "symbolic_ay_with_symbolic_loads_mps2": -1.7892778340546216
+    },
+    {
+      "k": 13,
+      "residual_mps2": -0.9740667952636191,
+      "native_ay_mps2": -3.3175266357297413,
+      "symbolic_ay_with_native_loads_mps2": -2.343459840466122,
+      "symbolic_ay_with_symbolic_loads_mps2": -2.4671290868694644
+    },
+    {
+      "k": 83,
+      "residual_mps2": -0.957660889057415,
+      "native_ay_mps2": -2.9770502216818167,
+      "symbolic_ay_with_native_loads_mps2": -2.0193893326244017,
+      "symbolic_ay_with_symbolic_loads_mps2": -2.080772052394688
+    },
+    {
+      "k": 23,
+      "residual_mps2": -0.9550615295009641,
+      "native_ay_mps2": -0.6666588547890381,
+      "symbolic_ay_with_native_loads_mps2": 0.2884026747119261,
+      "symbolic_ay_with_symbolic_loads_mps2": 0.2597494996731948
+    },
+    {
+      "k": 17,
+      "residual_mps2": -0.9544920086356039,
+      "native_ay_mps2": -3.3595920643063755,
+      "symbolic_ay_with_native_loads_mps2": -2.4051000556707716,
+      "symbolic_ay_with_symbolic_loads_mps2": -2.445987596829855
+    }
+  ],
+  "caveat": "Different PhysX contact/load integration and differential-model discretization are NOT reconciled by algebraic projection.",
+  "seed_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/optimized_practice_v2_3_0/warmstart_physx/native_warmstart.npz",
+  "source_hash": "a0ba8f8cb9a44dc09922a6ab15597a1a93b0e203623427151f279729daf9d290",
+  "seed_map_checksums": {
+    "provenance": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/optimized_practice_v2_3_0/provenance.json",
+    "map_sha256": "0c39e17b3ae88ca70067c76c830c6de542af08c149f0616c06c9de227d79d016",
+    "centerline_sha256": "09b0c3e5b36b781b8709eb08a98cd8c36eb7951391f269ed761409a64938a253"
+  }
+}

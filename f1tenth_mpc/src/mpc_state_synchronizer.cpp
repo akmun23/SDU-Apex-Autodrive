@@ -95,6 +95,22 @@ MpcSyncStatus MpcStateSynchronizer::set_map_pose(
     return MpcSyncStatus::kOk;
 }
 
+bool is_causal_plant_state_usable(bool received,
+                                  int64_t plant_stamp_ns,
+                                  int64_t odom_stamp_ns,
+                                  int64_t synchronized_stamp_ns,
+                                  double maximum_age_s)
+{
+    if (!received || plant_stamp_ns <= 0 || odom_stamp_ns <= 0 ||
+        synchronized_stamp_ns <= 0 || !std::isfinite(maximum_age_s) ||
+        maximum_age_s < 0.0 || plant_stamp_ns > odom_stamp_ns ||
+        plant_stamp_ns > synchronized_stamp_ns) {
+        return false;
+    }
+    const int64_t age_ns = synchronized_stamp_ns - plant_stamp_ns;
+    return static_cast<double>(age_ns) * kNsToSeconds <= maximum_age_s;
+}
+
 MpcSyncStatus MpcStateSynchronizer::synchronize(
     int64_t command_time_ns, MpcSynchronizedState *state) const
 {

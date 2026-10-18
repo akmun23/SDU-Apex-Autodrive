@@ -1,0 +1,86 @@
+== Recover verified original IPOPT spatial min-time source ==
+Original commit: ca120e0cde7ae60e70082d38f86c5931f79f148f
+Working CasADi solver: /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py
+Phase-I Hessian: limited-memory; historical source preserved: True
+== Resolve current PhysX/Unity source parameters ==
+Map autodrive_practice_20260924_b.pgm | OCP length 28.410 m | nodes 143 | reference min clearance 0.438 m
+Motor 428.0 Nm; wheel radius 0.059 m; brake at exactly zero throttle; steering ±0.5236 rad
+WARNING: --brake-zones 0 prohibits ALL zero-throttle CAWB braking. With 428 Nm total motor torque, a drive-only periodic lap may be infeasible. For the Porto lap-time target use --brake-zones 3.
+== Reusing physics warm-start file: /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/optimized_practice_v2_3_0/warmstart_physx/native_warmstart.npz ==
+== IPOPT OCP: 143 nodes, 0 initial brake nodes, 12 feasibility + 1 time iterations, Phase-I seed-distance cap=disabled, seed=native, Phase-I elastic dynamics + safe spatial evaluations + simple bounds, Phase-I Hessian=limited-memory ==
+== IPOPT feasibility -> minimum-time solve 1/1 ==
+Source-model seed projection audit: {"forced_full_brake_nodes_unseen_in_native": 0, "type": "unprojected_native_state"}
+Phase-I numeric seed diagnostics ready; starting IPOPT
+
+******************************************************************************
+This program contains Ipopt, a library for large-scale nonlinear optimization.
+ Ipopt is released as open source code under the Eclipse Public License (EPL).
+         For more information visit https://github.com/coin-or/Ipopt
+******************************************************************************
+
+This is Ipopt version 3.14.19, running with linear solver MUMPS 5.8.2.
+
+Number of nonzeros in equality constraint Jacobian...:    48620
+Number of nonzeros in inequality constraint Jacobian.:     7578
+Number of nonzeros in Lagrangian Hessian.............:        0
+
+Total number of variables............................:     6578
+                     variables with only lower bounds:     1145
+                variables with lower and upper bounds:     3861
+                     variables with only upper bounds:        0
+Total number of equality constraints.................:     3146
+Total number of inequality constraints...............:     1430
+        inequality constraints with only lower bounds:      285
+   inequality constraints with lower and upper bounds:      572
+        inequality constraints with only upper bounds:      573
+
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+   0  3.7724897e+01 0.00e+00 1.32e+00   0.0 0.00e+00    -  0.00e+00 0.00e+00   0
+   1  1.9763935e+02 3.06e+00 1.60e+03   2.0 1.62e+02    -  9.89e-01 9.25e-03f  1
+   2  8.3117966e+02 7.14e+00 1.41e+03   5.9 6.13e+06    -  3.67e-04 2.12e-04f  1
+   3  2.7655980e+03 1.07e+01 1.75e+06   5.9 7.06e+05    -  9.90e-01 6.95e-04f  1
+   4  3.5332312e+04 3.04e+01 1.97e+06   5.2 4.77e+03    -  5.47e-01 1.00e+00H  1
+   5  5.6318676e+04 3.58e+01 2.62e+05   4.5 2.44e+04    -  9.10e-01 1.00e+00f  1
+   6  7.8943558e+04 3.36e+01 4.06e+04   3.8 2.68e+04    -  8.36e-01 1.00e+00f  1
+   7  3.6885568e+04 4.69e+01 3.28e+04   3.1 5.99e+05    -  6.91e-01 6.25e-02f  5
+   8  2.9194566e+04 4.61e+01 3.70e+04   2.4 4.60e+05    -  4.01e-01 1.78e-02f  6
+   9  2.0424518e+04 4.50e+01 3.76e+04   2.4 4.70e+05    -  2.04e-01 2.43e-02f  6
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+  10  1.7057669e+04 3.94e+01 3.12e+04   2.4 1.10e+05    -  3.59e-01 3.04e-01F  1
+  11  1.0059315e+04 3.60e+01 6.51e+03   1.7 5.58e+03    -  7.57e-01 1.00e+00f  1
+  12  8.7172964e+03 4.59e+01 8.77e+03   1.7 3.14e+01    -  6.70e-01 1.00e+00f  1
+
+Number of Iterations....: 12
+
+                                   (scaled)                 (unscaled)
+Objective...............:   8.7172963694515456e+03    8.7172963694515456e+03
+Dual infeasibility......:   8.7737293350177752e+03    8.7737293350177752e+03
+Constraint violation....:   2.5323654788760720e+01    4.5913950763845882e+01
+Variable bound violation:   0.0000000000000000e+00    0.0000000000000000e+00
+Complementarity.........:   5.6244803440054629e+03    5.6244803440054629e+03
+Overall NLP error.......:   1.3364073866037365e+03    8.7737293350177752e+03
+
+
+Number of objective function evaluations             = 15
+Number of objective gradient evaluations             = 13
+Number of equality constraint evaluations            = 40
+Number of inequality constraint evaluations          = 40
+Number of equality constraint Jacobian evaluations   = 13
+Number of inequality constraint Jacobian evaluations = 13
+Number of Lagrangian Hessian evaluations             = 0
+Total seconds in IPOPT                               = 1.160
+
+EXIT: Maximum Number of Iterations Exceeded.
+      solver  :   t_proc      (avg)   t_wall      (avg)    n_eval
+callback_fun  | 632.95ms ( 48.69ms) 632.98ms ( 48.69ms)        13
+       nlp_f  | 694.00us ( 46.27us) 692.03us ( 46.14us)        15
+       nlp_g  |  22.45ms (561.33us)  22.45ms (561.29us)        40
+  nlp_grad_f  |   1.83ms ( 65.39us)   1.83ms ( 65.18us)        28
+   nlp_jac_g  | 118.57ms (  8.47ms) 118.58ms (  8.47ms)        14
+       total  |   1.16 s (  1.16 s)   1.16 s (  1.16 s)         1
+Phase-I elastic dynamics: seed_defect=1.0647761866538858, best_defect=1.0647761866538858, strict_violation=1.0647761866538858, accepted=False, source=initial_elastic_guess
+IPOPT Phase-I diagnostics:
+  IPOPT status: Maximum_Iterations_Exceeded
+  Max NLP violation: None
+  No labeled constraint diagnostics available; inspect JSON report.
+IPOPT did not find a fully feasible periodic lap. Inspect phase-I defect-continuation diagnostics in ipopt_report_pass_XX.json. No MPC raceline exported.

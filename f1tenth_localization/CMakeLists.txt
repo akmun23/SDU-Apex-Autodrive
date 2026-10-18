@@ -27,23 +27,6 @@ find_package(std_msgs REQUIRED)
 find_package(sdu_apex_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
-set(PHYSX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../external/physx-4.1-source/physx")
-set(PHYSX_SHARED_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../external/physx-4.1-source/pxshared")
-set(PHYSX_RELEASE_LIBDIR "${PHYSX_ROOT}/bin/linux.clang/release")
-set(PHYSX_NATIVE_LIBS
-  "${PHYSX_RELEASE_LIBDIR}/libPhysXVehicle_static_64.a"
-  "${PHYSX_RELEASE_LIBDIR}/libPhysXExtensions_static_64.a"
-  "${PHYSX_RELEASE_LIBDIR}/libPhysXCooking_static_64.a"
-  "${PHYSX_RELEASE_LIBDIR}/libPhysX_static_64.a"
-  "${PHYSX_RELEASE_LIBDIR}/libPhysXCommon_static_64.a"
-  "${PHYSX_RELEASE_LIBDIR}/libPhysXFoundation_static_64.a"
-  "${PHYSX_RELEASE_LIBDIR}/libPhysXPvdSDK_static_64.a")
-foreach(PHYSX_LIBRARY IN LISTS PHYSX_NATIVE_LIBS)
-  if(NOT EXISTS "${PHYSX_LIBRARY}")
-    message(FATAL_ERROR "Missing required PhysX source-parity library: ${PHYSX_LIBRARY}")
-  endif()
-endforeach()
-
 if(BUILD_GPU_AMCL)
   find_package(CUDAToolkit REQUIRED)
 
@@ -85,23 +68,14 @@ add_executable(sensor_odometry_node
   src/sensor_odometry_node.cpp
   src/odometry_observer.cpp
   src/sensor_packet_assembler.cpp
-  src/physx_odom_runtime.cpp)
-target_include_directories(sensor_odometry_node PRIVATE include)
+  src/unity_source_odom_runtime.cpp
+  ../f1tenth_mpc/src/unity_source_plant.cpp)
+target_include_directories(sensor_odometry_node PRIVATE
+  include
+  ../f1tenth_mpc/include)
 ament_target_dependencies(sensor_odometry_node
-  ament_index_cpp rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros
+  rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros
   sdu_apex_msgs)
-
-add_executable(physx_native_vehicle_step
-  src/physx_native_vehicle_step.cpp
-  src/physx_glibc_compat.cpp)
-target_include_directories(physx_native_vehicle_step PRIVATE
-  "${PHYSX_ROOT}/include"
-  "${PHYSX_SHARED_ROOT}/include"
-  "${PHYSX_ROOT}/source/physxvehicle/src")
-target_compile_definitions(physx_native_vehicle_step PRIVATE
-  PX_PHYSX_STATIC_LIB NDEBUG)
-target_link_libraries(physx_native_vehicle_step PRIVATE
-  -Wl,--start-group ${PHYSX_NATIVE_LIBS} -Wl,--end-group dl pthread)
 
 add_executable(ekf_localization_node
   gpu_amcl_cpp/src/main_ekf.cpp
@@ -112,7 +86,7 @@ ament_target_dependencies(ekf_localization_node
   rclcpp nav_msgs geometry_msgs tf2_ros)
 
 set(LOCALIZATION_INSTALL_TARGETS
-  sensor_odometry_node physx_native_vehicle_step ekf_localization_node)
+  sensor_odometry_node ekf_localization_node)
 if(BUILD_GPU_AMCL)
   list(APPEND LOCALIZATION_INSTALL_TARGETS gpu_amcl_cpp_node)
 endif()
@@ -127,10 +101,26 @@ if(BUILD_TESTING)
     src/sensor_packet_assembler.cpp)
   target_include_directories(test_sensor_packet_assembler PRIVATE include)
 
-  ament_add_gtest(test_odometry_observer_diagnostics
-    test/test_odometry_observer_diagnostics.cpp
+  ament_add_gtest(test_odometry_observer
+    test/test_odometry_observer.cpp
     src/odometry_observer.cpp)
-  target_include_directories(test_odometry_observer_diagnostics PRIVATE include)
+  target_include_directories(test_odometry_observer PRIVATE include)
+
+  ament_add_gtest(test_physx_odom_actuation
+    test/test_physx_odom_actuation.cpp)
+  target_include_directories(test_physx_odom_actuation PRIVATE include)
+
+  ament_add_gtest(test_unity_wheel_encoder
+    test/test_unity_wheel_encoder.cpp)
+  target_include_directories(test_unity_wheel_encoder PRIVATE include)
+
+  ament_add_gtest(test_source_derived_odom_runtime
+    test/test_source_derived_odom_runtime.cpp
+    src/unity_source_odom_runtime.cpp
+    ../f1tenth_mpc/src/unity_source_plant.cpp)
+  target_include_directories(test_source_derived_odom_runtime PRIVATE
+    include ../f1tenth_mpc/include)
+
 endif()
 
 ament_package()

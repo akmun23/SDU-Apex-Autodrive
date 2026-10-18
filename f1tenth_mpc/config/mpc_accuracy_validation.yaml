@@ -1,0 +1,5 @@
+/**:
+  ros__parameters:
+    # Temporary validation profile: allow the expanded PhysX-state rollout to
+    # finish and be measured before optimizing it for the 40 Hz deadline.
+    rti_cycle_budget_ms: 100.0

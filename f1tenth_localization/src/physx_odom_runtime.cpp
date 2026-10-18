@@ -1,4 +1,5 @@
 #include "f1tenth_localization/physx_odom_runtime.hpp"
+#include "f1tenth_localization/physx_odom_actuation.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -17,39 +18,19 @@ namespace f1tenth_localization
 namespace
 {
 
-constexpr unsigned int kPhysicsStepsPerPacket = 25;
+constexpr unsigned int kPhysicsStepsPerPacket =
+  static_cast<unsigned int>(detail::kPhysicsStepsPerPacket);
 constexpr unsigned int kInitialRestSettleSteps = 1000;
-constexpr float kPhysicsStepS = 0.001f;
-constexpr float kSteeringRateDegPerS = 183.346f;
-constexpr float kSteeringLimitDeg = 30.0f;
 constexpr float kWheelbaseMm = 324.0f;
 constexpr float kTrackWidthMm = 236.0f;
+// The active scene overrides the prefab's 85.6 N m default with 428 N m.
+// CAWD divides nonzero drive torque by four; CAWB applies full MotorTorque
+// independently as brake torque to each wheel when throttle is exactly zero.
 constexpr float kMotorTorqueNm = 428.0f;
-constexpr float kPi = 3.14159265358979323846f;
-
-float unity_steering_step(float angle_deg, float command_norm)
-{
-  const float command = std::clamp(command_norm, -1.0f, 1.0f);
-  const float threshold = angle_deg / kSteeringLimitDeg;
-  const float increment = kSteeringRateDegPerS * kPhysicsStepS;
-  const float target = -command * kSteeringLimitDeg;
-  if (command > threshold) {
-    angle_deg -= increment;
-    if (angle_deg <= target) {
-      angle_deg = target;
-    }
-  } else {
-    angle_deg += increment;
-    if (angle_deg >= target) {
-      angle_deg = target;
-    }
-  }
-  return angle_deg;
-}
 
 float radians(float degrees)
 {
-  return degrees * (kPi / 180.0f);
+  return degrees * (detail::kPi / 180.0f);
 }
 
 std::pair<float, float> unity_ackermann(float center_angle_deg)
@@ -142,9 +123,11 @@ PhysxOdomRuntime::PhysxOdomRuntime(
   // The reset pose is not a static suspension equilibrium. Let the source
   // plant settle on the plane before its first estimate is used; the normal
   // startup order starts this node before the simulator/vehicle begins moving.
-  for (unsigned int index = 0; index < kInitialRestSettleSteps; ++index) {
-    send_physics_step(0.0f);
-    (void)read_state();
+  const std::array<float, kPhysicsStepsPerPacket> restSteering{};
+  const unsigned int settlePackets = kInitialRestSettleSteps /
+    kPhysicsStepsPerPacket;
+  for (unsigned int index = 0; index < settlePackets; ++index) {
+    (void)send_physics_packet(0.0f, restSteering);
   }
 }
 
@@ -168,8 +151,7 @@ PhysxOdomRuntime::~PhysxOdomRuntime()
 
 PredictedPlantState PhysxOdomRuntime::advance(
   double steering_command_norm, double throttle_command_norm,
-  bool actuator_feedback_valid, double steering_feedback_rad,
-  double throttle_feedback)
+  bool steering_feedback_valid, double steering_feedback_rad)
 {
   if (!std::isfinite(steering_command_norm) ||
     !std::isfinite(throttle_command_norm))
@@ -180,60 +162,134 @@ PredictedPlantState PhysxOdomRuntime::advance(
     std::clamp(steering_command_norm, -1.0, 1.0));
   const float command_throttle = static_cast<float>(
     std::clamp(throttle_command_norm, -1.0, 1.0));
-  const bool use_feedback = actuator_feedback_valid &&
-    std::isfinite(steering_feedback_rad) && std::isfinite(throttle_feedback);
-  const float throttle = use_feedback ? static_cast<float>(
-    std::clamp(throttle_feedback, -1.0, 1.0)) : command_throttle;
-  const float steering_start_deg = center_steering_angle_deg_;
-  const float steering_feedback_deg = use_feedback ? std::clamp(
-    -static_cast<float>(steering_feedback_rad) * (180.0f / kPi),
-    -kSteeringLimitDeg, kSteeringLimitDeg) : steering_start_deg;
-
-  PredictedPlantState plant;
-  for (unsigned int index = 0; index < kPhysicsStepsPerPacket; ++index) {
-    if (use_feedback) {
-      const float fraction = static_cast<float>(index + 1) /
-        static_cast<float>(kPhysicsStepsPerPacket);
-      center_steering_angle_deg_ = steering_start_deg + fraction *
-        (steering_feedback_deg - steering_start_deg);
-    } else {
-      center_steering_angle_deg_ = unity_steering_step(
-        center_steering_angle_deg_, steering_command);
-    }
-    send_physics_step(throttle);
-    plant = read_state();
+  const auto actuation = detail::make_physx_packet_actuation(
+    center_steering_angle_deg_, delayed_steering_commands_norm_[0],
+    delayed_throttle_commands_norm_[0], steering_feedback_valid,
+    steering_feedback_rad);
+  delayed_steering_commands_norm_[0] = delayed_steering_commands_norm_[1];
+  delayed_steering_commands_norm_[1] = steering_command;
+  delayed_throttle_commands_norm_[0] = delayed_throttle_commands_norm_[1];
+  delayed_throttle_commands_norm_[1] = command_throttle;
+  PredictedPlantState output = send_physics_packet(
+    actuation.throttle_normalized, actuation.steering_angles_deg);
+  for (std::size_t slot = 0; slot < 2; ++slot) {
+    output.delayed_steering_commands_normalized[slot] =
+      delayed_steering_commands_norm_[slot];
+    output.delayed_throttle_commands_normalized[slot] =
+      delayed_throttle_commands_norm_[slot];
   }
-  return plant;
+  return output;
 }
 
-void PhysxOdomRuntime::send_physics_step(float throttle_input)
+void PhysxOdomRuntime::correct(
+  double body_u_mps, double body_v_com_mps, double yaw_rate_radps,
+  double yaw_rad, double roll_rad, double pitch_rad,
+  double body_vertical_velocity_world_mps,
+  double roll_rate_radps, double pitch_rate_radps,
+  const std::array<double, 4> & wheel_omega_radps)
+{
+  if (child_input_ == nullptr || !std::isfinite(body_u_mps) ||
+    !std::isfinite(body_v_com_mps) || !std::isfinite(yaw_rate_radps) ||
+    !std::isfinite(yaw_rad) || !std::isfinite(roll_rad) ||
+    !std::isfinite(pitch_rad) ||
+    !std::isfinite(body_vertical_velocity_world_mps) ||
+    !std::isfinite(roll_rate_radps) ||
+    !std::isfinite(pitch_rate_radps) ||
+    !std::all_of(wheel_omega_radps.begin(), wheel_omega_radps.end(),
+      [](double value) {return std::isfinite(value);}))
+  {
+    throw std::runtime_error("invalid measured correction for PhysX Odom state");
+  }
+  const int written = std::fprintf(
+    child_input_,
+    "{\"op\":\"correct\",\"body_forward_velocity_mps\":%.12g,"
+    "\"body_lateral_velocity_com_mps\":%.12g,\"yaw_rate_radps\":%.12g,"
+    "\"yaw_rad\":%.12g,\"roll_rad\":%.12g,\"pitch_rad\":%.12g,"
+    "\"body_vertical_velocity_world_mps\":%.12g,"
+    "\"roll_rate_radps\":%.12g,\"pitch_rate_radps\":%.12g,"
+    "\"wheel_omega_radps\":[%.12g,%.12g,%.12g,%.12g]}\n",
+    body_u_mps, body_v_com_mps, yaw_rate_radps, yaw_rad, roll_rad,
+    pitch_rad, body_vertical_velocity_world_mps,
+    roll_rate_radps, pitch_rate_radps,
+    wheel_omega_radps[0], wheel_omega_radps[1],
+    wheel_omega_radps[2], wheel_omega_radps[3]);
+  if (written < 0 || std::fflush(child_input_) != 0) {
+    throw std::runtime_error("failed sending sensor correction to PhysX Odom");
+  }
+  char * line = nullptr;
+  size_t capacity = 0;
+  const ssize_t count = getline(&line, &capacity, child_output_);
+  const bool acknowledged = count > 0 &&
+    std::strstr(line, "\"op\":\"corrected\"") != nullptr;
+  std::free(line);
+  if (!acknowledged) {
+    throw std::runtime_error("PhysX Odom did not acknowledge sensor correction");
+  }
+}
+
+PredictedPlantState PhysxOdomRuntime::send_physics_packet(
+  float throttle_input,
+  const std::array<float, kPhysicsStepsPerPacket> & steering_angles_deg)
 {
   if (child_input_ == nullptr) {
     throw std::runtime_error("PhysX Odom process is not available");
   }
-  const auto [front_left, front_right] = unity_ackermann(center_steering_angle_deg_);
   const float drive_torque = throttle_input == 0.0f ?
     0.0f : kMotorTorqueNm * throttle_input / 4.0f;
   const float brake_torque = throttle_input == 0.0f ? kMotorTorqueNm : 0.0f;
-  const double time_s = static_cast<double>(physics_step_index_) * 0.001;
-  const int written = std::fprintf(
-    child_input_,
-    "{\"op\":\"step\",\"capture_row\":%llu,\"time_s\":%.9f,"
-    "\"wheel_commands\":["
-    "{\"steer_angle_rad\":%.9g,\"drive_torque_nm\":%.9g,\"brake_torque_nm\":%.9g},"
-    "{\"steer_angle_rad\":%.9g,\"drive_torque_nm\":%.9g,\"brake_torque_nm\":%.9g},"
-    "{\"steer_angle_rad\":0,\"drive_torque_nm\":%.9g,\"brake_torque_nm\":%.9g},"
-    "{\"steer_angle_rad\":0,\"drive_torque_nm\":%.9g,\"brake_torque_nm\":%.9g}]}\n",
-    static_cast<unsigned long long>(physics_step_index_), time_s,
-    static_cast<double>(front_left), static_cast<double>(drive_torque),
-    static_cast<double>(brake_torque), static_cast<double>(front_right),
-    static_cast<double>(drive_torque), static_cast<double>(brake_torque),
-    static_cast<double>(drive_torque), static_cast<double>(brake_torque),
-    static_cast<double>(drive_torque), static_cast<double>(brake_torque));
-  if (written < 0 || std::fflush(child_input_) != 0) {
+  std::array<char, 16384> request{};
+  std::size_t offset = 0;
+  const auto append = [&request, &offset](const char * format, auto... values) {
+      if (offset >= request.size()) return false;
+      const int count = std::snprintf(
+        request.data() + offset, request.size() - offset, format, values...);
+      if (count < 0 || static_cast<std::size_t>(count) >= request.size() - offset)
+        return false;
+      offset += static_cast<std::size_t>(count);
+      return true;
+    };
+  const auto append_literal = [&request, &offset](const char * text,
+                                                  std::size_t length) {
+      if (offset >= request.size() || length >= request.size() - offset)
+        return false;
+      std::memcpy(request.data() + offset, text, length);
+      offset += length;
+      request[offset] = '\0';
+      return true;
+    };
+  const double packet_start_s = static_cast<double>(physics_step_index_) * 0.001;
+  bool valid = append(
+    "{\"op\":\"rollout\",\"stages\":[{\"capture_row\":%llu,"
+    "\"time_s\":%.9f,\"wheel_commands_by_tick\":[",
+    static_cast<unsigned long long>(physics_step_index_), packet_start_s);
+  for (std::size_t tick = 0; valid && tick < kPhysicsStepsPerPacket; ++tick) {
+    const auto [front_left, front_right] =
+      unity_ackermann(steering_angles_deg[tick]);
+    if (tick > 0) valid = append_literal(",", 1);
+    if (valid) valid = append(
+      "[{\"steer_angle_rad\":%.9g,\"drive_torque_nm\":%.9g,"
+      "\"brake_torque_nm\":%.9g},"
+      "{\"steer_angle_rad\":%.9g,\"drive_torque_nm\":%.9g,"
+      "\"brake_torque_nm\":%.9g},"
+      "{\"steer_angle_rad\":0,\"drive_torque_nm\":%.9g,"
+      "\"brake_torque_nm\":%.9g},"
+      "{\"steer_angle_rad\":0,\"drive_torque_nm\":%.9g,"
+      "\"brake_torque_nm\":%.9g}]",
+      static_cast<double>(front_left), static_cast<double>(drive_torque),
+      static_cast<double>(brake_torque), static_cast<double>(front_right),
+      static_cast<double>(drive_torque), static_cast<double>(brake_torque),
+      static_cast<double>(drive_torque), static_cast<double>(brake_torque),
+      static_cast<double>(drive_torque), static_cast<double>(brake_torque));
+  }
+  if (valid) valid = append_literal("]}] }\n", 6);
+  if (!valid || std::fwrite(request.data(), 1, offset, child_input_) != offset ||
+    std::fflush(child_input_) != 0)
+  {
     throw std::runtime_error("failed writing a physics tick to PhysX Odom");
   }
   ++physics_step_index_;
+  physics_step_index_ += kPhysicsStepsPerPacket - 1;
+  return read_state();
 }
 
 PredictedPlantState PhysxOdomRuntime::read_state()
@@ -295,7 +351,19 @@ PredictedPlantState PhysxOdomRuntime::read_state()
     };
 
   PredictedPlantState plant;
+  std::array<double, 3> rearAxleWorld{};
+  array_for("rear_axle_position_world_m", rearAxleWorld.data(),
+            rearAxleWorld.size());
+  // Unity world +Z is vehicle-forward and world -X is vehicle-left.
+  plant.rear_axle_x_m = rearAxleWorld[2];
+  plant.rear_axle_y_m = -rearAxleWorld[0];
   array_for("unity_source_state", plant.state.data(), plant.state.size());
+  array_for("wheel_rotation_angle_rad",
+            plant.wheel_rotation_angle_rad.data(),
+            plant.wheel_rotation_angle_rad.size());
+  array_for("wheel_encoder_angle_prediction_rad",
+            plant.wheel_encoder_angle_prediction_rad.data(),
+            plant.wheel_encoder_angle_prediction_rad.size());
   array_for("longitudinal_slip", plant.longitudinal_slip.data(), 4);
   array_for("lateral_slip", plant.lateral_slip.data(), 4);
   array_for("normal_load_n", plant.normal_load_n.data(), 4);

@@ -14,10 +14,64 @@
  * Defines
  *===========================================================================*/
 
-/* Riccati dimensions. The RTI state contains the 26-coordinate tracking and
- * Unity-derived plant state plus the two prior-input memory coordinates. */
-#define RICCATI_MAX_NX  28                               /* Full Unity-derived plant, tracking, and prior-input states. */
-#define RICCATI_MAX_NU  2                                /* Steering-rate and normalized throttle. */
+/* One source of truth for the production RTI state layout. The source plant's
+ * u/v/yaw-rate and physical steering are represented once here; only its
+ * wheel, sprung-body, and suspension states are additional hidden channels. */
+enum
+{
+    MPC_STATE_IDX_EY = 0,
+    MPC_STATE_IDX_EPSI = 1,
+    MPC_STATE_IDX_U = 2,
+    MPC_STATE_IDX_V = 3,
+    MPC_STATE_IDX_R = 4,
+    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1 = 5,
+    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2 = 6,
+    MPC_STATE_IDX_ACTUAL_STEERING_ANGLE = 7,
+    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1 = 8,
+    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2 = 9,
+    MPC_STATE_IDX_WHEEL_OMEGA_FL = 10,
+    MPC_STATE_IDX_WHEEL_OMEGA_FR = 11,
+    MPC_STATE_IDX_WHEEL_OMEGA_RL = 12,
+    MPC_STATE_IDX_WHEEL_OMEGA_RR = 13,
+    MPC_STATE_IDX_BODY_HEIGHT = 14,
+    MPC_STATE_IDX_BODY_HEIGHT_RATE = 15,
+    MPC_STATE_IDX_ROLL = 16,
+    MPC_STATE_IDX_ROLL_RATE = 17,
+    MPC_STATE_IDX_PITCH = 18,
+    MPC_STATE_IDX_PITCH_RATE = 19,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_FL = 20,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_FR = 21,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_RL = 22,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_RR = 23,
+    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL = 24,
+    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FR = 25,
+    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_RL = 26,
+    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_RR = 27,
+    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL = 28,
+    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FR = 29,
+    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_RL = 30,
+    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_RR = 31,
+    /* Acceleration remains a plant/output channel, but is not an independent
+     * optimizer state: the plant recomputes it from each transition and does
+     * not consume the previous value. */
+    MPC_STATE_COUNT = 32
+};
+
+#define MPC_MODEL_NX MPC_STATE_COUNT
+#define MPC_MODEL_NU 2
+/* The nonlinear plant retains both FIFO slots per actuator. The optimizer
+ * does not: the two in-flight commands are fixed values in the first two
+ * control stages, while one prior-command value per actuator carries the
+ * command-slew cost. */
+enum
+{
+    MPC_OPT_STATE_PREVIOUS_STEERING_COMMAND = MPC_MODEL_NX - 4,
+    MPC_OPT_STATE_PREVIOUS_THROTTLE_COMMAND = MPC_MODEL_NX - 3,
+    MPC_OPT_PHYSICAL_NX = MPC_OPT_STATE_PREVIOUS_STEERING_COMMAND,
+    MPC_OPTIMIZER_NX = MPC_MODEL_NX - 2
+};
+#define RICCATI_MAX_NX MPC_OPTIMIZER_NX
+#define RICCATI_MAX_NU MPC_MODEL_NU
 
 /* Math and timing */
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
@@ -27,9 +81,9 @@
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
-#define PREDICTION_HORIZON 30                            /* 30 commands at 40 Hz = 0.75 s. */
+#define PREDICTION_HORIZON 30
+#define RICCATI_HORIZON (PREDICTION_HORIZON + 2)
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
-#define MPC_MODEL_NX 26                                  /* Tracking, actuator queues, and all 18 Unity source-plant states without duplicated body channels. */
 
 /* Solver and model safeguards */
 #define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
@@ -38,11 +92,19 @@
 #define SOURCE_MAX_STEERING_RAD 0.5235987756f            /* VehicleController SteeringLimit: 30 deg. */
 #define SOURCE_STEERING_RATE_RADPS 3.2f                  /* Prefab SteeringRate: 183.346 deg/s. */
 #define SOURCE_STEERING_WHEELBASE_M 0.324f               /* VehicleController Wheelbase: 324 mm. */
-#define MPC_YAW_RATE_RESPONSE_TIME_CONSTANT_SECONDS 0.015f /* Practice-bag system identification: held-out 40 Hz yaw-rate steps across independent laps. */
-#define MPC_YAW_RATE_STEERING_GAIN_PER_M 2.95f          /* Held-out yaw-rate gain per u*tan(delta), distinct from source wheelbase. */
 #define MPC_MAX_COMMAND_SPEED_MPS 16.0f                  /* Project command envelope, not simulator physics. */
 #define MPC_THROTTLE_MIN 0.0f
 #define MPC_THROTTLE_MAX 1.0f
+/* bridge_40hz serializes actuator commands to three decimal places; any
+ * positive command below this threshold is transmitted as Unity's zero/brake
+ * branch and therefore cannot represent a drive-mode QP decision. */
+#define MPC_THROTTLE_MIN_DRIVE 0.001f
+/* Native PxVehicleNoDrive stop sweeps at 1 ms across 0.5--12 m/s show a
+ * transient body-u undershoot no larger than 7.79 mm/s before the sticky-tire
+ * scene constraint settles the vehicle. Keep that measured solver transient
+ * representable instead of rejecting a source-consistent braking rollout. */
+#define MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS 0.008f
+#define MPC_PHYSX_STICKY_TIMER_CAP_S 1.001f
 
 /* AutoDRIVE vehicle footprint dimensions used for MPC corridor projection.
  * They are geometry only, not tire or vehicle-dynamics parameters. */
@@ -141,7 +203,6 @@ typedef struct
     int shared_rho;
     /* ADMM over-relaxation in [1, 2]; zero selects the unrelaxed baseline. */
     float over_relaxation;
-    int use_prefactorization;
     /* Cooperative wall-time bound for one ADMM solve. Zero disables the
      * bound. The solver checks after each complete primal/projection pass. */
     double max_solve_time_us;
@@ -169,8 +230,8 @@ typedef enum
  */
 typedef struct
 {
-    float x[PREDICTION_HORIZON + 1][RICCATI_MAX_NX];
-    float u[PREDICTION_HORIZON][RICCATI_MAX_NU];
+    float x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    float u[RICCATI_HORIZON][RICCATI_MAX_NU];
     int iterations;
     float primal_residual;
     float dual_residual;
@@ -184,15 +245,12 @@ typedef struct
  */
 typedef struct
 {
-    float z_x[PREDICTION_HORIZON + 1][RICCATI_MAX_NX];
-    float z_u[PREDICTION_HORIZON][RICCATI_MAX_NU];
-    float y_x[PREDICTION_HORIZON + 1][RICCATI_MAX_NX];
-    float y_u[PREDICTION_HORIZON][RICCATI_MAX_NU];
+    float z_x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    float z_u[RICCATI_HORIZON][RICCATI_MAX_NU];
+    float y_x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    float y_u[RICCATI_HORIZON][RICCATI_MAX_NU];
     float rho;
     float rho_u;
-    int nx;
-    int nu;
-    int horizon;
     int initialized;
     int scaling_enabled;
     float state_scale[RICCATI_MAX_NX];

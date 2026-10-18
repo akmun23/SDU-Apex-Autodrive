@@ -16,93 +16,38 @@
     startup_ramp_laps: 1.0
 
     state_extrapolation_max_s: 0.12
-    control_time_predictor_mode: ct2
     command_actuation_delay_s: 0.0
-    # Held-out open-plane high-steer captures and a clean practice run support
-    # one 40 Hz request interval; two intervals materially overpredict lag.
-    physical_steering_delay_s: 0.025
-    # The legal simulator steering sensor is the current physical angle. A
-    # three-frame freshness window tolerates one delayed packet while rejecting
-    # a stalled feedback stream.
-    steering_feedback_topic: /autodrive/roboracer_1/steering
-    steering_feedback_max_age_s: 0.075
-    # The actuator interface publishes its normalized output command. The
-    # plant rollout uses it to initialize the delayed normalized-throttle
-    # queue from the command actually presented to the simulator.
-    throttle_command_topic: /autodrive/roboracer_1/throttle_command
-    throttle_command_max_age_s: 0.075
     unity_plant_state_topic: /odom/unity_plant_state
     drive_command_topic: /mpc/drive_command
-    left_encoder_topic: /autodrive/roboracer_1/left_encoder
-    right_encoder_topic: /autodrive/roboracer_1/right_encoder
-    wheel_encoder_max_age_s: 0.075
-    imu_topic: /autodrive/roboracer_1/imu
-    imu_feedback_max_age_s: 0.075
     pose_odom_max_skew_s: 0.12
     source_dt_min_s: 0.001
     source_dt_max_s: 0.250
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
 
-    # Identified from synchronized truth yaw-rate and measured steering in two
-    # independent 12-lap bags. Alternating-lap holdouts reduced one-step yaw
-    # prediction RMSE from about 0.05 to 0.02 rad/s; a third live 12-lap run
-    # remained collision-free with no nonlinear-rollout rejections.
-    yaw_rate_response_time_constant_s: 0.015
-    yaw_rate_steering_gain_per_m: 2.95
-    # Ground-truth identification shows a sharp authority loss near the
-    # physical steering limit. Keep the nominal gain below 0.41 rad and
-    # transition to approximately 1.23 1/m by 0.46 rad.
-    yaw_rate_steering_gain_reduction_per_rad: 35.6
-    yaw_rate_steering_gain_start_rad: 0.41
-    yaw_rate_steering_gain_end_rad: 0.46
-    yaw_rate_curvature_gain_reduction_per_m: 0.0
-    yaw_rate_curvature_gain_start_per_m: 0.20
-    yaw_rate_curvature_gain_end_per_m: 0.40
-    yaw_rate_low_speed_response_time_constant_s: 0.0
-    yaw_rate_low_speed_transition_speed_mps: 2.0
-    # Y1 measured low-speed/high-steering response specialist. Independent
-    # whole-run captures improved supported one-step yaw RMSE by 88.7%/90.7%,
-    # and C/Python/CasADi parity passed. Keep the model strictly inside its
-    # measured steering/speed/hold support; ordinary steering stays on legacy.
-    yaw_rate_response_surface_enabled: true
-    yaw_rate_response_surface_file: /workspace/src/f1tenth_mpc/config/yaw_response_surface_y1.csv
-    yaw_rate_response_surface_response_scale: 1.0
-    yaw_rate_response_surface_blend_q_start: 0.30
-    yaw_rate_response_surface_blend_q_end: 0.70
-    yaw_rate_response_surface_speed_blend_margin_mps: 0.10
-    yaw_rate_response_surface_low_speed_blend_margin_mps: 0.10
-    yaw_rate_response_surface_low_speed_support_fadeout_mps: 0.0
-    yaw_rate_response_surface_high_speed_support_fadein_mps: 0.0
-    yaw_rate_response_surface_steering_blend_start_rad: 0.29
-    yaw_rate_response_surface_steering_blend_full_start_rad: 0.30
-    yaw_rate_response_surface_steering_blend_full_end_rad: 0.42
-    yaw_rate_response_surface_steering_blend_end_rad: 0.45
-    yaw_rate_response_surface_hold_time_constant_s: 0.1293144252
-    yaw_rate_response_surface_hold_rate_full_radps: 0.05
-    yaw_rate_response_surface_hold_rate_zero_radps: 0.15
-
-    # Closed-loop authority profile: strong speed tracking, moderate lateral
-    # tracking, low heading cost, and the BachelorProject lateral-velocity term.
+    # Speed-priority candidate that retained high acceptance in the matched
+    # practice screen; the physical corridor remains a hard feasibility gate.
     weight_e_y: 125.0
     weight_e_psi: 2.0
-    weight_u: 200.0
-    weight_u_overspeed: 200.0
-    weight_longitudinal_acceleration: 20.0
+    # Coordinated profile: strong under-target speed tracking, lower overspeed
+    # cost, and light wheel-spin / throttle-smoothing penalties.
+    weight_u: 500.0
+    weight_u_overspeed: 300.0
+    weight_longitudinal_slip: 5.0
     weight_v: 5.0
     weight_r: 1.5
     weight_steering_command: 3.0
-    weight_steering_rate: 5.0
-    weight_throttle_command: 0.5
-    weight_steering_rate_change: 10.0
-    weight_throttle_command_change: 5.0
+    weight_steering_target: 5.0
+    weight_throttle_command: 0.1
+    weight_steering_target_change: 10.0
+    weight_throttle_command_change: 1.0
     terminal_multiplier: 3.0
 
     max_steering_rad: 0.5235987756
-    max_steering_rate_radps: 3.2
-    # Minimum physical wall clearance; car extent is projected per heading.
-    corridor_margin_m: 0.15
-    first_prediction_corridor_margin_m: 0.15
+    # Preserve 5 cm physical wall clearance; the vehicle rectangle is projected
+    # per predicted heading in the exact rollout and linearized constraints.
+    corridor_margin_m: 0.05
+    first_prediction_corridor_margin_m: 0.05
     corridor_preview_halfwidth_m: 0.10
     # The .005 m profile completed all ten racing laps below 11 s with no
     # collision. The .010 m trial collided during the opening hairpin.
@@ -118,9 +63,14 @@
     adaptive_rho_update_period: 5
     adaptive_rho: true
     admm_over_relaxation: 1.6
+    # Exact coordinate transform for mixed-unit solver state/input channels.
+    solver_state_scaling_enabled: true
     solver_tolerance: 0.01
     solver_degraded_tolerance: 0.01
-    max_solver_iterations: 100
+    # The first live 25-state solve reached the 100-iteration ceiling on most
+    # cycles while remaining inside the 20 ms RTI deadline. Permit additional
+    # ADMM work; the deadline remains the hard bound on callback computation.
+    max_solver_iterations: 160
     # Bound RTI work to leave ~5 ms for synchronization, ROS scheduling, and
     # publishing within the 25 ms 40 Hz period. R1/R2 are still checked by
     # the exact nonlinear feasibility gate before any command is accepted.
@@ -130,16 +80,17 @@
     jacobian_threads: 4
     solver_max_regularization: 0.01
     max_consecutive_degraded_solves: 3
-    use_riccati_prefactorization: true
 
     rti_refinement_mode: adaptive
     rti2_progress_error_trigger_m: 0.10
     rti2_curvature_error_trigger_per_m: 0.02
     rti2_bound_error_trigger_m: 0.05
     rti2_min_corridor_slack_trigger_m: 0.25
-    rti2_steering_rate_correction_trigger_radps: 0.50
+    rti2_steering_target_correction_trigger_rad: 0.50
     rti2_throttle_correction_trigger: 0.05
     rti2_residual_imbalance_trigger: 8.0
     rti2_lateral_load_trigger_mps2: 3.0
     rti2_nonsmooth_columns_trigger: 50
-    rti2_residual_recovery_limit: 0.25
+    # Allow bounded residual-limited iterates to reach exact source-plant
+    # rollout validation. This does not relax the hard nonlinear/corridor gate.
+    rti2_residual_recovery_limit: 0.5

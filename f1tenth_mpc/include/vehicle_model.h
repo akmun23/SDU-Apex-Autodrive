@@ -4,10 +4,9 @@
  *
  * This API deliberately has no Pacejka, friction-coefficient, cornering
  * stiffness, load-transfer, or direct-acceleration vehicle contract.  The
- * nominal lateral relation is the current Unity controller's Ackermann
- * geometry.  WheelCollider/contact effects are handled by an observable
- * response map before promotion; until then this is a bounded, conservative
- * controller-stage baseline rather than a claim of full Unity parity.
+ * nonlinear vehicle transition is the checked-in source-derived four-wheel
+ * plant advanced at 1 ms. This is not the native patched WheelCollider
+ * contact solver and is not claimed to be a bit-exact Unity replica.
  */
 
 #ifndef VEHICLE_MODEL_H
@@ -16,6 +15,37 @@
 #include "mpc_types.h"
 #include "unity_source_plant_c.h"
 
+enum
+{
+    MPC_PLANT_STATE_WHEEL_OMEGA_FL = 0,
+    MPC_PLANT_STATE_WHEEL_OMEGA_FR = 1,
+    MPC_PLANT_STATE_WHEEL_OMEGA_RL = 2,
+    MPC_PLANT_STATE_WHEEL_OMEGA_RR = 3,
+    MPC_PLANT_STATE_BODY_HEIGHT = 4,
+    MPC_PLANT_STATE_BODY_HEIGHT_RATE = 5,
+    MPC_PLANT_STATE_ROLL = 6,
+    MPC_PLANT_STATE_ROLL_RATE = 7,
+    MPC_PLANT_STATE_PITCH = 8,
+    MPC_PLANT_STATE_PITCH_RATE = 9,
+    MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL = 10,
+    MPC_PLANT_STATE_SUSPENSION_JOUNCE_FR = 11,
+    MPC_PLANT_STATE_SUSPENSION_JOUNCE_RL = 12,
+    MPC_PLANT_STATE_SUSPENSION_JOUNCE_RR = 13,
+    MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL = 14,
+    MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FR = 15,
+    MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_RL = 16,
+    MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_RR = 17,
+    MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL = 18,
+    MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FR = 19,
+    MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_RL = 20,
+    MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_RR = 21,
+    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL = 22,
+    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FR = 23,
+    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_RL = 24,
+    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_RR = 25,
+    MPC_PLANT_INTERNAL_STATE_COUNT = 26
+};
+
 typedef struct
 {
     float e_y;
@@ -23,152 +53,65 @@ typedef struct
     float u;
     float v;
     float r;
-    /* Body-forward acceleration from the source plant [m/s^2]. */
+    /* Latest source-plant longitudinal acceleration [m/s^2]. This is a
+     * derived transition output cached for speed-reference scheduling; it is
+     * not a recursively propagated physical state or an RTI coordinate. */
     float longitudinal_acceleration_mps2;
-    float steering_command;
-    /* Preserve both causal command-history samples. The identified physical
-     * steering target follows the newest queued sample (one 40 Hz interval);
-     * these values are reconstructed from our own past published commands. */
+    /* Two causal actuator-queue values published by odometry at this epoch. */
     float delayed_steering_command_1;
     float delayed_steering_command_2;
-    /* Unity keeps a separate physical wheel angle and slews it toward the
-     * delayed commanded target. This state is estimated causally by the
-     * controller; it is not a simulator-only runtime input. */
+    /* Unity keeps a physical wheel angle, slewed by the source plant. */
     float actual_steering_angle;
-    /* Bridge output reaches the Unity vehicle dynamics two 40 Hz packets
-     * after it is sent. Keep both pending throttle commands in the optimized
-     * state so the RTI Jacobian propagates their delayed effect. */
+    /* Odom-published pending throttle commands; slot 2 is also the latest
+     * accepted command and supplies the previous-input cost. */
     float delayed_throttle_command_1;
     float delayed_throttle_command_2;
-    /* Recursive Unity-derived state. The RTI vector includes the 10 internal
+    /* Recursive Unity-derived state. The RTI vector includes the 14 internal
      * coordinates not already represented above, so their effects and
      * sensitivities propagate through the full horizon. */
-    double source_plant_state[UNITY_SOURCE_PLANT_STATE_SIZE];
-    /* Rear-wheel angular speed from the permitted left/right encoder-angle
-     * streams. Correct only the first source-plant stage; later stages
-     * propagate wheel spin from the source equations. */
-    float source_rear_wheel_omega_feedback_radps[2];
-    int source_rear_wheel_omega_feedback_valid;
-    /* Diagnostics for the bounded Y1 equilibrium-response correction applied
-     * on top of the source-derived wheel plant; these are not optimized states. */
-    float source_yaw_surface_blend;
-    float source_yaw_surface_target_radps;
-    double source_longitudinal_slip[4];
-    double source_lateral_slip[4];
-    double source_normal_load_n[4];
+    /* The 14 recursive source-plant values not represented by the dedicated
+     * MPC u/v/r/steering coordinates. The full Unity 18-vector is assembled
+     * only at the plant boundary; this prevents four duplicated states. */
+    double source_plant_internal_state[MPC_PLANT_INTERNAL_STATE_COUNT];
     int source_plant_initialized;
     int source_suspension_history_initialized;
     int source_imu_state_initialized;
 } MpcModelState_t;
 
-/* Materialize a causal source-plant initial state and consume any fresh rear
- * encoder sample into its wheel-spin state. The MPC calls this once before
- * building the RTI state vector so wheel speed is an explicit Markov state. */
-int vehicle_model_initialize_source_plant_state(MpcModelState_t *state);
+/* Non-recursive per-wheel quantities emitted by a plant transition. Keeping
+ * these outside MpcModelState_t avoids copying diagnostics through every
+ * finite-difference perturbation and state handoff. */
+typedef struct
+{
+    double longitudinal_slip[4];
+    double maximum_positive_longitudinal_slip[4];
+    double maximum_longitudinal_slip_excess_mps[4];
+    double lateral_slip[4];
+    double normal_load_n[4];
+} MpcModelOutput_t;
 
 typedef struct
 {
-    float steering_rate;
+    /* Absolute actuator targets. Unity applies its own physical steering slew
+     * and the control-rate command queues below this interface. */
+    float steering_target_rad;
     /* Normalized simulator throttle applied after the explicit two-packet
      * command queue [0, 1]. Zero is Unity's brake branch. */
     float throttle_command;
 } MpcModelControl_t;
 
-/*
- * The Unity wheel/contact response is represented here as an identified
- * command-to-yaw map.  These are not real-car tire parameters.  The optional
- * curvature term is an empirical correction for the observed reduction in
- * yaw response during the simulator's high-curvature transitions.
- */
-typedef struct
-{
-    float response_time_constant_s;
-    float steering_gain_per_m;
-    /* Empirical authority loss as the physical steering angle approaches the
-     * Unity steering limit. The nominal gain remains active below the start
-     * of this transition. */
-    float steering_gain_reduction_per_rad;
-    float steering_gain_start_rad;
-    float steering_gain_end_rad;
-    float curvature_gain_reduction_per_m;
-    float curvature_gain_start_per_m;
-    float curvature_gain_end_per_m;
-    /* Optional empirical low-speed response extension.  A value of zero
-     * leaves the identified constant-time-constant model unchanged. */
-    float low_speed_response_time_constant_s;
-    float low_speed_transition_speed_mps;
-} MpcYawRateModelParameters_t;
-
 enum
 {
-    MPC_YAW_SURFACE_SPEED_KNOTS = 5,
-    MPC_YAW_SURFACE_TURN_DIRECTIONS = 2,
-    MPC_YAW_SURFACE_Q_KNOTS = 10,
-};
-
-/* Repeated open-plane response data for yaw-rate magnitude vs
- * q = speed * tan(|steering|).  It is a Unity-specific, bounded empirical
- * surface, not a tire-force law. Direction index 0 is right/negative and 1
- * is left/positive. */
-typedef struct
-{
-    int enabled;
-    int speed_count;
-    /* Scales only the empirical steady-response correction, matching the
-     * optimizer's yaw_surface_response_scale. Hold-time-constant gating is
-     * intentionally not scaled. */
-    float response_scale;
-    float blend_q_start;
-    float blend_q_end;
-    /* Smoothly disable the empirical table outside its measured speed knots. */
-    float speed_blend_margin_mps;
-    /* Independent low-speed fade; the upper measured-speed fade remains above. */
-    float low_speed_blend_margin_mps;
-    /* Optional evidence gates around the measured low- and high-speed bands.
-     * The low band ends at speed_mps[0], and the high band begins at
-     * speed_mps[2]; the intervening knot is an unsupported bridge. */
-    float low_speed_support_fadeout_mps;
-    float high_speed_support_fadein_mps;
-    float speed_mps[MPC_YAW_SURFACE_SPEED_KNOTS];
-    float q[MPC_YAW_SURFACE_SPEED_KNOTS]
-           [MPC_YAW_SURFACE_TURN_DIRECTIONS]
-           [MPC_YAW_SURFACE_Q_KNOTS];
-    float yaw_rate_abs_rps[MPC_YAW_SURFACE_SPEED_KNOTS]
-                          [MPC_YAW_SURFACE_TURN_DIRECTIONS]
-                          [MPC_YAW_SURFACE_Q_KNOTS];
-    /* Optional bounded steering support window. All zero preserves the
-     * historical q-only blend. The response ramps in from start to full-start,
-     * stays active through full-end, then fades to zero at end. */
-    float steering_blend_start_rad;
-    float steering_blend_full_start_rad;
-    float steering_blend_full_end_rad;
-    float steering_blend_end_rad;
-    /* Optional hold-phase response time constant. It is blended only within
-     * the same measured speed/steering support as the empirical surface. */
-    float hold_response_time_constant_s;
-    float hold_rate_full_radps;
-    float hold_rate_zero_radps;
-} MpcYawRateResponseSurface_t;
-
-enum
-{
-    MPC_STAGE_CLIPPED_STEERING_RATE = 1u << 0,
+    MPC_STAGE_CLIPPED_STEERING_TARGET = 1u << 0,
     MPC_STAGE_CLIPPED_THROTTLE = 1u << 1,
-    MPC_STAGE_CLIPPED_STEERING_COMMAND = 1u << 2,
-    MPC_STAGE_CLIPPED_LONGITUDINAL_ACCELERATION = 1u << 3,
-    MPC_STAGE_CLIPPED_ACCELERATION = 1u << 4,
-    MPC_STAGE_CLIPPED_BODY_SPEED = 1u << 5,
-    MPC_STAGE_CLIPPED_ACTUAL_STEERING = 1u << 6,
-    MPC_STAGE_CLIPPED_YAW_RESIDUAL = 1u << 7,
-    MPC_STAGE_ACTIVE_BRAKE = 1u << 8,
-    MPC_STAGE_PLANT_BRAKE = 1u << 9,
+    MPC_STAGE_PLANT_BRAKE = 1u << 2,
 };
 
 typedef struct
 {
     MpcModelState_t next;
+    MpcModelOutput_t output;
     float delta_s_m;
-    float body_accel_mps2;
     unsigned int branch_flags;
     int valid;
 } MpcStageResult_t;
@@ -177,31 +120,44 @@ typedef struct
 extern "C" {
 #endif
 
-/* Authoritative 8-state accepted AutoDRIVE model stage. The control-rate
- * decisions update command states before this same interval's response. */
+/* Seed missing wheel/suspension state for explicit cold-start use. */
+int vehicle_model_initialize_plant_state(MpcModelState_t *state);
+
+/* Unity-source tire slip metrics for the current MPC plant state. */
+int vehicle_model_longitudinal_slip_excess(
+    const MpcModelState_t *state,
+    double excess_speed_mps[4],
+    double excess_derivative_wheel_omega[4]);
+
+/* One packet-rate model stage: use slot 1 during the interval, then shift each
+ * FIFO and append this stage's decision. */
 MpcStageResult_t mpc_vehicle_model_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
     float dt,
     float path_curvature);
 
+/* Propagate from commands already present in queue slot 1 without advancing
+ * either packet-rate FIFO. Queue advancement happens only when a new command
+ * packet is accepted. */
+MpcStageResult_t mpc_vehicle_model_propagate(
+    const MpcModelState_t *state,
+    float dt,
+    float path_curvature);
+
+/* Append one newly accepted command to the two-packet actuator FIFOs. */
+int vehicle_model_queue_command(
+    MpcModelState_t *state,
+    float steering_target_rad,
+    float throttle_command,
+    int throttle_valid);
+
 VehicleParameters_t vehicle_model_default_parameters(void);
 VehicleParameters_t vehicle_model_get_parameters(void);
 int vehicle_model_set_parameters(const VehicleParameters_t *parameters);
 
-MpcYawRateModelParameters_t vehicle_model_default_yaw_rate_parameters(void);
-MpcYawRateModelParameters_t vehicle_model_get_yaw_rate_parameters(void);
-int vehicle_model_set_yaw_rate_parameters(
-    const MpcYawRateModelParameters_t *parameters);
-int vehicle_model_set_yaw_rate_response_surface(
-    const MpcYawRateResponseSurface_t *surface);
-
-/* Identified Unity steering relation used by both prediction and feed-forward. */
-float vehicle_model_yaw_rate_gain(float steering_rad);
-float vehicle_model_yaw_rate_gain_for_curvature(float curvature_radpm);
+/* Geometric initial steering seed. The four-wheel plant computes yaw response. */
 float vehicle_model_steering_for_curvature(float curvature_radpm);
-float vehicle_model_steering_for_curvature_at_speed(
-    float curvature_radpm, float speed_mps);
 
 /* Apply the controller's temporary target-speed ceiling to every nonlinear
  * and linearized model step.  This is a command-policy limit, not a change to

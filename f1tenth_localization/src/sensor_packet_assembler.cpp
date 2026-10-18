@@ -49,6 +49,11 @@ void SensorPacketAssembler::update_packet(int64_t source_stamp_ns, Update && upd
   update(packet);
 
   process_ready_packets();
+  while (pending_.size() > kMaximumPendingPackets) {
+    pending_.erase(pending_.begin());
+    ++packet_drop_count_;
+    ++diagnostics_.incomplete_packet_drop_count;
+  }
 }
 
 void SensorPacketAssembler::add_encoder_sample(
@@ -66,13 +71,18 @@ void SensorPacketAssembler::add_encoder_sample(
 }
 
 void SensorPacketAssembler::add_imu_sample(
-  int64_t source_stamp_ns, double ax, double ay, double yaw_rate, double yaw)
+  int64_t source_stamp_ns, double ax, double ay, double yaw_rate, double yaw,
+  double roll, double pitch, double roll_rate, double pitch_rate)
 {
   update_packet(source_stamp_ns, [=](SensorPacket & packet) {
     packet.ax_mps2 = ax;
     packet.ay_mps2 = ay;
     packet.yaw_rate_radps = yaw_rate;
     packet.imu_yaw_rad = yaw;
+    packet.roll_rad = roll;
+    packet.pitch_rad = pitch;
+    packet.roll_rate_radps = roll_rate;
+    packet.pitch_rate_radps = pitch_rate;
     packet.have_imu = true;
   });
 }
@@ -95,11 +105,14 @@ void SensorPacketAssembler::process_ready_packets()
         diagnostics_.maximum_reorder_time_ns, reorder_time_ns);
     }
 
+    bool stale_packet = false;
     if (diagnostics_.last_emitted_source_stamp_ns > 0) {
       if (packet.stamp_ns < diagnostics_.last_emitted_source_stamp_ns) {
         ++diagnostics_.source_reversal_count;
+        stale_packet = true;
       } else if (packet.stamp_ns == diagnostics_.last_emitted_source_stamp_ns) {
         ++diagnostics_.duplicate_source_count;
+        stale_packet = true;
       }
     }
     if (highest_emitted_source_stamp_ns_ > 0 &&
@@ -107,11 +120,13 @@ void SensorPacketAssembler::process_ready_packets()
     {
       ++diagnostics_.late_completed_packet_count;
     }
-    highest_emitted_source_stamp_ns_ = std::max(
-      highest_emitted_source_stamp_ns_, packet.stamp_ns);
-    diagnostics_.last_emitted_source_stamp_ns = packet.stamp_ns;
-
     it = pending_.erase(it);
+    if (stale_packet) {
+      ++packet_drop_count_;
+      continue;
+    }
+    highest_emitted_source_stamp_ns_ = packet.stamp_ns;
+    diagnostics_.last_emitted_source_stamp_ns = packet.stamp_ns;
     process_packet(packet);
   }
 }

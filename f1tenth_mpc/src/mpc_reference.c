@@ -129,6 +129,25 @@ int mpc_trajectory_sample(
     return 1;
 }
 
+float mpc_reference_acceleration_under_speed_ceiling(
+    float trajectory_speed_mps,
+    float trajectory_acceleration_mps2,
+    float speed_ceiling_mps)
+{
+    if (!isfinite(trajectory_speed_mps) ||
+        !isfinite(trajectory_acceleration_mps2) ||
+        !isfinite(speed_ceiling_mps) || speed_ceiling_mps < 0.0f) {
+        return NAN;
+    }
+
+    /* Once the ceiling replaces the trajectory's speed profile, its stored
+     * acceleration is no longer the derivative of the reference being
+     * tracked.  In particular, retaining a positive mintime acceleration
+     * while clipping its speed asks MPC to accelerate through its own limit. */
+    return trajectory_speed_mps > speed_ceiling_mps
+        ? 0.0f : trajectory_acceleration_mps2;
+}
+
 static size_t wrapped_index(long long index, size_t count)
 {
     const long long n = (long long)count;

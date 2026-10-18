@@ -58,8 +58,7 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
                              double integration_step_s,
                              const MpcTrajectorySample_t *trajectory,
                              std::size_t trajectory_count,
-                             double lap_length_m,
-                             double throttle_normalized)
+                             double lap_length_m)
 {
     if (end_ns < start_ns || !integrated_elapsed_ns ||
         start_ns < grid_origin_ns || end_ns < grid_origin_ns) return false;
@@ -88,11 +87,8 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         if (!(dt > 0.0f) || !mpc_trajectory_sample(trajectory,
                 trajectory_count, lap_length_m, *progress_m, &sample))
             return false;
-        const MpcModelControl_t held_command_rate{
-            0.0f, static_cast<float>(std::clamp(
-                throttle_normalized, 0.0, 1.0))};
-        const MpcStageResult_t result = mpc_vehicle_model_step(
-            state, &held_command_rate, dt, static_cast<float>(sample.curvature));
+        const MpcStageResult_t result = mpc_vehicle_model_propagate(
+            state, dt, static_cast<float>(sample.curvature));
         if (!result.valid) return false;
         *state = result.next;
         *progress_m += result.delta_s_m;
@@ -197,11 +193,9 @@ MpcControlTimeStatus predict_to_control_time(
     const MpcControlTimePredictorConfig &config,
     MpcControlTimePrediction *prediction)
 {
-    const bool valid_mode = mode == MpcControlTimeMode::kNoExtrapolation ||
-        mode == MpcControlTimeMode::kConstantBodyTwist ||
-        mode == MpcControlTimeMode::kAcceptedModelCommandHistory;
     if (!prediction || !finite_source(source_state) || target_stamp_ns <= 0 ||
-        !valid_mode ||
+        mode != MpcControlTimeMode::kAcceptedModelCommandHistory ||
+        !source_plant_state ||
         !trajectory || trajectory_count < 3 || !std::isfinite(lap_length_m) ||
         !(lap_length_m > 0.0) || !std::isfinite(config.maximum_state_age_s) ||
         config.maximum_state_age_s < 0.0 ||
@@ -209,9 +203,9 @@ MpcControlTimeStatus predict_to_control_time(
         !(config.model_integration_step_s > 0.0) ||
         !std::isfinite(config.command_actuation_delay_s) ||
         config.command_actuation_delay_s < 0.0 ||
-        (source_plant_state && (source_plant_stamp_ns <= 0 ||
-            source_plant_stamp_ns > target_stamp_ns ||
-            !std::isfinite(source_plant_progress_m))))
+        source_plant_stamp_ns <= 0 ||
+        source_plant_stamp_ns > target_stamp_ns ||
+        !std::isfinite(source_plant_progress_m))
         return MpcControlTimeStatus::kInvalidInput;
     const double age_s = static_cast<double>(target_stamp_ns -
         source_state.source_stamp_ns) * kNsToSeconds;
@@ -255,37 +249,6 @@ MpcControlTimeStatus predict_to_control_time(
         result.command_event_stamps_ns[
             result.command_event_stamp_count++] = entry.stamp_ns;
     };
-    MpcCommandHistoryEntry command_at_target{};
-    if (causal_command_history->latest_at_or_before(target_stamp_ns,
-            &command_at_target)) {
-        result.steering_command_rad = command_at_target.steering_command_rad;
-        if (command_at_target.throttle_valid)
-            result.throttle_normalized = command_at_target.throttle_normalized;
-        MpcCommandHistoryEntry previous_command{};
-        for (std::size_t i = 1; i < causal_command_history->size(); ++i) {
-            MpcCommandHistoryEntry candidate{};
-            MpcCommandHistoryEntry following{};
-            if (!causal_command_history->at(i - 1, &candidate) ||
-                !causal_command_history->at(i, &following)) break;
-            if (following.stamp_ns > target_stamp_ns) break;
-            previous_command = candidate;
-        }
-        if (previous_command.stamp_ns > 0 &&
-            command_at_target.stamp_ns > previous_command.stamp_ns) {
-            const double command_dt_s = static_cast<double>(
-                command_at_target.stamp_ns - previous_command.stamp_ns) *
-                kNsToSeconds;
-            result.previous_steering_rate_radps =
-                (command_at_target.steering_command_rad -
-                 previous_command.steering_command_rad) / command_dt_s;
-        }
-    }
-    result.previous_throttle_command = source_plant_state ?
-        std::clamp(static_cast<double>(
-            source_plant_state->delayed_throttle_command_2), 0.0, 1.0) :
-        result.throttle_normalized;
-    if (command_at_target.throttle_valid)
-        result.previous_throttle_command = command_at_target.throttle_normalized;
     if (known_source_projection) {
         if (!std::isfinite(known_source_projection->s) ||
             !std::isfinite(known_source_projection->lateral_error) ||
@@ -299,88 +262,27 @@ MpcControlTimeStatus predict_to_control_time(
     }
     result.progress_m = result.projection.s;
 
-    if (age_s < 0.0 || age_s > config.maximum_state_age_s) {
-        // Do not turn source/arrival jitter into a command inhibit. For a
-        // state outside the predictor's validated support, retain the newest
-        // legal state without extrapolating it; the measured age remains in
-        // diagnostics and the MPC still receives a usable state.
-        result.used_time_fallback = true;
-        if (causal_command_history->latest_at_or_before(target_stamp_ns,
-                &command_at_target)) {
-            result.steering_command_rad =
-                command_at_target.steering_command_rad;
-            if (command_at_target.throttle_valid)
-                result.throttle_normalized = command_at_target.throttle_normalized;
-            if (command_at_target.throttle_valid)
-                result.previous_throttle_command =
-                    command_at_target.throttle_normalized;
-            record_command_event(command_at_target);
-        } else {
-            result.used_command_fallback = true;
-        }
-        *prediction = result;
-        return MpcControlTimeStatus::kOk;
-    }
+    if (age_s < 0.0) return MpcControlTimeStatus::kTargetBeforeSource;
+    if (age_s > config.maximum_state_age_s)
+        return MpcControlTimeStatus::kStateTooOld;
 
-    if (mode == MpcControlTimeMode::kConstantBodyTwist && age_s > 0.0) {
-        const double midpoint_yaw = source_state.map_yaw +
-            0.5 * source_state.yaw_rate * age_s;
-        result.state.map_x += age_s * (source_state.u * std::cos(midpoint_yaw) -
-            source_state.v * std::sin(midpoint_yaw));
-        result.state.map_y += age_s * (source_state.u * std::sin(midpoint_yaw) +
-            source_state.v * std::cos(midpoint_yaw));
-        result.state.map_yaw = wrap_angle(source_state.map_yaw +
-            source_state.yaw_rate * age_s);
-        if (!project_predicted_map_pose(&result, trajectory, trajectory_count,
-                lap_length_m, result.projection.segment))
-            return MpcControlTimeStatus::kProjectionFailed;
-    } else if (mode == MpcControlTimeMode::kAcceptedModelCommandHistory) {
-        MpcModelState_t plant = source_plant_state ? *source_plant_state :
-            MpcModelState_t{};
-        double throttle_normalized = source_plant_state ?
-            std::clamp(static_cast<double>(plant.delayed_throttle_command_2), 0.0, 1.0) :
-            result.throttle_normalized;
-        const int64_t plant_stamp_ns = source_plant_state ?
-            source_plant_stamp_ns : source_state.source_stamp_ns;
-        const double initial_progress_m = source_plant_state ?
-            source_plant_progress_m : result.projection.s;
+    {
+        MpcModelState_t plant = *source_plant_state;
+        const int64_t plant_stamp_ns = source_plant_stamp_ns;
+        const double initial_progress_m = source_plant_progress_m;
         result.plant_source_stamp_ns = plant_stamp_ns;
         result.plant_to_sensor_s = static_cast<double>(
             source_state.source_stamp_ns - plant_stamp_ns) * kNsToSeconds;
         result.progress_m = initial_progress_m;
 
-        /* Keep a newly received encoder sample aside until the model reaches
-         * that sample's timestamp. Applying it to the previous nominal state
-         * would move a future measurement backwards in time. */
-        const bool wheel_feedback_valid =
-            plant.source_rear_wheel_omega_feedback_valid != 0;
-        const float wheel_feedback[2] = {
-            plant.source_rear_wheel_omega_feedback_radps[0],
-            plant.source_rear_wheel_omega_feedback_radps[1]};
-        plant.source_rear_wheel_omega_feedback_valid = 0;
-
-        if (!source_plant_state || (!plant.source_plant_initialized &&
-                plant_stamp_ns == source_state.source_stamp_ns)) {
+        if (!plant.source_plant_initialized &&
+            plant_stamp_ns == source_state.source_stamp_ns) {
             plant.e_y = static_cast<float>(result.projection.lateral_error);
             plant.e_psi = static_cast<float>(result.projection.heading_error);
             plant.u = static_cast<float>(std::max(0.0, source_state.u));
             plant.v = static_cast<float>(source_state.v);
             plant.r = static_cast<float>(source_state.yaw_rate);
         }
-
-        MpcCommandHistoryEntry active_command{};
-        if (causal_command_history->latest_at_or_before(
-                plant_stamp_ns, &active_command)) {
-            record_command_event(active_command);
-            plant.steering_command = static_cast<float>(
-                active_command.steering_command_rad);
-            if (active_command.throttle_valid)
-                throttle_normalized = active_command.throttle_normalized;
-        } else if (!source_plant_state) {
-            result.used_command_fallback = true;
-        }
-        result.steering_command_rad = plant.steering_command;
-        result.throttle_normalized = throttle_normalized;
 
         int64_t cursor_ns = plant_stamp_ns;
         int64_t integrated_elapsed_ns = 0;
@@ -396,17 +298,14 @@ MpcControlTimeStatus predict_to_control_time(
                         cursor_ns, segment_end_ns, plant_stamp_ns,
                         &integrated_elapsed_ns,
                         config.model_integration_step_s, trajectory,
-                        trajectory_count, lap_length_m,
-                        throttle_normalized)) return false;
+                        trajectory_count, lap_length_m)) return false;
                 cursor_ns = segment_end_ns;
                 if (!has_next) break;
                 record_command_event(next_command);
-                plant.steering_command = static_cast<float>(
-                    next_command.steering_command_rad);
-                if (next_command.throttle_valid)
-                    throttle_normalized = next_command.throttle_normalized;
-                result.steering_command_rad = plant.steering_command;
-                result.throttle_normalized = throttle_normalized;
+                if (!vehicle_model_queue_command(&plant,
+                        static_cast<float>(next_command.steering_command_rad),
+                        static_cast<float>(next_command.throttle_normalized),
+                        next_command.throttle_valid ? 1 : 0)) return false;
                 ++result.command_changes_used;
                 if (++guard > kMpcCommandHistoryCapacity) return false;
             }
@@ -430,23 +329,6 @@ MpcControlTimeStatus predict_to_control_time(
             plant.u = static_cast<float>(std::max(0.0, source_state.u));
             plant.v = static_cast<float>(source_state.v);
             plant.r = static_cast<float>(source_state.yaw_rate);
-            if (wheel_feedback_valid) {
-                plant.source_rear_wheel_omega_feedback_radps[0] =
-                    wheel_feedback[0];
-                plant.source_rear_wheel_omega_feedback_radps[1] =
-                    wheel_feedback[1];
-                if (plant.source_plant_initialized) {
-                    plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL] =
-                        wheel_feedback[0];
-                    plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RR] =
-                        wheel_feedback[1];
-                    plant.source_rear_wheel_omega_feedback_valid = 0;
-                } else {
-                    /* The first model step will seed Unity's hidden plant from
-                     * the observed body state and consume these wheel speeds. */
-                    plant.source_rear_wheel_omega_feedback_valid = 1;
-                }
-            }
             result.sensor_state_fused = true;
         }
 
@@ -487,7 +369,6 @@ MpcControlTimeStatus predict_to_control_time(
         result.plant_state = plant;
         result.plant_state_valid = true;
     }
-
     *prediction = result;
     return MpcControlTimeStatus::kOk;
 }

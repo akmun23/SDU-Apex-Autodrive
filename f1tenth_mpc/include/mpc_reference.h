@@ -49,6 +49,13 @@ int mpc_trajectory_sample(
     double s,
     MpcTrajectorySample_t *sample);
 
+/* Return a longitudinal-acceleration reference consistent with the speed
+ * reference after applying the active MPC speed ceiling. */
+float mpc_reference_acceleration_under_speed_ceiling(
+    float trajectory_speed_mps,
+    float trajectory_acceleration_mps2,
+    float speed_ceiling_mps);
+
 /* Continuous projection onto track segments. Pass SIZE_MAX for full-track
  * initialization; otherwise search locally first, then direction-gated full
  * track fallback. */

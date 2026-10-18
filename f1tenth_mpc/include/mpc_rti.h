@@ -11,45 +11,16 @@ extern "C" {
 
 enum
 {
-    MPC_RTI_PLANT_NX = 26,
-    MPC_RTI_NX = 28,
-    MPC_RTI_NU = 2,
-    MPC_RTI_IDX_EY = 0,
-    MPC_RTI_IDX_EPSI = 1,
-    MPC_RTI_IDX_U = 2,
-    MPC_RTI_IDX_V = 3,
-    MPC_RTI_IDX_R = 4,
-    MPC_RTI_IDX_LONGITUDINAL_ACCELERATION = 5,
-    MPC_RTI_IDX_STEERING_COMMAND = 6,
-    MPC_RTI_IDX_DELAYED_STEERING_COMMAND_1 = 7,
-    MPC_RTI_IDX_DELAYED_STEERING_COMMAND_2 = 8,
-    MPC_RTI_IDX_ACTUAL_STEERING_ANGLE = 9,
-    MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_1 = 10,
-    MPC_RTI_IDX_DELAYED_THROTTLE_COMMAND_2 = 11,
-    MPC_RTI_IDX_WHEEL_OMEGA_FL = 12,
-    MPC_RTI_IDX_WHEEL_OMEGA_FR = 13,
-    MPC_RTI_IDX_WHEEL_OMEGA_RL = 14,
-    MPC_RTI_IDX_WHEEL_OMEGA_RR = 15,
-    MPC_RTI_IDX_BODY_HEIGHT = 16,
-    MPC_RTI_IDX_BODY_HEIGHT_RATE = 17,
-    MPC_RTI_IDX_ROLL = 18,
-    MPC_RTI_IDX_ROLL_RATE = 19,
-    MPC_RTI_IDX_PITCH = 20,
-    MPC_RTI_IDX_PITCH_RATE = 21,
-    MPC_RTI_IDX_SUSPENSION_JOUNCE_FL = 22,
-    MPC_RTI_IDX_SUSPENSION_JOUNCE_FR = 23,
-    MPC_RTI_IDX_SUSPENSION_JOUNCE_RL = 24,
-    MPC_RTI_IDX_SUSPENSION_JOUNCE_RR = 25,
-    MPC_RTI_IDX_PREVIOUS_STEERING_RATE = 26,
-    MPC_RTI_IDX_PREVIOUS_THROTTLE_COMMAND = 27
+    MPC_RTI_NX = MPC_OPTIMIZER_NX,
+    MPC_RTI_NU = MPC_MODEL_NU
 };
 
 typedef struct
 {
     MpcModelState_t plant;
-    float previous_steering_rate;
-    float previous_throttle_command;
     unsigned int incoming_branch_flags;
+    float incoming_max_positive_wheel_slip;
+    double incoming_wheel_slip_excess_mps[4];
     int incoming_transition_valid;
 } MpcRtiState_t;
 
@@ -74,19 +45,20 @@ typedef struct
     float weight_u;
     /* Used only while the nominal state is above the raceline speed. */
     float weight_u_overspeed;
-    float weight_longitudinal_acceleration;
+    /* Soft cost on per-wheel surface-speed mismatch beyond Unity's forward
+     * tire-curve extremum; not a hard slip feasibility limit. */
+    float weight_longitudinal_slip;
     float weight_v;
     float weight_r;
     float weight_steering_command;
-    float weight_steering_rate;
+    float weight_steering_target;
     float weight_throttle_command;
-    float weight_steering_rate_change;
+    float weight_steering_target_change;
     float weight_throttle_command_change;
     float terminal_multiplier;
     float max_speed_mps;
     float active_speed_ceiling_mps;
     float max_steering_rad;
-    float max_steering_rate_radps;
     float corridor_margin_m;
     /* Optional first predicted sample margin; default equals corridor_margin_m. */
     float first_prediction_corridor_margin_m;
@@ -111,19 +83,52 @@ enum
     MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK = 2
 };
 
+typedef enum
+{
+    MPC_RTI_NOMINAL_BUILD_OK = 0,
+    MPC_RTI_NOMINAL_BUILD_INVALID_INPUT,
+    MPC_RTI_NOMINAL_BUILD_SPEED_CEILING,
+    MPC_RTI_NOMINAL_BUILD_SPEED_SEED,
+    MPC_RTI_NOMINAL_BUILD_SEED_REFERENCE,
+    MPC_RTI_NOMINAL_BUILD_SEED_STEP,
+    MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE,
+    MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT,
+    MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE,
+    MPC_RTI_NOMINAL_BUILD_SOURCE_SPEED_ENVELOPE,
+    MPC_RTI_NOMINAL_BUILD_THROTTLE_MODE,
+    MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT,
+    MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE
+} MpcRtiNominalBuildFailureStage_t;
+
+typedef enum
+{
+    MPC_RTI_COMMAND_ENVELOPE_OK = 0,
+    MPC_RTI_COMMAND_ENVELOPE_NONFINITE_STATE,
+    MPC_RTI_COMMAND_ENVELOPE_SPEED_BELOW_ZERO,
+    MPC_RTI_COMMAND_ENVELOPE_SPEED_ABOVE_MAX,
+    MPC_RTI_COMMAND_ENVELOPE_STEERING_QUEUE,
+    MPC_RTI_COMMAND_ENVELOPE_ACTUAL_STEERING,
+    MPC_RTI_COMMAND_ENVELOPE_THROTTLE_QUEUE
+} MpcRtiCommandEnvelopeFailure_t;
+
 typedef struct
 {
     MpcRtiState_t states[PREDICTION_HORIZON + 1];
     MpcModelControl_t controls[PREDICTION_HORIZON];
     double progress[PREDICTION_HORIZON + 1];
+    float speed_reference[PREDICTION_HORIZON + 1];
     int horizon;
+    int speed_reference_valid;
     int valid;
+    MpcRtiNominalBuildFailureStage_t build_failure_stage;
+    MpcRtiCommandEnvelopeFailure_t build_failure_constraint;
+    int build_failure_index;
 } MpcRtiNominal_t;
 
 /* A single corridor schedule shared by the QP and the exact nonlinear
- * rollout.  The normal bounds are never modified.  Active bounds may be
- * directionally extended only before the deterministic bounded seed has
- * re-entered the normal corridor. */
+ * rollout. Normal bounds remain immutable. If the measured x0 is already
+ * outside the requested clearance corridor, active bounds taper that initial
+ * violation back to the normal corridor over the horizon. */
 typedef struct
 {
     float normal_lower[PREDICTION_HORIZON + 1];
@@ -168,7 +173,7 @@ typedef struct
 
 typedef struct
 {
-    RiccatiStepData_t steps[PREDICTION_HORIZON];
+    RiccatiStepData_t steps[RICCATI_HORIZON];
     float terminal_Q[RICCATI_MAX_NX];
     float terminal_q[RICCATI_MAX_NX];
     float terminal_x_lb[RICCATI_MAX_NX];
@@ -223,7 +228,7 @@ typedef struct
     float rti2_curvature_error_trigger_per_m;
     float rti2_bound_error_trigger_m;
     float rti2_min_corridor_slack_trigger_m;
-    float rti2_steering_rate_correction_trigger_radps;
+    float rti2_steering_target_correction_trigger_rad;
     float rti2_throttle_correction_trigger;
     float rti2_residual_imbalance_trigger;
     float rti2_lateral_load_trigger_mps2;
@@ -259,9 +264,22 @@ typedef enum
     MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT
 } MpcRtiCycleStatus_t;
 
+typedef enum
+{
+    MPC_RTI_INPUT_FAILURE_NONE = 0,
+    MPC_RTI_INPUT_FAILURE_CYCLE_ARGUMENTS,
+    MPC_RTI_INPUT_FAILURE_PLANT_STATE,
+    MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD,
+    MPC_RTI_INPUT_FAILURE_CORRIDOR_SCHEDULE
+} MpcRtiInputFailureReason_t;
+
 typedef struct
 {
     MpcRtiCycleStatus_t status;
+    MpcRtiInputFailureReason_t input_failure_reason;
+    MpcRtiNominalBuildFailureStage_t nominal_build_failure_stage;
+    MpcRtiCommandEnvelopeFailure_t nominal_build_failure_constraint;
+    int nominal_build_failure_index;
     MpcModelControl_t first_control;
     MpcModelControl_t nominal_first_control;
     MpcRtiCandidatePathDelta_t candidate_path_delta;
@@ -308,13 +326,10 @@ typedef struct
     double total_rti_us;
     int selected_candidate; /* 1=R1, 2=R2, 3=corridor repair. */
     int corridor_repair_used;
+    unsigned int corridor_repair_trials;
+    double corridor_repair_us;
     /* Exact-feasible candidate retained despite an ADMM residual limit. */
     int residual_candidate_published;
-    /* Finite first action retained when the full horizon failed validation. */
-    int best_effort_action_published;
-    /* A failed-horizon first action was moved toward the nominal control
-     * until its exact one-step nonlinear rollout satisfied the corridor. */
-    int best_effort_action_repaired;
     float corridor_repair_alpha;
     float rho_start;
     float rho_u_start;

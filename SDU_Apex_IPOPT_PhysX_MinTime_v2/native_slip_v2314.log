@@ -1,0 +1,45 @@
+Reevaluated 1924 wheel records from the previous native lap
+{
+  "lateral_slip": {
+    "before": {
+      "rms": 0.003827891064609367,
+      "max_abs": 0.01970431010684795
+    },
+    "after": {
+      "rms": 0.0005468262985638182,
+      "max_abs": 0.002242479563321166
+    }
+  },
+  "longitudinal_slip": {
+    "before": {
+      "rms": 0.0006890103610237261,
+      "max_abs": 0.003384028828803204
+    },
+    "after": {
+      "rms": 0.0006890103610237261,
+      "max_abs": 0.003384028828803204
+    }
+  },
+  "lateral_tire_force_n": {
+    "before": {
+      "rms": 3.7620469196806625,
+      "max_abs": 16.441083396044398
+    },
+    "after": {
+      "rms": 0.5767185298751064,
+      "max_abs": 2.1140456944289
+    }
+  },
+  "longitudinal_tire_force_n": {
+    "before": {
+      "rms": 0.03767913746468791,
+      "max_abs": 0.19520391392238334
+    },
+    "after": {
+      "rms": 0.03767913746468791,
+      "max_abs": 0.19520391392238334
+    }
+  }
+}
+Wrote /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/native_slip_v2314/summary.json /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/native_slip_v2314/per_wheel.csv
+No native replay or IPOPT solve ran

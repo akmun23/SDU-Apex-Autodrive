@@ -38,24 +38,28 @@ TEST(MpcControlTimePredictor, HandlesFractionalMillisecondCommandAndSensorTimes)
   source.u = 2.0;
 
   f1tenth_mpc::MpcCommandHistory history;
-  ASSERT_TRUE(history.push({source_stamp_ns + 8400000, 0.0, 2.0}));
-  ASSERT_TRUE(history.push({source_stamp_ns + 18600000, 0.0, 1.9}));
+  ASSERT_TRUE(history.push({source_stamp_ns + 8400000, 0.0, 0.60, true}));
+  ASSERT_TRUE(history.push({source_stamp_ns + 18600000, 0.0, 0.55, true}));
 
   MpcPathProjection_t source_projection{};
   source_projection.s = 0.0;
   source_projection.segment = 0;
+  MpcModelState_t source_plant{};
+  source_plant.u = static_cast<float>(source.u);
   f1tenth_mpc::MpcControlTimePredictorConfig config;
   f1tenth_mpc::MpcControlTimePrediction prediction{};
   const auto status = f1tenth_mpc::predict_to_control_time(
       f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
       source, target_stamp_ns, history, trajectory.data(), trajectory.size(),
-      lap_length, 0, &source_projection, nullptr, 0, 0.0, config,
+      lap_length, 0, &source_projection, &source_plant, source_stamp_ns,
+      source_projection.s, config,
       &prediction);
 
   ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
   EXPECT_EQ(prediction.command_changes_used, 2U);
   EXPECT_NEAR(prediction.age_s, 0.0252, 1.0e-12);
-  EXPECT_NEAR(prediction.speed_reference_mps, 1.9, 1.0e-6);
+  EXPECT_NEAR(prediction.plant_state.delayed_throttle_command_2, 0.55f,
+              1.0e-6f);
   EXPECT_TRUE(std::isfinite(prediction.state.u));
   EXPECT_TRUE(std::isfinite(prediction.state.map_x));
   EXPECT_TRUE(std::isfinite(prediction.state.map_y));
@@ -77,7 +81,7 @@ TEST(MpcControlTimePredictor, PreservesCarriedSteeringStateAcrossUpdates)
   source.yaw_rate = -0.7;
 
   f1tenth_mpc::MpcCommandHistory history;
-  ASSERT_TRUE(history.push({source_stamp_ns, -0.35, 5.0}));
+  ASSERT_TRUE(history.push({source_stamp_ns, -0.35, 0.50, true}));
   MpcPathProjection_t source_projection{};
   source_projection.s = 0.0;
   source_projection.heading_error = -0.7;
@@ -85,9 +89,10 @@ TEST(MpcControlTimePredictor, PreservesCarriedSteeringStateAcrossUpdates)
 
   MpcModelState_t carried{};
   carried.actual_steering_angle = -0.35f;
-  carried.steering_command = -0.35f;
   carried.delayed_steering_command_1 = -0.35f;
   carried.delayed_steering_command_2 = -0.35f;
+  MpcModelState_t cold{};
+  cold.u = static_cast<float>(source.u);
 
   f1tenth_mpc::MpcControlTimePredictorConfig config;
   f1tenth_mpc::MpcControlTimePrediction cold_prediction{};
@@ -95,7 +100,7 @@ TEST(MpcControlTimePredictor, PreservesCarriedSteeringStateAcrossUpdates)
   const auto cold_status = f1tenth_mpc::predict_to_control_time(
       f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
       source, target_stamp_ns, history, trajectory.data(), trajectory.size(),
-      lap_length, 0, &source_projection, nullptr, 0, 0.0, config,
+      lap_length, 0, &source_projection, &cold, source_stamp_ns, 0.0, config,
       &cold_prediction);
   const auto carried_status = f1tenth_mpc::predict_to_control_time(
       f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
@@ -125,8 +130,8 @@ TEST(MpcControlTimePredictor, ReturnsLatentPlantAtControlTime)
   source.u = 2.0;
 
   f1tenth_mpc::MpcCommandHistory history;
-  ASSERT_TRUE(history.push({source_stamp_ns - 25000000, 0.0, 2.0}));
-  ASSERT_TRUE(history.push({source_stamp_ns, 0.0, 2.0}));
+  ASSERT_TRUE(history.push({source_stamp_ns - 25000000, 0.0, 0.50, true}));
+  ASSERT_TRUE(history.push({source_stamp_ns, 0.0, 0.50, true}));
   MpcPathProjection_t source_projection{};
   source_projection.s = 0.0;
   source_projection.segment = 0;
@@ -136,12 +141,6 @@ TEST(MpcControlTimePredictor, ReturnsLatentPlantAtControlTime)
   source_plant.longitudinal_acceleration_mps2 = 2.0f;
   source_plant.delayed_throttle_command_1 = 0.25f;
   source_plant.delayed_throttle_command_2 = 0.25f;
-  source_plant.delayed_throttle_command_2 = 0.25f;
-  source_plant.source_rear_wheel_omega_feedback_radps[0] =
-      2.0 / wheel_radius_m;
-  source_plant.source_rear_wheel_omega_feedback_radps[1] =
-      2.0 / wheel_radius_m;
-  source_plant.source_rear_wheel_omega_feedback_valid = 1;
 
   f1tenth_mpc::MpcControlTimePredictorConfig config;
   f1tenth_mpc::MpcControlTimePrediction prediction{};
@@ -154,12 +153,85 @@ TEST(MpcControlTimePredictor, ReturnsLatentPlantAtControlTime)
   ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
   ASSERT_TRUE(prediction.plant_state_valid);
   EXPECT_TRUE(prediction.plant_state.source_plant_initialized);
-  EXPECT_NEAR(prediction.plant_state.source_plant_state[UNITY_SOURCE_U],
-              prediction.state.u, 1.0e-5);
-  EXPECT_GT(prediction.plant_state.source_plant_state[
-                UNITY_SOURCE_WHEEL_OMEGA_RL],
+  EXPECT_NEAR(prediction.plant_state.u, prediction.state.u, 1.0e-5);
+  EXPECT_GT(prediction.plant_state.source_plant_internal_state[
+                MPC_PLANT_STATE_WHEEL_OMEGA_RL],
             2.0 / wheel_radius_m - 1.0);
   EXPECT_NEAR(prediction.age_s, 0.029, 1.0e-12);
+}
+
+TEST(MpcControlTimePredictor, KeepsPacketQueuesFixedBetweenCommands)
+{
+  constexpr int64_t source_stamp_ns = 3500000000;
+  constexpr int64_t target_stamp_ns = source_stamp_ns + 29000000;
+  double lap_length = 0.0;
+  const auto trajectory = square_trajectory(&lap_length);
+  f1tenth_mpc::MpcSynchronizedState source{};
+  source.source_stamp_ns = source_stamp_ns;
+  source.map_x = 0.0;
+  source.map_y = 0.0;
+  source.map_yaw = 0.0;
+  source.u = 2.0;
+  f1tenth_mpc::MpcCommandHistory history;
+  ASSERT_TRUE(history.push({source_stamp_ns, 0.20, 0.40, true}));
+  MpcPathProjection_t projection{};
+  projection.segment = 0;
+  MpcModelState_t plant{};
+  plant.u = 2.0f;
+  plant.delayed_steering_command_1 = 0.10f;
+  plant.delayed_steering_command_2 = 0.20f;
+  plant.delayed_throttle_command_1 = 0.30f;
+  plant.delayed_throttle_command_2 = 0.40f;
+  f1tenth_mpc::MpcControlTimePrediction prediction{};
+  const auto status = f1tenth_mpc::predict_to_control_time(
+      f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
+      source, target_stamp_ns, history, trajectory.data(), trajectory.size(),
+      lap_length, 0, &projection, &plant, source_stamp_ns, 0.0, {},
+      &prediction);
+  ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
+  ASSERT_TRUE(prediction.plant_state_valid);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_steering_command_1, 0.10f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_steering_command_2, 0.20f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_1, 0.30f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_2, 0.40f);
+}
+
+TEST(MpcControlTimePredictor, AdvancesBothCommandQueuesOnlyAtCommandEvents)
+{
+  constexpr int64_t source_stamp_ns = 3600000000;
+  constexpr int64_t event_stamp_ns = source_stamp_ns + 10000000;
+  constexpr int64_t target_stamp_ns = source_stamp_ns + 20000000;
+  double lap_length = 0.0;
+  const auto trajectory = square_trajectory(&lap_length);
+  f1tenth_mpc::MpcSynchronizedState source{};
+  source.source_stamp_ns = source_stamp_ns;
+  source.map_x = 0.0;
+  source.map_y = 0.0;
+  source.map_yaw = 0.0;
+  source.u = 2.0;
+  f1tenth_mpc::MpcCommandHistory history;
+  ASSERT_TRUE(history.push({source_stamp_ns, 0.20, 0.40, true}));
+  ASSERT_TRUE(history.push({event_stamp_ns, -0.30, 0.80, true}));
+  MpcPathProjection_t projection{};
+  projection.segment = 0;
+  MpcModelState_t plant{};
+  plant.u = 2.0f;
+  plant.delayed_steering_command_1 = 0.10f;
+  plant.delayed_steering_command_2 = 0.20f;
+  plant.delayed_throttle_command_1 = 0.30f;
+  plant.delayed_throttle_command_2 = 0.40f;
+  f1tenth_mpc::MpcControlTimePrediction prediction{};
+  const auto status = f1tenth_mpc::predict_to_control_time(
+      f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
+      source, target_stamp_ns, history, trajectory.data(), trajectory.size(),
+      lap_length, 0, &projection, &plant, source_stamp_ns, 0.0, {},
+      &prediction);
+  ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
+  ASSERT_TRUE(prediction.plant_state_valid);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_steering_command_1, 0.20f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_steering_command_2, -0.30f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_1, 0.40f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_2, 0.80f);
 }
 
 TEST(MpcControlTimePredictor, PropagatesThenFusesAtObservedSensorEpoch)
@@ -180,7 +252,7 @@ TEST(MpcControlTimePredictor, PropagatesThenFusesAtObservedSensorEpoch)
   observed.yaw_rate = 0.4;
 
   f1tenth_mpc::MpcCommandHistory history;
-  ASSERT_TRUE(history.push({plant_stamp_ns, 0.0, 2.0}));
+  ASSERT_TRUE(history.push({plant_stamp_ns, 0.0, 0.50, true}));
   MpcPathProjection_t observed_projection{};
   observed_projection.s = 0.02;
   observed_projection.lateral_error = 0.01;
@@ -189,18 +261,15 @@ TEST(MpcControlTimePredictor, PropagatesThenFusesAtObservedSensorEpoch)
 
   MpcModelState_t carried{};
   carried.u = 2.0f;
-  carried.speed_reference_mps = 2.0f;
   carried.delayed_throttle_command_2 = 0.25f;
   carried.source_plant_initialized = 1;
   carried.source_suspension_history_initialized = 1;
-  carried.source_plant_state[UNITY_SOURCE_U] = 2.0;
-  carried.source_plant_state[UNITY_SOURCE_BODY_HEIGHT] = 0.00464804098;
+  carried.source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT] =
+      0.00464804098;
   for (int wheel = 0; wheel < 4; ++wheel)
-    carried.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL + wheel] =
+    carried.source_plant_internal_state[
+        MPC_PLANT_STATE_WHEEL_OMEGA_FL + wheel] =
         2.0 / 0.059;
-  carried.source_rear_wheel_omega_feedback_radps[0] = 50.0f;
-  carried.source_rear_wheel_omega_feedback_radps[1] = 51.0f;
-  carried.source_rear_wheel_omega_feedback_valid = 1;
 
   f1tenth_mpc::MpcControlTimePredictorConfig config;
   f1tenth_mpc::MpcControlTimePrediction prediction{};
@@ -226,10 +295,10 @@ TEST(MpcControlTimePredictor, PropagatesThenFusesAtObservedSensorEpoch)
               observed_projection.lateral_error, 1.0e-6);
   EXPECT_NEAR(prediction.plant_handoff_state.e_psi,
               observed_projection.heading_error, 1.0e-6);
-  EXPECT_NEAR(prediction.plant_handoff_state.source_plant_state[
-                  UNITY_SOURCE_WHEEL_OMEGA_RL], 50.0, 1.0e-6);
-  EXPECT_NEAR(prediction.plant_handoff_state.source_plant_state[
-                  UNITY_SOURCE_WHEEL_OMEGA_RR], 51.0, 1.0e-6);
+  EXPECT_TRUE(std::isfinite(prediction.plant_handoff_state.
+      source_plant_internal_state[MPC_PLANT_STATE_WHEEL_OMEGA_RL]));
+  EXPECT_TRUE(std::isfinite(prediction.plant_handoff_state.
+      source_plant_internal_state[MPC_PLANT_STATE_WHEEL_OMEGA_RR]));
 
   /* The next sensor sample should be newer than the carried sensor-epoch
    * snapshot, even though it is older than the preceding control-time state. */
@@ -270,17 +339,13 @@ TEST(MpcControlTimePredictor, DoesNotFuseObservationOlderThanCarriedPlant)
   observed.u = 0.5;
 
   f1tenth_mpc::MpcCommandHistory history;
-  ASSERT_TRUE(history.push({plant_stamp_ns, 0.0, 2.0}));
+  ASSERT_TRUE(history.push({plant_stamp_ns, 0.0, 0.50, true}));
   MpcPathProjection_t stale_projection{};
   stale_projection.s = 0.0;
   stale_projection.segment = 0;
 
   MpcModelState_t carried{};
   carried.u = 2.0f;
-  carried.speed_reference_mps = 2.0f;
-  carried.source_rear_wheel_omega_feedback_radps[0] = 100.0f;
-  carried.source_rear_wheel_omega_feedback_radps[1] = 100.0f;
-  carried.source_rear_wheel_omega_feedback_valid = 1;
 
   f1tenth_mpc::MpcControlTimePredictorConfig config;
   f1tenth_mpc::MpcControlTimePrediction prediction{};
@@ -298,8 +363,8 @@ TEST(MpcControlTimePredictor, DoesNotFuseObservationOlderThanCarriedPlant)
   EXPECT_NEAR(prediction.plant_handoff_progress_m, 0.0, 1.0e-6);
   EXPECT_GT(prediction.plant_state.u, 1.5);
   EXPECT_GT(std::abs(prediction.plant_state.u - observed.u), 1.0);
-  EXPECT_NE(prediction.plant_state.source_plant_state[
-                UNITY_SOURCE_WHEEL_OMEGA_RL], 100.0);
+  EXPECT_TRUE(std::isfinite(prediction.plant_state.source_plant_internal_state[
+      MPC_PLANT_STATE_WHEEL_OMEGA_RL]));
 }
 
 }  // namespace

@@ -12,10 +12,10 @@ extern "C" {
 typedef struct
 {
     float A[MPC_MODEL_NX][MPC_MODEL_NX];
-    float B[MPC_MODEL_NX][2];
+    float B[MPC_MODEL_NX][MPC_MODEL_NU];
     float d[MPC_MODEL_NX];
     unsigned int nominal_branch_flags;
-    uint32_t nonsmooth_column_mask;
+    uint64_t nonsmooth_column_mask;
     int nonsmooth_column_count;
     int failure_reason;
     int failure_index;

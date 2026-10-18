@@ -1,0 +1,28 @@
+{
+  "diagnostic": "native_1khz_physx_tire_callback_vs_scalar_shader",
+  "samples": 481,
+  "wheel_samples": 1924,
+  "native_callback_observed_nonzero_fraction": 1.0,
+  "source_stiffness_outside_norm_rms_force_error_n": 0.34791748793082006,
+  "historical_stiffness_inside_norm_rms_force_error_n": 0.361867056717535,
+  "source_stiffness_outside_norm_max_force_error_n": 1.305587492120658,
+  "historical_stiffness_inside_norm_max_force_error_n": 1.7410598660056715,
+  "source_minus_historical_predicted_max_component_n": 0.5703121347427809,
+  "inferred_callback_load_coverage_fraction": 0.5644490644490644,
+  "inferred_callback_load_minus_symbolic_filtered_load_rms_n": 1.499678015970754,
+  "inferred_callback_load_minus_symbolic_filtered_load_mean_n": -1.4936426264368612,
+  "native_friction_pair": "1.0 (verified exact PxVehicleDrivableSurfaceToTireFrictionPairs source)",
+  "important_caveat": "Native shader receives PhysX tireLoad that is not directly present in the existing compact native response; load comparisons use the documented filter and separately infer effective callback load. The native contact output is sampled every 25ms after the last 1ms PxVehicleUpdates, not a 143-node IPOPT collocation trace.",
+  "never_accept_as_racing_lap": true,
+  "native_trial": {
+    "backend": "native",
+    "trial_speed_mps": 2.4,
+    "progress_m": 56.73051446281683,
+    "elapsed_s": 24.05,
+    "failure": null,
+    "flying_lap_samples": 481,
+    "min_clearance_beyond_margin_m": 0.04912100144036188,
+    "completed_flying_lap": true
+  },
+  "source_hash_note": "native source and current restored wheel model; no fitting"
+}

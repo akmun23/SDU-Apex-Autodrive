@@ -1,8 +1,7 @@
 #pragma once
 
-#include <cstdint>
-#include <deque>
-#include <vector>
+#include <array>
+#include <cstddef>
 
 namespace f1tenth_localization
 {
@@ -10,225 +9,12 @@ namespace f1tenth_localization
 struct OdometryObserverConfig
 {
   double wheel_radius_m{0.059};
-  // Fallback direct wheel-to-body speed scale. Keep the physical wheel radius
-  // separate from this runtime calibration.
-  double wheel_speed_scale{0.968};
-  // Optional monotone calibration of the wheel-to-body speed scale. The
-  // values are linearly interpolated against the raw rolling wheel speed and
-  // endpoint values are held outside the identified range. An invalid or
-  // incomplete table falls back to wheel_speed_scale, so a bad deployment
-  // parameter cannot silently disable odometry.
-  std::vector<double> wheel_speed_scale_speeds_mps;
-  std::vector<double> wheel_speed_scale_values;
-  double reset_encoder_jump_rad{50.0};
-  // The simulator can repeat a cumulative encoder angle for several source
-  // packets and then publish the accumulated jump.  Differentiate over a
-  // short source-time window so the observer sees displacement, not bursts.
-  // The 20 Hz simulator encoder stream contains delayed cumulative-angle
-  // packets.  The recorded run comparison showed that 150 ms adds avoidable
-  // launch/braking lag; retain only two native samples for the rolling rate.
-  double wheel_speed_window_s{0.10};
-  // This nominal interval affects diagnostics only; delayed samples are kept.
-  double normal_packet_dt_max_s{0.035};
-  double decel_detect_ax_mps2{-0.5};
-  // The repeated-encoder dropout can coincide with genuine hard braking. Use
-  // the calibrated IMU deceleration until a fresh wheel packet returns; a
-  // reduced scale leaves /odom dangerously above the actual vehicle speed in
-  // the closed loop.
-  double decel_ax_scale{1.005};
-  double decel_ax_offset_mps2{0.020};
-  // Keep the observed body acceleration during encoder dropouts, with a cap
-  // measured from clean simulator acceleration samples.
-  double wheel_dropout_positive_ax_max_mps2{4.4};
-  // Wheel speed is the direct longitudinal measurement.  Keep this gate
-  // above the measured launch acceleration so valid wheel updates are not
-  // replaced by the slower IMU prediction.
-  double wheel_update_ax_abs_max_mps2{6.5};
-  double wheel_freeze_speed_mps{0.15};
-  // During launch the encoder can report a coherent wheel rate while the
-  // driven wheels are spinning far faster than the body. Do not let the
-  // coherent-recovery shortcut promote that value into odometry until the
-  // body-speed prediction has left the launch regime.
-  double wheel_recovery_launch_speed_mps{2.0};
-  double wheel_recovery_launch_innovation_mps{2.0};
-  double wheel_recovery_launch_wheel_speed_mps{4.0};
-  // A delayed cumulative-encoder burst appears first in the rolling rate and
-  // then again in the current packet. Reject only that two-stage signature;
-  // ordinary acceleration packets have no packet-vs-window disagreement.
-  double wheel_burst_disagreement_mps{1.0};
-  // Disabled by default: IMU acceleration has already propagated causal speed
-  // while a wheel burst is rejected. Adding another acceleration here caused
-  // a large positive speed/pose error in independent high-speed/high-steer
-  // simulator replays. Coherent wheel recovery remains available separately.
-  double wheel_burst_catchup_accel_mps2{0.0};
-  double wheel_burst_catchup_max_mps{16.0};
-  // In a turn, a fresh synchronized packet can be a valid current-motion
-  // sample while the rolling window still contains a repeated angle. Permit
-  // that recovery only when the packet is close to the causal speed and is
-  // clearly newer than the stale window; straight-line burst recovery keeps
-  // the stricter window-coherence rule.
-  bool allow_turn_current_packet_recovery{true};
-  double turn_current_packet_max_increase_mps{0.20};
-  // Do not accept a stale low current packet as recovery from a moving
-  // dropout.  The limit is chosen above one source-step of measured braking.
-  double turn_current_packet_max_decrease_mps{0.50};
-  // Provisional, bounded turn-speed residual calibration identified from
-  // held-out live runs. It uses only mapped wheel speed and IMU yaw rate at
-  // runtime; simulator truth is used offline to fit/score the coefficients.
-  bool use_turn_speed_bias_model{false};
-  double turn_speed_bias_constant_mps{0.0};
-  double turn_speed_bias_speed_mps{0.0};
-  double turn_speed_bias_speed_squared_mps{0.0};
-  double turn_speed_bias_yaw_rate_abs_mps{0.185};
-  double turn_speed_bias_yaw_rate_squared_mps{0.0};
-  double turn_speed_bias_speed_yaw_rate_abs_mps{0.0};
-  double turn_speed_bias_max_mps{0.15};
-  // This residual is validated only at high speed; fade it in outside ordinary
-  // practice-track turns instead of extrapolating it over the whole envelope.
-  double turn_speed_bias_start_speed_mps{6.5};
-  double turn_speed_bias_full_speed_mps{7.5};
-  // Optional gate for the high-speed residual. It was identified in hard
-  // turns; suppress it at low lateral-acceleration proxy, where practice
-  // validation exposed a small forward-speed overestimate.
-  bool use_turn_speed_bias_lateral_accel_gate{false};
-  double turn_speed_bias_lateral_accel_gate_start_mps2{4.0};
-  double turn_speed_bias_lateral_accel_gate_full_mps2{8.0};
-  // Practice captures show positive wheel-update speed residual rising with
-  // the wheel-speed/yaw-rate lateral-acceleration proxy. Keep this separate
-  // from the high-speed calibration and fade it out before that regime.
-  double turn_slip_speed_bias_lateral_accel_threshold_mps2{4.0};
-  double turn_slip_speed_bias_gain_mps_per_mps2{0.05};
-  double turn_slip_speed_bias_start_speed_mps{2.0};
-  double turn_slip_speed_bias_full_speed_mps{2.8};
-  double turn_slip_speed_bias_fade_start_mps{4.0};
-  double turn_slip_speed_bias_fade_end_mps{4.5};
-  // The rolling encoder window rejects delayed cumulative-angle bursts, but
-  // it lags the current motion during a genuine turn transient. When both
-  // rates are coherent, use the current packet only for pose integration;
-  // keep the published longitudinal state anchored to the rolling estimate.
-  bool use_coherent_packet_velocity_for_pose{false};
-  double coherent_packet_pose_blend{1.0};
-  // Reject abrupt rolling wheel-rate changes that are physically inconsistent
-  // with the causal body-speed estimate. A release back to causal speed is
-  // still allowed to recover.
-  double wheel_speed_slew_limit_mps2{40.0};
-  double wheel_update_beta{0.85};
-  // In established turn mode, a positive wheel/body innovation can indicate
-  // wheelspin. Blend that wheel update with a one-step rigid-body prediction
-  // from the prior body state and current IMU acceleration.
-  double turn_wheel_update_start_speed_mps{7.0};
-  double turn_wheel_update_min_ax_mps2{0.0};
-  double turn_wheel_update_innovation_threshold_mps{0.0};
-  double turn_wheel_update_slip_beta{0.125};
-  // A frozen encoder must not immediately zero a moving estimate because a
-  // single dropped packet is possible.  Sustained zero wheel motion together
-  // with calm IMU data is, however, a reliable stopped/collision signature.
-  // This is deliberately much lower than wheel_freeze_speed_mps: the latter
-  // is an innovation/missing-packet guard, not a stopped-vehicle threshold.
-  double stationary_speed_threshold_mps{0.03};
-  double stationary_hold_s{0.10};
-  double stationary_ax_abs_max_mps2{0.25};
-  double stationary_ay_abs_max_mps2{0.75};
-  double stationary_yaw_rate_abs_max_radps{0.15};
-  double turn_enter_yaw_rate_radps{0.6};
-  double turn_enter_abs_ay_mps2{6.0};
-  double turn_exit_yaw_rate_radps{0.1};
-  double turn_exit_abs_ay_mps2{0.5};
-  double turn_exit_hold_s{0.5};
-  // During a hard turn/braking transient the IMU-integrated prediction can
-  // temporarily exceed the synchronized wheel estimate. A valid nonzero
-  // wheel packet is still useful; isolated zero packets remain protected by
-  // wheel_freeze_speed.
-  double turn_wheel_braking_ax_mps2{-1.0};
-  // Longitudinal location of the point whose velocity is differentiated by
-  // the Unity IMU script, relative to base_link/rear axle. This is not the
-  // IMU Transform offset used for TF (imu_x_m): Unity differentiates the
-  // vehicle Rigidbody velocity at its configured COM.
-  double imu_acceleration_reference_x_m{0.15532};
-  // Bounded weight for the source-parity PhysX lateral-velocity prediction.
-  // Forward velocity has a separate weight because the PhysX plant predicts
-  // longitudinal wheel spin and braking while its lateral model has not yet
-  // transferred with comparable accuracy.
-  double physx_velocity_blend{0.0};
-  // Weight for the 1 kHz source-parity PhysX forward-speed prediction.
-  double physx_forward_velocity_blend{0.0};
-  // Lateral PhysX blend schedule: at launch, the coarse cumulative encoder
-  // angle under-resolves movement, so fade this weight to physx_velocity_blend.
-  double physx_low_speed_velocity_blend{0.45};
-  double physx_low_speed_blend_transition_mps{1.5};
-  // The simulator's lateral IMU acceleration contains enough bias/noise to
-  // create a persistent pose error when integrated at native 20 Hz.  The
-  // default car model therefore uses wheel speed plus IMU yaw only (a
-  // no-lateral-slip kinematic update). The dynamic propagation is opt-in;
-  // an encoder dropout never enables it implicitly because the Unity IMU
-  // lateral acceleration is not a validated replacement for the missing
-  // lateral state.
-  bool integrate_lateral_acceleration_in_turn{false};
-  // High-yaw spin/sliding candidate: propagate a private coupled body-velocity
-  // state from causal IMU inputs, and replace published u only when mapped
-  // encoder rate exceeds that state by a measured innovation margin.
-  bool use_high_yaw_wheel_slip_observer{false};
-  double high_yaw_wheel_slip_enter_radps{2.5};
-  double high_yaw_wheel_slip_exit_radps{1.5};
-  double high_yaw_wheel_slip_exit_hold_s{0.10};
-  double high_yaw_wheel_slip_innovation_mps{2.0};
-  // Train-only practice-domain correction to the rear-axle longitudinal
-  // velocity. Features are current observer state and existing encoder/IMU
-  // diagnostics; the correction is disabled outside the measured speed band.
-  bool use_learned_u_residual_model{false};
-  double learned_u_residual_min_speed_mps{2.0};
-  double learned_u_residual_max_speed_mps{8.0};
-  // Joint support shared by the practice-trained longitudinal corrections.
-  std::vector<double> u_correction_support_speed_edges_mps{2.0, 4.0, 6.0, 8.0};
-  std::vector<double> u_correction_support_max_abs_steering_rad{0.30, 0.20, 0.10};
-  double learned_u_residual_intercept_mps{0.0};
-  std::vector<double> learned_u_residual_coefficients;
-  // Unity CAWD applies a distinct wheel-brake branch at exactly zero
-  // throttle; otherwise its common actuator applies motor torque to all four
-  // wheels. This optional correction uses those legal feedback channels.
-  bool use_unity_actuator_u_experts{false};
-  double unity_actuator_u_min_speed_mps{2.0};
-  double unity_actuator_u_max_speed_mps{8.0};
-  double unity_zero_throttle_intercept_mps{0.0};
-  std::vector<double> unity_zero_throttle_coefficients;
-  double unity_nonzero_throttle_intercept_mps{0.0};
-  std::vector<double> unity_nonzero_throttle_coefficients;
-  // Separately identified high-steering residual. It is enabled only inside
-  // its measured speed, steering, and throttle support.
-  bool use_high_steer_unity_actuator_u_expert{false};
-  double high_steer_unity_actuator_u_min_speed_mps{1.0};
-  double high_steer_unity_actuator_u_max_speed_mps{4.0};
-  double high_steer_unity_actuator_u_max_speed_low_throttle_mps{3.4};
-  double high_steer_unity_actuator_u_throttle_split{0.15};
-  double high_steer_unity_actuator_u_min_abs_yaw_rate_radps{0.0};
-  double high_steer_unity_actuator_u_min_abs_steering_rad{0.30};
-  double high_steer_unity_actuator_u_max_abs_steering_rad{0.50};
-  double high_steer_unity_actuator_u_min_throttle_feedback{0.11};
-  double high_steer_unity_actuator_u_max_throttle_feedback{0.18};
-  double high_steer_unity_actuator_u_intercept_mps{0.0};
-  std::vector<double> high_steer_unity_actuator_u_coefficients;
-  // Optional bounded COM lateral-velocity model using causal wheel speed and
-  // yaw rate. Its output is translated to base_link with the configured point
-  // offset; it is separate from integrating lateral acceleration.
-  bool use_kinematic_lateral_slip_model{false};
-  // COM model: v_com = yaw_rate * (gain_m + gain_s * u), before its bound.
-  double lateral_velocity_yaw_rate_gain_m{0.167};
-  double lateral_velocity_speed_yaw_rate_gain_s{-0.0063};
-  // Bound applied to the estimated COM lateral velocity, before point shift.
-  double lateral_velocity_max_mps{0.35};
-  // The kinematic lateral-velocity model estimates velocity at the Rigidbody
-  // COM. Translate it to the odometry base point, which is behind the COM:
-  // v_base = v_reference - yaw_rate * reference_forward_offset.
-  double lateral_velocity_reference_forward_offset_m{0.0};
-  // A single impossible longitudinal IMU sample must not be integrated into
-  // odometry.  The competition vehicle's lateral acceleration can be large
-  // in a tight turn, so this guard is intentionally only for ax.
-  double max_imu_ax_abs_mps2{30.0};
+  double encoder_ticks_per_revolution{1920.0};
+  double imu_reference_forward_m{0.15532};
+  double maximum_packet_dt_s{0.10};
+  double lateral_acceleration_residual_gain{1.0};
 };
 
-/* Configuration used by offline replay and as the node's pre-YAML baseline.
- * Keep this profile aligned with config/sensor_odometry.yaml so a replay
- * cannot silently evaluate a different estimator than the deployed node. */
 OdometryObserverConfig deployment_observer_config();
 
 struct OdometryObservation
@@ -240,14 +26,32 @@ struct OdometryObservation
   double ay_mps2{0.0};
   double yaw_rate_radps{0.0};
   double yaw_rad{0.0};
+  double roll_rad{0.0};
+  double pitch_rad{0.0};
+  double roll_rate_radps{0.0};
+  double pitch_rate_radps{0.0};
   double steering_feedback_rad{0.0};
   double throttle_feedback{0.0};
   bool actuator_feedback_valid{false};
+  double steering_command_normalized{0.0};
+  double throttle_command_normalized{0.0};
+  bool actuator_command_valid{false};
   double physx_forward_velocity_mps{0.0};
-  // Native PhysX reports lateral speed at the Rigidbody COM; update() shifts
-  // it to the rear-axle/base_link reference before fusion.
-  double physx_lateral_velocity_mps{0.0};
-  bool physx_velocity_valid{false};
+  double physx_lateral_velocity_com_mps{0.0};
+  double physx_yaw_rate_radps{0.0};
+  double physx_longitudinal_acceleration_mps2{0.0};
+  double physx_lateral_acceleration_mps2{0.0};
+  double physx_rear_axle_x_m{0.0};
+  double physx_rear_axle_y_m{0.0};
+  std::array<double, 4> physx_wheel_omega_radps{};
+  std::array<double, 4> physx_wheel_rotation_angle_rad{};
+  std::array<double, 4> physx_wheel_encoder_angle_prediction_rad{};
+  std::array<double, 26> physx_state{};
+  std::array<double, 4> physx_longitudinal_slip{};
+  std::array<double, 4> physx_lateral_slip{};
+  std::array<double, 4> physx_normal_load_n{};
+  bool physx_state_valid{false};
+  bool physx_pose_valid{false};
 };
 
 struct OdometryEstimate
@@ -255,39 +59,37 @@ struct OdometryEstimate
   double stamp_s{0.0};
   double dt_s{0.0};
   double speed_pred_mps{0.0};
-  // Causal speed reference immediately before this packet's wheel measurement
-  // is applied. Invalid on reset/turn-entry packets where the transition
-  // already consumes the current wheel sample.
-  double pre_wheel_update_speed_mps{0.0};
-  bool pre_wheel_update_speed_valid{false};
   double speed_mps{0.0};
   double body_u_mps{0.0};
   double body_v_mps{0.0};
+  double body_v_com_mps{0.0};
   double x_m{0.0};
   double y_m{0.0};
+  double physx_model_x_m{0.0};
+  double physx_model_y_m{0.0};
   double yaw_rad{0.0};
-  // Exact synchronized packet inputs used by the observer. These are kept in
-  // diagnostics so an offline replay cannot accidentally combine callback
-  // snapshots from different source timestamps.
   double left_angle_rad{0.0};
   double right_angle_rad{0.0};
   double imu_yaw_rad{0.0};
-  double wheel_raw_mps{0.0};
-  double wheel_mapped_mps{0.0};
-  // Diagnostic-only current-packet rate. The observer normally uses the
-  // short window rate because the simulator can burst cumulative angle.
-  double wheel_packet_mps{0.0};
-  double turn_speed_bias_mps{0.0};
+  double encoder_rear_axle_speed_mps{0.0};
   double ax_mps2{0.0};
   double ay_mps2{0.0};
   double yaw_rate_radps{0.0};
-  bool wheel_update_used{false};
-  bool wheel_burst_rejected{false};
-  bool turn_mode{false};
-  bool high_yaw_wheel_slip_active{false};
-  bool reset_epoch{false};
-  bool timing_degraded{false};
-  bool sensor_outlier{false};
+  std::array<double, 4> wheel_omega_radps{};
+  std::array<double, 2> encoder_model_rotation_residual_rad{};
+  std::array<double, 2> wheel_omega_correction_radps{};
+  std::array<double, 2> encoder_wheel_omega_average_radps{};
+  std::array<double, 4> longitudinal_slip{};
+  std::array<double, 4> lateral_slip{};
+  std::array<double, 4> normal_load_n{};
+  std::array<double, 26> unity_state{};
+  double roll_rad{0.0};
+  double pitch_rad{0.0};
+  double roll_rate_radps{0.0};
+  double pitch_rate_radps{0.0};
+  double longitudinal_acceleration_mps2{0.0};
+  double lateral_acceleration_mps2{0.0};
+  double lateral_acceleration_residual_gain{1.0};
   bool valid{false};
 };
 
@@ -295,71 +97,28 @@ class OdometryObserver final
 {
 public:
   explicit OdometryObserver(OdometryObserverConfig config = {});
-
   void reset() noexcept;
-
-  OdometryEstimate update(const OdometryObservation & observation) noexcept;
+  OdometryEstimate update(const OdometryObservation & observation);
 
 private:
-  static double wrap_angle(double angle) noexcept;
-  static bool finite(double value) noexcept;
-  double wheel_scale_for_speed(double raw_speed_mps) const noexcept;
-  double turn_speed_bias_mps(
-    double wheel_mapped_mps, double yaw_rate_radps) const noexcept;
-  double kinematic_base_lateral_velocity(
-    double yaw_rate_radps, double longitudinal_speed_mps) const noexcept;
-
-  OdometryEstimate estimate(const OdometryObservation & observation) const noexcept;
-  void update_pose(
-    double dt_s, double yaw_rad,
-    double previous_body_u_mps, double previous_body_v_mps,
-    double body_u_mps, double body_v_mps) noexcept;
-  void update_turn(double ax_origin, double ay_origin, double yaw_rate, double dt_s) noexcept;
-
+  OdometryEstimate current_estimate() const noexcept;
   OdometryObserverConfig config_;
   bool initialized_{false};
-  bool turn_mode_{false};
-  double turn_calm_time_s_{0.0};
-  bool high_yaw_wheel_slip_active_{false};
-  double high_yaw_wheel_slip_calm_time_s_{0.0};
-  double high_yaw_latent_u_mps_{0.0};
-  double high_yaw_latent_v_mps_{0.0};
   double previous_stamp_s_{0.0};
-  double previous_left_angle_rad_{0.0};
-  double previous_right_angle_rad_{0.0};
   double previous_yaw_rad_{0.0};
   double previous_yaw_rate_radps_{0.0};
-  double speed_mps_{0.0};
+  double previous_encoder_left_angle_rad_{0.0};
+  double previous_encoder_right_angle_rad_{0.0};
+  std::array<double, 4> previous_physx_wheel_encoder_angle_prediction_rad_{};
+  double physx_pose_origin_x_m_{0.0};
+  double physx_pose_origin_y_m_{0.0};
+  bool physx_pose_origin_initialized_{false};
   double body_u_mps_{0.0};
+  double body_v_com_mps_{0.0};
   double body_v_mps_{0.0};
-  double previous_pose_body_u_mps_{0.0};
-  double previous_pose_body_v_mps_{0.0};
   double x_m_{0.0};
   double y_m_{0.0};
-  double last_speed_pred_mps_{0.0};
-  double last_pre_wheel_update_speed_mps_{0.0};
-  bool last_pre_wheel_update_speed_valid_{false};
-  double last_wheel_raw_mps_{0.0};
-  double last_wheel_mapped_mps_{0.0};
-  double last_wheel_packet_mps_{0.0};
-  double last_turn_speed_bias_mps_{0.0};
-  double previous_actuator_steering_rad_{0.0};
-  double previous_actuator_throttle_{0.0};
-  bool actuator_history_valid_{false};
-  double stationary_time_s_{0.0};
-  bool wheel_dropout_active_{false};
-  bool wheel_burst_rejected_{false};
-  // Keep a burst dropout active until the current packet also agrees with
-  // the rolling-window rate; the first nonzero packet can still be delayed.
-  bool wheel_burst_recovery_pending_{false};
-
-  struct EncoderSample
-  {
-    double stamp_s;
-    double left_angle_rad;
-    double right_angle_rad;
-  };
-  std::deque<EncoderSample> encoder_history_;
+  OdometryEstimate last_{};
 };
 
 }  // namespace f1tenth_localization

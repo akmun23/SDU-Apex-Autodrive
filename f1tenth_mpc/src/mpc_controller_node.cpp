@@ -4,19 +4,16 @@
 #include "mpc_rti.h"
 #include "mpc_control_time_predictor.hpp"
 #include "mpc_state_synchronizer.hpp"
+#include "unity_source_plant.hpp"
 #include "vehicle_model.h"
-#include "yaw_response_surface_io.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
-#include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
 #include <sdu_apex_msgs/msg/drive_command.hpp>
 #include <sdu_apex_msgs/msg/unity_plant_state.hpp>
-#include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
@@ -24,7 +21,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -39,16 +35,14 @@
 namespace f1tenth_mpc {
 namespace {
 
+constexpr std::uint32_t kUnityPlantStateSchemaVersion = 7;
+constexpr double kStickyForwardTimerThresholdS = 1.0;
+constexpr double kStickySideTimerThresholdS = 1.0;
+constexpr double kStickyTimerStepS = 0.001;
+
 double clamp(double value, double lower, double upper)
 {
     return std::min(std::max(value, lower), upper);
-}
-
-double move_toward(double value, double target, double maximum_delta)
-{
-    const double delta = target - value;
-    if (std::abs(delta) <= maximum_delta) return target;
-    return value + std::copysign(maximum_delta, delta);
 }
 
 using Waypoint = MpcTrajectorySample_t;
@@ -57,6 +51,28 @@ int64_t steady_time_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
+{
+    solver.use_scaling = enabled ? 1 : 0;
+    if (!enabled) return;
+
+    // x = D*x_scaled and u = Du*u_scaled. These fixed characteristic scales
+    // normalize the mixed SI units without changing physical costs, bounds,
+    // plant equations, or actuator commands.
+    constexpr float state_scale[RICCATI_MAX_NX] = {
+        0.10f, 0.10f, 4.0f, 1.0f, 4.0f,
+        0.5f,
+        400.0f, 400.0f, 400.0f, 400.0f,
+        0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
+        0.05f, 0.05f, 0.05f, 0.05f,
+        1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f,
+        0.5f, 1.0f};
+    constexpr float input_scale[MPC_MODEL_NU] = {0.5f, 1.0f};
+    std::copy_n(state_scale, RICCATI_MAX_NX, solver.state_scale);
+    std::copy_n(input_scale, MPC_MODEL_NU, solver.input_scale);
 }
 
 }  // namespace
@@ -90,56 +106,8 @@ public:
         const double command_actuation_delay_s = std::clamp(
             declare_parameter<double>("command_actuation_delay_s", 0.0),
             0.0, 1.0);
-        steering_feedback_topic_ = declare_parameter<std::string>(
-            "steering_feedback_topic", "/autodrive/roboracer_1/steering");
-        throttle_command_topic_ = declare_parameter<std::string>(
-            "throttle_command_topic",
-            "/autodrive/roboracer_1/throttle_command");
-        left_encoder_topic_ = declare_parameter<std::string>(
-            "left_encoder_topic", "/autodrive/roboracer_1/left_encoder");
-        right_encoder_topic_ = declare_parameter<std::string>(
-            "right_encoder_topic", "/autodrive/roboracer_1/right_encoder");
-        steering_feedback_max_age_s_ = std::clamp(
-            declare_parameter<double>("steering_feedback_max_age_s", 0.075),
-            0.025, 0.25);
-        throttle_command_max_age_s_ = std::clamp(
-            declare_parameter<double>("throttle_command_max_age_s", 0.075),
-            0.025, 0.25);
-        wheel_encoder_max_age_s_ = std::clamp(
-            declare_parameter<double>("wheel_encoder_max_age_s", 0.075),
-            0.025, 0.25);
-        imu_topic_ = declare_parameter<std::string>(
-            "imu_topic", "/autodrive/roboracer_1/imu");
         unity_plant_state_topic_ = declare_parameter<std::string>(
             "unity_plant_state_topic", "/odom/unity_plant_state");
-        imu_feedback_max_age_s_ = std::clamp(
-            declare_parameter<double>("imu_feedback_max_age_s", 0.075),
-            0.025, 0.25);
-        /* The physical Unity steering state follows a command after one
-         * 40 Hz request interval, as identified from held-out actuator
-         * command/feedback captures. Runtime uses only our own command
-         * history. */
-        physical_steering_delay_s_ = std::clamp(
-            declare_parameter<double>("physical_steering_delay_s", 0.025),
-            0.0, 0.20);
-        if (std::abs(physical_steering_delay_s_ -
-                     static_cast<double>(TIME_STEP_SECONDS)) > 1.0e-9) {
-            throw std::runtime_error(
-                "physical_steering_delay_s must equal one 40 Hz model step");
-        }
-        control_time_mode_name_ = declare_parameter<std::string>(
-            "control_time_predictor_mode", "ct2");
-        if (control_time_mode_name_ == "ct0") {
-            control_time_mode_ = MpcControlTimeMode::kNoExtrapolation;
-        } else if (control_time_mode_name_ == "ct1") {
-            control_time_mode_ = MpcControlTimeMode::kConstantBodyTwist;
-        } else if (control_time_mode_name_ == "ct2") {
-            control_time_mode_ =
-                MpcControlTimeMode::kAcceptedModelCommandHistory;
-        } else {
-            throw std::runtime_error(
-                "control_time_predictor_mode must be ct0, ct1, or ct2");
-        }
         control_time_predictor_config_.maximum_state_age_s =
             state_extrapolation_max_s_;
         control_time_predictor_config_.model_integration_step_s =
@@ -186,134 +154,10 @@ public:
                 unity_plant_state_topic_, latest_state_qos,
                 std::bind(&MpcControllerNode::unity_plant_state_callback, this,
                           std::placeholders::_1));
-        steering_feedback_sub_ = create_subscription<std_msgs::msg::Float32>(
-            steering_feedback_topic_, latest_state_qos,
-            std::bind(&MpcControllerNode::steering_feedback_callback, this,
-                      std::placeholders::_1));
-        throttle_command_sub_ = create_subscription<std_msgs::msg::Float32>(
-            throttle_command_topic_, latest_state_qos,
-            std::bind(&MpcControllerNode::throttle_command_callback, this,
-                      std::placeholders::_1));
-        left_encoder_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-            left_encoder_topic_, latest_state_qos,
-            [this](const sensor_msgs::msg::JointState & message) {
-                wheel_encoder_callback(message, true);
-            });
-        right_encoder_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-            right_encoder_topic_, latest_state_qos,
-            [this](const sensor_msgs::msg::JointState & message) {
-                wheel_encoder_callback(message, false);
-            });
-        imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic_, latest_state_qos,
-            std::bind(&MpcControllerNode::imu_callback, this,
-                      std::placeholders::_1));
-
         auto declare_weight = [this](const char * name, float fallback) {
             return static_cast<float>(declare_parameter<double>(name, fallback));
         };
-        const MpcYawRateModelParameters_t default_yaw_model =
-            vehicle_model_default_yaw_rate_parameters();
-        MpcYawRateModelParameters_t yaw_model = default_yaw_model;
-        yaw_model.response_time_constant_s = static_cast<float>(
-            declare_parameter<double>("yaw_rate_response_time_constant_s",
-                default_yaw_model.response_time_constant_s));
-        yaw_model.steering_gain_per_m = static_cast<float>(
-            declare_parameter<double>("yaw_rate_steering_gain_per_m",
-                default_yaw_model.steering_gain_per_m));
-        yaw_model.steering_gain_reduction_per_rad = static_cast<float>(
-            declare_parameter<double>("yaw_rate_steering_gain_reduction_per_rad",
-                default_yaw_model.steering_gain_reduction_per_rad));
-        yaw_model.steering_gain_start_rad = static_cast<float>(
-            declare_parameter<double>("yaw_rate_steering_gain_start_rad",
-                default_yaw_model.steering_gain_start_rad));
-        yaw_model.steering_gain_end_rad = static_cast<float>(
-            declare_parameter<double>("yaw_rate_steering_gain_end_rad",
-                default_yaw_model.steering_gain_end_rad));
-        yaw_model.curvature_gain_reduction_per_m = static_cast<float>(
-            declare_parameter<double>("yaw_rate_curvature_gain_reduction_per_m",
-                default_yaw_model.curvature_gain_reduction_per_m));
-        yaw_model.curvature_gain_start_per_m = static_cast<float>(
-            declare_parameter<double>("yaw_rate_curvature_gain_start_per_m",
-                default_yaw_model.curvature_gain_start_per_m));
-        yaw_model.curvature_gain_end_per_m = static_cast<float>(
-            declare_parameter<double>("yaw_rate_curvature_gain_end_per_m",
-                default_yaw_model.curvature_gain_end_per_m));
-        yaw_model.low_speed_response_time_constant_s = static_cast<float>(
-            declare_parameter<double>(
-                "yaw_rate_low_speed_response_time_constant_s",
-                default_yaw_model.low_speed_response_time_constant_s));
-        yaw_model.low_speed_transition_speed_mps = static_cast<float>(
-            declare_parameter<double>("yaw_rate_low_speed_transition_speed_mps",
-                default_yaw_model.low_speed_transition_speed_mps));
-        if (!vehicle_model_set_yaw_rate_parameters(&yaw_model)) {
-            throw std::runtime_error("invalid yaw-rate model parameters");
-        }
-        const bool yaw_surface_enabled = declare_parameter<bool>(
-            "yaw_rate_response_surface_enabled", false);
-        if (yaw_surface_enabled) {
-            const float blend_start = static_cast<float>(declare_parameter<double>(
-                "yaw_rate_response_surface_blend_q_start", 0.60));
-            const float blend_end = static_cast<float>(declare_parameter<double>(
-                "yaw_rate_response_surface_blend_q_end", 0.85));
-            const float speed_blend_margin = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_speed_blend_margin_mps", 0.50));
-            const float low_speed_blend_margin = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_low_speed_blend_margin_mps",
-                    speed_blend_margin));
-            const float low_speed_support_fadeout = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_low_speed_support_fadeout_mps", 0.0));
-            const float high_speed_support_fadein = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_high_speed_support_fadein_mps", 0.0));
-            const float steering_blend_start = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_steering_blend_start_rad", 0.0));
-            const float steering_blend_full_start = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_steering_blend_full_start_rad", 0.0));
-            const float steering_blend_full_end = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_steering_blend_full_end_rad", 0.0));
-            const float steering_blend_end = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_steering_blend_end_rad", 0.0));
-            const float hold_response_time_constant = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_hold_time_constant_s", 0.0));
-            const float hold_rate_full = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_hold_rate_full_radps", 0.0));
-            const float hold_rate_zero = static_cast<float>(
-                declare_parameter<double>(
-                    "yaw_rate_response_surface_hold_rate_zero_radps", 0.0));
-            const auto share = ament_index_cpp::get_package_share_directory(
-                "f1tenth_mpc");
-            const auto configured_surface_path = declare_parameter<std::string>(
-                "yaw_rate_response_surface_file", "");
-            const auto surface_path = configured_surface_path.empty()
-                ? share + "/config/yaw_response_surface.csv"
-                : configured_surface_path;
-            auto surface = load_yaw_response_surface_csv(
-                surface_path, blend_start, blend_end, speed_blend_margin,
-                low_speed_blend_margin, low_speed_support_fadeout,
-                high_speed_support_fadein, steering_blend_start,
-                steering_blend_full_start, steering_blend_full_end,
-                steering_blend_end, hold_response_time_constant,
-                hold_rate_full, hold_rate_zero);
-            surface.response_scale = static_cast<float>(declare_parameter<double>(
-                "yaw_rate_response_surface_response_scale", 1.0));
-            if (!vehicle_model_set_yaw_rate_response_surface(&surface)) {
-                throw std::runtime_error("invalid empirical yaw response surface");
-            }
-        } else {
-            const MpcYawRateResponseSurface_t disabled_surface{};
-            (void)vehicle_model_set_yaw_rate_response_surface(&disabled_surface);
-        }
-        /* Keep parameter fallbacks identical to the canonical competition YAML.
+                /* Keep parameter fallbacks identical to the canonical competition YAML.
          * Otherwise a missing/renamed YAML silently selected the historical
          * BachelorProject objective while the offline replay and documented
          * production profile used different weights. */
@@ -322,18 +166,18 @@ public:
         rti_config_.model.weight_u = declare_weight("weight_u", 200.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
             "weight_u_overspeed", 200.0f);
-        rti_config_.model.weight_longitudinal_acceleration = declare_weight(
-            "weight_longitudinal_acceleration", 20.0f);
+        rti_config_.model.weight_longitudinal_slip = declare_weight(
+            "weight_longitudinal_slip", 50.0f);
         rti_config_.model.weight_v = declare_weight("weight_v", 5.0f);
         rti_config_.model.weight_r = declare_weight("weight_r", 1.5f);
         rti_config_.model.weight_steering_command = declare_weight(
             "weight_steering_command", 3.0f);
-        rti_config_.model.weight_steering_rate = declare_weight(
-            "weight_steering_rate", 5.0f);
+        rti_config_.model.weight_steering_target = declare_weight(
+            "weight_steering_target", 5.0f);
         rti_config_.model.weight_throttle_command = declare_weight(
             "weight_throttle_command", 0.5f);
-        rti_config_.model.weight_steering_rate_change = declare_weight(
-            "weight_steering_rate_change", 10.0f);
+        rti_config_.model.weight_steering_target_change = declare_weight(
+            "weight_steering_target_change", 10.0f);
         rti_config_.model.weight_throttle_command_change = declare_weight(
             "weight_throttle_command_change", 5.0f);
         rti_config_.model.terminal_multiplier = declare_weight(
@@ -341,11 +185,10 @@ public:
         rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
         rti_config_.model.active_speed_ceiling_mps =
             static_cast<float>(max_speed_mps_);
+        actuator_steering_limit_rad_ = declare_parameter<double>(
+            "max_steering_rad", SOURCE_MAX_STEERING_RAD);
         rti_config_.model.max_steering_rad = static_cast<float>(
-            declare_parameter<double>("max_steering_rad", SOURCE_MAX_STEERING_RAD));
-        rti_config_.model.max_steering_rate_radps = static_cast<float>(
-            declare_parameter<double>("max_steering_rate_radps",
-                                      SOURCE_STEERING_RATE_RADPS));
+            actuator_steering_limit_rad_);
         rti_config_.model.corridor_margin_m = static_cast<float>(
             declare_parameter<double>("corridor_margin_m",
                                       MPC_REQUIRED_WALL_CLEARANCE_M));
@@ -382,9 +225,9 @@ public:
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
             declare_parameter<int>("jacobian_threads", 4), 0L, 16L));
         const int configured_iterations = declare_parameter<int>(
-            "max_solver_iterations", 100);
+            "max_solver_iterations", 160);
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
-            std::clamp(configured_iterations, 1, 100));
+            std::clamp(configured_iterations, 1, 160));
         const double rti_cycle_budget_ms = declare_parameter<double>(
             "rti_cycle_budget_ms", 20.0);
         if (!std::isfinite(rti_cycle_budget_ms) || rti_cycle_budget_ms < 0.0) {
@@ -407,8 +250,8 @@ public:
         rti_config_.solver.shared_rho = 0;
         rti_config_.solver.over_relaxation = static_cast<float>(
             declare_parameter<double>("admm_over_relaxation", 1.6));
-        rti_config_.solver.use_prefactorization = declare_parameter<bool>(
-            "use_riccati_prefactorization", true) ? 1 : 0;
+        configure_solver_state_scaling(rti_config_.solver,
+            declare_parameter<bool>("solver_state_scaling_enabled", true));
         const std::string refinement_mode = declare_parameter<std::string>(
             "rti_refinement_mode", "adaptive");
         if (refinement_mode == "r1") {
@@ -429,9 +272,9 @@ public:
             declare_parameter<double>("rti2_bound_error_trigger_m", 0.05));
         rti_config_.rti2_min_corridor_slack_trigger_m = static_cast<float>(
             declare_parameter<double>("rti2_min_corridor_slack_trigger_m", 0.25));
-        rti_config_.rti2_steering_rate_correction_trigger_radps =
+        rti_config_.rti2_steering_target_correction_trigger_rad =
             static_cast<float>(declare_parameter<double>(
-                "rti2_steering_rate_correction_trigger_radps", 0.50));
+                "rti2_steering_target_correction_trigger_rad", 0.50));
         rti_config_.rti2_throttle_correction_trigger =
             static_cast<float>(declare_parameter<double>(
                 "rti2_throttle_correction_trigger", 0.05));
@@ -467,139 +310,6 @@ public:
     }
 
 private:
-    struct ThrottleCommandSample
-    {
-        int64_t stamp_ns;
-        float value;
-    };
-
-    struct WheelEncoderSample
-    {
-        int64_t stamp_ns{};
-        double angle_rad{};
-    };
-
-    struct WheelAngularSpeedSample
-    {
-        int64_t stamp_ns{};
-        double omega_radps{};
-        bool valid{};
-    };
-
-    static bool throttle_command_at_or_before(
-        const std::deque<ThrottleCommandSample> & history,
-        int64_t stamp_ns,
-        float * value)
-    {
-        if (history.empty() || value == nullptr) return false;
-        for (auto it = history.rbegin(); it != history.rend(); ++it) {
-            if (it->stamp_ns <= stamp_ns) {
-                *value = it->value;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void seed_delayed_throttle_commands(
-        int64_t state_stamp_ns, MpcModelState_t * plant)
-    {
-        if (plant == nullptr) return;
-        std::lock_guard<std::mutex> lock(throttle_command_mutex_);
-        if (throttle_command_history_.empty()) return;
-
-        const int64_t packet_period_ns = static_cast<int64_t>(
-            std::llround(TIME_STEP_SECONDS * 1.0e9));
-        const float latest = throttle_command_history_.back().value;
-        float one_packet_old = latest;
-        float current = one_packet_old;
-        (void)throttle_command_at_or_before(
-            throttle_command_history_, state_stamp_ns - packet_period_ns,
-            &one_packet_old);
-        const bool has_current = throttle_command_at_or_before(
-            throttle_command_history_, state_stamp_ns, &current);
-        if (!has_current) current = latest;
-
-        /* The measured two-packet command/feedback offset means the command
-         * one packet old is next to affect the predicted body state. Carry it
-         * and the current command; newly optimized output enters at the tail. */
-        plant->delayed_throttle_command_1 = one_packet_old;
-        plant->delayed_throttle_command_2 = current;
-        const int64_t age_ns = state_stamp_ns -
-            throttle_command_history_.back().stamp_ns;
-        if (age_ns >= 0 && age_ns <= static_cast<int64_t>(
-                std::llround(throttle_command_max_age_s_ * 1.0e9)))
-            plant->delayed_throttle_command_2 = latest;
-    }
-
-    void wheel_encoder_callback(
-        const sensor_msgs::msg::JointState & message, bool left)
-    {
-        if (message.position.empty() ||
-            !std::isfinite(message.position.front())) return;
-        const int64_t stamp_ns = rclcpp::Time(
-            message.header.stamp, get_clock()->get_clock_type()).nanoseconds();
-        if (stamp_ns <= 0) return;
-
-        const double angle_rad = message.position.front();
-        std::lock_guard<std::mutex> lock(wheel_encoder_mutex_);
-        auto & previous = left ? left_encoder_previous_ : right_encoder_previous_;
-        auto & speed = left ? left_wheel_omega_ : right_wheel_omega_;
-        if (previous.stamp_ns == stamp_ns) return;
-        if (previous.stamp_ns <= 0 || stamp_ns < previous.stamp_ns) {
-            previous = {stamp_ns, angle_rad};
-            speed.valid = false;
-            return;
-        }
-
-        const double sample_dt_s =
-            static_cast<double>(stamp_ns - previous.stamp_ns) * 1.0e-9;
-        speed.valid = sample_dt_s >= 0.015 && sample_dt_s <= 0.035;
-        if (speed.valid) {
-            /* The simulator publishes cumulative encoder angle at nominal
-             * 40 Hz. Use the fixed 25 ms sample grid, not transport jitter. */
-            speed.omega_radps = (angle_rad - previous.angle_rad) /
-                TIME_STEP_SECONDS;
-            speed.stamp_ns = stamp_ns;
-            speed.valid = std::isfinite(speed.omega_radps) &&
-                std::abs(speed.omega_radps) <= 300.0;
-        }
-        previous = {stamp_ns, angle_rad};
-    }
-
-    void seed_rear_wheel_encoder_feedback(
-        int64_t state_stamp_ns, MpcModelState_t * plant)
-    {
-        if (plant == nullptr) return;
-        wheel_encoder_feedback_used_ = false;
-        wheel_encoder_feedback_age_s_ = -1.0;
-        wheel_encoder_feedback_anchor_age_s_ = -1.0;
-        std::lock_guard<std::mutex> lock(wheel_encoder_mutex_);
-        const auto usable = [this, state_stamp_ns](
-            const WheelAngularSpeedSample & sample) {
-            if (!sample.valid || sample.stamp_ns > state_stamp_ns) return false;
-            const double age_s = static_cast<double>(
-                state_stamp_ns - sample.stamp_ns) * 1.0e-9;
-            return age_s <= wheel_encoder_max_age_s_;
-        };
-        if (!usable(left_wheel_omega_) || !usable(right_wheel_omega_)) {
-            plant->source_rear_wheel_omega_feedback_valid = 0;
-            return;
-        }
-        plant->source_rear_wheel_omega_feedback_radps[0] =
-            static_cast<float>(left_wheel_omega_.omega_radps);
-        plant->source_rear_wheel_omega_feedback_radps[1] =
-            static_cast<float>(right_wheel_omega_.omega_radps);
-        plant->source_rear_wheel_omega_feedback_valid = 1;
-        wheel_encoder_feedback_used_ = true;
-        wheel_encoder_feedback_age_s_ = std::max(
-            static_cast<double>(state_stamp_ns - left_wheel_omega_.stamp_ns),
-            static_cast<double>(state_stamp_ns - right_wheel_omega_.stamp_ns)) *
-            1.0e-9;
-        wheel_encoder_feedback_anchor_age_s_ =
-            wheel_encoder_feedback_age_s_;
-    }
-
     bool load_trajectory(const std::string & path)
     {
         if (path.empty()) {
@@ -705,16 +415,22 @@ private:
     void publish_command(double steering, double throttle_normalized = 0.0)
     {
         if (!drive_command_pub_) return;
+        const double finite_steering = std::isfinite(steering) ? steering : 0.0;
+        const double finite_throttle = std::isfinite(throttle_normalized)
+            ? throttle_normalized : 0.0;
+        const double bounded_steering = std::clamp(finite_steering,
+            -actuator_steering_limit_rad_, actuator_steering_limit_rad_);
+        const double bounded_throttle = clamp(finite_throttle, 0.0, 1.0);
         sdu_apex_msgs::msg::DriveCommand command;
         const rclcpp::Time command_time = now();
         command.header.stamp = command_time;
         command.header.frame_id = command_frame_;
-        command.steering_angle_rad = steering;
-        command.throttle_normalized = clamp(throttle_normalized, 0.0, 1.0);
+        command.steering_angle_rad = bounded_steering;
+        command.throttle_normalized = bounded_throttle;
         {
             std::lock_guard<std::mutex> lock(command_history_mutex_);
-            command_history_.push({command_time.nanoseconds(), steering,
-                command.throttle_normalized, true});
+            command_history_.push({command_time.nanoseconds(), bounded_steering,
+                bounded_throttle, true});
         }
         drive_command_pub_->publish(command);
     }
@@ -723,13 +439,8 @@ private:
     {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
         mpc_rti_memory_reset(&rti_memory_);
-        source_nominal_valid_ = false;
         if (enabled_) {
             last_steering_command_rad_ = 0.0;
-            estimated_actual_steering_angle_rad_ = 0.0;
-            actual_steering_initialized_ = false;
-            last_control_time_ns_ = 0;
-            last_steering_rate_radps_ = 0.0;
             last_throttle_command_ = 0.0;
             publish_command(0.0, 0.0);
         }
@@ -748,7 +459,6 @@ private:
             "holding bounded driving command while localization recovers", reason);
         if (reset_rti_memory) {
             mpc_rti_memory_reset(&rti_memory_);
-            source_nominal_valid_ = false;
         }
         if (enabled_) {
             last_steering_command_rad_ = clamp(
@@ -786,7 +496,6 @@ private:
             ++accepted_degraded_;
         }
         if (result.residual_candidate_published) ++residual_candidate_published_;
-        if (result.best_effort_action_published) ++best_effort_action_published_;
         if (result.corridor_repair_used) ++corridor_repair_used_;
         max_solver_iterations_seen_ = std::max(
             max_solver_iterations_seen_, result.solver_iterations);
@@ -799,7 +508,7 @@ private:
         RCLCPP_INFO(get_logger(),
             "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
             "accepted_degraded=%llu residual_candidate_published=%llu "
-            "best_effort_action_published=%llu corridor_repair_used=%llu "
+            "corridor_repair_used=%llu "
             "hard_fallback_cycles=%llu max_solver_iterations_seen=%d "
             "max_solve_us=%.1f",
             phase,
@@ -807,7 +516,6 @@ private:
             static_cast<unsigned long long>(accepted_optimal_),
             static_cast<unsigned long long>(accepted_degraded_),
             static_cast<unsigned long long>(residual_candidate_published_),
-            static_cast<unsigned long long>(best_effort_action_published_),
             static_cast<unsigned long long>(corridor_repair_used_),
             static_cast<unsigned long long>(hard_fallback_cycles_),
             max_solver_iterations_seen_, max_solve_us_);
@@ -848,6 +556,60 @@ private:
         }
     }
 
+    static const char * input_failure_reason_name(int reason)
+    {
+        switch (reason) {
+        case MPC_RTI_INPUT_FAILURE_NONE: return "none";
+        case MPC_RTI_INPUT_FAILURE_CYCLE_ARGUMENTS: return "cycle_arguments";
+        case MPC_RTI_INPUT_FAILURE_PLANT_STATE: return "plant_state";
+        case MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD: return "nominal_build";
+        case MPC_RTI_INPUT_FAILURE_CORRIDOR_SCHEDULE:
+            return "corridor_schedule";
+        }
+        return "unknown";
+    }
+
+    static const char * nominal_build_failure_stage_name(int stage)
+    {
+        switch (stage) {
+        case MPC_RTI_NOMINAL_BUILD_OK: return "none";
+        case MPC_RTI_NOMINAL_BUILD_INVALID_INPUT: return "invalid_input";
+        case MPC_RTI_NOMINAL_BUILD_SPEED_CEILING: return "speed_ceiling";
+        case MPC_RTI_NOMINAL_BUILD_SPEED_SEED: return "speed_seed";
+        case MPC_RTI_NOMINAL_BUILD_SEED_REFERENCE: return "seed_reference";
+        case MPC_RTI_NOMINAL_BUILD_SEED_STEP: return "seed_step";
+        case MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE: return "pass_a_reference";
+        case MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT: return "pass_a_rollout";
+        case MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE: return "pass_b_reference";
+        case MPC_RTI_NOMINAL_BUILD_SOURCE_SPEED_ENVELOPE:
+            return "source_speed_envelope";
+        case MPC_RTI_NOMINAL_BUILD_THROTTLE_MODE: return "throttle_mode";
+        case MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT: return "final_rollout";
+        case MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE:
+            return "command_envelope";
+        }
+        return "unknown";
+    }
+
+    static const char * command_envelope_failure_name(int failure)
+    {
+        switch (failure) {
+        case MPC_RTI_COMMAND_ENVELOPE_OK: return "none";
+        case MPC_RTI_COMMAND_ENVELOPE_NONFINITE_STATE: return "nonfinite_state";
+        case MPC_RTI_COMMAND_ENVELOPE_SPEED_BELOW_ZERO:
+            return "speed_below_zero";
+        case MPC_RTI_COMMAND_ENVELOPE_SPEED_ABOVE_MAX:
+            return "speed_above_max";
+        case MPC_RTI_COMMAND_ENVELOPE_STEERING_QUEUE:
+            return "steering_queue";
+        case MPC_RTI_COMMAND_ENVELOPE_ACTUAL_STEERING:
+            return "actual_steering";
+        case MPC_RTI_COMMAND_ENVELOPE_THROTTLE_QUEUE:
+            return "throttle_queue";
+        }
+        return "unknown";
+    }
+
     void publish_cycle_diagnostics(const MpcRtiState_t &state,
         const MpcSynchronizedState &synchronized,
         const MpcControlTimePrediction &control_prediction,
@@ -882,7 +644,7 @@ private:
             json << ',';
             json_number(failure.state.plant.r);
             json << ',';
-            json_number(failure.state.plant.steering_command);
+            json_number(failure.state.plant.delayed_steering_command_2);
             json << ',';
             json_number(failure.state.plant.actual_steering_angle);
             json << "],\"reference\":[";
@@ -909,7 +671,17 @@ private:
             &current_path_sample);
         json << std::setprecision(9)
             << "{\"status\":\"" << cycle_status_name(result.status)
-            << "\",\"nonlinear_failure_stage\":"
+            << "\",\"input_failure_reason\":\""
+            << input_failure_reason_name(result.input_failure_reason)
+            << "\",\"nominal_build_failure_stage\":\""
+            << nominal_build_failure_stage_name(
+                result.nominal_build_failure_stage)
+            << "\",\"nominal_build_failure_constraint\":\""
+            << command_envelope_failure_name(
+                result.nominal_build_failure_constraint)
+            << "\",\"nominal_build_failure_index\":"
+            << result.nominal_build_failure_index
+            << ",\"nonlinear_failure_stage\":"
             << result.nonlinear_failure_stage
             << ",\"nonlinear_failure_reason\":\""
             << nonlinear_failure_reason_name(result.nonlinear_failure_reason)
@@ -937,8 +709,8 @@ private:
             << ",\"source_age_s\":" << synchronized.source_age_s
             << ",\"source_dt_s\":" << source_dt_s
             << ",\"pose_odom_skew_s\":" << synchronized.pose_odom_skew_s
-            << ",\"control_time_prediction\":{\"mode\":\""
-            << control_time_mode_name_ << "\",\"age_s\":"
+            << ",\"control_time_prediction\":{\"mode\":\"unity_plant\","
+            << "\"age_s\":"
             << control_prediction.age_s << ",\"elapsed_us\":"
             << control_prediction_us << ",\"command_changes_used\":"
             << control_prediction.command_changes_used
@@ -954,8 +726,6 @@ private:
             << (control_prediction.sensor_state_fused ? "true" : "false")
             << ",\"command_actuation_delay_s\":"
             << control_time_predictor_config_.command_actuation_delay_s
-            << ",\"physical_steering_delay_s\":"
-            << physical_steering_delay_s_
             << ",\"command_event_stamps_ns\":[";
         for (std::size_t i = 0;
              i < control_prediction.command_event_stamp_count; ++i) {
@@ -963,10 +733,6 @@ private:
             json << control_prediction.command_event_stamps_ns[i];
         }
         json << "]"
-            << ",\"command_fallback\":"
-            << (control_prediction.used_command_fallback ? "true" : "false")
-            << ",\"time_fallback\":"
-            << (control_prediction.used_time_fallback ? "true" : "false")
             << ",\"plant_state_propagated\":"
             << (control_prediction.plant_state_valid ? "true" : "false")
             << ",\"odom_hidden_state_used\":"
@@ -980,9 +746,6 @@ private:
             << ",\"predicted_speed_state\":["
             << control_prediction.state.u << ',' << control_prediction.state.v
             << ',' << control_prediction.state.yaw_rate << ']'
-            << ",\"prediction_previous_command_state\":["
-            << control_prediction.previous_steering_rate_radps << ','
-            << control_prediction.previous_throttle_command << ']'
             << "}"
             << ",\"host_timing_ns\":{" << "\"callback\":"
             << callback_steady_ns << ",\"synchronize\":"
@@ -991,9 +754,16 @@ private:
             << ",\"path_curvature_per_m\":";
         json_number(current_path_sample_valid ? current_path_sample.curvature :
             std::numeric_limits<double>::quiet_NaN());
-        json << ",\"reference\":{\"acceleration_mps2\":";
+        json << ",\"reference\":{\"trajectory_acceleration_mps2\":";
         json_number(current_path_sample_valid ? current_path_sample.acceleration :
             std::numeric_limits<double>::quiet_NaN());
+        json << ",\"acceleration_reference_mps2\":";
+        json_number(current_path_sample_valid
+            ? mpc_reference_acceleration_under_speed_ceiling(
+                static_cast<float>(current_path_sample.speed),
+                static_cast<float>(current_path_sample.acceleration),
+                rti_config_.model.active_speed_ceiling_mps)
+            : std::numeric_limits<double>::quiet_NaN());
         const double current_reference_speed = current_path_sample_valid
             ? std::min(current_path_sample.speed,
                 static_cast<double>(rti_config_.model.active_speed_ceiling_mps))
@@ -1004,32 +774,20 @@ private:
         json << ",\"state\":[" << state.plant.e_y << ','
             << state.plant.e_psi << ',' << state.plant.u << ','
             << state.plant.v << ',' << state.plant.r << ','
-            << state.plant.steering_command
-            << ',' << state.plant.delayed_steering_command_1
+            << state.plant.delayed_steering_command_1
             << ',' << state.plant.delayed_steering_command_2
-            << ',' << state.plant.actual_steering_angle << ','
-            << state.previous_steering_rate << ','
-            << state.previous_throttle_command << ']'
-            << ",\"steering_feedback_used\":"
-            << (steering_feedback_used_ ? "true" : "false")
-            << ",\"steering_feedback_age_s\":";
-        json_number(steering_feedback_age_s_);
-        json << ",\"steering_feedback_rad\":";
-        json_number(steering_feedback_value_used_rad_);
-        json << ",\"rear_wheel_encoder_feedback_used\":"
-            << (wheel_encoder_feedback_used_ ? "true" : "false")
-            << ",\"rear_wheel_encoder_feedback_age_s\":";
-        json_number(wheel_encoder_feedback_age_s_);
-        json << ",\"rear_wheel_encoder_anchor_age_s\":";
-        json_number(wheel_encoder_feedback_anchor_age_s_);
-        json << ",\"rear_wheel_encoder_omega_radps\":["
-            << state.plant.source_rear_wheel_omega_feedback_radps[0] << ','
-            << state.plant.source_rear_wheel_omega_feedback_radps[1] << ']';
+            << ',' << state.plant.actual_steering_angle
+            << ',' << state.plant.delayed_throttle_command_1
+            << ',' << state.plant.delayed_throttle_command_2 << ']'
+            << ",\"plant_state_source\":\"odometry_v7\"";
         json << ",\"solver\":{\"iterations\":" << result.solver_iterations
-            << ",\"primal_residual\":" << result.primal_residual
-            << ",\"dual_residual\":" << result.dual_residual
-            << ",\"max_regularization\":"
-            << result.maximum_regularization
+            << ",\"primal_residual\":";
+        json_number(result.primal_residual);
+        json << ",\"dual_residual\":";
+        json_number(result.dual_residual);
+        json << ",\"max_regularization\":";
+        json_number(result.maximum_regularization);
+        json
             << ",\"regularization_count\":" << result.regularization_count
             << ",\"nonsmooth_columns\":"
             << result.nonsmooth_jacobian_columns
@@ -1070,10 +828,10 @@ private:
         json << ",\"r2_min_corridor_slack\":";
         json_number(result.r2_min_corridor_slack);
         json << ",\"r1_first_action\":["
-             << result.r1_first_action.steering_rate << ','
+             << result.r1_first_action.steering_target_rad << ','
              << result.r1_first_action.throttle_command << ']'
              << ",\"r2_first_action\":["
-             << result.r2_first_action.steering_rate << ','
+             << result.r2_first_action.steering_target_rad << ','
              << result.r2_first_action.throttle_command << ']'
              << ",\"r1_solver_iterations\":"
              << result.r1_solver_iterations
@@ -1100,12 +858,13 @@ private:
                  result.selected_candidate == 1 ? "R1" : "none") << '\"'
              << ",\"corridor_repair_used\":"
              << (result.corridor_repair_used ? "true" : "false")
+             << ",\"corridor_repair_trials\":"
+             << result.corridor_repair_trials
+             << ",\"corridor_repair_us\":";
+        json_number(result.corridor_repair_us);
+        json
              << ",\"residual_candidate_published\":"
              << (result.residual_candidate_published ? "true" : "false")
-            << ",\"best_effort_action_published\":"
-            << (result.best_effort_action_published ? "true" : "false")
-            << ",\"best_effort_action_repaired\":"
-            << (result.best_effort_action_repaired ? "true" : "false")
             << ",\"corridor_repair_alpha\":";
         json_number(result.corridor_repair_alpha);
         json << ",\"nominal_vs_candidate_progress_error_max_m\":";
@@ -1173,53 +932,75 @@ private:
                 static_cast<double>(
                     rti_config_.model.active_speed_ceiling_mps));
             const double feedforward = clamp(
-                vehicle_model_steering_for_curvature_at_speed(
-                    static_cast<float>(sample.curvature),
-                    static_cast<float>(reference_speed)),
+                vehicle_model_steering_for_curvature(
+                    static_cast<float>(sample.curvature)),
                 -rti_config_.model.max_steering_rad,
                 rti_config_.model.max_steering_rad);
             const MpcModelControl_t &control =
                 rti_memory_.nominal.controls[step - 1];
+            MpcTrajectorySample_t transition_sample{};
+            MpcStageResult_t diagnostic_transition{};
+            bool have_transition_output =
+                step <= rti_memory_.nominal.horizon &&
+                mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
+                    track_length_m_,
+                    rti_memory_.nominal.progress[step - 1],
+                    &transition_sample);
+            if (have_transition_output) {
+                diagnostic_transition = mpc_vehicle_model_step(
+                    &rti_memory_.nominal.states[step - 1].plant,
+                    &control, PREDICTION_DT_SECONDS,
+                    static_cast<float>(transition_sample.curvature));
+                have_transition_output = diagnostic_transition.valid != 0;
+            }
+            if (!have_transition_output) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                    "MPC diagnostic plant output could not be reconstructed");
+                return;
+            }
             json << "{\"n\":" << step << ",\"s_m\":" << predicted_s
                 << ",\"state\":[" << predicted.plant.e_y << ','
                 << predicted.plant.e_psi << ',' << predicted.plant.u << ','
                 << predicted.plant.v << ',' << predicted.plant.r << ','
-                << predicted.plant.steering_command << ','
                 << predicted.plant.delayed_steering_command_1 << ','
                 << predicted.plant.delayed_steering_command_2 << ','
                 << predicted.plant.actual_steering_angle << ']'
-                << ",\"source_yaw_surface_blend\":"
-                << predicted.plant.source_yaw_surface_blend
-                << ",\"source_yaw_surface_target_radps\":"
-                << predicted.plant.source_yaw_surface_target_radps
                 << ",\"source_wheel_omega_radps\":["
-                << predicted.plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FL]
-                << ',' << predicted.plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_FR]
-                << ',' << predicted.plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RL]
-                << ',' << predicted.plant.source_plant_state[UNITY_SOURCE_WHEEL_OMEGA_RR]
+                << predicted.plant.source_plant_internal_state[
+                    MPC_PLANT_STATE_WHEEL_OMEGA_FL]
+                << ',' << predicted.plant.source_plant_internal_state[
+                    MPC_PLANT_STATE_WHEEL_OMEGA_FR]
+                << ',' << predicted.plant.source_plant_internal_state[
+                    MPC_PLANT_STATE_WHEEL_OMEGA_RL]
+                << ',' << predicted.plant.source_plant_internal_state[
+                    MPC_PLANT_STATE_WHEEL_OMEGA_RR]
                 << "]"
                 << ",\"source_longitudinal_slip\":["
-                << predicted.plant.source_longitudinal_slip[0] << ','
-                << predicted.plant.source_longitudinal_slip[1] << ','
-                << predicted.plant.source_longitudinal_slip[2] << ','
-                << predicted.plant.source_longitudinal_slip[3]
+                << diagnostic_transition.output.longitudinal_slip[0] << ','
+                << diagnostic_transition.output.longitudinal_slip[1] << ','
+                << diagnostic_transition.output.longitudinal_slip[2] << ','
+                << diagnostic_transition.output.longitudinal_slip[3]
                 << "]"
                 << ",\"source_lateral_slip\":["
-                << predicted.plant.source_lateral_slip[0] << ','
-                << predicted.plant.source_lateral_slip[1] << ','
-                << predicted.plant.source_lateral_slip[2] << ','
-                << predicted.plant.source_lateral_slip[3]
+                << diagnostic_transition.output.lateral_slip[0] << ','
+                << diagnostic_transition.output.lateral_slip[1] << ','
+                << diagnostic_transition.output.lateral_slip[2] << ','
+                << diagnostic_transition.output.lateral_slip[3]
                 << "]"
                 << ",\"source_normal_load_n\":["
-                << predicted.plant.source_normal_load_n[0] << ','
-                << predicted.plant.source_normal_load_n[1] << ','
-                << predicted.plant.source_normal_load_n[2] << ','
-                << predicted.plant.source_normal_load_n[3]
+                << diagnostic_transition.output.normal_load_n[0] << ','
+                << diagnostic_transition.output.normal_load_n[1] << ','
+                << diagnostic_transition.output.normal_load_n[2] << ','
+                << diagnostic_transition.output.normal_load_n[3]
                 << "]"
                 << ",\"reference\":[0,0," << reference_speed
                 << ",0," << sample.curvature * reference_speed << ','
-                << feedforward << ',' << sample.acceleration << ']'
-                << ",\"input\":[" << control.steering_rate << ','
+                << feedforward << ','
+                << mpc_reference_acceleration_under_speed_ceiling(
+                    static_cast<float>(sample.speed),
+                    static_cast<float>(sample.acceleration),
+                    rti_config_.model.active_speed_ceiling_mps) << ']'
+                << ",\"input\":[" << control.steering_target_rad << ','
                 << control.throttle_command << ']'
                 << ",\"corridor\":[" << sample.left_bound << ','
                 << sample.right_bound << "]}";
@@ -1259,26 +1040,11 @@ private:
         }
     }
 
-    void steering_feedback_callback(
-        const std_msgs::msg::Float32::SharedPtr message)
-    {
-        const double steering = message->data;
-        if (!std::isfinite(steering) ||
-            std::abs(steering) > rti_config_.model.max_steering_rad + 1.0e-3f) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC ignored invalid steering feedback");
-            return;
-        }
-        std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
-        latest_steering_feedback_rad_ = steering;
-        steering_feedback_receipt_steady_ns_ = steady_time_ns();
-        steering_feedback_received_ = true;
-    }
-
     void unity_plant_state_callback(
         const sdu_apex_msgs::msg::UnityPlantState::SharedPtr message)
     {
-        if (message->state_schema_version != 2 || message->state_origin != 1 ||
+        if (message->state_schema_version != kUnityPlantStateSchemaVersion ||
+            message->state_origin != 1 ||
             message->header.stamp.sec < 0 ||
             (message->header.stamp.sec == 0 && message->header.stamp.nanosec == 0)) {
             return;
@@ -1287,7 +1053,11 @@ private:
             return std::all_of(values.begin(), values.end(),
                 [](double value) { return std::isfinite(value); });
         };
-        if (!finite_array(message->state) ||
+        if (!finite_array(message->wheel_omega_radps) ||
+            !finite_array(message->wheel_rotation_angle_rad) ||
+            !finite_array(message->suspension_jounce_m) ||
+            !finite_array(message->low_forward_speed_time_s) ||
+            !finite_array(message->low_side_speed_time_s) ||
             !finite_array(message->longitudinal_slip) ||
             !finite_array(message->lateral_slip) ||
             !finite_array(message->normal_load_n) ||
@@ -1298,6 +1068,13 @@ private:
             !std::isfinite(message->longitudinal_acceleration_mps2) ||
             !std::isfinite(message->lateral_acceleration_mps2) ||
             !std::isfinite(message->yaw_acceleration_radps2) ||
+            !std::isfinite(message->body_height_m) ||
+            !std::isfinite(message->body_height_rate_mps) ||
+            !std::isfinite(message->roll_rad) ||
+            !std::isfinite(message->roll_rate_radps) ||
+            !std::isfinite(message->pitch_rad) ||
+            !std::isfinite(message->pitch_rate_radps) ||
+            !std::isfinite(message->physical_steering_rad) ||
             !std::isfinite(message->longitudinal_velocity_mps) ||
             !std::isfinite(message->lateral_velocity_com_mps) ||
             !std::isfinite(message->lateral_velocity_rear_axle_mps) ||
@@ -1305,30 +1082,38 @@ private:
             !std::isfinite(message->gyro_yaw_rate_radps) ||
             !std::isfinite(message->steering_command_normalized) ||
             !std::isfinite(message->throttle_command_normalized) ||
+            !std::isfinite(message->delayed_steering_command_1_normalized) ||
+            !std::isfinite(message->delayed_steering_command_2_normalized) ||
+            !std::isfinite(message->delayed_throttle_command_1_normalized) ||
+            !std::isfinite(message->delayed_throttle_command_2_normalized) ||
             !std::isfinite(message->steering_feedback_rad) ||
             !std::isfinite(message->throttle_feedback_normalized)) {
             return;
         }
-        constexpr double kNamedStateConsistencyTolerance = 1.0e-6;
-        if (std::abs(message->state[UNITY_SOURCE_U] -
-                message->longitudinal_velocity_mps) >
-                kNamedStateConsistencyTolerance ||
-            std::abs(message->state[UNITY_SOURCE_V_COM] -
-                message->lateral_velocity_com_mps) >
-                kNamedStateConsistencyTolerance ||
-            std::abs(message->state[UNITY_SOURCE_YAW_RATE] -
-                message->yaw_rate_radps) >
-                kNamedStateConsistencyTolerance ||
-            message->steering_command_normalized < -1.0 ||
+        if (message->steering_command_normalized < -1.0 ||
             message->steering_command_normalized > 1.0 ||
+            message->delayed_steering_command_1_normalized < -1.0 ||
+            message->delayed_steering_command_1_normalized > 1.0 ||
+            message->delayed_steering_command_2_normalized < -1.0 ||
+            message->delayed_steering_command_2_normalized > 1.0 ||
             message->throttle_command_normalized < 0.0 ||
             message->throttle_command_normalized > 1.0 ||
+            message->delayed_throttle_command_1_normalized < 0.0 ||
+            message->delayed_throttle_command_1_normalized > 1.0 ||
+            message->delayed_throttle_command_2_normalized < 0.0 ||
+            message->delayed_throttle_command_2_normalized > 1.0 ||
             (message->actuator_feedback_valid &&
              (std::abs(message->steering_feedback_rad) >
                     rti_config_.model.max_steering_rad + 1.0e-3f ||
               message->throttle_feedback_normalized < 0.0 ||
               message->throttle_feedback_normalized > 1.0))) {
             return;
+        }
+        for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+            if (message->low_forward_speed_time_s[wheel] < 0.0 ||
+                message->low_side_speed_time_s[wheel] < 0.0) {
+                return;
+            }
         }
         const int64_t stamp_ns = rclcpp::Time(
             message->header.stamp, get_clock()->get_clock_type()).nanoseconds();
@@ -1341,50 +1126,6 @@ private:
         latest_unity_plant_state_ = *message;
         unity_plant_state_stamp_ns_ = stamp_ns;
         unity_plant_state_received_ = true;
-    }
-
-    void throttle_command_callback(
-        const std_msgs::msg::Float32::SharedPtr message)
-    {
-        const float throttle = message->data;
-        if (!std::isfinite(throttle) || throttle < 0.0 || throttle > 1.0)
-            return;
-        const int64_t stamp_ns = now().nanoseconds();
-        std::lock_guard<std::mutex> lock(throttle_command_mutex_);
-        if (!throttle_command_history_.empty() &&
-            stamp_ns < throttle_command_history_.back().stamp_ns) {
-            throttle_command_history_.clear();
-        }
-        if (!throttle_command_history_.empty() &&
-            stamp_ns == throttle_command_history_.back().stamp_ns) {
-            throttle_command_history_.back().value = throttle;
-            return;
-        }
-        throttle_command_history_.push_back({stamp_ns, throttle});
-        while (throttle_command_history_.size() > 16U)
-            throttle_command_history_.pop_front();
-    }
-
-    void imu_callback(const sensor_msgs::msg::Imu::SharedPtr message)
-    {
-        const auto & q = message->orientation;
-        const double roll = std::atan2(
-            2.0 * (q.w * q.x + q.y * q.z),
-            1.0 - 2.0 * (q.x * q.x + q.y * q.y));
-        const double sin_pitch = std::clamp(
-            2.0 * (q.w * q.y - q.z * q.x), -1.0, 1.0);
-        const double pitch = std::asin(sin_pitch);
-        const double roll_rate = message->angular_velocity.x;
-        const double pitch_rate = message->angular_velocity.y;
-        if (!std::isfinite(roll) || !std::isfinite(pitch) ||
-            !std::isfinite(roll_rate) || !std::isfinite(pitch_rate)) return;
-        std::lock_guard<std::mutex> lock(imu_feedback_mutex_);
-        latest_imu_roll_rad_ = roll;
-        latest_imu_pitch_rad_ = pitch;
-        latest_imu_roll_rate_radps_ = roll_rate;
-        latest_imu_pitch_rate_radps_ = pitch_rate;
-        imu_feedback_receipt_steady_ns_ = steady_time_ns();
-        imu_feedback_received_ = true;
     }
 
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
@@ -1500,14 +1241,18 @@ private:
             source_plant_handoff_valid_ && source_plant_gap_ns >= 0 &&
             static_cast<double>(source_plant_gap_ns) * 1.0e-9 <=
                 state_extrapolation_max_s_;
-        const bool unity_plant_snapshot_usable = unity_plant_snapshot_received &&
-            unity_plant_snapshot_stamp_ns == coherent_state.odom_source_stamp_ns &&
-            unity_plant_snapshot_stamp_ns == coherent_state.source_stamp_ns;
-        const int64_t source_rollout_gap_ns =
-            control_ros_time.nanoseconds() - source_nominal_stamp_ns_;
-        const bool source_rollout_contiguous = source_nominal_valid_ &&
-            rti_memory_.nominal.valid && source_rollout_gap_ns >= 15000000 &&
-            source_rollout_gap_ns <= 35000000;
+        const bool unity_plant_snapshot_usable =
+            is_causal_plant_state_usable(
+                unity_plant_snapshot_received,
+                unity_plant_snapshot_stamp_ns,
+                coherent_state.odom_source_stamp_ns,
+                coherent_state.source_stamp_ns,
+                state_extrapolation_max_s_);
+        if (!unity_plant_snapshot_usable && !source_plant_handoff_usable) {
+            publish_driving_fallback(
+                "waiting for a synchronized complete odometry plant state");
+            return;
+        }
         const MpcSynchronizedState &prediction_source = coherent_state;
         const MpcPathProjection_t &prediction_source_projection = projection;
         MpcModelState_t source_time_plant{};
@@ -1521,28 +1266,11 @@ private:
             source_time_plant = source_plant_handoff_state_;
             source_plant_stamp_ns = source_plant_handoff_stamp_ns_;
             source_plant_progress_m = source_plant_handoff_progress_m_;
-            if (coherent_state.source_stamp_ns >= source_plant_stamp_ns) {
-                seed_rear_wheel_encoder_feedback(
-                    coherent_state.source_stamp_ns, &source_time_plant);
-            } else {
-                wheel_encoder_feedback_used_ = false;
-                wheel_encoder_feedback_age_s_ = -1.0;
-                wheel_encoder_feedback_anchor_age_s_ = -1.0;
-                source_time_plant.source_rear_wheel_omega_feedback_valid = 0;
-            }
         }
         if (!source_plant_handoff_usable) {
             source_time_plant = MpcModelState_t{};
             source_plant_stamp_ns = coherent_state.source_stamp_ns;
             source_plant_progress_m = projection.s;
-            if (actual_steering_initialized_) {
-                source_time_plant.actual_steering_angle = static_cast<float>(
-                    estimated_actual_steering_angle_rad_);
-            }
-            seed_delayed_throttle_commands(
-                coherent_state.source_stamp_ns, &source_time_plant);
-            seed_rear_wheel_encoder_feedback(
-                coherent_state.source_stamp_ns, &source_time_plant);
         }
         if (unity_plant_snapshot_usable) {
             /* Odom owns the causal hidden-state estimate. Start the MPC plant
@@ -1550,12 +1278,41 @@ private:
              * recreating suspension, body attitude, and wheel-spin state. The
              * source model remains an estimate; current legal odom/encoders/
              * IMU and actuator feedback are fused below at their timestamps. */
-            std::copy(unity_plant_snapshot.state.begin(),
-                unity_plant_snapshot.state.end(),
-                source_time_plant.source_plant_state);
+            auto * const plant_state =
+                source_time_plant.source_plant_internal_state;
+            std::copy(unity_plant_snapshot.wheel_omega_radps.begin(),
+                unity_plant_snapshot.wheel_omega_radps.end(),
+                plant_state + MPC_PLANT_STATE_WHEEL_OMEGA_FL);
+            plant_state[MPC_PLANT_STATE_BODY_HEIGHT] =
+                unity_plant_snapshot.body_height_m;
+            plant_state[MPC_PLANT_STATE_BODY_HEIGHT_RATE] =
+                unity_plant_snapshot.body_height_rate_mps;
+            plant_state[MPC_PLANT_STATE_ROLL] = unity_plant_snapshot.roll_rad;
+            plant_state[MPC_PLANT_STATE_ROLL_RATE] =
+                unity_plant_snapshot.roll_rate_radps;
+            plant_state[MPC_PLANT_STATE_PITCH] = unity_plant_snapshot.pitch_rad;
+            plant_state[MPC_PLANT_STATE_PITCH_RATE] =
+                unity_plant_snapshot.pitch_rate_radps;
+            std::copy(unity_plant_snapshot.suspension_jounce_m.begin(),
+                unity_plant_snapshot.suspension_jounce_m.end(),
+                plant_state + MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL);
+            // PxVehicle only tests these timers against zero and one second.
+            // Saturating at threshold + one source fixed step is therefore
+            // an exact state reduction for future tire-constraint behavior.
+            for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+                plant_state[MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL + wheel] =
+                    std::min(unity_plant_snapshot.low_forward_speed_time_s[wheel],
+                        kStickyForwardTimerThresholdS + kStickyTimerStepS);
+                plant_state[MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL + wheel] =
+                    std::min(unity_plant_snapshot.low_side_speed_time_s[wheel],
+                        kStickySideTimerThresholdS + kStickyTimerStepS);
+                plant_state[MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL + wheel] =
+                    unity_plant_snapshot.wheel_rotation_angle_rad[wheel];
+            }
             source_time_plant.source_plant_initialized = 1;
             source_time_plant.source_suspension_history_initialized =
                 unity_plant_snapshot.suspension_history_initialized ? 1 : 0;
+            source_time_plant.source_imu_state_initialized = 1;
             source_time_plant.u = static_cast<float>(
                 unity_plant_snapshot.longitudinal_velocity_mps);
             source_time_plant.r = static_cast<float>(
@@ -1563,31 +1320,31 @@ private:
             source_time_plant.v = static_cast<float>(
                 unity_plant_snapshot.lateral_velocity_rear_axle_mps);
             source_time_plant.actual_steering_angle = static_cast<float>(
-                unity_plant_snapshot.state[UNITY_SOURCE_PHYSICAL_STEERING]);
+                unity_plant_snapshot.physical_steering_rad);
+            source_time_plant.delayed_steering_command_1 = static_cast<float>(
+                unity_steering_command_normalized_to_physical_rad(
+                    unity_plant_snapshot.delayed_steering_command_1_normalized,
+                    rti_config_.model.max_steering_rad));
+            source_time_plant.delayed_steering_command_2 = static_cast<float>(
+                unity_steering_command_normalized_to_physical_rad(
+                    unity_plant_snapshot.delayed_steering_command_2_normalized,
+                    rti_config_.model.max_steering_rad));
+            source_time_plant.delayed_throttle_command_1 = static_cast<float>(
+                unity_plant_snapshot.delayed_throttle_command_1_normalized);
+            source_time_plant.delayed_throttle_command_2 = static_cast<float>(
+                unity_plant_snapshot.delayed_throttle_command_2_normalized);
             source_time_plant.longitudinal_acceleration_mps2 = static_cast<float>(
                 unity_plant_snapshot.longitudinal_acceleration_mps2);
-            std::copy(unity_plant_snapshot.longitudinal_slip.begin(),
-                unity_plant_snapshot.longitudinal_slip.end(),
-                source_time_plant.source_longitudinal_slip);
-            std::copy(unity_plant_snapshot.lateral_slip.begin(),
-                unity_plant_snapshot.lateral_slip.end(),
-                source_time_plant.source_lateral_slip);
-            std::copy(unity_plant_snapshot.normal_load_n.begin(),
-                unity_plant_snapshot.normal_load_n.end(),
-                source_time_plant.source_normal_load_n);
             source_plant_stamp_ns = unity_plant_snapshot_stamp_ns;
             source_plant_progress_m = projection.s;
-            seed_delayed_throttle_commands(
-                source_plant_stamp_ns, &source_time_plant);
-            seed_rear_wheel_encoder_feedback(
-                source_plant_stamp_ns, &source_time_plant);
             unity_plant_state_used_ = true;
         } else {
             unity_plant_state_used_ = false;
         }
         const auto prediction_start = std::chrono::steady_clock::now();
         const MpcControlTimeStatus prediction_status = predict_to_control_time(
-            control_time_mode_, prediction_source,
+            MpcControlTimeMode::kAcceptedModelCommandHistory,
+            prediction_source,
             control_ros_time.nanoseconds(),
             command_history_snapshot, trajectory_.data(), trajectory_.size(),
             track_length_m_, prediction_source_projection.segment,
@@ -1605,13 +1362,6 @@ private:
                 control_time_status_name(prediction_status));
             publish_driving_fallback("MPC command-time state prediction is uncertain");
             return;
-        }
-        if (control_time_prediction.plant_state_valid) {
-            /* The body and latent wheel/actuator/suspension states must share
-             * the same control-time epoch. Do not replace this propagated
-             * latent state with encoder deltas or command history that belong
-             * to the older odometry source stamp. */
-            wheel_encoder_feedback_age_s_ += control_time_prediction.age_s;
         }
         if (control_time_prediction.plant_handoff_state_valid) {
             source_plant_handoff_state_ =
@@ -1632,88 +1382,12 @@ private:
         rti_config_.model.active_speed_ceiling_mps =
             static_cast<float>(speed_ceiling);
 
-        double commanded_steering =
-            control_time_prediction.steering_command_rad;
-        double previous_steering_rate =
-            control_time_prediction.previous_steering_rate_radps;
-        double previous_throttle_command =
-            control_time_prediction.previous_throttle_command;
-        /* Keep command-history states for future rollout, but anchor the
-         * current physical steering angle to permitted measured feedback
-         * whenever it is fresh. Command-only reconstruction misses steering
-         * reversals observed in aggressive practice transitions. */
-        double delayed_steering_command_1 = commanded_steering;
-        double delayed_steering_command_2 = commanded_steering;
-        MpcCommandHistoryEntry delayed_command{};
-        if (command_history_snapshot.latest_at_or_before(
-                control_ros_time.nanoseconds() - static_cast<int64_t>(
-                    std::llround(TIME_STEP_SECONDS * 1.0e9)),
-                &delayed_command)) {
-            delayed_steering_command_1 = delayed_command.steering_command_rad;
-        }
-        if (command_history_snapshot.latest_at_or_before(
-                control_ros_time.nanoseconds() - static_cast<int64_t>(
-                    std::llround(physical_steering_delay_s_ * 1.0e9)),
-                &delayed_command)) {
-            delayed_steering_command_2 = delayed_command.steering_command_rad;
-        }
-        double feedback_steering = 0.0;
-        double feedback_age_s = -1.0;
-        bool feedback_received = false;
-        {
-            std::lock_guard<std::mutex> lock(steering_feedback_mutex_);
-            feedback_received = steering_feedback_received_;
-            feedback_steering = latest_steering_feedback_rad_;
-            if (feedback_received) {
-                feedback_age_s = static_cast<double>(
-                    steady_time_ns() - steering_feedback_receipt_steady_ns_) * 1.0e-9;
-            }
-        }
-        steering_feedback_used_ = feedback_received && feedback_age_s >= 0.0 &&
-            feedback_age_s <= steering_feedback_max_age_s_;
-        steering_feedback_age_s_ = feedback_age_s;
-        steering_feedback_value_used_rad_ = feedback_steering;
-        if (steering_feedback_used_) {
-            /* The simulator's Float32 steering feedback can exceed the
-             * configured mechanical limit by a few ulps at saturation (the
-             * recorded value was 1.2e-6 rad over).  Preserve the raw sample
-             * for diagnostics, but keep the model state inside the physical
-             * steering envelope so one representational overshoot cannot
-             * make every subsequent MPC nominal rollout invalid. */
-            estimated_actual_steering_angle_rad_ = clamp(
-                feedback_steering,
-                -rti_config_.model.max_steering_rad,
-                rti_config_.model.max_steering_rad);
-            actual_steering_initialized_ = true;
-        } else if (!actual_steering_initialized_) {
-            const int64_t delayed_stamp_ns =
-                control_ros_time.nanoseconds() - static_cast<int64_t>(
-                    std::llround(physical_steering_delay_s_ * 1.0e9));
-            estimated_actual_steering_angle_rad_ =
-                command_history_snapshot.latest_at_or_before(
-                    delayed_stamp_ns, &delayed_command)
-                ? delayed_command.steering_command_rad : 0.0;
-            actual_steering_initialized_ = true;
-        } else {
-            const double control_dt = last_control_time_ns_ == 0 ?
-                TIME_STEP_SECONDS : clamp(
-                    static_cast<double>(control_ros_time.nanoseconds() -
-                        last_control_time_ns_) * 1.0e-9,
-                    0.0, 0.250);
-            estimated_actual_steering_angle_rad_ = move_toward(
-                estimated_actual_steering_angle_rad_,
-                delayed_steering_command_1,
-                SOURCE_STEERING_RATE_RADPS * control_dt);
-        }
-        last_control_time_ns_ = control_ros_time.nanoseconds();
-
         MpcRtiState_t state{};
         if (control_time_prediction.plant_state_valid) {
             state.plant = control_time_prediction.plant_state;
         } else if (source_plant_handoff_usable) {
             state.plant = source_plant_handoff_state_;
         } else {
-            source_nominal_valid_ = false;
             state.plant = source_time_plant;
             state.plant.delayed_throttle_command_2 = 0.0f;
         }
@@ -1722,43 +1396,6 @@ private:
         state.plant.u = static_cast<float>(std::max(0.0, command_time_state.u));
         state.plant.v = static_cast<float>(command_time_state.v);
         state.plant.r = static_cast<float>(command_time_state.yaw_rate);
-        state.plant.steering_command = static_cast<float>(commanded_steering);
-        state.plant.delayed_steering_command_1 = static_cast<float>(
-            delayed_steering_command_1);
-        state.plant.delayed_steering_command_2 = static_cast<float>(
-            delayed_steering_command_2);
-        state.plant.actual_steering_angle = static_cast<float>(
-            estimated_actual_steering_angle_rad_);
-        double imu_age_s = -1.0;
-        bool imu_received = false;
-        double imu_roll = 0.0;
-        double imu_pitch = 0.0;
-        double imu_roll_rate = 0.0;
-        double imu_pitch_rate = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(imu_feedback_mutex_);
-            imu_received = imu_feedback_received_;
-            imu_roll = latest_imu_roll_rad_;
-            imu_pitch = latest_imu_pitch_rad_;
-            imu_roll_rate = latest_imu_roll_rate_radps_;
-            imu_pitch_rate = latest_imu_pitch_rate_radps_;
-            if (imu_received) {
-                imu_age_s = static_cast<double>(
-                    steady_time_ns() - imu_feedback_receipt_steady_ns_) * 1.0e-9;
-            }
-        }
-        if (imu_received && imu_age_s >= 0.0 &&
-            imu_age_s <= imu_feedback_max_age_s_) {
-            state.plant.source_plant_state[UNITY_SOURCE_ROLL] = imu_roll;
-            state.plant.source_plant_state[UNITY_SOURCE_ROLL_RATE] = imu_roll_rate;
-            state.plant.source_plant_state[UNITY_SOURCE_PITCH] = imu_pitch;
-            state.plant.source_plant_state[UNITY_SOURCE_PITCH_RATE] = imu_pitch_rate;
-            state.plant.source_imu_state_initialized = 1;
-        }
-        state.previous_steering_rate = static_cast<float>(previous_steering_rate);
-        state.previous_throttle_command =
-            static_cast<float>(previous_throttle_command);
-
         MpcRtiCycleResult_t result{};
         const auto solve_start = std::chrono::steady_clock::now();
         const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
@@ -1769,12 +1406,6 @@ private:
         const double solve_us = std::chrono::duration<double, std::micro>(
             solve_finish - solve_start).count();
         record_cycle_health(status, result, solve_us);
-        source_nominal_valid_ =
-            (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
-             status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) &&
-            rti_memory_.nominal.valid;
-        if (source_nominal_valid_)
-            source_nominal_stamp_ns_ = control_ros_time.nanoseconds();
         if (result.corridor_repair_used) {
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC exact corridor repair accepted: alpha=%.4f "
@@ -1782,11 +1413,8 @@ private:
                 result.corridor_repair_alpha, result.r1_status,
                 result.r2_status);
         }
-        const bool has_usable_best_effort_action =
-            result.best_effort_action_published != 0;
         if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
-            status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED &&
-            !has_usable_best_effort_action) {
+            status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC RTI rejected: %s iterations=%d residual=(%.6g,%.6g) "
                 "regularization=(%.6g,%d) nonsmooth_columns=%d "
@@ -1819,22 +1447,18 @@ private:
                     synchronize_steady_ns);
             /* No exact-feasible candidate exists. Keep command continuity,
              * but apply the configured bounded speed reduction so a numerical
-             * failure cannot preserve an unsafe racing speed. This path
-             * remains visible in diagnostics and resets the failed RTI
-             * memory. */
+             * failure cannot preserve an unsafe racing speed. The RTI core
+             * deliberately retains its ADMM iterate for residual-only
+             * failures; preserve that warm start so the next 40 Hz solve can
+             * continue convergence. Hard input, nonlinear, and solver errors
+             * still reset it. */
+            const bool reset_rti_memory =
+                status != MPC_RTI_CYCLE_REJECTED_RESIDUAL;
             publish_driving_fallback(
                 "MPC RTI cycle had no exact-feasible candidate",
-                false, true);
+                false, reset_rti_memory);
             ++hard_fallback_cycles_;
             return;
-        }
-
-        if (has_usable_best_effort_action) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC published a one-step-feasible action despite "
-                "full-horizon rejection (status=%s,r1=%d,r2=%d)",
-                cycle_status_name(status), result.r1_status,
-                result.r2_status);
         }
 
         if (result.residual_candidate_published) {
@@ -1852,7 +1476,6 @@ private:
                 synchronize_steady_ns);
         if (enabled_) {
             last_steering_command_rad_ = result.published_steering_command;
-            last_steering_rate_radps_ = result.first_control.steering_rate;
             last_throttle_command_ = result.published_throttle;
             publish_command(last_steering_command_rad_, result.published_throttle);
         }
@@ -1869,9 +1492,6 @@ private:
     std::string command_frame_;
     std::string trajectory_file_;
     std::string drive_command_topic_;
-    std::string control_time_mode_name_;
-    MpcControlTimeMode control_time_mode_{
-        MpcControlTimeMode::kAcceptedModelCommandHistory};
     MpcControlTimePredictorConfig control_time_predictor_config_{};
     double max_speed_mps_{};
     double startup_speed_mps_{};
@@ -1882,47 +1502,17 @@ private:
     double source_dt_max_s_{};
     double startup_path_max_distance_m_{};
     double startup_path_heading_tolerance_rad_{};
+    double actuator_steering_limit_rad_{SOURCE_MAX_STEERING_RAD};
     double track_length_m_{};
     double startup_progress_m_{};
     double last_projected_s_{};
     double last_steering_command_rad_{};
-    double physical_steering_delay_s_{};
-    std::string steering_feedback_topic_;
-    std::string throttle_command_topic_;
-    std::string left_encoder_topic_;
-    std::string right_encoder_topic_;
-    std::string imu_topic_;
     std::string unity_plant_state_topic_;
-    double steering_feedback_max_age_s_{};
-    double throttle_command_max_age_s_{};
-    double wheel_encoder_max_age_s_{};
-    double imu_feedback_max_age_s_{};
-    double estimated_actual_steering_angle_rad_{};
-    bool actual_steering_initialized_{};
-    double latest_steering_feedback_rad_{};
-    int64_t steering_feedback_receipt_steady_ns_{};
-    bool steering_feedback_received_{};
-    bool steering_feedback_used_{};
-    bool wheel_encoder_feedback_used_{};
-    double wheel_encoder_feedback_age_s_{-1.0};
-    double wheel_encoder_feedback_anchor_age_s_{-1.0};
-    double steering_feedback_age_s_{-1.0};
-    double steering_feedback_value_used_rad_{};
-    double latest_imu_roll_rad_{};
-    double latest_imu_pitch_rad_{};
-    double latest_imu_roll_rate_radps_{};
-    double latest_imu_pitch_rate_radps_{};
-    int64_t imu_feedback_receipt_steady_ns_{};
-    bool imu_feedback_received_{};
-    bool source_nominal_valid_{};
-    int64_t source_nominal_stamp_ns_{};
     bool source_plant_handoff_valid_{};
     bool unity_plant_state_used_{};
     int64_t source_plant_handoff_stamp_ns_{};
     double source_plant_handoff_progress_m_{};
     MpcModelState_t source_plant_handoff_state_{};
-    int64_t last_control_time_ns_{};
-    double last_steering_rate_radps_{};
     double last_throttle_command_{};
     std::size_t last_closest_index_{};
     rclcpp::Time last_source_stamp_{0, 0, RCL_ROS_TIME};
@@ -1933,15 +1523,6 @@ private:
     MpcCommandHistory command_history_;
     std::mutex state_mutex_;
     std::mutex command_history_mutex_;
-    std::mutex steering_feedback_mutex_;
-    std::mutex throttle_command_mutex_;
-    std::deque<ThrottleCommandSample> throttle_command_history_;
-    std::mutex wheel_encoder_mutex_;
-    WheelEncoderSample left_encoder_previous_{};
-    WheelEncoderSample right_encoder_previous_{};
-    WheelAngularSpeedSample left_wheel_omega_{};
-    WheelAngularSpeedSample right_wheel_omega_{};
-    std::mutex imu_feedback_mutex_;
     std::mutex unity_plant_state_mutex_;
     sdu_apex_msgs::msg::UnityPlantState latest_unity_plant_state_{};
     int64_t unity_plant_state_stamp_ns_{};
@@ -1952,21 +1533,11 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sdu_apex_msgs::msg::UnityPlantState>::SharedPtr
         unity_plant_state_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr
-        steering_feedback_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr
-        throttle_command_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
-        left_encoder_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
-        right_encoder_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
     std::uint64_t control_cycles_{};
     std::uint64_t accepted_optimal_{};
     std::uint64_t accepted_degraded_{};
     std::uint64_t residual_candidate_published_{};
-    std::uint64_t best_effort_action_published_{};
     std::uint64_t corridor_repair_used_{};
     std::uint64_t hard_fallback_cycles_{};
     int max_solver_iterations_seen_{};

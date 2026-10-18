@@ -5,16 +5,28 @@ set -e
 # entrypoint and does not mount this source file.
 source /opt/ros/humble/setup.bash
 source /home/autodrive_devkit/install/setup.bash
-source /workspace/install/setup.bash
 
 if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
   echo "Building the mounted runtime and its package dependencies"
+  # The reusable dev image may carry generated artifacts from an older
+  # sdu_apex_autodrive source tree. In particular, setuptools can retain
+  # deleted config/launch files in SOURCES.txt and then fail while copying
+  # them from the stale build directory. Remove only this package's generated
+  # build/install outputs; the mounted source and other package caches remain.
+  rm -rf \
+    /workspace/build/sdu_apex_autodrive \
+    /workspace/install/lib/sdu_apex_autodrive \
+    /workspace/install/share/ament_index/resource_index/packages/sdu_apex_autodrive \
+    /workspace/install/share/colcon-core/packages/sdu_apex_autodrive \
+    /workspace/install/share/sdu_apex_autodrive
   cd /workspace
   CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build \
     --packages-up-to sdu_apex_autodrive \
     --parallel-workers 1 \
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+  source /workspace/install/setup.bash
+else
   source /workspace/install/setup.bash
 fi
 

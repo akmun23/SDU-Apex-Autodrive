@@ -1,0 +1,30 @@
+{
+  "diagnostic": "v2315_native_callback_force_body_axis_parity",
+  "wheel_records": 1924,
+  "timestamps": 481,
+  "native_lap_completed": true,
+  "historical_source_untouched": true,
+  "working_wheel_model_sha256": "c5596451e12d072c3c539103bf35a255d9358f6b796de10f7110671a196a7bff",
+  "force_rotation_exact_max_n": 0.0,
+  "observed_ay_from_post_scene_25ms_dvdt_mps2": true,
+  "before_wrong_native_fy_as_left_positive": {
+    "rms_mps2": 4.067605772777651,
+    "max_abs_mps2": 9.870127404483092,
+    "mean_error_mps2": 2.324708498206835,
+    "pearson_r": -0.995741466171304
+  },
+  "after_measured_native_fy_converted_to_left_positive": {
+    "rms_mps2": 0.22685825278692223,
+    "max_abs_mps2": 0.7656361199765174,
+    "mean_error_mps2": 0.08816157816109785,
+    "pearson_r": 0.9954694859181007
+  },
+  "after_actual_CasADi_reconstructed_slip": {
+    "rms_mps2": 0.7187118251006376,
+    "max_abs_mps2": 1.5644370284745763,
+    "mean_error_mps2": 0.4281376672897171,
+    "pearson_r": 0.9751113010248088
+  },
+  "caveat": "Native tire Fx/Fy and slips correspond to the vehicle update before the scene solver; post-scene body velocity and wheel omega are staggered by 1 ms. Measured ay is a 25 ms velocity finite difference and can include contact impulses. These checks do not certify full native physics fidelity or IPOPT feasibility."
+}
+NO IPOPT or native replay executed.

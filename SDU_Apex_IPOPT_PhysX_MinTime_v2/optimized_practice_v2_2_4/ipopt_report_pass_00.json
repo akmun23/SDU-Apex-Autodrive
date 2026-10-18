@@ -1,0 +1,400 @@
+{
+  "optimizer": "CasADi/IPOPT phase-switched spatial direct collocation",
+  "path_initialization": "free geometry; initialized from the supplied lateral/heading state seed, then optimized without a hard reference-path constraint",
+  "decision_variables": {
+    "differential_states": [
+      "ey_m",
+      "epsi_rad",
+      "u_mps",
+      "v_mps",
+      "yaw_rate_radps",
+      "steering_rad",
+      "body_height_m",
+      "body_height_rate_mps",
+      "roll_rad",
+      "roll_rate_radps",
+      "pitch_rad",
+      "pitch_rate_radps"
+    ],
+    "dynamic_states": [
+      "ey_m",
+      "epsi_rad",
+      "u_mps",
+      "v_mps",
+      "yaw_rate_radps",
+      "steering_rad",
+      "body_height_m",
+      "body_height_rate_mps",
+      "roll_rad",
+      "roll_rate_radps",
+      "pitch_rad",
+      "pitch_rate_radps",
+      "wheel_omega_fl_radps",
+      "wheel_omega_fr_radps",
+      "wheel_omega_rl_radps",
+      "wheel_omega_rr_radps"
+    ],
+    "algebraic_states": [
+      "four spring/damper loads and planar accelerations"
+    ],
+    "controls": [
+      "physical steering rate",
+      "positive normalized motor torque",
+      "exact-zero CAWB brake phases"
+    ],
+    "path_geometry": "independent lateral offset at every optimized spatial node",
+    "brake_phase_lengths_are_optimized": true,
+    "brake_phase_order_and_count": "seeded from measured training run; switch locations and durations are free"
+  },
+  "wheel_spin_discretization": {
+    "method": "closed-form composition of PhysX implicit-Euler internal wheel substeps; 5 x 0.2 ms below 5 m/s, 1 x 1 ms at/above 5 m/s",
+    "time_constant_s": 0.000758858,
+    "reason": "integer internal-step damping exactly composes integrateNoDriveWheelSpeeds for held torque; the substep branch is selected from interval-start forward speed, matching the outer vehicle tick as represented by the spatial mesh; a spatial interval crossing 5 m/s cannot reproduce per-tick branch changes. Variable intervals use a smooth fractional-step extension and trapezoidal tire-reaction torque",
+    "physx_source_status": "source wheel torque split, speed-dependent 5/1 internal substeps, finite CAWB brake torque, implicit damping, and zero-crossing wheel lock are connected to the spatial OCP; wheel reaction torque is averaged over each spatial interval",
+    "body_state_discretization": "trapezoidal spatial collocation",
+    "spatial_state_defect_scales": [
+      0.25,
+      0.35,
+      2.0,
+      1.0,
+      2.0,
+      0.35,
+      0.02,
+      1.0,
+      0.12,
+      2.0,
+      0.1,
+      2.0
+    ],
+    "suspension_load_model": "per-wheel WheelCollider ray travel, calibrated source spring and damper forces; heave/roll/pitch integrate rigid-body forces and moments with Unity source inertia and drag"
+  },
+  "unity_vehicle_model": {
+    "source_capture": null,
+    "source_config": {
+      "active_prefab": "external/autodrive-unity-source/Assets/Prefabs/F1TENTH/F1TENTH.prefab",
+      "physx_source_commit": "a2c0428acab643e60618c681b501e86f7fd558cc"
+    },
+    "mass_kg": 3.47,
+    "yaw_inertia_kgm2": 0.100088306,
+    "wheel_radius_m": 0.059,
+    "wheel_radius_scale": 1.0,
+    "wheel_inertia_kgm2": 0.0001897145,
+    "wheel_inertia_derivation": "Unity WheelCollider::AddWheelToExistingVehicle sets PhysX mMOI=0.5*mMass*(effectiveRadius)^2; active F1TENTH prefab has mass 0.109 kg, radius 0.059 m, unit transform scale",
+    "wheel_damping_nms": 0.25,
+    "wheel_mass_kg": 0.109,
+    "sprung_masses_kg": [
+      0.8172174,
+      0.8160214,
+      0.9189909,
+      0.9177702
+    ],
+    "sprung_mass_derivation": "Unity WheelCollider::UpdateVehicleSpringCMOffsetsAndMasses passes transformed wheel-centre offsets, Rigidbody COM and mass to PxVehicleComputeSprungMasses(gravityDirection=1)",
+    "suspension_target_position": 0.5,
+    "wheel_spin_damping_time_constant_s": 0.000758858,
+    "steering_limit_rad": 0.5235987755982989,
+    "steering_rate_radps": 3.2,
+    "motor_torque_total_nm": 428.0,
+    "forward_curves": [
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ],
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ],
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ],
+      [
+        0.15,
+        0.9,
+        0.25,
+        0.58,
+        0.8
+      ]
+    ],
+    "lateral_curves": [
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ],
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ],
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ],
+      [
+        0.01,
+        1.0,
+        0.1,
+        0.5,
+        1.0
+      ]
+    ],
+    "tire_force_model": "Unity VehicleComputeTireForce from matching UnityPlayer symbol-bearing build; curve response and combined-slip ellipse are direct native-code translations",
+    "tire_load_filter": {
+      "points": [
+        0.0,
+        0.2308,
+        3.0,
+        3.0
+      ],
+      "rest_load_kg": [
+        0.9262174,
+        0.9250214,
+        1.0279909,
+        1.0267702
+      ],
+      "source": "PhysX 4.1 PxVehicleTireLoadFilterData default; rest load is wheel mass plus sprung mass"
+    },
+    "load_model": "PhysX 4.1 source spring/damper force for a flat horizontal contact plane; uses source ray direction, jounce, gravity projection, and contact-normal projection",
+    "load_model_id": "unity_sprung_mass_spring_damper_heave_roll_pitch_v1",
+    "suspension": {
+      "target_travel_m": [
+        0.025,
+        0.025,
+        0.025,
+        0.025
+      ],
+      "spring_n_per_m": [
+        500.0,
+        500.0,
+        500.0,
+        500.0
+      ],
+      "damper_ns_per_m": [
+        100.0,
+        100.0,
+        100.0,
+        100.0
+      ],
+      "travel_distance_m": 0.05,
+      "wheel_camber_rad": [
+        -0.08726646259971649,
+        0.08726646259971649,
+        0.0,
+        0.0
+      ],
+      "reference_body_height_m": 0.00464804098,
+      "inertia_pitch_kgm2": 0.0934206,
+      "inertia_roll_kgm2": 0.0228149127,
+      "force_application_point_distance_m": 0.0
+    },
+    "model_boundary": "Historical CasADi differential/algebraic tire+wheel+spring model; not native PhysX scene solver, collision impulses, wheel-contact recursion or exact 1 ms map. Mandatory native replay follows.",
+    "tire_slip_coordinates": "PhysX 4.1 applied-torque branch (Unity NoDrive has motor or brake torque at each optimizer node): longSlip=(R*omega-vx)/(max(abs(vx),abs(R*omega))+0.1m); lateralSlip=atan(vy/(abs(vx)+1m)). The remaining approximation is the planar contact-point/tire-axis velocity reconstruction; low-speed sticky constraints are not modeled.",
+    "source_origin": "f1tenth_mpc/src/unity_source_plant.cpp + f1tenth_localization/config/physx_odom_reset_initial.json"
+  },
+  "track": {
+    "count": 143,
+    "length_m": 28.410164690649342,
+    "spacing_m_mean": 0.19867248035419122,
+    "spacing_m_min": 0.19867248035419038,
+    "spacing_m_max": 0.19867248035419394,
+    "curvature_abs_max_m_inv": 0.8747620678707339,
+    "left_min_m": 0.4882486206901658,
+    "right_min_m": 0.425
+  },
+  "gate_state_anchor": null,
+  "gate_lateral_tolerance_m": 0.0,
+  "gate_steering_tolerance_rad": 0.0,
+  "controller_trackability_limits": {
+    "max_body_to_path_heading_error_rad": null,
+    "max_abs_lateral_speed_mps": null,
+    "body_to_path_heading_definition": "body heading relative to the optimized path tangent; path tangent offset is atan2(d(ey)/ds, 1-kappa_centerline*ey)"
+  },
+  "path_reference_tube": {
+    "enabled": false,
+    "maximum_lateral_deviation_m": null,
+    "reference_offset_min_m": null,
+    "reference_offset_max_m": null
+  },
+  "minimum_wheel_normal_load_constraint_n": 0.05,
+  "feasibility_trust_region": 200.0,
+  "ipopt_iteration_budgets": {
+    "captured_motion_feasibility": 1200,
+    "per_time_optimization_stage": 1200
+  },
+  "time_hessian_approximation": "limited-memory",
+  "time_trust_region_factors": [
+    4.0,
+    8.0,
+    16.0,
+    1000000.0
+  ],
+  "nlp_feasibility_tolerance": 0.001,
+  "constraint_residual_scaling": {
+    "longitudinal_force_balance": "unscaled physical acceleration residual (m/s^2)",
+    "lateral_force_balance": "unscaled physical acceleration residual (m/s^2)",
+    "physical_equations_changed": false
+  },
+  "wall_clearance_m": 0.15,
+  "supported_speed_domain_mps": [
+    0.35,
+    16.0
+  ],
+  "brake_mode_seed_source": "drive-mode initialization",
+  "throttle_fall_rate_limit_norm_per_s": null,
+  "brake_phase_seed_ranges_and_modes": [
+    {
+      "seed_start_node": 0,
+      "seed_end_exclusive_node": 143,
+      "mode": "drive",
+      "optimized_mesh_nodes": 143,
+      "seed_length_m": 28.410164690649342
+    }
+  ],
+  "model_consistent_initialization_iterations": 5,
+  "suspension_seed": {
+    "method": "periodic 1 kHz RK4 using current tire-model planar forcing",
+    "outer_force_load_iterations": 5,
+    "periodic_laps": 1,
+    "fixed_point_residual_scaled": 5.423323635109223e-06
+  },
+  "optimized_phase_lengths_m": [
+    28.410164690649342
+  ],
+  "optimized_brake_nodes": 0,
+  "predicted_lap_time_s": 4.588766951785829,
+  "elapsed_s": 130.4043417469984,
+  "solve_stages": [
+    {
+      "name": "captured-motion feasibility",
+      "success": false,
+      "return_status": "Maximum_Iterations_Exceeded",
+      "ipopt_converged": false,
+      "iterations": 150,
+      "max_constraint_violation": 0.5130731253626415
+    },
+    {
+      "dynamic_equality_tolerance": 0.5,
+      "iterations_budget": 0,
+      "status": "Initial_Feasible_Incumbent",
+      "initial_max_constraint_violation": 0.0,
+      "max_constraint_violation": 0.0,
+      "worst_constraints": [],
+      "accepted_stage": true,
+      "exception": null,
+      "diagnostic_error": null
+    },
+    {
+      "dynamic_equality_tolerance": 0.35,
+      "iterations_budget": 150,
+      "status": "Maximum_Iterations_Exceeded",
+      "initial_max_constraint_violation": 0.11654326597560016,
+      "max_constraint_violation": 0.1630731253626415,
+      "worst_constraints": [
+        {
+          "label": "lateral_force_balance_k7",
+          "index": 210,
+          "violation": 0.1630731253626415,
+          "value": 0.5130731253626415,
+          "lower": -0.35,
+          "upper": 0.35
+        },
+        {
+          "label": "lateral_force_balance_k18",
+          "index": 507,
+          "violation": 0.11282852272970312,
+          "value": 0.4628285227297031,
+          "lower": -0.35,
+          "upper": 0.35
+        }
+      ],
+      "accepted_stage": false,
+      "exception": null,
+      "diagnostic_error": null
+    }
+  ],
+  "selected_stage": "captured-motion feasibility",
+  "selected_trust_region_factor": null,
+  "feasibility_objective_reference": null,
+  "solver": {
+    "success": false,
+    "return_status": "Maximum_Iterations_Exceeded",
+    "ipopt_converged": false,
+    "iterations": 150,
+    "exception": null,
+    "feasible_incumbent": false
+  },
+  "nlp_diagnostics": {
+    "max_constraint_violation": 0.1630731253626415,
+    "nonfinite_constraint_count": 0,
+    "worst_constraints": [
+      {
+        "label": "lateral_force_balance_k7",
+        "index": 210,
+        "violation": 0.1630731253626415,
+        "value": 0.5130731253626415,
+        "lower": -0.35,
+        "upper": 0.35
+      },
+      {
+        "label": "lateral_force_balance_k18",
+        "index": 507,
+        "violation": 0.11282852272970312,
+        "value": 0.4628285227297031,
+        "lower": -0.35,
+        "upper": 0.35
+      }
+    ],
+    "initial_guess": {
+      "max_constraint_violation": 0.0,
+      "nonfinite_constraint_count": 0,
+      "worst_constraints": []
+    },
+    "last_primal_infeasibility": 0.4838768962178987,
+    "last_dual_infeasibility": 227.0934330538475,
+    "feasible_incumbent": false,
+    "solver_error": null
+  },
+  "limits_and_caveats": [
+    "The optimizer is a new free-geometry path-and-speed OCP, not a speed-scaled reference trajectory.",
+    "The measured capture seeds only the number/order of drive and exact-zero brake phases; IPOPT optimizes every phase length.",
+    "Public Unity VehicleController, active serialized vehicle values, source capture friction curves, and source-derived rigid-body equations are used; the native WheelCollider contact solver is not embedded in the differentiable OCP.",
+    "The configured Unity friction curves and native tire-force callback equations are source-translated, but contact velocity, changing raycast hit/load, surface friction pair, and full body/contact solve are not reproduced end-to-end. The horizontal plane and spring/damper states remain optimizer assumptions.",
+    "Wheel spin uses the closed-form PhysX implicit-Euler composition with the source 5/1 substep branch selected from interval-start forward speed, matching the outer vehicle tick represented by the spatial mesh; spatial intervals crossing 5 m/s, fractional durations, interval-averaged tire reaction, and exact native 1 ms contact/tire recomputation remain OCP discretization approximations. Zero-throttle CAWB phases use finite configured brake torque and the PhysX zero-crossing wheel lock.",
+    "IPOPT establishes a local solution only; the objective is not a global-minimum or Unity lap-time guarantee."
+  ],
+  "phase1_solver_overlay": {
+    "phase1_hessian": "limited-memory",
+    "phase1_method": "stage-gated dynamic equality defect homotopy, mandatory zero tolerance",
+    "dynamics_relaxation_schedule": [
+      0.5,
+      0.35,
+      0.2,
+      0.1,
+      0.05,
+      0.02,
+      0.005,
+      0.0
+    ],
+    "original_solver_sha256": "e647398e97775eb95779c76eb7abdfd10cc622e2e146bded4348c2e33e109057",
+    "working_solver_sha256": "7b55ac4915d7708f8e0e60248fcd80a14c67450cd6f5c6bd8bb4a8379c5f5c01",
+    "source_untouched": true,
+    "working_solver_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py",
+    "patch_method": "Phase-I numerical initializer only; exact original constraints restored at zero-defect final stage and Phase II"
+  }
+}

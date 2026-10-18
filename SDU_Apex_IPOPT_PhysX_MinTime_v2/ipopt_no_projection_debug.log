@@ -1,0 +1,12 @@
+== Recover verified original IPOPT spatial min-time source ==
+Original commit: ca120e0cde7ae60e70082d38f86c5931f79f148f
+Working CasADi solver: /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py
+Phase-I Hessian: limited-memory; historical source preserved: True
+== Resolve current PhysX/Unity source parameters ==
+Map autodrive_practice_20260924_b.pgm | OCP length 28.410 m | nodes 143 | reference min clearance 0.438 m
+Motor 428.0 Nm; wheel radius 0.059 m; brake at exactly zero throttle; steering ±0.5236 rad
+WARNING: --brake-zones 0 prohibits ALL zero-throttle CAWB braking. With 428 Nm total motor torque, a drive-only periodic lap may be infeasible. For the Porto lap-time target use --brake-zones 3.
+== Reusing physics warm-start file: /home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/optimized_practice_v2_3_0/warmstart_physx/native_warmstart.npz ==
+== IPOPT OCP: 143 nodes, 0 initial brake nodes, 20 feasibility + 1 time iterations, Phase-I seed-distance cap=disabled, seed=native, Phase-I elastic dynamics + safe spatial evaluations + simple bounds, Phase-I Hessian=limited-memory ==
+== IPOPT feasibility -> minimum-time solve 1/1 ==
+Source-model seed projection audit: {"forced_full_brake_nodes_unseen_in_native": 0, "type": "unprojected_native_state"}

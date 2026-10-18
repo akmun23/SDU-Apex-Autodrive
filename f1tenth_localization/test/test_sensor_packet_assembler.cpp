@@ -14,7 +14,7 @@ void add_complete_packet(SensorPacketAssembler & assembler, int64_t stamp_ns)
 {
   assembler.add_encoder_sample(stamp_ns, 0.1, true);
   assembler.add_encoder_sample(stamp_ns, 0.2, false);
-  assembler.add_imu_sample(stamp_ns, 0.0, 0.0, 0.0, 0.0);
+  assembler.add_imu_sample(stamp_ns, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 }
 
 TEST(SensorPacketAssembler, RecordsNormalSourceGapWithoutReordering)
@@ -35,7 +35,7 @@ TEST(SensorPacketAssembler, RecordsNormalSourceGapWithoutReordering)
   EXPECT_EQ(assembler.diagnostics().maximum_reorder_depth, 0U);
 }
 
-TEST(SensorPacketAssembler, RecordsLateCompletionAfterBypassingIncompletePacket)
+TEST(SensorPacketAssembler, DropsLateCompletionAfterBypassingIncompletePacket)
 {
   SensorPacketAssembler assembler;
   std::vector<int64_t> emitted;
@@ -53,15 +53,15 @@ TEST(SensorPacketAssembler, RecordsLateCompletionAfterBypassingIncompletePacket)
   EXPECT_EQ(assembler.diagnostics().maximum_reorder_time_ns, 25'000'000);
 
   assembler.add_encoder_sample(earlier, 0.2, false);
-  assembler.add_imu_sample(earlier, 0.0, 0.0, 0.0, 0.0);
+  assembler.add_imu_sample(earlier, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
-  EXPECT_EQ(emitted, (std::vector<int64_t>{later, earlier}));
+  EXPECT_EQ(emitted, (std::vector<int64_t>{later}));
   EXPECT_EQ(assembler.diagnostics().source_reversal_count, 1U);
   EXPECT_EQ(assembler.diagnostics().late_completed_packet_count, 1U);
-  EXPECT_EQ(assembler.diagnostics().last_emitted_source_stamp_ns, earlier);
+  EXPECT_EQ(assembler.diagnostics().last_emitted_source_stamp_ns, later);
 }
 
-TEST(SensorPacketAssembler, CountsConsecutiveDuplicateCompletedSourceStamp)
+TEST(SensorPacketAssembler, DropsConsecutiveDuplicateCompletedSourceStamp)
 {
   SensorPacketAssembler assembler;
   std::size_t emitted = 0;
@@ -70,7 +70,7 @@ TEST(SensorPacketAssembler, CountsConsecutiveDuplicateCompletedSourceStamp)
   add_complete_packet(assembler, 1'050'000'000);
   add_complete_packet(assembler, 1'050'000'000);
 
-  EXPECT_EQ(emitted, 2U);
+  EXPECT_EQ(emitted, 1U);
   EXPECT_EQ(assembler.diagnostics().duplicate_source_count, 1U);
   EXPECT_EQ(assembler.diagnostics().source_reversal_count, 0U);
 }

@@ -13,8 +13,8 @@
  * Using ADMM to handle constraints, with Riccati recursion for the
  * unconstrained LQR sub-problem (O(N) per ADMM iteration).
  *
- * Supports cross-cost term x^T N u for rate-penalty formulations
- * where the state is augmented with previous control inputs.
+ * Supports cross-cost term x^T N u for command-change penalties against
+ * the latest command already represented by the plant's actuator queue.
  *
  * All arithmetic uses native float operations.
  * @dependencies mpc_types.h
@@ -36,20 +36,6 @@
 extern "C" {
 #endif
 
-/**
- * @brief Compute the analytical inverse of a 2x2 matrix.
- * @details Inputs: S is a 2x2 matrix in row-major layout.
- *          Purpose: provide a fast closed-form inverse for the Riccati control
- *          Hessian block.
- *          Outputs: writes inverse entries to Si when invertible.
- * @param S Input 2x2 matrix.
- * @param Si Output 2x2 inverse matrix.
- * @return 0 on success, -1 when the matrix is singular or near-singular.
- */
-int riccati_invert_2x2(
-    float S[2][2],
-    float Si[2][2]);
-
 typedef struct
 {
     float rho_start;
@@ -68,7 +54,6 @@ typedef struct
     int quadratic_factorization_count;
     uint64_t quadratic_factorization_time_ns;
     uint64_t quadratic_rhs_time_ns;
-    uint64_t refactor_pass_time_ns;
     uint64_t projection_residual_time_ns;
 } RiccatiDebugInfo_t;
 
@@ -126,7 +111,6 @@ int riccati_solver_pass(
     const float * RICCATI_RESTRICT terminal_x_lb,
     const float * RICCATI_RESTRICT terminal_x_ub,
     const float * RICCATI_RESTRICT x0,
-    int nx, int nu, int N,
     float rho,
     float rho_u,
     const float z_x[][RICCATI_MAX_NX],
@@ -139,16 +123,13 @@ int riccati_solver_pass(
 /** Cached quadratic Riccati terms for repeated ADMM linear-RHS updates. */
 typedef struct
 {
-    float P[PREDICTION_HORIZON + 1][RICCATI_MAX_NX][RICCATI_MAX_NX];
-    float K[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
-    float S_inv[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NU];
-    float G[PREDICTION_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
-    uint8_t x_is_constrained[PREDICTION_HORIZON + 1][RICCATI_MAX_NX];
+    float P[RICCATI_HORIZON + 1][RICCATI_MAX_NX][RICCATI_MAX_NX];
+    float K[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
+    float S_inv[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NU];
+    float G[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
+    uint8_t x_is_constrained[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
     float rho;
     float rho_u;
-    int nx;
-    int nu;
-    int horizon;
     int valid;
 } RiccatiFactorization_t;
 
@@ -157,9 +138,6 @@ int riccati_solver_factorize(
     const float *terminal_Q,
     const float *terminal_x_lb,
     const float *terminal_x_ub,
-    int nx,
-    int nu,
-    int horizon,
     float rho,
     float rho_u,
     RiccatiFactorization_t *factorization);
@@ -170,9 +148,6 @@ int riccati_solver_pass_factored(
     const float *terminal_x_lb,
     const float *terminal_x_ub,
     const float *x0,
-    int nx,
-    int nu,
-    int horizon,
     const RiccatiFactorization_t *factorization,
     const float z_x[][RICCATI_MAX_NX],
     const float y_x[][RICCATI_MAX_NX],
@@ -201,15 +176,12 @@ void riccati_admm_state_init(RiccatiAdmmState_t *state);
 /** Shift a valid ADMM warm-start one stage toward the present. */
 void riccati_admm_shift_warm_start(
     RiccatiAdmmState_t *state,
-    int nx,
-    int nu,
-    int horizon,
     const float *new_x0);
 
 /**
  * @brief Solve constrained LQR over a finite horizon using Riccati-ADMM.
- * @details Inputs: per-step dynamics/cost data, terminal cost vectors,
- *          initial state, dimensions, horizon, and solver configuration.
+ * @details Inputs: fixed-size per-step dynamics/cost data, terminal cost
+ *          vectors, initial state, and solver configuration.
  *          Purpose: compute a control/state trajectory that minimizes stage and
  *          terminal costs while satisfying box constraints through ADMM
  *          projections.
@@ -225,20 +197,19 @@ void riccati_admm_shift_warm_start(
  * 4. y-update: dual variable update
  * 5. Convergence check against the configured absolute maximum residual
  *
- * Complexity: O(N × (nx³ + nu·nx²)); the MPC rewrite uses nx=9, nu=2.
+ * This solver is specialized for N=RICCATI_HORIZON=32,
+ * nx=RICCATI_MAX_NX=22, and nu=RICCATI_MAX_NU=2. These compile-time
+ * dimensions are the only supported problem shape.
  *
- * @param step_data   Per-step dynamics and cost data (array of N elements)
- * @param terminal_Q  Terminal state cost (diagonal weights, length nx)
- * @param terminal_q  Terminal state linear cost (length nx)
- * @param x0          Initial state (length nx)
- * @param nx          State dimension (≤ RICCATI_MAX_NX)
- * @param nu          Control dimension (≤ RICCATI_MAX_NU)
- * @param horizon     Prediction steps N (≤ PREDICTION_HORIZON)
+ * @param step_data   Per-step dynamics and cost data (array of 32 elements)
+ * @param terminal_Q  Terminal state cost (diagonal weights, length 25)
+ * @param terminal_q  Terminal state linear cost (length 25)
+ * @param x0          Initial state (length 25)
  * @param config      ADMM configuration (if NULL, compile-time defaults are used).
  * @param admm_state  ADMM warm-start state (modified in-place)
  * @param solution    Output: optimal trajectories and status
- * @return Status code. Returns RICCATI_STATUS_ERROR if dimensions are invalid
- *         or any mandatory pointer input is NULL.
+ * @return Status code. Returns RICCATI_STATUS_ERROR if any mandatory pointer
+ *         input is NULL.
  */
 RiccatiStatus_t riccati_admm_solve(
     const RiccatiStepData_t *step_data,
@@ -247,7 +218,6 @@ RiccatiStatus_t riccati_admm_solve(
     const float *terminal_x_lb,
     const float *terminal_x_ub,
     const float *x0,
-    int nx, int nu, int horizon,
     const RiccatiAdmmConfig_t *config,
     RiccatiAdmmState_t *admm_state,
     RiccatiSolution_t *solution);
