@@ -50,6 +50,13 @@ struct UnitySourcePlantInput {
 
 struct UnitySourcePlantOutput {
   UnitySourcePlantState state{};
+  // Rear-axle planar displacement in the interval's initial body frame and
+  // world-yaw change, accumulated at the same 1 ms rate as the source plant.
+  // These let the MPC propagate pose without approximating a 25 ms interval
+  // from endpoint twist samples.
+  double integrated_body_forward_displacement_m{};
+  double integrated_body_lateral_displacement_m{};
+  double integrated_yaw_delta_rad{};
   // Contact kinematics and active low-speed constraints are exposed for
   // diagnostics; production odometry/MPC continue to consume the propagated
   // state and force channels below.

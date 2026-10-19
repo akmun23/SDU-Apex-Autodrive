@@ -21,6 +21,9 @@ typedef struct
     unsigned int incoming_branch_flags;
     float incoming_max_positive_wheel_slip;
     double incoming_wheel_slip_excess_mps[4];
+    float incoming_body_forward_delta_m;
+    float incoming_body_lateral_delta_m;
+    float incoming_body_yaw_delta_rad;
     int incoming_transition_valid;
 } MpcRtiState_t;
 

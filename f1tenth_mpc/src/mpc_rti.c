@@ -297,6 +297,12 @@ static int rollout_nominal_controls(
         if (!step.valid || !isfinite(progress[k] + step.delta_s_m)) return 0;
         states[k + 1].plant = step.next;
         states[k + 1].incoming_branch_flags = step.branch_flags;
+        states[k + 1].incoming_body_forward_delta_m =
+            step.body_forward_delta_m;
+        states[k + 1].incoming_body_lateral_delta_m =
+            step.body_lateral_delta_m;
+        states[k + 1].incoming_body_yaw_delta_rad =
+            step.body_yaw_delta_rad;
         store_slip_metrics(&states[k + 1], &step);
         states[k + 1].incoming_transition_valid = 1;
         progress[k + 1] = progress[k] + step.delta_s_m;
@@ -720,6 +726,12 @@ int mpc_rti_build_ltv_qp_with_schedule(
         known_step.next = nominal_states[k + 1].plant;
         known_step.branch_flags =
             nominal_states[k + 1].incoming_branch_flags;
+        known_step.body_forward_delta_m =
+            nominal_states[k + 1].incoming_body_forward_delta_m;
+        known_step.body_lateral_delta_m =
+            nominal_states[k + 1].incoming_body_lateral_delta_m;
+        known_step.body_yaw_delta_rad =
+            nominal_states[k + 1].incoming_body_yaw_delta_rad;
         known_step.valid = nominal_states[k + 1].incoming_transition_valid;
 #ifdef MPC_ENABLE_FD_ORACLE
         const int linearized = configuration->use_fd_jacobian_oracle
@@ -1288,6 +1300,12 @@ static int build_recovery_policy_seed(
         seed->controls[k] = control;
         seed->states[k + 1].plant = step.next;
         seed->states[k + 1].incoming_branch_flags = step.branch_flags;
+        seed->states[k + 1].incoming_body_forward_delta_m =
+            step.body_forward_delta_m;
+        seed->states[k + 1].incoming_body_lateral_delta_m =
+            step.body_lateral_delta_m;
+        seed->states[k + 1].incoming_body_yaw_delta_rad =
+            step.body_yaw_delta_rad;
         seed->states[k + 1].incoming_transition_valid = 1;
         seed->progress[k + 1] = seed->progress[k] + step.delta_s_m;
         if (!state_inside_command_envelope(&seed->states[k + 1], configuration))
@@ -1444,6 +1462,12 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
         }
         states[k + 1].plant = step.next;
         states[k + 1].incoming_branch_flags = step.branch_flags;
+        states[k + 1].incoming_body_forward_delta_m =
+            step.body_forward_delta_m;
+        states[k + 1].incoming_body_lateral_delta_m =
+            step.body_lateral_delta_m;
+        states[k + 1].incoming_body_yaw_delta_rad =
+            step.body_yaw_delta_rad;
         store_slip_metrics(&states[k + 1], &step);
         states[k + 1].incoming_transition_valid = 1;
         candidate_progress[k + 1] = candidate_progress[k] + step.delta_s_m;
@@ -2200,6 +2224,12 @@ static int build_rti_corridor_repair_seed(
         if (!step.valid) return 0;
         seed->states[k + 1].plant = step.next;
         seed->states[k + 1].incoming_branch_flags = step.branch_flags;
+        seed->states[k + 1].incoming_body_forward_delta_m =
+            step.body_forward_delta_m;
+        seed->states[k + 1].incoming_body_lateral_delta_m =
+            step.body_lateral_delta_m;
+        seed->states[k + 1].incoming_body_yaw_delta_rad =
+            step.body_yaw_delta_rad;
         store_slip_metrics(&seed->states[k + 1], &step);
         seed->states[k + 1].incoming_transition_valid = 1;
         seed->progress[k + 1] = seed->progress[k] + step.delta_s_m;

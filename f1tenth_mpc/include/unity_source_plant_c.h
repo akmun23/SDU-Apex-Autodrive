@@ -56,6 +56,9 @@ typedef struct {
 
 typedef struct {
   double state[UNITY_SOURCE_PLANT_STATE_SIZE];
+  double integrated_body_forward_displacement_m;
+  double integrated_body_lateral_displacement_m;
+  double integrated_yaw_delta_rad;
   /* PxVehicle wheel pose rotation is persistent and affects the source
    * wheel-mesh collision shapes in the native scene solve. */
   double wheel_rotation_angle_rad[4];

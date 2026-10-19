@@ -239,6 +239,16 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
   return result;
 }
 
+double SourceDerivedOdomRuntime::yaw_rate_prediction_residual_radps() const
+{
+  return previous_yaw_rate_prediction_residual_radps_;
+}
+
+bool SourceDerivedOdomRuntime::yaw_rate_prediction_residual_valid() const
+{
+  return yaw_rate_prediction_residual_valid_;
+}
+
 void SourceDerivedOdomRuntime::correct(
   double body_u_mps, double body_v_com_mps, double yaw_rate_radps,
   double yaw_rad, double roll_rad, double pitch_rad,
@@ -262,6 +272,7 @@ void SourceDerivedOdomRuntime::correct(
     previous_yaw_rate_prediction_residual_radps_ =
       last_raw_yaw_rate_prediction_radps_ - yaw_rate_radps;
     have_previous_yaw_rate_prediction_residual_ = true;
+    yaw_rate_prediction_residual_valid_ = true;
     have_raw_yaw_rate_prediction_ = false;
   }
 

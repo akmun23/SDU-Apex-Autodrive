@@ -421,7 +421,7 @@ private:
 
     sdu_apex_msgs::msg::UnityPlantState state;
     state.header = odom.header;
-    state.state_schema_version = 10;
+    state.state_schema_version = 11;
     state.state_origin = 1;
     state.suspension_history_initialized = last_plant_.suspension_history_initialized;
     state.sensor_corrected_state_mask =
@@ -435,6 +435,11 @@ private:
     state.physx_model_rear_axle_y_m = estimate.physx_model_y_m;
     state.yaw_rate_radps = estimate.yaw_rate_radps;
     state.gyro_yaw_rate_radps = packet.yaw_rate_radps;
+    state.yaw_rate_prediction_residual_valid =
+      plant_runtime_->yaw_rate_prediction_residual_valid();
+    state.yaw_rate_prediction_residual_radps =
+      state.yaw_rate_prediction_residual_valid ?
+      plant_runtime_->yaw_rate_prediction_residual_radps() : 0.0;
     state.steering_command_normalized = steering_command;
     state.throttle_command_normalized = throttle_command;
     state.delayed_steering_command_1_normalized =

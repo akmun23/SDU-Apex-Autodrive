@@ -56,6 +56,9 @@ public:
     double steering_command_norm, double throttle_command_norm,
     bool steering_feedback_valid, double steering_feedback_rad);
 
+  double yaw_rate_prediction_residual_radps() const;
+  bool yaw_rate_prediction_residual_valid() const;
+
   void correct(
     double body_u_mps, double body_v_com_mps, double yaw_rate_radps,
     double yaw_rad, double roll_rad, double pitch_rad,
@@ -80,6 +83,7 @@ private:
   double previous_steering_feedback_delta_rad_{0.0};
   bool have_raw_yaw_rate_prediction_{false};
   bool have_previous_yaw_rate_prediction_residual_{false};
+  bool yaw_rate_prediction_residual_valid_{false};
   bool have_yaw_rate_measurement_{false};
   bool have_previous_yaw_rate_measurement_{false};
   bool have_steering_feedback_{false};

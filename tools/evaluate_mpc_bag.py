@@ -67,6 +67,9 @@ class UnitySourcePlantInputC(ctypes.Structure):
 class UnitySourcePlantOutputC(ctypes.Structure):
     _fields_ = [
         ("state", ctypes.c_double * UNITY_SOURCE_PLANT_STATE_SIZE),
+        ("integrated_body_forward_displacement_m", ctypes.c_double),
+        ("integrated_body_lateral_displacement_m", ctypes.c_double),
+        ("integrated_yaw_delta_rad", ctypes.c_double),
         ("wheel_rotation_angle_rad", ctypes.c_double * 4),
         ("suspension_history_initialized", ctypes.c_int),
         ("longitudinal_slip", ctypes.c_double * 4),
@@ -94,15 +97,18 @@ def validate_source_plant_abi() -> None:
         "suspension_history_initialized": 256,
     }
     expected_output_offsets = {
-        "wheel_rotation_angle_rad": 208,
-        "suspension_history_initialized": 240,
-        "longitudinal_slip": 248,
-        "tire_longitudinal_force_n": 472,
-        "longitudinal_acceleration_mps2": 536,
+        "integrated_body_forward_displacement_m": 208,
+        "integrated_body_lateral_displacement_m": 216,
+        "integrated_yaw_delta_rad": 224,
+        "wheel_rotation_angle_rad": 232,
+        "suspension_history_initialized": 264,
+        "longitudinal_slip": 272,
+        "tire_longitudinal_force_n": 496,
+        "longitudinal_acceleration_mps2": 560,
     }
     if ctypes.sizeof(UnitySourcePlantInputC) != 264:
         raise RuntimeError("UnitySourcePlantInputC size disagrees with C ABI")
-    if ctypes.sizeof(UnitySourcePlantOutputC) != 560:
+    if ctypes.sizeof(UnitySourcePlantOutputC) != 584:
         raise RuntimeError("UnitySourcePlantOutputC size disagrees with C ABI")
     for structure, offsets in (
         (UnitySourcePlantInputC, expected_input_offsets),
@@ -180,10 +186,23 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
             # making the schema mismatch explicit.
             if topic != PLANT:
                 raise
-            if not skipped_plant_schema:
-                print(f"note: skipping incompatible {PLANT} payloads: {error}")
-                skipped_plant_schema = True
-            continue
+            # Schema 11 only appended (bool, float64) to schema 10. Fast-CDR
+            # needs 16 bytes for that bool, alignment padding, and double.
+            # Retry with zero defaults, then accept this compatibility path
+            # only when the decoded payload explicitly identifies schema 10.
+            try:
+                legacy_message = deserialize_message(
+                    serialized + bytes(16), message_types[topic])
+            except Exception:
+                legacy_message = None
+            if (legacy_message is not None and
+                    legacy_message.state_schema_version == 10):
+                message = legacy_message
+            else:
+                if not skipped_plant_schema:
+                    print(f"note: skipping incompatible {PLANT} payloads: {error}")
+                    skipped_plant_schema = True
+                continue
         row: dict[str, Any] = {"bag_time": bag_time_ns * 1e-9}
         if topic in (GT, ODOM, EKF):
             row.update(
@@ -205,6 +224,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
                 v_com=message.lateral_velocity_com_mps,
                 v_rear=message.lateral_velocity_rear_axle_mps,
                 r=message.yaw_rate_radps,
+                gyro_r=message.gyro_yaw_rate_radps,
                 wheel_omega=list(message.wheel_omega_radps),
                 wheel_angle=list(message.wheel_rotation_angle_rad),
                 body_height=message.body_height_m,
@@ -1062,7 +1082,9 @@ def report_horizon_errors(
 
 def report_source_plant_rollout(
     truth: list[dict[str, Any]], plant: list[dict[str, Any]],
-    library_path: Path,
+    odom_diagnostics: list[dict[str, Any]], library_path: Path,
+    yaw_residual_gain: float = 0.0,
+    yaw_residual_decay: float = 1.0,
 ) -> None:
     """Replay only odom plant state and queued commands through the C++ MPC plant.
 
@@ -1088,6 +1110,20 @@ def report_source_plant_rollout(
 
     truth_by_stamp = {round(row["stamp"], 6): row for row in truth}
     plant_by_stamp = {round(row["stamp"], 6): row for row in plant}
+    # Float64MultiArray has no ROS header, so its first value is the local
+    # observer clock (which starts at zero), not the bag/Unity epoch. Pair it
+    # to the plant publication by recorder receive time; both are emitted in
+    # sequence from the same sensor callback.
+    raw_yaw_forecast_by_stamp: dict[float, float] = {}
+    ordered_plant = sorted(plant, key=lambda row: row["bag_time"])
+    ordered_diagnostics = sorted(odom_diagnostics, key=lambda row: row["bag_time"])
+    for plant_row, diagnostic_row in zip(ordered_plant, ordered_diagnostics):
+        if (abs(plant_row["bag_time"] - diagnostic_row["bag_time"]) <= 0.005 and
+                len(diagnostic_row.get("values", [])) >= 13 and
+                diagnostic_row.get("label") ==
+                "sensor_corrected_source_derived_odom_v3"):
+            raw_yaw_forecast_by_stamp[round(plant_row["stamp"], 6)] = \
+                diagnostic_row["values"][12]
     times = sorted(set(truth_by_stamp) & set(plant_by_stamp))
     if len(times) < 31:
         print(f"source-plant rollout: only {len(times)} aligned epochs")
@@ -1227,6 +1263,8 @@ def report_source_plant_rollout(
     first_step_details: list[dict[str, float]] = []
     pathwise_position_maxima: list[float] = []
     skipped = 0
+    residual_valid_windows = 0
+    residual_enabled_windows = 0
     for start in range(0, len(times) - max(horizons)):
         # Only publish a window if its entire 750 ms input/truth interval is
         # available on the simulator's 40 Hz epoch grid.  Otherwise we'd keep
@@ -1254,10 +1292,26 @@ def report_source_plant_rollout(
         previous_r = state[2]
         start_speed = math.hypot(start_truth["u"], start_truth["v"])
         start_steering = abs(start_plant["physical_steering"])
+        # advance() forecasts this callback's epoch before correct() applies
+        # its same-epoch gyro sample. Thus the causal innovation is the raw
+        # forecast paired to this publication minus this epoch's gyro. It
+        # never reads future simulator truth.
+        raw_forecast = raw_yaw_forecast_by_stamp.get(round(start_time, 6))
+        yaw_residual = (
+            raw_forecast - start_plant["gyro_r"]
+            if raw_forecast is not None else 0.0)
+        residual_valid_windows += raw_forecast is not None
+        yaw_residual_enabled = (
+            raw_forecast is not None and yaw_residual_gain != 0.0 and
+            2.8 <= abs(state[0]) <= 5.0 and
+            0.10 <= start_steering <= 0.31 and
+            state[2] * yaw_residual < 0.0)
+        residual_enabled_windows += yaw_residual_enabled
         window_max_abs_yaw_error = 0.0
         window_max_abs_steering = start_steering
         window_yaw_rate_errors: list[float] = []
         window_position_errors: list[float] = []
+        window_pose_trace: list[dict[str, float]] = []
         valid = True
         window_errors = {horizon: {field: [] for field in ("u", "v", "r", "yaw", "xy")}
                          for horizon in horizons}
@@ -1279,31 +1333,53 @@ def report_source_plant_rollout(
                 break
             previous_state = state
             state = list(output.state)
+            raw_r_next = state[2]
+            predicted_speed = abs(state[0])
+            predicted_steering = abs(state[13])
+            residual_supported = (
+                yaw_residual_enabled and
+                2.8 <= predicted_speed <= 5.0 and
+                0.10 <= predicted_steering <= 0.31 and
+                state[13] * previous_state[13] > 0.0 and
+                raw_r_next * yaw_residual < 0.0)
+            residual_weight = yaw_residual_decay ** (horizon - 1)
+            if residual_supported:
+                state[2] = raw_r_next - (
+                    yaw_residual_gain * residual_weight * yaw_residual)
             angles = list(output.wheel_rotation_angle_rad)
             history_initialized = bool(output.suspension_history_initialized)
             predicted_yaw_start = predicted_yaw
-            yaw_rate_mid = 0.5 * (previous_r + state[2])
-            yaw_mid = predicted_yaw + 0.5 * yaw_rate_mid * 0.025
-            u_mid = 0.5 * (previous_state[0] + state[0])
-            rear_v_previous = previous_state[1] - previous_r * COM_TO_REAR_AXLE_M
-            rear_v_current = state[1] - state[2] * COM_TO_REAR_AXLE_M
-            v_mid = 0.5 * (rear_v_previous + rear_v_current)
-            predicted_yaw_end = predicted_yaw + yaw_rate_mid * 0.025
-            predicted_yaw_mid = 0.5 * (predicted_yaw_start + predicted_yaw_end)
-            predicted_pose_x += 0.025 * (
-                u_mid * math.cos(yaw_mid) - v_mid * math.sin(yaw_mid))
-            predicted_pose_y += 0.025 * (
-                u_mid * math.sin(yaw_mid) + v_mid * math.cos(yaw_mid))
-            predicted_yaw = predicted_yaw_end
+            yaw_delta = output.integrated_yaw_delta_rad
+            body_forward_delta = output.integrated_body_forward_displacement_m
+            body_lateral_delta = output.integrated_body_lateral_displacement_m
+            if residual_supported:
+                # Match the production rollout's causal endpoint correction
+                # over this fixed 25 ms interval while retaining source-plant
+                # intermediate integration for translation and heading.
+                delta_r = state[2] - raw_r_next
+                yaw_delta += delta_r * dt
+                body_lateral_delta -= delta_r * COM_TO_REAR_AXLE_M * dt
+            predicted_pose_x += (
+                body_forward_delta * math.cos(predicted_yaw_start) -
+                body_lateral_delta * math.sin(predicted_yaw_start))
+            predicted_pose_y += (
+                body_forward_delta * math.sin(predicted_yaw_start) +
+                body_lateral_delta * math.cos(predicted_yaw_start))
+            predicted_yaw_mid = predicted_yaw_start + 0.5 * yaw_delta
+            predicted_yaw = predicted_yaw_start + yaw_delta
             fine_predicted_pose_x, fine_predicted_pose_y = integrate_interpolated_twist(
                 fine_predicted_pose_x, fine_predicted_pose_y,
-                previous_state[0], rear_v_previous, predicted_yaw_start,
-                state[0], rear_v_current, predicted_yaw, dt)
+                previous_state[0],
+                previous_state[1] - previous_r * COM_TO_REAR_AXLE_M,
+                predicted_yaw_start, state[0],
+                state[1] - state[2] * COM_TO_REAR_AXLE_M,
+                predicted_yaw, dt)
             previous_r = state[2]
             actual = truth_by_stamp[target_time]
-            window_position_errors.append(math.hypot(
+            position_error = math.hypot(
                 predicted_pose_x - actual["x"],
-                predicted_pose_y - actual["y"]))
+                predicted_pose_y - actual["y"])
+            window_position_errors.append(position_error)
             previous_truth_for_step = previous_truth
             truth_yaw_delta = normalized_angle(actual["yaw"] - previous_truth["yaw"])
             truth_yaw_mid = previous_truth["yaw"] + 0.5 * truth_yaw_delta
@@ -1313,9 +1389,11 @@ def report_source_plant_rollout(
             truth_rear_v_current = actual["v"] - actual["r"] * COM_TO_REAR_AXLE_M
             truth_v_mid = 0.5 * (truth_rear_v_previous + truth_rear_v_current)
             gt_heading_predicted_motion_x += 0.025 * (
-                u_mid * math.cos(truth_yaw_mid) - v_mid * math.sin(truth_yaw_mid))
+                truth_u_mid * math.cos(truth_yaw_mid) -
+                truth_v_mid * math.sin(truth_yaw_mid))
             gt_heading_predicted_motion_y += 0.025 * (
-                u_mid * math.sin(truth_yaw_mid) + v_mid * math.cos(truth_yaw_mid))
+                truth_u_mid * math.sin(truth_yaw_mid) +
+                truth_v_mid * math.cos(truth_yaw_mid))
             predicted_heading_gt_motion_x += 0.025 * (
                 truth_u_mid * math.cos(predicted_yaw_mid) -
                 truth_v_mid * math.sin(predicted_yaw_mid))
@@ -1335,6 +1413,19 @@ def report_source_plant_rollout(
                 truth_rear_v_current, actual["yaw"], dt)
             previous_truth = actual
             window_yaw_rate_errors.append(state[2] - actual["r"])
+            window_pose_trace.append({
+                "step": float(horizon),
+                "xy_error_m": position_error,
+                "yaw_error_rad": normalized_angle(
+                    predicted_yaw - actual["yaw"]),
+                "yaw_rate_error_radps": state[2] - actual["r"],
+                "speed_error_mps": state[0] - actual["u"],
+                "lateral_speed_error_mps": state[1] - actual["v"],
+                "physical_steering_rad": state[13],
+                "queued_steering_rad":
+                    current["delayed_steering_1"] * MAX_STEERING_RAD,
+                "queued_throttle": current["delayed_throttle_1"],
+            })
             window_max_abs_yaw_error = max(
                 window_max_abs_yaw_error,
                 abs(normalized_angle(predicted_yaw - actual["yaw"])))
@@ -1420,6 +1511,16 @@ def report_source_plant_rollout(
             skipped += 1
             continue
         pathwise_position_maxima.append(max(window_position_errors))
+        path_peak_index = max(
+            range(len(window_position_errors)),
+            key=window_position_errors.__getitem__)
+        path_peak = window_position_errors[path_peak_index]
+        path_row = position_decomposition[max(horizons)][-1]
+        path_row["path_max_xy_m"] = path_peak
+        path_row["path_max_step"] = float(path_peak_index + 1)
+        path_row["start_yaw_residual_radps"] = yaw_residual
+        if path_peak > 0.05:
+            path_row["path_trace"] = window_pose_trace
         for horizon in horizons:
             for field in errors[horizon]:
                 errors[horizon][field].extend(window_errors[horizon][field])
@@ -1427,6 +1528,9 @@ def report_source_plant_rollout(
 
     print("\nProduction source-plant open-loop rollout (logged UnityPlantState start "
           "+ slot-1 commands; no future state correction):")
+    print(f"  causal yaw-residual correction gain={yaw_residual_gain:.3f}; "
+          "residual is same-epoch raw forecast minus current gyro; "
+          f"aligned={residual_valid_windows}, enabled={residual_enabled_windows}")
     print(f"  aligned_epochs={len(times)} start_windows={len(times)-max(horizons)} "
           f"skipped_windows={skipped} model_dt=25ms")
     for horizon in horizons:
@@ -1514,6 +1618,30 @@ def report_source_plant_rollout(
                   f"dr={row['end_r_error_radps']:+.3f}rad/s "
                   f"mean_dr={row['yaw_rate_error_mean_radps']:+.3f}rad/s "
                   f"rmse_dr={row['yaw_rate_error_rmse_radps']:.3f}rad/s")
+        failing_path_rows = [row for row in endpoint_rows
+                             if row.get("path_max_xy_m", 0.0) > 0.05]
+        if failing_path_rows:
+            print("  full-path failures (>5cm at an intermediate or final 25ms step):")
+            for row in sorted(failing_path_rows,
+                              key=lambda item: item["path_max_xy_m"],
+                              reverse=True)[:20]:
+                print(f"    peak={row['path_max_xy_m']:.4f}m at="
+                      f"{int(row['path_max_step'])*25}ms start_speed="
+                      f"{row['start_speed_mps']:.2f}m/s start_steer="
+                      f"{row['start_steering_rad']:.3f}rad "
+                      f"yaw_innovation={row['start_yaw_residual_radps']:+.4f}rad/s")
+                for step in row.get("path_trace", []):
+                    if int(step["step"]) in (1, 4, 10, 20, 30) or \
+                            abs(step["xy_error_m"] - row["path_max_xy_m"]) < 1.0e-9:
+                        print(f"      {int(step['step'])*25:3d}ms xy="
+                              f"{step['xy_error_m']:.4f}m yaw="
+                              f"{step['yaw_error_rad']:+.4f}rad "
+                              f"dr={step['yaw_rate_error_radps']:+.4f}rad/s "
+                              f"du={step['speed_error_mps']:+.4f}/"
+                              f"{step['lateral_speed_error_mps']:+.4f}m/s "
+                              f"steer={step['physical_steering_rad']:+.3f}/"
+                              f"{step['queued_steering_rad']:+.3f}rad "
+                              f"q={step['queued_throttle']:.3f}")
         oracle_rows = oracle_position_errors[max(horizons)]
         for index, label in enumerate(("plant_translation_with_GT_yaw",
                                        "GT_translation_with_plant_yaw")):
@@ -1596,6 +1724,16 @@ def main() -> int:
         default=Path("build/f1tenth_mpc/libunity_source_plant_eval.so"),
         help="optional evaluator library built from the production plant source",
     )
+    parser.add_argument(
+        "--yaw-residual-gain", type=float, default=0.0,
+        help="apply the production gated causal gyro-residual yaw correction "
+             "during fixed-input source-plant replay (default: disabled)",
+    )
+    parser.add_argument(
+        "--yaw-residual-decay", type=float, default=1.0,
+        help="per-25ms multiplicative decay of the starting causal yaw residual "
+             "during fixed-input replay (default: constant residual)",
+    )
     args = parser.parse_args()
     data = read_bag(args.bag)
     truth = data.get(GT, [])
@@ -1646,7 +1784,9 @@ def main() -> int:
             data.get(RIGHT_ENCODER, []), data.get(THROTTLE, []))
         if args.source_plant_rollout:
             report_source_plant_rollout(
-                truth, plant_rows, args.source_plant_library)
+                truth, plant_rows, data.get(ODOM_DIAGNOSTICS, []),
+                args.source_plant_library, args.yaw_residual_gain,
+                args.yaw_residual_decay)
     elif args.source_plant_rollout:
         print(f"source-plant rollout: bag has no usable {PLANT} stream")
     diagnostics = [row for row in data.get(DIAGNOSTICS, []) if row.get("json")]

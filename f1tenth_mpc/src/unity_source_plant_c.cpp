@@ -41,6 +41,11 @@ void to_c(const f1tenth_mpc::UnitySourcePlantOutput &source,
   output->state[UNITY_SOURCE_U] = state.u_mps;
   output->state[UNITY_SOURCE_V] = state.v_mps;
   output->state[UNITY_SOURCE_YAW_RATE] = state.yaw_rate_radps;
+  output->integrated_body_forward_displacement_m =
+      source.integrated_body_forward_displacement_m;
+  output->integrated_body_lateral_displacement_m =
+      source.integrated_body_lateral_displacement_m;
+  output->integrated_yaw_delta_rad = source.integrated_yaw_delta_rad;
   std::copy(state.wheel_omega_radps.begin(), state.wheel_omega_radps.end(),
             output->state + UNITY_SOURCE_WHEEL_OMEGA_FL);
   std::copy(state.wheel_rotation_angle_rad.begin(),

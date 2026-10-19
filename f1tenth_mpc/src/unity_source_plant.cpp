@@ -33,6 +33,7 @@ constexpr double kGravity = 9.81;
 constexpr double kWheelbaseM = 0.324;
 constexpr double kTrackM = 0.236;
 constexpr double kWheelRadiusM = 0.059;
+constexpr double kComForwardFromRearAxleM = 0.15532;
 // PxVehicleUpdate.cpp::setVehicleToleranceScale sets the lateral-slip
 // denominator floor to 1.0 * scale.length; the active PhysX scale length is 1m.
 constexpr double kMinLateralSpeedForTireModelMps = 1.0;
@@ -1030,11 +1031,37 @@ bool unity_source_plant_step(const UnitySourcePlantState &state,
     return false;
   UnitySourcePlantState current = state;
   UnitySourcePlantOutput result{};
+  double integrated_forward_m = 0.0;
+  double integrated_lateral_m = 0.0;
+  double integrated_yaw_rad = 0.0;
   std::array<double, 4> maximum_positive_slip{};
   std::array<double, 4> maximum_slip_excess_mps{};
   for (unsigned int i = 0; i < exact_steps; ++i) {
     const bool final_step = i + 1 == exact_steps;
     if (!step(current, input, kDt, &result, final_step)) return false;
+    const auto & next = result.state;
+    const double u_mid = 0.5 * (current.u_mps + next.u_mps);
+    const double r_mid = 0.5 * (current.yaw_rate_radps + next.yaw_rate_radps);
+    const double v_rear_mid =
+        0.5 * (current.v_mps + next.v_mps) - r_mid * kComForwardFromRearAxleM;
+    const double roll_mid = 0.5 * (current.roll_rad + next.roll_rad);
+    const double pitch_mid = 0.5 * (current.pitch_rad + next.pitch_rad);
+    const double pitch_rate_mid =
+        0.5 * (current.pitch_rate_radps + next.pitch_rate_radps);
+    const double cos_pitch = std::cos(pitch_mid);
+    if (std::abs(cos_pitch) < 1.0e-6) return false;
+    // Rigidbody angular velocity is body-frame p/q/r. Convert the integrated
+    // source states to ZYX Euler yaw rate instead of treating body-z rate as
+    // world-yaw rate when the chassis is rolled or pitched.
+    const double yaw_rate_euler =
+        (pitch_rate_mid * std::sin(roll_mid) + r_mid * std::cos(roll_mid)) /
+        cos_pitch;
+    const double yaw_mid = integrated_yaw_rad + 0.5 * kDt * yaw_rate_euler;
+    integrated_forward_m += kDt *
+        (u_mid * std::cos(yaw_mid) - v_rear_mid * std::sin(yaw_mid));
+    integrated_lateral_m += kDt *
+        (u_mid * std::sin(yaw_mid) + v_rear_mid * std::cos(yaw_mid));
+    integrated_yaw_rad += kDt * yaw_rate_euler;
     for (std::size_t wheel = 0; wheel < maximum_positive_slip.size(); ++wheel) {
       maximum_positive_slip[wheel] = std::max(maximum_positive_slip[wheel],
           result.maximum_positive_longitudinal_slip[wheel]);
@@ -1046,6 +1073,9 @@ bool unity_source_plant_step(const UnitySourcePlantState &state,
   }
   result.maximum_positive_longitudinal_slip = maximum_positive_slip;
   result.maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
+  result.integrated_body_forward_displacement_m = integrated_forward_m;
+  result.integrated_body_lateral_displacement_m = integrated_lateral_m;
+  result.integrated_yaw_delta_rad = integrated_yaw_rad;
   *output = result;
   return true;
 }

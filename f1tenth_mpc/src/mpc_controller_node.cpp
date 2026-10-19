@@ -35,7 +35,7 @@
 namespace f1tenth_mpc {
 namespace {
 
-constexpr std::uint32_t kUnityPlantStateSchemaVersion = 10;
+constexpr std::uint32_t kUnityPlantStateSchemaVersion = 11;
 
 double clamp(double value, double lower, double upper)
 {
@@ -1359,6 +1359,7 @@ private:
             !std::isfinite(message->lateral_velocity_rear_axle_mps) ||
             !std::isfinite(message->yaw_rate_radps) ||
             !std::isfinite(message->gyro_yaw_rate_radps) ||
+            !std::isfinite(message->yaw_rate_prediction_residual_radps) ||
             !std::isfinite(message->steering_command_normalized) ||
             !std::isfinite(message->throttle_command_normalized) ||
             !std::isfinite(message->delayed_steering_command_1_normalized) ||
@@ -1610,6 +1611,19 @@ private:
             // comes from the vehicle plant equations.
             source_time_plant.r = static_cast<float>(
                 unity_plant_snapshot.gyro_yaw_rate_radps);
+            source_time_plant.yaw_rate_prediction_residual_radps =
+                unity_plant_snapshot.yaw_rate_prediction_residual_valid ?
+                static_cast<float>(
+                    unity_plant_snapshot.yaw_rate_prediction_residual_radps) :
+                0.0f;
+            source_time_plant.yaw_rate_residual_correction_enabled =
+                unity_plant_snapshot.yaw_rate_prediction_residual_valid &&
+                std::abs(source_time_plant.u) >= 2.8f &&
+                std::abs(source_time_plant.u) <= 5.0f &&
+                std::abs(unity_plant_snapshot.physical_steering_rad) >= 0.10 &&
+                std::abs(unity_plant_snapshot.physical_steering_rad) <= 0.31 &&
+                source_time_plant.r *
+                    source_time_plant.yaw_rate_prediction_residual_radps < 0.0f;
             source_time_plant.v = static_cast<float>(
                 unity_plant_snapshot.lateral_velocity_rear_axle_mps);
             source_time_plant.actual_steering_angle = static_cast<float>(

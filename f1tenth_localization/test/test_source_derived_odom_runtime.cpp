@@ -105,6 +105,21 @@ TEST(SourceDerivedOdomRuntime, AppliesOnlyThePreviousGyroInnovationToYawForecast
     second.raw_yaw_rate_prediction_radps + 0.04, 1.0e-12);
 }
 
+TEST(SourceDerivedOdomRuntime, ExposesCurrentCausalYawPredictionInnovation)
+{
+  SourceDerivedOdomRuntime runtime(0.15532);
+  const auto prediction = runtime.advance(0.0, 0.0, false, 0.0);
+  EXPECT_FALSE(runtime.yaw_rate_prediction_residual_valid());
+
+  constexpr double measured_rate_offset = 0.037;
+  runtime.correct(0.0, 0.0,
+    prediction.raw_yaw_rate_prediction_radps - measured_rate_offset,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, {0.0, 0.0, 0.0, 0.0});
+  EXPECT_TRUE(runtime.yaw_rate_prediction_residual_valid());
+  EXPECT_NEAR(runtime.yaw_rate_prediction_residual_radps(),
+    measured_rate_offset, 1.0e-12);
+}
+
 TEST(SourceDerivedOdomRuntime, SeparatesSteeringRampReversalAndSettledYawForecasts)
 {
   SourceDerivedOdomRuntime runtime(0.15532);

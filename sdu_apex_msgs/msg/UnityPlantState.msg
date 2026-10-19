@@ -70,3 +70,8 @@ float64 longitudinal_acceleration_mps2
 float64 lateral_acceleration_mps2
 # Derived yaw-rate change from the same 1 ms source-plant sample interval.
 float64 yaw_acceleration_radps2
+# Causal one-packet yaw-model innovation: raw source-plant prediction minus
+# this epoch's measured gyro rate. It is an observed residual, not simulator
+# truth; MPC may use it only as bounded predictive context.
+bool yaw_rate_prediction_residual_valid
+float64 yaw_rate_prediction_residual_radps

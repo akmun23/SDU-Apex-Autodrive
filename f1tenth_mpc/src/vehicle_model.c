@@ -14,6 +14,15 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Conservative residual use selected by cross-run replay. This is an
+ * observer correction, not a PhysX parameter; the source plant remains the
+ * physical transition and the correction is disabled outside its support. */
+static const float kYawResidualCorrectionGain = 0.5f;
+static const float kYawResidualMinSpeedMps = 2.8f;
+static const float kYawResidualMaxSpeedMps = 5.0f;
+static const float kYawResidualMinSteeringRad = 0.10f;
+static const float kYawResidualMaxSteeringRad = 0.31f;
+
 /* Unity's Rigidbody velocity is measured at its COM. The MPC state and
  * /odom twist are referenced to base_link at the rear axle. The source
  * vehicle geometry puts COM 0.15532 m forward of that axle (see
@@ -252,6 +261,9 @@ static int finite_mpc_state(const MpcModelState_t *state)
     if (!state || !isfinite(state->e_y) || !isfinite(state->e_psi) ||
         !isfinite(state->u) || !isfinite(state->v) || !isfinite(state->r) ||
         !isfinite(state->longitudinal_acceleration_mps2) ||
+        !isfinite(state->yaw_rate_prediction_residual_radps) ||
+        (state->yaw_rate_residual_correction_enabled != 0 &&
+         state->yaw_rate_residual_correction_enabled != 1) ||
         !isfinite(state->actual_steering_angle) ||
         !isfinite(state->delayed_throttle_command_1) ||
         !isfinite(state->delayed_throttle_command_2)) return 0;
@@ -276,46 +288,34 @@ static unsigned int mask_popcount(uint64_t mask)
     return count;
 }
 
-/* The path-coordinate integration depends on the vehicle transition only
- * through its next body velocities. Keeping it separate makes derivatives
- * of e_y/e_psi inexpensive without replaying the 1 ms wheel-contact model. */
-static int vehicle_model_tracking_step(
+/* The plant has already integrated body displacement and Euler yaw at its
+ * internal 1 ms rate. Project that actual interval motion into Frenet
+ * coordinates rather than reconstructing it from 25 ms endpoint twist. */
+static int vehicle_model_tracking_step_integrated(
     const MpcModelState_t *state,
-    float u_next,
-    float v_next,
-    float r_next,
-    float dt,
+    float body_forward_delta_m,
+    float body_lateral_delta_m,
+    float body_yaw_delta_rad,
     float path_curvature,
     float *e_y_next,
     float *e_psi_next,
     float *delta_s)
 {
     if (!state || !e_y_next || !e_psi_next || !delta_s) return 0;
-    const float u_mid = 0.5f * (state->u + u_next);
-    const float v_mid = 0.5f * (state->v + v_next);
-    const float r_mid = 0.5f * (state->r + r_next);
-    const float denominator0 = 1.0f - path_curvature * state->e_y;
-    if (fabsf(denominator0) < 0.05f) return 0;
-    const float s_dot0 =
-        (state->u * cosf(state->e_psi) - state->v * sinf(state->e_psi)) /
-        denominator0;
-    const float e_y_dot0 =
-        state->u * sinf(state->e_psi) + state->v * cosf(state->e_psi);
-    const float e_psi_dot0 = state->r - path_curvature * s_dot0;
-    const float e_y_mid = state->e_y + 0.5f * dt * e_y_dot0;
-    const float e_psi_mid = state->e_psi + 0.5f * dt * e_psi_dot0;
-    const float denominator_mid = 1.0f - path_curvature * e_y_mid;
-    if (fabsf(denominator_mid) < 0.05f) return 0;
-    const float s_dot_mid =
-        (u_mid * cosf(e_psi_mid) - v_mid * sinf(e_psi_mid)) /
-        denominator_mid;
-    const float e_y_dot_mid =
-        u_mid * sinf(e_psi_mid) + v_mid * cosf(e_psi_mid);
-    const float e_psi_dot_mid = r_mid - path_curvature * s_dot_mid;
-    const float e_psi_raw = state->e_psi + dt * e_psi_dot_mid;
-    *e_y_next = state->e_y + dt * e_y_dot_mid;
+    const float c = cosf(state->e_psi);
+    const float s = sinf(state->e_psi);
+    const float path_forward_delta =
+        body_forward_delta_m * c - body_lateral_delta_m * s;
+    const float path_lateral_delta =
+        body_forward_delta_m * s + body_lateral_delta_m * c;
+    const float denominator = 1.0f - path_curvature * state->e_y;
+    if (fabsf(denominator) < 0.05f) return 0;
+    *delta_s = path_forward_delta / denominator;
+    *e_y_next = state->e_y + path_lateral_delta -
+        0.5f * path_curvature * (*delta_s) * (*delta_s);
+    const float e_psi_raw = state->e_psi + body_yaw_delta_rad -
+        path_curvature * (*delta_s);
     *e_psi_next = atan2f(sinf(e_psi_raw), cosf(e_psi_raw));
-    *delta_s = dt * s_dot_mid;
     return isfinite(*e_y_next) && isfinite(*e_psi_next) &&
         isfinite(*delta_s);
 }
@@ -393,7 +393,32 @@ static int vehicle_model_step_scalar(
         source_output.suspension_history_initialized;
 
     const float u_next = (float)source_output.state[UNITY_SOURCE_U];
-    const float r_next = (float)source_output.state[UNITY_SOURCE_YAW_RATE];
+    const float raw_r_next =
+        (float)source_output.state[UNITY_SOURCE_YAW_RATE];
+    const float predicted_speed = fabsf(
+        (float)source_output.state[UNITY_SOURCE_U]);
+    const float predicted_steering = fabsf(
+        (float)source_output.state[UNITY_SOURCE_PHYSICAL_STEERING]);
+    const float yaw_residual = state->yaw_rate_prediction_residual_radps;
+    const int residual_supported =
+        state->yaw_rate_residual_correction_enabled &&
+        predicted_speed >= kYawResidualMinSpeedMps &&
+        predicted_speed <= kYawResidualMaxSpeedMps &&
+        predicted_steering >= kYawResidualMinSteeringRad &&
+        predicted_steering <= kYawResidualMaxSteeringRad &&
+        source_output.state[UNITY_SOURCE_PHYSICAL_STEERING] *
+            state->actual_steering_angle > 0.0 &&
+        raw_r_next * yaw_residual < 0.0f;
+    const float r_next = raw_r_next - (residual_supported ?
+        kYawResidualCorrectionGain * yaw_residual : 0.0f);
+    const float yaw_rate_correction = r_next - raw_r_next;
+    const float body_yaw_delta = (float)
+        source_output.integrated_yaw_delta_rad + yaw_rate_correction * dt;
+    const float body_forward_delta = (float)
+        source_output.integrated_body_forward_displacement_m;
+    const float body_lateral_delta = (float)
+        (source_output.integrated_body_lateral_displacement_m -
+         yaw_rate_correction * kComForwardFromRearAxleM * dt);
     const float v_next = (float)(
         source_output.state[UNITY_SOURCE_V] -
         r_next * kComForwardFromRearAxleM);
@@ -405,9 +430,13 @@ static int vehicle_model_step_scalar(
         !isfinite(actual_next) || !isfinite(acceleration) ||
         fabsf(u_next) > parameters.maximum_command_speed_mps) return 0;
 
-    if (!vehicle_model_tracking_step(
-            state, u_next, v_next, r_next, dt, path_curvature,
+    if (!vehicle_model_tracking_step_integrated(
+            state, body_forward_delta, body_lateral_delta,
+            body_yaw_delta, path_curvature,
             &next.e_y, &next.e_psi, &stage->delta_s_m)) return 0;
+    stage->body_forward_delta_m = body_forward_delta;
+    stage->body_lateral_delta_m = body_lateral_delta;
+    stage->body_yaw_delta_rad = body_yaw_delta;
     next.u = u_next;
     next.v = v_next;
     next.r = r_next;
@@ -640,12 +669,14 @@ static int vehicle_model_linearize_with_known_step(
         mpc_state_perturb(&state_minus, column, -epsilon);
         float plus_ey = 0.0f, plus_epsi = 0.0f, plus_ds = 0.0f;
         float minus_ey = 0.0f, minus_epsi = 0.0f, minus_ds = 0.0f;
-        const int plus_valid = vehicle_model_tracking_step(
-            &state_plus, stage->next.u, stage->next.v, stage->next.r,
-            dt, path_curvature, &plus_ey, &plus_epsi, &plus_ds);
-        const int minus_valid = vehicle_model_tracking_step(
-            &state_minus, stage->next.u, stage->next.v, stage->next.r,
-            dt, path_curvature, &minus_ey, &minus_epsi, &minus_ds);
+        const int plus_valid = vehicle_model_tracking_step_integrated(
+            &state_plus, stage->body_forward_delta_m,
+            stage->body_lateral_delta_m, stage->body_yaw_delta_rad,
+            path_curvature, &plus_ey, &plus_epsi, &plus_ds);
+        const int minus_valid = vehicle_model_tracking_step_integrated(
+            &state_minus, stage->body_forward_delta_m,
+            stage->body_lateral_delta_m, stage->body_yaw_delta_rad,
+            path_curvature, &minus_ey, &minus_epsi, &minus_ds);
         if (plus_valid && minus_valid) {
             linearization->A[0][column] =
                 (plus_ey - minus_ey) / (2.0f * epsilon);

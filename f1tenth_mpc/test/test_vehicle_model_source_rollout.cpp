@@ -47,6 +47,42 @@ TEST(VehicleModelSourceRollout, CarriesLateralYawWheelAndSuspensionMotion)
             first.next.source_plant_internal_state[MPC_PLANT_STATE_ROLL]);
 }
 
+TEST(VehicleModelSourceRollout, AppliesCausalYawResidualOnlyInSupportedRegime)
+{
+  MpcModelState_t state = turning_state();
+  state.u = 3.5f;
+  state.delayed_steering_command_1 = -0.25f;
+  state.delayed_steering_command_2 = -0.25f;
+  state.actual_steering_angle = -0.25f;
+  const MpcModelControl_t control{-0.25f, 0.25f};
+  const MpcStageResult_t raw = mpc_vehicle_model_step(
+      &state, &control, 0.025f, 0.0f);
+  ASSERT_TRUE(raw.valid);
+  ASSERT_GT(std::abs(raw.next.r), 1.0e-3f);
+
+  state.yaw_rate_prediction_residual_radps = raw.next.r > 0.0f ? -0.08f : 0.08f;
+  state.yaw_rate_residual_correction_enabled = 1;
+  const MpcStageResult_t corrected = mpc_vehicle_model_step(
+      &state, &control, 0.025f, 0.0f);
+  ASSERT_TRUE(corrected.valid);
+  EXPECT_NEAR(corrected.next.r, raw.next.r -
+      0.5f * state.yaw_rate_prediction_residual_radps, 1.0e-5f);
+  EXPECT_EQ(corrected.next.yaw_rate_residual_correction_enabled, 1);
+  EXPECT_FLOAT_EQ(corrected.next.yaw_rate_prediction_residual_radps,
+      state.yaw_rate_prediction_residual_radps);
+
+  state.u = 6.0f;
+  const MpcStageResult_t outside_speed_support = mpc_vehicle_model_step(
+      &state, &control, 0.025f, 0.0f);
+  ASSERT_TRUE(outside_speed_support.valid);
+  MpcModelState_t state_without_correction = state;
+  state_without_correction.yaw_rate_residual_correction_enabled = 0;
+  const MpcStageResult_t outside_speed_raw = mpc_vehicle_model_step(
+      &state_without_correction, &control, 0.025f, 0.0f);
+  ASSERT_TRUE(outside_speed_raw.valid);
+  EXPECT_FLOAT_EQ(outside_speed_support.next.r, outside_speed_raw.next.r);
+}
+
 TEST(VehicleModelSourceRollout, CachedAccelerationIsNotARecursivePlantState)
 {
   MpcModelState_t low_cache = turning_state();
@@ -589,6 +625,12 @@ TEST(MpcRtiStageParallelism, CondensesQueuedCommandsWithoutChangingPlantJacobian
     ASSERT_TRUE(step.valid);
     nominal_states[k + 1].plant = step.next;
     nominal_states[k + 1].incoming_branch_flags = step.branch_flags;
+    nominal_states[k + 1].incoming_body_forward_delta_m =
+        step.body_forward_delta_m;
+    nominal_states[k + 1].incoming_body_lateral_delta_m =
+        step.body_lateral_delta_m;
+    nominal_states[k + 1].incoming_body_yaw_delta_rad =
+        step.body_yaw_delta_rad;
     nominal_states[k + 1].incoming_transition_valid = 1;
   }
   MpcStageLinearization_t serial[PREDICTION_HORIZON] = {};
@@ -658,6 +700,10 @@ TEST(MpcRtiStageParallelism, CondensesQueuedCommandsWithoutChangingPlantJacobian
       EXPECT_FLOAT_EQ(problem.steps[k].B[row][1],
           serial[k].A[model_row][MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1]);
       for (int col = 0; col < MPC_OPT_PHYSICAL_NX; ++col) {
+        SCOPED_TRACE(::testing::Message() << "stage=" << k
+            << " row=" << row << " col=" << col
+            << " model_row=" << model_row
+            << " model_col=" << model_index(col));
         EXPECT_FLOAT_EQ(problem.steps[k].A[row][col],
             serial[k].A[model_row][model_index(col)]);
       }
