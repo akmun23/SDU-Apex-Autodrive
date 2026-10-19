@@ -241,10 +241,6 @@ int vehicle_model_initialize_plant_state(MpcModelState_t *state)
         UnitySourcePlantInputC initial;
         seed_source_physics(state, &initial);
         source_state_to_internal(state, initial.state);
-        memcpy(&state->source_plant_internal_state[
-                   MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL],
-               initial.wheel_rotation_angle_rad,
-               4 * sizeof(initial.wheel_rotation_angle_rad[0]));
         state->source_suspension_history_initialized = 0;
         state->source_plant_initialized = 1;
     }
@@ -374,10 +370,6 @@ static int vehicle_model_step_scalar(
     source_input.steering_target_rad = clamp_source_steering_target(
         state->delayed_steering_command_1);
     source_input.throttle_normalized = state->delayed_throttle_command_1;
-    memcpy(source_input.wheel_rotation_angle_rad,
-        &state->source_plant_internal_state[
-            MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL],
-        4 * sizeof(source_input.wheel_rotation_angle_rad[0]));
     if (source_input.throttle_normalized == 0.0f)
         stage->branch_flags |= MPC_STAGE_PLANT_BRAKE;
     UnitySourcePlantOutputC source_output;
@@ -396,10 +388,6 @@ static int vehicle_model_step_scalar(
     memcpy(stage->output.normal_load_n, source_output.normal_load_n,
            sizeof(stage->output.normal_load_n));
     source_state_to_internal(&next, source_output.state);
-    memcpy(&next.source_plant_internal_state[
-               MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL],
-           source_output.wheel_rotation_angle_rad,
-           4 * sizeof(source_output.wheel_rotation_angle_rad[0]));
     next.source_plant_initialized = 1;
     next.source_suspension_history_initialized =
         source_output.suspension_history_initialized;
@@ -442,18 +430,6 @@ static int vehicle_model_step_scalar(
 
 static float mpc_state_component(const MpcModelState_t *state, int index)
 {
-    if (index >= MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL &&
-        index <= MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_RR) {
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL +
-            index - MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL];
-    }
-    if (index >= MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL &&
-        index <= MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_RR) {
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL +
-            index - MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL];
-    }
     switch (index) {
     case MPC_STATE_IDX_EY: return state->e_y;
     case MPC_STATE_IDX_EPSI: return state->e_psi;
@@ -516,20 +492,6 @@ static float mpc_state_component(const MpcModelState_t *state, int index)
 
 static void mpc_state_perturb(MpcModelState_t *state, int index, float amount)
 {
-    if (index >= MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL &&
-        index <= MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_RR) {
-        state->source_plant_internal_state[
-            MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL +
-            index - MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL] += amount;
-        return;
-    }
-    if (index >= MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL &&
-        index <= MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_RR) {
-        state->source_plant_internal_state[
-            MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL +
-            index - MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL] += amount;
-        return;
-    }
     switch (index) {
     case MPC_STATE_IDX_EY: state->e_y += amount; break;
     case MPC_STATE_IDX_EPSI: state->e_psi += amount; break;
@@ -629,10 +591,9 @@ static int vehicle_model_linearize_with_known_step(
         1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
         1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-3f, 1.0e-3f,
         1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f,
-        1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-        1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-4f,
         1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-        1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f};
+        1.0e-3f, 1.0e-3f,
+        1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-4f};
     static const float input_epsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 
     /* These columns have exact deterministic dependencies:

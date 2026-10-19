@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 
+#include "unity_source_plant_c.h"
+
 namespace f1tenth_localization
 {
 
@@ -46,7 +48,7 @@ struct OdometryObservation
   std::array<double, 4> physx_wheel_omega_radps{};
   std::array<double, 4> physx_wheel_rotation_angle_rad{};
   std::array<double, 4> physx_wheel_encoder_angle_prediction_rad{};
-  std::array<double, 26> physx_state{};
+  std::array<double, UNITY_SOURCE_PLANT_STATE_SIZE> physx_state{};
   std::array<double, 4> physx_longitudinal_slip{};
   std::array<double, 4> physx_lateral_slip{};
   std::array<double, 4> physx_normal_load_n{};
@@ -82,7 +84,7 @@ struct OdometryEstimate
   std::array<double, 4> longitudinal_slip{};
   std::array<double, 4> lateral_slip{};
   std::array<double, 4> normal_load_n{};
-  std::array<double, 26> unity_state{};
+  std::array<double, UNITY_SOURCE_PLANT_STATE_SIZE> unity_state{};
   double roll_rad{0.0};
   double pitch_rad{0.0};
   double roll_rate_radps{0.0};

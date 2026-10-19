@@ -43,6 +43,14 @@ endif()
 target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Optional C ABI shared object used by tools/evaluate_mpc_bag.py to replay
+# logged plant states and command queues against the production rollout. It is
+# not linked into or installed with the controller runtime.
+add_library(unity_source_plant_eval SHARED EXCLUDE_FROM_ALL
+  src/unity_source_plant.cpp
+  src/unity_source_plant_c.cpp)
+target_include_directories(unity_source_plant_eval PRIVATE include)
+
 add_library(mpc_state_sync STATIC src/mpc_state_synchronizer.cpp)
 target_include_directories(mpc_state_sync PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -77,7 +85,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_unity_source_plant
     test/test_unity_source_plant.cpp
-    src/unity_source_plant.cpp)
+    src/unity_source_plant.cpp
+    src/unity_source_plant_c.cpp)
   target_include_directories(test_unity_source_plant PRIVATE include)
   ament_add_gtest(test_vehicle_model_source_rollout
     test/test_vehicle_model_source_rollout.cpp)

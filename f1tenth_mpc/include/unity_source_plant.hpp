@@ -19,6 +19,9 @@ struct UnitySourcePlantState {
   double body_height_m{0.00464804098};
   double body_height_rate_mps{};
   double roll_rad{};
+  // These are body-frame angular-velocity components (mapped to the plant's
+  // roll/pitch/yaw axes), as supplied by the gyro. They are not Euler-angle
+  // derivatives; the plant converts them through the ZYX attitude kinematics.
   double roll_rate_radps{};
   double pitch_rad{};
   double pitch_rate_radps{};
@@ -26,11 +29,11 @@ struct UnitySourcePlantState {
   // PhysX damper velocity is the finite difference of each wheel's jounce
   // across internal vehicle substeps, not a chassis-rate approximation.
   std::array<double, 4> suspension_jounce_m{};
-  // PxVehicleUpdate.cpp carries these per-wheel timers across vehicle steps
-  // and uses them to switch from tire-slip forces to sticky velocity rows.
+  bool suspension_history_initialized{};
+  // Public PxVehicle's sticky-tire activation history. These are plant
+  // memory, propagated deterministically; they are not optimizer decisions.
   std::array<double, 4> low_forward_speed_time_s{};
   std::array<double, 4> low_side_speed_time_s{};
-  bool suspension_history_initialized{};
 };
 
 struct UnitySourcePlantInput {
@@ -39,19 +42,34 @@ struct UnitySourcePlantInput {
   // nonzero normalized throttle requests quarter-share motor torque. The
   // production MPC constrains throttle to [0, 1].
   double throttle_normalized{};
+  // Defaults to the source-derived production treatment. Offline capture
+  // ablations may disable only these constraints to attribute their effect.
+  bool apply_sticky_tire_constraints{true};
+  bool apply_immediate_sticky_constraints{true};
 };
 
 struct UnitySourcePlantOutput {
   UnitySourcePlantState state{};
+  // Contact kinematics and active low-speed constraints are exposed for
+  // diagnostics; production odometry/MPC continue to consume the propagated
+  // state and force channels below.
+  std::array<double, 4> contact_forward_speed_mps{};
+  std::array<double, 4> contact_lateral_speed_mps{};
+  std::array<double, 4> sticky_contact_forward_speed_mps{};
+  std::array<double, 4> sticky_contact_lateral_speed_mps{};
+  std::array<std::array<double, 3>, 4> sticky_contact_position_body_m{};
+  std::array<std::array<double, 3>, 4> sticky_tire_longitudinal_body{};
+  std::array<bool, 4> sticky_forward_active{};
+  std::array<bool, 4> sticky_side_active{};
   std::array<double, 4> longitudinal_slip{};
   std::array<double, 4> maximum_positive_longitudinal_slip{};
   std::array<double, 4> maximum_longitudinal_slip_excess_mps{};
+  // Uses Unity WheelHit.sidewaysSlip sign convention. The force calculation
+  // uses the opposite body-left-positive contact-velocity coordinate.
   std::array<double, 4> lateral_slip{};
   std::array<double, 4> normal_load_n{};
   std::array<double, 4> suspension_force_n{};
   std::array<double, 4> suspension_jounce_rate_mps{};
-  std::array<bool, 4> sticky_tire_longitudinal_active{};
-  std::array<bool, 4> sticky_tire_lateral_active{};
   std::array<double, 4> tire_longitudinal_force_n{};
   std::array<double, 4> tire_lateral_force_n{};
   double longitudinal_acceleration_mps2{};
@@ -73,6 +91,14 @@ double unity_steering_command_normalized_to_physical_rad(
 // source-derived spring/damper load model. This is not the native patched
 // WheelCollider contact solver; callers must retain that boundary in reports.
 bool unity_source_plant_step_1ms(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    UnitySourcePlantOutput *output);
+
+// State-only 1 ms step for callers that discard per-step diagnostics and need
+// only the propagated plant state and within-step slip maxima. Dynamics and
+// branch behavior are identical to unity_source_plant_step_1ms().
+bool unity_source_plant_step_1ms_minimal(
     const UnitySourcePlantState &state,
     const UnitySourcePlantInput &input,
     UnitySourcePlantOutput *output);

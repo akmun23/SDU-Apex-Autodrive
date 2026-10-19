@@ -94,7 +94,6 @@ typedef enum
     MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE,
     MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT,
     MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE,
-    MPC_RTI_NOMINAL_BUILD_SOURCE_SPEED_ENVELOPE,
     MPC_RTI_NOMINAL_BUILD_THROTTLE_MODE,
     MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT,
     MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE
@@ -296,6 +295,7 @@ typedef struct
     int rti2_triggered;
     unsigned int rti2_trigger_reason_mask;
     int rti2_budget_skipped;
+    int throttle_mode_switches;
     int r1_status;
     int r2_status;
     int nonlinear_failure_reason;
@@ -399,6 +399,14 @@ int mpc_rti_build_nominal(
     const MpcRtiConfiguration_t *configuration,
     MpcRtiNominal_t *nominal,
     MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
+
+/* Choose the Unity drive/full-brake branch and initialize the throttle RTI
+ * seed at the delayed effect stage. Exposed for focused regression tests. */
+int mpc_rti_select_throttle_modes(
+    MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcRtiState_t predicted_states[PREDICTION_HORIZON + 1],
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    int horizon);
 
 int mpc_rti_build_corridor_schedule(
     const MpcRtiState_t *current_state,

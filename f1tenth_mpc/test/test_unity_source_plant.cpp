@@ -35,6 +35,29 @@ double raw_curve(double slip, const std::array<double, 5> &curve)
   return std::copysign(response, slip);
 }
 
+double expected_yaw_acceleration_from_wheel_forces(
+    const f1tenth_mpc::UnitySourcePlantOutput &output)
+{
+  constexpr double wheel_x[4] = {
+    0.17467999458312988, 0.17467999458312988,
+    -0.15532000362873077, -0.15532000362873077};
+  constexpr double wheel_y[4] = {
+    0.11574111133813858, -0.11590110510587692,
+    0.11792000383138657, -0.11807999759912491};
+  double torque_z = 0.0;
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    const double fx = output.tire_longitudinal_force_n[wheel];
+    const double fy = output.tire_lateral_force_n[wheel];
+    torque_z += wheel_x[wheel] * fy - wheel_y[wheel] * fx;
+  }
+
+  // PxVehicleUpdate::updateNoDrive makes the temporary COM pose rotation
+  // identity before integrateBody. Vehicle substeps therefore use the
+  // principal mass-space diagonal, not the rotated scene-solver tensor.
+  constexpr double inverse_yaw_inertia = 9.389614230328439;
+  return inverse_yaw_inertia * torque_z;
+}
+
 }  // namespace
 
 TEST(UnitySourcePlant, ZeroSlipAtMatchedWheelSurfaceSpeed)
@@ -53,6 +76,77 @@ TEST(UnitySourcePlant, ZeroSlipAtMatchedWheelSurfaceSpeed)
   EXPECT_TRUE(std::isfinite(output.longitudinal_acceleration_mps2));
   EXPECT_TRUE(std::isfinite(output.lateral_acceleration_mps2));
   EXPECT_TRUE(std::isfinite(output.yaw_acceleration_radps2));
+}
+
+TEST(UnitySourcePlant, MinimalStepsMatchFullStateAndMultiStepDiagnostics)
+{
+  const auto initial = state_at_speed(4.2);
+  const f1tenth_mpc::UnitySourcePlantInput input{0.18, 0.35};
+  f1tenth_mpc::UnitySourcePlantOutput full_step{}, minimal_step{};
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      initial, input, &full_step));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms_minimal(
+      initial, input, &minimal_step));
+
+  const auto expect_same_state = [](const auto &a, const auto &b) {
+    EXPECT_DOUBLE_EQ(a.u_mps, b.u_mps);
+    EXPECT_DOUBLE_EQ(a.v_mps, b.v_mps);
+    EXPECT_DOUBLE_EQ(a.yaw_rate_radps, b.yaw_rate_radps);
+    EXPECT_DOUBLE_EQ(a.body_height_m, b.body_height_m);
+    EXPECT_DOUBLE_EQ(a.body_height_rate_mps, b.body_height_rate_mps);
+    EXPECT_DOUBLE_EQ(a.roll_rad, b.roll_rad);
+    EXPECT_DOUBLE_EQ(a.roll_rate_radps, b.roll_rate_radps);
+    EXPECT_DOUBLE_EQ(a.pitch_rad, b.pitch_rad);
+    EXPECT_DOUBLE_EQ(a.pitch_rate_radps, b.pitch_rate_radps);
+    EXPECT_DOUBLE_EQ(a.physical_steering_rad, b.physical_steering_rad);
+    EXPECT_EQ(a.suspension_history_initialized,
+              b.suspension_history_initialized);
+    for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+      EXPECT_DOUBLE_EQ(a.wheel_omega_radps[wheel],
+                       b.wheel_omega_radps[wheel]);
+      EXPECT_DOUBLE_EQ(a.wheel_rotation_angle_rad[wheel],
+                       b.wheel_rotation_angle_rad[wheel]);
+      EXPECT_DOUBLE_EQ(a.suspension_jounce_m[wheel],
+                       b.suspension_jounce_m[wheel]);
+      EXPECT_DOUBLE_EQ(a.low_forward_speed_time_s[wheel],
+                       b.low_forward_speed_time_s[wheel]);
+      EXPECT_DOUBLE_EQ(a.low_side_speed_time_s[wheel],
+                       b.low_side_speed_time_s[wheel]);
+    }
+  };
+  expect_same_state(full_step.state, minimal_step.state);
+  EXPECT_EQ(full_step.maximum_positive_longitudinal_slip,
+            minimal_step.maximum_positive_longitudinal_slip);
+  EXPECT_EQ(full_step.maximum_longitudinal_slip_excess_mps,
+            minimal_step.maximum_longitudinal_slip_excess_mps);
+
+  f1tenth_mpc::UnitySourcePlantOutput batched{}, explicit_output{};
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step(
+      initial, input, 0.025, &batched));
+  auto explicit_state = initial;
+  std::array<double, 4> maximum_slip{}, maximum_excess{};
+  for (int tick = 0; tick < 25; ++tick) {
+    ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+        explicit_state, input, &explicit_output));
+    for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+      maximum_slip[wheel] = std::max(maximum_slip[wheel],
+          explicit_output.maximum_positive_longitudinal_slip[wheel]);
+      maximum_excess[wheel] = std::max(maximum_excess[wheel],
+          explicit_output.maximum_longitudinal_slip_excess_mps[wheel]);
+    }
+    explicit_state = explicit_output.state;
+  }
+  expect_same_state(explicit_state, batched.state);
+  EXPECT_EQ(maximum_slip, batched.maximum_positive_longitudinal_slip);
+  EXPECT_EQ(maximum_excess, batched.maximum_longitudinal_slip_excess_mps);
+  EXPECT_EQ(explicit_output.longitudinal_slip, batched.longitudinal_slip);
+  EXPECT_EQ(explicit_output.lateral_slip, batched.lateral_slip);
+  EXPECT_DOUBLE_EQ(explicit_output.longitudinal_acceleration_mps2,
+                   batched.longitudinal_acceleration_mps2);
+  EXPECT_DOUBLE_EQ(explicit_output.lateral_acceleration_mps2,
+                   batched.lateral_acceleration_mps2);
+  EXPECT_DOUBLE_EQ(explicit_output.yaw_acceleration_radps2,
+                   batched.yaw_acceleration_radps2);
 }
 
 TEST(UnitySourcePlant, SlipExcessMatchesSourceCurveAndHasCorrectWheelDerivative)
@@ -109,6 +203,109 @@ TEST(UnitySourcePlant, SuspensionJounceHistoryInitializesAndAdvances)
     EXPECT_TRUE(std::isfinite(load));
 }
 
+TEST(UnitySourcePlant, BrakeLockedWheelReportsZeroForwardSlipAtLowSpeed)
+{
+  auto state = state_at_speed(0.15);
+  state.wheel_omega_radps.fill(0.0);
+  state.suspension_history_initialized = true;
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {0.0, 0.0}, &output));
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    EXPECT_DOUBLE_EQ(output.state.wheel_omega_radps[wheel], 0.0);
+    // In the open-plane WheelCollider capture, forwardSlip is zero while all
+    // four encoders are locked under hard braking at this speed.
+    EXPECT_DOUBLE_EQ(output.longitudinal_slip[wheel], 0.0);
+    EXPECT_DOUBLE_EQ(output.tire_longitudinal_force_n[wheel], 0.0);
+  }
+}
+
+TEST(UnitySourcePlant, StickyForwardConstraintUsesSourceSpeedBoundary)
+{
+  auto above = state_at_speed(0.2005);
+  above.wheel_omega_radps.fill(0.0);
+  above.suspension_history_initialized = true;
+  f1tenth_mpc::UnitySourcePlantOutput above_output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      above, {0.0, 0.0}, &above_output));
+  for (bool active : above_output.sticky_forward_active)
+    EXPECT_FALSE(active);
+
+  auto below = state_at_speed(0.1995);
+  below.wheel_omega_radps.fill(0.0);
+  below.suspension_history_initialized = true;
+  f1tenth_mpc::UnitySourcePlantOutput below_output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      below, {0.0, 0.0}, &below_output));
+  for (bool active : below_output.sticky_forward_active)
+    EXPECT_TRUE(active);
+}
+
+TEST(UnitySourcePlant, StraightLockedWheelBrakeDoesNotCreateYawImpulse)
+{
+  auto state = state_at_speed(0.15);
+  state.wheel_omega_radps.fill(0.0);
+  state.suspension_history_initialized = true;
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {0.0, 0.0}, &output));
+  EXPECT_LT(std::abs(output.state.yaw_rate_radps), 3.0e-3);
+}
+
+TEST(UnitySourcePlant, LowSideTimerResetsWhenDriverIntendsToAccelerate)
+{
+  auto state = state_at_speed(0.0);
+  state.wheel_omega_radps.fill(0.0);
+  state.low_side_speed_time_s.fill(0.5);
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {0.0, 0.2}, &output));
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    EXPECT_DOUBLE_EQ(output.state.low_forward_speed_time_s[wheel], 0.0);
+    EXPECT_DOUBLE_EQ(output.state.low_side_speed_time_s[wheel], 0.0);
+  }
+}
+
+TEST(UnitySourcePlant, StickyTireTimersSurviveMpcInternalStateRoundTrip)
+{
+  std::array<double, UNITY_SOURCE_PLANT_STATE_SIZE> state{};
+  state[UNITY_SOURCE_U] = 0.1;
+  state[UNITY_SOURCE_BODY_HEIGHT] = 0.00464804098;
+  state[UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_RL] = 0.8;
+  state[UNITY_SOURCE_LOW_SIDE_SPEED_TIME_RR] = 0.9;
+  UnitySourcePlantInputC input{};
+  std::copy(state.begin(), state.end(), input.state);
+  input.suspension_history_initialized = 1;
+  input.throttle_normalized = 0.0;
+  UnitySourcePlantOutputC output{};
+  ASSERT_EQ(unity_source_plant_step_c(&input, 0.001, &output), 1);
+  EXPECT_GT(output.state[UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_RL], 0.8);
+  EXPECT_GT(output.state[UNITY_SOURCE_LOW_SIDE_SPEED_TIME_RR], 0.9);
+}
+
+TEST(UnitySourcePlant, LowSpeedTireForceYawMirrorsWithSteeringDirection)
+{
+  auto left = state_at_speed(0.12);
+  left.wheel_omega_radps.fill(0.0);
+  left.physical_steering_rad = 0.15;
+  left.suspension_history_initialized = true;
+  auto right = left;
+  right.physical_steering_rad = -left.physical_steering_rad;
+
+  f1tenth_mpc::UnitySourcePlantOutput left_output, right_output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      left, {left.physical_steering_rad, 0.0}, &left_output));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      right, {right.physical_steering_rad, 0.0}, &right_output));
+  EXPECT_GT(std::abs(left_output.state.yaw_rate_radps), 1.0e-4);
+  // The active Unity inertiaTensorRotation is slightly off-axis, so mirrored
+  // forces are not expected to have identical magnitudes after tensor
+  // coupling. Steering reversal must still reverse the yaw response.
+  EXPECT_LT(left_output.state.yaw_rate_radps *
+                right_output.state.yaw_rate_radps,
+            0.0);
+}
+
 TEST(UnitySourcePlant, LeftWheelSupportProducesPositiveSourceFrameRoll)
 {
   auto state = state_at_speed(5.0);
@@ -126,7 +323,7 @@ TEST(UnitySourcePlant, LeftWheelSupportProducesPositiveSourceFrameRoll)
   EXPECT_GT(output.state.roll_rate_radps, state.roll_rate_radps);
 }
 
-TEST(UnitySourcePlant, PhysXVehicleIntegratorDoesNotAddGyroscopicYawTorque)
+TEST(UnitySourcePlant, PxVehicleSubstepUsesPrincipalInertiaWithoutGyroTerm)
 {
   f1tenth_mpc::UnitySourcePlantState state;
   state.u_mps = 5.0;
@@ -137,8 +334,72 @@ TEST(UnitySourcePlant, PhysXVehicleIntegratorDoesNotAddGyroscopicYawTorque)
   f1tenth_mpc::UnitySourcePlantOutput output;
   ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
       state, {0.0, 0.0}, &output));
-  EXPECT_NEAR(output.yaw_acceleration_radps2, 0.0, 1.0e-12);
-  EXPECT_NEAR(output.state.yaw_rate_radps, 0.0, 1.0e-12);
+  const double force_derived_yaw_acceleration =
+      expected_yaw_acceleration_from_wheel_forces(output);
+  const double expected_rate =
+      (state.yaw_rate_radps + 0.001 * force_derived_yaw_acceleration) *
+      (1.0 - 0.1 * 0.001);
+  EXPECT_NEAR(output.state.yaw_rate_radps, expected_rate, 1.0e-10);
+  EXPECT_NEAR(output.yaw_acceleration_radps2,
+      (output.state.yaw_rate_radps - state.yaw_rate_radps) / 0.001,
+      1.0e-10);
+  EXPECT_NEAR(force_derived_yaw_acceleration, 0.0, 1.0e-12);
+}
+
+TEST(UnitySourcePlant, RigidbodyAngularUpdateUsesTorqueThenSceneDamping)
+{
+  auto state = state_at_speed(6.0);  // single vehicle substep
+  state.yaw_rate_radps = 0.75;
+  state.suspension_history_initialized = true;
+
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {0.0, 0.2}, &output));  // drive intent disables sticky rows
+
+  // PxVehicle integrates angular velocity from the wheel-force torque first;
+  // PhysX scene pre-integration then applies Rigidbody angular damping before
+  // constraints. At 6 m/s the model uses one vehicle substep, and drive intent
+  // disables sticky rows, so this checks the exact ordered update.
+  EXPECT_NEAR(output.yaw_acceleration_radps2,
+      (output.state.yaw_rate_radps - state.yaw_rate_radps) / 0.001,
+      1.0e-12);
+}
+
+TEST(UnitySourcePlant, GyroBodyRatesAdvanceTiltUsingEulerKinematics)
+{
+  auto state = state_at_speed(5.0);
+  state.roll_rad = 0.20;
+  state.pitch_rad = -0.15;
+  state.roll_rate_radps = 0.30;
+  state.pitch_rate_radps = -0.40;
+  state.yaw_rate_radps = 2.20;
+  state.physical_steering_rad = 0.10;
+
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {state.physical_steering_rad, 0.0}, &output));
+
+  // The production plant applies Rigidbody angular damping after the
+  // substep's pose integration. Undo that final 1 ms damping to recover the
+  // body rates used by the semi-implicit pose update.
+  constexpr double dt = 0.001;
+  const double undamped_p = output.state.roll_rate_radps / (1.0 - 0.1 * dt);
+  const double undamped_q = output.state.pitch_rate_radps / (1.0 - 0.1 * dt);
+  const double undamped_r = output.state.yaw_rate_radps / (1.0 - 0.1 * dt);
+  const double expected_roll_rate = undamped_p +
+      std::tan(state.pitch_rad) *
+          (std::sin(state.roll_rad) * undamped_q +
+           std::cos(state.roll_rad) * undamped_r);
+  const double expected_pitch_rate =
+      std::cos(state.roll_rad) * undamped_q -
+      std::sin(state.roll_rad) * undamped_r;
+
+  EXPECT_NEAR((output.state.roll_rad - state.roll_rad) / dt,
+              expected_roll_rate, 2.0e-6);
+  EXPECT_NEAR((output.state.pitch_rad - state.pitch_rad) / dt,
+              expected_pitch_rate, 2.0e-6);
+  EXPECT_GT(std::abs(expected_roll_rate - undamped_p), 0.05);
+  EXPECT_GT(std::abs(expected_pitch_rate - undamped_q), 0.05);
 }
 
 TEST(UnitySourcePlant, ThrottleChangesWheelSpinAndLongitudinalSlip)
@@ -162,37 +423,7 @@ TEST(UnitySourcePlant, ZeroThrottleUsesFullBrakeTorque)
     EXPECT_NEAR(omega, 0.0, 1.0e-12);
 }
 
-TEST(UnitySourcePlant, StickyTireRowsUseThePersistentPhysXTimers)
-{
-  f1tenth_mpc::UnitySourcePlantState state;
-  state.u_mps = 0.15;
-  state.low_forward_speed_time_s.fill(1.0);
-  state.low_side_speed_time_s.fill(1.0);
-
-  f1tenth_mpc::UnitySourcePlantOutput braking;
-  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
-      state, {0.0, 0.0}, &braking));
-  for (int wheel = 0; wheel < 4; ++wheel) {
-    EXPECT_TRUE(braking.sticky_tire_longitudinal_active[wheel]);
-    EXPECT_TRUE(braking.sticky_tire_lateral_active[wheel]);
-    EXPECT_DOUBLE_EQ(braking.longitudinal_slip[wheel], 0.0);
-    EXPECT_DOUBLE_EQ(braking.lateral_slip[wheel], 0.0);
-    EXPECT_DOUBLE_EQ(braking.state.low_forward_speed_time_s[wheel], 1.001);
-    EXPECT_DOUBLE_EQ(braking.state.low_side_speed_time_s[wheel], 1.001);
-  }
-
-  f1tenth_mpc::UnitySourcePlantOutput driving;
-  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
-      braking.state, {0.0, 0.2}, &driving));
-  for (int wheel = 0; wheel < 4; ++wheel) {
-    EXPECT_FALSE(driving.sticky_tire_longitudinal_active[wheel]);
-    EXPECT_FALSE(driving.sticky_tire_lateral_active[wheel]);
-    EXPECT_DOUBLE_EQ(driving.state.low_forward_speed_time_s[wheel], 0.0);
-    EXPECT_DOUBLE_EQ(driving.state.low_side_speed_time_s[wheel], 0.0);
-  }
-}
-
-TEST(UnitySourcePlant, HardBrakeReverseTransientStaysInsideNativePhysXEnvelope)
+TEST(UnitySourcePlant, HardBrakeReverseTransientStaysInsidePlantSweepBound)
 {
   constexpr double speeds_mps[] = {0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0};
   double worst_reverse_mps = 0.0;
@@ -219,10 +450,11 @@ TEST(UnitySourcePlant, SteeringGeneratesLateralForceAndYaw)
       state, {0.25, 0.2}, 0.025, &output));
   EXPECT_GT(output.lateral_acceleration_mps2, 0.0);
   EXPECT_GT(output.yaw_acceleration_radps2, 0.0);
-  // Positive-left steering gives negative lateral velocity in the wheel's
-  // local right/forward convention; the source tire callback negates the
-  // lateral curve to produce a positive-left force on the chassis.
-  EXPECT_LT(output.lateral_slip[0], 0.0);
+  // Positive-left steering gives negative lateral contact velocity in the
+  // wheel's local right/forward convention. WheelHit reports the opposite
+  // sign, while the force still opposes the actual contact velocity.
+  EXPECT_GT(output.lateral_slip[0], 0.0);
+  EXPECT_GT(output.tire_lateral_force_n[0], 0.0);
   EXPECT_NEAR(output.state.physical_steering_rad,
               0.025 * 3.2, 2.0e-4);
 
@@ -231,6 +463,8 @@ TEST(UnitySourcePlant, SteeringGeneratesLateralForceAndYaw)
       state, {-0.25, 0.2}, 0.025, &reverse_turn));
   EXPECT_LT(reverse_turn.lateral_acceleration_mps2, 0.0);
   EXPECT_LT(reverse_turn.yaw_acceleration_radps2, 0.0);
+  EXPECT_LT(reverse_turn.lateral_slip[0], 0.0);
+  EXPECT_LT(reverse_turn.tire_lateral_force_n[0], 0.0);
   EXPECT_NEAR(reverse_turn.state.physical_steering_rad,
               -0.025 * 3.2, 2.0e-4);
 }
@@ -287,8 +521,8 @@ TEST(UnitySourcePlant, LateralSlipUsesPhysXToleranceScaleFloor)
   const double former_candidate_slip = std::atan(
       wheel_lateral / (std::abs(wheel_forward) + 0.1));
 
-  EXPECT_NEAR(output.lateral_slip[0], source_slip, 1.0e-12);
-  EXPECT_GT(std::abs(output.lateral_slip[0] - former_candidate_slip), 1.0e-3);
+  EXPECT_NEAR(output.lateral_slip[0], -source_slip, 1.0e-12);
+  EXPECT_GT(std::abs(output.lateral_slip[0] + former_candidate_slip), 1.0e-3);
 }
 
 TEST(UnitySourcePlant, WheelSlipUsesFullAngularVelocityAtContactPoint)
@@ -306,7 +540,7 @@ TEST(UnitySourcePlant, WheelSlipUsesFullAngularVelocityAtContactPoint)
   const double roll_contact_lateral_speed =
       -state.roll_rate_radps * contact_z;
   EXPECT_NEAR(roll_output.lateral_slip[0],
-      std::atan(roll_contact_lateral_speed / 6.0), 1.0e-10);
+      -std::atan(roll_contact_lateral_speed / 6.0), 1.0e-10);
 
   state = state_at_speed(5.0);
   state.pitch_rate_radps = 0.4;
@@ -353,7 +587,7 @@ TEST(UnitySourcePlant, ContactJounceUsesPhysXRayPlaneIntersection)
   EXPECT_NEAR(output.state.suspension_jounce_m[0], expected_jounce, 1.0e-10);
 }
 
-TEST(UnitySourcePlant, CombinedSlipUsesRawCurveResponsesBeforeStiffness)
+TEST(UnitySourcePlant, EffectiveCombinedSlipEnvelopeIsApplied)
 {
   auto state = state_at_speed(4.0);
   state.v_mps = 0.7;
@@ -369,7 +603,8 @@ TEST(UnitySourcePlant, CombinedSlipUsesRawCurveResponsesBeforeStiffness)
   const std::array<double, 5> lateral{0.01, 1.0, 0.1, 0.5, 1.0};
   for (std::size_t i = 0; i < 4; ++i) {
     const double raw_x = raw_curve(output.longitudinal_slip[i], forward);
-    const double raw_y = raw_curve(output.lateral_slip[i], lateral);
+    const double force_model_slip_y = -output.lateral_slip[i];
+    const double raw_y = raw_curve(force_model_slip_y, lateral);
     const double utilization = std::sqrt(std::max(
         1.0, std::pow(raw_x / forward[1], 2.0) +
                  std::pow(raw_y / lateral[1], 2.0)));

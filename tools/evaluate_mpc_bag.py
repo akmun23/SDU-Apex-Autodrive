@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
+import ctypes
 import json
 import math
 import statistics
@@ -30,6 +31,7 @@ ODOM = "/odom"
 EKF = "/ekf_odom"
 PLANT = "/odom/unity_plant_state"
 DIAGNOSTICS = "/mpc/diagnostics"
+OPEN_LOOP_TEST = "/mpc/open_loop_test"
 IMU = "/autodrive/roboracer_1/imu"
 LAP = "/autodrive/roboracer_1/lap_count"
 COLLISION = "/autodrive/roboracer_1/collision_count"
@@ -48,9 +50,74 @@ COM_TO_REAR_AXLE_M = 0.15532
 WHEEL_RADIUS_M = 0.059
 REAR_HALF_TRACK_M = 0.118
 ENCODER_SAMPLE_PERIOD_S = 0.025
+MAX_STEERING_RAD = math.pi / 6.0
+UNITY_SOURCE_PLANT_STATE_SIZE = 26
+
+
+class UnitySourcePlantInputC(ctypes.Structure):
+    _fields_ = [
+        ("state", ctypes.c_double * UNITY_SOURCE_PLANT_STATE_SIZE),
+        ("wheel_rotation_angle_rad", ctypes.c_double * 4),
+        ("steering_target_rad", ctypes.c_double),
+        ("throttle_normalized", ctypes.c_double),
+        ("suspension_history_initialized", ctypes.c_int),
+    ]
+
+
+class UnitySourcePlantOutputC(ctypes.Structure):
+    _fields_ = [
+        ("state", ctypes.c_double * UNITY_SOURCE_PLANT_STATE_SIZE),
+        ("wheel_rotation_angle_rad", ctypes.c_double * 4),
+        ("suspension_history_initialized", ctypes.c_int),
+        ("longitudinal_slip", ctypes.c_double * 4),
+        ("maximum_positive_longitudinal_slip", ctypes.c_double * 4),
+        ("maximum_longitudinal_slip_excess_mps", ctypes.c_double * 4),
+        ("lateral_slip", ctypes.c_double * 4),
+        ("normal_load_n", ctypes.c_double * 4),
+        ("suspension_force_n", ctypes.c_double * 4),
+        ("suspension_jounce_rate_mps", ctypes.c_double * 4),
+        ("tire_longitudinal_force_n", ctypes.c_double * 4),
+        ("tire_lateral_force_n", ctypes.c_double * 4),
+        ("longitudinal_acceleration_mps2", ctypes.c_double),
+        ("lateral_acceleration_mps2", ctypes.c_double),
+        ("yaw_acceleration_radps2", ctypes.c_double),
+    ]
+
+
+def validate_source_plant_abi() -> None:
+    # Keep synchronized with unity_source_plant_c.h. A ctypes layout mismatch
+    # can silently corrupt rollout inputs/outputs while still returning success.
+    expected_input_offsets = {
+        "wheel_rotation_angle_rad": 208,
+        "steering_target_rad": 240,
+        "throttle_normalized": 248,
+        "suspension_history_initialized": 256,
+    }
+    expected_output_offsets = {
+        "wheel_rotation_angle_rad": 208,
+        "suspension_history_initialized": 240,
+        "longitudinal_slip": 248,
+        "tire_longitudinal_force_n": 472,
+        "longitudinal_acceleration_mps2": 536,
+    }
+    if ctypes.sizeof(UnitySourcePlantInputC) != 264:
+        raise RuntimeError("UnitySourcePlantInputC size disagrees with C ABI")
+    if ctypes.sizeof(UnitySourcePlantOutputC) != 560:
+        raise RuntimeError("UnitySourcePlantOutputC size disagrees with C ABI")
+    for structure, offsets in (
+        (UnitySourcePlantInputC, expected_input_offsets),
+        (UnitySourcePlantOutputC, expected_output_offsets),
+    ):
+        for field, expected in offsets.items():
+            if getattr(structure, field).offset != expected:
+                raise RuntimeError(
+                    f"{structure.__name__}.{field} offset disagrees with C ABI")
+
+
+validate_source_plant_abi()
 
 TOPICS = {
-    GT, ODOM, EKF, PLANT, DIAGNOSTICS, IMU, LAP, COLLISION, LAST_LAP,
+    GT, ODOM, EKF, PLANT, DIAGNOSTICS, OPEN_LOOP_TEST, IMU, LAP, COLLISION, LAST_LAP,
     BEST_LAP, THROTTLE, THROTTLE_COMMAND, STEERING, STEERING_COMMAND,
     BRIDGE_FAULT, DRIVE_COMMAND, LEFT_ENCODER, RIGHT_ENCODER, ODOM_DIAGNOSTICS,
 }
@@ -140,6 +207,19 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
                 r=message.yaw_rate_radps,
                 wheel_omega=list(message.wheel_omega_radps),
                 wheel_angle=list(message.wheel_rotation_angle_rad),
+                body_height=message.body_height_m,
+                body_height_rate=message.body_height_rate_mps,
+                roll=message.roll_rad,
+                roll_rate=message.roll_rate_radps,
+                pitch=message.pitch_rad,
+                pitch_rate=message.pitch_rate_radps,
+                physical_steering=message.physical_steering_rad,
+                suspension_jounce=list(message.suspension_jounce_m),
+                suspension_history_initialized=message.suspension_history_initialized,
+                low_forward_speed_time_s=list(message.low_forward_speed_time_s),
+                low_side_speed_time_s=list(message.low_side_speed_time_s),
+                delayed_steering_1=message.delayed_steering_command_1_normalized,
+                delayed_throttle_1=message.delayed_throttle_command_1_normalized,
                 long_slip=list(message.longitudinal_slip),
                 lat_slip=list(message.lateral_slip),
                 normal_load=list(message.normal_load_n),
@@ -149,7 +229,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
                 ay=message.lateral_acceleration_mps2,
                 yaw_accel=message.yaw_acceleration_radps2,
             )
-        elif topic == DIAGNOSTICS:
+        elif topic in (DIAGNOSTICS, OPEN_LOOP_TEST):
             try:
                 row["json"] = json.loads(message.data)
             except (TypeError, json.JSONDecodeError):
@@ -259,6 +339,167 @@ def report_state_errors(
         f"yaw_end={yaw_errors[-1]:.3f}rad "
         f"yaw_p95_abs={percentile([abs(x) for x in yaw_errors], 0.95):.3f}rad"
     )
+
+
+def report_open_loop_horizon_test(
+    truth: list[dict[str, Any]], events: list[dict[str, Any]],
+) -> None:
+    payloads = [row.get("json", {}) for row in events if row.get("json")]
+    plans = [row for row in payloads if row.get("event") == "plan"]
+    samples = [row for row in payloads if row.get("event") == "sample"]
+    outputs = [row for row in payloads if row.get("event") == "output"]
+    completions = [row for row in payloads if row.get("event") == "complete"]
+    aborts = [row for row in payloads if row.get("event") == "abort"]
+    observation_gaps = [row for row in payloads
+                        if row.get("event") == "observation_gap"]
+    if not plans:
+        print("MPC frozen-horizon test: no latched plan was recorded")
+        return
+    plan = plans[-1]
+    plan_id = plan.get("plan_id")
+    samples = [row for row in samples if row.get("plan_id") == plan_id]
+    outputs = [row for row in outputs if row.get("plan_id") == plan_id]
+    observation_gaps = [row for row in observation_gaps
+                        if row.get("plan_id") == plan_id]
+    controls = plan.get("controls", [])
+    step_samples = sorted(samples, key=lambda row: row.get("stage", -1))
+    sample_times = [row["control_stamp_ns"] * 1e-9
+                    for row in step_samples if row.get("control_stamp_ns")]
+    print("\nMPC frozen-plan execution:")
+    print(
+        f"  plan_id={plan_id} speed_at_latch="
+        f"{plan.get('trigger_speed_mps', math.nan):.3f}m/s "
+        f"steps={len(controls)} dt={plan.get('step_s', math.nan)*1000:.2f}ms "
+        f"completed={bool(completions)} aborted={bool(aborts)}"
+    )
+    if observation_gaps:
+        missing = sorted({int(row.get("stage", -1)) for row in observation_gaps})
+        print(f"  missing-state observations={len(observation_gaps)} stages={missing}")
+    completion = completions[-1] if completions else {}
+    print(
+        f"  emitted fixed commands={len(outputs)}/{len(controls)} "
+        f"terminal_state_observed={completion.get('terminal_state_observed', False)}"
+    )
+    output_times = sorted(
+        int(row["steady_stamp_ns"]) * 1.0e-9
+        for row in outputs if row.get("steady_stamp_ns")
+    )
+    output_intervals = [b - a for a, b in zip(output_times, output_times[1:])
+                        if b > a]
+    if output_intervals:
+        print(
+            f"  output interval: median={statistics.median(output_intervals)*1000:.2f}ms "
+            f"p95={percentile(output_intervals, 0.95)*1000:.2f}ms "
+            f"max={max(output_intervals)*1000:.2f}ms"
+        )
+    if sample_times:
+        intervals = [b - a for a, b in zip(sample_times, sample_times[1:])
+                     if b > a]
+        if intervals:
+            print(
+                f"  observed sample interval: median="
+                f"{statistics.median(intervals)*1000:.2f}ms "
+                f"p95={percentile(intervals, 0.95)*1000:.2f}ms "
+                f"samples={len(sample_times)}"
+            )
+
+    truth = sorted((row for row in truth if math.isfinite(row.get("stamp", math.nan))),
+                   key=lambda row: row["stamp"])
+    truth_times = [row["stamp"] for row in truth]
+
+    def truth_at(timestamp: float) -> dict[str, float] | None:
+        index = bisect.bisect_left(truth_times, timestamp)
+        if index < len(truth_times) and abs(truth_times[index] - timestamp) < 1e-6:
+            return truth[index]
+        if index == 0 or index >= len(truth_times):
+            return None
+        before, after = truth[index - 1], truth[index]
+        gap = after["stamp"] - before["stamp"]
+        if gap <= 0.0 or gap > 0.10:
+            return None
+        fraction = (timestamp - before["stamp"]) / gap
+        result = {}
+        for key in ("x", "y", "u", "v", "r"):
+            result[key] = before[key] + fraction * (after[key] - before[key])
+        result["yaw"] = before["yaw"] + fraction * normalized_angle(
+            after["yaw"] - before["yaw"])
+        return result
+
+    errors: dict[str, list[float]] = {
+        key: [] for key in ("position", "yaw", "u", "v_rear", "r")
+    }
+    hidden_errors = [[] for _ in range(4)]
+    speeds: list[float] = []
+    full_plan = [row for row in plan.get("predictions", []) if row]
+    scored_rows: list[tuple[float, list[float], list[float], dict[str, Any] | None]] = []
+    if full_plan and plan.get("stamp_ns"):
+        plan_stamp = int(plan["stamp_ns"]) * 1e-9
+        for prediction in full_plan:
+            timestamp = plan_stamp + float(prediction.get("time_s", 0.0))
+            scored_rows.append((timestamp, prediction.get("pose", []),
+                                prediction.get("state", []), None))
+        print("  accuracy source: complete frozen-plan states vs Unity ground truth")
+    else:
+        for row in step_samples:
+            if row.get("control_stamp_ns"):
+                scored_rows.append((row["control_stamp_ns"] * 1e-9,
+                    row.get("predicted_pose", []), row.get("predicted_state", []), row))
+        print("  accuracy source: sparse frozen-plan states vs Unity ground truth")
+
+    for timestamp, predicted_pose, predicted_state, source_row in scored_rows:
+        measured = truth_at(timestamp)
+        if measured is None or len(predicted_pose or []) != 3 or len(predicted_state or []) < 6:
+            continue
+        px, py, pyaw = predicted_pose
+        errors["position"].append(math.hypot(px - measured["x"], py - measured["y"]))
+        errors["yaw"].append(abs(normalized_angle(pyaw - measured["yaw"])))
+        errors["u"].append(predicted_state[2] - measured["u"])
+        # The plant's MPC lateral velocity is at the rear axle; simulator
+        # odometry reports the rigid-body/COM velocity.
+        measured_v_rear = measured["v"] - measured["r"] * COM_TO_REAR_AXLE_M
+        errors["v_rear"].append(predicted_state[3] - measured_v_rear)
+        errors["r"].append(predicted_state[4] - measured["r"])
+        speeds.append(math.hypot(measured["u"], measured_v_rear))
+
+    for row in step_samples:
+        predicted_state = row.get("predicted_state", [])
+        actual_state = row.get("actual_state", [])
+        if len(actual_state) >= 10 and len(predicted_state) >= 10:
+            for wheel in range(4):
+                hidden_errors[wheel].append(
+                    predicted_state[6 + wheel] - actual_state[6 + wheel]
+                )
+
+    if not errors["position"]:
+        print("  no samples could be aligned to simulator truth")
+    else:
+        for key, label, unit in (
+            ("position", "position", "m"), ("yaw", "yaw", "rad"),
+            ("u", "forward speed", "m/s"),
+            ("v_rear", "rear lateral speed", "m/s"),
+            ("r", "yaw rate", "rad/s"),
+        ):
+            values = errors[key]
+            absolute = [abs(value) for value in values]
+            print(
+                f"  {label}: n={len(values)} RMSE="
+                f"{math.sqrt(statistics.mean(value*value for value in values)):.5f}{unit} "
+                f"p95_abs={percentile(absolute, 0.95):.5f}{unit} "
+                f"max_abs={max(absolute):.5f}{unit}"
+            )
+        print(
+            f"  truth speed during scored horizon: "
+            f"{min(speeds):.3f}-{max(speeds):.3f}m/s"
+        )
+    if any(hidden_errors):
+        print("  predicted-vs-reanchored odom wheel-rate RMSE (not independent wheel truth):")
+        for wheel, label in enumerate(("FL", "FR", "RL", "RR")):
+            values = hidden_errors[wheel]
+            rmse = (math.sqrt(statistics.mean(v*v for v in values))
+                    if values else math.nan)
+            print(f"    {label}: n={len(values)} RMSE={rmse:.5f}rad/s")
+    if aborts:
+        print(f"  abort detail: {aborts[-1]}")
 
 
 def nearest_by_stamp(rows: list[dict[str, Any]], target: float) -> dict[str, Any] | None:
@@ -819,10 +1060,542 @@ def report_horizon_errors(
                 print(f"  speed_bin [{lower:g},{upper:g}): u_RMSE={rmse:.4f} n={len(subset)}")
 
 
+def report_source_plant_rollout(
+    truth: list[dict[str, Any]], plant: list[dict[str, Any]],
+    library_path: Path,
+) -> None:
+    """Replay only odom plant state and queued commands through the C++ MPC plant.
+
+    Starts from a recorded UnityPlantState, then advances with the recorded
+    slot-1 actuator command sequence. It never reads future measured states
+    during a rollout; simulator truth is used only to score each endpoint.
+    """
+    if not truth or not plant:
+        print("source-plant rollout: requires both Unity truth and plant-state streams")
+        return
+    if not library_path.is_file():
+        print(f"source-plant rollout: shared model not found: {library_path}")
+        return
+    try:
+        model = ctypes.CDLL(str(library_path.resolve()))
+    except OSError as error:
+        print(f"source-plant rollout: cannot load model library: {error}")
+        return
+    step = model.unity_source_plant_step_c
+    step.argtypes = [ctypes.POINTER(UnitySourcePlantInputC), ctypes.c_double,
+                     ctypes.POINTER(UnitySourcePlantOutputC)]
+    step.restype = ctypes.c_int
+
+    truth_by_stamp = {round(row["stamp"], 6): row for row in truth}
+    plant_by_stamp = {round(row["stamp"], 6): row for row in plant}
+    times = sorted(set(truth_by_stamp) & set(plant_by_stamp))
+    if len(times) < 31:
+        print(f"source-plant rollout: only {len(times)} aligned epochs")
+        return
+
+    def source_state(row: dict[str, Any]) -> list[float]:
+        state = [0.0] * UNITY_SOURCE_PLANT_STATE_SIZE
+        state[0] = row["u"]
+        state[1] = row["v_com"]
+        state[2] = row["r"]
+        state[3:7] = row["wheel_omega"]
+        state[7] = row["body_height"]
+        state[8] = row["body_height_rate"]
+        state[9] = row["roll"]
+        state[10] = row["roll_rate"]
+        state[11] = row["pitch"]
+        state[12] = row["pitch_rate"]
+        state[13] = row["physical_steering"]
+        state[14:18] = row["suspension_jounce"]
+        state[18:22] = row["low_forward_speed_time_s"]
+        state[22:26] = row["low_side_speed_time_s"]
+        return state
+
+    def make_input(state: list[float], angles: list[float],
+                   queue: dict[str, Any], history_initialized: bool) -> UnitySourcePlantInputC:
+        value = UnitySourcePlantInputC()
+        value.state[:] = state
+        value.wheel_rotation_angle_rad[:] = angles
+        value.steering_target_rad = queue["delayed_steering_1"] * MAX_STEERING_RAD
+        value.throttle_normalized = queue["delayed_throttle_1"]
+        value.suspension_history_initialized = int(history_initialized)
+        return value
+
+    def add(errors: dict[str, list[float]], predicted: list[float],
+            actual: dict[str, Any], predicted_yaw: float,
+            predicted_pose_x: float, predicted_pose_y: float) -> None:
+        errors["u"].append(predicted[0] - actual["u"])
+        errors["v"].append(predicted[1] - actual["v"])
+        errors["r"].append(predicted[2] - actual["r"])
+        errors["yaw"].append(normalized_angle(predicted_yaw - actual["yaw"]))
+        errors["xy"].append(math.hypot(
+            predicted_pose_x - actual["x"],
+            predicted_pose_y - actual["y"],
+        ))
+
+    def truth_pose_xy(row: dict[str, Any]) -> tuple[float, float]:
+        return row["x"], row["y"]
+
+    def integrate_interpolated_twist(
+        x: float, y: float, u0: float, v0: float, yaw0: float,
+        u1: float, v1: float, yaw1: float, dt: float,
+    ) -> tuple[float, float]:
+        # Diagnostic only: approximate pose propagation at 1 ms by linearly
+        # interpolating the available 40 Hz endpoint state samples.
+        substeps = max(1, round(dt / 0.001))
+        yaw_delta = normalized_angle(yaw1 - yaw0)
+        h = dt / substeps
+        for substep in range(substeps):
+            fraction = (substep + 0.5) / substeps
+            u = u0 + fraction * (u1 - u0)
+            v = v0 + fraction * (v1 - v0)
+            yaw = yaw0 + fraction * yaw_delta
+            x += h * (u * math.cos(yaw) - v * math.sin(yaw))
+            y += h * (u * math.sin(yaw) + v * math.cos(yaw))
+        return x, y
+
+    # Check whether the simulator's published twist actually closes against
+    # its published pose increments. This distinguishes plant rollout error
+    # from a pose/twist frame or sampling-phase mismatch in the reference.
+    closure_modes = {
+        "body_twist_rotated_by_yaw": [],
+        "body_twist_minus_yaw_rate_times_com_to_rear": [],
+        "body_twist_plus_yaw_rate_times_com_to_rear": [],
+        "twist_treated_as_world_xy": [],
+        "body_lateral_sign_flipped": [],
+    }
+    closure_signed: dict[str, list[tuple[float, float, float]]] = {
+        name: [] for name in closure_modes
+    }
+    for index in range(len(times) - 1):
+        t0, t1 = times[index], times[index + 1]
+        measured_dt = t1 - t0
+        if abs(measured_dt - 0.025) > 0.004:
+            continue
+        dt = 0.025
+        first, second = truth_by_stamp[t0], truth_by_stamp[t1]
+        yaw_delta = normalized_angle(second["yaw"] - first["yaw"])
+        yaw_mid = first["yaw"] + 0.5 * yaw_delta
+        u_mid = 0.5 * (first["u"] + second["u"])
+        v_mid = 0.5 * (first["v"] + second["v"])
+        r_mid = 0.5 * (first["r"] + second["r"])
+        x0, y0 = truth_pose_xy(first)
+        x1, y1 = truth_pose_xy(second)
+        dx, dy = x1 - x0, y1 - y0
+        candidates = {
+            "body_twist_rotated_by_yaw": (
+                u_mid * math.cos(yaw_mid) - v_mid * math.sin(yaw_mid),
+                u_mid * math.sin(yaw_mid) + v_mid * math.cos(yaw_mid)),
+            "body_twist_minus_yaw_rate_times_com_to_rear": (
+                u_mid * math.cos(yaw_mid) -
+                (v_mid - r_mid * COM_TO_REAR_AXLE_M) * math.sin(yaw_mid),
+                u_mid * math.sin(yaw_mid) +
+                (v_mid - r_mid * COM_TO_REAR_AXLE_M) * math.cos(yaw_mid)),
+            "body_twist_plus_yaw_rate_times_com_to_rear": (
+                u_mid * math.cos(yaw_mid) -
+                (v_mid + r_mid * COM_TO_REAR_AXLE_M) * math.sin(yaw_mid),
+                u_mid * math.sin(yaw_mid) +
+                (v_mid + r_mid * COM_TO_REAR_AXLE_M) * math.cos(yaw_mid)),
+            "twist_treated_as_world_xy": (u_mid, v_mid),
+            "body_lateral_sign_flipped": (
+                u_mid * math.cos(yaw_mid) + v_mid * math.sin(yaw_mid),
+                u_mid * math.sin(yaw_mid) - v_mid * math.cos(yaw_mid)),
+        }
+        for name, (vx, vy) in candidates.items():
+            err_x, err_y = vx * dt - dx, vy * dt - dy
+            closure_modes[name].append(math.hypot(err_x, err_y))
+            closure_signed[name].append((
+                err_x * math.cos(first["yaw"]) + err_y * math.sin(first["yaw"]),
+                -err_x * math.sin(first["yaw"]) + err_y * math.cos(first["yaw"]),
+                math.hypot(err_x, err_y)))
+
+    horizons = (1, 4, 10, 20, 30)
+    errors = {horizon: {field: [] for field in ("u", "v", "r", "yaw", "xy")}
+              for horizon in horizons}
+    grouped_yaw: dict[int, list[tuple[float, float, float]]] = {
+        horizon: [] for horizon in horizons
+    }
+    position_decomposition: dict[int, list[dict[str, float]]] = {
+        horizon: [] for horizon in horizons
+    }
+    fine_position_errors: dict[int, list[tuple[float, float, float]]] = {
+        horizon: [] for horizon in horizons
+    }
+    oracle_position_errors: dict[int, list[tuple[float, float]]] = {
+        horizon: [] for horizon in horizons
+    }
+    first_step_details: list[dict[str, float]] = []
+    pathwise_position_maxima: list[float] = []
+    skipped = 0
+    for start in range(0, len(times) - max(horizons)):
+        # Only publish a window if its entire 750 ms input/truth interval is
+        # available on the simulator's 40 Hz epoch grid.  Otherwise we'd keep
+        # early-horizon scores from a window that failed at a later step.
+        if any(abs((times[index + 1] - times[index]) - 0.025) > 0.004
+               for index in range(start, start + max(horizons))):
+            skipped += 1
+            continue
+        start_time = times[start]
+        start_truth = truth_by_stamp[start_time]
+        start_plant = plant_by_stamp[start_time]
+        state = source_state(start_plant)
+        angles = list(start_plant["wheel_angle"])
+        history_initialized = start_plant["suspension_history_initialized"]
+        predicted_yaw = start_truth["yaw"]
+        predicted_pose_x, predicted_pose_y = truth_pose_xy(start_truth)
+        fine_predicted_pose_x, fine_predicted_pose_y = predicted_pose_x, predicted_pose_y
+        gt_heading_predicted_motion_x = predicted_pose_x
+        gt_heading_predicted_motion_y = predicted_pose_y
+        predicted_heading_gt_motion_x = predicted_pose_x
+        predicted_heading_gt_motion_y = predicted_pose_y
+        truth_integrated_pose_x, truth_integrated_pose_y = truth_pose_xy(start_truth)
+        fine_truth_pose_x, fine_truth_pose_y = truth_integrated_pose_x, truth_integrated_pose_y
+        previous_truth = start_truth
+        previous_r = state[2]
+        start_speed = math.hypot(start_truth["u"], start_truth["v"])
+        start_steering = abs(start_plant["physical_steering"])
+        window_max_abs_yaw_error = 0.0
+        window_max_abs_steering = start_steering
+        window_yaw_rate_errors: list[float] = []
+        window_position_errors: list[float] = []
+        valid = True
+        window_errors = {horizon: {field: [] for field in ("u", "v", "r", "yaw", "xy")}
+                         for horizon in horizons}
+        window_grouped_yaw: dict[int, list[tuple[float, float, float]]] = {
+            horizon: [] for horizon in horizons
+        }
+        for horizon in range(1, max(horizons) + 1):
+            current = plant_by_stamp[times[start + horizon - 1]]
+            target_time = times[start + horizon]
+            measured_dt = target_time - times[start + horizon - 1]
+            if abs(measured_dt - 0.025) > 0.004:
+                valid = False
+                break
+            dt = 0.025
+            input_value = make_input(state, angles, current, history_initialized)
+            output = UnitySourcePlantOutputC()
+            if not step(ctypes.byref(input_value), 0.025, ctypes.byref(output)):
+                valid = False
+                break
+            previous_state = state
+            state = list(output.state)
+            angles = list(output.wheel_rotation_angle_rad)
+            history_initialized = bool(output.suspension_history_initialized)
+            predicted_yaw_start = predicted_yaw
+            yaw_rate_mid = 0.5 * (previous_r + state[2])
+            yaw_mid = predicted_yaw + 0.5 * yaw_rate_mid * 0.025
+            u_mid = 0.5 * (previous_state[0] + state[0])
+            rear_v_previous = previous_state[1] - previous_r * COM_TO_REAR_AXLE_M
+            rear_v_current = state[1] - state[2] * COM_TO_REAR_AXLE_M
+            v_mid = 0.5 * (rear_v_previous + rear_v_current)
+            predicted_yaw_end = predicted_yaw + yaw_rate_mid * 0.025
+            predicted_yaw_mid = 0.5 * (predicted_yaw_start + predicted_yaw_end)
+            predicted_pose_x += 0.025 * (
+                u_mid * math.cos(yaw_mid) - v_mid * math.sin(yaw_mid))
+            predicted_pose_y += 0.025 * (
+                u_mid * math.sin(yaw_mid) + v_mid * math.cos(yaw_mid))
+            predicted_yaw = predicted_yaw_end
+            fine_predicted_pose_x, fine_predicted_pose_y = integrate_interpolated_twist(
+                fine_predicted_pose_x, fine_predicted_pose_y,
+                previous_state[0], rear_v_previous, predicted_yaw_start,
+                state[0], rear_v_current, predicted_yaw, dt)
+            previous_r = state[2]
+            actual = truth_by_stamp[target_time]
+            window_position_errors.append(math.hypot(
+                predicted_pose_x - actual["x"],
+                predicted_pose_y - actual["y"]))
+            previous_truth_for_step = previous_truth
+            truth_yaw_delta = normalized_angle(actual["yaw"] - previous_truth["yaw"])
+            truth_yaw_mid = previous_truth["yaw"] + 0.5 * truth_yaw_delta
+            truth_u_mid = 0.5 * (previous_truth["u"] + actual["u"])
+            truth_rear_v_previous = (
+                previous_truth["v"] - previous_truth["r"] * COM_TO_REAR_AXLE_M)
+            truth_rear_v_current = actual["v"] - actual["r"] * COM_TO_REAR_AXLE_M
+            truth_v_mid = 0.5 * (truth_rear_v_previous + truth_rear_v_current)
+            gt_heading_predicted_motion_x += 0.025 * (
+                u_mid * math.cos(truth_yaw_mid) - v_mid * math.sin(truth_yaw_mid))
+            gt_heading_predicted_motion_y += 0.025 * (
+                u_mid * math.sin(truth_yaw_mid) + v_mid * math.cos(truth_yaw_mid))
+            predicted_heading_gt_motion_x += 0.025 * (
+                truth_u_mid * math.cos(predicted_yaw_mid) -
+                truth_v_mid * math.sin(predicted_yaw_mid))
+            predicted_heading_gt_motion_y += 0.025 * (
+                truth_u_mid * math.sin(predicted_yaw_mid) +
+                truth_v_mid * math.cos(predicted_yaw_mid))
+            truth_integrated_pose_x += dt * (
+                truth_u_mid * math.cos(truth_yaw_mid) -
+                truth_v_mid * math.sin(truth_yaw_mid))
+            truth_integrated_pose_y += dt * (
+                truth_u_mid * math.sin(truth_yaw_mid) +
+                truth_v_mid * math.cos(truth_yaw_mid))
+            fine_truth_pose_x, fine_truth_pose_y = integrate_interpolated_twist(
+                fine_truth_pose_x, fine_truth_pose_y,
+                previous_truth_for_step["u"], truth_rear_v_previous,
+                previous_truth_for_step["yaw"], actual["u"],
+                truth_rear_v_current, actual["yaw"], dt)
+            previous_truth = actual
+            window_yaw_rate_errors.append(state[2] - actual["r"])
+            window_max_abs_yaw_error = max(
+                window_max_abs_yaw_error,
+                abs(normalized_angle(predicted_yaw - actual["yaw"])))
+            window_max_abs_steering = max(
+                window_max_abs_steering,
+                abs(current["physical_steering"]))
+            if horizon in errors:
+                add(window_errors[horizon], state, actual, predicted_yaw,
+                    predicted_pose_x, predicted_pose_y)
+                yaw0 = start_truth["yaw"]
+                c0, s0 = math.cos(yaw0), math.sin(yaw0)
+                pred_dx = predicted_pose_x - actual["x"]
+                pred_dy = predicted_pose_y - actual["y"]
+                truth_dx = truth_integrated_pose_x - actual["x"]
+                truth_dy = truth_integrated_pose_y - actual["y"]
+                model_dx = predicted_pose_x - truth_integrated_pose_x
+                model_dy = predicted_pose_y - truth_integrated_pose_y
+                position_decomposition[horizon].append({
+                    "pred_world_x": pred_dx,
+                    "pred_world_y": pred_dy,
+                    "pred_forward": pred_dx * c0 + pred_dy * s0,
+                    "pred_lateral": -pred_dx * s0 + pred_dy * c0,
+                    "truth_twist_world_x": truth_dx,
+                    "truth_twist_world_y": truth_dy,
+                    "truth_twist_forward": truth_dx * c0 + truth_dy * s0,
+                    "truth_twist_lateral": -truth_dx * s0 + truth_dy * c0,
+                    "plant_vs_twist_world_x": model_dx,
+                    "plant_vs_twist_world_y": model_dy,
+                    "plant_vs_twist_forward": model_dx * c0 + model_dy * s0,
+                    "plant_vs_twist_lateral": -model_dx * s0 + model_dy * c0,
+                    "xy_m": math.hypot(pred_dx, pred_dy),
+                    "start_speed_mps": start_speed,
+                    "start_steering_rad": start_steering,
+                    "max_steering_rad": window_max_abs_steering,
+                    "max_abs_yaw_error_rad": window_max_abs_yaw_error,
+                    "end_abs_yaw_error_rad": abs(normalized_angle(
+                        predicted_yaw - actual["yaw"])),
+                    "end_u_error_mps": state[0] - actual["u"],
+                    "end_v_error_mps": state[1] - actual["v"],
+                    "end_r_error_radps": state[2] - actual["r"],
+                    "yaw_rate_error_mean_radps": statistics.mean(
+                        window_yaw_rate_errors),
+                    "yaw_rate_error_rmse_radps": math.sqrt(statistics.mean(
+                        error * error for error in window_yaw_rate_errors)),
+                })
+                fine_pred_error = math.hypot(
+                    fine_predicted_pose_x - actual["x"],
+                    fine_predicted_pose_y - actual["y"])
+                fine_truth_error = math.hypot(
+                    fine_truth_pose_x - actual["x"],
+                    fine_truth_pose_y - actual["y"])
+                fine_plant_vs_truth = math.hypot(
+                    fine_predicted_pose_x - fine_truth_pose_x,
+                    fine_predicted_pose_y - fine_truth_pose_y)
+                fine_position_errors[horizon].append((
+                    fine_pred_error, fine_truth_error, fine_plant_vs_truth))
+                oracle_position_errors[horizon].append((
+                    math.hypot(gt_heading_predicted_motion_x - actual["x"],
+                               gt_heading_predicted_motion_y - actual["y"]),
+                    math.hypot(predicted_heading_gt_motion_x - actual["x"],
+                               predicted_heading_gt_motion_y - actual["y"])))
+                window_grouped_yaw[horizon].append(
+                    (start_speed, start_steering,
+                     normalized_angle(predicted_yaw - actual["yaw"]))
+                )
+                if horizon == 1:
+                    first_step_details.append({
+                        "stamp": target_time,
+                        "speed": start_speed,
+                        "steering": start_steering,
+                        "yaw_rate_start": start_truth["r"],
+                        "yaw_rate_predicted": state[2],
+                        "yaw_rate_actual": actual["r"],
+                        "yaw_rate_error": state[2] - actual["r"],
+                        "queued_throttle": current["delayed_throttle_1"],
+                        "queued_steering": current["delayed_steering_1"] *
+                            MAX_STEERING_RAD,
+                        "wheel_body_mismatch": statistics.mean(
+                            abs(omega * WHEEL_RADIUS_M - start_truth["u"])
+                            for omega in start_plant["wheel_omega"]),
+                    })
+        if not valid:
+            skipped += 1
+            continue
+        pathwise_position_maxima.append(max(window_position_errors))
+        for horizon in horizons:
+            for field in errors[horizon]:
+                errors[horizon][field].extend(window_errors[horizon][field])
+            grouped_yaw[horizon].extend(window_grouped_yaw[horizon])
+
+    print("\nProduction source-plant open-loop rollout (logged UnityPlantState start "
+          "+ slot-1 commands; no future state correction):")
+    print(f"  aligned_epochs={len(times)} start_windows={len(times)-max(horizons)} "
+          f"skipped_windows={skipped} model_dt=25ms")
+    for horizon in horizons:
+        values = errors[horizon]
+        if not values["u"]:
+            continue
+        print(f"  horizon={horizon*25}ms n={len(values['u'])}")
+        for field in ("u", "v", "r", "yaw", "xy"):
+            unit = ("rad" if field == "yaw" else "rad/s" if field == "r" else
+                    "m" if field == "xy" else "m/s")
+            absolute = [abs(value) for value in values[field]]
+            rmse = math.sqrt(statistics.mean(
+                value * value for value in values[field]))
+            print(f"    {field}: RMSE={rmse:.5f} {unit} "
+                  f"p95_abs={percentile(absolute, 0.95):.5f} max={max(absolute):.5f}")
+        for low, high in ((0, 2), (2, 4), (4, 6), (6, 8), (8, math.inf)):
+            selected = [abs(yaw_error) for speed, _, yaw_error in grouped_yaw[horizon]
+                        if low <= speed < high]
+            if selected:
+                print(f"    start_speed[{low:g},{high:g})m/s yaw_p95="
+                      f"{percentile(selected, 0.95):.5f}rad n={len(selected)}")
+        for low, high in ((0.0, 0.1), (0.1, 0.2), (0.2, 0.35), (0.35, math.inf)):
+            selected = [abs(yaw_error) for _, steering, yaw_error
+                        in grouped_yaw[horizon] if low <= steering < high]
+            if selected:
+                print(f"    start_abs_steer[{low:.2f},{high:g})rad yaw_p95="
+                      f"{percentile(selected, 0.95):.5f}rad n={len(selected)}")
+
+    print("  position-error decomposition at each scored horizon (rear-axle pose, "
+          "axes rotated to each window's initial heading):")
+    for horizon in horizons:
+        rows = position_decomposition[horizon]
+        if not rows:
+            continue
+        print(f"    {horizon*25}ms n={len(rows)}")
+        for label, prefix in (("plant_vs_GT_pose", "pred"),
+                              ("GT_twist_integral_vs_pose", "truth_twist"),
+                              ("plant_vs_GT_twist_integral", "plant_vs_twist")):
+            forward = [row[f"{prefix}_forward"] for row in rows]
+            lateral = [row[f"{prefix}_lateral"] for row in rows]
+            magnitude = [math.hypot(row[f"{prefix}_world_x"],
+                                    row[f"{prefix}_world_y"]) for row in rows]
+            rmse = math.sqrt(statistics.mean(value * value for value in magnitude))
+            print(f"      {label}: forward_bias={statistics.mean(forward):+.4f}m "
+                  f"lateral_bias={statistics.mean(lateral):+.4f}m "
+                  f"xy_RMSE={rmse:.4f}m xy_p95={percentile(magnitude, 0.95):.4f}m")
+    endpoint_rows = position_decomposition[max(horizons)]
+    if endpoint_rows:
+        over_5cm = sum(row["xy_m"] > 0.05 for row in endpoint_rows)
+        print(f"  750ms 5cm endpoint gate: {len(endpoint_rows)-over_5cm}/"
+              f"{len(endpoint_rows)} pass; {over_5cm} exceed 5cm")
+        pathwise_over_5cm = sum(value > 0.05 for value in pathwise_position_maxima)
+        pathwise_rmse = math.sqrt(statistics.mean(
+            value * value for value in pathwise_position_maxima))
+        print(f"  full 750ms path 5cm gate (max error at any 25ms step): "
+              f"{len(pathwise_position_maxima)-pathwise_over_5cm}/"
+              f"{len(pathwise_position_maxima)} pass; "
+              f"{pathwise_over_5cm} exceed 5cm; "
+              f"max-error RMSE={pathwise_rmse:.4f}m "
+              f"p95={percentile(pathwise_position_maxima, 0.95):.4f}m "
+              f"max={max(pathwise_position_maxima):.4f}m")
+        for low, high in ((0.0, 0.10), (0.10, 0.20), (0.20, math.inf)):
+            selected = [row for row in endpoint_rows
+                        if low <= row["start_steering_rad"] < high]
+            if not selected:
+                continue
+            position = [row["xy_m"] for row in selected]
+            yaw = [row["end_abs_yaw_error_rad"] for row in selected]
+            print(f"    start_abs_steer[{low:.2f},{high:g})rad: "
+                  f">5cm={sum(value > 0.05 for value in position)}/{len(position)} "
+                  f"xy_p95={percentile(position, 0.95):.4f}m "
+                  f"xy_max={max(position):.4f}m yaw_abs_p95="
+                  f"{percentile(yaw, 0.95):.4f}rad")
+        print("  worst 750ms endpoint windows:")
+        for row in sorted(endpoint_rows, key=lambda item: item["xy_m"],
+                          reverse=True)[:5]:
+            print(f"    xy={row['xy_m']:.4f}m start_speed="
+                  f"{row['start_speed_mps']:.2f}m/s "
+                  f"start_steer={row['start_steering_rad']:.3f}rad "
+                  f"max_steer={row['max_steering_rad']:.3f}rad "
+                  f"yaw_end={row['end_abs_yaw_error_rad']:.4f}rad "
+                  f"yaw_peak={row['max_abs_yaw_error_rad']:.4f}rad "
+                  f"du={row['end_u_error_mps']:+.3f}m/s "
+                  f"dv={row['end_v_error_mps']:+.3f}m/s "
+                  f"dr={row['end_r_error_radps']:+.3f}rad/s "
+                  f"mean_dr={row['yaw_rate_error_mean_radps']:+.3f}rad/s "
+                  f"rmse_dr={row['yaw_rate_error_rmse_radps']:.3f}rad/s")
+        oracle_rows = oracle_position_errors[max(horizons)]
+        for index, label in enumerate(("plant_translation_with_GT_yaw",
+                                       "GT_translation_with_plant_yaw")):
+            values = [row[index] for row in oracle_rows]
+            print(f"    attribution {label}: xy_RMSE="
+                  f"{math.sqrt(statistics.mean(value*value for value in values)):.4f}m "
+                  f"xy_p95={percentile(values, 0.95):.4f}m "
+                  f">5cm={sum(value > 0.05 for value in values)}/{len(values)}")
+    print("  same trajectories with pose integrated at 1 ms from linearly "
+          "interpolated 40 Hz endpoint states (diagnostic, not extra measurements):")
+    for horizon in horizons:
+        rows = fine_position_errors[horizon]
+        if not rows:
+            continue
+        print(f"    {horizon*25}ms n={len(rows)}")
+        for index, label in enumerate(("plant_vs_GT_pose", "GT_twist_integral_vs_pose",
+                                       "plant_vs_GT_twist_integral")):
+            values = [row[index] for row in rows]
+            print(f"      {label}: xy_RMSE="
+                  f"{math.sqrt(statistics.mean(value*value for value in values)):.4f}m "
+                  f"xy_p95={percentile(values, 0.95):.4f}m")
+    print("  truth pose/twist one-step closure hypotheses (per 25 ms interval):")
+    for name, magnitudes in closure_modes.items():
+        rows = closure_signed[name]
+        if not magnitudes:
+            continue
+        forward = [row[0] for row in rows]
+        lateral = [row[1] for row in rows]
+        print(f"    {name}: displacement_RMSE="
+              f"{math.sqrt(statistics.mean(value*value for value in magnitudes)):.5f}m "
+              f"p95={percentile(magnitudes, 0.95):.5f}m "
+              f"forward_bias={statistics.mean(forward):+.5f}m "
+              f"lateral_bias={statistics.mean(lateral):+.5f}m n={len(rows)}")
+
+    if first_step_details:
+        print("  first-step yaw-rate attribution (overlapping 40 Hz windows):")
+        partitions = (
+            ("queued_hard_brake", lambda row: row["queued_throttle"] == 0.0),
+            ("queued_drive", lambda row: row["queued_throttle"] > 0.0),
+            ("queued_abs_steer<0.10", lambda row: abs(row["queued_steering"]) < 0.10),
+            ("queued_abs_steer>=0.10", lambda row: abs(row["queued_steering"]) >= 0.10),
+            ("wheel_body_mismatch<0.5", lambda row: row["wheel_body_mismatch"] < 0.5),
+            ("wheel_body_mismatch>=0.5", lambda row: row["wheel_body_mismatch"] >= 0.5),
+        )
+        for label, predicate in partitions:
+            selected = [row["yaw_rate_error"] for row in first_step_details
+                        if predicate(row)]
+            if selected:
+                absolute = [abs(value) for value in selected]
+                rmse = math.sqrt(statistics.mean(value * value for value in selected))
+                print(f"    {label}: n={len(selected)} RMSE={rmse:.5f}rad/s "
+                      f"p95_abs={percentile(absolute, 0.95):.5f} "
+                      f"max_abs={max(absolute):.5f}")
+        print("  largest first-step yaw-rate residuals:")
+        for row in sorted(first_step_details,
+                          key=lambda value: abs(value["yaw_rate_error"]),
+                          reverse=True)[:5]:
+            print(
+                f"    t={row['stamp']:.3f} speed={row['speed']:.2f}m/s "
+                f"steer={row['steering']:.3f}rad r0={row['yaw_rate_start']:.3f} "
+                f"r_pred={row['yaw_rate_predicted']:.3f} "
+                f"r_gt={row['yaw_rate_actual']:.3f} "
+                f"q1=({row['queued_steering']:.3f}rad,"
+                f"{row['queued_throttle']:.3f}) "
+                f"wheel-body={row['wheel_body_mismatch']:.2f}m/s"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bag", type=Path, help="rosbag directory")
     parser.add_argument("--trajectory", type=Path, help="raceline CSV used for the run")
+    parser.add_argument(
+        "--source-plant-rollout", action="store_true",
+        help="score a no-reanchoring 25 ms command-sequence rollout using the logged "
+             "UnityPlantState and the production C++ source plant",
+    )
+    parser.add_argument(
+        "--source-plant-library", type=Path,
+        default=Path("build/f1tenth_mpc/libunity_source_plant_eval.so"),
+        help="optional evaluator library built from the production plant source",
+    )
     args = parser.parse_args()
     data = read_bag(args.bag)
     truth = data.get(GT, [])
@@ -871,12 +1644,19 @@ def main() -> int:
         report_encoder_slip(
             truth, plant_rows, data.get(LEFT_ENCODER, []),
             data.get(RIGHT_ENCODER, []), data.get(THROTTLE, []))
+        if args.source_plant_rollout:
+            report_source_plant_rollout(
+                truth, plant_rows, args.source_plant_library)
+    elif args.source_plant_rollout:
+        print(f"source-plant rollout: bag has no usable {PLANT} stream")
     diagnostics = [row for row in data.get(DIAGNOSTICS, []) if row.get("json")]
     if diagnostics:
         payloads = [row["json"] for row in diagnostics]
         print(f"MPC status counts: {dict(Counter(x.get('status') for x in payloads))}")
         print(f"MPC plant-state source counts: {dict(Counter(x.get('plant_state_source') for x in payloads))}")
         report_horizon_errors(truth, diagnostics, load_trajectory(args.trajectory))
+    if data.get(OPEN_LOOP_TEST):
+        report_open_loop_horizon_test(truth, data[OPEN_LOOP_TEST])
     for row in data.get(BRIDGE_FAULT, []):
         if row["value"]:
             print(f"bridge timing fault detail: {row['value']}")

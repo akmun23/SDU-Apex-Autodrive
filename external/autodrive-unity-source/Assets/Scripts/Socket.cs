@@ -164,6 +164,9 @@ public class Socket : MonoBehaviour
                             {
                                 VehicleControllers[i].CurrentThrottle = float.Parse(jsonObject.GetField("V"+(i+1).ToString()+" Throttle").str); // Set throttle
                                 VehicleControllers[i].CurrentSteeringAngle = float.Parse(jsonObject.GetField("V"+(i+1).ToString()+" Steering").str); // Set steering angle
+#if DEVELOPMENT_BUILD
+                                VehicleControllers[i].MarkDevelopmentCommandReceived();
+#endif
                             }
                         }
                     }
@@ -179,6 +182,9 @@ public class Socket : MonoBehaviour
                         {
                             VehicleControllers[i].CurrentThrottle = float.Parse(jsonObject.GetField("V"+(i+1).ToString()+" Throttle").str); // Set throttle
                             VehicleControllers[i].CurrentSteeringAngle = float.Parse(jsonObject.GetField("V"+(i+1).ToString()+" Steering").str); // Set steering angle
+#if DEVELOPMENT_BUILD
+                            VehicleControllers[i].MarkDevelopmentCommandReceived();
+#endif
                         }
                     }
                     if(VehicleLightings.Length != 0)

@@ -37,38 +37,30 @@ TEST(OdometryObserver, AppliesSameEpochAccelerationInnovationForOnePhysicsTick)
   EXPECT_NEAR(estimate.body_u_mps, 2.002, 1.0e-12);
 }
 
-TEST(OdometryObserver, PreservesPhysxStickyTireTimersForTheNextPlantStep)
+TEST(OdometryObserver, PreservesSuspensionJouncePlantChannels)
 {
   OdometryObserver observer;
   auto observation = plant_observation(0.0);
-  observation.physx_state[18] = 0.125;
-  observation.physx_state[19] = 0.250;
-  observation.physx_state[20] = 1.001;
-  observation.physx_state[21] = 0.0;
-  observation.physx_state[22] = 0.5;
-  observation.physx_state[23] = 0.75;
-  observation.physx_state[24] = 1.001;
-  observation.physx_state[25] = 0.0;
+  observation.physx_state[14] = 0.001;
+  observation.physx_state[15] = 0.002;
+  observation.physx_state[16] = 0.003;
+  observation.physx_state[17] = 0.004;
   auto estimate = observer.update(observation);
-  for (std::size_t state = 18; state < observation.physx_state.size(); ++state) {
+  for (std::size_t state = 14; state < observation.physx_state.size(); ++state) {
     EXPECT_DOUBLE_EQ(estimate.unity_state[state], observation.physx_state[state])
-        << "initial PhysX state index " << state;
+        << "initial plant state index " << state;
   }
 
   observation = plant_observation(0.025);
   observation.physx_forward_velocity_mps = estimate.body_u_mps;
-  observation.physx_state[18] = 0.126;
-  observation.physx_state[19] = 0.251;
-  observation.physx_state[20] = 1.002;
-  observation.physx_state[21] = 0.0;
-  observation.physx_state[22] = 0.501;
-  observation.physx_state[23] = 0.751;
-  observation.physx_state[24] = 1.002;
-  observation.physx_state[25] = 0.0;
+  observation.physx_state[14] = 0.005;
+  observation.physx_state[15] = 0.006;
+  observation.physx_state[16] = 0.007;
+  observation.physx_state[17] = 0.008;
   estimate = observer.update(observation);
-  for (std::size_t state = 18; state < observation.physx_state.size(); ++state) {
+  for (std::size_t state = 14; state < observation.physx_state.size(); ++state) {
     EXPECT_DOUBLE_EQ(estimate.unity_state[state], observation.physx_state[state])
-        << "corrected PhysX state index " << state;
+        << "corrected plant state index " << state;
   }
 }
 

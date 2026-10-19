@@ -43,7 +43,8 @@ void copy_plant_state(
   std::copy(input.low_forward_speed_time_s.begin(),
     input.low_forward_speed_time_s.end(),
     output->begin() + UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL);
-  std::copy(input.low_side_speed_time_s.begin(), input.low_side_speed_time_s.end(),
+  std::copy(input.low_side_speed_time_s.begin(),
+    input.low_side_speed_time_s.end(),
     output->begin() + UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL);
 }
 
@@ -133,8 +134,13 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
     }
 
     const auto previous_state = plant_state_;
-    if (!f1tenth_mpc::unity_source_plant_step_1ms(
-        plant_state_, input, &physics_output))
+    const bool final_tick = tick + 1 == kStepsPerPacket;
+    const bool stepped = final_tick
+      ? f1tenth_mpc::unity_source_plant_step_1ms(
+          plant_state_, input, &physics_output)
+      : f1tenth_mpc::unity_source_plant_step_1ms_minimal(
+          plant_state_, input, &physics_output);
+    if (!stepped)
     {
       throw std::runtime_error("source-derived odometry plant rejected its state");
     }

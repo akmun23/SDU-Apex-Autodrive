@@ -130,7 +130,7 @@ def _get_state(phys, state):
 
 
 def one_trial(repo, binary, backend, ref, grid, track, output, target_speed,
-              wall_margin, max_seconds=65., contact_records=None):
+              wall_margin, max_seconds=65., contact_records=None, state_records=None):
     factory=(lambda:NativePhysX(repo,binary)) if backend=='native' else (
              lambda:SourcePlant(repo,output/'source_plant_build'))
     phys=factory(); records=[]; samples=[]
@@ -217,6 +217,19 @@ def one_trial(repo, binary, backend, ref, grid, track, output, target_speed,
                             'wheel_omega_radps': raw[3:7].copy(),
                             **{name: np.asarray(values,dtype=float).copy()
                                for name,values in observed.items()}})
+                    if state_records is not None:
+                        # Synchronized 25 ms post-scene native body state;
+                        # wheel callback forces were sampled before the scene
+                        # step and are NOT falsely labeled instantaneous.
+                        state_records.append({
+                            'time_s': float(t), 'progress_m': float(progress),
+                            'body_state_18': raw.copy(),
+                            'world_xy_m': [float(nxt.x), float(nxt.y)],
+                            'world_yaw_rad': float(nxt.yaw),
+                            'steering_command_rad': float(steering),
+                            'throttle_norm': float(throttle),
+                            'native_math':getattr(phys,'last_native_math',None),
+                        })
                     last_abs=progress
             previous=nxt
             if progress>=2*ref.length-.02:

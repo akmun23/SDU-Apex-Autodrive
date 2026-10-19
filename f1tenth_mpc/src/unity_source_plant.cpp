@@ -10,14 +10,24 @@ namespace {
 constexpr double kDt = 0.001;
 constexpr double kPi = 3.1415926535897932384626433832795;
 constexpr double kMassKg = 3.47;
-// PxVehicleUpdate.cpp::integrateBody uses getMassSpaceInvInertiaTensor()
-// transformed by the temporary chassis pose. Its vehicle-specific transform
-// resets the COM-local rotation to identity, so the applied vehicle-step
-// inertia is the mass-space diagonal (Unity right/up/forward mapped to this
-// model's roll/pitch/yaw axes). Do not substitute a full Euler rigid-body
-// tensor or add omega x (I omega): the source vehicle integrator does neither.
-constexpr std::array<double, 3> kVehicleMassSpaceInertiaKgM2{
-    0.0228149127, 0.0934206, 0.100088306};
+// The current F1TENTH runtime captures (locked brake, brake pulse, and
+// randomized yaw transitions) report inertiaTensor=(0.07804474,0.106500648,
+// 0.0399487168) kg m^2 and inertiaTensorRotation=(-0.00117634609,
+// 0.00208427128,0.00431931624,0.9999879). The scene constraint solver uses
+// this Rigidbody mass frame: R*diag(1/I)*R^T, mapped from Unity
+// right/up/forward into plant forward/left/up.
+constexpr double kInverseInertiaConstraintBodyKgM2[3][3] = {
+    {25.031794528147884, -0.05074067626085555, 0.03695920329073879},
+    {-0.05074067626085555, 12.813118838227348, -0.029710480898300164},
+    {0.03695920329073879, -0.02971048089830015, 9.389957331844979}};
+// PxVehicleUpdate::updateNoDrive resets the temporary chassis COM-pose
+// rotation to identity before integrateBody transforms getMassSpaceInvInertiaTensor.
+// Consequently its vehicle-force substeps use the captured principal
+// mass-space diagonal in the actor frame, not the rotated tensor used by the
+// later scene constraint solve. Unity principal moments are right/up/forward;
+// map reciprocals into this plant's forward/left/up axes.
+constexpr std::array<double, 3> kInverseInertiaVehicleBodyKgM2{
+    25.0320931459806, 12.813163321448696, 9.389614230328439};
 constexpr double kDragPerS = 0.273;
 constexpr double kGravity = 9.81;
 constexpr double kWheelbaseM = 0.324;
@@ -26,12 +36,6 @@ constexpr double kWheelRadiusM = 0.059;
 // PxVehicleUpdate.cpp::setVehicleToleranceScale sets the lateral-slip
 // denominator floor to 1.0 * scale.length; the active PhysX scale length is 1m.
 constexpr double kMinLateralSpeedForTireModelMps = 1.0;
-constexpr double kStickyTireSpeedThresholdMps = 0.2;
-constexpr double kStickyForwardTimerThresholdS = 1.0;
-constexpr double kStickySideTimerThresholdS = 1.0;
-constexpr double kStickyForwardTargetRatio = 0.01;
-constexpr double kStickySideTargetRatio = 0.1;
-constexpr double kStickyConstraintDamping = 1000.0;
 constexpr double kSuspensionMaxCompressionM = 0.025;
 constexpr double kSuspensionMaxDroopM = 0.025;
 constexpr double kWheelInertiaKgM2 = 0.0001897145;
@@ -55,6 +59,19 @@ constexpr std::array<double, 4> kWheelY{
 constexpr std::array<double, 4> kWheelCenterZCom{
     -0.004435138776898384, -0.004435138776898384,
     -0.014340000227093697, -0.014340000227093697};
+// WheelCollider.center is (0, 0.025, 0) in the active prefab. These are the
+// resulting wheel centers relative to the rigid-body COM, including that
+// local-center offset and front camber. Sticky activation uses the suspension
+// ray's bottom point, not the simplified force-model contact point below.
+constexpr std::array<double, 4> kStickyWheelY{
+    kWheelY[0], kWheelY[1], kWheelY[2], kWheelY[3]};
+constexpr std::array<double, 4> kStickyWheelCenterZCom{
+    0.02056485, 0.02056485, 0.01066, 0.01066};
+constexpr std::array<std::array<double, 3>, 4> kStickySuspensionDirectionBody{{
+    {0.0, 0.08715574274765817, -0.9961946980917455},
+    {0.0, -0.08715574274765817, -0.9961946980917455},
+    {0.0, 0.0, -1.0},
+    {0.0, 0.0, -1.0}}};
 // Active Unity prefab Rigidbody.centerOfMass, expressed in the model frame.
 constexpr std::array<double, 3> kComOffsetFromActorBody{
     -0.00468, 0.00008, 0.06434};
@@ -74,8 +91,35 @@ constexpr double kTireLoadFilterMin = 0.0;
 constexpr double kTireLoadFilterMinValue = 0.2308;
 constexpr double kTireLoadFilterMax = 3.0;
 constexpr double kTireLoadFilterMaxValue = 3.0;
+constexpr double kWheelSubstepThresholdMps = 5.0;
+// The shipped WheelCapture UnityPlayer debug symbols identify the active
+// WheelCollider backend as PxVehicleNoDrive. Its binary globals are
+// gLowLongSpeedSubstepCount=3 and gHighLongSpeedSubstepCount=1; no project
+// script calls ConfigureVehicleSubsteps, so PxVehicleWheelsSimData retains
+// these defaults. Do not replace this source-backed schedule with a capture-
+// fitted effective count.
+constexpr unsigned int kWheelSubstepsBelowThreshold = 3;
+constexpr unsigned int kWheelSubstepsAboveThreshold = 1;
+// Public PhysX PxVehicle sticky-tire thresholds and activation history.
+constexpr double kStickyTireSpeedThresholdMps = 0.2;
+constexpr double kStickyTireSpeedThresholdTimeS = 1.0;
+constexpr double kStickyTireForwardTargetRatio = 0.01;
+constexpr double kStickyTireSideTargetRatio = 0.1;
+constexpr double kStickyTireConstraintDampingPerS = 1000.0;
+// The active Unity Rigidbody reports six position and one velocity solver
+// iterations. Sticky rows are ordinary 1D constraints in the normal batch,
+// so they are applied in all six position passes and again in the mandatory
+// velocity/writeback pass.
+constexpr unsigned int kStickyTireSolverIterations = 7;
 
 using Vec3 = std::array<double, 3>;
+
+struct StickyTireConstraint {
+  bool active{};
+  Vec3 direction_body{};
+  Vec3 angular_direction_body{};
+  double target_speed_mps{};
+};
 
 struct AttitudeBasis {
   double sr{};
@@ -86,6 +130,14 @@ struct AttitudeBasis {
   Vec3 tire_longitudinal_unsteered_body{};
   Vec3 tire_lateral_unsteered_body{};
 };
+
+double body_vertical_speed(const UnitySourcePlantState &s,
+                           const AttitudeBasis &attitude)
+{
+  return (s.body_height_rate_mps + attitude.sp * s.u_mps -
+          attitude.cp * attitude.sr * s.v_mps) /
+      (attitude.cp * attitude.cr);
+}
 
 Vec3 add(const Vec3 &a, const Vec3 &b)
 {
@@ -172,9 +224,27 @@ struct WheelContactKinematics {
   double lateral_speed_mps{};
 };
 
+struct WheelSteeringBasis {
+  double cosine{1.0};
+  double sine{};
+};
+
+std::array<WheelSteeringBasis, 4> make_wheel_steering_basis(
+    const std::array<double, 4> &steer)
+{
+  std::array<WheelSteeringBasis, 4> basis{};
+  for (std::size_t wheel = 0; wheel < basis.size(); ++wheel) {
+    basis[wheel] = {std::cos(steer[wheel]), std::sin(steer[wheel])};
+  }
+  return basis;
+}
+
 bool wheel_contact_kinematics(const UnitySourcePlantState &s,
                               const AttitudeBasis &attitude,
-                              std::size_t wheel, double steering_rad,
+                              const Vec3 &body_velocity,
+                              const Vec3 &angular_velocity,
+                              std::size_t wheel,
+                              const WheelSteeringBasis &steering,
                               WheelContactKinematics *out)
 {
   if (!out || wheel >= 4) return false;
@@ -198,33 +268,88 @@ bool wheel_contact_kinematics(const UnitySourcePlantState &s,
       ray_direction_dot_normal;
   const double rest_travel =
       2.0 * kWheelRadiusM + kSuspensionMaxCompressionM;
+  const double ray_jounce = rest_travel - ray_travel;
   out->jounce_m = std::clamp(
-      rest_travel - ray_travel, -kSuspensionMaxDroopM,
+      ray_jounce, -kSuspensionMaxDroopM,
       kSuspensionMaxCompressionM);
-  out->contact_position_body = add(ray_start,
-      scale(suspension_direction, rest_travel - out->jounce_m));
+  // PxVehicleUpdate::intersectRayPlane forms wheelBottomPos from the raw
+  // ray-plane distance before processSuspWheelTireWheels clamps jounce for
+  // suspension force. Keep the contact kinematics on that raw intersection.
+  out->contact_position_body = add(
+      ray_start, scale(suspension_direction, ray_travel));
   out->ground_normal_body = attitude.ground_normal_body;
 
   // PxVehicleUpdate computes wheel-bottom velocity as v_COM + omega x r,
   // then projects tire directions onto the hit plane. Use all three angular
   // rates and solve the same ground-plane tire basis in the current attitude.
-  const double body_vertical_speed =
-      (s.body_height_rate_mps + attitude.sp * s.u_mps -
-       attitude.cp * attitude.sr * s.v_mps) /
-      (attitude.cp * attitude.cr);
-  const Vec3 body_velocity{s.u_mps, s.v_mps, body_vertical_speed};
-  const Vec3 angular_velocity{
-      s.roll_rate_radps, s.pitch_rate_radps, s.yaw_rate_radps};
   const Vec3 wheel_bottom_velocity = add(
       body_velocity, cross(angular_velocity, out->contact_position_body));
 
-  const double cs = std::cos(steering_rad), sn = std::sin(steering_rad);
   out->tire_longitudinal_body = add(
-      scale(attitude.tire_longitudinal_unsteered_body, cs),
-      scale(attitude.tire_lateral_unsteered_body, sn));
+      scale(attitude.tire_longitudinal_unsteered_body, steering.cosine),
+      scale(attitude.tire_lateral_unsteered_body, steering.sine));
   out->tire_lateral_body = subtract(
-      scale(attitude.tire_lateral_unsteered_body, cs),
-      scale(attitude.tire_longitudinal_unsteered_body, sn));
+      scale(attitude.tire_lateral_unsteered_body, steering.cosine),
+      scale(attitude.tire_longitudinal_unsteered_body, steering.sine));
+  out->forward_speed_mps = dot(wheel_bottom_velocity,
+                               out->tire_longitudinal_body);
+  out->lateral_speed_mps = dot(wheel_bottom_velocity,
+                               out->tire_lateral_body);
+  return std::isfinite(out->jounce_m) &&
+      std::isfinite(out->forward_speed_mps) &&
+      std::isfinite(out->lateral_speed_mps);
+}
+
+bool sticky_contact_kinematics(const UnitySourcePlantState &s,
+                               const AttitudeBasis &attitude,
+                               const Vec3 &body_velocity,
+                               const Vec3 &angular_velocity,
+                               std::size_t wheel,
+                               const WheelSteeringBasis &steering,
+                               WheelContactKinematics *out)
+{
+  if (!out || wheel >= 4) return false;
+  const Vec3 suspension_direction{
+      kStickySuspensionDirectionBody[wheel][0],
+      kStickySuspensionDirectionBody[wheel][1],
+      kStickySuspensionDirectionBody[wheel][2]};
+  const Vec3 wheel_center{kWheelX[wheel], kStickyWheelY[wheel],
+                          kStickyWheelCenterZCom[wheel]};
+  const double rest_travel =
+      2.0 * kWheelRadiusM + kSuspensionMaxCompressionM;
+  const Vec3 ray_start = subtract(wheel_center,
+      scale(suspension_direction,
+            kWheelRadiusM + kSuspensionMaxCompressionM));
+  const double ray_dot_normal =
+      dot(attitude.ground_normal_body, suspension_direction);
+  if (std::abs(ray_dot_normal) < 1.0e-8) return false;
+
+  const Vec3 com_offset{kComOffsetFromActorBody[0],
+                        kComOffsetFromActorBody[1],
+                        kComOffsetFromActorBody[2]};
+  const double ray_travel = -(s.body_height_m +
+      dot(attitude.ground_normal_body, com_offset) +
+      dot(attitude.ground_normal_body, ray_start)) / ray_dot_normal;
+  const double ray_jounce = rest_travel - ray_travel;
+  out->jounce_m = std::clamp(
+      ray_jounce, -kSuspensionMaxDroopM,
+      kSuspensionMaxCompressionM);
+  // Sticky activation and its target speed use PhysX's wheelBottomPos, which
+  // is computed from the unclamped ray distance. The later jounce clamp does
+  // not move that point.
+  out->contact_position_body = add(
+      ray_start, scale(suspension_direction, ray_travel));
+  out->ground_normal_body = attitude.ground_normal_body;
+
+  const Vec3 wheel_bottom_velocity = add(
+      body_velocity, cross(angular_velocity, out->contact_position_body));
+
+  out->tire_longitudinal_body = add(
+      scale(attitude.tire_longitudinal_unsteered_body, steering.cosine),
+      scale(attitude.tire_lateral_unsteered_body, steering.sine));
+  out->tire_lateral_body = subtract(
+      scale(attitude.tire_lateral_unsteered_body, steering.cosine),
+      scale(attitude.tire_longitudinal_unsteered_body, steering.sine));
   out->forward_speed_mps = dot(wheel_bottom_velocity,
                                out->tire_longitudinal_body);
   out->lateral_speed_mps = dot(wheel_bottom_velocity,
@@ -276,6 +401,24 @@ double curve_base_response(double slip, const std::array<double, 5> &curve)
   return std::copysign(response, slip);
 }
 
+double tire_load(double suspension_force, double sprung_mass)
+{
+  const double rest_load = (sprung_mass + 0.109) * kGravity;
+  const double normalized = suspension_force / rest_load;
+  double filtered;
+  if (normalized <= kTireLoadFilterMin) {
+    filtered = kTireLoadFilterMinValue;
+  } else if (normalized >= kTireLoadFilterMax) {
+    filtered = kTireLoadFilterMaxValue;
+  } else {
+    filtered = kTireLoadFilterMinValue +
+        (normalized - kTireLoadFilterMin) *
+        (kTireLoadFilterMaxValue - kTireLoadFilterMinValue) /
+        (kTireLoadFilterMax - kTireLoadFilterMin);
+  }
+  return filtered * rest_load;
+}
+
 std::array<double, 4> wheel_steering_angles(double physical_steering_rad)
 {
   const double tangent = std::tan(physical_steering_rad);
@@ -299,9 +442,16 @@ bool source_slip_excess(
   AttitudeBasis attitude;
   if (!make_attitude_basis(state, &attitude)) return false;
   const auto steer = wheel_steering_angles(state.physical_steering_rad);
+  const auto steering_basis = make_wheel_steering_basis(steer);
+  const Vec3 body_velocity{
+      state.u_mps, state.v_mps, body_vertical_speed(state, attitude)};
+  const Vec3 angular_velocity{
+      state.roll_rate_radps, state.pitch_rate_radps, state.yaw_rate_radps};
   for (std::size_t i = 0; i < 4; ++i) {
     WheelContactKinematics contact;
-    if (!wheel_contact_kinematics(state, attitude, i, steer[i], &contact))
+    if (!wheel_contact_kinematics(
+            state, attitude, body_velocity, angular_velocity,
+            i, steering_basis[i], &contact))
       return false;
     const double wheel_forward = contact.forward_speed_mps;
     const double wheel_surface = state.wheel_omega_radps[i] * kWheelRadiusM;
@@ -326,30 +476,10 @@ bool source_slip_excess(
   return true;
 }
 
-double tire_load(double suspension_force, double sprung_mass)
-{
-  const double rest_load = (sprung_mass + 0.109) * kGravity;
-  const double normalized = suspension_force / rest_load;
-  double filtered;
-  if (normalized <= kTireLoadFilterMin) {
-    filtered = kTireLoadFilterMinValue;
-  } else if (normalized >= kTireLoadFilterMax) {
-    filtered = kTireLoadFilterMaxValue;
-  } else {
-    filtered = kTireLoadFilterMinValue +
-        (normalized - kTireLoadFilterMin) *
-        (kTireLoadFilterMaxValue - kTireLoadFilterMinValue) /
-        (kTireLoadFilterMax - kTireLoadFilterMin);
-  }
-  return filtered * rest_load;
-}
-
-double suspension_force(const UnitySourcePlantState &s, std::size_t i,
+double suspension_force(const AttitudeBasis &attitude, std::size_t i,
                         double jounce, double jounce_rate)
 {
-  const double roll = s.roll_rad;
-  const double pitch = s.pitch_rad;
-  const double denominator = std::cos(pitch) * std::cos(roll);
+  const double denominator = attitude.cp * attitude.cr;
   const double gravity_along_suspension =
       std::max(0.0, kGravity * denominator);
   const double spring_weight = std::max(
@@ -365,9 +495,19 @@ double wheel_omega_update(double omega, double drive_torque,
                           double brake_torque, double tire_torque,
                           double duration)
 {
-  const double brake = omega > 0.0 ? -brake_torque
-      : omega < 0.0 ? brake_torque : 0.0;
-  const double total_torque = drive_torque + brake + tire_torque;
+  const double applied_torque = drive_torque + tire_torque;
+  // WheelCollider brakeTorque can hold a stationary wheel. Treating brake
+  // torque as zero at omega == 0 lets tire reaction torque spin a fully
+  // braked wheel up from rest, which contradicts the captured Unity encoder
+  // response. This is the wheel-level brake complementarity only; it does
+  // not impose the unrelated chassis-velocity "sticky tire" constraint.
+  if (brake_torque > 0.0 && std::abs(omega) <= 1.0e-12 &&
+      std::abs(applied_torque) <= brake_torque)
+    return 0.0;
+  const double brake = brake_torque > 0.0
+      ? -std::copysign(brake_torque, omega != 0.0 ? omega : applied_torque)
+      : 0.0;
+  const double total_torque = applied_torque + brake;
   const double next = (omega + duration * total_torque / kWheelInertiaKgM2) /
       (1.0 + kWheelDampingNms * duration / kWheelInertiaKgM2);
   if (brake_torque > 0.0 && omega * next <= 0.0) return 0.0;
@@ -378,93 +518,135 @@ double wheel_omega_update(double omega, double drive_torque,
 std::array<double, 3> angular_acceleration(
     const std::array<double, 3> &torque)
 {
-  return {torque[0] / kVehicleMassSpaceInertiaKgM2[0],
-          torque[1] / kVehicleMassSpaceInertiaKgM2[1],
-          torque[2] / kVehicleMassSpaceInertiaKgM2[2]};
+  // PxVehicleUpdate::updateNoDrive deliberately gives integrateBody a
+  // chassis transform whose COM-local rotation is identity. Its vehicle
+  // substeps therefore apply the mass-space diagonal in the actor frame.
+  // The later scene solver instead uses the Rigidbody mass frame (above).
+  // The public vehicle integrator has no separate omega x (I omega) term.
+  return {
+      kInverseInertiaVehicleBodyKgM2[0] * torque[0],
+      kInverseInertiaVehicleBodyKgM2[1] * torque[1],
+      kInverseInertiaVehicleBodyKgM2[2] * torque[2]};
 }
 
-struct StickyTireConstraint {
-  bool active{};
-  Vec3 direction_body{};
-  Vec3 angular_direction_body{};
-  double target_speed_mps{};
-};
-
-void solve_sticky_tire_velocity_rows(
-    const std::array<StickyTireConstraint, 8> &rows,
-    double duration,
-    double *u_mps, double *v_mps, double *body_height_rate_mps,
-    double roll_rad, double pitch_rad,
-    double *roll_rate_radps, double *pitch_rate_radps,
-    double *yaw_rate_radps,
-    Vec3 *delta_linear_body, Vec3 *delta_angular_body)
+Vec3 inverse_inertia_times(const Vec3 &value)
 {
-  const double cp = std::cos(pitch_rad), sp = std::sin(pitch_rad);
-  const double cr = std::cos(roll_rad), sr = std::sin(roll_rad);
+  return {
+      kInverseInertiaConstraintBodyKgM2[0][0] * value[0] +
+          kInverseInertiaConstraintBodyKgM2[0][1] * value[1] +
+          kInverseInertiaConstraintBodyKgM2[0][2] * value[2],
+      kInverseInertiaConstraintBodyKgM2[1][0] * value[0] +
+          kInverseInertiaConstraintBodyKgM2[1][1] * value[1] +
+          kInverseInertiaConstraintBodyKgM2[1][2] * value[2],
+      kInverseInertiaConstraintBodyKgM2[2][0] * value[0] +
+          kInverseInertiaConstraintBodyKgM2[2][1] * value[1] +
+          kInverseInertiaConstraintBodyKgM2[2][2] * value[2]};
+}
+
+void solve_sticky_tire_constraints(
+    const std::array<StickyTireConstraint, 8> &rows,
+    double duration, const AttitudeBasis &attitude,
+    UnitySourcePlantState *state)
+{
+  if (!state) return;
+  std::array<std::size_t, 8> active_rows{};
+  std::size_t active_count = 0;
+  for (std::size_t row = 0; row < rows.size(); ++row) {
+    if (rows[row].active) active_rows[active_count++] = row;
+  }
+  // With no active PhysX rows, the solver is an identity operation. Avoid
+  // converting the velocity basis and running seven empty PGS sweeps on the
+  // overwhelmingly common high-speed/no-sticky path.
+  if (active_count == 0) return;
+
   Vec3 linear_velocity{
-      *u_mps, *v_mps,
-      (*body_height_rate_mps + sp * *u_mps - cp * sr * *v_mps) / (cp * cr)};
-  Vec3 angular_velocity{*roll_rate_radps, *pitch_rate_radps,
-                        *yaw_rate_radps};
-  const Vec3 initial_linear_velocity = linear_velocity;
-  const Vec3 initial_angular_velocity = angular_velocity;
-  std::array<double, 8> accumulated_impulse{};
+      state->u_mps, state->v_mps, body_vertical_speed(*state, attitude)};
+  Vec3 angular_velocity{
+      state->roll_rate_radps, state->pitch_rate_radps,
+      state->yaw_rate_radps};
   const double inverse_mass = 1.0 / kMassKg;
-  const double inverse_inertia[3] = {
-      1.0 / kVehicleMassSpaceInertiaKgM2[0],
-      1.0 / kVehicleMassSpaceInertiaKgM2[1],
-      1.0 / kVehicleMassSpaceInertiaKgM2[2]};
-  const double spring_a = duration * kStickyConstraintDamping;
+  const double spring_a = duration * kStickyTireConstraintDampingPerS;
   const double x = 1.0 / (1.0 + spring_a);
   const double impulse_multiplier = 1.0 - x;
-
-  // PxVehicleSuspLimitConstraintShader orders all forward sticky rows before
-  // all side rows. The active scene uses one velocity solver iteration.
-  for (std::size_t row = 0; row < rows.size(); ++row) {
-    if (!rows[row].active) continue;
-    const Vec3 &direction = rows[row].direction_body;
-    const Vec3 &angular_direction = rows[row].angular_direction_body;
+  std::array<double, 8> accumulated_impulse{};
+  std::array<Vec3, 8> angular_response{};
+  std::array<double, 8> velocity_multiplier{};
+  std::array<double, 8> constant{};
+  std::size_t valid_count = 0;
+  for (std::size_t active_index = 0;
+       active_index < active_count; ++active_index) {
+    const std::size_t row = active_rows[active_index];
+    angular_response[row] =
+        inverse_inertia_times(rows[row].angular_direction_body);
     const double response = inverse_mass +
-        angular_direction[0] * angular_direction[0] * inverse_inertia[0] +
-        angular_direction[1] * angular_direction[1] * inverse_inertia[1] +
-        angular_direction[2] * angular_direction[2] * inverse_inertia[2];
+        dot(rows[row].angular_direction_body, angular_response[row]);
     if (!(response > 0.0) || !std::isfinite(response)) continue;
-
-    const double normal_velocity = dot(linear_velocity, direction) +
-        dot(angular_velocity, angular_direction);
-    const double constant = x * spring_a *
-        rows[row].target_speed_mps / response;
-    const double velocity_multiplier = -x * spring_a / response;
-    const double new_impulse = impulse_multiplier * accumulated_impulse[row] +
-        velocity_multiplier * normal_velocity + constant;
-    const double impulse_delta = new_impulse - accumulated_impulse[row];
-    accumulated_impulse[row] = new_impulse;
-    linear_velocity = add(linear_velocity,
-        scale(direction, inverse_mass * impulse_delta));
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-      angular_velocity[axis] += angular_direction[axis] *
-          inverse_inertia[axis] * impulse_delta;
+    active_rows[valid_count++] = row;
+    velocity_multiplier[row] = -x * spring_a / response;
+    constant[row] =
+        x * spring_a * rows[row].target_speed_mps / response;
+  }
+  // PxVehicleSuspLimitConstraintShader emits rows in this exact order:
+  // forward FL..RR, followed by side FL..RR. The active Unity body reports
+  // six main PGS iterations. Keep PhysX's ordered PGS update; reversing and
+  // averaging the rows is not the simulator's algorithm.
+  for (unsigned int iteration = 0;
+       iteration < kStickyTireSolverIterations; ++iteration) {
+    for (std::size_t active_index = 0;
+         active_index < valid_count; ++active_index) {
+      const std::size_t row = active_rows[active_index];
+      const double contact_speed =
+          dot(linear_velocity, rows[row].direction_body) +
+          dot(angular_velocity, rows[row].angular_direction_body);
+      const double new_impulse =
+          impulse_multiplier * accumulated_impulse[row] +
+          velocity_multiplier[row] * contact_speed + constant[row];
+      // The source constraint shader uses +/-FLT_MAX, i.e. no tire-force
+      // clamp. Preserve the accumulated impulse update used by PhysX PGS.
+      const double impulse_delta = new_impulse - accumulated_impulse[row];
+      accumulated_impulse[row] = new_impulse;
+      linear_velocity = add(linear_velocity,
+          scale(rows[row].direction_body, inverse_mass * impulse_delta));
+      angular_velocity = add(angular_velocity,
+          scale(angular_response[row], impulse_delta));
     }
   }
 
-  *u_mps = linear_velocity[0];
-  *v_mps = linear_velocity[1];
-  *body_height_rate_mps = linear_velocity[2] * cp * cr -
+  const double cp = std::cos(state->pitch_rad);
+  const double sp = std::sin(state->pitch_rad);
+  const double cr = std::cos(state->roll_rad);
+  const double sr = std::sin(state->roll_rad);
+  state->u_mps = linear_velocity[0];
+  state->v_mps = linear_velocity[1];
+  state->body_height_rate_mps = linear_velocity[2] * cp * cr -
       sp * linear_velocity[0] + cp * sr * linear_velocity[1];
-  *roll_rate_radps = angular_velocity[0];
-  *pitch_rate_radps = angular_velocity[1];
-  *yaw_rate_radps = angular_velocity[2];
-  if (delta_linear_body) {
-    *delta_linear_body = subtract(linear_velocity, initial_linear_velocity);
-  }
-  if (delta_angular_body) {
-    *delta_angular_body = subtract(angular_velocity, initial_angular_velocity);
-  }
+  state->roll_rate_radps = angular_velocity[0];
+  state->pitch_rate_radps = angular_velocity[1];
+  state->yaw_rate_radps = angular_velocity[2];
+}
+
+std::array<double, 2> euler_roll_pitch_rates(
+    const AttitudeBasis &attitude, double roll_body_rate,
+    double pitch_body_rate, double yaw_body_rate)
+{
+  // Unity's pose is a quaternion, while this reduced state carries the two
+  // tilt angles needed by the flat-ground wheel model. Gyro values are body
+  // angular-velocity components p/q/r. For the plant's Z-Y-X Euler
+  // convention, the kinematic conversion is:
+  //   roll_dot  = p + sin(roll)*tan(pitch)*q + cos(roll)*tan(pitch)*r
+  //   pitch_dot = cos(roll)*q - sin(roll)*r
+  // Treating p/q as roll_dot/pitch_dot (the old update) loses the yaw/tilt
+  // coupling and corrupts suspension-ray orientation during aggressive turns.
+  const double tan_pitch = attitude.sp / attitude.cp;
+  return {
+    roll_body_rate + tan_pitch *
+        (attitude.sr * pitch_body_rate + attitude.cr * yaw_body_rate),
+    attitude.cr * pitch_body_rate - attitude.sr * yaw_body_rate};
 }
 
 bool step(const UnitySourcePlantState &input_state,
           const UnitySourcePlantInput &input, double duration,
-          UnitySourcePlantOutput *out)
+          UnitySourcePlantOutput *out, bool complete_output)
 {
   if (!out || !finite_state(input_state) ||
       !std::isfinite(input.steering_target_rad) ||
@@ -501,85 +683,132 @@ bool step(const UnitySourcePlantState &input_state,
 
   const std::array<double, 4> steer =
       wheel_steering_angles(s.physical_steering_rad);
+  const auto steering_basis = make_wheel_steering_basis(steer);
   std::array<double, 4> fx_tire{}, fy_tire{};
-  std::array<WheelContactKinematics, 4> contacts{};
+  std::array<WheelContactKinematics, 4> contacts{}, sticky_contacts{};
   std::array<double, 4> slip_x{}, slip_y{}, load{}, suspension_force_n{};
+  std::array<double, 4> contact_forward_speed{}, contact_lateral_speed{};
+  std::array<double, 4> sticky_contact_forward_speed{};
+  std::array<double, 4> sticky_contact_lateral_speed{};
+  std::array<std::array<double, 3>, 4> sticky_contact_position{};
+  std::array<std::array<double, 3>, 4> sticky_tire_longitudinal{};
+  std::array<bool, 4> sticky_forward_output{}, sticky_side_output{};
   std::array<double, 4> maximum_positive_slip{};
   std::array<double, 4> maximum_slip_excess_mps{};
-  std::array<StickyTireConstraint, 8> sticky_rows{};
-  std::array<bool, 4> sticky_forward_active{};
-  std::array<bool, 4> sticky_side_active{};
-  const bool intends_to_accelerate = input.throttle_normalized != 0.0;
+  std::array<StickyTireConstraint, 8> sticky_tire_rows{};
   const double drive_torque = input.throttle_normalized == 0.0
       ? 0.0 : kMotorTorqueNm * input.throttle_normalized / 4.0;
   const double brake_torque = input.throttle_normalized == 0.0
       ? kMotorTorqueNm : 0.0;
-  const unsigned int substep_count = std::abs(s.u_mps) < 5.0 ? 5U : 1U;
+  const unsigned int substep_count = std::abs(s.u_mps) <
+      kWheelSubstepThresholdMps ? kWheelSubstepsBelowThreshold :
+                                  kWheelSubstepsAboveThreshold;
   const double substep_dt = duration / static_cast<double>(substep_count);
-  double ax = 0.0, ay = 0.0, yaw_accel = 0.0;
+  double yaw_accel = 0.0;
   std::array<double, 4> final_jounce_rate{};
   for (unsigned int substep = 0; substep < substep_count; ++substep) {
     AttitudeBasis attitude;
     if (!make_attitude_basis(s, &attitude)) return false;
+    const Vec3 body_velocity{
+        s.u_mps, s.v_mps, body_vertical_speed(s, attitude)};
+    const Vec3 body_angular_velocity{
+        s.roll_rate_radps, s.pitch_rate_radps, s.yaw_rate_radps};
     std::array<double, 4> jounce{};
     std::array<double, 4> jounce_rate{};
     Vec3 total_force_body{0.0, 0.0, 0.0};
     Vec3 total_torque_body{0.0, 0.0, 0.0};
     for (std::size_t i = 0; i < 4; ++i) {
-      if (!wheel_contact_kinematics(s, attitude, i, steer[i], &contacts[i]))
+      if (!wheel_contact_kinematics(
+              s, attitude, body_velocity, body_angular_velocity,
+              i, steering_basis[i], &contacts[i]))
+        return false;
+      if (!sticky_contact_kinematics(
+              s, attitude, body_velocity, body_angular_velocity,
+              i, steering_basis[i], &sticky_contacts[i]))
         return false;
       jounce[i] = contacts[i].jounce_m;
       if (s.suspension_history_initialized) {
         jounce_rate[i] =
             (jounce[i] - s.suspension_jounce_m[i]) / substep_dt;
       }
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
       const double wheel_forward = contacts[i].forward_speed_mps;
       const double wheel_lateral = contacts[i].lateral_speed_mps;
+      const double sticky_wheel_forward =
+          sticky_contacts[i].forward_speed_mps;
+      const double sticky_wheel_lateral =
+          sticky_contacts[i].lateral_speed_mps;
       const double wheel_surface = s.wheel_omega_radps[i] * kWheelRadiusM;
-      const double wheel_omega = s.wheel_omega_radps[i];
-      if (!intends_to_accelerate &&
-          std::abs(wheel_forward) < kStickyTireSpeedThresholdMps &&
-          std::abs(wheel_omega) <
-              kStickyTireSpeedThresholdMps / kWheelRadiusM) {
-        s.low_forward_speed_time_s[i] = std::min(
-            s.low_forward_speed_time_s[i] + substep_dt,
-            kStickyForwardTimerThresholdS + kDt);
-      } else {
+      suspension_force_n[i] = suspension_force(
+          attitude, i, jounce[i], jounce_rate[i]);
+      load[i] = tire_load(suspension_force_n[i], kSprungMassKg[i]);
+      const bool intention_to_accelerate = input.throttle_normalized != 0.0;
+      const bool tire_force_branch_active = load[i] > 0.0;
+      if (tire_force_branch_active &&
+          std::abs(sticky_wheel_forward) < kStickyTireSpeedThresholdMps &&
+          std::abs(s.wheel_omega_radps[i]) <
+              kStickyTireSpeedThresholdMps / kWheelRadiusM &&
+          !intention_to_accelerate) {
+        s.low_forward_speed_time_s[i] += substep_dt;
+      } else if (tire_force_branch_active) {
         s.low_forward_speed_time_s[i] = 0.0;
       }
-      if (!intends_to_accelerate &&
-          std::abs(wheel_lateral) < kStickyTireSpeedThresholdMps) {
-        s.low_side_speed_time_s[i] = std::min(
-            s.low_side_speed_time_s[i] + substep_dt,
-            kStickySideTimerThresholdS + kDt);
-      } else {
+      // PxVehicleUpdate.cpp resets both low-speed histories when the driver
+      // intends to accelerate. The side-constraint activation later ignores
+      // the intent flag itself, but consumes this already-gated timer.
+      if (tire_force_branch_active &&
+          std::abs(sticky_wheel_lateral) < kStickyTireSpeedThresholdMps &&
+          !intention_to_accelerate) {
+        s.low_side_speed_time_s[i] += substep_dt;
+      } else if (tire_force_branch_active) {
         s.low_side_speed_time_s[i] = 0.0;
       }
-      const bool sticky_forward = !intends_to_accelerate &&
-          ((std::abs(wheel_forward) < kStickyTireSpeedThresholdMps &&
-            wheel_omega == 0.0) ||
-           s.low_forward_speed_time_s[i] >
-               kStickyForwardTimerThresholdS);
-      const bool sticky_side = s.low_forward_speed_time_s[i] > 0.0 &&
-          s.low_side_speed_time_s[i] > kStickySideTimerThresholdS;
-      sticky_forward_active[i] = sticky_forward;
-      sticky_side_active[i] = sticky_side;
+      const bool sticky_forward_active = input.apply_sticky_tire_constraints &&
+          tire_force_branch_active &&
+          !intention_to_accelerate &&
+          ((input.apply_immediate_sticky_constraints &&
+            std::abs(sticky_wheel_forward) < kStickyTireSpeedThresholdMps &&
+            s.wheel_omega_radps[i] == 0.0) ||
+           s.low_forward_speed_time_s[i] > kStickyTireSpeedThresholdTimeS);
+      const bool sticky_side_active = input.apply_sticky_tire_constraints &&
+          tire_force_branch_active &&
+          s.low_forward_speed_time_s[i] > 0.0 &&
+          s.low_side_speed_time_s[i] > kStickyTireSpeedThresholdTimeS;
       const Vec3 application_point{
           kWheelX[i], kWheelY[i], kForceApplicationZ[i]};
-      sticky_rows[i] = StickyTireConstraint{
-          sticky_forward, contacts[i].tire_longitudinal_body,
-          cross(application_point, contacts[i].tire_longitudinal_body),
-          kStickyForwardTargetRatio * wheel_forward};
-      sticky_rows[4 + i] = StickyTireConstraint{
-          sticky_side, contacts[i].tire_lateral_body,
-          cross(application_point, contacts[i].tire_lateral_body),
-          kStickySideTargetRatio * wheel_lateral};
+      // Public PxVehicle stores VehicleConstraintData only for internal
+      // substep k==0. Timers and tire forces update at every substep, but its
+      // solver rows, directions, and targets are frozen from the first one.
+      if (substep == 0) {
+        contact_forward_speed[i] = wheel_forward;
+        contact_lateral_speed[i] = wheel_lateral;
+        sticky_contact_forward_speed[i] = sticky_wheel_forward;
+        sticky_contact_lateral_speed[i] = sticky_wheel_lateral;
+        sticky_contact_position[i] = sticky_contacts[i].contact_position_body;
+        sticky_tire_longitudinal[i] =
+            sticky_contacts[i].tire_longitudinal_body;
+        sticky_forward_output[i] = sticky_forward_active;
+        sticky_side_output[i] = sticky_side_active;
+        sticky_tire_rows[i] = StickyTireConstraint{
+            sticky_forward_active,
+            sticky_contacts[i].tire_longitudinal_body,
+            cross(application_point,
+                  sticky_contacts[i].tire_longitudinal_body),
+            kStickyTireForwardTargetRatio * sticky_wheel_forward};
+        sticky_tire_rows[4 + i] = StickyTireConstraint{
+            sticky_side_active,
+            sticky_contacts[i].tire_lateral_body,
+            cross(application_point,
+                  sticky_contacts[i].tire_lateral_body),
+            kStickyTireSideTargetRatio * sticky_wheel_lateral};
+      }
       const double denominator = std::max(
           std::max(std::abs(wheel_forward), std::abs(wheel_surface)) + 0.1,
           0.0);
       const double raw_slip_x = denominator > 0.0
           ? (wheel_surface - wheel_forward) / denominator : 0.0;
-      slip_x[i] = sticky_forward ? 0.0 : raw_slip_x;
+      slip_x[i] = sticky_forward_active ? 0.0 : raw_slip_x;
       maximum_positive_slip[i] =
           std::max(maximum_positive_slip[i], slip_x[i]);
       const double slip_excess = std::max(0.0,
@@ -587,25 +816,34 @@ bool step(const UnitySourcePlantState &input_state,
               kForwardCurve[0] * denominator);
       maximum_slip_excess_mps[i] = std::max(
           maximum_slip_excess_mps[i], slip_excess);
+      // The tire-force curve uses body-left-positive contact velocity here.
+      // Unity's WheelHit.sidewaysSlip reports the opposite sign for the same
+      // wheel motion; keep this force-model coordinate separate from the
+      // externally published WheelHit-compatible diagnostic below.
       const double raw_slip_y = std::atan(wheel_lateral /
           (std::abs(wheel_forward) + kMinLateralSpeedForTireModelMps));
-      slip_y[i] = sticky_side ? 0.0 : raw_slip_y;
-      // The tire-load filter belongs to VehicleComputeTireForce. The chassis
-      // receives the unfiltered spring/damper support force from PhysX.
-      suspension_force_n[i] =
-          suspension_force(s, i, jounce[i], jounce_rate[i]);
-      load[i] = tire_load(suspension_force_n[i], kSprungMassKg[i]);
+      slip_y[i] = sticky_side_active ? 0.0 : raw_slip_y;
+      // The tire-load filter belongs to VehicleComputeTireForce. It is not
+      // Unity WheelCollider source; retain it only as the current capture-
+      // validated effective load mapping until a WheelCollider-specific
+      // mapping is established. The chassis receives the unfiltered support.
       const double response_x = curve_base_response(slip_x[i], kForwardCurve);
       const double response_y = curve_base_response(slip_y[i], kSideCurve);
+      // Retain the combined-slip cap only as an empirically supported
+      // effective contact-force constraint. Removing it to follow the two
+      // separately exposed WheelCollider curves worsened the same capture's
+      // 750 ms rollout RMSE (u/v/r: 0.081/0.065/0.068 versus
+      // 0.057/0.021/0.034). This is not asserted to be Unity's internal
+      // implementation; it remains an explicit model approximation.
+      const double normalized_longitudinal =
+          response_x / kForwardCurve[1];
+      const double normalized_lateral = response_y / kSideCurve[1];
       const double utilization = std::sqrt(std::max(
-          1.0,
-          std::pow(response_x / kForwardCurve[1], 2.0) +
-          std::pow(response_y / kSideCurve[1], 2.0)));
-      // VehicleComputeTireForce normalizes combined slip using the raw curve
-      // responses, then applies each WheelFrictionCurve stiffness to its force.
-      const double force_wheel_x = sticky_forward ? 0.0 :
+          1.0, normalized_longitudinal * normalized_longitudinal +
+                   normalized_lateral * normalized_lateral));
+      const double force_wheel_x = sticky_forward_active ? 0.0 :
           load[i] * response_x * kForwardCurve[4] / utilization;
-      const double force_wheel_y = sticky_side ? 0.0 :
+      const double force_wheel_y = sticky_side_active ? 0.0 :
           -load[i] * response_y * kSideCurve[4] / utilization;
       fx_tire[i] = force_wheel_x;
       fy_tire[i] = force_wheel_y;
@@ -623,26 +861,17 @@ bool step(const UnitySourcePlantState &input_state,
       total_torque_body = add(total_torque_body,
                               cross(application_point, wheel_force_body));
     }
-    const double body_vertical_speed =
-        (s.body_height_rate_mps + std::sin(s.pitch_rad) * s.u_mps -
-         std::cos(s.pitch_rad) * std::sin(s.roll_rad) * s.v_mps) /
-        (std::cos(s.pitch_rad) * std::cos(s.roll_rad));
-    const Vec3 body_velocity{s.u_mps, s.v_mps, body_vertical_speed};
-    const Vec3 body_angular_velocity{
-        s.roll_rate_radps, s.pitch_rate_radps, s.yaw_rate_radps};
-    const Vec3 gravity_body = rotate_world_to_body(
-        attitude, Vec3{0.0, 0.0, -kGravity});
-    // This is inertial acceleration in body coordinates (what the IMU
-    // measures); subtract omega x v separately when differentiating the
-    // body-frame velocity state.
-    const Vec3 inertial_acceleration_body = add(
-        subtract(scale(total_force_body, 1.0 / kMassKg),
-                 scale(body_velocity, kDragPerS)), gravity_body);
+    // PxVehicleUpdate integrates only vehicle tire/suspension forces in its
+    // internal substeps. Gravity and Rigidbody damping are applied later by
+    // the PhysX scene's once-per-fixed-step unconstrained-velocity pass.
+    // Keeping those out of this loop matters at the strict sticky-tire speed
+    // boundary: damping each substep can move a contact across 0.2 m/s before
+    // PhysX would apply any scene damping.
+    const Vec3 inertial_acceleration_body =
+        scale(total_force_body, 1.0 / kMassKg);
     const Vec3 body_velocity_rate = subtract(
         inertial_acceleration_body,
         cross(body_angular_velocity, body_velocity));
-    ax = inertial_acceleration_body[0];
-    ay = inertial_acceleration_body[1];
     const double heave_accel =
         rotate_body_to_world(attitude, inertial_acceleration_body)[2];
 
@@ -661,57 +890,107 @@ bool step(const UnitySourcePlantState &input_state,
           s.wheel_omega_radps[i] * substep_dt;
     }
     // PxVehicleUpdates integrates velocities and its internal chassis
-    // transform at every configured vehicle substep (5 below 5 m/s, 1 above).
+    // transform at every configured vehicle substep.
     s.u_mps += substep_dt * body_velocity_rate[0];
     s.v_mps += substep_dt * body_velocity_rate[1];
     s.yaw_rate_radps += substep_dt * yaw_accel;
     s.body_height_rate_mps += substep_dt * heave_accel;
     s.body_height_m += substep_dt * s.body_height_rate_mps;
     s.roll_rate_radps += substep_dt * roll_accel;
-    s.roll_rad += substep_dt * s.roll_rate_radps;
     s.pitch_rate_radps += substep_dt * pitch_accel;
-    s.pitch_rad += substep_dt * s.pitch_rate_radps;
+    const auto tilt_rates = euler_roll_pitch_rates(
+        attitude, s.roll_rate_radps,
+        s.pitch_rate_radps, s.yaw_rate_radps);
+    s.roll_rad += substep_dt * tilt_rates[0];
+    s.pitch_rad += substep_dt * tilt_rates[1];
     s.suspension_jounce_m = jounce;
     s.suspension_history_initialized = true;
     final_jounce_rate = jounce_rate;
   }
 
-  // PxVehicleUpdates emits these rows; PxScene solves them after the vehicle
-  // substeps. Match its one-velocity-iteration acceleration-spring update in
-  // DySolverConstraint1D instead of suppressing low-speed reversal by clamp.
-  Vec3 sticky_delta_velocity{}, sticky_delta_angular_velocity{};
-  solve_sticky_tire_velocity_rows(sticky_rows, duration,
-      &s.u_mps, &s.v_mps, &s.body_height_rate_mps,
-      s.roll_rad, s.pitch_rad, &s.roll_rate_radps,
-      &s.pitch_rate_radps, &s.yaw_rate_radps,
-      &sticky_delta_velocity, &sticky_delta_angular_velocity);
-  ax += sticky_delta_velocity[0] / duration;
-  ay += sticky_delta_velocity[1] / duration;
-  yaw_accel += sticky_delta_angular_velocity[2] / duration;
+  // Match DyBodyCoreIntegrator.h::bodyCoreComputeUnconstrainedVelocity:
+  // scene gravity is added once, then the captured Rigidbody linear damping
+  // is applied as max(1 - damping*dt, 0). The vehicle substep transform above
+  // remains local to PxVehicleUpdate; the state returned to callers is the
+  // actor velocity/height after the scene step.
+  AttitudeBasis scene_attitude;
+  if (!make_attitude_basis(s, &scene_attitude)) return false;
+  Vec3 scene_linear_velocity = rotate_body_to_world(
+      scene_attitude,
+      Vec3{s.u_mps, s.v_mps, body_vertical_speed(s, scene_attitude)});
+  scene_linear_velocity[2] -= kGravity * duration;
+  const double linear_damping = std::max(1.0 - kDragPerS * duration, 0.0);
+  scene_linear_velocity = scale(scene_linear_velocity, linear_damping);
+  const Vec3 scene_body_velocity = rotate_world_to_body(
+      scene_attitude, scene_linear_velocity);
+  s.u_mps = scene_body_velocity[0];
+  s.v_mps = scene_body_velocity[1];
+  s.body_height_rate_mps = scene_linear_velocity[2];
 
-  // PhysX applies Rigidbody angular damping once in the ordinary 1 ms scene
-  // step after PxVehicleUpdates, not inside each vehicle substep.
+  // PxVehicleUpdates first sets the post-vehicle angular velocity. The
+  // ordinary PhysX scene step then applies Rigidbody angular damping during
+  // unconstrained-velocity pre-integration, before solving its constraint
+  // rows (including the public PxVehicle sticky-tire rows).
   const double angular_damping = std::max(1.0 - 0.1 * duration, 0.0);
   s.roll_rate_radps *= angular_damping;
   s.pitch_rate_radps *= angular_damping;
   s.yaw_rate_radps *= angular_damping;
 
+  solve_sticky_tire_constraints(
+      sticky_tire_rows, duration, scene_attitude, &s);
+
+  // PxRigidBody pose integration follows the unconstrained-velocity update
+  // and sticky-row solve. Preserve the substep height during the vehicle
+  // update above, but return the actor height advanced by the final scene
+  // velocity, matching the pose that the next suspension raycast observes.
+  s.body_height_m = input_state.body_height_m +
+      duration * s.body_height_rate_mps;
+
   if (!finite_state(s)) return false;
   out->state = s;
-  out->longitudinal_slip = slip_x;
   out->maximum_positive_longitudinal_slip = maximum_positive_slip;
   out->maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
-  out->lateral_slip = slip_y;
+  if (!complete_output) return true;
+
+  out->contact_forward_speed_mps = contact_forward_speed;
+  out->contact_lateral_speed_mps = contact_lateral_speed;
+  out->sticky_contact_forward_speed_mps = sticky_contact_forward_speed;
+  out->sticky_contact_lateral_speed_mps = sticky_contact_lateral_speed;
+  out->sticky_contact_position_body_m = sticky_contact_position;
+  out->sticky_tire_longitudinal_body = sticky_tire_longitudinal;
+  out->sticky_forward_active = sticky_forward_output;
+  out->sticky_side_active = sticky_side_output;
+  out->longitudinal_slip = slip_x;
+  for (std::size_t i = 0; i < slip_y.size(); ++i)
+    out->lateral_slip[i] = -slip_y[i];
   out->normal_load_n = load;
   out->suspension_force_n = suspension_force_n;
   out->suspension_jounce_rate_mps = final_jounce_rate;
-  out->sticky_tire_longitudinal_active = sticky_forward_active;
-  out->sticky_tire_lateral_active = sticky_side_active;
   out->tire_longitudinal_force_n = fx_tire;
   out->tire_lateral_force_n = fy_tire;
-  out->longitudinal_acceleration_mps2 = ax;
-  out->lateral_acceleration_mps2 = ay;
-  out->yaw_acceleration_radps2 = yaw_accel;
+  const Vec3 final_world_velocity = rotate_body_to_world(
+      scene_attitude,
+      Vec3{s.u_mps, s.v_mps, body_vertical_speed(s, scene_attitude)});
+  const AttitudeBasis initial_attitude{
+      std::sin(input_state.roll_rad), std::cos(input_state.roll_rad),
+      std::sin(input_state.pitch_rad), std::cos(input_state.pitch_rad)};
+  const Vec3 initial_body_velocity{
+      input_state.u_mps, input_state.v_mps,
+      body_vertical_speed(input_state, initial_attitude)};
+  const Vec3 initial_world_velocity = rotate_body_to_world(
+      initial_attitude, initial_body_velocity);
+  const Vec3 average_world_acceleration = scale(
+      subtract(final_world_velocity, initial_world_velocity), 1.0 / duration);
+  const Vec3 average_body_acceleration = rotate_world_to_body(
+      scene_attitude, average_world_acceleration);
+  out->longitudinal_acceleration_mps2 = average_body_acceleration[0];
+  out->lateral_acceleration_mps2 = average_body_acceleration[1];
+  // Report the effective acceleration of the propagated body-rate state over
+  // this call, including scene damping and any sticky-row impulse. `yaw_accel`
+  // above is only the unconstrained torque acceleration of the final vehicle
+  // substep and is not the derivative of the state returned to callers.
+  out->yaw_acceleration_radps2 =
+      (s.yaw_rate_radps - input_state.yaw_rate_radps) / duration;
   return true;
 }
 
@@ -727,7 +1006,15 @@ bool unity_source_plant_step_1ms(const UnitySourcePlantState &state,
                                 const UnitySourcePlantInput &input,
                                 UnitySourcePlantOutput *output)
 {
-  return step(state, input, kDt, output);
+  return step(state, input, kDt, output, true);
+}
+
+bool unity_source_plant_step_1ms_minimal(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    UnitySourcePlantOutput *output)
+{
+  return step(state, input, kDt, output, false);
 }
 
 bool unity_source_plant_step(const UnitySourcePlantState &state,
@@ -746,7 +1033,8 @@ bool unity_source_plant_step(const UnitySourcePlantState &state,
   std::array<double, 4> maximum_positive_slip{};
   std::array<double, 4> maximum_slip_excess_mps{};
   for (unsigned int i = 0; i < exact_steps; ++i) {
-    if (!unity_source_plant_step_1ms(current, input, &result)) return false;
+    const bool final_step = i + 1 == exact_steps;
+    if (!step(current, input, kDt, &result, final_step)) return false;
     for (std::size_t wheel = 0; wheel < maximum_positive_slip.size(); ++wheel) {
       maximum_positive_slip[wheel] = std::max(maximum_positive_slip[wheel],
           result.maximum_positive_longitudinal_slip[wheel]);

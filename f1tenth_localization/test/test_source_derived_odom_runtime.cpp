@@ -35,6 +35,27 @@ TEST(SourceDerivedOdomRuntime, AppliesCommandsAfterTheTwoPacketDelay)
   }
 }
 
+TEST(SourceDerivedOdomRuntime, PropagatesPhysXTireTimersAndResetsOnDriveCommand)
+{
+  SourceDerivedOdomRuntime runtime(0.15532);
+
+  // The reset/settle interval is one second at rest, so the shared plant has
+  // entered the persistent low-speed sticky-tire regime before commands are
+  // applied. The runtime must preserve this state through its command queue.
+  const auto first = runtime.advance(0.0, 0.2, false, 0.0);
+  EXPECT_GT(first.state[UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL], 1.0);
+  EXPECT_GT(first.state[UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL], 1.0);
+
+  runtime.advance(0.0, 0.2, false, 0.0);
+  const auto drive_applied = runtime.advance(0.0, 0.2, false, 0.0);
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    EXPECT_DOUBLE_EQ(
+      drive_applied.state[UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL + wheel], 0.0);
+    EXPECT_DOUBLE_EQ(
+      drive_applied.state[UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL + wheel], 0.0);
+  }
+}
+
 TEST(SourceDerivedOdomRuntime, UsesMeasuredSteeringAndCorrectedBodyState)
 {
   SourceDerivedOdomRuntime runtime(0.15532);

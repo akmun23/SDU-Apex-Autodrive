@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "unity_source_plant.hpp"
+#include "unity_source_plant_c.h"
 #include "f1tenth_localization/unity_wheel_encoder.hpp"
 
 namespace f1tenth_localization
@@ -14,7 +15,7 @@ struct PredictedPlantState
   // Source-plant state after the packet's 1 ms steps. Yaw rate in state[2]
   // remains the uncorrected source-plant state. The causal corrected forecast
   // is separate so it cannot silently alter other state estimates.
-  std::array<double, 26> state{};
+  std::array<double, UNITY_SOURCE_PLANT_STATE_SIZE> state{};
   double raw_yaw_rate_prediction_radps{0.0};
   double corrected_yaw_rate_prediction_radps{0.0};
   double yaw_rate_prediction_correction_radps{0.0};

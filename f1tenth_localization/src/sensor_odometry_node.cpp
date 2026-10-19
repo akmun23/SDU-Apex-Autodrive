@@ -421,7 +421,7 @@ private:
 
     sdu_apex_msgs::msg::UnityPlantState state;
     state.header = odom.header;
-    state.state_schema_version = 7;
+    state.state_schema_version = 10;
     state.state_origin = 1;
     state.suspension_history_initialized = last_plant_.suspension_history_initialized;
     state.sensor_corrected_state_mask =
@@ -461,9 +461,11 @@ private:
       steering_feedback : last_plant_.state[13];
     std::copy_n(last_plant_.state.begin() + 14, 4,
       state.suspension_jounce_m.begin());
-    std::copy_n(last_plant_.state.begin() + 18, 4,
+    std::copy_n(last_plant_.state.begin() +
+          UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL, 4,
       state.low_forward_speed_time_s.begin());
-    std::copy_n(last_plant_.state.begin() + 22, 4,
+    std::copy_n(last_plant_.state.begin() +
+          UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL, 4,
       state.low_side_speed_time_s.begin());
     state.longitudinal_slip = last_plant_.longitudinal_slip;
     state.lateral_slip = last_plant_.lateral_slip;

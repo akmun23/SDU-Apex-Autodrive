@@ -39,11 +39,10 @@ enum
     MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FR = 19,
     MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_RL = 20,
     MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_RR = 21,
-    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FL = 22,
-    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_FR = 23,
-    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_RL = 24,
-    MPC_PLANT_STATE_WHEEL_ROTATION_ANGLE_RR = 25,
-    MPC_PLANT_INTERNAL_STATE_COUNT = 26
+    /* Wheel rotation angle is accumulated for odometry's encoder output but
+     * does not affect wheel forces or body motion. Keep it in the shared
+     * odometry plant only; it is not part of MPC model state. */
+    MPC_PLANT_INTERNAL_STATE_COUNT = 22
 };
 
 typedef struct
@@ -66,12 +65,9 @@ typedef struct
      * accepted command and supplies the previous-input cost. */
     float delayed_throttle_command_1;
     float delayed_throttle_command_2;
-    /* Recursive Unity-derived state. The RTI vector includes the 14 internal
-     * coordinates not already represented above, so their effects and
-     * sensitivities propagate through the full horizon. */
-    /* The 14 recursive source-plant values not represented by the dedicated
-     * MPC u/v/r/steering coordinates. The full Unity 18-vector is assembled
-     * only at the plant boundary; this prevents four duplicated states. */
+    /* Four wheel rates, six sprung-body values and four suspension jounces.
+     * Encoder wheel-angle accumulation is deliberately omitted: it is an
+     * odometry output accumulator and has no effect on MPC plant dynamics. */
     double source_plant_internal_state[MPC_PLANT_INTERNAL_STATE_COUNT];
     int source_plant_initialized;
     int source_suspension_history_initialized;

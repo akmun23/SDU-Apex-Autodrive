@@ -5,7 +5,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${repo_root}/tools/docker_env.sh"
 
 if [[ "$#" -lt 4 || "$#" -gt 5 ]]; then
-  echo "Usage: $0 <controller-container> <simulator-container> <recorder-container> <target-lap|collision> [timeout-s]" >&2
+  echo "Usage: $0 <controller-container> <simulator-container> <recorder-container> <target-lap|collision|mpc-horizon> [timeout-s]" >&2
   exit 2
 fi
 
@@ -16,12 +16,15 @@ target_lap="$4"
 timeout_s="${5:-120}"
 stall_timeout_s="${SDU_APEX_WATCH_STALL_TIMEOUT_S:-20}"
 post_target_lap_guard_s="${SDU_APEX_WATCH_POST_TARGET_GUARD_S:-0.5}"
+simulator_stop_timeout_s="${SDU_APEX_WATCH_SIM_STOP_TIMEOUT_S:-30}"
 watcher_container="${SDU_APEX_WATCHER_CONTAINER:-${controller_container}}"
 if [[ ! "${timeout_s}" =~ ^[1-9][0-9]*$ ||
       ! "${stall_timeout_s}" =~ ^[1-9][0-9]*$ ||
+      ! "${simulator_stop_timeout_s}" =~ ^[0-9]+$ ||
       ! "${post_target_lap_guard_s}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ||
-      ("${target_lap}" != "collision" && ! "${target_lap}" =~ ^[1-9][0-9]*$) ]]; then
-  echo "target-lap must be a positive integer or collision; timeout-s and SDU_APEX_WATCH_STALL_TIMEOUT_S must be positive integers; SDU_APEX_WATCH_POST_TARGET_GUARD_S must be nonnegative." >&2
+      ("${target_lap}" != "collision" && "${target_lap}" != "mpc-horizon" &&
+       ! "${target_lap}" =~ ^[1-9][0-9]*$) ]]; then
+  echo "target-lap must be a positive integer, collision, or mpc-horizon; timeout-s and SDU_APEX_WATCH_STALL_TIMEOUT_S must be positive integers; SDU_APEX_WATCH_SIM_STOP_TIMEOUT_S must be nonnegative; SDU_APEX_WATCH_POST_TARGET_GUARD_S must be nonnegative." >&2
   exit 2
 fi
 
@@ -32,10 +35,15 @@ cleanup() {
     return
   fi
   cleanup_done=1
-  # On any failed screen (especially a collision), stop motion immediately;
-  # bag finalization must never leave the car running while it waits for ROS.
-  if [[ "${watch_status}" != "0" ]]; then
+  # Collision and external interruption require an immediate stop. A timeout
+  # or no-progress screen still exits promptly, but let Unity shut down cleanly
+  # so development-only in-memory physics captures can be flushed.
+  if [[ "${watch_status}" == "3" || "${watch_status}" == "5" ||
+        "${watch_status}" == "130" ||
+        "${watch_status}" == "143" ]]; then
     docker stop --timeout 0 "${simulator_container}" >/dev/null 2>&1 || true
+    docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
+  elif [[ "${watch_status}" != "0" ]]; then
     docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
   fi
   # On clean completion, finalize the bag at the requested target-lap boundary.
@@ -51,7 +59,7 @@ cleanup() {
     docker stop --timeout 5 "${recorder_container}" >/dev/null 2>&1 || true
   fi
 
-  docker stop --timeout 0 "${simulator_container}" >/dev/null 2>&1 || true
+  docker stop --timeout "${simulator_stop_timeout_s}" "${simulator_container}" >/dev/null 2>&1 || true
   docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
   for _ in $(seq 1 10); do
     running="$(docker inspect --format '{{.State.Running}}' "${controller_container}" 2>/dev/null || true)"
@@ -70,6 +78,10 @@ set +e
 if [[ "${target_lap}" == "collision" ]]; then
   docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --collision-only --timeout-s "$1" --stall-timeout-s "$2"' \
+    _ "${timeout_s}" "${stall_timeout_s}"
+elif [[ "${target_lap}" == "mpc-horizon" ]]; then
+  docker exec "${watcher_container}" /bin/bash -lc \
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-horizon-test --timeout-s "$1" --stall-timeout-s "$2"' \
     _ "${timeout_s}" "${stall_timeout_s}"
 else
   docker exec "${watcher_container}" /bin/bash -lc \

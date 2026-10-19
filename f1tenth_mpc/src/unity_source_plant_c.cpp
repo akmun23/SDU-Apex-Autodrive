@@ -81,12 +81,6 @@ void to_c(const f1tenth_mpc::UnitySourcePlantOutput &source,
   std::copy(source.suspension_jounce_rate_mps.begin(),
             source.suspension_jounce_rate_mps.end(),
             output->suspension_jounce_rate_mps);
-  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
-    output->sticky_tire_longitudinal_active[wheel] =
-        source.sticky_tire_longitudinal_active[wheel] ? 1 : 0;
-    output->sticky_tire_lateral_active[wheel] =
-        source.sticky_tire_lateral_active[wheel] ? 1 : 0;
-  }
   std::copy(source.tire_longitudinal_force_n.begin(),
             source.tire_longitudinal_force_n.end(),
             output->tire_longitudinal_force_n);

@@ -110,9 +110,13 @@ static int optimizer_index_from_model_state(int model_index)
 {
     if (model_index >= MPC_STATE_IDX_EY &&
         model_index <= MPC_STATE_IDX_R) return model_index;
-    if (model_index == MPC_STATE_IDX_ACTUAL_STEERING_ANGLE) return 5;
+    if (model_index == MPC_STATE_IDX_ACTUAL_STEERING_ANGLE)
+        return MPC_OPT_IDX_ACTUAL_STEERING_ANGLE;
     if (model_index >= MPC_STATE_IDX_WHEEL_OMEGA_FL &&
-        model_index < MPC_MODEL_NX) return model_index - 4;
+        model_index <= MPC_STATE_IDX_SUSPENSION_JOUNCE_RR) {
+        return MPC_OPT_IDX_WHEEL_OMEGA_FL +
+            model_index - MPC_STATE_IDX_WHEEL_OMEGA_FL;
+    }
     return -1;
 }
 
@@ -135,12 +139,6 @@ static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
         full[MPC_STATE_IDX_SUSPENSION_JOUNCE_FL + wheel] = (float)
             prepared_plant.source_plant_internal_state[
                 MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL + wheel];
-        full[MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL + wheel] = (float)
-            prepared_plant.source_plant_internal_state[
-                MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL + wheel];
-        full[MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL + wheel] = (float)
-            prepared_plant.source_plant_internal_state[
-                MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL + wheel];
     }
     full[MPC_STATE_IDX_BODY_HEIGHT] = (float)
         prepared_plant.source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT];
@@ -306,61 +304,6 @@ static int rollout_nominal_controls(
     return 1;
 }
 
-/* Build exact source-plant speed envelopes for the current queued commands.
- * Both probes use the same path steering sequence; only the new throttle
- * decisions differ (Unity's exact-zero brake branch versus maximum drive).
- * The resulting interval is used to avoid asking the nominal horizon to
- * reach speeds that neither source rollout can reach at that packet. */
-static int build_source_speed_envelope(
-    const MpcRtiState_t *initial_state,
-    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
-    int horizon,
-    float prediction_dt,
-    const MpcRtiConfiguration_t *configuration,
-    float lower[PREDICTION_HORIZON + 1],
-    float upper[PREDICTION_HORIZON + 1])
-{
-    if (!initial_state || !references || !configuration || !lower || !upper ||
-        horizon < 1 || horizon > PREDICTION_HORIZON ||
-        !isfinite(prediction_dt) || prediction_dt <= 0.0f) return 0;
-
-    MpcModelState_t brake = initial_state->plant;
-    MpcModelState_t drive = initial_state->plant;
-    lower[0] = upper[0] = initial_state->plant.u;
-    for (int k = 0; k < horizon; ++k) {
-        const MpcModelControl_t brake_control = {
-            .steering_target_rad = references[k + 1].steering_command,
-            .throttle_command = 0.0f};
-        const MpcModelControl_t drive_control = {
-            .steering_target_rad = references[k + 1].steering_command,
-            .throttle_command = MPC_THROTTLE_MAX};
-        const MpcStageResult_t brake_step = mpc_vehicle_model_step(
-            &brake, &brake_control, prediction_dt,
-            references[k].path_curvature);
-        const MpcStageResult_t drive_step = mpc_vehicle_model_step(
-            &drive, &drive_control, prediction_dt,
-            references[k].path_curvature);
-        if (!brake_step.valid || !drive_step.valid) return 0;
-        brake = brake_step.next;
-        drive = drive_step.next;
-        lower[k + 1] = fminf(brake.u, drive.u);
-        upper[k + 1] = fmaxf(brake.u, drive.u);
-        upper[k + 1] = fminf(upper[k + 1],
-            configuration->active_speed_ceiling_mps);
-    }
-    return 1;
-}
-
-static void clamp_speed_references_to_source_envelope(
-    MpcRtiReference_t references[PREDICTION_HORIZON + 1],
-    int horizon,
-    const float lower[PREDICTION_HORIZON + 1],
-    const float upper[PREDICTION_HORIZON + 1])
-{
-    for (int k = 0; k <= horizon; ++k)
-        references[k].u = clampf_rti(references[k].u, lower[k], upper[k]);
-}
-
 static void align_speed_reference_derivatives(
     MpcRtiReference_t references[PREDICTION_HORIZON + 1],
     int horizon,
@@ -377,7 +320,17 @@ static void align_speed_reference_derivatives(
         references[horizon].u;
 }
 
-static int select_throttle_modes(
+static float speed_error_drive_throttle_floor(float speed_error_mps)
+{
+    /* Treat a material speed deficit as a drive-mode request.  The source
+     * plant predicts the resulting wheel spin and body response; do not
+     * attenuate a feasible acceleration command with an arbitrary throttle
+     * ladder.  q=0 remains Unity's hard-brake mode. */
+    if (speed_error_mps >= 0.35f) return MPC_THROTTLE_MAX;
+    return MPC_THROTTLE_MIN_DRIVE;
+}
+
+int mpc_rti_select_throttle_modes(
     MpcModelControl_t controls[PREDICTION_HORIZON],
     const MpcRtiState_t predicted_states[PREDICTION_HORIZON + 1],
     const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
@@ -389,7 +342,6 @@ static int select_throttle_modes(
      * float roundoff can leave its nominally flat launch segment with tiny
      * negative acceleration and a few 1e-11 m/s of apparent overspeed. Those
      * numerical signs must not select Unity's full-brake branch at standstill. */
-    const float acceleration_mode_epsilon_mps2 = 1.0e-3f;
     const float speed_mode_epsilon_mps = 1.0e-3f;
     for (int k = 0; k < horizon; ++k) {
         /* q[k] enters queue slot 2 in state k+1, slot 1 in state k+2, and is
@@ -400,9 +352,12 @@ static int select_throttle_modes(
         const int effect_stage = k + 3 <= horizon ? k + 3 : horizon;
         const MpcRtiReference_t *target = &references[effect_stage];
         const MpcRtiState_t *predicted = &predicted_states[effect_stage];
+        /* A falling reference-speed derivative is not itself a brake request.
+         * q=0 selects Unity's full-brake branch, so applying it while the
+         * predicted vehicle is still below the speed target drives it farther
+         * from the reference. The delayed effect stage already compares the
+         * predicted speed with the speed target at the time this command acts. */
         const int brake =
-            target->longitudinal_acceleration_mps2 <
-                -acceleration_mode_epsilon_mps2 ||
             predicted->plant.u > target->u + speed_mode_epsilon_mps;
         /* Slip is a continuous plant response, not a request to engage the
          * exact-zero brake branch. When the car is still below its speed
@@ -411,7 +366,9 @@ static int select_throttle_modes(
          * an asymptote crossing directly to q=0 repeatedly switched the
          * launch into Unity's full 428 N m-per-wheel brake mode. */
         controls[k].throttle_command = brake ? 0.0f :
-            fmaxf(controls[k].throttle_command, MPC_THROTTLE_MIN_DRIVE);
+            fmaxf(controls[k].throttle_command,
+                speed_error_drive_throttle_floor(
+                    target->u - predicted->plant.u));
     }
     return 1;
 }
@@ -623,14 +580,6 @@ static int set_state_bounds_with_corridor(
     for (int wheel = 0; wheel < 4; ++wheel) {
         lower[6 + wheel] = -350.0f;
         upper[6 + wheel] = 350.0f;
-        const int low_forward_timer =
-            MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL + wheel - 4;
-        const int low_side_timer =
-            MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL + wheel - 4;
-        lower[low_forward_timer] = 0.0f;
-        upper[low_forward_timer] = MPC_PHYSX_STICKY_TIMER_CAP_S;
-        lower[low_side_timer] = 0.0f;
-        upper[low_side_timer] = MPC_PHYSX_STICKY_TIMER_CAP_S;
     }
     return 1;
 }
@@ -841,18 +790,20 @@ int mpc_rti_build_ltv_qp_with_schedule(
                     nominal_states[j].plant.delayed_steering_command_1;
                 const float applied_throttle =
                     nominal_states[j].plant.delayed_throttle_command_1;
-                /* Form the affine residual in the same accumulation order
-                 * used by the Riccati prediction (d, then A*x, then B*u).
-                 * Subtracting a pre-summed A*x+B*u from the nominal next
-                 * state caused avoidable float cancellation in yaw-rate rows
-                 * whose wheel/suspension sensitivities are large. */
-                float affine_offset = next_optimizer_states[j][row];
+                /* The affine residual can be much smaller than the separate
+                 * A*x and B*u terms, especially for yaw rows coupled to
+                 * wheel/suspension states. Form it in double so cancellation
+                 * does not corrupt the nominal-point identity before the
+                 * result is stored in the solver's float matrices. */
+                double affine_offset = next_optimizer_states[j][row];
                 for (int col = 0; col < MPC_OPT_PHYSICAL_NX; ++col)
-                    affine_offset -= stage->A[row][col] *
+                    affine_offset -= (double)stage->A[row][col] *
                         nominal_optimizer_states[j][col];
-                affine_offset -= stage->B[row][0] * applied_steering;
-                affine_offset -= stage->B[row][1] * applied_throttle;
-                stage->d[row] = affine_offset;
+                affine_offset -= (double)stage->B[row][0] *
+                    applied_steering;
+                affine_offset -= (double)stage->B[row][1] *
+                    applied_throttle;
+                stage->d[row] = (float)affine_offset;
             }
         } else {
             /* The last two QP stages carry the command-cost tail. Vehicle
@@ -933,12 +884,19 @@ int mpc_rti_build_ltv_qp_with_schedule(
             stage->u_lb[0] = stage->u_ub[0] = queued_steering;
             stage->u_lb[1] = stage->u_ub[1] = queued_throttle;
         } else if (j <= horizon + 1) {
-            const MpcModelControl_t *command = &nominal_controls[j - 2];
+            const int command_index = j - 2;
+            const MpcModelControl_t *command =
+                &nominal_controls[command_index];
             stage->u_lb[0] = -configuration->max_steering_rad;
             stage->u_ub[0] = configuration->max_steering_rad;
             const int brake_mode = command->throttle_command ==
                 MPC_THROTTLE_MIN;
-            stage->u_lb[1] = brake_mode ? 0.0f : MPC_THROTTLE_MIN_DRIVE;
+            const int effect_stage = command_index + 3 <= horizon
+                ? command_index + 3 : horizon;
+            const float minimum_drive = speed_error_drive_throttle_floor(
+                references[effect_stage].u -
+                    nominal_states[effect_stage].plant.u);
+            stage->u_lb[1] = brake_mode ? 0.0f : minimum_drive;
             stage->u_ub[1] = brake_mode ? 0.0f : MPC_THROTTLE_MAX;
         } else {
             stage->u_lb[0] = stage->u_ub[0] = 0.0f;
@@ -1112,24 +1070,25 @@ int mpc_rti_build_nominal(
             return fail_nominal_build(
                 nominal, MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE);
     }
-    float reachable_speed_lower[PREDICTION_HORIZON + 1] = {0.0f};
-    float reachable_speed_upper[PREDICTION_HORIZON + 1] = {0.0f};
-    if (!build_source_speed_envelope(current_state, references, horizon,
-            prediction_dt, configuration, reachable_speed_lower,
-            reachable_speed_upper))
-        return fail_nominal_build(
-            nominal, MPC_RTI_NOMINAL_BUILD_SOURCE_SPEED_ENVELOPE);
-    clamp_speed_references_to_source_envelope(
-        references, horizon, reachable_speed_lower, reachable_speed_upper);
+    /* The initial condition is fixed by odometry; only future samples track
+     * the requested trajectory speed. */
+    references[0].u = current_state->plant.u;
+    /* Keep the trajectory's requested speed as the optimization target.
+     * Clipping it to a short source-plant reachable envelope made the target
+     * collapse toward the current speed while stopped/slow, so the optimizer
+     * saw little speed error and emitted tiny throttle.  The nonlinear source
+     * rollout itself remains the feasibility check; it already accounts for
+     * command delay, wheel spin, and the reachable body speed. */
     align_speed_reference_derivatives(references, horizon, prediction_dt,
         current_state->plant.longitudinal_acceleration_mps2);
-    if (!select_throttle_modes(nominal->controls, pass_a_states, references,
+    if (!mpc_rti_select_throttle_modes(
+            nominal->controls, pass_a_states, references,
             horizon))
         return fail_nominal_build(
             nominal, MPC_RTI_NOMINAL_BUILD_THROTTLE_MODE);
 
-    /* The speed target now respects the exact queued brake/drive rollouts,
-     * and each QP stage remains entirely within its selected Unity branch. */
+    /* Throttle mode remains source-specific: positive q drives; exact zero
+     * engages Unity's hard-brake branch. */
     if (!rollout_nominal_controls(current_state, current_progress,
             nominal->controls, references, horizon, prediction_dt,
             nominal->states, nominal->progress))
@@ -1606,7 +1565,7 @@ static int valid_cycle_configuration(
         configuration->solver.max_iterations > 0 &&
         finite_nonnegative(configuration->degraded_residual_limit) &&
         finite_nonnegative(configuration->maximum_regularization) &&
-        configuration->maximum_regularization <= 1.0e-2f &&
+        configuration->maximum_regularization <= 0.25f &&
         configuration->max_consecutive_degraded_solves >= 0 &&
         finite_nonnegative(configuration->max_cycle_time_us);
 }
@@ -1630,6 +1589,7 @@ typedef struct
     int nonlinear_failure_reason;
     MpcRtiRolloutFailure_t nonlinear_failure;
     int first_action_valid;
+    int throttle_mode_switches;
     float nonlinear_objective;
     float minimum_corridor_slack;
     float lateral_accel_proxy;
@@ -1826,9 +1786,29 @@ static int build_exact_corridor_repair_candidate(
             const MpcModelControl_t qp_control = failed_pass->candidate.controls[k];
             controls[k].steering_target_rad = nominal_control.steering_target_rad +
                 alpha * (qp_control.steering_target_rad - nominal_control.steering_target_rad);
-            controls[k].throttle_command = nominal_control.throttle_command +
-                alpha * (qp_control.throttle_command -
-                    nominal_control.throttle_command);
+            const int nominal_brakes = nominal_control.throttle_command ==
+                MPC_THROTTLE_MIN;
+            const int qp_brakes = qp_control.throttle_command ==
+                MPC_THROTTLE_MIN;
+            const int selected_brake_mode = nominal_brakes == qp_brakes
+                ? nominal_brakes : (alpha >= 0.5f ? qp_brakes : nominal_brakes);
+            if (selected_brake_mode) {
+                /* q=0 is a discrete Unity hard-brake mode, not the low end
+                 * of a continuous throttle interpolation. Never turn a
+                 * drive/brake line-search blend into a small positive drive
+                 * command and call it braking. */
+                controls[k].throttle_command = MPC_THROTTLE_MIN;
+            } else {
+                const float nominal_drive = nominal_brakes
+                    ? MPC_THROTTLE_MIN_DRIVE
+                    : nominal_control.throttle_command;
+                const float qp_drive = qp_brakes
+                    ? MPC_THROTTLE_MIN_DRIVE
+                    : qp_control.throttle_command;
+                controls[k].throttle_command = fmaxf(
+                    MPC_THROTTLE_MIN_DRIVE,
+                    nominal_drive + alpha * (qp_drive - nominal_drive));
+            }
             if (!isfinite(controls[k].steering_target_rad) ||
                 !isfinite(controls[k].throttle_command)) {
                 controls_valid = 0;
@@ -1987,8 +1967,36 @@ static MpcRtiCycleStatus_t solve_rti_pass(
 
     MpcModelControl_t candidate_controls[PREDICTION_HORIZON] = {0};
     for (int k = 0; k < horizon; ++k) {
-        candidate_controls[k].steering_target_rad = solution.u[k + 2][0];
-        candidate_controls[k].throttle_command = solution.u[k + 2][1];
+        /* An iteration-limited ADMM point is not guaranteed to satisfy its
+         * actuator box constraints. Residual recovery is allowed only as a
+         * seed for nonlinear validation, so project each delayed decision
+         * back into the exact QP stage bounds before simulating it. In
+         * particular this prevents a large speed deficit from silently
+         * publishing a tiny throttle that violates the speed-first drive
+         * floor. The complete projected sequence still has to pass the
+         * source-plant rollout and hard corridor gate below. */
+        const RiccatiStepData_t *command_stage = &problem.steps[k + 2];
+        candidate_controls[k].steering_target_rad = clampf_rti(
+            solution.u[k + 2][0], command_stage->u_lb[0],
+            command_stage->u_ub[0]);
+        candidate_controls[k].throttle_command = clampf_rti(
+            solution.u[k + 2][1], command_stage->u_lb[1],
+            command_stage->u_ub[1]);
+    }
+    /* The nominal rollout can be badly optimistic about speed after the
+     * delayed command queue. Do not let that prediction erase the measured
+     * speed deficit from the first command actually being published. Keep a
+     * strong drive request whenever current body speed is materially below
+     * the target at this command's first effect stage; the full candidate is
+     * immediately re-rolled through the source plant and still must pass the
+     * hard nonlinear corridor gate before it can leave this function. */
+    const int first_effect_stage = horizon >= 3 ? 3 : horizon;
+    const float measured_speed_deficit = references[first_effect_stage].u -
+        current_state->plant.u;
+    if (measured_speed_deficit >= 0.35f) {
+        candidate_controls[0].throttle_command = fmaxf(
+            candidate_controls[0].throttle_command,
+            speed_error_drive_throttle_floor(measured_speed_deficit));
     }
     pass->first_action = candidate_controls[0];
     pass->first_action_valid = isfinite(pass->first_action.steering_target_rad) &&
@@ -2010,12 +2018,11 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         if (max_residual > configuration->degraded_residual_limit ||
             memory->consecutive_degraded_solves + 1 >
                 configuration->max_consecutive_degraded_solves) {
-            /* In adaptive/R2 mode, keep a bounded projected solution long
-             * enough to validate its exact nonlinear rollout and use it as a
-             * same-cycle R2 seed. It is never accepted or published as R1.
-             * R1-only mode keeps the strict residual gate. */
-            if (configuration->refinement_mode == MPC_RTI_REFINEMENT_R1 ||
-                configuration->rti2_residual_recovery_limit <= 0.0f ||
+            /* A residual-limited iterate is not yet a command. Retain it in
+             * every refinement mode only within the explicit recovery bound;
+             * the caller may publish it only after exact plant rollout and
+             * nonlinear corridor validation. */
+            if (configuration->rti2_residual_recovery_limit <= 0.0f ||
                 max_residual > configuration->rti2_residual_recovery_limit) {
                 pass->status = MPC_RTI_CYCLE_REJECTED_RESIDUAL;
                 pass->solve_us = monotonic_microseconds() - start_us;
@@ -2054,6 +2061,53 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         pass->nonlinear_failure_reason = (int)rollout_status;
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
+    }
+
+    /* The QP uses a smooth local model, but Unity's throttle is hybrid:
+     * exact zero selects the hard-brake branch and any positive command
+     * selects motor drive. Reclassify each command from the QP candidate's
+     * exact predicted speed, not only from the stale nominal used to build
+     * the QP. Then replay the whole horizon through the exact source-derived
+     * plant before nonlinear acceptance. This prevents a candidate that is
+     * already predicted to overspeed from being trapped in positive drive
+     * merely because its previous nominal was in drive mode.
+     */
+    MpcModelControl_t mode_checked_controls[PREDICTION_HORIZON];
+    memcpy(mode_checked_controls, candidate_controls,
+        (size_t)horizon * sizeof(candidate_controls[0]));
+    if (!mpc_rti_select_throttle_modes(mode_checked_controls,
+            candidate_states, references, horizon)) {
+        pass->status = MPC_RTI_CYCLE_REJECTED_INPUT;
+        pass->solve_us = monotonic_microseconds() - start_us;
+        return pass->status;
+    }
+    for (int k = 0; k < horizon; ++k) {
+        if (mode_checked_controls[k].throttle_command !=
+                candidate_controls[k].throttle_command)
+            ++pass->throttle_mode_switches;
+    }
+    if (pass->throttle_mode_switches > 0) {
+        memcpy(candidate_controls, mode_checked_controls,
+            (size_t)horizon * sizeof(candidate_controls[0]));
+        phase_start_us = monotonic_microseconds();
+        const MpcRtiRolloutStatus_t mode_rollout_status =
+            mpc_rti_rollout_candidate_with_schedule(
+                current_state, current_progress, candidate_controls,
+                trajectory, trajectory_count, lap_length, references,
+                nominal->progress, &pass->path_delta, horizon,
+                prediction_dt, &configuration->model, schedule,
+                candidate_states, candidate_progress,
+                &pass->nonlinear_failure_stage, &pass->nonlinear_failure);
+        pass->exact_rollout_us += monotonic_microseconds() - phase_start_us;
+        if (mode_rollout_status != MPC_RTI_ROLLOUT_OK) {
+            pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+            pass->nonlinear_failure_reason = (int)mode_rollout_status;
+            pass->solve_us = monotonic_microseconds() - start_us;
+            return pass->status;
+        }
+        memcpy(pass->candidate.controls, candidate_controls,
+            (size_t)horizon * sizeof(candidate_controls[0]));
+        pass->first_action = candidate_controls[0];
     }
 
     pass->candidate.valid = 1;
@@ -2394,12 +2448,10 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         r1_status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
     const MpcRtiMemory_t r1_memory = *memory;
     const int repairable_corridor_failure = !r1_accepted &&
-        configuration->refinement_mode != MPC_RTI_REFINEMENT_R1 &&
         r1_status == MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT &&
         r1.nonlinear_failure_reason == MPC_RTI_ROLLOUT_CORRIDOR &&
         r1.nonlinear_failure_stage >= 0;
     const int repairable_residual_failure = !r1_accepted &&
-        configuration->refinement_mode != MPC_RTI_REFINEMENT_R1 &&
         r1_status == MPC_RTI_CYCLE_REJECTED_RESIDUAL &&
         r1.candidate.valid;
     MpcRtiPassResult_t corridor_repair = r1;
@@ -2473,7 +2525,38 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     int run_r2 = configuration->refinement_mode ==
             MPC_RTI_REFINEMENT_R2 ||
         (configuration->refinement_mode == MPC_RTI_REFINEMENT_ADAPTIVE &&
-         trigger_mask != 0u) || repairable_corridor_failure;
+         trigger_mask != 0u) ||
+        (repairable_corridor_failure &&
+         configuration->refinement_mode != MPC_RTI_REFINEMENT_R1);
+    /* A residual-limited R1 candidate has already passed the exact nonlinear
+     * rollout and hard corridor gate. In R1-only mode it is the requested
+     * result; in adaptive mode, retain R2 for low-clearance candidates where
+     * refinement could materially improve the reserve. */
+    if (repairable_residual_failure &&
+        (configuration->refinement_mode == MPC_RTI_REFINEMENT_R1 ||
+         (configuration->refinement_mode == MPC_RTI_REFINEMENT_ADAPTIVE &&
+          r1.minimum_corridor_slack >
+              configuration->rti2_min_corridor_slack_trigger_m))) {
+        selected = r1;
+        selected.status = MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
+        selected_candidate = 1;
+        result->residual_candidate_published = 1;
+        run_r2 = 0;
+    }
+    /* R1-only remains one QP solve. If its exact plant rollout misses the
+     * corridor, use the existing bounded blend search rather than turning a
+     * distant, small corridor miss into q=0 hard braking. Each trial is
+     * replayed through the nonlinear source plant over the full horizon and
+     * is published only after the same hard corridor validator succeeds. */
+    if (repairable_corridor_failure && corridor_repair_available &&
+        configuration->refinement_mode == MPC_RTI_REFINEMENT_R1) {
+        *memory = memory_before_r1;
+        selected = corridor_repair;
+        selected_candidate = 3;
+        result->corridor_repair_used = 1;
+        result->corridor_repair_alpha = corridor_repair_alpha;
+        run_r2 = 0;
+    }
     if (run_r2 && cycle_deadline_us > 0.0 &&
         cycle_deadline_us - monotonic_microseconds() <
             (double)MPC_RTI2_MIN_REMAINING_US) {
@@ -2683,6 +2766,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         selected.lateral_accel_proxy_by_stage,
         (size_t)(horizon + 1) * sizeof(float));
     result->solver_iterations = selected.iterations;
+    result->throttle_mode_switches = selected.throttle_mode_switches;
     result->primal_residual = selected.primal_residual;
     result->dual_residual = selected.dual_residual;
     result->maximum_regularization = selected.maximum_regularization;

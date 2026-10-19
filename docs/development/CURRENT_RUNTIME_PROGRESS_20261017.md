@@ -2,18 +2,32 @@
 
 ## Maintained stack
 
+> **Live status update — 2026-10-18:** this work is focused on production
+> odometry and its source plant; no controller was run. The in-process plant
+> remains a source-derived approximation, not a 1:1 port of Unity's private
+> WheelCollider solver. Its low-speed constraint treatment now uses six
+> sweeps, supported by two independent 1 kHz captures; the corrected one-step
+> yaw-rate maximum fell from `0.0556/0.0669` to
+> `0.0030/0.0040 rad/s`. This also removes the corresponding one-step forward
+> speed error. The plant ABI has 18 states and `UnityPlantState` schema 9.
+> Production odometry and targeted plant tests compile/pass. This is capture
+> replay evidence, not yet a full-lap odometry claim.
+
 The workspace now retains one ROS runtime path: the 40 Hz bridge, source-
 derived PhysX odometry, EKF/AMCL, the RTI MPC, and a direct actuator interface.
 The MPC output is `DriveCommand(steering_angle_rad, throttle_normalized)`;
 raceline speed remains a tracking reference, not an actuator command. The
 MPC's RTI state carries the typed plant channels and pending throttle/steering
-history. The PhysX process source is in
-`f1tenth_localization/src/physx_native_vehicle_step.cpp` and is built by the
-localization package.
+history. Production odometry advances the in-process source-derived plant in
+`f1tenth_localization/src/unity_source_odom_runtime.cpp` and
+`f1tenth_mpc/src/unity_source_plant.cpp`; it does not launch a PhysX subprocess
+or link the PhysX SDK. The old process implementation was not in the active
+build and has been removed.
 
 The active track assets are the competition map/raceline pair and the practice
-map/raceline pair under `f1tenth_planning/`. No simulator was launched during
-this cleanup.
+map/raceline pair under `f1tenth_planning/`. No simulator was launched for
+the earlier data purge; a separate instrumented open-plane capture was made
+later as recorded below.
 
 ## Purge performed
 
@@ -171,8 +185,8 @@ root-owned generated build/install/log/cache trees are removed.
   front-wheel-steer/common-AWD physics, PhysX wheel geometry, and encoder
   conversion therefore correctly use 0.059 m; no radius change was made.
 - Cross-checked the checked-in Unity timing and PhysX 4.1 implementation:
-  Unity fixed timestep is 1 ms; the vehicle uses five substeps below 5 m/s and
-  one at/above 5 m/s. The source plant and native PhysX setup use the same
+  Unity fixed timestep is 1 ms; the vehicle uses three substeps below 5 m/s
+  and one at/above 5 m/s. The source plant and native PhysX setup use the same
   threshold/count. PhysX's `+0.1 m/s` longitudinal-slip denominator applies
   when wheel torque is active; the configured 4 m/s floor is the no-torque
   branch. The current production commands select drive or brake torque, so the
@@ -1217,6 +1231,14 @@ accuracy objective nor the queue-condensing objective is complete.
 
 ### PhysX hidden-state and MPC-rollout audit — 2026-10-18
 
+> **Implementation correction (2026-10-18):** the native-process and
+> PhysX-SDK results in this historical audit describe an earlier prototype.
+> That subprocess was never part of the active CMake runtime and its source
+> files have now been removed. Current production odometry and MPC both use
+> the in-process `UnitySourcePlant` translation; it does not call `PxVehicle`
+> or Unity's private `WheelCollider` solver. Treat earlier native-process
+> rollout numbers as historical experiments, not current production accuracy.
+
 - Rechecked the active scene override and `VehicleController.Drive()` rather
   than inferring torque from the prefab default. In the active scene,
   `MotorTorque=428 N m`, `driveType=CAWD`, and `brakeType=CAWB`: for nonzero
@@ -1230,26 +1252,26 @@ accuracy objective nor the queue-condensing objective is complete.
   the commanded torque/brake **and** tire contact; it is not a direct encoding
   of throttle. Odom must continue using encoder counts to correct wheel-spin
   state, never substitute peripheral wheel speed for chassis `u/v`.
-- Pinned PhysX 4.1 source identifies persistent per-wheel internals erased by
+- Pinned public PhysX 4.1 source identifies persistent per-wheel internals erased by
   `PxVehicleNoDrive::setToRestState()`: both wheel-speed arrays, wheel angle,
   low-forward/low-side sticky-friction timers, previous jounce, and cached
   suspension-query data. `PxVehicleWheelsDynData::copy()` does not copy jounce
   or the vehicle-constraint/scene solver state. These facts explain why a cold
-  reset is not equivalent to continuing a mature vehicle simulation, but
-  source thresholds also rule out the sticky timer as the cause of the tested
-  fast-window errors: sticky forward behavior needs tire-point speed below
+  reset is not equivalent to continuing a mature simulation of that public
+  vehicle SDK. Those timers are not evidence that Unity WheelCollider uses
+  the same behavior. In the public PhysX branch, sticky forward behavior needs
+  tire-point speed below
   0.2 m/s or a full second accumulated there; the audited windows start above
   3.1 m/s. The native process performs fresh suspension raycasts at every
   1 ms update, so invalidated cached hit planes are refreshed before use.
-- Therefore, adding timer or cache coordinates to MPC is not justified by the
-  current high-speed error evidence. The remaining material rollout gap is
-  structural: `f1tenth_mpc/src/unity_source_plant.cpp` is a reduced force/state
-  translation. It analytically reconstructs suspension jounce and integrates
-  chassis velocity/angular state itself; it does **not** call
-  `PxVehicleUpdates()` followed by `PxScene::simulate()/fetchResults()` as the
-  odometry plant does, and it cannot reproduce Unity's private WheelCollider
-  implementation. Wheel torque/brake and several vehicle equations are
-  source-derived, but this is not a 1:1 rollout.
+- Therefore, public PhysX timer/cache coordinates are not justified in the
+  optimizer without evidence that Unity uses those same states. The shared
+  production odometry/MPC plant is a reduced force/state translation: it
+  analytically reconstructs suspension jounce and integrates chassis
+  velocity/angular state itself; it neither calls `PxVehicleUpdates()` nor
+  reproduces Unity's private WheelCollider implementation. Wheel torque/brake
+  and several vehicle equations are source-derived, but this is not a 1:1
+  rollout.
 - Previously measured command-only native PhysX horizons, when the native
   process was first primed with the capture's past and then left persistent,
   were much closer to truth than the reduced MPC plant on the eight selected
@@ -1328,14 +1350,8 @@ accuracy objective nor the queue-condensing objective is complete.
   diagnostics label the active path `sensor_corrected_physx_odom_v7`.
 - Against the recorded v5 odometry in the same captures, these are substantial
   replay improvements (v5 `u` RMSE `0.0771/0.1455 m/s`, `v` RMSE
-  `0.0119/0.0124 m/s`, endpoint `0.217/0.258 m`). This verifies that the
-  current estimator is accurate on these two held-out high-speed runs, not
-  that it is an in-process source-only port: production still launches the
-  separate `physx_native_vehicle_step` process linked to the public PhysX
-  libraries. That process boundary remains explicitly unresolved. The next
-  work must compare an in-process, source-derived candidate against these
-  same captures and retain this result as the accuracy target; do not describe
-  the existing external-process implementation as the requested port.
+  `0.0119/0.0124 m/s`, endpoint `0.217/0.258 m`). These are replay results on
+  two held-out high-speed runs, not a general accuracy guarantee.
 
 ### Runtime-cost optimization and held-out replay — 2026-10-18
 
@@ -1470,7 +1486,7 @@ accuracy objective nor the queue-condensing objective is complete.
   force-application moments, and 1 ms propagation. Those equations are adapted
   from public NVIDIA `PxVehicle` source; that public vehicle SDK is not proof
   of an exact copy of Unity's private native `WheelCollider` implementation.
-- Existing practice data still lacks `WheelHit` slip/contact/load channels and
+- Existing practice data still lacks `WheelHit` slip/contact-force channels and
   a Unity physics-step identifier. The bridge diagnostic schema also leaves
   `simulation_physics_step`, applied command sequence, and simulation time
   empty. On the practice capture, the source-plant yaw forecast at sample 798
@@ -1487,16 +1503,919 @@ accuracy objective nor the queue-condensing objective is complete.
   `0.0197/0.0262 rad/s`, with maxima `0.1789/0.1946`. These are forecast-only
   diagnostic results, not an odometry-output change and not validation of a
   PhysX correction. The large practice tail remains unacceptable.
-- Required next step before changing tire-force equations: add a
-  development-only, non-physics-changing 1 kHz capture of each WheelCollider's
-  `GetGroundHit` result (`forwardSlip`, `sidewaysSlip`, normal/contact point,
-  and reported contact force), plus wheel RPM, `steerAngle`, motor/brake torque,
-  Rigidbody linear/angular velocity, and the exact fixed-step/command sequence.
-  `WheelHit` does not expose the two tire-force components directly, so compare
-  its measured slips and normal load first, then compare the aggregate
-  tire-force/moment implied by 1 kHz Rigidbody acceleration. Keep this
-  instrumentation offline/development-only: it must not become an odometry or
-  MPC input in the competition runtime. Use it to localize the first mismatch
-  (actuator timing, slip, load, force curve, application point, or integration)
-  before modifying production equations. No generic additional data campaign
-  is justified yet.
+- Before changing tire-force equations, the required development capture has
+  now been added to the source hook (implementation details and build blocker
+  below). `WheelHit` does not expose separate longitudinal/lateral tire-force
+  components, so the next analysis must compare measured slips and the reported
+  contact-force magnitude first, then compare the aggregate force/moment
+  implied by 1 kHz Rigidbody acceleration. The instrumentation is
+  offline/development-only and must not
+  become an odometry or MPC input in the competition runtime. No generic
+  additional data campaign is justified.
+
+### Development WheelCollider capture implementation — 2026-10-18
+
+- Added `OpenPlaneWheelDynamicsCapture` behind `DEVELOPMENT_BUILD`. With
+  `SDU_APEX_WHEEL_CAPTURE_PATH` set, it stores at most the latest 60,000
+  fixed-step samples in memory and writes one CSV on application exit. With no
+  environment variable, the capture buffer is not allocated and no file is
+  written. Each sample includes fixed-time/wall-time/step sequence, the
+  received throttle-steering command sequence and monotonic receive time,
+  requested command, the controller's pre-update feedback values and
+  post-update rack/drive values, Rigidbody pose/twist/body-frame acceleration,
+  mass/inertia/drag, and all four wheel RPM,
+  steering, applied motor/brake torque, contact state, `WheelHit` slip, force
+  magnitude and contact geometry, suspension settings, and active
+  forward/sideways friction curves.
+- The capture hook is in `VehicleController.FixedUpdate` after this step's
+  actuator writes and before the next physics solve. Therefore the recorded
+  wheel actuator values are queued for the upcoming solve, while `WheelHit`
+  describes the most recently completed solve. This phase distinction is
+  encoded in the CSV header; it must be retained when aligning against 25 ms
+  ROS packets. `WheelHit.force` is not represented as separately measured
+  longitudinal/lateral tire force.
+- Source-level mismatch hypothesis now made explicit for the next comparison:
+  `unity_source_plant.cpp` adapts the public `PxVehicle` combined-slip
+  normalization and tire-load filter, plus inferred suspension/contact state.
+  Unity's public `WheelFrictionCurve` documentation specifies separate forward
+  and sideways slip curves, but does not specify the private native
+  `WheelCollider` cross-axis force-combination rule. Therefore the current
+  combined-slip normalization is not yet proven to match this simulator; it is
+  a high-priority measurement target, not a parameter to tune blindly. The
+  capture also logs runtime friction curves and `WheelHit` state so we can
+  distinguish cross-axis force mismatch from normal-load, contact-point, and
+  steering-angle mismatch.
+- The Socket command setter now increments one development-only sequence per
+  received throttle/steering pair. Its throttle and steering assignments are
+  still the same clamped property writes. No force, torque, physics timestep,
+  controller decision, odometry input, or MPC input was changed. The capture
+  is not part of the competition runtime and its data is not used online.
+- `tools/start_simulator.sh` now supports an optional
+  `SDU_APEX_SIM_CAPTURE_DIR` mount under `live_runs/` and optional
+  `SDU_APEX_SIM_IMAGE_OVERRIDE` for a locally built instrumented player;
+  default launches remain unchanged. The host path persists capture output
+  when the selected player has the development instrumentation.
+- The earlier build-blocker assessment is superseded. Unity Editor
+  `2022.3.52f1` and an active Personal license are installed. The published
+  upstream `AutoDRIVE-Simulator` project is being checked out under
+  `external/AutoDRIVE-Simulator-upstream`; its F1TENTH prefab and controller
+  source match the local reference files, and the official practice image's
+  player, `GameAssembly.so`, and IL2CPP metadata hashes match the published
+  simulator release. This establishes a version-matched source/build path; it
+  does not yet establish a model-accuracy gain.
+- The full-repository checkout was stopped after it began materializing
+  unrelated terrain and scene assets. Only project settings, packages, the
+  RoboRacer scene, scripts, F1TENTH prefab, and required SocketIO, RGL,
+  file-browser, and main-thread-dispatcher plugin paths are being restored.
+  Their combined plugin footprint is about 21 MB. The Unity `Library` cache is
+  larger because this upstream project declares 79 packages and is undergoing
+  its first import; this is build cache, not simulator output.
+- The first Linux development-player build exposed missing project plugins.
+  Those dependencies were restored; the clean build is currently importing
+  packages/assets. `DEVELOPMENT_BUILD` instrumentation and the selected
+  RoboRacer scene are in that build, while simulation physics and the pinned
+  runtime image remain unchanged. No simulator has been launched yet.
+- Next: complete the matching Linux player build, run one short supervised
+  practice capture through the established Xvfb batch-mode launcher, validate
+  1 ms row cadence and command/actuator phases, then compare measured wheel
+  slip/contact and body acceleration/yaw acceleration against the existing
+  per-wheel force/moment model. Change production yaw equations only after the
+  capture identifies the first mismatching physical term. Capture data remains
+  offline-only.
+
+### In-process plant reduction and capture-based comparison — 2026-10-18
+
+- Removed the eight low-forward/low-side timer coordinates and lateral sticky
+  rows. The source plant retained a no-history longitudinal low-speed
+  constraint because wheel-lock captures show a distinct braking transition;
+  this was an interim approximation, not evidence that Unity's private
+  `WheelCollider` uses the public SDK's timer implementation.
+- The active plant ABI is now 18 states; `UnityPlantState` schema is 8; MPC
+  retains 24 nonlinear model states and the RTI vector is 22 coordinates.
+  Two queued actuator commands remain in the nonlinear plant but are
+  represented as fixed in-flight commands rather than extra optimizer states.
+  The old subprocess implementation files
+  `physx_odom_runtime.cpp` and `physx_native_vehicle_step.cpp` were removed:
+  neither was in the active CMake target, and the former referenced the
+  retired process interface. A repository-wide reference check found no
+  remaining runtime dependency on either file.
+- A later experiment removed that remaining longitudinal constraint. It was
+  rejected: across the independent run2 capture it raised one-step maximum
+  yaw-rate error to `0.262 rad/s` and maximum forward-speed error to
+  `0.117 m/s`; it also failed to reproduce the measured locked-wheel braking
+  response. The current code retains the branch, with the solver-convergence
+  correction documented below.
+- Historical qualification: a data-only comparison preferred a 5/1 schedule
+  over PhysX's public 3/1 default for wheel-angular-speed RMSE (`0.0306` versus
+  `0.1449 rad/s`) on one drive subset. At that time Unity's native setting had
+  not been verified, so the schedule was temporarily treated as capture-
+  supported. The 2026-10-18 UnityPlayer binary audit below supersedes that
+  surrogate: the shipped WheelCollider backend is `PxVehicleNoDrive` and the
+  compiled defaults are 3/1. Accuracy fit does not override that source fact.
+- The old one-pass longitudinal-row solve was strongly order-dependent. The
+  straight and mirrored-turn capture rows exposed artificial yaw-rate errors
+  of roughly `0.056–0.067 rad/s`; six solver sweeps removed those outliers on
+  both captures. This changes the numerical approximation of a private solver,
+  not the tire-force law.
+- Corrected a stale observer test that wrote timer values beyond the new
+  18-element state array. It now checks valid suspension-jounce state
+  preservation. This removes undefined behavior from the test itself.
+- Historical build/test results from the earlier pass are retained above; the
+  latest odometry-only build/test and capture metrics are recorded below. No
+  controller execution, racing lap, or real-track timing claim is made.
+- Remaining work is to validate full 40 Hz odometry state propagation and
+  integrated pose on independent runs. One-step gyro yaw at packet boundaries
+  is measured directly; the model's free-running yaw forecast remains a
+  separate, bounded-accuracy quantity.
+
+### Production odometry state correction from WheelHit comparison — 2026-10-18
+
+- Corrected the published per-wheel `lateral_slip` sign in the in-process
+  source plant to match Unity `WheelHit.sidewaysSlip`. The force model keeps its
+  separate body-left-positive contact-velocity coordinate, so the tire-force,
+  yaw, and vehicle-motion equations are unchanged by this reporting fix. The
+  `UnityPlantState` semantic version is now 9; producer and consumer checks
+  agree on that version.
+- Evidence: on the aligned 1 kHz `run2` capture
+  (`live_runs/odom_yaw_transition_20261018/run2/`, 15,280 rows), comparing the
+  model step against the following row's `WheelHit` (the capture hook runs
+  before the upcoming solve, while `WheelHit` is from the completed solve),
+  the previous sign gave lateral-slip RMSE `0.007808`; its sign-reversed value
+  gives RMSE `0.000912`, p95 absolute error `0.000606`, and maximum absolute
+  error `0.01093` across 7,968 hard-brake hold wheel samples. This is a
+  measured state-reporting correction, not evidence of lower yaw or pose error.
+- Production wiring publishes this state through `UnityPlantState`; the
+  localization ROS node compiled with the change. The targeted plant suite
+  passed 18/18, source-derived odometry runtime passed 4/4, and odometry
+  observer passed 14/14. No MPC/controller test or controller run was made.
+- The previously recorded yaw figures (`0.00455 RMSE`, `0.2128 maximum`) came
+  from an ad hoc replay with an incorrect body-height mapping and are
+  superseded by the correctly aligned replay below. They must not be used as
+  current plant accuracy.
+- Correction to the preceding log entry: the statement that the custom sticky
+  constraint solver was removed was too broad for the current source tree.
+  The current plant has no persistent low-speed timer states or lateral sticky
+  rows, but it does retain a longitudinal sticky-constraint solve for exact
+  zero-throttle wheel lock below `0.2 m/s`. Treat that as the active code and
+  do not rely on the earlier removal wording.
+
+### Production odometry source-plant correction — 2026-10-18
+
+- Root cause: the plant solved its four coupled low-speed longitudinal wheel
+  constraints in only one ordered pass. At wheel lock this left a large
+  row-order residual, creating a false yaw impulse in straight braking and
+  underpredicting the measured braking response. The capture records
+  `Rigidbody.solverIterations=6`; the private WheelCollider solver is still
+  unavailable, so six fixed sweeps are an explicit, capture-validated
+  approximation—not a claim that `solverIterations` directly specifies the
+  WheelCollider algorithm.
+- Updated the production source plant to perform six fixed sweeps and renamed
+  the constant to `kStickyConstraintSolverIterations`. No tire coefficients,
+  wheel inertia, torque, or commanded behavior changed. Added a regression
+  test that locked-wheel straight braking does not create yaw, while the
+  existing mirrored-steering test now passes with the converged solve.
+- Replayed actual pre-solve 1 ms states against the following Unity capture row
+  with actor `position_world_y` as body height (not COM height), captured
+  actuator settings, measured wheel RPM, and retained suspension history.
+  Across independent 5,228-step and 15,279-step recordings, one-step results
+  changed as follows (run1/run2):
+
+  | State | One-sweep RMSE | Six-sweep RMSE | Six-sweep max absolute error |
+  | --- | ---: | ---: | ---: |
+  | Forward velocity | 0.000607 / 0.000585 m/s | 0.0000316 / 0.0000443 m/s | 0.000756 / 0.000885 m/s |
+  | Lateral velocity | 0.0000873 / 0.000251 m/s | 0.0000873 / 0.0000744 m/s | 0.000191 / 0.000812 m/s |
+  | Yaw rate | 0.001651 / 0.001720 rad/s | 0.000472 / 0.000402 rad/s | 0.00303 / 0.00396 rad/s |
+
+- Wheel angular-speed RMSE is unchanged because the solver corrects chassis
+  constraint velocities: rear-left/right `0.0154/0.0179` and `0.0144/0.0144
+  rad/s`; front-left/right `0.0198/0.0241` and `0.0187/0.0187 rad/s`. Their
+  largest errors remain `0.085–0.245 rad/s`.
+- On zero-order-held command windows of 25 ms, six-sweep forward-velocity
+  RMSE/max was `0.000261/0.00115` and `0.000481/0.00465 m/s`; lateral-velocity
+  RMSE/max was `0.00142/0.00522` and `0.00116/0.00533 m/s`; yaw-rate
+  RMSE/max was `0.00716/0.0289` and `0.00625/0.0311 rad/s`. Integrated yaw
+  angle error stayed below `0.00025 rad`. Integrated rear-axle displacement
+  error over the same windows had norm RMSE `0.0000464/0.0000486 m`, p95
+  `0.0000650/0.0000678 m`, and maximum `0.0000697/0.0001538 m`. These are
+  open-loop plant forecasts with known captured commands, not a full-run
+  odometry replay; production odometry corrects yaw rate/attitude from
+  permitted gyro/IMU data at each packet boundary.
+- The no-sticky candidate was explicitly rejected because it regressed these
+  regimes. This is a production-code change in
+  `f1tenth_mpc/src/unity_source_plant.cpp`, compiled into
+  `sensor_odometry_node`; no MPC/controller was run. Validation: plant tests
+  `19/19`, source-derived odometry runtime `4/4`, observer `14/14`, and
+  `git diff --check` passed.
+- Next odometry-only work: validate 40 Hz recursive propagation and integrated
+  position/velocity against a separate whole-run capture, then investigate
+  remaining wheel-speed and high-steering 25 ms yaw tails. Do not infer a
+  perfect full-run odometry result from these short-horizon capture metrics.
+
+### Odometry hot-loop optimization and current timing — 2026-10-18
+
+- Hoisted the low-speed sticky-constraint row's inverse-inertia response,
+  effective denominator, velocity multiplier, and target term out of the six
+  solver sweeps. These quantities are invariant across sweeps; only chassis
+  velocities and accumulated impulses change. This preserves the equations
+  and six-sweep solve while avoiding repeated matrix-vector products and
+  divisions in the production plant hot loop.
+- Rebuilt `sensor_odometry_node`; source-plant tests passed `19/19`, and the
+  source-derived odometry runtime test passed. No controller was run.
+- Measured the rebuilt production odometry node on the same 1,436-packet,
+  47.9-second `physx_sticky_online_20261018` capture, replaying only sensor and
+  command inputs in an isolated ROS domain. Before/after hot-loop optimization
+  (microseconds per packet):
+
+  | Measurement | Before p50 / p95 / p99 / max | After p50 / p95 / p99 / max |
+  | --- | ---: | ---: |
+  | Plant advance | 232.10 / 354.98 / 406.88 / 1302.66 | 143.27 / 336.16 / 368.50 / 454.23 |
+  | Whole odometry callback | 320.66 / 476.43 / 547.95 / 1417.16 | 204.31 / 457.48 / 502.13 / 597.49 |
+
+- Median plant advance fell about `38%`; median whole-callback time fell about
+  `36%`. The post-change p95 callback time was `0.457 ms` and maximum was
+  `0.597 ms`, both well below the `25 ms` nominal sensor interval on this
+  host/capture. This is a focused replay timing measurement, not a guarantee
+  for every machine or a measurement of 40 Hz message delivery. The equations
+  remain amenable to further profiling, but timing is no longer the apparent
+  bottleneck; accuracy remains the priority.
+
+### MPC plant-rollout hot-loop optimization — 2026-10-18
+
+- The MPC nonlinear stage uses the same 1 ms Unity-source plant as odometry.
+  In `f1tenth_mpc/src/unity_source_plant.cpp`, wheel steering sine/cosine are
+  now computed once per plant step and reused across each wheel's internal
+  substeps and slip diagnostics. Steering is fixed for that step, so this
+  changes computation placement, not the model equations or control behavior.
+- Built `mpc_controller_node` and the two targeted model suites. The Unity
+  source plant passed `19/19`; source-model rollout passed `28/28`;
+  `git diff --check` passed. The controller node was built, not launched; no
+  simulator or driving test was run.
+- Benchmarked standalone model calls over a 30-stage, 25 ms-per-stage horizon
+  at a 3.5 m/s operating point, with the same CPU affinity and an interleaved
+  uncached/cached binary A/B (three pairs). For the costly finite-difference
+  linearized horizon, the median of the three run medians decreased from
+  `13.479 ms` to `12.635 ms` (about `6%`). The plain nonlinear horizon was
+  about `0.6 ms`; its three-pair timings were noisy and did not establish a
+  reliable improvement. Host load affected tail timing, so no p95 claim is
+  made from this short benchmark.
+- These are model/linearization timings only—not total MPC solve or callback
+  timing, and not evidence that the full MPC meets 40 Hz. The main remaining
+  model-side cost is repeated full plant evaluation for finite-difference
+  Jacobians. Any analytic/sensitivity rewrite must be checked against these
+  derivatives and held-out rollout accuracy before adoption.
+
+### Speed-first MPC live diagnosis — 2026-10-18
+
+- Built and ran two supervised practice attempts with the established
+  batch-mode simulator, current practice raceline, 40 Hz bridge, diagnostics,
+  and immediate collision watcher. Both bags are retained under
+  `live_runs/mpc_horizon_20261018_10/` and `_11/`; neither recorded a
+  collision.
+- Run 10 exposed a hidden constraint: the inherited one-lap startup ramp
+  capped the desired speed at `1.5 m/s` even where the loaded trajectory asks
+  for about `5.03 m/s`. The dev-only overlay now disables that cap and keeps
+  the competition speed ramp/config untouched. The same overlay resets the
+  cost balance (`weight_u=3000`, `weight_e_y=25`, lower steering/throttle
+  smoothing and slip costs), fixes ADMM rho, and uses 8 Jacobian workers on
+  this 16-logical-CPU host.
+- Run 11 reached one lap in `114.6 s` of bag time without collision. The
+  trajectory target spanned `2.80–8.07 m/s`, but simulator truth was only
+  `0.161 m/s` median, `0.951 m/s` p95, and `1.843 m/s` maximum. Actual throttle
+  averaged `0.0179` (maximum `0.692`). The MPC accepted `3981` degraded and
+  `257` optimal cycles; it rejected `155` nonlinear rollouts, `151` solver
+  cycles, and `9` regularization cases. All reported solver cycles reached
+  the 80-iteration ceiling. This is not a successful high-speed run.
+- Diagnosis from the bag: speed-priority weights and the removed startup cap
+  still did not produce meaningful first-step throttle. For example, at
+  measured `u≈0.30 m/s` with a `5.68 m/s` reference, an 80-iteration
+  residual-limited candidate requested `q≈0.04`; separate candidate traces
+  predicted only `3.52 m/s` by 750 ms against a `5.86 m/s` target. The QP's
+  speed floor was based on its nominal rollout, which could be optimistic
+  relative to the measured state, and a residual-limited primal control could
+  also sit inside its residual tolerance while still being too timid.
+- Implemented two candidate-path corrections in `mpc_rti.c`: project every
+  extracted actuator decision onto its actual delayed QP box bounds before
+  nonlinear validation; and enforce a strong first-command throttle floor
+  from the measured speed deficit at the first command-effect stage. The
+  complete source-plant rollout and hard corridor gate still run after these
+  changes. The targeted MPC build succeeded and all `64/64` package tests
+  passed after this patch; a live run with the new binary is still required.
+- Timing from run 11 with 8 Jacobian workers: total RTI p50/p95/p99/max was
+  `14.30/18.78/21.74/58.20 ms`; QP build p50/p95 was `5.46/8.23 ms`, and
+  ADMM p50/p95 was `2.24/3.45 ms`. The p95 fits a 25 ms cycle, but the maximum
+  does not. This is an observed improvement over the preceding 4-worker test
+  (run 10 total p50/p95/max `16.75/21.51/60.14 ms`), not a guarantee of a
+  hard 40 Hz deadline.
+- Neither run reached the `7 m/s` latch threshold; `/mpc/open_loop_test` was
+  empty. Therefore there is no valid fixed-input, 750 ms high-speed rollout
+  accuracy result yet. The evaluator's closed-loop horizon errors are
+  contaminated by replanning; they are diagnostic only. Run 11's 25 ms
+  prediction errors were `u RMSE 0.0805 m/s`, `v RMSE 0.0368 m/s`,
+  `r RMSE 0.0847 rad/s`, XY RMSE `0.0170 m`, and yaw RMSE `0.0080 rad`.
+  At 750 ms the closed-loop comparison reports `u RMSE 2.1415 m/s`,
+  `r RMSE 0.7400 rad/s`, XY RMSE `0.6943 m`, yaw RMSE `0.2550 rad`; these
+  values do not certify a frozen rollout.
+- Next: run the projected/measured-floor binary under the same watcher; inspect
+  whether throttle actually rises and whether exact corridor validation accepts
+  the sequence. If it reaches the high-speed latch, score the recorded fixed
+  30-command plan against Unity truth. Continue hot-path work only against the
+  measured worst-cycle cause; do not claim rollout accuracy or 40 Hz closure
+  before those checks pass.
+
+### Frozen-plan failure and solver-path correction — 2026-10-18
+
+- Run 22 is retained at `live_runs/mpc_horizon_20261018_22/run`. The exact
+  30-command horizon completed and the watcher then aborted on collision
+  during the post-plan stop phase. This is a failed driving outcome, not a
+  successful or collision-free test.
+- The planned throttle was `1.0` at all 30 stages. The optimizer is already
+  choosing maximum throttle; increasing its throttle preference cannot raise
+  the command further. Its steering sequence still jumped across the full
+  `[-0.524,+0.524] rad` range: median adjacent change `0.281 rad`, p95/max
+  `1.047 rad` per 25 ms. That combination is not a trustworthy controllable
+  plan.
+- Direct frozen-plan comparison (no replanning): position RMSE `0.289 m`, yaw
+  RMSE `0.172 rad`, forward-speed RMSE `0.170 m/s`, rear lateral-speed RMSE
+  `0.024 m/s`, and yaw-rate RMSE `0.778 rad/s`, over truth speeds
+  `2.58–4.99 m/s`. The yaw-rate error is substantially worse than run 21's
+  `0.387 rad/s`; the latest steering/path weight candidate is rejected and is
+  not evidence of improvement. Truth samples were sparse (median `29.8 ms`,
+  p95 `88.7 ms`), so preserve that limitation when comparing fine time detail.
+- Solver diagnostics explain why the steering weights did not produce a stable
+  sequence: 25 cycles were accepted-degraded, 5 rejected by nonlinear
+  corridor rollout, and 2 rejected by the QP. Every solve hit exactly 160
+  ADMM iterations; primal residual p50/p95 was `0.383/1.190`, dual residual
+  `0.028/1.029`. RTI p50/p95/max was `15.32/19.43/40.72 ms`; QP build
+  p50/p95/max `5.28/6.22/23.00 ms`; ADMM p50/p95 `4.00/6.42 ms`.
+- A second issue was structural, not a weight: run 22's overlay requested 200
+  ADMM iterations, but `mpc_controller_node` silently clamped the parameter
+  to 160. The clamp now uses the declared compile-time maximum (200), and the
+  node reports the effective iteration cap, rho mode, Jacobian workers, RTI
+  mode, state dimensions, and cycle budget at startup. The MPC package rebuilt
+  and its four targeted CTest suites passed. This correction has not yet been
+  validated in a live controller run.
+- ADMM inner iterations solve one linearized QP; they do not correct nonlinear
+  model error. Run 22 was explicitly configured `rti_refinement_mode=r1`, so
+  it allowed only one nonlinear RTI pass. The dev overlay now enables adaptive
+  rho (five-iteration updates) and adaptive RTI refinement while retaining
+  exact rollout/corridor gates and the 20 ms cycle budget. The weights are
+  frozen; this candidate configuration still needs a safe validation and is
+  not promoted.
+- State/weight audit: the MPC objective directly weights path offset, heading
+  error, forward/lateral speed, yaw rate, and a wheel-slip penalty. Roll,
+  pitch, wheel rates, suspension, and sprung-body states are not separately
+  rewarded; they remain in the nonlinear plant because they affect tire loads
+  and motion. The RTI QP still carries 20 physical/path coordinates plus two
+  previous-command coordinates for slew cost. The two-slot actuator delay is
+  already represented as a fixed known-command prefix, not four QP states.
+  Further dimension reduction must condense hidden dynamics exactly or retain
+  their effects; simply deleting them would change the rollout.
+- Practice-track testing is paused after the collision. The existing
+  development-only Explore capture was too narrow (1.45 m/s). It is being
+  expanded to a randomized 36-condition open-plane sweep: target speeds
+  `2.5, 5, 7.5, 10 m/s`, steering magnitudes `0.20, 0.35, 0.50 rad`, and
+  throttle `0, 0.3, 1.0`, with turn-in/hold/unwind and full-brake settling.
+  The capture logs requested condition labels plus fixed-step WheelCollider
+  slip/contact, wheel speed/torque, suspension, and body motion. It makes no
+  changes to forces or physics. A separate development player build is in
+  progress; do not use it as a competition runtime.
+
+- Next: complete that Unity build, run the Explore capture, confirm the 1 kHz
+  fixed-step sequence and condition coverage, then compare the current source
+  plant's one-step/recursive predictions against the measured capture. Make
+  model changes from the first measured divergence, and test the reduced-state
+  solver only after the rollout discrepancy is understood. No new walled-track
+  run until that open-plane analysis and the solver-candidate checks pass.
+
+### Open-plane capture harness correction — 2026-10-18
+
+- The separate Linux development player built successfully. The first Explore
+  run did **not** exercise the intended steering sweep: it stopped at trial 0,
+  stage 0 while trying to reach 5 m/s. Its acquire command was fixed at 0.08
+  throttle; over 10 s Unity reached only 1.997 m/s. The capture has 10,001
+  rows on exact 1 ms fixed-time intervals, all at zero steering. It is retained
+  as a valid low-throttle straight transient, but is not training/validation
+  evidence for steering or high-speed behavior.
+- Replaying that limited trace through the current plant gives 1 ms forward
+  speed RMSE `2.8e-5 m/s`, yaw-rate RMSE `1e-6 rad/s`, and 25 ms held-command
+  forward-speed RMSE `9.5e-5 m/s`. These numbers apply only to this straight,
+  low-speed interval; they say nothing about the failed higher-speed or
+  steering regions.
+- Root cause is now corrected in the development capture harness: acquire
+  speed with full throttle, then switch to the requested test throttle at the
+  first fixed step that reaches the target. This changes only diagnostic
+  commands; it does not edit Unity physics, production controller behavior, or
+  the MPC. The modified development player has rebuilt successfully.
+- The resulting capture is present at
+  `live_runs/openplane_yaw_sweep_20261018/capture_full_throttle/unity_wheel_dynamics_20261018_183432_497.csv`:
+  114,729 rows, 36 randomized trial labels, and 114,728 consecutive 1 ms
+  transitions. It is useful for prediction analysis, but includes large
+  lateral-slip hard-braking states that must not be averaged away as ordinary
+  steady turns.
+
+### Production rollout correction and remaining contact transient — 2026-10-18
+
+- The production plant had treated gyro/body angular rates `p` and `q` as
+  Euler roll/pitch derivatives. That omits yaw/tilt coupling in the Z-Y-X
+  attitude kinematics used to orient suspension rays and contact frames. The
+  plant now converts body rates to Euler roll/pitch rates before advancing its
+  attitude, while retaining the directly propagated body angular-velocity
+  components. Added a focused test for this conversion.
+- RTI affine offsets were also being formed through cancellation-heavy
+  float subtraction. The production QP builder now accumulates each affine
+  residual in double precision, then stores the result in the existing float
+  solver matrices. This preserves the 20 physical coordinates and two
+  command-slew coordinates; it does not alter the delayed-command model.
+- Validation: `mpc_controller_node` builds; the focused source-plant suite
+  passes `18/18`; the complete source-rollout suite passes `31/31`; and the
+  condensed queued-command affine identity passes its original `5e-5` yaw
+  tolerance. `git diff --check` is clean.
+- Replayed the 1 kHz open-plane capture using the current production plant.
+  Measured-state-conditioned 1 ms errors over all rows are `u` RMSE
+  `0.00203 m/s` (p95 `0.000075`), `v` RMSE `0.000153 m/s` (p95 `0.000056`),
+  and yaw-rate RMSE `0.00342 rad/s` (p95 `0.00335`). These pooled values have
+  rare large tails: yaw-rate maximum `0.365 rad/s`; they are not a claim of
+  uniformly near-zero error.
+- On command-only recursive replay from the measured initial state, the
+  pooled overlapping 750 ms windows give `u` RMSE `0.00733 m/s` (p95
+  `0.00137`), `v` RMSE `0.00181 m/s` (p95 `0.00082`), and yaw-rate RMSE
+  `0.0186 rad/s` (p95 `0.00320`). The maximum yaw-rate endpoint error is
+  `0.615 rad/s`; the high percentile is good while the near-stop tail is not.
+  These are not independent-run uncertainty estimates because windows
+  overlap.
+- The strongest supported improvement is the `0.20 rad` steering hold at the
+  `2.5 m/s` initial-speed condition, in the `0.3` and `1.0` throttle trials:
+  one-step yaw-rate RMSE fell from `0.00963/0.01032` to
+  `0.00066/0.00068 rad/s`, with maxima `0.00206/0.00217 rad/s`. This supports
+  the body-rate kinematic correction in that tested regime, not universal
+  accuracy.
+- Remaining mismatch is concentrated in full-brake unwind near zero forward
+  speed while lateral velocity/yaw remain. In trial 35, one 1 ms sample changes
+  measured yaw rate from about `0.731` to `0.335 rad/s`; the plant predicts
+  about `0.700 rad/s` at the endpoint. The measured finite-difference yaw
+  acceleration is about `-396 rad/s²`, versus roughly `-30 rad/s²` predicted.
+  Recorded sideways slip is close to the plant's value, while reported
+  longitudinal WheelHit slip drops to zero with locked wheel encoders. This
+  points to a low-speed wheel/contact impulse or mode transition, not missing
+  steering-command history alone.
+- The public PhysX 4.1 `PxVehicle` sticky-tire constraint is a different
+  vehicle path and is not treated as Unity WheelCollider truth. Its earlier
+  aggregate 750 ms comparison traded slightly worse RMSE/maximum for a better
+  high-percentile error; the focused hard-brake ablation and exact metrics are
+  recorded in the later follow-up below. Unity documents WheelCollider
+  raycast suspension, torque/brake inputs, separate slip-based tire friction,
+  and WheelHit telemetry, but its implementation is native. Available project
+  code therefore does not expose enough to claim an exact port of its
+  low-speed contact solver. Any next correction must explain and improve this
+  measured near-stop transient without regressing ordinary turn-in/hold
+  rollout; do not add a generic fitted impulse or broad fallback.
+- The production correction is implemented and mathematically/regression
+  tested, but the low-speed contact tail remains unresolved. No MPC weights,
+  raceline, or runtime topic policy changed in this step. The capture harness
+  has a declaration-order fix, but a fresh Unity development build/run has not
+  yet been made from that latest source.
+
+### Gyro and sticky-tire source-path follow-up — 2026-10-18
+
+- Unity's `IMU.FixedUpdate` does not synthesize yaw rate from steering or
+  throttle: it reads `Rigidbody.angularVelocity`, transforms it into the
+  vehicle frame, and publishes the signed local Y component. The physical
+  state that produces that sample is advanced by the body solver. In the
+  available PhysX 4.1 vehicle source, `PxVehicleUpdate.cpp::integrateBody`
+  updates angular velocity as world inverse inertia times applied wheel-force
+  torque, then integrates the transform quaternion. `DyBodyCoreIntegrator.h`
+  applies Rigidbody angular damping in scene pre-integration before solver
+  constraints. There is no separate gyro filter or yaw-rate lookup in the
+  Unity IMU path.
+- Corrected the in-process shared plant's ordering so it applies the captured
+  Rigidbody angular damping before its sticky constraint solve, matching the
+  available PhysX scene-step order. Added a torque-then-damping regression test.
+  This code is shared by production odometry and MPC rollout; it does not add
+  a learned yaw correction or read future IMU data.
+- Verified sticky tire memory is shared end-to-end: the production plant
+  propagates four forward and four lateral low-speed timers; odometry publishes
+  them in `UnityPlantState`; MPC restores them into its hidden plant state.
+  The low-side timer also resets on drive intent, matching
+  `PxVehicleUpdate.cpp::updateLowSideSpeedTimer`. Added an odometry-runtime test
+  that carries the settled sticky state through the two-packet queue and
+  confirms delayed drive intent resets both timer banks.
+- Verification: `colcon build --packages-up-to f1tenth_mpc
+  f1tenth_localization` succeeded. Focused plant and MPC rollout suites passed
+  `21/21` and `31/31`; the source-derived odometry runtime suite passed `5/5`.
+  No simulator was started during this follow-up.
+- Replayed the 114,729-row high-speed open-plane yaw sweep with the updated
+  plant: one-step yaw-rate RMSE/p95/max are `0.001291 / 0.003335 / 0.020715`
+  rad/s; command-only 750 ms rollout RMSE/p95/max are
+  `0.001752 / 0.003014 / 0.025835` rad/s. The separate 60,000-row hard-brake
+  capture remains the limiting case: one-step yaw max `0.2256` rad/s and
+  750 ms max `0.3702` rad/s. Correct damping order changes those maxima only
+  negligibly; it is a source-order correction, not a worst-case fix.
+- The worst residuals coincide with locked-wheel, near-stop hard-brake events
+  where Unity WheelHit longitudinal slip abruptly becomes zero and Rigidbody
+  yaw rate changes sharply. Public `PxVehicle` sticky constraints are present
+  in the shared plant and therefore affect both odometry propagation and MPC
+  rollout, but the source available here does not include Unity's native
+  WheelCollider implementation. Do not claim 1:1 Unity WheelCollider
+  reproduction or promote an arbitrary impulse/fitted yaw patch. The
+  near-stop tail still requires a specific source or measured mechanism before
+  it can be called resolved.
+
+### Gyro-state output and sticky-threshold attribution — 2026-10-18
+
+- The predicted gyro rate is generated from body torque, not inferred from the
+  steering command: the plant sums each contact/suspension moment
+  `r_i × F_i`, applies the captured inverse-inertia tensor, advances body
+  angular velocity, then applies Rigidbody damping and active contact
+  constraints. Unity's IMU samples the resulting local Rigidbody angular
+  velocity. Odometry and MPC share this same plant; odometry corrects its
+  propagated yaw rate from the permitted gyro sample, while MPC starts from
+  that state and predicts later rates from the plant. No future gyro samples
+  enter rollout.
+- Corrected the reported `yaw_acceleration_radps2`: it is now the net change in
+  the returned yaw-rate state divided by the step duration, so it includes
+  damping and sticky-constraint impulses. It previously reported only the
+  final internal vehicle-substep's unconstrained torque acceleration, which
+  could disagree sharply with the rate change actually returned. This changes
+  the published acceleration diagnostic, not the propagated yaw-rate path.
+- Exposed per-wheel contact speeds and sticky activation in the C++ plant
+  output for offline diagnosis. Added a focused test around the source-derived
+  strict `0.2 m/s` boundary. A tested `0.201 m/s` candidate raised hard-brake
+  one-step yaw RMSE from `0.00342` to `0.01153 rad/s` and maximum error from
+  `0.22558` to `0.37032 rad/s`, so it was reverted.
+- A controlled ablation over all 59,999 one-millisecond transitions in the
+  60,000-row hard-brake capture shows why sticky behavior remains in the
+  shared odometry/MPC plant. With the default sticky path, yaw-rate RMSE/p95/
+  max are `0.003422 / 0.000084 / 0.225579 rad/s`; disabling sticky constraints
+  gives `0.019199 / 0.000161 / 0.368646 rad/s`. At 750 ms, default sticky is
+  `0.016749 / 0.000236 / 0.370190`, versus `0.016032 / 0.006953 / 0.366547`
+  without them. Sticky substantially improves typical and p95 behavior, but
+  does not remove the worst tail.
+- The largest default-path one-step outlier is a specific threshold-boundary
+  event: during hard braking near `0.208 m/s`, only the rear-right contact
+  falls just below `0.2 m/s` in the plant, so one sticky row predicts yaw rate
+  `-0.254 rad/s`; Unity's next sample is `-0.0285 rad/s`. The corrected
+  finite-step yaw acceleration is about `-218.6 rad/s²`, versus the measured
+  `+7.0 rad/s²`; the previous `+5.53` figure was only the last internal
+  substep and hid the impulse. Raising the threshold activates more wheels and
+  is worse, so neither threshold inflation nor globally disabling sticky is
+  justified. The remaining mismatch is in the magnitude/order of Unity's
+  private low-speed contact solve, not a missing yaw-from-torque equation.
+- On this capture, a locked-wheel/zero-throttle classifier using the
+  `0.2 m/s` contact-speed threshold agrees with zero/nonzero WheelHit forward
+  slip at `99.68%` precision and `99.99%` recall. This supports the threshold
+  but does not reveal Unity's hidden constraint impulse. WheelHit remains an
+  offline diagnostic, not an online competition input.
+- Focused source-plant and MPC-rollout tests pass; the source-derived odometry
+  runtime test passes; and production `f1tenth_mpc` and
+  `f1tenth_localization` packages build. The high-speed sweep's one-step yaw
+  errors remain `0.001291` RMSE / `0.003335` p95 / `0.020715 rad/s` max. No
+  simulator was launched. The near-stop worst-case yaw error remains
+  unresolved; this is not a claim of near-zero or fully Unity-equivalent
+  rollout accuracy.
+
+### UnityPlayer WheelCollider backend and substep correction — 2026-10-18
+
+- Inspected the debug symbols and executable data for the same Unity
+  `WheelCapture` build used by the 1 kHz vehicle-capture setup. The native
+  symbols show `WheelCollider::AddWheelToExistingVehicle(...,
+  physx::PxVehicleNoDrive*, ...)`, `VehiclesManager::VehicleConfig::UpdateVehicles`,
+  and `physx::PxVehicleUpdates`; this identifies WheelCollider's vehicle
+  backend as the public PhysX no-drive vehicle path, rather than an unrelated
+  proprietary tire solver.
+- Read the compiled PhysX globals directly from that `UnityPlayer.so`:
+  `gLowLongSpeedSubstepCount=3`, `gHighLongSpeedSubstepCount=1`. Checked all
+  simulator C# projects for `ConfigureVehicleSubsteps`; none calls it, so the
+  default counts remain active. The checked-in PhysX 4.1 source independently
+  initializes the same defaults and copies them to `PxVehicleWheelsSimData`.
+- Replaced the capture-fitted 5/1 low/high-speed schedule in the shared
+  production plant with the verified 3/1 Unity schedule. The 5 m/s threshold
+  is also the source default. Odometry and MPC therefore now use the same
+  verified internal substep count. The old 5/1 result was a useful mismatch
+  diagnostic, but not the correct simulator configuration.
+- The plant already forms sticky constraint rows on substep `k==0`, matching
+  `PxVehicleUpdate.cpp`, then advances low-speed timers at every internal
+  substep; the rigid-body constraint solver applies the rows after the vehicle
+  update. No future WheelHit or ground-truth signal was added to production.
+- The gyro is an output sensor, not the yaw dynamics: Unity's `IMU.cs` reads
+  `Rigidbody.angularVelocity` in the body frame and maps axes/signs. The
+  upstream vehicle integrator first forms chassis torque from tire and
+  suspension forces, applies the mass-space inverse inertia tensor, and
+  integrates angular velocity; the scene solver then applies damping and
+  constraints. The shared plant follows that same causal order. It does not
+  infer yaw from the gyro for MPC prediction; online odometry still uses the
+  permitted gyro observation to correct its yaw-rate state.
+- Rebuilt the production packages and replay evaluator with restored wheel
+  geometry, then replayed the 60,000-row hard-brake capture and 114,729-row
+  high-speed open-plane capture. Both captures have complete 1 ms intervals
+  (`invalid_dt=0`). The 3/1 schedule gives high-speed one-step yaw-rate
+  RMSE/p95/max `0.001311 / 0.003349 / 0.022511 rad/s`; open-loop 750 ms is
+  `0.001721 / 0.003022 / 0.024589 rad/s`. On hard braking, one-step is
+  `0.003438 / 0.000127 / 0.226722 rad/s`; open-loop 750 ms is
+  `0.012757 / 0.000335 / 0.370598 rad/s`. The p95 is small because the large
+  miss is an isolated near-stop event; the maximum is still unacceptable and
+  must not be hidden by the aggregate RMSE.
+- The remaining event is specifically a sticky-row activation mismatch, not
+  evidence that the gyro signal itself is wrong. At capture row 28467, the
+  plant computes front-right/rear-right contact speeds `0.20003636 /
+  0.19999061 m/s`, so it activates the rear-right locked-wheel row and
+  predicts `r=-0.23354 rad/s`; measured next-step yaw rate is
+  `-0.00682 rad/s`. A second offline reconstruction using the recorded
+  WheelCollider mount, suspension axis, hit plane, Rigidbody twist, and
+  `PxVehicleUpdate::intersectRayPlane` instead yields front-right/rear-right
+  wheel-bottom speeds `0.19997609 / 0.20000053 m/s`—the opposite branch mask.
+  The source branch is strict `<0.2`, and the distinction is only tens of
+  micrometres per second. This confirms that the state/geometry feeding the
+  branch is not yet reproduced closely enough; changing the threshold itself
+  would conceal that mismatch.
+- Added the source-ray reconstruction to the existing capture evaluator and
+  tested its branch mask as an offline diagnostic (current sample only, no
+  future truth). It lowers hard-brake one-step yaw max from `0.2267` to
+  `0.0806 rad/s`, but transfers badly: on the independent open-plane capture,
+  one-step max becomes `0.3040 rad/s` and open-loop 750 ms max becomes
+  `0.6179 rad/s`, versus the normal model's `0.0225` and `0.0246 rad/s`.
+  Therefore this reconstruction is not a valid general branch predictor and
+  is not used in production.
+- Also tested replacing the plant's front wheel-center offsets with the
+  captured static WheelCollider mount offsets, first together with the force
+  point and then with the old force-point offsets held separately. The
+  hard-brake and high-speed held-out scores regressed, so the geometry
+  candidate was reverted. This isolates the cause as more than a simple
+  front-track coordinate typo; no unverified geometry is retained.
+- The prior WheelHit-point and wheel-center/radius/normal speed calculations
+  are measurement proxies, not direct access to PhysX's internal sticky-row
+  activation flag. The new source-ray reconstruction is closer to the source
+  equation but still cannot reproduce the active flag consistently across
+  captures. Sticky behavior remains **unresolved**; no threshold inflation,
+  global disable, oracle activation, or regime-specific override is promoted.
+- The production odometry and MPC share `unity_source_plant.cpp`, so both now
+  use the source-default 3/1 internal wheel-substep schedule; the odometry
+  sticky timers remain carried in its state. Build passed with
+  `colcon build --packages-up-to f1tenth_mpc f1tenth_localization`; focused
+  tests passed (`test_unity_source_plant`,
+  `test_vehicle_model_source_rollout`, `test_source_derived_odom_runtime`).
+  These are build/unit checks plus offline capture replays, not a new live
+  simulator run. Next, isolate why the captured WheelCollider/ray geometry
+  and production contact kinematics disagree at the sticky threshold, then
+  validate any correction on both captures before touching the shared plant.
+
+### Sticky-yaw inertia correction and source substep audit — 2026-10-19
+
+- Rechecked the large sticky-yaw residual against the latest locked-brake,
+  brake-pulse, and randomized steering-transition captures. This exposed two
+  distinct Rigidbody inertia profiles in the existing captures. The earlier
+  `unity_physx_capture_retry*` files report principal moments near
+  `(0.0936, 0.1003, 0.0228) kg m^2`; the current WheelCapture locked-brake,
+  brake-pulse, and yaw-transition runs report approximately
+  `(0.0780, 0.1065, 0.03995) kg m^2`. Pooling those as one vehicle setup had
+  put the older profile into the current plant despite using the newer
+  prefab's wheel/COM geometry.
+- Set the shared plant's current runtime inertia to the latter measured
+  profile. Preserve the two different PhysX paths: `PxVehicleUpdate::integrateBody`
+  uses the principal mass-space diagonal after `updateNoDrive` makes the
+  temporary COM-local rotation identity; the scene sticky-row solver uses the
+  Rigidbody's rotated mass frame `R * diag(1/I) * R^T`. The model now carries
+  separate source-derived transforms for those operations. No sticky threshold,
+  branch, force, or physics parameter was adjusted to hide the residual.
+- On the same current locked-brake capture, the prior inertia candidate had
+  yaw-rate one-step RMSE/max `0.00652 / 0.31957 rad/s`. The current tensor gives
+  `0.000156 / 0.003579 rad/s`; at the inspected sticky event (capture row 708)
+  the predicted next yaw rate is `0.326149` versus measured `0.326145 rad/s`.
+  Current brake-pulse yaw is `0.000001 / 0.000023 rad/s` RMSE/max. The two
+  randomized yaw-transition runs give one-step RMSE/max `0.001206 / 0.005706`
+  and `0.001574 / 0.005987 rad/s`; their open-loop 750 ms yaw maxima are
+  `0.000062` and `0.000094 rad/s`. The 10,000-step open-plane yaw sweep is
+  below the evaluator's six-decimal reporting precision. These are real Unity
+  capture replays, not a new simulator run.
+- **Version-scope correction:** the `0.1605/0.1863 rad/s` sustained-cornering
+  yaw-forecast RMSE recorded in the 2026-10-18 audit above was measured before
+  this 2026-10-19 sticky-inertia correction. The correction was replayed on
+  locked-brake, brake-pulse, and steering-transition captures, but the two
+  three-lap high-speed captures have not yet been rescored with this corrected
+  plant. Therefore `0.18 rad/s` is not a verified post-fix error, and the low
+  post-fix transition errors do not establish full-lap yaw accuracy. The
+  post-fix full-lap result remains unmeasured.
+- Confirmed the branch at the former locked-wheel outlier: the current plant
+  activates the same forward sticky rows as the capture and reproduces their
+  yaw impulse. The remaining current-profile one-step yaw outliers are below
+  `0.006 rad/s`, rather than the earlier `0.32 rad/s` event. The Rigidbody's
+  implicit inertia changes slightly during a capture (about 1.4% span in the
+  largest principal moment); the current production plant uses the nominal
+  startup tensor. That small state-dependent Unity mass-property update is a
+  remaining modeling difference, not evidence to alter the sticky threshold.
+- Re-audited `computeNumberOfSubsteps`: PhysX computes
+  `abs(linearVelocity dot worldForward)`, selects low count only for strict
+  `< threshold`, and defaults to a 5 m/s threshold with 3 low-speed and 1
+  high-speed substeps. The plant's body-forward state is the same projection
+  and its 3/1 boundary matches the source and UnityPlayer defaults. The 25 ms
+  odometry loop still advances the shared plant as 25 consecutive 1 ms
+  updates; MPC and odometry compile the same plant source.
+- Reduced repeated sticky-solver work without changing the PGS order or
+  equations: each active row's inverse-inertia response and spring coefficients
+  are now computed once per plant step and reused across the seven constraint
+  passes. This removes repeated 3x3 products from the inner solver loop.
+- Removed temporary body-torque diagnostic output, retained the focused
+  capture evaluator, and taught it to skip only a truncated final CSV row
+  (all incomplete interior rows still fail parsing). The yaw-transition run1
+  now evaluates 5,227 complete one-millisecond transitions; exactly one
+  incomplete tail row is excluded and reported.
+- Verification: rebuilt the production odometry node, production MPC node,
+  and the focused tests. `test_unity_source_plant`,
+  `test_source_derived_odom_runtime`, and `test_vehicle_model_source_rollout`
+  all pass. No batch simulator was started because the existing current-runtime
+  captures directly cover the corrected sticky transition and steering
+  regimes; this is a verified capture-based improvement, not a new live lap.
+
+### Steering-phase correction and 40 Hz hot-path optimization — 2026-10-19
+
+- **Correction to the yaw-transition numbers immediately above:** the first
+  evaluator pass initialized the plant from the post-`Steer()` rack angle,
+  then advanced steering once more. In `VehicleController.FixedUpdate`, the
+  logged `previous_feedback_steering` is pre-update feedback, while
+  `rack_angle_deg` is post-`Steer()`. The evaluator now seeds from the former
+  and lets the 1 ms plant step apply that update once. It reproduces the
+  recorded post-update rack value at the transition. Do not use the earlier
+  unaligned run1/run2 yaw scores; the corrected scores below supersede them.
+- Corrected replay results on the same Unity captures: yaw-rate one-step
+  RMSE/p95-absolute/max-absolute are `0.000300/0.000646/0.001697 rad/s`
+  over 5,227 transitions (yaw-transition run1),
+  `0.000290/0.000525/0.004846 rad/s` over 15,279 transitions (independent
+  run2), and `0.000126/0.000183/0.003579 rad/s` over 5,999 transitions
+  (locked-brake capture). Run2's max is a low-speed, zero-throttle sticky-row
+  event; these scores describe these captures, not every possible regime.
+- Optimized the shared odom/MPC plant without changing its equations or 1 ms
+  evolution: body velocity and angular velocity are computed once per vehicle
+  substep and reused for all eight tire/sticky contact calculations; the
+  already-computed final attitude is reused by the constraint solve; active
+  sticky rows are compacted in original PhysX order; and the solver now exits
+  immediately when no rows are active. It still uses the same seven ordered
+  PGS passes when rows exist.
+- Added a minimal internal 1 ms propagation path for intervals where callers
+  discard diagnostics. Odometry uses it for the first 24 steps in each 25 ms
+  packet and computes complete diagnostics on the final step. The 25 ms MPC
+  plant wrapper similarly computes complete output only on its final 1 ms
+  step while accumulating the same per-interval slip maxima. A new parity test
+  compares every dynamic state over one step and a batched 25-step rollout
+  against explicit full-output 1 ms steps; states, maximum-slip summaries,
+  final slip and acceleration diagnostics match exactly.
+- Replayed the same 1,436-packet, 47.9-second `physx_sticky_online_20261018`
+  bag at 1x through the rebuilt production odometry node in an isolated ROS
+  domain, feeding only its encoder, IMU, actuator-feedback, and command topics.
+  Before/after hot-path measurements in microseconds per packet were:
+
+  | Measurement | Before p50 / p95 / p99 / max | After p50 / p95 / p99 / max |
+  | --- | ---: | ---: |
+  | Plant advance | 58.80 / 198.36 / 238.56 / 365.62 | 48.50 / 158.27 / 226.09 / 275.34 |
+  | Whole odometry callback | 90.70 / 270.98 / 323.35 / 456.43 | 76.95 / 220.39 / 299.48 / 367.40 |
+
+  The after replay had no callback above the 25 ms period. These are two
+  paced replay samples, not a controlled hardware worst-case guarantee; the
+  observed median and p95 reductions were about 15–18% for the full callback.
+- Separately benchmarked the production 25 ms plant API at `-O3`: a 30-stage
+  source-plant-only horizon is approximately `0.30 ms` at the 8 m/s turn
+  point, `0.60 ms` at low-speed drive, and `0.85 ms` in the active sticky-brake
+  case. This excludes MPC linearization, Riccati/ADMM, candidate checks,
+  synchronization, and ROS overhead. It demonstrates that the plant advance
+  itself is not the 40 Hz bottleneck; it does **not** establish full MPC
+  deadline compliance. The latest recorded full RTI timing still had a
+  `58.2 ms` maximum, so the current full-cycle worst case remains to be
+  remeasured and addressed separately.
+- Verification: Release `-O3` production MPC and odometry nodes rebuilt;
+  `test_unity_source_plant`, `test_vehicle_model_source_rollout`, and
+  `test_source_derived_odom_runtime` pass; corrected run2 yaw replay retains
+  the metrics above; `git diff --check` passes. No simulator was launched and
+  no physics, controller weights, topics, or command behavior changed.
+
+### Fixed-input 30-step racing-lap replay after sticky correction — 2026-10-19
+
+- Replayed both retained three-lap high-speed captures through the current
+  `sensor_odometry_node` (ROS domains 76 and 77). The odometry node received
+  encoder, IMU, actuator-feedback, and steering/throttle-command topics only;
+  Unity truth odometry was separately recorded for offline scoring and was not
+  an estimator subscription. The current runtime supplied the full starting
+  plant state, wheel angles, suspension-history flag, sticky timers, and
+  two-packet delayed commands.
+- This is not an MPC test: from every valid 25 ms epoch, the evaluator advances
+  the C++ source plant for the next 30 fixed logged commands (750 ms), without
+  replanning or reading any future plant/sensor state. The commands are the
+  recorded slot-1 delayed steering/throttle inputs, preserving the real
+  two-packet actuation delay. Ground truth is used only to score endpoints and
+  anchor each window's initial global pose. The 775 and 781 windows per capture
+  overlap heavily; they are not independent statistical trials.
+- Fixed an evaluator ABI defect before accepting these results. Its Python
+  `ctypes` structs had an 18-value state where `unity_source_plant_c.h` defines
+  26 values, an extra output field absent from the C ABI, and it omitted the
+  two sticky-timer arrays when reconstructing a start state. The evaluator
+  now uses the exact 26-value state and C struct layout, checks ABI sizes and
+  offsets, and carries both sticky timers. Before this correction the 30-step
+  evaluator skipped 774/775 windows; earlier output from that path is invalid.
+  The separate `0.1605/0.1863 rad/s` raw-yaw diagnostic came from recorded
+  odometry diagnostics and was not affected by the ctypes defect.
+- Corrected-model 25 ms yaw-rate forecast across the full captures is
+  `0.0201 rad/s` RMSE, `0.0865` max for `run/`, and `0.0225` RMSE, `0.1004`
+  max for `run_1/`. This is materially below the stale pre-sticky-correction
+  `0.18 rad/s` whole-run RMSE, though the second run's single-step maximum is
+  just above `0.1 rad/s`.
+- At the requested 30-step/750 ms endpoint:
+
+  | Capture | `u/v/r` RMSE (m/s, m/s, rad/s) | yaw RMSE / p95 / max (rad) | displacement RMSE / p95 / max (m) |
+  | --- | ---: | ---: | ---: |
+  | `run/` | `0.00395 / 0.00043 / 0.00337` | `0.01391 / 0.02423 / 0.02860` | `0.02789 / 0.05763 / 0.06912` |
+  | `run_1/` | `0.00517 / 0.00082 / 0.00671` | `0.01549 / 0.02605 / 0.06738` | `0.03197 / 0.05981 / 0.13869` |
+
+  The yaw-rate endpoint maximum is `0.01884 rad/s` for `run/` and
+  `0.09439 rad/s` for `run_1/`; the latter is a tail event despite its low
+  RMSE/p95. The initially reported ~15 cm position RMSE was a scoring-frame
+  error: it integrated COM lateral velocity against a rear-axle/base_link pose.
+  After converting velocity to the pose reference point, the 750 ms position
+  RMSE is 2.8–3.2 cm. Every window starts at its recorded plant state and Unity
+  pose, so this is not free-running full-lap odometry drift.
+- Full reports and regenerated state captures are retained under
+  `live_runs/sticky_corrected_30step_replay_20261019/{run,run_1}/`. No MPC
+  solve or Unity simulator was run. These results resolve the comparison for
+  these two captures only; they do not establish accuracy at every speed,
+  steering combination, or on a completely unseen lap.
+
+### Endpoint position reference-point correction — 2026-10-19
+
+- The 15 cm result came from a bug in the offline evaluator, not the production
+  plant: the evaluator propagated COM lateral velocity directly into the
+  rear-axle/base_link pose. Unity twist is at the rigid-body COM; the pose being
+  scored is at the rear axle. For longitudinal offset `L=0.15532 m`, the
+  matching lateral velocity is `v_rear = v_COM - r*L`.
+- This diagnosis was directly checked against consecutive Unity pose samples
+  on both independent captures. Integrating COM twist as if it were rear-axle
+  twist had `7.19/7.47 mm` one-step displacement RMSE and `-3.79/-3.71 mm`
+  lateral bias. Applying the source/production COM-to-rear-axle conversion
+  reduced those to `3.54/4.29 mm` RMSE and `-0.18/-0.18 mm` lateral bias.
+  Treating twist as world-frame was much worse (`~0.167 m` per step). The
+  production code already performs this conversion in
+  `integrate_rear_axle_pose()` and `vehicle_model_step_scalar()`; no runtime
+  physics change was warranted.
+- Corrected 750 ms decomposition:
+
+  | Capture | Plant vs Unity pose RMSE / p95 | Unity twist-integral vs pose RMSE / p95 | Plant vs Unity-twist integral RMSE / p95 |
+  | --- | ---: | ---: | ---: |
+  | `run/` | `0.0279 / 0.0576 m` | `0.0052 / 0.0089 m` | `0.0281 / 0.0565 m` |
+  | `run_1/` | `0.0320 / 0.0598 m` | `0.0057 / 0.0101 m` | `0.0328 / 0.0608 m` |
+
+  The two captures therefore do not support the earlier claim of 15 cm
+  rollout error. The remaining ~3 cm RMSE is a real plant-vs-reference motion
+  residual; its tail is larger (max corrected endpoint error is `6.9 cm` in
+  `run/` and `13.9 cm` in `run_1/`). A 1 ms pose-integration diagnostic using
+  linearly interpolated 40 Hz endpoints produced essentially the same error,
+  so simply shrinking the kinematic pose step does not explain or remove the
+  residual.
+- Applying the user's 5 cm endpoint requirement as a strict per-window gate,
+  `700/781` windows in `run/` and `667/775` in `run_1/` pass; therefore the
+  current rollout still fails the requirement. Windows overlap, so these are
+  coverage counts, not independent confidence trials. The worst `run_1/`
+  windows start near `3.5 m/s` and `0.258 rad` steering, end with `0.059–0.067
+  rad` yaw error, but only about `0.007 m/s` forward-speed error and
+  `0.002–0.003 rad/s` yaw-rate error. This points to accumulated yaw-angle
+  trajectory error as the dominant tail mechanism there; it is not yet a
+  proven causal attribution for every failing window.
+- An offline oracle decomposition on those same windows confirms yaw is the
+  limiting state: replacing only predicted heading with recorded future Unity
+  yaw reduces 750 ms position RMSE to `5.9 mm` (`run/`) and `7.7 mm` (`run_1/`),
+  with all windows below 5 cm. Replacing only predicted translation with
+  recorded Unity `u/v/r` while keeping predicted yaw leaves RMSE at `2.79 cm`
+  and `3.14 cm`, with 79/781 and 103/775 windows still over 5 cm. The GT yaw
+  is used only for this offline attribution and is not a runtime input.
+- In the worst `run_1/` windows, mean predicted-minus-GT yaw-rate error across
+  750 ms is `+0.075–+0.094 rad/s`, while endpoint yaw-rate error is only
+  `0.002–0.003 rad/s`. This identifies a transient yaw-trajectory mismatch
+  that later reconverges, especially around `3.4–3.5 m/s` and `0.258 rad`
+  steering. The 5 cm endpoint maximum criterion remains unmet; next inspect
+  the source-derived tire lateral force/yaw-moment path and its known
+  WheelCollider/PhysX approximations before changing the model. Runtime must
+  predict this from current estimated state and queued controls, never future
+  GT yaw.
+- `tools/evaluate_mpc_bag.py` now scores pose at the rear-axle reference point,
+  converts both predicted and GT COM lateral velocity before integration, and
+  reports the pose/twist closure hypotheses. Verification: both bags rescored
+  with the workspace messages sourced; script syntax and `git diff --check`
+  pass. No simulator or controller ran.
+- The 5 cm requirement is now checked both at the 750 ms terminal point and
+  pathwise at every 25 ms prediction step within each 750 ms rollout. The
+  pathwise gate passes `700/781` windows for `run/` and `661/775` for
+  `run_1/`; `81` and `114` windows respectively exceed 5 cm at some point.
+  Worst per-window error is `6.91 cm` and `13.87 cm`. This is stricter than
+  checking the terminal point alone (`700/781`, `667/775`), because some
+  rollouts briefly exceed the bound then recover. Neither capture meets a
+  universal 5 cm guarantee.
+- The current vehicle prefab's steering rate (`183.346 deg/s`), wheelbase
+  (`324 mm`), track (`236 mm`), and sideways friction-curve points match the
+  production plant constants. This rules out those direct configuration
+  mismatches as the explanation for the high-steering yaw residual. Unity's
+  public WheelCollider documentation describes separate forward and sideways
+  slip-force curves; the plant's additional combined-slip cap and effective
+  tire-load mapping remain acknowledged approximations. Do not remove the cap
+  blindly: a previous aggregate ablation regressed another capture. Next,
+  compare that approximation specifically on the failing `3.4–3.6 m/s`,
+  `~0.26 rad` turning windows and across the rest of both held-out runs before
+  any production change.
+- A 5 cm endpoint error alone cannot guarantee obstacle clearance: safety also
+  depends on the maximum error along the whole predicted horizon, vehicle
+  footprint, map/corridor error, localization error, and tracking deviation.
+  The new pathwise metric checks intermediate prediction positions, but the
+  combined physical clearance budget has not yet been established.

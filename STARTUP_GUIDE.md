@@ -66,6 +66,45 @@ The watcher stops the simulator immediately on collision and finalizes the
 recorder. Preserve only captures intended for a specific analysis in the
 workspace; run data belongs under ignored `live_runs/`.
 
+## Freeze and execute one MPC horizon
+
+For a development-only rollout check, the MPC can latch its next accepted
+30-command plan once odometry reports at least 7 m/s, publish all 30 outputs
+without another solve, and emit predicted-versus-current state samples on
+`/mpc/open_loop_test`. The normal controller profile leaves this disabled.
+Use the focused recorder profile to avoid recording the high-volume lidar
+stream:
+
+```bash
+SDU_APEX_MPC_PARAMETER_OVERLAY="$PWD/f1tenth_mpc/config/mpc_open_loop_horizon_test.yaml" \
+SDU_APEX_MPC_PUBLISH_DIAGNOSTICS=true \
+AUTODRIVE_REBUILD=0 SDU_APEX_IMAGE=sdu-apex-autodrive:practice-physx-odom-20261016 \
+SDU_APEX_MAP_YAML="$PWD/f1tenth_planning/maps/autodrive_practice_20260924_b.yaml" \
+SDU_APEX_TRAJECTORY_FILE="$PWD/f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv" \
+./tools/start_dev.sh
+```
+
+In separate terminals, start the focused recorder, the completion/collision
+watcher, and then the practice simulator in batch mode:
+
+```bash
+SDU_APEX_IMAGE=sdu-apex-autodrive:practice-physx-odom-20261016 \
+SDU_APEX_RUN_ID=mpc_horizon_run SDU_APEX_RECORD_PROFILE=mpc_open_loop_test \
+  ./tools/record_debug_bag.sh
+./tools/watch_sim_run.sh sdu_apex_autodrive_dev sdu_apex_sim_practice \
+  rec_mpc_horizon_run mpc-horizon 60
+SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode \
+  ./tools/start_simulator.sh
+```
+
+The watcher aborts on any collision or execution-state fault, and stops the
+simulator shortly after the 750 ms horizon has been sampled. Analyze a
+completed capture with:
+
+```bash
+python3 tools/evaluate_mpc_bag.py live_runs/mpc_horizon_run/run
+```
+
 ## Competition image
 
 Build the self-contained image with its installed map/raceline pair:

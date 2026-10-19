@@ -104,7 +104,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_odometry_observer
     test/test_odometry_observer.cpp
     src/odometry_observer.cpp)
-  target_include_directories(test_odometry_observer PRIVATE include)
+  target_include_directories(test_odometry_observer PRIVATE
+    include ../f1tenth_mpc/include)
 
   ament_add_gtest(test_physx_odom_actuation
     test/test_physx_odom_actuation.cpp)

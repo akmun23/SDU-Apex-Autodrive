@@ -151,7 +151,11 @@ class NativePhysX:
         if not self.init_path.is_file() or not self.shapes.is_file():
             raise FileNotFoundError('PhysX reset config or recovered Unity collider shapes missing in repo')
         self.config=json.loads(self.init_path.read_text())['initial']
-        self.code_hash=source_hash([loc/'src/physx_native_vehicle_step.cpp',self.init_path,self.shapes])
+        # The verified compiled native binary is executable even if its C++ source
+        # has been deleted from the worktree. Fingerprint the *actual backend*.
+        source_cpp=loc/'src/physx_native_vehicle_step.cpp'
+        self.code_hash=source_hash(([source_cpp] if source_cpp.is_file() else [])
+                                   +[self.init_path,self.shapes,self.binary])
         self.proc=subprocess.Popen([str(self.binary),'--server',str(self.init_path),str(self.shapes)],
                                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE,text=True,bufsize=1)
@@ -163,6 +167,9 @@ class NativePhysX:
         self.last_source_state=None
         # Observations from the native wheel tire-force callback.
         self.last_native_contact=None
+        # Diagnostic-only observables. Native binary already emits these;
+        # do not change the simulation, integrator or control sequence.
+        self.last_native_math=None
 
     def reset(self,x,y,yaw,speed):
         # Map x/y -> Unity x/z: model forward = world +z, model left = world -x.
@@ -180,7 +187,9 @@ class NativePhysX:
         self.step_index=0
         self.state=State(float(x),float(y),float(yaw),float(speed),0.,0.,0.,[0.]*4,[0.]*4,[0.]*4)
         self.last_source_state=None
+        self.last_full_source_state=None
         self.last_native_contact=None
+        self.last_native_math=None
         return self.state
 
     def step(self,steer,throttle):
@@ -235,9 +244,16 @@ class NativePhysX:
         if self.state is not None:
             yaw+=2*math.pi*round((self.state.yaw-yaw)/(2*math.pi))
         raw_native_state=data['unity_source_state']
-        if len(raw_native_state) != 18:
-            raise RuntimeError('Native PhysX returned an unexpected vehicle state size')
-        self.last_source_state=tuple(float(v) for v in raw_native_state)
+        # C++ revisions expose the same 18 historical observable channels,
+        # sometimes followed by four low-forward/side-speed timers each (26).
+        # Do NOT confuse additional internal state with an incompatible prefix.
+        if len(raw_native_state) not in (18,26):
+            raise RuntimeError(f'Native PhysX returned unsupported vehicle state length: {len(raw_native_state)}')
+        full=tuple(float(v) for v in raw_native_state)
+        if not np.isfinite(full).all():
+            raise RuntimeError('Native PhysX returned nonfinite vehicle state')
+        self.last_full_source_state=full
+        self.last_source_state=full[:18]
         observed_fields = ('tire_longitudinal_force_n',
                            'tire_lateral_force_n',
                            'longitudinal_slip',
@@ -253,6 +269,22 @@ class NativePhysX:
                 raise RuntimeError('Native PhysX returned nonfinite wheel contact values')
         else:
             self.last_native_contact = None
+        # Preserve the precise 1 ms IMU and opt-in vehicle/scene solver
+        # stage split, which a 25 ms finite-difference cannot reconstruct.
+        vector_keys=('suspension_force_n','suspension_jounce_rate_mps',
+                     'linear_velocity_world_mps','angular_velocity_world_radps',
+                     'rotation_world_xyzw')
+        scalar_keys=('longitudinal_acceleration_mps2',
+                     'lateral_acceleration_mps2','yaw_acceleration_radps2')
+        self.last_native_math={
+            **{k:np.asarray(data[k],dtype=float).copy()
+               for k in vector_keys if k in data},
+            **{k:float(data[k]) for k in scalar_keys if k in data},
+            'solver_diagnostics':data.get('solver_diagnostics'),
+        }
+        if any(not np.isfinite(val).all() for val in self.last_native_math.values()
+               if isinstance(val,np.ndarray)):
+            raise RuntimeError('Nonfinite native IMU/solver-stage diagnostic')
         s=State(float(world[2]),-float(world[0]),yaw,
                 float(data['body_forward_velocity_mps']),
                 float(data['body_lateral_velocity_mps']),

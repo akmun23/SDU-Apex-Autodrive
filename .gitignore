@@ -25,3 +25,5 @@ artifacts/
 *.bag
 *.db3
 *.csv.tmp
+
+external/

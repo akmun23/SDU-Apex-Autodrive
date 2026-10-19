@@ -1,7 +1,7 @@
 std_msgs/Header header
 uint32 state_schema_version
-# Version 7 additionally exposes the PhysX sticky-tire low-speed timers used
-# to select its low-speed longitudinal and lateral contact constraints.
+# Version 10 reports PhysX sticky-tire timers as hidden causal plant state.
+# Unity WheelCollider's private native handling is not exposed by this source.
 # 1 = propagated by the source-derived local PhysX plant in odometry; this is
 # an estimate, not Unity ground truth or an independently observed state.
 uint8 state_origin
@@ -11,6 +11,8 @@ uint8 state_origin
 # remain source-model estimates.
 uint32 sensor_corrected_state_mask
 bool suspension_history_initialized
+float64[4] low_forward_speed_time_s
+float64[4] low_side_speed_time_s
 # Named body-motion channels at this exact odometry epoch. The lateral
 # velocities are both exposed because the source plant uses COM coordinates
 # while the odometry body frame is referenced at the rear axle.
@@ -49,15 +51,13 @@ float64 pitch_rad
 float64 pitch_rate_radps
 float64 physical_steering_rad
 float64[4] suspension_jounce_m
-# Persistent PhysX WheelData state. The MPC uses the exact timer values up to
-# the source thresholds; values above a threshold are dynamically equivalent.
-float64[4] low_forward_speed_time_s
-float64[4] low_side_speed_time_s
 # Per-wheel slip/load/force/rate fields are the latest completed 1 ms PhysX
 # solver outputs in this packet. The observer corrects selected state channels
 # after that solve; these diagnostic outputs are not recomputed without another
 # physics step. The MPC rollout consumes the corrected mechanical state above.
 float64[4] longitudinal_slip
+# Unity WheelHit.sidewaysSlip sign convention; opposite the internal
+# body-left-positive contact-velocity coordinate used to calculate tire force.
 float64[4] lateral_slip
 float64[4] normal_load_n
 float64[4] suspension_force_n

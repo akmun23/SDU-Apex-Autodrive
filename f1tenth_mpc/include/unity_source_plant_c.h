@@ -69,8 +69,6 @@ typedef struct {
   double normal_load_n[4];
   double suspension_force_n[4];
   double suspension_jounce_rate_mps[4];
-  int sticky_tire_longitudinal_active[4];
-  int sticky_tire_lateral_active[4];
   double tire_longitudinal_force_n[4];
   double tire_lateral_force_n[4];
   double longitudinal_acceleration_mps2;

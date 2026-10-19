@@ -9,14 +9,12 @@
  * the central-difference oracle a poor local-derivative check. */
 static const float kStateEpsilon[MPC_MODEL_NX] = {
     1.0e-4f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
-    1.0e-4f, 1.0e-3f, 1.0e-3f,
+    1.0e-3f, 1.0e-4f, 1.0e-4f, 1.0e-4f,
+    1.0e-3f, 1.0e-3f,
     1.0e-2f, 1.0e-2f, 1.0e-2f, 1.0e-2f,
     1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f, 1.0e-4f, 1.0e-4f,
-    1.0e-4f, 1.0e-4f,
-    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f,
-    1.0e-3f, 1.0e-3f, 1.0e-3f, 1.0e-3f};
+    1.0e-3f, 1.0e-3f,
+    1.0e-4f, 1.0e-4f, 1.0e-4f, 1.0e-4f};
 static const float kInputEpsilon[MPC_MODEL_NU] = {1.0e-3f, 1.0e-2f};
 #endif
 
@@ -61,12 +59,6 @@ static void state_to_array(const MpcModelState_t *state, float x[MPC_MODEL_NX])
         x[MPC_STATE_IDX_SUSPENSION_JOUNCE_FL + wheel] = (float)
             prepared.source_plant_internal_state[
                 MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL + wheel];
-        x[MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL + wheel] = (float)
-            prepared.source_plant_internal_state[
-                MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL + wheel];
-        x[MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL + wheel] = (float)
-            prepared.source_plant_internal_state[
-                MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL + wheel];
     }
 }
 
@@ -111,12 +103,6 @@ static MpcModelState_t array_to_state(
         state.source_plant_internal_state[
             MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL + wheel] =
             x[MPC_STATE_IDX_SUSPENSION_JOUNCE_FL + wheel];
-        state.source_plant_internal_state[
-            MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL + wheel] =
-            x[MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL + wheel];
-        state.source_plant_internal_state[
-            MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL + wheel] =
-            x[MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL + wheel];
     }
     return state;
 }

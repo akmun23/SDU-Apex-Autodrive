@@ -43,28 +43,41 @@ enum
     MPC_STATE_IDX_SUSPENSION_JOUNCE_FR = 21,
     MPC_STATE_IDX_SUSPENSION_JOUNCE_RL = 22,
     MPC_STATE_IDX_SUSPENSION_JOUNCE_RR = 23,
-    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FL = 24,
-    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_FR = 25,
-    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_RL = 26,
-    MPC_STATE_IDX_LOW_FORWARD_SPEED_TIME_RR = 27,
-    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FL = 28,
-    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_FR = 29,
-    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_RL = 30,
-    MPC_STATE_IDX_LOW_SIDE_SPEED_TIME_RR = 31,
     /* Acceleration remains a plant/output channel, but is not an independent
      * optimizer state: the plant recomputes it from each transition and does
      * not consume the previous value. */
-    MPC_STATE_COUNT = 32
+    MPC_STATE_COUNT = 24
 };
 
 #define MPC_MODEL_NX MPC_STATE_COUNT
 #define MPC_MODEL_NU 2
-/* The nonlinear plant retains both FIFO slots per actuator. The optimizer
- * does not: the two in-flight commands are fixed values in the first two
- * control stages, while one prior-command value per actuator carries the
- * command-slew cost. */
+/* Compact RTI state layout. Four command-queue coordinates are omitted: the
+ * first two applied values are fixed controls for the first two stages, and
+ * future values are the decision sequence shifted by the known packet delay.
+ * All 20 path/body/plant coordinates, including four suspension jounces,
+ * remain in the QP. */
 enum
 {
+    MPC_OPT_IDX_EY = 0,
+    MPC_OPT_IDX_EPSI = 1,
+    MPC_OPT_IDX_U = 2,
+    MPC_OPT_IDX_V = 3,
+    MPC_OPT_IDX_R = 4,
+    MPC_OPT_IDX_ACTUAL_STEERING_ANGLE = 5,
+    MPC_OPT_IDX_WHEEL_OMEGA_FL = 6,
+    MPC_OPT_IDX_WHEEL_OMEGA_FR = 7,
+    MPC_OPT_IDX_WHEEL_OMEGA_RL = 8,
+    MPC_OPT_IDX_WHEEL_OMEGA_RR = 9,
+    MPC_OPT_IDX_BODY_HEIGHT = 10,
+    MPC_OPT_IDX_BODY_HEIGHT_RATE = 11,
+    MPC_OPT_IDX_ROLL = 12,
+    MPC_OPT_IDX_ROLL_RATE = 13,
+    MPC_OPT_IDX_PITCH = 14,
+    MPC_OPT_IDX_PITCH_RATE = 15,
+    MPC_OPT_IDX_SUSPENSION_JOUNCE_FL = 16,
+    MPC_OPT_IDX_SUSPENSION_JOUNCE_FR = 17,
+    MPC_OPT_IDX_SUSPENSION_JOUNCE_RL = 18,
+    MPC_OPT_IDX_SUSPENSION_JOUNCE_RR = 19,
     MPC_OPT_STATE_PREVIOUS_STEERING_COMMAND = MPC_MODEL_NX - 4,
     MPC_OPT_STATE_PREVIOUS_THROTTLE_COMMAND = MPC_MODEL_NX - 3,
     MPC_OPT_PHYSICAL_NX = MPC_OPT_STATE_PREVIOUS_STEERING_COMMAND,
@@ -99,12 +112,9 @@ enum
  * positive command below this threshold is transmitted as Unity's zero/brake
  * branch and therefore cannot represent a drive-mode QP decision. */
 #define MPC_THROTTLE_MIN_DRIVE 0.001f
-/* Native PxVehicleNoDrive stop sweeps at 1 ms across 0.5--12 m/s show a
- * transient body-u undershoot no larger than 7.79 mm/s before the sticky-tire
- * scene constraint settles the vehicle. Keep that measured solver transient
- * representable instead of rejecting a source-consistent braking rollout. */
+/* The 1 ms hard-brake plant sweep bottoms out at about -7.3 mm/s before
+ * settling to rest; retain this measured numerical stopping transient. */
 #define MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS 0.008f
-#define MPC_PHYSX_STICKY_TIMER_CAP_S 1.001f
 
 /* AutoDRIVE vehicle footprint dimensions used for MPC corridor projection.
  * They are geometry only, not tire or vehicle-dynamics parameters. */
