@@ -1,4 +1,5 @@
 #include "f1tenth_localization/physx_odom_runtime.hpp"
+#include "f1tenth_localization/physx_odom_actuation.hpp"
 
 #include "unity_source_plant_c.h"
 
@@ -110,9 +111,26 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
   delayed_throttle_commands_norm_[1] = std::clamp(throttle_command_norm, -1.0, 1.0);
 
   if (steering_feedback_valid) {
-    plant_state_.physical_steering_rad = std::clamp(
+    const double measured_physical_steering_rad = std::clamp(
       steering_feedback_rad, -UNITY_SOURCE_MAX_STEERING_RAD,
       UNITY_SOURCE_MAX_STEERING_RAD);
+    // VehicleController.CurrentSteeringAngle returns currentS. FixedUpdate
+    // assigns currentS from SteeringAngle before Steer() advances SteeringAngle
+    // for that same physics tick, so the published feedback is one Unity fixed
+    // step behind the rack state used by the wheel solver. Reconstruct that
+    // post-Steer state from the command already at the plant queue head under
+    // this runtime's two-packet delay model. The headerless ROS command and
+    // feedback topics carry no Unity fixed-step sequence, so the exact target
+    // association is not independently observable from a bag. Do not advance
+    // body dynamics here because the sensor packet already anchors those at
+    // this boundary.
+    float internal_steering_deg = -static_cast<float>(
+      measured_physical_steering_rad * (180.0 / kPi));
+    internal_steering_deg = detail::unity_steering_step(
+      internal_steering_deg, static_cast<float>(applied_steering));
+    plant_state_.physical_steering_rad = std::clamp(
+      -static_cast<double>(internal_steering_deg) * (kPi / 180.0),
+      -UNITY_SOURCE_MAX_STEERING_RAD, UNITY_SOURCE_MAX_STEERING_RAD);
   }
   const double steering_feedback_delta = steering_feedback_valid &&
     have_steering_feedback_ ?

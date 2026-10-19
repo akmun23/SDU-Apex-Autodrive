@@ -9,6 +9,7 @@ sensor_odometry:
     throttle_command_topic: /autodrive/roboracer_1/throttle_command
     odom_topic: /odom
     diagnostics_topic: /odom/diagnostics
+    publish_diagnostics: false
     unity_plant_state_topic: /odom/unity_plant_state
 
     odom_frame: odom

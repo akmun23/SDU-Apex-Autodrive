@@ -260,7 +260,6 @@ static int finite_mpc_state(const MpcModelState_t *state)
 {
     if (!state || !isfinite(state->e_y) || !isfinite(state->e_psi) ||
         !isfinite(state->u) || !isfinite(state->v) || !isfinite(state->r) ||
-        !isfinite(state->longitudinal_acceleration_mps2) ||
         !isfinite(state->yaw_rate_prediction_residual_radps) ||
         (state->yaw_rate_residual_correction_enabled != 0 &&
          state->yaw_rate_residual_correction_enabled != 1) ||
@@ -424,10 +423,8 @@ static int vehicle_model_step_scalar(
         r_next * kComForwardFromRearAxleM);
     const float actual_next = (float)
         source_output.state[UNITY_SOURCE_PHYSICAL_STEERING];
-    const float acceleration = (float)
-        source_output.longitudinal_acceleration_mps2;
     if (!isfinite(u_next) || !isfinite(v_next) || !isfinite(r_next) ||
-        !isfinite(actual_next) || !isfinite(acceleration) ||
+        !isfinite(actual_next) ||
         fabsf(u_next) > parameters.maximum_command_speed_mps) return 0;
 
     if (!vehicle_model_tracking_step_integrated(
@@ -440,7 +437,6 @@ static int vehicle_model_step_scalar(
     next.u = u_next;
     next.v = v_next;
     next.r = r_next;
-    next.longitudinal_acceleration_mps2 = acceleration;
     if (advance_command_queues) {
         /* Match odometry's two-slot packet FIFO: the plant used slot 1 for
          * this interval; now advance slot 2 and append this interval's new

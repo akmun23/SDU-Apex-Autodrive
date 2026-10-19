@@ -11,16 +11,12 @@ case "${track}" in
     image="autodriveecosystem/autodrive_roboracer_sim@sha256:b4bbda41fdb1da7a2eadba4350ed3a0cb5020e7eb783454e78399ef5852dbd76"
     container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_practice}"
     ;;
-  explore)
-    image="autodriveecosystem/autodrive_roboracer_sim@sha256:1a26bcc8b91fe845f2caafb95533bf3606092502430efca493709e167a5adb40"
-    container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_explore}"
-    ;;
   compete)
     image="autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete"
     container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_compete}"
     ;;
   *)
-    echo "SDU_APEX_SIM_TRACK must be practice, explore, or compete." >&2
+    echo "SDU_APEX_SIM_TRACK must be practice or compete." >&2
     exit 2
     ;;
 esac
@@ -62,51 +58,6 @@ if [[ "${mode}" == "gui" ]]; then
     -v "${xauthority_path}:${xauthority_path}:ro")
 fi
 
-capture_args=()
-capture_profile="${SDU_APEX_SIM_CAPTURE_PROFILE:-}"
-if [[ -n "${capture_profile}" ]]; then
-  if [[ "${track}" != "explore" ]]; then
-    echo "Development wheel-capture profiles are restricted to the Explore simulator." >&2
-    exit 2
-  fi
-  if [[ -z "${SDU_APEX_SIM_CAPTURE_DIR:-}" ]]; then
-    echo "SDU_APEX_SIM_CAPTURE_PROFILE requires SDU_APEX_SIM_CAPTURE_DIR." >&2
-    exit 2
-  fi
-  if [[ -z "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
-    echo "SDU_APEX_SIM_CAPTURE_PROFILE requires a custom development player." >&2
-    exit 2
-  fi
-  case "${capture_profile}" in
-    brake_pulse|yaw_transition) ;;
-    *) echo "Unsupported capture profile: ${capture_profile}" >&2; exit 2 ;;
-  esac
-fi
-if [[ -n "${SDU_APEX_SIM_CAPTURE_DIR:-}" ]]; then
-  requested_capture_directory="${SDU_APEX_SIM_CAPTURE_DIR}"
-  if [[ "${requested_capture_directory}" != /* ]]; then
-    requested_capture_directory="${repo_root}/${requested_capture_directory}"
-  fi
-  capture_directory="$(realpath -m -- "${requested_capture_directory}")"
-  case "${capture_directory}" in
-    "${repo_root}"/live_runs/*) ;;
-    *) echo "SDU_APEX_SIM_CAPTURE_DIR must be inside ${repo_root}/live_runs." >&2; exit 2 ;;
-  esac
-  mkdir -p -- "${capture_directory}"
-  capture_args=(-e SDU_APEX_WHEEL_CAPTURE_PATH=/sdu_apex_capture \
-    -v "${capture_directory}:/sdu_apex_capture:rw")
-  if [[ -n "${capture_profile}" ]]; then
-    capture_args+=(-e "SDU_APEX_WHEEL_CAPTURE_PROFILE=${capture_profile}")
-    if [[ "${capture_profile}" == "yaw_transition" ]]; then
-      capture_args+=(-e "SDU_APEX_WHEEL_CAPTURE_SEED=${SDU_APEX_WHEEL_CAPTURE_SEED:-20261018}")
-      echo "No ROS controller is launched; the development player owns only the diagnostic inputs."
-    fi
-    echo "Unity diagnostic command profile: ${capture_profile}"
-  fi
-  echo "Development wheel capture output: ${capture_directory}"
-  echo "The selected simulator image must include the development capture source for this to produce a file."
-fi
-
 player_args=()
 if [[ -n "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
   requested_player_directory="${SDU_APEX_SIM_PLAYER_DIR}"
@@ -144,7 +95,6 @@ exec docker run --rm --name "${container}" "${tty_args[@]}" \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
   ${DISPLAY:+-e DISPLAY} \
   "${xauthority_args[@]}" \
-  "${capture_args[@]}" \
   "${player_args[@]}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   --entrypoint /bin/bash \

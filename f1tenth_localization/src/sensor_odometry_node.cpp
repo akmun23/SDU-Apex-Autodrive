@@ -80,6 +80,7 @@ public:
     declare_parameter("throttle_command_topic", "/autodrive/roboracer_1/throttle_command");
     declare_parameter("odom_topic", "/odom");
     declare_parameter("diagnostics_topic", "/odom/diagnostics");
+    declare_parameter("publish_diagnostics", false);
     declare_parameter("unity_plant_state_topic", "/odom/unity_plant_state");
 
     declare_parameter("odom_frame", "odom");
@@ -135,10 +136,24 @@ public:
     twist_yaw_variance_ = std::max(
       0.0, get_parameter("twist_yaw_variance").as_double());
 
+    odom_message_.header.frame_id = odom_frame_;
+    odom_message_.child_frame_id = base_frame_;
+    plant_state_message_.header.frame_id = odom_frame_;
+    transform_message_.header.frame_id = odom_frame_;
+    transform_message_.child_frame_id = base_frame_;
+
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
       get_parameter("odom_topic").as_string(), rclcpp::QoS(100));
-    diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      get_parameter("diagnostics_topic").as_string(), rclcpp::QoS(100));
+    if (get_parameter("publish_diagnostics").as_bool()) {
+      diagnostics_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        get_parameter("diagnostics_topic").as_string(), rclcpp::QoS(100));
+      diagnostics_message_.layout.dim.resize(1);
+      diagnostics_message_.layout.dim[0].label =
+        "sensor_corrected_source_derived_odom_v3";
+      diagnostics_message_.layout.dim[0].size = 42;
+      diagnostics_message_.layout.dim[0].stride = 42;
+      diagnostics_message_.data.resize(42);
+    }
     plant_state_pub_ = create_publisher<sdu_apex_msgs::msg::UnityPlantState>(
       get_parameter("unity_plant_state_topic").as_string(),
       rclcpp::SensorDataQoS().keep_last(1));
@@ -289,7 +304,9 @@ private:
 
   void process_packet(const f1tenth_localization::SensorPacket & packet)
   {
-    const auto packet_start = std::chrono::steady_clock::now();
+    const auto packet_start = diagnostics_pub_
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point{};
     if (!clock_initialized_) {
       clock_initialized_ = true;
       observer_stamp_s_ = 0.0;
@@ -316,12 +333,16 @@ private:
       }
     }
 
-    const auto plant_advance_start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point plant_advance_start{};
+    if (diagnostics_pub_)
+      plant_advance_start = std::chrono::steady_clock::now();
     last_plant_ = plant_runtime_->advance(
       steering_command, throttle_command, feedback_valid,
       steering_feedback);
-    const double plant_advance_us = std::chrono::duration<double, std::micro>(
-      std::chrono::steady_clock::now() - plant_advance_start).count();
+    const double plant_advance_us = diagnostics_pub_
+      ? std::chrono::duration<double, std::micro>(
+          std::chrono::steady_clock::now() - plant_advance_start).count()
+      : 0.0;
 
     f1tenth_localization::OdometryObservation observation;
     observation.stamp_s = observer_stamp_s_;
@@ -363,12 +384,20 @@ private:
     observation.physx_normal_load_n = last_plant_.normal_load_n;
     observation.physx_state_valid = true;
 
-    const auto raw_plant = last_plant_;
-    const auto observer_update_start = std::chrono::steady_clock::now();
+    f1tenth_localization::PredictedPlantState raw_plant{};
+    if (diagnostics_pub_)
+      raw_plant = last_plant_;
+    std::chrono::steady_clock::time_point observer_update_start{};
+    if (diagnostics_pub_)
+      observer_update_start = std::chrono::steady_clock::now();
     const auto estimate = observer_.update(observation);
-    const double observer_update_us = std::chrono::duration<double, std::micro>(
-      std::chrono::steady_clock::now() - observer_update_start).count();
-    const auto plant_correction_start = std::chrono::steady_clock::now();
+    const double observer_update_us = diagnostics_pub_
+      ? std::chrono::duration<double, std::micro>(
+          std::chrono::steady_clock::now() - observer_update_start).count()
+      : 0.0;
+    std::chrono::steady_clock::time_point plant_correction_start{};
+    if (diagnostics_pub_)
+      plant_correction_start = std::chrono::steady_clock::now();
     plant_runtime_->correct(
       estimate.body_u_mps, estimate.body_v_com_mps,
       estimate.yaw_rate_radps, estimate.yaw_rad,
@@ -376,8 +405,10 @@ private:
       estimate.unity_state[8],
       estimate.roll_rate_radps, estimate.pitch_rate_radps,
       estimate.wheel_omega_radps);
-    const double plant_correction_us = std::chrono::duration<double, std::micro>(
-      std::chrono::steady_clock::now() - plant_correction_start).count();
+    const double plant_correction_us = diagnostics_pub_
+      ? std::chrono::duration<double, std::micro>(
+          std::chrono::steady_clock::now() - plant_correction_start).count()
+      : 0.0;
     last_plant_.state = estimate.unity_state;
     last_plant_.longitudinal_acceleration_mps2 =
       estimate.longitudinal_acceleration_mps2;
@@ -397,15 +428,15 @@ private:
     double plant_correction_us,
     const f1tenth_localization::PredictedPlantState & raw_plant)
   {
-    const auto publish_start = std::chrono::steady_clock::now();
+    const auto publish_start = diagnostics_pub_
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point{};
     // All three sensor streams were assembled by their source timestamp. Keep
     // the published odometry and plant state on that same epoch; publication
     // time here is later and can include packet-reordering/dispatch latency.
     const rclcpp::Time stamp(packet.stamp_ns, get_clock()->get_clock_type());
-    nav_msgs::msg::Odometry odom;
+    auto & odom = odom_message_;
     odom.header.stamp = stamp;
-    odom.header.frame_id = odom_frame_;
-    odom.child_frame_id = base_frame_;
     odom.pose.pose.position.x = estimate.x_m;
     odom.pose.pose.position.y = estimate.y_m;
     odom.pose.pose.orientation = quaternion_from_yaw(estimate.yaw_rad);
@@ -419,8 +450,8 @@ private:
     odom.twist.covariance[7] = twist_linear_variance_;
     odom.twist.covariance[35] = twist_yaw_variance_;
 
-    sdu_apex_msgs::msg::UnityPlantState state;
-    state.header = odom.header;
+    auto & state = plant_state_message_;
+    state.header.stamp = stamp;
     state.state_schema_version = 11;
     state.state_origin = 1;
     state.suspension_history_initialized = last_plant_.suspension_history_initialized;
@@ -489,57 +520,53 @@ private:
     odom_pub_->publish(odom);
 
     if (publish_tf_) {
-      geometry_msgs::msg::TransformStamped transform;
-      transform.header = odom.header;
-      transform.child_frame_id = base_frame_;
+      auto & transform = transform_message_;
+      transform.header.stamp = stamp;
       transform.transform.translation.x = estimate.x_m;
       transform.transform.translation.y = estimate.y_m;
       transform.transform.rotation = odom.pose.pose.orientation;
       tf_broadcaster_->sendTransform(transform);
     }
 
-    const double publish_us = std::chrono::duration<double, std::micro>(
-      std::chrono::steady_clock::now() - publish_start).count();
-    const double process_packet_us = std::chrono::duration<double, std::micro>(
-      std::chrono::steady_clock::now() - packet_start).count();
-    std_msgs::msg::Float64MultiArray diagnostics;
-    diagnostics.layout.dim.resize(1);
-    diagnostics.layout.dim[0].label =
-      "sensor_corrected_source_derived_odom_v3";
-    diagnostics.layout.dim[0].size = 42;
-    diagnostics.layout.dim[0].stride = 42;
-    diagnostics.data = {
-      estimate.stamp_s, estimate.dt_s, estimate.body_u_mps,
-      estimate.body_v_mps, estimate.body_v_com_mps,
-      estimate.yaw_rate_radps, estimate.speed_mps,
-      estimate.encoder_rear_axle_speed_mps,
-      packet.ax_mps2, packet.ay_mps2,
-      raw_plant.state[0], raw_plant.state[1],
-      raw_plant.raw_yaw_rate_prediction_radps,
-      steering_command, throttle_command,
-      static_cast<double>(packet_assembler_.packet_drop_count()),
-      static_cast<double>(packet_assembler_.packet_coherence_fault_count()),
-      plant_advance_us, observer_update_us, plant_correction_us,
-      publish_us, process_packet_us,
-      raw_plant.state[3 + 2], raw_plant.state[3 + 3],
-      estimate.encoder_wheel_omega_average_radps[0],
-      estimate.encoder_wheel_omega_average_radps[1],
-      estimate.encoder_model_rotation_residual_rad[0],
-      estimate.encoder_model_rotation_residual_rad[1],
-      estimate.wheel_omega_correction_radps[0],
-      estimate.wheel_omega_correction_radps[1],
-      estimate.physx_model_x_m, estimate.physx_model_y_m,
-      raw_plant.longitudinal_acceleration_mps2,
-      raw_plant.lateral_acceleration_mps2,
-      estimate.lateral_acceleration_residual_gain,
-      last_plant_.wheel_encoder_angle_prediction_rad[0],
-      last_plant_.wheel_encoder_angle_prediction_rad[1],
-      last_plant_.wheel_encoder_angle_prediction_rad[2],
-      last_plant_.wheel_encoder_angle_prediction_rad[3],
-      raw_plant.corrected_yaw_rate_prediction_radps,
-      raw_plant.yaw_rate_prediction_correction_radps,
-      static_cast<double>(raw_plant.yaw_rate_prediction_mode)};
-    diagnostics_pub_->publish(diagnostics);
+    if (diagnostics_pub_) {
+      const double publish_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - publish_start).count();
+      const double process_packet_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - packet_start).count();
+      auto & diagnostics = diagnostics_message_.data;
+      diagnostics = {
+        estimate.stamp_s, estimate.dt_s, estimate.body_u_mps,
+        estimate.body_v_mps, estimate.body_v_com_mps,
+        estimate.yaw_rate_radps, estimate.speed_mps,
+        estimate.encoder_rear_axle_speed_mps,
+        packet.ax_mps2, packet.ay_mps2,
+        raw_plant.state[0], raw_plant.state[1],
+        raw_plant.raw_yaw_rate_prediction_radps,
+        steering_command, throttle_command,
+        static_cast<double>(packet_assembler_.packet_drop_count()),
+        static_cast<double>(packet_assembler_.packet_coherence_fault_count()),
+        plant_advance_us, observer_update_us, plant_correction_us,
+        publish_us, process_packet_us,
+        raw_plant.state[3 + 2], raw_plant.state[3 + 3],
+        estimate.encoder_wheel_omega_average_radps[0],
+        estimate.encoder_wheel_omega_average_radps[1],
+        estimate.encoder_model_rotation_residual_rad[0],
+        estimate.encoder_model_rotation_residual_rad[1],
+        estimate.wheel_omega_correction_radps[0],
+        estimate.wheel_omega_correction_radps[1],
+        estimate.physx_model_x_m, estimate.physx_model_y_m,
+        raw_plant.longitudinal_acceleration_mps2,
+        raw_plant.lateral_acceleration_mps2,
+        estimate.lateral_acceleration_residual_gain,
+        last_plant_.wheel_encoder_angle_prediction_rad[0],
+        last_plant_.wheel_encoder_angle_prediction_rad[1],
+        last_plant_.wheel_encoder_angle_prediction_rad[2],
+        last_plant_.wheel_encoder_angle_prediction_rad[3],
+        raw_plant.corrected_yaw_rate_prediction_radps,
+        raw_plant.yaw_rate_prediction_correction_radps,
+        static_cast<double>(raw_plant.yaw_rate_prediction_mode)};
+      diagnostics_pub_->publish(diagnostics_message_);
+    }
   }
 
   f1tenth_localization::OdometryObserverConfig observer_config_{};
@@ -549,7 +576,11 @@ private:
   f1tenth_localization::PredictedPlantState last_plant_{};
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr diagnostics_pub_;
+  std_msgs::msg::Float64MultiArray diagnostics_message_;
   rclcpp::Publisher<sdu_apex_msgs::msg::UnityPlantState>::SharedPtr plant_state_pub_;
+  nav_msgs::msg::Odometry odom_message_;
+  sdu_apex_msgs::msg::UnityPlantState plant_state_message_;
+  geometry_msgs::msg::TransformStamped transform_message_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;

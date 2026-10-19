@@ -138,7 +138,6 @@ TEST(MpcControlTimePredictor, ReturnsLatentPlantAtControlTime)
 
   MpcModelState_t source_plant{};
   source_plant.u = 2.0f;
-  source_plant.longitudinal_acceleration_mps2 = 2.0f;
   source_plant.delayed_throttle_command_1 = 0.25f;
   source_plant.delayed_throttle_command_2 = 0.25f;
 

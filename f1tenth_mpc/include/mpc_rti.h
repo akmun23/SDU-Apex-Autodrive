@@ -35,7 +35,6 @@ typedef struct
     float v;
     float r;
     float steering_command;
-    float longitudinal_acceleration_mps2;
     float path_curvature;
     float left_bound;
     float right_bound;
@@ -56,8 +55,6 @@ typedef struct
     float weight_steering_command;
     float weight_steering_target;
     float weight_throttle_command;
-    float weight_steering_target_change;
-    float weight_throttle_command_change;
     float terminal_multiplier;
     float max_speed_mps;
     float active_speed_ceiling_mps;
@@ -235,12 +232,7 @@ typedef struct
     float rti2_residual_imbalance_trigger;
     float rti2_lateral_load_trigger_mps2;
     int rti2_nonsmooth_columns_trigger;
-    /* A finite nonlinear-feasible R1 may be used only as an R2 seed when
-     * its residual is above the normal degraded gate but below this bound.
-     * Zero disables this recovery path. */
-    float rti2_residual_recovery_limit;
     float degraded_residual_limit;
-    float maximum_regularization;
     int max_consecutive_degraded_solves;
     /* Total RTI-cycle wall-time budget. Zero disables the budget. When the
      * budget is tight, optional R2 refinement may be skipped; R1 is only
@@ -262,7 +254,6 @@ typedef enum
     MPC_RTI_CYCLE_REJECTED_INPUT,
     MPC_RTI_CYCLE_REJECTED_SOLVER,
     MPC_RTI_CYCLE_REJECTED_RESIDUAL,
-    MPC_RTI_CYCLE_REJECTED_REGULARIZATION,
     MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT
 } MpcRtiCycleStatus_t;
 
@@ -327,7 +318,7 @@ typedef struct
     double r2_exact_rollout_us;
     double r2_nonlinear_validation_us;
     double total_rti_us;
-    int selected_candidate; /* 1=R1, 2=R2, 3=corridor repair. */
+    int selected_candidate; /* 1=R1, 2=R2, 3=repair. */
     int corridor_repair_used;
     unsigned int corridor_repair_trials;
     double corridor_repair_us;

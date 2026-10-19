@@ -13,9 +13,6 @@
  * Using ADMM to handle constraints, with Riccati recursion for the
  * unconstrained LQR sub-problem (O(N) per ADMM iteration).
  *
- * Supports cross-cost term x^T N u for command-change penalties against
- * the latest command already represented by the plant's actuator queue.
- *
  * All arithmetic uses native float operations.
  * @dependencies mpc_types.h
  */
@@ -197,14 +194,14 @@ void riccati_admm_shift_warm_start(
  * 4. y-update: dual variable update
  * 5. Convergence check against the configured absolute maximum residual
  *
- * This solver is specialized for N=RICCATI_HORIZON=32,
- * nx=RICCATI_MAX_NX=22, and nu=RICCATI_MAX_NU=2. These compile-time
+ * This solver is specialized for N=RICCATI_HORIZON=28,
+ * nx=RICCATI_MAX_NX=20, and nu=RICCATI_MAX_NU=2. These compile-time
  * dimensions are the only supported problem shape.
  *
- * @param step_data   Per-step dynamics and cost data (array of 32 elements)
- * @param terminal_Q  Terminal state cost (diagonal weights, length 25)
- * @param terminal_q  Terminal state linear cost (length 25)
- * @param x0          Initial state (length 25)
+ * @param step_data   Per-step dynamics and cost data (array of 28 elements)
+ * @param terminal_Q  Terminal state cost (diagonal weights, length 20)
+ * @param terminal_q  Terminal state linear cost (length 20)
+ * @param x0          Initial state (length 20)
  * @param config      ADMM configuration (if NULL, compile-time defaults are used).
  * @param admm_state  ADMM warm-start state (modified in-place)
  * @param solution    Output: optimal trajectories and status

@@ -4516,26 +4516,6 @@
       "trigger": false
     }
   ],
-  "active_open_plane_floor": {
-    "collider_size_local_m": [
-      1.0,
-      2.0,
-      1.0
-    ],
-    "component_path_id": 1875,
-    "exclude_layers_bits": 0,
-    "include_layers_bits": 0,
-    "layer": 0,
-    "layer_override_priority": 0,
-    "material": {
-      "explicit": false,
-      "file_id": 0,
-      "path_id": 0
-    },
-    "provides_contacts": false,
-    "world_y_max_m": 0.0,
-    "world_y_min_m": -0.019999999552965164
-  },
   "active_vehicle_compound_shape_counts": {
     "box_colliders": 2,
     "convex_mesh_colliders": 12,
@@ -4546,14 +4526,14 @@
     "fl": {
       "collider_local_to_wheel_pose_matrix": [
         [
-          1.2212453204702273e-17,
+          1.2212453204702273E-17,
           -0.021994764515200552,
           0.0023996284903393793,
           0.0007999999797903001
         ],
         [
           0.10999999940395354,
-          2.4424906409404546e-18,
+          2.4424906409404546E-18,
           0.0,
           0.000699999975040555
         ],
@@ -4561,7 +4541,7 @@
           0.0,
           0.0004799256980678759,
           0.10997382257600276,
-          9.999999747378752e-05
+          0.00009999999747378752
         ],
         [
           0.0,
@@ -4653,7 +4633,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           -1.0,
           0.5000000596046448
         ],
@@ -4718,7 +4698,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           1.0,
           0.5000000596046448
         ],
@@ -4794,16 +4774,16 @@
     "fr": {
       "collider_local_to_wheel_pose_matrix": [
         [
-          2.4424899791959645e-17,
+          2.4424899791959645E-17,
           -0.02199999615550041,
           0.0,
           0.0008999999845400453
         ],
         [
           0.10999996960163114,
-          4.884980454700297e-18,
+          4.884980454700297E-18,
           0.0,
-          -9.999999747378752e-05
+          -0.00009999999747378752
         ],
         [
           0.0,
@@ -4901,7 +4881,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           -1.0,
           0.5000000596046448
         ],
@@ -4966,7 +4946,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           1.0,
           0.5000000596046448
         ],
@@ -5042,14 +5022,14 @@
     "rl": {
       "collider_local_to_wheel_pose_matrix": [
         [
-          2.4424903100682096e-17,
+          2.4424903100682096E-17,
           -0.021999999880790707,
           0.0,
           0.0
         ],
         [
           0.10999998450279233,
-          4.884981281880909e-18,
+          4.884981281880909E-18,
           0.0,
           0.0
         ],
@@ -5149,7 +5129,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           -1.0,
           0.5000000596046448
         ],
@@ -5214,7 +5194,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           1.0,
           0.5000000596046448
         ],
@@ -5290,20 +5270,20 @@
     "rr": {
       "collider_local_to_wheel_pose_matrix": [
         [
-          -1.221245237752166e-16,
+          -1.221245237752166E-16,
           -0.021999999880790693,
-          4.80825375712199e-09,
+          4.80825375712199E-9,
           0.0
         ],
         [
           0.10999999195337287,
-          1.7097434486583182e-17,
-          4.80825375712199e-09,
+          1.7097434486583182E-17,
+          4.80825375712199E-9,
           0.0
         ],
         [
-          -4.808252128745961e-09,
-          9.616504908842333e-10,
+          -4.808252128745961E-9,
+          9.616504908842333E-10,
           0.11000002920627573,
           0.0
         ],
@@ -5397,7 +5377,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           -1.0,
           0.5000000596046448
         ],
@@ -5462,7 +5442,7 @@
           0.4755283296108246
         ],
         [
-          1.4901161193847656e-08,
+          1.4901161193847656E-8,
           1.0,
           0.5000000596046448
         ],
@@ -5536,118 +5516,6 @@
       "visual_parent": "RR Wheel"
     }
   },
-  "body_shape_clearance_to_open_plane_y0": {
-    "Battery-1-solid1#1837": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.02210247193693983,
-      "minimum_clearance_row": 137829,
-      "minimum_clearance_time_s": 137.82900654652622,
-      "minimum_support_normal_velocity_mps": -0.033518212288766135,
-      "samples": 289450
-    },
-    "Chassis-1-solid1#1842": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.1732630851615132,
-      "fraction_within_20mm_and_receding": 0.05871480393850406,
-      "fraction_within_20mm_contact_offset_pair": 0.23197788910001726,
-      "minimum_clearance_m": 0.017683999373262385,
-      "minimum_clearance_row": 142075,
-      "minimum_clearance_time_s": 142.0750067482004,
-      "minimum_support_normal_velocity_mps": -0.03493189676565813,
-      "samples": 289450
-    },
-    "Front Crash Member-1-solid1#1847": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.029593496675909138,
-      "minimum_clearance_row": 226550,
-      "minimum_clearance_time_s": 226.5500107605476,
-      "minimum_support_normal_velocity_mps": -0.08549505846502028,
-      "samples": 289450
-    },
-    "Front Shock Tower-1-solid1#1841": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.05684673443567692,
-      "minimum_clearance_row": 226951,
-      "minimum_clearance_time_s": 226.95101077959407,
-      "minimum_support_normal_velocity_mps": -0.05923930470161852,
-      "samples": 289450
-    },
-    "Hokuyo UST-10LX-1-solid3#1839": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.09173495992702863,
-      "minimum_clearance_row": 226951,
-      "minimum_clearance_time_s": 226.95101077959407,
-      "minimum_support_normal_velocity_mps": -0.04617301164569582,
-      "samples": 289450
-    },
-    "Hokuyo UST-10LX-1-solid4#1838": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.12359626829729217,
-      "minimum_clearance_row": 226951,
-      "minimum_clearance_time_s": 226.95101077959407,
-      "minimum_support_normal_velocity_mps": -0.04674654389329768,
-      "samples": 289450
-    },
-    "Platform Deck-1-solid1#1846": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.0836337858561162,
-      "minimum_clearance_row": 226951,
-      "minimum_clearance_time_s": 226.95101077959407,
-      "minimum_support_normal_velocity_mps": -0.05697900158182383,
-      "samples": 289450
-    },
-    "Rear Shock Tower-1-solid1#1848": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.06269815113168592,
-      "minimum_clearance_row": 238660,
-      "minimum_clearance_time_s": 238.66001133574173,
-      "minimum_support_normal_velocity_mps": -0.044891716524732894,
-      "samples": 289450
-    },
-    "Vehicle#2018": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.09389920409537307,
-      "minimum_clearance_row": 226506,
-      "minimum_clearance_time_s": 226.50601075845768,
-      "minimum_support_normal_velocity_mps": -0.03530388030714291,
-      "samples": 289450
-    },
-    "Vehicle#2019": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_and_approaching": 0.0,
-      "fraction_within_20mm_and_receding": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 0.0,
-      "minimum_clearance_m": 0.09594683992014458,
-      "minimum_clearance_row": 179817,
-      "minimum_clearance_time_s": 179.8170085408492,
-      "minimum_support_normal_velocity_mps": -0.021671022241855215,
-      "samples": 289450
-    }
-  },
   "contact_offset_pair_m": 0.019999999552965164,
   "inactive_vehicle_mesh_colliders": [
     {
@@ -5687,7 +5555,7 @@
       },
       "clearance_m_by_wheel_shape": {
         "fl": 0.0017842070871212012,
-        "fr": -8.857377596199409e-05,
+        "fr": -0.00008857377596199409,
         "rl": 0.0014846865218987697,
         "rr": 0.0017584853768051606
       },
@@ -5720,7 +5588,7 @@
       },
       "clearance_m_by_wheel_shape": {
         "fl": 0.0011016468577798328,
-        "fr": -5.2798894617792774e-05,
+        "fr": -0.000052798894617792774,
         "rl": 0.0015422258075480765,
         "rr": 0.0015745591252250002
       },
@@ -5795,7 +5663,7 @@
     "default_solver_velocity_iterations": 1,
     "enable_pcm_serialized": null,
     "enhanced_determinism": false,
-    "fast_motion_threshold_m": 3.4028234663852886e+38,
+    "fast_motion_threshold_m": 3.4028234663852886E+38,
     "friction_type_serialized": 0,
     "gravity_mps2": [
       0.0,
@@ -6064,7 +5932,7 @@
     "implicit_inertia_tensor": true,
     "mass_kg": 3.4700000286102295,
     "runtime_center_of_mass_body_m": [
-      -8e-05,
+      -0.00008,
       0.06434,
       -0.00468
     ],
@@ -6080,39 +5948,5 @@
       0.9924773
     ],
     "use_gravity": true
-  },
-  "wheel_shape_clearance_to_open_plane_y0": {
-    "fl": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 1.0,
-      "minimum_clearance_m": 0.0006408412281377479,
-      "minimum_clearance_row": 142085,
-      "minimum_clearance_time_s": 142.08500674867537,
-      "samples": 289450
-    },
-    "fr": {
-      "fraction_negative": 0.0014061150457764726,
-      "fraction_within_20mm_contact_offset_pair": 1.0,
-      "minimum_clearance_m": -0.00012706993082086011,
-      "minimum_clearance_row": 142122,
-      "minimum_clearance_time_s": 142.12200675043275,
-      "samples": 289450
-    },
-    "rl": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 1.0,
-      "minimum_clearance_m": 0.0014575118640118264,
-      "minimum_clearance_row": 137977,
-      "minimum_clearance_time_s": 137.97700655355584,
-      "samples": 289450
-    },
-    "rr": {
-      "fraction_negative": 0.0,
-      "fraction_within_20mm_contact_offset_pair": 1.0,
-      "minimum_clearance_m": 0.0014489163574751122,
-      "minimum_clearance_row": 138198,
-      "minimum_clearance_time_s": 138.19800656405278,
-      "samples": 289450
-    }
   }
 }

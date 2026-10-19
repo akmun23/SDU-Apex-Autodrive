@@ -63,8 +63,7 @@ void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
         0.5f,
         400.0f, 400.0f, 400.0f, 400.0f,
         0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
-        0.05f, 0.05f, 0.05f, 0.05f,
-        1.0f, 1.0f};
+        0.05f, 0.05f, 0.05f, 0.05f};
     constexpr float input_scale[MPC_MODEL_NU] = {0.5f, 1.0f};
     std::copy_n(state_scale, RICCATI_MAX_NX, solver.state_scale);
     std::copy_n(input_scale, MPC_MODEL_NU, solver.input_scale);
@@ -175,11 +174,11 @@ public:
          * production profile used different weights. */
         rti_config_.model.weight_e_y = declare_weight("weight_e_y", 125.0f);
         rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 2.0f);
-        rti_config_.model.weight_u = declare_weight("weight_u", 200.0f);
+        rti_config_.model.weight_u = declare_weight("weight_u", 500.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
-            "weight_u_overspeed", 200.0f);
+            "weight_u_overspeed", 300.0f);
         rti_config_.model.weight_longitudinal_slip = declare_weight(
-            "weight_longitudinal_slip", 50.0f);
+            "weight_longitudinal_slip", 5.0f);
         rti_config_.model.weight_v = declare_weight("weight_v", 5.0f);
         rti_config_.model.weight_r = declare_weight("weight_r", 1.5f);
         rti_config_.model.weight_steering_command = declare_weight(
@@ -187,11 +186,7 @@ public:
         rti_config_.model.weight_steering_target = declare_weight(
             "weight_steering_target", 5.0f);
         rti_config_.model.weight_throttle_command = declare_weight(
-            "weight_throttle_command", 0.5f);
-        rti_config_.model.weight_steering_target_change = declare_weight(
-            "weight_steering_target_change", 10.0f);
-        rti_config_.model.weight_throttle_command_change = declare_weight(
-            "weight_throttle_command_change", 5.0f);
+            "weight_throttle_command", 0.1f);
         rti_config_.model.terminal_multiplier = declare_weight(
             "terminal_multiplier", 3.0f);
         rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
@@ -239,8 +234,7 @@ public:
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", MAX_ITERATIONS);
         // Keep the ROS parameter consistent with the solver's compile-time
-        // storage bound.  A separate 160-iteration clamp here silently
-        // ignored valid development configurations that requested 200.
+        // storage bound. The production node caps the runtime request here.
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
             std::clamp(configured_iterations, 1, MAX_ITERATIONS));
         const double rti_cycle_budget_ms = declare_parameter<double>(
@@ -299,12 +293,8 @@ public:
             declare_parameter<double>("rti2_lateral_load_trigger_mps2", 3.0));
         rti_config_.rti2_nonsmooth_columns_trigger = declare_parameter<int>(
             "rti2_nonsmooth_columns_trigger", 50);
-        rti_config_.rti2_residual_recovery_limit = static_cast<float>(
-            declare_parameter<double>("rti2_residual_recovery_limit", 0.25));
         rti_config_.degraded_residual_limit = static_cast<float>(
             declare_parameter<double>("solver_degraded_tolerance", 0.01));
-        rti_config_.maximum_regularization = static_cast<float>(
-            declare_parameter<double>("solver_max_regularization", 0.01));
         rti_config_.max_consecutive_degraded_solves =
             declare_parameter<int>("max_consecutive_degraded_solves", 3);
         RCLCPP_INFO(get_logger(),
@@ -484,7 +474,8 @@ private:
     {
         abort_open_loop_horizon_test(reason);
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
-            "holding bounded driving command while localization recovers", reason);
+            "applying zero-throttle active brake until a feasible horizon "
+            "is available", reason);
         if (reset_rti_memory) {
             mpc_rti_memory_reset(&rti_memory_);
         }
@@ -809,8 +800,6 @@ private:
         case MPC_RTI_CYCLE_REJECTED_INPUT: return "rejected_input";
         case MPC_RTI_CYCLE_REJECTED_SOLVER: return "rejected_solver";
         case MPC_RTI_CYCLE_REJECTED_RESIDUAL: return "rejected_residual";
-        case MPC_RTI_CYCLE_REJECTED_REGULARIZATION:
-            return "rejected_regularization";
         case MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT:
             return "rejected_nonlinear_rollout";
         }
@@ -1035,13 +1024,6 @@ private:
         json << ",\"reference\":{\"trajectory_acceleration_mps2\":";
         json_number(current_path_sample_valid ? current_path_sample.acceleration :
             std::numeric_limits<double>::quiet_NaN());
-        json << ",\"acceleration_reference_mps2\":";
-        json_number(current_path_sample_valid
-            ? mpc_reference_acceleration_under_speed_ceiling(
-                static_cast<float>(current_path_sample.speed),
-                static_cast<float>(current_path_sample.acceleration),
-                rti_config_.model.active_speed_ceiling_mps)
-            : std::numeric_limits<double>::quiet_NaN());
         const double current_reference_speed = current_path_sample_valid
             ? std::min(current_path_sample.speed,
                 static_cast<double>(rti_config_.model.active_speed_ceiling_mps))
@@ -1161,8 +1143,6 @@ private:
              << rti_config_.model.corridor_margin_m
              << ",\"first_prediction_corridor_margin_m\":"
              << rti_config_.model.first_prediction_corridor_margin_m
-             << ",\"rti2_residual_recovery_limit\":"
-             << rti_config_.rti2_residual_recovery_limit
              << ",\"recovery_active\":"
              << (result.recovery_active ? "true" : "false")
              << ",\"recovery_not_found\":"
@@ -1275,11 +1255,7 @@ private:
                 << "]"
                 << ",\"reference\":[0,0," << reference_speed
                 << ",0," << sample.curvature * reference_speed << ','
-                << feedforward << ','
-                << mpc_reference_acceleration_under_speed_ceiling(
-                    static_cast<float>(sample.speed),
-                    static_cast<float>(sample.acceleration),
-                    rti_config_.model.active_speed_ceiling_mps) << ']'
+                << feedforward << ']'
                 << ",\"input\":[" << control.steering_target_rad << ','
                 << control.throttle_command << ']'
                 << ",\"corridor\":[" << sample.left_bound << ','
@@ -1337,16 +1313,6 @@ private:
             !finite_array(message->suspension_jounce_m) ||
             !finite_array(message->low_forward_speed_time_s) ||
             !finite_array(message->low_side_speed_time_s) ||
-            !finite_array(message->longitudinal_slip) ||
-            !finite_array(message->lateral_slip) ||
-            !finite_array(message->normal_load_n) ||
-            !finite_array(message->suspension_force_n) ||
-            !finite_array(message->suspension_jounce_rate_mps) ||
-            !finite_array(message->tire_longitudinal_force_n) ||
-            !finite_array(message->tire_lateral_force_n) ||
-            !std::isfinite(message->longitudinal_acceleration_mps2) ||
-            !std::isfinite(message->lateral_acceleration_mps2) ||
-            !std::isfinite(message->yaw_acceleration_radps2) ||
             !std::isfinite(message->body_height_m) ||
             !std::isfinite(message->body_height_rate_mps) ||
             !std::isfinite(message->roll_rad) ||
@@ -1355,24 +1321,16 @@ private:
             !std::isfinite(message->pitch_rate_radps) ||
             !std::isfinite(message->physical_steering_rad) ||
             !std::isfinite(message->longitudinal_velocity_mps) ||
-            !std::isfinite(message->lateral_velocity_com_mps) ||
             !std::isfinite(message->lateral_velocity_rear_axle_mps) ||
-            !std::isfinite(message->yaw_rate_radps) ||
             !std::isfinite(message->gyro_yaw_rate_radps) ||
             !std::isfinite(message->yaw_rate_prediction_residual_radps) ||
-            !std::isfinite(message->steering_command_normalized) ||
-            !std::isfinite(message->throttle_command_normalized) ||
             !std::isfinite(message->delayed_steering_command_1_normalized) ||
             !std::isfinite(message->delayed_steering_command_2_normalized) ||
             !std::isfinite(message->delayed_throttle_command_1_normalized) ||
-            !std::isfinite(message->delayed_throttle_command_2_normalized) ||
-            !std::isfinite(message->steering_feedback_rad) ||
-            !std::isfinite(message->throttle_feedback_normalized)) {
+            !std::isfinite(message->delayed_throttle_command_2_normalized)) {
             return;
         }
-        if (message->steering_command_normalized < -1.0 ||
-            message->steering_command_normalized > 1.0 ||
-            message->delayed_steering_command_1_normalized < -1.0 ||
+        if (message->delayed_steering_command_1_normalized < -1.0 ||
             message->delayed_steering_command_1_normalized > 1.0 ||
             message->delayed_steering_command_2_normalized < -1.0 ||
             message->delayed_steering_command_2_normalized > 1.0 ||
@@ -1381,12 +1339,7 @@ private:
             message->delayed_throttle_command_1_normalized < 0.0 ||
             message->delayed_throttle_command_1_normalized > 1.0 ||
             message->delayed_throttle_command_2_normalized < 0.0 ||
-            message->delayed_throttle_command_2_normalized > 1.0 ||
-            (message->actuator_feedback_valid &&
-             (std::abs(message->steering_feedback_rad) >
-                    rti_config_.model.max_steering_rad + 1.0e-3f ||
-              message->throttle_feedback_normalized < 0.0 ||
-              message->throttle_feedback_normalized > 1.0))) {
+            message->delayed_throttle_command_2_normalized > 1.0) {
             return;
         }
         const int64_t stamp_ns = rclcpp::Time(
@@ -1640,8 +1593,6 @@ private:
                 unity_plant_snapshot.delayed_throttle_command_1_normalized);
             source_time_plant.delayed_throttle_command_2 = static_cast<float>(
                 unity_plant_snapshot.delayed_throttle_command_2_normalized);
-            source_time_plant.longitudinal_acceleration_mps2 = static_cast<float>(
-                unity_plant_snapshot.longitudinal_acceleration_mps2);
             source_plant_stamp_ns = unity_plant_snapshot_stamp_ns;
             source_plant_progress_m = projection.s;
             unity_plant_state_used_ = true;

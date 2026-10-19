@@ -43,19 +43,16 @@ enum
     MPC_STATE_IDX_SUSPENSION_JOUNCE_FR = 21,
     MPC_STATE_IDX_SUSPENSION_JOUNCE_RL = 22,
     MPC_STATE_IDX_SUSPENSION_JOUNCE_RR = 23,
-    /* Acceleration remains a plant/output channel, but is not an independent
-     * optimizer state: the plant recomputes it from each transition and does
-     * not consume the previous value. */
     MPC_STATE_COUNT = 24
 };
 
 #define MPC_MODEL_NX MPC_STATE_COUNT
 #define MPC_MODEL_NU 2
-/* Compact RTI state layout. Four command-queue coordinates are omitted: the
- * first two applied values are fixed controls for the first two stages, and
- * future values are the decision sequence shifted by the known packet delay.
- * All 20 path/body/plant coordinates, including four suspension jounces,
- * remain in the QP. */
+/* Compact RTI state layout. The four actuator-queue values remain in the
+ * nonlinear plant and are represented by a fixed two-command prefix plus the
+ * shifted decision sequence. The QP carries only the 20 path/body/plant
+ * coordinates; command-slew memory is not an optimizer state because the
+ * physical steering and wheel dynamics already represent actuator response. */
 enum
 {
     MPC_OPT_IDX_EY = 0,
@@ -78,24 +75,25 @@ enum
     MPC_OPT_IDX_SUSPENSION_JOUNCE_FR = 17,
     MPC_OPT_IDX_SUSPENSION_JOUNCE_RL = 18,
     MPC_OPT_IDX_SUSPENSION_JOUNCE_RR = 19,
-    MPC_OPT_STATE_PREVIOUS_STEERING_COMMAND = MPC_MODEL_NX - 4,
-    MPC_OPT_STATE_PREVIOUS_THROTTLE_COMMAND = MPC_MODEL_NX - 3,
-    MPC_OPT_PHYSICAL_NX = MPC_OPT_STATE_PREVIOUS_STEERING_COMMAND,
-    MPC_OPTIMIZER_NX = MPC_MODEL_NX - 2
+    MPC_OPT_PHYSICAL_NX = 20,
+    MPC_OPTIMIZER_NX = MPC_OPT_PHYSICAL_NX
 };
 #define RICCATI_MAX_NX MPC_OPTIMIZER_NX
 #define RICCATI_MAX_NU MPC_MODEL_NU
+#define MPC_COMMAND_DELAY_STEPS 2
 
 /* Math and timing */
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
 
 /* Other swept MPC defaults */
-#define MAX_ITERATIONS 200                             /* Default solver iteration budget per control update. */
+#define MAX_ITERATIONS 100                             /* Production-node per-pass ceiling; offline solver callers may request more. */
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30
-#define RICCATI_HORIZON (PREDICTION_HORIZON + 2)
+/* Commands already in flight are propagated before the QP; the final two
+ * newly planned commands cannot affect the 30-step state horizon. */
+#define RICCATI_HORIZON (PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS)
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
 
 /* Solver and model safeguards */
@@ -173,8 +171,8 @@ typedef struct
 /**
  * @brief Per-stage dynamics, cost, and box-constraint data for Riccati-ADMM.
  * @details Represents one prediction step used by the constrained LQR solve.
- *          Q and R are diagonal weights, N is an optional cross-cost term,
- *          and x/u bounds define box constraints for ADMM projection.
+ *          Q and R are diagonal weights, and x/u bounds define box
+ *          constraints for ADMM projection.
  */
 typedef struct
 {
@@ -185,7 +183,6 @@ typedef struct
     float q[RICCATI_MAX_NX];
     float R_diag[RICCATI_MAX_NU];
     float r[RICCATI_MAX_NU];
-    float N[RICCATI_MAX_NX][RICCATI_MAX_NU];
     float x_lb[RICCATI_MAX_NX];
     float x_ub[RICCATI_MAX_NX];
     float u_lb[RICCATI_MAX_NU];

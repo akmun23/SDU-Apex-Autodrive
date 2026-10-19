@@ -35,13 +35,12 @@ cleanup() {
     return
   fi
   cleanup_done=1
-  # Collision and external interruption require an immediate stop. A timeout
-  # or no-progress screen still exits promptly, but let Unity shut down cleanly
-  # so development-only in-memory physics captures can be flushed.
+  # Send the stop signal immediately on collision/interruption, then allow
+  # Unity a short shutdown grace period to flush development-only captures.
   if [[ "${watch_status}" == "3" || "${watch_status}" == "5" ||
         "${watch_status}" == "130" ||
         "${watch_status}" == "143" ]]; then
-    docker stop --timeout 0 "${simulator_container}" >/dev/null 2>&1 || true
+    docker stop --timeout 2 "${simulator_container}" >/dev/null 2>&1 || true
     docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true
   elif [[ "${watch_status}" != "0" ]]; then
     docker kill --signal SIGINT "${controller_container}" >/dev/null 2>&1 || true

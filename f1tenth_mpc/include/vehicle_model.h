@@ -52,17 +52,13 @@ typedef struct
     float u;
     float v;
     float r;
-    /* Latest source-plant longitudinal acceleration [m/s^2]. This is a
-     * derived transition output cached for speed-reference scheduling; it is
-     * not a recursively propagated physical state or an RTI coordinate. */
-    float longitudinal_acceleration_mps2;
     /* Two causal actuator-queue values published by odometry at this epoch. */
     float delayed_steering_command_1;
     float delayed_steering_command_2;
     /* Unity keeps a physical wheel angle, slewed by the source plant. */
     float actual_steering_angle;
-    /* Odom-published pending throttle commands; slot 2 is also the latest
-     * accepted command and supplies the previous-input cost. */
+    /* Odom-published pending throttle commands; retained for the exact
+     * two-packet plant delay, not as artificial optimizer state/cost memory. */
     float delayed_throttle_command_1;
     float delayed_throttle_command_2;
     /* Four wheel rates, six sprung-body values and four suspension jounces.

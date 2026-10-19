@@ -30,8 +30,6 @@
     weight_steering_command: 0.1
     weight_steering_target: 0.1
     weight_throttle_command: 0.0
-    weight_steering_target_change: 2.0
-    weight_throttle_command_change: 0.005
     terminal_multiplier: 3.0
 
     # Run22 exhausted the silently imposed 160-iteration cap with median
@@ -41,13 +39,8 @@
     # acceptance gates.
     adaptive_rho: true
     adaptive_rho_update_period: 5
-    max_solver_iterations: 200
+    max_solver_iterations: 100
     solver_degraded_tolerance: 0.05
-    # The first live solve needed lambda=0.193 in its 2x2 control Hessian;
-    # permit that already-computed regularized solution to reach exact
-    # nonlinear validation instead of rejecting it at the old 0.01 gate.
-    solver_max_regularization: 0.25
-    rti2_residual_recovery_limit: 5.0
     # Allow a second nonlinear RTI pass when the first pass leaves enough of
     # the 20 ms budget. This is distinct from ADMM's inner iterations.
     rti_refinement_mode: adaptive

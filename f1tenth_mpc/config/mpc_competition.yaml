@@ -30,7 +30,7 @@
     weight_e_y: 125.0
     weight_e_psi: 2.0
     # Coordinated profile: strong under-target speed tracking, lower overspeed
-    # cost, and light wheel-spin / throttle-smoothing penalties.
+    # cost, with light wheel-spin and absolute throttle-effort penalties.
     weight_u: 500.0
     weight_u_overspeed: 300.0
     weight_longitudinal_slip: 5.0
@@ -39,8 +39,6 @@
     weight_steering_command: 3.0
     weight_steering_target: 5.0
     weight_throttle_command: 0.1
-    weight_steering_target_change: 10.0
-    weight_throttle_command_change: 1.0
     terminal_multiplier: 3.0
 
     max_steering_rad: 0.5235987756
@@ -67,18 +65,14 @@
     solver_state_scaling_enabled: true
     solver_tolerance: 0.01
     solver_degraded_tolerance: 0.01
-    # The first live 25-state solve reached the 100-iteration ceiling on most
-    # cycles while remaining inside the 20 ms RTI deadline. Permit additional
-    # ADMM work; the deadline remains the hard bound on callback computation.
-    max_solver_iterations: 160
-    # Bound RTI work to leave ~5 ms for synchronization, ROS scheduling, and
-    # publishing within the 25 ms 40 Hz period. R1/R2 are still checked by
-    # the exact nonlinear feasibility gate before any command is accepted.
-    rti_cycle_budget_ms: 20.0
+    # No wall-time cutoff: measure and optimize natural solve latency. Exact
+    # source-plant rollout and corridor checks remain the command acceptance
+    # gates; target p95 is 10-15 ms, leaving margin inside the 25 ms period.
+    max_solver_iterations: 100
+    rti_cycle_budget_ms: 0.0
     # Four workers were faster in the complete practice timing capture than
     # the 8-worker screen's tail; zero disables OpenMP parallelism.
     jacobian_threads: 4
-    solver_max_regularization: 0.01
     max_consecutive_degraded_solves: 3
 
     rti_refinement_mode: adaptive
@@ -91,6 +85,3 @@
     rti2_residual_imbalance_trigger: 8.0
     rti2_lateral_load_trigger_mps2: 3.0
     rti2_nonsmooth_columns_trigger: 50
-    # Allow bounded residual-limited iterates to reach exact source-plant
-    # rollout validation. This does not relax the hard nonlinear/corridor gate.
-    rti2_residual_recovery_limit: 0.5

@@ -72,6 +72,23 @@ TEST(SourceDerivedOdomRuntime, UsesMeasuredSteeringAndCorrectedBodyState)
   EXPECT_TRUE(std::isfinite(output.wheel_encoder_angle_prediction_rad[2]));
 }
 
+TEST(SourceDerivedOdomRuntime, AdvancesPreSteerFeedbackToRackStateAtPacketBoundary)
+{
+  SourceDerivedOdomRuntime runtime(0.15532);
+  runtime.advance(0.5, 0.0, false, 0.0);
+  runtime.advance(0.5, 0.0, false, 0.0);
+
+  // The source getter reports the angle before Steer() updates it. The
+  // feedback correction reconstructs that missing fixed-step rack motion,
+  // then the 25 future plant ticks advance steering normally.
+  const auto output = runtime.advance(0.5, 0.0, true, 0.1);
+  constexpr double kSteeringRateRadps =
+    183.345993 * 3.14159265358979323846 / 180.0;
+  constexpr double kStep = kSteeringRateRadps * 0.001;
+  EXPECT_NEAR(output.state[UNITY_SOURCE_PHYSICAL_STEERING],
+    0.1 + 26.0 * kStep, 1.0e-7);
+}
+
 TEST(SourceDerivedOdomRuntime, AppliesOnlyThePreviousGyroInnovationToYawForecast)
 {
   SourceDerivedOdomRuntime runtime(0.15532);

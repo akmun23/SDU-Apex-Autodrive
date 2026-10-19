@@ -61,33 +61,6 @@ public class VehicleController : MonoBehaviour
     private float currentT = 0;
     private float currentS = 0;
 
-#if DEVELOPMENT_BUILD
-    private int developmentCommandSequence = 0;
-    private long developmentCommandReceiptTicks = 0;
-
-    internal int DevelopmentCommandSequence
-    {
-        get { return System.Threading.Interlocked.CompareExchange(ref developmentCommandSequence, 0, 0); }
-    }
-
-    internal long DevelopmentCommandReceiptTicks
-    {
-        get { return System.Threading.Interlocked.Read(ref developmentCommandReceiptTicks); }
-    }
-
-    internal float DevelopmentRackAngleDegrees { get { return SteeringAngle; } }
-    internal float DevelopmentDriveTorque { get { return DriveTorque; } }
-    internal float DevelopmentBrakeTorque { get { return BrakeTorque; } }
-
-    internal void MarkDevelopmentCommandReceived()
-    {
-        System.Threading.Interlocked.Exchange(
-            ref developmentCommandReceiptTicks,
-            System.Diagnostics.Stopwatch.GetTimestamp());
-        System.Threading.Interlocked.Increment(ref developmentCommandSequence);
-    }
-#endif
-
     public int CurrentDrivingMode
     {
         get { return DrivingMode; }
@@ -98,10 +71,6 @@ public class VehicleController : MonoBehaviour
         get { return currentT; }
         set
         {
-#if DEVELOPMENT_BUILD
-            if (OpenPlaneWheelDynamicsCapture.OwnsDiagnosticCommands)
-                return;
-#endif
             AutonomousThrottle = Mathf.Clamp(value, -1.0f, 1.0f);
         }
     }
@@ -111,10 +80,6 @@ public class VehicleController : MonoBehaviour
         get { return currentS; }
         set
         {
-#if DEVELOPMENT_BUILD
-            if (OpenPlaneWheelDynamicsCapture.OwnsDiagnosticCommands)
-                return;
-#endif
             AutonomousSteering = Mathf.Clamp(value, -1.0f, 1.0f);
         }
     }
@@ -122,9 +87,6 @@ public class VehicleController : MonoBehaviour
     void Start()
     {
         VehicleRigidBody.centerOfMass = COM; // Set COM
-#if DEVELOPMENT_BUILD
-        OpenPlaneWheelDynamicsCapture.Initialize();
-#endif
     }
 
     public void GetInput()
@@ -357,9 +319,6 @@ public class VehicleController : MonoBehaviour
 
   	void FixedUpdate()
   	{       
-#if DEVELOPMENT_BUILD
-            OpenPlaneWheelDynamicsCapture.ApplyDiagnosticProfile(this);
-#endif
             if(DrivingMode==0) VehicleRigidBody.isKinematic = false;
     		GetInput();
             if(driveType!=DriveType.SkidSteer)
@@ -376,30 +335,5 @@ public class VehicleController : MonoBehaviour
                     ExtendedDifferentialDrive(); // Do not drive/steer like a car for skid-steer configuration
             }
     		UpdateWheelPoses();
-#if DEVELOPMENT_BUILD
-            OpenPlaneWheelDynamicsCapture.Capture(this);
-#endif
   	}
-
-#if DEVELOPMENT_BUILD
-    void OnCollisionEnter(Collision collision)
-    {
-        OpenPlaneWheelDynamicsCapture.CaptureCollision(this, "enter", collision);
-    }
-
-    void OnCollisionStay(Collision collision)
-    {
-        OpenPlaneWheelDynamicsCapture.CaptureCollision(this, "stay", collision);
-    }
-
-    void OnCollisionExit(Collision collision)
-    {
-        OpenPlaneWheelDynamicsCapture.CaptureCollision(this, "exit", collision);
-    }
-
-    void OnApplicationQuit()
-    {
-        OpenPlaneWheelDynamicsCapture.Flush();
-    }
-#endif
 }

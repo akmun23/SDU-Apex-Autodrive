@@ -7,7 +7,7 @@
  * Riccati backward pass (per step):
  *   M    = B^T P_{k+1}           (nu×nx)
  *   S    = R + M B               (nu×nu, invert via 2×2 formula)
- *   G    = M A + N^T             (nu×nx, includes cross-cost)
+ *   G    = M A                   (nu×nx)
  *   K_k  = -S^{-1} G             (nu×nx, feedback gain)
  *   kk_k = -S^{-1} (r + B^T p)   (nu×1, feedforward)
  *   P_k  = Q + A^T P A + G^T K   (nx×nx)
@@ -292,10 +292,11 @@ int riccati_solver_pass(
                 }
             }
             for (int j = 0; j < nx; ++j) {
-                G[a][j] = sd->N[j][a];
+                float value = 0.0f;
                 for (int s = 0; s < nx; ++s) {
-                    G[a][j] += M[a][s] * sd->A[s][j];
+                    value += M[a][s] * sd->A[s][j];
                 }
+                G[a][j] = value;
             }
         }
 
@@ -465,9 +466,10 @@ int riccati_solver_factorize(
                     S[a][b] += M[a][s] * sd->B[s][b];
             }
             for (int j = 0; j < nx; ++j) {
-                factor->G[k][a][j] = sd->N[j][a];
+                float value = 0.0f;
                 for (int s = 0; s < nx; ++s)
-                    factor->G[k][a][j] += M[a][s] * sd->A[s][j];
+                    value += M[a][s] * sd->A[s][j];
+                factor->G[k][a][j] = value;
             }
         }
         if (!invert_regularized_control_hessian(
@@ -1209,7 +1211,7 @@ RiccatiStatus_t riccati_admm_solve(
         riccati_admm_state_init(admm_state);
 
     /* x = Dx*xhat and u = Du*uhat.  Scale dynamics, all diagonal and
-     * cross-cost terms, affine costs, and hard bounds consistently. */
+     * affine costs, and hard bounds consistently. */
     RiccatiStepData_t scaled_steps[RICCATI_HORIZON] = {0};
     float scaled_terminal_Q[RICCATI_MAX_NX] = {0};
     float scaled_terminal_q[RICCATI_MAX_NX] = {0};
@@ -1243,8 +1245,6 @@ RiccatiStatus_t riccati_admm_solve(
             for (int a = 0; a < nu; ++a) {
                 scaled->B[i][a] = physical->B[i][a] *
                     config->input_scale[a] / state_scale;
-                scaled->N[i][a] = physical->N[i][a] *
-                    state_scale * config->input_scale[a];
             }
         }
         for (int a = 0; a < nu; ++a) {
