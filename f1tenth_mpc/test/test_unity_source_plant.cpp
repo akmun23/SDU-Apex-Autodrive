@@ -184,6 +184,9 @@ TEST(UnitySourcePlant, SlipExcessMatchesSourceCurveAndHasCorrectWheelDerivative)
 TEST(UnitySourcePlant, SuspensionJounceHistoryInitializesAndAdvances)
 {
   auto state = state_at_speed(5.0);
+  // Put the collider ray inside its suspension travel after accounting for
+  // WheelCollider.center; the default state-at-speed fixture is at max droop.
+  state.body_height_m = -0.025;
   f1tenth_mpc::UnitySourcePlantOutput first;
   ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
       state, {0.0, 0.25}, &first));
@@ -505,17 +508,8 @@ TEST(UnitySourcePlant, LateralSlipUsesPhysXToleranceScaleFloor)
   ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
       state, {0.18, 0.25}, &output));
 
-  const double tangent = std::tan(output.state.physical_steering_rad);
-  const double wheel_steering = std::atan2(
-      2.0 * 0.324 * tangent, 2.0 * 0.324 - 0.236 * tangent);
-  const double wheel_x = 0.17467999458312988;
-  const double wheel_y = 0.11574111133813858;
-  const double center_forward = state.u_mps - state.yaw_rate_radps * wheel_y;
-  const double center_lateral = state.v_mps + state.yaw_rate_radps * wheel_x;
-  const double wheel_forward = std::cos(wheel_steering) * center_forward +
-      std::sin(wheel_steering) * center_lateral;
-  const double wheel_lateral = -std::sin(wheel_steering) * center_forward +
-      std::cos(wheel_steering) * center_lateral;
+  const double wheel_forward = output.contact_forward_speed_mps[0];
+  const double wheel_lateral = output.contact_lateral_speed_mps[0];
   const double source_slip = std::atan(
       wheel_lateral / (std::abs(wheel_forward) + 1.0));
   const double former_candidate_slip = std::atan(
@@ -560,16 +554,25 @@ TEST(UnitySourcePlant, WheelSlipUsesFullAngularVelocityAtContactPoint)
 TEST(UnitySourcePlant, ContactJounceUsesPhysXRayPlaneIntersection)
 {
   auto state = state_at_speed(5.0);
+  state.body_height_m = -0.025;
   state.roll_rad = 0.035;
   state.pitch_rad = -0.045;
   const double sr = std::sin(state.roll_rad), cr = std::cos(state.roll_rad);
   const double sp = std::sin(state.pitch_rad), cp = std::cos(state.pitch_rad);
   const std::array<double, 3> normal_body{-sp, cp * sr, cp * cr};
-  const std::array<double, 3> wheel_center{
+  const std::array<double, 3> suspension_direction{
+      0.0, 0.08715574274765817, -0.9961946980917455};
+  const std::array<double, 3> collider_transform{
       0.17467999458312988, 0.11574111133813858,
       -0.004435138776898384};
-  const std::array<double, 3> ray_start{
-      wheel_center[0], wheel_center[1], wheel_center[2] + 0.059 + 0.025};
+  std::array<double, 3> wheel_center{};
+  std::array<double, 3> ray_start{};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    wheel_center[axis] = collider_transform[axis] -
+        suspension_direction[axis] * 0.025;
+    ray_start[axis] = wheel_center[axis] -
+        suspension_direction[axis] * (0.059 + 0.025);
+  }
   const std::array<double, 3> com_offset{-0.00468, 0.00008, 0.06434};
   const auto dot3 = [](const std::array<double, 3> &a,
                        const std::array<double, 3> &b) {
@@ -577,7 +580,7 @@ TEST(UnitySourcePlant, ContactJounceUsesPhysXRayPlaneIntersection)
   };
   const double ray_travel = -(state.body_height_m +
       dot3(normal_body, com_offset) + dot3(normal_body, ray_start)) /
-      -normal_body[2];
+      dot3(normal_body, suspension_direction);
   const double expected_jounce = std::clamp(
       2.0 * 0.059 + 0.025 - ray_travel, -0.025, 0.025);
 
@@ -587,7 +590,25 @@ TEST(UnitySourcePlant, ContactJounceUsesPhysXRayPlaneIntersection)
   EXPECT_NEAR(output.state.suspension_jounce_m[0], expected_jounce, 1.0e-10);
 }
 
-TEST(UnitySourcePlant, EffectiveCombinedSlipEnvelopeIsApplied)
+TEST(UnitySourcePlant, TireAndStickyPhysicsUseSameWheelBottomKinematics)
+{
+  auto state = state_at_speed(3.5);
+  state.body_height_m = -0.025;
+  state.v_mps = 0.12;
+  state.yaw_rate_radps = -0.2;
+  state.physical_steering_rad = -0.25;
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {0.0, 0.0}, &output));
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    EXPECT_DOUBLE_EQ(output.contact_forward_speed_mps[wheel],
+                     output.sticky_contact_forward_speed_mps[wheel]);
+    EXPECT_DOUBLE_EQ(output.contact_lateral_speed_mps[wheel],
+                     output.sticky_contact_lateral_speed_mps[wheel]);
+  }
+}
+
+TEST(UnitySourcePlant, UnityPlayerTireForceCallbackAppliesCombinedSlipCircle)
 {
   auto state = state_at_speed(4.0);
   state.v_mps = 0.7;
