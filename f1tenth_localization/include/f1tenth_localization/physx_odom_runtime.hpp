@@ -46,7 +46,9 @@ struct PredictedPlantState
 
 // In-process, source-derived 1 kHz vehicle plant used by production odometry.
 // It has no subprocess or PhysX-library dependency. Each sensor packet
-// advances 25 Unity 1 ms steps, consuming the oldest queued actuator sample.
+// advances 25 Unity 1 ms steps. Measured actuator feedback, when available,
+// supplies the torque that acted over the just-completed packet interval;
+// request commands remain queued for future MPC stages.
 class SourceDerivedOdomRuntime
 {
 public:
@@ -54,7 +56,9 @@ public:
 
   PredictedPlantState advance(
     double steering_command_norm, double throttle_command_norm,
-    bool steering_feedback_valid, double steering_feedback_rad);
+    bool steering_feedback_valid, double steering_feedback_rad,
+    bool throttle_feedback_valid = false,
+    double throttle_feedback_norm = 0.0);
 
   double yaw_rate_prediction_residual_radps() const;
   bool yaw_rate_prediction_residual_valid() const;

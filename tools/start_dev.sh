@@ -14,8 +14,12 @@ if docker container inspect "${container}" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Starting the ROS 2 MPC development stack..."
-echo "The bridge, PhysX odometry, localization, MPC, and direct actuator are one launch."
+echo "Starting the ROS 2 development stack..."
+if [[ "${SDU_APEX_MPC_ENABLED:-true}" == "false" ]]; then
+  echo "MPC disabled; the explicitly selected development test controller will run."
+else
+  echo "The bridge, PhysX odometry, localization, MPC, and direct actuator are one launch."
+fi
 echo "The simulator may already be connected or may connect while this starts."
 
 python3 tools/verify_runtime_topic_policy.py
@@ -81,7 +85,13 @@ fi
 
 map_yaml_override=""
 trajectory_file_override=""
-for path_setting in SDU_APEX_MAP_YAML SDU_APEX_TRAJECTORY_FILE; do
+csv_command_file_override=""
+csv_path_repeats="${SDU_APEX_CSV_PATH_REPEATS:-3}"
+if [[ ! "${csv_path_repeats}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SDU_APEX_CSV_PATH_REPEATS must be a positive integer." >&2
+  exit 2
+fi
+for path_setting in SDU_APEX_MAP_YAML SDU_APEX_TRAJECTORY_FILE SDU_APEX_CSV_COMMAND_FILE; do
   path_value="${!path_setting:-}"
   [[ -n "${path_value}" ]] || continue
   if [[ ! -f "${path_value}" ]]; then
@@ -94,8 +104,10 @@ for path_setting in SDU_APEX_MAP_YAML SDU_APEX_TRAJECTORY_FILE; do
       container_path="/workspace/src/${resolved_path#"${repo_root}"/}"
       if [[ "${path_setting}" == SDU_APEX_TRAJECTORY_FILE ]]; then
         trajectory_file_override="${container_path}"
-      else
+      elif [[ "${path_setting}" == SDU_APEX_MAP_YAML ]]; then
         map_yaml_override="${container_path}"
+      else
+        csv_command_file_override="${container_path}"
       fi
       ;;
     *)
@@ -129,6 +141,12 @@ exec docker run --rm --name "${container}" \
   -e "SDU_APEX_ODOM_PARAMETER_OVERLAY=${odom_parameter_overlay}" \
   -e "SDU_APEX_MAP_YAML=${map_yaml_override}" \
   -e "SDU_APEX_TRAJECTORY_FILE=${trajectory_file_override}" \
+  -e "SDU_APEX_CSV_COMMAND_FILE=${csv_command_file_override}" \
+  -e "SDU_APEX_CSV_PATH_REPEATS=${csv_path_repeats}" \
+  -e "SDU_APEX_CSV_LOOKAHEAD_SPEED_GAIN_S=${SDU_APEX_CSV_LOOKAHEAD_SPEED_GAIN_S:-0.12}" \
+  -e "SDU_APEX_CSV_NATIVE_CONTROL_DELAY_S=${SDU_APEX_CSV_NATIVE_CONTROL_DELAY_S:-0.05}" \
+  -e "SDU_APEX_DEV_SIM_RESET_ENABLED=${SDU_APEX_DEV_SIM_RESET_ENABLED:-false}" \
+  -e "SDU_APEX_MPC_ENABLED=${SDU_APEX_MPC_ENABLED:-true}" \
   -v "${repo_root}:/workspace/src:rw" \
   --entrypoint /bin/bash \
   "${image}" /workspace/src/docker/development_entrypoint.sh

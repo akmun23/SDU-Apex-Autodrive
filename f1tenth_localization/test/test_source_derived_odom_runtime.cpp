@@ -9,7 +9,7 @@ namespace f1tenth_localization
 namespace
 {
 
-TEST(SourceDerivedOdomRuntime, AppliesCommandsAfterTheTwoPacketDelay)
+TEST(SourceDerivedOdomRuntime, UsesNewestQueuedCommandForElapsedPacket)
 {
   SourceDerivedOdomRuntime runtime(0.15532);
 
@@ -20,19 +20,45 @@ TEST(SourceDerivedOdomRuntime, AppliesCommandsAfterTheTwoPacketDelay)
   EXPECT_DOUBLE_EQ(first.delayed_throttle_commands_normalized[1], 0.2);
 
   const auto second = runtime.advance(-0.25, 0.0, false, 0.0);
+  EXPECT_GT(second.state[13], 0.0);
+  EXPECT_NEAR(second.state[13], 0.025 * 3.2, 0.002);
   EXPECT_DOUBLE_EQ(second.delayed_steering_commands_normalized[0], 0.5);
   EXPECT_DOUBLE_EQ(second.delayed_steering_commands_normalized[1], -0.25);
   EXPECT_DOUBLE_EQ(second.delayed_throttle_commands_normalized[0], 0.2);
   EXPECT_DOUBLE_EQ(second.delayed_throttle_commands_normalized[1], 0.0);
 
   const auto third = runtime.advance(0.0, 0.1, false, 0.0);
-  EXPECT_GT(third.state[13], 0.0);
-  EXPECT_NEAR(third.state[13], 0.025 * 3.2, 0.002);
+  EXPECT_NEAR(third.state[13], 0.0, 0.002);
   EXPECT_DOUBLE_EQ(third.delayed_steering_commands_normalized[0], -0.25);
   EXPECT_DOUBLE_EQ(third.delayed_throttle_commands_normalized[0], 0.0);
   for (const double value : third.state) {
     EXPECT_TRUE(std::isfinite(value));
   }
+}
+
+TEST(SourceDerivedOdomRuntime, UsesMeasuredTorqueForElapsedIntervalOnly)
+{
+  SourceDerivedOdomRuntime queued_runtime(0.15532);
+  SourceDerivedOdomRuntime feedback_runtime(0.15532);
+  for (SourceDerivedOdomRuntime * runtime :
+    {&queued_runtime, &feedback_runtime})
+  {
+    runtime->advance(0.0, 0.2, false, 0.0);
+    runtime->advance(0.0, 0.0, false, 0.0);
+  }
+
+  const auto queue_only = queued_runtime.advance(0.0, 0.1, false, 0.0);
+  const auto measured = feedback_runtime.advance(
+    0.0, 0.1, false, 0.0, true, 0.5);
+
+  // Feedback selects the torque for this completed interval, but does not
+  // rewrite the delayed request queue that the MPC needs for future stages.
+  EXPECT_GT(measured.state[UNITY_SOURCE_WHEEL_OMEGA_RL],
+    queue_only.state[UNITY_SOURCE_WHEEL_OMEGA_RL]);
+  EXPECT_DOUBLE_EQ(measured.delayed_throttle_commands_normalized[0],
+    queue_only.delayed_throttle_commands_normalized[0]);
+  EXPECT_DOUBLE_EQ(measured.delayed_throttle_commands_normalized[1],
+    queue_only.delayed_throttle_commands_normalized[1]);
 }
 
 TEST(SourceDerivedOdomRuntime, PropagatesPhysXTireTimersAndResetsOnDriveCommand)

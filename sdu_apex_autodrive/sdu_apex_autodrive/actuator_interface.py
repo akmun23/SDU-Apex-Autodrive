@@ -1,6 +1,7 @@
 """Forward the MPC's steering and throttle command to AutoDRIVE."""
 
 import math
+import json
 import time
 
 from nav_msgs.msg import Odometry
@@ -8,7 +9,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sdu_apex_msgs.msg import DriveCommand
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 
 
 class ActuatorInterface(Node):
@@ -21,6 +22,7 @@ class ActuatorInterface(Node):
         self.declare_parameter(
             "throttle_topic", "/autodrive/roboracer_1/throttle_command")
         self.declare_parameter("external_stop_topic", "")
+        self.declare_parameter("development_timing_topic", "")
         self.declare_parameter("max_steering_angle_rad", 0.5235987756)
         self.declare_parameter("command_timeout_sec", 0.15)
         self.declare_parameter("odom_timeout_sec", 0.15)
@@ -46,6 +48,9 @@ class ActuatorInterface(Node):
         self.stop_latched = False
         self.last_neutral_reason = None
         self.output_active = False
+        self.command_sequence = 0
+        timing_topic = str(
+            self.get_parameter("development_timing_topic").value).strip()
 
         self.steering_pub = self.create_publisher(
             Float32, self.get_parameter("steering_topic").value, 10)
@@ -64,6 +69,8 @@ class ActuatorInterface(Node):
         stop_topic = str(self.get_parameter("external_stop_topic").value).strip()
         self.stop_sub = self.create_subscription(
             Bool, stop_topic, self._on_external_stop, 1) if stop_topic else None
+        self.timing_pub = self.create_publisher(
+            String, timing_topic, 10) if timing_topic else None
         # The timer only enforces command/odometry freshness. Valid MPC output
         # is forwarded from _on_command immediately; a second periodic
         # resampling clock here can make the Bridge send the previous command
@@ -71,6 +78,8 @@ class ActuatorInterface(Node):
         self.timer = self.create_timer(1.0 / watchdog_rate_hz, self._tick)
 
     def _on_command(self, message: DriveCommand) -> None:
+        received_monotonic_ns = time.monotonic_ns()
+        self.command_sequence += 1
         steering = float(message.steering_angle_rad)
         throttle = float(message.throttle_normalized)
         if (not math.isfinite(steering) or not math.isfinite(throttle) or
@@ -80,18 +89,46 @@ class ActuatorInterface(Node):
                 f"Rejected invalid MPC actuator command: steering={steering:.9g} rad "
                 f"(limit={self.max_steering:.9g}), "
                 f"throttle={throttle:.9g} (range=[0,1])")
+            self._publish_command_timing(
+                message, received_monotonic_ns, "rejected_invalid")
             return
         self.command = (steering, throttle)
         self.command_received_at = time.monotonic()
         now = self.command_received_at
         if self.stop_latched:
             self._neutral("external stop")
+            output_status = "external_stop"
         elif not self._odom_is_fresh(now):
             self._neutral("odometry timeout")
+            output_status = "odom_timeout"
         else:
             self._publish(steering / self.max_steering, throttle)
             self.output_active = True
             self.last_neutral_reason = None
+            output_status = "forwarded"
+        self._publish_command_timing(
+            message, received_monotonic_ns, output_status)
+
+    def _publish_command_timing(self, message: DriveCommand,
+                                received_monotonic_ns: int,
+                                status: str) -> None:
+        if self.timing_pub is None:
+            return
+        published_monotonic_ns = time.monotonic_ns()
+        diagnostic = String()
+        diagnostic.data = json.dumps({
+            "schema_version": 1,
+            "command_sequence": self.command_sequence,
+            "source_stamp_ns": (
+                int(message.header.stamp.sec) * 1_000_000_000 +
+                int(message.header.stamp.nanosec)),
+            "interface_receive_monotonic_ns": received_monotonic_ns,
+            "actuator_publish_monotonic_ns": published_monotonic_ns,
+            "status": status,
+            "steering_angle_rad": float(message.steering_angle_rad),
+            "throttle_normalized": float(message.throttle_normalized),
+        }, separators=(",", ":"))
+        self.timing_pub.publish(diagnostic)
 
     def _on_odom(self, message: Odometry) -> None:
         twist = message.twist.twist

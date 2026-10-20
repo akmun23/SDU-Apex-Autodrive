@@ -63,7 +63,8 @@ void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
         0.5f,
         400.0f, 400.0f, 400.0f, 400.0f,
         0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
-        0.05f, 0.05f, 0.05f, 0.05f};
+        0.05f, 0.05f, 0.05f, 0.05f,
+        0.5f, 1.0f};
     constexpr float input_scale[MPC_MODEL_NU] = {0.5f, 1.0f};
     std::copy_n(state_scale, RICCATI_MAX_NX, solver.state_scale);
     std::copy_n(input_scale, MPC_MODEL_NU, solver.input_scale);
@@ -192,6 +193,10 @@ public:
             "weight_steering_target", 5.0f);
         rti_config_.model.weight_throttle_command = declare_weight(
             "weight_throttle_command", 0.1f);
+        rti_config_.model.weight_steering_slew = declare_weight(
+            "weight_steering_slew", 25.0f);
+        rti_config_.model.weight_throttle_slew = declare_weight(
+            "weight_throttle_slew", 2.0f);
         rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
             declare_parameter<double>("startup_nominal_throttle_seed", 0.0));
         rti_config_.model.terminal_multiplier = declare_weight(
@@ -214,30 +219,6 @@ public:
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
             declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.001));
-        rti_config_.model.qp_corridor_padding_m = static_cast<float>(
-            declare_parameter<double>("qp_corridor_padding_m", 0.0));
-        const std::string recovery_seed_policy = declare_parameter<std::string>(
-            "recovery_seed_policy", "nominal");
-        if (recovery_seed_policy == "nominal") {
-            rti_config_.model.recovery_seed_policy =
-                MPC_RTI_RECOVERY_SEED_NOMINAL;
-        } else if (recovery_seed_policy == "heading_feedback") {
-            rti_config_.model.recovery_seed_policy =
-                MPC_RTI_RECOVERY_SEED_HEADING_FEEDBACK;
-        } else if (recovery_seed_policy == "brake_heading_feedback") {
-            rti_config_.model.recovery_seed_policy =
-                MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK;
-        } else {
-            throw std::runtime_error(
-                "recovery_seed_policy must be nominal, heading_feedback, "
-                "or brake_heading_feedback");
-        }
-        rti_config_.model.recovery_steering_k_e_y = static_cast<float>(
-            declare_parameter<double>("recovery_steering_k_e_y", 0.0));
-        rti_config_.model.recovery_steering_k_e_psi = static_cast<float>(
-            declare_parameter<double>("recovery_steering_k_e_psi", 0.0));
-        rti_config_.model.recovery_steering_k_r = static_cast<float>(
-            declare_parameter<double>("recovery_steering_k_r", 0.0));
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
             declare_parameter<int>("jacobian_threads", 4), 0L, 4L));
         const int configured_iterations = declare_parameter<int>(
@@ -307,48 +288,11 @@ public:
             declare_parameter<double>("admm_over_relaxation", 1.6));
         configure_solver_state_scaling(rti_config_.solver,
             declare_parameter<bool>("solver_state_scaling_enabled", true));
-        const std::string refinement_mode = declare_parameter<std::string>(
-            "rti_refinement_mode", "adaptive");
-        if (refinement_mode == "r1") {
-            rti_config_.refinement_mode = MPC_RTI_REFINEMENT_R1;
-        } else if (refinement_mode == "r2") {
-            rti_config_.refinement_mode = MPC_RTI_REFINEMENT_R2;
-        } else if (refinement_mode == "adaptive" || refinement_mode == "ra") {
-            rti_config_.refinement_mode = MPC_RTI_REFINEMENT_ADAPTIVE;
-        } else {
-            throw std::runtime_error(
-                "rti_refinement_mode must be r1, r2, or adaptive");
-        }
-        rti_config_.rti2_progress_error_trigger_m = static_cast<float>(
-            declare_parameter<double>("rti2_progress_error_trigger_m", 0.10));
-        rti_config_.rti2_curvature_error_trigger_per_m = static_cast<float>(
-            declare_parameter<double>("rti2_curvature_error_trigger_per_m", 0.02));
-        rti_config_.rti2_bound_error_trigger_m = static_cast<float>(
-            declare_parameter<double>("rti2_bound_error_trigger_m", 0.05));
-        rti_config_.rti2_min_corridor_slack_trigger_m = static_cast<float>(
-            declare_parameter<double>("rti2_min_corridor_slack_trigger_m", 0.25));
-        rti_config_.rti2_steering_target_correction_trigger_rad =
-            static_cast<float>(declare_parameter<double>(
-                "rti2_steering_target_correction_trigger_rad", 0.50));
-        rti_config_.rti2_throttle_correction_trigger =
-            static_cast<float>(declare_parameter<double>(
-                "rti2_throttle_correction_trigger", 0.05));
-        rti_config_.rti2_residual_imbalance_trigger = static_cast<float>(
-            declare_parameter<double>("rti2_residual_imbalance_trigger", 8.0));
-        rti_config_.rti2_lateral_load_trigger_mps2 = static_cast<float>(
-            declare_parameter<double>("rti2_lateral_load_trigger_mps2", 3.0));
-        rti_config_.rti2_nonsmooth_columns_trigger = declare_parameter<int>(
-            "rti2_nonsmooth_columns_trigger", 50);
-        rti_config_.degraded_residual_limit = static_cast<float>(
-            declare_parameter<double>("solver_degraded_tolerance", 0.01));
-        rti_config_.max_consecutive_degraded_solves =
-            declare_parameter<int>("max_consecutive_degraded_solves", 3);
         RCLCPP_INFO(get_logger(),
             "MPC solver config: ADMM per-solve max=%u, rho adaptation=%s/%d, "
             "rho-x overrides=[ey=%.2f,u=%.2f,steer=%.2f], "
             "rho-u override=[%.2f,%.2f], cold-start=%s, "
-            "Jacobian workers=%d, RTI refinement=%d, "
-            "cycle budget=%.1f ms, "
+            "Jacobian workers=%d, cycle budget=%.1f ms, "
             "decision state=%d, plant state=%d, horizon=%d",
             static_cast<unsigned>(rti_config_.solver.max_iterations),
             rti_config_.solver.adaptive_rho ? "on" : "off",
@@ -361,7 +305,6 @@ public:
             rti_config_.solver.rho_u_by_input[1],
             rti_config_.solver.cold_start_each_solve ? "on" : "off",
             rti_config_.model.jacobian_threads,
-            static_cast<int>(rti_config_.refinement_mode),
             rti_config_.max_cycle_time_us / 1000.0,
             MPC_OPTIMIZER_NX, MPC_OPT_PHYSICAL_NX, PREDICTION_HORIZON);
         mpc_rti_memory_reset(&rti_memory_);
@@ -810,20 +753,7 @@ private:
                              double solve_us)
     {
         ++control_cycles_;
-        if (result.selected_candidate == 1 || result.selected_candidate == 2)
-            ++optimizer_candidate_cycles_;
-        else if (result.selected_candidate == 3)
-            ++corridor_repair_candidate_cycles_;
-        else if (result.selected_candidate == 4 ||
-                 result.selected_candidate == 5)
-            ++feedback_recovery_candidate_cycles_;
-        if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
-            ++accepted_optimal_;
-        } else if (status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
-            ++accepted_degraded_;
-        }
-        if (result.residual_candidate_published) ++residual_candidate_published_;
-        if (result.corridor_repair_used) ++corridor_repair_used_;
+        if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) ++accepted_optimal_;
         max_solver_iterations_seen_ = std::max(
             max_solver_iterations_seen_, result.solver_iterations);
         max_solve_us_ = std::max(max_solve_us_, solve_us);
@@ -834,59 +764,25 @@ private:
     {
         RCLCPP_INFO(get_logger(),
             "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
-            "accepted_degraded=%llu optimizer_candidates=%llu "
-            "corridor_repair_candidates=%llu feedback_recovery_candidates=%llu "
-            "residual_candidate_published=%llu corridor_repair_used=%llu "
             "control_fault_cycles=%llu max_solver_iterations_seen=%d "
             "max_solve_us=%.1f",
             phase,
             static_cast<unsigned long long>(control_cycles_),
             static_cast<unsigned long long>(accepted_optimal_),
-            static_cast<unsigned long long>(accepted_degraded_),
-            static_cast<unsigned long long>(optimizer_candidate_cycles_),
-            static_cast<unsigned long long>(corridor_repair_candidate_cycles_),
-            static_cast<unsigned long long>(feedback_recovery_candidate_cycles_),
-            static_cast<unsigned long long>(residual_candidate_published_),
-            static_cast<unsigned long long>(corridor_repair_used_),
             static_cast<unsigned long long>(control_fault_cycles_),
             max_solver_iterations_seen_, max_solve_us_);
-    }
-
-    static const char * selected_candidate_name(int candidate)
-    {
-        switch (candidate) {
-        case 1: return "R1";
-        case 2: return "R2";
-        case 3: return "corridor_repair";
-        case 4: return "feedback_drive_recovery";
-        case 5: return "feedback_brake_recovery";
-        default: return "none";
-        }
-    }
-
-    static bool selected_candidate_is_optimizer(int candidate)
-    {
-        return candidate == 1 || candidate == 2;
     }
 
     static const char * cycle_status_name(MpcRtiCycleStatus_t status)
     {
         switch (status) {
         case MPC_RTI_CYCLE_ACCEPTED_OPTIMAL: return "accepted_optimal";
-        case MPC_RTI_CYCLE_ACCEPTED_DEGRADED: return "accepted_degraded";
         case MPC_RTI_CYCLE_REJECTED_INPUT: return "rejected_input";
         case MPC_RTI_CYCLE_REJECTED_SOLVER: return "rejected_solver";
-        case MPC_RTI_CYCLE_REJECTED_RESIDUAL: return "rejected_residual";
         case MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT:
             return "rejected_nonlinear_rollout";
         }
         return "unknown";
-    }
-
-    static const char * cycle_status_name_code(int status)
-    {
-        if (status < 0) return "not_run";
-        return cycle_status_name(static_cast<MpcRtiCycleStatus_t>(status));
     }
 
     static const char * nonlinear_failure_reason_name(int reason)
@@ -909,8 +805,6 @@ private:
         case MPC_RTI_INPUT_FAILURE_CYCLE_ARGUMENTS: return "cycle_arguments";
         case MPC_RTI_INPUT_FAILURE_PLANT_STATE: return "plant_state";
         case MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD: return "nominal_build";
-        case MPC_RTI_INPUT_FAILURE_CORRIDOR_SCHEDULE:
-            return "corridor_schedule";
         }
         return "unknown";
     }
@@ -927,7 +821,6 @@ private:
         case MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE: return "pass_a_reference";
         case MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT: return "pass_a_rollout";
         case MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE: return "pass_b_reference";
-        case MPC_RTI_NOMINAL_BUILD_THROTTLE_MODE: return "throttle_mode";
         case MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT: return "final_rollout";
         case MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE:
             return "command_envelope";
@@ -1030,20 +923,8 @@ private:
             << result.nonlinear_failure_stage
             << ",\"nonlinear_failure_reason\":\""
             << nonlinear_failure_reason_name(result.nonlinear_failure_reason)
-            << "\",\"r1_nonlinear_failure_stage\":"
-            << result.r1_nonlinear_failure_stage
-            << ",\"r1_nonlinear_failure_reason\":\""
-            << nonlinear_failure_reason_name(
-                result.r1_nonlinear_failure_reason)
-            << "\",\"r2_nonlinear_failure_stage\":"
-            << result.r2_nonlinear_failure_stage
-            << ",\"r2_nonlinear_failure_reason\":\""
-            << nonlinear_failure_reason_name(
-                result.r2_nonlinear_failure_reason) << '"';
-        append_rollout_failure("r1_nonlinear_failure",
-            result.r1_nonlinear_failure);
-        append_rollout_failure("r2_nonlinear_failure",
-            result.r2_nonlinear_failure);
+            << '"';
+        append_rollout_failure("nonlinear_failure", result.nonlinear_failure);
         json
             << ",\"source_stamp_ns\":" << synchronized.source_stamp_ns
             << ",\"odom_source_stamp_ns\":"
@@ -1129,177 +1010,47 @@ private:
             << ',' << state.plant.delayed_throttle_command_2 << ']'
             << ",\"plant_state_source\":\"odometry_v7\"";
         json << ",\"solver\":{\"iterations\":" << result.solver_iterations
+            << ",\"admm_status\":" << result.admm_status
             << ",\"primal_residual\":";
         json_number(result.primal_residual);
         json << ",\"dual_residual\":";
         json_number(result.dual_residual);
         json << ",\"max_regularization\":";
         json_number(result.maximum_regularization);
-        json
-            << ",\"regularization_count\":" << result.regularization_count
-            << ",\"nonsmooth_columns\":"
-            << result.nonsmooth_jacobian_columns
-            << ",\"rho_start\":" << result.rho_start
-            << ",\"rho_u_start\":" << result.rho_u_start
-            << ",\"rho_final\":" << result.rho_final
-            << ",\"rho_u_final\":" << result.rho_u_final
-            << ",\"rho_change_count\":" << result.rho_change_count
-            << ",\"factorization_count\":" << result.factorization_count
-            << ",\"factorization_time_ns\":" << result.factorization_time_ns
-            << ",\"solve_us\":" << solve_us << '}'
-            << ",\"first_action\":["
-            << result.published_steering_command << ','
-            << result.first_control.throttle_command << ']'
-            << ",\"rti_iterations_used\":" << result.rti_iterations_used
-            << ",\"convergence_retry_count\":"
-            << result.convergence_retry_count
-            << ",\"convergence_retry_cycle_status\":"
-            << result.convergence_retry_cycle_status
-            << ",\"convergence_retry_r1_admm_status\":"
-            << result.convergence_retry_r1_admm_status
-            << ",\"convergence_retry_r2_admm_status\":"
-            << result.convergence_retry_r2_admm_status
-            << ",\"convergence_retry_r1_iterations\":"
-            << result.convergence_retry_r1_iterations
-            << ",\"convergence_retry_r2_iterations\":"
-            << result.convergence_retry_r2_iterations
-            << ",\"convergence_retry_us\":";
-        json_number(result.convergence_retry_us);
-        json
-            << ",\"rti2_triggered\":"
-            << (result.rti2_triggered ? "true" : "false")
-            << ",\"rti2_trigger_reason_mask\":"
-            << result.rti2_trigger_reason_mask
-            << ",\"rti2_budget_skipped\":"
-            << (result.rti2_budget_skipped ? "true" : "false")
-            << ",\"throttle_mode_switches\":"
-            << result.throttle_mode_switches
-            << ",\"r1_status\":\""
-            << cycle_status_name_code(result.r1_status) << '\"'
-            << ",\"linearization_failure_stage\":"
-            << result.linearization_failure_stage
-            << ",\"linearization_failure_reason\":"
-            << result.linearization_failure_reason
-            << ",\"linearization_failure_index\":"
-            << result.linearization_failure_index
-            << ",\"r2_status\":\""
-            << cycle_status_name_code(result.r2_status) << '\"'
-            << ",\"r1_nonlinear_objective\":";
-        json_number(result.r1_nonlinear_objective);
-        json << ",\"r2_nonlinear_objective\":";
-        json_number(result.r2_nonlinear_objective);
-        json << ",\"r1_min_corridor_slack\":";
-        json_number(result.r1_min_corridor_slack);
-        json << ",\"r2_min_corridor_slack\":";
-        json_number(result.r2_min_corridor_slack);
-        json << ",\"r1_first_action\":["
-             << result.r1_first_action.steering_target_rad << ','
-             << result.r1_first_action.throttle_command << ']'
-             << ",\"r2_first_action\":["
-             << result.r2_first_action.steering_target_rad << ','
-             << result.r2_first_action.throttle_command << ']'
-             << ",\"r1_solver_iterations\":"
-             << result.r1_solver_iterations
-             << ",\"r2_solver_iterations\":"
-             << result.r2_solver_iterations
-             << ",\"r1_solver_attempts\":"
-             << result.r1_solver_attempts
-             << ",\"r2_solver_attempts\":"
-             << result.r2_solver_attempts
-             << ",\"r1_solver_iterations_total\":"
-             << result.r1_solver_iterations_total
-             << ",\"r2_solver_iterations_total\":"
-             << result.r2_solver_iterations_total
-             << ",\"r1_qp_corridor_padding_m\":"
-             << result.r1_qp_corridor_padding_m
-             << ",\"r2_qp_corridor_padding_m\":"
-             << result.r2_qp_corridor_padding_m
-             << ",\"r1_admm_status\":" << result.r1_admm_status
-             << ",\"r2_admm_status\":" << result.r2_admm_status
-             << ",\"r1_admm_residuals\":{\"primal\":";
-        json_number(result.r1_primal_residual);
-        json << ",\"dual\":";
-        json_number(result.r1_dual_residual);
-        json << ",\"state_primal\":";
-        json_number(result.r1_state_primal_residual);
-        json << ",\"state_dual\":";
-        json_number(result.r1_state_dual_residual);
-        json << ",\"input_primal\":";
-        json_number(result.r1_input_primal_residual);
-        json << ",\"input_dual\":";
-        json_number(result.r1_input_dual_residual);
-        json << "},\"r1_residual_locations\":["
-             << result.r1_state_primal_stage << ','
-             << result.r1_state_primal_index << ','
-             << result.r1_state_dual_stage << ','
-             << result.r1_state_dual_index << ','
-             << result.r1_input_primal_stage << ','
-             << result.r1_input_primal_index << ','
-             << result.r1_input_dual_stage << ','
-             << result.r1_input_dual_index
-             << "],\"r1_rho\":[" << result.r1_rho_start << ','
-             << result.r1_rho_u_start << ',' << result.r1_rho_final << ','
-             << result.r1_rho_u_final << ',' << result.r1_rho_change_count
-             << "],\"r2_admm_residuals\":{\"primal\":";
-        json_number(result.r2_primal_residual);
-        json << ",\"dual\":";
-        json_number(result.r2_dual_residual);
-        json << ",\"state_primal\":";
-        json_number(result.r2_state_primal_residual);
-        json << ",\"state_dual\":";
-        json_number(result.r2_state_dual_residual);
-        json << ",\"input_primal\":";
-        json_number(result.r2_input_primal_residual);
-        json << ",\"input_dual\":";
-        json_number(result.r2_input_dual_residual);
-        json << "},\"r2_residual_locations\":["
-             << result.r2_state_primal_stage << ','
-             << result.r2_state_primal_index << ','
-             << result.r2_state_dual_stage << ','
-             << result.r2_state_dual_index << ','
-             << result.r2_input_primal_stage << ','
-             << result.r2_input_primal_index << ','
-             << result.r2_input_dual_stage << ','
-             << result.r2_input_dual_index
-             << "],\"r2_rho\":[" << result.r2_rho_start << ','
-             << result.r2_rho_u_start << ',' << result.r2_rho_final << ','
-             << result.r2_rho_u_final << ',' << result.r2_rho_change_count
-             << "],\"r1_solve_us\":" << result.r1_solve_us
-             << ",\"r2_solve_us\":" << result.r2_solve_us
-             << ",\"r1_qp_build_us\":" << result.r1_qp_build_us
-             << ",\"r1_admm_us\":" << result.r1_admm_us
-             << ",\"r1_exact_rollout_us\":"
-             << result.r1_exact_rollout_us
-             << ",\"r1_nonlinear_validation_us\":"
-             << result.r1_nonlinear_validation_us
-             << ",\"r2_qp_build_us\":" << result.r2_qp_build_us
-             << ",\"r2_admm_us\":" << result.r2_admm_us
-             << ",\"r2_exact_rollout_us\":"
-             << result.r2_exact_rollout_us
-             << ",\"r2_nonlinear_validation_us\":"
-             << result.r2_nonlinear_validation_us
-             << ",\"total_rti_us\":" << result.total_rti_us
-            << ",\"selected_candidate\":\""
-             << selected_candidate_name(result.selected_candidate) << '\"'
-            << ",\"normal_optimizer_candidate\":"
-             << (selected_candidate_is_optimizer(result.selected_candidate)
-                    ? "true" : "false")
-            << ",\"recovery_candidate_published\":"
-             << ((result.selected_candidate == 3 ||
-                  result.selected_candidate == 4 ||
-                  result.selected_candidate == 5) ? "true" : "false")
-             << ",\"corridor_repair_used\":"
-             << (result.corridor_repair_used ? "true" : "false")
-             << ",\"corridor_repair_trials\":"
-             << result.corridor_repair_trials
-             << ",\"corridor_repair_us\":";
-        json_number(result.corridor_repair_us);
-        json
-             << ",\"residual_candidate_published\":"
-             << (result.residual_candidate_published ? "true" : "false")
-            << ",\"corridor_repair_alpha\":";
-        json_number(result.corridor_repair_alpha);
-        json << ",\"nominal_vs_candidate_progress_error_max_m\":";
+        json << ",\"regularization_count\":"
+             << result.regularization_count
+             << ",\"nonsmooth_columns\":"
+             << result.nonsmooth_jacobian_columns
+             << ",\"rho_start\":" << result.rho_start
+             << ",\"rho_u_start\":" << result.rho_u_start
+             << ",\"rho_final\":" << result.rho_final
+             << ",\"rho_u_final\":" << result.rho_u_final
+             << ",\"rho_change_count\":" << result.rho_change_count
+             << ",\"factorization_count\":" << result.factorization_count
+             << ",\"factorization_time_ns\":"
+             << result.factorization_time_ns
+             << ",\"qp_build_us\":" << result.qp_build_us
+             << ",\"admm_us\":" << result.admm_us
+             << ",\"exact_rollout_us\":" << result.exact_rollout_us
+             << ",\"nonlinear_validation_us\":"
+             << result.nonlinear_validation_us
+             << ",\"solve_us\":" << result.total_solve_us
+             << ",\"node_solve_us\":" << solve_us
+             << ",\"cycle_us\":" << result.total_cycle_us
+             << ",\"objective\":";
+        json_number(result.nonlinear_objective);
+        json << '}'
+             << ",\"first_action\":["
+             << result.published_steering_command << ','
+             << result.published_throttle << ']'
+             << ",\"nominal_first_action\":["
+             << result.nominal_first_control.steering_target_rad << ','
+             << result.nominal_first_control.throttle_command << ']'
+             << ",\"linearization_failure\":["
+             << result.linearization_failure_stage << ','
+             << result.linearization_failure_reason << ','
+             << result.linearization_failure_index << ']'
+             << ",\"nominal_vs_candidate_progress_error_max_m\":";
         json_number(result.max_candidate_progress_error_m);
         json << ",\"nominal_vs_candidate_curvature_error_max_per_m\":";
         json_number(result.max_candidate_curvature_error_per_m);
@@ -1309,20 +1060,6 @@ private:
         json_number(result.max_candidate_right_bound_error_m);
         json << ",\"minimum_predicted_corridor_slack_m\":";
         json_number(result.minimum_predicted_corridor_slack_m);
-        json << ",\"corridor_margin_m\":"
-             << rti_config_.model.corridor_margin_m
-             << ",\"first_prediction_corridor_margin_m\":"
-             << rti_config_.model.first_prediction_corridor_margin_m
-             << ",\"recovery_active\":"
-             << (result.recovery_active ? "true" : "false")
-             << ",\"recovery_not_found\":"
-             << (result.recovery_not_found ? "true" : "false")
-             << ",\"recovery_reentry_stage\":"
-             << result.recovery_reentry_stage
-             << ",\"recovery_initial_normal_violation_m\":";
-        json_number(result.recovery_initial_normal_violation_m);
-        json << ",\"recovery_max_seed_violation_m\":";
-        json_number(result.recovery_max_seed_violation_m);
         json << ",\"lateral_accel_proxy_mps2\":";
         json_number(result.lateral_accel_proxy_mps2);
         json << ",\"lateral_accel_proxy_stage\":"
@@ -1335,8 +1072,7 @@ private:
         json << ']';
         json << ",\"predictions\":[";
 
-        if (result.status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
-            result.status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+        if (result.status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
             json << "],\"diagnostic_publish_steady_ns\":"
                  << steady_time_ns() << '}';
             std_msgs::msg::String message;
@@ -1885,24 +1621,16 @@ private:
         const double solve_us = std::chrono::duration<double, std::micro>(
             solve_finish - solve_start).count();
         record_cycle_health(status, result, solve_us);
-        if (result.corridor_repair_used) {
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC exact corridor repair accepted: alpha=%.4f "
-                "r1_status=%d r2_status=%d",
-                result.corridor_repair_alpha, result.r1_status,
-                result.r2_status);
-        }
-        if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
-            status != MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
+        if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC RTI rejected: %s iterations=%d residual=(%.6g,%.6g) "
+                "MPC cycle rejected: %s ADMM=%d iterations=%d "
+                "residual=(%.6g,%.6g) "
                 "regularization=(%.6g,%d) nonsmooth_columns=%d "
                 "rho=(%.4g->%.4g,%.4g->%.4g) rho_changes=%d "
                 "nonlinear_failure=(reason=%d,stage=%d) "
-                "r1=(status=%d,reason=%d,stage=%d) "
-                "r2=(status=%d,reason=%d,stage=%d) "
-                "rti2_triggered=%d state=(ey=%.3f,epsi=%.3f,u=%.3f,r=%.3f)",
-                cycle_status_name(status), result.solver_iterations,
+                "state=(ey=%.3f,epsi=%.3f,u=%.3f,r=%.3f)",
+                cycle_status_name(status), result.admm_status,
+                result.solver_iterations,
                 result.primal_residual, result.dual_residual,
                 result.maximum_regularization, result.regularization_count,
                 result.nonsmooth_jacobian_columns,
@@ -1911,11 +1639,6 @@ private:
                 result.rho_change_count,
                 result.nonlinear_failure_reason,
                 result.nonlinear_failure_stage,
-                result.r1_status, result.r1_nonlinear_failure_reason,
-                result.r1_nonlinear_failure_stage,
-                result.r2_status, result.r2_nonlinear_failure_reason,
-                result.r2_nonlinear_failure_stage,
-                result.rti2_triggered,
                 state.plant.e_y, state.plant.e_psi, state.plant.u,
                 state.plant.r);
             if (diagnostics_pub_)
@@ -1925,27 +1648,10 @@ private:
                     control_ros_time.nanoseconds(), candidate_command_stamp_ns,
                     callback_steady_ns,
                     synchronize_steady_ns);
-            /* No exact-feasible candidate exists. Keep command continuity,
-             * but apply the configured bounded speed reduction so a numerical
-             * failure cannot preserve an unsafe racing speed. The RTI core
-             * deliberately retains its ADMM iterate for residual-only
-             * failures; preserve that warm start so the next 40 Hz solve can
-             * continue convergence. Hard input, nonlinear, and solver errors
-             * still reset it. */
-            const bool reset_rti_memory =
-                status != MPC_RTI_CYCLE_REJECTED_RESIDUAL;
             report_control_fault(
-                "MPC RTI cycle had no exact-feasible candidate",
-                false, reset_rti_memory);
+                "MPC RTI cycle had no exact-feasible candidate");
             ++control_fault_cycles_;
             return;
-        }
-
-        if (result.residual_candidate_published) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC published an exact-feasible residual-limited candidate "
-                "(r1=%d,r2=%d,iterations=%d)", result.r1_status,
-                result.r2_status, result.solver_iterations);
         }
 
         if (diagnostics_pub_)
@@ -2083,12 +1789,6 @@ private:
     rclcpp::TimerBase::SharedPtr open_loop_horizon_timer_;
     std::uint64_t control_cycles_{};
     std::uint64_t accepted_optimal_{};
-    std::uint64_t accepted_degraded_{};
-    std::uint64_t optimizer_candidate_cycles_{};
-    std::uint64_t corridor_repair_candidate_cycles_{};
-    std::uint64_t feedback_recovery_candidate_cycles_{};
-    std::uint64_t residual_candidate_published_{};
-    std::uint64_t corridor_repair_used_{};
     std::uint64_t control_fault_cycles_{};
     int max_solver_iterations_seen_{};
     double max_solve_us_{};

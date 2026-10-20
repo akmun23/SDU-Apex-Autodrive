@@ -2694,3 +2694,275 @@ only for low-speed wheel-pose-angle blending.
   practice run is required to measure whether the production change improves
   the full rollout and to isolate this remaining phase error. Do not call the
   5 cm full-horizon bound passed yet.
+
+### Correct-format v300 trajectory attempt — 2026-10-20
+
+- Replaced the earlier geometry-only reconstruction with the user's exact
+  `v300_optimized_MPC_AMCL_raceline.csv`, copied byte-for-byte into the
+  practice trajectory directory. The runtime loaded all 1,024 points and the
+  supplied velocity, acceleration, and corridor fields. SHA-256:
+  `2874816456f7209b52ea359458c8fdaf6fb51bd4fa10781671d3e3483b06bb3d`.
+- Ran the exact candidate in the established practice batch-mode simulator
+  procedure with runtime topic policy passing and a collision watcher. It
+  collided at about 5.11 s before completing the first lap. The exact-run bag
+  is `live_runs/mpc_v300_exact_r2reject_practice_1lap_20261020/run`. The prior
+  geometry-only attempt is not counted as validation of this supplied CSV.
+- In the exact bag, the first non-optimal MPC cycle occurred around 1.50 s;
+  an R1/R2 residual rejection took ~100 ms and produced ~90 ms command lead.
+  At ~3.87 s cross-track error was ~0.51 m, both nonlinear checks rejected,
+  the cycle took ~201 ms with ~191 ms command lead, and collision followed at
+  ~5.11 s. Diagnostic cycle timing was median/p95/max ~12.7/199/234 ms, with
+  30/104 cycles over 25 ms. AMCL scan XY error was 10.5 cm RMSE (17.7 cm p95).
+- Exact-file offline solver replay on the 163 pre-collision GT-pose/production-
+  plant inputs found that `r2_on_rejection` reduced nonlinear-rejected samples
+  from 58 (R1-only) to 33 and increased optimal/degraded outcomes, but cycles
+  over 25 ms rose from 30 to 46 and the maximum solver time rose from 45.5 to
+  68.3 ms. This is not closed-loop proof or a reason to promote R2; neither
+  mode is validated to drive the complete candidate lap.
+- No trajectory physics or production defaults were changed based on this
+  single collision. The next step is code-level diagnosis of the repeated
+  solver work/rejected-cycle command behavior and the separate AMCL pose
+  error. Keep both diagnostic bags. Do not start another simulator run until
+  one specific correction has offline evidence; retain immediate collision
+  abort behavior.
+
+### v300 native-controls path-follower experiment — 2026-10-20
+
+- Imported the exact 11-column user file, preserving the comment header and
+  all supplied values. It matches the nine geometry/speed/bounds columns of
+  the correct v300 trajectory. Added direct parsing for this format to the
+  development follower, diagnostics for the native steering reference, and a
+  repeat-count launch setting. The follower uses native throttle indexed by GT
+  path progress; GT does not enter production odometry or MPC.
+- First practice batch-mode attempt used existing GT pure-pursuit steering
+  and the CSV throttle. It reached 7.24 m/s and advanced 25.37 m along the
+  path, but collided before a complete first lap. Cross-track distance first
+  exceeded 0.25 m at ~5.56 s and 0.50 m at ~5.76 s on the tight turn. At that
+  point pure-pursuit steering was ~-0.454 rad versus the file's native-applied
+  steering reference ~-0.229 rad, and pure pursuit reached its -0.524 rad
+  limit. Bag: `live_runs/v300_native_controls_pp_5lap_20261020/run`.
+- A second attempt replayed the provided native-applied steering and throttle
+  by GT path progress. It collided early (~1.5 s bag span, 5.34 m/s max);
+  cross-track error exceeded 0.50 m after ~1.25 s of motion. Bag:
+  `live_runs/v300_native_controls_replay_5lap_20261020/run`. This column is
+  not established as a directly commandable steering profile; direct replay
+  is not retained as the follower's default.
+- The initial follower version used GT pure-pursuit steering plus CSV throttle
+  and logged native steering only as a reference. Raw native-steering replay
+  was also attempted, but is not retained as a policy; both bags remain
+  diagnostic.
+
+### v251 CSV continuous-follow capture — 2026-10-20
+
+- Ran two repeated five-lap practice captures with the development-only
+  ground-truth pure-pursuit/CSV-throttle follower, MPC disabled. Each reached
+  lap count 5 with zero collisions. Across ten simulator-reported laps, mean
+  was `9.721 s`, best `9.649 s`; this is data collection, not MPC evidence.
+- Both full bags and detailed tracking/plant-replay metrics are recorded in
+  [CSV_V251_PRACTICE_FOLLOW_20261020.md](CSV_V251_PRACTICE_FOLLOW_20261020.md).
+  The source-plant 750 ms endpoint XY RMSE was `2.20–2.53 cm`, but 64–67 of
+  roughly 1,850 endpoints per run exceeded 5 cm; worst anywhere along the
+  750 ms path was `10.1 cm` and `34.4 cm`. Thus the strict 5 cm path-error
+  target remains unmet.
+- Current full-data bags are `live_runs/csv_v251_gt_5lap_run1_20261020/run`
+  and `live_runs/csv_v251_gt_5lap_run2_20261020/run`. Removed the 451 previous
+  ROS bag payload/metadata files (2.50 GiB across 225 bag directories) from
+  `live_runs`; verified that only these two bag captures remain. Non-bag
+  analysis files were not part of the requested bag cleanup.
+
+### v300 follower lookahead follow-up — 2026-10-20
+
+- Added a development-only `SDU_APEX_CSV_LOOKAHEAD_SPEED_GAIN_S` launch
+  setting for the CSV follower; the default remains `0.12 s`. Offline
+  recomputation on the first capture suggested `0.60 s` would moderate the
+  high steering saturation, so a watched practice run tested it. That bag
+  reached `7.24 m/s` but collided at the first closing turn near CSV progress
+  `26.8 m` (cross-track about `0.35 m`), before lap completion:
+  `live_runs/v300_native_controls_pp_l060_5lap_20261020/run`.
+- A `0.30 s` compromise attempt was not scoreable: its first bagged truth was
+  already in motion at a different pose and its collision count was already
+  1; the 125 ms bag contains no CSV follower diagnostics:
+  `live_runs/v300_native_controls_pp_l030_5lap_20261020/run`. Do not interpret
+  it as a collision caused by that gain. Later captures enabled the built-in
+  development reset and began at the expected saved spawn.
+- No successful lap or lap time was produced by these v300 attempts. The
+  original `0.12 s` run advanced farther than the valid `0.60 s` run; no gain
+  is promoted. Full details and per-capture interpretation are in
+  [CSV_V251_PRACTICE_FOLLOW_20261020.md](CSV_V251_PRACTICE_FOLLOW_20261020.md).
+
+### v300 spatial control handoff — 2026-10-20
+
+- The user clarified that pure pursuit should first bring the vehicle onto
+  the path, then the CSV's interpolated native steering at the closest
+  GT-projected station should be used. The development follower now follows
+  that policy: native steering activates at cross-track `<=0.05 m` and
+  heading error `<=0.05 rad`; it returns to PP when either exceeds `0.10`.
+  CSV throttle is always interpolated at current projected progress; the
+  lookahead station is used only by PP. Diagnostics include native-control
+  mode. This is dev-only; GT never enters production odometry or MPC.
+- With the built-in reset held during practice simulator startup, the vehicle
+  began at the expected pose and reached `7.26 m/s`. It briefly entered native
+  control near progress `21 m`, then left as tracking error exceeded the
+  release thresholds, returned to PP, saturated steering, and collided at
+  about `3.42 s` near progress `29.9 m` with about `0.84 m` path error. No lap
+  completed. Bag: `live_runs/v300_native_controls_handoff_5lap_20261020/run`.
+- A separate valid test of continuous native steering feed-forward plus PP
+  deviation correction (not the acquire/release handoff) reached `7.26 m/s`
+  and collided at about `3.76 s`, near progress `32.3 m`. No lap completed.
+  Bag: `live_runs/v300_native_controls_ff_pp_5lap_20261020/run`. Neither
+  policy has demonstrated a complete lap or lap time; no faster result is
+  validated.
+
+### Faster v300 bag and MPC/rollout diagnosis — 2026-10-20
+
+- A later speed-governed GT path-following run completed one practice lap with
+  zero collisions and peaked at `7.9565 m/s`:
+  `live_runs/v300_native_controls_speed_governor_20261020/run`. This is a
+  successful data capture, not an MPC-controlled lap or sub-5-second result.
+- Path lookup is continuous GT projection onto a locally searched path
+  segment, monotonic in station, followed by interpolation. It is not a
+  discrete nearest-row lookup. PP handles tracking correction, while native
+  controls are blended according to cross-track/heading agreement and sampled
+  at current projected progress plus the configured `50 ms` command-delay
+  distance. In this capture, full native-control weight occurred on 19% of
+  ticks; the median weight was 0.666. The prior hard handoff attempt collided,
+  so it is not being silently substituted for the current policy.
+- On 850 one-step windows, the queue-phase A/B found yaw-rate RMSE `0.0404
+  rad/s` for steering slot 2 plus throttle slot 1, versus `0.1126 rad/s` for
+  steering slot 1 plus throttle slot 2. This does not prove the runtime phase.
+  Replay of bridge request-stamped commands with carried source state had
+  `0.0758 rad/s` yaw-rate RMSE. The 750 ms source-plant XY endpoint RMSE is
+  `6.47 cm`, p95 `13.41 cm`, maximum `26.30 cm`; only `444/764` endpoints
+  stayed within 5 cm. Error accumulates primarily through yaw/heading
+  prediction, with the largest growth in the first 25–75 ms at roughly
+  `4.5–4.7 m/s` and `0.14–0.16 rad` steering. This is still outside the
+  agreed accuracy bound; no accurate-rollout claim is made. A future-steering
+  feedback oracle reduces 750 ms XY RMSE to `4.34 cm` (p95 `8.49 cm`, path
+  max `13.34 cm`), still outside the gate. Steering-actuator prediction is a
+  contributor, but not the sole remaining mismatch.
+- GT-seeded offline MPC replay on 854 bag points yielded 25 nonlinear rejects
+  with R1 alone, 2 with R2 every cycle, and 1 with R2 only after R1 rejection.
+  The remaining conditional-R2 rejection violates the nonlinear corridor by
+  about 1.1 cm at stage 21; R2's p95/max cycle time is `25.97/62.62 ms`.
+  This replay is an offline solver diagnostic—not online MPC validation.
+- Detailed capture, projection policy, rollout partitions, replay results,
+  and reproduction artifacts are recorded in
+  [CSV_V251_PRACTICE_FOLLOW_20261020.md](CSV_V251_PRACTICE_FOLLOW_20261020.md).
+  No production plant/MPC default or trajectory was changed. Continue with
+  the demonstrated yaw/steering-transition mismatch and the single nonlinear
+  feasibility rejection before a supervised MPC practice run.
+
+### Update: repeated faster-profile bags and odometry torque feedback — 2026-10-20
+
+- Two independent five-lap practice bags now exist for the 85%-scaled v300
+  speed/throttle profile: `live_runs/v300_native_controls_speed85_5lap_run1_20261020/run`
+  and `...run2...`. Both completed five laps with zero collisions; valid-lap
+  means were 7.663 s and 7.674 s. These used the development GT path follower,
+  not MPC, and are not a sub-5-second result.
+- Production source-derived odometry now uses fresh existing throttle
+  feedback to represent torque during the elapsed packet interval while
+  retaining the requested-command delay queue for future prediction. Unity
+  source confirms the feedback is normalized `DriveTorque/MotorTorque`; zero
+  enters the configured full-brake branch. No topic was added.
+- Identical offline replay on both bags shows the feedback-conditioned
+  750 ms endpoint XY RMSE decreases from 8.33 to 5.94 cm and 7.97 to 5.43 cm;
+  the 5 cm threshold is still missed by many endpoints. This is a useful
+  odometry update, not evidence that the open-loop MPC rollout is accurate.
+- The localization package builds, and all 8 focused source-plant runtime
+  tests pass. A post-change practice run was then captured at
+  `live_runs/v300_native_controls_speed85_5lap_post_odom_20261020/run`; it
+  reached 3 laps with zero collisions before the GT-stale watchdog stopped it.
+  It is partial, not a completed five-lap validation. The bag's bridge latency
+  was abnormally high (median/p95/max 19.84/66.56/261.94 ms), and the 750 ms
+  feedback replay did not confirm a clean gain; worst path error regressed.
+  The transport outlier makes that run inconclusive for plant physics.
+- One retry with identical settings completed 5 laps with zero collisions:
+  `live_runs/v300_native_controls_speed85_5lap_post_odom_retry_20261020/run`.
+  Its lap times were 8.203, 7.507, 7.732, 7.526, and 7.541 s (mean 7.702,
+  best 7.507); max speed was 7.149 m/s. Bridge latency returned to
+  4.76/29.63/36.27 ms median/p95/max. Production odom u/v RMSE was
+  0.0432/0.0089 m/s; 0.179 m integrated pose drift. These GT-follower data
+  are not MPC closed-loop validation.
+- On this clean bag, 750 ms source-plant XY RMSE changed from 5.96 cm with
+  planned-command-only propagation to 4.69 cm when each elapsed interval used
+  its recorded throttle feedback; endpoint coverage under 5 cm rose from
+  1112/1536 to 1182/1536. Full-path max-error RMSE remained 5.29 cm with the
+  feedback replay, and 391/1536 paths still exceeded 5 cm. This supports a
+  retrospective odometry correction, but does not make future MPC rollout
+  accurate: its future feedback is unknown. The bridge timing outlier bag is
+  retained and documented separately, not treated as a vehicle failure.
+- Full metrics and caveats are in
+  [CSV_V251_PRACTICE_FOLLOW_20261020.md](CSV_V251_PRACTICE_FOLLOW_20261020.md).
+
+### Follow-up: newest-request command phase and repeated practice bags — 2026-10-20
+
+- The current runtime source plant and MPC now use the newest request-associated
+  command for the next modeled interval (queue slot 2), avoiding an extra
+  unsupported 25 ms command delay. The MPC delay prefix is one step; command
+  history remains outside the QP state vector. The source Jacobian preserves
+  the exact queue shift/append derivatives. Focused source-plant, MPC rollout,
+  predictor, and state-synchronizer tests and the package build passed before
+  the repeated capture.
+- Three independent five-lap practice bags are retained under
+  `live_runs/v300_native_controls_speed85_phasefix_5lap_run{1,2,3}_20261020/run`.
+  All used the same 85%-scaled v300 path/profile, GT-based development follower,
+  MPC disabled, established Xvfb batch-mode practice simulator, and collision
+  watcher. All completed five laps with zero collisions. Mean lap times were
+  7.752 s (run 1), 7.698 s over run 2's non-startup laps, and 7.770 s (run 3).
+  These are data-gathering runs, not MPC validation or a track-record claim.
+- On run 3, source-plant A/B with the same initial states/commands showed
+  current-request phase vs preceding-request phase: one-step yaw-rate RMSE
+  `0.0902 vs 0.1325 rad/s`, forward-speed RMSE `0.0651 vs 0.0792 m/s`; 750 ms
+  XY RMSE `9.08 vs 11.19 cm`. The phase change is retained. It does not meet
+  the 5 cm rollout bound: `816/1,551` full 750 ms paths exceeded 5 cm and worst
+  error was `45.2 cm`.
+- Offline oracle diagnostics on this unseen run attribute a substantial part
+  of the residual to command/actuator association: future throttle feedback
+  reduced 750 ms forward-speed RMSE `0.191 -> 0.051 m/s`; future steering
+  feedback reduced yaw-rate RMSE `0.105 -> 0.060 rad/s`; both together yielded
+  `2.76 cm` XY RMSE, but still `158/1,551` paths above 5 cm and `33.2 cm`
+  maximum error. These future-feedback replays are diagnostic only and are not
+  production MPC inputs. Do not claim high-accuracy rollout or a complete
+  PhysX match. The remaining work is a causal permitted-input representation
+  of actuator/command application phase; the bridge capture has no Unity
+  FixedUpdate/applied-command sequence with which to make the oracle deployable.
+- The detailed bag inventory, lap metrics, 25 ms cadence, phase A/B results,
+  oracle partitions, and limits are in
+  [CSV_V251_PRACTICE_FOLLOW_20261020.md](CSV_V251_PRACTICE_FOLLOW_20261020.md).
+
+### Follow-up: is the remaining rollout error command timing? — 2026-10-20
+
+- The evidence says **command/actuator epoch association explains a substantial
+  part, but not all, of the remaining error**. On practice run 3, substituting
+  recorded future actuator feedback (an offline oracle, unavailable to a
+  forward rollout) reduced 750 ms forward-speed RMSE from `0.191` to
+  `0.051 m/s` with throttle feedback, and yaw-rate RMSE from `0.105` to
+  `0.060 rad/s` with steering feedback. Supplying both reduced XY RMSE from
+  `9.08` to `2.76 cm`, but still left `158/1,551` full paths above 5 cm and a
+  `33.2 cm` worst path. The oracle proves sensitivity to actuator values/epoch;
+  it does not by itself prove network receive delay is the cause.
+- The current MPC transition is not batching 25 ms of dynamics under one final
+  steering angle: `unity_source_plant_step()` calls `step_interval()`, which
+  executes 25 sequential 1 ms plant steps. The Unity configuration uses a 1 ms
+  outer fixed timestep. Thus the obvious coarse-step scheduling mismatch is
+  ruled out in this path.
+- Unity source explains a remaining sample-phase ambiguity: each
+  `VehicleController.FixedUpdate()` copies `DriveTorque` and `SteeringAngle`
+  into `currentT/currentS` **before** it calls `Steer()` and `Drive()`. The
+  feedback getters therefore expose the prior tick's actuator state, while
+  `Socket.OnBridge()` updates autonomous command targets asynchronously with
+  respect to those fixed updates. Bridge ROS headers are deliberately stamped
+  at the host request boundary, although the packet arrives later (run 3
+  request/response latency median `4.79 ms`, p95 `30.16 ms`, max `63.62 ms`).
+  The bags have no Unity fixed-step index or applied-command sequence, so they
+  cannot establish the exact tick at which each target affected the vehicle.
+- Disposition: do not add another fixed 25 ms shift or fit a timing offset.
+  Existing phase A/B already supports the current request-associated command
+  phase over the preceding-request phase. The residual is consistent with
+  variable command-to-fixed-step / feedback sampling association, plus other
+  unresolved plant or truth-sampling error; the current bags cannot separate
+  those causes. A causal conclusion requires development-only recording of
+  command sequence at Unity receipt, command sequence used by each
+  `FixedUpdate`, physics-step index/time, and the feedback/pose/twist snapshot
+  index. These fields must remain diagnostics and must not become production
+  controller inputs.

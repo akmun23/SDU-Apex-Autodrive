@@ -94,17 +94,31 @@ SourceDerivedOdomRuntime::SourceDerivedOdomRuntime(double rear_axle_from_com_m)
 
 PredictedPlantState SourceDerivedOdomRuntime::advance(
   double steering_command_norm, double throttle_command_norm,
-  bool steering_feedback_valid, double steering_feedback_rad)
+  bool steering_feedback_valid, double steering_feedback_rad,
+  bool throttle_feedback_valid, double throttle_feedback_norm)
 {
   if (!std::isfinite(steering_command_norm) ||
     !std::isfinite(throttle_command_norm) ||
-    (steering_feedback_valid && !std::isfinite(steering_feedback_rad)))
+    (steering_feedback_valid && !std::isfinite(steering_feedback_rad)) ||
+    (throttle_feedback_valid && !std::isfinite(throttle_feedback_norm)))
   {
     throw std::runtime_error("non-finite input sent to source-derived odometry plant");
   }
 
-  const double applied_steering = delayed_steering_commands_norm_[0];
-  const double applied_throttle = delayed_throttle_commands_norm_[0];
+  // The latest command associated with the preceding Bridge request is the
+  // command applied during the packet interval just completed. Slot 0 is one
+  // request older; using it adds an unsupported extra 25 ms of delay.
+  const double applied_steering = delayed_steering_commands_norm_[1];
+  // VehicleController.CurrentThrottle is currentT = DriveTorque/MotorTorque,
+  // sampled before the next Drive() call. Use the latest feedback admitted by
+  // the caller's freshness check to represent the completed interval. The
+  // Float32 feedback has no Unity-step/packet sequence, so its exact coverage
+  // of all 25 substeps is not observable; this is an interval association,
+  // not a claim of per-step torque history. Keep the delayed request queue
+  // unchanged for future stages and MPC state publication.
+  const double applied_throttle = throttle_feedback_valid
+    ? std::clamp(throttle_feedback_norm, -1.0, 1.0)
+    : delayed_throttle_commands_norm_[1];
   delayed_steering_commands_norm_[0] = delayed_steering_commands_norm_[1];
   delayed_steering_commands_norm_[1] = std::clamp(steering_command_norm, -1.0, 1.0);
   delayed_throttle_commands_norm_[0] = delayed_throttle_commands_norm_[1];
@@ -118,9 +132,9 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
     // assigns currentS from SteeringAngle before Steer() advances SteeringAngle
     // for that same physics tick, so the published feedback is one Unity fixed
     // step behind the rack state used by the wheel solver. Reconstruct that
-    // post-Steer state from the command already at the plant queue head under
-    // this runtime's two-packet delay model. The headerless ROS command and
-    // feedback topics carry no Unity fixed-step sequence, so the exact target
+    // post-Steer state from the newest command sample in the plant queue. The
+    // headerless ROS command and feedback topics carry no Unity fixed-step
+    // sequence, so the exact target
     // association is not independently observable from a bag. Do not advance
     // body dynamics here because the sensor packet already anchors those at
     // this boundary.

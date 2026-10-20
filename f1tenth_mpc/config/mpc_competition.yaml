@@ -44,6 +44,9 @@
     weight_steering_command: 3.0
     weight_steering_target: 5.0
     weight_throttle_command: 0.1
+    # Penalize per-cycle command increments; steering smoothness dominates.
+    weight_steering_slew: 25.0
+    weight_throttle_slew: 2.0
     terminal_multiplier: 3.0
 
     max_steering_rad: 0.5235987756
@@ -55,11 +58,6 @@
     # The .005 m profile completed all ten racing laps below 11 s with no
     # collision. The .010 m trial collided during the opening hairpin.
     nonlinear_corridor_tolerance_m: 0.005
-
-    recovery_seed_policy: nominal
-    recovery_steering_k_e_y: 0.0
-    recovery_steering_k_e_psi: 0.0
-    recovery_steering_k_r: 0.0
 
     admm_rho: 7.0
     admm_rho_input: 7.0
@@ -77,30 +75,10 @@
     # Exact nonlinear corridor validation remains a separate hard gate.
     # The exact source-plant rollout and corridor remain independent gates.
     solver_tolerance: 0.02
-    solver_degraded_tolerance: 0.02
-    # No wall-time cutoff: measure and optimize natural solve latency. Exact
-    # source-plant rollout and corridor checks remain the command acceptance
-    # gates; target p95 is 10-15 ms, leaving margin inside the 25 ms period.
-    # Maximum iterations for each Riccati-ADMM solve (R1 and optional R2).
-    # Every QP pass has a hard cap of 50; RTI pass count is recorded separately.
+    # One QP and one nonlinear validation per 40 Hz cycle; no retry pass.
     max_solver_iterations: 50
-    rti_cycle_budget_ms: 0.0
+    rti_cycle_budget_ms: 20.0
     # Cap parallel Jacobian construction at four workers so the controller
     # remains deployable on competition PCs with limited CPU availability.
     # Zero disables OpenMP parallelism.
     jacobian_threads: 4
-    max_consecutive_degraded_solves: 3
-
-    # Practice replay showed no reduction in exact-corridor rejections from
-    # R2, while R2 adds a second ADMM pass. Keep competition runtime at R1
-    # until a paired simulator run demonstrates better tracking from R2.
-    rti_refinement_mode: r1
-    rti2_progress_error_trigger_m: 0.10
-    rti2_curvature_error_trigger_per_m: 0.02
-    rti2_bound_error_trigger_m: 0.05
-    rti2_min_corridor_slack_trigger_m: 0.25
-    rti2_steering_target_correction_trigger_rad: 0.50
-    rti2_throttle_correction_trigger: 0.05
-    rti2_residual_imbalance_trigger: 8.0
-    rti2_lateral_load_trigger_mps2: 3.0
-    rti2_nonsmooth_columns_trigger: 50

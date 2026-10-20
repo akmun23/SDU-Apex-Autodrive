@@ -355,8 +355,8 @@ static int vehicle_model_step_scalar(
      * source double limit. Clip only that representation error at the plant
      * boundary; this preserves the simulator's physical steering limit. */
     source_input.steering_target_rad = clamp_source_steering_target(
-        state->delayed_steering_command_1);
-    source_input.throttle_normalized = state->delayed_throttle_command_1;
+        state->delayed_steering_command_2);
+    source_input.throttle_normalized = state->delayed_throttle_command_2;
     if (source_input.throttle_normalized == 0.0f)
         stage->branch_flags |= MPC_STAGE_PLANT_BRAKE;
     UnitySourcePlantOutputC source_output;
@@ -408,9 +408,8 @@ static int vehicle_model_step_scalar(
     next.v = v_next;
     next.r = r_next;
     if (advance_command_queues) {
-        /* Match odometry's two-slot packet FIFO: the plant used slot 1 for
-         * this interval; now advance slot 2 and append this interval's new
-         * decision. */
+        /* Keep the last command as history, then append the new decision as
+         * the next in-flight command (slot 2). */
         next.delayed_steering_command_1 = state->delayed_steering_command_2;
         next.delayed_steering_command_2 = delta_next;
         next.delayed_throttle_command_1 = state->delayed_throttle_command_2;
@@ -551,9 +550,9 @@ enum { MPC_FORWARD_SENSITIVITY_COLUMNS = 20 };
 static const int kPlantSensitiveModelColumns[
     MPC_FORWARD_SENSITIVITY_COLUMNS] = {
     MPC_STATE_IDX_U, MPC_STATE_IDX_V, MPC_STATE_IDX_R,
-    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1,
+    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2,
     MPC_STATE_IDX_ACTUAL_STEERING_ANGLE,
-    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1,
+    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2,
     MPC_STATE_IDX_WHEEL_OMEGA_FL, MPC_STATE_IDX_WHEEL_OMEGA_FR,
     MPC_STATE_IDX_WHEEL_OMEGA_RL, MPC_STATE_IDX_WHEEL_OMEGA_RR,
     MPC_STATE_IDX_BODY_HEIGHT, MPC_STATE_IDX_BODY_HEIGHT_RATE,
@@ -581,13 +580,13 @@ static int model_column_seed_source(int model_column, int *source_index,
         *second_source_index = UNITY_SOURCE_V;
         *second_source_scale = kComForwardFromRearAxleM;
         return 1;
-    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1:
+    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2:
         *command_kind = 1;
         return 1;
     case MPC_STATE_IDX_ACTUAL_STEERING_ANGLE:
         *source_index = UNITY_SOURCE_PHYSICAL_STEERING;
         return 1;
-    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1:
+    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2:
         *command_kind = 2;
         return 1;
     default: break;
@@ -674,8 +673,8 @@ static int vehicle_model_forward_plant_jacobian(
     memset(&source_input, 0, sizeof(source_input));
     write_source_plant_state(state, source_input.state);
     source_input.steering_target_rad = clamp_source_steering_target(
-        state->delayed_steering_command_1);
-    source_input.throttle_normalized = state->delayed_throttle_command_1;
+        state->delayed_steering_command_2);
+    source_input.throttle_normalized = state->delayed_throttle_command_2;
     source_input.suspension_history_initialized =
         state->source_suspension_history_initialized;
 
@@ -705,7 +704,7 @@ static int vehicle_model_forward_plant_jacobian(
                     second_source_scale;
             if (command_kind == 1) {
                 const double target =
-                    state->delayed_steering_command_1;
+                    state->delayed_steering_command_2;
                 seeds.steering_target[lane] =
                     target > -UNITY_SOURCE_MAX_STEERING_RAD &&
                     target < UNITY_SOURCE_MAX_STEERING_RAD ? 1.0 : 0.0;
@@ -718,6 +717,14 @@ static int vehicle_model_forward_plant_jacobian(
             const int model_column =
                 kPlantSensitiveModelColumns[first_column + lane];
             for (int row = 2; row < MPC_MODEL_NX; ++row) {
+                /* Command-history rows are exact shift/append equations,
+                 * not Unity plant outputs. Preserve their analytic Jacobian. */
+                if (row == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1 ||
+                    row == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2 ||
+                    row == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1 ||
+                    row == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2) {
+                    continue;
+                }
                 const float derivative =
                     source_output_derivative_to_model(
                         &sensitivity, row, lane);
@@ -754,8 +761,8 @@ static int vehicle_model_forward_plant_jacobian(
              * direction crosses modes. Leave that column to the existing
              * branch-aware one-sided difference rather than inventing a
              * smooth derivative at the hybrid boundary. */
-            if (model_column == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1 &&
-                state->delayed_throttle_command_1 == 0.0f) {
+            if (model_column == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2 &&
+                state->delayed_throttle_command_2 == 0.0f) {
                 *covered_columns &= ~(UINT32_C(1) << model_column);
             }
         }
@@ -810,7 +817,7 @@ static int vehicle_model_linearize_with_known_step(
 
     /* These columns have exact deterministic dependencies:
      * - e_y/e_psi enter only the cheap Frenet integration below;
-     * - each two-slot actuator FIFO advances by shift and append.
+     * - each two-sample command history advances by shift and append.
      * Fill these exact dependencies directly rather than finite-differencing
      * the costly 1 ms tire/contact equations for every bookkeeping state. */
     const VehicleParameters_t parameters = vehicle_model_get_parameters();

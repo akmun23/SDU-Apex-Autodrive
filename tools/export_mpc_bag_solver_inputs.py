@@ -19,10 +19,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evaluate_mpc_bag import (  # noqa: E402
     DIAGNOSTICS,
+    GT,
     PLANT,
     load_trajectory,
     read_bag,
 )
+
+MAX_STEERING_RAD = math.pi / 6.0
 
 
 def project_pose_to_trajectory(
@@ -66,6 +69,119 @@ def project_pose_to_trajectory(
     return best
 
 
+def export_oracle_pose_inputs(
+    bag_data: dict,
+    output_path: Path,
+    trajectory: tuple[list[dict[str, float]], float],
+    max_speed_mps: float,
+    startup_speed_mps: float,
+    startup_ramp_laps: float,
+) -> int:
+    """Export GT path pose plus recorded production plant state for solver replay.
+
+    This is an offline diagnostic initialization, not a permissible runtime
+    input path. It answers whether the solver can converge when path pose is
+    known, while retaining the causal production plant state and command queue.
+    """
+    truth = sorted(bag_data.get(GT, []), key=lambda row: row["stamp"])
+    plants = sorted(bag_data.get(PLANT, []), key=lambda row: row["stamp"])
+    if not truth or not plants:
+        raise RuntimeError("oracle-pose export needs GT and UnityPlantState topics")
+
+    plant_by_stamp = {round(row["stamp"], 6): row for row in plants}
+    points, lap_length = trajectory
+    previous_progress = None
+    startup_progress = 0.0
+    count = 0
+    projection_distances = []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="") as output:
+        writer = csv.writer(output)
+        writer.writerow([
+            "# stamp_ns", "progress_m", "active_speed_ceiling_mps", "e_y",
+            "e_psi", "u", "v", "r", "actual_steering_rad",
+            "delayed_steer_1_rad", "delayed_steer_2_rad",
+            "delayed_throttle_1", "delayed_throttle_2",
+            "suspension_history_initialized", "yaw_residual_radps",
+            "yaw_residual_valid", "wheel_omega_fl", "wheel_omega_fr",
+            "wheel_omega_rl", "wheel_omega_rr", "body_height",
+            "body_height_rate", "roll", "roll_rate", "pitch", "pitch_rate",
+            "jounce_fl", "jounce_fr", "jounce_rl", "jounce_rr",
+            "low_forward_fl", "low_forward_fr", "low_forward_rl",
+            "low_forward_rr", "low_side_fl", "low_side_fr", "low_side_rl",
+            "low_side_rr",
+        ])
+        for pose in truth:
+            plant = plant_by_stamp.get(round(pose["stamp"], 6))
+            if plant is None or len(plant.get("wheel_omega", [])) != 4:
+                continue
+            progress, e_y, e_psi, projection_distance = project_pose_to_trajectory(
+                trajectory, pose["x"], pose["y"], pose["yaw"])
+            projection_distances.append(projection_distance)
+            if previous_progress is not None:
+                unwrapped = progress
+                while unwrapped - previous_progress < -0.5 * lap_length:
+                    unwrapped += lap_length
+                while unwrapped - previous_progress > 0.5 * lap_length:
+                    unwrapped -= lap_length
+                delta = unwrapped - previous_progress
+                if 0.0 < delta < 0.5 * lap_length:
+                    startup_progress += delta
+                progress = unwrapped
+            previous_progress = progress
+
+            if startup_ramp_laps > 1.0e-6:
+                ramp_fraction = min(
+                    1.0, max(0.0, startup_progress /
+                             (startup_ramp_laps * lap_length)))
+                speed_ceiling = startup_speed_mps + (
+                    max_speed_mps - startup_speed_mps) * ramp_fraction
+            else:
+                speed_ceiling = max_speed_mps
+
+            hidden = (
+                list(plant["wheel_omega"])
+                + [plant["body_height"], plant["body_height_rate"],
+                   plant["roll"], plant["roll_rate"], plant["pitch"],
+                   plant["pitch_rate"]]
+                + list(plant["suspension_jounce"])
+                + list(plant["low_forward_speed_time_s"])
+                + list(plant["low_side_speed_time_s"])
+            )
+            if len(hidden) != 22:
+                continue
+            stamp_ns = round(pose["stamp"] * 1e9)
+            writer.writerow([
+                stamp_ns, progress, speed_ceiling, e_y, e_psi,
+                plant["u"], plant["v_rear"], plant["gyro_r"],
+                plant["physical_steering"],
+                plant["delayed_steering_1"] * MAX_STEERING_RAD,
+                plant["delayed_steering_2"] * MAX_STEERING_RAD,
+                plant["delayed_throttle_1"], plant["delayed_throttle_2"],
+                int(plant["suspension_history_initialized"]),
+                plant.get("yaw_rate_prediction_residual", 0.0),
+                int(plant.get("yaw_rate_prediction_residual_valid", False)),
+                *hidden,
+            ])
+            count += 1
+
+    if count == 0:
+        raise RuntimeError("no same-epoch GT/plant samples were exported")
+    ordered_distances = sorted(projection_distances)
+    p95 = ordered_distances[
+        min(len(ordered_distances) - 1,
+            int(0.95 * (len(ordered_distances) - 1)))
+    ]
+    print(
+        f"exported {count} oracle-pose/production-plant MPC inputs to "
+        f"{output_path}; route projection distance median="
+        f"{statistics.median(ordered_distances):.3f}m "
+        f"p95/max={p95:.3f}/{ordered_distances[-1]:.3f}m; "
+        f"active speed ceiling={startup_speed_mps:g}..{max_speed_mps:g}m/s"
+    )
+    return count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bag", type=Path)
@@ -73,6 +189,13 @@ def main() -> int:
     parser.add_argument(
         "--trajectory", type=Path,
         help="reproject saved command-time map poses onto this trajectory")
+    parser.add_argument(
+        "--oracle-ground-truth-pose", action="store_true",
+        help="offline only: create solver inputs from GT pose and the recorded "
+             "production UnityPlantState; requires --trajectory")
+    parser.add_argument("--max-speed-mps", type=float, default=16.0)
+    parser.add_argument("--startup-speed-mps", type=float, default=1.5)
+    parser.add_argument("--startup-ramp-laps", type=float, default=1.0)
     args = parser.parse_args()
 
     data = read_bag(args.bag)
@@ -86,6 +209,20 @@ def main() -> int:
             points,
             points[-1]["s"] - points[0]["s"] + closing_distance,
         )
+    if args.oracle_ground_truth_pose:
+        if trajectory is None:
+            parser.error("--oracle-ground-truth-pose requires --trajectory")
+        if (not math.isfinite(args.max_speed_mps) or args.max_speed_mps <= 0.0 or
+                not math.isfinite(args.startup_speed_mps) or
+                args.startup_speed_mps < 0.0 or
+                not math.isfinite(args.startup_ramp_laps) or
+                args.startup_ramp_laps < 0.0):
+            parser.error("speed and startup ramp settings must be finite and nonnegative")
+        export_oracle_pose_inputs(
+            data, args.output, trajectory,
+            args.max_speed_mps, args.startup_speed_mps,
+            args.startup_ramp_laps)
+        return 0
     plant_rows = data.get(PLANT, [])
     plant_by_ns = {
         round(row["stamp"] * 1e9): row

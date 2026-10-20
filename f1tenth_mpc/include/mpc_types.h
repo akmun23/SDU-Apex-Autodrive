@@ -48,11 +48,10 @@ enum
 
 #define MPC_MODEL_NX MPC_STATE_COUNT
 #define MPC_MODEL_NU 2
-/* Compact RTI state layout. The four actuator-queue values remain in the
- * nonlinear plant and are represented by a fixed two-command prefix plus the
- * shifted decision sequence. The QP carries only the 20 path/body/plant
- * coordinates; command-slew memory is not an optimizer state because the
- * physical steering and wheel dynamics already represent actuator response. */
+/* Compact RTI state layout. The four logged actuator samples remain in the
+ * nonlinear plant representation, but practice request/response timing shows
+ * only the newest sample is in flight at a sensor epoch. The older sample is
+ * history. The QP carries only the 20 path/body/plant coordinates. */
 enum
 {
     MPC_OPT_IDX_EY = 0,
@@ -76,11 +75,13 @@ enum
     MPC_OPT_IDX_SUSPENSION_JOUNCE_RL = 18,
     MPC_OPT_IDX_SUSPENSION_JOUNCE_RR = 19,
     MPC_OPT_PHYSICAL_NX = 20,
-    MPC_OPTIMIZER_NX = MPC_OPT_PHYSICAL_NX
+    MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND = 20,
+    MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND = 21,
+    MPC_OPTIMIZER_NX = 22
 };
 #define RICCATI_MAX_NX MPC_OPTIMIZER_NX
 #define RICCATI_MAX_NU MPC_MODEL_NU
-#define MPC_COMMAND_DELAY_STEPS 2
+#define MPC_COMMAND_DELAY_STEPS 1
 
 /* Math and timing */
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
@@ -91,8 +92,7 @@ enum
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30
-/* Commands already in flight are propagated before the QP; the final two
- * newly planned commands cannot affect the 30-step state horizon. */
+/* The one command already in flight is propagated before the QP. */
 #define RICCATI_HORIZON (PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS)
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
 
@@ -109,7 +109,7 @@ enum
 /* bridge_40hz serializes actuator commands to three decimal places; any
  * positive command below this threshold is transmitted as Unity's zero/brake
  * branch and therefore cannot represent a drive-mode QP decision. */
-#define MPC_THROTTLE_MIN_DRIVE 0.001f
+#define MPC_THROTTLE_MIN_DRIVE 0.01f
 /* The 1 ms hard-brake plant sweep bottoms out at about -7.3 mm/s before
  * settling to rest; retain this measured numerical stopping transient. */
 #define MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS 0.008f
@@ -171,8 +171,8 @@ typedef struct
 /**
  * @brief Per-stage dynamics, cost, and box-constraint data for Riccati-ADMM.
  * @details Represents one prediction step used by the constrained LQR solve.
- *          Q and R are diagonal weights, and x/u bounds define box
- *          constraints for ADMM projection.
+ *          Q and R are diagonal weights; N is the state/input cross term.
+ *          x/u bounds define box constraints for ADMM projection.
  */
 typedef struct
 {
@@ -181,6 +181,7 @@ typedef struct
     float d[RICCATI_MAX_NX];
     float Q_diag[RICCATI_MAX_NX];
     float q[RICCATI_MAX_NX];
+    float N[RICCATI_MAX_NX][RICCATI_MAX_NU];
     float R_diag[RICCATI_MAX_NU];
     float r[RICCATI_MAX_NU];
     float x_lb[RICCATI_MAX_NX];

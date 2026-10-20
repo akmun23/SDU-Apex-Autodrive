@@ -49,7 +49,7 @@ TEST(VehicleModelSourceRollout, YawAndPoseUseOnlySourcePlantTransition)
 {
   MpcModelState_t state = turning_state();
   state.u = 3.5f;
-  state.delayed_steering_command_1 = -0.25f;
+  state.delayed_steering_command_1 = 0.15f;
   state.delayed_steering_command_2 = -0.25f;
   state.actual_steering_angle = -0.25f;
   const MpcModelControl_t control{-0.25f, 0.25f};
@@ -87,8 +87,8 @@ TEST(VehicleModelSourceRollout, YawAndPoseUseOnlySourcePlantTransition)
   std::copy_n(initialized.source_plant_internal_state +
                   MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL,
               4, input.state + UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL);
-  input.steering_target_rad = initialized.delayed_steering_command_1;
-  input.throttle_normalized = initialized.delayed_throttle_command_1;
+  input.steering_target_rad = initialized.delayed_steering_command_2;
+  input.throttle_normalized = initialized.delayed_throttle_command_2;
   input.suspension_history_initialized =
       initialized.source_suspension_history_initialized;
 
@@ -130,6 +130,8 @@ TEST(VehicleModelSourceRollout, ZeroThrottleUsesTheSourceBrakeBranch)
 {
   MpcModelState_t state{};
   state.u = 3.0f;
+  state.delayed_throttle_command_1 = 0.5f;
+  state.delayed_throttle_command_2 = 0.0f;
   const MpcModelControl_t control{};
   const MpcStageResult_t stage = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
@@ -171,7 +173,7 @@ TEST(VehicleModelSourceRollout,
 }
 
 TEST(VehicleModelSourceRollout,
-     DirectThrottleCommandEntersTheTwoPacketPlantQueue)
+     DirectThrottleCommandEntersTheInFlightPlantQueue)
 {
   MpcModelState_t state = turning_state();
   state.delayed_throttle_command_1 = 0.20f;
@@ -180,9 +182,8 @@ TEST(VehicleModelSourceRollout,
   const MpcStageResult_t stage = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(stage.valid);
-  /* The plant sees the already-delayed command; the optimizer's command is
-   * queued for the appropriate future packet instead of being converted to a
-   * speed target by an internal actuator controller. */
+  /* The plant sees the newest in-flight command. The optimizer's decision is
+   * shifted into that slot for the following packet interval. */
   EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_1, 0.30f);
   EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_2, 0.70f);
   EXPECT_TRUE(std::isfinite(stage.next.u));
@@ -206,7 +207,7 @@ TEST(VehicleModelSourceRollout,
 }
 
 TEST(VehicleModelSourceRollout,
-     SteeringCommandAdvancesThroughBothPendingPackets)
+     SteeringCommandShiftsPastHistoryAndQueuesNextCommand)
 {
   MpcModelState_t state = turning_state();
   state.delayed_steering_command_1 = 0.18f;
@@ -326,25 +327,25 @@ TEST(VehicleModelSourceRollout,
   }
 }
 
-TEST(VehicleModelSourceRollout, AppliesAndShiftsTheTwoPacketThrottleQueue)
+TEST(VehicleModelSourceRollout, AppliesNewestQueuedThrottleAndShiftsHistory)
 {
   MpcModelState_t state = turning_state();
-  state.delayed_throttle_command_1 = 0.0f;
-  state.delayed_throttle_command_2 = 0.30f;
-  const MpcModelControl_t control{};
+  state.delayed_throttle_command_1 = 0.30f;
+  state.delayed_throttle_command_2 = 0.0f;
+  const MpcModelControl_t control{0.0f, 0.40f};
   const MpcStageResult_t delayed = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(delayed.valid);
   EXPECT_NE(delayed.branch_flags & MPC_STAGE_PLANT_BRAKE, 0U);
 
   MpcModelState_t immediate_state = state;
-  immediate_state.delayed_throttle_command_1 = 0.30f;
+  immediate_state.delayed_throttle_command_2 = 0.30f;
   const MpcStageResult_t immediate = mpc_vehicle_model_step(
       &immediate_state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(immediate.valid);
   EXPECT_LT(delayed.next.u, immediate.next.u);
-  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_1, 0.30f);
-  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_2, 0.0f);
+  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_1, 0.0f);
+  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_2, 0.40f);
 }
 
 TEST(RiccatiSolverDeadline, StopsOnlyAfterACompleteAdmmIteration)
@@ -426,6 +427,8 @@ TEST(RiccatiSolverScaling, PreservesThePhysicalSolution)
     steps[k].x_lb[0] = -0.15f;
     steps[k].x_ub[0] = 0.15f;
     steps[k].B[0][0] = 0.25f;
+    steps[k].N[0][0] = -0.03f;
+    steps[k].N[1][1] = -0.02f;
     steps[k].R_diag[0] = 0.5f;
     steps[k].R_diag[1] = 0.5f;
     steps[k].u_lb[0] = -1.0f;
@@ -448,7 +451,8 @@ TEST(RiccatiSolverScaling, PreservesThePhysicalSolution)
       0.10f, 0.10f, 0.5f, 1.0f, 4.0f, 0.5f,
       400.0f, 400.0f, 400.0f, 400.0f,
       0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
-      0.05f, 0.05f, 0.05f, 0.05f};
+      0.05f, 0.05f, 0.05f, 0.05f,
+      0.5f, 1.0f};
   std::copy_n(scales, RICCATI_MAX_NX, scaled.state_scale);
   scaled.input_scale[0] = 0.5f;
   scaled.input_scale[1] = 1.0f;
@@ -549,6 +553,7 @@ TEST(RiccatiSolver, SymmetricValueRecursionMatchesUnfactoredPass)
       }
       for (int a = 0; a < nu; ++a) {
         step.B[i][a] = 0.001f * static_cast<float>(1 + (i + a) % 3);
+        step.N[i][a] = 0.0001f * static_cast<float>(1 + (i + 2 * a) % 5);
       }
     }
     for (int a = 0; a < nu; ++a) {
@@ -590,6 +595,34 @@ TEST(RiccatiSolver, SymmetricValueRecursionMatchesUnfactoredPass)
   }
 }
 
+TEST(MpcRtiSlewCost, CrossTermEqualsSquaredCommandIncrement)
+{
+  RiccatiStepData_t stage{};
+  float state[MPC_RTI_NX] = {};
+  float control[MPC_RTI_NU] = {};
+  constexpr float steering_weight = 17.0f;
+  constexpr float throttle_weight = 3.5f;
+  state[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] = 0.2f;
+  state[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] = 0.4f;
+  control[0] = -0.1f;
+  control[1] = 0.7f;
+  stage.Q_diag[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] =
+      2.0f * steering_weight;
+  stage.R_diag[0] = 2.0f * steering_weight;
+  stage.N[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND][0] =
+      -2.0f * steering_weight;
+  stage.Q_diag[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] =
+      2.0f * throttle_weight;
+  stage.R_diag[1] = 2.0f * throttle_weight;
+  stage.N[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND][1] =
+      -2.0f * throttle_weight;
+
+  const float expected = steering_weight * 0.3f * 0.3f +
+      throttle_weight * 0.3f * 0.3f;
+  EXPECT_NEAR(mpc_rti_matrix_stage_cost(&stage, state, control),
+      expected, 1.0e-6f);
+}
+
 TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
 {
   constexpr int horizon = PREDICTION_HORIZON;
@@ -600,11 +633,14 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   config.weight_e_y = 1.0f;
   config.weight_e_psi = 1.0f;
   config.weight_u = 1.0f;
+  config.weight_u_overspeed = 1.0f;
   config.weight_v = 1.0f;
   config.weight_r = 1.0f;
   config.weight_steering_command = 1.0f;
   config.weight_steering_target = 1.0f;
   config.weight_throttle_command = 1.0f;
+  config.weight_steering_slew = 20.0f;
+  config.weight_throttle_slew = 2.0f;
   config.terminal_multiplier = 1.0f;
   config.max_speed_mps = 16.0f;
   config.active_speed_ceiling_mps = 10.0f;
@@ -613,7 +649,6 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   config.first_prediction_corridor_margin_m = 0.05f;
   config.corridor_preview_halfwidth_m = 0.10f;
   config.nonlinear_corridor_tolerance_m = 0.01f;
-  config.recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
   config.jacobian_threads = 4;
 
   MpcModelState_t plant = turning_state();
@@ -628,7 +663,7 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   }
   for (int k = 0; k < horizon; ++k) {
     nominal_controls[k].steering_target_rad = (k % 2 == 0) ? 0.1f : -0.1f;
-    nominal_controls[k].throttle_command = k % 2 == 0 ? 0.2f : 0.0f;
+    nominal_controls[k].throttle_command = k % 2 == 0 ? 0.2f : 0.3f;
   }
 
   ASSERT_TRUE(vehicle_model_set_active_target_speed_ceiling(
@@ -661,21 +696,39 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   MpcModelState_t prepared_optimizer_plant =
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant;
   ASSERT_TRUE(vehicle_model_initialize_plant_state(&prepared_optimizer_plant));
-  EXPECT_EQ(MPC_RTI_NX, 20);
+  EXPECT_EQ(MPC_RTI_NX, 22);
   EXPECT_EQ(RICCATI_HORIZON,
       PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS);
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_EY],
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant.e_y);
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_U],
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant.u);
+  EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND],
+      nominal_states[MPC_COMMAND_DELAY_STEPS].plant
+          .delayed_steering_command_2);
+  EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],
+      nominal_states[MPC_COMMAND_DELAY_STEPS].plant
+          .delayed_throttle_command_2);
   EXPECT_FLOAT_EQ(problem.steps[0].u_lb[1],
       MPC_THROTTLE_MIN_DRIVE);
   EXPECT_FLOAT_EQ(problem.steps[0].u_ub[1],
       MPC_THROTTLE_MAX);
   EXPECT_FLOAT_EQ(problem.steps[1].u_lb[1],
-      MPC_THROTTLE_MIN);
+      MPC_THROTTLE_MIN_DRIVE);
   EXPECT_FLOAT_EQ(problem.steps[1].u_ub[1],
-      MPC_THROTTLE_MIN);
+      MPC_THROTTLE_MAX);
+  EXPECT_FLOAT_EQ(problem.steps[0].B[
+      MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND][0], 1.0f);
+  EXPECT_FLOAT_EQ(problem.steps[0].B[
+      MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND][1], 1.0f);
+  EXPECT_FLOAT_EQ(problem.steps[0].Q_diag[
+      MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND], 40.0f);
+  EXPECT_FLOAT_EQ(problem.steps[0].N[
+      MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND][0], -40.0f);
+  EXPECT_FLOAT_EQ(problem.steps[0].Q_diag[
+      MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND], 4.0f);
+  EXPECT_FLOAT_EQ(problem.steps[0].N[
+      MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND][1], -4.0f);
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_ACTUAL_STEERING_ANGLE],
       prepared_optimizer_plant.actual_steering_angle);
   for (int wheel = 0; wheel < 4; ++wheel) {
@@ -698,9 +751,9 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
     for (int row = 0; row < MPC_OPT_PHYSICAL_NX; ++row) {
       const int model_row = model_index(row);
       EXPECT_FLOAT_EQ(problem.steps[k].B[row][0],
-          serial[model_stage].A[model_row][MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1]);
+          serial[model_stage].A[model_row][MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2]);
       EXPECT_FLOAT_EQ(problem.steps[k].B[row][1],
-          serial[model_stage].A[model_row][MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1]);
+          serial[model_stage].A[model_row][MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2]);
       for (int col = 0; col < MPC_OPT_PHYSICAL_NX; ++col) {
         SCOPED_TRACE(::testing::Message() << "stage=" << k
             << " model_stage=" << model_stage
@@ -922,203 +975,6 @@ TEST(MpcReference, LaunchesFromRestWhenSpeedReferenceIsPositive)
          "when a stopped car is still well below its requested speed.";
 }
 
-TEST(MpcRtiCorridorSchedule,
-     TapersAnExistingClearanceViolationAcrossThePredictionHorizon)
-{
-  MpcTrajectorySample_t trajectory[3] = {
-      {0.0, 0.0, 0.0, 0.0, 0.0, 1.5, 0.65, 0.65, 0.0},
-      {10.0, 10.0, 0.0, 0.0, 0.0, 1.5, 0.65, 0.65, 0.0},
-      {20.0, 20.0, 0.0, 0.0, 0.0, 1.5, 0.65, 0.65, 0.0}};
-  size_t trajectory_count = 3;
-  double lap_length = 0.0;
-  ASSERT_TRUE(mpc_trajectory_prepare(
-      trajectory, &trajectory_count, &lap_length));
-
-  MpcRtiConfiguration_t config{};
-  config.max_speed_mps = 16.0f;
-  config.active_speed_ceiling_mps = 8.0f;
-  config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
-  config.corridor_margin_m = 0.15f;
-  config.first_prediction_corridor_margin_m = 0.15f;
-  config.corridor_preview_halfwidth_m = 0.10f;
-  config.nonlinear_corridor_tolerance_m = 0.005f;
-  config.recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
-
-  MpcRtiState_t initial{};
-  initial.plant.e_y = 0.65f - config.corridor_margin_m -
-      0.5f * MPC_CAR_WIDTH_M + 0.01f;  // 10 mm outside physical-clearance bound.
-  MpcRtiNominal_t nominal{};
-  nominal.valid = 1;
-  nominal.horizon = PREDICTION_HORIZON;
-  for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
-    nominal.states[k] = initial;
-    nominal.progress[k] = 0.0;
-  }
-
-  MpcRtiCorridorSchedule_t schedule{};
-  ASSERT_TRUE(mpc_rti_build_corridor_schedule(&initial, &nominal,
-      trajectory, trajectory_count, lap_length, PREDICTION_DT_SECONDS,
-      &config, &schedule));
-  ASSERT_TRUE(schedule.recovery_active);
-  EXPECT_TRUE(schedule.recovery_not_found)
-      << "The nominal seed is stationary, but the active envelope must still "
-         "allow a bounded recovery rollout.";
-  EXPECT_NEAR(schedule.initial_normal_violation, 0.01f, 1.0e-5f);
-  EXPECT_GT(schedule.active_upper[1], schedule.normal_upper[1]);
-  EXPECT_GT(schedule.active_upper[1] - schedule.normal_upper[1],
-      schedule.active_upper[PREDICTION_HORIZON] -
-          schedule.normal_upper[PREDICTION_HORIZON]);
-  EXPECT_FLOAT_EQ(schedule.active_upper[PREDICTION_HORIZON],
-      schedule.normal_upper[PREDICTION_HORIZON]);
-  EXPECT_TRUE(schedule.recovery_stage[1]);
-  EXPECT_NEAR(schedule.recovery_allowance_m[1],
-      schedule.initial_normal_violation, 1.0e-6f);
-  EXPECT_NEAR(schedule.recovery_allowance_m[MPC_COMMAND_DELAY_STEPS + 1],
-      schedule.initial_normal_violation, 1.0e-6f);
-  EXPECT_LT(schedule.recovery_allowance_m[MPC_COMMAND_DELAY_STEPS + 2],
-      schedule.recovery_allowance_m[MPC_COMMAND_DELAY_STEPS + 1]);
-  EXPECT_FLOAT_EQ(schedule.recovery_allowance_m[PREDICTION_HORIZON], 0.0f);
-  EXPECT_FALSE(schedule.recovery_stage[PREDICTION_HORIZON]);
-}
-
-TEST(MpcRtiCorridorSchedule,
-     StagewiseEnvelopeContainsItsRecoveringNominalUntilReentry)
-{
-  MpcTrajectorySample_t trajectory[3] = {
-      {0.0, 0.0, 0.0, 0.0, 0.0, 1.5, 0.65, 0.65, 0.0},
-      {10.0, 10.0, 0.0, 0.0, 0.0, 1.5, 0.65, 0.65, 0.0},
-      {20.0, 20.0, 0.0, 0.0, 0.0, 1.5, 0.65, 0.65, 0.0}};
-  size_t trajectory_count = 3;
-  double lap_length = 0.0;
-  ASSERT_TRUE(mpc_trajectory_prepare(
-      trajectory, &trajectory_count, &lap_length));
-
-  MpcRtiConfiguration_t config{};
-  config.max_speed_mps = 16.0f;
-  config.active_speed_ceiling_mps = 8.0f;
-  config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
-  config.corridor_margin_m = 0.15f;
-  config.first_prediction_corridor_margin_m = 0.15f;
-  config.corridor_preview_halfwidth_m = 0.10f;
-  config.nonlinear_corridor_tolerance_m = 0.005f;
-  config.recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
-
-  const float normal_upper = 0.65f - config.corridor_margin_m -
-      0.5f * MPC_CAR_WIDTH_M;
-  MpcRtiState_t initial{};
-  initial.plant.e_y = normal_upper + 0.01f;
-  MpcRtiNominal_t nominal{};
-  nominal.valid = 1;
-  nominal.horizon = PREDICTION_HORIZON;
-  for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
-    nominal.states[k] = initial;
-    nominal.progress[k] = 0.0;
-  }
-  nominal.states[4].plant.e_y = normal_upper + 0.015f;
-  nominal.states[5].plant.e_y = normal_upper + 0.012f;
-  nominal.states[6].plant.e_y = normal_upper + 0.005f;
-  /* Touching the normal corridor at stage 7 is not yet recovery: the seed
-   * briefly exits again before returning and staying inside at stage 10. */
-  for (int k = 7; k <= PREDICTION_HORIZON; ++k)
-    nominal.states[k].plant.e_y = normal_upper;
-  nominal.states[8].plant.e_y = normal_upper + 0.004f;
-  nominal.states[9].plant.e_y = normal_upper + 0.002f;
-
-  MpcRtiCorridorSchedule_t schedule{};
-  ASSERT_TRUE(mpc_rti_build_corridor_schedule(&initial, &nominal,
-      trajectory, trajectory_count, lap_length, PREDICTION_DT_SECONDS,
-      &config, &schedule));
-  ASSERT_TRUE(schedule.recovery_active);
-  ASSERT_FALSE(schedule.recovery_not_found);
-  EXPECT_EQ(schedule.first_normal_feasible_stage, 7);
-  for (int k = 1; k <= 9; ++k) {
-    EXPECT_TRUE(schedule.recovery_stage[k]);
-    EXPECT_GE(schedule.recovery_allowance_m[k],
-        schedule.seed_violation[k] - 1.0e-6f);
-    EXPECT_GE(schedule.active_upper[k],
-        schedule.seed_e_y[k] - 1.0e-6f);
-  }
-  EXPECT_FALSE(schedule.recovery_stage[10]);
-  EXPECT_FLOAT_EQ(schedule.recovery_allowance_m[10], 0.0f);
-}
-
-TEST(MpcRtiCorridorRecovery,
-     AllowsTransientUseOfFiveCentimeterReserveThenRequiresReentry)
-{
-  MpcTrajectorySample_t trajectory[3] = {
-      {0.0, 0.0, 0.0, 0.0, 0.0, 1.5, 1.2, 1.2, 0.0},
-      {10.0, 10.0, 0.0, 0.0, 0.0, 1.5, 1.2, 1.2, 0.0},
-      {20.0, 20.0, 0.0, 0.0, 0.0, 1.5, 1.2, 1.2, 0.0}};
-  size_t trajectory_count = 3;
-  double lap_length = 0.0;
-  ASSERT_TRUE(mpc_trajectory_prepare(
-      trajectory, &trajectory_count, &lap_length));
-
-  MpcRtiConfiguration_t config{};
-  config.max_speed_mps = 16.0f;
-  config.active_speed_ceiling_mps = 8.0f;
-  config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
-  config.corridor_margin_m = 0.15f;
-  config.first_prediction_corridor_margin_m = 0.15f;
-  config.nonlinear_corridor_tolerance_m = 0.0f;
-
-  MpcRtiState_t initial{};
-  initial.plant.e_y = 0.90f;
-  initial.plant.e_psi = 0.05f;
-  initial.plant.u = 1.5f;
-  initial.plant.r = -0.4f;
-
-  MpcModelControl_t controls[PREDICTION_HORIZON] = {};
-  for (int k = 0; k < PREDICTION_HORIZON; ++k) {
-    controls[k].steering_target_rad = 0.0f;
-    controls[k].throttle_command = 0.10f;
-  }
-  MpcRtiCorridorSchedule_t schedule{};
-  schedule.horizon = PREDICTION_HORIZON;
-  schedule.initial_normal_violation = 0.01f;
-  schedule.recovery_active = 1;
-  for (int k = 1; k <= PREDICTION_HORIZON; ++k)
-    schedule.recovery_stage[k] = 1;
-
-  MpcRtiState_t states[PREDICTION_HORIZON + 1] = {};
-  double progress[PREDICTION_HORIZON + 1] = {};
-  int failure_stage = -1;
-  MpcRtiRolloutFailure_t failure{};
-  const MpcRtiRolloutStatus_t status =
-      mpc_rti_rollout_candidate_with_schedule(&initial, 0.0, controls,
-          trajectory, trajectory_count, lap_length, nullptr, nullptr, nullptr,
-          PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config, &schedule,
-          states, progress, &failure_stage, &failure);
-
-  ASSERT_EQ(status, MPC_RTI_ROLLOUT_OK)
-      << "failure stage=" << failure_stage
-      << " ey=" << failure.state.plant.e_y
-      << " epsi=" << failure.state.plant.e_psi
-      << " bounds=[" << failure.lower_bound_m << ','
-      << failure.upper_bound_m << ']';
-  const auto normal_upper = [&](const MpcRtiState_t & state) {
-    const float extent = 0.5f * MPC_CAR_WIDTH_M *
-            std::abs(std::cos(state.plant.e_psi)) +
-        std::max(MPC_REAR_AXLE_TO_FRONT_BUMPER_M, MPC_REAR_OVERHANG_M) *
-            std::abs(std::sin(state.plant.e_psi));
-    return trajectory[1].left_bound - config.corridor_margin_m - extent;
-  };
-  EXPECT_GT(states[1].plant.e_y, normal_upper(states[1]));
-  EXPECT_GT(states[PREDICTION_HORIZON].plant.e_y,
-      normal_upper(states[PREDICTION_HORIZON]));
-
-  /* The production recovery schedule disables the recovery allowance at its
-   * endpoint. The same rollout must therefore fail if it has not re-entered
-   * the normal corridor by the horizon. */
-  schedule.recovery_stage[PREDICTION_HORIZON] = 0;
-  failure_stage = -1;
-  EXPECT_EQ(mpc_rti_rollout_candidate_with_schedule(&initial, 0.0, controls,
-      trajectory, trajectory_count, lap_length, nullptr, nullptr, nullptr,
-      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config, &schedule,
-      states, progress, &failure_stage, &failure), MPC_RTI_ROLLOUT_CORRIDOR);
-  EXPECT_EQ(failure_stage, PREDICTION_HORIZON - 1);
-}
-
 TEST(MpcReference,
      WheelSlipBelowSpeedTargetDoesNotForceUnityFullBrakeMode)
 {
@@ -1139,7 +995,6 @@ TEST(MpcReference,
   config.first_prediction_corridor_margin_m = 0.05f;
   config.corridor_preview_halfwidth_m = 0.10f;
   config.nonlinear_corridor_tolerance_m = 0.01f;
-  config.recovery_seed_policy = MPC_RTI_RECOVERY_SEED_NOMINAL;
   ASSERT_TRUE(vehicle_model_set_active_target_speed_ceiling(8.0f));
 
   MpcRtiState_t initial{};
@@ -1171,49 +1026,6 @@ TEST(MpcReference,
          "or overspeed target selects Unity's q=0 full-brake mode.";
 }
 
-TEST(MpcReference,
-     FallingReferenceStillSeedsDriveWhenDelayedSpeedIsBelowTarget)
-{
-  MpcModelControl_t controls[PREDICTION_HORIZON] = {};
-  MpcRtiState_t predicted[PREDICTION_HORIZON + 1] = {};
-  MpcRtiReference_t references[PREDICTION_HORIZON + 1] = {};
-  controls[0].throttle_command = MPC_THROTTLE_MIN;
-  predicted[3].plant.u = 3.0f;
-  references[3].u = 4.0f;
-  ASSERT_TRUE(mpc_rti_select_throttle_modes(
-      controls, predicted, references, PREDICTION_HORIZON));
-  EXPECT_FLOAT_EQ(controls[0].throttle_command, MPC_THROTTLE_MIN_DRIVE)
-      << "A negative reference-speed derivative must not select Unity's "
-         "full-brake q=0 branch while delayed predicted speed is still "
-         "below the decreasing speed target; drive-mode magnitude remains "
-         "a continuous optimizer decision.";
-}
-
-TEST(MpcReference, UnderspeedPreservesContinuousDriveDecision)
-{
-  MpcModelControl_t controls[PREDICTION_HORIZON] = {};
-  MpcRtiState_t predicted[PREDICTION_HORIZON + 1] = {};
-  MpcRtiReference_t references[PREDICTION_HORIZON + 1] = {};
-  controls[0].throttle_command = 0.37f;
-  predicted[3].plant.u = 1.5f;
-  references[3].u = 6.0f;
-  ASSERT_TRUE(mpc_rti_select_throttle_modes(
-      controls, predicted, references, PREDICTION_HORIZON));
-  EXPECT_FLOAT_EQ(controls[0].throttle_command, 0.37f);
-}
-
-TEST(MpcReference, PredictedOverspeedSelectsTheUnityFullBrakeBranch)
-{
-  MpcModelControl_t controls[PREDICTION_HORIZON] = {};
-  MpcRtiState_t predicted[PREDICTION_HORIZON + 1] = {};
-  MpcRtiReference_t references[PREDICTION_HORIZON + 1] = {};
-  predicted[3].plant.u = 4.5f;
-  references[3].u = 4.0f;
-  ASSERT_TRUE(mpc_rti_select_throttle_modes(
-      controls, predicted, references, PREDICTION_HORIZON));
-  EXPECT_FLOAT_EQ(controls[0].throttle_command, MPC_THROTTLE_MIN);
-}
-
 TEST(MpcRtiCommandEnvelope, FullBrakeAtRestDoesNotCreateReverseSpeed)
 {
   MpcModelState_t state{};
@@ -1231,7 +1043,7 @@ TEST(MpcRtiCommandEnvelope, FullBrakeAtRestDoesNotCreateReverseSpeed)
          "reverse body motion from rest.";
 }
 
-TEST(MpcCandidate, RejectsWireDeadbandButAcceptsSourceSaturatedSlip)
+TEST(MpcCandidate, PlantRolloutPreservesDriveAndBrakeBranches)
 {
   MpcTrajectorySample_t trajectory[3] = {
       {0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 100.0, 100.0, 0.0},
@@ -1263,28 +1075,22 @@ TEST(MpcCandidate, RejectsWireDeadbandButAcceptsSourceSaturatedSlip)
   MpcModelControl_t controls[PREDICTION_HORIZON] = {};
   MpcRtiState_t states[PREDICTION_HORIZON + 1] = {};
   double progress[PREDICTION_HORIZON + 1] = {};
-  controls[0].throttle_command = 0.0005f;
-  EXPECT_EQ(mpc_rti_rollout_candidate_with_schedule(&initial, 0.0,
-      controls, trajectory, trajectory_count, lap_length, nullptr, nullptr,
-      nullptr, 1, PREDICTION_DT_SECONDS, &config, nullptr, states, progress,
-      nullptr, nullptr), MPC_RTI_ROLLOUT_COMMAND_LIMIT);
-
   for (int k = 0; k < PREDICTION_HORIZON; ++k)
-    controls[k].throttle_command = 0.001f;
-  EXPECT_EQ(mpc_rti_rollout_candidate_with_schedule(&initial, 0.0,
+    controls[k].throttle_command = MPC_THROTTLE_MIN_DRIVE;
+  EXPECT_EQ(mpc_rti_rollout_candidate(&initial, 0.0,
       controls, trajectory, trajectory_count, lap_length, nullptr, nullptr,
-      nullptr, 4, PREDICTION_DT_SECONDS, &config, nullptr, states, progress,
-      nullptr, nullptr), MPC_RTI_ROLLOUT_OK);
+      nullptr, 4, PREDICTION_DT_SECONDS, &config, states, progress,
+      nullptr), MPC_RTI_ROLLOUT_OK);
   EXPECT_GT(states[1].incoming_max_positive_wheel_slip,
             UNITY_SOURCE_FORWARD_ASYMPTOTE_SLIP);
   EXPECT_GT(states[1].incoming_wheel_slip_excess_mps[2], 0.0);
 
   for (int k = 0; k < PREDICTION_HORIZON; ++k)
-    controls[k].throttle_command = 0.0f;
-  EXPECT_EQ(mpc_rti_rollout_candidate_with_schedule(&initial, 0.0,
+    controls[k].throttle_command = MPC_THROTTLE_MIN;
+  EXPECT_EQ(mpc_rti_rollout_candidate(&initial, 0.0,
       controls, trajectory, trajectory_count, lap_length, nullptr, nullptr,
-      nullptr, 4, PREDICTION_DT_SECONDS, &config, nullptr, states, progress,
-      nullptr, nullptr), MPC_RTI_ROLLOUT_OK);
+      nullptr, 4, PREDICTION_DT_SECONDS, &config, states, progress,
+      nullptr), MPC_RTI_ROLLOUT_OK);
 }
 
 TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
@@ -1412,7 +1218,7 @@ TEST(VehicleModelSourceRollout, JacobianDifferentiatesTheSameSourceStep)
 }
 
 TEST(VehicleModelSourceRollout,
-     JacobianUsesExactTwoPacketQueuesAndCheapFrenetColumns)
+     JacobianUsesNewestCommandAndExactHistoryShift)
 {
   MpcModelState_t state = turning_state();
   state.delayed_steering_command_1 = 0.18f;
@@ -1494,9 +1300,6 @@ TEST(VehicleModelSourceRollout,
       1.0e-3f);
 
   EXPECT_FLOAT_EQ(jacobian.A[MPC_STATE_IDX_ACTUAL_STEERING_ANGLE]
-                              [MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2],
-                  0.0f);
-  EXPECT_FLOAT_EQ(jacobian.A[MPC_STATE_IDX_ACTUAL_STEERING_ANGLE]
                               [MPC_STATE_IDX_ACTUAL_STEERING_ANGLE],
                   0.0f);
 
@@ -1509,12 +1312,26 @@ TEST(VehicleModelSourceRollout,
   EXPECT_FLOAT_EQ(jacobian.A[MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2]
                               [MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2],
                   0.0f);
-  for (int row = 0; row < MPC_MODEL_NX; ++row) {
-    if (row != MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1) {
-      EXPECT_FLOAT_EQ(
-          jacobian.A[row][MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2], 0.0f);
-    }
-  }
+  MpcModelState_t plus_throttle = state;
+  MpcModelState_t minus_throttle = state;
+  plus_throttle.delayed_throttle_command_2 += 1.0e-4f;
+  minus_throttle.delayed_throttle_command_2 -= 1.0e-4f;
+  const auto plus_throttle_step = mpc_vehicle_model_step(
+      &plus_throttle, &control, dt, curvature);
+  const auto minus_throttle_step = mpc_vehicle_model_step(
+      &minus_throttle, &control, dt, curvature);
+  ASSERT_TRUE(plus_throttle_step.valid);
+  ASSERT_TRUE(minus_throttle_step.valid);
+  const float du_dq = jacobian.A[MPC_STATE_IDX_U]
+      [MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2];
+  const float dr_dq = jacobian.A[MPC_STATE_IDX_R]
+      [MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2];
+  EXPECT_NEAR(du_dq,
+      (plus_throttle_step.next.u - minus_throttle_step.next.u) / 2.0e-4f,
+      0.02f * std::max(1.0f, std::abs(du_dq)));
+  EXPECT_NEAR(dr_dq,
+      (plus_throttle_step.next.r - minus_throttle_step.next.r) / 2.0e-4f,
+      0.02f * std::max(1.0f, std::abs(dr_dq)));
 }
 
 TEST(VehicleModelSourceRollout,
@@ -1594,7 +1411,7 @@ TEST(VehicleModelSourceRollout, RTIJacobianCarriesAllWheelSpinStates)
 TEST(VehicleModelSourceRollout, KeepsTheRealTimeRTIStateCompact)
 {
   EXPECT_EQ(MPC_MODEL_NX, 24);
-  EXPECT_EQ(MPC_RTI_NX, 20);
+  EXPECT_EQ(MPC_RTI_NX, 22);
   EXPECT_EQ(RICCATI_HORIZON,
       PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS);
   EXPECT_EQ(MPC_PLANT_INTERNAL_STATE_COUNT, 22);

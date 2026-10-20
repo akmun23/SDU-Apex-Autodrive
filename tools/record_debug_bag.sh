@@ -66,6 +66,7 @@ exec docker run --rm --name "${container}" \
       /autodrive/roboracer_1/collision_count \
       /autodrive/roboracer_1/lap_count \
       /autodrive/roboracer_1/bridge_packet_timing \
+      /autodrive/roboracer_1/development_actuator_timing \
       /autodrive/roboracer_1/bridge_timing_fault \
       /autodrive/roboracer_1/bridge_timing_fault_detail \
       /odom \
@@ -83,7 +84,8 @@ exec docker run --rm --name "${container}" \
       /current_map_pose \
       /mpc/drive_command \
       /mpc/diagnostics \
-      /mpc/open_loop_test
+      /mpc/open_loop_test \
+      /csv_replay/diagnostics
     fi
     exec ros2 bag record --max-cache-size 10485760 -o "${ROSBAG_OUTPUT}" \
       /autodrive/roboracer_1/lidar \
@@ -102,6 +104,7 @@ exec docker run --rm --name "${container}" \
       /autodrive/roboracer_1/last_lap_time \
       /autodrive/roboracer_1/best_lap_time \
       /autodrive/roboracer_1/bridge_packet_timing \
+      /autodrive/roboracer_1/development_actuator_timing \
       /autodrive/roboracer_1/bridge_timing_fault \
       /autodrive/roboracer_1/bridge_timing_fault_detail \
       /autodrive/reset_command \
@@ -121,5 +124,6 @@ exec docker run --rm --name "${container}" \
       /current_map_pose \
       /mpc/diagnostics \
       /mpc/open_loop_test \
+      /csv_replay/diagnostics \
       /map
   '

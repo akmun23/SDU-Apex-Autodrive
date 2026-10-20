@@ -39,11 +39,9 @@ def generate_launch_description():
                 "jacobian_threads": max(0, min(4, int(os.environ.get(
                     "MPC_JACOBIAN_THREADS", "4")))),
                 "max_solver_iterations": int(os.environ.get(
-                    "MPC_MAX_ITERATIONS", "200")),
+                    "MPC_MAX_ITERATIONS", "50")),
                 "solver_tolerance": float(os.environ.get(
                     "MPC_SOLVER_TOLERANCE", "0.02")),
-                "solver_degraded_tolerance": float(os.environ.get(
-                    "MPC_DEGRADED_TOLERANCE", "0.02")),
                 "admm_rho": float(os.environ.get("MPC_RHO", "7.0")),
                 "admm_rho_input": float(os.environ.get(
                     "MPC_RHO_INPUT", "7.0")),
@@ -83,10 +81,12 @@ def generate_launch_description():
                     "MPC_WEIGHT_STEERING_TARGET", "5.0")),
                 "weight_throttle_command": float(os.environ.get(
                     "MPC_WEIGHT_THROTTLE", "0.1")),
+                "weight_steering_slew": float(os.environ.get(
+                    "MPC_WEIGHT_STEERING_SLEW", "25.0")),
+                "weight_throttle_slew": float(os.environ.get(
+                    "MPC_WEIGHT_THROTTLE_SLEW", "2.0")),
                 "startup_nominal_throttle_seed": float(os.environ.get(
                     "MPC_STARTUP_THROTTLE_SEED", "0.0")),
-                "rti_refinement_mode": os.environ.get(
-                    "MPC_REFINEMENT_MODE", "adaptive"),
                 "rti_cycle_budget_ms": 0.0,
             },
         ],

@@ -57,7 +57,7 @@ double number_arg(char **argv, int index, double fallback)
 
 void configure(MpcRtiCycleConfiguration_t *config,
                double rho, double rho_steer, double rho_throttle,
-               double alpha, double cost_scale, const std::string &mode,
+               double alpha, double cost_scale,
                double rho_ey, double rho_u_state, double rho_steer_state,
                double rho_max, int rho_period, double tolerance,
                bool cold_start_each_solve, int jacobian_threads,
@@ -68,10 +68,7 @@ void configure(MpcRtiCycleConfiguration_t *config,
                double heading_state_scale,
                double corridor_margin,
                double first_corridor_margin,
-               int recovery_policy,
-               double recovery_k_ey,
-               double recovery_k_epsi,
-               double recovery_k_r)
+               double rho_u)
 {
     *config = MpcRtiCycleConfiguration_t{};
     auto &model = config->model;
@@ -87,6 +84,8 @@ void configure(MpcRtiCycleConfiguration_t *config,
     model.weight_steering_command = static_cast<float>(3.0 * cost_scale);
     model.weight_steering_target = static_cast<float>(5.0 * cost_scale);
     model.weight_throttle_command = static_cast<float>(0.1 * cost_scale);
+    model.weight_steering_slew = 25.0f;
+    model.weight_throttle_slew = 2.0f;
     model.startup_nominal_throttle_seed = static_cast<float>(
         startup_throttle_seed);
     model.terminal_multiplier = 3.0f;
@@ -98,15 +97,11 @@ void configure(MpcRtiCycleConfiguration_t *config,
         static_cast<float>(first_corridor_margin);
     model.corridor_preview_halfwidth_m = 0.10f;
     model.nonlinear_corridor_tolerance_m = 0.005f;
-    model.recovery_seed_policy = recovery_policy;
-    model.recovery_steering_k_e_y = static_cast<float>(recovery_k_ey);
-    model.recovery_steering_k_e_psi = static_cast<float>(recovery_k_epsi);
-    model.recovery_steering_k_r = static_cast<float>(recovery_k_r);
     model.jacobian_threads = jacobian_threads;
 
     auto &solver = config->solver;
     solver.rho = static_cast<float>(rho);
-    solver.rho_u = 40.0f;
+    solver.rho_u = static_cast<float>(rho_u);
     solver.rho_x_by_state[MPC_OPT_IDX_EY] = static_cast<float>(rho_ey);
     solver.rho_x_by_state[MPC_OPT_IDX_U] = static_cast<float>(rho_u_state);
     solver.rho_x_by_state[MPC_OPT_IDX_ACTUAL_STEERING_ANGLE] =
@@ -133,19 +128,6 @@ void configure(MpcRtiCycleConfiguration_t *config,
     solver.input_scale[0] = 0.5f;
     solver.input_scale[1] = 1.0f;
 
-    config->refinement_mode = mode == "r2"
-        ? MPC_RTI_REFINEMENT_R2 : MPC_RTI_REFINEMENT_R1;
-    config->rti2_progress_error_trigger_m = 0.10f;
-    config->rti2_curvature_error_trigger_per_m = 0.02f;
-    config->rti2_bound_error_trigger_m = 0.05f;
-    config->rti2_min_corridor_slack_trigger_m = 0.25f;
-    config->rti2_steering_target_correction_trigger_rad = 0.50f;
-    config->rti2_throttle_correction_trigger = 0.05f;
-    config->rti2_residual_imbalance_trigger = 8.0f;
-    config->rti2_lateral_load_trigger_mps2 = 3.0f;
-    config->rti2_nonsmooth_columns_trigger = 50;
-    config->degraded_residual_limit = static_cast<float>(tolerance);
-    config->max_consecutive_degraded_solves = 3;
     config->max_cycle_time_us = 0.0;
 }
 
@@ -153,17 +135,17 @@ void configure(MpcRtiCycleConfiguration_t *config,
 
 int main(int argc, char **argv)
 {
-    if (argc < 8 || argc > 30) {
+    if (argc < 8 || argc > 25) {
         std::cerr << "usage: mpc_bag_solver_replay TRAJECTORY INPUT_CSV "
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
-                     "[r1|r2] [RHO_EY RHO_U_STATE RHO_STEER_STATE "
+                     "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
                      "[RHO_MAX PERIOD TOLERANCE "
-                     "[sequence|independent] [warm|cold] [REPEATS "
+                     "[sequence|independent] [warm|cold] "
                      "[JACOBIAN_THREADS [STARTUP_SEED "
                      "[EY_WEIGHT_MULTIPLIER [EPSI_WEIGHT_MULTIPLIER "
                      "[EY_STATE_SCALE [EPSI_STATE_SCALE "
                      "[CORRIDOR_MARGIN [FIRST_CORRIDOR_MARGIN "
-                     "[RECOVERY_POLICY [K_EY [K_EPSI [K_R]]]]]]]]]]\n";
+                     "[RHO_U]]]]]]]]]]\n";
         return 2;
     }
 
@@ -173,50 +155,39 @@ int main(int argc, char **argv)
         const double rho_throttle = number_arg(argv, 5, 7.0);
         const double alpha = number_arg(argv, 6, 1.6);
         const double cost_scale = number_arg(argv, 7, 0.001);
-        const std::string mode = argc >= 9 ? argv[8] : "r1";
-        const double rho_ey = argc >= 10 ? number_arg(argv, 9, 0.0) : 0.0;
-        const double rho_u_state = argc >= 11 ? number_arg(argv, 10, 0.0) : 0.0;
-        const double rho_steer_state = argc >= 12
-            ? number_arg(argv, 11, 0.0) : 0.0;
-        const double rho_max = argc >= 13 ? number_arg(argv, 12, 32.0) : 32.0;
-        const int rho_period = argc >= 14
-            ? static_cast<int>(number_arg(argv, 13, 10.0)) : 10;
-        const double tolerance = argc >= 15
-            ? number_arg(argv, 14, 0.02) : 0.02;
-        const std::string memory_mode = argc >= 16 ? argv[15] : "sequence";
-        const std::string solver_start = argc >= 17 ? argv[16] : "warm";
-        const int max_repeats = argc >= 18
-            ? static_cast<int>(number_arg(argv, 17, 0.0)) : 0;
-        const int jacobian_threads = argc >= 19
-            ? static_cast<int>(number_arg(argv, 18, 4.0)) : 4;
-        const double startup_seed = argc >= 20
-            ? number_arg(argv, 19, 0.25) : 0.25;
-        const double ey_weight_multiplier = argc >= 21
-            ? number_arg(argv, 20, 1.0) : 1.0;
-        const double epsi_weight_multiplier = argc >= 22
-            ? number_arg(argv, 21, 1.0) : 1.0;
-        const double ey_state_scale = argc >= 23
-            ? number_arg(argv, 22, 0.10) : 0.10;
-        const double epsi_state_scale = argc >= 24
-            ? number_arg(argv, 23, 0.10) : 0.10;
-        const double corridor_margin = argc >= 25
-            ? number_arg(argv, 24, 0.05) : 0.05;
-        const double first_corridor_margin = argc >= 26
-            ? number_arg(argv, 25, corridor_margin) : corridor_margin;
-        const int recovery_policy = argc >= 27
-            ? static_cast<int>(number_arg(argv, 26, 0.0))
-            : MPC_RTI_RECOVERY_SEED_NOMINAL;
-        const double recovery_k_ey = argc >= 28
-            ? number_arg(argv, 27, 0.0) : 0.0;
-        const double recovery_k_epsi = argc >= 29
-            ? number_arg(argv, 28, 0.0) : 0.0;
-        const double recovery_k_r = argc >= 30
-            ? number_arg(argv, 29, 0.0) : 0.0;
-        if ((mode != "r1" && mode != "r2") || !(cost_scale > 0.0) ||
+        const double rho_ey = argc >= 9 ? number_arg(argv, 8, 0.0) : 0.0;
+        const double rho_u_state = argc >= 10 ? number_arg(argv, 9, 0.0) : 0.0;
+        const double rho_steer_state = argc >= 11
+            ? number_arg(argv, 10, 0.0) : 0.0;
+        const double rho_max = argc >= 12 ? number_arg(argv, 11, 32.0) : 32.0;
+        const int rho_period = argc >= 13
+            ? static_cast<int>(number_arg(argv, 12, 10.0)) : 10;
+        const double tolerance = argc >= 14
+            ? number_arg(argv, 13, 0.02) : 0.02;
+        const std::string memory_mode = argc >= 15 ? argv[14] : "sequence";
+        const std::string solver_start = argc >= 16 ? argv[15] : "warm";
+        const int jacobian_threads = argc >= 17
+            ? static_cast<int>(number_arg(argv, 16, 4.0)) : 4;
+        const double startup_seed = argc >= 18
+            ? number_arg(argv, 17, 0.25) : 0.25;
+        const double ey_weight_multiplier = argc >= 19
+            ? number_arg(argv, 18, 1.0) : 1.0;
+        const double epsi_weight_multiplier = argc >= 20
+            ? number_arg(argv, 19, 1.0) : 1.0;
+        const double ey_state_scale = argc >= 21
+            ? number_arg(argv, 20, 0.10) : 0.10;
+        const double epsi_state_scale = argc >= 22
+            ? number_arg(argv, 21, 0.10) : 0.10;
+        const double corridor_margin = argc >= 23
+            ? number_arg(argv, 22, 0.05) : 0.05;
+        const double first_corridor_margin = argc >= 24
+            ? number_arg(argv, 23, corridor_margin) : corridor_margin;
+        const double rho_u = argc >= 25 ? number_arg(argv, 24, 7.0) : 7.0;
+        if (!(cost_scale > 0.0) ||
             !(tolerance > 0.0) ||
+            !std::isfinite(rho_u) || !(rho_u > 0.0) || rho_u > 127.0 ||
             (memory_mode != "sequence" && memory_mode != "independent") ||
             (solver_start != "warm" && solver_start != "cold") ||
-            max_repeats < 0 || max_repeats > 10 ||
             jacobian_threads < 0 || jacobian_threads > 4 ||
             startup_seed < 0.0 || startup_seed > 1.0 ||
             !(ey_weight_multiplier > 0.0) || ey_weight_multiplier > 100.0 ||
@@ -226,12 +197,8 @@ int main(int argc, char **argv)
             !(epsi_state_scale > 0.0) || epsi_state_scale > 10.0 ||
             corridor_margin < 0.0 ||
             first_corridor_margin < 0.0 ||
-            first_corridor_margin > corridor_margin ||
-            recovery_policy < MPC_RTI_RECOVERY_SEED_NOMINAL ||
-            recovery_policy > MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK ||
-            recovery_k_ey < 0.0 || recovery_k_epsi < 0.0 ||
-            recovery_k_r < 0.0)
-            throw std::runtime_error("invalid mode or cost scale");
+            first_corridor_margin > corridor_margin)
+            throw std::runtime_error("invalid replay configuration");
 
         double lap_length = 0.0;
         const auto trajectory = load_trajectory(argv[1], &lap_length);
@@ -240,12 +207,11 @@ int main(int argc, char **argv)
 
         MpcRtiCycleConfiguration_t config{};
         configure(&config, rho, rho_steer, rho_throttle, alpha, cost_scale,
-                  mode, rho_ey, rho_u_state, rho_steer_state,
+                  rho_ey, rho_u_state, rho_steer_state,
                   rho_max, rho_period, tolerance, solver_start == "cold",
                   jacobian_threads, startup_seed, ey_weight_multiplier,
                   epsi_weight_multiplier, ey_state_scale, epsi_state_scale,
-                  corridor_margin, first_corridor_margin, recovery_policy,
-                  recovery_k_ey, recovery_k_epsi, recovery_k_r);
+                  corridor_margin, first_corridor_margin, rho_u);
         const char *trace_row_text = std::getenv("MPC_REPLAY_TRACE_ROW");
         const long trace_row = trace_row_text
             ? std::strtol(trace_row_text, nullptr, 10) : -1;
@@ -253,34 +219,11 @@ int main(int argc, char **argv)
         const long diagnostic_row = diagnostic_row_text
             ? std::strtol(diagnostic_row_text, nullptr, 10) : -1;
         riccati_debug_set_trace_enabled(trace_row >= 0);
-        std::cout << "stamp_ns,status,r1_admm_status,r1_iterations,r1_primal,"
-                     "r1_dual,r1_state_primal,r1_state_primal_stage,"
-                     "r1_state_primal_index,r1_state_dual,r1_state_dual_stage,"
-                     "r1_state_dual_index,r1_input_primal,"
-                     "r1_input_primal_stage,r1_input_primal_index,"
-                     "r1_input_dual,r1_input_dual_stage,r1_input_dual_index,"
-                     "r2_admm_status,r2_iterations,r2_primal,r2_dual,rti_calls,"
-                     "convergence_retry_count,convergence_retry_cycle_status,"
-                     "convergence_retry_r1_admm_status,"
-                     "convergence_retry_r2_admm_status,"
-                     "convergence_retry_r1_iterations,"
-                     "convergence_retry_r2_iterations,"
-                     "convergence_retry_us,"
-                     "r1_attempts,r2_attempts,r1_iterations_total,r2_iterations_total,"
-                     "r1_qp_padding_m,r2_qp_padding_m,"
-                     "r1_solve_us,r2_solve_us,total_rti_us,"
-                     "r1_first_steering,r1_first_throttle,"
-                     "r1_cycle_status,r1_nonlinear_reason,r1_nonlinear_stage,"
-                     "r2_cycle_status,r2_nonlinear_reason,r2_nonlinear_stage,"
-                     "corridor_repair_used,corridor_repair_alpha,"
-                     "r1_nonlinear_objective,r2_nonlinear_objective,"
-                     "selected_candidate,nonlinear_failure_reason,"
-                     "nonlinear_failure_stage,"
-                     "r1_failure_valid,r1_failure_ey,r1_failure_epsi,"
-                     "r1_failure_lower,r1_failure_upper,"
-                     "r2_failure_valid,r2_failure_ey,r2_failure_epsi,"
-                     "r2_failure_lower,r2_failure_upper,"
-                     "selected_steering,selected_throttle\n";
+        std::cout << "stamp_ns,status,admm_status,iterations,primal,dual,"
+                     "solve_us,cycle_us,qp_build_us,admm_us,rollout_us,"
+                     "nonlinear_validation_us,min_corridor_slack_m,"
+                     "nonlinear_failure_reason,nonlinear_failure_stage,"
+                     "first_steering,first_throttle\n";
 
         std::string line;
         std::size_t row_index = 0;
@@ -316,25 +259,10 @@ int main(int argc, char **argv)
             config.model.active_speed_ceiling_mps = static_cast<float>(row[2]);
             MpcRtiCycleResult_t result{};
             if (memory_mode == "independent") mpc_rti_memory_reset(&memory);
-            MpcRtiCycleStatus_t status = MPC_RTI_CYCLE_REJECTED_INPUT;
-            int rti_calls = 0;
-            for (int attempt = 0; attempt <= max_repeats; ++attempt) {
-                status = mpc_rti_solve_cycle(
-                    &state, row[1], trajectory.data(), trajectory.size(),
-                    lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
-                    &config, &memory, &result);
-                ++rti_calls;
-                const bool r1_converged = result.r1_admm_status == 0 &&
-                    result.r1_solver_iterations < 50;
-                const bool r2_converged = result.r2_admm_status == 0 &&
-                    result.r2_solver_iterations < 50;
-                const bool retry_converged =
-                    (result.convergence_retry_r1_admm_status == 0 &&
-                     result.convergence_retry_r1_iterations < 50) ||
-                    (result.convergence_retry_r2_admm_status == 0 &&
-                     result.convergence_retry_r2_iterations < 50);
-                if (r1_converged || r2_converged || retry_converged) break;
-            }
+            const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
+                &state, row[1], trajectory.data(), trajectory.size(),
+                lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
+                &config, &memory, &result);
             if (static_cast<long>(row_index) == trace_row) {
                 const int trace_count = riccati_debug_get_trace_count();
                 for (int i = 0; i < trace_count; ++i) {
@@ -360,40 +288,24 @@ int main(int argc, char **argv)
                 }
             }
             if (static_cast<long>(row_index) == diagnostic_row) {
-                std::cerr << "SCHEDULE row=" << row_index
+                std::cerr << "CYCLE row=" << row_index
                           << " status=" << status
-                          << " recovery=" << result.recovery_active
-                          << " not_found=" << result.recovery_not_found
-                          << " initial_violation="
-                          << result.recovery_initial_normal_violation_m
-                          << " max_seed_violation="
-                          << result.recovery_max_seed_violation_m
-                          << " reentry=" << result.recovery_reentry_stage
+                          << " admm=" << result.admm_status
+                          << " iterations=" << result.solver_iterations
+                          << " nonlinear_failure="
+                          << result.nonlinear_failure_reason
+                          << " stage=" << result.nonlinear_failure_stage
                           << " state={ey:" << state.plant.e_y
                           << ",e_psi:" << state.plant.e_psi
                           << ",u:" << state.plant.u
                           << ",r:" << state.plant.r << "}\n";
-                std::cerr << "stage,seed_ey,seed_violation,normal_lower,normal_upper,active_lower,active_upper,allowance,recovery\n";
-                for (int k = 0; k <= PREDICTION_HORIZON; ++k)
-                    std::cerr << k << ',' << result.recovery_seed_e_y_m[k]
-                              << ',' << result.recovery_seed_violation_m[k]
-                              << ',' << result.recovery_normal_lower_m[k]
-                              << ',' << result.recovery_normal_upper_m[k]
-                              << ',' << result.recovery_active_lower_m[k]
-                              << ',' << result.recovery_active_upper_m[k]
-                              << ',' << result.recovery_seed_violation_m[k]
-                              << ',' << result.recovery_stage[k] << '\n';
-                auto print_failure = [](const char *label,
-                                        const MpcRtiRolloutFailure_t &failure) {
-                    std::cerr << label << " valid=" << failure.valid
-                              << " stage=" << failure.stage
-                              << " ey=" << failure.state.plant.e_y
-                              << " epsi=" << failure.state.plant.e_psi
-                              << " lower=" << failure.lower_bound_m
-                              << " upper=" << failure.upper_bound_m << '\n';
-                };
-                print_failure("R1_FAILURE", result.r1_nonlinear_failure);
-                print_failure("R2_FAILURE", result.r2_nonlinear_failure);
+                const auto &failure = result.nonlinear_failure;
+                std::cerr << "NONLINEAR_FAILURE valid=" << failure.valid
+                          << " stage=" << failure.stage
+                          << " ey=" << failure.state.plant.e_y
+                          << " epsi=" << failure.state.plant.e_psi
+                          << " lower=" << failure.lower_bound_m
+                          << " upper=" << failure.upper_bound_m << '\n';
             }
             if (status == MPC_RTI_CYCLE_REJECTED_INPUT &&
                 result.input_failure_reason != MPC_RTI_INPUT_FAILURE_NONE)
@@ -401,64 +313,15 @@ int main(int argc, char **argv)
                           << result.input_failure_reason << '\n';
             std::cout.precision(9);
             std::cout << static_cast<std::uint64_t>(row[0]) << ',' << status << ','
-                      << result.r1_admm_status << ',' << result.r1_solver_iterations
-                      << ',' << result.r1_primal_residual << ','
-                      << result.r1_dual_residual << ','
-                      << result.r1_state_primal_residual << ','
-                      << result.r1_state_primal_stage << ','
-                      << result.r1_state_primal_index << ','
-                      << result.r1_state_dual_residual << ','
-                      << result.r1_state_dual_stage << ','
-                      << result.r1_state_dual_index << ','
-                      << result.r1_input_primal_residual << ','
-                      << result.r1_input_primal_stage << ','
-                      << result.r1_input_primal_index << ','
-                      << result.r1_input_dual_residual << ','
-                      << result.r1_input_dual_stage << ','
-                      << result.r1_input_dual_index << ','
-                      << result.r2_admm_status << ',' << result.r2_solver_iterations
-                      << ',' << result.r2_primal_residual << ','
-                      << result.r2_dual_residual << ',' << rti_calls << ','
-                      << result.convergence_retry_count << ','
-                      << result.convergence_retry_cycle_status << ','
-                      << result.convergence_retry_r1_admm_status << ','
-                      << result.convergence_retry_r2_admm_status << ','
-                      << result.convergence_retry_r1_iterations << ','
-                      << result.convergence_retry_r2_iterations << ','
-                      << result.convergence_retry_us << ','
-                      << result.r1_solver_attempts << ','
-                      << result.r2_solver_attempts << ','
-                      << result.r1_solver_iterations_total << ','
-                      << result.r2_solver_iterations_total << ','
-                      << result.r1_qp_corridor_padding_m << ','
-                      << result.r2_qp_corridor_padding_m << ','
-                      << result.r1_solve_us << ',' << result.r2_solve_us << ','
-                      << result.total_rti_us << ','
-                      << result.r1_first_action.steering_target_rad << ','
-                      << result.r1_first_action.throttle_command << ','
-                      << result.r1_status << ','
-                      << result.r1_nonlinear_failure_reason << ','
-                      << result.r1_nonlinear_failure_stage << ','
-                      << result.r2_status << ','
-                      << result.r2_nonlinear_failure_reason << ','
-                      << result.r2_nonlinear_failure_stage << ','
-                      << result.corridor_repair_used << ','
-                      << result.corridor_repair_alpha << ','
-                      << result.r1_nonlinear_objective << ','
-                      << result.r2_nonlinear_objective << ','
-                      << result.selected_candidate << ','
+                      << result.admm_status << ',' << result.solver_iterations << ','
+                      << result.primal_residual << ',' << result.dual_residual << ','
+                      << result.total_solve_us << ',' << result.total_cycle_us << ','
+                      << result.qp_build_us << ',' << result.admm_us << ','
+                      << result.exact_rollout_us << ','
+                      << result.nonlinear_validation_us << ','
+                      << result.minimum_predicted_corridor_slack_m << ','
                       << result.nonlinear_failure_reason << ','
                       << result.nonlinear_failure_stage << ','
-                      << result.r1_nonlinear_failure.valid << ','
-                      << result.r1_nonlinear_failure.state.plant.e_y << ','
-                      << result.r1_nonlinear_failure.state.plant.e_psi << ','
-                      << result.r1_nonlinear_failure.lower_bound_m << ','
-                      << result.r1_nonlinear_failure.upper_bound_m << ','
-                      << result.r2_nonlinear_failure.valid << ','
-                      << result.r2_nonlinear_failure.state.plant.e_y << ','
-                      << result.r2_nonlinear_failure.state.plant.e_psi << ','
-                      << result.r2_nonlinear_failure.lower_bound_m << ','
-                      << result.r2_nonlinear_failure.upper_bound_m << ','
                       << result.first_control.steering_target_rad << ','
                       << result.first_control.throttle_command << '\n';
             ++row_index;

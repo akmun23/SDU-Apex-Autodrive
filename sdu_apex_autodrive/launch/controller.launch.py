@@ -90,11 +90,23 @@ def _setup(context):
     if not math.isfinite(start_delay) or start_delay < 0.0:
         raise RuntimeError("mpc_start_delay_sec must be finite and nonnegative")
     with_rviz = _bool(LaunchConfiguration("with_rviz").perform(context))
+    enable_mpc = _bool(LaunchConfiguration("enable_mpc").perform(context))
+    csv_command_file = LaunchConfiguration(
+        "csv_command_file").perform(context).strip()
+    if csv_command_file and enable_mpc:
+        raise RuntimeError(
+            "CSV command replay requires enable_mpc:=false to avoid competing publishers")
+    if csv_command_file and not os.path.isfile(csv_command_file):
+        raise RuntimeError(f"CSV command file does not exist: {csv_command_file}")
     expected = {
         "autodrive_bridge", "sensor_odometry", "ekf_localization",
         "map_server", "lifecycle_manager_map", "gpu_amcl_cpp",
-        "controller_container", "autodrive_actuator_interface",
+        "autodrive_actuator_interface",
     }
+    if enable_mpc:
+        expected.add("controller_container")
+    if csv_command_file:
+        expected.add("csv_command_replay")
     _reject_existing_runtime_nodes(expected)
 
     bridge = Node(
@@ -157,6 +169,9 @@ def _setup(context):
         composable_node_descriptions=[mpc_node], output="screen")
     actuator_parameters = [
         os.path.join(integration, "config", "actuator_interface.yaml")]
+    actuator_parameters.append({
+        "development_timing_topic":
+            "/autodrive/roboracer_1/development_actuator_timing"})
     if overlays["actuator_parameter_overlay"]:
         actuator_parameters.append(overlays["actuator_parameter_overlay"])
     actuator = Node(
@@ -167,13 +182,28 @@ def _setup(context):
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
         bridge, odometry, ekf, map_server, map_lifecycle, amcl, actuator,
-        RegisterEventHandler(OnProcessStart(
+    ]
+    if enable_mpc:
+        actions.append(RegisterEventHandler(OnProcessStart(
             target_action=amcl,
             on_start=[TimerAction(period=start_delay, actions=[
                 LogInfo(msg=f"Starting MPC after {start_delay:.2f}s AMCL warm-up"),
                 controller,
-            ])])),
-    ]
+            ])])))
+    if csv_command_file:
+        actions.append(Node(
+            package="sdu_apex_autodrive", executable="csv_command_replay",
+            name="csv_command_replay", output="screen",
+            parameters=[{
+                "csv_file": csv_command_file,
+                "path_repeats": int(LaunchConfiguration(
+                    "csv_path_repeats").perform(context)),
+                "lookahead_speed_gain_s": float(LaunchConfiguration(
+                    "csv_lookahead_speed_gain_s").perform(context)),
+                "native_control_delay_s": float(LaunchConfiguration(
+                    "csv_native_control_delay_s").perform(context)),
+            }],
+        ))
     if with_rviz:
         actions.append(Node(
             package="rviz2", executable="rviz2", name="rviz",
@@ -187,6 +217,11 @@ def generate_launch_description():
         DeclareLaunchArgument("map_yaml", default_value=""),
         DeclareLaunchArgument("trajectory_file", default_value=""),
         DeclareLaunchArgument("with_rviz", default_value="false"),
+        DeclareLaunchArgument("enable_mpc", default_value="true"),
+        DeclareLaunchArgument("csv_command_file", default_value=""),
+        DeclareLaunchArgument("csv_path_repeats", default_value="3"),
+        DeclareLaunchArgument("csv_lookahead_speed_gain_s", default_value="0.12"),
+        DeclareLaunchArgument("csv_native_control_delay_s", default_value="0.05"),
         DeclareLaunchArgument("controller_max_speed", default_value="16.0"),
         DeclareLaunchArgument("mpc_publish_diagnostics", default_value="false"),
         DeclareLaunchArgument("mpc_start_delay_sec", default_value="2.0"),

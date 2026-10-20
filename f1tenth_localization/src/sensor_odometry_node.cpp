@@ -321,6 +321,8 @@ private:
     double steering_feedback = 0.0;
     double throttle_feedback = 0.0;
     bool feedback_valid = false;
+    bool steering_feedback_valid = false;
+    bool throttle_feedback_valid = false;
     {
       std::lock_guard<std::mutex> lock(actuator_mutex_);
       // Sensor headers carry the Bridge request epoch, while controller
@@ -332,11 +334,15 @@ private:
       throttle_command = throttle_command_history_.value_at_or_before(
         packet.stamp_ns, 0.0);
       const auto current = std::chrono::steady_clock::now();
-      feedback_valid = have_steering_feedback_ && have_throttle_feedback_ &&
-        current - steering_feedback_received_ <= kActuatorFeedbackMaxAge &&
+      steering_feedback_valid = have_steering_feedback_ &&
+        current - steering_feedback_received_ <= kActuatorFeedbackMaxAge;
+      throttle_feedback_valid = have_throttle_feedback_ &&
         current - throttle_feedback_received_ <= kActuatorFeedbackMaxAge;
-      if (feedback_valid) {
+      feedback_valid = steering_feedback_valid && throttle_feedback_valid;
+      if (steering_feedback_valid) {
         steering_feedback = steering_feedback_rad_;
+      }
+      if (throttle_feedback_valid) {
         throttle_feedback = throttle_feedback_;
       }
     }
@@ -345,8 +351,8 @@ private:
     if (diagnostics_pub_)
       plant_advance_start = std::chrono::steady_clock::now();
     last_plant_ = plant_runtime_->advance(
-      steering_command, throttle_command, feedback_valid,
-      steering_feedback);
+      steering_command, throttle_command, steering_feedback_valid,
+      steering_feedback, throttle_feedback_valid, throttle_feedback);
     const double plant_advance_us = diagnostics_pub_
       ? std::chrono::duration<double, std::micro>(
           std::chrono::steady_clock::now() - plant_advance_start).count()

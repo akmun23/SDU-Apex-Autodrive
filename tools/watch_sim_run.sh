@@ -5,7 +5,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${repo_root}/tools/docker_env.sh"
 
 if [[ "$#" -lt 4 || "$#" -gt 5 ]]; then
-  echo "Usage: $0 <controller-container> <simulator-container> <recorder-container> <target-lap|collision|mpc-horizon> [timeout-s]" >&2
+  echo "Usage: $0 <controller-container> <simulator-container> <recorder-container> <target-lap|collision|mpc|mpc-horizon|csv-command|csv-follow-N> [timeout-s]" >&2
   exit 2
 fi
 
@@ -22,9 +22,12 @@ if [[ ! "${timeout_s}" =~ ^[1-9][0-9]*$ ||
       ! "${stall_timeout_s}" =~ ^[1-9][0-9]*$ ||
       ! "${simulator_stop_timeout_s}" =~ ^[0-9]+$ ||
       ! "${post_target_lap_guard_s}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ||
-      ("${target_lap}" != "collision" && "${target_lap}" != "mpc-horizon" &&
+      ("${target_lap}" != "collision" && "${target_lap}" != "mpc" &&
+       "${target_lap}" != "mpc-horizon" &&
+       "${target_lap}" != "csv-command" &&
+       ! "${target_lap}" =~ ^csv-follow-[1-9][0-9]*$ &&
        ! "${target_lap}" =~ ^[1-9][0-9]*$) ]]; then
-  echo "target-lap must be a positive integer, collision, or mpc-horizon; timeout-s and SDU_APEX_WATCH_STALL_TIMEOUT_S must be positive integers; SDU_APEX_WATCH_SIM_STOP_TIMEOUT_S must be nonnegative; SDU_APEX_WATCH_POST_TARGET_GUARD_S must be nonnegative." >&2
+  echo "target-lap must be a positive integer, collision, mpc, or mpc-horizon; timeout-s and SDU_APEX_WATCH_STALL_TIMEOUT_S must be positive integers; SDU_APEX_WATCH_SIM_STOP_TIMEOUT_S must be nonnegative; SDU_APEX_WATCH_POST_TARGET_GUARD_S must be nonnegative." >&2
   exit 2
 fi
 
@@ -78,10 +81,23 @@ if [[ "${target_lap}" == "collision" ]]; then
   docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --collision-only --timeout-s "$1" --stall-timeout-s "$2"' \
     _ "${timeout_s}" "${stall_timeout_s}"
+elif [[ "${target_lap}" == "mpc" ]]; then
+  docker exec "${watcher_container}" /bin/bash -lc \
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-run --timeout-s "$1" --stall-timeout-s "$2"' \
+    _ "${timeout_s}" "${stall_timeout_s}"
 elif [[ "${target_lap}" == "mpc-horizon" ]]; then
   docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-horizon-test --timeout-s "$1" --stall-timeout-s "$2"' \
     _ "${timeout_s}" "${stall_timeout_s}"
+elif [[ "${target_lap}" == "csv-command" ]]; then
+  docker exec "${watcher_container}" /bin/bash -lc \
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --csv-command-test --timeout-s "$1" --stall-timeout-s "$2"' \
+    _ "${timeout_s}" "${stall_timeout_s}"
+elif [[ "${target_lap}" =~ ^csv-follow-([1-9][0-9]*)$ ]]; then
+  csv_target_lap="${BASH_REMATCH[1]}"
+  docker exec "${watcher_container}" /bin/bash -lc \
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --csv-path-follow --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4"' \
+    _ "${csv_target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}"
 else
   docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4"' \

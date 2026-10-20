@@ -35,15 +35,11 @@
     weight_throttle_command: 0.0
     terminal_multiplier: 3.0
 
-    # Keep the one-shot test's 100-iteration ceiling, but do not impose a
-    # cycle-time deadline: the first attempt showed the 20 ms deadline expired
-    # during QP construction, before ADMM took even one iteration. Timing is
-    # deliberately not the gate for this accuracy experiment.
+    # The one-shot test still uses the production single-solve formulation.
+    # It disables only the cycle deadline so the frozen-plan accuracy measure
+    # is not conflated with the 40 Hz runtime gate.
     adaptive_rho: true
     adaptive_rho_update_period: 5
-    max_solver_iterations: 100
-    solver_degraded_tolerance: 0.05
-    # Allow a second nonlinear RTI pass after the first candidate is available.
-    rti_refinement_mode: adaptive
+    max_solver_iterations: 50
     rti_cycle_budget_ms: 0.0
     jacobian_threads: 4

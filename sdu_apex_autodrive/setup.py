@@ -43,6 +43,7 @@ setup(
         "console_scripts": [
             "actuator_interface = sdu_apex_autodrive.actuator_interface:main",
             "autodrive_bridge_40hz = sdu_apex_autodrive.bridge_40hz:main",
+            "csv_command_replay = sdu_apex_autodrive.csv_command_replay:main",
         ],
     },
 )

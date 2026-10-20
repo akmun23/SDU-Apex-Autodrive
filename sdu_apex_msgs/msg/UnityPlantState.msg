@@ -30,8 +30,10 @@ float64 physx_model_rear_axle_y_m
 # Latest normalized actuator values observed by odometry at this epoch.
 float64 steering_command_normalized
 float64 throttle_command_normalized
-# Two command samples currently in the vehicle's transport/actuation pipeline.
-# Slot 1 is consumed by the next 25 ms plant step; slot 2 follows it.
+# Two command samples retained by the odometry queue. Slot 1 is the preceding
+# sample; slot 2 is the newest request-associated command used for the next
+# modeled packet interval. This is a host-side association, not Unity's hidden
+# per-FixedUpdate command history.
 float64 delayed_steering_command_1_normalized
 float64 delayed_steering_command_2_normalized
 float64 delayed_throttle_command_1_normalized

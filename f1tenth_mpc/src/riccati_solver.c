@@ -302,7 +302,7 @@ int riccati_solver_pass(
                 for (int s = 0; s < nx; ++s) {
                     value += M[a][s] * sd->A[s][j];
                 }
-                G[a][j] = value;
+                G[a][j] = value + sd->N[j][a];
             }
         }
 
@@ -493,7 +493,7 @@ static int riccati_solver_factorize_diagonal(
                 float value = 0.0f;
                 for (int s = 0; s < nx; ++s)
                     value += M[a][s] * sd->A[s][j];
-                factor->G[k][a][j] = value;
+                factor->G[k][a][j] = value + sd->N[j][a];
             }
         }
         if (!invert_regularized_control_hessian(
@@ -1462,10 +1462,17 @@ RiccatiStatus_t riccati_admm_solve(
 {
     enum { nx = RICCATI_MAX_NX, nu = RICCATI_MAX_NU,
            N = RICCATI_HORIZON };
-    if (!admm_state || !solution) {
+    if (!admm_state || !solution || !step_data) {
         if (solution) solution->status = RICCATI_STATUS_ERROR;
         return RICCATI_STATUS_ERROR;
     }
+    for (int k = 0; k < RICCATI_HORIZON; ++k)
+        for (int i = 0; i < RICCATI_MAX_NX; ++i)
+            for (int a = 0; a < RICCATI_MAX_NU; ++a)
+                if (!isfinite(step_data[k].N[i][a])) {
+                    solution->status = RICCATI_STATUS_ERROR;
+                    return RICCATI_STATUS_ERROR;
+                }
 
     const int use_scaling = config ? config->use_scaling : 0;
     if (use_scaling != 0 && use_scaling != 1) {
@@ -1532,6 +1539,10 @@ RiccatiStatus_t riccati_admm_solve(
             scaled->Q_diag[i] = physical->Q_diag[i] *
                 state_scale * state_scale;
             scaled->q[i] = physical->q[i] * state_scale;
+            for (int a = 0; a < nu; ++a) {
+                scaled->N[i][a] = physical->N[i][a] * state_scale *
+                    config->input_scale[a];
+            }
             scaled->x_lb[i] = scale_state_lower_bound(
                 physical->x_lb[i], state_scale);
             scaled->x_ub[i] = scale_state_upper_bound(

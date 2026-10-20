@@ -52,13 +52,14 @@ typedef struct
     float u;
     float v;
     float r;
-    /* Two causal actuator-queue values published by odometry at this epoch. */
+    /* Two command samples published by odometry: slot 1 is the preceding
+     * command, slot 2 is the newest command associated with this epoch. */
     float delayed_steering_command_1;
     float delayed_steering_command_2;
     /* Unity keeps a physical wheel angle, slewed by the source plant. */
     float actual_steering_angle;
-    /* Odom-published pending throttle commands; retained for the exact
-     * two-packet plant delay, not as artificial optimizer state/cost memory. */
+    /* Odom-published throttle history; slot 2 is the newest in-flight
+     * command. Neither sample is an optimizer cost/state coordinate. */
     float delayed_throttle_command_1;
     float delayed_throttle_command_2;
     /* Four wheel rates, six sprung-body values and four suspension jounces.
@@ -87,8 +88,7 @@ typedef struct
     /* Absolute actuator targets. Unity applies its own physical steering slew
      * and the control-rate command queues below this interface. */
     float steering_target_rad;
-    /* Normalized simulator throttle applied after the explicit two-packet
-     * command queue [0, 1]. Zero is Unity's brake branch. */
+    /* Normalized simulator throttle; zero is Unity's brake branch. */
     float throttle_command;
 } MpcModelControl_t;
 
@@ -124,23 +124,22 @@ int vehicle_model_longitudinal_slip_excess(
     double excess_speed_mps[4],
     double excess_derivative_wheel_omega[4]);
 
-/* One packet-rate model stage: use slot 1 during the interval, then shift each
- * FIFO and append this stage's decision. */
+/* One packet-rate model stage: use newest in-flight slot 2, then shift history
+ * and append this stage's decision. */
 MpcStageResult_t mpc_vehicle_model_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
     float dt,
     float path_curvature);
 
-/* Propagate from commands already present in queue slot 1 without advancing
- * either packet-rate FIFO. Queue advancement happens only when a new command
- * packet is accepted. */
+/* Propagate from newest queued commands in slot 2 without advancing either
+ * command-history slot. */
 MpcStageResult_t mpc_vehicle_model_propagate(
     const MpcModelState_t *state,
     float dt,
     float path_curvature);
 
-/* Append one newly accepted command to the two-packet actuator FIFOs. */
+/* Shift command history and append one newly accepted command. */
 int vehicle_model_queue_command(
     MpcModelState_t *state,
     float steering_target_rad,

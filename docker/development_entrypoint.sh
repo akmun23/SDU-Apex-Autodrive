@@ -51,7 +51,14 @@ python3 /workspace/src/tools/verify_runtime_topic_policy.py
 # default so the normal 40 Hz path does not serialize JSON.
 launch_args=(
   "with_rviz:=${SDU_APEX_WITH_RVIZ:-false}"
+  "enable_mpc:=${SDU_APEX_MPC_ENABLED:-true}"
 )
+if [[ -n "${SDU_APEX_CSV_COMMAND_FILE:-}" ]]; then
+  launch_args+=("csv_command_file:=${SDU_APEX_CSV_COMMAND_FILE}")
+  launch_args+=("csv_path_repeats:=${SDU_APEX_CSV_PATH_REPEATS:-3}")
+  launch_args+=("csv_lookahead_speed_gain_s:=${SDU_APEX_CSV_LOOKAHEAD_SPEED_GAIN_S:-0.12}")
+  launch_args+=("csv_native_control_delay_s:=${SDU_APEX_CSV_NATIVE_CONTROL_DELAY_S:-0.05}")
+fi
 if [[ -n "${SDU_APEX_MAP_YAML:-}" ]]; then
   launch_args+=("map_yaml:=${SDU_APEX_MAP_YAML}")
 fi

@@ -55,6 +55,9 @@ typedef struct
     float weight_steering_command;
     float weight_steering_target;
     float weight_throttle_command;
+    /* Per-stage squared command increments, (u[k]-u[k-1])^2. */
+    float weight_steering_slew;
+    float weight_throttle_slew;
     /* Optional cold-nominal drive seed when launching below 0.5 m/s toward
      * a materially faster reference. This initializes the linearization only;
      * the optimizer remains free to reduce or reject the command. */
@@ -68,27 +71,11 @@ typedef struct
     float first_prediction_corridor_margin_m;
     float corridor_preview_halfwidth_m;
     float nonlinear_corridor_tolerance_m;
-    /* Numerical padding for the linearized QP's lateral corridor only.
-     * Exact nonlinear rollout validation always uses the physical corridor. */
-    float qp_corridor_padding_m;
     /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */
     int use_fd_jacobian_oracle;
-    /* Recovery-seed policy is used only when the nominal seed violates the
-     * normal corridor.  Policy zero preserves exact normal-operation parity. */
-    int recovery_seed_policy;
-    float recovery_steering_k_e_y;
-    float recovery_steering_k_e_psi;
-    float recovery_steering_k_r;
     /* Independent horizon-stage Jacobians; zero selects the serial fallback. */
     int jacobian_threads;
 } MpcRtiConfiguration_t;
-
-enum
-{
-    MPC_RTI_RECOVERY_SEED_NOMINAL = 0,
-    MPC_RTI_RECOVERY_SEED_HEADING_FEEDBACK = 1,
-    MPC_RTI_RECOVERY_SEED_BRAKE_HEADING_FEEDBACK = 2
-};
 
 typedef enum
 {
@@ -101,7 +88,6 @@ typedef enum
     MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE,
     MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT,
     MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE,
-    MPC_RTI_NOMINAL_BUILD_THROTTLE_MODE,
     MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT,
     MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE
 } MpcRtiNominalBuildFailureStage_t;
@@ -130,33 +116,6 @@ typedef struct
     MpcRtiCommandEnvelopeFailure_t build_failure_constraint;
     int build_failure_index;
 } MpcRtiNominal_t;
-
-/* A single corridor schedule shared by the QP and exact nonlinear rollout.
- * Normal bounds remain immutable. A clearance excursion predicted from the
- * measured state and commands already in flight is bounded through the first
- * command-effect stage, then tapered back to the normal corridor. */
-typedef struct
-{
-    float normal_lower[PREDICTION_HORIZON + 1];
-    float normal_upper[PREDICTION_HORIZON + 1];
-    float active_lower[PREDICTION_HORIZON + 1];
-    float active_upper[PREDICTION_HORIZON + 1];
-    float seed_e_y[PREDICTION_HORIZON + 1];
-    float seed_violation[PREDICTION_HORIZON + 1];
-    /* Additional temporary use of the configured 5 cm clearance during a
-     * measured/queued-command recovery. This starts at the nominal-prefix
-     * violation, is held until the first delayed command can affect the plant,
-     * then tapers to zero. A separate zero-clearance footprint check stays
-     * hard. */
-    float recovery_allowance_m[PREDICTION_HORIZON + 1];
-    int recovery_stage[PREDICTION_HORIZON + 1];
-    int horizon;
-    int recovery_active;
-    int recovery_not_found;
-    int first_normal_feasible_stage;
-    float initial_normal_violation;
-    float max_seed_violation;
-} MpcRtiCorridorSchedule_t;
 
 typedef enum
 {
@@ -207,49 +166,11 @@ typedef struct
     float right_bound_error_m[PREDICTION_HORIZON + 1];
 } MpcRtiCandidatePathDelta_t;
 
-typedef enum
-{
-    MPC_RTI_REFINEMENT_R1 = 0,
-    MPC_RTI_REFINEMENT_R2 = 1,
-    MPC_RTI_REFINEMENT_ADAPTIVE = 2
-} MpcRtiRefinementMode_t;
-
-enum
-{
-    MPC_RTI2_TRIGGER_PROGRESS = 1u << 0,
-    MPC_RTI2_TRIGGER_CURVATURE = 1u << 1,
-    MPC_RTI2_TRIGGER_LEFT_BOUND = 1u << 2,
-    MPC_RTI2_TRIGGER_RIGHT_BOUND = 1u << 3,
-    MPC_RTI2_TRIGGER_LOW_SLACK = 1u << 4,
-    MPC_RTI2_TRIGGER_NONSMOOTH = 1u << 5,
-    MPC_RTI2_TRIGGER_ACTION_CORRECTION = 1u << 6,
-    MPC_RTI2_TRIGGER_DEGRADED_SOLVE = 1u << 7,
-    MPC_RTI2_TRIGGER_RESIDUAL_IMBALANCE = 1u << 8,
-    MPC_RTI2_TRIGGER_STEERING_REVERSAL = 1u << 9,
-    MPC_RTI2_TRIGGER_LATERAL_LOAD = 1u << 10,
-    MPC_RTI2_TRIGGER_R1_CORRIDOR_REPAIR = 1u << 11,
-    MPC_RTI2_TRIGGER_R1_RESIDUAL_RECOVERY = 1u << 12
-};
-
 typedef struct
 {
     MpcRtiConfiguration_t model;
     RiccatiAdmmConfig_t solver;
-    MpcRtiRefinementMode_t refinement_mode;
-    float rti2_progress_error_trigger_m;
-    float rti2_curvature_error_trigger_per_m;
-    float rti2_bound_error_trigger_m;
-    float rti2_min_corridor_slack_trigger_m;
-    float rti2_steering_target_correction_trigger_rad;
-    float rti2_throttle_correction_trigger;
-    float rti2_residual_imbalance_trigger;
-    float rti2_lateral_load_trigger_mps2;
-    int rti2_nonsmooth_columns_trigger;
-    float degraded_residual_limit;
-    int max_consecutive_degraded_solves;
-    /* Total RTI-cycle wall-time budget. Zero disables the budget. When the
-     * budget is tight, optional R2 refinement may be skipped; R1 is only
-     * retained if it passes the existing exact nonlinear validation. */
+    /* End-to-end cycle budget; zero means no deadline. */
     double max_cycle_time_us;
 } MpcRtiCycleConfiguration_t;
 
@@ -257,16 +178,13 @@ typedef struct
 {
     RiccatiAdmmState_t solver_state;
     MpcRtiNominal_t nominal;
-    int consecutive_degraded_solves;
 } MpcRtiMemory_t;
 
 typedef enum
 {
     MPC_RTI_CYCLE_ACCEPTED_OPTIMAL = 0,
-    MPC_RTI_CYCLE_ACCEPTED_DEGRADED,
     MPC_RTI_CYCLE_REJECTED_INPUT,
     MPC_RTI_CYCLE_REJECTED_SOLVER,
-    MPC_RTI_CYCLE_REJECTED_RESIDUAL,
     MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT
 } MpcRtiCycleStatus_t;
 
@@ -275,8 +193,7 @@ typedef enum
     MPC_RTI_INPUT_FAILURE_NONE = 0,
     MPC_RTI_INPUT_FAILURE_CYCLE_ARGUMENTS,
     MPC_RTI_INPUT_FAILURE_PLANT_STATE,
-    MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD,
-    MPC_RTI_INPUT_FAILURE_CORRIDOR_SCHEDULE
+    MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD
 } MpcRtiInputFailureReason_t;
 
 typedef struct
@@ -292,110 +209,15 @@ typedef struct
     float published_steering_command;
     float published_throttle;
     int solver_iterations;
-    /* One bounded extra RTI cycle may be run when neither R1 nor R2 reaches
-     * ADMM convergence. Retry diagnostics are kept separate from the
-     * selected cycle so a rejected retry cannot masquerade as its output. */
-    int convergence_retry_count;
-    int convergence_retry_cycle_status;
-    int convergence_retry_r1_admm_status;
-    int convergence_retry_r2_admm_status;
-    int convergence_retry_r1_iterations;
-    int convergence_retry_r2_iterations;
-    double convergence_retry_us;
+    int admm_status;
     float primal_residual;
     float dual_residual;
     float maximum_regularization;
     int regularization_count;
     int nonsmooth_jacobian_columns;
     int nonlinear_failure_stage;
-    int rti_iterations_used;
-    int rti2_triggered;
-    unsigned int rti2_trigger_reason_mask;
-    int rti2_budget_skipped;
-    int throttle_mode_switches;
-    int r1_status;
-    int r2_status;
-    /* Raw Riccati-ADMM status: 0=converged, 1=iteration limit, 2=error;
-     * -1 means the corresponding RTI pass did not call ADMM. */
-    int r1_admm_status;
-    int r2_admm_status;
     int nonlinear_failure_reason;
-    int r1_nonlinear_failure_reason;
-    int r2_nonlinear_failure_reason;
-    int r1_nonlinear_failure_stage;
-    int r2_nonlinear_failure_stage;
-    MpcRtiRolloutFailure_t r1_nonlinear_failure;
-    MpcRtiRolloutFailure_t r2_nonlinear_failure;
-    float r1_nonlinear_objective;
-    float r2_nonlinear_objective;
-    float r1_min_corridor_slack;
-    float r2_min_corridor_slack;
-    MpcModelControl_t r1_first_action;
-    MpcModelControl_t r2_first_action;
-    int r1_solver_iterations;
-    int r2_solver_iterations;
-    int r1_solver_attempts;
-    int r2_solver_attempts;
-    int r1_solver_iterations_total;
-    int r2_solver_iterations_total;
-    float r1_qp_corridor_padding_m;
-    float r2_qp_corridor_padding_m;
-    float r1_primal_residual;
-    float r1_dual_residual;
-    float r1_state_primal_residual;
-    float r1_state_dual_residual;
-    float r1_input_primal_residual;
-    float r1_input_dual_residual;
-    int r1_state_primal_stage;
-    int r1_state_primal_index;
-    int r1_state_dual_stage;
-    int r1_state_dual_index;
-    int r1_input_primal_stage;
-    int r1_input_primal_index;
-    int r1_input_dual_stage;
-    int r1_input_dual_index;
-    float r2_primal_residual;
-    float r2_dual_residual;
-    float r2_state_primal_residual;
-    float r2_state_dual_residual;
-    float r2_input_primal_residual;
-    float r2_input_dual_residual;
-    int r2_state_primal_stage;
-    int r2_state_primal_index;
-    int r2_state_dual_stage;
-    int r2_state_dual_index;
-    int r2_input_primal_stage;
-    int r2_input_primal_index;
-    int r2_input_dual_stage;
-    int r2_input_dual_index;
-    float r1_rho_start;
-    float r1_rho_u_start;
-    float r1_rho_final;
-    float r1_rho_u_final;
-    int r1_rho_change_count;
-    float r2_rho_start;
-    float r2_rho_u_start;
-    float r2_rho_final;
-    float r2_rho_u_final;
-    int r2_rho_change_count;
-    double r1_solve_us;
-    double r2_solve_us;
-    double r1_qp_build_us;
-    double r1_admm_us;
-    double r1_exact_rollout_us;
-    double r1_nonlinear_validation_us;
-    double r2_qp_build_us;
-    double r2_admm_us;
-    double r2_exact_rollout_us;
-    double r2_nonlinear_validation_us;
-    double total_rti_us;
-    int selected_candidate; /* 1=R1, 2=R2, 3=repair, 4=drive-recover, 5=brake-recover. */
-    int corridor_repair_used;
-    unsigned int corridor_repair_trials;
-    double corridor_repair_us;
-    /* Exact-feasible candidate retained despite an ADMM residual limit. */
-    int residual_candidate_published;
-    float corridor_repair_alpha;
+    MpcRtiRolloutFailure_t nonlinear_failure;
     float rho_start;
     float rho_u_start;
     float rho_final;
@@ -414,18 +236,13 @@ typedef struct
     int linearization_failure_stage;
     int linearization_failure_reason;
     int linearization_failure_index;
-    int recovery_active;
-    int recovery_not_found;
-    int recovery_reentry_stage;
-    float recovery_initial_normal_violation_m;
-    float recovery_max_seed_violation_m;
-    float recovery_normal_lower_m[PREDICTION_HORIZON + 1];
-    float recovery_normal_upper_m[PREDICTION_HORIZON + 1];
-    float recovery_active_lower_m[PREDICTION_HORIZON + 1];
-    float recovery_active_upper_m[PREDICTION_HORIZON + 1];
-    float recovery_seed_e_y_m[PREDICTION_HORIZON + 1];
-    float recovery_seed_violation_m[PREDICTION_HORIZON + 1];
-    int recovery_stage[PREDICTION_HORIZON + 1];
+    double qp_build_us;
+    double admm_us;
+    double exact_rollout_us;
+    double nonlinear_validation_us;
+    double total_solve_us;
+    double total_cycle_us;
+    float nonlinear_objective;
 } MpcRtiCycleResult_t;
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */
@@ -436,18 +253,6 @@ int mpc_rti_build_ltv_qp(
     int horizon,
     float prediction_dt,
     const MpcRtiConfiguration_t *configuration,
-    MpcRtiProblem_t *problem);
-
-/* Scheduled variant used by the RTI cycle and its deterministic regression
- * tests.  Passing NULL is equivalent to the normal hard corridor. */
-int mpc_rti_build_ltv_qp_with_schedule(
-    const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
-    const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
-    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
-    int horizon,
-    float prediction_dt,
-    const MpcRtiConfiguration_t *configuration,
-    const MpcRtiCorridorSchedule_t *schedule,
     MpcRtiProblem_t *problem);
 
 /* Shift (or cold-seed) controls and construct a deterministic two-pass
@@ -464,24 +269,6 @@ int mpc_rti_build_nominal(
     const MpcRtiConfiguration_t *configuration,
     MpcRtiNominal_t *nominal,
     MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
-
-/* Choose the Unity drive/full-brake branch and initialize the throttle RTI
- * seed at the delayed effect stage. Exposed for focused regression tests. */
-int mpc_rti_select_throttle_modes(
-    MpcModelControl_t controls[PREDICTION_HORIZON],
-    const MpcRtiState_t predicted_states[PREDICTION_HORIZON + 1],
-    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
-    int horizon);
-
-int mpc_rti_build_corridor_schedule(
-    const MpcRtiState_t *current_state,
-    const MpcRtiNominal_t *nominal,
-    const MpcTrajectorySample_t *trajectory,
-    size_t trajectory_count,
-    double lap_length,
-    float prediction_dt,
-    const MpcRtiConfiguration_t *configuration,
-    MpcRtiCorridorSchedule_t *schedule);
 
 /* Recursively score a candidate at candidate progress, sampling its exact
  * nonlinear curvature and corridor instead of reusing the nominal schedule. */
@@ -502,25 +289,6 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1],
     int *failure_stage);
-
-MpcRtiRolloutStatus_t mpc_rti_rollout_candidate_with_schedule(
-    const MpcRtiState_t *initial_state,
-    double initial_progress,
-    const MpcModelControl_t controls[PREDICTION_HORIZON],
-    const MpcTrajectorySample_t *trajectory,
-    size_t trajectory_count,
-    double lap_length,
-    const MpcRtiReference_t nominal_references[PREDICTION_HORIZON + 1],
-    const double nominal_progress[PREDICTION_HORIZON + 1],
-    MpcRtiCandidatePathDelta_t *path_delta,
-    int horizon,
-    float prediction_dt,
-    const MpcRtiConfiguration_t *configuration,
-    const MpcRtiCorridorSchedule_t *schedule,
-    MpcRtiState_t states[PREDICTION_HORIZON + 1],
-    double progress[PREDICTION_HORIZON + 1],
-    int *failure_stage,
-    MpcRtiRolloutFailure_t *failure);
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory);
 
