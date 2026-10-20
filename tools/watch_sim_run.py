@@ -16,6 +16,7 @@ class SimRunWatcher(Node):
     def __init__(self, watch_mpc_horizon_test: bool = False) -> None:
         super().__init__("development_sim_run_watcher")
         self.lap_count: int | None = None
+        self.initial_lap_count: int | None = None
         self.collision_count: int | None = None
         self.progress_position: tuple[float, float] | None = None
         self.last_progress_time: float | None = None
@@ -52,6 +53,9 @@ class SimRunWatcher(Node):
             )
 
     def _lap_callback(self, message: Int32) -> None:
+        if self.initial_lap_count is None:
+            self.initial_lap_count = message.data
+            print(f"lap_count_start={message.data}", flush=True)
         if message.data != self.lap_count:
             self.lap_count = message.data
             print(f"lap_count={message.data}", flush=True)
@@ -155,17 +159,22 @@ def main() -> int:
                           "test", flush=True)
                     result = 5
                     break
-            if (watcher.last_progress_time is not None and
+            if (not args.collision_only and
+                    watcher.last_progress_time is not None and
                     time.monotonic() - watcher.last_progress_time >=
                     args.stall_timeout_s):
                 print("SCREEN_ABORT: no odometry progress", flush=True)
                 result = 4
                 break
             if (args.target_lap > 0 and watcher.lap_count is not None and
-                    watcher.lap_count >= args.target_lap):
+                    watcher.initial_lap_count is not None and
+                    watcher.lap_count >=
+                    watcher.initial_lap_count + args.target_lap):
                 if target_lap_reached_at is None:
                     target_lap_reached_at = time.monotonic()
-                    print("target lap reached; retaining collision watch", flush=True)
+                    print(
+                        f"target laps completed: {args.target_lap}; "
+                        "retaining collision watch", flush=True)
                 elif (time.monotonic() - target_lap_reached_at >=
                       args.post_target_lap_guard_s):
                     print("SCREEN_COMPLETE: lap limit", flush=True)

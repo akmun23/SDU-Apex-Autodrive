@@ -68,11 +68,6 @@ typedef struct
     int source_plant_initialized;
     int source_suspension_history_initialized;
     int source_imu_state_initialized;
-    /* Causal odometry innovation context, not an optimizer coordinate or
-     * physical PhysX state. The MPC may apply it only in the measured
-     * supported yaw-mismatch envelope. */
-    float yaw_rate_prediction_residual_radps;
-    int yaw_rate_residual_correction_enabled;
 } MpcModelState_t;
 
 /* Non-recursive per-wheel quantities emitted by a plant transition. Keeping

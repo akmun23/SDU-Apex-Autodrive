@@ -93,6 +93,23 @@ struct UnitySourcePlantOutputT {
 
 using UnitySourcePlantOutput = UnitySourcePlantOutputT<double>;
 
+inline constexpr std::size_t kUnityPlantSensitivityWidth = 20;
+inline constexpr std::size_t kUnityPlantSensitivityStateSize = 26;
+struct UnitySourcePlantSensitivitySeeds {
+  std::array<std::array<double, kUnityPlantSensitivityWidth>,
+             kUnityPlantSensitivityStateSize> state{};
+  std::array<double, kUnityPlantSensitivityWidth> steering_target{};
+  std::array<double, kUnityPlantSensitivityWidth> throttle{};
+};
+
+struct UnitySourcePlantSensitivity {
+  std::array<std::array<double, kUnityPlantSensitivityWidth>,
+             kUnityPlantSensitivityStateSize> state{};
+  std::array<double, kUnityPlantSensitivityWidth> body_forward_displacement{};
+  std::array<double, kUnityPlantSensitivityWidth> body_lateral_displacement{};
+  std::array<double, kUnityPlantSensitivityWidth> yaw_delta{};
+};
+
 // VehicleController stores AutonomousSteering with the opposite sign in its
 // internal wheel angle, then publishes CurrentSteeringAngle as the negated
 // internal angle. The externally normalized command therefore maps to the
@@ -100,9 +117,19 @@ using UnitySourcePlantOutput = UnitySourcePlantOutputT<double>;
 double unity_steering_command_normalized_to_physical_rad(
     double normalized_command, double max_steering_rad);
 
-// Active vehicle wheel update schedule: five substeps below 5 m/s and one at
-// or above 5 m/s. Keep the strict threshold semantics covered by the test.
+// Exact practice-player schedule: five substeps below 128 m/s and one at or
+// above 128 m/s. UnityPlayer_s.debug confirms the WheelCollider initialization
+// call setSubStepCount(128.0f, 5, 1); see the pinned source constant in
+// unity_source_plant.cpp and test the equality branch explicitly.
 unsigned int unity_source_wheel_substep_count(double forward_speed_mps);
+
+// Reconcile the suspension history after an observer corrects body pose or
+// attitude. PhysX damper velocity is a finite difference from the preceding
+// substep; carrying jounce computed from the pre-correction body state would
+// create a spurious first-substep spring/damper impulse. This updates only
+// the four geometric jounces and marks their history initialized.
+bool unity_source_plant_reconcile_suspension_jounce(
+    UnitySourcePlantState *state);
 
 
 // Advance a held 40 Hz steering/throttle command using Unity's 1 ms fixed
@@ -129,6 +156,17 @@ bool unity_source_plant_step(
     const UnitySourcePlantInput &input,
     double duration_s,
     UnitySourcePlantOutput *output);
+
+// Differentiate the same source-derived interval step through its active
+// branch for up to eight independent directions. Branch selection is based on
+// primal doubles and is therefore a local derivative, not a smoothing of the
+// WheelCollider/PhysX branch transitions.
+bool unity_source_plant_step_with_sensitivities(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    double duration_s,
+    const UnitySourcePlantSensitivitySeeds &seeds,
+    UnitySourcePlantSensitivity *sensitivity);
 
 bool unity_source_plant_slip_excess(
     const UnitySourcePlantState &state,

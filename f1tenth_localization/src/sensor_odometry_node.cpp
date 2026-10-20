@@ -21,6 +21,7 @@
 #include "f1tenth_localization/odometry_observer.hpp"
 #include "f1tenth_localization/physx_odom_runtime.hpp"
 #include "f1tenth_localization/sensor_packet_assembler.hpp"
+#include "f1tenth_localization/timed_command_history.hpp"
 
 namespace
 {
@@ -294,11 +295,12 @@ private:
     if (!std::isfinite(value)) {
       return;
     }
+    const int64_t received_stamp_ns = get_clock()->now().nanoseconds();
     std::lock_guard<std::mutex> lock(actuator_mutex_);
     if (steering) {
-      steering_command_norm_ = value;
+      steering_command_history_.push(received_stamp_ns, value);
     } else {
-      throttle_command_norm_ = value;
+      throttle_command_history_.push(received_stamp_ns, value);
     }
   }
 
@@ -321,8 +323,14 @@ private:
     bool feedback_valid = false;
     {
       std::lock_guard<std::mutex> lock(actuator_mutex_);
-      steering_command = steering_command_norm_;
-      throttle_command = throttle_command_norm_;
+      // Sensor headers carry the Bridge request epoch, while controller
+      // outputs may be published during the later telemetry round trip.
+      // Sampling by callback receipt time prevents a command for the next
+      // request from being shifted into this packet's two-command delay line.
+      steering_command = steering_command_history_.value_at_or_before(
+        packet.stamp_ns, 0.0);
+      throttle_command = throttle_command_history_.value_at_or_before(
+        packet.stamp_ns, 0.0);
       const auto current = std::chrono::steady_clock::now();
       feedback_valid = have_steering_feedback_ && have_throttle_feedback_ &&
         current - steering_feedback_received_ <= kActuatorFeedbackMaxAge &&
@@ -595,8 +603,8 @@ private:
   std::mutex actuator_mutex_;
   bool clock_initialized_{false};
   double observer_stamp_s_{0.0};
-  double steering_command_norm_{0.0};
-  double throttle_command_norm_{0.0};
+  f1tenth_localization::TimedCommandHistory steering_command_history_;
+  f1tenth_localization::TimedCommandHistory throttle_command_history_;
   double steering_feedback_rad_{0.0};
   double throttle_feedback_{0.0};
   std::chrono::steady_clock::time_point steering_feedback_received_{};

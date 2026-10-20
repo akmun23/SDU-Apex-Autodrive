@@ -47,9 +47,9 @@ exec docker run --rm --name "${container}" \
     source /opt/ros/humble/setup.bash
     source /home/autodrive_devkit/install/setup.bash
     cd /workspace
-    CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build \
+    MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build \
       --packages-up-to sdu_apex_msgs \
-      --parallel-workers 1 \
+      --parallel-workers 4 \
       --merge-install --symlink-install \
       --event-handlers console_direct+ \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
@@ -71,6 +71,15 @@ exec docker run --rm --name "${container}" \
       /odom \
       /odom/unity_plant_state \
       /odom/diagnostics \
+      /ekf_odom \
+      /ekf_pose \
+      /amcl_pose \
+      /amcl_localization_health \
+      /amcl_scan_alignment \
+      /amcl_particle_count \
+      /amcl_kld_diagnostics \
+      /amcl_timing \
+      /amcl_gpu_timing \
       /current_map_pose \
       /mpc/drive_command \
       /mpc/diagnostics \

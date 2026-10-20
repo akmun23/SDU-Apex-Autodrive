@@ -143,14 +143,13 @@ gpu_amcl_cpp:
     # Associate local scan clusters with the causal odometry-predicted pose;
     # repeated corridor aliases outside this radius are not controller input.
     local_cluster_association_max_distance_m: 0.80
-    # Candidate threshold based on the 2026-09-17 batchmode baseline: with 0.90, all
-    # 7,325 local scan updates were rejected. The strongest cluster weights
-    # were 0.750-0.812 (median 0.783), while the filter remained within the
-    # 0.80 m causal association radius. Use 0.70 for the validation run so
-    # those scan-supported local corrections can be tested; association and
-    # pose-jump gates remain active. This is not promoted unless offline
-    # truth-scored position error improves on a separate run.
-    local_cluster_min_weight: 0.70
+    # Require the previously observed strong-cluster band. In the 2026-10-20
+    # practice run, accepted 0.706/0.723 clusters produced 0.132/0.210 m map
+    # corrections; the first moved the pose about 0.13 m away from Unity truth
+    # while the causal odometry prediction was within about 0.03 m. Keep
+    # lower-confidence local aliases from moving the control pose; the existing
+    # multi-scan recovery path remains available for stable strong clusters.
+    local_cluster_min_weight: 0.75
     local_tracking_recovery_after_rejected_scans: 3
     local_tracking_recovery_confirm_scans: 3
     local_tracking_recovery_min_cluster_weight: 0.80

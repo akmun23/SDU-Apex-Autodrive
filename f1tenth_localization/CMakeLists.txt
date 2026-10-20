@@ -69,7 +69,8 @@ add_executable(sensor_odometry_node
   src/odometry_observer.cpp
   src/sensor_packet_assembler.cpp
   src/unity_source_odom_runtime.cpp
-  ../f1tenth_mpc/src/unity_source_plant.cpp)
+  ../f1tenth_mpc/src/unity_source_plant.cpp
+  ../f1tenth_mpc/src/unity_source_plant_c.cpp)
 target_include_directories(sensor_odometry_node PRIVATE
   include
   ../f1tenth_mpc/include)
@@ -118,9 +119,14 @@ if(BUILD_TESTING)
   ament_add_gtest(test_source_derived_odom_runtime
     test/test_source_derived_odom_runtime.cpp
     src/unity_source_odom_runtime.cpp
-    ../f1tenth_mpc/src/unity_source_plant.cpp)
+    ../f1tenth_mpc/src/unity_source_plant.cpp
+    ../f1tenth_mpc/src/unity_source_plant_c.cpp)
   target_include_directories(test_source_derived_odom_runtime PRIVATE
     include ../f1tenth_mpc/include)
+
+  ament_add_gtest(test_timed_command_history
+    test/test_timed_command_history.cpp)
+  target_include_directories(test_timed_command_history PRIVATE include)
 
 endif()
 

@@ -54,7 +54,12 @@ enum class MpcControlTimeStatus {
 };
 
 struct MpcControlTimePredictorConfig {
+    /* Maximum age of the synchronized sensor state at the control snapshot. */
     double maximum_state_age_s{0.120};
+    /* The command-publication lead is a model prediction, not sensor age.
+     * Bound it separately so solver latency does not consume the sensor-age
+     * budget a second time. */
+    double maximum_prediction_lead_s{0.500};
     double model_integration_step_s{0.025};
     /* Commands are timestamped when published by the controller, while the
      * simulator may apply them later after the bridge transport backlog. The

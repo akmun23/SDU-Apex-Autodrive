@@ -1,0 +1,52 @@
+/**:
+  ros__parameters:
+    # Practice-track candidate evaluated on the exact 737-input route-correct
+    # capture. All 737 inputs have a converged ADMM pass below 50 iterations
+    # (maximum 49); 736 publish an exact-validated candidate with drive/brake
+    # recovery enabled. One sample remains a safe rejection. The live run is
+    # still required to establish lap tracking and collision-free operation.
+    # All cost weights are scaled together by 1e-3 (ratios unchanged) to
+    # condition ADMM; tolerance is in the solver's scaled coordinates.
+    startup_speed_mps: 7.1
+    startup_ramp_laps: 0.0
+    startup_nominal_throttle_seed: 0.25
+
+    weight_e_y: 0.125
+    weight_e_psi: 0.03125
+    weight_u: 0.5
+    weight_u_overspeed: 0.3
+    weight_longitudinal_slip: 0.005
+    weight_v: 0.005
+    weight_r: 0.0078125
+    weight_steering_command: 0.003
+    weight_steering_target: 0.005
+    weight_throttle_command: 0.0001
+    terminal_multiplier: 3.0
+
+    admm_rho: 2.0
+    admm_rho_input: 40.0
+    admm_rho_ey: 5.0
+    admm_rho_steering: 1.0
+    admm_rho_throttle: 3.5
+    admm_rho_max: 127.0
+    admm_over_relaxation: 1.8
+    adaptive_rho: true
+    adaptive_rho_update_period: 1
+    solver_state_scaling_enabled: true
+    solver_cold_start_each_solve: true
+    max_solver_iterations: 49
+    solver_tolerance: 0.05
+    solver_degraded_tolerance: 0.05
+    rti_cycle_budget_ms: 0.0
+    jacobian_threads: 4
+    rti_refinement_mode: r2
+    qp_corridor_padding_m: 0.0
+
+    # On nonlinear corridor rejection, evaluate bounded steering-feedback
+    # drive and full-brake recovery sequences. Publish only a sequence whose
+    # complete source-model rollout passes the hard vehicle-footprint boundary
+    # and scheduled clearance/re-entry checks.
+    recovery_seed_policy: heading_feedback
+    recovery_steering_k_e_y: 0.5
+    recovery_steering_k_e_psi: 2.0
+    recovery_steering_k_r: 0.0

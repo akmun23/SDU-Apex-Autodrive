@@ -86,7 +86,7 @@ enum
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
 
 /* Other swept MPC defaults */
-#define MAX_ITERATIONS 100                             /* Production-node per-pass ceiling; offline solver callers may request more. */
+#define MAX_ITERATIONS 200                             /* Diagnostic node ceiling; competition profile remains at 50 per pass. */
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
@@ -201,9 +201,19 @@ typedef struct
 {
     float rho;
     float rho_u;
+    /* Optional per-state penalties; zero inherits rho. */
+    float rho_x_by_state[RICCATI_MAX_NX];
+    /* Optional per-control ADMM penalties. A nonpositive entry inherits
+     * rho_u; input 0 is steering and input 1 is throttle in the MPC model. */
+    float rho_u_by_input[RICCATI_MAX_NU];
+    /* Upper bound for adaptive penalties; zero preserves the generic 127 cap. */
+    float rho_max;
     float tolerance;
     int max_iterations;
     int adaptive_rho;
+    /* Discard the previous ADMM primal, dual, and penalty iterate before
+     * each QP solve. Zero preserves warm-start behavior. */
+    int cold_start_each_solve;
     /* Re-factor only every Nth ADMM iteration when adapting rho; zero keeps
      * the historical per-iteration update cadence. */
     int adaptive_rho_update_period;
@@ -242,6 +252,20 @@ typedef struct
     int iterations;
     float primal_residual;
     float dual_residual;
+    /* Final ADMM residual components in the solver's scaled coordinates. */
+    float state_primal_residual;
+    float state_dual_residual;
+    float input_primal_residual;
+    float input_dual_residual;
+    /* Stage/channel locations of the final maximum residuals; -1 if absent. */
+    int state_primal_stage;
+    int state_primal_index;
+    int state_dual_stage;
+    int state_dual_index;
+    int input_primal_stage;
+    int input_primal_index;
+    int input_dual_stage;
+    int input_dual_index;
     RiccatiStatus_t status;
 } RiccatiSolution_t;
 
@@ -258,6 +282,9 @@ typedef struct
     float y_u[RICCATI_HORIZON][RICCATI_MAX_NU];
     float rho;
     float rho_u;
+    /* Stage/channel penalties; shifted with the horizon warm start. */
+    float rho_state[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    float rho_input[RICCATI_HORIZON][RICCATI_MAX_NU];
     int initialized;
     int scaling_enabled;
     float state_scale[RICCATI_MAX_NX];

@@ -21,9 +21,10 @@ from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
 
 
-MAP_NAME = "autodrive_track_ftg_commit_20260909_025m.yaml"
+MAP_NAME = "autodrive_practice_20260924_b.yaml"
 RACELINE_PATH = os.path.join(
-    "autodrive_mintime_sim_5p0_dense", "autodrive_mintime_raceline.csv")
+    "autodrive_practice_20260924_b",
+    "autodrive_practice_20260924_b_mintime_raceline.csv")
 
 
 def _bool(value: str) -> bool:
@@ -151,7 +152,8 @@ def _setup(context):
             ("odom", "/odom"), ("pose", "/current_map_pose")])
     controller = ComposableNodeContainer(
         name="controller_container", namespace="",
-        package="rclcpp_components", executable="component_container",
+        package="rclcpp_components", executable="component_container_mt",
+        arguments=["--ros-args", "-p", "thread_num:=4"],
         composable_node_descriptions=[mpc_node], output="screen")
     actuator_parameters = [
         os.path.join(integration, "config", "actuator_interface.yaml")]

@@ -9,6 +9,7 @@ extern "C" {
  * capture evaluator. state[] ordering is documented in this header so C and
  * Python callers do not depend on the C++ std::array ABI. */
 enum { UNITY_SOURCE_PLANT_STATE_SIZE = 26 };
+enum { UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH = 20 };
 /* Exact physical command limit. Float-valued ROS/MPC interfaces round 30 deg
  * slightly upward, so plant inputs are clipped to this double boundary. */
 #define UNITY_SOURCE_MAX_STEERING_RAD 0.52359877559829887308
@@ -79,11 +80,42 @@ typedef struct {
   double yaw_acceleration_radps2;
 } UnitySourcePlantOutputC;
 
+typedef struct {
+  double state[UNITY_SOURCE_PLANT_STATE_SIZE]
+      [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+  double steering_target[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+  double throttle[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+} UnitySourcePlantSensitivitySeedsC;
+
+typedef struct {
+  double state[UNITY_SOURCE_PLANT_STATE_SIZE]
+      [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+  double body_forward_displacement
+      [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+  double body_lateral_displacement
+      [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+  double yaw_delta[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+} UnitySourcePlantSensitivityC;
+
 /* Returns 1 on success; rejects non-finite/out-of-contract inputs. duration
  * must be an integer number of 1 ms Unity fixed steps, no longer than 250 ms. */
 int unity_source_plant_step_c(const UnitySourcePlantInputC *input,
                               double duration_s,
                               UnitySourcePlantOutputC *output);
+
+/* Recompute source-geometry suspension jounce after an observer corrects the
+ * body state. Mutates only state[14..17] and suspension_history_initialized. */
+int unity_source_plant_reconcile_suspension_jounce_c(
+    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    int *suspension_history_initialized);
+
+/* Branch-local forward-mode derivatives of the exact same source plant. Each
+ * direction seeds one or more state/command entries; the returned columns
+ * correspond to those directions. */
+int unity_source_plant_step_sensitivity_c(
+    const UnitySourcePlantInputC *input, double duration_s,
+    const UnitySourcePlantSensitivitySeedsC *seeds,
+    UnitySourcePlantSensitivityC *sensitivity);
 
 /* Evaluate Unity's source slip equation at the supplied physical plant state.
  * The excess is wheel-surface-speed mismatch beyond the source curve's force

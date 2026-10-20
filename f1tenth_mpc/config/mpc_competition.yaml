@@ -16,6 +16,10 @@
     startup_ramp_laps: 1.0
 
     state_extrapolation_max_s: 0.12
+    # Publication lead is model-predicted separately from sensor-state age.
+    # 500 ms covers the measured practice solve/publish lead (<400 ms) while
+    # remaining inside the offline plant's validated 750 ms prediction span.
+    maximum_command_publication_lead_s: 0.5
     command_actuation_delay_s: 0.0
     unity_plant_state_topic: /odom/unity_plant_state
     drive_command_topic: /mpc/drive_command
@@ -25,17 +29,18 @@
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
 
-    # Speed-priority candidate that retained high acceptance in the matched
-    # practice screen; the physical corridor remains a hard feasibility gate.
+    # A 0.5 m preview maps heading error into lateral displacement, so
+    # w_psi = w_y * 0.5^2. A yaw-rate error integrated over 0.5 s produces the
+    # same heading error, so w_r = w_psi * 0.5^2.
     weight_e_y: 125.0
-    weight_e_psi: 2.0
+    weight_e_psi: 31.25
     # Coordinated profile: strong under-target speed tracking, lower overspeed
     # cost, with light wheel-spin and absolute throttle-effort penalties.
     weight_u: 500.0
     weight_u_overspeed: 300.0
     weight_longitudinal_slip: 5.0
     weight_v: 5.0
-    weight_r: 1.5
+    weight_r: 7.8125
     weight_steering_command: 3.0
     weight_steering_target: 5.0
     weight_throttle_command: 0.1
@@ -58,24 +63,38 @@
 
     admm_rho: 7.0
     admm_rho_input: 7.0
-    adaptive_rho_update_period: 5
+    # Bound adaptive penalties: practice captures repeatedly drove rho_u to
+    # 127 on iteration-limited solves, with larger dual residuals. Cap at 32.
+    admm_rho_max: 32.0
+    # Avoid rapid penalty escalation: restrained 1.25x/0.8x updates were
+    # retained from the previous high-input-rho practice trial.
+    adaptive_rho_update_period: 10
     adaptive_rho: true
     admm_over_relaxation: 1.6
     # Exact coordinate transform for mixed-unit solver state/input channels.
     solver_state_scaling_enabled: true
-    solver_tolerance: 0.01
-    solver_degraded_tolerance: 0.01
+    # In scaled coordinates, 0.02 is the absolute maximum ADMM residual.
+    # Exact nonlinear corridor validation remains a separate hard gate.
+    # The exact source-plant rollout and corridor remain independent gates.
+    solver_tolerance: 0.02
+    solver_degraded_tolerance: 0.02
     # No wall-time cutoff: measure and optimize natural solve latency. Exact
     # source-plant rollout and corridor checks remain the command acceptance
     # gates; target p95 is 10-15 ms, leaving margin inside the 25 ms period.
-    max_solver_iterations: 100
+    # Maximum iterations for each Riccati-ADMM solve (R1 and optional R2).
+    # Every QP pass has a hard cap of 50; RTI pass count is recorded separately.
+    max_solver_iterations: 50
     rti_cycle_budget_ms: 0.0
-    # Four workers were faster in the complete practice timing capture than
-    # the 8-worker screen's tail; zero disables OpenMP parallelism.
+    # Cap parallel Jacobian construction at four workers so the controller
+    # remains deployable on competition PCs with limited CPU availability.
+    # Zero disables OpenMP parallelism.
     jacobian_threads: 4
     max_consecutive_degraded_solves: 3
 
-    rti_refinement_mode: adaptive
+    # Practice replay showed no reduction in exact-corridor rejections from
+    # R2, while R2 adds a second ADMM pass. Keep competition runtime at R1
+    # until a paired simulator run demonstrates better tracking from R2.
+    rti_refinement_mode: r1
     rti2_progress_error_trigger_m: 0.10
     rti2_curvature_error_trigger_per_m: 0.02
     rti2_bound_error_trigger_m: 0.05

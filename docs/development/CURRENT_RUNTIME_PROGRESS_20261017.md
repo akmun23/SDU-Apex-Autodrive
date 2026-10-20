@@ -185,10 +185,11 @@ root-owned generated build/install/log/cache trees are removed.
   front-wheel-steer/common-AWD physics, PhysX wheel geometry, and encoder
   conversion therefore correctly use 0.059 m; no radius change was made.
 - Cross-checked the checked-in Unity timing and PhysX 4.1 implementation:
-  Unity fixed timestep is 1 ms; the shipped WheelCollider setup uses five
-  vehicle substeps below 5 m/s and one at/above 5 m/s. This is a Unity-specific
-  override of PhysX's 3/1 library defaults, verified in the shipped player
-  binary and pinned by a focused boundary test. PhysX's `+0.1 m/s`
+  Unity fixed timestep is 1 ms. **Correction entered 2026-10-20:** the shipped
+  player does not switch vehicle substeps at 5 m/s; exact-build disassembly
+  shows `setSubStepCount(128.0f, 5, 1)`. The 5 m/s source constant is for
+  low-speed wheel-pose-angle blending, not the vehicle substep schedule.
+  PhysX's `+0.1 m/s`
   longitudinal-slip denominator applies
   when wheel torque is active; the configured 4 m/s floor is the no-torque
   branch. The current production commands select drive or brake torque, so the
@@ -1700,10 +1701,12 @@ current production replay and outlier findings in
 The previous non-practice development captures and analyses have been removed.
 The active evidence and precise remaining yaw/position limits are summarized
 in [`YAW_MISMATCH_EVIDENCE_LEDGER_20261019.md`](YAW_MISMATCH_EVIDENCE_LEDGER_20261019.md).
-The wheel substep helper remains encoded as five substeps below 5 m/s and one
-otherwise, with a strict-boundary test. The retained practice bags do not
-independently identify the Unity native internal substep count, so this is a
-model configuration assumption rather than a claim established by those bags.
+The substep statement in this 2026-10-19 section was wrong. Exact-build native
+disassembly on 2026-10-20 established `setSubStepCount(128.0f, 5, 1)`; the
+current source and boundary test use five substeps below 128 m/s and one at or
+above 128 m/s. This is established by the matching practice-player binary,
+not inferred from bag timing. The unrelated public-PhysX 5 m/s constant is
+only for low-speed wheel-pose-angle blending.
 
 ### Current production odom and plant-only rollout, practice bags only — 2026-10-19
 
@@ -2082,3 +2085,612 @@ model configuration assumption rather than a claim established by those bags.
   results, then same-input full-cycle timing. Do not replace the current path
   unless those checks show both acceptable numerical parity and an end-to-end
   latency gain.
+
+### MPC Jacobian and parallel-build implementation — 2026-10-19
+
+- Implemented forward-mode sensitivities in the production Unity-source plant
+  equations. The primal state remains double precision; four tangent lanes are
+  carried together, covering the 20 plant-dependent MPC state columns in five
+  source-plant passes. Existing analytic FIFO/Frenet columns remain analytic.
+  At the hybrid `throttle == 0` brake/drive boundary, the throttle column still
+  uses the existing one-sided finite difference rather than pretending the
+  branch is smooth.
+- The active C MPC linearizer now uses the source sensitivities for those
+  columns and falls back to its existing branch-aware finite difference when
+  the sensitivity call fails or a column is deliberately left uncovered.
+  No optimizer state was removed and no plant equations or control semantics
+  were changed.
+- Added direct tests comparing the sensitivity API with finite differences on
+  smooth tire branches, attitude/body states, and all four jounce directions;
+  all passed. The active QP-build result was also compared across 1/2/4/8/16
+  Jacobian workers; stage A and affine terms matched the single-worker result
+  within `1e-6` for all tested worker counts.
+- A local synthetic 28-transition QP-build timing screen measured p50/p95:
+  1 worker `7.27/7.31 ms`; 2 `3.73/3.75 ms`; 4 `1.89/2.04 ms`; 8
+  `1.37/1.38 ms`; 16 `0.77/6.00 ms`. Eight is the best repeatable choice in
+  this screen; 16 had a large tail. The competition config and node default
+  are set to 8 workers accordingly. These are QP-build-only timings on this
+  machine, not a complete RTI-cycle or simulator result.
+- A single-stage micro-screen was less favorable: the full active linearizer
+  measured about `270/276 us` p50/p95, while 20 bare one-sided plant calls were
+  about `194/198 us`. That comparison excludes linearizer bookkeeping and is
+  not fully apples-to-apples, but it prevents claiming a standalone stage
+  speedup. The measured QP improvement comes from parallel stage processing;
+  complete RTI timing must decide whether the derivative implementation is a
+  net production win.
+- Still required before calling this fast/effective: build the full node,
+  run all focused MPC/plant regressions, and measure full RTI p50/p95/max on
+  the established practice simulator path with eight workers. The current
+  `15 ms` median / `25 ms` maximum objective has not yet been verified on that
+  path; no live-drive, solve-quality, or timing guarantee is claimed here.
+
+### Startup-bag ADMM convergence recovery — 2026-10-20
+
+- The supervised practice capture is
+  `live_runs/mpc_startup_convergence_20261020/run`; it ended after a collision
+  near progress `48.5 m`. Its source-stamp-aligned solver input export is
+  `live_runs/mpc_convergence_replay_20261020/startup_live_inputs.csv` with
+  349 inputs at approximately 40 Hz. The separate follow-up live validation
+  is described below.
+- With the prior candidate, 7 inputs had no sub-50 converged R1/R2 pass; the
+  hard tail cluster was rows 336–341. Repeating the same failed QP from a cold
+  start did not help. Rho/relaxation and tracking-weight sweeps also failed to
+  remove that cluster without making other rows worse.
+- Implemented a bounded numerical recovery in `solve_rti_pass`: when ADMM
+  reaches its iteration limit, rebuild the same linearized problem with the
+  configured QP corridor padding, then try up to `0.25 m` and `0.50 m` padding.
+  This padding affects only linearized QP bounds; exact Unity-source nonlinear
+  rollout validation continues to use the original physical corridor. It does
+  not alter vehicle equations, map, trajectory, or physical safety limits.
+- Replayed all 349 recorded inputs sequentially with cold solver starts and a
+  per-solve cap of 49. Every input now has at least one converged R1 or R2
+  ADMM pass in 1–49 iterations (`349/349`). Per-pass maxima are 49; some
+  numerical passes require up to three attempts and therefore up to 147 total
+  ADMM iterations across attempts. R1 converged on `346/349` inputs; R2 on
+  `343/349`. The bag-level cycle outcomes are 323 optimal accepted, 16
+  degraded accepted, and 10 rejected by the exact nonlinear rollout/corridor
+  gate. Solver convergence is therefore achieved for the requested inputs,
+  but full-cycle acceptance is not.
+- The remaining ten nonlinear rejections cluster near the collision-truncated
+  tail and are not to be “fixed” by loosening the exact corridor. The captured
+  state sequence is from the previous controller and is not causally replayed
+  after the newly converging commands; it cannot tell whether the changed
+  solver would avoid entering that tail in a live closed loop.
+- The all-input convergence gate was also checked on a new, supervised live
+  validation capture, `live_runs/mpc_startup_adaptive_padding_20261020/run`.
+  It has 75 valid solver inputs (plus six startup diagnostics rejected before
+  a state was available); replay found at least one sub-50 converged pass for
+  all `75/75`. R1 converged on `71/75`, R2 on `72/75`, and the maximum final
+  ADMM pass was 49 iterations. The runtime logged 74 optimal cycles, one
+  degraded cycle, zero hard-fallback cycles, and a 49-iteration maximum.
+- That practice validation nevertheless collided before a lap, around
+  progress `26 m` / `1.65 s` of vehicle motion. The bag's final valid truth
+  speed was about `5.02 m/s`, while the trajectory target had risen from
+  `7.09` to `8.88 m/s`; this run does not establish that the requested speed
+  is feasible or that the car can safely track this raceline. Its position
+  stream also shows an AMCL correction problem: at about `0.8 s`, the logged
+  odometry prediction was within roughly `0.03 m` of truth, but a local scan
+  cluster of weight `0.706` applied a `0.132 m` correction in the wrong
+  direction. The fused map pose then differed laterally from truth by about
+  `0.20 m` before impact. This is a strong localization suspect, not proof it
+  alone caused the collision. The compact recorder profile previously omitted
+  raw AMCL/scan-alignment diagnostics; those topics are now included for the
+  next supervised capture.
+- Based on that truth-scored correction, raised
+  `local_cluster_min_weight` from `0.70` to `0.75`; the separate strong,
+  multi-scan recovery threshold remains `0.80`. This rejects the two observed
+  low-confidence corrections while retaining the existing recovery route.
+  The MPC/solver code and its convergence settings were not changed by this
+  localization adjustment.
+- The full current ROS workspace compiled successfully in the maintained
+  development-entrypoint clean-build path (`sdu_apex_msgs`, planning,
+  localization, MPC, and integration packages). A direct ad-hoc colcon attempt
+  hit stale generated setuptools metadata; the maintained entrypoint cleaned
+  only generated artifacts and then completed. At this checkpoint the next
+  simulator run had not started; its result and the later convergence retry
+  implementation are recorded in the following section.
+- Do not claim that multi-attempt total work is under 50 iterations: the
+  contract verified here is that each bag input obtains a converged ADMM pass
+  with fewer than 50 iterations. Also do not equate that solver result with a
+  safe or accepted command; the exact nonlinear gate remains authoritative.
+
+### Bounded same-sample convergence retry and live recheck — 2026-10-20
+
+- The follow-up `/mpc/diagnostics` bag replay identified one repeatable
+  numerical corner in the 52-input capture: input row 6 exhausted all three
+  QP corridor-padding attempts in both R1 and R2 at 49 iterations. This was a
+  solver convergence miss, distinct from exact nonlinear feasibility.
+- Raising the ADMM tolerance from `0.05` to `0.055` made that capture pass in a
+  single cycle, but degraded the older 349-input replay from 10 to 15 exact
+  nonlinear rejections. That looser tolerance was rejected; production remains
+  at `0.05`.
+- Implemented a single bounded extra RTI cycle in `mpc_rti_solve_cycle()` only
+  when neither R1 nor R2 has a converged sub-50 pass and at least one completed
+  ADMM pass missed that gate. The retry uses the same sensor sample/progress
+  and the nominal/memory resulting from the first cycle, retains the original
+  convergence tolerance and exact nonlinear corridor gate, and receives only
+  the remainder of a configured cycle-time budget. Input/factorization/model
+  errors do not trigger retries. If the retry fails, an already exact-feasible
+  first candidate is preserved. Retry count/status/iterations/time are
+  separately exposed in MPC diagnostics and the offline replay CSV.
+- Rebuilt the full ROS workspace using the maintained dev-entrypoint build,
+  compiled `mpc_bag_solver_replay` against that exact `mpc_core`, and replayed
+  all current exports with external replay retries disabled. All `534/534`
+  captured solver inputs across the `349`, `75`, `52`, and new `58`-input bags
+  have at least one converged ADMM pass in `1–49` iterations at tolerance
+  `0.05`. No bag input fails the gate. One input in the newest 58-row replay
+  used the bounded same-sample retry (R1 `1`, R2 `25`); one input in the earlier
+  52-row replay used it (R1 `37`, R2 `13`). Maximum iterations in any ADMM
+  pass are `49`. This does **not** bound aggregate work across QP-padding
+  attempts, R1/R2, or the extra RTI cycle to 49 iterations.
+- Ran a supervised validation as
+  `live_runs/mpc_startup_convergence_retry_20261020/run` with the production
+  retry build, tolerance `0.05`, AMCL local-cluster threshold `0.75`, expanded
+  compact recording, and the collision watcher. It was described at the time
+  as using the practice trajectory/map; a later audit disproved that route
+  description. The watcher stopped at the first collision: `66` Unity odometry
+  samples over `1.63 s`, zero laps, one collision. See the route audit below.
+- The live bag's `58/58` valid control inputs each had a converged R1/R2 pass
+  under 50; the actual callback reported zero same-sample retries in this
+  particular run. MPC cycle outcomes were 56 optimal, one degraded, and one
+  exact nonlinear rejection (plus six startup diagnostics before a legal map
+  pose existed). The independent production-core replay of those same 58
+  state inputs triggered one retry and also passed `58/58`.
+- Separating pre-impact samples from the respawn-contaminated tail gives
+  AMCL scan-pose and control-map-pose XY RMSE `0.112 m`, p95 `0.229 m`, max
+  `0.244–0.246 m` before collision. Across the whole collision-truncated bag,
+  those errors rise to about `0.225 m` RMSE / `0.835 m` max. Only `15/60`
+  scan-alignment updates were accepted; applied XY correction was p95 `0.054
+  m`, max `0.158 m`. The `0.75` confidence threshold therefore did not make
+  localization sufficiently accurate in this short run, and the bag does not
+  record cluster confidence itself. Do not attribute the collision solely to
+  AMCL from these correlations.
+- The early control trace also remains poor: from rest at `t≈0.18 s`, with
+  speed reference `7.1 m/s` and `e_y≈-0.18 m`, the first command was steering
+  `+0.524 rad` and throttle `0.0097`; the next sample commanded throttle
+  `0.001`. At `t≈1.18 s`, truth speed was `3.30 m/s`, AMCL/map pose error had
+  reached `0.23 m`, and `e_y≈-0.53 m`; near `t≈1.38 s`, speed was `4.37 m/s`,
+  `e_y≈-0.61 m`, and the selected throttle rose to `0.612`. The collision
+  followed shortly after. This is evidence of unresolved tracking/pose and
+  startup-command behavior, not evidence that the convergence retry failed.
+- The collision remains a separate closed-loop/model/localization/trajectory
+  problem. The bag evaluator reports truth speed max `4.51 m/s`, forward-speed
+  RMSE `1.44 m/s`, relative XY endpoint error `0.90 m`, and no completed lap;
+  those errors are collision-truncated and must not be read as a full-lap
+  accuracy score. Solver convergence is now gated successfully, but no claim
+  of a safe or fast raceline is made. The expanded AMCL diagnostics are in the
+  bag for continued diagnosis.
+- At completion, the watcher stopped both simulator and runtime; no containers
+  are left running. Before another simulator run, replay any newly added bag
+  inputs through this production-core version and require at least one ADMM
+  pass per input below 50, as above.
+
+### Practice raceline selection correction — 2026-10-20
+
+- The collision-truncated retry bag was not following the intended practice
+  raceline. Its MPC reference diagnostics match
+  `autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv` (for
+  example, at progress about `23.4 m`, reference position near `(1.429, 1.098)`
+  and speed near `7.94 m/s`). That reference lies beyond the practice map's
+  occupied boundary in this section. The nearest practice-line point to the
+  last pre-impact Unity pose `(1.088, 1.009)` is around progress `20.63 m`, at
+  `(0.765, 1.033)`. The previous statement that this was a practice-line
+  validation was incorrect. The bag does not encode the loaded Unity scene or
+  contact manifold, so the route mismatch is a strong collision explanation,
+  not proof of the exact collider/contact that caused it.
+- Corrected the development launch default in
+  `sdu_apex_autodrive/launch/controller.launch.py` to pair
+  `maps/autodrive_practice_20260924_b.yaml` with
+  `trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv`.
+  Both AMCL's global-heading initializer and MPC receive that same trajectory.
+  The competition launch and its configured route were not changed. Explicit
+  map/trajectory overrides remain supported as a required pair.
+- Extended `tools/export_mpc_bag_solver_inputs.py` with route-aware export:
+  it reprojects each saved command-time map pose onto the selected trajectory
+  using the MPC's full-track, forward-heading-gated segment projection, then
+  writes the matching progress, lateral error, and heading error while
+  retaining the synchronized sensor/plant state. This avoids replaying old
+  Frenet coordinates as if they belonged to the newly selected line.
+- Re-exported the three recent practice-route captures and replayed every
+  available valid input against the corrected practice raceline using the
+  production MPC core and the existing candidate solver settings. All
+  `185/185` inputs passed the requested gate: at least one R1/R2/internal-retry
+  ADMM pass converged in `1–49` iterations. Route projection max distances
+  were `0.517 m` (75-row adaptive-padding capture), `0.402 m` (52-row AMCL
+  capture), and `0.221 m` (58-row retry capture), all below the configured
+  `0.80 m` startup projection limit. The older 349-row capture projects at
+  median `0.923 m`, p95 `4.483 m`, max `4.562 m`; it is not evidence from this
+  practice route and was excluded from this route-specific gate, not deleted.
+- Ran the corrected pair in the established practice `-batchmode`/Xvfb path,
+  with mounted-source rebuild, the convergence candidate overlay, full bag
+  recording, and the collision/stall watcher. Startup logs independently
+  confirm that `map_server` loaded the practice map and AMCL/MPC loaded the
+  same practice CSV (1422 CSV rows; MPC's trajectory preparation retains 1421
+  points after its duplicate-closure handling). The run is saved at
+  `live_runs/mpc_correct_practice_raceline_20261020/run`.
+- This was not a completed lap: the watcher observed no collision-count
+  increment, but aborted after odometry stopped moving for its 20-second stall
+  window. The bag has 1094 Unity odometry samples at mean `25.03 ms` spacing,
+  zero laps, and collision count zero. The car moved along the route from
+  projected progress `18.50 m` to about `35.96 m` (17.46 m), then remained at
+  approximately `(-0.942, -1.461)` with zero speed for the remainder. Peak
+  Unity speed was `6.06 m/s`. Do not label this as a successful or collision-
+  free lap; it is a route-correct partial run that stalled without a recorded
+  collision event.
+- The per-cycle diagnostics show `737` valid solves: `159` optimal,
+  `57` degraded, and `521` rejected by the exact nonlinear corridor check;
+  six earlier diagnostics were rejected before a synchronized state existed.
+  Every one of the `737/737` valid inputs had at least one converged R1/R2
+  ADMM pass below 50 iterations (maximum `49`, no internal retry). Thus the
+  saved-input convergence gate passed on the correct line, while nonlinear
+  candidate acceptance/tracking remains the immediate blocker. The watcher
+  stopped the simulator, runtime, and recorder; no active containers remain.
+- At the terminal stopped state, progress was `35.9606 m`, `e_y=-0.274816 m`,
+  and both candidates failed nonlinear corridor validation at stage 0. The
+  tolerance-inclusive lower bound was `-0.274649 m` (about `0.17 mm` outside);
+  the 5 cm footprint-clearance bound before tolerance was `-0.269649 m`, so
+  the state was about `5.17 mm` beyond that stricter bound. Recovery was active
+  but reported no re-entry stage, no candidate was selected, and the published
+  fallback was zero steering/zero throttle (Unity's hard-brake command). This
+  explains why the car remained stopped; do not “fix” it by relaxing the
+  physical-clearance requirement without a separate measured safety analysis.
+
+### RTI-versus-tracking diagnosis — 2026-10-20
+
+- The machine was idle before this analysis; no simulator was launched. The
+  route-correct partial capture
+  `live_runs/mpc_practice_recovery_multilap_retry1_20261020/run` contains 748
+  valid command-time states and did not complete a lap. It progressed into the
+  sharp-turn region, then stalled around `s=16.7 m`, with no recorded
+  collision. This is a failed tracking run, not an MPC success.
+- The turn failure starts before the stall: at `s=14.16 m`, the measured state
+  was approximately `u=3.38 m/s`, `r=-1.55 rad/s`, `e_y=0.26 m`,
+  `e_psi=0.24 rad`; by `s=15.21 m`, `e_y=0.71 m`; by `s=15.97 m`,
+  `e_y=1.06 m`. The practice trajectory requests roughly `7.5–8.1 m/s²`
+  (`v_ref² * |kappa|`) in this section. Measured `|u*r|` was about `5.2`
+  at 14.16 m, `3.2` at 14.57 m, and `1.3` at 15.21 m. This establishes a
+  severe turn-response/trajectory-feasibility mismatch at the point where
+  tracking is lost; it does not, by itself, distinguish tire-model error from
+  actuator timing, state error, or an infeasible path/speed combination.
+- An exact replay of the 748 saved states with the current production core,
+  49-iteration cap, and R2 mode had at least one sub-50 converged pass for
+  `746/748` rows. It still had `260/748` nonlinear corridor rejections. Over
+  `s=16–19 m`, `259/439` rows produced no selected candidate and `156/439`
+  selected the hard-brake recovery; mean selected throttle in that interval
+  was `0.004`. The repeated braking is therefore a visible response to lost
+  feasibility, not evidence that more ADMM iterations are needed.
+- A replay that multiplied lateral- and heading-error weights by four changed
+  steering/throttle commands, but left the sharp-turn stall/rejection count
+  essentially unchanged. This does not prove weights are irrelevant; it does
+  show that a broad weight increase alone did not repair this failure. The
+  base profile already assigns `500` to under-speed error, `125` to lateral
+  error, `31.25` to heading error, and only `0.1` to absolute throttle effort.
+- A third SQP/RTI pass on the same capture did not lower the 261-rejection
+  result in its prior replay and did not increase normal R1/R2 selections.
+  Removed that third-pass line-search/relinearization branch rather than
+  adding iterations without tracking benefit. The normal two-pass RTI remains.
+- Runtime diagnostics previously mislabeled selected feedback-drive and
+  feedback-brake recovery candidates as `"none"`, and health counters grouped
+  them under generic degraded acceptance. They now expose the exact candidate
+  name, whether it is an R1/R2 optimizer output, and whether a recovery action
+  was published; periodic health logs count optimizer, corridor-repair, and
+  feedback-recovery selections separately. This is an observability fix, not
+  a driving improvement.
+- Fixed the ADMM scalar-to-per-coordinate penalty migration so initialized
+  scalar `rho`/`rho_u` values are used when the newer penalty arrays are empty,
+  matching the documented migration and the focused solver regression. This
+  did not change the fixed-capture outcome because that replay cold-started.
+- Verification after these edits: `mpc_core`, `mpc_controller_node`, and the
+  focused source-rollout/RTI test target compiled; all 31 tests in that target
+  passed; `git diff --check` passed. The saved-input replay is diagnostic only;
+  no simulator run has verified a behavior change. The unresolved work is to
+  reduce the measured yaw/lateral response mismatch in the sharp turn and make
+  ordinary R1/R2 candidates feasible there before another practice attempt.
+- A previously skipped fixed-input report was rerun after sourcing the local
+  ROS message overlay. Persistent reports are
+  `live_runs/mpc_practice_recovery_multilap_retry1_20261020/fixed_input_rollout_report.txt`
+  and `oracle_start_rollout_report.txt`. The first starts from logged plant
+  state and replays recorded slot-1 commands without future state correction;
+  it is the relevant plant rollout score, unlike the separately reported
+  closed-loop horizon samples that are confounded by later replans.
+- Fixed-input rollout over 1,483 windows: at 25 ms, `u` RMSE `0.0948 m/s`,
+  `v` `0.0163 m/s`, yaw-rate `0.1170 rad/s`, yaw `0.00179 rad`, and XY
+  `0.00264 m`; at 750 ms, `u` `0.0930 m/s`, `v` `0.0174 m/s`, yaw-rate
+  `0.1301 rad/s`, yaw `0.0205 rad`, and XY `0.0676 m` (p95 `0.1133 m`, max
+  `0.6192 m`). The complete 750 ms path stays within 5 cm for `1,346/1,483`
+  windows; `137` windows exceed the 5 cm bound. This is useful predictive
+  ability, but does not meet the requested worst-case 5 cm criterion.
+- Errors are regime-concentrated, not uniform: fixed-input one-step yaw-rate
+  RMSE is `0.249 rad/s` for the high-steer group and `0.318 rad/s` during
+  high-steer turn-in; the alternate command-queue phase scores `0.459` and
+  `0.514 rad/s`, respectively. One-step position remains small because it
+  integrates over only 25 ms; that must not be mistaken for accurate yaw-rate
+  dynamics. The run barely samples higher speed (truth max `6.15 m/s`, with
+  only two 6–8 m/s samples in the controller horizon score).
+- The diagnostic-only oracle-start replay replaces only initial `u/v/r` with
+  same-epoch Unity truth; future inputs and hidden states remain as recorded.
+  At 750 ms it improves XY RMSE from `0.0676` to `0.0435 m` and p95 from
+  `0.1133` to `0.0716 m`; full-path >5 cm windows drop from `137` to `103`.
+  But yaw-rate RMSE changes only from `0.1301` to `0.1282 rad/s` at 750 ms
+  (`0.1170` to `0.1113` at 25 ms). Thus initial velocity-state error explains
+  part, not most, of the yaw-response tail; a production yaw/steering/tire
+  response discrepancy remains.
+- The live run also missed 40 Hz control cadence: `/mpc/diagnostics` and
+  `/mpc/drive_command` each recorded only `748` messages against `1,513`
+  40 Hz odometry updates. Parsed `solve_us` is mean `46.0 ms`, p50 `43.3 ms`,
+  p95 `76.1 ms`, max `97.9 ms`; `564/748` solves exceeded the 25 ms period.
+  Command intervals were median `44.2 ms`, p95 `76.6 ms`. More RTI passes
+  would worsen this. On the same saved states, an R1-only cold replay had
+  `23.7 ms` p95 solve time but the same `260` nonlinear rejections and fewer
+  normal optimizer selections (`245` versus `274` in the two-pass replay).
+  R2 improves some candidate quality, not feasibility or cadence; a third pass
+  was not retained.
+- The correct conclusion is neither “weights alone are wrong” nor “RTI is
+  unsolvable”: the present model has low typical translation error but a
+  significant dynamic yaw tail, the sharp-turn path asks for about
+  `7.5–8.1 m/s²` lateral acceleration, R1/R2 fail the exact corridor often,
+  and the live solve is too slow to update at 40 Hz. Keep active braking only
+  as a fail-safe, but count corridor repair, feedback recovery, and no-candidate
+  cycles as failed tracking attempts—not successes. No further practice run is
+  justified until the next candidate reduces these measured failure modes.
+
+### Frozen 30-command MPC rollout audit — 2026-10-20
+
+- Corrected the interpretation of the `fixed_input_rollout_report.txt` above:
+  it restarts from many logged states and replays the commands that were
+  actually emitted by the *closed-loop, replanning* controller. It is a useful
+  source-plant response check, but it is not the accuracy of one MPC plan whose
+  30 commands were latched and executed unchanged. It cannot substantiate a
+  `<5 cm` maximum error for a planned MPC horizon.
+- Re-evaluated the dedicated frozen-plan bags from
+  `live_runs/mpc_horizon_20261018_16` through `_22`. The latest route-correct
+  practice retry bag, `mpc_practice_recovery_multilap_retry1_20261020/run`,
+  does not contain `/mpc/open_loop_test`; it has no frozen-plan score.
+- Runs `_21` and `_22` are the complete, auditable plan tests. Each recorded a
+  30-control plan, output stages `0..29` in order, and the published
+  `DriveCommand` values matched the latched controls exactly. The corresponding
+  normalized `/steering_command` and `/throttle_command` actuator-interface
+  topics also matched all 30 controls (maximum absolute value discrepancy
+  below `3.1e-8`; nearest publication within `9.3 ms`). Their output cadence was
+  about `25.0 ms`. Neither had a new collision during the 750 ms frozen
+  horizon; both later recorded a collision after that horizon and completed
+  zero laps. These topic comparisons verify the MPC-to-actuator-interface
+  sequence, not a per-packet Unity acknowledgement; old bridge telemetry does
+  not provide a populated applied-command sequence for these runs.
+- Run `_21`, latched at `2.521 m/s`, includes all 31 predicted states and
+  truth-aligned states from `0` through `750 ms`: XY RMSE `0.1484 m`, p95
+  `0.2586 m`, max `0.3106 m`; yaw RMSE `0.0778 rad`, max `0.1385 rad`; forward
+  speed RMSE `0.1757 m/s`, max `0.2478 m/s`; yaw-rate RMSE `0.3865 rad/s`, max
+  `0.9830 rad/s`.
+- Run `_22`, latched at `2.500 m/s`, also has all 31 horizon states: XY RMSE
+  `0.2892 m`, p95 `0.5711 m`, max `0.7381 m`; yaw RMSE `0.1724 rad`, max
+  `0.3367 rad`; forward-speed RMSE `0.1697 m/s`, max `0.5772 m/s`; yaw-rate
+  RMSE `0.7783 rad/s`, max `1.8570 rad/s`.
+- Separating initial pose error from rollout drift does not rescue the result.
+  The start XY mismatch is `3.78 cm` in `_21` and `1.84 cm` in `_22`, with
+  negligible initial yaw error (`0.00065` and `-0.00049 rad`). After rigidly
+  aligning only the initial pose for diagnostic decomposition, relative-path
+  XY max remains `27.22 cm` / `72.67 cm`; relative-yaw max remains
+  `0.1379` / `0.3372 rad`. The fit-to-start transform is for scoring only and
+  is not applied to the controller.
+- Stagewise comparison localizes the first large prediction error to yaw
+  response: `|r_pred-r_GT|` first exceeds `0.1 rad/s` at 25 ms in `_21` and
+  50 ms in `_22`; at 100 ms the errors are `0.711` and `1.146 rad/s`. Relative
+  XY first exceeds 5 cm at 225 ms and 250 ms, respectively. The small initial
+  pose offsets do not explain the accumulating path error.
+- Both complete plans also expose steering chattering: all 30 throttle outputs
+  are `1.0`; each plan reverses steering sign nine times, with maximum adjacent
+  target changes of `0.756 rad` and `1.047 rad` per 25 ms. The test profile
+  used absolute steering-target effort `0.1`. The QP cost penalizes absolute
+  target/reference error and absolute target magnitude, but has no
+  adjacent-target slew cost or constraint. This is a concrete objective-design
+  weakness to address; smoothing alone cannot repair the early yaw-rate
+  prediction error and is not a plant-model fix.
+- Run `_18` emitted all 30 commands at `6.567 m/s`, but its plan event did not
+  serialize the full predicted state array; only 17 sparse state observations
+  align to truth. Its sparse position max is `0.636 m`, but it is not a
+  complete 31-state horizon score. Run `_16` aborted at stage 16 with
+  `state_too_old` and has no recorded output events, so it is not a completed
+  plan test.
+- Therefore no existing fully scored frozen-plan execution supports the
+  earlier `<5 cm` statement. The two complete full-horizon tests fail that
+  bound substantially. They also latch at only `2.5 m/s`; full-speed horizon
+  accuracy remains unverified. These are genuine model/controller/command-path
+  mismatches, but the bags do not by themselves separate plant-model error
+  from low-level command application timing.
+- Corrected the iteration-count interpretation for the route-correct live
+  capture. `748/748` had at least one R1 or R2 ADMM pass converge below 50; that
+  is not a total-cycle `<50` guarantee. Summing R1 and R2 ADMM iterations over
+  their QP-padding attempts gives p50 `57`, p95 `146`, max `245`, with
+  `398/748` cycles over 49 total iterations. There were no whole-cycle retries
+  in this run; up to five QP attempts occurred across R1+R2. Thus both timing
+  and total work fail the stated target despite the earlier per-pass gate.
+- Code inspection confirms R1/R2 are sequential SQP/RTI linearizations, not
+  alternative controllers: R2 normally relinearizes around R1's candidate;
+  when both pass exact nonlinear validation, the lower nonlinear objective
+  wins (corridor slack breaks ties). On the saved route inputs, R2 increased
+  ordinary optimizer selections but left nonlinear corridor rejections at
+  `260/748`; R1-only replay had the same rejection count and fewer ordinary
+  candidates. Deleting R2 or increasing ADMM iterations is therefore not a
+  demonstrated fix. The next design needs feasibility-aware refinement and one
+  aggregate iteration/time budget. Non-optimizer safety actions must fault and
+  stop the run rather than be reported as successful MPC output.
+- Tightened `tools/evaluate_mpc_bag.py` so frozen-plan reports now filter
+  completion/abort events by plan ID, compare every emitted stage and command
+  against the latched plan, compare the actuator-interface command topics,
+  flag collisions inside the frozen horizon, and report the number/time span
+  of truth-aligned predictions, and separate initial-pose error from
+  rigidly start-aligned relative-path error. This prevents a closed-loop replay
+  or partial sparse record from being reported as a complete fixed-horizon
+  validation.
+  Python syntax validation and rescoring runs `_16`, `_18`, `_21`, and `_22`
+  pass; only `_21` and `_22` qualify as complete full-state frozen-horizon
+  scores, and neither meets 5 cm.
+- No production MPC behavior was changed in this audit and no simulator was
+  launched. The next controller change must target the measured horizon yaw
+  and position mismatch and the observed nonlinear corridor rejection, then
+  pass this frozen-plan score before another closed-loop race attempt. The
+  earlier recommendation to retain an on-car hard-brake fallback is superseded
+  by the user's stated preference: for supervised simulator experiments, stop
+  the simulator on collision/fault rather than hold a hard brake and wait. Any
+  recovery output must remain separately labeled and must not count as normal
+  optimizer success.
+
+## Exact-build Unity/PhysX reverse engineering — 2026-10-20 continuation
+
+- Continued targeted decompilation of the matching practice `UnityPlayer.so`
+  debug ELF (same Build ID), using Ghidra `-noanalysis`; no simulator was
+  launched. Added native targets for automatic Rigidbody mass distribution,
+  Unity COM/tensor setters, PhysX mass-property routines, wheel sprung-mass
+  reset/set paths, `PxVehicleComputeSprungMasses`, and the vehicle wheel-ray
+  prefilter. The target list is maintained in
+  `tools/unity_reverse_engineering/ExportWheelCollider.java` and detailed
+  findings are in
+  `docs/development/UNITY_PRACTICE_WHEELCOLLIDER_REVERSE_ENGINEERING_20261020.md`.
+- Reverse-engineered the exact mass path: Unity enumerates Rigidbody shapes
+  and calls `PxRigidBodyExt::setMassAndUpdateInertia`; the checked-in PhysX 4.1
+  implementation aggregates per-shape mass properties, scales to 3.47 kg,
+  applies the explicit/automatic COM, diagonalizes the tensor, then writes the
+  actor mass frame. The active prefab has automatic inertia enabled and the
+  C# controller sets COM `(-0.00008, 0.06434, -0.00468)`.
+- Independently solved the exact PhysX four-wheel minimum-variance sprung-mass
+  constraints from the scene wheel coordinates. Results
+  `[0.817194701, 0.816018680, 0.918992382, 0.917794237] kg` reproduce the
+  production constants to float-rounding precision. Added source-provenance
+  comments only; no vehicle equations or output behavior changed.
+- Honest validation remains poor for open-loop rollout: current shared plant
+  evaluation on the available Oct 19 practice captures has one-step `v` RMSE
+  about `0.132 m/s` and yaw-rate RMSE `0.066–0.072 rad/s`; at 750 ms XY endpoint
+  RMSE is about `1.38 m`, and only about `100/780` rolling windows stay within
+  5 cm. Those bags predate the current source revision, and this is offline
+  replay, not an online validation. The newly traced mass and sprung-mass
+  equations are already represented by fixed practice-vehicle constants and
+  do not explain or resolve the remaining error by themselves.
+- Also traced the native suspension query: COM-pose ray origin, direction,
+  `3*radius + maxCompression + maxDroop` length, hit-plane intersection, and
+  Unity's ignore/layer prefilter. Our plant already implements the exact
+  ray-to-plane intersection when the plane is known. It does not yet reproduce
+  hit selection, per-triangle normals/materials, or dynamic scene actors from
+  the practice scene. At the time of the initial audit, the replay had not
+  causally identified the residual and no change was warranted. The later
+  2026-10-20 continuation below found and corrected a separate exact callback
+  equation mismatch; the contact-query gaps remain.
+
+## 2026-10-20: corrected native combined-slip equation and replay
+
+- Continued from the 750 ms XY endpoint error (~1.38 m) by inspecting the
+  exact-build `VehicleComputeTireForce` decompilation and its native register
+  dataflow. The prior implementation/report had inserted filtered tire load
+  into the normalized lateral combined-slip demand. The Unity callback instead
+  computes `sqrt(max(1, (rawFx/forwardExtremumValue)^2 +
+  (rawFy/sidewaysExtremumValue)^2))`; filtered tire load multiplies each
+  resulting force only. This was a concrete source/implementation mismatch,
+  not a fitted correction.
+- Removed the extra load factor in the production-shared plant and changed the
+  callback-equation unit test to enforce the decompiled Unity expression.
+  Focused `test_unity_source_plant` passes. Rebuilt `mpc_core`,
+  `mpc_controller_node`, and `sensor_odometry_node`, so the equation is in
+  both production paths and not evaluator-only.
+- Replayed both available independent practice captures, using their recorded
+  initial plant state and the recorded delayed slot-1 commands without future
+  state correction. At 750 ms:
+  - `run/`: `u RMSE=0.00521 m/s`, `v=0.00038 m/s`, `r=0.00300 rad/s`,
+    heading `0.00135 rad`, XY endpoint RMSE `0.00570 m`.
+  - `run_1/`: `u RMSE=0.00678 m/s`, `v=0.00069 m/s`, `r=0.00558 rad/s`,
+    heading `0.00188 rad`, XY endpoint RMSE `0.00787 m`.
+  The previous ~1.381 m endpoint RMSE fell by ~99.5% on both. Thus the stated
+  `<5 cm XY RMSE` target is met in both offline practice replays.
+- Keep the maximum separate from RMSE: all 781 endpoints in `run/` are under
+  5 cm; `run_1/` has one endpoint at 50.31 mm and two intermediate path samples
+  above 5 cm (maximum 53.7 mm). In those tail windows, the predicted plant
+  increments agree with GT twist to sub-millimeter scale, while some recorded
+  GT pose/twist increments differ by 2.9–3.8 cm in one 25 ms interval. Do not
+  hide these tails or compensate with a force gain; they are pose/twist
+  reference-consistency events and need a separate synchronization audit if
+  the requirement is a strict per-sample maximum rather than RMSE.
+- No live simulator was launched. The bags are practice-only and the result is
+  offline replay using corrected current source, not online deployment proof.
+  The exact native callback correction is supported by the matching Unity
+  binary; arbitrary track-mesh contact selection and the full Unity scene
+  constraint solve remain outside this reduced plant.
+
+### MPC re-entry diagnosis after the plant correction — 2026-10-20
+
+- Replayed the latest route-correct practice capture's 748 saved solver inputs
+  through the rebuilt current `mpc_core` and the same startup-candidate
+  settings. No simulator was started. The current source plant produced 259
+  nonlinear corridor rejections, versus 261 in the saved earlier replay; this
+  is not a material MPC improvement. R1/R2 still converge on many of these
+  samples but neither supplies an exact-validated candidate through the
+  failing section.
+- The 259 rejections are localized to a short stalled/recovery region. Every
+  failure is a corridor failure at the early horizon (R1 around stage 4; R2
+  around stage 6), with approximately 8–12 mm excess beyond the scheduled
+  normal-clearance bound. The recorded state is near stopped (about
+  `0.024 m/s`) and already outside the nominal 5 cm-clearance corridor. The
+  diagnostic reports `recovery_active=true`, no sustained re-entry found
+  within the horizon, and an initial normal-corridor violation of about
+  `7 mm` (the seed reaches about `18 mm`). This points to recovery/re-entry
+  feasibility—not a failure to run another ADMM iteration—as the immediate
+  reason these cycles cannot publish a normal candidate. The logged failure
+  bounds are the normal-clearance bounds; the next check must distinguish the
+  recovery allowance from the hard full-footprint track boundary before any
+  schedule change is made.
+- The relevant offline MPC replay utility no longer compiled because it still
+  wrote two yaw-residual fields removed from the production state. Updated it
+  to ignore those retained legacy CSV columns and rebuilt it against the
+  current production core. This only restores the ability to replay saved
+  solver inputs; it does not change runtime MPC behavior.
+- Accuracy is therefore conditional, not globally accepted: the two Oct 19
+  practice replays meet the 750 ms endpoint-RMSE target, but the newer Oct 20
+  aggressive practice capture remains at `0.0676 m` endpoint XY RMSE,
+  `0.1133 m` p95, and `0.6192 m` max; `130/1,483` endpoints exceed 5 cm and
+  `137/1,483` windows exceed 5 cm somewhere in the 750 ms path. That capture
+  also has `0.130 rad/s` yaw-rate RMSE at 750 ms. Do not call the plant
+  accurate across the full observed practice range or use this as evidence
+  that the MPC is ready for a speed-seeking run.
+- Next: inspect the recovery schedule and exact hard-footprint bound at these
+  failing samples, then make one recovery-feasibility correction only if the
+  source-model rollout remains inside the hard track boundary. Replay the
+  same saved inputs and require fewer exact-corridor rejections without
+  increasing hard-bound violations; only then consider a supervised sim run.
+
+### Rollout time-origin discrepancy — 2026-10-20
+
+- The controller previously formed its optimization initial state at the
+  callback's `control_ros_time`, then ran the solver and published the first
+  command afterward. The vehicle plant already propagated its two command
+  queue slots, but this omitted the pre-publication interval while the old
+  queued command remained active.
+- The two auditable frozen-plan bags show this interval is material: the first
+  output was published about `18 ms` after the plan's control timestamp, while
+  the next bridge requests were about `20 ms` (`_21`) and `23 ms` (`_22`) after
+  that timestamp. In both recordings the first output missed that request and
+  entered the recorded queue on the following request. An offline timing sweep
+  moved the first planned-control effect later and improved both position
+  scores, but did not reach the 5 cm worst-case target. This supports a timing
+  contribution, not a complete explanation of the rollout error.
+- The MPC now uses the previous cycle's measured ROS-stamp interval from its
+  control snapshot to the command publication as the next cycle's prediction
+  lead. The control-time plant predictor advances known queued inputs to that
+  expected publication epoch before optimization; the MPC decision still
+  enters through the existing two-packet queue. No physics constants, tire
+  equations, or optimizer states were changed. The first command after startup
+  has no measured previous-cycle lead and therefore starts with zero lead.
+- The lead is emitted in optional MPC diagnostics as
+  `candidate_command_stamp_ns` and `candidate_command_lead_s`. Open-loop plan
+  metadata now uses the same expected command-publication epoch as its initial
+  predicted state.
+- Validation: `colcon build --packages-select f1tenth_mpc` succeeded; all
+  eight `test_mpc_control_time_predictor` tests passed, including a new
+  47 ms future-publication-epoch queue-propagation case. No simulator was
+  started in this step.
+- Still unresolved: command transport/packet phase is separate from solver
+  time. In the two frozen-plan records, a command published just before a
+  request was received just after it and therefore waited for the next packet.
+  The production MPC does not subscribe to the diagnostic bridge-timing topic;
+  it must infer the permitted command/packet timing from legal state and
+  command history or preserve this as an uncertainty. A new frozen-plan
+  practice run is required to measure whether the production change improves
+  the full rollout and to isolate this remaining phase error. Do not call the
+  5 cm full-horizon bound passed yet.

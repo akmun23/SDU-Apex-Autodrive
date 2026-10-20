@@ -20,9 +20,9 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     /workspace/install/share/colcon-core/packages/sdu_apex_autodrive \
     /workspace/install/share/sdu_apex_autodrive
   cd /workspace
-  CMAKE_BUILD_PARALLEL_LEVEL=1 colcon build \
+  MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build \
     --packages-up-to sdu_apex_autodrive \
-    --parallel-workers 1 \
+    --parallel-workers 4 \
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
   source /workspace/install/setup.bash

@@ -310,6 +310,21 @@ void SourceDerivedOdomRuntime::correct(
   plant_state_.roll_rate_radps = roll_rate_radps;
   plant_state_.pitch_rate_radps = pitch_rate_radps;
   plant_state_.wheel_omega_radps = wheel_omega_radps;
+  std::array<double, UNITY_SOURCE_PLANT_STATE_SIZE> reconciled_state{};
+  copy_plant_state(plant_state_, &reconciled_state);
+  int suspension_history_initialized =
+    plant_state_.suspension_history_initialized ? 1 : 0;
+  if (!unity_source_plant_reconcile_suspension_jounce_c(
+      reconciled_state.data(), &suspension_history_initialized))
+  {
+    throw std::runtime_error(
+      "failed to reconcile source suspension state after sensor correction");
+  }
+  std::copy(reconciled_state.begin() + UNITY_SOURCE_SUSPENSION_JOUNCE_FL,
+    reconciled_state.begin() + UNITY_SOURCE_SUSPENSION_JOUNCE_FL + 4,
+    plant_state_.suspension_jounce_m.begin());
+  plant_state_.suspension_history_initialized =
+    suspension_history_initialized != 0;
   yaw_rad_ = yaw_rad;
 }
 

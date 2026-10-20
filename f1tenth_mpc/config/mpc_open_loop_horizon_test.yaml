@@ -10,6 +10,9 @@
     # execute and score a genuinely published fixed-input horizon.
     open_loop_horizon_test_min_speed_mps: 2.5
     open_loop_horizon_test_topic: /mpc/open_loop_test
+    # Keep current sensor staleness bounded; the measured command-publication
+    # lead has its own 500 ms limit in the predictor configuration.
+    state_extrapolation_max_s: 0.25
     # Do not impose the competition startup crawl on this development
     # evaluation. The selected path is already speed-profiled from 2.72 to
     # 8.07 m/s; the one-lap startup ramp had silently capped its 5 m/s section
@@ -32,17 +35,15 @@
     weight_throttle_command: 0.0
     terminal_multiplier: 3.0
 
-    # Run22 exhausted the silently imposed 160-iteration cap with median
-    # primal residual 0.383 and p95 1.19. The node now honors the 200-iteration
-    # configured ceiling. Adaptive rho is enabled to address the observed
-    # primal/dual imbalance; exact rollout and corridor validation remain hard
-    # acceptance gates.
+    # Keep the one-shot test's 100-iteration ceiling, but do not impose a
+    # cycle-time deadline: the first attempt showed the 20 ms deadline expired
+    # during QP construction, before ADMM took even one iteration. Timing is
+    # deliberately not the gate for this accuracy experiment.
     adaptive_rho: true
     adaptive_rho_update_period: 5
     max_solver_iterations: 100
     solver_degraded_tolerance: 0.05
-    # Allow a second nonlinear RTI pass when the first pass leaves enough of
-    # the 20 ms budget. This is distinct from ADMM's inner iterations.
+    # Allow a second nonlinear RTI pass after the first candidate is available.
     rti_refinement_mode: adaptive
-    rti_cycle_budget_ms: 20.0
-    jacobian_threads: 8
+    rti_cycle_budget_ms: 0.0
+    jacobian_threads: 4

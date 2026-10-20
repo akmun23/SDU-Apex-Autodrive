@@ -119,6 +119,65 @@ extern "C" int unity_source_plant_step_c(
   return 1;
 }
 
+extern "C" int unity_source_plant_reconcile_suspension_jounce_c(
+    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    int *suspension_history_initialized)
+{
+  if (!state || !suspension_history_initialized) return 0;
+  auto plant_state = from_c(state, *suspension_history_initialized);
+  if (!f1tenth_mpc::unity_source_plant_reconcile_suspension_jounce(
+          &plant_state))
+    return 0;
+  std::copy(plant_state.suspension_jounce_m.begin(),
+            plant_state.suspension_jounce_m.end(),
+            state + UNITY_SOURCE_SUSPENSION_JOUNCE_FL);
+  *suspension_history_initialized =
+      plant_state.suspension_history_initialized ? 1 : 0;
+  return 1;
+}
+
+extern "C" int unity_source_plant_step_sensitivity_c(
+    const UnitySourcePlantInputC *input, double duration_s,
+    const UnitySourcePlantSensitivitySeedsC *seeds,
+    UnitySourcePlantSensitivityC *sensitivity)
+{
+  if (!input || !seeds || !sensitivity) return 0;
+  auto plant_state = from_c(input->state,
+                            input->suspension_history_initialized);
+  std::copy_n(input->wheel_rotation_angle_rad, 4,
+              plant_state.wheel_rotation_angle_rad.begin());
+  const f1tenth_mpc::UnitySourcePlantInput plant_input{
+      input->steering_target_rad, input->throttle_normalized};
+  f1tenth_mpc::UnitySourcePlantSensitivitySeeds typed_seeds;
+  for (std::size_t state = 0; state < UNITY_SOURCE_PLANT_STATE_SIZE; ++state)
+    for (std::size_t lane = 0;
+         lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
+      typed_seeds.state[state][lane] = seeds->state[state][lane];
+  for (std::size_t lane = 0;
+       lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane) {
+    typed_seeds.steering_target[lane] = seeds->steering_target[lane];
+    typed_seeds.throttle[lane] = seeds->throttle[lane];
+  }
+  f1tenth_mpc::UnitySourcePlantSensitivity typed_sensitivity;
+  if (!f1tenth_mpc::unity_source_plant_step_with_sensitivities(
+          plant_state, plant_input, duration_s, typed_seeds,
+          &typed_sensitivity)) return 0;
+  for (std::size_t state = 0; state < UNITY_SOURCE_PLANT_STATE_SIZE; ++state)
+    for (std::size_t lane = 0;
+         lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
+      sensitivity->state[state][lane] =
+          typed_sensitivity.state[state][lane];
+  for (std::size_t lane = 0;
+       lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane) {
+    sensitivity->body_forward_displacement[lane] =
+        typed_sensitivity.body_forward_displacement[lane];
+    sensitivity->body_lateral_displacement[lane] =
+        typed_sensitivity.body_lateral_displacement[lane];
+    sensitivity->yaw_delta[lane] = typed_sensitivity.yaw_delta[lane];
+  }
+  return 1;
+}
+
 extern "C" int unity_source_plant_slip_excess_c(
     const double state[UNITY_SOURCE_PLANT_STATE_SIZE],
     double longitudinal_slip[4], double excess_speed_mps[4],

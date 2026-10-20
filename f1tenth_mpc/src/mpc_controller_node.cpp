@@ -55,11 +55,11 @@ void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
     solver.use_scaling = enabled ? 1 : 0;
     if (!enabled) return;
 
-    // x = D*x_scaled and u = Du*u_scaled. These fixed characteristic scales
-    // normalize the mixed SI units without changing physical costs, bounds,
-    // plant equations, or actuator commands.
+    // x = D*x_scaled and u = Du*u_scaled. These are characteristic physical
+    // state/input scales, not vehicle parameters; the transform preserves the
+    // physical cost, bounds, plant equations, and actuator commands.
     constexpr float state_scale[RICCATI_MAX_NX] = {
-        0.10f, 0.10f, 4.0f, 1.0f, 4.0f,
+        0.10f, 0.10f, 0.5f, 1.0f, 4.0f,
         0.5f,
         400.0f, 400.0f, 400.0f, 400.0f,
         0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
@@ -111,6 +111,9 @@ public:
             "unity_plant_state_topic", "/odom/unity_plant_state");
         control_time_predictor_config_.maximum_state_age_s =
             state_extrapolation_max_s_;
+        control_time_predictor_config_.maximum_prediction_lead_s =
+            std::clamp(declare_parameter<double>(
+                "maximum_command_publication_lead_s", 0.500), 0.0, 0.750);
         control_time_predictor_config_.model_integration_step_s =
             TIME_STEP_SECONDS;
         control_time_predictor_config_.command_actuation_delay_s =
@@ -153,6 +156,8 @@ public:
         }
         // State is time-sensitive: if executor/DDS scheduling falls behind,
         // drop old samples instead of replaying them as current control input.
+        control_callback_group_ = create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive);
         const auto latest_state_qos = rclcpp::SensorDataQoS().keep_last(1);
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             pose_topic_, latest_state_qos,
@@ -187,6 +192,8 @@ public:
             "weight_steering_target", 5.0f);
         rti_config_.model.weight_throttle_command = declare_weight(
             "weight_throttle_command", 0.1f);
+        rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
+            declare_parameter<double>("startup_nominal_throttle_seed", 0.0));
         rti_config_.model.terminal_multiplier = declare_weight(
             "terminal_multiplier", 3.0f);
         rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
@@ -207,6 +214,8 @@ public:
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
             declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.001));
+        rti_config_.model.qp_corridor_padding_m = static_cast<float>(
+            declare_parameter<double>("qp_corridor_padding_m", 0.0));
         const std::string recovery_seed_policy = declare_parameter<std::string>(
             "recovery_seed_policy", "nominal");
         if (recovery_seed_policy == "nominal") {
@@ -230,7 +239,7 @@ public:
         rti_config_.model.recovery_steering_k_r = static_cast<float>(
             declare_parameter<double>("recovery_steering_k_r", 0.0));
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
-            declare_parameter<int>("jacobian_threads", 4), 0L, 16L));
+            declare_parameter<int>("jacobian_threads", 4), 0L, 4L));
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", MAX_ITERATIONS);
         // Keep the ROS parameter consistent with the solver's compile-time
@@ -248,10 +257,47 @@ public:
             declare_parameter<double>("admm_rho", 7.0));
         rti_config_.solver.rho_u = static_cast<float>(
             declare_parameter<double>("admm_rho_input", 7.0));
+        rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_EY] = static_cast<float>(
+            declare_parameter<double>("admm_rho_ey", 0.0));
+        rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_U] = static_cast<float>(
+            declare_parameter<double>("admm_rho_forward_speed", 0.0));
+        rti_config_.solver.rho_x_by_state[
+            MPC_OPT_IDX_ACTUAL_STEERING_ANGLE] = static_cast<float>(
+                declare_parameter<double>("admm_rho_actual_steering", 0.0));
+        for (const float rho_state : rti_config_.solver.rho_x_by_state) {
+            if (!std::isfinite(rho_state) ||
+                (rho_state != 0.0f &&
+                 (rho_state < 1.0f || rho_state > 127.0f))) {
+                throw std::runtime_error(
+                    "ADMM state-rho overrides must be zero or in [1, 127]");
+            }
+        }
+        rti_config_.solver.rho_u_by_input[0] = static_cast<float>(
+            declare_parameter<double>("admm_rho_steering", 0.0));
+        rti_config_.solver.rho_u_by_input[1] = static_cast<float>(
+            declare_parameter<double>("admm_rho_throttle", 0.0));
+        for (const float rho_input : rti_config_.solver.rho_u_by_input) {
+            if (!std::isfinite(rho_input) ||
+                (rho_input != 0.0f &&
+                 (rho_input < 1.0f || rho_input > 127.0f))) {
+                throw std::runtime_error(
+                    "admm_rho_steering/throttle must be zero or in [1, 127]");
+            }
+        }
+        rti_config_.solver.rho_max = static_cast<float>(
+            declare_parameter<double>("admm_rho_max", 32.0));
+        if (!std::isfinite(rti_config_.solver.rho_max) ||
+            rti_config_.solver.rho_max < 1.0f ||
+            rti_config_.solver.rho_max > 127.0f) {
+            throw std::runtime_error(
+                "admm_rho_max must be finite and in [1, 127]");
+        }
         rti_config_.solver.tolerance = static_cast<float>(
             declare_parameter<double>("solver_tolerance", 0.01));
         rti_config_.solver.adaptive_rho = declare_parameter<bool>(
             "adaptive_rho", true) ? 1 : 0;
+        rti_config_.solver.cold_start_each_solve = declare_parameter<bool>(
+            "solver_cold_start_each_solve", false) ? 1 : 0;
         const int adaptive_rho_update_period = static_cast<int>(
             declare_parameter<int>("adaptive_rho_update_period", 1));
         rti_config_.solver.adaptive_rho_update_period = std::clamp(
@@ -298,12 +344,22 @@ public:
         rti_config_.max_consecutive_degraded_solves =
             declare_parameter<int>("max_consecutive_degraded_solves", 3);
         RCLCPP_INFO(get_logger(),
-            "MPC solver config: ADMM max=%u, rho adaptation=%s/%d, "
-            "Jacobian workers=%d, RTI refinement=%d, cycle budget=%.1f ms, "
+            "MPC solver config: ADMM per-solve max=%u, rho adaptation=%s/%d, "
+            "rho-x overrides=[ey=%.2f,u=%.2f,steer=%.2f], "
+            "rho-u override=[%.2f,%.2f], cold-start=%s, "
+            "Jacobian workers=%d, RTI refinement=%d, "
+            "cycle budget=%.1f ms, "
             "decision state=%d, plant state=%d, horizon=%d",
             static_cast<unsigned>(rti_config_.solver.max_iterations),
             rti_config_.solver.adaptive_rho ? "on" : "off",
             rti_config_.solver.adaptive_rho_update_period,
+            rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_EY],
+            rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_U],
+            rti_config_.solver.rho_x_by_state[
+                MPC_OPT_IDX_ACTUAL_STEERING_ANGLE],
+            rti_config_.solver.rho_u_by_input[0],
+            rti_config_.solver.rho_u_by_input[1],
+            rti_config_.solver.cold_start_each_solve ? "on" : "off",
             rti_config_.model.jacobian_threads,
             static_cast<int>(rti_config_.refinement_mode),
             rti_config_.max_cycle_time_us / 1000.0,
@@ -317,6 +373,16 @@ public:
         if (!enabled_) {
             RCLCPP_WARN(get_logger(),
                 "MPC is inactive; no command publisher is created");
+        } else {
+            /* Keep sensor callbacks responsive while the nonlinear solve runs.
+             * The control group is mutually exclusive, so only one solve may
+             * touch RTI memory at a time. Input subscriptions remain in the
+             * node's separate default group and can refresh the synchronized
+             * state concurrently in the four-thread component executor. */
+            control_timer_ = create_wall_timer(
+                std::chrono::milliseconds(5),
+                std::bind(&MpcControllerNode::control_timer_callback, this),
+                control_callback_group_);
         }
     }
 
@@ -428,9 +494,9 @@ private:
         return startup_speed_mps_ + (max_speed_mps_ - startup_speed_mps_) * fraction;
     }
 
-    void publish_command(double steering, double throttle_normalized = 0.0)
+    int64_t publish_command(double steering, double throttle_normalized = 0.0)
     {
-        if (!drive_command_pub_) return;
+        if (!drive_command_pub_) return 0;
         const double finite_steering = std::isfinite(steering) ? steering : 0.0;
         const double finite_throttle = std::isfinite(throttle_normalized)
             ? throttle_normalized : 0.0;
@@ -449,45 +515,26 @@ private:
                 bounded_throttle, true});
         }
         drive_command_pub_->publish(command);
+        return command_time.nanoseconds();
     }
 
-    void publish_stop(const char * reason, bool emit_diagnostic = true)
+    void report_control_fault(const char * reason,
+                              bool emit_diagnostic = true,
+                              bool reset_rti_memory = true)
     {
         abort_open_loop_horizon_test(reason);
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s", reason);
-        mpc_rti_memory_reset(&rti_memory_);
-        if (enabled_) {
-            last_steering_command_rad_ = 0.0;
-            last_throttle_command_ = 0.0;
-            publish_command(0.0, 0.0);
-        }
-        if (diagnostics_pub_ && emit_diagnostic)
-            publish_cycle_failure(reason);
-    }
-
-    /* A rejected MPC candidate is never published as if it were valid. A
-     * direct-throttle controller has no speed-loop fallback: zero throttle is
-     * the simulator's active-brake command. Preserve bounded steering only. */
-    void publish_driving_fallback(const char *reason,
-                                  bool emit_diagnostic = true,
-                                  bool reset_rti_memory = true)
-    {
-        abort_open_loop_horizon_test(reason);
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s; "
-            "applying zero-throttle active brake until a feasible horizon "
-            "is available", reason);
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+            "%s; no replacement command published (last actuator command "
+            "remains active)", reason);
         if (reset_rti_memory) {
             mpc_rti_memory_reset(&rti_memory_);
         }
-        if (enabled_) {
-            last_steering_command_rad_ = clamp(
-                std::isfinite(last_steering_command_rad_)
-                    ? last_steering_command_rad_ : 0.0,
-                -rti_config_.model.max_steering_rad,
-                rti_config_.model.max_steering_rad);
-            last_throttle_command_ = 0.0;
-            publish_command(last_steering_command_rad_, 0.0);
-        }
+        /* Do not misrepresent a rejected plan as a valid recovery command.
+         * In particular, Unity interprets q=0 as full active braking, which
+         * can stall a diagnostic run before its collision watcher records
+         * the failure. Publish the fault only; the simulator keeps the last
+         * actuator command until the supervising run stops on collision or
+         * its explicit overall timeout. */
         if (diagnostics_pub_ && emit_diagnostic)
             publish_cycle_failure(reason);
     }
@@ -736,7 +783,7 @@ private:
         publish_open_loop_horizon_event(json.str());
     }
 
-    void publish_open_loop_horizon_command(int stage)
+    int64_t publish_open_loop_horizon_command(int stage)
     {
         const MpcModelControl_t & control =
             open_loop_horizon_test_plan_.controls[stage];
@@ -744,7 +791,8 @@ private:
             control.steering_target_rad,
             -actuator_steering_limit_rad_, actuator_steering_limit_rad_);
         last_throttle_command_ = clamp(control.throttle_command, 0.0, 1.0);
-        publish_command(last_steering_command_rad_, last_throttle_command_);
+        const int64_t command_stamp_ns = publish_command(
+            last_steering_command_rad_, last_throttle_command_);
         std::ostringstream output;
         output << std::setprecision(9)
                << "{\"event\":\"output\",\"plan_id\":"
@@ -754,6 +802,7 @@ private:
                << ",\"control\":[" << control.steering_target_rad << ','
                << control.throttle_command << "]}";
         publish_open_loop_horizon_event(output.str());
+        return command_stamp_ns;
     }
 
     void record_cycle_health(MpcRtiCycleStatus_t status,
@@ -761,6 +810,13 @@ private:
                              double solve_us)
     {
         ++control_cycles_;
+        if (result.selected_candidate == 1 || result.selected_candidate == 2)
+            ++optimizer_candidate_cycles_;
+        else if (result.selected_candidate == 3)
+            ++corridor_repair_candidate_cycles_;
+        else if (result.selected_candidate == 4 ||
+                 result.selected_candidate == 5)
+            ++feedback_recovery_candidate_cycles_;
         if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
             ++accepted_optimal_;
         } else if (status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
@@ -778,18 +834,39 @@ private:
     {
         RCLCPP_INFO(get_logger(),
             "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
-            "accepted_degraded=%llu residual_candidate_published=%llu "
-            "corridor_repair_used=%llu "
-            "hard_fallback_cycles=%llu max_solver_iterations_seen=%d "
+            "accepted_degraded=%llu optimizer_candidates=%llu "
+            "corridor_repair_candidates=%llu feedback_recovery_candidates=%llu "
+            "residual_candidate_published=%llu corridor_repair_used=%llu "
+            "control_fault_cycles=%llu max_solver_iterations_seen=%d "
             "max_solve_us=%.1f",
             phase,
             static_cast<unsigned long long>(control_cycles_),
             static_cast<unsigned long long>(accepted_optimal_),
             static_cast<unsigned long long>(accepted_degraded_),
+            static_cast<unsigned long long>(optimizer_candidate_cycles_),
+            static_cast<unsigned long long>(corridor_repair_candidate_cycles_),
+            static_cast<unsigned long long>(feedback_recovery_candidate_cycles_),
             static_cast<unsigned long long>(residual_candidate_published_),
             static_cast<unsigned long long>(corridor_repair_used_),
-            static_cast<unsigned long long>(hard_fallback_cycles_),
+            static_cast<unsigned long long>(control_fault_cycles_),
             max_solver_iterations_seen_, max_solve_us_);
+    }
+
+    static const char * selected_candidate_name(int candidate)
+    {
+        switch (candidate) {
+        case 1: return "R1";
+        case 2: return "R2";
+        case 3: return "corridor_repair";
+        case 4: return "feedback_drive_recovery";
+        case 5: return "feedback_brake_recovery";
+        default: return "none";
+        }
+    }
+
+    static bool selected_candidate_is_optimizer(int candidate)
+    {
+        return candidate == 1 || candidate == 2;
     }
 
     static const char * cycle_status_name(MpcRtiCycleStatus_t status)
@@ -883,6 +960,7 @@ private:
         double control_prediction_us, double progress,
         double source_dt_s, const MpcRtiCycleResult_t &result,
         double solve_us, int64_t control_ros_stamp_ns,
+        int64_t candidate_command_stamp_ns,
         int64_t callback_steady_ns, int64_t synchronize_steady_ns)
     {
         if (!diagnostics_pub_) return;
@@ -973,6 +1051,11 @@ private:
             << ",\"map_pose_source_stamp_ns\":"
             << synchronized.map_pose_source_stamp_ns
             << ",\"control_ros_stamp_ns\":" << control_ros_stamp_ns
+            << ",\"candidate_command_stamp_ns\":"
+            << candidate_command_stamp_ns
+            << ",\"candidate_command_lead_s\":"
+            << static_cast<double>(candidate_command_stamp_ns -
+                control_ros_stamp_ns) * 1.0e-9
             << ",\"source_age_s\":" << synchronized.source_age_s
             << ",\"source_dt_s\":" << source_dt_s
             << ",\"pose_odom_skew_s\":" << synchronized.pose_odom_skew_s
@@ -1018,6 +1101,8 @@ private:
             << callback_steady_ns << ",\"synchronize\":"
             << synchronize_steady_ns << '}'
             << ",\"progress_m\":" << progress
+            << ",\"active_speed_ceiling_mps\":"
+            << rti_config_.model.active_speed_ceiling_mps
             << ",\"path_curvature_per_m\":";
         json_number(current_path_sample_valid ? current_path_sample.curvature :
             std::numeric_limits<double>::quiet_NaN());
@@ -1028,6 +1113,9 @@ private:
             ? std::min(current_path_sample.speed,
                 static_cast<double>(rti_config_.model.active_speed_ceiling_mps))
             : std::numeric_limits<double>::quiet_NaN();
+        json << ",\"trajectory_speed_mps\":";
+        json_number(current_path_sample_valid ? current_path_sample.speed :
+            std::numeric_limits<double>::quiet_NaN());
         json << ",\"speed_reference_mps\":";
         json_number(current_reference_speed);
         json << "}";
@@ -1063,6 +1151,21 @@ private:
             << result.published_steering_command << ','
             << result.first_control.throttle_command << ']'
             << ",\"rti_iterations_used\":" << result.rti_iterations_used
+            << ",\"convergence_retry_count\":"
+            << result.convergence_retry_count
+            << ",\"convergence_retry_cycle_status\":"
+            << result.convergence_retry_cycle_status
+            << ",\"convergence_retry_r1_admm_status\":"
+            << result.convergence_retry_r1_admm_status
+            << ",\"convergence_retry_r2_admm_status\":"
+            << result.convergence_retry_r2_admm_status
+            << ",\"convergence_retry_r1_iterations\":"
+            << result.convergence_retry_r1_iterations
+            << ",\"convergence_retry_r2_iterations\":"
+            << result.convergence_retry_r2_iterations
+            << ",\"convergence_retry_us\":";
+        json_number(result.convergence_retry_us);
+        json
             << ",\"rti2_triggered\":"
             << (result.rti2_triggered ? "true" : "false")
             << ",\"rti2_trigger_reason_mask\":"
@@ -1099,7 +1202,69 @@ private:
              << result.r1_solver_iterations
              << ",\"r2_solver_iterations\":"
              << result.r2_solver_iterations
-             << ",\"r1_solve_us\":" << result.r1_solve_us
+             << ",\"r1_solver_attempts\":"
+             << result.r1_solver_attempts
+             << ",\"r2_solver_attempts\":"
+             << result.r2_solver_attempts
+             << ",\"r1_solver_iterations_total\":"
+             << result.r1_solver_iterations_total
+             << ",\"r2_solver_iterations_total\":"
+             << result.r2_solver_iterations_total
+             << ",\"r1_qp_corridor_padding_m\":"
+             << result.r1_qp_corridor_padding_m
+             << ",\"r2_qp_corridor_padding_m\":"
+             << result.r2_qp_corridor_padding_m
+             << ",\"r1_admm_status\":" << result.r1_admm_status
+             << ",\"r2_admm_status\":" << result.r2_admm_status
+             << ",\"r1_admm_residuals\":{\"primal\":";
+        json_number(result.r1_primal_residual);
+        json << ",\"dual\":";
+        json_number(result.r1_dual_residual);
+        json << ",\"state_primal\":";
+        json_number(result.r1_state_primal_residual);
+        json << ",\"state_dual\":";
+        json_number(result.r1_state_dual_residual);
+        json << ",\"input_primal\":";
+        json_number(result.r1_input_primal_residual);
+        json << ",\"input_dual\":";
+        json_number(result.r1_input_dual_residual);
+        json << "},\"r1_residual_locations\":["
+             << result.r1_state_primal_stage << ','
+             << result.r1_state_primal_index << ','
+             << result.r1_state_dual_stage << ','
+             << result.r1_state_dual_index << ','
+             << result.r1_input_primal_stage << ','
+             << result.r1_input_primal_index << ','
+             << result.r1_input_dual_stage << ','
+             << result.r1_input_dual_index
+             << "],\"r1_rho\":[" << result.r1_rho_start << ','
+             << result.r1_rho_u_start << ',' << result.r1_rho_final << ','
+             << result.r1_rho_u_final << ',' << result.r1_rho_change_count
+             << "],\"r2_admm_residuals\":{\"primal\":";
+        json_number(result.r2_primal_residual);
+        json << ",\"dual\":";
+        json_number(result.r2_dual_residual);
+        json << ",\"state_primal\":";
+        json_number(result.r2_state_primal_residual);
+        json << ",\"state_dual\":";
+        json_number(result.r2_state_dual_residual);
+        json << ",\"input_primal\":";
+        json_number(result.r2_input_primal_residual);
+        json << ",\"input_dual\":";
+        json_number(result.r2_input_dual_residual);
+        json << "},\"r2_residual_locations\":["
+             << result.r2_state_primal_stage << ','
+             << result.r2_state_primal_index << ','
+             << result.r2_state_dual_stage << ','
+             << result.r2_state_dual_index << ','
+             << result.r2_input_primal_stage << ','
+             << result.r2_input_primal_index << ','
+             << result.r2_input_dual_stage << ','
+             << result.r2_input_dual_index
+             << "],\"r2_rho\":[" << result.r2_rho_start << ','
+             << result.r2_rho_u_start << ',' << result.r2_rho_final << ','
+             << result.r2_rho_u_final << ',' << result.r2_rho_change_count
+             << "],\"r1_solve_us\":" << result.r1_solve_us
              << ",\"r2_solve_us\":" << result.r2_solve_us
              << ",\"r1_qp_build_us\":" << result.r1_qp_build_us
              << ",\"r1_admm_us\":" << result.r1_admm_us
@@ -1115,9 +1280,14 @@ private:
              << result.r2_nonlinear_validation_us
              << ",\"total_rti_us\":" << result.total_rti_us
             << ",\"selected_candidate\":\""
-             << (result.selected_candidate == 3 ? "corridor_repair" :
-                 result.selected_candidate == 2 ? "R2" :
-                 result.selected_candidate == 1 ? "R1" : "none") << '\"'
+             << selected_candidate_name(result.selected_candidate) << '\"'
+            << ",\"normal_optimizer_candidate\":"
+             << (selected_candidate_is_optimizer(result.selected_candidate)
+                    ? "true" : "false")
+            << ",\"recovery_candidate_published\":"
+             << ((result.selected_candidate == 3 ||
+                  result.selected_candidate == 4 ||
+                  result.selected_candidate == 5) ? "true" : "false")
              << ",\"corridor_repair_used\":"
              << (result.corridor_repair_used ? "true" : "false")
              << ",\"corridor_repair_trials\":"
@@ -1323,7 +1493,6 @@ private:
             !std::isfinite(message->longitudinal_velocity_mps) ||
             !std::isfinite(message->lateral_velocity_rear_axle_mps) ||
             !std::isfinite(message->gyro_yaw_rate_radps) ||
-            !std::isfinite(message->yaw_rate_prediction_residual_radps) ||
             !std::isfinite(message->delayed_steering_command_1_normalized) ||
             !std::isfinite(message->delayed_steering_command_2_normalized) ||
             !std::isfinite(message->delayed_throttle_command_1_normalized) ||
@@ -1357,7 +1526,6 @@ private:
 
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
     {
-        const int64_t callback_steady_ns = steady_time_ns();
         const auto & odom_pose = message->pose.pose;
         const auto & q = odom_pose.orientation;
         const double odom_yaw = std::atan2(
@@ -1370,34 +1538,45 @@ private:
             !std::isfinite(message->twist.twist.linear.x) ||
             !std::isfinite(message->twist.twist.linear.y) ||
             !std::isfinite(message->twist.twist.angular.z)) {
-            if (open_loop_horizon_test_active_) {
-                record_open_loop_observation_gaps_through(
-                    open_loop_stage_at(now().nanoseconds()), "invalid_odometry");
-                return;
-            }
-            publish_driving_fallback(
-                "MPC received uncertain odometry");
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            latest_odom_ingest_status_ = MpcSyncStatus::kInvalidInput;
+            ++odom_generation_;
             return;
         }
         if (odom_stamp.nanoseconds() <= 0) odom_stamp = now();
 
         if (!enabled_) return;
-        if (!trajectory_loaded_) {
-            publish_stop("MPC requires a valid trajectory");
-            return;
-        }
-
-        MpcSyncStatus odom_status;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            odom_status = state_synchronizer_.push_odometry({
+            latest_odom_ingest_status_ = state_synchronizer_.push_odometry({
                 odom_stamp.nanoseconds(), odom_pose.position.x,
                 odom_pose.position.y, odom_yaw,
                 message->twist.twist.linear.x,
                 message->twist.twist.linear.y,
                 message->twist.twist.angular.z});
+            ++odom_generation_;
         }
+    }
 
+    void control_timer_callback()
+    {
+        const int64_t callback_steady_ns = steady_time_ns();
+        if (!enabled_) return;
+
+        std::uint64_t odom_generation = 0;
+        MpcSyncStatus odom_status = MpcSyncStatus::kMissingOdom;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            odom_generation = odom_generation_;
+            odom_status = latest_odom_ingest_status_;
+        }
+        if (odom_generation == last_control_odom_generation_) return;
+        last_control_odom_generation_ = odom_generation;
+
+        if (!trajectory_loaded_) {
+            report_control_fault("MPC requires a valid trajectory");
+            return;
+        }
         if (odom_status != MpcSyncStatus::kOk) {
             if (open_loop_horizon_test_active_) {
                 record_open_loop_observation_gaps_through(
@@ -1405,7 +1584,7 @@ private:
                     MpcStateSynchronizer::status_name(odom_status));
                 return;
             }
-            publish_driving_fallback(
+            report_control_fault(
                 "MPC rejected uncertain legal odometry sample");
             return;
         }
@@ -1413,6 +1592,21 @@ private:
         MpcSynchronizedState coherent_state;
         MpcSyncStatus sync_status;
         const rclcpp::Time control_ros_time = now();
+        const int64_t control_stamp_ns = control_ros_time.nanoseconds();
+        const int64_t publication_lead_ns =
+            std::max<int64_t>(0, last_command_publication_lead_ns_);
+        if (publication_lead_ns > 0 && control_stamp_ns >
+            std::numeric_limits<int64_t>::max() - publication_lead_ns) {
+            report_control_fault("MPC command-time prediction stamp overflow");
+            return;
+        }
+        /* Optimize from the state expected when this cycle can publish its
+         * first command, not from the pre-solve callback snapshot. The lead is
+         * measured in the same ROS clock domain from the previous completed
+         * cycle; the plant predictor advances the known queued commands over
+         * that interval before the new decision sequence enters the queue. */
+        const int64_t candidate_command_stamp_ns =
+            control_stamp_ns + publication_lead_ns;
         const int64_t synchronize_steady_ns = steady_time_ns();
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1424,7 +1618,7 @@ private:
                 "MPC waiting for legal state input: %s",
                 MpcStateSynchronizer::status_name(sync_status));
             // Do not keep racing on stale odometry/localization. The direct
-            // throttle fallback below commands active braking immediately.
+            // controller-fault path below publishes no replacement command.
             const std::string reason = std::string(
                 "MPC rejected unsynchronized legal state: ") +
                 MpcStateSynchronizer::status_name(sync_status);
@@ -1434,7 +1628,7 @@ private:
                     MpcStateSynchronizer::status_name(sync_status));
                 return;
             }
-            publish_driving_fallback(
+            report_control_fault(
                 reason.c_str());
             return;
         }
@@ -1457,13 +1651,13 @@ private:
                     "trajectory_projection_failed");
                 return;
             }
-            publish_driving_fallback("MPC could not project uncertain pose");
+            report_control_fault("MPC could not project uncertain pose");
             return;
         }
         if (!startup_path_validated_) {
             if (projection.distance > startup_path_max_distance_m_ ||
                 std::abs(projection.heading_error) > startup_path_heading_tolerance_rad_) {
-                publish_driving_fallback("MPC startup pose is not yet aligned");
+                report_control_fault("MPC startup pose is not yet aligned");
                 return;
             }
             startup_path_validated_ = true;
@@ -1499,7 +1693,7 @@ private:
                 coherent_state.source_stamp_ns,
                 state_extrapolation_max_s_);
         if (!unity_plant_snapshot_usable && !source_plant_handoff_usable) {
-            publish_driving_fallback(
+            report_control_fault(
                 "waiting for a synchronized complete odometry plant state");
             return;
         }
@@ -1564,19 +1758,6 @@ private:
             // comes from the vehicle plant equations.
             source_time_plant.r = static_cast<float>(
                 unity_plant_snapshot.gyro_yaw_rate_radps);
-            source_time_plant.yaw_rate_prediction_residual_radps =
-                unity_plant_snapshot.yaw_rate_prediction_residual_valid ?
-                static_cast<float>(
-                    unity_plant_snapshot.yaw_rate_prediction_residual_radps) :
-                0.0f;
-            source_time_plant.yaw_rate_residual_correction_enabled =
-                unity_plant_snapshot.yaw_rate_prediction_residual_valid &&
-                std::abs(source_time_plant.u) >= 2.8f &&
-                std::abs(source_time_plant.u) <= 5.0f &&
-                std::abs(unity_plant_snapshot.physical_steering_rad) >= 0.10 &&
-                std::abs(unity_plant_snapshot.physical_steering_rad) <= 0.31 &&
-                source_time_plant.r *
-                    source_time_plant.yaw_rate_prediction_residual_radps < 0.0f;
             source_time_plant.v = static_cast<float>(
                 unity_plant_snapshot.lateral_velocity_rear_axle_mps);
             source_time_plant.actual_steering_angle = static_cast<float>(
@@ -1603,7 +1784,7 @@ private:
         const MpcControlTimeStatus prediction_status = predict_to_control_time(
             MpcControlTimeMode::kAcceptedModelCommandHistory,
             prediction_source,
-            control_ros_time.nanoseconds(),
+            candidate_command_stamp_ns,
             command_history_snapshot, trajectory_.data(), trajectory_.size(),
             track_length_m_, prediction_source_projection.segment,
             &prediction_source_projection,
@@ -1624,7 +1805,7 @@ private:
                     control_time_status_name(prediction_status));
                 return;
             }
-            publish_driving_fallback("MPC command-time state prediction is uncertain");
+            report_control_fault("MPC command-time state prediction is uncertain");
             return;
         }
         if (control_time_prediction.plant_handoff_state_valid) {
@@ -1741,7 +1922,8 @@ private:
                 publish_cycle_diagnostics(state, coherent_state,
                     control_time_prediction, control_prediction_us,
                     last_projected_s_, source_dt, result, solve_us,
-                    control_ros_time.nanoseconds(), callback_steady_ns,
+                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                    callback_steady_ns,
                     synchronize_steady_ns);
             /* No exact-feasible candidate exists. Keep command continuity,
              * but apply the configured bounded speed reduction so a numerical
@@ -1752,10 +1934,10 @@ private:
              * still reset it. */
             const bool reset_rti_memory =
                 status != MPC_RTI_CYCLE_REJECTED_RESIDUAL;
-            publish_driving_fallback(
+            report_control_fault(
                 "MPC RTI cycle had no exact-feasible candidate",
                 false, reset_rti_memory);
-            ++hard_fallback_cycles_;
+            ++control_fault_cycles_;
             return;
         }
 
@@ -1770,7 +1952,8 @@ private:
             publish_cycle_diagnostics(state, coherent_state,
                 control_time_prediction, control_prediction_us,
                 last_projected_s_, source_dt, result, solve_us,
-                control_ros_time.nanoseconds(), callback_steady_ns,
+                control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                callback_steady_ns,
                 synchronize_steady_ns);
         if (enabled_ && open_loop_horizon_test_enabled_ &&
             !open_loop_horizon_test_triggered_ &&
@@ -1783,15 +1966,15 @@ private:
             open_loop_horizon_test_active_ = true;
             open_loop_horizon_test_next_stage_ = 1;
             open_loop_horizon_start_stamp_ns_ =
-                control_ros_time.nanoseconds();
+                candidate_command_stamp_ns;
             open_loop_horizon_last_sample_stage_ = 0;
             open_loop_horizon_all_outputs_sent_ = false;
             open_loop_horizon_terminal_waiting_ = false;
             publish_open_loop_horizon_plan(
-                state, control_ros_time.nanoseconds());
+                state, candidate_command_stamp_ns);
             publish_open_loop_horizon_sample(0, state, coherent_state,
                 command_time_state, command_time_projection,
-                control_ros_time.nanoseconds());
+                candidate_command_stamp_ns);
             if (!open_loop_horizon_test_active_) {
                 last_throttle_command_ = 0.0;
                 publish_command(last_steering_command_rad_, 0.0);
@@ -1802,17 +1985,23 @@ private:
                 "outputs will be emitted on the fixed 25 ms clock",
                 static_cast<unsigned long long>(open_loop_horizon_test_plan_id_),
                 state.plant.u, PREDICTION_HORIZON);
-            publish_open_loop_horizon_command(0);
+            const int64_t command_stamp_ns =
+                publish_open_loop_horizon_command(0);
+            last_command_publication_lead_ns_ = command_stamp_ns >=
+                control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
             open_loop_horizon_timer_ = create_wall_timer(
                 std::chrono::milliseconds(25),
                 std::bind(&MpcControllerNode::open_loop_horizon_timer_callback,
-                    this));
+                    this), control_callback_group_);
             return;
         }
         if (enabled_) {
             last_steering_command_rad_ = result.published_steering_command;
             last_throttle_command_ = result.published_throttle;
-            publish_command(last_steering_command_rad_, result.published_throttle);
+            const int64_t command_stamp_ns = publish_command(
+                last_steering_command_rad_, result.published_throttle);
+            last_command_publication_lead_ns_ = command_stamp_ns >=
+                control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
         }
     }
 
@@ -1860,6 +2049,7 @@ private:
     bool source_plant_handoff_valid_{};
     bool unity_plant_state_used_{};
     int64_t source_plant_handoff_stamp_ns_{};
+    int64_t last_command_publication_lead_ns_{};
     double source_plant_handoff_progress_m_{};
     MpcModelState_t source_plant_handoff_state_{};
     double last_throttle_command_{};
@@ -1869,6 +2059,9 @@ private:
     MpcRtiMemory_t rti_memory_{};
     std::vector<Waypoint> trajectory_;
     MpcStateSynchronizer state_synchronizer_;
+    MpcSyncStatus latest_odom_ingest_status_{MpcSyncStatus::kMissingOdom};
+    std::uint64_t odom_generation_{};
+    std::uint64_t last_control_odom_generation_{};
     MpcCommandHistory command_history_;
     std::mutex state_mutex_;
     std::mutex command_history_mutex_;
@@ -1885,13 +2078,18 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr
         open_loop_horizon_test_pub_;
+    rclcpp::CallbackGroup::SharedPtr control_callback_group_;
+    rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr open_loop_horizon_timer_;
     std::uint64_t control_cycles_{};
     std::uint64_t accepted_optimal_{};
     std::uint64_t accepted_degraded_{};
+    std::uint64_t optimizer_candidate_cycles_{};
+    std::uint64_t corridor_repair_candidate_cycles_{};
+    std::uint64_t feedback_recovery_candidate_cycles_{};
     std::uint64_t residual_candidate_published_{};
     std::uint64_t corridor_repair_used_{};
-    std::uint64_t hard_fallback_cycles_{};
+    std::uint64_t control_fault_cycles_{};
     int max_solver_iterations_seen_{};
     double max_solve_us_{};
 };

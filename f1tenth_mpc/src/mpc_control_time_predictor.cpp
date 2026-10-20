@@ -199,6 +199,10 @@ MpcControlTimeStatus predict_to_control_time(
         !trajectory || trajectory_count < 3 || !std::isfinite(lap_length_m) ||
         !(lap_length_m > 0.0) || !std::isfinite(config.maximum_state_age_s) ||
         config.maximum_state_age_s < 0.0 ||
+        !std::isfinite(config.maximum_prediction_lead_s) ||
+        config.maximum_prediction_lead_s < 0.0 ||
+        !std::isfinite(source_state.source_age_s) ||
+        source_state.source_age_s < 0.0 ||
         !std::isfinite(config.model_integration_step_s) ||
         !(config.model_integration_step_s > 0.0) ||
         !std::isfinite(config.command_actuation_delay_s) ||
@@ -263,7 +267,12 @@ MpcControlTimeStatus predict_to_control_time(
     result.progress_m = result.projection.s;
 
     if (age_s < 0.0) return MpcControlTimeStatus::kTargetBeforeSource;
-    if (age_s > config.maximum_state_age_s)
+    if (source_state.source_age_s > config.maximum_state_age_s)
+        return MpcControlTimeStatus::kStateTooOld;
+    const double prediction_lead_s = age_s - source_state.source_age_s;
+    if (prediction_lead_s < -1.0e-9)
+        return MpcControlTimeStatus::kTargetBeforeSource;
+    if (prediction_lead_s > config.maximum_prediction_lead_s)
         return MpcControlTimeStatus::kStateTooOld;
 
     {

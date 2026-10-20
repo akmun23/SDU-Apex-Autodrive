@@ -233,6 +233,88 @@ TEST(MpcControlTimePredictor, AdvancesBothCommandQueuesOnlyAtCommandEvents)
   EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_2, 0.80f);
 }
 
+TEST(MpcControlTimePredictor, AdvancesToExpectedCommandPublicationEpoch)
+{
+  constexpr int64_t source_stamp_ns = 3650000000;
+  constexpr int64_t publication_stamp_ns = source_stamp_ns + 47000000;
+  constexpr int64_t known_command_stamp_ns = source_stamp_ns + 30000000;
+  double lap_length = 0.0;
+  const auto trajectory = square_trajectory(&lap_length);
+  f1tenth_mpc::MpcSynchronizedState source{};
+  source.source_stamp_ns = source_stamp_ns;
+  source.map_x = 0.0;
+  source.map_y = 0.0;
+  source.map_yaw = 0.0;
+  source.u = 2.0;
+
+  f1tenth_mpc::MpcCommandHistory history;
+  ASSERT_TRUE(history.push({known_command_stamp_ns, -0.30, 0.80, true}));
+  MpcPathProjection_t projection{};
+  projection.segment = 0;
+  MpcModelState_t plant{};
+  plant.u = 2.0f;
+  plant.delayed_steering_command_1 = 0.10f;
+  plant.delayed_steering_command_2 = 0.20f;
+  plant.delayed_throttle_command_1 = 0.30f;
+  plant.delayed_throttle_command_2 = 0.40f;
+
+  f1tenth_mpc::MpcControlTimePrediction prediction{};
+  const auto status = f1tenth_mpc::predict_to_control_time(
+      f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
+      source, publication_stamp_ns, history, trajectory.data(),
+      trajectory.size(), lap_length, 0, &projection, &plant,
+      source_stamp_ns, 0.0, {}, &prediction);
+
+  ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
+  ASSERT_TRUE(prediction.plant_state_valid);
+  EXPECT_EQ(prediction.command_changes_used, 1U);
+  EXPECT_NEAR(prediction.age_s, 0.047, 1.0e-12);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_steering_command_1, 0.20f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_steering_command_2, -0.30f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_1, 0.40f);
+  EXPECT_FLOAT_EQ(prediction.plant_state.delayed_throttle_command_2, 0.80f);
+}
+
+TEST(MpcControlTimePredictor, SeparatesSensorAgeFromPublicationPredictionLead)
+{
+  constexpr int64_t source_stamp_ns = 3700000000;
+  constexpr int64_t sensor_age_ns = 100000000;
+  constexpr int64_t publication_lead_ns = 400000000;
+  constexpr int64_t target_stamp_ns =
+      source_stamp_ns + sensor_age_ns + publication_lead_ns;
+  double lap_length = 0.0;
+  const auto trajectory = square_trajectory(&lap_length);
+
+  f1tenth_mpc::MpcSynchronizedState source{};
+  source.source_stamp_ns = source_stamp_ns;
+  source.source_age_s = 0.10;
+  source.u = 2.0;
+  MpcPathProjection_t projection{};
+  projection.segment = 0;
+  MpcModelState_t plant{};
+  plant.u = 2.0f;
+
+  f1tenth_mpc::MpcControlTimePredictorConfig config;
+  config.maximum_state_age_s = 0.12;
+  config.maximum_prediction_lead_s = 0.45;
+  f1tenth_mpc::MpcControlTimePrediction prediction{};
+  const auto status = f1tenth_mpc::predict_to_control_time(
+      f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
+      source, target_stamp_ns, {}, trajectory.data(), trajectory.size(),
+      lap_length, 0, &projection, &plant, source_stamp_ns, 0.0, config,
+      &prediction);
+
+  ASSERT_EQ(status, f1tenth_mpc::MpcControlTimeStatus::kOk);
+  EXPECT_NEAR(prediction.age_s, 0.50, 1.0e-12);
+
+  config.maximum_prediction_lead_s = 0.39;
+  EXPECT_EQ(f1tenth_mpc::predict_to_control_time(
+      f1tenth_mpc::MpcControlTimeMode::kAcceptedModelCommandHistory,
+      source, target_stamp_ns, {}, trajectory.data(), trajectory.size(),
+      lap_length, 0, &projection, &plant, source_stamp_ns, 0.0, config,
+      &prediction), f1tenth_mpc::MpcControlTimeStatus::kStateTooOld);
+}
+
 TEST(MpcControlTimePredictor, PropagatesThenFusesAtObservedSensorEpoch)
 {
   constexpr int64_t plant_stamp_ns = 4000000000;

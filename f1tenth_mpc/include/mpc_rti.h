@@ -55,6 +55,10 @@ typedef struct
     float weight_steering_command;
     float weight_steering_target;
     float weight_throttle_command;
+    /* Optional cold-nominal drive seed when launching below 0.5 m/s toward
+     * a materially faster reference. This initializes the linearization only;
+     * the optimizer remains free to reduce or reject the command. */
+    float startup_nominal_throttle_seed;
     float terminal_multiplier;
     float max_speed_mps;
     float active_speed_ceiling_mps;
@@ -64,6 +68,9 @@ typedef struct
     float first_prediction_corridor_margin_m;
     float corridor_preview_halfwidth_m;
     float nonlinear_corridor_tolerance_m;
+    /* Numerical padding for the linearized QP's lateral corridor only.
+     * Exact nonlinear rollout validation always uses the physical corridor. */
+    float qp_corridor_padding_m;
     /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */
     int use_fd_jacobian_oracle;
     /* Recovery-seed policy is used only when the nominal seed violates the
@@ -124,10 +131,10 @@ typedef struct
     int build_failure_index;
 } MpcRtiNominal_t;
 
-/* A single corridor schedule shared by the QP and the exact nonlinear
- * rollout. Normal bounds remain immutable. If the measured x0 is already
- * outside the requested clearance corridor, active bounds taper that initial
- * violation back to the normal corridor over the horizon. */
+/* A single corridor schedule shared by the QP and exact nonlinear rollout.
+ * Normal bounds remain immutable. A clearance excursion predicted from the
+ * measured state and commands already in flight is bounded through the first
+ * command-effect stage, then tapered back to the normal corridor. */
 typedef struct
 {
     float normal_lower[PREDICTION_HORIZON + 1];
@@ -136,6 +143,12 @@ typedef struct
     float active_upper[PREDICTION_HORIZON + 1];
     float seed_e_y[PREDICTION_HORIZON + 1];
     float seed_violation[PREDICTION_HORIZON + 1];
+    /* Additional temporary use of the configured 5 cm clearance during a
+     * measured/queued-command recovery. This starts at the nominal-prefix
+     * violation, is held until the first delayed command can affect the plant,
+     * then tapers to zero. A separate zero-clearance footprint check stays
+     * hard. */
+    float recovery_allowance_m[PREDICTION_HORIZON + 1];
     int recovery_stage[PREDICTION_HORIZON + 1];
     int horizon;
     int recovery_active;
@@ -279,6 +292,16 @@ typedef struct
     float published_steering_command;
     float published_throttle;
     int solver_iterations;
+    /* One bounded extra RTI cycle may be run when neither R1 nor R2 reaches
+     * ADMM convergence. Retry diagnostics are kept separate from the
+     * selected cycle so a rejected retry cannot masquerade as its output. */
+    int convergence_retry_count;
+    int convergence_retry_cycle_status;
+    int convergence_retry_r1_admm_status;
+    int convergence_retry_r2_admm_status;
+    int convergence_retry_r1_iterations;
+    int convergence_retry_r2_iterations;
+    double convergence_retry_us;
     float primal_residual;
     float dual_residual;
     float maximum_regularization;
@@ -292,6 +315,10 @@ typedef struct
     int throttle_mode_switches;
     int r1_status;
     int r2_status;
+    /* Raw Riccati-ADMM status: 0=converged, 1=iteration limit, 2=error;
+     * -1 means the corresponding RTI pass did not call ADMM. */
+    int r1_admm_status;
+    int r2_admm_status;
     int nonlinear_failure_reason;
     int r1_nonlinear_failure_reason;
     int r2_nonlinear_failure_reason;
@@ -307,6 +334,50 @@ typedef struct
     MpcModelControl_t r2_first_action;
     int r1_solver_iterations;
     int r2_solver_iterations;
+    int r1_solver_attempts;
+    int r2_solver_attempts;
+    int r1_solver_iterations_total;
+    int r2_solver_iterations_total;
+    float r1_qp_corridor_padding_m;
+    float r2_qp_corridor_padding_m;
+    float r1_primal_residual;
+    float r1_dual_residual;
+    float r1_state_primal_residual;
+    float r1_state_dual_residual;
+    float r1_input_primal_residual;
+    float r1_input_dual_residual;
+    int r1_state_primal_stage;
+    int r1_state_primal_index;
+    int r1_state_dual_stage;
+    int r1_state_dual_index;
+    int r1_input_primal_stage;
+    int r1_input_primal_index;
+    int r1_input_dual_stage;
+    int r1_input_dual_index;
+    float r2_primal_residual;
+    float r2_dual_residual;
+    float r2_state_primal_residual;
+    float r2_state_dual_residual;
+    float r2_input_primal_residual;
+    float r2_input_dual_residual;
+    int r2_state_primal_stage;
+    int r2_state_primal_index;
+    int r2_state_dual_stage;
+    int r2_state_dual_index;
+    int r2_input_primal_stage;
+    int r2_input_primal_index;
+    int r2_input_dual_stage;
+    int r2_input_dual_index;
+    float r1_rho_start;
+    float r1_rho_u_start;
+    float r1_rho_final;
+    float r1_rho_u_final;
+    int r1_rho_change_count;
+    float r2_rho_start;
+    float r2_rho_u_start;
+    float r2_rho_final;
+    float r2_rho_u_final;
+    int r2_rho_change_count;
     double r1_solve_us;
     double r2_solve_us;
     double r1_qp_build_us;
@@ -318,7 +389,7 @@ typedef struct
     double r2_exact_rollout_us;
     double r2_nonlinear_validation_us;
     double total_rti_us;
-    int selected_candidate; /* 1=R1, 2=R2, 3=repair. */
+    int selected_candidate; /* 1=R1, 2=R2, 3=repair, 4=drive-recover, 5=brake-recover. */
     int corridor_repair_used;
     unsigned int corridor_repair_trials;
     double corridor_repair_us;

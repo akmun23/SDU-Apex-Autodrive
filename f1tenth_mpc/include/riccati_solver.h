@@ -125,6 +125,10 @@ typedef struct
     float S_inv[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NU];
     float G[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
     uint8_t x_is_constrained[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    /* Diagonal augmented-Lagrangian penalties; scalar fields are summaries
+     * retained for the public scalar-factorization API and diagnostics. */
+    float rho_state[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    float rho_input[RICCATI_HORIZON][RICCATI_MAX_NU];
     float rho;
     float rho_u;
     int valid;

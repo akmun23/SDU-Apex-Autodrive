@@ -117,23 +117,29 @@ void riccati_admm_shift_warm_start(
         for (int i = 0; i < nx; ++i) {
             state->z_x[k][i] = state->z_x[source][i];
             state->y_x[k][i] = state->y_x[source][i];
+            state->rho_state[k][i] = state->rho_state[source][i];
         }
     }
     /* Hold the prior terminal prediction at the new horizon endpoint. */
     for (int i = 0; i < nx; ++i) {
         state->z_x[horizon][i] = state->z_x[horizon - 1][i];
         state->y_x[horizon][i] = state->y_x[horizon - 1][i];
+        state->rho_state[horizon][i] =
+            state->rho_state[horizon - 1][i];
     }
     for (int k = 0; k < horizon - 1; ++k) {
         for (int a = 0; a < nu; ++a) {
             state->z_u[k][a] = state->z_u[k + 1][a];
             state->y_u[k][a] = state->y_u[k + 1][a];
+            state->rho_input[k][a] = state->rho_input[k + 1][a];
         }
     }
     if (horizon > 1) {
         for (int a = 0; a < nu; ++a) {
             state->z_u[horizon - 1][a] = state->z_u[horizon - 2][a];
             state->y_u[horizon - 1][a] = state->y_u[horizon - 2][a];
+            state->rho_input[horizon - 1][a] =
+                state->rho_input[horizon - 2][a];
         }
     }
     for (int i = 0; i < nx; ++i) {
@@ -403,33 +409,50 @@ int riccati_solver_pass(
     return 1;
 }
 
-int riccati_solver_factorize(
+static int riccati_solver_factorize_diagonal(
     const RiccatiStepData_t *step_data,
     const float *terminal_Q,
     const float *terminal_x_lb,
     const float *terminal_x_ub,
-    float rho,
-    float rho_u,
+    const float rho_state[][RICCATI_MAX_NX],
+    const float rho_input[][RICCATI_MAX_NU],
     RiccatiFactorization_t *factorization)
 {
     enum { nx = RICCATI_MAX_NX, nu = RICCATI_MAX_NU,
            N = RICCATI_HORIZON };
     RiccatiFactorization_t *const factor = factorization;
     if (!step_data || !terminal_Q || !terminal_x_lb || !terminal_x_ub ||
-        !factor ||
-        !isfinite(rho) || rho < 0.0f || !isfinite(rho_u) || rho_u < 0.0f) {
+        !rho_state || !rho_input || !factor) {
         return 0;
     }
 
     memset(factor, 0, sizeof(*factor));
-    factor->rho = rho;
-    factor->rho_u = rho_u;
+    factor->rho = 0.0f;
+    factor->rho_u = 0.0f;
+    for (int k = 0; k <= N; ++k) {
+        for (int i = 0; i < nx; ++i) {
+            if (!isfinite(rho_state[k][i]) || rho_state[k][i] < 0.0f)
+                return 0;
+            factor->rho_state[k][i] = rho_state[k][i];
+            if (rho_state[k][i] > factor->rho)
+                factor->rho = rho_state[k][i];
+        }
+    }
+    for (int k = 0; k < N; ++k) {
+        for (int a = 0; a < nu; ++a) {
+            if (!isfinite(rho_input[k][a]) || rho_input[k][a] < 0.0f)
+                return 0;
+            factor->rho_input[k][a] = rho_input[k][a];
+            if (rho_input[k][a] > factor->rho_u)
+                factor->rho_u = rho_input[k][a];
+        }
+    }
 
     for (int i = 0; i < nx; ++i) {
         factor->x_is_constrained[N][i] =
             terminal_x_ub[i] < BIG_BOUND || terminal_x_lb[i] > -BIG_BOUND;
         factor->P[N][i][i] = terminal_Q[i] +
-            (factor->x_is_constrained[N][i] ? rho : 0.0f);
+            (factor->x_is_constrained[N][i] ? rho_state[N][i] : 0.0f);
         if (!isfinite(factor->P[N][i][i])) return 0;
     }
 
@@ -445,11 +468,12 @@ int riccati_solver_factorize(
             const int constrained = k > 0 &&
                 (sd->x_ub[i] < BIG_BOUND || sd->x_lb[i] > -BIG_BOUND);
             factor->x_is_constrained[k][i] = (uint8_t)constrained;
-            q_aug_diag[i] = sd->Q_diag[i] + (constrained ? rho : 0.0f);
+            q_aug_diag[i] = sd->Q_diag[i] +
+                (constrained ? rho_state[k][i] : 0.0f);
             if (!isfinite(q_aug_diag[i])) return 0;
         }
         for (int a = 0; a < nu; ++a) {
-            r_aug_diag[a] = sd->R_diag[a] + rho_u;
+            r_aug_diag[a] = sd->R_diag[a] + rho_input[k][a];
             if (!isfinite(r_aug_diag[a])) return 0;
         }
 
@@ -511,6 +535,29 @@ int riccati_solver_factorize(
     return 1;
 }
 
+int riccati_solver_factorize(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    float rho,
+    float rho_u,
+    RiccatiFactorization_t *factorization)
+{
+    float rho_state[RICCATI_HORIZON + 1][RICCATI_MAX_NX] = {{0}};
+    float rho_input[RICCATI_HORIZON][RICCATI_MAX_NU] = {{0}};
+    for (int k = 0; k <= RICCATI_HORIZON; ++k)
+        for (int i = 0; i < RICCATI_MAX_NX; ++i)
+            rho_state[k][i] = rho;
+    for (int k = 0; k < RICCATI_HORIZON; ++k)
+        for (int a = 0; a < RICCATI_MAX_NU; ++a)
+            rho_input[k][a] = rho_u;
+    return riccati_solver_factorize_diagonal(
+        step_data, terminal_Q, terminal_x_lb, terminal_x_ub,
+        (const float (*)[RICCATI_MAX_NX])rho_state,
+        (const float (*)[RICCATI_MAX_NU])rho_input, factorization);
+}
+
 int riccati_solver_pass_factored(
     const RiccatiStepData_t *step_data,
     const float *terminal_q,
@@ -539,7 +586,8 @@ int riccati_solver_pass_factored(
     for (int i = 0; i < nx; ++i) {
         p[N][i] = terminal_q[i] -
             (factor->x_is_constrained[N][i]
-                ? factor->rho * (z_x[N][i] - y_x[N][i]) : 0.0f);
+                ? factor->rho_state[N][i] *
+                    (z_x[N][i] - y_x[N][i]) : 0.0f);
         if (!isfinite(p[N][i])) return 0;
     }
 
@@ -556,12 +604,13 @@ int riccati_solver_pass_factored(
                 p_shift[i] += factor->P[k + 1][i][s] * sd->d[s];
             q_aug_linear[i] = sd->q[i] -
                 (factor->x_is_constrained[k][i]
-                    ? factor->rho * (z_x[k][i] - y_x[k][i]) : 0.0f);
+                    ? factor->rho_state[k][i] *
+                        (z_x[k][i] - y_x[k][i]) : 0.0f);
             if (!isfinite(p_shift[i]) || !isfinite(q_aug_linear[i])) return 0;
         }
         for (int a = 0; a < nu; ++a) {
             r_aug_linear[a] = sd->r[a] -
-                factor->rho_u * (z_u[k][a] - y_u[k][a]);
+                factor->rho_input[k][a] * (z_u[k][a] - y_u[k][a]);
             for (int s = 0; s < nx; ++s)
                 btp[a] += sd->B[s][a] * p_shift[s];
             if (!isfinite(r_aug_linear[a]) || !isfinite(btp[a])) return 0;
@@ -610,8 +659,8 @@ static int riccati_solver_primal_pass(
     const float *terminal_x_lb,
     const float *terminal_x_ub,
     const float *x0,
-    float rho,
-    float rho_u,
+    const float rho_state[][RICCATI_MAX_NX],
+    const float rho_input[][RICCATI_MAX_NU],
     const float z_x[][RICCATI_MAX_NX],
     const float y_x[][RICCATI_MAX_NX],
     const float z_u[][RICCATI_MAX_NU],
@@ -621,13 +670,21 @@ static int riccati_solver_primal_pass(
     RiccatiFactorization_t *factorization)
 {
     if (!factorization) return 0;
-    if (!factorization->valid ||
-        factorization->rho != rho || factorization->rho_u != rho_u) {
+    int same_penalties = factorization->valid;
+    for (int k = 0; same_penalties && k <= RICCATI_HORIZON; ++k)
+        for (int i = 0; same_penalties && i < RICCATI_MAX_NX; ++i)
+            same_penalties =
+                factorization->rho_state[k][i] == rho_state[k][i];
+    for (int k = 0; same_penalties && k < RICCATI_HORIZON; ++k)
+        for (int a = 0; same_penalties && a < RICCATI_MAX_NU; ++a)
+            same_penalties =
+                factorization->rho_input[k][a] == rho_input[k][a];
+    if (!same_penalties) {
 #ifdef MPC_ENABLE_RICCATI_PROFILE
         const uint64_t start_ns = riccati_profile_now_ns();
 #endif
-        if (!riccati_solver_factorize(step_data, terminal_Q,
-                terminal_x_lb, terminal_x_ub, rho, rho_u,
+        if (!riccati_solver_factorize_diagonal(step_data, terminal_Q,
+                terminal_x_lb, terminal_x_ub, rho_state, rho_input,
                 factorization)) return 0;
 #ifdef MPC_ENABLE_RICCATI_PROFILE
         const uint64_t finish_ns = riccati_profile_now_ns();
@@ -673,6 +730,9 @@ static RiccatiStatus_t riccati_admm_solve_core(
         return RICCATI_STATUS_ERROR;
     }
 
+    if (config && config->cold_start_each_solve)
+        riccati_admm_state_init(admm_state);
+
     enum { nx = RICCATI_MAX_NX, nu = RICCATI_MAX_NU,
            N = RICCATI_HORIZON };
     const float over_relaxation = config &&
@@ -685,6 +745,29 @@ static RiccatiStatus_t riccati_admm_solve_core(
 
     const float cfg_rho = (config && config->rho > 0.0f) ? config->rho : ADMM_RHO;
     const float cfg_rho_u = (config && config->rho_u > 0.0f) ? config->rho_u : ADMM_RHO_U;
+    float cfg_rho_x_by_state[RICCATI_MAX_NX];
+    int per_state_rho_enabled = 0;
+    for (int s = 0; s < RICCATI_MAX_NX; ++s) {
+        const float configured = config ? config->rho_x_by_state[s] : 0.0f;
+        if (!isfinite(configured) || configured < 0.0f ||
+            configured > 127.0f || (configured > 0.0f && configured < 1.0f)) {
+            solution->status = RICCATI_STATUS_ERROR;
+            return RICCATI_STATUS_ERROR;
+        }
+        cfg_rho_x_by_state[s] = configured > 0.0f ? configured : cfg_rho;
+        per_state_rho_enabled |= configured > 0.0f;
+    }
+    float cfg_rho_u_by_input[RICCATI_MAX_NU];
+    for (int a = 0; a < RICCATI_MAX_NU; ++a) {
+        const float configured = config ? config->rho_u_by_input[a] : 0.0f;
+        if (!isfinite(configured) || configured < 0.0f || configured > 127.0f) {
+            solution->status = RICCATI_STATUS_ERROR;
+            return RICCATI_STATUS_ERROR;
+        }
+        cfg_rho_u_by_input[a] = configured > 0.0f ? configured : cfg_rho_u;
+    }
+    const float cfg_rho_max = config && config->rho_max > 0.0f
+        ? fminf(config->rho_max, 127.0f) : 127.0f;
     const int cfg_max_iter = (config && config->max_iterations > 0)
                                  ? config->max_iterations
                                  : MAX_ITERATIONS;
@@ -717,24 +800,100 @@ static RiccatiStatus_t riccati_admm_solve_core(
                     ? admm_state->rho : cfg_rho;
     float rho_u = (admm_state->initialized && admm_state->rho_u > 0.0f)
                     ? admm_state->rho_u : (cfg_rho_u > 0.0f ? cfg_rho_u : rho);
-    /* Clamp initial penalties to the configured CPU/replay adaptive range. */
-    if (rho < 1.0f) rho = 1.0f;
-    if (rho_u < 1.0f) rho_u = 1.0f;
-    if (rho > 127.0f) rho = 127.0f;
-    if (rho_u > 127.0f) rho_u = 127.0f;
+    float rho_state[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
+    float rho_input[RICCATI_HORIZON][RICCATI_MAX_NU];
+    /* Penalties track the same horizon coordinates as z/y. Older
+     * scalar-only warm states migrate by broadcasting their scalar values. */
+    for (int k = 0; k <= N; ++k) {
+        for (int s = 0; s < nx; ++s) {
+            const float old_rho = admm_state->initialized &&
+                    admm_state->rho_state[k][s] > 0.0f
+                ? admm_state->rho_state[k][s]
+                : (admm_state->initialized && admm_state->rho > 0.0f
+                    ? admm_state->rho : cfg_rho_x_by_state[s]);
+            rho_state[k][s] = fminf(fmaxf(old_rho, 1.0f), cfg_rho_max);
+            if (admm_state->initialized && rho_state[k][s] != old_rho)
+                admm_state->y_x[k][s] *= old_rho / rho_state[k][s];
+        }
+    }
+    for (int k = 0; k < N; ++k) {
+        for (int a = 0; a < nu; ++a) {
+            const float old_rho_u = admm_state->initialized &&
+                    admm_state->rho_input[k][a] > 0.0f
+                ? admm_state->rho_input[k][a]
+                : (admm_state->initialized && admm_state->rho_u > 0.0f
+                    ? admm_state->rho_u : cfg_rho_u_by_input[a]);
+            rho_input[k][a] =
+                fminf(fmaxf(old_rho_u, 1.0f), cfg_rho_max);
+            if (admm_state->initialized && rho_input[k][a] != old_rho_u)
+                admm_state->y_u[k][a] *=
+                    old_rho_u / rho_input[k][a];
+        }
+    }
+    rho_u = 0.0f;
+    for (int a = 0; a < nu; ++a)
+        rho_u = fmaxf(rho_u, rho_input[0][a]);
     if (shared_rho) {
-        /* A public-API caller may switch an existing warm start from
-         * independent penalties to one shared penalty.  Preserve the
-         * unscaled control dual before adopting the state rho. */
-        if (admm_state->initialized && rho_u != rho) {
-            const float y_u_scale = rho_u / rho;
-            for (int k = 0; k < N; k++) {
-                for (int a = 0; a < nu; a++) {
-                    admm_state->y_u[k][a] *= y_u_scale;
+        /* Preserve the unscaled dual when a caller requests one common
+         * penalty after a previous per-coordinate solve. */
+        const float shared = fminf(fmaxf(rho, 1.0f), cfg_rho_max);
+        for (int k = 0; k <= N; ++k) {
+            for (int s = 0; s < nx; ++s) {
+                if (admm_state->initialized && rho_state[k][s] != shared)
+                    admm_state->y_x[k][s] *= rho_state[k][s] / shared;
+                rho_state[k][s] = shared;
+            }
+        }
+        for (int k = 0; k < N; ++k) {
+            for (int a = 0; a < nu; ++a) {
+                if (admm_state->initialized && rho_input[k][a] != shared)
+                    admm_state->y_u[k][a] *= rho_input[k][a] / shared;
+                rho_input[k][a] = shared;
+            }
+        }
+        rho = shared;
+        rho_u = shared;
+    } else {
+        /* Keep each state/input channel uniform over stages. Per-state
+         * penalties are opt-in; otherwise preserve the scalar state-rho
+         * behavior that was already validated on the complete replay bag. */
+        if (per_state_rho_enabled) {
+            rho = 0.0f;
+            for (int s = 0; s < nx; ++s) {
+                const float channel_rho = fminf(
+                    fmaxf(rho_state[0][s], 1.0f), cfg_rho_max);
+                for (int k = 0; k <= N; ++k) {
+                    if (admm_state->initialized &&
+                        rho_state[k][s] != channel_rho)
+                        admm_state->y_x[k][s] *=
+                            rho_state[k][s] / channel_rho;
+                    rho_state[k][s] = channel_rho;
+                }
+                rho = fmaxf(rho, channel_rho);
+            }
+        } else {
+            rho = fminf(fmaxf(rho, 1.0f), cfg_rho_max);
+            for (int k = 0; k <= N; ++k) {
+                for (int s = 0; s < nx; ++s) {
+                    if (admm_state->initialized && rho_state[k][s] != rho)
+                        admm_state->y_x[k][s] *= rho_state[k][s] / rho;
+                    rho_state[k][s] = rho;
                 }
             }
         }
-        rho_u = rho;
+        rho_u = 0.0f;
+        for (int a = 0; a < nu; ++a) {
+            const float channel_rho = fminf(
+                fmaxf(rho_input[0][a], 1.0f), cfg_rho_max);
+            for (int k = 0; k < N; ++k) {
+                if (admm_state->initialized &&
+                    rho_input[k][a] != channel_rho)
+                    admm_state->y_u[k][a] *=
+                        rho_input[k][a] / channel_rho;
+                rho_input[k][a] = channel_rho;
+            }
+            rho_u = fmaxf(rho_u, channel_rho);
+        }
     }
     g_riccati_debug_last.rho_start = rho;
     g_riccati_debug_last.rho_u_start = rho_u;
@@ -757,8 +916,6 @@ static RiccatiStatus_t riccati_admm_solve_core(
         for (int s = 0; s < nx; s++) {
             const float xub = (k < N) ? step_data[k].x_ub[s] : terminal_x_ub[s];
             const float xlb = (k < N) ? step_data[k].x_lb[s] : terminal_x_lb[s];
-            /* x_0 is fixed data.  Only predicted states x_1..x_N can be
-             * projected by ADMM. */
             x_is_constrained[k][s] = k > 0 &&
                                      (xub < BIG_BOUND || xlb > -BIG_BOUND);
         }
@@ -766,12 +923,15 @@ static RiccatiStatus_t riccati_admm_solve_core(
 
     if (admm_state->initialized) {
         /* A warm start may contain a projected (or simply stale) stage-zero
-         * value.  Keep the fixed initial state out of the split variables. */
+         * value. Keep the fixed initial state out of the split variables. */
         for (int s = 0; s < nx; s++) {
             z_x[0][s] = x0[s];
             y_x[0][s] = 0.0f;
         }
+
     }
+
+    /* Remaining initialization and iterations follow. */
 
     if (!admm_state->initialized) {
         /* Cold start */
@@ -847,7 +1007,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
         /*--- Primal update: Riccati pass with augmented costs ---*/
         if (!riccati_solver_primal_pass(
             step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub, x0,
-            rho, rho_u,
+            (const float (*)[RICCATI_MAX_NX])rho_state,
+            (const float (*)[RICCATI_MAX_NU])rho_input,
             (const float (*)[RICCATI_MAX_NX])z_x,
             (const float (*)[RICCATI_MAX_NX])y_x,
             (const float (*)[RICCATI_MAX_NU])z_u,
@@ -870,6 +1031,14 @@ static RiccatiStatus_t riccati_admm_solve_core(
          * compared as if they were the same channel. */
         float state_primal_balance = 0.0f, state_dual_balance = 0.0f;
         float ctrl_primal_balance = 0.0f, ctrl_dual_balance = 0.0f;
+        float state_primal_balance_by_state[RICCATI_MAX_NX] = {0};
+        float state_dual_balance_by_state[RICCATI_MAX_NX] = {0};
+        float ctrl_primal_balance_by_input[RICCATI_MAX_NU] = {0};
+        float ctrl_dual_balance_by_input[RICCATI_MAX_NU] = {0};
+        int state_primal_stage = -1, state_primal_index = -1;
+        int state_dual_stage = -1, state_dual_index = -1;
+        int ctrl_primal_stage = -1, ctrl_primal_index = -1;
+        int ctrl_dual_stage = -1, ctrl_dual_index = -1;
 #ifdef MPC_ENABLE_RICCATI_PROFILE
         const uint64_t projection_start_ns = riccati_profile_now_ns();
 #endif
@@ -893,19 +1062,34 @@ static RiccatiStatus_t riccati_admm_solve_core(
                     const float span = fmaxf(xub - xlb, 1.0e-3f);
                     /* Dual residual */
                     float z_prev = z_x[k][s];
-                    float dd = fabsf(rho * (z_new - z_prev));
-                    state_dual = fmaxf(state_dual, dd);
+                    float dd = fabsf(rho_state[k][s] *
+                        (z_new - z_prev));
+                    if (dd > state_dual) {
+                        state_dual = dd;
+                        state_dual_stage = k;
+                        state_dual_index = s;
+                    }
+                    const float dual_balance = dd / span;
                     state_dual_balance = fmaxf(
-                        state_dual_balance, dd / span);
+                        state_dual_balance, dual_balance);
+                    state_dual_balance_by_state[s] = fmaxf(
+                        state_dual_balance_by_state[s], dual_balance);
                     /* y-update: y += x_hat - z.  x_hat is the standard ADMM
                      * over-relaxed primal point; with alpha=1 this is the
                      * original unrelaxed update. */
                     y_x[k][s] = x_hat - z_new + y_x[k][s];
                     /* Primal residual */
                     float pd = fabsf(solution->x[k][s] - z_new);
-                    state_primal = fmaxf(state_primal, pd);
+                    if (pd > state_primal) {
+                        state_primal = pd;
+                        state_primal_stage = k;
+                        state_primal_index = s;
+                    }
+                    const float primal_balance = pd / span;
                     state_primal_balance = fmaxf(
-                        state_primal_balance, pd / span);
+                        state_primal_balance, primal_balance);
+                    state_primal_balance_by_state[s] = fmaxf(
+                        state_primal_balance_by_state[s], primal_balance);
                     z_x[k][s] = z_new;
                 } else {
                     z_x[k][s] = solution->x[k][s];
@@ -928,16 +1112,32 @@ static RiccatiStatus_t riccati_admm_solve_core(
                 const float span = fmaxf(sd->u_ub[a] - sd->u_lb[a], 1.0e-3f);
                 /* Dual residual */
                 float z_prev = z_u[k][a];
-                float dd = fabsf(rho_u * (z_new - z_prev));
-                ctrl_dual = fmaxf(ctrl_dual, dd);
-                ctrl_dual_balance = fmaxf(ctrl_dual_balance, dd / span);
+                float dd = fabsf(rho_input[k][a] * (z_new - z_prev));
+                if (dd > ctrl_dual) {
+                    ctrl_dual = dd;
+                    ctrl_dual_stage = k;
+                    ctrl_dual_index = a;
+                }
+                const float dual_balance = dd / span;
+                ctrl_dual_balance = fmaxf(
+                    ctrl_dual_balance, dual_balance);
+                ctrl_dual_balance_by_input[a] = fmaxf(
+                    ctrl_dual_balance_by_input[a], dual_balance);
                 /* y-update uses the same over-relaxed primal point as the
                  * state split. */
                 y_u[k][a] = u_hat - z_new + y_u[k][a];
                 /* Primal residual */
                 float pd = fabsf(solution->u[k][a] - z_new);
-                ctrl_primal = fmaxf(ctrl_primal, pd);
-                ctrl_primal_balance = fmaxf(ctrl_primal_balance, pd / span);
+                if (pd > ctrl_primal) {
+                    ctrl_primal = pd;
+                    ctrl_primal_stage = k;
+                    ctrl_primal_index = a;
+                }
+                const float primal_balance = pd / span;
+                ctrl_primal_balance = fmaxf(
+                    ctrl_primal_balance, primal_balance);
+                ctrl_primal_balance_by_input[a] = fmaxf(
+                    ctrl_primal_balance_by_input[a], primal_balance);
                 z_u[k][a] = z_new;
             }
         }
@@ -950,6 +1150,18 @@ static RiccatiStatus_t riccati_admm_solve_core(
         solution->iterations = iter + 1;
         solution->primal_residual = primal_res;
         solution->dual_residual = dual_res;
+        solution->state_primal_residual = state_primal;
+        solution->state_dual_residual = state_dual;
+        solution->input_primal_residual = ctrl_primal;
+        solution->input_dual_residual = ctrl_dual;
+        solution->state_primal_stage = state_primal_stage;
+        solution->state_primal_index = state_primal_index;
+        solution->state_dual_stage = state_dual_stage;
+        solution->state_dual_index = state_dual_index;
+        solution->input_primal_stage = ctrl_primal_stage;
+        solution->input_primal_index = ctrl_primal_index;
+        solution->input_dual_stage = ctrl_dual_stage;
+        solution->input_dual_index = ctrl_dual_index;
 #ifdef MPC_ENABLE_RICCATI_PROFILE
         const uint64_t projection_finish_ns = riccati_profile_now_ns();
         if (projection_finish_ns >= projection_start_ns)
@@ -1006,10 +1218,10 @@ static RiccatiStatus_t riccati_admm_solve_core(
             const float adapt_ratio_ctrl = 2.0f;
             const float adapt_ratio_shared = 5.0f;
             const float rho_min = 1.0f;
-            const float rho_max = 127.0f;
-
+            const float rho_max = cfg_rho_max;
             int scale_rho = 0;
             int scale_rho_u = 0;
+            int changed = 0;
 
             if (shared_rho) {
                 const float primal_balance = state_primal_balance >
@@ -1025,22 +1237,141 @@ static RiccatiStatus_t riccati_admm_solve_core(
                     scale_rho = -1;
                 }
                 scale_rho_u = scale_rho;
-            } else {
-                if (state_primal_balance > adapt_ratio_state *
-                        state_dual_balance && rho < rho_max) {
-                    scale_rho = 1;
-                } else if (state_dual_balance > adapt_ratio_state *
-                               state_primal_balance && rho > rho_min) {
-                    scale_rho = -1;
+            }
+
+            if (shared_rho && scale_rho != 0) {
+                const float old = rho;
+                const float updated = scale_rho > 0
+                    ? fminf(rho * 1.25f, rho_max)
+                    : fmaxf(rho * 0.75f, rho_min);
+                if (updated != old) {
+                    const float y_scale = old / updated;
+                    for (int k = 0; k <= N; ++k) {
+                        for (int s = 0; s < nx; ++s) {
+                            if (x_is_constrained[k][s])
+                                y_x[k][s] *= y_scale;
+                            rho_state[k][s] = updated;
+                        }
+                    }
+                    for (int k = 0; k < N; ++k) {
+                        for (int a = 0; a < nu; ++a) {
+                            y_u[k][a] *= y_scale;
+                            rho_input[k][a] = updated;
+                        }
+                    }
+                    rho = updated;
+                    rho_u = updated;
+                    changed = 1;
+                }
+            } else if (!shared_rho) {
+                int direction = 0;
+                int state_direction_summary = 0;
+                if (per_state_rho_enabled) {
+                    for (int s = 0; s < nx; ++s) {
+                        direction = 0;
+                        const float channel_rho = rho_state[0][s];
+                        if (state_primal_balance_by_state[s] >
+                                adapt_ratio_state *
+                                    state_dual_balance_by_state[s] &&
+                            channel_rho < rho_max) {
+                            direction = 1;
+                        } else if (state_dual_balance_by_state[s] >
+                                       adapt_ratio_state *
+                                           state_primal_balance_by_state[s] &&
+                                   channel_rho > rho_min) {
+                            direction = -1;
+                        }
+                        if (direction == 0) continue;
+
+                        const float updated = direction > 0
+                            ? fminf(channel_rho * 1.25f, rho_max)
+                            : fmaxf(channel_rho * 0.75f, rho_min);
+                        if (updated == channel_rho) continue;
+
+                        const float y_scale = channel_rho / updated;
+                        for (int k = 0; k <= N; ++k) {
+                            if (x_is_constrained[k][s])
+                                y_x[k][s] *= y_scale;
+                            rho_state[k][s] = updated;
+                        }
+                        changed = 1;
+                        if (state_direction_summary == 0)
+                            state_direction_summary = direction;
+                        else if (state_direction_summary != direction)
+                            state_direction_summary = 2;
+                    }
+                    scale_rho = state_direction_summary;
+                    rho = 0.0f;
+                    for (int s = 0; s < nx; ++s)
+                        rho = fmaxf(rho, rho_state[0][s]);
+                } else {
+                    if (state_primal_balance >
+                            adapt_ratio_state * state_dual_balance &&
+                        rho < rho_max) {
+                        direction = 1;
+                    } else if (state_dual_balance >
+                                   adapt_ratio_state * state_primal_balance &&
+                               rho > rho_min) {
+                        direction = -1;
+                    }
+                    if (direction != 0) {
+                        const float old = rho;
+                        rho = direction > 0
+                            ? fminf(old * 1.25f, rho_max)
+                            : fmaxf(old * 0.75f, rho_min);
+                        if (rho != old) {
+                            const float y_scale = old / rho;
+                            for (int k = 0; k <= N; ++k) {
+                                for (int s = 0; s < nx; ++s) {
+                                    if (x_is_constrained[k][s])
+                                        y_x[k][s] *= y_scale;
+                                    rho_state[k][s] = rho;
+                                }
+                            }
+                            changed = 1;
+                            scale_rho = direction;
+                        }
+                    }
                 }
 
-                if (ctrl_primal_balance > adapt_ratio_ctrl *
-                        ctrl_dual_balance && rho_u < rho_max) {
-                    scale_rho_u = 1;
-                } else if (ctrl_dual_balance > adapt_ratio_ctrl *
-                               ctrl_primal_balance && rho_u > rho_min) {
-                    scale_rho_u = -1;
+                for (int a = 0; a < nu; ++a) {
+                    direction = 0;
+                    const float channel_rho = rho_input[0][a];
+                    if (ctrl_primal_balance_by_input[a] >
+                            adapt_ratio_ctrl *
+                                ctrl_dual_balance_by_input[a] &&
+                        channel_rho < rho_max) {
+                        direction = 1;
+                    } else if (ctrl_dual_balance_by_input[a] >
+                                   adapt_ratio_ctrl *
+                                       ctrl_primal_balance_by_input[a] &&
+                               channel_rho > rho_min) {
+                        direction = -1;
+                    }
+                    if (direction == 0) continue;
+
+                    const float updated = direction > 0
+                        ? fminf(channel_rho * 1.25f, rho_max)
+                        : fmaxf(channel_rho * 0.8f, rho_min);
+                    if (updated == channel_rho) continue;
+
+                    const float y_scale = channel_rho / updated;
+                    for (int k = 0; k < N; ++k) {
+                        y_u[k][a] *= y_scale;
+                        rho_input[k][a] = updated;
+                    }
+                    changed = 1;
+                    if (scale_rho_u == 0) scale_rho_u = direction;
+                    else if (scale_rho_u != direction) scale_rho_u = 2;
                 }
+                rho_u = 0.0f;
+                for (int a = 0; a < nu; ++a)
+                    rho_u = fmaxf(rho_u, rho_input[0][a]);
+            }
+
+            if (shared_rho) {
+                rho = rho_state[0][0];
+                rho_u = rho_input[0][0];
             }
 
             if (g_riccati_debug_trace_enabled &&
@@ -1050,61 +1381,9 @@ static RiccatiStatus_t riccati_admm_solve_core(
                 sample->scale_rho = scale_rho;
                 sample->scale_rho_u = scale_rho_u;
             }
-
-            /* Update penalties and rescale the scaled dual variables to keep
-             * lambda = rho*y invariant.  Deriving the multiplier from the
-             * clamped old/new values is important: rho changes by 1.25/0.75
-             * for states, by 2/0.5 for controls, and may hit either bound. */
-            if (scale_rho != 0) {
-                const float old_rho = rho;
-                if (scale_rho > 0) {
-                    rho *= 1.25f;
-                    if (rho > rho_max) rho = rho_max;
-                } else {
-                    rho *= 0.75f;
-                    if (rho < rho_min) rho = rho_min;
-                }
-                const float y_x_scale = old_rho / rho;
-                for (int k = 1; k <= N; k++) {
-                    for (int s = 0; s < nx; s++) {
-                        if (x_is_constrained[k][s]) {
-                            y_x[k][s] *= y_x_scale;
-                        }
-                    }
-                }
-            }
-
-            if (shared_rho) {
-                const float old_rho_u = rho_u;
-                rho_u = rho;
-                if (rho_u != old_rho_u) {
-                    const float y_u_scale = old_rho_u / rho_u;
-                    for (int k = 0; k < N; k++) {
-                        for (int a = 0; a < nu; a++) {
-                            y_u[k][a] *= y_u_scale;
-                        }
-                    }
-                }
-            } else if (scale_rho_u != 0) {
-                const float old_rho_u = rho_u;
-                if (scale_rho_u > 0) {
-                    rho_u *= 2.0f;
-                    if (rho_u > rho_max) rho_u = rho_max;
-                } else {
-                    rho_u *= 0.5f;
-                    if (rho_u < rho_min) rho_u = rho_min;
-                }
-                const float y_u_scale = old_rho_u / rho_u;
-                for (int k = 0; k < N; k++) {
-                    for (int a = 0; a < nu; a++) {
-                        y_u[k][a] *= y_u_scale;
-                    }
-                }
-            }
-            if (rho != rho_before_adaptation ||
-                rho_u != rho_u_before_adaptation) {
+            if (changed || rho != rho_before_adaptation ||
+                rho_u != rho_u_before_adaptation)
                 ++g_riccati_debug_last.rho_change_count;
-            }
         }
 
         /* Stop only between complete ADMM iterations. The caller may use the
@@ -1124,6 +1403,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
     /* Save scalar warm-start metadata. Buffers are already updated in-place. */
     admm_state->rho = rho;
     admm_state->rho_u = shared_rho ? rho : rho_u;
+    memcpy(admm_state->rho_state, rho_state, sizeof(rho_state));
+    memcpy(admm_state->rho_input, rho_input, sizeof(rho_input));
     admm_state->initialized = 1;
 
     g_riccati_debug_last.rho = rho;
@@ -1153,6 +1434,19 @@ static int riccati_scaling_signature_matches(
     for (int a = 0; a < nu; ++a)
         if (state->input_scale[a] != config->input_scale[a]) return 0;
     return 1;
+}
+
+static float scale_state_lower_bound(float bound, float scale)
+{
+    /* BIG_BOUND is a semantic unconstrained marker, not a physical limit.
+     * Dividing it by D can move it inside the core solver's BIG_BOUND test
+     * and accidentally constrain scaled wheel/body states. */
+    return bound <= -BIG_BOUND ? -BIG_BOUND : bound / scale;
+}
+
+static float scale_state_upper_bound(float bound, float scale)
+{
+    return bound >= BIG_BOUND ? BIG_BOUND : bound / scale;
 }
 
 RiccatiStatus_t riccati_admm_solve(
@@ -1222,8 +1516,10 @@ RiccatiStatus_t riccati_admm_solve(
         const float scale = config->state_scale[i];
         scaled_terminal_Q[i] = terminal_Q[i] * scale * scale;
         scaled_terminal_q[i] = terminal_q[i] * scale;
-        scaled_terminal_lb[i] = terminal_x_lb[i] / scale;
-        scaled_terminal_ub[i] = terminal_x_ub[i] / scale;
+        scaled_terminal_lb[i] = scale_state_lower_bound(
+            terminal_x_lb[i], scale);
+        scaled_terminal_ub[i] = scale_state_upper_bound(
+            terminal_x_ub[i], scale);
         scaled_x0[i] = x0[i] / scale;
     }
     memcpy(scaled_steps, step_data, (size_t)N * sizeof(scaled_steps[0]));
@@ -1236,8 +1532,10 @@ RiccatiStatus_t riccati_admm_solve(
             scaled->Q_diag[i] = physical->Q_diag[i] *
                 state_scale * state_scale;
             scaled->q[i] = physical->q[i] * state_scale;
-            scaled->x_lb[i] = physical->x_lb[i] / state_scale;
-            scaled->x_ub[i] = physical->x_ub[i] / state_scale;
+            scaled->x_lb[i] = scale_state_lower_bound(
+                physical->x_lb[i], state_scale);
+            scaled->x_ub[i] = scale_state_upper_bound(
+                physical->x_ub[i], state_scale);
             for (int j = 0; j < nx; ++j) {
                 scaled->A[i][j] = physical->A[i][j] *
                     config->state_scale[j] / state_scale;

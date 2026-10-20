@@ -8,4 +8,4 @@ autodrive_actuator_interface:
     max_steering_angle_rad: 0.5235987756
     command_timeout_sec: 0.15
     odom_timeout_sec: 0.15
-    publish_rate_hz: 40.0
+    watchdog_rate_hz: 40.0

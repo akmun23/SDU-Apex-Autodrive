@@ -14,15 +14,6 @@
 #include <stddef.h>
 #include <string.h>
 
-/* Conservative residual use selected by cross-run replay. This is an
- * observer correction, not a PhysX parameter; the source plant remains the
- * physical transition and the correction is disabled outside its support. */
-static const float kYawResidualCorrectionGain = 0.5f;
-static const float kYawResidualMinSpeedMps = 2.8f;
-static const float kYawResidualMaxSpeedMps = 5.0f;
-static const float kYawResidualMinSteeringRad = 0.10f;
-static const float kYawResidualMaxSteeringRad = 0.31f;
-
 /* Unity's Rigidbody velocity is measured at its COM. The MPC state and
  * /odom twist are referenced to base_link at the rear axle. The source
  * vehicle geometry puts COM 0.15532 m forward of that axle (see
@@ -260,9 +251,6 @@ static int finite_mpc_state(const MpcModelState_t *state)
 {
     if (!state || !isfinite(state->e_y) || !isfinite(state->e_psi) ||
         !isfinite(state->u) || !isfinite(state->v) || !isfinite(state->r) ||
-        !isfinite(state->yaw_rate_prediction_residual_radps) ||
-        (state->yaw_rate_residual_correction_enabled != 0 &&
-         state->yaw_rate_residual_correction_enabled != 1) ||
         !isfinite(state->actual_steering_angle) ||
         !isfinite(state->delayed_throttle_command_1) ||
         !isfinite(state->delayed_throttle_command_2)) return 0;
@@ -392,32 +380,14 @@ static int vehicle_model_step_scalar(
         source_output.suspension_history_initialized;
 
     const float u_next = (float)source_output.state[UNITY_SOURCE_U];
-    const float raw_r_next =
+    const float r_next =
         (float)source_output.state[UNITY_SOURCE_YAW_RATE];
-    const float predicted_speed = fabsf(
-        (float)source_output.state[UNITY_SOURCE_U]);
-    const float predicted_steering = fabsf(
-        (float)source_output.state[UNITY_SOURCE_PHYSICAL_STEERING]);
-    const float yaw_residual = state->yaw_rate_prediction_residual_radps;
-    const int residual_supported =
-        state->yaw_rate_residual_correction_enabled &&
-        predicted_speed >= kYawResidualMinSpeedMps &&
-        predicted_speed <= kYawResidualMaxSpeedMps &&
-        predicted_steering >= kYawResidualMinSteeringRad &&
-        predicted_steering <= kYawResidualMaxSteeringRad &&
-        source_output.state[UNITY_SOURCE_PHYSICAL_STEERING] *
-            state->actual_steering_angle > 0.0 &&
-        raw_r_next * yaw_residual < 0.0f;
-    const float r_next = raw_r_next - (residual_supported ?
-        kYawResidualCorrectionGain * yaw_residual : 0.0f);
-    const float yaw_rate_correction = r_next - raw_r_next;
     const float body_yaw_delta = (float)
-        source_output.integrated_yaw_delta_rad + yaw_rate_correction * dt;
+        source_output.integrated_yaw_delta_rad;
     const float body_forward_delta = (float)
         source_output.integrated_body_forward_displacement_m;
     const float body_lateral_delta = (float)
-        (source_output.integrated_body_lateral_displacement_m -
-         yaw_rate_correction * kComForwardFromRearAxleM * dt);
+        source_output.integrated_body_lateral_displacement_m;
     const float v_next = (float)(
         source_output.state[UNITY_SOURCE_V] -
         r_next * kComForwardFromRearAxleM);
@@ -576,6 +546,223 @@ static float mpc_component_delta(int row, float lhs, float rhs)
                     : lhs - rhs;
 }
 
+enum { MPC_FORWARD_SENSITIVITY_COLUMNS = 20 };
+
+static const int kPlantSensitiveModelColumns[
+    MPC_FORWARD_SENSITIVITY_COLUMNS] = {
+    MPC_STATE_IDX_U, MPC_STATE_IDX_V, MPC_STATE_IDX_R,
+    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1,
+    MPC_STATE_IDX_ACTUAL_STEERING_ANGLE,
+    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1,
+    MPC_STATE_IDX_WHEEL_OMEGA_FL, MPC_STATE_IDX_WHEEL_OMEGA_FR,
+    MPC_STATE_IDX_WHEEL_OMEGA_RL, MPC_STATE_IDX_WHEEL_OMEGA_RR,
+    MPC_STATE_IDX_BODY_HEIGHT, MPC_STATE_IDX_BODY_HEIGHT_RATE,
+    MPC_STATE_IDX_ROLL, MPC_STATE_IDX_ROLL_RATE,
+    MPC_STATE_IDX_PITCH, MPC_STATE_IDX_PITCH_RATE,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_FL,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_FR,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_RL,
+    MPC_STATE_IDX_SUSPENSION_JOUNCE_RR};
+
+static int model_column_seed_source(int model_column, int *source_index,
+                                   int *second_source_index,
+                                   double *second_source_scale,
+                                   int *command_kind)
+{
+    *source_index = -1;
+    *second_source_index = -1;
+    *second_source_scale = 0.0;
+    *command_kind = 0;
+    switch (model_column) {
+    case MPC_STATE_IDX_U: *source_index = UNITY_SOURCE_U; return 1;
+    case MPC_STATE_IDX_V: *source_index = UNITY_SOURCE_V; return 1;
+    case MPC_STATE_IDX_R:
+        *source_index = UNITY_SOURCE_YAW_RATE;
+        *second_source_index = UNITY_SOURCE_V;
+        *second_source_scale = kComForwardFromRearAxleM;
+        return 1;
+    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1:
+        *command_kind = 1;
+        return 1;
+    case MPC_STATE_IDX_ACTUAL_STEERING_ANGLE:
+        *source_index = UNITY_SOURCE_PHYSICAL_STEERING;
+        return 1;
+    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1:
+        *command_kind = 2;
+        return 1;
+    default: break;
+    }
+    if (model_column >= MPC_STATE_IDX_WHEEL_OMEGA_FL &&
+        model_column <= MPC_STATE_IDX_WHEEL_OMEGA_RR) {
+        *source_index = UNITY_SOURCE_WHEEL_OMEGA_FL +
+            model_column - MPC_STATE_IDX_WHEEL_OMEGA_FL;
+        return 1;
+    }
+    switch (model_column) {
+    case MPC_STATE_IDX_BODY_HEIGHT: *source_index = UNITY_SOURCE_BODY_HEIGHT; return 1;
+    case MPC_STATE_IDX_BODY_HEIGHT_RATE:
+        *source_index = UNITY_SOURCE_BODY_HEIGHT_RATE; return 1;
+    case MPC_STATE_IDX_ROLL: *source_index = UNITY_SOURCE_ROLL; return 1;
+    case MPC_STATE_IDX_ROLL_RATE:
+        *source_index = UNITY_SOURCE_ROLL_RATE; return 1;
+    case MPC_STATE_IDX_PITCH: *source_index = UNITY_SOURCE_PITCH; return 1;
+    case MPC_STATE_IDX_PITCH_RATE:
+        *source_index = UNITY_SOURCE_PITCH_RATE; return 1;
+    default: break;
+    }
+    if (model_column >= MPC_STATE_IDX_SUSPENSION_JOUNCE_FL &&
+        model_column <= MPC_STATE_IDX_SUSPENSION_JOUNCE_RR) {
+        *source_index = UNITY_SOURCE_SUSPENSION_JOUNCE_FL +
+            model_column - MPC_STATE_IDX_SUSPENSION_JOUNCE_FL;
+        return 1;
+    }
+    return 0;
+}
+
+static float source_output_derivative_to_model(
+    const UnitySourcePlantSensitivityC *sensitivity,
+    int model_row, int lane)
+{
+    switch (model_row) {
+    case MPC_STATE_IDX_U:
+        return (float)sensitivity->state[UNITY_SOURCE_U][lane];
+    case MPC_STATE_IDX_V:
+        return (float)(sensitivity->state[UNITY_SOURCE_V][lane] -
+            kComForwardFromRearAxleM *
+                sensitivity->state[UNITY_SOURCE_YAW_RATE][lane]);
+    case MPC_STATE_IDX_R:
+        return (float)sensitivity->state[UNITY_SOURCE_YAW_RATE][lane];
+    case MPC_STATE_IDX_ACTUAL_STEERING_ANGLE:
+        return (float)sensitivity->state[
+            UNITY_SOURCE_PHYSICAL_STEERING][lane];
+    default: break;
+    }
+    if (model_row >= MPC_STATE_IDX_WHEEL_OMEGA_FL &&
+        model_row <= MPC_STATE_IDX_WHEEL_OMEGA_RR) {
+        const int source = UNITY_SOURCE_WHEEL_OMEGA_FL +
+            model_row - MPC_STATE_IDX_WHEEL_OMEGA_FL;
+        return (float)sensitivity->state[source][lane];
+    }
+    if (model_row >= MPC_STATE_IDX_BODY_HEIGHT &&
+        model_row <= MPC_STATE_IDX_PITCH_RATE) {
+        static const int source_state[] = {
+            UNITY_SOURCE_BODY_HEIGHT, UNITY_SOURCE_BODY_HEIGHT_RATE,
+            UNITY_SOURCE_ROLL, UNITY_SOURCE_ROLL_RATE,
+            UNITY_SOURCE_PITCH, UNITY_SOURCE_PITCH_RATE};
+        return (float)sensitivity->state[
+            source_state[model_row - MPC_STATE_IDX_BODY_HEIGHT]][lane];
+    }
+    if (model_row >= MPC_STATE_IDX_SUSPENSION_JOUNCE_FL &&
+        model_row <= MPC_STATE_IDX_SUSPENSION_JOUNCE_RR) {
+        const int source = UNITY_SOURCE_SUSPENSION_JOUNCE_FL +
+            model_row - MPC_STATE_IDX_SUSPENSION_JOUNCE_FL;
+        return (float)sensitivity->state[source][lane];
+    }
+    return 0.0f;
+}
+
+static int vehicle_model_forward_plant_jacobian(
+    const MpcModelState_t *state, float dt, float path_curvature,
+    const MpcStageResult_t *nominal_stage,
+    MpcStageLinearization_t *linearization,
+    uint32_t *covered_columns)
+{
+    if (!state || !nominal_stage || !linearization || !covered_columns)
+        return 0;
+    *covered_columns = 0;
+    UnitySourcePlantInputC source_input;
+    memset(&source_input, 0, sizeof(source_input));
+    write_source_plant_state(state, source_input.state);
+    source_input.steering_target_rad = clamp_source_steering_target(
+        state->delayed_steering_command_1);
+    source_input.throttle_normalized = state->delayed_throttle_command_1;
+    source_input.suspension_history_initialized =
+        state->source_suspension_history_initialized;
+
+    for (int first_column = 0;
+         first_column < MPC_FORWARD_SENSITIVITY_COLUMNS;
+         first_column += UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH) {
+        UnitySourcePlantSensitivitySeedsC seeds = {0};
+        UnitySourcePlantSensitivityC sensitivity = {0};
+        const int lane_count =
+            MPC_FORWARD_SENSITIVITY_COLUMNS - first_column <
+                    UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH
+                ? MPC_FORWARD_SENSITIVITY_COLUMNS - first_column
+                : UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;
+        for (int lane = 0; lane < lane_count; ++lane) {
+            const int column_index = first_column + lane;
+            const int model_column =
+                kPlantSensitiveModelColumns[column_index];
+            int source_index, second_source_index, command_kind;
+            double second_source_scale;
+            if (!model_column_seed_source(model_column, &source_index,
+                    &second_source_index, &second_source_scale,
+                    &command_kind)) return 0;
+            if (source_index >= 0)
+                seeds.state[source_index][lane] = 1.0;
+            if (second_source_index >= 0)
+                seeds.state[second_source_index][lane] =
+                    second_source_scale;
+            if (command_kind == 1) {
+                const double target =
+                    state->delayed_steering_command_1;
+                seeds.steering_target[lane] =
+                    target > -UNITY_SOURCE_MAX_STEERING_RAD &&
+                    target < UNITY_SOURCE_MAX_STEERING_RAD ? 1.0 : 0.0;
+            }
+            if (command_kind == 2) seeds.throttle[lane] = 1.0;
+        }
+        if (!unity_source_plant_step_sensitivity_c(
+                &source_input, dt, &seeds, &sensitivity)) return 0;
+        for (int lane = 0; lane < lane_count; ++lane) {
+            const int model_column =
+                kPlantSensitiveModelColumns[first_column + lane];
+            for (int row = 2; row < MPC_MODEL_NX; ++row) {
+                const float derivative =
+                    source_output_derivative_to_model(
+                        &sensitivity, row, lane);
+                if (!isfinite(derivative)) return 0;
+                linearization->A[row][model_column] = derivative;
+            }
+
+            const float d_forward = (float)
+                sensitivity.body_forward_displacement[lane];
+            const float d_lateral = (float)
+                sensitivity.body_lateral_displacement[lane];
+            const float d_yaw = (float)sensitivity.yaw_delta[lane];
+            const float c = cosf(state->e_psi);
+            const float s = sinf(state->e_psi);
+            const float denominator = 1.0f - path_curvature * state->e_y;
+            if (fabsf(denominator) < 0.05f) return 0;
+            const float d_path_forward = d_forward * c - d_lateral * s;
+            const float d_path_lateral = d_forward * s + d_lateral * c;
+            const float d_delta_s = d_path_forward / denominator;
+            const float d_ey = d_path_lateral - path_curvature *
+                nominal_stage->delta_s_m * d_delta_s;
+            const float d_epsi = d_yaw - path_curvature * d_delta_s;
+            /* Derivative of the exact integrated-motion Frenet map. The path
+             * coordinate columns e_y/e_psi remain on their cheap dedicated
+             * path above; this maps plant-state sensitivities only. */
+            if (!isfinite(d_ey) || !isfinite(d_epsi)) return 0;
+            linearization->A[MPC_STATE_IDX_EY][model_column] = d_ey;
+            linearization->A[MPC_STATE_IDX_EPSI][model_column] = d_epsi;
+            *covered_columns |= UINT32_C(1) << model_column;
+
+            /* At exactly zero throttle, Unity changes from the motor-torque
+             * branch to its hard-brake branch. A local derivative through
+             * the active brake branch is zero, but the feasible positive
+             * direction crosses modes. Leave that column to the existing
+             * branch-aware one-sided difference rather than inventing a
+             * smooth derivative at the hybrid boundary. */
+            if (model_column == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1 &&
+                state->delayed_throttle_command_1 == 0.0f) {
+                *covered_columns &= ~(UINT32_C(1) << model_column);
+            }
+        }
+    }
+    return 1;
+}
+
 static int vehicle_model_linearize_with_known_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
@@ -699,13 +886,20 @@ static int vehicle_model_linearize_with_known_step(
         }
     }
 
+    uint32_t sensitivity_covered_columns = 0;
+    const int sensitivities_valid = vehicle_model_forward_plant_jacobian(
+        state, dt, path_curvature, stage, linearization,
+        &sensitivity_covered_columns);
+
     for (int column = 0; column < MPC_MODEL_NX + MPC_MODEL_NU; ++column) {
         const int is_state = column < MPC_MODEL_NX;
         const int index = is_state ? column : column - MPC_MODEL_NX;
         const int analytic_column = is_state
             ? (index == MPC_STATE_IDX_EY || index == MPC_STATE_IDX_EPSI ||
                index == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2 ||
-               index == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2)
+               index == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2 ||
+               (sensitivities_valid &&
+                (sensitivity_covered_columns & (UINT32_C(1) << index)) != 0))
             : 1;
         if (analytic_column) continue;
         const float epsilon = is_state
