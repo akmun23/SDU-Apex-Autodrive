@@ -36,6 +36,7 @@ namespace f1tenth_mpc {
 namespace {
 
 constexpr std::uint32_t kUnityPlantStateSchemaVersion = 11;
+constexpr int64_t kBridgeControlPeriodNs = 25'000'000;
 
 double clamp(double value, double lower, double upper)
 {
@@ -48,6 +49,26 @@ int64_t steady_time_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool next_bridge_request_epoch(int64_t source_request_stamp_ns,
+                               int64_t predicted_publish_stamp_ns,
+                               int64_t * request_epoch_stamp_ns)
+{
+    if (!request_epoch_stamp_ns || source_request_stamp_ns <= 0 ||
+        predicted_publish_stamp_ns < source_request_stamp_ns) {
+        return false;
+    }
+    const int64_t elapsed_ns =
+        predicted_publish_stamp_ns - source_request_stamp_ns;
+    const int64_t periods = elapsed_ns / kBridgeControlPeriodNs + 1;
+    if (periods > (std::numeric_limits<int64_t>::max() -
+            source_request_stamp_ns) / kBridgeControlPeriodNs) {
+        return false;
+    }
+    *request_epoch_stamp_ns = source_request_stamp_ns +
+        periods * kBridgeControlPeriodNs;
+    return true;
 }
 
 void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
@@ -143,7 +164,7 @@ public:
         }
         if (enabled_ && publish_diagnostics) {
             diagnostics_pub_ = create_publisher<std_msgs::msg::String>(
-                diagnostics_topic_, rclcpp::QoS(rclcpp::KeepLast(2)));
+                diagnostics_topic_, rclcpp::QoS(rclcpp::KeepLast(10)));
         }
         if (enabled_ && open_loop_horizon_test_enabled_) {
             open_loop_horizon_test_pub_ =
@@ -174,19 +195,18 @@ public:
         auto declare_weight = [this](const char * name, float fallback) {
             return static_cast<float>(declare_parameter<double>(name, fallback));
         };
-                /* Keep parameter fallbacks identical to the canonical competition YAML.
-         * Otherwise a missing/renamed YAML silently selected the historical
-         * BachelorProject objective while the offline replay and documented
-         * production profile used different weights. */
+        /* Keep parameter defaults identical to the canonical competition
+         * YAML. A missing/renamed config must not silently select a different
+         * steering/yaw objective than saved-state replay and production. */
         rti_config_.model.weight_e_y = declare_weight("weight_e_y", 125.0f);
-        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 2.0f);
+        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 31.25f);
         rti_config_.model.weight_u = declare_weight("weight_u", 500.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
             "weight_u_overspeed", 300.0f);
         rti_config_.model.weight_longitudinal_slip = declare_weight(
             "weight_longitudinal_slip", 5.0f);
         rti_config_.model.weight_v = declare_weight("weight_v", 5.0f);
-        rti_config_.model.weight_r = declare_weight("weight_r", 1.5f);
+        rti_config_.model.weight_r = declare_weight("weight_r", 7.8125f);
         rti_config_.model.weight_steering_command = declare_weight(
             "weight_steering_command", 3.0f);
         rti_config_.model.weight_steering_target = declare_weight(
@@ -234,6 +254,26 @@ public:
                 "rti_cycle_budget_ms must be finite and nonnegative");
         }
         rti_config_.max_cycle_time_us = rti_cycle_budget_ms * 1000.0;
+        end_to_end_cycle_budget_ms_ = declare_parameter<double>(
+            "end_to_end_cycle_budget_ms", 25.0);
+        max_command_start_lateness_ms_ = declare_parameter<double>(
+            "max_command_start_lateness_ms", 2.0);
+        const double initial_command_publication_lead_ms =
+            declare_parameter<double>(
+                "initial_command_publication_lead_ms", 15.0);
+        if (!std::isfinite(end_to_end_cycle_budget_ms_) ||
+            end_to_end_cycle_budget_ms_ <= 0.0 ||
+            !std::isfinite(max_command_start_lateness_ms_) ||
+            max_command_start_lateness_ms_ < 0.0 ||
+            !std::isfinite(initial_command_publication_lead_ms) ||
+            initial_command_publication_lead_ms < 0.0) {
+            throw std::runtime_error(
+                "end-to-end budget must be positive and command-start "
+                "lateness and initial command lead must be finite and "
+                "nonnegative");
+        }
+        last_command_publication_lead_ns_ = static_cast<int64_t>(
+            std::llround(initial_command_publication_lead_ms * 1.0e6));
         rti_config_.solver.rho = static_cast<float>(
             declare_parameter<double>("admm_rho", 7.0));
         rti_config_.solver.rho_u = static_cast<float>(
@@ -292,7 +332,9 @@ public:
             "MPC solver config: ADMM per-solve max=%u, rho adaptation=%s/%d, "
             "rho-x overrides=[ey=%.2f,u=%.2f,steer=%.2f], "
             "rho-u override=[%.2f,%.2f], cold-start=%s, "
-            "Jacobian workers=%d, cycle budget=%.1f ms, "
+            "Jacobian workers=%d, RTI budget=%.1f ms, end-to-end="
+            "%.1f ms, max command-start lateness=%.1f ms, "
+            "initial publication lead=%.1f ms, "
             "decision state=%d, plant state=%d, horizon=%d",
             static_cast<unsigned>(rti_config_.solver.max_iterations),
             rti_config_.solver.adaptive_rho ? "on" : "off",
@@ -306,6 +348,8 @@ public:
             rti_config_.solver.cold_start_each_solve ? "on" : "off",
             rti_config_.model.jacobian_threads,
             rti_config_.max_cycle_time_us / 1000.0,
+            end_to_end_cycle_budget_ms_, max_command_start_lateness_ms_,
+            initial_command_publication_lead_ms,
             MPC_OPTIMIZER_NX, MPC_OPT_PHYSICAL_NX, PREDICTION_HORIZON);
         mpc_rti_memory_reset(&rti_memory_);
         trajectory_loaded_ = load_trajectory(trajectory_file_);
@@ -437,15 +481,17 @@ private:
         return startup_speed_mps_ + (max_speed_mps_ - startup_speed_mps_) * fraction;
     }
 
-    int64_t publish_command(double steering, double throttle_normalized = 0.0)
+    int64_t publish_command(double steering, double throttle_normalized)
     {
         if (!drive_command_pub_) return 0;
-        const double finite_steering = std::isfinite(steering) ? steering : 0.0;
-        const double finite_throttle = std::isfinite(throttle_normalized)
-            ? throttle_normalized : 0.0;
-        const double bounded_steering = std::clamp(finite_steering,
+        if (!std::isfinite(steering) || !std::isfinite(throttle_normalized) ||
+            std::abs(steering) > actuator_steering_limit_rad_ + 1.0e-6 ||
+            throttle_normalized < MPC_THROTTLE_MIN_DRIVE - 1.0e-6 ||
+            throttle_normalized > 1.0 + 1.0e-6) return 0;
+        const double bounded_steering = clamp(steering,
             -actuator_steering_limit_rad_, actuator_steering_limit_rad_);
-        const double bounded_throttle = clamp(finite_throttle, 0.0, 1.0);
+        const double bounded_throttle = clamp(throttle_normalized,
+            MPC_THROTTLE_MIN_DRIVE, 1.0);
         sdu_apex_msgs::msg::DriveCommand command;
         const rclcpp::Time command_time = now();
         command.header.stamp = command_time;
@@ -465,21 +511,49 @@ private:
                               bool emit_diagnostic = true,
                               bool reset_rti_memory = true)
     {
+        if (control_fault_latched_) return;
+        control_fault_latched_ = true;
+        ++control_fault_cycles_;
         abort_open_loop_horizon_test(reason);
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-            "%s; no replacement command published (last actuator command "
-            "remains active)", reason);
+            "%s; MPC fault latched and no replacement drive command published",
+            reason);
         if (reset_rti_memory) {
             mpc_rti_memory_reset(&rti_memory_);
         }
-        /* Do not misrepresent a rejected plan as a valid recovery command.
-         * In particular, Unity interprets q=0 as full active braking, which
-         * can stall a diagnostic run before its collision watcher records
-         * the failure. Publish the fault only; the simulator keeps the last
-         * actuator command until the supervising run stops on collision or
-         * its explicit overall timeout. */
+        /* A rejected plan is a latched controller fault, not a recovery
+         * command. The run supervisor owns stopping the simulator; the MPC
+         * never substitutes Unity's q=0 active-brake mode. */
         if (diagnostics_pub_ && emit_diagnostic)
             publish_cycle_failure(reason);
+    }
+
+    bool command_timing_is_valid(int64_t callback_steady_ns,
+                                 int64_t candidate_command_stamp_ns,
+                                 const char ** fault_reason)
+    {
+        const double end_to_end_ms = std::max(0.0,
+            static_cast<double>(steady_time_ns() - callback_steady_ns) *
+                1.0e-6);
+        const double command_start_lateness_ms = std::max(0.0,
+            static_cast<double>(now().nanoseconds() -
+                candidate_command_stamp_ns) * 1.0e-6);
+        if (end_to_end_ms <= end_to_end_cycle_budget_ms_ &&
+            command_start_lateness_ms <= max_command_start_lateness_ms_) {
+            return true;
+        }
+
+        if (fault_reason) {
+            *fault_reason = end_to_end_ms > end_to_end_cycle_budget_ms_
+                ? "MPC accepted solve exceeded end-to-end 40 Hz deadline"
+                : "MPC accepted plan missed its predicted command-start time";
+        }
+        RCLCPP_ERROR(get_logger(),
+            "MPC command rejected by timing gate: end-to-end %.3f/%.3f ms, "
+            "command-start lateness %.3f/%.3f ms",
+            end_to_end_ms, end_to_end_cycle_budget_ms_,
+            command_start_lateness_ms, max_command_start_lateness_ms_);
+        return false;
     }
 
     void publish_cycle_failure(const char * reason)
@@ -491,6 +565,46 @@ private:
              << "\",\"source_stamp_ns\":" << last_source_stamp_.nanoseconds()
              << '}';
         message.data = json.str();
+        diagnostics_pub_->publish(message);
+    }
+
+    void publish_waiting_for_localization()
+    {
+        if (!diagnostics_pub_) return;
+        std_msgs::msg::String message;
+        message.data = "{\"status\":\"waiting_for_localization\","
+            "\"reason\":\"initial_map_pose_not_received\"}";
+        diagnostics_pub_->publish(message);
+    }
+
+    void publish_waiting_for_plant_state()
+    {
+        if (!diagnostics_pub_) return;
+        std_msgs::msg::String message;
+        message.data = "{\"status\":\"waiting_for_plant_state\","
+            "\"reason\":\"initial_causal_plant_snapshot_not_received\"}";
+        diagnostics_pub_->publish(message);
+    }
+
+    bool actuator_subscription_matched() const
+    {
+        if (!drive_command_pub_) return false;
+        const auto endpoints = get_subscriptions_info_by_topic(
+            drive_command_topic_);
+        return std::any_of(
+            endpoints.begin(), endpoints.end(), [](const auto & endpoint) {
+                return endpoint.endpoint_type() ==
+                        rclcpp::EndpointType::Subscription &&
+                    endpoint.node_name() == "autodrive_actuator_interface";
+            });
+    }
+
+    void publish_waiting_for_actuator()
+    {
+        if (!diagnostics_pub_) return;
+        std_msgs::msg::String message;
+        message.data = "{\"status\":\"waiting_for_actuator\","
+            "\"reason\":\"drive_command_subscription_not_matched\"}";
         diagnostics_pub_->publish(message);
     }
 
@@ -562,8 +676,6 @@ private:
                   << (terminal_state_observed ? "true" : "false") << '}';
         publish_open_loop_horizon_event(completed.str());
         if (open_loop_horizon_timer_) open_loop_horizon_timer_->cancel();
-        last_throttle_command_ = 0.0;
-        publish_command(last_steering_command_rad_, 0.0);
     }
 
     void open_loop_horizon_timer_callback()
@@ -572,7 +684,11 @@ private:
         if (open_loop_horizon_test_next_stage_ <
             open_loop_horizon_test_plan_.horizon) {
             const int stage = open_loop_horizon_test_next_stage_++;
-            publish_open_loop_horizon_command(stage);
+            if (publish_open_loop_horizon_command(stage) == 0) {
+                report_control_fault(
+                    "latched MPC plan contains a command outside the drive envelope");
+                return;
+            }
             if (open_loop_horizon_test_next_stage_ ==
                 open_loop_horizon_test_plan_.horizon) {
                 open_loop_horizon_all_outputs_sent_ = true;
@@ -580,13 +696,10 @@ private:
             return;
         }
 
-        // Hold the final planned command for one full 25 ms interval before
-        // active braking. Then wait briefly for the terminal state sample.
+        // Observe the terminal state without inventing a new actuator action.
         if (!open_loop_horizon_terminal_waiting_) {
             open_loop_horizon_terminal_waiting_ = true;
             open_loop_horizon_terminal_wait_start_ns_ = steady_time_ns();
-            last_throttle_command_ = 0.0;
-            publish_command(last_steering_command_rad_, 0.0);
             if (open_loop_horizon_last_sample_stage_ >=
                 open_loop_horizon_test_plan_.horizon) {
                 finish_open_loop_horizon_test(true);
@@ -594,7 +707,7 @@ private:
             return;
         }
         if (steady_time_ns() - open_loop_horizon_terminal_wait_start_ns_ >=
-            1000000000LL) {
+            100000000LL) {
             finish_open_loop_horizon_test(false);
         }
     }
@@ -730,12 +843,13 @@ private:
     {
         const MpcModelControl_t & control =
             open_loop_horizon_test_plan_.controls[stage];
-        last_steering_command_rad_ = clamp(
-            control.steering_target_rad,
-            -actuator_steering_limit_rad_, actuator_steering_limit_rad_);
-        last_throttle_command_ = clamp(control.throttle_command, 0.0, 1.0);
+        if (control.throttle_command < MPC_THROTTLE_MIN_DRIVE ||
+            control.throttle_command > 1.0 ||
+            std::abs(control.steering_target_rad) >
+                actuator_steering_limit_rad_) return 0;
         const int64_t command_stamp_ns = publish_command(
-            last_steering_command_rad_, last_throttle_command_);
+            control.steering_target_rad, control.throttle_command);
+        if (command_stamp_ns == 0) return 0;
         std::ostringstream output;
         output << std::setprecision(9)
                << "{\"event\":\"output\",\"plan_id\":"
@@ -937,6 +1051,16 @@ private:
             << ",\"candidate_command_lead_s\":"
             << static_cast<double>(candidate_command_stamp_ns -
                 control_ros_stamp_ns) * 1.0e-9
+            << ",\"candidate_command_lateness_ms\":"
+            << std::max(0.0, static_cast<double>(now().nanoseconds() -
+                candidate_command_stamp_ns) * 1.0e-6)
+            << ",\"max_command_start_lateness_ms\":"
+            << max_command_start_lateness_ms_
+            << ",\"end_to_end_control_ms\":"
+            << std::max(0.0, static_cast<double>(steady_time_ns() -
+                callback_steady_ns) * 1.0e-6)
+            << ",\"end_to_end_cycle_budget_ms\":"
+            << end_to_end_cycle_budget_ms_
             << ",\"source_age_s\":" << synchronized.source_age_s
             << ",\"source_dt_s\":" << source_dt_s
             << ",\"pose_odom_skew_s\":" << synchronized.pose_odom_skew_s
@@ -1008,7 +1132,20 @@ private:
             << ',' << state.plant.actual_steering_angle
             << ',' << state.plant.delayed_throttle_command_1
             << ',' << state.plant.delayed_throttle_command_2 << ']'
-            << ",\"plant_state_source\":\"odometry_v7\"";
+            << ",\"plant_internal_state\":[";
+        for (int i = 0; i < MPC_PLANT_INTERNAL_STATE_COUNT; ++i) {
+            if (i > 0) json << ',';
+            json_number(state.plant.source_plant_internal_state[i]);
+        }
+        json << "],\"plant_state_flags\":["
+            << state.plant.source_plant_initialized << ','
+            << state.plant.source_suspension_history_initialized << ','
+            << state.plant.source_imu_state_initialized << ']'
+            << ",\"plant_state_source\":\""
+            << (unity_plant_state_used_
+                    ? "odom_unity_plant_state"
+                    : "source_plant_from_odom_or_handoff")
+            << "\"";
         json << ",\"solver\":{\"iterations\":" << result.solver_iterations
             << ",\"admm_status\":" << result.admm_status
             << ",\"primal_residual\":";
@@ -1070,6 +1207,17 @@ private:
             json_number(result.lateral_accel_proxy_by_stage_mps2[k]);
         }
         json << ']';
+        if (result.candidate_control_count > 0) {
+            json << ",\"rejected_candidate_controls\":[";
+            for (int k = 0; k < result.candidate_control_count; ++k) {
+                if (k > 0) json << ',';
+                json << '['
+                     << result.candidate_controls[k].steering_target_rad
+                     << ',' << result.candidate_controls[k].throttle_command
+                     << ']';
+            }
+            json << ']';
+        }
         json << ",\"predictions\":[";
 
         if (result.status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
@@ -1281,7 +1429,7 @@ private:
         }
         if (odom_stamp.nanoseconds() <= 0) odom_stamp = now();
 
-        if (!enabled_) return;
+        if (!enabled_ || control_fault_latched_) return;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             latest_odom_ingest_status_ = state_synchronizer_.push_odometry({
@@ -1297,7 +1445,27 @@ private:
     void control_timer_callback()
     {
         const int64_t callback_steady_ns = steady_time_ns();
-        if (!enabled_) return;
+        if (!enabled_ || control_fault_latched_) return;
+
+        /* The development recorder also subscribes to drive_command, so a
+         * publisher subscriber-count check is not sufficient. Wait for the
+         * actuator endpoint itself before spending a solve or publishing a
+         * plan that cannot reach Unity. DDS discovery can complete after the
+         * component's first timer callbacks. */
+        if (!actuator_subscription_matched()) {
+            if (!waiting_for_actuator_) {
+                RCLCPP_WARN(get_logger(),
+                    "MPC waiting for the actuator command subscription to match");
+                publish_waiting_for_actuator();
+                waiting_for_actuator_ = true;
+            }
+            return;
+        }
+        if (waiting_for_actuator_) {
+            RCLCPP_INFO(get_logger(),
+                "MPC actuator command subscription is matched; enabling solves");
+            waiting_for_actuator_ = false;
+        }
 
         std::uint64_t odom_generation = 0;
         MpcSyncStatus odom_status = MpcSyncStatus::kMissingOdom;
@@ -1329,20 +1497,6 @@ private:
         MpcSyncStatus sync_status;
         const rclcpp::Time control_ros_time = now();
         const int64_t control_stamp_ns = control_ros_time.nanoseconds();
-        const int64_t publication_lead_ns =
-            std::max<int64_t>(0, last_command_publication_lead_ns_);
-        if (publication_lead_ns > 0 && control_stamp_ns >
-            std::numeric_limits<int64_t>::max() - publication_lead_ns) {
-            report_control_fault("MPC command-time prediction stamp overflow");
-            return;
-        }
-        /* Optimize from the state expected when this cycle can publish its
-         * first command, not from the pre-solve callback snapshot. The lead is
-         * measured in the same ROS clock domain from the previous completed
-         * cycle; the plant predictor advances the known queued commands over
-         * that interval before the new decision sequence enters the queue. */
-        const int64_t candidate_command_stamp_ns =
-            control_stamp_ns + publication_lead_ns;
         const int64_t synchronize_steady_ns = steady_time_ns();
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1350,6 +1504,13 @@ private:
                 control_ros_time.nanoseconds(), &coherent_state);
         }
         if (sync_status != MpcSyncStatus::kOk) {
+            if (!state_initialized_ &&
+                sync_status == MpcSyncStatus::kMissingMapPose) {
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                    "MPC waiting for its first localized map pose");
+                publish_waiting_for_localization();
+                return;
+            }
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC waiting for legal state input: %s",
                 MpcStateSynchronizer::status_name(sync_status));
@@ -1366,6 +1527,29 @@ private:
             }
             report_control_fault(
                 reason.c_str());
+            return;
+        }
+        state_initialized_ = true;
+
+        const int64_t publication_lead_ns =
+            std::max<int64_t>(0, last_command_publication_lead_ns_);
+        if (publication_lead_ns > 0 && control_stamp_ns >
+            std::numeric_limits<int64_t>::max() - publication_lead_ns) {
+            report_control_fault("MPC command-time prediction stamp overflow");
+            return;
+        }
+        const int64_t predicted_publish_stamp_ns =
+            control_stamp_ns + publication_lead_ns;
+        int64_t candidate_command_stamp_ns = 0;
+        /* Bridge packets are requested on a fixed 25 ms phase, and every
+         * sensor message carries its associated request timestamp. A command
+         * published before the next request is consumed at that request; use
+         * the next request epoch after the measured publication-time estimate
+         * rather than letting host callback jitter shift the plant phase. */
+        if (!next_bridge_request_epoch(coherent_state.source_stamp_ns,
+                predicted_publish_stamp_ns, &candidate_command_stamp_ns)) {
+            report_control_fault(
+                "MPC could not align command start to the bridge request epoch");
             return;
         }
 
@@ -1429,6 +1613,18 @@ private:
                 coherent_state.source_stamp_ns,
                 state_extrapolation_max_s_);
         if (!unity_plant_snapshot_usable && !source_plant_handoff_usable) {
+            if (!source_plant_handoff_valid_) {
+                /* The first hidden-state sample can arrive after the matching
+                 * odometry callback because these are separate DDS topics.
+                 * Wait for the next source epoch; do not latch a permanent
+                 * controller fault before MPC has ever had a usable plant
+                 * state. Once initialized, a missing/stale plant remains a
+                 * real fault and is handled below. */
+                RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                    "MPC waiting for its first causal odometry plant snapshot");
+                publish_waiting_for_plant_state();
+                return;
+            }
             report_control_fault(
                 "waiting for a synchronized complete odometry plant state");
             return;
@@ -1589,10 +1785,8 @@ private:
                     command_time_state, command_time_projection,
                     control_ros_time.nanoseconds());
                 if (!open_loop_horizon_test_active_) {
-                    // A diagnostic-plan failure must never fall through into
-                    // normal MPC output with an incomplete open-loop test.
-                    last_throttle_command_ = 0.0;
-                    publish_command(last_steering_command_rad_, 0.0);
+                    // A diagnostic failure must not fall through into normal
+                    // MPC output or synthesize a braking command.
                     return;
                 }
                 open_loop_horizon_last_sample_stage_ = stage;
@@ -1604,10 +1798,8 @@ private:
             return;
         }
         if (open_loop_horizon_test_finished_) {
-            /* Keep the car in Unity's active-brake mode until the test watcher
-             * has observed the completion event and shut down the simulator. */
-            last_throttle_command_ = 0.0;
-            publish_command(last_steering_command_rad_, 0.0);
+            // The run supervisor stops the simulator after observing this
+            // terminal event; MPC does not issue an unplanned brake command.
             return;
         }
 
@@ -1650,17 +1842,27 @@ private:
                     synchronize_steady_ns);
             report_control_fault(
                 "MPC RTI cycle had no exact-feasible candidate");
-            ++control_fault_cycles_;
             return;
         }
 
-        if (diagnostics_pub_)
-            publish_cycle_diagnostics(state, coherent_state,
-                control_time_prediction, control_prediction_us,
-                last_projected_s_, source_dt, result, solve_us,
-                control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                callback_steady_ns,
-                synchronize_steady_ns);
+        /* A numerically accepted plan is not publishable if its command-time
+         * state is already stale or if state acquisition through validation
+         * crossed one 40 Hz period. No substitute command is emitted.
+         * Full diagnostics are serialized after command publication so a
+         * debug recording cannot consume the control deadline. */
+        const char * timing_fault_reason = nullptr;
+        if (enabled_ && !command_timing_is_valid(callback_steady_ns,
+                candidate_command_stamp_ns, &timing_fault_reason)) {
+            if (diagnostics_pub_)
+                publish_cycle_diagnostics(state, coherent_state,
+                    control_time_prediction, control_prediction_us,
+                    last_projected_s_, source_dt, result, solve_us,
+                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                    callback_steady_ns, synchronize_steady_ns);
+            report_control_fault(timing_fault_reason, false);
+            publish_cycle_failure(timing_fault_reason);
+            return;
+        }
         if (enabled_ && open_loop_horizon_test_enabled_ &&
             !open_loop_horizon_test_triggered_ &&
             state.plant.u >= open_loop_horizon_test_min_speed_mps_ &&
@@ -1682,8 +1884,19 @@ private:
                 command_time_state, command_time_projection,
                 candidate_command_stamp_ns);
             if (!open_loop_horizon_test_active_) {
-                last_throttle_command_ = 0.0;
-                publish_command(last_steering_command_rad_, 0.0);
+                return;
+            }
+            if (!command_timing_is_valid(callback_steady_ns,
+                    candidate_command_stamp_ns, &timing_fault_reason)) {
+                if (diagnostics_pub_)
+                    publish_cycle_diagnostics(state, coherent_state,
+                        control_time_prediction, control_prediction_us,
+                        last_projected_s_, source_dt, result, solve_us,
+                        control_ros_time.nanoseconds(),
+                        candidate_command_stamp_ns, callback_steady_ns,
+                        synchronize_steady_ns);
+                report_control_fault(timing_fault_reason, false);
+                publish_cycle_failure(timing_fault_reason);
                 return;
             }
             RCLCPP_WARN(get_logger(),
@@ -1693,28 +1906,58 @@ private:
                 state.plant.u, PREDICTION_HORIZON);
             const int64_t command_stamp_ns =
                 publish_open_loop_horizon_command(0);
+            if (command_stamp_ns == 0) {
+                report_control_fault(
+                    "latched MPC plan starts outside the drive command envelope");
+                return;
+            }
             last_command_publication_lead_ns_ = command_stamp_ns >=
                 control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
             open_loop_horizon_timer_ = create_wall_timer(
                 std::chrono::milliseconds(25),
                 std::bind(&MpcControllerNode::open_loop_horizon_timer_callback,
                     this), control_callback_group_);
+            if (diagnostics_pub_)
+                publish_cycle_diagnostics(state, coherent_state,
+                    control_time_prediction, control_prediction_us,
+                    last_projected_s_, source_dt, result, solve_us,
+                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                    callback_steady_ns, synchronize_steady_ns);
             return;
         }
         if (enabled_) {
-            last_steering_command_rad_ = result.published_steering_command;
-            last_throttle_command_ = result.published_throttle;
             const int64_t command_stamp_ns = publish_command(
-                last_steering_command_rad_, result.published_throttle);
+                result.published_steering_command, result.published_throttle);
+            if (command_stamp_ns == 0) {
+                if (diagnostics_pub_)
+                    publish_cycle_diagnostics(state, coherent_state,
+                        control_time_prediction, control_prediction_us,
+                        last_projected_s_, source_dt, result, solve_us,
+                        control_ros_time.nanoseconds(),
+                        candidate_command_stamp_ns, callback_steady_ns,
+                        synchronize_steady_ns);
+                report_control_fault(
+                    "accepted MPC action violates the positive-throttle command envelope");
+                return;
+            }
             last_command_publication_lead_ns_ = command_stamp_ns >=
                 control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
         }
+        if (diagnostics_pub_)
+            publish_cycle_diagnostics(state, coherent_state,
+                control_time_prediction, control_prediction_us,
+                last_projected_s_, source_dt, result, solve_us,
+                control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                callback_steady_ns, synchronize_steady_ns);
     }
 
     bool enabled_{};
     bool trajectory_loaded_{};
     bool startup_path_validated_{};
     bool progress_initialized_{};
+    bool state_initialized_{};
+    bool control_fault_latched_{};
+    bool waiting_for_actuator_{};
     std::string odom_topic_;
     std::string pose_topic_;
     std::string diagnostics_topic_;
@@ -1733,10 +1976,11 @@ private:
     double startup_path_max_distance_m_{};
     double startup_path_heading_tolerance_rad_{};
     double actuator_steering_limit_rad_{SOURCE_MAX_STEERING_RAD};
+    double end_to_end_cycle_budget_ms_{25.0};
+    double max_command_start_lateness_ms_{2.0};
     double track_length_m_{};
     double startup_progress_m_{};
     double last_projected_s_{};
-    double last_steering_command_rad_{};
     std::string unity_plant_state_topic_;
     std::string open_loop_horizon_test_topic_;
     bool open_loop_horizon_test_enabled_{};
@@ -1755,10 +1999,11 @@ private:
     bool source_plant_handoff_valid_{};
     bool unity_plant_state_used_{};
     int64_t source_plant_handoff_stamp_ns_{};
+    /* Until the first command is published, seed from the measured practice
+     * node-cycle median; subsequent values are measured callback-to-publish. */
     int64_t last_command_publication_lead_ns_{};
     double source_plant_handoff_progress_m_{};
     MpcModelState_t source_plant_handoff_state_{};
-    double last_throttle_command_{};
     std::size_t last_closest_index_{};
     rclcpp::Time last_source_stamp_{0, 0, RCL_ROS_TIME};
     MpcRtiCycleConfiguration_t rti_config_{};

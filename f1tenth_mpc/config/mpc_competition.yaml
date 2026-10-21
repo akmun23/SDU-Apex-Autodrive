@@ -21,6 +21,13 @@
     # remaining inside the offline plant's validated 750 ms prediction span.
     maximum_command_publication_lead_s: 0.5
     command_actuation_delay_s: 0.0
+    # Reject a mathematically valid solve if compute has passed its predicted
+    # command epoch or if acquisition-to-command work exceeds one 40 Hz period.
+    # A miss latches a controller fault; MPC does not publish a substitute.
+    end_to_end_cycle_budget_ms: 25.0
+    max_command_start_lateness_ms: 2.0
+    # The Oct 21 practice MPC capture measured 14.2 ms median callback-to-publish.
+    initial_command_publication_lead_ms: 15.0
     unity_plant_state_topic: /odom/unity_plant_state
     drive_command_topic: /mpc/drive_command
     pose_odom_max_skew_s: 0.12
@@ -76,7 +83,11 @@
     # The exact source-plant rollout and corridor remain independent gates.
     solver_tolerance: 0.02
     # One QP and one nonlinear validation per 40 Hz cycle; no retry pass.
-    max_solver_iterations: 50
+    # On 174 saved practice states (offline GT-pose isolation), 100 iterations
+    # raised exact-feasible candidates from 10/174 to 92/174. With four
+    # Jacobian workers the replay p95/max cycle was 11.94/12.98 ms; the live
+    # 20 ms RTI deadline remains the hard bound.
+    max_solver_iterations: 100
     rti_cycle_budget_ms: 20.0
     # Cap parallel Jacobian construction at four workers so the controller
     # remains deployable on competition PCs with limited CPU availability.

@@ -677,7 +677,6 @@ static int vehicle_model_forward_plant_jacobian(
     source_input.throttle_normalized = state->delayed_throttle_command_2;
     source_input.suspension_history_initialized =
         state->source_suspension_history_initialized;
-
     for (int first_column = 0;
          first_column < MPC_FORWARD_SENSITIVITY_COLUMNS;
          first_column += UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH) {

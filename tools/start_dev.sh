@@ -135,6 +135,7 @@ exec docker run --rm --name "${container}" \
   -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
   -e SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
   -e "SDU_APEX_MPC_START_DELAY_SEC=${SDU_APEX_MPC_START_DELAY_SEC:-2.0}" \
+  -e "SDU_APEX_CONTROLLER_MAX_SPEED=${SDU_APEX_CONTROLLER_MAX_SPEED:-}" \
   -e "SDU_APEX_BUILD_MOUNTED_SOURCE=${build_mounted_source}" \
   -e "SDU_APEX_MPC_PARAMETER_OVERLAY=${mpc_parameter_overlay}" \
   -e "SDU_APEX_ACTUATOR_PARAMETER_OVERLAY=${actuator_parameter_overlay}" \

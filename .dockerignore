@@ -15,6 +15,8 @@ tools
 docs
 STARTUP_GUIDE.md
 
-# Unity source is a development reference and is not part of the ROS image.
-external/autodrive-unity-source
+# Unity/PhysX and simulator-source trees are development references only;
+# runtime packages build from the checked-in ROS/C++ source, so exclude the
+# multi-gigabyte external tree from every Docker build context.
+external
 

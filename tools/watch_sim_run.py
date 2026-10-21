@@ -23,8 +23,8 @@ class SimRunWatcher(Node):
         self.collision_count: int | None = None
         self.progress_position: tuple[float, float] | None = None
         self.last_progress_time: float | None = None
-        self.truth_speed_mps: float | None = None
         self.mpc_horizon_event: str | None = None
+        self.mpc_horizon_terminal_observed = False
         self.mpc_fault_reason: str | None = None
         self.csv_command_event: str | None = None
         self.create_subscription(
@@ -41,15 +41,6 @@ class SimRunWatcher(Node):
         )
         self.create_subscription(Odometry, "/odom", self._odom_callback, 10)
         if watch_mpc_horizon_test:
-            # This development-only watcher uses simulator truth strictly to
-            # keep observing collisions until the open-loop vehicle has
-            # physically stopped. It is not part of the controller stack.
-            self.create_subscription(
-                Odometry,
-                "/autodrive/roboracer_1/odom",
-                self._truth_odom_callback,
-                10,
-            )
             self.create_subscription(
                 String,
                 "/mpc/open_loop_test",
@@ -94,18 +85,16 @@ class SimRunWatcher(Node):
             self.progress_position = current
             self.last_progress_time = time.monotonic()
 
-    def _truth_odom_callback(self, message: Odometry) -> None:
-        twist = message.twist.twist
-        self.truth_speed_mps = (float(twist.linear.x) ** 2 +
-                                float(twist.linear.y) ** 2) ** 0.5
-
     def _mpc_horizon_callback(self, message: String) -> None:
         try:
-            event = json.loads(message.data).get("event")
+            payload = json.loads(message.data)
         except (TypeError, json.JSONDecodeError):
             return
+        event = payload.get("event")
         if event in ("complete", "abort"):
             self.mpc_horizon_event = event
+            self.mpc_horizon_terminal_observed = bool(
+                payload.get("terminal_state_observed", False))
             print(f"MPC_HORIZON_TEST_{event.upper()}: {message.data}", flush=True)
 
     def _mpc_diagnostics_callback(self, message: String) -> None:
@@ -114,6 +103,9 @@ class SimRunWatcher(Node):
         except (TypeError, json.JSONDecodeError):
             return
         status = diagnostic.get("status")
+        if status in ("waiting_for_localization", "waiting_for_plant_state",
+                      "waiting_for_actuator"):
+            return
         if status and status != "accepted_optimal":
             reason = diagnostic.get("nonlinear_failure_reason", "none")
             stage = diagnostic.get("nonlinear_failure_stage", -1)
@@ -154,8 +146,8 @@ def main() -> int:
             (args.mpc_horizon_test and
              (args.target_lap != 0 or args.collision_only or args.mpc_run)) or
             (args.mpc_run and
-             (args.target_lap != 0 or args.collision_only or
-              args.csv_command_test or args.csv_path_follow)) or
+             (args.collision_only or args.csv_command_test or
+              args.csv_path_follow)) or
             (args.csv_command_test and
              (args.target_lap != 0 or args.collision_only or args.mpc_horizon_test)) or
             (args.csv_path_follow and
@@ -168,7 +160,7 @@ def main() -> int:
 
     rclpy.init()
     watcher = SimRunWatcher(
-        args.mpc_horizon_test, args.mpc_run,
+        args.mpc_horizon_test, args.mpc_run or args.mpc_horizon_test,
         args.csv_command_test, args.csv_path_follow)
     print("WATCHER_READY: collision, lap, odometry"
           + (", and fixed-horizon completion" if args.mpc_horizon_test else "")
@@ -179,8 +171,6 @@ def main() -> int:
           + " subscriptions created", flush=True)
     deadline = time.monotonic() + args.timeout_s
     target_lap_reached_at: float | None = None
-    mpc_horizon_complete_at: float | None = None
-    stationary_since: float | None = None
     result = 2
     try:
         while time.monotonic() < deadline:
@@ -221,28 +211,15 @@ def main() -> int:
                     break
             if (args.mpc_horizon_test and
                     watcher.mpc_horizon_event == "complete"):
-                if mpc_horizon_complete_at is None:
-                    mpc_horizon_complete_at = time.monotonic()
-                    print("MPC horizon complete; retaining collision watch until "
-                          "the vehicle stops",
-                          flush=True)
-                if watcher.truth_speed_mps is not None and \
-                        watcher.truth_speed_mps <= 0.20:
-                    if stationary_since is None:
-                        stationary_since = time.monotonic()
-                    elif time.monotonic() - stationary_since >= 0.5:
-                        print("SCREEN_COMPLETE: MPC fixed-horizon test; "
-                              "vehicle stopped with collision watch active",
-                              flush=True)
-                        result = 0
-                        break
-                else:
-                    stationary_since = None
-                if time.monotonic() - mpc_horizon_complete_at >= 6.0:
-                    print("SCREEN_ABORT: vehicle did not stop after fixed-horizon "
-                          "test", flush=True)
+                if not watcher.mpc_horizon_terminal_observed:
+                    print("SCREEN_ABORT: MPC horizon ended without a terminal "
+                          "state observation", flush=True)
                     result = 5
                     break
+                print("SCREEN_COMPLETE: full MPC horizon observed; simulator "
+                      "will be stopped by the run supervisor", flush=True)
+                result = 0
+                break
             if (not args.collision_only and
                     watcher.last_progress_time is not None and
                     time.monotonic() - watcher.last_progress_time >=

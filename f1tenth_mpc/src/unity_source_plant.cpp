@@ -65,6 +65,65 @@ Dual20 operator/(const Dual20 &a, const Dual20 &b)
   return out;
 }
 
+/* Most source equations combine differentiated values with scalar vehicle
+ * constants. Avoid materializing a zero-tangent Dual20 and traversing all 20
+ * lanes for those operations; the derivatives below are the same forward-mode
+ * rules as the Dual20/Dual20 overloads. */
+Dual20 operator+(const Dual20 &a, double b)
+{
+  Dual20 out(a.value + b);
+  out.derivative = a.derivative;
+  return out;
+}
+
+Dual20 operator+(double a, const Dual20 &b) { return b + a; }
+
+Dual20 operator-(const Dual20 &a, double b)
+{
+  Dual20 out(a.value - b);
+  out.derivative = a.derivative;
+  return out;
+}
+
+Dual20 operator-(double a, const Dual20 &b)
+{
+  Dual20 out(a - b.value);
+  for (std::size_t i = 0; i < out.derivative.size(); ++i)
+    out.derivative[i] = -b.derivative[i];
+  return out;
+}
+
+Dual20 operator*(const Dual20 &a, double b)
+{
+  Dual20 out(a.value * b);
+  const float scale = static_cast<float>(b);
+  for (std::size_t i = 0; i < out.derivative.size(); ++i)
+    out.derivative[i] = a.derivative[i] * scale;
+  return out;
+}
+
+Dual20 operator*(double a, const Dual20 &b) { return b * a; }
+
+Dual20 operator/(const Dual20 &a, double b)
+{
+  Dual20 out(a.value / b);
+  const float scalar = static_cast<float>(b);
+  const float inverse_square = static_cast<float>(1.0 / (b * b));
+  for (std::size_t i = 0; i < out.derivative.size(); ++i)
+    out.derivative[i] = a.derivative[i] * scalar * inverse_square;
+  return out;
+}
+
+Dual20 operator/(double a, const Dual20 &b)
+{
+  Dual20 out(a / b.value);
+  const float scalar = static_cast<float>(a);
+  const float inverse_square = static_cast<float>(1.0 / (b.value * b.value));
+  for (std::size_t i = 0; i < out.derivative.size(); ++i)
+    out.derivative[i] = -scalar * b.derivative[i] * inverse_square;
+  return out;
+}
+
 Dual20 &operator+=(Dual20 &a, const Dual20 &b) { return a = a + b; }
 Dual20 &operator-=(Dual20 &a, const Dual20 &b) { return a = a - b; }
 Dual20 &operator*=(Dual20 &a, const Dual20 &b) { return a = a * b; }

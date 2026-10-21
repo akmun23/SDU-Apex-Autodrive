@@ -1,11 +1,6 @@
 autodrive_actuator_interface:
   ros__parameters:
     drive_command_topic: /mpc/drive_command
-    odom_topic: /odom
     steering_topic: /autodrive/roboracer_1/steering_command
     throttle_topic: /autodrive/roboracer_1/throttle_command
-    external_stop_topic: ""
     max_steering_angle_rad: 0.5235987756
-    command_timeout_sec: 0.15
-    odom_timeout_sec: 0.15
-    watchdog_rate_hz: 40.0

@@ -597,12 +597,15 @@ int mpc_rti_build_ltv_qp(
      * Start at its exact nonlinear endpoint; linearize only transitions that
      * new throttle/steering decisions can affect inside this horizon. */
     serialize_state(&nominal_states[MPC_COMMAND_DELAY_STEPS], problem->x0);
+    /* Match evaluate_nonlinear_candidate(): the first optimized input's
+     * slew cost is measured from the command already present at the incoming
+     * state. Seeding these auxiliary coordinates from the post-delay nominal
+     * state instead compares the decision against a newly generated nominal
+     * command, weakening/misaligning the first-action continuity penalty. */
     problem->x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] =
-        nominal_states[MPC_COMMAND_DELAY_STEPS].plant
-            .delayed_steering_command_2;
+        nominal_states[0].plant.delayed_steering_command_2;
     problem->x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] =
-        nominal_states[MPC_COMMAND_DELAY_STEPS].plant
-            .delayed_throttle_command_2;
+        nominal_states[0].plant.delayed_throttle_command_2;
 
     MpcStageLinearization_t plant_linearizations[RICCATI_HORIZON];
     int linearization_ok[RICCATI_HORIZON] = {0};
@@ -1270,7 +1273,12 @@ static double monotonic_microseconds(void)
     return (double)now.tv_sec * 1.0e6 + (double)now.tv_nsec * 1.0e-3;
 }
 
-enum { MPC_RTI_POST_SOLVE_RESERVE_US = 6000 };
+/* The live frozen-plan profile measured exact rollout at <=2.675 ms and
+ * nonlinear acceptance at <=0.026 ms. Reserve 3.5 ms for those operations
+ * plus candidate bookkeeping. A 6 ms reserve made the 20 ms production
+ * budget reject the first startup cycle before ADMM, despite the complete
+ * command cycle remaining inside the outer 25 ms deadline. */
+enum { MPC_RTI_POST_SOLVE_RESERVE_US = 3500 };
 
 static int evaluate_nonlinear_candidate(
     const MpcRtiNominal_t *candidate,
@@ -1680,6 +1688,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->nonlinear_failure_stage = pass.nonlinear_failure_stage;
     result->nonlinear_failure_reason = pass.nonlinear_failure_reason;
     result->nonlinear_failure = pass.nonlinear_failure;
+    if (pass.candidate.horizon == horizon && pass.first_action_valid) {
+        result->candidate_control_count = horizon;
+        memcpy(result->candidate_controls, pass.candidate.controls,
+            (size_t)horizon * sizeof(result->candidate_controls[0]));
+    }
     result->nonlinear_objective = pass.nonlinear_objective;
     result->candidate_path_delta = pass.path_delta;
     result->max_candidate_progress_error_m = max_path_delta_double(

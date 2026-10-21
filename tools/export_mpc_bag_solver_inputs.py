@@ -272,13 +272,20 @@ def main() -> int:
             source_ns = int(diag.get("source_stamp_ns", 0))
             plant_ns = int(diag.get("control_time_prediction", {}).get(
                 "plant_source_stamp_ns", source_ns))
-            # The diagnostic body/path state is command-time predicted from
-            # the newest synchronized sensor epoch. Use the full hidden plant
-            # snapshot at that same sensor epoch; the controller's older
-            # handoff snapshot is only an internal propagation starting point
-            # and would leave the replay plant roughly one packet stale.
+            # Current diagnostics carry the full plant state actually supplied
+            # to the optimizer. Older bags lack that field; for those only,
+            # use the synchronized sensor-epoch snapshot as the best available
+            # replay state (it may be stale relative to command time).
             plant = plant_at(source_ns) or plant_at(plant_ns)
-            if plant is None:
+            logged_hidden = diag.get("plant_internal_state")
+            logged_flags = diag.get("plant_state_flags")
+            if (not isinstance(logged_hidden, list) or
+                    len(logged_hidden) != 22):
+                logged_hidden = None
+            if (not isinstance(logged_flags, list) or
+                    len(logged_flags) != 3):
+                logged_flags = None
+            if plant is None and logged_hidden is None:
                 continue
             progress_m = float(diag["progress_m"])
             lateral_error = float(state[0])
@@ -289,11 +296,15 @@ def main() -> int:
                 if not isinstance(predicted_pose, list) or len(predicted_pose) != 3:
                     raise RuntimeError(
                         "route-aware export requires command-time predicted_map_pose")
-                (progress_m, lateral_error, heading_error,
-                 projection_distance) = project_pose_to_trajectory(
+                # `progress_m` and `state[:2]` above are the exact values passed
+                # to mpc_rti_solve_cycle(). Reprojecting the diagnostic pose here
+                # silently changes those optimizer inputs (and can shift them
+                # by >10 cm when the command-time projection and saved pose
+                # differ). Keep the re-projection strictly diagnostic.
+                _, _, _, projection_distance = project_pose_to_trajectory(
                     trajectory, *map(float, predicted_pose))
                 projection_distances.append(projection_distance)
-            hidden = (
+            hidden = logged_hidden if logged_hidden is not None else (
                 list(plant["wheel_omega"])
                 + [plant["body_height"], plant["body_height_rate"],
                    plant["roll"], plant["roll_rate"], plant["pitch"],
@@ -312,9 +323,12 @@ def main() -> int:
                 diag["active_speed_ceiling_mps"],
                 lateral_error, heading_error, *state[2:5],
                 state[7], state[5], state[6], state[8], state[9],
-                int(plant["suspension_history_initialized"]),
-                plant.get("yaw_rate_prediction_residual", 0.0),
-                int(plant.get("yaw_rate_prediction_residual_valid", False)),
+                int(logged_flags[1]) if logged_flags is not None else
+                    int(plant["suspension_history_initialized"]),
+                0.0 if plant is None else
+                    plant.get("yaw_rate_prediction_residual", 0.0),
+                0 if plant is None else
+                    int(plant.get("yaw_rate_prediction_residual_valid", False)),
                 *hidden,
             ])
             count += 1

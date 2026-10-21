@@ -61,6 +61,7 @@ void configure(MpcRtiCycleConfiguration_t *config,
                double rho_ey, double rho_u_state, double rho_steer_state,
                double rho_max, int rho_period, double tolerance,
                bool cold_start_each_solve, int jacobian_threads,
+               int max_iterations,
                double startup_throttle_seed,
                double lateral_error_weight_multiplier,
                double heading_error_weight_multiplier,
@@ -68,7 +69,10 @@ void configure(MpcRtiCycleConfiguration_t *config,
                double heading_state_scale,
                double corridor_margin,
                double first_corridor_margin,
-               double rho_u)
+               double rho_u,
+               double steering_slew_weight,
+               double throttle_slew_weight,
+               bool adaptive_rho)
 {
     *config = MpcRtiCycleConfiguration_t{};
     auto &model = config->model;
@@ -84,8 +88,8 @@ void configure(MpcRtiCycleConfiguration_t *config,
     model.weight_steering_command = static_cast<float>(3.0 * cost_scale);
     model.weight_steering_target = static_cast<float>(5.0 * cost_scale);
     model.weight_throttle_command = static_cast<float>(0.1 * cost_scale);
-    model.weight_steering_slew = 25.0f;
-    model.weight_throttle_slew = 2.0f;
+    model.weight_steering_slew = static_cast<float>(steering_slew_weight);
+    model.weight_throttle_slew = static_cast<float>(throttle_slew_weight);
     model.startup_nominal_throttle_seed = static_cast<float>(
         startup_throttle_seed);
     model.terminal_multiplier = 3.0f;
@@ -110,19 +114,22 @@ void configure(MpcRtiCycleConfiguration_t *config,
     solver.rho_u_by_input[1] = static_cast<float>(rho_throttle);
     solver.rho_max = static_cast<float>(rho_max);
     solver.tolerance = static_cast<float>(tolerance);
-    solver.max_iterations = 49;
-    solver.adaptive_rho = 1;
+    solver.max_iterations = max_iterations;
+    solver.adaptive_rho = adaptive_rho ? 1 : 0;
     solver.cold_start_each_solve = cold_start_each_solve ? 1 : 0;
     solver.adaptive_rho_update_period = rho_period;
     solver.shared_rho = 0;
     solver.over_relaxation = static_cast<float>(alpha);
     solver.use_scaling = 1;
-    const float state_scale[RICCATI_MAX_NX] = {
+    const std::array<float, RICCATI_MAX_NX> state_scale = {{
         0.10f, 0.10f, 0.5f, 1.0f, 4.0f, 0.5f,
         400.0f, 400.0f, 400.0f, 400.0f,
         0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
-        0.05f, 0.05f, 0.05f, 0.05f};
-    std::copy_n(state_scale, RICCATI_MAX_NX, solver.state_scale);
+        0.05f, 0.05f, 0.05f, 0.05f,
+        0.5f, 1.0f}};
+    static_assert(state_scale.size() == RICCATI_MAX_NX,
+        "replay scaling must cover every optimizer state");
+    std::copy(state_scale.begin(), state_scale.end(), solver.state_scale);
     solver.state_scale[MPC_OPT_IDX_EY] = static_cast<float>(lateral_state_scale);
     solver.state_scale[MPC_OPT_IDX_EPSI] = static_cast<float>(heading_state_scale);
     solver.input_scale[0] = 0.5f;
@@ -135,17 +142,19 @@ void configure(MpcRtiCycleConfiguration_t *config,
 
 int main(int argc, char **argv)
 {
-    if (argc < 8 || argc > 25) {
+    if (argc < 8 || argc > 29) {
         std::cerr << "usage: mpc_bag_solver_replay TRAJECTORY INPUT_CSV "
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
                      "[RHO_MAX PERIOD TOLERANCE "
-                     "[sequence|independent] [warm|cold] "
-                     "[JACOBIAN_THREADS [STARTUP_SEED "
+                     "[sequence|independent|nominal-cold] [warm|cold] "
+                     "[JACOBIAN_THREADS [MAX_ITERATIONS [STARTUP_SEED "
                      "[EY_WEIGHT_MULTIPLIER [EPSI_WEIGHT_MULTIPLIER "
                      "[EY_STATE_SCALE [EPSI_STATE_SCALE "
                      "[CORRIDOR_MARGIN [FIRST_CORRIDOR_MARGIN "
-                     "[RHO_U]]]]]]]]]]\n";
+                     "[RHO_U [STEERING_SLEW_WEIGHT "
+                     "[THROTTLE_SLEW_WEIGHT [ADAPTIVE_RHO]]]]]]]]]]]]]] "
+                     "(MAX_ITERATIONS: 1..200)\n";
         return 2;
     }
 
@@ -168,27 +177,39 @@ int main(int argc, char **argv)
         const std::string solver_start = argc >= 16 ? argv[15] : "warm";
         const int jacobian_threads = argc >= 17
             ? static_cast<int>(number_arg(argv, 16, 4.0)) : 4;
-        const double startup_seed = argc >= 18
-            ? number_arg(argv, 17, 0.25) : 0.25;
-        const double ey_weight_multiplier = argc >= 19
-            ? number_arg(argv, 18, 1.0) : 1.0;
-        const double epsi_weight_multiplier = argc >= 20
+        const int max_iterations = argc >= 18
+            ? static_cast<int>(number_arg(argv, 17, 100.0)) : 100;
+        const double startup_seed = argc >= 19
+            ? number_arg(argv, 18, 0.25) : 0.25;
+        const double ey_weight_multiplier = argc >= 20
             ? number_arg(argv, 19, 1.0) : 1.0;
-        const double ey_state_scale = argc >= 21
-            ? number_arg(argv, 20, 0.10) : 0.10;
-        const double epsi_state_scale = argc >= 22
+        const double epsi_weight_multiplier = argc >= 21
+            ? number_arg(argv, 20, 1.0) : 1.0;
+        const double ey_state_scale = argc >= 22
             ? number_arg(argv, 21, 0.10) : 0.10;
-        const double corridor_margin = argc >= 23
-            ? number_arg(argv, 22, 0.05) : 0.05;
-        const double first_corridor_margin = argc >= 24
-            ? number_arg(argv, 23, corridor_margin) : corridor_margin;
-        const double rho_u = argc >= 25 ? number_arg(argv, 24, 7.0) : 7.0;
+        const double epsi_state_scale = argc >= 23
+            ? number_arg(argv, 22, 0.10) : 0.10;
+        const double corridor_margin = argc >= 24
+            ? number_arg(argv, 23, 0.05) : 0.05;
+        const double first_corridor_margin = argc >= 25
+            ? number_arg(argv, 24, corridor_margin) : corridor_margin;
+        const double rho_u = argc >= 26 ? number_arg(argv, 25, 7.0) : 7.0;
+        const double steering_slew_weight = argc >= 27
+            ? number_arg(argv, 26, 25.0) : 25.0;
+        const double throttle_slew_weight = argc >= 28
+            ? number_arg(argv, 27, 2.0) : 2.0;
+        const double adaptive_rho_value = argc >= 29
+            ? number_arg(argv, 28, 1.0) : 1.0;
+        const bool adaptive_rho = adaptive_rho_value != 0.0;
         if (!(cost_scale > 0.0) ||
             !(tolerance > 0.0) ||
+            (adaptive_rho_value != 0.0 && adaptive_rho_value != 1.0) ||
             !std::isfinite(rho_u) || !(rho_u > 0.0) || rho_u > 127.0 ||
-            (memory_mode != "sequence" && memory_mode != "independent") ||
+            (memory_mode != "sequence" && memory_mode != "independent" &&
+             memory_mode != "nominal-cold") ||
             (solver_start != "warm" && solver_start != "cold") ||
             jacobian_threads < 0 || jacobian_threads > 4 ||
+            max_iterations < 1 || max_iterations > 200 ||
             startup_seed < 0.0 || startup_seed > 1.0 ||
             !(ey_weight_multiplier > 0.0) || ey_weight_multiplier > 100.0 ||
             !(epsi_weight_multiplier > 0.0) ||
@@ -197,7 +218,11 @@ int main(int argc, char **argv)
             !(epsi_state_scale > 0.0) || epsi_state_scale > 10.0 ||
             corridor_margin < 0.0 ||
             first_corridor_margin < 0.0 ||
-            first_corridor_margin > corridor_margin)
+            first_corridor_margin > corridor_margin ||
+            !std::isfinite(steering_slew_weight) ||
+            steering_slew_weight < 0.0 ||
+            !std::isfinite(throttle_slew_weight) ||
+            throttle_slew_weight < 0.0)
             throw std::runtime_error("invalid replay configuration");
 
         double lap_length = 0.0;
@@ -209,9 +234,11 @@ int main(int argc, char **argv)
         configure(&config, rho, rho_steer, rho_throttle, alpha, cost_scale,
                   rho_ey, rho_u_state, rho_steer_state,
                   rho_max, rho_period, tolerance, solver_start == "cold",
-                  jacobian_threads, startup_seed, ey_weight_multiplier,
+                  jacobian_threads, max_iterations, startup_seed,
+                  ey_weight_multiplier,
                   epsi_weight_multiplier, ey_state_scale, epsi_state_scale,
-                  corridor_margin, first_corridor_margin, rho_u);
+                  corridor_margin, first_corridor_margin, rho_u,
+                  steering_slew_weight, throttle_slew_weight, adaptive_rho);
         const char *trace_row_text = std::getenv("MPC_REPLAY_TRACE_ROW");
         const long trace_row = trace_row_text
             ? std::strtol(trace_row_text, nullptr, 10) : -1;
@@ -220,10 +247,12 @@ int main(int argc, char **argv)
             ? std::strtol(diagnostic_row_text, nullptr, 10) : -1;
         riccati_debug_set_trace_enabled(trace_row >= 0);
         std::cout << "stamp_ns,status,admm_status,iterations,primal,dual,"
+                     "rho_changes,factorizations,"
                      "solve_us,cycle_us,qp_build_us,admm_us,rollout_us,"
                      "nonlinear_validation_us,min_corridor_slack_m,"
                      "nonlinear_failure_reason,nonlinear_failure_stage,"
-                     "first_steering,first_throttle\n";
+                     "first_steering,first_throttle,"
+                     "max_plan_steering_delta,max_plan_throttle_delta\n";
 
         std::string line;
         std::size_t row_index = 0;
@@ -258,11 +287,37 @@ int main(int argc, char **argv)
 
             config.model.active_speed_ceiling_mps = static_cast<float>(row[2]);
             MpcRtiCycleResult_t result{};
-            if (memory_mode == "independent") mpc_rti_memory_reset(&memory);
+            if (memory_mode == "independent") {
+                mpc_rti_memory_reset(&memory);
+            } else if (memory_mode == "nominal-cold") {
+                /* Keep the solver's ADMM iterate, but discard only the
+                 * previous nonlinear nominal. This isolates whether a
+                 * shifted trajectory—not the QP warm state—is the source of
+                 * sequence-replay convergence failures. */
+                memory.nominal.valid = 0;
+            }
             const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
                 &state, row[1], trajectory.data(), trajectory.size(),
                 lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
                 &config, &memory, &result);
+            float max_plan_steering_delta = 0.0f;
+            float max_plan_throttle_delta = 0.0f;
+            if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+                memory.nominal.valid && memory.nominal.horizon > 0) {
+                float previous_steering = state.plant.delayed_steering_command_2;
+                float previous_throttle = state.plant.delayed_throttle_command_2;
+                for (int k = 0; k < memory.nominal.horizon; ++k) {
+                    const MpcModelControl_t &control = memory.nominal.controls[k];
+                    max_plan_steering_delta = std::max(
+                        max_plan_steering_delta,
+                        std::abs(control.steering_target_rad - previous_steering));
+                    max_plan_throttle_delta = std::max(
+                        max_plan_throttle_delta,
+                        std::abs(control.throttle_command - previous_throttle));
+                    previous_steering = control.steering_target_rad;
+                    previous_throttle = control.throttle_command;
+                }
+            }
             if (static_cast<long>(row_index) == trace_row) {
                 const int trace_count = riccati_debug_get_trace_count();
                 for (int i = 0; i < trace_count; ++i) {
@@ -299,6 +354,13 @@ int main(int argc, char **argv)
                           << ",e_psi:" << state.plant.e_psi
                           << ",u:" << state.plant.u
                           << ",r:" << state.plant.r << "}\n";
+                std::cerr << "NOMINAL_FIRST row=" << row_index
+                          << " steering="
+                          << result.nominal_first_control.steering_target_rad
+                          << " throttle="
+                          << result.nominal_first_control.throttle_command
+                          << " progress=" << row[1]
+                          << " curvature=" << row[2] << '\n';
                 const auto &failure = result.nonlinear_failure;
                 std::cerr << "NONLINEAR_FAILURE valid=" << failure.valid
                           << " stage=" << failure.stage
@@ -306,6 +368,53 @@ int main(int argc, char **argv)
                           << " epsi=" << failure.state.plant.e_psi
                           << " lower=" << failure.lower_bound_m
                           << " upper=" << failure.upper_bound_m << '\n';
+                if (result.candidate_control_count > 0) {
+                    std::cerr << "REJECTED_CANDIDATE_CONTROLS row="
+                              << row_index;
+                    for (int k = 0;
+                         k < result.candidate_control_count; ++k) {
+                        const MpcModelControl_t &control =
+                            result.candidate_controls[k];
+                        std::cerr << " [k=" << k << ",delta="
+                                  << control.steering_target_rad
+                                  << ",q=" << control.throttle_command << ']';
+                    }
+                    std::cerr << '\n';
+                }
+                if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+                    memory.nominal.horizon > 0) {
+                    const int horizon = memory.nominal.horizon;
+                    const int sample_stages[] = {
+                        0, 1, 2, 3, 4, horizon / 3,
+                        (2 * horizon) / 3, horizon - 1};
+                    std::cerr << "PLAN_SAMPLES row=" << row_index;
+                    int previous_stage = -1;
+                    for (const int stage : sample_stages) {
+                        if (stage < 0 || stage >= horizon ||
+                            stage == previous_stage) continue;
+                        previous_stage = stage;
+                        const MpcModelControl_t &control =
+                            memory.nominal.controls[stage];
+                        const float predicted_u =
+                            memory.nominal.states[stage + 1].plant.u;
+                        std::cerr << " [k=" << stage << ",delta="
+                                  << control.steering_target_rad
+                                  << ',' << control.throttle_command << ']';
+                        std::cerr << " u=" << predicted_u;
+                    }
+                    std::cerr << " terminal_u="
+                              << memory.nominal.states[horizon].plant.u;
+                    std::cerr << '\n';
+                    std::cerr << "PLAN_CONTROLS row=" << row_index;
+                    for (int stage = 0; stage < horizon; ++stage) {
+                        const MpcModelControl_t &control =
+                            memory.nominal.controls[stage];
+                        std::cerr << " [k=" << stage << ':'
+                                  << control.steering_target_rad << ','
+                                  << control.throttle_command << ']';
+                    }
+                    std::cerr << '\n';
+                }
             }
             if (status == MPC_RTI_CYCLE_REJECTED_INPUT &&
                 result.input_failure_reason != MPC_RTI_INPUT_FAILURE_NONE)
@@ -315,6 +424,8 @@ int main(int argc, char **argv)
             std::cout << static_cast<std::uint64_t>(row[0]) << ',' << status << ','
                       << result.admm_status << ',' << result.solver_iterations << ','
                       << result.primal_residual << ',' << result.dual_residual << ','
+                      << result.rho_change_count << ','
+                      << result.factorization_count << ','
                       << result.total_solve_us << ',' << result.total_cycle_us << ','
                       << result.qp_build_us << ',' << result.admm_us << ','
                       << result.exact_rollout_us << ','
@@ -323,7 +434,9 @@ int main(int argc, char **argv)
                       << result.nonlinear_failure_reason << ','
                       << result.nonlinear_failure_stage << ','
                       << result.first_control.steering_target_rad << ','
-                      << result.first_control.throttle_command << '\n';
+                      << result.first_control.throttle_command << ','
+                      << max_plan_steering_delta << ','
+                      << max_plan_throttle_delta << '\n';
             ++row_index;
         }
         return row_index == 0 ? 1 : 0;

@@ -43,6 +43,13 @@ endif()
 target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# On-demand saved-state replay against the exact production RTI core. This
+# stays outside the default build and is not installed in either runtime
+# image; explicitly build the target when diagnosing a captured MPC cycle.
+add_executable(mpc_bag_solver_replay EXCLUDE_FROM_ALL
+  ../tools/mpc_bag_solver_replay.cpp)
+target_link_libraries(mpc_bag_solver_replay PRIVATE mpc_core)
+
 # Optional C ABI shared object used by tools/evaluate_mpc_bag.py to replay
 # logged plant states and command queues against the production rollout. It is
 # not linked into or installed with the controller runtime.

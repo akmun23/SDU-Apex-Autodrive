@@ -125,7 +125,6 @@ def generate_launch_description():
             actuator_params,
             {
                 "drive_command_topic": "/mpc/drive_command",
-                "external_stop_topic": "",
             },
         ],
     )

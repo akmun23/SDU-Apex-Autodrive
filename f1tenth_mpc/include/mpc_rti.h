@@ -218,6 +218,11 @@ typedef struct
     int nonlinear_failure_stage;
     int nonlinear_failure_reason;
     MpcRtiRolloutFailure_t nonlinear_failure;
+    /* The solver's exact action sequence when it converged but nonlinear
+     * rollout validation rejected that sequence. Diagnostic-only; never a
+     * publishable command on a rejected cycle. */
+    int candidate_control_count;
+    MpcModelControl_t candidate_controls[PREDICTION_HORIZON];
     float rho_start;
     float rho_u_start;
     float rho_final;

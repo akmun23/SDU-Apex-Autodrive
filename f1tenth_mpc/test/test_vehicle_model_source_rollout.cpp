@@ -704,9 +704,15 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_U],
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant.u);
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND],
-      nominal_states[MPC_COMMAND_DELAY_STEPS].plant
+      nominal_states[0].plant
           .delayed_steering_command_2);
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],
+      nominal_states[0].plant
+          .delayed_throttle_command_2);
+  EXPECT_NE(problem.x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND],
+      nominal_states[MPC_COMMAND_DELAY_STEPS].plant
+          .delayed_steering_command_2);
+  EXPECT_NE(problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant
           .delayed_throttle_command_2);
   EXPECT_FLOAT_EQ(problem.steps[0].u_lb[1],

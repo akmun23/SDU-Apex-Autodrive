@@ -542,6 +542,25 @@ def report_admm_convergence(diagnostics: list[dict[str, Any]]) -> None:
             f"{percentile(solve_ms, 0.50):.3f}/"
             f"{percentile(solve_ms, 0.95):.3f}/{max(solve_ms):.3f}"
         )
+    timing_fields = (
+        ("QP build", "qp_build_us"),
+        ("ADMM", "admm_us"),
+        ("exact rollout", "exact_rollout_us"),
+        ("nonlinear validation", "nonlinear_validation_us"),
+        ("RTI solve", "solve_us"),
+        ("node solve", "node_solve_us"),
+    )
+    for label, field in timing_fields:
+        values = [float(row["solver"][field]) * 1.0e-3
+                  for row in solver_rows
+                  if field in row["solver"] and
+                  math.isfinite(float(row["solver"][field]))]
+        if values:
+            print(
+                f"  {label} ms p50/p95/max="
+                f"{percentile(values, 0.50):.3f}/"
+                f"{percentile(values, 0.95):.3f}/{max(values):.3f}"
+            )
 
 
 def print_interval(topic: str, rows: list[dict[str, Any]]) -> None:
@@ -806,6 +825,7 @@ def report_open_loop_horizon_test(
     hidden_errors = [[] for _ in range(4)]
     speeds: list[float] = []
     scored_times_s: list[float] = []
+    scored_stages: list[int] = []
     scored_pose_pairs: list[
         tuple[tuple[float, float, float], dict[str, float]]
     ] = []
@@ -813,26 +833,32 @@ def report_open_loop_horizon_test(
         tuple[list[float], dict[str, float]]
     ] = []
     full_plan = [row for row in plan.get("predictions", []) if row]
-    scored_rows: list[tuple[float, list[float], list[float], dict[str, Any] | None]] = []
+    scored_rows: list[
+        tuple[int, float, list[float], list[float], dict[str, Any] | None]
+    ] = []
     if full_plan and plan.get("stamp_ns"):
         plan_stamp = int(plan["stamp_ns"]) * 1e-9
         for prediction in full_plan:
             timestamp = plan_stamp + float(prediction.get("time_s", 0.0))
-            scored_rows.append((timestamp, prediction.get("pose", []),
+            scored_rows.append((int(prediction.get("stage", -1)), timestamp,
+                                prediction.get("pose", []),
                                 prediction.get("state", []), None))
         print("  accuracy source: complete frozen-plan states vs Unity ground truth")
     else:
         for row in step_samples:
             if row.get("control_stamp_ns"):
-                scored_rows.append((row["control_stamp_ns"] * 1e-9,
+                scored_rows.append((int(row.get("stage", -1)),
+                    row["control_stamp_ns"] * 1e-9,
                     row.get("predicted_pose", []), row.get("predicted_state", []), row))
         print("  accuracy source: sparse frozen-plan states vs Unity ground truth")
 
-    for timestamp, predicted_pose, predicted_state, source_row in scored_rows:
+    worst_yaw_rate_rows: list[tuple[float, int, float, float, float, float]] = []
+    for stage, timestamp, predicted_pose, predicted_state, source_row in scored_rows:
         measured = truth_at(timestamp)
         if measured is None or len(predicted_pose or []) != 3 or len(predicted_state or []) < 6:
             continue
         scored_times_s.append(timestamp - int(plan["stamp_ns"]) * 1.0e-9)
+        scored_stages.append(stage)
         px, py, pyaw = predicted_pose
         scored_pose_pairs.append(((px, py, pyaw), measured))
         scored_state_pairs.append((predicted_state, measured))
@@ -844,6 +870,12 @@ def report_open_loop_horizon_test(
         measured_v_rear = measured["v"] - measured["r"] * COM_TO_REAR_AXLE_M
         errors["v_rear"].append(predicted_state[3] - measured_v_rear)
         errors["r"].append(predicted_state[4] - measured["r"])
+        prior_control = controls[stage - 1] if 0 < stage <= len(controls) else None
+        worst_yaw_rate_rows.append((
+            abs(predicted_state[4] - measured["r"]), stage,
+            predicted_state[4], measured["r"], measured["u"],
+            math.nan if prior_control is None else float(prior_control[0]),
+        ))
         speeds.append(math.hypot(measured["u"], measured_v_rear))
 
     for row in step_samples:
@@ -921,10 +953,74 @@ def report_open_loop_horizon_test(
             f"{math.sqrt(statistics.mean(x*x for x in relative_yaw_errors)):.5f}rad "
             f"max_abs={max(abs(x) for x in relative_yaw_errors):.5f}rad"
         )
+        yaw_rate_pose_diagnostics = []
+        for index in range(1, len(scored_pose_pairs) - 1):
+            elapsed = scored_times_s[index + 1] - scored_times_s[index - 1]
+            if elapsed <= 0.0 or elapsed > 0.075:
+                continue
+            predicted_before = scored_pose_pairs[index - 1][0][2]
+            predicted_after = scored_pose_pairs[index + 1][0][2]
+            truth_before = scored_pose_pairs[index - 1][1]["yaw"]
+            truth_after = scored_pose_pairs[index + 1][1]["yaw"]
+            predicted_yaw_rate = normalized_angle(
+                predicted_after - predicted_before) / elapsed
+            truth_yaw_rate = normalized_angle(
+                truth_after - truth_before) / elapsed
+            predicted_state = scored_state_pairs[index][0]
+            truth_rate = scored_pose_pairs[index][1]["r"]
+            yaw_rate_pose_diagnostics.append((
+                abs(predicted_state[4] - truth_rate), scored_stages[index],
+                predicted_state[4], truth_rate, predicted_yaw_rate,
+                truth_yaw_rate,
+            ))
+        if yaw_rate_pose_diagnostics:
+            predicted_rate_residuals = [row[2] - row[4]
+                                        for row in yaw_rate_pose_diagnostics]
+            truth_rate_residuals = [row[3] - row[5]
+                                    for row in yaw_rate_pose_diagnostics]
+            print(
+                "  centered pose-yaw-rate check (25 ms samples): "
+                f"predicted r vs pose derivative RMSE="
+                f"{math.sqrt(statistics.mean(x*x for x in predicted_rate_residuals)):.4f}rad/s; "
+                f"Unity r vs pose derivative RMSE="
+                f"{math.sqrt(statistics.mean(x*x for x in truth_rate_residuals)):.4f}rad/s"
+            )
         print(
             f"  truth speed during scored horizon: "
             f"{min(speeds):.3f}-{max(speeds):.3f}m/s"
         )
+        if controls:
+            steering = [float(control[0]) for control in controls]
+            throttle = [float(control[1]) for control in controls]
+            max_steering_step = max(
+                (abs(right - left) for left, right in zip(steering, steering[1:])),
+                default=0.0,
+            )
+            print(
+                f"  latched controls: steering={min(steering):+.4f}.."
+                f"{max(steering):+.4f}rad max_step={max_steering_step:.4f}rad; "
+                f"throttle={min(throttle):.4f}..{max(throttle):.4f} "
+                f"all_drive={min(throttle) > 0.0}"
+            )
+        yaw_pose_by_stage = {row[1]: row for row in yaw_rate_pose_diagnostics}
+        for absolute_error, stage, predicted_r, measured_r, measured_u, prior_steer in sorted(
+                worst_yaw_rate_rows, reverse=True)[:5]:
+            next_steer = (
+                float(controls[stage][0])
+                if 0 <= stage < len(controls) else math.nan
+            )
+            pose_rates = yaw_pose_by_stage.get(stage)
+            pose_rate_text = (
+                "" if pose_rates is None else
+                f" pred/GT pose_yawdot={pose_rates[4]:+.3f}/{pose_rates[5]:+.3f}rad/s"
+            )
+            print(
+                f"  yaw-rate tail: stage={stage} t={stage * plan.get('step_s', 0.0):.3f}s "
+                f"pred={predicted_r:+.4f} truth={measured_r:+.4f} "
+                f"abs_error={absolute_error:.4f}rad/s GT_u={measured_u:.3f}m/s "
+                f"steer_prev/next={prior_steer:+.4f}/{next_steer:+.4f}rad"
+                f"{pose_rate_text}"
+            )
     if any(hidden_errors):
         print("  predicted-vs-reanchored odom wheel-rate RMSE (not independent wheel truth):")
         for wheel, label in enumerate(("FL", "FR", "RL", "RR")):
