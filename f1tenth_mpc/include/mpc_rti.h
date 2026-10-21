@@ -13,8 +13,16 @@ enum
 {
     MPC_RTI_NX = MPC_OPTIMIZER_NX,
     MPC_RTI_NU = MPC_MODEL_NU,
-    MPC_RTI_MAX_JACOBIAN_THREADS = 8
+    MPC_RTI_MAX_JACOBIAN_THREADS = 8,
+    MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT = 7
 };
+
+typedef struct
+{
+    int stage;
+    int valid;
+    MpcModelOutput_t output;
+} MpcRtiDiagnosticStageOutput_t;
 
 typedef struct
 {
@@ -201,6 +209,9 @@ typedef struct
     int enable_nonlinear_line_search;
     int line_search_max_backtracks; /* 0..2: alpha=0.5, then alpha=0.25 */
     int line_search_command_epoch_valid;
+    /* Capture already-computed source-output samples for runtime diagnostics.
+     * When false, exact rollouts do not retain or copy this debug data. */
+    int capture_diagnostic_outputs;
 } MpcRtiCycleConfiguration_t;
 
 typedef struct
@@ -267,6 +278,18 @@ typedef struct
     int admm_status;
     float primal_residual;
     float dual_residual;
+    float state_primal_residual;
+    float state_dual_residual;
+    float input_primal_residual;
+    float input_dual_residual;
+    int state_primal_stage;
+    int state_primal_index;
+    int state_dual_stage;
+    int state_dual_index;
+    int input_primal_stage;
+    int input_primal_index;
+    int input_dual_stage;
+    int input_dual_index;
     float maximum_regularization;
     int regularization_count;
     int nonsmooth_jacobian_columns;
@@ -284,6 +307,9 @@ typedef struct
     int line_search_last_failure_stage;
     float line_search_selected_alpha;
     double line_search_us;
+    int diagnostic_output_count;
+    MpcRtiDiagnosticStageOutput_t
+        diagnostic_outputs[MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT];
     /* The solver's exact action sequence when it converged but nonlinear
      * rollout validation rejected that sequence. Diagnostic-only; never a
      * publishable command on a rejected cycle. */
@@ -420,6 +446,25 @@ MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
     float prediction_dt,
     const MpcRtiCycleConfiguration_t *configuration,
     MpcRtiNominal_t *validated_plan,
+    int *failure_stage);
+
+/* As above, while retaining selected source outputs that were already
+ * computed by the exact rollout. This avoids stepping the plant again in the
+ * ROS diagnostics publisher. */
+MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan_with_diagnostics(
+    const MpcRtiState_t *initial_state,
+    double initial_progress,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    int horizon,
+    float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    MpcRtiNominal_t *validated_plan,
+    MpcRtiDiagnosticStageOutput_t diagnostic_outputs[
+        MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT],
+    int *diagnostic_output_count,
     int *failure_stage);
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory);

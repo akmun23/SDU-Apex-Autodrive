@@ -18,77 +18,76 @@ def generate_launch_description():
             repo_root, "f1tenth_planning", "trajectories",
             "autodrive_practice_20260924_b",
             "autodrive_practice_20260924_b_mintime_raceline.csv"))
+    node_overrides = {
+        "use_sim_time": True,
+        "trajectory_file": trajectory,
+        "max_speed_mps": float(os.environ.get("MPC_MAX_SPEED_MPS", "16.0")),
+        "publish_diagnostics": True,
+        "diagnostics_topic": "/mpc/candidate_diagnostics",
+        "drive_command_topic": "/mpc/candidate_drive_command",
+    }
+
+    # The production YAML is the sole source of defaults. This diagnostic
+    # launch used to silently override it with stale race weights, a 50-solve
+    # cap, a zero RTI budget and a nonzero startup ramp. Apply an experiment
+    # override only when the caller explicitly supplies its environment key.
+    float_overrides = {
+        "MPC_STARTUP_SPEED_MPS": "startup_speed_mps",
+        "MPC_STARTUP_RAMP_LAPS": "startup_ramp_laps",
+        "MPC_SOLVER_TOLERANCE": "solver_tolerance",
+        "MPC_RHO": "admm_rho",
+        "MPC_RHO_INPUT": "admm_rho_input",
+        "MPC_RHO_X_EY": "admm_rho_ey",
+        "MPC_RHO_X_U": "admm_rho_forward_speed",
+        "MPC_RHO_X_STEERING": "admm_rho_actual_steering",
+        "MPC_RHO_STEERING": "admm_rho_steering",
+        "MPC_RHO_THROTTLE": "admm_rho_throttle",
+        "MPC_RHO_MAX": "admm_rho_max",
+        "MPC_OVER_RELAXATION": "admm_over_relaxation",
+        "MPC_WEIGHT_U": "weight_u",
+        "MPC_WEIGHT_U_OVERSPEED": "weight_u_overspeed",
+        "MPC_WEIGHT_EY": "weight_e_y",
+        "MPC_WEIGHT_EPSI": "weight_e_psi",
+        "MPC_WEIGHT_V": "weight_v",
+        "MPC_WEIGHT_R": "weight_r",
+        "MPC_WEIGHT_SLIP": "weight_longitudinal_slip",
+        "MPC_WEIGHT_STEERING_COMMAND": "weight_steering_command",
+        "MPC_WEIGHT_STEERING_TARGET": "weight_steering_target",
+        "MPC_WEIGHT_THROTTLE": "weight_throttle_command",
+        "MPC_WEIGHT_STEERING_SLEW": "weight_steering_slew",
+        "MPC_WEIGHT_THROTTLE_SLEW": "weight_throttle_slew",
+        "MPC_STARTUP_THROTTLE_SEED": "startup_nominal_throttle_seed",
+        "MPC_RTI_CYCLE_BUDGET_MS": "rti_cycle_budget_ms",
+    }
+    for env_name, parameter_name in float_overrides.items():
+        if env_name in os.environ:
+            node_overrides[parameter_name] = float(os.environ[env_name])
+
+    int_overrides = {
+        "MPC_MAX_ITERATIONS": "max_solver_iterations",
+        "MPC_RHO_UPDATE_PERIOD": "adaptive_rho_update_period",
+    }
+    for env_name, parameter_name in int_overrides.items():
+        if env_name in os.environ:
+            node_overrides[parameter_name] = int(os.environ[env_name])
+    if "MPC_JACOBIAN_THREADS" in os.environ:
+        node_overrides["jacobian_threads"] = max(
+            0, min(8, int(os.environ["MPC_JACOBIAN_THREADS"])))
+
+    for env_name, parameter_name in (
+            ("MPC_ADAPTIVE_RHO", "adaptive_rho"),
+            ("MPC_COLD_START_EACH_SOLVE", "solver_cold_start_each_solve")):
+        if env_name in os.environ:
+            node_overrides[parameter_name] = os.environ[env_name].lower() in (
+                "1", "true", "yes")
+
     node = ComposableNode(
         package="f1tenth_mpc",
         plugin="f1tenth_mpc::MpcControllerNode",
         name="mpc_controller_node",
         parameters=[
             os.path.join(mpc_share, "config", "mpc_competition.yaml"),
-            {
-                "use_sim_time": True,
-                "trajectory_file": trajectory,
-                "max_speed_mps": float(os.environ.get(
-                    "MPC_MAX_SPEED_MPS", "16.0")),
-                "startup_speed_mps": float(os.environ.get(
-                    "MPC_STARTUP_SPEED_MPS", "1.5")),
-                "startup_ramp_laps": float(os.environ.get(
-                    "MPC_STARTUP_RAMP_LAPS", "1.0")),
-                "publish_diagnostics": True,
-                "diagnostics_topic": "/mpc/candidate_diagnostics",
-                "drive_command_topic": "/mpc/candidate_drive_command",
-                "jacobian_threads": max(0, min(8, int(os.environ.get(
-                    "MPC_JACOBIAN_THREADS", "4")))),
-                "max_solver_iterations": int(os.environ.get(
-                    "MPC_MAX_ITERATIONS", "50")),
-                "solver_tolerance": float(os.environ.get(
-                    "MPC_SOLVER_TOLERANCE", "0.02")),
-                "admm_rho": float(os.environ.get("MPC_RHO", "7.0")),
-                "admm_rho_input": float(os.environ.get(
-                    "MPC_RHO_INPUT", "7.0")),
-                "admm_rho_ey": float(os.environ.get(
-                    "MPC_RHO_X_EY", "0.0")),
-                "admm_rho_forward_speed": float(os.environ.get(
-                    "MPC_RHO_X_U", "0.0")),
-                "admm_rho_actual_steering": float(os.environ.get(
-                    "MPC_RHO_X_STEERING", "0.0")),
-                "admm_rho_steering": float(os.environ.get(
-                    "MPC_RHO_STEERING", "0.0")),
-                "admm_rho_throttle": float(os.environ.get(
-                    "MPC_RHO_THROTTLE", "0.0")),
-                "admm_rho_max": float(os.environ.get(
-                    "MPC_RHO_MAX", "32.0")),
-                "admm_over_relaxation": float(os.environ.get(
-                    "MPC_OVER_RELAXATION", "1.6")),
-                "adaptive_rho": os.environ.get(
-                    "MPC_ADAPTIVE_RHO", "true").lower() in ("1", "true", "yes"),
-                "solver_cold_start_each_solve": os.environ.get(
-                    "MPC_COLD_START_EACH_SOLVE", "false").lower()
-                    in ("1", "true", "yes"),
-                "adaptive_rho_update_period": int(os.environ.get(
-                    "MPC_RHO_UPDATE_PERIOD", "10")),
-                "weight_u": float(os.environ.get("MPC_WEIGHT_U", "500")),
-                "weight_u_overspeed": float(os.environ.get(
-                    "MPC_WEIGHT_U_OVERSPEED", "300")),
-                "weight_e_y": float(os.environ.get("MPC_WEIGHT_EY", "125")),
-                "weight_e_psi": float(os.environ.get("MPC_WEIGHT_EPSI", "31.25")),
-                "weight_v": float(os.environ.get("MPC_WEIGHT_V", "5.0")),
-                "weight_r": float(os.environ.get("MPC_WEIGHT_R", "7.8125")),
-                "weight_longitudinal_slip": float(os.environ.get(
-                    "MPC_WEIGHT_SLIP", "5.0")),
-                "weight_steering_command": float(os.environ.get(
-                    "MPC_WEIGHT_STEERING_COMMAND", "3.0")),
-                "weight_steering_target": float(os.environ.get(
-                    "MPC_WEIGHT_STEERING_TARGET", "5.0")),
-                "weight_throttle_command": float(os.environ.get(
-                    "MPC_WEIGHT_THROTTLE", "0.1")),
-                "weight_steering_slew": float(os.environ.get(
-                    "MPC_WEIGHT_STEERING_SLEW", "25.0")),
-                "weight_throttle_slew": float(os.environ.get(
-                    "MPC_WEIGHT_THROTTLE_SLEW", "2.0")),
-                "startup_nominal_throttle_seed": float(os.environ.get(
-                    "MPC_STARTUP_THROTTLE_SEED", "0.0")),
-                "rti_cycle_budget_ms": 0.0,
-            },
+            node_overrides,
         ],
     )
     container = ComposableNodeContainer(

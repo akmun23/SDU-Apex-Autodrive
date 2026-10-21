@@ -1235,6 +1235,7 @@ TEST(MpcCandidate, PriorPlanSuffixRequiresExactCurrentStateValidation)
   config.model.first_prediction_corridor_margin_m = 0.05f;
   config.model.corridor_preview_halfwidth_m = 0.10f;
   config.model.nonlinear_corridor_tolerance_m = 0.001f;
+  config.capture_diagnostic_outputs = 1;
 
   MpcRtiState_t initial{};
   initial.plant.u = 1.0f;
@@ -1252,13 +1253,47 @@ TEST(MpcCandidate, PriorPlanSuffixRequiresExactCurrentStateValidation)
   controls[0].throttle_command = 0.1f;
   controls[1].throttle_command = 0.1f;
   MpcRtiNominal_t validated{};
+  MpcRtiDiagnosticStageOutput_t diagnostic_outputs[
+      MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT]{};
+  int diagnostic_output_count = -1;
   int failure_stage = -1;
-  EXPECT_EQ(mpc_rti_validate_candidate_plan(&initial, 0.0, controls,
+  EXPECT_EQ(mpc_rti_validate_candidate_plan_with_diagnostics(
+      &initial, 0.0, controls,
       trajectory, trajectory_count, lap_length, 2, PREDICTION_DT_SECONDS,
-      &config, &validated, &failure_stage), MPC_RTI_ROLLOUT_OK);
+      &config, &validated, diagnostic_outputs, &diagnostic_output_count,
+      &failure_stage), MPC_RTI_ROLLOUT_OK);
   ASSERT_TRUE(validated.valid);
   EXPECT_EQ(validated.horizon, 2);
   EXPECT_FLOAT_EQ(validated.controls[0].throttle_command, 0.1f);
+  ASSERT_EQ(diagnostic_output_count, 2);
+  EXPECT_EQ(diagnostic_outputs[0].stage, 1);
+  EXPECT_EQ(diagnostic_outputs[1].stage, 2);
+  ASSERT_TRUE(diagnostic_outputs[0].valid);
+  ASSERT_TRUE(diagnostic_outputs[1].valid);
+  ASSERT_TRUE(vehicle_model_set_active_target_speed_ceiling(
+      config.model.active_speed_ceiling_mps));
+  const MpcStageResult_t expected_step_1 = mpc_vehicle_model_step(
+      &initial.plant, &controls[0], PREDICTION_DT_SECONDS, 0.0f);
+  ASSERT_TRUE(expected_step_1.valid);
+  const MpcStageResult_t expected_step_2 = mpc_vehicle_model_step(
+      &expected_step_1.next, &controls[1], PREDICTION_DT_SECONDS, 0.0f);
+  ASSERT_TRUE(expected_step_2.valid);
+  for (int wheel = 0; wheel < 4; ++wheel) {
+    EXPECT_DOUBLE_EQ(diagnostic_outputs[0].output.longitudinal_slip[wheel],
+        expected_step_1.output.longitudinal_slip[wheel]);
+    EXPECT_DOUBLE_EQ(diagnostic_outputs[1].output.lateral_slip[wheel],
+        expected_step_2.output.lateral_slip[wheel]);
+    EXPECT_DOUBLE_EQ(diagnostic_outputs[0].output.normal_load_n[wheel],
+        expected_step_1.output.normal_load_n[wheel]);
+  }
+
+  config.capture_diagnostic_outputs = 0;
+  diagnostic_output_count = -1;
+  EXPECT_EQ(mpc_rti_validate_candidate_plan_with_diagnostics(
+      &initial, 0.0, controls, trajectory, trajectory_count, lap_length, 2,
+      PREDICTION_DT_SECONDS, &config, &validated, diagnostic_outputs,
+      &diagnostic_output_count, &failure_stage), MPC_RTI_ROLLOUT_OK);
+  EXPECT_EQ(diagnostic_output_count, 0);
 
   controls[1].steering_target_rad = SOURCE_MAX_STEERING_RAD + 0.01f;
   EXPECT_EQ(mpc_rti_validate_candidate_plan(&initial, 0.0, controls,

@@ -1187,6 +1187,15 @@ int mpc_rti_build_nominal_with_warm_start(
         configuration, nominal, references);
 }
 
+static int diagnostic_sample_index_for_stage(int stage)
+{
+    static const int sample_stages[MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT] = {
+        1, 2, 3, 5, 10, 20, 30};
+    for (int i = 0; i < MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT; ++i)
+        if (sample_stages[i] == stage) return i;
+    return -1;
+}
+
 static MpcRtiRolloutStatus_t rollout_candidate_impl(
     const MpcRtiState_t *initial_state,
     double initial_progress,
@@ -1202,12 +1211,19 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
     const MpcRtiConfiguration_t *configuration,
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1],
+    MpcRtiDiagnosticStageOutput_t diagnostic_outputs[
+        MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT],
+    int *diagnostic_output_count,
     int *failure_stage,
     MpcRtiRolloutFailure_t *failure)
 {
     if (failure_stage) *failure_stage = -1;
     if (failure) memset(failure, 0, sizeof(*failure));
     if (path_delta) memset(path_delta, 0, sizeof(*path_delta));
+    if (diagnostic_output_count) *diagnostic_output_count = 0;
+    if (diagnostic_outputs)
+        memset(diagnostic_outputs, 0,
+            MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT * sizeof(diagnostic_outputs[0]));
     if (!finite_rti_state(initial_state) || !isfinite(initial_progress) ||
         !controls || !trajectory || trajectory_count < 3 ||
         !isfinite(lap_length) || !(lap_length > 0.0) ||
@@ -1280,6 +1296,16 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
         if (!step.valid) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_INVALID_MODEL;
+        }
+        if (diagnostic_outputs) {
+            const int sample_index = diagnostic_sample_index_for_stage(k + 1);
+            if (sample_index >= 0) {
+                diagnostic_outputs[sample_index].stage = k + 1;
+                diagnostic_outputs[sample_index].valid = 1;
+                diagnostic_outputs[sample_index].output = step.output;
+                if (diagnostic_output_count)
+                    *diagnostic_output_count = sample_index + 1;
+            }
         }
         states[k + 1].plant = step.next;
         states[k + 1].incoming_branch_flags = step.branch_flags;
@@ -1367,7 +1393,7 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
         initial_state, initial_progress, controls, trajectory,
         trajectory_count, lap_length, nominal_references, nominal_progress,
         path_delta, horizon, prediction_dt, configuration, states,
-        progress, failure_stage, NULL);
+        progress, NULL, NULL, failure_stage, NULL);
 }
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory)
@@ -1426,7 +1452,9 @@ static int valid_cycle_configuration(
         (!configuration->enable_nonlinear_line_search ||
          configuration->line_search_max_backtracks > 0) &&
         (configuration->line_search_command_epoch_valid == 0 ||
-         configuration->line_search_command_epoch_valid == 1);
+         configuration->line_search_command_epoch_valid == 1) &&
+        (configuration->capture_diagnostic_outputs == 0 ||
+         configuration->capture_diagnostic_outputs == 1);
 }
 
 typedef struct
@@ -1476,6 +1504,9 @@ typedef struct
     int line_search_last_failure_stage;
     float line_search_selected_alpha;
     double line_search_us;
+    int diagnostic_output_count;
+    MpcRtiDiagnosticStageOutput_t
+        diagnostic_outputs[MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT];
     int first_action_valid;
     float nonlinear_objective;
     float minimum_corridor_slack;
@@ -1653,6 +1684,28 @@ MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
     MpcRtiNominal_t *validated_plan,
     int *failure_stage)
 {
+    return mpc_rti_validate_candidate_plan_with_diagnostics(
+        initial_state, initial_progress, controls, trajectory,
+        trajectory_count, lap_length, horizon, prediction_dt,
+        configuration, validated_plan, NULL, NULL, failure_stage);
+}
+
+MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan_with_diagnostics(
+    const MpcRtiState_t *initial_state,
+    double initial_progress,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    int horizon,
+    float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    MpcRtiNominal_t *validated_plan,
+    MpcRtiDiagnosticStageOutput_t diagnostic_outputs[
+        MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT],
+    int *diagnostic_output_count,
+    int *failure_stage)
+{
     if (!validated_plan || !configuration)
         return MPC_RTI_ROLLOUT_INVALID_INPUT;
     memset(validated_plan, 0, sizeof(*validated_plan));
@@ -1662,7 +1715,9 @@ MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
         initial_state, initial_progress, controls, trajectory,
         trajectory_count, lap_length, NULL, NULL, NULL, horizon,
         prediction_dt, &configuration->model, validated_plan->states,
-        validated_plan->progress, failure_stage, NULL);
+        validated_plan->progress,
+        configuration->capture_diagnostic_outputs ? diagnostic_outputs : NULL,
+        diagnostic_output_count, failure_stage, NULL);
     if (status != MPC_RTI_ROLLOUT_OK) return status;
     memcpy(validated_plan->controls, controls,
         (size_t)horizon * sizeof(validated_plan->controls[0]));
@@ -1898,6 +1953,10 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         trajectory_count, lap_length, references, nominal->progress,
         &pass->path_delta, horizon, prediction_dt, &configuration->model,
         candidate_states, candidate_progress,
+        configuration->capture_diagnostic_outputs
+            ? pass->diagnostic_outputs : NULL,
+        configuration->capture_diagnostic_outputs
+            ? &pass->diagnostic_output_count : NULL,
         &pass->nonlinear_failure_stage, &full_step_failure);
     pass->exact_rollout_us = monotonic_microseconds() - phase_start_us;
     int candidate_valid = rollout_status == MPC_RTI_ROLLOUT_OK;
@@ -2000,7 +2059,12 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                 trial_controls, trajectory, trajectory_count, lap_length,
                 references, nominal->progress, &trial_path_delta, horizon,
                 prediction_dt, &configuration->model, candidate_states,
-                candidate_progress, &trial_failure_stage, &trial_failure);
+                candidate_progress,
+                configuration->capture_diagnostic_outputs
+                    ? pass->diagnostic_outputs : NULL,
+                configuration->capture_diagnostic_outputs
+                    ? &pass->diagnostic_output_count : NULL,
+                &trial_failure_stage, &trial_failure);
         const double trial_rollout_us =
             monotonic_microseconds() - phase_start_us;
         pass->exact_rollout_us += trial_rollout_us;
@@ -2112,6 +2176,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->line_search_last_failure_stage = -1;
         result->linearization_failure_stage = -1;
         result->linearization_failure_index = -1;
+        result->state_primal_stage = -1;
+        result->state_primal_index = -1;
+        result->state_dual_stage = -1;
+        result->state_dual_index = -1;
+        result->input_primal_stage = -1;
+        result->input_primal_index = -1;
+        result->input_dual_stage = -1;
+        result->input_dual_index = -1;
         result->minimum_predicted_corridor_slack_m = NAN;
         result->lateral_accel_proxy_mps2 = NAN;
         result->lateral_accel_proxy_stage = -1;
@@ -2214,6 +2286,18 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->admm_status = pass.admm_status;
     result->primal_residual = pass.primal_residual;
     result->dual_residual = pass.dual_residual;
+    result->state_primal_residual = pass.state_primal_residual;
+    result->state_dual_residual = pass.state_dual_residual;
+    result->input_primal_residual = pass.input_primal_residual;
+    result->input_dual_residual = pass.input_dual_residual;
+    result->state_primal_stage = pass.state_primal_stage;
+    result->state_primal_index = pass.state_primal_index;
+    result->state_dual_stage = pass.state_dual_stage;
+    result->state_dual_index = pass.state_dual_index;
+    result->input_primal_stage = pass.input_primal_stage;
+    result->input_primal_index = pass.input_primal_index;
+    result->input_dual_stage = pass.input_dual_stage;
+    result->input_dual_index = pass.input_dual_index;
     result->maximum_regularization = pass.maximum_regularization;
     result->regularization_count = pass.regularization_count;
     result->nonsmooth_jacobian_columns = pass.nonsmooth_columns;
@@ -2301,6 +2385,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         pass.line_search_last_failure_stage;
     result->line_search_selected_alpha = pass.line_search_selected_alpha;
     result->line_search_us = pass.line_search_us;
+    result->diagnostic_output_count = pass.diagnostic_output_count;
+    if (pass.diagnostic_output_count > 0)
+        memcpy(result->diagnostic_outputs, pass.diagnostic_outputs,
+            (size_t)pass.diagnostic_output_count *
+                sizeof(result->diagnostic_outputs[0]));
 
     if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
         status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE &&

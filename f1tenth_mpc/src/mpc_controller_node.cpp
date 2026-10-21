@@ -17,20 +17,32 @@
 #include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <time.h>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 namespace f1tenth_mpc {
 namespace {
@@ -57,6 +69,284 @@ int64_t steady_time_ns()
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+int64_t thread_cpu_time_ns()
+{
+    timespec value{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return 0;
+    return static_cast<int64_t>(value.tv_sec) * 1'000'000'000LL +
+        value.tv_nsec;
+}
+
+struct DiagnosticTimingSample
+{
+    bool valid{};
+    double wall_us{};
+    double thread_cpu_us{};
+    double plant_wall_us{};
+    double plant_thread_cpu_us{};
+    double json_build_wall_us{};
+    double json_build_thread_cpu_us{};
+    double queue_enqueue_wall_us{};
+    double queue_enqueue_thread_cpu_us{};
+    int reconstructed_plant_steps{};
+};
+
+class DiagnosticTimingRecorder
+{
+public:
+    explicit DiagnosticTimingRecorder(DiagnosticTimingSample &sample)
+        : sample_(sample), wall_start_ns_(steady_time_ns()),
+          cpu_start_ns_(thread_cpu_time_ns())
+    {
+        sample_ = {};
+    }
+
+    void begin_plant()
+    {
+        phase_wall_start_ns_ = steady_time_ns();
+        phase_cpu_start_ns_ = thread_cpu_time_ns();
+    }
+
+    void end_plant(int reconstructed_steps)
+    {
+        sample_.plant_wall_us = elapsed_us(phase_wall_start_ns_, steady_time_ns());
+        sample_.plant_thread_cpu_us =
+            elapsed_us(phase_cpu_start_ns_, thread_cpu_time_ns());
+        sample_.reconstructed_plant_steps = reconstructed_steps;
+    }
+
+    void begin_json_build()
+    {
+        phase_wall_start_ns_ = steady_time_ns();
+        phase_cpu_start_ns_ = thread_cpu_time_ns();
+    }
+
+    void end_json_build()
+    {
+        sample_.json_build_wall_us =
+            elapsed_us(phase_wall_start_ns_, steady_time_ns());
+        sample_.json_build_thread_cpu_us =
+            elapsed_us(phase_cpu_start_ns_, thread_cpu_time_ns());
+    }
+
+    void begin_enqueue()
+    {
+        phase_wall_start_ns_ = steady_time_ns();
+        phase_cpu_start_ns_ = thread_cpu_time_ns();
+    }
+
+    void end_enqueue()
+    {
+        sample_.queue_enqueue_wall_us =
+            elapsed_us(phase_wall_start_ns_, steady_time_ns());
+        sample_.queue_enqueue_thread_cpu_us =
+            elapsed_us(phase_cpu_start_ns_, thread_cpu_time_ns());
+    }
+
+    ~DiagnosticTimingRecorder()
+    {
+        sample_.wall_us = elapsed_us(wall_start_ns_, steady_time_ns());
+        sample_.thread_cpu_us = elapsed_us(cpu_start_ns_, thread_cpu_time_ns());
+        sample_.valid = true;
+    }
+
+private:
+    static double elapsed_us(int64_t start_ns, int64_t finish_ns)
+    {
+        return start_ns > 0 && finish_ns >= start_ns
+            ? static_cast<double>(finish_ns - start_ns) * 1.0e-3 : 0.0;
+    }
+
+    DiagnosticTimingSample &sample_;
+    int64_t wall_start_ns_{};
+    int64_t cpu_start_ns_{};
+    int64_t phase_wall_start_ns_{};
+    int64_t phase_cpu_start_ns_{};
+};
+
+class DiagnosticPublisherWorker
+{
+public:
+    struct Stats
+    {
+        std::uint64_t published_frames{};
+        std::uint64_t replaced_frames{};
+        std::uint64_t publish_failures{};
+        double last_queue_wait_us{};
+        double last_serialization_wall_us{};
+        double last_serialization_thread_cpu_us{};
+        double last_publish_wall_us{};
+        double last_publish_thread_cpu_us{};
+        bool lower_priority{};
+    };
+
+    explicit DiagnosticPublisherWorker(
+        rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher)
+        : publisher_(std::move(publisher)), worker_([this] { run(); })
+    {
+    }
+
+    ~DiagnosticPublisherWorker()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_one();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    bool enqueue(std::ostringstream && json_stream)
+    {
+        Frame frame;
+        frame.has_json_stream = true;
+        frame.json_stream = std::move(json_stream);
+        frame.enqueue_steady_ns = steady_time_ns();
+        return enqueue_frame(std::move(frame));
+    }
+
+    bool enqueue(std::string serialized_message)
+    {
+        Frame frame;
+        frame.serialized_message = std::move(serialized_message);
+        frame.enqueue_steady_ns = steady_time_ns();
+        return enqueue_frame(std::move(frame));
+    }
+
+    Stats stats() const
+    {
+        return {
+            published_frames_.load(std::memory_order_relaxed),
+            replaced_frames_.load(std::memory_order_relaxed),
+            publish_failures_.load(std::memory_order_relaxed),
+            last_queue_wait_us_.load(std::memory_order_relaxed),
+            last_serialization_wall_us_.load(std::memory_order_relaxed),
+            last_serialization_thread_cpu_us_.load(std::memory_order_relaxed),
+            last_publish_wall_us_.load(std::memory_order_relaxed),
+            last_publish_thread_cpu_us_.load(std::memory_order_relaxed),
+            lower_priority_.load(std::memory_order_relaxed),
+        };
+    }
+
+private:
+    struct Frame
+    {
+        bool has_json_stream{};
+        std::string serialized_message;
+        std::ostringstream json_stream;
+        int64_t enqueue_steady_ns{};
+    };
+
+    bool enqueue_frame(Frame frame)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) return false;
+            if (pending_) replaced_frames_.fetch_add(1,
+                std::memory_order_relaxed);
+            pending_.emplace(std::move(frame));
+        }
+        condition_.notify_one();
+        return true;
+    }
+
+    void run()
+    {
+#if defined(__linux__)
+        const auto thread_id = static_cast<id_t>(syscall(SYS_gettid));
+        lower_priority_.store(
+            setpriority(PRIO_PROCESS, thread_id, 5) == 0,
+            std::memory_order_relaxed);
+#endif
+        for (;;) {
+            Frame frame;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [this] { return stopping_ || pending_; });
+                if (!pending_ && stopping_) return;
+                frame = std::move(*pending_);
+                pending_.reset();
+            }
+
+            const int64_t dequeued_ns = steady_time_ns();
+            last_queue_wait_us_.store(
+                frame.enqueue_steady_ns > 0 && dequeued_ns >= frame.enqueue_steady_ns
+                    ? static_cast<double>(dequeued_ns - frame.enqueue_steady_ns) * 1.0e-3
+                    : 0.0,
+                std::memory_order_relaxed);
+
+            std_msgs::msg::String message;
+            try {
+                if (frame.has_json_stream) {
+                    const int64_t serialize_wall_start_ns = steady_time_ns();
+                    const int64_t serialize_cpu_start_ns = thread_cpu_time_ns();
+                    message.data = frame.json_stream.str();
+                    const int64_t serialize_wall_end_ns = steady_time_ns();
+                    const int64_t serialize_cpu_end_ns = thread_cpu_time_ns();
+                    last_serialization_wall_us_.store(
+                        static_cast<double>(serialize_wall_end_ns -
+                            serialize_wall_start_ns) * 1.0e-3,
+                        std::memory_order_relaxed);
+                    last_serialization_thread_cpu_us_.store(
+                        serialize_cpu_start_ns > 0 && serialize_cpu_end_ns >=
+                                serialize_cpu_start_ns
+                            ? static_cast<double>(serialize_cpu_end_ns -
+                                serialize_cpu_start_ns) * 1.0e-3
+                            : 0.0,
+                        std::memory_order_relaxed);
+                } else {
+                    message.data = std::move(frame.serialized_message);
+                    last_serialization_wall_us_.store(0.0,
+                        std::memory_order_relaxed);
+                    last_serialization_thread_cpu_us_.store(0.0,
+                        std::memory_order_relaxed);
+                }
+            } catch (...) {
+                publish_failures_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            const int64_t publish_wall_start_ns = steady_time_ns();
+            const int64_t publish_cpu_start_ns = thread_cpu_time_ns();
+            try {
+                publisher_->publish(message);
+                published_frames_.fetch_add(1, std::memory_order_relaxed);
+            } catch (...) {
+                publish_failures_.fetch_add(1, std::memory_order_relaxed);
+            }
+            const int64_t publish_wall_end_ns = steady_time_ns();
+            const int64_t publish_cpu_end_ns = thread_cpu_time_ns();
+            last_publish_wall_us_.store(
+                static_cast<double>(publish_wall_end_ns -
+                    publish_wall_start_ns) * 1.0e-3,
+                std::memory_order_relaxed);
+            last_publish_thread_cpu_us_.store(
+                publish_cpu_start_ns > 0 && publish_cpu_end_ns >=
+                        publish_cpu_start_ns
+                    ? static_cast<double>(publish_cpu_end_ns -
+                        publish_cpu_start_ns) * 1.0e-3
+                    : 0.0,
+                std::memory_order_relaxed);
+        }
+    }
+
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::optional<Frame> pending_;
+    bool stopping_{};
+    std::thread worker_;
+    std::atomic<std::uint64_t> published_frames_{};
+    std::atomic<std::uint64_t> replaced_frames_{};
+    std::atomic<std::uint64_t> publish_failures_{};
+    std::atomic<double> last_queue_wait_us_{};
+    std::atomic<double> last_serialization_wall_us_{};
+    std::atomic<double> last_serialization_thread_cpu_us_{};
+    std::atomic<double> last_publish_wall_us_{};
+    std::atomic<double> last_publish_thread_cpu_us_{};
+    std::atomic<bool> lower_priority_{};
+};
 
 bool next_bridge_request_epoch(int64_t source_request_stamp_ns,
                                int64_t predicted_publish_stamp_ns,
@@ -172,7 +462,11 @@ public:
         if (enabled_ && publish_diagnostics) {
             diagnostics_pub_ = create_publisher<std_msgs::msg::String>(
                 diagnostics_topic_, rclcpp::QoS(rclcpp::KeepLast(10)));
+            diagnostics_worker_ =
+                std::make_unique<DiagnosticPublisherWorker>(diagnostics_pub_);
         }
+        rti_config_.capture_diagnostic_outputs =
+            diagnostics_pub_ != nullptr;
         if (enabled_ && open_loop_horizon_test_enabled_) {
             open_loop_horizon_test_pub_ =
                 create_publisher<std_msgs::msg::String>(
@@ -514,7 +808,8 @@ private:
         }
         drive_command_pub_->publish(command);
         command_published_this_cycle_ = true;
-        return command_time.nanoseconds();
+        last_published_command_stamp_ns_ = command_time.nanoseconds();
+        return last_published_command_stamp_ns_;
     }
 
     void report_control_fault(const char * reason,
@@ -648,10 +943,13 @@ private:
         prior_plan_validated_horizon_ = kCommandEffectValidationHorizon;
         const auto validation_start = std::chrono::steady_clock::now();
         const MpcRtiRolloutStatus_t rollout_status =
-            mpc_rti_validate_candidate_plan(&state, progress, controls,
+            mpc_rti_validate_candidate_plan_with_diagnostics(
+                &state, progress, controls,
                 trajectory_.data(), trajectory_.size(), track_length_m_,
                 kCommandEffectValidationHorizon, TIME_STEP_SECONDS,
                 &rti_config_, &revalidated,
+                result->diagnostic_outputs,
+                &result->diagnostic_output_count,
                 &failure_stage);
         prior_plan_validation_status_ = static_cast<int>(rollout_status);
         prior_plan_validation_failure_stage_ = failure_stage;
@@ -788,10 +1086,13 @@ private:
             kCommandEffectValidationHorizon;
         const auto validation_start = std::chrono::steady_clock::now();
         const MpcRtiRolloutStatus_t rollout_status =
-            mpc_rti_validate_candidate_plan(&state, progress,
+            mpc_rti_validate_candidate_plan_with_diagnostics(
+                &state, progress,
                 controls, trajectory_.data(), trajectory_.size(),
                 track_length_m_, kCommandEffectValidationHorizon,
                 TIME_STEP_SECONDS, &rti_config_, &revalidated,
+                result->diagnostic_outputs,
+                &result->diagnostic_output_count,
                 &failure_stage);
         candidate_prefix_validation_status_ = static_cast<int>(rollout_status);
         candidate_prefix_validation_failure_stage_ = failure_stage;
@@ -869,31 +1170,37 @@ private:
     void publish_cycle_failure(const char * reason)
     {
         if (!diagnostics_pub_) return;
-        std_msgs::msg::String message;
         std::ostringstream json;
         json << "{\"status\":\"rejected\",\"reason\":\"" << reason
              << "\",\"source_stamp_ns\":" << last_source_stamp_.nanoseconds()
              << '}';
-        message.data = json.str();
-        diagnostics_pub_->publish(message);
+        enqueue_diagnostic_stream(std::move(json));
     }
 
     void publish_waiting_for_localization()
     {
         if (!diagnostics_pub_) return;
-        std_msgs::msg::String message;
-        message.data = "{\"status\":\"waiting_for_localization\","
-            "\"reason\":\"initial_map_pose_not_received\"}";
-        diagnostics_pub_->publish(message);
+        enqueue_diagnostic_text("{\"status\":\"waiting_for_localization\","
+            "\"reason\":\"initial_map_pose_not_received\"}");
     }
 
     void publish_waiting_for_plant_state()
     {
         if (!diagnostics_pub_) return;
-        std_msgs::msg::String message;
-        message.data = "{\"status\":\"waiting_for_plant_state\","
-            "\"reason\":\"initial_causal_plant_snapshot_not_received\"}";
-        diagnostics_pub_->publish(message);
+        enqueue_diagnostic_text("{\"status\":\"waiting_for_plant_state\","
+            "\"reason\":\"initial_causal_plant_snapshot_not_received\"}");
+    }
+
+    void enqueue_diagnostic_stream(std::ostringstream && json)
+    {
+        if (diagnostics_worker_)
+            diagnostics_worker_->enqueue(std::move(json));
+    }
+
+    void enqueue_diagnostic_text(std::string message)
+    {
+        if (diagnostics_worker_)
+            diagnostics_worker_->enqueue(std::move(message));
     }
 
     bool actuator_subscription_matched() const
@@ -912,10 +1219,8 @@ private:
     void publish_waiting_for_actuator()
     {
         if (!diagnostics_pub_) return;
-        std_msgs::msg::String message;
-        message.data = "{\"status\":\"waiting_for_actuator\","
-            "\"reason\":\"drive_command_subscription_not_matched\"}";
-        diagnostics_pub_->publish(message);
+        enqueue_diagnostic_text("{\"status\":\"waiting_for_actuator\","
+            "\"reason\":\"drive_command_subscription_not_matched\"}");
     }
 
     void publish_open_loop_horizon_event(const std::string & json)
@@ -1303,7 +1608,13 @@ private:
         int64_t callback_steady_ns, int64_t synchronize_steady_ns)
     {
         if (!diagnostics_pub_) return;
-        const int steps[] = {1, 2, 3, 5, 10, 20, 30};
+        const DiagnosticTimingSample previous_diagnostics =
+            last_diagnostic_timing_;
+        const DiagnosticPublisherWorker::Stats async_publisher_stats =
+            diagnostics_worker_ ? diagnostics_worker_->stats()
+                                : DiagnosticPublisherWorker::Stats{};
+        DiagnosticTimingRecorder diagnostic_timing(last_diagnostic_timing_);
+        diagnostic_timing.begin_json_build();
         std::ostringstream json;
         const auto json_number = [&json](double value) {
             if (std::isfinite(value)) json << value;
@@ -1353,8 +1664,63 @@ private:
         const bool current_path_sample_valid = mpc_trajectory_sample(
             trajectory_.data(), trajectory_.size(), track_length_m_, progress,
             &current_path_sample);
+        const bool gate_budget_violation =
+            last_publication_gate_elapsed_ms_ >= end_to_end_cycle_budget_ms_;
         json << std::setprecision(9)
-            << "{\"status\":\"" << cycle_status_name(result.status)
+            << "{\"diagnostics_schema_version\":2"
+            << ",\"control_callback_interval_ms\":";
+        json_number(control_callback_interval_ms_);
+        json << ",\"previous_diagnostics_timing\":{";
+        json << "\"valid\":" << (previous_diagnostics.valid ? "true" : "false")
+            << ",\"wall_us\":";
+        json_number(previous_diagnostics.wall_us);
+        json << ",\"thread_cpu_us\":";
+        json_number(previous_diagnostics.thread_cpu_us);
+        json << ",\"queue_enqueue_wall_us\":";
+        json_number(previous_diagnostics.queue_enqueue_wall_us);
+        json << ",\"queue_enqueue_thread_cpu_us\":";
+        json_number(previous_diagnostics.queue_enqueue_thread_cpu_us);
+        json << ",\"reconstructed_plant_steps\":"
+            << previous_diagnostics.reconstructed_plant_steps
+            << ",\"json_build_wall_us\":";
+        json_number(previous_diagnostics.json_build_wall_us);
+        json << ",\"json_build_thread_cpu_us\":";
+        json_number(previous_diagnostics.json_build_thread_cpu_us);
+        json << "},\"diagnostic_async_publisher\":{"
+             << "\"published_frames\":"
+             << async_publisher_stats.published_frames
+             << ",\"replaced_frames\":"
+             << async_publisher_stats.replaced_frames
+             << ",\"publish_failures\":"
+             << async_publisher_stats.publish_failures
+             << ",\"lower_priority\":"
+             << (async_publisher_stats.lower_priority ? "true" : "false")
+             << ",\"last_queue_wait_us\":";
+        json_number(async_publisher_stats.last_queue_wait_us);
+        json << ",\"last_serialization_wall_us\":";
+        json_number(async_publisher_stats.last_serialization_wall_us);
+        json << ",\"last_serialization_thread_cpu_us\":";
+        json_number(async_publisher_stats.last_serialization_thread_cpu_us);
+        json << ",\"last_publish_wall_us\":";
+        json_number(async_publisher_stats.last_publish_wall_us);
+        json << ",\"last_publish_thread_cpu_us\":";
+        json_number(async_publisher_stats.last_publish_thread_cpu_us);
+        json << "},\"publication_gate_budget_violation\":";
+        if (last_publication_gate_elapsed_ms_ < 0.0) json << "null";
+        else json << (gate_budget_violation ? "true" : "false");
+        json << ",\"prior_plan_published_while_over_budget\":";
+        if (last_publication_gate_elapsed_ms_ < 0.0) json << "null";
+        else json << ((command_published_this_cycle_ &&
+                prior_plan_revalidation_attempted_ && gate_budget_violation)
+                    ? "true" : "false");
+        json << ",\"steering_limit_rad\":"
+             << rti_config_.model.max_steering_rad;
+        json << ",\"issued_command_stamp_ns\":";
+        if (last_published_command_stamp_ns_ > 0)
+            json << last_published_command_stamp_ns_;
+        else
+            json << "null";
+        json << ",\"status\":\"" << cycle_status_name(result.status)
             << "\",\"action_source\":\""
             << (!command_published_this_cycle_ ? "none_published" :
                 (result.status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH
@@ -1551,10 +1917,39 @@ private:
             << ",\"sqp_iterations_accepted\":"
             << result.sqp_iterations_accepted
             << ",\"admm_status\":" << result.admm_status
-            << ",\"primal_residual\":";
+            << ",\"admm_stop_reason\":\""
+            << (result.solver_skipped_for_deadline
+                    ? "deadline_before_admm"
+                : result.solver_time_budget_exhausted
+                    ? "time_budget"
+                : result.admm_status == 0
+                    ? "converged"
+                : result.admm_status == 1
+                    ? "iteration_cap"
+                : result.admm_status < 0
+                    ? "not_run"
+                    : "numerical_or_solver_error")
+            << "\",\"primal_residual\":";
         json_number(result.primal_residual);
         json << ",\"dual_residual\":";
         json_number(result.dual_residual);
+        json << ",\"residual_hotspots\":{";
+        json << "\"state_primal\":{" << "\"value\":";
+        json_number(result.state_primal_residual);
+        json << ",\"stage\":" << result.state_primal_stage
+            << ",\"coordinate\":" << result.state_primal_index << "},"
+            << "\"state_dual\":{" << "\"value\":";
+        json_number(result.state_dual_residual);
+        json << ",\"stage\":" << result.state_dual_stage
+            << ",\"coordinate\":" << result.state_dual_index << "},"
+            << "\"input_primal\":{" << "\"value\":";
+        json_number(result.input_primal_residual);
+        json << ",\"stage\":" << result.input_primal_stage
+            << ",\"coordinate\":" << result.input_primal_index << "},"
+            << "\"input_dual\":{" << "\"value\":";
+        json_number(result.input_dual_residual);
+        json << ",\"stage\":" << result.input_dual_stage
+            << ",\"coordinate\":" << result.input_dual_index << "}}";
         json << ",\"max_regularization\":";
         json_number(result.maximum_regularization);
         json << ",\"regularization_count\":"
@@ -1722,11 +2117,13 @@ private:
             result.status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX ||
             result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN;
         if (!accepted) {
-            json << "],\"diagnostic_publish_steady_ns\":"
+            json << "],\"diagnostic_recomputed_plant_steps\":0"
+                 << ",\"diagnostic_publish_steady_ns\":"
                  << steady_time_ns() << '}';
-            std_msgs::msg::String message;
-            message.data = json.str();
-            diagnostics_pub_->publish(message);
+            diagnostic_timing.end_json_build();
+            diagnostic_timing.begin_enqueue();
+            enqueue_diagnostic_stream(std::move(json));
+            diagnostic_timing.end_enqueue();
             return;
         }
 
@@ -1736,8 +2133,15 @@ private:
              result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN)
                 ? recovered_action_revalidated_nominal_
                 : rti_memory_.nominal;
-        for (const int step : steps) {
-            if (step > diagnostic_nominal.horizon) continue;
+        for (int output_index = 0;
+             output_index < result.diagnostic_output_count &&
+                 output_index < MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT;
+             ++output_index) {
+            const MpcRtiDiagnosticStageOutput_t &cached_output =
+                result.diagnostic_outputs[output_index];
+            const int step = cached_output.stage;
+            if (!cached_output.valid || step < 1 ||
+                step > diagnostic_nominal.horizon) continue;
             if (!first) json << ',';
             first = false;
             const MpcRtiState_t &predicted = diagnostic_nominal.states[step];
@@ -1745,6 +2149,7 @@ private:
             const double predicted_s = diagnostic_nominal.progress[step];
             if (!mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
                     track_length_m_, predicted_s, &sample)) {
+                diagnostic_timing.end_json_build();
                 publish_cycle_failure("prediction_reference_unavailable");
                 return;
             }
@@ -1759,26 +2164,7 @@ private:
                 rti_config_.model.max_steering_rad);
             const MpcModelControl_t &control =
                 diagnostic_nominal.controls[step - 1];
-            MpcTrajectorySample_t transition_sample{};
-            MpcStageResult_t diagnostic_transition{};
-            bool have_transition_output =
-                step <= diagnostic_nominal.horizon &&
-                mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
-                    track_length_m_,
-                    diagnostic_nominal.progress[step - 1],
-                    &transition_sample);
-            if (have_transition_output) {
-                diagnostic_transition = mpc_vehicle_model_step(
-                    &diagnostic_nominal.states[step - 1].plant,
-                    &control, PREDICTION_DT_SECONDS,
-                    static_cast<float>(transition_sample.curvature));
-                have_transition_output = diagnostic_transition.valid != 0;
-            }
-            if (!have_transition_output) {
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                    "MPC diagnostic plant output could not be reconstructed");
-                return;
-            }
+            const MpcModelOutput_t &plant_output = cached_output.output;
             json << "{\"n\":" << step << ",\"s_m\":" << predicted_s
                 << ",\"state\":[" << predicted.plant.e_y << ','
                 << predicted.plant.e_psi << ',' << predicted.plant.u << ','
@@ -1797,22 +2183,22 @@ private:
                     MPC_PLANT_STATE_WHEEL_OMEGA_RR]
                 << "]"
                 << ",\"source_longitudinal_slip\":["
-                << diagnostic_transition.output.longitudinal_slip[0] << ','
-                << diagnostic_transition.output.longitudinal_slip[1] << ','
-                << diagnostic_transition.output.longitudinal_slip[2] << ','
-                << diagnostic_transition.output.longitudinal_slip[3]
+                << plant_output.longitudinal_slip[0] << ','
+                << plant_output.longitudinal_slip[1] << ','
+                << plant_output.longitudinal_slip[2] << ','
+                << plant_output.longitudinal_slip[3]
                 << "]"
                 << ",\"source_lateral_slip\":["
-                << diagnostic_transition.output.lateral_slip[0] << ','
-                << diagnostic_transition.output.lateral_slip[1] << ','
-                << diagnostic_transition.output.lateral_slip[2] << ','
-                << diagnostic_transition.output.lateral_slip[3]
+                << plant_output.lateral_slip[0] << ','
+                << plant_output.lateral_slip[1] << ','
+                << plant_output.lateral_slip[2] << ','
+                << plant_output.lateral_slip[3]
                 << "]"
                 << ",\"source_normal_load_n\":["
-                << diagnostic_transition.output.normal_load_n[0] << ','
-                << diagnostic_transition.output.normal_load_n[1] << ','
-                << diagnostic_transition.output.normal_load_n[2] << ','
-                << diagnostic_transition.output.normal_load_n[3]
+                << plant_output.normal_load_n[0] << ','
+                << plant_output.normal_load_n[1] << ','
+                << plant_output.normal_load_n[2] << ','
+                << plant_output.normal_load_n[3]
                 << "]"
                 << ",\"reference\":[0,0," << reference_speed
                 << ",0," << sample.curvature * reference_speed << ','
@@ -1822,11 +2208,15 @@ private:
                 << ",\"corridor\":[" << sample.left_bound << ','
                 << sample.right_bound << "]}";
         }
-        json << "],\"diagnostic_publish_steady_ns\":"
+        json << "],\"diagnostic_recomputed_plant_steps\":0"
+             << ",\"diagnostic_cached_source_output_count\":"
+             << result.diagnostic_output_count;
+        json << ",\"diagnostic_publish_steady_ns\":"
              << steady_time_ns() << '}';
-        std_msgs::msg::String message;
-        message.data = json.str();
-        diagnostics_pub_->publish(message);
+        diagnostic_timing.end_json_build();
+        diagnostic_timing.begin_enqueue();
+        enqueue_diagnostic_stream(std::move(json));
+        diagnostic_timing.end_enqueue();
     }
 
     void pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message)
@@ -1954,6 +2344,11 @@ private:
         const double callback_start_monotonic_us =
             mpc_rti_monotonic_time_us();
         const int64_t callback_steady_ns = steady_time_ns();
+        control_callback_interval_ms_ = last_control_callback_start_ns_ > 0
+            ? static_cast<double>(callback_steady_ns -
+                last_control_callback_start_ns_) * 1.0e-6 : -1.0;
+        last_control_callback_start_ns_ = callback_steady_ns;
+        last_published_command_stamp_ns_ = 0;
         double cycle_budget_us = end_to_end_cycle_budget_ms_ * 1000.0;
         if (rti_config_.max_cycle_time_us > 0.0)
             cycle_budget_us = std::min(
@@ -2630,6 +3025,10 @@ private:
     double actuator_steering_limit_rad_{SOURCE_MAX_STEERING_RAD};
     double end_to_end_cycle_budget_ms_{20.0};
     double last_publication_gate_elapsed_ms_{-1.0};
+    DiagnosticTimingSample last_diagnostic_timing_{};
+    int64_t last_control_callback_start_ns_{};
+    int64_t last_published_command_stamp_ns_{};
+    double control_callback_interval_ms_{-1.0};
     bool command_published_this_cycle_{};
     bool prior_plan_revalidation_attempted_{};
     bool prior_plan_exact_valid_{};
@@ -2704,6 +3103,7 @@ private:
     rclcpp::Subscription<sdu_apex_msgs::msg::UnityPlantState>::SharedPtr
         unity_plant_state_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
+    std::unique_ptr<DiagnosticPublisherWorker> diagnostics_worker_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr
         open_loop_horizon_test_pub_;
     rclcpp::CallbackGroup::SharedPtr control_callback_group_;

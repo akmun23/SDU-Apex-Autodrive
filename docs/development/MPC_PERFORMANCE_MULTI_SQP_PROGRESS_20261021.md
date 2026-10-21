@@ -876,3 +876,103 @@ in captured trials, and the unchanged five-lap profile has not passed repeated
 post-fix runs. The experiment also reinforces that reducing thread count is
 not itself a reliable latency fix; solve/publish policy and plant/path
 feasibility still need correction before another unchanged-profile campaign.
+
+### Optimization/timing handoff continuation — 2026-10-21
+
+The handoff execution matrix and explicit deferred items are in
+`MPC_OPTIMIZATION_TIMING_HANDOFF_20261021.md`. This continuation implements
+the measurement/diagnostics slice and one real full-speed practice run; it
+does **not** declare the complete 11-PR roadmap or its ten-session acceptance
+gate complete.
+
+The fresh live bag is
+`live_runs/mpc_diag_async_worker_20261021/run`, with configuration/runtime
+hashes in its sibling `run_metadata.json`. It used the pinned practice
+simulator, the production practice map/raceline/config, no speed cap and the
+actual MPC. Five laps completed without collision. Distinct lap times were
+`6.892, 6.169, 6.774, 6.444, 6.329 s` (mean `6.521 s`), so this is not a
+sub-5 result or evidence of repeatable racing.
+
+The report and per-cycle CSV are under
+`live_runs/mpc_handoff_optimization_20261021/reports/diag_async_worker.{json,csv}`.
+The report makes exact request/command stamp joins, explicit `live_closed_loop`
+classification, unknown Unity effect epochs, prefix-vs-full-plan separation,
+progress/outcome summaries, worker profile, solver counters and fault cutoff
+visible. Review found and fixed two exporter defects before retaining this
+report: microsecond timing values had been emitted under millisecond names,
+and repeated last-lap topic samples were being counted as separate laps.
+Regression tests check units, distinct solver termination categories, distinct
+worker CPU/wall maxima, explicit
+regime, exact-stamp strictness, collision/bridge/unpublished-rejection
+cutoffs, post-cutoff lap exclusion, and one-record-per-lap semantics.
+
+Observed live results: 1,347 published command cycles; 1,228 optimal, 88
+exact-valid but iteration-limited feasible, 31 candidate-prefix actions and no
+prior-plan action. Gate p50/p95/p99/p99.9/max was
+`6.191/9.181/10.402/14.038/16.217 ms`, with zero of 1,347 at/above 20 ms.
+Eight Jacobian workers were used; Jacobian wall was
+`2.702/3.242/4.698/7.010/10.378 ms` p50/p95/p99/p99.9/max. Diagnostic plant
+replays were exactly zero; no worker frame was replaced. Synchronous JSON
+field construction remains in the controller callback (p95 `0.284 ms`); the
+worker handles final stream materialization and ROS publication. This is a
+measured partial offload, not a claim that all serialization work left the
+callback, and no paired diagnostics-on/off timing result exists yet.
+
+The controller-error distributions in the report remain too large to call
+tracking solved: cross-track abs p95/max `0.241/0.520 m`, heading abs
+p95/max `0.204/0.375 rad`, speed abs p95/max `1.422/5.030 m/s`. The previous
+separate truth-scored evaluator replay of this bag has odom `u/v` RMSE
+`0.0459/0.0224 m/s`, integrated relative-XY endpoint error `0.176 m` (p95/max
+`0.225/0.251 m`), and a 750 ms source-rollout endpoint RMSE of `0.235 m`
+(p95/max `0.456/1.080 m`). Rollout `u` RMSE is `0.528 m/s`, yaw-rate RMSE is
+`0.537 rad/s`, and yaw RMSE is `0.137 rad`. This remains materially above the
+requested few-centimeter rollout target. Do not treat the timing success as a
+model-accuracy or fast-lap win.
+
+Further tooling work made offline solver report labels explicit: sequence
+memory replay is `sequence_replay`; independent/nominal-cold saved-state runs
+are `identical_source_state`; live bag captures are `live_closed_loop`.
+`identical_qp` replay remains unsupported because the solver replay tool
+rebuilds QPs and has no frozen matrix fixture/import path. The report states
+this limitation rather than misclassifying a state replay as a same-QP test.
+The temporary Jacobian replay launch now uses the production YAML as its
+default and only takes explicitly supplied experiment overrides.
+
+Validation: ROS Jazzy package build and four configured CTests, development
+image rebuild, and supervised live launch passed before this continuation's
+Python-only exporter/benchmark changes. Python compilation, six report
+tests, two replay-regime tests and `git diff --check` pass. The four configured
+MPC CTests were rerun after the report changes and pass 4/4. The live run has
+ended; simulator/controller/recorder/watcher are not running.
+No plant, MPC objective/weights, raceline or command/fallback policy changed.
+
+The detailed checklist marks PR-01/02/03/10 partial; PR-04/05/07/08/09 open;
+PR-06 investigation-only; and PR-11 not passed. Those are substantive open
+items, not hidden under a progress label. Preserve the user's untracked
+`f1tenth_planning/trajectories/autodrive_practice_20260924_b/ipopt_v1_baseline_raceline.csv`;
+it was not modified or removed during this work.
+
+Independent review of the report exporter caught and prompted correction of
+additional issues: unpublished production rejection statuses were not all
+recognized as score cutoffs; post-cutoff lap samples could leak into lap
+statistics; the slowest-worker CPU and wall metrics could select different
+workers but were previously conflated; and asynchronous publisher timings had
+no frame ID and must be labeled unpaired latest-completion samples. The report
+now states its cutoff reason explicitly, distinguishes all three fault types,
+stores only compact summary data in JSON with per-cycle data in the companion
+CSV, and describes asynchronous timing association limits. The source manifest
+for the live capture was reconstructed post-run and was not sealed at launch;
+it is evidence with that limitation, not cryptographic runtime provenance.
+The summary also normalizes solver termination into separate optimal,
+iteration-cap, ADMM time-budget, pre-ADMM deadline-skip, numerical/solver-error,
+known not-run (including localization-wait cycles) and unknown categories.
+The JSON now includes the exact deduplicated lap-time values, not just their
+distribution. A true QP-build-timeout counter remains
+unavailable because the runtime diagnostic schema does not distinguish it.
+
+Final sub-agent audit confirmed no remaining concrete inconsistencies in the
+handoff checklist, progress log, exporter, tests or regenerated report. It
+verified the six exporter tests, exact lap list, known localization-wait
+`not_run` count, and reconciled diagnostic/command/CSV row counts. This is a
+documentation/report audit only; the handoff's open solver, rollout, timing
+repeatability and 10×5-lap racing gates remain open as recorded above.

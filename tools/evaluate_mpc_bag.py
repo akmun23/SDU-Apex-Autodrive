@@ -337,6 +337,7 @@ def decode_drive_command_cdr(
     return {
         "bag_time": bag_time_ns * 1.0e-9,
         "stamp": sec + nanosec * 1.0e-9,
+        "stamp_ns": sec * 1_000_000_000 + nanosec,
         "steering": steering,
         "throttle": throttle,
     }

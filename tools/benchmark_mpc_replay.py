@@ -153,6 +153,17 @@ def cmake_metadata(build_dir: Path) -> dict[str, Any]:
     }
 
 
+def experiment_regime_for_memory_mode(memory_mode: str) -> str:
+    """Name the data/feedback regime separately from the ADMM seed choice."""
+    if memory_mode == "sequence":
+        return "sequence_replay"
+    if memory_mode in {"independent", "nominal-cold"}:
+        # Each input row is the same saved source state when A/B runs use the
+        # identical fixture hash; only RTI memory/nominal-seed policy changes.
+        return "identical_source_state"
+    raise ValueError(f"unsupported replay memory mode: {memory_mode}")
+
+
 def load_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="") as stream:
         return list(csv.DictReader(stream))
@@ -317,6 +328,10 @@ def main() -> int:
             parser.error("Jacobian workers must be between 0 and 8")
     replay_mode = replay_args[11] if len(replay_args) > 11 else "sequence"
     solver_start = replay_args[12] if len(replay_args) > 12 else "warm"
+    try:
+        experiment_regime = experiment_regime_for_memory_mode(replay_mode)
+    except ValueError as error:
+        parser.error(str(error))
     command = [str(args.binary.resolve()), str(args.trajectory.resolve()),
                str(args.input_csv.resolve()), *replay_args]
     load_before = os.getloadavg() if hasattr(os, "getloadavg") else None
@@ -352,9 +367,15 @@ def main() -> int:
     report = {
         "schema": "sdu-apex-mpc-replay-benchmark-v1",
         "label": args.label,
+        "experiment_regime": experiment_regime,
         "configuration_profile": args.profile,
         "mode": "offline fixed-state solver replay (not live end-to-end timing)",
         "sequence_mode": replay_mode,
+        "identical_qp_replay": {
+            "supported": False,
+            "reason": ("mpc_bag_solver_replay rebuilds QPs internally and "
+                       "does not ingest frozen A/B/d, cost, and bound matrices"),
+        },
         "admm_start": solver_start,
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "command": command,
