@@ -730,6 +730,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
         return RICCATI_STATUS_ERROR;
     }
 
+    solution->time_budget_exhausted = 0;
+
     if (config && config->cold_start_each_solve)
         riccati_admm_state_init(admm_state);
 
@@ -1419,6 +1421,7 @@ static RiccatiStatus_t riccati_admm_solve_core(
                 ? (double)(now_ns - solve_start_ns) * 1.0e-3 : 0.0;
             if (elapsed_us >= max_solve_time_us) {
                 status = RICCATI_STATUS_MAX_ITERATIONS;
+                solution->time_budget_exhausted = 1;
                 break;
             }
         }
@@ -1487,9 +1490,13 @@ RiccatiStatus_t riccati_admm_solve(
     enum { nx = RICCATI_MAX_NX, nu = RICCATI_MAX_NU,
            N = RICCATI_HORIZON };
     if (!admm_state || !solution || !step_data) {
-        if (solution) solution->status = RICCATI_STATUS_ERROR;
+        if (solution) {
+            solution->status = RICCATI_STATUS_ERROR;
+            solution->time_budget_exhausted = 0;
+        }
         return RICCATI_STATUS_ERROR;
     }
+    solution->time_budget_exhausted = 0;
     for (int k = 0; k < RICCATI_HORIZON; ++k)
         for (int i = 0; i < RICCATI_MAX_NX; ++i)
             for (int a = 0; a < RICCATI_MAX_NU; ++a)

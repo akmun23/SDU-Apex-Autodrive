@@ -733,11 +733,24 @@ def report_admm_convergence(
     if not solver_rows:
         print("MPC solver status: not recorded in this bag schema")
         return
-    status_name = {-1: "not_run", 0: "converged", 1: "iteration_limit", 2: "error"}
-    statuses = [int(row["solver"].get("admm_status", -1))
-                for row in solver_rows]
-    counts = {status_name.get(key, str(key)): count
-              for key, count in Counter(statuses).items()}
+    termination_counts: Counter[str] = Counter()
+    for row in solver_rows:
+        solver = row["solver"]
+        status = int(solver.get("admm_status", -1))
+        if status == 0:
+            termination_counts["converged"] += 1
+        elif status == 1:
+            budget_exhausted = solver.get("time_budget_exhausted")
+            if budget_exhausted is True:
+                termination_counts["wall_time_budget"] += 1
+            elif budget_exhausted is False:
+                termination_counts["iteration_cap"] += 1
+            else:
+                termination_counts["limit_cause_unrecorded"] += 1
+        elif status == -1:
+            termination_counts["not_run"] += 1
+        else:
+            termination_counts["solver_error"] += 1
     converged = [row for row in solver_rows
                  if int(row["solver"].get("admm_status", -1)) == 0]
     iterations = [int(row["solver"].get("iterations", 0)) for row in converged]
@@ -748,12 +761,12 @@ def report_admm_convergence(
                 for row in solver_rows]
     accepted = sum(row.get("status") in (
                        "accepted_optimal", "accepted_feasible",
-                       "accepted_prior_plan")
+                       "accepted_line_search", "accepted_prior_plan")
                    for row in solver_rows)
     print(
         f"single-solve MPC: exact-valid solver candidates="
         f"{accepted}/{len(solver_rows)}; "
-        f"ADMM={counts}"
+        f"ADMM termination={dict(termination_counts)}"
     )
     if drive_commands is not None:
         print(f"  recorded MPC drive-command messages={len(drive_commands)} "

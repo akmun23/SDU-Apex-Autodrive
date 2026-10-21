@@ -36,7 +36,7 @@ def generate_launch_description():
                 "publish_diagnostics": True,
                 "diagnostics_topic": "/mpc/candidate_diagnostics",
                 "drive_command_topic": "/mpc/candidate_drive_command",
-                "jacobian_threads": max(0, min(4, int(os.environ.get(
+                "jacobian_threads": max(0, min(8, int(os.environ.get(
                     "MPC_JACOBIAN_THREADS", "4")))),
                 "max_solver_iterations": int(os.environ.get(
                     "MPC_MAX_ITERATIONS", "50")),

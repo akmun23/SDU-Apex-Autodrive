@@ -73,7 +73,8 @@ void configure(MpcRtiCycleConfiguration_t *config,
                double rho_u,
                double steering_slew_weight,
                double throttle_slew_weight,
-               bool adaptive_rho)
+               bool adaptive_rho,
+               double speed_tracking_weight_multiplier)
 {
     *config = MpcRtiCycleConfiguration_t{};
     auto &model = config->model;
@@ -83,6 +84,9 @@ void configure(MpcRtiCycleConfiguration_t *config,
         31.25 * cost_scale * heading_error_weight_multiplier);
     model.weight_u = static_cast<float>(500.0 * cost_scale);
     model.weight_u_overspeed = static_cast<float>(300.0 * cost_scale);
+    model.weight_u *= static_cast<float>(speed_tracking_weight_multiplier);
+    model.weight_u_overspeed *=
+        static_cast<float>(speed_tracking_weight_multiplier);
     model.weight_longitudinal_slip = static_cast<float>(5.0 * cost_scale);
     model.weight_v = static_cast<float>(5.0 * cost_scale);
     model.weight_r = static_cast<float>(7.8125 * cost_scale);
@@ -143,7 +147,7 @@ void configure(MpcRtiCycleConfiguration_t *config,
 
 int main(int argc, char **argv)
 {
-    if (argc < 8 || argc > 29) {
+    if (argc < 8 || (argc > 31 && argc != 43)) {
         std::cerr << "usage: mpc_bag_solver_replay TRAJECTORY INPUT_CSV "
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
@@ -154,7 +158,12 @@ int main(int argc, char **argv)
                      "[EY_STATE_SCALE [EPSI_STATE_SCALE "
                      "[CORRIDOR_MARGIN [FIRST_CORRIDOR_MARGIN "
                      "[RHO_U [STEERING_SLEW_WEIGHT "
-                     "[THROTTLE_SLEW_WEIGHT [ADAPTIVE_RHO]]]]]]]]]]]]]] "
+                     "[THROTTLE_SLEW_WEIGHT [ADAPTIVE_RHO "
+                     "[LINE_SEARCH_BACKTRACKS "
+                     "[SPEED_TRACKING_WEIGHT_MULTIPLIER "
+                     "[DIRECT_WEIGHTS: EY EPSI U U_OVERSPEED SLIP V R "
+                     "STEER_COMMAND STEER_TARGET THROTTLE_COMMAND "
+                     "STEER_SLEW THROTTLE_SLEW]]]]]]]]]]]]]]]]] "
                      "(MAX_ITERATIONS: 1..200)\n";
         return 2;
     }
@@ -202,6 +211,10 @@ int main(int argc, char **argv)
         const double adaptive_rho_value = argc >= 29
             ? number_arg(argv, 28, 1.0) : 1.0;
         const bool adaptive_rho = adaptive_rho_value != 0.0;
+        const int line_search_backtracks = argc >= 30
+            ? static_cast<int>(number_arg(argv, 29, 0.0)) : 0;
+        const double speed_tracking_weight_multiplier = argc >= 31
+            ? number_arg(argv, 30, 1.0) : 1.0;
         if (!(cost_scale > 0.0) ||
             !(tolerance > 0.0) ||
             (adaptive_rho_value != 0.0 && adaptive_rho_value != 1.0) ||
@@ -209,7 +222,8 @@ int main(int argc, char **argv)
             (memory_mode != "sequence" && memory_mode != "independent" &&
              memory_mode != "nominal-cold") ||
             (solver_start != "warm" && solver_start != "cold") ||
-            jacobian_threads < 0 || jacobian_threads > 4 ||
+            jacobian_threads < 0 ||
+                jacobian_threads > MPC_RTI_MAX_JACOBIAN_THREADS ||
             max_iterations < 1 || max_iterations > 200 ||
             startup_seed < 0.0 || startup_seed > 1.0 ||
             !(ey_weight_multiplier > 0.0) || ey_weight_multiplier > 100.0 ||
@@ -223,7 +237,11 @@ int main(int argc, char **argv)
             !std::isfinite(steering_slew_weight) ||
             steering_slew_weight < 0.0 ||
             !std::isfinite(throttle_slew_weight) ||
-            throttle_slew_weight < 0.0)
+            throttle_slew_weight < 0.0 ||
+            line_search_backtracks < 0 || line_search_backtracks > 2 ||
+            !std::isfinite(speed_tracking_weight_multiplier) ||
+            !(speed_tracking_weight_multiplier > 0.0) ||
+            speed_tracking_weight_multiplier > 100.0)
             throw std::runtime_error("invalid replay configuration");
 
         double lap_length = 0.0;
@@ -239,7 +257,40 @@ int main(int argc, char **argv)
                   ey_weight_multiplier,
                   epsi_weight_multiplier, ey_state_scale, epsi_state_scale,
                   corridor_margin, first_corridor_margin, rho_u,
-                  steering_slew_weight, throttle_slew_weight, adaptive_rho);
+                  steering_slew_weight, throttle_slew_weight, adaptive_rho,
+                  speed_tracking_weight_multiplier);
+        /* Production tuning sweeps use the exact twelve production-stage
+         * weights, rather than trying to synthesize them from this replay
+         * executable's historical global cost multipliers. Keep the older
+         * multiplier interface intact for existing benchmark artifacts. */
+        if (argc == 43) {
+            float * const direct_weights[] = {
+                &config.model.weight_e_y,
+                &config.model.weight_e_psi,
+                &config.model.weight_u,
+                &config.model.weight_u_overspeed,
+                &config.model.weight_longitudinal_slip,
+                &config.model.weight_v,
+                &config.model.weight_r,
+                &config.model.weight_steering_command,
+                &config.model.weight_steering_target,
+                &config.model.weight_throttle_command,
+                &config.model.weight_steering_slew,
+                &config.model.weight_throttle_slew,
+            };
+            for (int index = 0; index < 12; ++index) {
+                const double value = number_arg(argv, 31 + index, 0.0);
+                if (!std::isfinite(value) || value < 0.0 || value > 1.0e8)
+                    throw std::runtime_error(
+                        "direct replay weights must be finite and in [0, 1e8]");
+                *direct_weights[index] = static_cast<float>(value);
+            }
+        }
+        config.enable_nonlinear_line_search = line_search_backtracks > 0;
+        config.line_search_max_backtracks = line_search_backtracks;
+        /* This executable is an offline fixed-state evaluator; it has no
+         * bridge command epoch. Live code leaves the corresponding gate off. */
+        config.line_search_command_epoch_valid = 1;
         const char *trace_row_text = std::getenv("MPC_REPLAY_TRACE_ROW");
         const long trace_row = trace_row_text
             ? std::strtol(trace_row_text, nullptr, 10) : -1;
@@ -247,7 +298,7 @@ int main(int argc, char **argv)
         const long diagnostic_row = diagnostic_row_text
             ? std::strtol(diagnostic_row_text, nullptr, 10) : -1;
         riccati_debug_set_trace_enabled(trace_row >= 0);
-        std::cout << "stamp_ns,status,admm_status,iterations,"
+        std::cout << "stamp_ns,status,admm_status,time_budget_exhausted,iterations,"
                      "sqp_iterations_attempted,sqp_iterations_completed,"
                      "sqp_iterations_accepted,primal,dual,"
                      "rho_changes,factorizations,"
@@ -267,6 +318,14 @@ int main(int argc, char **argv)
                      "output_unscale_ns,rollout_us,"
                      "nonlinear_validation_us,min_corridor_slack_m,"
                      "nonlinear_failure_reason,nonlinear_failure_stage,"
+                     "line_search_attempted,line_search_trials,"
+                     "line_search_accepted,line_search_skipped_budget,"
+                     "line_search_skipped_command_epoch,"
+                     "line_search_full_step_failure_reason,"
+                     "line_search_full_step_failure_stage,"
+                     "line_search_last_failure_reason,"
+                     "line_search_last_failure_stage,"
+                     "line_search_selected_alpha,line_search_us,"
                      "first_steering,first_throttle,"
                      "max_plan_steering_delta,max_plan_throttle_delta\n";
 
@@ -324,7 +383,8 @@ int main(int argc, char **argv)
             float max_plan_steering_delta = 0.0f;
             float max_plan_throttle_delta = 0.0f;
             if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
-                 status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) &&
+                 status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+                 status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) &&
                 memory.nominal.valid && memory.nominal.horizon > 0) {
                 float previous_steering = state.plant.delayed_steering_command_2;
                 float previous_throttle = state.plant.delayed_throttle_command_2;
@@ -404,7 +464,8 @@ int main(int argc, char **argv)
                     std::cerr << '\n';
                 }
                 if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
-                     status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) &&
+                     status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+                     status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) &&
                     memory.nominal.horizon > 0) {
                     const int horizon = memory.nominal.horizon;
                     const int sample_stages[] = {
@@ -445,7 +506,9 @@ int main(int argc, char **argv)
                           << result.input_failure_reason << '\n';
             std::cout.precision(9);
             std::cout << static_cast<std::uint64_t>(row[0]) << ',' << status << ','
-                      << result.admm_status << ',' << result.solver_iterations << ','
+                      << result.admm_status << ','
+                      << result.solver_time_budget_exhausted << ','
+                      << result.solver_iterations << ','
                       << result.sqp_iterations_attempted << ','
                       << result.sqp_iterations_completed << ','
                       << result.sqp_iterations_accepted << ','
@@ -488,6 +551,17 @@ int main(int argc, char **argv)
                       << result.minimum_predicted_corridor_slack_m << ','
                       << result.nonlinear_failure_reason << ','
                       << result.nonlinear_failure_stage << ','
+                      << result.line_search_attempted << ','
+                      << result.line_search_trials << ','
+                      << result.line_search_accepted << ','
+                      << result.line_search_skipped_budget << ','
+                      << result.line_search_skipped_command_epoch << ','
+                      << result.line_search_full_step_failure_reason << ','
+                      << result.line_search_full_step_failure_stage << ','
+                      << result.line_search_last_failure_reason << ','
+                      << result.line_search_last_failure_stage << ','
+                      << result.line_search_selected_alpha << ','
+                      << result.line_search_us << ','
                       << result.first_control.steering_target_rad << ','
                       << result.first_control.throttle_command << ','
                       << max_plan_steering_delta << ','

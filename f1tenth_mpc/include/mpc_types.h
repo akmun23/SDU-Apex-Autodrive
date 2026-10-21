@@ -251,6 +251,9 @@ typedef struct
     float x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
     float u[RICCATI_HORIZON][RICCATI_MAX_NU];
     int iterations;
+    /* Separates a wall-budget stop from reaching max_iterations while both
+     * continue to use MAX_ITERATIONS as the candidate-validity status. */
+    int time_budget_exhausted;
     float primal_residual;
     float dual_residual;
     /* Final ADMM residual components in the solver's scaled coordinates. */

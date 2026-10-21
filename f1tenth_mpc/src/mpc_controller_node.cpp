@@ -37,6 +37,13 @@ namespace {
 
 constexpr std::uint32_t kUnityPlantStateSchemaVersion = 11;
 constexpr int64_t kBridgeControlPeriodNs = 25'000'000;
+/* A fresh command takes effect after the two queued bridge packets. Validate
+ * those two intervals plus the first interval affected by this command. */
+constexpr int kCommandEffectValidationHorizon = 3;
+/* Only a truly stationary, plan-less spawn may wait for the next solve tick
+ * when cold Jacobian construction consumes the reserved ADMM budget. */
+constexpr float kStationaryStartupRetrySpeedMps = 0.05f;
+constexpr float kStationaryStartupRetryYawRateRadps = 0.05f;
 
 double clamp(double value, double lower, double upper)
 {
@@ -240,7 +247,8 @@ public:
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
             declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.001));
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
-            declare_parameter<int>("jacobian_threads", 4), 0L, 4L));
+            declare_parameter<int>("jacobian_threads", 4), 0L,
+            MPC_RTI_MAX_JACOBIAN_THREADS));
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", MAX_ITERATIONS);
         // Keep the ROS parameter consistent with the solver's compile-time
@@ -531,7 +539,8 @@ private:
 
     bool cycle_time_is_valid(int64_t callback_steady_ns,
                              int64_t candidate_command_stamp_ns,
-                             const char ** fault_reason)
+                             const char ** fault_reason,
+                             bool exact_prior_plan = false)
     {
         const double end_to_end_ms = std::max(0.0,
             static_cast<double>(steady_time_ns() - callback_steady_ns) *
@@ -549,6 +558,22 @@ private:
                 end_to_end_ms);
         }
         if (end_to_end_ms < end_to_end_cycle_budget_ms_) return true;
+
+        /* A cycle overrun must not discard a still-safe command sequence.
+         * The prior-plan caller reaches this only after exact nonlinear
+         * validation from the current state through the delayed command
+         * effect. Continue that plan only while its scheduled command epoch
+         * is still timely; never turn an overdue action into a fallback. */
+        if (exact_prior_plan && command_start_lateness_ms <=
+                max_command_start_lateness_ms_) {
+            RCLCPP_WARN(get_logger(),
+                "MPC cycle took %.3f ms (budget %.3f ms); publishing the "
+                "exact-validated prior-plan action because its command "
+                "start remains timely (lateness %.3f ms)",
+                end_to_end_ms, end_to_end_cycle_budget_ms_,
+                command_start_lateness_ms);
+            return true;
+        }
 
         if (fault_reason)
             *fault_reason = "MPC cycle reached or exceeded its 20 ms budget";
@@ -579,56 +604,76 @@ private:
             return false;
         }
 
-        const int remaining = previous.horizon - 1;
-        MpcModelControl_t shifted[PREDICTION_HORIZON]{};
-        for (int k = 0; k < remaining; ++k) {
-            shifted[k] = previous.controls[k + 1];
-            if (!std::isfinite(shifted[k].steering_target_rad) ||
-                !std::isfinite(shifted[k].throttle_command) ||
-                shifted[k].throttle_command <
+        /* A distant failure in the old plan must not discard a still-safe
+         * prefix. Validate through the first interval where the command being
+         * published affects the plant (two queued packets plus one interval),
+         * not just the already-queued motion. The plan cursor is finite. */
+        const int next_control_index = prior_plan_control_index_ + 1;
+        if (next_control_index + kCommandEffectValidationHorizon >
+            previous.horizon) {
+            if (fault_reason)
+                *fault_reason = "accepted MPC plan has insufficient actions "
+                    "to validate through the delayed command effect";
+            return false;
+        }
+
+        MpcModelControl_t controls[kCommandEffectValidationHorizon]{};
+        for (int i = 0; i < kCommandEffectValidationHorizon; ++i) {
+            controls[i] = previous.controls[next_control_index + i];
+            if (!std::isfinite(controls[i].steering_target_rad) ||
+                !std::isfinite(controls[i].throttle_command) ||
+                controls[i].throttle_command <
                     MPC_THROTTLE_MIN_DRIVE - 1.0e-6f ||
-                shifted[k].throttle_command > 1.0f + 1.0e-6f ||
-                std::abs(shifted[k].steering_target_rad) >
+                controls[i].throttle_command > 1.0f + 1.0e-6f ||
+                std::abs(controls[i].steering_target_rad) >
                     actuator_steering_limit_rad_ + 1.0e-6) {
                 if (fault_reason)
-                    *fault_reason = "remaining accepted plan violates the "
+                    *fault_reason = "accepted-plan prefix violates the "
                         "production drive-command envelope";
                 return false;
             }
-            /* Match publish_command(): tiny float representation overrun is
-             * clamped before use, and exact validation must score the same
-             * action the actuator will receive. */
-            shifted[k].steering_target_rad = static_cast<float>(clamp(
-                shifted[k].steering_target_rad,
+            /* Match publish_command(): clamp only float-rounding overrun;
+             * validate the exact bounded sequence that will be commanded. */
+            controls[i].steering_target_rad = static_cast<float>(clamp(
+                controls[i].steering_target_rad,
                 -actuator_steering_limit_rad_, actuator_steering_limit_rad_));
-            shifted[k].throttle_command = static_cast<float>(clamp(
-                shifted[k].throttle_command, MPC_THROTTLE_MIN_DRIVE, 1.0));
+            controls[i].throttle_command = static_cast<float>(clamp(
+                controls[i].throttle_command, MPC_THROTTLE_MIN_DRIVE, 1.0));
         }
 
         MpcRtiNominal_t revalidated{};
         int failure_stage = -1;
+        prior_plan_validated_horizon_ = kCommandEffectValidationHorizon;
         const auto validation_start = std::chrono::steady_clock::now();
         const MpcRtiRolloutStatus_t rollout_status =
-            mpc_rti_validate_candidate_plan(&state, progress, shifted,
+            mpc_rti_validate_candidate_plan(&state, progress, controls,
                 trajectory_.data(), trajectory_.size(), track_length_m_,
-                remaining, TIME_STEP_SECONDS, &rti_config_, &revalidated,
+                kCommandEffectValidationHorizon, TIME_STEP_SECONDS,
+                &rti_config_, &revalidated,
                 &failure_stage);
+        prior_plan_validation_status_ = static_cast<int>(rollout_status);
+        prior_plan_validation_failure_stage_ = failure_stage;
         prior_plan_validation_us_ = std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - validation_start).count();
         if (rollout_status != MPC_RTI_ROLLOUT_OK) {
             if (fault_reason)
-                *fault_reason = "remaining accepted plan failed current-state "
-                    "nonlinear rollout/corridor validation";
+                *fault_reason = "accepted-plan prefix failed exact "
+                    "delayed-command rollout/corridor validation";
             RCLCPP_WARN(get_logger(),
-                "Prior MPC plan not reused: exact rollout status=%d stage=%d",
+                "Prior MPC prefix not reused: exact 75 ms rollout "
+                "status=%d stage=%d",
                 static_cast<int>(rollout_status), failure_stage);
             return false;
         }
         prior_plan_exact_valid_ = true;
+        recovered_action_revalidated_nominal_ = revalidated;
+        prior_plan_validated_control_index_ = next_control_index;
+        prior_plan_actions_remaining_ = previous.horizon -
+            next_control_index - 1;
 
         const char * timing_fault_reason = nullptr;
         if (!cycle_time_is_valid(callback_steady_ns,
-                candidate_command_stamp_ns, &timing_fault_reason)) {
+                candidate_command_stamp_ns, &timing_fault_reason, true)) {
             prior_plan_timing_rejected_ = true;
             if (fault_reason) *fault_reason = timing_fault_reason;
             return false;
@@ -643,10 +688,139 @@ private:
             return false;
         }
 
-        rti_memory_.nominal = revalidated;
+        /* Keep the original converged sequence and advance its cursor only
+         * after publishing this exactly validated action. This preserves the
+         * remaining plan if another isolated solve rejection follows. */
+        prior_plan_control_index_ = next_control_index;
+        consecutive_candidate_prefix_actions_ = 0;
+        ++consecutive_prior_plan_actions_;
         last_command_publication_lead_ns_ = command_stamp_ns >= control_stamp_ns
             ? command_stamp_ns - control_stamp_ns : 0;
         result->status = MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN;
+        result->first_control = first;
+        result->published_steering_command = first.steering_target_rad;
+        result->published_throttle = first.throttle_command;
+        result->candidate_control_count = 0;
+        return true;
+    }
+
+    bool try_publish_candidate_prefix(
+        const MpcRtiState_t &state,
+        double progress,
+        int64_t callback_steady_ns,
+        int64_t control_stamp_ns,
+        int64_t candidate_command_stamp_ns,
+        MpcRtiCycleResult_t *result,
+        const char **fault_reason)
+    {
+        if (fault_reason) *fault_reason = nullptr;
+        if (!result || result->status !=
+                MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT ||
+            result->candidate_control_count < 1) return false;
+
+        candidate_prefix_revalidation_attempted_ = true;
+        const bool solver_converged =
+            result->admm_status == RICCATI_STATUS_OPTIMAL;
+        const bool solver_iteration_limited =
+            result->admm_status == RICCATI_STATUS_MAX_ITERATIONS;
+        if (!solver_converged && !solver_iteration_limited) {
+            if (fault_reason)
+                *fault_reason = "full-horizon-invalid candidate did not "
+                    "produce a finite ADMM iterate";
+            return false;
+        }
+        candidate_prefix_solver_converged_ = solver_converged;
+        candidate_prefix_iteration_limited_ = solver_iteration_limited;
+        if (result->candidate_control_count <
+                kCommandEffectValidationHorizon) {
+            if (fault_reason)
+                *fault_reason = "rejected candidate is too short to validate "
+                    "through the delayed command effect";
+            return false;
+        }
+        MpcModelControl_t controls[kCommandEffectValidationHorizon]{};
+        for (int i = 0; i < kCommandEffectValidationHorizon; ++i) {
+            controls[i] = result->candidate_controls[i];
+            if (!std::isfinite(controls[i].steering_target_rad) ||
+                !std::isfinite(controls[i].throttle_command) ||
+                controls[i].throttle_command <
+                    MPC_THROTTLE_MIN_DRIVE - 1.0e-6f ||
+                controls[i].throttle_command > 1.0f + 1.0e-6f ||
+                std::abs(controls[i].steering_target_rad) >
+                    actuator_steering_limit_rad_ + 1.0e-6) {
+                if (fault_reason)
+                    *fault_reason = "rejected candidate prefix violates "
+                        "the production drive-command envelope";
+                return false;
+            }
+            controls[i].steering_target_rad = static_cast<float>(clamp(
+                controls[i].steering_target_rad,
+                -actuator_steering_limit_rad_, actuator_steering_limit_rad_));
+            controls[i].throttle_command = static_cast<float>(clamp(
+                controls[i].throttle_command, MPC_THROTTLE_MIN_DRIVE, 1.0));
+        }
+
+        MpcRtiNominal_t revalidated{};
+        int failure_stage = -1;
+        candidate_prefix_validation_horizon_ =
+            kCommandEffectValidationHorizon;
+        const auto validation_start = std::chrono::steady_clock::now();
+        const MpcRtiRolloutStatus_t rollout_status =
+            mpc_rti_validate_candidate_plan(&state, progress,
+                controls, trajectory_.data(), trajectory_.size(),
+                track_length_m_, kCommandEffectValidationHorizon,
+                TIME_STEP_SECONDS, &rti_config_, &revalidated,
+                &failure_stage);
+        candidate_prefix_validation_status_ = static_cast<int>(rollout_status);
+        candidate_prefix_validation_failure_stage_ = failure_stage;
+        candidate_prefix_validation_us_ =
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - validation_start).count();
+        if (rollout_status != MPC_RTI_ROLLOUT_OK) {
+            if (fault_reason)
+                *fault_reason = "rejected candidate prefix failed exact "
+                    "delayed-command rollout/corridor validation";
+            RCLCPP_WARN(get_logger(),
+                "Rejected horizon prefix not reused: exact 75 ms "
+                "rollout status=%d stage=%d",
+                static_cast<int>(rollout_status), failure_stage);
+            return false;
+        }
+        candidate_prefix_exact_valid_ = true;
+        recovered_action_revalidated_nominal_ = revalidated;
+
+        const char * timing_fault_reason = nullptr;
+        if (!cycle_time_is_valid(callback_steady_ns,
+                candidate_command_stamp_ns, &timing_fault_reason)) {
+            candidate_prefix_timing_rejected_ = true;
+            if (fault_reason) *fault_reason = timing_fault_reason;
+            return false;
+        }
+        const MpcModelControl_t &first = revalidated.controls[0];
+        const int64_t command_stamp_ns = publish_command(
+            first.steering_target_rad, first.throttle_command);
+        if (command_stamp_ns == 0) {
+            if (fault_reason)
+                *fault_reason = "exact-validated candidate prefix could not "
+                    "be published within the command envelope";
+            return false;
+        }
+
+        /* The stored accepted plan advanced in time even though this newer
+         * candidate supplied the output. Skip the now-stale corresponding
+         * action before it can be used as a later prior-plan recovery. */
+        const MpcRtiNominal_t &prior = rti_memory_.nominal;
+        if (prior.valid && prior_plan_control_index_ < prior.horizon - 1)
+            ++prior_plan_control_index_;
+        /* This is a newly solved control, not stale-plan replay. Even when
+         * ADMM hit its iteration cap, publish only if the exact three-step
+         * delayed-action prefix is corridor-safe and meets the deadline.
+         * Re-solve at the next tick; never repeat a stale candidate blindly. */
+        consecutive_prior_plan_actions_ = 0;
+        ++consecutive_candidate_prefix_actions_;
+        last_command_publication_lead_ns_ = command_stamp_ns >= control_stamp_ns
+            ? command_stamp_ns - control_stamp_ns : 0;
+        result->status = MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX;
         result->first_control = first;
         result->published_steering_command = first.steering_target_rad;
         result->published_throttle = first.throttle_command;
@@ -968,6 +1142,10 @@ private:
         if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) ++accepted_optimal_;
         else if (status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE)
             ++accepted_feasible_;
+        else if (status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH)
+            ++accepted_line_search_;
+        else if (status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX)
+            ++accepted_candidate_prefix_;
         else if (status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN)
             ++accepted_prior_plan_;
         max_solver_iterations_seen_ = std::max(
@@ -980,13 +1158,17 @@ private:
     {
         RCLCPP_INFO(get_logger(),
             "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
-            "accepted_feasible=%llu accepted_prior_plan=%llu "
+            "accepted_feasible=%llu accepted_line_search=%llu "
+            "accepted_candidate_prefix=%llu "
+            "accepted_prior_plan=%llu "
             "control_fault_cycles=%llu max_solver_iterations_seen=%d "
             "max_solve_us=%.1f",
             phase,
             static_cast<unsigned long long>(control_cycles_),
             static_cast<unsigned long long>(accepted_optimal_),
             static_cast<unsigned long long>(accepted_feasible_),
+            static_cast<unsigned long long>(accepted_line_search_),
+            static_cast<unsigned long long>(accepted_candidate_prefix_),
             static_cast<unsigned long long>(accepted_prior_plan_),
             static_cast<unsigned long long>(control_fault_cycles_),
             max_solver_iterations_seen_, max_solve_us_);
@@ -997,11 +1179,16 @@ private:
         switch (status) {
         case MPC_RTI_CYCLE_ACCEPTED_OPTIMAL: return "accepted_optimal";
         case MPC_RTI_CYCLE_ACCEPTED_FEASIBLE: return "accepted_feasible";
+        case MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH: return "accepted_line_search";
+        case MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX:
+            return "accepted_candidate_prefix";
         case MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN: return "accepted_prior_plan";
         case MPC_RTI_CYCLE_REJECTED_INPUT: return "rejected_input";
         case MPC_RTI_CYCLE_REJECTED_SOLVER: return "rejected_solver";
         case MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT:
             return "rejected_nonlinear_rollout";
+        case MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET:
+            return "waiting_for_solver_budget";
         }
         return "unknown";
     }
@@ -1132,19 +1319,60 @@ private:
             << "{\"status\":\"" << cycle_status_name(result.status)
             << "\",\"action_source\":\""
             << (!command_published_this_cycle_ ? "none_published" :
-                (result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN
-                    ? "revalidated_prior_plan" : "current_solver_candidate"))
+                (result.status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH
+                    ? "current_solver_line_search" :
+                (result.status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX
+                    ? "revalidated_candidate_prefix" :
+                    (result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN
+                        ? "revalidated_prior_plan"
+                        : "current_solver_candidate"))))
             << "\",\"command_published\":"
             << (command_published_this_cycle_ ? "true" : "false")
+            << ",\"solver_skipped_for_deadline\":"
+            << (result.solver_skipped_for_deadline ? "true" : "false")
             << ",\"prior_plan_revalidation\":{\"attempted\":"
             << (prior_plan_revalidation_attempted_ ? "true" : "false")
             << ",\"exact_valid\":"
             << (prior_plan_exact_valid_ ? "true" : "false")
             << ",\"timing_rejected\":"
             << (prior_plan_timing_rejected_ ? "true" : "false")
+            << ",\"validation_horizon\":"
+            << prior_plan_validated_horizon_
+            << ",\"control_index\":"
+            << prior_plan_validated_control_index_
+            << ",\"actions_remaining\":"
+            << prior_plan_actions_remaining_
+            << ",\"validation_status\":"
+            << prior_plan_validation_status_
+            << ",\"failure_stage\":"
+            << prior_plan_validation_failure_stage_
             << ",\"validation_us\":";
         json_number(prior_plan_validation_us_);
-        json << "},\"input_failure_reason\":\""
+        json << "},\"candidate_prefix_revalidation\":{\"attempted\":"
+            << (candidate_prefix_revalidation_attempted_ ? "true" : "false")
+            << ",\"exact_valid\":"
+            << (candidate_prefix_exact_valid_ ? "true" : "false")
+            << ",\"timing_rejected\":"
+            << (candidate_prefix_timing_rejected_ ? "true" : "false")
+            << ",\"solver_converged\":"
+            << (candidate_prefix_solver_converged_ ? "true" : "false")
+            << ",\"solver_iteration_limited\":"
+            << (candidate_prefix_iteration_limited_ ? "true" : "false")
+            << ",\"validation_horizon\":"
+            << candidate_prefix_validation_horizon_
+            << ",\"validation_status\":"
+            << candidate_prefix_validation_status_
+            << ",\"failure_stage\":"
+            << candidate_prefix_validation_failure_stage_
+            << ",\"validation_us\":";
+        json_number(candidate_prefix_validation_us_);
+        json << "},\"consecutive_prior_plan_actions\":"
+            << consecutive_prior_plan_actions_
+            << ",\"prior_plan_actions_remaining\":"
+            << prior_plan_actions_remaining_
+            << ",\"consecutive_candidate_prefix_actions\":"
+            << consecutive_candidate_prefix_actions_
+            << ",\"input_failure_reason\":\""
             << input_failure_reason_name(result.input_failure_reason)
             << "\",\"nominal_build_failure_stage\":\""
             << nominal_build_failure_stage_name(
@@ -1274,6 +1502,10 @@ private:
                     : "source_plant_from_odom_or_handoff")
             << "\"";
         json << ",\"solver\":{\"iterations\":" << result.solver_iterations
+            << ",\"max_iterations_configured\":"
+            << rti_config_.solver.max_iterations
+            << ",\"time_budget_exhausted\":"
+            << (result.solver_time_budget_exhausted ? "true" : "false")
             << ",\"sqp_iterations_attempted\":"
             << result.sqp_iterations_attempted
             << ",\"sqp_iterations_completed\":"
@@ -1338,6 +1570,26 @@ private:
              << ",\"exact_rollout_us\":" << result.exact_rollout_us
              << ",\"nonlinear_validation_us\":"
              << result.nonlinear_validation_us
+             << ",\"line_search_attempted\":"
+             << (result.line_search_attempted ? "true" : "false")
+             << ",\"line_search_trials\":" << result.line_search_trials
+             << ",\"line_search_accepted\":"
+             << (result.line_search_accepted ? "true" : "false")
+             << ",\"line_search_skipped_budget\":"
+             << (result.line_search_skipped_budget ? "true" : "false")
+             << ",\"line_search_skipped_command_epoch\":"
+             << (result.line_search_skipped_command_epoch ? "true" : "false")
+             << ",\"line_search_full_step_failure_reason\":"
+             << result.line_search_full_step_failure_reason
+             << ",\"line_search_full_step_failure_stage\":"
+             << result.line_search_full_step_failure_stage
+             << ",\"line_search_last_failure_reason\":"
+             << result.line_search_last_failure_reason
+             << ",\"line_search_last_failure_stage\":"
+             << result.line_search_last_failure_stage
+             << ",\"line_search_selected_alpha\":"
+             << result.line_search_selected_alpha
+             << ",\"line_search_us\":" << result.line_search_us
              << ",\"solve_us\":" << result.total_solve_us
              << ",\"node_solve_us\":" << solve_us
              << ",\"cycle_us\":" << result.total_cycle_us
@@ -1378,6 +1630,8 @@ private:
             const bool accepted_controls =
                 result.status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
                 result.status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+                result.status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH ||
+                result.status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX ||
                 result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN;
             json << (accepted_controls ? ",\"candidate_controls\":["
                                       : ",\"rejected_candidate_controls\":[");
@@ -1395,6 +1649,8 @@ private:
         const bool accepted =
             result.status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
             result.status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+            result.status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH ||
+            result.status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX ||
             result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN;
         if (!accepted) {
             json << "],\"diagnostic_publish_steady_ns\":"
@@ -1406,13 +1662,18 @@ private:
         }
 
         bool first = true;
+        const MpcRtiNominal_t &diagnostic_nominal =
+            (result.status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX ||
+             result.status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN)
+                ? recovered_action_revalidated_nominal_
+                : rti_memory_.nominal;
         for (const int step : steps) {
-            if (step > rti_memory_.nominal.horizon) continue;
+            if (step > diagnostic_nominal.horizon) continue;
             if (!first) json << ',';
             first = false;
-            const MpcRtiState_t &predicted = rti_memory_.nominal.states[step];
+            const MpcRtiState_t &predicted = diagnostic_nominal.states[step];
             MpcTrajectorySample_t sample{};
-            const double predicted_s = rti_memory_.nominal.progress[step];
+            const double predicted_s = diagnostic_nominal.progress[step];
             if (!mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
                     track_length_m_, predicted_s, &sample)) {
                 publish_cycle_failure("prediction_reference_unavailable");
@@ -1428,18 +1689,18 @@ private:
                 -rti_config_.model.max_steering_rad,
                 rti_config_.model.max_steering_rad);
             const MpcModelControl_t &control =
-                rti_memory_.nominal.controls[step - 1];
+                diagnostic_nominal.controls[step - 1];
             MpcTrajectorySample_t transition_sample{};
             MpcStageResult_t diagnostic_transition{};
             bool have_transition_output =
-                step <= rti_memory_.nominal.horizon &&
+                step <= diagnostic_nominal.horizon &&
                 mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
                     track_length_m_,
-                    rti_memory_.nominal.progress[step - 1],
+                    diagnostic_nominal.progress[step - 1],
                     &transition_sample);
             if (have_transition_output) {
                 diagnostic_transition = mpc_vehicle_model_step(
-                    &rti_memory_.nominal.states[step - 1].plant,
+                    &diagnostic_nominal.states[step - 1].plant,
                     &control, PREDICTION_DT_SECONDS,
                     static_cast<float>(transition_sample.curvature));
                 have_transition_output = diagnostic_transition.valid != 0;
@@ -1621,13 +1882,35 @@ private:
 
     void control_timer_callback()
     {
+        const double callback_start_monotonic_us =
+            mpc_rti_monotonic_time_us();
         const int64_t callback_steady_ns = steady_time_ns();
+        double cycle_budget_us = end_to_end_cycle_budget_ms_ * 1000.0;
+        if (rti_config_.max_cycle_time_us > 0.0)
+            cycle_budget_us = std::min(
+                cycle_budget_us, rti_config_.max_cycle_time_us);
+        const double callback_deadline_us =
+            callback_start_monotonic_us + cycle_budget_us;
         last_publication_gate_elapsed_ms_ = -1.0;
         command_published_this_cycle_ = false;
         prior_plan_revalidation_attempted_ = false;
         prior_plan_exact_valid_ = false;
         prior_plan_timing_rejected_ = false;
         prior_plan_validation_us_ = 0.0;
+        prior_plan_validated_horizon_ = 0;
+        prior_plan_validated_control_index_ = -1;
+        prior_plan_actions_remaining_ = 0;
+        candidate_prefix_revalidation_attempted_ = false;
+        candidate_prefix_exact_valid_ = false;
+        candidate_prefix_timing_rejected_ = false;
+        candidate_prefix_validation_us_ = 0.0;
+        candidate_prefix_validation_horizon_ = 0;
+        candidate_prefix_iteration_limited_ = false;
+        prior_plan_validation_status_ = -1;
+        prior_plan_validation_failure_stage_ = -1;
+        candidate_prefix_solver_converged_ = false;
+        candidate_prefix_validation_status_ = -1;
+        candidate_prefix_validation_failure_stage_ = -1;
         if (!enabled_ || control_fault_latched_) return;
 
         /* The development recorder also subscribes to drive_command, so a
@@ -1988,15 +2271,81 @@ private:
 
         MpcRtiCycleResult_t result{};
         const auto solve_start = std::chrono::steady_clock::now();
-        const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
+        MpcRtiCycleConfiguration_t cycle_configuration = rti_config_;
+        cycle_configuration.absolute_deadline_monotonic_us =
+            callback_deadline_us;
+        MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
             &state, last_projected_s_, trajectory_.data(), trajectory_.size(),
             track_length_m_, TIME_STEP_SECONDS, PREDICTION_HORIZON,
-            &rti_config_, &rti_memory_, &result);
+            &cycle_configuration, &rti_memory_, &result);
         const auto solve_finish = std::chrono::steady_clock::now();
         const double solve_us = std::chrono::duration<double, std::micro>(
             solve_finish - solve_start).count();
+        if (status == MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET &&
+            !rti_memory_.nominal.valid &&
+            std::abs(state.plant.u) <= kStationaryStartupRetrySpeedMps &&
+            std::abs(state.plant.v) <= kStationaryStartupRetrySpeedMps &&
+            std::abs(state.plant.r) <=
+                kStationaryStartupRetryYawRateRadps) {
+            /* No command has been accepted, so there is no safe prior action
+             * to reuse. At spawn the vehicle can remain stationary for one
+             * 25 ms tick and retry the cold solve; never turn this into a
+             * moving-state or late-command fallback. */
+            record_cycle_health(status, result, solve_us);
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "Startup solve deferred: Jacobian build consumed the reserved "
+                "ADMM budget; retrying next control tick while stationary");
+            if (diagnostics_pub_)
+                publish_cycle_diagnostics(state, coherent_state,
+                    control_time_prediction, control_prediction_us,
+                    last_projected_s_, source_dt, result, solve_us,
+                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                    callback_steady_ns, synchronize_steady_ns);
+            return;
+        }
+        if (status == MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET) {
+            /* A solver-budget miss is retryable only at a motionless spawn.
+             * During motion, route it through the normal fault/reuse path. */
+            status = MPC_RTI_CYCLE_REJECTED_SOLVER;
+            result.status = status;
+        }
         if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
-            status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
+            status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE &&
+            status != MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) {
+            const char *candidate_prefix_failure_reason = nullptr;
+            if (try_publish_candidate_prefix(state, last_projected_s_,
+                    callback_steady_ns, control_stamp_ns,
+                    candidate_command_stamp_ns, &result,
+                    &candidate_prefix_failure_reason)) {
+                record_cycle_health(
+                    MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX,
+                    result, solve_us);
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                    "Full MPC horizon rejected; published its exact-validated "
+                    "next 25 ms action after the prior converged plan was "
+                    "unavailable or failed revalidation");
+                if (diagnostics_pub_)
+                    publish_cycle_diagnostics(state, coherent_state,
+                        control_time_prediction, control_prediction_us,
+                        last_projected_s_, source_dt, result, solve_us,
+                        control_ros_time.nanoseconds(),
+                        candidate_command_stamp_ns, callback_steady_ns,
+                        synchronize_steady_ns);
+                return;
+            }
+            if (candidate_prefix_timing_rejected_) {
+                record_cycle_health(status, result, solve_us);
+                if (diagnostics_pub_)
+                    publish_cycle_diagnostics(state, coherent_state,
+                        control_time_prediction, control_prediction_us,
+                        last_projected_s_, source_dt, result, solve_us,
+                        control_ros_time.nanoseconds(),
+                        candidate_command_stamp_ns, callback_steady_ns,
+                        synchronize_steady_ns);
+                report_control_fault(candidate_prefix_failure_reason, false);
+                publish_cycle_failure(candidate_prefix_failure_reason);
+                return;
+            }
             const char * reuse_failure_reason = nullptr;
             if (try_publish_prior_plan(state, last_projected_s_,
                     callback_steady_ns, control_stamp_ns,
@@ -2046,7 +2395,9 @@ private:
                     synchronize_steady_ns);
             report_control_fault(
                 reuse_failure_reason ? reuse_failure_reason :
-                    "MPC RTI cycle had no exact-feasible candidate");
+                    (candidate_prefix_failure_reason
+                        ? candidate_prefix_failure_reason
+                        : "MPC RTI cycle had no exact-feasible candidate"));
             return;
         }
 
@@ -2150,6 +2501,9 @@ private:
             }
             last_command_publication_lead_ns_ = command_stamp_ns >=
                 control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
+            prior_plan_control_index_ = 0;
+            consecutive_prior_plan_actions_ = 0;
+            consecutive_candidate_prefix_actions_ = 0;
         }
         if (diagnostics_pub_)
             publish_cycle_diagnostics(state, coherent_state,
@@ -2191,6 +2545,24 @@ private:
     bool prior_plan_exact_valid_{};
     bool prior_plan_timing_rejected_{};
     double prior_plan_validation_us_{};
+    int prior_plan_control_index_{};
+    int consecutive_prior_plan_actions_{};
+    int consecutive_candidate_prefix_actions_{};
+    MpcRtiNominal_t recovered_action_revalidated_nominal_{};
+    int prior_plan_validated_horizon_{};
+    int prior_plan_validated_control_index_{-1};
+    int prior_plan_actions_remaining_{};
+    int prior_plan_validation_status_{-1};
+    int prior_plan_validation_failure_stage_{-1};
+    bool candidate_prefix_revalidation_attempted_{};
+    bool candidate_prefix_exact_valid_{};
+    bool candidate_prefix_timing_rejected_{};
+    bool candidate_prefix_solver_converged_{};
+    bool candidate_prefix_iteration_limited_{};
+    double candidate_prefix_validation_us_{};
+    int candidate_prefix_validation_horizon_{};
+    int candidate_prefix_validation_status_{-1};
+    int candidate_prefix_validation_failure_stage_{-1};
     double max_command_start_lateness_ms_{2.0};
     double track_length_m_{};
     double startup_progress_m_{};
@@ -2249,6 +2621,8 @@ private:
     std::uint64_t control_cycles_{};
     std::uint64_t accepted_optimal_{};
     std::uint64_t accepted_feasible_{};
+    std::uint64_t accepted_line_search_{};
+    std::uint64_t accepted_candidate_prefix_{};
     std::uint64_t accepted_prior_plan_{};
     std::uint64_t control_fault_cycles_{};
     int max_solver_iterations_seen_{};

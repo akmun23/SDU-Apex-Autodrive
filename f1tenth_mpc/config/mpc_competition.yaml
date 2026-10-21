@@ -13,7 +13,9 @@
 
     max_speed_mps: 16.0
     startup_speed_mps: 1.5
-    startup_ramp_laps: 1.0
+    # Use the loaded native speed profile immediately; no artificial lap-based
+    # speed ramp in the development/competition vehicle model.
+    startup_ramp_laps: 0.0
 
     state_extrapolation_max_s: 0.12
     # Publication lead is model-predicted separately from sensor-state age.
@@ -36,24 +38,27 @@
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
 
-    # A 0.5 m preview maps heading error into lateral displacement, so
-    # w_psi = w_y * 0.5^2. A yaw-rate error integrated over 0.5 s produces the
-    # same heading error, so w_r = w_psi * 0.5^2.
-    weight_e_y: 125.0
-    weight_e_psi: 31.25
-    # Coordinated profile: strong under-target speed tracking, lower overspeed
-    # cost, with light wheel-spin and absolute throttle-effort penalties.
-    weight_u: 500.0
-    weight_u_overspeed: 300.0
-    weight_longitudinal_slip: 5.0
+    # Native-speed practice profile: five uncapped laps completed without
+    # collision with these weights. The 5.972 s/lap raceline produced measured
+    # lap times 6.849, 6.587, 6.410, 6.181, 6.261 s. Higher e_y or lower
+    # steering-slew variants were tested and failed earlier; keep this tested
+    # profile as the baseline while continuing to reduce its tracking tail.
+    weight_e_y: 4000.0
+    weight_e_psi: 1500.0
+    weight_u: 7.5
+    weight_u_overspeed: 60.0
+    weight_longitudinal_slip: 25.0
     weight_v: 5.0
     weight_r: 7.8125
     weight_steering_command: 3.0
     weight_steering_target: 5.0
     weight_throttle_command: 0.1
-    # Penalize per-cycle command increments; steering smoothness dominates.
-    weight_steering_slew: 25.0
-    weight_throttle_slew: 2.0
+    # Input-increment regularization from the five-lap profile. Reducing the
+    # steering-slew penalty to 1000 caused an immediate high-heading corridor
+    # failure; the higher value avoids abrupt reversals.
+    weight_steering_slew: 2000.0
+    weight_throttle_slew: 10.0
+    startup_nominal_throttle_seed: 0.25
     terminal_multiplier: 3.0
 
     max_steering_rad: 0.5235987756
@@ -89,7 +94,8 @@
     # 20 ms RTI deadline remains the hard bound.
     max_solver_iterations: 100
     rti_cycle_budget_ms: 20.0
-    # Cap parallel Jacobian construction at four workers so the controller
-    # remains deployable on competition PCs with limited CPU availability.
+    # Eight workers improved replay and passed one supervised, 3 m/s practice
+    # run (publication-gate max 19.730 ms). Continue supervising until higher-
+    # speed runs confirm CPU contention and deadline-tail margin.
     # Zero disables OpenMP parallelism.
-    jacobian_threads: 4
+    jacobian_threads: 8

@@ -12,7 +12,8 @@ extern "C" {
 enum
 {
     MPC_RTI_NX = MPC_OPTIMIZER_NX,
-    MPC_RTI_NU = MPC_MODEL_NU
+    MPC_RTI_NU = MPC_MODEL_NU,
+    MPC_RTI_MAX_JACOBIAN_THREADS = 8
 };
 
 typedef struct
@@ -183,8 +184,16 @@ typedef struct
 {
     MpcRtiConfiguration_t model;
     RiccatiAdmmConfig_t solver;
-    /* End-to-end cycle budget; zero means no deadline. */
+    /* Relative end-to-end budget for offline callers; zero means unbounded. */
     double max_cycle_time_us;
+    /* Optional absolute CLOCK_MONOTONIC deadline in microseconds. When set,
+     * this deadline takes precedence over max_cycle_time_us. */
+    double absolute_deadline_monotonic_us;
+    /* Rejection-only nonlinear backtracking. Production remains disabled
+     * until command-epoch safety is established. */
+    int enable_nonlinear_line_search;
+    int line_search_max_backtracks; /* 0..2: alpha=0.5, then alpha=0.25 */
+    int line_search_command_epoch_valid;
 } MpcRtiCycleConfiguration_t;
 
 typedef struct
@@ -199,12 +208,20 @@ typedef enum
     /* Solver hit its iteration cap, but this candidate passed the same full
      * nonlinear plant and corridor validation as an optimal candidate. */
     MPC_RTI_CYCLE_ACCEPTED_FEASIBLE,
-    /* The RTI solve failed, but a remaining suffix of the last accepted plan
-     * was revalidated from the current state and published once. */
+    /* The horizon failed validation, but its next 25 ms action was exact-
+     * validated and published; the next cycle must solve/revalidate again. */
+    MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX,
+    /* The RTI solve failed, but the next action of the last accepted plan was
+     * revalidated from the current state and published once. */
     MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
     MPC_RTI_CYCLE_REJECTED_INPUT,
     MPC_RTI_CYCLE_REJECTED_SOLVER,
-    MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT
+    MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT,
+    /* Startup-only retry: nominal/Jacobian work consumed the reserved solver
+     * budget before ADMM began. No command is publishable yet. */
+    MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET,
+    /* A damped QP direction passed the same complete nonlinear checks. */
+    MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH
 } MpcRtiCycleStatus_t;
 
 typedef enum
@@ -228,6 +245,8 @@ typedef struct
     float published_steering_command;
     float published_throttle;
     int solver_iterations;
+    int solver_skipped_for_deadline;
+    int solver_time_budget_exhausted;
     int sqp_iterations_attempted;
     int sqp_iterations_completed;
     int sqp_iterations_accepted;
@@ -240,6 +259,17 @@ typedef struct
     int nonlinear_failure_stage;
     int nonlinear_failure_reason;
     MpcRtiRolloutFailure_t nonlinear_failure;
+    int line_search_attempted;
+    int line_search_trials;
+    int line_search_accepted;
+    int line_search_skipped_budget;
+    int line_search_skipped_command_epoch;
+    int line_search_full_step_failure_reason;
+    int line_search_full_step_failure_stage;
+    int line_search_last_failure_reason;
+    int line_search_last_failure_stage;
+    float line_search_selected_alpha;
+    double line_search_us;
     /* The solver's exact action sequence when it converged but nonlinear
      * rollout validation rejected that sequence. Diagnostic-only; never a
      * publishable command on a rejected cycle. */
@@ -367,6 +397,10 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     const MpcRtiCycleConfiguration_t *configuration,
     MpcRtiMemory_t *memory,
     MpcRtiCycleResult_t *result);
+
+/* CLOCK_MONOTONIC timestamp in microseconds, shared by the ROS wrapper and
+ * RTI core when constructing an absolute per-callback deadline. */
+double mpc_rti_monotonic_time_us(void);
 
 /* Diagnostic evaluators used to test the exact scalar/matrix cost algebra. */
 float mpc_rti_matrix_stage_cost(

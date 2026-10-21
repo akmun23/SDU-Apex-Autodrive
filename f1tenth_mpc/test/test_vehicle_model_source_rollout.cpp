@@ -394,6 +394,7 @@ TEST(RiccatiSolverDeadline, StopsOnlyAfterACompleteAdmmIteration)
   EXPECT_EQ(status, RICCATI_STATUS_MAX_ITERATIONS);
   EXPECT_GE(solution.iterations, 1);
   EXPECT_LT(solution.iterations, config.max_iterations);
+  EXPECT_EQ(solution.time_budget_exhausted, 1);
   EXPECT_TRUE(memory.initialized);
 }
 
@@ -1266,11 +1267,24 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
       &initial, 0.0, trajectory, trajectory_count, lap_length,
       PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &config, &memory, &result);
   EXPECT_EQ(result.admm_status, RICCATI_STATUS_MAX_ITERATIONS);
+  EXPECT_EQ(result.solver_time_budget_exhausted, 0);
   EXPECT_EQ(status, MPC_RTI_CYCLE_ACCEPTED_FEASIBLE)
       << "An iteration-limited action is publishable only after the exact "
          "nonlinear state/corridor validation succeeds.";
+  EXPECT_EQ(result.line_search_attempted, 0);
+  EXPECT_EQ(result.line_search_accepted, 0);
   EXPECT_TRUE(memory.nominal.valid);
   EXPECT_TRUE(std::isfinite(result.first_control.throttle_command));
+
+  mpc_rti_memory_reset(&memory);
+  config.absolute_deadline_monotonic_us = mpc_rti_monotonic_time_us() - 1.0;
+  const MpcRtiCycleStatus_t expired_status = mpc_rti_solve_cycle(
+      &initial, 0.0, trajectory, trajectory_count, lap_length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &config, &memory, &result);
+  EXPECT_EQ(expired_status, MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET);
+  EXPECT_EQ(result.solver_skipped_for_deadline, 1);
+  EXPECT_EQ(result.solver_time_budget_exhausted, 0);
+  EXPECT_EQ(result.solver_iterations, 0);
 }
 
 TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)

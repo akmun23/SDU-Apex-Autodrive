@@ -3004,6 +3004,70 @@ until every cycle has measured timing reserve. The detailed log documents the
 current single-solve candidate/previous-plan acceptance path and its remaining
 timing-fault limitation. A follow-up source change now records, per cycle,
 whether prior-plan validation was attempted, exactly feasible, and then too
-late for the gate, plus whether any command was actually published. It built
-and passed the MPC tests; those new fields have not yet been verified in a
-live bag.
+late for the gate, plus whether any command was actually published. Those
+fields are verified in the subsequent absolute-deadline bag.
+
+An offline 4-versus-8 Jacobian-worker sweep was then run four times per setting
+on identical 409-row practice replay inputs. Eight workers preserved every
+status and first steering/throttle output and reduced the median of per-run
+cycle p50/p95 from 7.467/9.909 ms to 4.269/6.100 ms on the 8-core Ryzen 9
+5900HS. A supervised practice run then launched the actual MPC with eight
+workers, diagnostics, the focused recorder, and collision/fault watcher. It
+published 529 commands over 13.2 s with no collision; odometry averaged 25.03
+ms and forwarded actuator sequences had no gaps. The publication gate was
+6.392/10.158/19.730 ms p50/p95/max, with no over-budget published command.
+However, after 530 solve cycles the watcher stopped the run on exact corridor
+rejection (candidate stage 16 and prior plan stage 27); no lap completed. The
+competition YAML is set to eight on this 8-core host. Treat the timing result
+as a successful short capped run, not robust high-speed or full-lap proof: the
+maximum left only 0.270 ms of margin.
+
+The next deadline-capture bag,
+`live_runs/mpc_absolute_deadline_practice_20261021/run`, had exactly one MPC
+rejection: an exactly feasible `accepted_feasible` result missed publication at
+20.448 ms; 220 other cycle outputs were published. Replay showed that raising
+the ADMM cap from 100 to 150 or 200 worsened p95 time and reduced exact-valid
+actions, so keep 100. Bounded nonlinear backtracking recovers only a small
+number of offline corridor cases and remains disabled in production until the
+Unity command-effect epoch can be certified. Based on the latest observed
+3.797 ms candidate-rollout max plus 0.484 ms callback tail, the post-solve
+reserve has been changed from 3.5 to 5.0 ms; this code change is pending a
+supervised live verification with the watcher armed before simulator motion.
+The latest capture reached 9 collisions before the late-armed watcher stopped
+it; it completed no lap and peaked at 1.999 m/s, so it proves neither a safe
+full run nor racing behavior. Detailed evidence is in
+[MPC_PERFORMANCE_MULTI_SQP_PROGRESS_20261021.md](MPC_PERFORMANCE_MULTI_SQP_PROGRESS_20261021.md).
+
+### MPC solver/recovery update — 2026-10-21
+
+The follow-up 5 ms post-solve reserve passed a short supervised practice
+capture: 536 published commands, publication-gate p50/p95/max
+`8.765/12.077/17.998 ms` (all below 20 ms). It did **not** complete a lap:
+the current candidate and revalidated prior-plan prefix both failed the exact
+corridor check at stage 2 after the car reached `e_y=0.860 m`,
+`e_psi=0.606 rad`, `u=2.610 m/s`. A collision was counted at shutdown, so this
+is not a collision-free run. See the linked performance log for the bag,
+decoded inputs, and replay evidence.
+
+More ADMM iterations do not currently solve that case. On the same 537 saved
+states, cap 100 exactly accepted 515; cap 500 accepted 513 and still missed
+the stage-2 upper corridor by 3.2 cm, while its worst offline cycle reached
+22.4 ms. The cap-500 setting was only a temporary diagnostic and has been
+restored; live cap remains 100. Keep bounded line search disabled live: it
+did not recover this state, and no command-effect epoch signal has been
+validated for safely scheduling optional trials. Timing is improved on this
+short capped run, but lap completion and reliable recovery remain unsolved.
+
+Follow-up analysis supports but does not prove a weight-priority problem:
+`|e_y|` stayed below `0.15 m` through sample 401, then rose from `0.264 m` to
+`0.860 m` over the final 22 samples in a tight bend. In fixed-state replay,
+the terminal one-stage speed-undershoot term is about `536`, compared with
+about `92` for lateral error and `12` for heading error. An extreme offline
+path-first replay (path weights ×8, speed weights ×0.01) raises exact-valid
+states from `515/537` to `524/537`; it accepts 10/22 late states above
+`|e_y|=0.25 m`, including 1/11 above `0.5 m`, but still rejects the terminal
+`0.860 m` state and every state above `0.75 m`. Offline replay timing reached
+`16.5 ms` p95 / `26.9 ms` max. This confirms objective priority contributes,
+but fixed-state replay is not closed-loop evidence and the extreme setting is
+not a production fix. No live weights have been changed. Details and replay
+artifacts are in the performance log's path-tracking diagnosis section.

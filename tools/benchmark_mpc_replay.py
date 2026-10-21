@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 
-ACCEPTED_STATUSES = {0, 1, 2}
+ACCEPTED_STATUSES = {0, 1, 2, 8}
 TIMING_FIELDS = {
     "cycle_ms": ("cycle_us", 1.0e-3),
     "nominal_build_ms": ("nominal_build_us", 1.0e-3),
@@ -45,6 +45,7 @@ TIMING_FIELDS = {
     "qp_unscale_ms": ("output_unscale_ns", 1.0e-6),
     "candidate_rollout_ms": ("rollout_us", 1.0e-3),
     "nonlinear_validation_ms": ("nonlinear_validation_us", 1.0e-3),
+    "line_search_ms": ("line_search_us", 1.0e-3),
 }
 
 
@@ -162,6 +163,39 @@ def summarize_rows(rows: list[dict[str, str]]) -> dict[str, Any]:
     for row in rows:
         status = row.get("status", "missing")
         status_counts[status] = status_counts.get(status, 0) + 1
+    admm_termination_counts: dict[str, int] = {}
+    admm_iterations: list[float] = []
+    line_search_trials = 0
+    line_search_accepted = 0
+    line_search_skipped_budget = 0
+    line_search_skipped_command_epoch = 0
+    for row in rows:
+        try:
+            status = int(row.get("admm_status", "-1"))
+            iterations = float(row.get("iterations", "nan"))
+            if math.isfinite(iterations):
+                admm_iterations.append(iterations)
+        except (TypeError, ValueError):
+            status = -1
+        if status == 0:
+            termination = "converged"
+        elif status == 1:
+            time_limited = row.get("time_budget_exhausted")
+            termination = ("wall_time_budget" if time_limited == "1" else
+                           "iteration_cap" if time_limited == "0" else
+                           "limit_cause_unrecorded")
+        elif status == -1:
+            termination = "not_run"
+        else:
+            termination = "solver_error"
+        admm_termination_counts[termination] = (
+            admm_termination_counts.get(termination, 0) + 1)
+        line_search_trials += int(row.get("line_search_trials", 0) or 0)
+        line_search_accepted += int(row.get("line_search_accepted", 0) or 0)
+        line_search_skipped_budget += int(
+            row.get("line_search_skipped_budget", 0) or 0)
+        line_search_skipped_command_epoch += int(
+            row.get("line_search_skipped_command_epoch", 0) or 0)
     accepted = [row for row in rows
                 if int(row.get("status", -1)) in ACCEPTED_STATUSES]
     timings: dict[str, Any] = {}
@@ -226,6 +260,14 @@ def summarize_rows(rows: list[dict[str, str]]) -> dict[str, Any]:
     return {
         "rows": len(rows),
         "statuses": status_counts,
+        "admm_termination_counts": admm_termination_counts,
+        "line_search": {
+            "trials": line_search_trials,
+            "accepted": line_search_accepted,
+            "skipped_budget": line_search_skipped_budget,
+            "skipped_command_epoch": line_search_skipped_command_epoch,
+        },
+        "admm_iterations": distribution(admm_iterations),
         "exact_accepted": len(accepted),
         "acceptance_fraction": len(accepted) / len(rows) if rows else None,
         "success_weighted_ms_per_exact_accepted_action":
@@ -271,8 +313,8 @@ def main() -> int:
             requested_threads = int(replay_args[13])
         except ValueError:
             parser.error("Jacobian worker count must be an integer")
-        if requested_threads < 0 or requested_threads > 4:
-            parser.error("Jacobian workers must be between 0 and 4")
+        if requested_threads < 0 or requested_threads > 8:
+            parser.error("Jacobian workers must be between 0 and 8")
     replay_mode = replay_args[11] if len(replay_args) > 11 else "sequence"
     solver_start = replay_args[12] if len(replay_args) > 12 else "warm"
     command = [str(args.binary.resolve()), str(args.trajectory.resolve()),
