@@ -615,3 +615,264 @@ the new nominal. Keep the production values unchanged for now; next fix and
 validate the iteration-limited command/prefix behavior and its command-epoch
 alignment, then re-run the same native-speed profile before another weight
 sweep. No speed cap or q=0 option should be added.
+
+## Six-priority follow-up — 2026-10-21
+
+This section tracks the user's ordered warm-start, prefix, timing, difficult-
+state convergence, worker-profile, and unchanged-profile retest requirements.
+The priorities are not all complete; the status below distinguishes measured
+results from remaining work.
+
+### 1. Issued-sequence warm start after prefix publication
+
+The production edit is in `mpc_controller_node.cpp`: the published sequence
+is committed as the next nominal warm start only after `publish_command()`
+succeeds, while the certified plan remains separate. Focused unit test
+`MpcReference.IssuedCandidateSequenceSeedsNextNominalAfterShift` passes. The
+subsequent full-speed capture found 40 comparable candidate-prefix transitions;
+all 40 next nominal first controls matched the previously issued prefix
+command within `1e-5` (`0` maximum steering and throttle discrepancy). This
+priority is implemented and directly checked in a live bag.
+
+### 2. Candidate-prefix chains
+
+The failed repeat at
+`live_runs/mpc_five_lap_verified_20261021/run` reached an 11-action candidate-
+prefix chain in the negative-curvature hairpin around progress `71.126–71.475 m`.
+Nine of those eleven issued first actions had the wrong steering sign for the
+negative curvature; the chain included an abrupt reversal. Every solve in that
+chain hit the iteration cap; residuals were poor and validated corridor slack
+fell to about `1 cm`. The two no-collision five-lap captures had maximum chains
+of three. This is a strong warning signature in these few runs, not enough
+independent examples to establish chain length alone as a predictor or to set
+a universal abort threshold.
+
+### 3. Command/actuator timing at the failing hairpin
+
+The failed bag was joined by the bridge request epoch, not by nearest packet
+arrival. At the 19 samples with `kappa <= -0.5 1/m` from progress `70.64–71.49 m`,
+the latest steering-command age at bridge request had median `11.02 ms`, p95
+`13.84 ms`, max `15.24 ms`; none exceeded `25 ms`. The corresponding request-
+to-response latency in the 11-action prefix chain was about `2.8–3.1 ms`, and
+the exact request timestamp matched the MPC source epoch for all 485 usable
+cycle rows. No command-sequence gaps were present before collision.
+
+At progress `71.126 m`, the MPC's first action changed to positive steering
+while curvature was `-0.741 1/m`; subsequent prefix commands continued positive
+through most of the chain. Unity feedback then slewed from negative steering
+through zero to positive, consistent with the commanded reversal and the
+source's rate-limited steering actuator. The successful capture traverses the
+same negative-curvature region with negative MPC/bridge steering. This points
+to a bad/nonconverged solver candidate, not a delayed Bridge-response
+association error. The practice bag still has no per-`FixedUpdate` applied
+command ID, so exact sub-millisecond command-to-physics-step timing remains
+unobservable; there is no evidence that such uncertainty caused this hairpin
+failure.
+
+### 4. Difficult-state replay and hybrid initialization
+
+The existing two independent 40-state terminal corpora were reused. To test a
+true partial/hybrid ADMM seed, the replay executable now accepts
+`dual-cold`: retain shifted primal projections `z`, adapted `rho`, and nominal
+history, but clear dual multipliers `y` before each solve. This is explicitly
+offline-only and does not change production initialization. Results (exact
+full-horizon nonlinear acceptance, out of 40):
+
+| Corpus | Warm sequence + adaptive rho | Full independent reset + adaptive rho | Hybrid dual-cold + adaptive rho | Hybrid dual-cold + fixed rho |
+|---|---:|---:|---:|---:|
+| Failed-repeat terminal states | 14/40 | 24/40 | 17/40 | 13/40 |
+| Independent repeat terminal states | 4/40 | 19/40 | 4/40 | 4/40 |
+
+The full reset's gain is repeatable on these two short corpora, but it also
+throws away nominal/issued-command history; it is not safe to promote as an
+online policy until the command-consistent seed is preserved and that exact
+hybrid is tested. Clearing only `y` did not produce a repeatable acceptance
+gain; fixed rho reduced compute time on one corpus but not nonlinear
+acceptance. No solver-initialization change is promoted. The replay executable
+was rebuilt successfully; the four new replay CSVs and configuration JSONs
+are saved under the two corpus directories.
+
+### 5. Eight-worker worst-case profile
+
+The full-speed five-lap capture
+`live_runs/mpc_priority_postfix_profile_20261021/run` recorded per-worker CPU
+and stage-duration arrays. The publication-gate maximum was `20.351 ms` (one
+of 1,487 commands at/over `20 ms`), so the requested reliable sub-20-ms maximum
+is not yet met. CPU-frequency samples overlap only part of the run, and
+`pidstat` thread context-switch data is not mapped to OpenMP worker indexes.
+Worker TID attribution plus a full-run frequency/scheduler capture remains
+necessary before this priority is complete.
+
+### 6. Unchanged-profile five-lap retest
+
+The same five-lap weight profile completed one additional uncapped practice
+run with zero collisions. Lap times were `7.003, 6.309, 6.216, 10.939, 6.257 s`
+(mean `7.345 s`). The slow fourth lap prevents calling this repeatable pace.
+Because priorities 4 and 5 remain unresolved, this is an interim retest, not
+the final post-fix repeat campaign.
+
+**Current gate:** priority 1 is implemented/live-verified; priorities 2 and 3
+are analyzed to the limit of available bag timing, with chain causality still
+uncertain and per-physics-step command timing unavailable; priority 4 has
+candidate replay evidence but no safe promotion; priority 5 is incomplete; and
+priority 6 needs repeated post-fix trials. The next implementation work should
+preserve the issued-sequence seed while testing initialization/convergence
+changes, then finish worker attribution and only afterward run the repeated
+unchanged-profile campaign.
+
+## Continuation after the status interruption — 2026-10-21
+
+I stopped after reporting status instead of continuing the requested six-point
+work. That was an execution mistake; the work was not complete. This section
+records the resumed analysis and keeps failed trials explicit.
+
+### Fresh full-speed captures
+
+`live_runs/mpc_priority_worker_tid_20261021/run` is the previously recorded
+five-lap 8-worker capture: five laps, zero collisions, p50/p95/max publication
+gate `7.629/10.289/19.503 ms`, and maximum candidate-prefix chain length 2.
+It is one successful run, not repeatability proof.
+
+`live_runs/mpc_priority_workers8_supervised_20261021/run` is a new full-speed
+practice capture with the same map, raceline, weights, 100-iteration setting,
+20 ms gate, and eight Jacobian workers. It completed two laps (`9.515` and
+`9.116 s`) and then had one collision at bag time `24.501 s`; the supervised
+run is therefore a failed repeat, not a five-lap success. Across 970 published
+commands, bridge diagnostics reported no sequence gaps. The publication gate
+was `8.690/11.684/17.967 ms` p50/p95/max, with zero of 970 samples at or above
+20 ms. This run's collision was not preceded by a deadline miss.
+
+The failure is a real tracking/feasibility failure, not evidence that timing
+alone caused it. In the final second, logged MPC cross-track error grew from
+`0.033 m` to `1.085 m`; offline ground-truth reprojection grew from `0.184 m`
+to `1.224 m`. The final solver cycle rejected the nonlinear rollout at
+constraint stage 2, and neither the new candidate prefix nor a prior-plan
+suffix passed exact corridor validation. The first collision followed 87 ms
+later. The latest pre-collision inputs show large alternating steering
+commands while lateral error was already growing. This localizes the proximate
+failure to lost path feasibility/steering response; it does not yet distinguish
+bad SQP candidates from model/actuator mismatch. Per-`FixedUpdate` applied
+command IDs remain unavailable.
+
+The capture has 49 candidate-prefix chains and 66 published prefix actions;
+maximum chain length is 6. The six-action chain at progress `99.306–99.591 m`
+had one steering reversal, residuals `0.433/0.689/0.824` (p50/p95/max), and
+minimum validated-prefix slack `0.408 m`. Near the end, slack declined to
+`0.117 m`, then `0.028 m` before the exact corridor rejection. This adds a
+second failed-run example where a long prefix chain precedes loss of tracking.
+It is still not a safe standalone predictor: the 4-worker timeout trial below
+crashed with maximum chain length 1, while the successful five-lap capture had
+maximum length 2. Chain length is a warning correlate, not a proven causal
+threshold.
+
+The supervised 4-worker comparison is
+`live_runs/mpc_priority_threads4_live_20261021/run`. It reached no completed
+lap. Before its first collision at `4.726 s`, it recorded 156 MPC diagnostics;
+one callback took `37.097 ms` through the publication gate (`6.732/8.413/37.097`
+ms p50/p95/max). That cycle's QP/Jacobian build took `21.520/21.456 ms`; an
+exact-valid prior-plan action was rejected because its command-start lateness
+was `18.775 ms`. No command was published after the fault. The bag continued
+recording after that first collision because the watcher previously only
+reported an abort and exited; I compounded that by waiting on the simulator
+log in a 30-second batch poll before acting. Its 48 later collision-counter
+increments are post-first-collision contamination and are not used as vehicle
+performance evidence. The first collision and preceding solver event remain
+usable.
+
+### Failure-seed replay
+
+The 40 terminal diagnostic states exported from the new 8-worker crash are in
+`live_runs/mpc_priority_workers8_supervised_20261021/terminal_solver_inputs.csv`.
+The final state is already outside the corridor (`e_y=1.085 m`); the preceding
+40-state logged-pose corpus has route reprojection distance median/p95/max
+`0.318/1.020/1.085 m`. A separate whole-bag offline oracle-GT export is retained
+as `oracle_gt_solver_inputs.csv`; it confirms the terminal displacement is
+present in Unity truth, not only in the localization estimate.
+
+On the same 40 terminal rows, exact nonlinear acceptance was 11/40 for warm
+sequence/adaptive rho, 11/40 for independent cold ADMM, 11/40 for dual-cold
+hybrid/adaptive rho, and 12/40 for dual-cold/fixed rho. The one-sample fixed-rho
+gain is not robust; no production seed or rho change is promoted. These results
+extend the existing two-corpus replay comparison rather than replace it.
+
+### Eight-worker host profile and supervision correction
+
+The new eight-worker bag carries 971 diagnostic cycles before collision. Its
+per-cycle Jacobian wall p50/p95/max was `2.763/4.478/10.209 ms`; summed worker
+CPU p50/p95/max was `17.392/28.157/33.401 ms`. Host TID mapping is recorded in
+`thread_namespace_map.csv`, with `pidstat_threads.log`, `mpstat_system.log`,
+and `cpu_frequency.log` alongside it. The four ROS executor roots selected
+four separate persistent eight-thread OpenMP teams (28 helper TIDs, plus the
+four calling threads); only one MPC callback is active at a time. Threads
+migrated across the 16 logical CPUs. During the active interval, one-second
+frequency snapshots had per-core medians around `3.6–3.74 GHz` and observed
+minima around `1.94–2.22 GHz`; the snapshot resolution is too coarse to assign
+a particular frequency dip to an individual slow solve. This is a concrete
+thread-pool/scheduler property to account for, not proof that it caused the
+previous deadline outliers.
+
+I changed `tools/watch_sim_run.py` to accept
+`--stop-simulator-container NAME`; on any terminal watch outcome it now sends
+SIGINT to that exact Docker container. The new 8-worker run exercised this
+path: it stopped on its first collision, and the bag recorded exactly one
+collision. `py_compile`, `--help`, and `git diff --check` pass. Future supervised
+trials must use this option and poll the watcher independently of simulator
+output.
+
+### Six-point status
+
+1. **Issued-sequence warm start:** implementation remains validated; the new
+   capture adds 66/66 exact prefix-to-next-nominal matches. Certified-plan
+   storage remains separate.
+2. **Prefix chains:** more failure/success comparison is documented. Long
+   chains correlate with two failed runs but are neither necessary nor proven
+   sufficient for failure.
+3. **Actuator timing:** old negative-hairpin timing association remains
+   non-limiting; the new crash had no command-sequence gaps or 20 ms miss. Exact
+   physics-step application IDs are not present in permitted runtime data.
+4. **Difficult-state convergence:** multiple initializations and rho settings
+   were replayed on the new terminal corpus; none materially improves exact
+   acceptance. No solver policy was promoted.
+5. **Worst-case timing:** the new 8-worker run is below 20 ms at every captured
+   publication gate, but other unchanged captures include 19.503, 20.351,
+   36.520, and the 4-worker 37.097 ms tail. A reliable <20 ms maximum is not
+   established. The 4-vs-8 live runs were not controlled enough to claim a
+   worker-count winner.
+6. **Repeated unchanged five-lap profile:** not passed. The new 8-worker repeat
+   completed two laps before collision; the earlier five-lap success remains a
+   single success only. Do not report the profile as consistent.
+
+No MPC weights, plant equations, map, raceline, or fallback/fault policy were
+changed by these trials. The pending work is a targeted solver/tracking fix
+based on the final steering/corridor failure and an architecture-level way to
+remove the observed per-executor OpenMP team duplication or bound its tail;
+then the unchanged five-lap campaign can be meaningfully repeated.
+
+### Single-executor experiment — 2026-10-21
+
+To test whether the four executor-owned OpenMP teams were contributing to
+tail latency, I ran the same full-speed setup with one ROS component executor
+thread and eight Jacobian workers:
+`live_runs/mpc_priority_executor1_threads8_20261021/run`. This removed the
+duplicated teams: one worker set (TIDs 611, 677–683) handled all 933 active
+cycles. It did not improve the live result. The publication gate was
+`9.000/17.212/20.191 ms` p50/p95/max, with one of 933 cycles at/over 20 ms;
+the previous supervised eight-worker/four-executor run was
+`8.690/11.684/17.967 ms`. The slowest cycle was an accepted-feasible candidate
+that missed publication (`20.191 ms`, node solve `19.791 ms`); no prior plan
+was available. A single executor therefore trades away input-callback
+concurrency and is not promoted as the solution to the worker-pool issue.
+
+The supervised run completed three laps (`6.957`, `6.333`, `13.112 s`) before
+one collision; the watcher stopped the simulator at that first collision.
+This is not a successful five-lap retest. The evaluator reported command/odom
+cadence near 25 ms and no bridge sequence gaps. As with the prior collision
+capture, this run cannot establish a repeatable safe pace. No simulator,
+controller, recorder, or watcher process remains running after the capture.
+
+This closes the narrow executor-count experiment without promoting its
+configuration. Priorities 5 and 6 remain open: timing tails above 20 ms exist
+in captured trials, and the unchanged five-lap profile has not passed repeated
+post-fix runs. The experiment also reinforces that reducing thread count is
+not itself a reliable latency fix; solve/publish policy and plant/path
+feasibility still need correction before another unchanged-profile campaign.

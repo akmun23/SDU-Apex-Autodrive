@@ -152,7 +152,8 @@ int main(int argc, char **argv)
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
                      "[RHO_MAX PERIOD TOLERANCE "
-                     "[sequence|independent|nominal-cold] [warm|cold] "
+                     "[sequence|independent|nominal-cold] "
+                     "[warm|cold|dual-cold] "
                      "[JACOBIAN_THREADS [MAX_ITERATIONS [STARTUP_SEED "
                      "[EY_WEIGHT_MULTIPLIER [EPSI_WEIGHT_MULTIPLIER "
                      "[EY_STATE_SCALE [EPSI_STATE_SCALE "
@@ -221,7 +222,8 @@ int main(int argc, char **argv)
             !std::isfinite(rho_u) || !(rho_u > 0.0) || rho_u > 127.0 ||
             (memory_mode != "sequence" && memory_mode != "independent" &&
              memory_mode != "nominal-cold") ||
-            (solver_start != "warm" && solver_start != "cold") ||
+            (solver_start != "warm" && solver_start != "cold" &&
+             solver_start != "dual-cold") ||
             jacobian_threads < 0 ||
                 jacobian_threads > MPC_RTI_MAX_JACOBIAN_THREADS ||
             max_iterations < 1 || max_iterations > 200 ||
@@ -375,6 +377,26 @@ int main(int argc, char **argv)
                  * shifted trajectory—not the QP warm state—is the source of
                  * sequence-replay convergence failures. */
                 memory.nominal.valid = 0;
+            }
+            if (solver_start == "dual-cold") {
+                /* Experimental hybrid ADMM seed: retain shifted primal
+                 * projections (z), adapted rho values, and nominal/command
+                 * history, but discard dual multipliers (y). This isolates
+                 * whether stale duals hurt difficult corridor states without
+                 * discarding the current command-consistent warm start.
+                 * Offline replay only; production remains warm. */
+                for (int stage = 0; stage <= RICCATI_HORIZON; ++stage) {
+                    for (int state_index = 0;
+                         state_index < RICCATI_MAX_NX; ++state_index) {
+                        memory.solver_state.y_x[stage][state_index] = 0.0f;
+                    }
+                }
+                for (int stage = 0; stage < RICCATI_HORIZON; ++stage) {
+                    for (int input_index = 0;
+                         input_index < RICCATI_MAX_NU; ++input_index) {
+                        memory.solver_state.y_u[stage][input_index] = 0.0f;
+                    }
+                }
             }
             const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
                 &state, row[1], trajectory.data(), trajectory.size(),

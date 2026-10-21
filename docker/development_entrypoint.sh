@@ -33,19 +33,11 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     /workspace/install/share/sdu_apex_autodrive
   cd /workspace
   MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build \
-    --packages-up-to sdu_apex_autodrive \
+    --packages-up-to sdu_apex_autodrive f1tenth_mpc \
     --parallel-workers 4 \
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-      -DSDU_APEX_MPC_NATIVE_TUNING=OFF
-  if [[ "${native_tuning}" == "true" ]]; then
-    MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build \
-      --packages-select f1tenth_mpc \
-      --parallel-workers 4 \
-      --merge-install --symlink-install \
-      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-        -DSDU_APEX_MPC_NATIVE_TUNING=ON
-  fi
+      "-DSDU_APEX_MPC_NATIVE_TUNING=${native_tuning}"
   source /workspace/install/setup.bash
 else
   source /workspace/install/setup.bash

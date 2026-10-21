@@ -594,6 +594,225 @@ def percentile(values: list[float], probability: float) -> float:
     return ordered[min(len(ordered) - 1, int(probability * (len(ordered) - 1)))]
 
 
+def report_candidate_prefix_chains(
+    diagnostics: list[dict[str, Any]],
+    collision_count: int | None = None,
+) -> None:
+    """Summarize contiguous, exact-validated short-horizon publications.
+
+    Keep the objective/slack semantics explicit: the objective is the solver's
+    full-horizon candidate objective, while the prefix is separately validated
+    over its short exact-rollout horizon. Older bags may omit these fields.
+    """
+    chains: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for row in diagnostics:
+        if row.get("status") == "accepted_candidate_prefix":
+            current.append(row)
+        elif current:
+            chains.append(current)
+            current = []
+    if current:
+        chains.append(current)
+    if not chains:
+        return
+
+    lengths = [len(chain) for chain in chains]
+    print("MPC candidate-prefix chains:")
+    print(f"  chains={len(chains)} total_prefix_actions={sum(lengths)} "
+          f"lengths={lengths} max={max(lengths)} "
+          f"run_collision_count={collision_count if collision_count is not None else 'unknown'}")
+    for index, chain in enumerate(chains, 1):
+        steer = [float(row["first_action"][0]) for row in chain
+                 if isinstance(row.get("first_action"), list) and
+                 len(row["first_action"]) >= 2 and
+                 math.isfinite(float(row["first_action"][0]))]
+        reversals = sum(left * right < 0.0
+                        for left, right in zip(steer, steer[1:]))
+        steer_curvature_pairs = [
+            (float(row["first_action"][0]),
+             float(row["path_curvature_per_m"]))
+            for row in chain
+            if isinstance(row.get("first_action"), list) and
+            len(row["first_action"]) >= 2 and
+            isinstance(row.get("path_curvature_per_m"), (int, float)) and
+            math.isfinite(float(row["first_action"][0])) and
+            math.isfinite(float(row["path_curvature_per_m"]))]
+        same_sign = sum(value * curve > 0.0
+                        for value, curve in steer_curvature_pairs)
+        opposite_sign = sum(value * curve < 0.0
+                            for value, curve in steer_curvature_pairs)
+        solver = [row.get("solver", {}) for row in chain]
+        residuals = [max(float(item.get("primal_residual", math.nan)),
+                         float(item.get("dual_residual", math.nan)))
+                     for item in solver]
+        residuals = [value for value in residuals if math.isfinite(value)]
+        objectives = []
+        for row in chain:
+            solver_diagnostics = row.get("solver", {})
+            objective = solver_diagnostics.get(
+                "objective", row.get("objective"))
+            if (isinstance(objective, (int, float)) and
+                    math.isfinite(float(objective))):
+                objectives.append(float(objective))
+        slacks = [float(row["minimum_predicted_corridor_slack_m"])
+                  for row in chain
+                  if isinstance(row.get("minimum_predicted_corridor_slack_m"),
+                                (int, float)) and
+                  math.isfinite(float(row["minimum_predicted_corridor_slack_m"]))]
+        progress = [float(row["progress_m"]) for row in chain
+                    if isinstance(row.get("progress_m"), (int, float)) and
+                    math.isfinite(float(row["progress_m"]))]
+        admm_statuses = Counter(
+            str(item.get("admm_status", "missing")) for item in solver)
+        residual_summary = (
+            f"{percentile(residuals, 0.50):.4g}/"
+            f"{percentile(residuals, 0.95):.4g}/{max(residuals):.4g}"
+            if residuals else "unavailable")
+        slack_summary = f"{min(slacks):.4g}m" if slacks else "unavailable"
+        progress_summary = (
+            f"{progress[0]:.3f}..{progress[-1]:.3f}m" if progress
+            else "unavailable")
+        print(
+            f"  chain{index}: n={len(chain)} "
+            f"progress={progress_summary} "
+            f"steer(+/-/0)="
+            f"{sum(value > 1e-4 for value in steer)}/"
+            f"{sum(value < -1e-4 for value in steer)}/"
+            f"{sum(abs(value) <= 1e-4 for value in steer)} "
+            f"reversals={reversals} steer-curvature(same/opposite)="
+            f"{same_sign}/{opposite_sign} ADMM={dict(admm_statuses)} "
+            f"residual(p50/p95/max)={residual_summary} "
+            f"prefix_objective_n={len(objectives)} "
+            f"prefix_slack_n/min={len(slacks)}/{slack_summary}")
+        if objectives:
+            print("    solver full-horizon candidate objective "+
+                  f"min/p50/p95/max={min(objectives):.6g}/"
+                  f"{percentile(objectives, 0.50):.6g}/"
+                  f"{percentile(objectives, 0.95):.6g}/"
+                  f"{max(objectives):.6g}")
+        if slacks:
+            print("    validated-prefix corridor slack "+
+                  f"min/p10/p50={min(slacks):.5f}/"
+                  f"{percentile(slacks, 0.10):.5f}/"
+                  f"{percentile(slacks, 0.50):.5f}m")
+
+    print("  Steering×curvature is descriptive only; long-chain association is "
+          "run-level and is not a causal threshold.")
+
+
+def report_prefix_warm_start_consistency(
+    diagnostics: list[dict[str, Any]],
+) -> None:
+    """Check that a published prefix seeds the next nominal after one shift."""
+    comparisons: list[tuple[float, float]] = []
+    skipped = 0
+    seed_source_missing = 0
+    seed_source_mismatch = 0
+    ordered = sorted(diagnostics, key=lambda row: float(row.get("bag_time", 0.0)))
+    for previous, current in zip(ordered, ordered[1:]):
+        prev = previous.get("json", {})
+        curr = current.get("json", {})
+        if prev.get("status") != "accepted_candidate_prefix":
+            continue
+        dt = float(current.get("bag_time", 0.0)) - float(
+            previous.get("bag_time", 0.0))
+        if dt <= 0.0 or dt > 0.040:
+            skipped += 1
+            continue
+        issued = prev.get("candidate_controls")
+        nominal = curr.get("nominal_controls")
+        current_solver = curr.get("solver", {})
+        seed_source = current_solver.get(
+            "nominal_control_seed_source",
+            curr.get("nominal_control_seed_source"))
+        if seed_source is None:
+            seed_source_missing += 1
+        elif seed_source != 2:
+            seed_source_mismatch += 1
+            skipped += 1
+            continue
+        if (not isinstance(issued, list) or len(issued) < 2 or
+                not isinstance(nominal, list) or not nominal):
+            skipped += 1
+            continue
+        try:
+            steering_error = abs(float(nominal[0][0]) - float(issued[1][0]))
+            throttle_error = abs(float(nominal[0][1]) - float(issued[1][1]))
+        except (IndexError, TypeError, ValueError):
+            skipped += 1
+            continue
+        comparisons.append((steering_error, throttle_error))
+
+    if not comparisons and not skipped:
+        return
+    print("MPC candidate-prefix → next nominal warm-start consistency:")
+    if not comparisons:
+        print(f"  comparable adjacent pairs=0 skipped={skipped}; "
+              "control arrays or an adjacent cycle are missing")
+        return
+    steering = [pair[0] for pair in comparisons]
+    throttle = [pair[1] for pair in comparisons]
+    print(f"  compared={len(comparisons)} skipped={skipped}; next nominal[0] "
+          "vs published-prefix candidate[1] abs error (steering/throttle):")
+    print(f"  steering max={max(steering):.3g}rad, "
+          f"throttle max={max(throttle):.3g}; "
+          f"exact-within-1e-5="
+          f"{sum(a <= 1.0e-5 and b <= 1.0e-5 for a, b in comparisons)}"
+          f"/{len(comparisons)}")
+    if seed_source_missing or seed_source_mismatch:
+        print(f"  seed-source code missing={seed_source_missing}, "
+              f"explicitly not issued-sequence={seed_source_mismatch}; "
+              "array equality is still measured independently")
+
+
+def report_jacobian_worker_distribution(
+    diagnostics: list[dict[str, Any]],
+) -> None:
+    rows = []
+    for row in diagnostics:
+        solver = row.get("solver", row)
+        if (isinstance(solver.get("jacobian_worker_cpu_us"), list) and
+                len(solver["jacobian_worker_cpu_us"]) == 8 and
+                isinstance(solver.get("jacobian_worker_stage_wall_us"), list) and
+                len(solver["jacobian_worker_stage_wall_us"]) == 8 and
+                isinstance(solver.get("jacobian_worker_stage_count"), list) and
+                len(solver["jacobian_worker_stage_count"]) == 8):
+            rows.append({**row, **solver})
+    if not rows:
+        return
+    print("MPC Jacobian worker load (new diagnostic schema):")
+    for worker in range(8):
+        active = [row for row in rows
+                  if int(row["jacobian_worker_stage_count"][worker]) > 0]
+        if not active:
+            continue
+        cpu = [float(row["jacobian_worker_cpu_us"][worker])
+               for row in active]
+        stage_wall = [float(row["jacobian_worker_stage_wall_us"][worker])
+                      for row in active]
+        stage_count = sum(int(row["jacobian_worker_stage_count"][worker])
+                          for row in rows)
+        worker_tids = [int(row["jacobian_worker_os_tid"][worker])
+                       for row in active
+                       if isinstance(row.get("jacobian_worker_os_tid"), list)
+                       and len(row["jacobian_worker_os_tid"]) == 8
+                       and int(row["jacobian_worker_os_tid"][worker]) > 0]
+        tid = Counter(worker_tids).most_common(1)[0][0] if worker_tids else 0
+        print(
+            f"  worker{worker}(tid={tid or 'unrecorded'}): "
+            f"active_cycles={len(active)} "
+            f"stage_count={stage_count} "
+            f"CPU_us(p50/p95/max)="
+            f"{percentile(cpu, 0.50):.1f}/"
+            f"{percentile(cpu, 0.95):.1f}/{max(cpu):.1f} "
+            f"stage_wall_sum_us(p50/p95/max)="
+            f"{percentile(stage_wall, 0.50):.1f}/"
+            f"{percentile(stage_wall, 0.95):.1f}/{max(stage_wall):.1f}")
+    print("  Per-worker stage-wall sums include task durations, not thread wait; "
+          "use jacobian_wall_us for elapsed parallel wall time.")
+
+
 def report_development_actuator_timing(rows: list[dict[str, Any]]) -> None:
     events = [row["json"] for row in rows
               if isinstance(row.get("json"), dict) and
@@ -4774,6 +4993,13 @@ def main() -> int:
             print("MPC diagnostic JSON decode: "
                   f"repaired_known_quote={repaired} undecodable={undecodable}")
         print(f"MPC status counts: {dict(Counter(x.get('status') for x in payloads))}")
+        collision_values = [int(row["value"])
+                            for row in data.get(COLLISION, [])
+                            if isinstance(row.get("value"), (int, float))]
+        report_candidate_prefix_chains(
+            payloads, max(collision_values) if collision_values else None)
+        report_prefix_warm_start_consistency(diagnostics)
+        report_jacobian_worker_distribution(payloads)
         report_admm_convergence(diagnostics, data.get(DRIVE_COMMAND, []))
         print(f"MPC plant-state source counts: {dict(Counter(x.get('plant_state_source') for x in payloads))}")
         report_horizon_errors(truth, diagnostics, load_trajectory(args.trajectory))

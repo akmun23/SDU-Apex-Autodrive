@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 
@@ -144,6 +145,11 @@ def main() -> int:
     parser.add_argument("--stall-timeout-s", type=float, default=20.0)
     parser.add_argument("--post-target-lap-guard-s", type=float, default=0.5,
                         help="keep collision monitoring active after the target lap")
+    parser.add_argument(
+        "--stop-simulator-container",
+        metavar="NAME",
+        help="send SIGINT to this simulator Docker container when the watch ends",
+    )
     args = parser.parse_args()
     if ((args.target_lap < 1 and not args.collision_only and
          not args.mpc_horizon_test and not args.mpc_run and
@@ -252,6 +258,31 @@ def main() -> int:
     finally:
         watcher.destroy_node()
         rclpy.shutdown()
+        if args.stop_simulator_container:
+            try:
+                stopped = subprocess.run(
+                    ["docker", "kill", "--signal=SIGINT",
+                     args.stop_simulator_container],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+                if stopped.returncode == 0:
+                    print(
+                        f"SIMULATOR_STOP_REQUESTED: "
+                        f"{args.stop_simulator_container}", flush=True)
+                else:
+                    detail = (stopped.stderr or stopped.stdout).strip()
+                    print(
+                        f"SIMULATOR_STOP_FAILED: "
+                        f"{args.stop_simulator_container}: {detail}",
+                        file=sys.stderr, flush=True)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(
+                    f"SIMULATOR_STOP_FAILED: "
+                    f"{args.stop_simulator_container}: {error}",
+                    file=sys.stderr, flush=True)
     return result
 
 

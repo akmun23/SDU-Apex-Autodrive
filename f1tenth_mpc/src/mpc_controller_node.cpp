@@ -365,6 +365,7 @@ public:
             RCLCPP_ERROR(get_logger(),
                 "MPC has no valid trajectory; controller remains inhibited");
         }
+        certified_plan_ = {};
         if (!enabled_) {
             RCLCPP_WARN(get_logger(),
                 "MPC is inactive; no command publisher is created");
@@ -529,6 +530,7 @@ private:
             reason);
         if (reset_rti_memory) {
             mpc_rti_memory_reset(&rti_memory_);
+            certified_plan_ = {};
         }
         /* A rejected plan is a latched controller fault, not a recovery
          * command. The run supervisor owns stopping the simulator; the MPC
@@ -597,7 +599,7 @@ private:
     {
         if (fault_reason) *fault_reason = nullptr;
         prior_plan_revalidation_attempted_ = true;
-        const MpcRtiNominal_t &previous = rti_memory_.nominal;
+        const MpcRtiNominal_t &previous = certified_plan_;
         if (!result || !previous.valid || previous.horizon < 2) {
             if (fault_reason)
                 *fault_reason = "no unconsumed accepted MPC plan remains";
@@ -667,6 +669,9 @@ private:
         }
         prior_plan_exact_valid_ = true;
         recovered_action_revalidated_nominal_ = revalidated;
+        result->nonlinear_objective = revalidated.validation_objective;
+        result->minimum_predicted_corridor_slack_m =
+            revalidated.validation_minimum_corridor_slack_m;
         prior_plan_validated_control_index_ = next_control_index;
         prior_plan_actions_remaining_ = previous.horizon -
             next_control_index - 1;
@@ -679,12 +684,28 @@ private:
             return false;
         }
         const MpcModelControl_t &first = revalidated.controls[0];
+        MpcModelControl_t next_warm_start[PREDICTION_HORIZON]{};
+        for (int k = 0; k < PREDICTION_HORIZON; ++k) {
+            const int source_index = std::min(
+                next_control_index + k, previous.horizon - 1);
+            next_warm_start[k] = previous.controls[source_index];
+        }
+        next_warm_start[0] = first;
         const int64_t command_stamp_ns = publish_command(
             first.steering_target_rad, first.throttle_command);
         if (command_stamp_ns == 0) {
             if (fault_reason)
                 *fault_reason = "revalidated prior-plan action could not be "
                     "published within the command envelope";
+            return false;
+        }
+        /* Commit the issued-sequence warm start only after publish_command()
+         * confirms that this action entered the actuator command history. */
+        if (!mpc_rti_memory_set_warm_start_controls(&rti_memory_,
+                next_warm_start, PREDICTION_HORIZON)) {
+            if (fault_reason)
+                *fault_reason = "published prior action could not seed the "
+                    "next MPC nominal sequence";
             return false;
         }
 
@@ -716,7 +737,8 @@ private:
         if (fault_reason) *fault_reason = nullptr;
         if (!result || result->status !=
                 MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT ||
-            result->candidate_control_count < 1) return false;
+            result->candidate_control_count < 1 ||
+            result->candidate_control_count > PREDICTION_HORIZON) return false;
 
         candidate_prefix_revalidation_attempted_ = true;
         const bool solver_converged =
@@ -788,6 +810,13 @@ private:
         }
         candidate_prefix_exact_valid_ = true;
         recovered_action_revalidated_nominal_ = revalidated;
+        result->nonlinear_objective = revalidated.validation_objective;
+        result->minimum_predicted_corridor_slack_m =
+            revalidated.validation_minimum_corridor_slack_m;
+        MpcModelControl_t next_warm_start[PREDICTION_HORIZON]{};
+        for (int k = 0; k < result->candidate_control_count; ++k)
+            next_warm_start[k] = result->candidate_controls[k];
+        next_warm_start[0] = revalidated.controls[0];
 
         const char * timing_fault_reason = nullptr;
         if (!cycle_time_is_valid(callback_steady_ns,
@@ -805,12 +834,22 @@ private:
                     "be published within the command envelope";
             return false;
         }
+        /* Do not let an unpublished candidate overwrite the next nominal.
+         * The command is now in the actuator history, so its shifted suffix
+         * is the correct next-cycle seed. */
+        if (!mpc_rti_memory_set_warm_start_controls(&rti_memory_,
+                next_warm_start, result->candidate_control_count)) {
+            if (fault_reason)
+                *fault_reason = "published candidate prefix could not seed "
+                    "the next MPC nominal sequence";
+            return false;
+        }
 
         /* The stored accepted plan advanced in time even though this newer
          * candidate supplied the output. Skip the now-stale corresponding
          * action before it can be used as a later prior-plan recovery. */
-        const MpcRtiNominal_t &prior = rti_memory_.nominal;
-        if (prior.valid && prior_plan_control_index_ < prior.horizon - 1)
+        if (certified_plan_.valid &&
+            prior_plan_control_index_ < certified_plan_.horizon - 1)
             ++prior_plan_control_index_;
         /* This is a newly solved control, not stale-plan replay. Even when
          * ADMM hit its iteration cap, publish only if the exact three-step
@@ -824,7 +863,6 @@ private:
         result->first_control = first;
         result->published_steering_command = first.steering_target_rad;
         result->published_throttle = first.throttle_command;
-        result->candidate_control_count = 0;
         return true;
     }
 
@@ -1265,7 +1303,7 @@ private:
         int64_t callback_steady_ns, int64_t synchronize_steady_ns)
     {
         if (!diagnostics_pub_) return;
-        const int steps[] = {1, 5, 10, 20, 30};
+        const int steps[] = {1, 2, 3, 5, 10, 20, 30};
         std::ostringstream json;
         const auto json_number = [&json](double value) {
             if (std::isfinite(value)) json << value;
@@ -1556,6 +1594,27 @@ private:
              << result.jacobian_source_sensitivity_calls
              << ",\"jacobian_finite_difference_columns\":"
              << result.jacobian_finite_difference_columns
+             << ",\"jacobian_worker_cpu_us\":[";
+        for (int worker = 0; worker < MPC_RTI_MAX_JACOBIAN_THREADS; ++worker) {
+            if (worker > 0) json << ',';
+            json_number(result.jacobian_worker_cpu_us[worker]);
+        }
+        json << "],\"jacobian_worker_stage_wall_us\":[";
+        for (int worker = 0; worker < MPC_RTI_MAX_JACOBIAN_THREADS; ++worker) {
+            if (worker > 0) json << ',';
+            json_number(result.jacobian_worker_stage_wall_us[worker]);
+        }
+        json << "],\"jacobian_worker_stage_count\":[";
+        for (int worker = 0; worker < MPC_RTI_MAX_JACOBIAN_THREADS; ++worker) {
+            if (worker > 0) json << ',';
+            json << result.jacobian_worker_stage_count[worker];
+        }
+        json << "],\"jacobian_worker_os_tid\":[";
+        for (int worker = 0; worker < MPC_RTI_MAX_JACOBIAN_THREADS; ++worker) {
+            if (worker > 0) json << ',';
+            json << result.jacobian_worker_os_tid[worker];
+        }
+        json << ']'
              << ",\"nominal_build_us\":" << result.nominal_build_us
              << ",\"reference_seed_us\":" << result.reference_seed_us
              << ",\"cold_start_queue_seed_us\":"
@@ -1566,6 +1625,8 @@ private:
              << result.progress_reference_resampling_us
              << ",\"nominal_rollout_b_us\":"
              << result.nominal_rollout_b_us
+             << ",\"nominal_control_seed_source\":"
+             << result.nominal_control_seed_source
              << ",\"admm_us\":" << result.admm_us
              << ",\"exact_rollout_us\":" << result.exact_rollout_us
              << ",\"nonlinear_validation_us\":"
@@ -1624,6 +1685,14 @@ private:
         for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
             if (k > 0) json << ',';
             json_number(result.lateral_accel_proxy_by_stage_mps2[k]);
+        }
+        json << ']';
+        json << ",\"nominal_controls\":[";
+        for (int k = 0; k < result.nominal_control_count; ++k) {
+            if (k > 0) json << ',';
+            json << '['
+                 << result.nominal_controls[k].steering_target_rad << ','
+                 << result.nominal_controls[k].throttle_command << ']';
         }
         json << ']';
         if (result.candidate_control_count > 0) {
@@ -2470,6 +2539,13 @@ private:
                     "latched MPC plan starts outside the drive command envelope");
                 return;
             }
+            certified_plan_ = rti_memory_.nominal;
+            if (certified_plan_.valid && certified_plan_.horizon > 0) {
+                certified_plan_.controls[0].steering_target_rad =
+                    result.published_steering_command;
+                certified_plan_.controls[0].throttle_command =
+                    result.published_throttle;
+            }
             last_command_publication_lead_ns_ = command_stamp_ns >=
                 control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
             open_loop_horizon_timer_ = create_wall_timer(
@@ -2501,6 +2577,20 @@ private:
             }
             last_command_publication_lead_ns_ = command_stamp_ns >=
                 control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
+            certified_plan_ = rti_memory_.nominal;
+            if (certified_plan_.valid && certified_plan_.horizon > 0) {
+                certified_plan_.controls[0].steering_target_rad =
+                    result.published_steering_command;
+                certified_plan_.controls[0].throttle_command =
+                    result.published_throttle;
+                MpcModelControl_t issued_plan[PREDICTION_HORIZON]{};
+                for (int k = 0; k < certified_plan_.horizon; ++k)
+                    issued_plan[k] = certified_plan_.controls[k];
+                issued_plan[0] = {result.published_steering_command,
+                    result.published_throttle};
+                mpc_rti_memory_set_warm_start_controls(&rti_memory_,
+                    issued_plan, certified_plan_.horizon);
+            }
             prior_plan_control_index_ = 0;
             consecutive_prior_plan_actions_ = 0;
             consecutive_candidate_prefix_actions_ = 0;
@@ -2594,6 +2684,7 @@ private:
     rclcpp::Time last_source_stamp_{0, 0, RCL_ROS_TIME};
     MpcRtiCycleConfiguration_t rti_config_{};
     MpcRtiMemory_t rti_memory_{};
+    MpcRtiNominal_t certified_plan_{};
     std::vector<Waypoint> trajectory_;
     MpcStateSynchronizer state_synchronizer_;
     MpcSyncStatus latest_odom_ingest_status_{MpcSyncStatus::kMissingOdom};

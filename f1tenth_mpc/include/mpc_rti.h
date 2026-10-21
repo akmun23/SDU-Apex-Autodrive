@@ -113,6 +113,9 @@ typedef struct
     int horizon;
     int speed_reference_valid;
     int valid;
+    /* Filled by exact command-sequence validation, not by nominal building. */
+    float validation_objective;
+    float validation_minimum_corridor_slack_m;
     /* Per-cycle benchmark instrumentation; microseconds from CLOCK_MONOTONIC. */
     double reference_seed_us;
     double cold_start_queue_seed_us;
@@ -166,6 +169,10 @@ typedef struct
     double jacobian_wall_us;
     double jacobian_thread_cpu_us;
     double jacobian_slowest_stage_us;
+    double jacobian_worker_cpu_us[MPC_RTI_MAX_JACOBIAN_THREADS];
+    double jacobian_worker_stage_wall_us[MPC_RTI_MAX_JACOBIAN_THREADS];
+    int jacobian_worker_stage_count[MPC_RTI_MAX_JACOBIAN_THREADS];
+    uint64_t jacobian_worker_os_tid[MPC_RTI_MAX_JACOBIAN_THREADS];
     int linearization_failure_stage;
     int linearization_failure_reason;
     int linearization_failure_index;
@@ -199,7 +206,14 @@ typedef struct
 typedef struct
 {
     RiccatiAdmmState_t solver_state;
+    /* Last full-horizon nominal retained for progress seeding. This is not
+     * the certified plan that may be replayed after a rejected solve. */
     MpcRtiNominal_t nominal;
+    /* Current sequence, including the command just issued at element zero.
+     * The next nominal shifts it once, so stage zero matches the next action. */
+    MpcModelControl_t warm_start_controls[PREDICTION_HORIZON];
+    int warm_start_control_count;
+    int warm_start_controls_valid;
 } MpcRtiMemory_t;
 
 typedef enum
@@ -275,6 +289,10 @@ typedef struct
      * publishable command on a rejected cycle. */
     int candidate_control_count;
     MpcModelControl_t candidate_controls[PREDICTION_HORIZON];
+    MpcModelControl_t nominal_controls[PREDICTION_HORIZON];
+    int nominal_control_count;
+    /* 0=cold seed, 1=shifted prior nominal, 2=issued command sequence. */
+    int nominal_control_seed_source;
     float rho_start;
     float rho_u_start;
     float rho_final;
@@ -306,6 +324,10 @@ typedef struct
     double jacobian_wall_us;
     double jacobian_thread_cpu_us;
     double jacobian_slowest_stage_us;
+    double jacobian_worker_cpu_us[MPC_RTI_MAX_JACOBIAN_THREADS];
+    double jacobian_worker_stage_wall_us[MPC_RTI_MAX_JACOBIAN_THREADS];
+    int jacobian_worker_stage_count[MPC_RTI_MAX_JACOBIAN_THREADS];
+    uint64_t jacobian_worker_os_tid[MPC_RTI_MAX_JACOBIAN_THREADS];
     double qp_build_us;
     double nominal_build_us;
     double reference_seed_us;
@@ -337,6 +359,24 @@ int mpc_rti_build_nominal(
     const MpcRtiState_t *current_state,
     double current_progress,
     const MpcRtiNominal_t *previous_nominal,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    int horizon,
+    const MpcRtiConfiguration_t *configuration,
+    MpcRtiNominal_t *nominal,
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
+
+/* As above, but shift the supplied command sequence instead of deriving
+ * controls from the prior nominal. The sequence must include the most
+ * recently issued command at index zero. */
+int mpc_rti_build_nominal_with_warm_start(
+    const MpcRtiState_t *current_state,
+    double current_progress,
+    const MpcRtiNominal_t *previous_nominal,
+    const MpcModelControl_t *warm_start_controls,
+    int warm_start_control_count,
     const MpcTrajectorySample_t *trajectory,
     size_t trajectory_count,
     double lap_length,
@@ -383,6 +423,10 @@ MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
     int *failure_stage);
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory);
+int mpc_rti_memory_set_warm_start_controls(
+    MpcRtiMemory_t *memory,
+    const MpcModelControl_t *controls,
+    int control_count);
 
 /* One RTI cycle: build shifted nominal/QP, solve once, validate the exact
  * nonlinear rollout, and commit the candidate only when it is accepted. */

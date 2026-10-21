@@ -196,7 +196,29 @@ def main() -> int:
     parser.add_argument("--max-speed-mps", type=float, default=16.0)
     parser.add_argument("--startup-speed-mps", type=float, default=1.5)
     parser.add_argument("--startup-ramp-laps", type=float, default=1.0)
+    parser.add_argument(
+        "--last-cycles", type=int, default=0,
+        help="export only the final N valid MPC diagnostic states for a "
+             "terminal-state replay corpus (0 exports the full capture)")
+    parser.add_argument(
+        "--progress-range-m", type=float, nargs=2, metavar=("START", "END"),
+        help="export diagnostic states in [START, END) trajectory progress; "
+             "useful for isolating the onset preceding a terminal failure")
     args = parser.parse_args()
+
+    if args.last_cycles < 0:
+        parser.error("--last-cycles must be zero or positive")
+    if args.last_cycles and args.progress_range_m is not None:
+        parser.error("choose either --last-cycles or --progress-range-m")
+    if args.progress_range_m is not None:
+        start_m, end_m = args.progress_range_m
+        if not (math.isfinite(start_m) and math.isfinite(end_m) and
+                end_m > start_m):
+            parser.error("--progress-range-m requires finite END > START")
+    if args.oracle_ground_truth_pose and (
+            args.last_cycles or args.progress_range_m is not None):
+        parser.error("terminal-state selection applies to MPC diagnostic-state "
+                     "export, not the oracle-pose export")
 
     data = read_bag(args.bag)
     trajectory = load_trajectory(args.trajectory)
@@ -235,6 +257,17 @@ def main() -> int:
     ]
     if not diagnostic_rows:
         raise RuntimeError("bag has no valid MPC state diagnostics")
+    if args.progress_range_m is not None:
+        start_m, end_m = args.progress_range_m
+        diagnostic_rows = [
+            row for row in diagnostic_rows
+            if start_m <= float(row.get("progress_m", math.nan)) < end_m
+        ]
+        if not diagnostic_rows:
+            raise RuntimeError(
+                "no valid MPC diagnostic states fall in the progress range")
+    if args.last_cycles:
+        diagnostic_rows = diagnostic_rows[-args.last_cycles:]
     plant_stamps = sorted(plant_by_ns)
 
     def plant_at(stamp_ns: int) -> dict | None:

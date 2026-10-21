@@ -1040,6 +1040,64 @@ TEST(MpcReference, LaunchesFromRestWhenSpeedReferenceIsPositive)
          "when a stopped car is still well below its requested speed.";
 }
 
+TEST(MpcReference, IssuedCandidateSequenceSeedsNextNominalAfterShift)
+{
+  MpcTrajectorySample_t trajectory[3] = {
+      {0.0, 0.0, 0.0, 0.0, 0.0, 1.5, 2.0, 2.0, 0.0},
+      {10.0, 10.0, 0.0, 0.0, 0.0, 1.5, 2.0, 2.0, 0.0},
+      {20.0, 10.0, 10.0, 0.0, 0.0, 1.5, 2.0, 2.0, 0.0}};
+  size_t trajectory_count = 3;
+  double lap_length = 0.0;
+  ASSERT_TRUE(mpc_trajectory_prepare(
+      trajectory, &trajectory_count, &lap_length));
+
+  MpcRtiConfiguration_t config{};
+  config.max_speed_mps = 16.0f;
+  config.active_speed_ceiling_mps = 1.5f;
+  config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
+  config.corridor_margin_m = 0.05f;
+  config.first_prediction_corridor_margin_m = 0.05f;
+  config.corridor_preview_halfwidth_m = 0.10f;
+  config.nonlinear_corridor_tolerance_m = 0.01f;
+  config.startup_nominal_throttle_seed = 0.9f;
+
+  MpcRtiState_t initial{};
+  MpcModelControl_t just_issued[PREDICTION_HORIZON]{};
+  for (int k = 0; k < PREDICTION_HORIZON; ++k) {
+    just_issued[k].steering_target_rad = 0.01f * (k + 1);
+    just_issued[k].throttle_command = 0.20f + 0.01f * k;
+  }
+  MpcRtiMemory_t memory{};
+  mpc_rti_memory_reset(&memory);
+  ASSERT_TRUE(mpc_rti_memory_set_warm_start_controls(
+      &memory, just_issued, PREDICTION_HORIZON));
+  ASSERT_EQ(memory.warm_start_control_count, PREDICTION_HORIZON);
+  ASSERT_EQ(memory.warm_start_controls_valid, 1);
+  MpcRtiNominal_t nominal{};
+  MpcRtiReference_t references[PREDICTION_HORIZON + 1] = {};
+  ASSERT_TRUE(mpc_rti_build_nominal_with_warm_start(&initial, 0.0, nullptr,
+      memory.warm_start_controls, memory.warm_start_control_count,
+      trajectory, trajectory_count,
+      lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &config,
+      &nominal, references));
+
+  EXPECT_FLOAT_EQ(nominal.controls[0].steering_target_rad,
+      just_issued[1].steering_target_rad);
+  EXPECT_FLOAT_EQ(nominal.controls[0].throttle_command,
+      just_issued[1].throttle_command);
+  EXPECT_FLOAT_EQ(nominal.controls[1].steering_target_rad,
+      just_issued[2].steering_target_rad);
+  EXPECT_FLOAT_EQ(nominal.controls[1].throttle_command,
+      just_issued[2].throttle_command);
+  EXPECT_NE(nominal.controls[0].throttle_command,
+      config.startup_nominal_throttle_seed)
+      << "An explicit published-sequence seed must not be overwritten by "
+         "the generic launch initialization.";
+  mpc_rti_memory_reset(&memory);
+  EXPECT_EQ(memory.warm_start_controls_valid, 0);
+  EXPECT_EQ(memory.warm_start_control_count, 0);
+}
+
 TEST(MpcReference,
      WheelSlipBelowSpeedTargetDoesNotForceUnityFullBrakeMode)
 {
