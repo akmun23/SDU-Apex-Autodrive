@@ -2771,7 +2771,7 @@ def report_source_plant_rollout(
     oracle_throttle_feedback: bool = False,
     reconstruct_command_queue_from_stamps: bool = False,
     reconstruct_command_queue_from_bridge: bool = False,
-    bridge_command_epoch_offset: int = 0,
+    bridge_command_epoch_offset: int = 1,
     steering_command_samples: list[dict[str, Any]] | None = None,
     throttle_command_samples: list[dict[str, Any]] | None = None,
     bridge_timing_samples: list[dict[str, Any]] | None = None,
@@ -2780,7 +2780,7 @@ def report_source_plant_rollout(
     """Replay only odom plant state and queued commands through the C++ MPC plant.
 
     Starts from a recorded UnityPlantState, then advances with the recorded
-    slot-1 actuator command sequence. It never reads future measured states
+    slot-2 actuator command sequence. It never reads future measured states
     during a rollout; simulator truth is used only to score each endpoint.
     The optional oracle-motion diagnostic replaces only initial u/v/r with
     same-epoch Unity truth. Hidden plant states and all future inputs remain
@@ -2853,47 +2853,70 @@ def report_source_plant_rollout(
                 ordered[sample_index]["value"] if sample_index >= 0 else 0.0)
         return values
 
-    command_samples_from_bridge: tuple[list[dict[str, Any]],
-                                       list[dict[str, Any]]] | None = None
-    if reconstruct_command_queue_from_bridge:
-        bridge_steering_samples: list[dict[str, Any]] = []
-        bridge_throttle_samples: list[dict[str, Any]] = []
-        for row in bridge_timing_samples or []:
-            payload = row.get("json", {})
-            request_stamp_ns = payload.get("bridge_request_ros_stamp_ns")
-            steering_sent = payload.get("sent_steering_norm")
-            throttle_sent = payload.get("sent_throttle_norm")
-            if (request_stamp_ns is None or steering_sent is None or
-                    throttle_sent is None):
-                continue
-            try:
-                request_stamp = int(request_stamp_ns) * 1.0e-9
-                steering_value = float(steering_sent)
-                throttle_value = float(throttle_sent)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not (math.isfinite(request_stamp) and
-                    math.isfinite(steering_value) and
-                    math.isfinite(throttle_value)):
-                continue
-            bridge_steering_samples.append({
-                "bag_time": request_stamp, "value": steering_value})
-            bridge_throttle_samples.append({
-                "bag_time": request_stamp, "value": throttle_value})
-        command_samples_from_bridge = (
-            bridge_steering_samples, bridge_throttle_samples)
+    # Bridge request stamps and ROS message headers are the same epoch, but
+    # converting their nanoseconds independently to float seconds can leave a
+    # sub-microsecond difference. Matching by rounded float keys or selecting
+    # only samples <= the rounded header can then choose the previous request.
+    # Associate by nearest integer-nanosecond epoch instead. The 1 ms bound is
+    # far below the 25 ms packet period and rejects adjacent requests.
+    bridge_payload_by_epoch: list[dict[str, Any]] = [{} for _ in times]
+    bridge_epoch_valid = [False for _ in times]
+    bridge_request_events: list[tuple[int, dict[str, Any]]] = []
+    for event in bridge_timing_samples or []:
+        payload = event.get("json", {})
+        request_ns = payload.get("bridge_request_ros_stamp_ns")
+        if request_ns is None:
+            continue
+        try:
+            bridge_request_events.append((int(request_ns), payload))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    bridge_request_events.sort(key=lambda event: event[0])
+    bridge_request_stamps_ns = [event[0] for event in bridge_request_events]
+    for index, epoch in enumerate(times):
+        epoch_ns = round(epoch * 1.0e9)
+        insertion = bisect.bisect_left(bridge_request_stamps_ns, epoch_ns)
+        candidates = [candidate for candidate in (insertion - 1, insertion)
+                     if 0 <= candidate < len(bridge_request_events)]
+        if not candidates:
+            continue
+        nearest = min(candidates,
+                      key=lambda candidate:
+                      abs(bridge_request_stamps_ns[candidate] - epoch_ns))
+        request_ns, payload = bridge_request_events[nearest]
+        if abs(request_ns - epoch_ns) <= 1_000_000:
+            bridge_payload_by_epoch[index] = payload
+            bridge_epoch_valid[index] = True
 
-    steering_samples = (command_samples_from_bridge[0]
-                        if command_samples_from_bridge is not None
-                        else steering_command_samples)
-    throttle_samples = (command_samples_from_bridge[1]
-                        if command_samples_from_bridge is not None
-                        else throttle_command_samples)
+    if reconstruct_command_queue_from_bridge:
+        # A missing exact request epoch stays invalid for validation below;
+        # zero here is only a storage placeholder and is never scored as a
+        # reconstructed command.
+        steering_command_by_epoch = [
+            float(payload["sent_steering_norm"])
+            if valid and payload.get("sent_steering_norm") is not None else 0.0
+            for payload, valid in zip(bridge_payload_by_epoch,
+                                      bridge_epoch_valid)]
+        throttle_command_by_epoch = [
+            float(payload["sent_throttle_norm"])
+            if valid and payload.get("sent_throttle_norm") is not None else 0.0
+            for payload, valid in zip(bridge_payload_by_epoch,
+                                      bridge_epoch_valid)]
+        bridge_epoch_valid = [
+            valid and
+            payload.get("sent_steering_norm") is not None and
+            payload.get("sent_throttle_norm") is not None
+            for payload, valid in zip(bridge_payload_by_epoch,
+                                      bridge_epoch_valid)]
+    else:
+        steering_samples = steering_command_samples
+        throttle_samples = throttle_command_samples
+        steering_command_by_epoch = sample_commands_at_epochs(steering_samples)
+        throttle_command_by_epoch = sample_commands_at_epochs(throttle_samples)
+
     reconstruct_command_queue = (
         reconstruct_command_queue_from_stamps or
         reconstruct_command_queue_from_bridge)
-    steering_command_by_epoch = sample_commands_at_epochs(steering_samples)
-    throttle_command_by_epoch = sample_commands_at_epochs(throttle_samples)
     steering_feedback_phase_errors = {
         offset: [] for offset in range(-2, 4)
     }
@@ -2924,15 +2947,15 @@ def report_source_plant_rollout(
                 f"{clock_offset:+.3f}s); use a live request-stamped bag")
             return
         # Compare both serialized queue slots and actuator feedback against
-        # nearby Bridge request epochs. The slot names are relative to the
-        # observer's current publication, whereas the rollout offset is
-        # relative to the preceding request; comparing only slot 1 to that
-        # selected rollout epoch silently mixes those two conventions.
+        # nearby Bridge request epochs. Slot 2 is the newest command associated
+        # with the current epoch and is consumed over the following plant
+        # interval; slot 1 is only the preceding command.
         # Keep this diagnostic descriptive: Bridge request stamps do not
         # expose Unity FixedUpdate/application sequence numbers.
         def report_bridge_epoch_alignment(
             label: str, observed_values: list[float],
             reference_values: list[float], valid: list[bool] | None = None,
+            reference_valid: list[bool] | None = None,
         ) -> None:
             offsets = (-2, -1, 0, 1)
             print(f"  {label} vs Bridge sent command by request-epoch offset:")
@@ -2941,7 +2964,9 @@ def report_source_plant_rollout(
                     observed_values[index] - reference_values[index + offset]
                     for index in range(len(times))
                     if (0 <= index + offset < len(times) and
-                        (valid is None or valid[index]))
+                        (valid is None or valid[index]) and
+                        (reference_valid is None or
+                         reference_valid[index + offset]))
                 ]
                 if not errors:
                     continue
@@ -2956,19 +2981,23 @@ def report_source_plant_rollout(
         report_bridge_epoch_alignment(
             "published steering queue slot 1",
             [plant_by_stamp[timestamp]["delayed_steering_1"]
-             for timestamp in times], steering_command_by_epoch)
+             for timestamp in times], steering_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         report_bridge_epoch_alignment(
             "published steering queue slot 2",
             [plant_by_stamp[timestamp]["delayed_steering_2"]
-             for timestamp in times], steering_command_by_epoch)
+             for timestamp in times], steering_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         report_bridge_epoch_alignment(
             "published throttle queue slot 1",
             [plant_by_stamp[timestamp]["delayed_throttle_1"]
-             for timestamp in times], throttle_command_by_epoch)
+             for timestamp in times], throttle_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         report_bridge_epoch_alignment(
             "published throttle queue slot 2",
             [plant_by_stamp[timestamp]["delayed_throttle_2"]
-             for timestamp in times], throttle_command_by_epoch)
+             for timestamp in times], throttle_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         feedback_valid = [
             plant_by_stamp[timestamp]["actuator_feedback_valid"]
             for timestamp in times]
@@ -2976,26 +3005,12 @@ def report_source_plant_rollout(
             "reported throttle actuator feedback",
             [plant_by_stamp[timestamp]["throttle_feedback"]
              for timestamp in times], throttle_command_by_epoch,
-            feedback_valid)
+            feedback_valid, bridge_epoch_valid)
 
     # Response receive time is not a Unity physics clock. Keep it only as an
     # A/B diagnostic: headers are request-stamped although telemetry is
     # decoded on response. This tests epoch mismatch without changing model
     # parameters or the production 25 ms input contract.
-    bridge_by_request_stamp: dict[float, dict[str, Any]] = {}
-    for event in bridge_timing_samples or []:
-        payload = event.get("json", {})
-        request_ns = payload.get("bridge_request_ros_stamp_ns")
-        if request_ns is None:
-            continue
-        try:
-            key = round(int(request_ns) * 1.0e-9, 6)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        bridge_by_request_stamp[key] = payload
-    bridge_payload_by_epoch = [
-        bridge_by_request_stamp.get(timestamp, {}) for timestamp in times
-    ]
     bridge_receive_time_by_epoch: list[float | None] = []
     bridge_pipeline_depth_by_epoch: list[int | None] = []
     bridge_requests_monotonic: list[tuple[int, int]] = []
@@ -3432,7 +3447,7 @@ def report_source_plant_rollout(
     command_timing_ab = {
         group: {
             source: {field: [] for field in ("u", "v", "r")}
-            for source in ("published_head", "request_timestamp")
+            for source in ("published_queue_slot_2", "request_timestamp")
         }
         for group in ("queue_aligned", "queue_misaligned")
     }
@@ -3466,10 +3481,16 @@ def report_source_plant_rollout(
         start_time, next_time = times[index], times[index + 1]
         if abs((next_time - start_time) - 0.025) > 0.004:
             continue
+        command_epoch = (index - 1 + bridge_command_epoch_offset
+                         if reconstruct_command_queue else -1)
         if (reconstruct_command_queue and
-                index - 1 + bridge_command_epoch_offset < 0):
+                command_epoch < 0):
             # The request immediately before the capture is absent, so its
             # queued command cannot be reconstructed causally.
+            continue
+        if (reconstruct_command_queue_from_bridge and
+                (command_epoch >= len(bridge_epoch_valid) or
+                 not bridge_epoch_valid[command_epoch])):
             continue
         start_plant = plant_by_stamp[start_time]
         start_truth = truth_by_stamp[start_time]
@@ -3484,7 +3505,8 @@ def report_source_plant_rollout(
             phase_residuals: list[tuple[float, int]] = []
             for offset in steering_feedback_phase_errors:
                 epoch = index + offset
-                if not 0 <= epoch < len(steering_command_by_epoch):
+                if (not 0 <= epoch < len(steering_command_by_epoch) or
+                        not bridge_epoch_valid[epoch]):
                     continue
                 target_angle = (
                     steering_command_by_epoch[epoch] * MAX_STEERING_RAD)
@@ -3515,21 +3537,21 @@ def report_source_plant_rollout(
                         OverflowError):
                     pass
         if reconstruct_command_queue:
-            command_epoch = index - 1 + bridge_command_epoch_offset
             reconstructed_steering = steering_command_by_epoch[command_epoch]
             reconstructed_throttle = throttle_command_by_epoch[command_epoch]
-            published_head_matches = (
-                abs(start_plant["delayed_steering_1"] -
+            published_queue_slot_2_matches = (
+                abs(start_plant["delayed_steering_2"] -
                     reconstructed_steering) <= 1.0e-3 and
-                abs(start_plant["delayed_throttle_1"] -
+                abs(start_plant["delayed_throttle_2"] -
                     reconstructed_throttle) <= 1.0e-3)
-            group = ("queue_aligned" if published_head_matches else
+            group = ("queue_aligned" if published_queue_slot_2_matches else
                      "queue_misaligned")
-            for source in ("published_head", "request_timestamp"):
+            for source in ("published_queue_slot_2", "request_timestamp"):
                 timing_input = make_input(
                     source_state(start_plant), list(start_plant["wheel_angle"]),
                     start_plant,
-                    start_plant["suspension_history_initialized"])
+                    start_plant["suspension_history_initialized"],
+                    command_slot=2)
                 if source == "request_timestamp":
                     timing_input.steering_target_rad = (
                         reconstructed_steering * MAX_STEERING_RAD)
@@ -3564,7 +3586,7 @@ def report_source_plant_rollout(
             candidate_input = make_input(
                 initial_state, list(start_plant["wheel_angle"]), start_plant,
                 initial_history_initialized, slot)
-            if reconstruct_command_queue and slot == 1:
+            if reconstruct_command_queue and slot == 2:
                 command_epoch = index - 1 + bridge_command_epoch_offset
                 steering_value = steering_command_by_epoch[command_epoch]
                 throttle_value = throttle_command_by_epoch[command_epoch]
@@ -3575,7 +3597,7 @@ def report_source_plant_rollout(
             if not step(ctypes.byref(candidate_input), 0.025,
                         ctypes.byref(candidate_output)):
                 continue
-            if reconstruct_command_queue and slot == 1:
+            if reconstruct_command_queue and slot == 2:
                 reconstructed_one_step_errors["u"].append(
                     candidate_output.state[0] - next_truth["u"])
                 reconstructed_one_step_errors["v"].append(
@@ -3622,7 +3644,7 @@ def report_source_plant_rollout(
                 candidate_output.state[2] - next_truth["r"])
             command_slot_errors[slot]["steering"].append(
                 candidate_output.state[13] - next_steering)
-            if slot == 1:
+            if slot == 2:
                 next_state = source_state(next_plant)
                 for state_index, name in enumerate(plant_state_names):
                     one_step_plant_state_errors[name].append(
@@ -3855,12 +3877,17 @@ def report_source_plant_rollout(
             command_step = start + horizon - 1
             if reconstruct_command_queue:
                 # Packet headers are stamped with the Bridge request epoch.
-                # The command callbacks are asynchronous and can deliver the
-                # next controller output before this response is processed.
-                # Reconstruct the two-entry queue using only command samples
-                # received by the request epoch; its head is the previous
-                # request's command, which is what advance() applies next.
+                # The request paired with this start state applies its command
+                # after the telemetry snapshot, over the following Unity
+                # physics interval. Offset +1 from the preceding request
+                # therefore selects this interval's command.
                 command_epoch = command_step - 1 + bridge_command_epoch_offset
+                if (reconstruct_command_queue_from_bridge and
+                        (command_epoch < 0 or
+                         command_epoch >= len(bridge_epoch_valid) or
+                         not bridge_epoch_valid[command_epoch])):
+                    valid = False
+                    break
                 steering_value = steering_command_by_epoch[command_epoch]
                 throttle_value = throttle_command_by_epoch[command_epoch]
                 steering_source = current
@@ -3877,14 +3904,15 @@ def report_source_plant_rollout(
                 break
             dt = 0.025
             input_value = make_input(
-                state, angles, steering_source, history_initialized)
+                state, angles, steering_source, history_initialized,
+                command_slot=2)
             if reconstruct_command_queue:
                 input_value.steering_target_rad = \
                     steering_value * MAX_STEERING_RAD
                 input_value.throttle_normalized = throttle_value
             else:
                 input_value.throttle_normalized = \
-                    throttle_source["delayed_throttle_1"]
+                    throttle_source["delayed_throttle_2"]
             if oracle_steering_feedback:
                 # Diagnostic only: use the next recorded actuator feedback as
                 # the steering target for this interval. This isolates the
@@ -4155,8 +4183,8 @@ def report_source_plant_rollout(
             grouped_yaw[horizon].extend(window_grouped_yaw[horizon])
 
     init_label = ("Unity-truth initial u/v/r + logged hidden UnityPlantState "
-                  "and slot-1 commands (diagnostic only)" if oracle_motion_initial_state
-                  else "logged UnityPlantState start + slot-1 commands")
+                  "and slot-2 commands (diagnostic only)" if oracle_motion_initial_state
+                  else "logged UnityPlantState start + slot-2 commands")
     if reconcile_suspension_jounce_at_start:
         init_label += "; geometric jounce reconciled at each independent start"
     print(f"\nSource-plant open-loop rollout ({init_label}; no future state correction):")
@@ -4188,7 +4216,7 @@ def report_source_plant_rollout(
             if not count:
                 continue
             print(f"    {group}: n={count}")
-            for source in ("published_head", "request_timestamp"):
+            for source in ("published_queue_slot_2", "request_timestamp"):
                 print(f"      {source}:")
                 for field, unit in (("u", "m/s"), ("v", "m/s"),
                                     ("r", "rad/s")):
@@ -4690,6 +4718,7 @@ def report_source_plant_rollout(
         # identify which carried-state prediction drives recursive drift.
         # They are deliberately not valid controller inputs or model scores.
         modes = {
+            "no_reanchoring": (),
             "u_only": ("u",),
             "v_only": ("v",),
             "yaw_rate_only": ("yaw_rate",),
@@ -4728,9 +4757,24 @@ def report_source_plant_rollout(
                     current = plant_by_stamp[times[start + horizon - 1]]
                     target_time = times[start + horizon]
                     actual = truth_by_stamp[target_time]
+                    command_epoch = start + horizon - 2 + bridge_command_epoch_offset
+                    if reconstruct_command_queue:
+                        if (command_epoch < 0 or
+                                command_epoch >= len(times) or
+                                (reconstruct_command_queue_from_bridge and
+                                 not bridge_epoch_valid[command_epoch])):
+                            valid = False
+                            break
                     output = UnitySourcePlantOutputC()
                     input_value = make_input(
-                        state, angles, current, history_initialized)
+                        state, angles, current, history_initialized,
+                        command_slot=2)
+                    if reconstruct_command_queue:
+                        input_value.steering_target_rad = (
+                            steering_command_by_epoch[command_epoch] *
+                            MAX_STEERING_RAD)
+                        input_value.throttle_normalized = (
+                            throttle_command_by_epoch[command_epoch])
                     if not step(ctypes.byref(input_value), 0.025,
                                 ctypes.byref(output)):
                         valid = False
@@ -4857,9 +4901,10 @@ def main() -> int:
              "request stamp; this restricted debug stream is never a runtime input",
     )
     parser.add_argument(
-        "--source-bridge-command-epoch-offset", type=int, default=0,
-        help="offline diagnostic: choose command epoch (normally interval i uses "
-             "request command i-1; offset +1 tests request i; negative tests older)",
+        "--source-bridge-command-epoch-offset", type=int, default=1,
+        help="offline diagnostic: offset from the request immediately preceding "
+             "an interval; +1 (default) selects the request paired with the "
+             "interval's start state; negative values select older commands",
     )
     parser.add_argument(
         "--diagnose-observed-state-reanchoring", action="store_true",

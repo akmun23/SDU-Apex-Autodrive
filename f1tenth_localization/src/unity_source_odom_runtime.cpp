@@ -109,16 +109,15 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
   // command applied during the packet interval just completed. Slot 0 is one
   // request older; using it adds an unsupported extra 25 ms of delay.
   const double applied_steering = delayed_steering_commands_norm_[1];
-  // VehicleController.CurrentThrottle is currentT = DriveTorque/MotorTorque,
-  // sampled before the next Drive() call. Use the latest feedback admitted by
-  // the caller's freshness check to represent the completed interval. The
-  // Float32 feedback has no Unity-step/packet sequence, so its exact coverage
-  // of all 25 substeps is not observable; this is an interval association,
-  // not a claim of per-step torque history. Keep the delayed request queue
-  // unchanged for future stages and MPC state publication.
-  const double applied_throttle = throttle_feedback_valid
-    ? std::clamp(throttle_feedback_norm, -1.0, 1.0)
-    : delayed_throttle_commands_norm_[1];
+  // Use the newest queued request for the interval just completed, as with
+  // steering. The practice fixed-step trace shows that Unity advances that
+  // interval using the request sequence associated with its start epoch. The
+  // throttle feedback in the response that closes the interval can already
+  // reflect the next request; applying it retrospectively replaces the
+  // interval's real torque command at throttle transitions. Keep feedback
+  // validation above for the runtime contract, but do not use this
+  // headerless, response-time sample as the completed interval's input.
+  const double applied_throttle = delayed_throttle_commands_norm_[1];
   delayed_steering_commands_norm_[0] = delayed_steering_commands_norm_[1];
   delayed_steering_commands_norm_[1] = std::clamp(steering_command_norm, -1.0, 1.0);
   delayed_throttle_commands_norm_[0] = delayed_throttle_commands_norm_[1];

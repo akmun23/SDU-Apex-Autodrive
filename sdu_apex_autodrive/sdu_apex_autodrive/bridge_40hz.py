@@ -86,6 +86,11 @@ _latest_steering_update_monotonic_ns: int | None = None
 _reset_level = False
 _reset_deadline_monotonic: float | None = None
 _RESET_HOLD_SEC = 0.75
+# Socket.OnConnect can emit one unsolicited telemetry packet. Keep the request
+# FIFO empty long enough for that packet to be discarded before the first
+# command/response pair; otherwise it can shift every request timestamp by one
+# epoch until a later missing packet happens to resynchronize the stream.
+_CONNECT_BOOTSTRAP_SETTLE_SEC = 0.1
 _stop_sender = Event()
 _emit_lock = Semaphore()
 _client_connected = Event()
@@ -495,6 +500,14 @@ def _capture_competition_packet(data: Any) -> bool:
         "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
         "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
         "simulator_collision_count": _parse_optional_int(data.get("V1 Collisions")),
+        # Development-player-only payload echoes establish the exact Unity
+        # telemetry event that produced this response. They are diagnostic
+        # metadata only; FIFO request association and all runtime inputs remain
+        # unchanged, and stock competition players omit both fields.
+        "simulator_development_telemetry_event_id": _parse_optional_int(
+            data.get("V1 Development Telemetry Event ID")),
+        "simulator_development_command_sequence": _parse_optional_int(
+            data.get("V1 Development Command Sequence")),
     })
 
     with _pending_request_lock:
@@ -690,6 +703,8 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
     global _connection_generation
     period = 1.0 / rate_hz
     next_send = time.monotonic()
+    settled_generation: int | None = None
+    settle_until = 0.0
     while not _stop_sender.is_set():
         now = time.monotonic()
         if _timing_fault:
@@ -707,14 +722,18 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
         if not _client_connected.is_set():
             gevent.sleep(period)
             continue
-        # In the interactive GUI, Unity emits one unsolicited packet from
-        # OnConnect and that packet opens the request gate.  Batchmode has no
-        # GUI connect-button path and deliberately does not emit that packet;
-        # waiting for it here deadlocks both sides (Unity waits for Bridge,
-        # while this sender waits for Unity).  The first response to this
-        # actual Bridge request is therefore allowed to be the first packet.
         with _pending_request_lock:
             generation = _connection_generation
+        if generation != settled_generation:
+            settled_generation = generation
+            settle_until = now + _CONNECT_BOOTSTRAP_SETTLE_SEC
+        if now < settle_until:
+            # Do not block connection callbacks: the inbound packet handler
+            # must be able to drop the unsolicited bootstrap while the FIFO is
+            # empty. This is a one-time delay per socket generation; after it,
+            # the normal 40 Hz request schedule is unchanged.
+            gevent.sleep(min(period, settle_until - now))
+            continue
 
         with _command_lock:
             global _reset_level, _reset_deadline_monotonic

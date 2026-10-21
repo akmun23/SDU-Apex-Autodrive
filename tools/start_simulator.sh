@@ -78,6 +78,33 @@ if [[ -n "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
   echo "Using workspace development player: ${player_directory}"
 fi
 
+trace_args=()
+if [[ -n "${SDU_APEX_SIM_TRACE_DIR:-}" ]]; then
+  if [[ "${track}" != "practice" ]]; then
+    echo "Development fixed-step tracing is restricted to the practice simulator." >&2
+    exit 2
+  fi
+  requested_trace_directory="${SDU_APEX_SIM_TRACE_DIR}"
+  if [[ "${requested_trace_directory}" != /* ]]; then
+    requested_trace_directory="${repo_root}/${requested_trace_directory}"
+  fi
+  mkdir -p -- "${requested_trace_directory}"
+  trace_directory="$(realpath -- "${requested_trace_directory}")"
+  case "${trace_directory}" in
+    "${repo_root}"/*) ;;
+    *) echo "SDU_APEX_SIM_TRACE_DIR must be inside ${repo_root}." >&2; exit 2 ;;
+  esac
+  trace_max_steps="${SDU_APEX_SIM_TRACE_MAX_STEPS:-60000}"
+  if [[ ! "${trace_max_steps}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SDU_APEX_SIM_TRACE_MAX_STEPS must be a positive integer." >&2
+    exit 2
+  fi
+  trace_args=(-e "SDU_APEX_PHYSICS_TRACE_PATH=/sdu_apex_trace/unity_fixedstep.csv"
+    -e "SDU_APEX_PHYSICS_TRACE_MAX_STEPS=${trace_max_steps}"
+    -v "${trace_directory}:/sdu_apex_trace:rw")
+  echo "Development fixed-step trace: ${trace_directory}/unity_fixedstep.csv (max ${trace_max_steps} steps)"
+fi
+
 if ! docker image inspect "${image}" >/dev/null 2>&1; then
   docker pull "${image}"
 fi
@@ -96,6 +123,7 @@ exec docker run --rm --name "${container}" "${tty_args[@]}" \
   ${DISPLAY:+-e DISPLAY} \
   "${xauthority_args[@]}" \
   "${player_args[@]}" \
+  "${trace_args[@]}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   --entrypoint /bin/bash \
   "${image}" -lc "${simulator_command}"

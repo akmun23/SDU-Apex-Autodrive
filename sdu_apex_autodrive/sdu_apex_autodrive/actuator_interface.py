@@ -15,8 +15,9 @@ MIN_DRIVE_THROTTLE = 0.01
 
 
 class ActuatorInterface(Node):
-    def __init__(self) -> None:
-        super().__init__("autodrive_actuator_interface")
+    def __init__(self, *, parameter_overrides=None) -> None:
+        super().__init__("autodrive_actuator_interface",
+                         parameter_overrides=parameter_overrides)
         self.declare_parameter("drive_command_topic", "/mpc/drive_command")
         self.declare_parameter(
             "steering_topic", "/autodrive/roboracer_1/steering_command")
@@ -24,11 +25,17 @@ class ActuatorInterface(Node):
             "throttle_topic", "/autodrive/roboracer_1/throttle_command")
         self.declare_parameter("development_timing_topic", "")
         self.declare_parameter("max_steering_angle_rad", 0.5235987756)
+        self.declare_parameter("minimum_throttle_normalized", MIN_DRIVE_THROTTLE)
 
         self.max_steering = float(
             self.get_parameter("max_steering_angle_rad").value)
         if not math.isfinite(self.max_steering) or self.max_steering <= 0.0:
             raise ValueError("maximum steering angle must be positive")
+        self.minimum_throttle = float(
+            self.get_parameter("minimum_throttle_normalized").value)
+        if (not math.isfinite(self.minimum_throttle) or
+                not 0.0 <= self.minimum_throttle <= 1.0):
+            raise ValueError("minimum throttle must be finite and in [0, 1]")
         self.command_sequence = 0
         timing_topic = str(
             self.get_parameter("development_timing_topic").value).strip()
@@ -53,12 +60,12 @@ class ActuatorInterface(Node):
         throttle = float(message.throttle_normalized)
         if (not math.isfinite(steering) or not math.isfinite(throttle) or
                 not -self.max_steering <= steering <= self.max_steering or
-                throttle < MIN_DRIVE_THROTTLE - 1.0e-6 or throttle > 1.0):
+                throttle < self.minimum_throttle - 1.0e-6 or throttle > 1.0):
             self.get_logger().error(
                 f"Rejected invalid MPC actuator command: steering={steering:.9g} rad "
                 f"(limit={self.max_steering:.9g}), "
                 f"throttle={throttle:.9g} "
-                f"(range=[{MIN_DRIVE_THROTTLE:g},1])")
+                f"(range=[{self.minimum_throttle:g},1])")
             self._publish_command_timing(
                 message, received_monotonic_ns, "rejected_invalid")
             return

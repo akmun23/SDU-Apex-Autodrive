@@ -36,7 +36,7 @@ TEST(SourceDerivedOdomRuntime, UsesNewestQueuedCommandForElapsedPacket)
   }
 }
 
-TEST(SourceDerivedOdomRuntime, UsesMeasuredTorqueForElapsedIntervalOnly)
+TEST(SourceDerivedOdomRuntime, DoesNotApplyEndpointThrottleFeedbackRetrospectively)
 {
   SourceDerivedOdomRuntime queued_runtime(0.15532);
   SourceDerivedOdomRuntime feedback_runtime(0.15532);
@@ -51,10 +51,12 @@ TEST(SourceDerivedOdomRuntime, UsesMeasuredTorqueForElapsedIntervalOnly)
   const auto measured = feedback_runtime.advance(
     0.0, 0.1, false, 0.0, true, 0.5);
 
-  // Feedback selects the torque for this completed interval, but does not
-  // rewrite the delayed request queue that the MPC needs for future stages.
-  EXPECT_GT(measured.state[UNITY_SOURCE_WHEEL_OMEGA_RL],
-    queue_only.state[UNITY_SOURCE_WHEEL_OMEGA_RL]);
+  // The endpoint feedback can already describe the next request. The
+  // completed interval is propagated with the queued request in both cases;
+  // feedback must not retrospectively change any predicted plant state.
+  for (std::size_t state = 0; state < measured.state.size(); ++state) {
+    EXPECT_DOUBLE_EQ(measured.state[state], queue_only.state[state]);
+  }
   EXPECT_DOUBLE_EQ(measured.delayed_throttle_commands_normalized[0],
     queue_only.delayed_throttle_commands_normalized[0]);
   EXPECT_DOUBLE_EQ(measured.delayed_throttle_commands_normalized[1],

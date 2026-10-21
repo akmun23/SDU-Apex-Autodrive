@@ -576,3 +576,121 @@ focused Python reporter/experiment/fixture/oracle/manifest suite passed
 they do not convert the two failed practice probes into a passing closed-loop
 result. `docker ps` was empty after the probes and all recording and
 supervisor processes were closed.
+
+## 2026-10-22 — throttle epoch correction and five-lap practice validation
+
+This section supersedes the earlier statement that no clean five-lap source-
+plant rollout had passed the local 5 cm horizon gate. It does **not** claim a
+continuous five-lap open-loop prediction or a completed MPC/racing validation.
+
+### Root cause and production correction
+
+The production odometry plant had propagated the just-completed 25 ms interval
+using the latest throttle feedback callback. That callback is a response
+snapshot at the interval endpoint and can already describe the next throttle
+request. At a command transition this retroactively applies the wrong torque
+to the interval that just elapsed. Steering propagation already used the
+delayed command queue. The correction makes throttle consistent: propagate
+the interval with `delayed_throttle_commands_norm_[1]`, and do not use
+headerless endpoint feedback as the interval input. Feedback remains subject
+to the existing finite/freshness checks; this change does not remove it from
+the observation contract or alter the vehicle physics.
+
+Evidence from the five-lap bag, reconstructed with Bridge-sent request values:
+
+| Same-state one-step command phase | Forward-speed RMSE | Lateral-speed RMSE | Yaw-rate RMSE |
+| --- | ---: | ---: | ---: |
+| Older queue slot 1 | 0.07089 m/s | 0.01553 m/s | 0.12736 rad/s |
+| Correct interval command, queue slot 2 | 0.01216 m/s | 0.00066 m/s | 0.00464 rad/s |
+
+The command-phase change reduces one-step yaw-rate RMSE by about 96% and
+forward-speed RMSE by about 83% in this capture. It is therefore not accurate
+to attribute the previously large rollout error solely to tire/contact
+equations: a command/response phase mismatch was a major cause. A second
+same-bag diagnostic that substitutes retrospective endpoint throttle
+feedback gives worse 750 ms results (XY RMSE 0.01039 m and 7/1551 windows
+exceeding 5 cm at an intermediate point), versus command-driven propagation
+(XY RMSE 0.01008 m and 0/1551 exceeding 5 cm). This supports using the queued
+command, not endpoint feedback, for propagation.
+
+### Code and regression coverage
+
+- `f1tenth_localization/src/unity_source_odom_runtime.cpp`: elapsed throttle
+  now comes from delayed queue slot 2; comments explain why endpoint feedback
+  is retrospective.
+- `f1tenth_localization/test/test_source_derived_odom_runtime.cpp`: the
+  regression test asserts that changing only endpoint throttle feedback does
+  not change any state propagated over the completed interval.
+- The development CSV follower needs Unity's `q=0` hard-brake mode. The
+  actuator interface now has a validated configurable minimum throttle,
+  defaulting to the production/MPC lower bound `0.01`; the launch overrides
+  it to `0.0` only for development CSV following with MPC disabled. This was
+  necessary because an earlier capture rejected all 34 zero-throttle brake
+  commands. It does not enable zero throttle as an MPC decision or change the
+  competition default.
+- Production odometry target and localization tests were built in the ROS
+  Humble development image. The focused C++ runtime binary passed **8/8**;
+  actuator-interface tests passed **5/5** in the same ROS environment.
+  `tools/verify_runtime_topic_policy.py` returned `PASS`; the real validation
+  run used the dev-only CSV/ground-truth follower, with MPC disabled. No
+  ground-truth input was added to odometry.
+
+### Real practice capture
+
+Bag: `live_runs/odom_throttle_epoch_fix_practice_20261022_run1/run`.
+The established practice batch-mode simulator ran with the updated development
+container, CSV path follower (not MPC), and full diagnostic recording. Five
+laps completed with zero collisions; all **1584/1584** actuator publications
+were forwarded, with no sequence gaps. Lap-time topics contained no finite
+completed-lap times, so this is not a racing-time result. The bag is about
+17 MB and retained for reproducibility.
+
+Production odometry over the run (1583 truth matches):
+
+- forward speed: RMSE 0.0126 m/s, p95 absolute 0.0244, max 0.1356 m/s;
+- lateral speed: RMSE 0.0007 m/s, p95 absolute 0.0010, max 0.0112 m/s;
+- yaw rate is read from the gyro, so its zero comparison error is not an
+  independent prediction result;
+- integrated relative pose drift: 5.5 cm at run end, 7.9 cm p95, 8.2 cm max.
+
+Source-plant rollout, each window initialized from its logged
+`UnityPlantState`, then propagated for 750 ms using the reconstructed queued
+commands with no future state correction (1551 valid windows):
+
+- forward-speed RMSE 0.0110 m/s (p95 absolute 0.0236, max 0.0480);
+- lateral-speed RMSE 0.00066 m/s (p95 0.00104, max 0.00656);
+- yaw-rate RMSE 0.00455 rad/s (p95 absolute 0.00801, max 0.04314);
+- yaw RMSE 0.00229 rad (p95 absolute 0.00480, max 0.00943);
+- XY endpoint RMSE 1.01 cm, p95 2.24 cm, max 3.89 cm;
+- the maximum position error anywhere along each 750 ms path was at most
+  4.45 cm: **1551/1551** paths passed the 5 cm gate.
+
+The remaining XY discrepancy is not all plant dynamics: comparison against
+the integrated recorded Unity twist attributes 0.54 cm XY RMSE / 1.07 cm p95
+to disagreement between 40 Hz pose increments and twist integration, and
+0.71 cm RMSE / 1.51 cm p95 to plant-vs-twist-integral differences. Yaw-rate
+tail errors are larger when wheel/body speed mismatch is high (p95 0.00942
+rad/s versus 0.00483 below 0.5 m/s mismatch), so wheel-spin/tire-contact
+residuals remain a plausible contributor; the logs have no independent
+per-wheel Unity angular-speed truth to prove that attribution.
+
+### What this establishes—and what it does not
+
+Established on this practice profile and capture: the interval command
+association was wrong when endpoint throttle feedback was used; the corrected
+production propagation materially improves one-step state prediction, and
+the source plant's 750 ms rolling-window XY predictions stay under 5 cm in
+all recorded windows, up to 7.13 m/s. This is evidence of useful rollout
+accuracy in the tested envelope, not proof across all steering/speed regimes.
+
+Not established: a continuous 750 ms+ forecast from one lap-start state (the
+scored windows are reinitialized from logged plant state), under-5-cm
+multi-lap odometry drift, MPC convergence/tracking, maximum-speed or
+independent-raceline behavior, or a 1:1 reproduction of PhysX's native private
+WheelCollider/contact solver. The one-run odometry pose maximum remains above
+5 cm, despite low velocity errors. Continue investigating that drift and
+high-wheel-mismatch yaw tails before declaring odometry solved. No new tire
+coefficient was fitted or promoted.
+
+The current simulator/controller containers and recorder were stopped by the
+five-lap watcher. The run produced no collision and is preserved above.

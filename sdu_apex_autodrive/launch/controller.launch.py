@@ -172,6 +172,11 @@ def _setup(context):
     actuator_parameters.append({
         "development_timing_topic":
             "/autodrive/roboracer_1/development_actuator_timing"})
+    if csv_command_file and not enable_mpc:
+        # The development path follower uses Unity's q=0 full-brake mode.
+        # MPC remains bounded to positive drive throttle and competition uses
+        # the default actuator minimum of 0.01.
+        actuator_parameters.append({"minimum_throttle_normalized": 0.0})
     if overlays["actuator_parameter_overlay"]:
         actuator_parameters.append(overlays["actuator_parameter_overlay"])
     actuator = Node(
