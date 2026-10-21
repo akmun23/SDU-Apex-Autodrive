@@ -27,6 +27,10 @@ if(SDU_APEX_MPC_NATIVE_TUNING)
   add_compile_options(-march=native -ffp-contract=off)
 endif()
 
+option(SDU_APEX_MPC_RICCATI_PROFILE
+  "Collect fine-grained Riccati timing counters (development only)"
+  OFF)
+
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -55,7 +59,9 @@ target_link_libraries(mpc_core PUBLIC m)
 if(OpenMP_C_FOUND)
   target_link_libraries(mpc_core PUBLIC OpenMP::OpenMP_C)
 endif()
-target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
+if(SDU_APEX_MPC_RICCATI_PROFILE)
+  target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
+endif()
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # On-demand saved-state replay against the exact production RTI core. This
@@ -65,6 +71,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mpc_bag_solver_replay.cpp")
   add_executable(mpc_bag_solver_replay EXCLUDE_FROM_ALL
     ../tools/mpc_bag_solver_replay.cpp)
   target_link_libraries(mpc_bag_solver_replay PRIVATE mpc_core)
+
+  add_executable(mpc_qp_fixture_replay EXCLUDE_FROM_ALL
+    ../tools/mpc_qp_fixture_replay.cpp)
+  target_link_libraries(mpc_qp_fixture_replay PRIVATE mpc_core)
+  add_custom_target(mpc_offline_qp_tools
+    DEPENDS mpc_bag_solver_replay mpc_qp_fixture_replay)
 endif()
 
 # Optional C ABI shared object used by tools/evaluate_mpc_bag.py to replay
@@ -107,6 +119,7 @@ rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcController
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   ament_add_gtest(test_unity_source_plant
     test/test_unity_source_plant.cpp
     src/unity_source_plant.cpp
@@ -124,6 +137,25 @@ if(BUILD_TESTING)
     test/test_mpc_state_synchronizer.cpp)
   target_link_libraries(test_mpc_state_synchronizer mpc_state_sync)
   target_include_directories(test_mpc_state_synchronizer PRIVATE include)
+  ament_add_gtest(test_mpc_drive_command_envelope
+    test/test_mpc_drive_command_envelope.cpp)
+  target_include_directories(test_mpc_drive_command_envelope PRIVATE include)
+  ament_add_gtest(test_mpc_publication_deadline
+    test/test_mpc_publication_deadline.cpp)
+  target_include_directories(test_mpc_publication_deadline PRIVATE include)
+  add_test(NAME test_mpc_qp_fixture_schema
+    COMMAND ${Python3_EXECUTABLE} -m unittest tools.test_mpc_qp_fixture -v)
+  set_tests_properties(test_mpc_qp_fixture_schema PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
+  add_test(NAME test_mpc_run_manifest
+    COMMAND ${Python3_EXECUTABLE} -m unittest tools.test_seal_mpc_run_manifest -v)
+  set_tests_properties(test_mpc_run_manifest PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
+  add_test(NAME test_mpc_qp_oracle_refinement_selection
+    COMMAND ${Python3_EXECUTABLE} -m unittest
+      tools.test_refine_mpc_qp_oracle_cases -v)
+  set_tests_properties(test_mpc_qp_oracle_refinement_selection PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
 endif()
 
 install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node

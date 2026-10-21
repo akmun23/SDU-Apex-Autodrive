@@ -620,7 +620,11 @@ int mpc_rti_build_ltv_qp(
     }
 
     memset(problem, 0, sizeof(*problem));
-    problem->horizon = horizon;
+    /* There are 30 physical prediction samples, but the first transition is
+     * already committed to the command in flight. The QP therefore has 29
+     * decision transitions. Keep this public diagnostic field equal to the
+     * actual Riccati array/solver horizon, not the plant rollout horizon. */
+    problem->horizon = RICCATI_HORIZON;
     problem->linearization_failure_stage = -1;
     problem->linearization_failure_index = -1;
     /* The newest queued command is already in flight and cannot be optimized.
@@ -1757,6 +1761,8 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     MpcRtiPassResult_t *pass)
 {
     memset(pass, 0, sizeof(*pass));
+    if (configuration->qp_capture)
+        configuration->qp_capture->valid = 0;
     pass->status = MPC_RTI_CYCLE_REJECTED_INPUT;
     pass->sqp_attempted = 1;
     pass->nonlinear_failure_stage = -1;
@@ -1853,13 +1859,38 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             solver_config.max_solve_time_us = solver_budget_us;
     }
 
+    MpcRtiQpCapture_t * const qp_capture = configuration->qp_capture;
+    if (qp_capture) {
+        /* This is deliberately a fixed-size memory snapshot only. The
+         * production solver never performs serialization or file I/O. */
+        qp_capture->problem = problem;
+        qp_capture->solver_config = solver_config;
+        qp_capture->initial_solver_state = memory->solver_state;
+        qp_capture->capture_count += 1;
+    }
+
     phase_start_us = monotonic_microseconds();
-    solver_status = riccati_admm_solve(
-        problem.steps, problem.terminal_Q, problem.terminal_q,
-        problem.terminal_x_lb, problem.terminal_x_ub, problem.x0,
-        &solver_config, &memory->solver_state, &solution);
+    if (qp_capture) {
+        solver_status = riccati_admm_solve_with_primal_controls(
+            problem.steps, problem.terminal_Q, problem.terminal_q,
+            problem.terminal_x_lb, problem.terminal_x_ub,
+            problem.x0, &solver_config, &memory->solver_state, &solution,
+            qp_capture->raw_primal_u);
+        qp_capture->final_solver_state = memory->solver_state;
+    } else {
+        solver_status = riccati_admm_solve(
+            problem.steps, problem.terminal_Q, problem.terminal_q,
+            problem.terminal_x_lb, problem.terminal_x_ub, problem.x0,
+            &solver_config, &memory->solver_state, &solution);
+    }
+    if (qp_capture) {
+        qp_capture->raw_solution = solution;
+        qp_capture->raw_status = solver_status;
+        qp_capture->valid = 1;
+    }
     pass->admm_us = monotonic_microseconds() - phase_start_us;
     riccati_debug_get_last(&debug);
+    if (qp_capture) qp_capture->debug_info = debug;
     pass->rho_final = debug.rho;
     pass->rho_u_final = debug.rho_u;
     pass->maximum_regularization = debug.max_control_hessian_regularization;

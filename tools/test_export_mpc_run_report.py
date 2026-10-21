@@ -5,12 +5,26 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-import export_mpc_run_report as report
-import evaluate_mpc_bag as evaluator
+from tools import evaluate_mpc_bag as evaluator
+from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_drive_command_ros_stamp_keeps_exact_nanoseconds(self) -> None:
+        expected = 1_792_611_522_369_873_606
+        message = SimpleNamespace(header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=expected // 1_000_000_000,
+                                  nanosec=expected % 1_000_000_000)))
+        exact = evaluator.stamp_nanoseconds(message)
+        indexed = report._drive_command_by_stamp([
+            {"stamp": exact * 1e-9, "stamp_ns": exact,
+             "steering": 0.1, "throttle": 0.3},
+        ])
+        self.assertEqual(exact, expected)
+        self.assertIn(expected, indexed)
+
     def test_solver_termination_categories_remain_distinct(self) -> None:
         self.assertEqual(report._normalized_solver_category("converged"),
                          "optimal")
@@ -38,6 +52,79 @@ class MpcRunReportTest(unittest.TestCase):
         self.assertEqual(row["solver_stop_reason"], "not_run")
         self.assertEqual(report._normalized_solver_category(
             row["solver_stop_reason"]), "not_run")
+
+    def test_rejection_and_prefix_failure_details_are_exported(self) -> None:
+        payload = {
+            "status": "rejected_nonlinear_rollout",
+            "reason": "accepted-plan prefix failed exact delayed-command rollout/corridor validation",
+            "input_failure_reason": "none",
+            "nonlinear_failure_reason": "corridor",
+            "nonlinear_failure_stage": 8,
+            "nonlinear_failure": {"stage": 8, "margin_m": 0.02},
+            "candidate_prefix_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 3, "validation_status": 5,
+                "validation_horizon": 3, "timing_rejected": False,
+                "solver_converged": False,
+                "solver_iteration_limited": True,
+            },
+            "prior_plan_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 2, "validation_status": 5,
+                "validation_horizon": 3, "timing_rejected": False,
+            },
+            "solver": {"admm_status": 1},
+        }
+        row = report._cycle_row(3.0, 0.0, payload, {}, {})
+        self.assertEqual(row["cycle_reason"], payload["reason"])
+        self.assertEqual(row["nonlinear_failure_reason"], "corridor")
+        self.assertEqual(row["nonlinear_failure_stage"], 8)
+        self.assertEqual(row["nonlinear_failure_detail"],
+                         {"stage": 8, "margin_m": 0.02})
+        self.assertTrue(row["candidate_prefix_validation_attempted"])
+        self.assertFalse(row["candidate_prefix_exact_valid"])
+        self.assertEqual(row["candidate_prefix_failure_stage"], 3)
+        self.assertEqual(row["candidate_prefix_validation_horizon"], 3)
+        self.assertFalse(row["prior_plan_exact_valid"])
+        self.assertEqual(row["prior_plan_failure_stage"], 2)
+
+        compact = report._cycle_row(
+            4.0, 0.0,
+            {"status": "rejected", "reason": "prefix validation failed",
+             "solver": {"admm_status": -1}}, {}, {})
+        self.assertEqual(compact["cycle_reason"], "prefix validation failed")
+        self.assertIsNone(compact["candidate_prefix_failure_stage"])
+
+    def test_failure_reason_counts_use_diagnostic_fields(self) -> None:
+        diagnostic = {"bag_time": 1.0, "json": {
+            "status": "rejected_nonlinear_rollout",
+            "reason": "no exact-feasible prefix",
+            "nonlinear_failure_reason": "corridor",
+            "nonlinear_failure_stage": 8,
+            "candidate_prefix_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 3,
+            },
+            "solver": {"admm_status": -1},
+        }}
+        data = {
+            evaluator.DIAGNOSTICS: [diagnostic],
+            evaluator.CANDIDATE_DIAGNOSTICS: [],
+            evaluator.BRIDGE_TIMING: [], evaluator.DRIVE_COMMAND: [],
+            evaluator.LAST_LAP: [], evaluator.COLLISION: [],
+            evaluator.BRIDGE_FAULT: [], evaluator.GT: [],
+        }
+        result, _ = report.make_report(
+            Path.cwd(), Path("missing_bag"), data, None, None, 5.0,
+            "live_closed_loop")
+        self.assertEqual(result["summary"]["cycle_reason_counts"],
+                         {"no exact-feasible prefix": 1})
+        self.assertEqual(
+            result["summary"]["nonlinear_failure_reason_counts"],
+            {"corridor": 1})
+        self.assertEqual(
+            result["summary"]["candidate_prefix_failure_stage_counts"],
+            {"3": 1})
 
     def test_joins_only_exact_bridge_and_command_stamps(self) -> None:
         bridge = report._bridge_by_request_stamp([

@@ -21,7 +21,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-import evaluate_mpc_bag as evaluator
+try:
+    from tools import evaluate_mpc_bag as evaluator
+except ModuleNotFoundError:
+    # Preserve the established `python tools/export_mpc_run_report.py ...`
+    # invocation where the script directory, rather than the repo root, is
+    # sys.path[0].
+    import evaluate_mpc_bag as evaluator
 
 
 REPORT_SCHEMA = "sdu_apex_mpc_run_report/v3"
@@ -362,6 +368,10 @@ def _cycle_row(
     previous_diag = previous_diag if isinstance(previous_diag, dict) else {}
     async_publisher = payload.get("diagnostic_async_publisher")
     async_publisher = async_publisher if isinstance(async_publisher, dict) else {}
+    candidate_prefix = payload.get("candidate_prefix_revalidation")
+    candidate_prefix = candidate_prefix if isinstance(candidate_prefix, dict) else {}
+    prior_plan = payload.get("prior_plan_revalidation")
+    prior_plan = prior_plan if isinstance(prior_plan, dict) else {}
     return {
         "bag_receipt_epoch_s": bag_receipt_epoch_s,
         "bag_time_from_start_s": bag_receipt_epoch_s - bag_time_origin_epoch_s,
@@ -386,6 +396,17 @@ def _cycle_row(
             _finite_number(published_throttle) is not None else None),
         "actual_unity_effect_epoch": None,
         "status": payload.get("status"),
+        "cycle_reason": payload.get("reason"),
+        "input_failure_reason": payload.get("input_failure_reason"),
+        "nominal_build_failure_stage": payload.get(
+            "nominal_build_failure_stage"),
+        "nominal_build_failure_constraint": payload.get(
+            "nominal_build_failure_constraint"),
+        "nominal_build_failure_index": payload.get(
+            "nominal_build_failure_index"),
+        "nonlinear_failure_reason": payload.get("nonlinear_failure_reason"),
+        "nonlinear_failure_stage": payload.get("nonlinear_failure_stage"),
+        "nonlinear_failure_detail": payload.get("nonlinear_failure"),
         "action_source": payload.get("action_source"),
         "command_published": payload.get("command_published"),
         "solver_skipped_for_deadline": payload.get(
@@ -487,10 +508,30 @@ def _cycle_row(
         "nominal_vs_candidate_right_bound_error_max_m": _finite_number(
             payload.get("nominal_vs_candidate_right_bound_error_max_m")),
         "full_horizon_failure_stage": payload.get("nonlinear_failure_stage"),
-        "prefix_validation_horizon": payload.get(
-            "candidate_prefix_revalidation", {}).get("validation_horizon")
-            if isinstance(payload.get("candidate_prefix_revalidation"), dict)
-            else None,
+        "candidate_prefix_validation_attempted": candidate_prefix.get(
+            "attempted"),
+        "candidate_prefix_exact_valid": candidate_prefix.get("exact_valid"),
+        "candidate_prefix_failure_stage": candidate_prefix.get(
+            "failure_stage"),
+        "candidate_prefix_validation_status": candidate_prefix.get(
+            "validation_status"),
+        "candidate_prefix_validation_horizon": candidate_prefix.get(
+            "validation_horizon"),
+        "candidate_prefix_timing_rejected": candidate_prefix.get(
+            "timing_rejected"),
+        "candidate_prefix_solver_converged": candidate_prefix.get(
+            "solver_converged"),
+        "candidate_prefix_solver_iteration_limited": candidate_prefix.get(
+            "solver_iteration_limited"),
+        "prior_plan_validation_attempted": prior_plan.get("attempted"),
+        "prior_plan_exact_valid": prior_plan.get("exact_valid"),
+        "prior_plan_failure_stage": prior_plan.get("failure_stage"),
+        "prior_plan_validation_status": prior_plan.get("validation_status"),
+        "prior_plan_validation_horizon": prior_plan.get(
+            "validation_horizon"),
+        "prior_plan_timing_rejected": prior_plan.get("timing_rejected"),
+        "prefix_validation_horizon": candidate_prefix.get(
+            "validation_horizon"),
         "corridor_slack_m": _finite_number(
             solver.get("minimum_predicted_corridor_slack_m",
                        payload.get("minimum_predicted_corridor_slack_m"))),
@@ -757,6 +798,19 @@ def make_report(
     scored = [row for row in cycles if row["score_eligible"]]
 
     status_counts = Counter(row.get("status", "unknown") for row in scored)
+    cycle_reason_counts = Counter(
+        str(row["cycle_reason"]) for row in scored
+        if isinstance(row.get("cycle_reason"), str) and row["cycle_reason"])
+    nonlinear_failure_counts = Counter(
+        str(row["nonlinear_failure_reason"]) for row in scored
+        if isinstance(row.get("nonlinear_failure_reason"), str) and
+        row["nonlinear_failure_reason"] not in ("", "none", "not_applicable"))
+    candidate_prefix_failure_stage_counts = Counter(
+        str(row["candidate_prefix_failure_stage"]) for row in scored
+        if row.get("candidate_prefix_validation_attempted") is True and
+        row.get("candidate_prefix_exact_valid") is False and
+        isinstance(row.get("candidate_prefix_failure_stage"), (int, float)) and
+        row["candidate_prefix_failure_stage"] >= 0)
     gate_values = [row["callback_to_gate_ms"] for row in scored
                    if row.get("callback_to_gate_ms") is not None]
     errors = {
@@ -815,6 +869,10 @@ def make_report(
             if controller_fault_time is not None else None),
         "cycles_scored": len(scored),
         "status_counts": dict(status_counts),
+        "cycle_reason_counts": dict(cycle_reason_counts),
+        "nonlinear_failure_reason_counts": dict(nonlinear_failure_counts),
+        "candidate_prefix_failure_stage_counts": dict(
+            candidate_prefix_failure_stage_counts),
         "status_percentages": {
             status: 100.0 * count / len(scored)
             for status, count in status_counts.items()} if scored else {},
@@ -1031,7 +1089,11 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "published_steering_message_matches_candidate",
         "published_throttle_message_matches_candidate",
         "scheduled_bridge_request_sequence",
-        "actual_unity_effect_epoch", "status", "action_source", "command_published",
+        "actual_unity_effect_epoch", "status", "cycle_reason",
+        "input_failure_reason", "nominal_build_failure_stage",
+        "nominal_build_failure_constraint", "nominal_build_failure_index",
+        "nonlinear_failure_reason", "nonlinear_failure_stage",
+        "nonlinear_failure_detail", "action_source", "command_published",
         "solver_skipped_for_deadline",
         "progress_m", "e_y_m", "e_psi_rad", "u_mps", "v_mps", "r_radps",
         "actual_steering_rad", "target_u_mps", "curvature_inv_m",
@@ -1045,7 +1107,18 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "state_dual_residual", "state_dual_stage", "state_dual_coordinate",
         "input_primal_residual", "input_primal_stage", "input_primal_coordinate",
         "input_dual_residual", "input_dual_stage", "input_dual_coordinate",
-        "objective", "full_horizon_failure_stage", "prefix_validation_horizon",
+        "objective", "full_horizon_failure_stage",
+        "candidate_prefix_validation_attempted",
+        "candidate_prefix_exact_valid", "candidate_prefix_failure_stage",
+        "candidate_prefix_validation_status",
+        "candidate_prefix_validation_horizon",
+        "candidate_prefix_timing_rejected",
+        "candidate_prefix_solver_converged",
+        "candidate_prefix_solver_iteration_limited",
+        "prior_plan_validation_attempted", "prior_plan_exact_valid",
+        "prior_plan_failure_stage", "prior_plan_validation_status",
+        "prior_plan_validation_horizon", "prior_plan_timing_rejected",
+        "prefix_validation_horizon",
         "nominal_candidate_control_delta_inf", "rho_change_count", "rho_start",
         "rho_final", "rho_u_start", "rho_u_final", "factorization_count",
         "regularization_count", "max_regularization",

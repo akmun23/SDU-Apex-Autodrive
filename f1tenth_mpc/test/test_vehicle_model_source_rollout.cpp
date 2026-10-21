@@ -852,7 +852,7 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
     }
   }
   EXPECT_GT(problem.terminal_Q[MPC_OPT_IDX_U], 0.0f);
-  EXPECT_EQ(problem.horizon, horizon);
+  EXPECT_EQ(problem.horizon, RICCATI_HORIZON);
 }
 
 TEST(MpcReference, NominalHorizonKeepsTrackSpeedTarget)

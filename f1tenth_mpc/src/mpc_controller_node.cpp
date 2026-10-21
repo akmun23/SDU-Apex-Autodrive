@@ -3,6 +3,8 @@
 
 #include "mpc_rti.h"
 #include "mpc_control_time_predictor.hpp"
+#include "mpc_drive_command.hpp"
+#include "mpc_publication_deadline.hpp"
 #include "mpc_state_synchronizer.hpp"
 #include "unity_source_plant.hpp"
 #include "vehicle_model.h"
@@ -563,16 +565,16 @@ public:
         const double initial_command_publication_lead_ms =
             declare_parameter<double>(
                 "initial_command_publication_lead_ms", 15.0);
-        if (!std::isfinite(end_to_end_cycle_budget_ms_) ||
-            end_to_end_cycle_budget_ms_ <= 0.0 ||
+        if (!f1tenth_mpc::mpc_publication_budget_valid(
+                end_to_end_cycle_budget_ms_) ||
             !std::isfinite(max_command_start_lateness_ms_) ||
             max_command_start_lateness_ms_ < 0.0 ||
             !std::isfinite(initial_command_publication_lead_ms) ||
             initial_command_publication_lead_ms < 0.0) {
             throw std::runtime_error(
-                "end-to-end budget must be positive and command-start "
-                "lateness and initial command lead must be finite and "
-                "nonnegative");
+                "end-to-end budget must be positive and at most 20 ms; "
+                "command-start lateness and initial command lead must be "
+                "finite and nonnegative");
         }
         last_command_publication_lead_ns_ = static_cast<int64_t>(
             std::llround(initial_command_publication_lead_ms * 1.0e6));
@@ -784,29 +786,56 @@ private:
         return startup_speed_mps_ + (max_speed_mps_ - startup_speed_mps_) * fraction;
     }
 
-    int64_t publish_command(double steering, double throttle_normalized)
+    int64_t publish_command(
+        double steering, double throttle_normalized,
+        int64_t callback_steady_ns, int64_t expected_command_stamp_ns,
+        const char **fault_reason)
     {
         if (!drive_command_pub_) return 0;
-        if (!std::isfinite(steering) || !std::isfinite(throttle_normalized) ||
-            std::abs(steering) > actuator_steering_limit_rad_ + 1.0e-6 ||
-            throttle_normalized < MPC_THROTTLE_MIN_DRIVE - 1.0e-6 ||
-            throttle_normalized > 1.0 + 1.0e-6) return 0;
-        const double bounded_steering = clamp(steering,
-            -actuator_steering_limit_rad_, actuator_steering_limit_rad_);
-        const double bounded_throttle = clamp(throttle_normalized,
-            MPC_THROTTLE_MIN_DRIVE, 1.0);
+        MpcDriveCommand bounded{};
+        if (!bound_mpc_drive_command(
+                steering, throttle_normalized,
+                actuator_steering_limit_rad_, &bounded)) return 0;
         sdu_apex_msgs::msg::DriveCommand command;
         const rclcpp::Time command_time = now();
         command.header.stamp = command_time;
         command.header.frame_id = command_frame_;
-        command.steering_angle_rad = bounded_steering;
-        command.throttle_normalized = bounded_throttle;
+        command.steering_angle_rad = bounded.steering_target_rad;
+        command.throttle_normalized = bounded.throttle_normalized;
+
+        /* Recheck adjacent to publication. Earlier preflight checks avoid
+         * spending time on work that is already over budget; this wrapper
+         * makes the actual publisher invocation conditional on the strict
+         * callback-to-publication deadline. */
+        if (!f1tenth_mpc::mpc_publish_before_deadline(
+                callback_steady_ns, end_to_end_cycle_budget_ms_,
+                &last_publication_gate_elapsed_ms_,
+                [] { return steady_time_ns(); },
+                [&] { drive_command_pub_->publish(command); })) {
+            if (fault_reason)
+                *fault_reason =
+                    "MPC cycle reached or exceeded its publication budget";
+            RCLCPP_ERROR(get_logger(),
+                "MPC candidate not published: callback-to-publication "
+                "elapsed %.3f ms must remain below %.3f ms",
+                last_publication_gate_elapsed_ms_, end_to_end_cycle_budget_ms_);
+            return 0;
+        }
         {
             std::lock_guard<std::mutex> lock(command_history_mutex_);
-            command_history_.push({command_time.nanoseconds(), bounded_steering,
-                bounded_throttle, true});
+            command_history_.push({command_time.nanoseconds(),
+                bounded.steering_target_rad, bounded.throttle_normalized, true});
         }
-        drive_command_pub_->publish(command);
+        const double command_start_lateness_ms = std::max(0.0,
+            static_cast<double>(now().nanoseconds() -
+                expected_command_stamp_ns) * 1.0e-6);
+        if (command_start_lateness_ms > max_command_start_lateness_ms_) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                "MPC command-start prediction was late by %.3f ms "
+                "(diagnostic threshold %.3f ms); the exact-validated "
+                "command was already published",
+                command_start_lateness_ms, max_command_start_lateness_ms_);
+        }
         command_published_this_cycle_ = true;
         last_published_command_stamp_ns_ = command_time.nanoseconds();
         return last_published_command_stamp_ns_;
@@ -835,51 +864,21 @@ private:
     }
 
     bool cycle_time_is_valid(int64_t callback_steady_ns,
-                             int64_t candidate_command_stamp_ns,
-                             const char ** fault_reason,
-                             bool exact_prior_plan = false)
+                             const char ** fault_reason)
     {
-        const double end_to_end_ms = std::max(0.0,
-            static_cast<double>(steady_time_ns() - callback_steady_ns) *
-                1.0e-6);
+        const double end_to_end_ms = static_cast<double>(
+            steady_time_ns() - callback_steady_ns) * 1.0e-6;
         last_publication_gate_elapsed_ms_ = end_to_end_ms;
-        const double command_start_lateness_ms = std::max(0.0,
-            static_cast<double>(now().nanoseconds() -
-                candidate_command_stamp_ns) * 1.0e-6);
-        if (command_start_lateness_ms > max_command_start_lateness_ms_) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC command-start prediction was late by %.3f ms "
-                "(diagnostic threshold %.3f ms); retaining the validated "
-                "candidate because cycle time is %.3f ms",
-                command_start_lateness_ms, max_command_start_lateness_ms_,
-                end_to_end_ms);
-        }
-        if (end_to_end_ms < end_to_end_cycle_budget_ms_) return true;
-
-        /* A cycle overrun must not discard a still-safe command sequence.
-         * The prior-plan caller reaches this only after exact nonlinear
-         * validation from the current state through the delayed command
-         * effect. Continue that plan only while its scheduled command epoch
-         * is still timely; never turn an overdue action into a fallback. */
-        if (exact_prior_plan && command_start_lateness_ms <=
-                max_command_start_lateness_ms_) {
-            RCLCPP_WARN(get_logger(),
-                "MPC cycle took %.3f ms (budget %.3f ms); publishing the "
-                "exact-validated prior-plan action because its command "
-                "start remains timely (lateness %.3f ms)",
-                end_to_end_ms, end_to_end_cycle_budget_ms_,
-                command_start_lateness_ms);
-            return true;
-        }
+        if (mpc_cycle_within_publication_deadline(
+                end_to_end_ms, end_to_end_cycle_budget_ms_)) return true;
 
         if (fault_reason)
-            *fault_reason = "MPC cycle reached or exceeded its 20 ms budget";
+            *fault_reason =
+                "MPC cycle reached or exceeded its publication budget";
         RCLCPP_ERROR(get_logger(),
             "MPC candidate not published: end-to-end cycle %.3f ms "
-            "must remain below %.3f ms (command-start lateness %.3f ms "
-            "is diagnostic only)",
-            end_to_end_ms, end_to_end_cycle_budget_ms_,
-            command_start_lateness_ms);
+            "must remain below %.3f ms",
+            end_to_end_ms, end_to_end_cycle_budget_ms_);
         return false;
     }
 
@@ -975,8 +974,7 @@ private:
             next_control_index - 1;
 
         const char * timing_fault_reason = nullptr;
-        if (!cycle_time_is_valid(callback_steady_ns,
-                candidate_command_stamp_ns, &timing_fault_reason, true)) {
+        if (!cycle_time_is_valid(callback_steady_ns, &timing_fault_reason)) {
             prior_plan_timing_rejected_ = true;
             if (fault_reason) *fault_reason = timing_fault_reason;
             return false;
@@ -989,12 +987,15 @@ private:
             next_warm_start[k] = previous.controls[source_index];
         }
         next_warm_start[0] = first;
+        const char *publication_fault_reason = nullptr;
         const int64_t command_stamp_ns = publish_command(
-            first.steering_target_rad, first.throttle_command);
+            first.steering_target_rad, first.throttle_command,
+            callback_steady_ns, candidate_command_stamp_ns,
+            &publication_fault_reason);
         if (command_stamp_ns == 0) {
-            if (fault_reason)
-                *fault_reason = "revalidated prior-plan action could not be "
-                    "published within the command envelope";
+            if (fault_reason) *fault_reason = publication_fault_reason ?
+                publication_fault_reason :
+                "revalidated prior-plan action violates the drive envelope";
             return false;
         }
         /* Commit the issued-sequence warm start only after publish_command()
@@ -1120,19 +1121,21 @@ private:
         next_warm_start[0] = revalidated.controls[0];
 
         const char * timing_fault_reason = nullptr;
-        if (!cycle_time_is_valid(callback_steady_ns,
-                candidate_command_stamp_ns, &timing_fault_reason)) {
+        if (!cycle_time_is_valid(callback_steady_ns, &timing_fault_reason)) {
             candidate_prefix_timing_rejected_ = true;
             if (fault_reason) *fault_reason = timing_fault_reason;
             return false;
         }
         const MpcModelControl_t &first = revalidated.controls[0];
+        const char *publication_fault_reason = nullptr;
         const int64_t command_stamp_ns = publish_command(
-            first.steering_target_rad, first.throttle_command);
+            first.steering_target_rad, first.throttle_command,
+            callback_steady_ns, candidate_command_stamp_ns,
+            &publication_fault_reason);
         if (command_stamp_ns == 0) {
-            if (fault_reason)
-                *fault_reason = "exact-validated candidate prefix could not "
-                    "be published within the command envelope";
+            if (fault_reason) *fault_reason = publication_fault_reason ?
+                publication_fault_reason :
+                "exact-validated candidate prefix violates the drive envelope";
             return false;
         }
         /* Do not let an unpublished candidate overwrite the next nominal.
@@ -1295,13 +1298,21 @@ private:
 
     void open_loop_horizon_timer_callback()
     {
+        const int64_t callback_steady_ns = steady_time_ns();
         if (!open_loop_horizon_test_active_) return;
         if (open_loop_horizon_test_next_stage_ <
             open_loop_horizon_test_plan_.horizon) {
             const int stage = open_loop_horizon_test_next_stage_++;
-            if (publish_open_loop_horizon_command(stage) == 0) {
+            const int64_t expected_command_stamp_ns =
+                open_loop_horizon_start_stamp_ns_ +
+                static_cast<int64_t>(stage) * kBridgeControlPeriodNs;
+            const char *publication_fault_reason = nullptr;
+            if (publish_open_loop_horizon_command(stage, callback_steady_ns,
+                    expected_command_stamp_ns,
+                    &publication_fault_reason) == 0) {
                 report_control_fault(
-                    "latched MPC plan contains a command outside the drive envelope");
+                    publication_fault_reason ? publication_fault_reason :
+                    "latched MPC plan command violates the drive envelope");
                 return;
             }
             if (open_loop_horizon_test_next_stage_ ==
@@ -1454,16 +1465,19 @@ private:
         publish_open_loop_horizon_event(json.str());
     }
 
-    int64_t publish_open_loop_horizon_command(int stage)
+    int64_t publish_open_loop_horizon_command(
+        int stage, int64_t callback_steady_ns,
+        int64_t expected_command_stamp_ns, const char **fault_reason)
     {
         const MpcModelControl_t & control =
             open_loop_horizon_test_plan_.controls[stage];
-        if (control.throttle_command < MPC_THROTTLE_MIN_DRIVE ||
-            control.throttle_command > 1.0 ||
-            std::abs(control.steering_target_rad) >
-                actuator_steering_limit_rad_) return 0;
+        MpcDriveCommand bounded{};
+        if (!bound_mpc_drive_command(
+                control.steering_target_rad, control.throttle_command,
+                actuator_steering_limit_rad_, &bounded)) return 0;
         const int64_t command_stamp_ns = publish_command(
-            control.steering_target_rad, control.throttle_command);
+            bounded.steering_target_rad, bounded.throttle_normalized,
+            callback_steady_ns, expected_command_stamp_ns, fault_reason);
         if (command_stamp_ns == 0) return 0;
         std::ostringstream output;
         output << std::setprecision(9)
@@ -1471,8 +1485,8 @@ private:
                << open_loop_horizon_test_plan_id_
                << ",\"stage\":" << stage
                << ",\"steady_stamp_ns\":" << steady_time_ns()
-               << ",\"control\":[" << control.steering_target_rad << ','
-               << control.throttle_command << "]}";
+               << ",\"control\":[" << bounded.steering_target_rad << ','
+               << bounded.throttle_normalized << "]}";
         publish_open_loop_horizon_event(output.str());
         return command_stamp_ns;
     }
@@ -2857,23 +2871,29 @@ private:
                     control_ros_time.nanoseconds(), candidate_command_stamp_ns,
                     callback_steady_ns,
                     synchronize_steady_ns);
+            /* The detailed cycle snapshot above is the authoritative fault
+             * record. The bounded diagnostic publisher may coalesce pending
+             * frames; enqueueing a second generic `status=rejected` message
+             * here can replace the state, nonlinear reason and failing stage
+             * that are needed to diagnose this fault. */
             report_control_fault(
                 reuse_failure_reason ? reuse_failure_reason :
                     (candidate_prefix_failure_reason
                         ? candidate_prefix_failure_reason
-                        : "MPC RTI cycle had no exact-feasible candidate"));
+                        : "MPC RTI cycle had no exact-feasible candidate"),
+                false);
             return;
         }
 
         /* A numerically accepted plan is not publishable if its command-time
          * state is already stale or if state acquisition through validation
-         * crossed the 20 ms compute budget. Command-start prediction age is
-         * reported separately and does not invalidate an exact-feasible plan.
+         * crossed the configured publication budget. Command-start prediction
+         * age is reported separately and does not invalidate an exact-feasible plan.
          * Full diagnostics are serialized after command publication so a
          * debug recording cannot consume the control deadline. */
         const char * timing_fault_reason = nullptr;
         if (enabled_ && !cycle_time_is_valid(callback_steady_ns,
-                candidate_command_stamp_ns, &timing_fault_reason)) {
+                &timing_fault_reason)) {
             if (diagnostics_pub_)
                 publish_cycle_diagnostics(state, coherent_state,
                     control_time_prediction, control_prediction_us,
@@ -2910,7 +2930,7 @@ private:
                 return;
             }
             if (!cycle_time_is_valid(callback_steady_ns,
-                    candidate_command_stamp_ns, &timing_fault_reason)) {
+                    &timing_fault_reason)) {
                 if (diagnostics_pub_)
                     publish_cycle_diagnostics(state, coherent_state,
                         control_time_prediction, control_prediction_us,
@@ -2927,11 +2947,14 @@ private:
                 "outputs will be emitted on the fixed 25 ms clock",
                 static_cast<unsigned long long>(open_loop_horizon_test_plan_id_),
                 state.plant.u, PREDICTION_HORIZON);
-            const int64_t command_stamp_ns =
-                publish_open_loop_horizon_command(0);
+            const char *publication_fault_reason = nullptr;
+            const int64_t command_stamp_ns = publish_open_loop_horizon_command(
+                0, callback_steady_ns, candidate_command_stamp_ns,
+                &publication_fault_reason);
             if (command_stamp_ns == 0) {
                 report_control_fault(
-                    "latched MPC plan starts outside the drive command envelope");
+                    publication_fault_reason ? publication_fault_reason :
+                    "latched MPC plan start violates the drive envelope");
                 return;
             }
             certified_plan_ = rti_memory_.nominal;
@@ -2956,8 +2979,11 @@ private:
             return;
         }
         if (enabled_) {
+            const char *publication_fault_reason = nullptr;
             const int64_t command_stamp_ns = publish_command(
-                result.published_steering_command, result.published_throttle);
+                result.published_steering_command,
+                result.published_throttle, callback_steady_ns,
+                candidate_command_stamp_ns, &publication_fault_reason);
             if (command_stamp_ns == 0) {
                 if (diagnostics_pub_)
                     publish_cycle_diagnostics(state, coherent_state,
@@ -2967,6 +2993,7 @@ private:
                         candidate_command_stamp_ns, callback_steady_ns,
                         synchronize_steady_ns);
                 report_control_fault(
+                    publication_fault_reason ? publication_fault_reason :
                     "accepted MPC action violates the positive-throttle command envelope");
                 return;
             }

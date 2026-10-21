@@ -186,6 +186,24 @@ typedef struct
     int linearization_failure_index;
 } MpcRtiProblem_t;
 
+/* Offline replay only. When non-NULL, solve_rti_pass copies the exact QP,
+ * effective solver configuration, pre-solve ADMM memory, and raw solver result
+ * at the solve boundary. Production leaves this pointer NULL; serialization
+ * and all file I/O belong to a development replay executable. */
+typedef struct
+{
+    MpcRtiProblem_t problem;
+    RiccatiAdmmConfig_t solver_config;
+    RiccatiAdmmState_t initial_solver_state;
+    RiccatiAdmmState_t final_solver_state;
+    float raw_primal_u[RICCATI_HORIZON][RICCATI_MAX_NU];
+    RiccatiSolution_t raw_solution;
+    RiccatiDebugInfo_t debug_info;
+    RiccatiStatus_t raw_status;
+    int capture_count;
+    int valid;
+} MpcRtiQpCapture_t;
+
 typedef struct
 {
     int sample_count;
@@ -212,6 +230,8 @@ typedef struct
     /* Capture already-computed source-output samples for runtime diagnostics.
      * When false, exact rollouts do not retain or copy this debug data. */
     int capture_diagnostic_outputs;
+    /* Optional offline-only POD sink. Must remain NULL in production. */
+    MpcRtiQpCapture_t *qp_capture;
 } MpcRtiCycleConfiguration_t;
 
 typedef struct

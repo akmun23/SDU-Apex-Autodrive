@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Solve a frozen controller QP with OSQP as an independent offline oracle.
+
+The stored QP is reconstructed exactly from the explicit little-endian fixture
+schema. This tool never loads the ROS controller or uses simulator truth.
+Install tools/requirements_mpc_qp_oracle.txt in the analysis environment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+import numpy as np
+from scipy import sparse
+from scipy.optimize import linprog
+
+from tools.mpc_qp_fixture import (Cursor, FixtureError, HEADER_SIZE, HORIZON,
+                                  NX, NU, parse_payload)
+
+
+def _load_osqp():
+    try:
+        import osqp
+        return osqp
+    except ModuleNotFoundError:
+        vendor = Path(__file__).resolve().parents[1] / "build_task/qp_oracle_vendor"
+        if vendor.is_dir():
+            sys.path.insert(0, str(vendor))
+            import osqp
+            return osqp
+        raise
+
+
+def decode_problem(payload: bytes) -> dict:
+    parse_payload(payload)  # schema, finite values, bounds, and exact EOF.
+    cursor = Cursor(payload)
+    cursor.offset = HEADER_SIZE
+    steps = []
+    for _ in range(HORIZON):
+        A = np.asarray(cursor.f32_array(NX * NX)).reshape(NX, NX)
+        B = np.asarray(cursor.f32_array(NX * NU)).reshape(NX, NU)
+        d = np.asarray(cursor.f32_array(NX))
+        Q = np.asarray(cursor.f32_array(NX))
+        q = np.asarray(cursor.f32_array(NX))
+        N = np.asarray(cursor.f32_array(NX * NU)).reshape(NX, NU)
+        R = np.asarray(cursor.f32_array(NU))
+        r = np.asarray(cursor.f32_array(NU))
+        x_lb = np.asarray(cursor.f32_array(NX))
+        x_ub = np.asarray(cursor.f32_array(NX))
+        u_lb = np.asarray(cursor.f32_array(NU))
+        u_ub = np.asarray(cursor.f32_array(NU))
+        steps.append((A, B, d, Q, q, N, R, r, x_lb, x_ub, u_lb, u_ub))
+    terminal_Q = np.asarray(cursor.f32_array(NX))
+    terminal_q = np.asarray(cursor.f32_array(NX))
+    terminal_lb = np.asarray(cursor.f32_array(NX))
+    terminal_ub = np.asarray(cursor.f32_array(NX))
+    x0 = np.asarray(cursor.f32_array(NX))
+    return {"steps": steps, "terminal_Q": terminal_Q,
+            "terminal_q": terminal_q, "terminal_lb": terminal_lb,
+            "terminal_ub": terminal_ub, "x0": x0}
+
+
+def build_osqp_matrices(problem: dict):
+    nx, nu, horizon = NX, NU, HORIZON
+    x_size = (horizon + 1) * nx
+    nvar = x_size + horizon * nu
+
+    def xidx(k, i):
+        return k * nx + i
+
+    def uidx(k, i):
+        return x_size + k * nu + i
+
+    pr, pc, pv = [], [], []
+    linear = np.zeros(nvar, dtype=np.float64)
+
+    def add_hessian(i, j, value):
+        if value == 0.0:
+            return
+        if i > j:
+            i, j = j, i
+        pr.append(i)
+        pc.append(j)
+        pv.append(float(value))
+
+    for k, step in enumerate(problem["steps"]):
+        _, _, _, Q, q, N, R, r, *_ = step
+        for i in range(nx):
+            add_hessian(xidx(k, i), xidx(k, i), Q[i])
+            linear[xidx(k, i)] += q[i]
+        for a in range(nu):
+            add_hessian(uidx(k, a), uidx(k, a), R[a])
+            linear[uidx(k, a)] += r[a]
+        for i in range(nx):
+            for a in range(nu):
+                add_hessian(xidx(k, i), uidx(k, a), N[i, a])
+    for i in range(nx):
+        add_hessian(xidx(horizon, i), xidx(horizon, i),
+                    problem["terminal_Q"][i])
+        linear[xidx(horizon, i)] += problem["terminal_q"][i]
+    P = sparse.coo_matrix((pv, (pr, pc)), shape=(nvar, nvar)).tocsc()
+
+    rows, cols, vals = [], [], []
+    lower, upper = [], []
+
+    def add_constraint(entries, lo, hi):
+        row = len(lower)
+        for column, value in entries:
+            if value != 0.0:
+                rows.append(row)
+                cols.append(column)
+                vals.append(float(value))
+        lower.append(float(lo))
+        upper.append(float(hi))
+
+    # Pin the supplied initial state and impose all linear dynamics exactly.
+    for i in range(nx):
+        add_constraint([(xidx(0, i), 1.0)], problem["x0"][i],
+                       problem["x0"][i])
+    for k, step in enumerate(problem["steps"]):
+        A, B, d = step[:3]
+        for i in range(nx):
+            entries = [(xidx(k + 1, i), 1.0)]
+            entries.extend((xidx(k, j), -A[i, j]) for j in range(nx))
+            entries.extend((uidx(k, a), -B[i, a]) for a in range(nu))
+            add_constraint(entries, d[i], d[i])
+
+    # Riccati ADMM deliberately excludes x0 from the split box constraints.
+    # Its constrained state slots are x1..x(H-1) using step_data[k] bounds,
+    # then xH using terminal bounds; step 0's state bounds are metadata only.
+    for k in range(1, horizon):
+        step = problem["steps"][k]
+        for i in range(nx):
+            add_constraint([(xidx(k, i), 1.0)], step[8][i], step[9][i])
+    for i in range(nx):
+        add_constraint([(xidx(horizon, i), 1.0)],
+                       problem["terminal_lb"][i],
+                       problem["terminal_ub"][i])
+    for k, step in enumerate(problem["steps"]):
+        for a in range(nu):
+            add_constraint([(uidx(k, a), 1.0)], step[10][a], step[11][a])
+    Acon = sparse.coo_matrix((vals, (rows, cols)),
+                             shape=(len(lower), nvar)).tocsc()
+    return P, linear, Acon, np.asarray(lower), np.asarray(upper)
+
+
+def solve(path: Path, max_iter: int = 25_000,
+          time_limit_s: float = 0.2) -> dict:
+    osqp = _load_osqp()
+    payload = path.read_bytes()
+    problem = decode_problem(payload)
+    P, q, A, lower, upper = build_osqp_matrices(problem)
+    solver = osqp.OSQP()
+    solver.setup(P=P, q=q, A=A, l=lower, u=upper,
+                 eps_abs=1e-8, eps_rel=1e-8, max_iter=max_iter,
+                 polishing=True, verbose=False, adaptive_rho=True,
+                 check_termination=25, time_limit=time_limit_s)
+    result = solver.solve(raise_error=False)
+    status = result.info.status
+    if result.x is None:
+        raise FixtureError(f"OSQP failed on {path.name}: {status}")
+    stage_hessian_min_eigenvalue = min(
+        float(np.linalg.eigvalsh(np.block([
+            [np.diag(step[3]), step[5]],
+            [step[5].T, np.diag(step[6])],
+        ])).min()) for step in problem["steps"])
+    stage_hessian_min_eigenvalue = min(
+        stage_hessian_min_eigenvalue,
+        float(np.min(problem["terminal_Q"])))
+    feasibility_lp_status = None
+    if "primal infeasible" in status.lower():
+        equality_count = NX * (HORIZON + 1)
+        bounds = [[-np.inf, np.inf] for _ in range(P.shape[0])]
+        for row_index in range(equality_count, A.shape[0]):
+            row = A.getrow(row_index)
+            if row.nnz != 1 or abs(row.data[0] - 1.0) > 1e-12:
+                raise FixtureError("unexpected non-box row in QP constraints")
+            variable = row.indices[0]
+            bounds[variable][0] = max(bounds[variable][0], lower[row_index])
+            bounds[variable][1] = min(bounds[variable][1], upper[row_index])
+        lp = linprog(
+            np.zeros(P.shape[0]), A_eq=A[:equality_count],
+            b_eq=lower[:equality_count], bounds=bounds, method="highs")
+        feasibility_lp_status = {
+            0: "feasible", 2: "infeasible"}.get(lp.status, f"status-{lp.status}")
+    return {
+        "fixture": path.name,
+        "oracle": "OSQP 1.0.4, eps_abs=eps_rel=1e-8, polishing",
+        "status": status,
+        "feasibility_lp_status": feasibility_lp_status,
+        "iterations": result.info.iter,
+        "solve_time_s": float(result.info.run_time),
+        "configured_iteration_limit": max_iter,
+        "configured_time_limit_s": time_limit_s,
+        "objective": float(result.info.obj_val),
+        "primal_residual": float(result.info.prim_res),
+        "dual_residual": float(result.info.dual_res),
+        "variables": int(P.shape[0]),
+        "constraints": int(A.shape[0]),
+        "hessian_min_eigenvalue": stage_hessian_min_eigenvalue,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("fixture", type=Path)
+    parser.add_argument("--max-iter", type=int, default=25_000)
+    parser.add_argument("--time-limit-s", type=float, default=0.2)
+    args = parser.parse_args()
+    try:
+        print(json.dumps(solve(args.fixture, args.max_iter,
+                               args.time_limit_s), sort_keys=True))
+        return 0
+    except (OSError, FixtureError, ImportError, RuntimeError,
+            ValueError) as error:
+        print(f"mpc_qp_oracle: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

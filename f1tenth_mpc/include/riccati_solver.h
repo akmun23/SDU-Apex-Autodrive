@@ -202,8 +202,8 @@ void riccati_admm_shift_warm_start(
  * 4. y-update: dual variable update
  * 5. Convergence check against the configured absolute maximum residual
  *
- * This solver is specialized for N=RICCATI_HORIZON=28,
- * nx=RICCATI_MAX_NX=20, and nu=RICCATI_MAX_NU=2. These compile-time
+ * This solver is specialized for N=RICCATI_HORIZON=29,
+ * nx=RICCATI_MAX_NX=22, and nu=RICCATI_MAX_NU=2. These compile-time
  * dimensions are the only supported problem shape.
  *
  * @param step_data   Per-step dynamics and cost data (array of 28 elements)
@@ -226,6 +226,22 @@ RiccatiStatus_t riccati_admm_solve(
     const RiccatiAdmmConfig_t *config,
     RiccatiAdmmState_t *admm_state,
     RiccatiSolution_t *solution);
+
+/* Offline diagnostic variant. In addition to the normal projected-control
+ * result, writes the final unconstrained Riccati primal controls before the
+ * ADMM box projection. Passing this output is optional and never used by the
+ * production controller. */
+RiccatiStatus_t riccati_admm_solve_with_primal_controls(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    const RiccatiAdmmConfig_t *config,
+    RiccatiAdmmState_t *admm_state,
+    RiccatiSolution_t *solution,
+    float primal_u_out[RICCATI_HORIZON][RICCATI_MAX_NU]);
 
 void riccati_debug_get_last(RiccatiDebugInfo_t *out);
 int riccati_debug_get_trace_count(void);

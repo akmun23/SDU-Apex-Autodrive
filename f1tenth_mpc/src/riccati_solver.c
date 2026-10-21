@@ -721,7 +721,8 @@ static RiccatiStatus_t riccati_admm_solve_core(
     const float *x0,
     const RiccatiAdmmConfig_t *config,
     RiccatiAdmmState_t *admm_state,
-    RiccatiSolution_t *solution)
+    RiccatiSolution_t *solution,
+    float primal_u_out[RICCATI_HORIZON][RICCATI_MAX_NU])
 {
     if (!step_data || !terminal_Q || !terminal_q || !terminal_x_lb || !terminal_x_ub || !x0 || !admm_state || !solution) {
         if (solution) {
@@ -1439,6 +1440,11 @@ static RiccatiStatus_t riccati_admm_solve_core(
     g_riccati_debug_last.primal_residual = solution->primal_residual;
     g_riccati_debug_last.dual_residual = solution->dual_residual;
 
+    /* Preserve the unconstrained Riccati primal only for the development
+     * fixture path, then return the normal ADMM-projected controls. */
+    if (primal_u_out)
+        memcpy(primal_u_out, solution->u, sizeof(admm_state->z_u));
+
     /* Output feasible controls: z_u is the ADMM projection */
     /* Return the ADMM projection z_u (not the primal u) as the feasible control,
      * because z_u is guaranteed to satisfy box constraints whereas u may not be. */
@@ -1476,7 +1482,7 @@ static float scale_state_upper_bound(float bound, float scale)
     return bound >= BIG_BOUND ? BIG_BOUND : bound / scale;
 }
 
-RiccatiStatus_t riccati_admm_solve(
+static RiccatiStatus_t riccati_admm_solve_impl(
     const RiccatiStepData_t *step_data,
     const float *terminal_Q,
     const float *terminal_q,
@@ -1485,7 +1491,8 @@ RiccatiStatus_t riccati_admm_solve(
     const float *x0,
     const RiccatiAdmmConfig_t *config,
     RiccatiAdmmState_t *admm_state,
-    RiccatiSolution_t *solution)
+    RiccatiSolution_t *solution,
+    float primal_u_out[RICCATI_HORIZON][RICCATI_MAX_NU])
 {
     enum { nx = RICCATI_MAX_NX, nu = RICCATI_MAX_NU,
            N = RICCATI_HORIZON };
@@ -1515,7 +1522,7 @@ RiccatiStatus_t riccati_admm_solve(
             riccati_admm_state_init(admm_state);
         return riccati_admm_solve_core(
             step_data, terminal_Q, terminal_q, terminal_x_lb, terminal_x_ub,
-            x0, config, admm_state, solution);
+            x0, config, admm_state, solution, primal_u_out);
     }
 
     if (!step_data || !terminal_Q || !terminal_q || !terminal_x_lb ||
@@ -1603,13 +1610,15 @@ RiccatiStatus_t riccati_admm_solve(
     RiccatiAdmmConfig_t scaled_config = *config;
     scaled_config.use_scaling = 0;
     RiccatiSolution_t scaled_solution = {0};
+    float scaled_primal_u[RICCATI_HORIZON][RICCATI_MAX_NU];
 #ifdef MPC_ENABLE_RICCATI_PROFILE
     const uint64_t scaling_finish_ns = riccati_profile_now_ns();
 #endif
     const RiccatiStatus_t status = riccati_admm_solve_core(
         scaled_steps, scaled_terminal_Q, scaled_terminal_q,
         scaled_terminal_lb, scaled_terminal_ub, scaled_x0,
-        &scaled_config, admm_state, &scaled_solution);
+        &scaled_config, admm_state, &scaled_solution,
+        primal_u_out ? scaled_primal_u : NULL);
     *solution = scaled_solution;
 #ifdef MPC_ENABLE_RICCATI_PROFILE
     const uint64_t output_unscale_start_ns = riccati_profile_now_ns();
@@ -1620,6 +1629,11 @@ RiccatiStatus_t riccati_admm_solve(
     for (int k = 0; k < N; ++k)
         for (int a = 0; a < nu; ++a)
             solution->u[k][a] *= config->input_scale[a];
+    if (primal_u_out)
+        for (int k = 0; k < N; ++k)
+            for (int a = 0; a < nu; ++a)
+                primal_u_out[k][a] =
+                    scaled_primal_u[k][a] * config->input_scale[a];
 
     if (admm_state->initialized) {
         admm_state->scaling_enabled = 1;
@@ -1638,4 +1652,36 @@ RiccatiStatus_t riccati_admm_solve(
             output_unscale_finish_ns - output_unscale_start_ns;
 #endif
     return status;
+}
+
+RiccatiStatus_t riccati_admm_solve(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    const RiccatiAdmmConfig_t *config,
+    RiccatiAdmmState_t *admm_state,
+    RiccatiSolution_t *solution)
+{
+    return riccati_admm_solve_impl(step_data, terminal_Q, terminal_q,
+        terminal_x_lb, terminal_x_ub, x0, config, admm_state, solution, NULL);
+}
+
+RiccatiStatus_t riccati_admm_solve_with_primal_controls(
+    const RiccatiStepData_t *step_data,
+    const float *terminal_Q,
+    const float *terminal_q,
+    const float *terminal_x_lb,
+    const float *terminal_x_ub,
+    const float *x0,
+    const RiccatiAdmmConfig_t *config,
+    RiccatiAdmmState_t *admm_state,
+    RiccatiSolution_t *solution,
+    float primal_u_out[RICCATI_HORIZON][RICCATI_MAX_NU])
+{
+    return riccati_admm_solve_impl(step_data, terminal_Q, terminal_q,
+        terminal_x_lb, terminal_x_ub, x0, config, admm_state, solution,
+        primal_u_out);
 }

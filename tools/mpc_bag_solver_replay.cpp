@@ -1,4 +1,5 @@
 #include "mpc_rti.h"
+#include "mpc_qp_fixture_format.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,13 +8,17 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace {
+
+MpcRtiQpCapture_t g_qp_capture{};
 
 constexpr double kMaxSteeringRad = 0.5235987755982988;
 constexpr std::size_t kInputColumnCount = 38;
@@ -152,7 +157,7 @@ int main(int argc, char **argv)
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
                      "[RHO_MAX PERIOD TOLERANCE "
-                     "[sequence|independent|nominal-cold] "
+                     "[sequence|independent|nominal-cold|reference-seed] "
                      "[warm|cold|dual-cold] "
                      "[JACOBIAN_THREADS [MAX_ITERATIONS [STARTUP_SEED "
                      "[EY_WEIGHT_MULTIPLIER [EPSI_WEIGHT_MULTIPLIER "
@@ -221,7 +226,8 @@ int main(int argc, char **argv)
             (adaptive_rho_value != 0.0 && adaptive_rho_value != 1.0) ||
             !std::isfinite(rho_u) || !(rho_u > 0.0) || rho_u > 127.0 ||
             (memory_mode != "sequence" && memory_mode != "independent" &&
-             memory_mode != "nominal-cold") ||
+             memory_mode != "nominal-cold" &&
+             memory_mode != "reference-seed") ||
             (solver_start != "warm" && solver_start != "cold" &&
              solver_start != "dual-cold") ||
             jacobian_threads < 0 ||
@@ -299,6 +305,37 @@ int main(int argc, char **argv)
         const char *diagnostic_row_text = std::getenv("MPC_REPLAY_DIAG_ROW");
         const long diagnostic_row = diagnostic_row_text
             ? std::strtol(diagnostic_row_text, nullptr, 10) : -1;
+        const char *qp_capture_dir_text =
+            std::getenv("MPC_REPLAY_QP_CAPTURE_DIR");
+        const char *qp_capture_row_text =
+            std::getenv("MPC_REPLAY_QP_CAPTURE_ROW");
+        const char *qp_capture_rows_text =
+            std::getenv("MPC_REPLAY_QP_CAPTURE_ROWS");
+        const long qp_capture_row = qp_capture_row_text
+            ? std::strtol(qp_capture_row_text, nullptr, 10) : -1;
+        std::set<long> qp_capture_rows;
+        if (qp_capture_rows_text && qp_capture_rows_text[0] != '\0') {
+            std::stringstream rows_stream(qp_capture_rows_text);
+            std::string row_token;
+            while (std::getline(rows_stream, row_token, ',')) {
+                if (row_token.empty())
+                    throw std::runtime_error(
+                        "empty row in MPC_REPLAY_QP_CAPTURE_ROWS");
+                std::size_t parsed = 0;
+                const long row = std::stol(row_token, &parsed);
+                if (parsed != row_token.size() || row < 0 ||
+                    !qp_capture_rows.insert(row).second)
+                    throw std::runtime_error(
+                        "invalid or duplicate MPC_REPLAY_QP_CAPTURE_ROWS row");
+            }
+        }
+        const bool qp_capture_enabled = qp_capture_dir_text &&
+            qp_capture_dir_text[0] != '\0';
+        const std::filesystem::path qp_capture_dir = qp_capture_enabled
+            ? std::filesystem::path(qp_capture_dir_text)
+            : std::filesystem::path{};
+        if (qp_capture_enabled)
+            std::filesystem::create_directories(qp_capture_dir);
         riccati_debug_set_trace_enabled(trace_row >= 0);
         std::cout << "stamp_ns,status,admm_status,time_budget_exhausted,iterations,"
                      "sqp_iterations_attempted,sqp_iterations_completed,"
@@ -368,6 +405,16 @@ int main(int argc, char **argv)
                 &operating_reference) != 0;
 
             config.model.active_speed_ceiling_mps = static_cast<float>(row[2]);
+            const bool capture_this_qp = qp_capture_enabled &&
+                ((qp_capture_row < 0 && qp_capture_rows.empty()) ||
+                 qp_capture_row == static_cast<long>(row_index) ||
+                 qp_capture_rows.count(static_cast<long>(row_index)) != 0);
+            if (capture_this_qp) {
+                g_qp_capture = MpcRtiQpCapture_t{};
+                config.qp_capture = &g_qp_capture;
+            } else {
+                config.qp_capture = nullptr;
+            }
             MpcRtiCycleResult_t result{};
             if (memory_mode == "independent") {
                 mpc_rti_memory_reset(&memory);
@@ -377,6 +424,17 @@ int main(int argc, char **argv)
                  * shifted trajectory—not the QP warm state—is the source of
                  * sequence-replay convergence failures. */
                 memory.nominal.valid = 0;
+            } else if (memory_mode == "reference-seed") {
+                /* Offline counterfactual for PR-C: preserve ADMM z/y/rho
+                 * history but rebuild the next physical nominal from the
+                 * trajectory/source-plant initializer, not the previous
+                 * rejected QP suffix. The current sensor state still carries
+                 * the immutable in-flight actuator queue. This is a replay
+                 * experiment only; it is not a publishable recovery action
+                 * and does not reconstruct an unavailable certified suffix. */
+                memory.nominal.valid = 0;
+                memory.warm_start_controls_valid = 0;
+                memory.warm_start_control_count = 0;
             }
             if (solver_start == "dual-cold") {
                 /* Experimental hybrid ADMM seed: retain shifted primal
@@ -402,6 +460,19 @@ int main(int argc, char **argv)
                 &state, row[1], trajectory.data(), trajectory.size(),
                 lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
                 &config, &memory, &result);
+            if (capture_this_qp && g_qp_capture.valid) {
+                char filename[32];
+                std::snprintf(filename, sizeof(filename), "qp_%06zu.fqp",
+                              row_index);
+                const auto path = qp_capture_dir / filename;
+                if (!sdu_apex::qp_fixture::write_capture(
+                        path.string(), g_qp_capture))
+                    throw std::runtime_error(
+                        "failed to write frozen QP fixture: " + path.string());
+                std::cerr << "QP_CAPTURE row=" << row_index
+                          << " passes=" << g_qp_capture.capture_count
+                          << " path=" << path.string() << '\n';
+            }
             float max_plan_steering_delta = 0.0f;
             float max_plan_throttle_delta = 0.0f;
             if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||

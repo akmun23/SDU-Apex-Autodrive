@@ -157,6 +157,12 @@ def stamp(message: Any) -> float:
     return message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
 
 
+def stamp_nanoseconds(message: Any) -> int:
+    """Return the exact ROS header epoch without a float64 round trip."""
+    return (int(message.header.stamp.sec) * 1_000_000_000 +
+            int(message.header.stamp.nanosec))
+
+
 def yaw_from_quaternion(q: Any) -> float:
     return math.atan2(
         2.0 * (q.w * q.z + q.x * q.y),
@@ -563,6 +569,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
         elif topic == DRIVE_COMMAND:
             row.update(
                 stamp=stamp(message),
+                stamp_ns=stamp_nanoseconds(message),
                 steering=message.steering_angle_rad,
                 throttle=message.throttle_normalized,
             )
@@ -3378,7 +3385,11 @@ def report_source_plant_rollout(
                 -err_x * math.sin(first["yaw"]) + err_y * math.cos(first["yaw"]),
                 math.hypot(err_x, err_y)))
 
-    horizons = (1, 4, 10, 20, 30)
+    # Include the handoff's early transition checkpoints as well as the
+    # established quarter/half/full-horizon checkpoints. All are sampled on
+    # the same 25 ms Unity epoch grid; the underlying plant still substeps at
+    # 1 ms between them.
+    horizons = (1, 2, 3, 4, 5, 10, 20, 30)
     errors = {horizon: {field: [] for field in ("u", "v", "r", "yaw", "xy")}
               for horizon in horizons}
     grouped_yaw: dict[int, list[tuple[float, float, float]]] = {
