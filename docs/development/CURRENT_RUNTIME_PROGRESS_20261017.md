@@ -1,5 +1,21 @@
 # Current runtime and rewrite status — 2026-10-17
 
+> **Latest MPC runtime update — 2026-10-21:** the supervised practice run,
+> exact measurements, runtime input audit, bag-decoder correction, and current
+> failure-policy behavior are documented in
+> [MPC_RUNTIME_FAILURE_AND_BAG_DECODE_20261021.md](MPC_RUNTIME_FAILURE_AND_BAG_DECODE_20261021.md).
+> Across the three capped practice runs in that report, the latest published
+> exactly validated current/prior actions in 408/409 solve cycles, including
+> 16 real prior-plan reuses; maximum end-to-end control time was 15.771 ms
+> (<20 ms). It completed no lap and stopped after a genuine corridor rejection
+> that the remaining prior plan also could not pass. This is not high-speed or
+> racing validation.
+
+> The dated progress entries below are historical snapshots. The 2026-10-21
+> report linked above is the latest runtime status and supersedes older
+> statements about schema versions, pending verification, and whether the MPC
+> has been run.
+
 ## Maintained stack
 
 > **Live status update — 2026-10-18:** this work is focused on production
@@ -2966,3 +2982,28 @@ only for low-speed wheel-pose-angle blending.
   `FixedUpdate`, physics-step index/time, and the feedback/pose/twist snapshot
   index. These fields must remain diagnostics and must not become production
   controller inputs.
+
+### MPC performance / multi-SQP handoff progress — 2026-10-21
+
+Progress and detailed replay data are tracked in
+[`MPC_PERFORMANCE_MULTI_SQP_PROGRESS_20261021.md`](MPC_PERFORMANCE_MULTI_SQP_PROGRESS_20261021.md).
+The latest supervised capture,
+`live_runs/mpc_performance_aligned_dual20_live_20261021/run`, used the current
+mounted workspace build on the **practice** simulator and passed the runtime
+topic-policy guard. Its CDR decoder recovered 396 schema-11 plant states, 303
+drive commands, and all actuator-timing events. This verifies that the live bag
+is analyzable with the current decoder.
+
+This was **not a successful run**: one collision occurred, no lap completed,
+and the peak speed was 2.207 m/s. The exact publication gate recorded one
+overrun at 32.771 ms (`p50/p95/max = 9.991/13.825/32.771 ms`), so the requested
+hard `<20 ms` maximum is not met. The aligned `Dual20` tangent layout preserved
+409-row replay outputs exactly and showed a promising p50 reduction, but did
+not establish a reliable p95/tail win. Do not add another nonlinear SQP pass
+until every cycle has measured timing reserve. The detailed log documents the
+current single-solve candidate/previous-plan acceptance path and its remaining
+timing-fault limitation. A follow-up source change now records, per cycle,
+whether prior-plan validation was attempted, exactly feasible, and then too
+late for the gate, plus whether any command was actually published. It built
+and passed the MPC tests; those new fields have not yet been verified in a
+live bag.

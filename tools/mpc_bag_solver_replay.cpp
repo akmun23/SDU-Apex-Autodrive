@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -246,9 +247,24 @@ int main(int argc, char **argv)
         const long diagnostic_row = diagnostic_row_text
             ? std::strtol(diagnostic_row_text, nullptr, 10) : -1;
         riccati_debug_set_trace_enabled(trace_row >= 0);
-        std::cout << "stamp_ns,status,admm_status,iterations,primal,dual,"
+        std::cout << "stamp_ns,status,admm_status,iterations,"
+                     "sqp_iterations_attempted,sqp_iterations_completed,"
+                     "sqp_iterations_accepted,primal,dual,"
                      "rho_changes,factorizations,"
-                     "solve_us,cycle_us,qp_build_us,admm_us,rollout_us,"
+                     "input_u_mps,input_v_mps,input_r_radps,"
+                     "input_abs_steering_rad,input_delayed_throttle,"
+                     "reference_speed_mps,reference_curvature_per_m,"
+                     "solve_us,cycle_us,nominal_build_us,reference_seed_us,"
+                     "cold_start_queue_seed_us,rollout_a_us,"
+                     "progress_reference_resampling_us,rollout_b_us,"
+                     "qp_build_us,jacobian_wall_us,jacobian_thread_cpu_us,"
+                     "jacobian_slowest_stage_us,jacobian_stages_completed,"
+                     "jacobian_threads_used,jacobian_source_sensitivity_calls,"
+                     "jacobian_finite_difference_columns,admm_us,"
+                     "solver_cold_start_initialization_ns,"
+                     "riccati_factorization_ns,riccati_rhs_ns,"
+                     "admm_projection_ns,rho_update_ns,scaling_transform_ns,"
+                     "output_unscale_ns,rollout_us,"
                      "nonlinear_validation_us,min_corridor_slack_m,"
                      "nonlinear_failure_reason,nonlinear_failure_stage,"
                      "first_steering,first_throttle,"
@@ -285,6 +301,11 @@ int main(int argc, char **argv)
             for (int i = 0; i < MPC_PLANT_INTERNAL_STATE_COUNT; ++i)
                 state.plant.source_plant_internal_state[i] = row[16 + i];
 
+            MpcTrajectorySample_t operating_reference{};
+            const bool operating_reference_valid = mpc_trajectory_sample(
+                trajectory.data(), trajectory.size(), lap_length, row[1],
+                &operating_reference) != 0;
+
             config.model.active_speed_ceiling_mps = static_cast<float>(row[2]);
             MpcRtiCycleResult_t result{};
             if (memory_mode == "independent") {
@@ -302,7 +323,8 @@ int main(int argc, char **argv)
                 &config, &memory, &result);
             float max_plan_steering_delta = 0.0f;
             float max_plan_throttle_delta = 0.0f;
-            if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+            if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                 status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) &&
                 memory.nominal.valid && memory.nominal.horizon > 0) {
                 float previous_steering = state.plant.delayed_steering_command_2;
                 float previous_throttle = state.plant.delayed_throttle_command_2;
@@ -381,7 +403,8 @@ int main(int argc, char **argv)
                     }
                     std::cerr << '\n';
                 }
-                if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+                if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                     status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) &&
                     memory.nominal.horizon > 0) {
                     const int horizon = memory.nominal.horizon;
                     const int sample_stages[] = {
@@ -423,11 +446,43 @@ int main(int argc, char **argv)
             std::cout.precision(9);
             std::cout << static_cast<std::uint64_t>(row[0]) << ',' << status << ','
                       << result.admm_status << ',' << result.solver_iterations << ','
+                      << result.sqp_iterations_attempted << ','
+                      << result.sqp_iterations_completed << ','
+                      << result.sqp_iterations_accepted << ','
                       << result.primal_residual << ',' << result.dual_residual << ','
                       << result.rho_change_count << ','
                       << result.factorization_count << ','
+                      << state.plant.u << ',' << state.plant.v << ','
+                      << state.plant.r << ','
+                      << std::abs(state.plant.actual_steering_angle) << ','
+                      << state.plant.delayed_throttle_command_2 << ','
+                      << (operating_reference_valid
+                          ? operating_reference.speed
+                          : std::numeric_limits<double>::quiet_NaN()) << ','
+                      << (operating_reference_valid
+                          ? operating_reference.curvature
+                          : std::numeric_limits<double>::quiet_NaN()) << ','
                       << result.total_solve_us << ',' << result.total_cycle_us << ','
-                      << result.qp_build_us << ',' << result.admm_us << ','
+                      << result.nominal_build_us << ',' << result.reference_seed_us << ','
+                      << result.cold_start_queue_seed_us << ','
+                      << result.nominal_rollout_a_us << ','
+                      << result.progress_reference_resampling_us << ','
+                      << result.nominal_rollout_b_us << ','
+                      << result.qp_build_us << ',' << result.jacobian_wall_us << ','
+                      << result.jacobian_thread_cpu_us << ','
+                      << result.jacobian_slowest_stage_us << ','
+                      << result.jacobian_stages_completed << ','
+                      << result.jacobian_threads_used << ','
+                      << result.jacobian_source_sensitivity_calls << ','
+                      << result.jacobian_finite_difference_columns << ','
+                      << result.admm_us << ','
+                      << result.solver_cold_start_initialization_time_ns << ','
+                      << result.factorization_time_ns << ','
+                      << result.riccati_rhs_time_ns << ','
+                      << result.admm_projection_time_ns << ','
+                      << result.rho_update_time_ns << ','
+                      << result.solver_scaling_time_ns << ','
+                      << result.solver_output_unscale_time_ns << ','
                       << result.exact_rollout_us << ','
                       << result.nonlinear_validation_us << ','
                       << result.minimum_predicted_corridor_slack_m << ','

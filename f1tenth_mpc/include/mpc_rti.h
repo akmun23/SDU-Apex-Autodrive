@@ -112,6 +112,12 @@ typedef struct
     int horizon;
     int speed_reference_valid;
     int valid;
+    /* Per-cycle benchmark instrumentation; microseconds from CLOCK_MONOTONIC. */
+    double reference_seed_us;
+    double cold_start_queue_seed_us;
+    double nominal_rollout_a_us;
+    double progress_reference_resampling_us;
+    double nominal_rollout_b_us;
     MpcRtiNominalBuildFailureStage_t build_failure_stage;
     MpcRtiCommandEnvelopeFailure_t build_failure_constraint;
     int build_failure_index;
@@ -152,6 +158,13 @@ typedef struct
     float x0[RICCATI_MAX_NX];
     int horizon;
     int nonsmooth_jacobian_columns;
+    int jacobian_stages_completed;
+    int jacobian_threads_used;
+    int jacobian_source_sensitivity_calls;
+    int jacobian_finite_difference_columns;
+    double jacobian_wall_us;
+    double jacobian_thread_cpu_us;
+    double jacobian_slowest_stage_us;
     int linearization_failure_stage;
     int linearization_failure_reason;
     int linearization_failure_index;
@@ -183,6 +196,12 @@ typedef struct
 typedef enum
 {
     MPC_RTI_CYCLE_ACCEPTED_OPTIMAL = 0,
+    /* Solver hit its iteration cap, but this candidate passed the same full
+     * nonlinear plant and corridor validation as an optimal candidate. */
+    MPC_RTI_CYCLE_ACCEPTED_FEASIBLE,
+    /* The RTI solve failed, but a remaining suffix of the last accepted plan
+     * was revalidated from the current state and published once. */
+    MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
     MPC_RTI_CYCLE_REJECTED_INPUT,
     MPC_RTI_CYCLE_REJECTED_SOLVER,
     MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT
@@ -209,6 +228,9 @@ typedef struct
     float published_steering_command;
     float published_throttle;
     int solver_iterations;
+    int sqp_iterations_attempted;
+    int sqp_iterations_completed;
+    int sqp_iterations_accepted;
     int admm_status;
     float primal_residual;
     float dual_residual;
@@ -230,6 +252,12 @@ typedef struct
     int rho_change_count;
     int factorization_count;
     uint64_t factorization_time_ns;
+    uint64_t solver_cold_start_initialization_time_ns;
+    uint64_t riccati_rhs_time_ns;
+    uint64_t admm_projection_time_ns;
+    uint64_t rho_update_time_ns;
+    uint64_t solver_scaling_time_ns;
+    uint64_t solver_output_unscale_time_ns;
     float max_candidate_progress_error_m;
     float max_candidate_curvature_error_per_m;
     float max_candidate_left_bound_error_m;
@@ -241,7 +269,20 @@ typedef struct
     int linearization_failure_stage;
     int linearization_failure_reason;
     int linearization_failure_index;
+    int jacobian_stages_completed;
+    int jacobian_threads_used;
+    int jacobian_source_sensitivity_calls;
+    int jacobian_finite_difference_columns;
+    double jacobian_wall_us;
+    double jacobian_thread_cpu_us;
+    double jacobian_slowest_stage_us;
     double qp_build_us;
+    double nominal_build_us;
+    double reference_seed_us;
+    double cold_start_queue_seed_us;
+    double nominal_rollout_a_us;
+    double progress_reference_resampling_us;
+    double nominal_rollout_b_us;
     double admm_us;
     double exact_rollout_us;
     double nonlinear_validation_us;
@@ -293,6 +334,22 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
     const MpcRtiConfiguration_t *configuration,
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1],
+    int *failure_stage);
+
+/* Validate a control sequence against the exact nonlinear plant, state and
+ * full-footprint corridor checks. Used only to continue a remaining suffix
+ * of a previously accepted plan after a later solve fails. */
+MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
+    const MpcRtiState_t *initial_state,
+    double initial_progress,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    int horizon,
+    float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    MpcRtiNominal_t *validated_plan,
     int *failure_stage);
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory);

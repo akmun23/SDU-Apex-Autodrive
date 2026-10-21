@@ -712,6 +712,7 @@ static int vehicle_model_forward_plant_jacobian(
         }
         if (!unity_source_plant_step_sensitivity_c(
                 &source_input, dt, &seeds, &sensitivity)) return 0;
+        ++linearization->source_sensitivity_call_count;
         for (int lane = 0; lane < lane_count; ++lane) {
             const int model_column =
                 kPlantSensitiveModelColumns[first_column + lane];
@@ -902,12 +903,19 @@ static int vehicle_model_linearize_with_known_step(
         const int index = is_state ? column : column - MPC_MODEL_NX;
         const int analytic_column = is_state
             ? (index == MPC_STATE_IDX_EY || index == MPC_STATE_IDX_EPSI ||
+               /* Slot 1 is consumed only by the exact shift/overwrite below:
+                * the plant acts on slot 2, and next slot 1 is copied from
+                * slot 2. Therefore both slot-1 state columns are exactly
+                * zero and must not trigger a finite-difference plant run. */
+               index == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1 ||
                index == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2 ||
+               index == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1 ||
                index == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2 ||
                (sensitivities_valid &&
                 (sensitivity_covered_columns & (UINT32_C(1) << index)) != 0))
             : 1;
         if (analytic_column) continue;
+        ++linearization->finite_difference_column_count;
         const float epsilon = is_state
             ? state_epsilon[index] : input_epsilon[index];
         MpcModelState_t state_plus = *state;
@@ -1026,6 +1034,38 @@ MpcStageResult_t mpc_vehicle_model_step(
     MpcStageResult_t stage = {0};
     vehicle_model_step_scalar(state, control, dt, path_curvature, 1, &stage);
     return stage;
+}
+
+int vehicle_model_reproject_tracking(
+    const MpcModelState_t *state,
+    const MpcStageResult_t *physical_step,
+    float path_curvature,
+    MpcStageResult_t *reprojected_step)
+{
+    if (!state || !physical_step || !reprojected_step ||
+        !physical_step->valid || !finite_mpc_state(state) ||
+        !finite_mpc_state(&physical_step->next) ||
+        !isfinite(physical_step->body_forward_delta_m) ||
+        !isfinite(physical_step->body_lateral_delta_m) ||
+        !isfinite(physical_step->body_yaw_delta_rad) ||
+        !isfinite(path_curvature)) {
+        return 0;
+    }
+
+    *reprojected_step = *physical_step;
+    if (!vehicle_model_tracking_step_integrated(
+            state, physical_step->body_forward_delta_m,
+            physical_step->body_lateral_delta_m,
+            physical_step->body_yaw_delta_rad, path_curvature,
+            &reprojected_step->next.e_y,
+            &reprojected_step->next.e_psi,
+            &reprojected_step->delta_s_m)) {
+        reprojected_step->valid = 0;
+        return 0;
+    }
+    reprojected_step->valid = finite_mpc_state(&reprojected_step->next) &&
+        isfinite(reprojected_step->delta_s_m);
+    return reprojected_step->valid;
 }
 
 MpcStageResult_t mpc_vehicle_model_propagate(

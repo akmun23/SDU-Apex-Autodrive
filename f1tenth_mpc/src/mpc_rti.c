@@ -6,8 +6,22 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 static double monotonic_microseconds(void);
+
+static double thread_cpu_microseconds(void)
+{
+#ifdef CLOCK_THREAD_CPUTIME_ID
+    struct timespec now;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now) == 0)
+        return (double)now.tv_sec * 1.0e6 + (double)now.tv_nsec * 1.0e-3;
+#endif
+    return NAN;
+}
+
 static float corridor_margin_for_state(
     const MpcRtiConfiguration_t *configuration,
     const MpcModelState_t *state,
@@ -270,16 +284,26 @@ static int rollout_nominal_controls(
     const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
     int horizon,
     float prediction_dt,
+    const MpcStageResult_t cached_physical_steps[PREDICTION_HORIZON],
+    MpcStageResult_t output_physical_steps[PREDICTION_HORIZON],
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1])
 {
     states[0] = *initial_state;
     progress[0] = initial_progress;
     for (int k = 0; k < horizon; ++k) {
-        const MpcStageResult_t step = mpc_vehicle_model_step(
-            &states[k].plant, &controls[k], prediction_dt,
-            references[k].path_curvature);
+        MpcStageResult_t step = {0};
+        if (cached_physical_steps) {
+            if (!vehicle_model_reproject_tracking(
+                    &states[k].plant, &cached_physical_steps[k],
+                    references[k].path_curvature, &step)) return 0;
+        } else {
+            step = mpc_vehicle_model_step(
+                &states[k].plant, &controls[k], prediction_dt,
+                references[k].path_curvature);
+        }
         if (!step.valid || !isfinite(progress[k] + step.delta_s_m)) return 0;
+        if (output_physical_steps) output_physical_steps[k] = step;
         states[k + 1].plant = step.next;
         states[k + 1].incoming_branch_flags = step.branch_flags;
         states[k + 1].incoming_body_forward_delta_m =
@@ -421,13 +445,14 @@ static int valid_previous_nominal(
     const MpcRtiNominal_t *nominal,
     int horizon)
 {
-    if (!nominal || !nominal->valid || nominal->horizon != horizon)
+    if (!nominal || !nominal->valid || nominal->horizon < 1 ||
+        nominal->horizon > horizon)
         return 0;
-    for (int k = 0; k <= horizon; ++k) {
+    for (int k = 0; k <= nominal->horizon; ++k) {
         if (!finite_rti_state(&nominal->states[k]) ||
             !isfinite(nominal->progress[k])) return 0;
     }
-    for (int k = 0; k < horizon; ++k)
+    for (int k = 0; k < nominal->horizon; ++k)
         if (!isfinite(nominal->controls[k].steering_target_rad) ||
             !isfinite(nominal->controls[k].throttle_command)) return 0;
     return 1;
@@ -609,13 +634,22 @@ int mpc_rti_build_ltv_qp(
 
     MpcStageLinearization_t plant_linearizations[RICCATI_HORIZON];
     int linearization_ok[RICCATI_HORIZON] = {0};
+    double jacobian_stage_wall_us[RICCATI_HORIZON] = {0.0};
+    double jacobian_stage_cpu_us[RICCATI_HORIZON] = {0.0};
+    int jacobian_stage_worker[RICCATI_HORIZON] = {0};
     const int jacobian_threads = configuration->jacobian_threads > 0
         ? configuration->jacobian_threads : 1;
+    const double jacobian_start_us = monotonic_microseconds();
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(jacobian_threads) \
     if(horizon >= 8 && jacobian_threads > 1)
 #endif
     for (int k = 0; k < RICCATI_HORIZON; ++k) {
+        const double stage_start_us = monotonic_microseconds();
+        const double stage_cpu_start_us = thread_cpu_microseconds();
+#ifdef _OPENMP
+        jacobian_stage_worker[k] = omp_get_thread_num();
+#endif
         const int model_stage = k + MPC_COMMAND_DELAY_STEPS;
         MpcStageLinearization_t *plant_linearization =
             &plant_linearizations[k];
@@ -658,6 +692,30 @@ int mpc_rti_build_ltv_qp(
                 references[model_stage].path_curvature, plant_linearization);
 #endif
         linearization_ok[k] = linearized;
+        jacobian_stage_wall_us[k] = monotonic_microseconds() - stage_start_us;
+        const double stage_cpu_finish_us = thread_cpu_microseconds();
+        if (isfinite(stage_cpu_start_us) && isfinite(stage_cpu_finish_us))
+            jacobian_stage_cpu_us[k] =
+                stage_cpu_finish_us - stage_cpu_start_us;
+    }
+    problem->jacobian_wall_us =
+        monotonic_microseconds() - jacobian_start_us;
+    int worker_seen[4] = {0};
+    for (int k = 0; k < RICCATI_HORIZON; ++k) {
+        problem->jacobian_slowest_stage_us = fmax(
+            problem->jacobian_slowest_stage_us,
+            jacobian_stage_wall_us[k]);
+        problem->jacobian_thread_cpu_us += jacobian_stage_cpu_us[k];
+        problem->jacobian_stages_completed += linearization_ok[k] != 0;
+        problem->jacobian_source_sensitivity_calls +=
+            plant_linearizations[k].source_sensitivity_call_count;
+        problem->jacobian_finite_difference_columns +=
+            plant_linearizations[k].finite_difference_column_count;
+        const int worker = jacobian_stage_worker[k];
+        if (worker >= 0 && worker < 4 && !worker_seen[worker]) {
+            worker_seen[worker] = 1;
+            ++problem->jacobian_threads_used;
+        }
     }
 
     /* The four FIFO coordinates remain in the nonlinear plant, but neither
@@ -810,6 +868,7 @@ int mpc_rti_build_ltv_qp(
             problem->terminal_x_ub,
             terminal_lower, terminal_upper,
             configuration)) return 0;
+
     return 1;
 }
 
@@ -862,19 +921,34 @@ int mpc_rti_build_nominal(
 
     double progress_seed[PREDICTION_HORIZON + 1] = {0};
     if (warm) {
+        const int previous_horizon = previous_nominal->horizon;
         progress_seed[0] = current_progress;
         const double previous_origin = previous_nominal->progress[1];
+        const double previous_last_increment =
+            previous_nominal->progress[previous_horizon] -
+            previous_nominal->progress[previous_horizon - 1];
         for (int k = 1; k < horizon; ++k) {
+            const int previous_stage = k + 1;
+            const double previous_progress = previous_stage <= previous_horizon
+                ? previous_nominal->progress[previous_stage]
+                : previous_nominal->progress[previous_horizon] +
+                    (previous_stage - previous_horizon) *
+                        previous_last_increment;
             progress_seed[k] = current_progress +
-                previous_nominal->progress[k + 1] - previous_origin;
+                previous_progress - previous_origin;
         }
-        const double last_increment = previous_nominal->progress[horizon] -
-            previous_nominal->progress[horizon - 1];
+        const int terminal_stage = horizon + 1;
+        const double previous_terminal_progress =
+            terminal_stage <= previous_horizon
+                ? previous_nominal->progress[terminal_stage]
+                : previous_nominal->progress[previous_horizon] +
+                    (terminal_stage - previous_horizon) *
+                        previous_last_increment;
         progress_seed[horizon] = current_progress +
-            previous_nominal->progress[horizon] - previous_origin +
-            last_increment;
+            previous_terminal_progress - previous_origin;
         for (int k = 0; k < horizon; ++k) {
-            const int shifted_index = k + 1 < horizon ? k + 1 : horizon - 1;
+            const int shifted_index = k + 1 < previous_horizon
+                ? k + 1 : previous_horizon - 1;
             nominal->controls[k] = previous_nominal->controls[shifted_index];
             nominal->controls[k].steering_target_rad = clampf_rti(
                 nominal->controls[k].steering_target_rad,
@@ -885,6 +959,7 @@ int mpc_rti_build_nominal(
                 MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
         }
     } else {
+        double phase_start_us = monotonic_microseconds();
         TrajectoryReferencePoint_t seed_references[PREDICTION_HORIZON + 1];
         if (!mpc_reference_build_speed_seed(
                 trajectory, trajectory_count, lap_length, current_progress,
@@ -898,8 +973,15 @@ int mpc_rti_build_nominal(
                     &references[k]))
                 return fail_nominal_build(
                     nominal, MPC_RTI_NOMINAL_BUILD_SEED_REFERENCE);
+        nominal->reference_seed_us +=
+            monotonic_microseconds() - phase_start_us;
 
-        MpcModelState_t plant = current_state->plant;
+        /* This seed loop only reads the queued throttle after each command
+         * shift. That queue is deterministic and independent of vehicle
+         * physics, so do not run 30 full 25 ms plant transitions merely to
+         * reconstruct it. The actual plant rollout follows in Pass A/B. */
+        phase_start_us = monotonic_microseconds();
+        float queued_throttle = current_state->plant.delayed_throttle_command_2;
         for (int k = 0; k < horizon; ++k) {
             const float desired_delta = references[k + 1].steering_command;
             nominal->controls[k].steering_target_rad = clampf_rti(
@@ -907,17 +989,17 @@ int mpc_rti_build_nominal(
                 -configuration->max_steering_rad,
                 configuration->max_steering_rad);
             nominal->controls[k].throttle_command = clampf_rti(
-                fmaxf(plant.delayed_throttle_command_2,
+                fmaxf(queued_throttle,
                     MPC_THROTTLE_MIN_DRIVE),
                 MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
-            const MpcStageResult_t step = mpc_vehicle_model_step(
-                &plant, &nominal->controls[k], prediction_dt,
-                references[k].path_curvature);
-            if (!step.valid)
-                return fail_nominal_build(
-                    nominal, MPC_RTI_NOMINAL_BUILD_SEED_STEP);
-            plant = step.next;
+            /* vehicle_model_step shifts delayed_throttle_command_2 to slot 1
+             * and appends this command in slot 2. Thus the next stage reads
+             * exactly the throttle chosen here; no tire or body state can
+             * affect this seed sequence. */
+            queued_throttle = nominal->controls[k].throttle_command;
         }
+        nominal->cold_start_queue_seed_us =
+            monotonic_microseconds() - phase_start_us;
     }
 
     /* A shifted nominal can retain minimum-drive throttle after a rejected
@@ -944,21 +1026,28 @@ int mpc_rti_build_nominal(
             MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
 
     MpcRtiReference_t pass_a_references[PREDICTION_HORIZON + 1];
+    double phase_start_us = monotonic_microseconds();
     for (int k = 0; k <= horizon; ++k) {
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 progress_seed[k], configuration, &pass_a_references[k]))
             return fail_nominal_build(
                 nominal, MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE);
     }
+    nominal->progress_reference_resampling_us +=
+        monotonic_microseconds() - phase_start_us;
     MpcRtiState_t pass_a_states[PREDICTION_HORIZON + 1];
+    MpcStageResult_t pass_a_physical_steps[PREDICTION_HORIZON];
     double pass_a_progress[PREDICTION_HORIZON + 1];
+    phase_start_us = monotonic_microseconds();
     if (!rollout_nominal_controls(current_state, current_progress,
             nominal->controls, pass_a_references, horizon, prediction_dt,
-            pass_a_states, pass_a_progress))
+            NULL, pass_a_physical_steps, pass_a_states, pass_a_progress))
         return fail_nominal_build(
             nominal, MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT);
+    nominal->nominal_rollout_a_us = monotonic_microseconds() - phase_start_us;
 
     /* Pass B resamples path data from Pass A's exact nonlinear delta_s. */
+    phase_start_us = monotonic_microseconds();
     for (int k = 0; k <= horizon; ++k) {
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
                 pass_a_progress[k], configuration, &references[k]))
@@ -975,13 +1064,18 @@ int mpc_rti_build_nominal(
      * rollout itself remains the feasibility check; it already accounts for
      * command delay, wheel spin, and the reachable body speed. */
     align_yaw_rate_references(references, horizon);
+    nominal->progress_reference_resampling_us +=
+        monotonic_microseconds() - phase_start_us;
     /* Normal MPC decisions are positive motor commands only. The physical
      * plant still models q=0 as Unity hard braking for already queued inputs. */
+    phase_start_us = monotonic_microseconds();
     if (!rollout_nominal_controls(current_state, current_progress,
             nominal->controls, references, horizon, prediction_dt,
-            nominal->states, nominal->progress))
+            pass_a_physical_steps, NULL, nominal->states,
+            nominal->progress))
         return fail_nominal_build(
             nominal, MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT);
+    nominal->nominal_rollout_b_us = monotonic_microseconds() - phase_start_us;
     for (int k = 0; k <= horizon; ++k) {
         const MpcRtiCommandEnvelopeFailure_t failure =
             command_envelope_failure(&nominal->states[k], configuration);
@@ -1218,6 +1312,9 @@ static int valid_cycle_configuration(
 typedef struct
 {
     MpcRtiCycleStatus_t status;
+    int sqp_attempted;
+    int sqp_completed;
+    int sqp_accepted;
     MpcRtiNominal_t candidate;
     MpcRtiCandidatePathDelta_t path_delta;
     MpcModelControl_t first_action;
@@ -1259,6 +1356,19 @@ typedef struct
     int rho_change_count;
     int factorization_count;
     uint64_t factorization_time_ns;
+    uint64_t solver_cold_start_initialization_time_ns;
+    uint64_t riccati_rhs_time_ns;
+    uint64_t admm_projection_time_ns;
+    uint64_t rho_update_time_ns;
+    uint64_t solver_scaling_time_ns;
+    uint64_t solver_output_unscale_time_ns;
+    int jacobian_stages_completed;
+    int jacobian_threads_used;
+    int jacobian_source_sensitivity_calls;
+    int jacobian_finite_difference_columns;
+    double jacobian_wall_us;
+    double jacobian_thread_cpu_us;
+    double jacobian_slowest_stage_us;
     double qp_build_us;
     double admm_us;
     double exact_rollout_us;
@@ -1384,6 +1494,49 @@ static int evaluate_nonlinear_candidate(
     return 1;
 }
 
+MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
+    const MpcRtiState_t *initial_state,
+    double initial_progress,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    int horizon,
+    float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    MpcRtiNominal_t *validated_plan,
+    int *failure_stage)
+{
+    if (!validated_plan || !configuration)
+        return MPC_RTI_ROLLOUT_INVALID_INPUT;
+    memset(validated_plan, 0, sizeof(*validated_plan));
+    validated_plan->horizon = horizon;
+    validated_plan->speed_reference_valid = 0;
+    MpcRtiRolloutStatus_t status = rollout_candidate_impl(
+        initial_state, initial_progress, controls, trajectory,
+        trajectory_count, lap_length, NULL, NULL, NULL, horizon,
+        prediction_dt, &configuration->model, validated_plan->states,
+        validated_plan->progress, failure_stage, NULL);
+    if (status != MPC_RTI_ROLLOUT_OK) return status;
+    memcpy(validated_plan->controls, controls,
+        (size_t)horizon * sizeof(validated_plan->controls[0]));
+    validated_plan->valid = 1;
+
+    float objective = 0.0f;
+    float minimum_corridor_slack = 0.0f;
+    float lateral_accel_proxy = 0.0f;
+    int lateral_accel_proxy_stage = 0;
+    float lateral_accel_proxy_by_stage[PREDICTION_HORIZON + 1] = {0.0f};
+    if (!evaluate_nonlinear_candidate(validated_plan, trajectory,
+            trajectory_count, lap_length, configuration, &objective,
+            &minimum_corridor_slack, &lateral_accel_proxy,
+            &lateral_accel_proxy_stage, lateral_accel_proxy_by_stage)) {
+        validated_plan->valid = 0;
+        return MPC_RTI_ROLLOUT_INVALID_MODEL;
+    }
+    return MPC_RTI_ROLLOUT_OK;
+}
+
 static MpcRtiCycleStatus_t solve_rti_pass(
     const MpcRtiState_t *current_state,
     double current_progress,
@@ -1401,6 +1554,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
 {
     memset(pass, 0, sizeof(*pass));
     pass->status = MPC_RTI_CYCLE_REJECTED_INPUT;
+    pass->sqp_attempted = 1;
     pass->nonlinear_failure_stage = -1;
     pass->nonlinear_failure_reason = -1;
     pass->linearization_failure_stage = -1;
@@ -1429,11 +1583,30 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             problem.linearization_failure_reason;
         pass->linearization_failure_index =
             problem.linearization_failure_index;
+        pass->jacobian_stages_completed = problem.jacobian_stages_completed;
+        pass->jacobian_threads_used = problem.jacobian_threads_used;
+        pass->jacobian_source_sensitivity_calls =
+            problem.jacobian_source_sensitivity_calls;
+        pass->jacobian_finite_difference_columns =
+            problem.jacobian_finite_difference_columns;
+        pass->jacobian_wall_us = problem.jacobian_wall_us;
+        pass->jacobian_thread_cpu_us = problem.jacobian_thread_cpu_us;
+        pass->jacobian_slowest_stage_us =
+            problem.jacobian_slowest_stage_us;
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
     pass->qp_build_us = monotonic_microseconds() - phase_start_us;
     pass->nonsmooth_columns = problem.nonsmooth_jacobian_columns;
+    pass->jacobian_stages_completed = problem.jacobian_stages_completed;
+    pass->jacobian_threads_used = problem.jacobian_threads_used;
+    pass->jacobian_source_sensitivity_calls =
+        problem.jacobian_source_sensitivity_calls;
+    pass->jacobian_finite_difference_columns =
+        problem.jacobian_finite_difference_columns;
+    pass->jacobian_wall_us = problem.jacobian_wall_us;
+    pass->jacobian_thread_cpu_us = problem.jacobian_thread_cpu_us;
+    pass->jacobian_slowest_stage_us = problem.jacobian_slowest_stage_us;
 
     RiccatiAdmmConfig_t solver_config = configuration->solver;
     if (cycle_deadline_us > 0.0) {
@@ -1463,9 +1636,19 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     pass->rho_change_count = debug.rho_change_count;
     pass->factorization_count = debug.quadratic_factorization_count;
     pass->factorization_time_ns = debug.quadratic_factorization_time_ns;
+    pass->solver_cold_start_initialization_time_ns =
+        debug.cold_start_initialization_time_ns;
+    pass->riccati_rhs_time_ns = debug.quadratic_rhs_time_ns;
+    pass->admm_projection_time_ns = debug.projection_residual_time_ns;
+    pass->rho_update_time_ns = debug.rho_update_time_ns;
+    pass->solver_scaling_time_ns = debug.scaling_transform_time_ns;
+    pass->solver_output_unscale_time_ns = debug.output_unscale_time_ns;
 
     pass->nonsmooth_columns = problem.nonsmooth_jacobian_columns;
     pass->admm_status = solver_status;
+    pass->sqp_completed =
+        solver_status == RICCATI_STATUS_OPTIMAL ||
+        solver_status == RICCATI_STATUS_MAX_ITERATIONS;
     pass->iterations = solution.iterations;
     pass->primal_residual = solution.primal_residual;
     pass->dual_residual = solution.dual_residual;
@@ -1484,7 +1667,9 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     pass->rho_start = previous_rho;
     pass->rho_u_start = previous_rho_u;
     if (!isfinite(solution.primal_residual) ||
-        !isfinite(solution.dual_residual) || solver_status == RICCATI_STATUS_ERROR) {
+        !isfinite(solution.dual_residual) ||
+        (solver_status != RICCATI_STATUS_OPTIMAL &&
+         solver_status != RICCATI_STATUS_MAX_ITERATIONS)) {
         pass->status = MPC_RTI_CYCLE_REJECTED_SOLVER;
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
@@ -1518,12 +1703,6 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             MPC_THROTTLE_MIN_DRIVE - 1.0e-5f &&
         pass->first_action.throttle_command <=
             MPC_THROTTLE_MAX + 1.0e-5f;
-
-    if (solver_status != RICCATI_STATUS_OPTIMAL) {
-        pass->status = MPC_RTI_CYCLE_REJECTED_SOLVER;
-        pass->solve_us = monotonic_microseconds() - start_us;
-        return pass->status;
-    }
 
     pass->candidate.horizon = horizon;
     pass->candidate.speed_reference_valid = nominal->speed_reference_valid;
@@ -1574,7 +1753,10 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
-    pass->status = MPC_RTI_CYCLE_ACCEPTED_OPTIMAL;
+    pass->status = solver_status == RICCATI_STATUS_OPTIMAL
+        ? MPC_RTI_CYCLE_ACCEPTED_OPTIMAL
+        : MPC_RTI_CYCLE_ACCEPTED_FEASIBLE;
+    pass->sqp_accepted = 1;
     pass->solve_us = monotonic_microseconds() - start_us;
     return pass->status;
 }
@@ -1648,10 +1830,19 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         ? cycle_start_us + configuration->max_cycle_time_us : 0.0;
     MpcRtiNominal_t nominal;
     MpcRtiReference_t references[PREDICTION_HORIZON + 1];
+    double nominal_start_us = monotonic_microseconds();
     if (!mpc_rti_build_nominal(&prepared_state, current_progress,
             &memory->nominal, trajectory, trajectory_count, lap_length,
             prediction_dt, horizon, &configuration->model, &nominal,
             references)) {
+        result->nominal_build_us = monotonic_microseconds() - nominal_start_us;
+        result->reference_seed_us = nominal.reference_seed_us;
+        result->cold_start_queue_seed_us =
+            nominal.cold_start_queue_seed_us;
+        result->nominal_rollout_a_us = nominal.nominal_rollout_a_us;
+        result->progress_reference_resampling_us =
+            nominal.progress_reference_resampling_us;
+        result->nominal_rollout_b_us = nominal.nominal_rollout_b_us;
         result->input_failure_reason = MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD;
         result->nominal_build_failure_stage = nominal.build_failure_stage;
         result->nominal_build_failure_constraint =
@@ -1660,6 +1851,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
         return MPC_RTI_CYCLE_REJECTED_INPUT;
     }
+    result->nominal_build_us = monotonic_microseconds() - nominal_start_us;
+    result->reference_seed_us = nominal.reference_seed_us;
+    result->cold_start_queue_seed_us =
+        nominal.cold_start_queue_seed_us;
+    result->nominal_rollout_a_us = nominal.nominal_rollout_a_us;
+    result->progress_reference_resampling_us =
+        nominal.progress_reference_resampling_us;
+    result->nominal_rollout_b_us = nominal.nominal_rollout_b_us;
     result->nominal_first_control = nominal.controls[0];
 
     MpcRtiPassResult_t pass;
@@ -1676,6 +1875,9 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         configuration, memory, deadline_us, &pass);
 
     result->solver_iterations = pass.iterations;
+    result->sqp_iterations_attempted = pass.sqp_attempted;
+    result->sqp_iterations_completed = pass.sqp_completed;
+    result->sqp_iterations_accepted = pass.sqp_accepted;
     result->admm_status = pass.admm_status;
     result->primal_residual = pass.primal_residual;
     result->dual_residual = pass.dual_residual;
@@ -1685,6 +1887,15 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->linearization_failure_stage = pass.linearization_failure_stage;
     result->linearization_failure_reason = pass.linearization_failure_reason;
     result->linearization_failure_index = pass.linearization_failure_index;
+    result->jacobian_stages_completed = pass.jacobian_stages_completed;
+    result->jacobian_threads_used = pass.jacobian_threads_used;
+    result->jacobian_source_sensitivity_calls =
+        pass.jacobian_source_sensitivity_calls;
+    result->jacobian_finite_difference_columns =
+        pass.jacobian_finite_difference_columns;
+    result->jacobian_wall_us = pass.jacobian_wall_us;
+    result->jacobian_thread_cpu_us = pass.jacobian_thread_cpu_us;
+    result->jacobian_slowest_stage_us = pass.jacobian_slowest_stage_us;
     result->nonlinear_failure_stage = pass.nonlinear_failure_stage;
     result->nonlinear_failure_reason = pass.nonlinear_failure_reason;
     result->nonlinear_failure = pass.nonlinear_failure;
@@ -1716,6 +1927,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->rho_change_count = pass.rho_change_count;
     result->factorization_count = pass.factorization_count;
     result->factorization_time_ns = pass.factorization_time_ns;
+    result->solver_cold_start_initialization_time_ns =
+        pass.solver_cold_start_initialization_time_ns;
+    result->riccati_rhs_time_ns = pass.riccati_rhs_time_ns;
+    result->admm_projection_time_ns = pass.admm_projection_time_ns;
+    result->rho_update_time_ns = pass.rho_update_time_ns;
+    result->solver_scaling_time_ns = pass.solver_scaling_time_ns;
+    result->solver_output_unscale_time_ns =
+        pass.solver_output_unscale_time_ns;
     result->qp_build_us = pass.qp_build_us;
     result->admm_us = pass.admm_us;
     result->exact_rollout_us = pass.exact_rollout_us;
@@ -1723,13 +1942,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->total_solve_us = pass.solve_us;
     result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
 
-    if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) {
+    if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
+        status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
         *memory = memory_before;
         result->status = status;
         return status;
     }
 
-    result->status = MPC_RTI_CYCLE_ACCEPTED_OPTIMAL;
+    result->status = status;
     result->first_control = pass.first_action;
     result->published_steering_command = pass.first_action.steering_target_rad;
     result->published_throttle = pass.first_action.throttle_command;

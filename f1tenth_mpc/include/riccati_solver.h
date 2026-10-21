@@ -52,6 +52,10 @@ typedef struct
     uint64_t quadratic_factorization_time_ns;
     uint64_t quadratic_rhs_time_ns;
     uint64_t projection_residual_time_ns;
+    uint64_t cold_start_initialization_time_ns;
+    uint64_t rho_update_time_ns;
+    uint64_t scaling_transform_time_ns;
+    uint64_t output_unscale_time_ns;
 } RiccatiDebugInfo_t;
 
 #define RICCATI_DEBUG_TRACE_MAX 256

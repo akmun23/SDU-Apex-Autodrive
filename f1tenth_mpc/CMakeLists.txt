@@ -12,6 +12,21 @@ if(NOT MSVC)
   add_compile_options(-Wall -Wextra -Wpedantic -O3)
 endif()
 
+option(SDU_APEX_MPC_NATIVE_TUNING
+  "Build this MPC for the CPU doing the build (not portable to other CPUs)"
+  OFF)
+if(SDU_APEX_MPC_NATIVE_TUNING)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
+     NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR
+      "SDU_APEX_MPC_NATIVE_TUNING requires GCC or Clang for C and C++")
+  endif()
+  # Native ISA vectorization improved the measured Jacobian on the build host.
+  # Disable contraction: FMA changed borderline QP statuses/commands on the
+  # fixed replay corpus. The default build remains architecture-portable.
+  add_compile_options(-march=native -ffp-contract=off)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)

@@ -17,6 +17,8 @@ typedef struct
     unsigned int nominal_branch_flags;
     uint64_t nonsmooth_column_mask;
     int nonsmooth_column_count;
+    int finite_difference_column_count;
+    int source_sensitivity_call_count;
     int failure_reason;
     int failure_index;
     int valid;

@@ -132,6 +132,16 @@ MpcStageResult_t mpc_vehicle_model_step(
     float dt,
     float path_curvature);
 
+/* Recompute only the Frenet/path-coordinate part of a known physical step.
+ * The full plant transition is independent of path curvature; callers may
+ * reuse that transition when references are resampled, provided the input
+ * physical state and command sequence are unchanged. */
+int vehicle_model_reproject_tracking(
+    const MpcModelState_t *state,
+    const MpcStageResult_t *physical_step,
+    float path_curvature,
+    MpcStageResult_t *reprojected_step);
+
 /* Propagate from newest queued commands in slot 2 without advancing either
  * command-history slot. */
 MpcStageResult_t mpc_vehicle_model_propagate(

@@ -8,6 +8,18 @@ source /home/autodrive_devkit/install/setup.bash
 
 if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
   echo "Building the mounted runtime and its package dependencies"
+  native_tuning=false
+  case "${SDU_APEX_MPC_NATIVE_TUNING:-false}" in
+    true)
+      echo "MPC native ISA tuning enabled for this build host only"
+      native_tuning=true
+      ;;
+    false) ;;
+    *)
+      echo "SDU_APEX_MPC_NATIVE_TUNING must be true or false" >&2
+      exit 2
+      ;;
+  esac
   # The reusable dev image may carry generated artifacts from an older
   # sdu_apex_autodrive source tree. In particular, setuptools can retain
   # deleted config/launch files in SOURCES.txt and then fail while copying
@@ -24,7 +36,16 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     --packages-up-to sdu_apex_autodrive \
     --parallel-workers 4 \
     --merge-install --symlink-install \
-    --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+    --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+      -DSDU_APEX_MPC_NATIVE_TUNING=OFF
+  if [[ "${native_tuning}" == "true" ]]; then
+    MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build \
+      --packages-select f1tenth_mpc \
+      --parallel-workers 4 \
+      --merge-install --symlink-install \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+        -DSDU_APEX_MPC_NATIVE_TUNING=ON
+  fi
   source /workspace/install/setup.bash
 else
   source /workspace/install/setup.bash

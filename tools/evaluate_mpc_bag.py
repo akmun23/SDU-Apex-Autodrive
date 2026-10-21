@@ -4,8 +4,10 @@
 Run in the ROS 2 environment that can deserialize the bag's message types:
   python3 tools/evaluate_mpc_bag.py live_runs/<run>/run [--trajectory path.csv]
 
-The trajectory is optional; when supplied, diagnostic path progress and
-cross-track error are converted back to a local XY/yaw rollout for comparison.
+The bag reader can decode the repository's UnityPlantState and DriveCommand
+CDR layouts directly, so generated sdu_apex_msgs Python classes are optional.
+The trajectory is optional; when supplied, diagnostic path progress and cross-
+track error are converted back to a local XY/yaw rollout for comparison.
 """
 
 from __future__ import annotations
@@ -55,6 +57,8 @@ STEERING = "/autodrive/roboracer_1/steering"
 STEERING_COMMAND = "/autodrive/roboracer_1/steering_command"
 BRIDGE_FAULT = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 BRIDGE_TIMING = "/autodrive/roboracer_1/bridge_packet_timing"
+DEVELOPMENT_ACTUATOR_TIMING = (
+    "/autodrive/roboracer_1/development_actuator_timing")
 DRIVE_COMMAND = "/mpc/drive_command"
 LEFT_ENCODER = "/autodrive/roboracer_1/left_encoder"
 RIGHT_ENCODER = "/autodrive/roboracer_1/right_encoder"
@@ -143,7 +147,8 @@ TOPICS = {
     PLANT, DIAGNOSTICS, CANDIDATE_DIAGNOSTICS,
     OPEN_LOOP_TEST, IMU, LAP, COLLISION, LAST_LAP,
     BEST_LAP, THROTTLE, THROTTLE_COMMAND, STEERING, STEERING_COMMAND,
-    BRIDGE_FAULT, BRIDGE_TIMING, DRIVE_COMMAND, LEFT_ENCODER, RIGHT_ENCODER,
+    BRIDGE_FAULT, BRIDGE_TIMING, DEVELOPMENT_ACTUATOR_TIMING,
+    DRIVE_COMMAND, LEFT_ENCODER, RIGHT_ENCODER,
     ODOM_DIAGNOSTICS, CSV_REPLAY,
 }
 
@@ -171,62 +176,64 @@ def normalized_angle(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def decode_schema9_plant_cdr(
+class CdrReader:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.offset = 4
+        self.origin = 4
+
+    def read(self, fmt: str) -> Any:
+        size = struct.calcsize(fmt)
+        alignment = min(size, 8)
+        self.offset = self.origin + (
+            (self.offset - self.origin + alignment - 1) & ~(alignment - 1)
+        )
+        if self.offset + size > len(self.data):
+            raise ValueError("truncated CDR payload")
+        values = struct.unpack_from("<" + fmt, self.data, self.offset)
+        self.offset += size
+        return values[0] if len(values) == 1 else values
+
+    def read_string(self) -> str:
+        length = self.read("I")
+        if length == 0 or self.offset + length > len(self.data):
+            raise ValueError("invalid CDR frame string")
+        value = self.data[self.offset:self.offset + length]
+        self.offset += length
+        return value.rstrip(b"\x00").decode("utf-8")
+
+    def doubles(self, count: int) -> list[float]:
+        return list(self.read(f"{count}d"))
+
+
+def decode_plant_cdr(
     serialized: bytes, bag_time_ns: int,
 ) -> dict[str, Any] | None:
-    """Decode the exact schema-9 UnityPlantState layout used by Oct 18 bags.
+    """Decode UnityPlantState schemas 9–11 without generated ROS classes.
 
-    Schema 9 predates the current message's sticky-timer and yaw-residual
-    fields. Keep this strictly as an offline replay compatibility path; never
-    use it to publish or infer production state. Missing sticky timers are
-    marked and initialized to zero so callers can report this limitation.
+    This is strictly an offline bag-reading path. It does not publish or feed
+    the runtime observer/controller. Schema additions are version-gated below
+    and exact payload consumption prevents silently misreading a new layout.
     """
     if len(serialized) < 4 or serialized[:2] != b"\x00\x01":
         return None
-
-    class CdrReader:
-        def __init__(self, data: bytes) -> None:
-            self.data = data
-            self.offset = 4
-            self.origin = 4
-
-        def read(self, fmt: str) -> Any:
-            size = struct.calcsize(fmt)
-            alignment = min(size, 8)
-            self.offset = self.origin + (
-                (self.offset - self.origin + alignment - 1) & ~(alignment - 1)
-            )
-            if self.offset + size > len(self.data):
-                raise ValueError("truncated schema-9 CDR payload")
-            values = struct.unpack_from("<" + fmt, self.data, self.offset)
-            self.offset += size
-            return values[0] if len(values) == 1 else values
-
-        def read_string(self) -> str:
-            length = self.read("I")
-            if length == 0 or self.offset + length > len(self.data):
-                raise ValueError("invalid schema-9 CDR frame string")
-            value = self.data[self.offset:self.offset + length]
-            self.offset += length
-            return value.rstrip(b"\x00").decode("utf-8")
-
-        def doubles(self, count: int) -> list[float]:
-            return list(self.read(f"{count}d"))
-
     cdr = CdrReader(serialized)
     sec = cdr.read("i")
     nanosec = cdr.read("I")
     frame_id = cdr.read_string()
     schema = cdr.read("I")
-    if schema != 9:
+    if schema not in (9, 10, 11):
         return None
 
-    # Wire order pinned from the schema-9 .msg definition and checked against
-    # recorded values (named u/r equal Unity odometry; final offset equals the
-    # serialized payload length for all retained plan-test messages).
-    _state_origin = cdr.read("B")
-    _sensor_corrected_mask = cdr.read("I")
+    state_origin = cdr.read("B")
+    sensor_corrected_mask = cdr.read("I")
     history_initialized = cdr.read("?")
+    if schema >= 10:
+        low_forward_speed_time = cdr.doubles(4)
+        low_side_speed_time = cdr.doubles(4)
+    else:
+        low_forward_speed_time = [0.0] * 4
+        low_side_speed_time = [0.0] * 4
     u, v_com, v_rear, yaw_rate, gyro_yaw_rate = cdr.doubles(5)
     model_x, model_y = cdr.doubles(2)
     steering_command, throttle_command = cdr.doubles(2)
@@ -248,9 +255,16 @@ def decode_schema9_plant_cdr(
     tire_fx = cdr.doubles(4)
     tire_fy = cdr.doubles(4)
     ax, ay, yaw_accel = cdr.doubles(3)
+    if schema >= 11:
+        yaw_residual_valid = cdr.read("?")
+        yaw_residual = cdr.read("d")
+    else:
+        yaw_residual_valid = False
+        yaw_residual = 0.0
     if cdr.offset != len(serialized):
         raise ValueError(
-            f"schema-9 CDR layout consumed {cdr.offset}/{len(serialized)} bytes"
+            f"schema-{schema} CDR layout consumed "
+            f"{cdr.offset}/{len(serialized)} bytes"
         )
 
     return {
@@ -258,13 +272,15 @@ def decode_schema9_plant_cdr(
         "stamp": sec + nanosec * 1.0e-9,
         "frame": frame_id,
         "schema": schema,
+        "state_origin": state_origin,
+        "sensor_corrected_mask": sensor_corrected_mask,
         "u": u,
         "v_com": v_com,
         "v_rear": v_rear,
         "r": yaw_rate,
         "gyro_r": gyro_yaw_rate,
-        "yaw_rate_prediction_residual": 0.0,
-        "yaw_rate_prediction_residual_valid": False,
+        "yaw_rate_prediction_residual": yaw_residual,
+        "yaw_rate_prediction_residual_valid": yaw_residual_valid,
         "wheel_omega": wheel_omega,
         "wheel_angle": wheel_angle,
         "body_height": body_height,
@@ -276,9 +292,9 @@ def decode_schema9_plant_cdr(
         "physical_steering": physical_steering,
         "suspension_jounce": suspension_jounce,
         "suspension_history_initialized": history_initialized,
-        "low_forward_speed_time_s": [0.0] * 4,
-        "low_side_speed_time_s": [0.0] * 4,
-        "legacy_missing_sticky_timers": True,
+        "low_forward_speed_time_s": low_forward_speed_time,
+        "low_side_speed_time_s": low_side_speed_time,
+        "legacy_missing_sticky_timers": schema == 9,
         "delayed_steering_1": delayed_steer_1,
         "delayed_steering_2": delayed_steer_2,
         "delayed_throttle_1": delayed_throttle_1,
@@ -303,6 +319,56 @@ def decode_schema9_plant_cdr(
     }
 
 
+def decode_drive_command_cdr(
+    serialized: bytes, bag_time_ns: int,
+) -> dict[str, Any] | None:
+    """Decode the current DriveCommand CDR layout for offline bag analysis."""
+    if len(serialized) < 4 or serialized[:2] != b"\x00\x01":
+        return None
+    cdr = CdrReader(serialized)
+    sec = cdr.read("i")
+    nanosec = cdr.read("I")
+    cdr.read_string()
+    steering, throttle = cdr.doubles(2)
+    if cdr.offset != len(serialized):
+        raise ValueError(
+            f"DriveCommand CDR layout consumed {cdr.offset}/{len(serialized)} bytes"
+        )
+    return {
+        "bag_time": bag_time_ns * 1.0e-9,
+        "stamp": sec + nanosec * 1.0e-9,
+        "steering": steering,
+        "throttle": throttle,
+    }
+
+
+def decode_json_payload(raw: str) -> dict[str, Any]:
+    """Decode diagnostic JSON, repairing the known action_source typo only.
+
+    One development capture contains a duplicated closing quote emitted by an
+    earlier MPC diagnostic formatter. Preserve all records when reading it,
+    but do not broadly rewrite arbitrary malformed JSON.
+    """
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        repaired = raw
+        for value in ("current_solver_candidate", "revalidated_prior_plan"):
+            repaired = repaired.replace(f'"{value}""', f'"{value}"')
+        if repaired == raw:
+            return {"_decode_error": "invalid_json", "_raw": raw}
+        try:
+            payload = json.loads(repaired)
+        except json.JSONDecodeError:
+            return {"_decode_error": "invalid_json_after_known_repair",
+                    "_raw": raw}
+        if isinstance(payload, dict):
+            payload["_bag_decoder_repaired_action_source_quote"] = True
+    if not isinstance(payload, dict):
+        return {"_decode_error": "json_root_not_object", "_raw": raw}
+    return payload
+
+
 def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
     storage_id = "mcap" if any(uri.glob("*.mcap")) else "sqlite3"
     reader = SequentialReader()
@@ -323,19 +389,44 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
         try:
             message_types[name] = get_message(kind)
         except (AttributeError, ModuleNotFoundError):
-            # The plant-state message is diagnostic-only here; the 35-value
-            # odom diagnostic topic already contains its raw pre-correction
-            # plant state. This lets the evaluator run on a stock ROS install.
+            # Decode the two retained custom types directly from CDR below;
+            # generated sdu_apex_msgs Python classes are optional.
             if name not in (PLANT, DRIVE_COMMAND):
                 raise
             print(f"note: skipping {name} (custom message package not sourced)")
     data = {topic: [] for topic in type_names}
     skipped_plant_schema = False
-    decoded_schema9_plant = False
+    decoded_custom_topics: set[str] = set()
 
     while reader.has_next():
         topic, serialized, bag_time_ns = reader.read_next()
         if topic not in message_types:
+            try:
+                if topic == PLANT:
+                    decoded = decode_plant_cdr(serialized, bag_time_ns)
+                elif topic == DRIVE_COMMAND:
+                    decoded = decode_drive_command_cdr(serialized, bag_time_ns)
+                else:
+                    decoded = None
+            except (UnicodeDecodeError, ValueError, struct.error) as error:
+                decoded = None
+                if topic == PLANT and not skipped_plant_schema:
+                    print(f"note: could not decode {PLANT} CDR: {error}")
+                    skipped_plant_schema = True
+            if decoded is not None:
+                data[topic].append(decoded)
+                if topic not in decoded_custom_topics:
+                    if topic == PLANT:
+                        print(
+                            "note: decoded UnityPlantState CDR directly; "
+                            "generated sdu_apex_msgs package is not required"
+                        )
+                    else:
+                        print(
+                            "note: decoded DriveCommand CDR directly; "
+                            "generated sdu_apex_msgs package is not required"
+                        )
+                    decoded_custom_topics.add(topic)
             continue
         try:
             message = deserialize_message(serialized, message_types[topic])
@@ -344,20 +435,24 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
             # That diagnostic topic is not needed for ground-truth odom or
             # MPC forecast scoring; keep the rest of the bag usable while
             # making the schema mismatch explicit.
-            if topic != PLANT:
+            if topic not in (PLANT, DRIVE_COMMAND):
                 raise
             try:
-                legacy_row = decode_schema9_plant_cdr(serialized, bag_time_ns)
+                if topic == PLANT:
+                    legacy_row = decode_plant_cdr(serialized, bag_time_ns)
+                else:
+                    legacy_row = decode_drive_command_cdr(
+                        serialized, bag_time_ns)
             except (UnicodeDecodeError, ValueError, struct.error):
                 legacy_row = None
             if legacy_row is not None:
                 data[topic].append(legacy_row)
-                if not decoded_schema9_plant:
+                if topic not in decoded_custom_topics:
                     print(
-                        "note: decoded legacy schema-9 UnityPlantState CDR "
-                        "for offline replay; sticky-timer history is absent"
+                        f"note: decoded {topic} CDR directly after "
+                        "generated-message deserialization failed"
                     )
-                    decoded_schema9_plant = True
+                    decoded_custom_topics.add(topic)
                 continue
             # Schema 11 only appended (bool, float64) to schema 10. Fast-CDR
             # needs 16 bytes for that bool, alignment padding, and double.
@@ -451,12 +546,9 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
             )
         elif topic in (
             DIAGNOSTICS, CANDIDATE_DIAGNOSTICS, OPEN_LOOP_TEST, BRIDGE_TIMING,
-            CSV_REPLAY,
+            DEVELOPMENT_ACTUATOR_TIMING, CSV_REPLAY,
         ):
-            try:
-                row["json"] = json.loads(message.data)
-            except (TypeError, json.JSONDecodeError):
-                row["json"] = {}
+            row["json"] = decode_json_payload(message.data)
         elif topic == IMU:
             row.update(
                 stamp=stamp(message),
@@ -502,9 +594,141 @@ def percentile(values: list[float], probability: float) -> float:
     return ordered[min(len(ordered) - 1, int(probability * (len(ordered) - 1)))]
 
 
-def report_admm_convergence(diagnostics: list[dict[str, Any]]) -> None:
+def report_development_actuator_timing(rows: list[dict[str, Any]]) -> None:
+    events = [row["json"] for row in rows
+              if isinstance(row.get("json"), dict) and
+              "_decode_error" not in row["json"]]
+    if not events:
+        return
+    statuses = Counter(event.get("status", "missing") for event in events)
+    forwarded = [event for event in events
+                 if event.get("status") == "forwarded" and
+                 isinstance(event.get("interface_receive_monotonic_ns"), int)
+                 and isinstance(event.get("actuator_publish_monotonic_ns"), int)]
+    elapsed_ms = [
+        (event["actuator_publish_monotonic_ns"] -
+         event["interface_receive_monotonic_ns"]) * 1.0e-6
+        for event in forwarded
+    ]
+    sequences = sorted({event["command_sequence"] for event in forwarded
+                        if isinstance(event.get("command_sequence"), int)})
+    gaps = sum(right - left - 1 for left, right in zip(sequences, sequences[1:]))
+    print("development actuator publication timing (diagnostic output, "
+          "not a controller input):")
+    print(f"  records={len(events)} statuses={dict(statuses)} "
+          f"forwarded={len(forwarded)} sequence_gaps={gaps}")
+    if elapsed_ms:
+        print("  interface-receive→actuator-publish ms "
+              f"median/p95/max={percentile(elapsed_ms, 0.50):.3f}/"
+              f"{percentile(elapsed_ms, 0.95):.3f}/{max(elapsed_ms):.3f}")
+
+
+def report_admm_convergence(
+    diagnostics: list[dict[str, Any]],
+    drive_commands: list[dict[str, Any]] | None = None,
+) -> None:
     """Report the single MPC solve and exact nonlinear acceptance."""
     rows = [row["json"] for row in diagnostics if row.get("json")]
+
+    # `solver.cycle_us` excludes work around the numerical solve. The timing
+    # check records its own elapsed time before command publication; the later
+    # diagnostic-emission timestamp includes ROS serialization and must not be
+    # mistaken for the value which actually passed or failed the gate.
+    gate_rows = [row for row in rows
+                 if isinstance(row.get("publication_gate_elapsed_ms"),
+                                (int, float))]
+    has_gate_schema = any("publication_gate_elapsed_ms" in row for row in rows)
+    emission_rows = [row for row in rows
+                     if isinstance(row.get("end_to_end_control_ms"),
+                                    (int, float))]
+    if gate_rows:
+        gate_ms = [float(row["publication_gate_elapsed_ms"])
+                   for row in gate_rows]
+        budgets = [float(row["end_to_end_cycle_budget_ms"])
+                   for row in gate_rows
+                   if isinstance(row.get("end_to_end_cycle_budget_ms"),
+                                  (int, float))]
+        budget = min(budgets) if budgets else math.nan
+        missed_guard = sum(
+            float(row["publication_gate_elapsed_ms"]) >=
+            float(row["end_to_end_cycle_budget_ms"])
+            for row in gate_rows
+            if isinstance(row.get("end_to_end_cycle_budget_ms"), (int, float))
+        )
+        print(
+            "  publication-gate elapsed ms p50/p95/max="
+            f"{percentile(gate_ms, 0.50):.3f}/"
+            f"{percentile(gate_ms, 0.95):.3f}/{max(gate_ms):.3f}; "
+            f"budget={budget:.3f}ms; at/over={missed_guard}/{len(gate_rows)}"
+        )
+    elif has_gate_schema:
+        print("  publication-gate timing: field present, but no valid candidate "
+              "reached the publication gate in this capture")
+    elif emission_rows:
+        print("  publication-gate timing: not recorded in this legacy bag")
+    if gate_rows:
+        slowest_gate_rows = sorted(
+            gate_rows,
+            key=lambda row: float(row["publication_gate_elapsed_ms"]),
+            reverse=True,
+        )[:3]
+        print("  slowest publication-gate samples (phase breakdown, ms):")
+        for row in slowest_gate_rows:
+            solver = row.get("solver")
+            solver = solver if isinstance(solver, dict) else {}
+            prediction = row.get("control_time_prediction")
+            prediction = prediction if isinstance(prediction, dict) else {}
+            prior_plan = row.get("prior_plan_revalidation")
+            prior_plan = prior_plan if isinstance(prior_plan, dict) else {}
+
+            def phase_ms(name: str) -> str:
+                value = solver.get(name)
+                if not isinstance(value, (int, float)):
+                    return "n/a"
+                return f"{float(value) * 1.0e-3:.3f}"
+
+            node_solve_ms = solver.get("node_solve_us")
+            outside_solver_ms = (
+                float(row["publication_gate_elapsed_ms"]) -
+                float(node_solve_ms) * 1.0e-3
+                if isinstance(node_solve_ms, (int, float)) else math.nan
+            )
+            prediction_us = prediction.get("elapsed_us")
+            prediction_ms = (
+                float(prediction_us) * 1.0e-3
+                if isinstance(prediction_us, (int, float)) else math.nan
+            )
+            print(
+                "    gate="
+                f"{float(row['publication_gate_elapsed_ms']):.3f} "
+                f"status={row.get('status', 'unknown')} "
+                f"action={row.get('action_source', 'unknown')} "
+                f"published={row.get('command_published', 'n/a')} "
+                f"node_solve={phase_ms('node_solve_us')} "
+                f"QP={phase_ms('qp_build_us')} "
+                f"Jacobian={phase_ms('jacobian_wall_us')} "
+                f"ADMM={phase_ms('admm_us')} "
+                f"control_prediction={prediction_ms:.3f} "
+                "prior_plan=(attempted="
+                f"{prior_plan.get('attempted', 'n/a')},"
+                f"valid={prior_plan.get('exact_valid', 'n/a')},"
+                f"deadline={prior_plan.get('timing_rejected', 'n/a')},"
+                f"validate_us={prior_plan.get('validation_us', 'n/a')}) "
+                f"callback_minus_node_solve={outside_solver_ms:.3f}"
+            )
+    if emission_rows:
+        emission_ms = [float(row["end_to_end_control_ms"])
+                       for row in emission_rows]
+        print("  callback→diagnostic-emission ms (not gate time) "
+              f"p50/p95/max={percentile(emission_ms, 0.50):.3f}/"
+              f"{percentile(emission_ms, 0.95):.3f}/{max(emission_ms):.3f}")
+    budget_rejections = [row for row in rows
+                         if row.get("status") == "rejected" and
+                         "budget" in str(row.get("reason", "")).lower()]
+    if budget_rejections:
+        print(f"  explicit publication-budget rejection events="
+              f"{len(budget_rejections)}")
+
     solver_rows = [row for row in rows if isinstance(row.get("solver"), dict)]
     if not solver_rows:
         print("MPC solver status: not recorded in this bag schema")
@@ -522,12 +746,18 @@ def report_admm_convergence(diagnostics: list[dict[str, Any]]) -> None:
                  for row in converged]
     solve_ms = [float(row["solver"].get("cycle_us", 0.0)) * 1.0e-3
                 for row in solver_rows]
-    accepted = sum(row.get("status") == "accepted_optimal"
+    accepted = sum(row.get("status") in (
+                       "accepted_optimal", "accepted_feasible",
+                       "accepted_prior_plan")
                    for row in solver_rows)
     print(
-        f"single-solve MPC: exact-accepted={accepted}/{len(solver_rows)}; "
+        f"single-solve MPC: exact-valid solver candidates="
+        f"{accepted}/{len(solver_rows)}; "
         f"ADMM={counts}"
     )
+    if drive_commands is not None:
+        print(f"  recorded MPC drive-command messages={len(drive_commands)} "
+              "(published outputs; distinct from candidate validity)")
     if iterations:
         print(
             "  converged iterations p50/p95/max="
@@ -538,20 +768,40 @@ def report_admm_convergence(diagnostics: list[dict[str, Any]]) -> None:
         )
     if solve_ms:
         print(
-            "  whole cycle ms p50/p95/max="
+            "  solver-reported cycle ms p50/p95/max="
             f"{percentile(solve_ms, 0.50):.3f}/"
             f"{percentile(solve_ms, 0.95):.3f}/{max(solve_ms):.3f}"
         )
+    if accepted:
+        total_cycle_us = sum(float(row["solver"].get("cycle_us", 0.0))
+                             for row in solver_rows)
+        print(f"  valid-candidate-weighted cycle cost="
+              f"{total_cycle_us / accepted * 1.0e-3:.3f} ms per exact-valid candidate")
     timing_fields = (
-        ("QP build", "qp_build_us"),
-        ("ADMM", "admm_us"),
-        ("exact rollout", "exact_rollout_us"),
-        ("nonlinear validation", "nonlinear_validation_us"),
-        ("RTI solve", "solve_us"),
-        ("node solve", "node_solve_us"),
+        ("nominal build", "nominal_build_us", 1.0e-3),
+        ("cold-start command-queue seed", "cold_start_queue_seed_us", 1.0e-3),
+        ("nominal rollout A", "nominal_rollout_a_us", 1.0e-3),
+        ("progress/reference resampling", "progress_reference_resampling_us", 1.0e-3),
+        ("nominal rollout B", "nominal_rollout_b_us", 1.0e-3),
+        ("QP build", "qp_build_us", 1.0e-3),
+        ("Jacobian wall", "jacobian_wall_us", 1.0e-3),
+        ("Jacobian worker CPU", "jacobian_thread_cpu_us", 1.0e-3),
+        ("Jacobian slowest stage", "jacobian_slowest_stage_us", 1.0e-3),
+        ("ADMM total", "admm_us", 1.0e-3),
+        ("ADMM cold initialization", "cold_start_initialization_time_ns", 1.0e-6),
+        ("Riccati factorization", "factorization_time_ns", 1.0e-6),
+        ("Riccati RHS passes", "riccati_rhs_time_ns", 1.0e-6),
+        ("ADMM projection/residual", "admm_projection_time_ns", 1.0e-6),
+        ("ADMM rho updates", "rho_update_time_ns", 1.0e-6),
+        ("QP scaling transform", "scaling_transform_time_ns", 1.0e-6),
+        ("QP output unscale", "output_unscale_time_ns", 1.0e-6),
+        ("exact candidate rollout", "exact_rollout_us", 1.0e-3),
+        ("nonlinear validation", "nonlinear_validation_us", 1.0e-3),
+        ("RTI solve", "solve_us", 1.0e-3),
+        ("node solve", "node_solve_us", 1.0e-3),
     )
-    for label, field in timing_fields:
-        values = [float(row["solver"][field]) * 1.0e-3
+    for label, field, to_ms in timing_fields:
+        values = [float(row["solver"][field]) * to_ms
                   for row in solver_rows
                   if field in row["solver"] and
                   math.isfinite(float(row["solver"][field]))]
@@ -4411,6 +4661,8 @@ def main() -> int:
         parser.error(f"bag has no simulator truth stream: {GT}")
 
     print(f"truth: frame={truth[0]['frame']} child={truth[0]['child']} count={len(truth)}")
+    report_development_actuator_timing(
+        data.get(DEVELOPMENT_ACTUATOR_TIMING, []))
     report_localization_diagnostics(truth, data)
     if args.truth_pose_twist_phase or args.truth_pose_twist_phase_only:
         report_truth_pose_twist_phase(truth, data.get(BRIDGE_TIMING, []))
@@ -4502,8 +4754,14 @@ def main() -> int:
     ]
     if diagnostics:
         payloads = [row["json"] for row in diagnostics]
+        repaired = sum(bool(x.get("_bag_decoder_repaired_action_source_quote"))
+                       for x in payloads)
+        undecodable = sum("_decode_error" in x for x in payloads)
+        if repaired or undecodable:
+            print("MPC diagnostic JSON decode: "
+                  f"repaired_known_quote={repaired} undecodable={undecodable}")
         print(f"MPC status counts: {dict(Counter(x.get('status') for x in payloads))}")
-        report_admm_convergence(diagnostics)
+        report_admm_convergence(diagnostics, data.get(DRIVE_COMMAND, []))
         print(f"MPC plant-state source counts: {dict(Counter(x.get('plant_state_source') for x in payloads))}")
         report_horizon_errors(truth, diagnostics, load_trajectory(args.trajectory))
     if data.get(OPEN_LOOP_TEST):

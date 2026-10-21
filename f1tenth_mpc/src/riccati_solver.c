@@ -934,6 +934,9 @@ static RiccatiStatus_t riccati_admm_solve_core(
     /* Remaining initialization and iterations follow. */
 
     if (!admm_state->initialized) {
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t cold_init_start_ns = riccati_profile_now_ns();
+#endif
         /* Cold start */
         memset(z_x, 0, sizeof(admm_state->z_x));
         memset(z_u, 0, sizeof(admm_state->z_u));
@@ -952,6 +955,12 @@ static RiccatiStatus_t riccati_admm_solve_core(
             solution->iterations = 0;
             solution->primal_residual = INFINITY;
             solution->dual_residual = INFINITY;
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+            const uint64_t cold_init_finish_ns = riccati_profile_now_ns();
+            if (cold_init_finish_ns >= cold_init_start_ns)
+                g_riccati_debug_last.cold_start_initialization_time_ns +=
+                    cold_init_finish_ns - cold_init_start_ns;
+#endif
             return RICCATI_STATUS_ERROR;
         }
 
@@ -998,6 +1007,12 @@ static RiccatiStatus_t riccati_admm_solve_core(
             sample->y0_steer = y_u[0][0];
             sample->y0_throttle = y_u[0][1];
         }
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t cold_init_finish_ns = riccati_profile_now_ns();
+        if (cold_init_finish_ns >= cold_init_start_ns)
+            g_riccati_debug_last.cold_start_initialization_time_ns +=
+                cold_init_finish_ns - cold_init_start_ns;
+#endif
     }
 
     RiccatiStatus_t status = RICCATI_STATUS_MAX_ITERATIONS;
@@ -1210,6 +1225,9 @@ static RiccatiStatus_t riccati_admm_solve_core(
         }
 
         /*--- Adaptive rho (aligned with FPGA HLS solver) ---*/
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t rho_update_start_ns = riccati_profile_now_ns();
+#endif
         if (adaptive_rho && iter > 0 &&
             iter % adaptive_rho_update_period == 0) {
             const float rho_before_adaptation = rho;
@@ -1385,6 +1403,12 @@ static RiccatiStatus_t riccati_admm_solve_core(
                 rho_u != rho_u_before_adaptation)
                 ++g_riccati_debug_last.rho_change_count;
         }
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+        const uint64_t rho_update_finish_ns = riccati_profile_now_ns();
+        if (rho_update_finish_ns >= rho_update_start_ns)
+            g_riccati_debug_last.rho_update_time_ns +=
+                rho_update_finish_ns - rho_update_start_ns;
+#endif
 
         /* Stop only between complete ADMM iterations. The caller may use the
          * projected candidate only after its normal residual and nonlinear
@@ -1513,6 +1537,9 @@ RiccatiStatus_t riccati_admm_solve(
 
     /* x = Dx*xhat and u = Du*uhat.  Scale dynamics, all diagonal and
      * affine costs, and hard bounds consistently. */
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+    const uint64_t scaling_start_ns = riccati_profile_now_ns();
+#endif
     RiccatiStepData_t scaled_steps[RICCATI_HORIZON] = {0};
     float scaled_terminal_Q[RICCATI_MAX_NX] = {0};
     float scaled_terminal_q[RICCATI_MAX_NX] = {0};
@@ -1569,11 +1596,17 @@ RiccatiStatus_t riccati_admm_solve(
     RiccatiAdmmConfig_t scaled_config = *config;
     scaled_config.use_scaling = 0;
     RiccatiSolution_t scaled_solution = {0};
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+    const uint64_t scaling_finish_ns = riccati_profile_now_ns();
+#endif
     const RiccatiStatus_t status = riccati_admm_solve_core(
         scaled_steps, scaled_terminal_Q, scaled_terminal_q,
         scaled_terminal_lb, scaled_terminal_ub, scaled_x0,
         &scaled_config, admm_state, &scaled_solution);
     *solution = scaled_solution;
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+    const uint64_t output_unscale_start_ns = riccati_profile_now_ns();
+#endif
     for (int k = 0; k <= N; ++k)
         for (int i = 0; i < nx; ++i)
             solution->x[k][i] *= config->state_scale[i];
@@ -1588,5 +1621,14 @@ RiccatiStatus_t riccati_admm_solve(
         memcpy(admm_state->input_scale, config->input_scale,
                (size_t)nu * sizeof(config->input_scale[0]));
     }
+#ifdef MPC_ENABLE_RICCATI_PROFILE
+    const uint64_t output_unscale_finish_ns = riccati_profile_now_ns();
+    if (scaling_finish_ns >= scaling_start_ns)
+        g_riccati_debug_last.scaling_transform_time_ns +=
+            scaling_finish_ns - scaling_start_ns;
+    if (output_unscale_finish_ns >= output_unscale_start_ns)
+        g_riccati_debug_last.output_unscale_time_ns +=
+            output_unscale_finish_ns - output_unscale_start_ns;
+#endif
     return status;
 }

@@ -10,11 +10,13 @@ namespace {
 // Fixed twenty-lane forward-mode scalar used to differentiate the production
 // source plant. Its primal value selects the same active branch as the ordinary
 // double rollout; derivatives are propagated only through that branch.
-struct Dual20 {
-  double value{};
+struct alignas(16) Dual20 {
   // Tangents are stored in the MPC's float Jacobian. Twenty lanes carry all
-  // plant-dependent columns through one 25 ms source-plant evaluation.
+  // plant-dependent columns through one 25 ms source-plant evaluation. Keep
+  // them first in an aligned object so the compiler can vector-load complete
+  // tangent vectors; the primal remains double precision.
   std::array<float, kUnityPlantSensitivityWidth> derivative{};
+  double value{};
 
   Dual20() = default;
   Dual20(double v) : value(v) {}
@@ -613,7 +615,7 @@ struct WheelSteeringBasis {
 
 template <typename Scalar>
 std::array<WheelSteeringBasis<Scalar>, 4> make_wheel_steering_basis(
-    Scalar physical_steering_rad)
+    const Scalar &physical_steering_rad)
 {
   const Scalar tangent = scalar_tan(physical_steering_rad);
   const Scalar numerator = 2.0 * kWheelbaseM * tangent;

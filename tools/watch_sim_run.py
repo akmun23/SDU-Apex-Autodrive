@@ -101,12 +101,17 @@ class SimRunWatcher(Node):
         try:
             diagnostic = json.loads(message.data)
         except (TypeError, json.JSONDecodeError):
+            self.mpc_fault_reason = "invalid MPC diagnostics JSON"
+            print("MPC_DIAGNOSTICS_INVALID_JSON: aborting supervised run",
+                  flush=True)
             return
         status = diagnostic.get("status")
         if status in ("waiting_for_localization", "waiting_for_plant_state",
                       "waiting_for_actuator"):
             return
-        if status and status != "accepted_optimal":
+        if status and status not in (
+                "accepted_optimal", "accepted_feasible",
+                "accepted_prior_plan"):
             reason = diagnostic.get("nonlinear_failure_reason", "none")
             stage = diagnostic.get("nonlinear_failure_stage", -1)
             self.mpc_fault_reason = f"{status}; nonlinear={reason}@{stage}"

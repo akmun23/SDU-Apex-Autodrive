@@ -1,14 +1,10 @@
 /**:
   ros__parameters:
-    # Keep the development solver inside the same per-cycle compute envelope
-    # as the deployed controller. A larger solver-only budget had allowed a
-    # live solve to run past the 25 ms deadline before the node rejected it.
-    # The watched 0.05-tolerance cycle exhausted the 20 ms inner budget during
-    # QP construction before ADMM started; its outer acquisition-to-publish
-    # time was 19.24 ms, inside the unchanged 25 ms hard gate. Allow 22 ms for
-    # RTI work while retaining the 3.5 ms post-solve reserve and 25 ms gate.
+    # Keep development on the same <20 ms end-to-end compute envelope as the
+    # deployed controller. The 3.5 ms post-solve reserve remains in the RTI
+    # cycle; command-start prediction lateness is diagnostic, not a rejection.
     rti_cycle_budget_ms: 22.0
-    end_to_end_cycle_budget_ms: 25.0
+    end_to_end_cycle_budget_ms: 20.0
     max_command_start_lateness_ms: 2.0
     initial_command_publication_lead_ms: 15.0
     # Exact replay of all 107 command-time snapshots from the Oct 21 watched

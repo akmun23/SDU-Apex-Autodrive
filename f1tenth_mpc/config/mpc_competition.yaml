@@ -21,10 +21,10 @@
     # remaining inside the offline plant's validated 750 ms prediction span.
     maximum_command_publication_lead_s: 0.5
     command_actuation_delay_s: 0.0
-    # Reject a mathematically valid solve if compute has passed its predicted
-    # command epoch or if acquisition-to-command work exceeds one 40 Hz period.
-    # A miss latches a controller fault; MPC does not publish a substitute.
-    end_to_end_cycle_budget_ms: 25.0
+    # Publish only when acquisition, solve, validation and command preparation
+    # finish in under 20 ms. Command-start prediction lateness is diagnostic;
+    # it does not invalidate an otherwise exact-feasible candidate.
+    end_to_end_cycle_budget_ms: 20.0
     max_command_start_lateness_ms: 2.0
     # The Oct 21 practice MPC capture measured 14.2 ms median callback-to-publish.
     initial_command_publication_lead_ms: 15.0
