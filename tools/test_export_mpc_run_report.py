@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,40 @@ from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_diagnostic_sidecar_preserves_candidate_nominal_and_plan_payloads(self) -> None:
+        payload = {
+            "status": "accepted_candidate_prefix",
+            "action_source": "revalidated_candidate_prefix",
+            "command_published": True,
+            "source_stamp_ns": 123,
+            "control_ros_stamp_ns": 124,
+            "candidate_command_stamp_ns": 125,
+            "issued_command_stamp_ns": 126,
+            "candidate_controls": [[0.1, 0.2], [0.3, 0.4]],
+            "nominal_controls": [[-0.1, 0.5], [-0.2, 0.6]],
+            "certified_plan_snapshot": {"valid": True, "cursor": 7},
+            "prior_plan_revalidation": {"attempted": True, "exact_valid": False},
+        }
+        rows = [
+            {"bag_time": 2.0, "json": payload},
+            {"bag_time": 1.0, "json": {"status": "waiting"}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "diagnostics.jsonl"
+            count = report.write_diagnostic_sequence_sidecar(output, rows)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual(records[0]["bag_receipt_epoch_s"], 1.0)
+        self.assertEqual(records[1]["candidate_command_stamp_ns"], 125)
+        self.assertEqual(records[1]["issued_command_stamp_ns"], 126)
+        self.assertEqual(records[1]["payload"]["candidate_controls"],
+                         payload["candidate_controls"])
+        self.assertEqual(records[1]["payload"]["nominal_controls"],
+                         payload["nominal_controls"])
+        self.assertEqual(records[1]["payload"]["certified_plan_snapshot"],
+                         payload["certified_plan_snapshot"])
+
     def test_drive_command_ros_stamp_keeps_exact_nanoseconds(self) -> None:
         expected = 1_792_611_522_369_873_606
         message = SimpleNamespace(header=SimpleNamespace(
@@ -73,6 +109,23 @@ class MpcRunReportTest(unittest.TestCase):
                 "failure_stage": 2, "validation_status": 5,
                 "validation_horizon": 3, "timing_rejected": False,
             },
+            "full_prior_plan_suffix_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 11, "validation_status": 5,
+                "validation_horizon": 27, "timing_rejected": False,
+                "validation_us": 610.5,
+            },
+            "quality_aware_prefix_selection_on_rejection": True,
+            "quality_aware_prefix_selection": {
+                "attempted": True, "choice": "candidate",
+                "candidate_valid": True, "prior_valid": True,
+                "candidate_objective": 12.5, "prior_objective": 13.0,
+                "candidate_minimum_corridor_slack_m": 0.08,
+                "prior_minimum_corridor_slack_m": 0.07,
+                "validation_us": 214.0,
+                "candidate_prefix_controls": [[0.1, 0.4], [0.2, 0.3]],
+                "prior_prefix_controls": [[-0.1, 0.2], [-0.2, 0.2]],
+            },
             "solver": {"admm_status": 1},
         }
         row = report._cycle_row(3.0, 0.0, payload, {}, {})
@@ -87,6 +140,27 @@ class MpcRunReportTest(unittest.TestCase):
         self.assertEqual(row["candidate_prefix_validation_horizon"], 3)
         self.assertFalse(row["prior_plan_exact_valid"])
         self.assertEqual(row["prior_plan_failure_stage"], 2)
+        self.assertTrue(row["full_prior_suffix_attempted"])
+        self.assertFalse(row["full_prior_suffix_exact_valid"])
+        self.assertEqual(row["full_prior_suffix_failure_stage"], 11)
+        self.assertEqual(row["full_prior_suffix_validation_horizon"], 27)
+        self.assertEqual(row["full_prior_suffix_validation_us"], 610.5)
+        self.assertTrue(row["quality_prefix_policy_enabled"])
+        self.assertTrue(row["quality_prefix_attempted"])
+        self.assertEqual(row["quality_prefix_choice"], "candidate")
+        self.assertTrue(row["quality_candidate_prefix_exact_valid"])
+        self.assertTrue(row["quality_prior_prefix_exact_valid"])
+        self.assertEqual(row["quality_candidate_prefix_objective"], 12.5)
+        self.assertEqual(row["quality_prior_prefix_objective"], 13.0)
+        self.assertEqual(row["quality_candidate_prefix_min_slack_m"], 0.08)
+        self.assertEqual(row["quality_prior_prefix_min_slack_m"], 0.07)
+        self.assertEqual(row["quality_prefix_validation_us"], 214.0)
+        self.assertEqual(
+            row["quality_candidate_prefix_controls_json"],
+            "[[0.1,0.4],[0.2,0.3]]")
+        self.assertEqual(
+            row["quality_prior_prefix_controls_json"],
+            "[[-0.1,0.2],[-0.2,0.2]]")
 
         compact = report._cycle_row(
             4.0, 0.0,
@@ -125,6 +199,53 @@ class MpcRunReportTest(unittest.TestCase):
         self.assertEqual(
             result["summary"]["candidate_prefix_failure_stage_counts"],
             {"3": 1})
+
+    def test_quality_prefix_selection_is_summarized(self) -> None:
+        data = {
+            evaluator.DIAGNOSTICS: [
+                {"bag_time": 0.5, "json": {
+                    "status": "accepted_prior_plan",
+                    "quality_aware_prefix_selection_on_rejection": True,
+                    "quality_aware_prefix_selection": {
+                        "attempted": True, "choice": "retained_plan",
+                        "candidate_valid": True, "prior_valid": True,
+                        "validation_us": 200.0,
+                    },
+                    "solver": {"admm_status": 1},
+                }},
+                {"bag_time": 0.6, "json": {
+                    "status": "accepted_candidate_prefix",
+                    "quality_aware_prefix_selection_on_rejection": True,
+                    "quality_aware_prefix_selection": {
+                        "attempted": True, "choice": "candidate",
+                        "candidate_valid": True, "prior_valid": False,
+                        "validation_us": 250.0,
+                    },
+                    "solver": {"admm_status": 1},
+                }},
+                {"bag_time": 0.7, "json": {
+                    "status": "accepted_optimal",
+                    "quality_aware_prefix_selection_on_rejection": True,
+                    "quality_aware_prefix_selection": {"attempted": False},
+                    "solver": {"admm_status": 0},
+                }},
+            ],
+            evaluator.CANDIDATE_DIAGNOSTICS: [],
+            evaluator.BRIDGE_TIMING: [], evaluator.DRIVE_COMMAND: [],
+            evaluator.LAST_LAP: [], evaluator.COLLISION: [],
+            evaluator.BRIDGE_FAULT: [], evaluator.GT: [],
+        }
+        result, cycles = report.make_report(
+            Path.cwd(), Path("missing_bag"), data, None, None, 5.0,
+            "live_closed_loop")
+        self.assertEqual(len(cycles), 3)
+        summary = result["summary"]
+        self.assertTrue(summary["quality_prefix_policy_enabled"])
+        self.assertEqual(summary["quality_prefix_attempt_count"], 2)
+        self.assertEqual(summary["quality_prefix_choice_counts"], {
+            "retained_plan": 1, "candidate": 1})
+        self.assertEqual(summary["quality_prefix_both_exact_valid_count"], 1)
+        self.assertEqual(summary["quality_prefix_validation_us"]["p50"], 200.0)
 
     def test_joins_only_exact_bridge_and_command_stamps(self) -> None:
         bridge = report._bridge_by_request_stamp([

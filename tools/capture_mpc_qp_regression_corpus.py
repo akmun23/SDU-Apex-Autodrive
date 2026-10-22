@@ -88,6 +88,40 @@ CASES = [
     },
 ]
 
+# Post-odometry-epoch-fix states are kept as a separate delta so the existing
+# Oct. 21 125-fixture corpus and manifest are never overwritten by this pass.
+# Both inputs are saved-state reconstructions, not live ADMM-memory captures.
+POST_ODOM_EPOCH_FIX_CASES = [
+    {
+        "id": "post_odom_fix_default_high_curvature_20261022",
+        "outcome": "success",
+        "input": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/"
+                 "default_high_curvature_solver_inputs.csv",
+        "bag": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/run",
+        "report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/report.json",
+        "trajectory": "f1tenth_planning/trajectories/autodrive_practice_20260924_b/"
+                      "autodrive_practice_20260924_b_mintime_raceline.csv",
+        "count": 31,
+        "tags": ["post_odom_epoch_fix", "successful_default_line",
+                 "high_curvature", "saved_state_reconstruction"],
+        "observed": "31 reconstructed high-curvature states from a five-lap default-line MPC capture.",
+    },
+    {
+        "id": "post_odom_fix_ipopt_terminal_20261022",
+        "outcome": "failure",
+        "input": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/"
+                 "solver_inputs_chain.csv",
+        "bag": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/run",
+        "report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/report.json",
+        "trajectory": "f1tenth_planning/trajectories/autodrive_practice_20260924_b/"
+                      "ipopt_v1_baseline_raceline.csv",
+        "count": 24,
+        "tags": ["post_odom_epoch_fix", "ipopt_fastline_terminal_chain",
+                 "saved_state_reconstruction"],
+        "observed": "24 reconstructed states around the failed fastline prefix chain; no completed lap.",
+    },
+]
+
 
 def data_rows(path: Path) -> list[list[str]]:
     with path.open(newline="") as stream:
@@ -172,33 +206,44 @@ def report_context(report_path: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--replay-binary", type=Path, required=True)
-    parser.add_argument("--output", type=Path,
-                        default=ROOT / "live_runs/mpc_qp_frozen_corpus_20261021")
+    parser.add_argument("--post-odom-epoch-fix-only", action="store_true",
+                        help="capture only Oct. 22 post-fix states to a separate delta corpus")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     binary = args.replay_binary.resolve()
-    output = args.output.resolve()
-    if not binary.is_file() or not TRAJECTORY.is_file():
-        parser.error("replay binary or practice trajectory is missing")
+    cases = POST_ODOM_EPOCH_FIX_CASES if args.post_odom_epoch_fix_only else CASES
+    default_output = ROOT / (
+        "live_runs/mpc_qp_post_odom_epoch_fix_20261022"
+        if args.post_odom_epoch_fix_only
+        else "live_runs/mpc_qp_frozen_corpus_20261021")
+    output = (args.output or default_output).resolve()
+    if not binary.is_file():
+        parser.error("replay binary is missing")
     output.mkdir(parents=True, exist_ok=True)
     manifest = {
         "schema": "sdu-apex-frozen-qp-regression-corpus-v1",
         "source_regime": "saved_state_reconstruction",
         "solver_experiment_regime": "identical_qp after frozen snapshot",
         "live_solver_memory_restored": False,
-        "trajectory": str(TRAJECTORY.resolve()),
-        "trajectory_sha256": sha256_file(TRAJECTORY),
+        "trajectory": None,
+        "trajectory_sha256": None,
         "replay_binary": str(binary),
         "replay_binary_sha256": sha256_file(binary),
         "replay_args": REPLAY_ARGS,
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "capture_scope": ("post_odom_epoch_fix_delta_only"
+                          if args.post_odom_epoch_fix_only
+                          else "full_historical_corpus"),
         "cases": [],
     }
     total_fixtures = 0
-    for case in CASES:
+    for case in cases:
         input_csv = ROOT / case["input"]
         bag = ROOT / case["bag"]
         report_path = ROOT / case["report"]
-        if not input_csv.is_file() or not bag.is_dir() or not report_path.is_file():
+        trajectory = ROOT / case.get("trajectory", str(TRAJECTORY.relative_to(ROOT)))
+        if (not input_csv.is_file() or not bag.is_dir() or
+                not report_path.is_file() or not trajectory.is_file()):
             raise RuntimeError(f"missing corpus input or source bag: {case['id']}")
         case_context = report_context(report_path)
         rows = data_rows(input_csv)
@@ -211,7 +256,7 @@ def main() -> int:
             json.dumps(case_context, indent=2, sort_keys=True) + "\n")
         command = [sys.executable, str(ROOT / "tools/mpc_qp_fixture.py"),
                    "capture", "--replay-binary", str(binary),
-                   "--trajectory", str(TRAJECTORY), "--input-csv",
+                   "--trajectory", str(trajectory), "--input-csv",
                    str(input_csv), "--output-dir", str(fixture_dir),
                    "--rows", ",".join(map(str, indices)), "--source-bag",
                    str(bag), "--case-label", case["id"], "--outcome",
@@ -231,6 +276,8 @@ def main() -> int:
             "input_csv_sha256": sha256_file(input_csv),
             "source_report": str(report_path.resolve()),
             "source_report_sha256": sha256_file(report_path),
+            "trajectory": str(trajectory.resolve()),
+            "trajectory_sha256": sha256_file(trajectory),
             "source_event_context": case_context,
             "requested_saved_state_rows": indices,
             "captured_fixture_count": len(fixture_files),
@@ -254,13 +301,21 @@ def main() -> int:
                                      for c in manifest["cases"])
     (output / "corpus_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    if total_fixtures < 100 or manifest["failure_groups"] < 3 or \
-            manifest["success_groups"] < 2:
-        raise RuntimeError("corpus gate failed: require >=100 fixtures, "
-                           ">=3 failure groups, and >=2 success groups")
-    print(f"corpus gate passed: {total_fixtures} fixtures, "
-          f"{manifest['failure_groups']} failure groups, "
-          f"{manifest['success_groups']} success groups")
+    if args.post_odom_epoch_fix_only:
+        if (total_fixtures != 55 or manifest["failure_groups"] != 1 or
+                manifest["success_groups"] != 1):
+            raise RuntimeError("post-fix delta gate failed: require 55 fixtures "
+                               "from one success group and one failure group")
+        print("post-fix delta gate passed: 55 fixtures, one success and one "
+              "failure group; original corpus was not modified")
+    else:
+        if total_fixtures < 100 or manifest["failure_groups"] < 3 or \
+                manifest["success_groups"] < 2:
+            raise RuntimeError("corpus gate failed: require >=100 fixtures, "
+                               ">=3 failure groups, and >=2 success groups")
+        print(f"corpus gate passed: {total_fixtures} fixtures, "
+              f"{manifest['failure_groups']} failure groups, "
+              f"{manifest['success_groups']} success groups")
     return 0
 
 

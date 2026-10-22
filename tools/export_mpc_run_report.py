@@ -30,7 +30,7 @@ except ModuleNotFoundError:
     import evaluate_mpc_bag as evaluator
 
 
-REPORT_SCHEMA = "sdu_apex_mpc_run_report/v3"
+REPORT_SCHEMA = "sdu_apex_mpc_run_report/v4"
 COMMAND_FLOAT_MATCH_TOL = 5.0e-8
 ACCEPTED_STATUSES = {
     "accepted_optimal", "accepted_feasible", "accepted_line_search",
@@ -372,6 +372,14 @@ def _cycle_row(
     candidate_prefix = candidate_prefix if isinstance(candidate_prefix, dict) else {}
     prior_plan = payload.get("prior_plan_revalidation")
     prior_plan = prior_plan if isinstance(prior_plan, dict) else {}
+    full_prior_suffix = payload.get("full_prior_plan_suffix_revalidation")
+    full_prior_suffix = (full_prior_suffix
+                         if isinstance(full_prior_suffix, dict) else {})
+    quality_prefix = payload.get("quality_aware_prefix_selection")
+    quality_prefix = quality_prefix if isinstance(quality_prefix, dict) else {}
+    quality_candidate_controls = quality_prefix.get(
+        "candidate_prefix_controls")
+    quality_prior_controls = quality_prefix.get("prior_prefix_controls")
     return {
         "bag_receipt_epoch_s": bag_receipt_epoch_s,
         "bag_time_from_start_s": bag_receipt_epoch_s - bag_time_origin_epoch_s,
@@ -530,6 +538,41 @@ def _cycle_row(
         "prior_plan_validation_horizon": prior_plan.get(
             "validation_horizon"),
         "prior_plan_timing_rejected": prior_plan.get("timing_rejected"),
+        "full_prior_suffix_attempted": full_prior_suffix.get("attempted"),
+        "full_prior_suffix_exact_valid": full_prior_suffix.get("exact_valid"),
+        "full_prior_suffix_failure_stage": full_prior_suffix.get(
+            "failure_stage"),
+        "full_prior_suffix_validation_status": full_prior_suffix.get(
+            "validation_status"),
+        "full_prior_suffix_validation_horizon": full_prior_suffix.get(
+            "validation_horizon"),
+        "full_prior_suffix_timing_rejected": full_prior_suffix.get(
+            "timing_rejected"),
+        "full_prior_suffix_validation_us": _finite_number(
+            full_prior_suffix.get("validation_us")),
+        "quality_prefix_policy_enabled": payload.get(
+            "quality_aware_prefix_selection_on_rejection"),
+        "quality_prefix_attempted": quality_prefix.get("attempted"),
+        "quality_prefix_choice": quality_prefix.get("choice"),
+        "quality_candidate_prefix_exact_valid": quality_prefix.get(
+            "candidate_valid"),
+        "quality_prior_prefix_exact_valid": quality_prefix.get("prior_valid"),
+        "quality_candidate_prefix_objective": _finite_number(
+            quality_prefix.get("candidate_objective")),
+        "quality_prior_prefix_objective": _finite_number(
+            quality_prefix.get("prior_objective")),
+        "quality_candidate_prefix_min_slack_m": _finite_number(
+            quality_prefix.get("candidate_minimum_corridor_slack_m")),
+        "quality_prior_prefix_min_slack_m": _finite_number(
+            quality_prefix.get("prior_minimum_corridor_slack_m")),
+        "quality_prefix_validation_us": _finite_number(
+            quality_prefix.get("validation_us")),
+        "quality_candidate_prefix_controls_json": (
+            json.dumps(quality_candidate_controls, separators=(",", ":"))
+            if isinstance(quality_candidate_controls, list) else None),
+        "quality_prior_prefix_controls_json": (
+            json.dumps(quality_prior_controls, separators=(",", ":"))
+            if isinstance(quality_prior_controls, list) else None),
         "prefix_validation_horizon": candidate_prefix.get(
             "validation_horizon"),
         "corridor_slack_m": _finite_number(
@@ -811,6 +854,11 @@ def make_report(
         row.get("candidate_prefix_exact_valid") is False and
         isinstance(row.get("candidate_prefix_failure_stage"), (int, float)) and
         row["candidate_prefix_failure_stage"] >= 0)
+    quality_prefix_rows = [row for row in scored
+                           if row.get("quality_prefix_attempted") is True]
+    quality_prefix_choice_counts = Counter(
+        str(row.get("quality_prefix_choice") or "unknown")
+        for row in quality_prefix_rows)
     gate_values = [row["callback_to_gate_ms"] for row in scored
                    if row.get("callback_to_gate_ms") is not None]
     errors = {
@@ -873,6 +921,18 @@ def make_report(
         "nonlinear_failure_reason_counts": dict(nonlinear_failure_counts),
         "candidate_prefix_failure_stage_counts": dict(
             candidate_prefix_failure_stage_counts),
+        "quality_prefix_policy_enabled": any(
+            row.get("quality_prefix_policy_enabled") is True for row in scored),
+        "quality_prefix_attempt_count": len(quality_prefix_rows),
+        "quality_prefix_choice_counts": dict(quality_prefix_choice_counts),
+        "quality_prefix_both_exact_valid_count": sum(
+            row.get("quality_candidate_prefix_exact_valid") is True and
+            row.get("quality_prior_prefix_exact_valid") is True
+            for row in quality_prefix_rows),
+        "quality_prefix_validation_us": _distribution([
+            float(row["quality_prefix_validation_us"])
+            for row in quality_prefix_rows
+            if row.get("quality_prefix_validation_us") is not None]),
         "status_percentages": {
             status: 100.0 * count / len(scored)
             for status, count in status_counts.items()} if scored else {},
@@ -1118,6 +1178,21 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "prior_plan_validation_attempted", "prior_plan_exact_valid",
         "prior_plan_failure_stage", "prior_plan_validation_status",
         "prior_plan_validation_horizon", "prior_plan_timing_rejected",
+        "full_prior_suffix_attempted", "full_prior_suffix_exact_valid",
+        "full_prior_suffix_failure_stage",
+        "full_prior_suffix_validation_status",
+        "full_prior_suffix_validation_horizon",
+        "full_prior_suffix_timing_rejected",
+        "full_prior_suffix_validation_us",
+        "quality_prefix_policy_enabled", "quality_prefix_attempted",
+        "quality_prefix_choice", "quality_candidate_prefix_exact_valid",
+        "quality_prior_prefix_exact_valid",
+        "quality_candidate_prefix_objective",
+        "quality_prior_prefix_objective",
+        "quality_candidate_prefix_min_slack_m",
+        "quality_prior_prefix_min_slack_m", "quality_prefix_validation_us",
+        "quality_candidate_prefix_controls_json",
+        "quality_prior_prefix_controls_json",
         "prefix_validation_horizon",
         "nominal_candidate_control_delta_inf", "rho_change_count", "rho_start",
         "rho_final", "rho_u_start", "rho_u_final", "factorization_count",
@@ -1172,6 +1247,41 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             })
 
 
+def write_diagnostic_sequence_sidecar(
+        path: Path, rows: list[dict[str, Any]]) -> int:
+    """Preserve complete decoded MPC diagnostics for offline branch replay.
+
+    The cycle CSV is intentionally a compact scalar summary. This JSONL keeps
+    the full per-cycle payload, including candidate/nominal controls and any
+    certified-plan snapshot, so later analysis does not reconstruct a missing
+    branch from published commands.
+    """
+    ordered = sorted(rows, key=lambda row: float(row.get("bag_time", 0.0)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        for row in ordered:
+            payload = row.get("json")
+            if not isinstance(payload, dict) or "_decode_error" in payload:
+                continue
+            record = {
+                "bag_receipt_epoch_s": float(row.get("bag_time", 0.0)),
+                "source_stamp_ns": payload.get("source_stamp_ns"),
+                "control_ros_stamp_ns": payload.get("control_ros_stamp_ns"),
+                "candidate_command_stamp_ns": payload.get(
+                    "candidate_command_stamp_ns"),
+                "issued_command_stamp_ns": payload.get("issued_command_stamp_ns"),
+                "status": payload.get("status"),
+                "action_source": payload.get("action_source"),
+                "command_published": payload.get("command_published"),
+                "payload": payload,
+            }
+            stream.write(json.dumps(record, separators=(",", ":"),
+                                  allow_nan=False) + "\n")
+    return sum(
+        isinstance(row.get("json"), dict) and
+        "_decode_error" not in row["json"] for row in ordered)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bag", type=Path)
@@ -1188,6 +1298,9 @@ def main() -> int:
         help="explicitly set live_closed_loop only when MPC commands controlled the run")
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-csv", type=Path, required=True)
+    parser.add_argument(
+        "--output-diagnostics-jsonl", type=Path,
+        help="full per-cycle diagnostic payload sidecar (default: sibling of output CSV)")
     args = parser.parse_args()
     if args.progress_bin_m <= 0.0:
         parser.error("--progress-bin-m must be positive")
@@ -1198,12 +1311,27 @@ def main() -> int:
         args.run_metadata.resolve() if args.run_metadata else None,
         args.progress_bin_m, args.experiment_regime)
     report["cycle_detail_csv"] = str(args.output_csv.resolve())
+    diag_topic = (evaluator.CANDIDATE_DIAGNOSTICS
+                  if data.get(evaluator.CANDIDATE_DIAGNOSTICS)
+                  else evaluator.DIAGNOSTICS)
+    diagnostic_sidecar = args.output_diagnostics_jsonl or args.output_csv.with_name(
+        f"{args.output_csv.stem}_diagnostics.jsonl")
+    sidecar_count = write_diagnostic_sequence_sidecar(
+        diagnostic_sidecar, data.get(diag_topic, []))
+    report["diagnostic_sequence_sidecar"] = {
+        "path": str(diagnostic_sidecar.resolve()),
+        "format": "JSONL; one record per decoded MPC diagnostic with full payload",
+        "records": sidecar_count,
+    }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     write_cycle_csv(args.output_csv, cycles)
     print(json.dumps(report["summary"], indent=2, allow_nan=False))
-    print(f"wrote schema={REPORT_SCHEMA} JSON={args.output_json} CSV={args.output_csv}")
+    print(
+        f"wrote schema={REPORT_SCHEMA} JSON={args.output_json} "
+        f"CSV={args.output_csv} diagnostics={diagnostic_sidecar} "
+        f"({sidecar_count} records)")
     return 0
 
 

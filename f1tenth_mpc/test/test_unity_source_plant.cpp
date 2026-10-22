@@ -889,6 +889,25 @@ TEST(UnitySourcePlant, SteeringGeneratesLateralForceAndYaw)
               -0.025 * 3.2, 2.0e-4);
 }
 
+TEST(UnitySourcePlant, SteeringPreservesVehicleControllerTargetCrossingClamp)
+{
+  constexpr double max_steering_rad = 0.52359877559829887308;
+  auto state = state_at_speed(0.0);
+  state.physical_steering_rad = 0.4;
+
+  f1tenth_mpc::UnitySourcePlantOutput output;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {0.1 * max_steering_rad, 0.2}, &output));
+
+  // VehicleController.Steer compares AutonomousSteering with the internal
+  // angle's opposite-sign normalized value, then clamps after its selected
+  // direction step. On this unwind case the source reaches the target in one
+  // 1 ms update; replacing it with a symmetric rate limiter is not source
+  // equivalent.
+  EXPECT_NEAR(output.state.physical_steering_rad,
+              0.1 * max_steering_rad, 1.0e-6);
+}
+
 TEST(UnitySourcePlant, InertialAccelerationIncludesBodyFrameYawTransport)
 {
   auto state = state_at_speed(3.5);

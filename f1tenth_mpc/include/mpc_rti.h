@@ -211,7 +211,22 @@ typedef struct
     float curvature_error_per_m[PREDICTION_HORIZON + 1];
     float left_bound_error_m[PREDICTION_HORIZON + 1];
     float right_bound_error_m[PREDICTION_HORIZON + 1];
+    /* Exact nonlinear footprint-clearance margins from the same rollout
+     * check. Stage zero is measured input and is not corridor-constrained. */
+    float lower_corridor_slack_m[PREDICTION_HORIZON + 1];
+    float upper_corridor_slack_m[PREDICTION_HORIZON + 1];
 } MpcRtiCandidatePathDelta_t;
+
+/* Diagnostic form of the nonlinear corridor test, using the same vehicle
+ * footprint and first-prediction margin as production validation. */
+int mpc_rti_compute_corridor_slack(
+    const MpcModelState_t *state,
+    float left_bound_m,
+    float right_bound_m,
+    const MpcRtiConfiguration_t *configuration,
+    int prediction_index,
+    float *lower_slack_m,
+    float *upper_slack_m);
 
 typedef struct
 {
@@ -222,10 +237,10 @@ typedef struct
     /* Optional absolute CLOCK_MONOTONIC deadline in microseconds. When set,
      * this deadline takes precedence over max_cycle_time_us. */
     double absolute_deadline_monotonic_us;
-    /* Rejection-only nonlinear backtracking. Production remains disabled
-     * until command-epoch safety is established. */
+    /* Exact nonlinear backtracking/merit guard. Production remains disabled
+     * until held-out quality and command-epoch safety are established. */
     int enable_nonlinear_line_search;
-    int line_search_max_backtracks; /* 0..2: alpha=0.5, then alpha=0.25 */
+    int line_search_max_backtracks; /* 0..3: alpha=0.5, 0.25, then 0.125 */
     int line_search_command_epoch_valid;
     /* Capture already-computed source-output samples for runtime diagnostics.
      * When false, exact rollouts do not retain or copy this debug data. */
@@ -325,6 +340,9 @@ typedef struct
     int line_search_full_step_failure_stage;
     int line_search_last_failure_reason;
     int line_search_last_failure_stage;
+    int line_search_merit_triggered;
+    int line_search_nominal_exact_valid;
+    float line_search_nominal_objective;
     float line_search_selected_alpha;
     double line_search_us;
     int diagnostic_output_count;

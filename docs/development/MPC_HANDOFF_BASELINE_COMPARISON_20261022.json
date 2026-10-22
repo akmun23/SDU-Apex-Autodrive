@@ -1,0 +1,838 @@
+{
+  "schema": "sdu_apex_mpc_handoff_baseline_comparison/v1",
+  "date": "2026-10-22",
+  "purpose": "PR-00 machine-readable comparison index for the Oct. 22 MPC/odometry handoff. Each entry retains its experiment regime; metrics from different regimes are not pooled.",
+  "metric_rules": {
+    "lap_time": "Only completed simulator laps count. A trajectory integral or optimizer estimate is not a lap time.",
+    "fixed_input_rollout": "Offline replay from a supplied initial state and recorded command sequence; not closed-loop MPC tracking.",
+    "saved_state_replay": "Offline solver replay reconstructed from bag state. Historical live ADMM memory is unavailable unless explicitly stated.",
+    "timing": "Reported gate is pre-publish callback-to-publication admission; it is not publish-return or transport latency."
+  },
+  "runs": [
+    {
+      "id": "csv_v251_gt_5lap_run1_20261020",
+      "comparison_class": "csv_follower_development",
+      "controller": "CSV follower; MPC disabled",
+      "bag": "live_runs/csv_v251_gt_5lap_run1_20261020/run",
+      "raw_db3_sha256": "1c466a4ba68c8aa840c937dd2c9a051eb29ae8f9ecff0c52596394e2aac01126",
+      "trajectory_sha256": null,
+      "launch_manifest": "missing; trajectory and runtime image cannot be inferred from the directory name",
+      "outcome": {
+        "completed_laps": 5,
+        "collision": null,
+        "mpc_result": "not applicable"
+      },
+      "measurements": {
+        "source_one_step_forward_velocity_rmse_mps": 0.00604,
+        "source_one_step_forward_velocity_bias_mps": 0.00041,
+        "source_one_step_forward_velocity_p95_abs_mps": 0.01089
+      },
+      "artifacts": [
+        "live_runs/csv_v251_gt_5lap_run1_20261020/source_one_step.json",
+        "live_runs/csv_v251_gt_5lap_run1_20261020/odom_drift.json"
+      ],
+      "interpretation": "Development command-profile comparator only; it is not production MPC or a matched fastline test."
+    },
+    {
+      "id": "mpc_ipopt_v1_mpc_probe_20261021",
+      "comparison_class": "pre_odom_epoch_fix_ipopt_mpc_probe",
+      "controller": "Production MPC, IPOPT fastline, sealed pre-fix run",
+      "git_commit": "56e2a3e679b92af70575a599c13bf75dae64593d",
+      "bag": "live_runs/mpc_ipopt_v1_mpc_probe_20261021/run",
+      "raw_db3_sha256": "d0b29e8c7a859a32a8df7cbfd4ae16a4d5bcc28f9db37c0ed3df717ee0c02a02",
+      "trajectory_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+      "launch_manifest": "live_runs/mpc_ipopt_v1_mpc_probe_20261021/run_manifest.json",
+      "outcome": {
+        "completed_laps": 0,
+        "first_mpc_rejection_from_start_s": null,
+        "first_collision_from_start_s": 6.38494,
+        "published_commands": 244,
+        "full_horizon_accepts": 209,
+        "candidate_prefix_accepts": 35
+      },
+      "timing_ms": {
+        "p50": 6.61697,
+        "p95": 10.04670,
+        "max": 11.55638,
+        "events_at_or_over_20ms": 0
+      },
+      "interpretation": "Pre-fix failure comparator. Its sealed launch manifest is stronger provenance than the later Oct. 22 bags, but this was not a completed lap."
+    },
+    {
+      "id": "mpc_ipopt_v1_mpc_probe_20261021_retry2",
+      "comparison_class": "pre_odom_epoch_fix_ipopt_mpc_probe",
+      "controller": "Production MPC, IPOPT fastline, sealed pre-fix retry",
+      "git_commit": "56e2a3e679b92af70575a599c13bf75dae64593d",
+      "bag": "live_runs/mpc_ipopt_v1_mpc_probe_20261021_retry2/run",
+      "raw_db3_sha256": "c5e4d4b0926be868508b05a41517b6977282ddc7191c482bd877826567e86c5f",
+      "trajectory_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+      "launch_manifest": "live_runs/mpc_ipopt_v1_mpc_probe_20261021_retry2/run_manifest.json",
+      "outcome": {
+        "completed_laps": 0,
+        "first_mpc_rejection_from_start_s": 3.53831,
+        "first_collision_from_start_s": null,
+        "published_commands": 137,
+        "full_horizon_accepts": 109,
+        "candidate_prefix_accepts": 28,
+        "terminal_candidate_prefix_failure_stage": 2
+      },
+      "timing_ms": {
+        "p50": 6.90274,
+        "p95": 10.19153,
+        "max": 12.05510,
+        "events_at_or_over_20ms": 0
+      },
+      "interpretation": "Fault-terminated pre-fix comparator; distinct from the collision-terminated first probe."
+    },
+    {
+      "id": "mpc_odom_epoch_fix_practice_20261022_run1",
+      "comparison_class": "post_odom_epoch_fix_default_line_live_mpc",
+      "controller": "Production MPC, default mintime trajectory",
+      "git_commit_reported_at_analysis": "cfefebcfe18aee16a7e55f95764db61dd0eca59f",
+      "bag": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/run",
+      "raw_db3_sha256": "a9f80c1fa28c9b706e39294fca73fbefde4b2a059bc54c9f709ed52b39776d17",
+      "trajectory": "f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv",
+      "trajectory_sha256": "09b0c3e5b36b781b8709eb08a98cd8c36eb7951391f269ed761409a64938a253",
+      "launch_manifest": "missing; report-sidecar provenance is not a pre-launch manifest",
+      "outcome": {
+        "completed_laps": 5,
+        "lap_times_s": [6.842, 6.245, 6.079, 6.045, 6.250],
+        "mean_lap_time_s": 6.292,
+        "best_lap_time_s": 6.045,
+        "collision": false,
+        "published_commands": 1276,
+        "full_horizon_accepts": 1266,
+        "candidate_prefix_accepts": 10,
+        "prior_plan_accepts": 0,
+        "final_accumulated_xy_odometry_error_m": 0.270
+      },
+      "timing_ms": {
+        "p50": 6.13838,
+        "p95": 7.97927,
+        "max": 14.64158,
+        "events_at_or_over_20ms": 0
+      },
+      "fixed_input_750ms_rollout": {
+        "windows": 1252,
+        "endpoint_xy_rmse_m": 0.02124,
+        "endpoint_xy_p95_m": 0.03400,
+        "endpoint_xy_max_m": 0.13247,
+        "whole_paths_over_0_05m": 52
+      },
+      "interpretation": "One five-lap default-line success; not a repeated-session reliability result. Integrated pose drift and fixed-input rollout error are separate metrics."
+    },
+    {
+      "id": "mpc_ipopt_v1_fastline_practice_20261022_run1",
+      "comparison_class": "post_odom_epoch_fix_ipopt_fastline_live_mpc",
+      "controller": "Production MPC, IPOPT fastline",
+      "git_commit_reported_at_analysis": "cfefebcfe18aee16a7e55f95764db61dd0eca59f",
+      "bag": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/run",
+      "raw_db3_sha256": "192b9f36f2b2a393506553c74d17379530f85ea14b7e159df4d39cf4564904bf",
+      "trajectory": "f1tenth_planning/trajectories/autodrive_practice_20260924_b/ipopt_v1_baseline_raceline.csv",
+      "trajectory_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+      "launch_manifest": "missing; report-sidecar provenance is not a pre-launch manifest",
+      "nominal_time_estimate_s": 5.367,
+      "outcome": {
+        "completed_laps": 0,
+        "candidate_prefix_chain_actions": 22,
+        "first_mpc_rejection_from_start_s": 5.73339,
+        "first_collision_from_start_s": 5.87142,
+        "published_commands": 223,
+        "full_horizon_accepts": 177,
+        "candidate_prefix_accepts": 46,
+        "terminal_prefix_failure_stage": 2,
+        "admm_residual_p50": 0.605,
+        "admm_residual_p95": 1.808,
+        "admm_residual_max": 7.021
+      },
+      "timing_ms": {
+        "p50": 7.24583,
+        "p95": 12.34690,
+        "max": 17.03052,
+        "events_at_or_over_20ms": 0
+      },
+      "interpretation": "Failed live attempt. 5.367 s is an optimizer estimate, not an achieved lap. Do not rerun unchanged."
+    },
+    {
+      "id": "mpc_fastline_5lap_20261022",
+      "comparison_class": "post_odom_epoch_fix_ipopt_fastline_live_mpc",
+      "controller": "Current production MPC on the IPOPT fastline; no speed cap or parameter overlay",
+      "git_commit": "cfefebcfe18aee16a7e55f95764db61dd0eca59f",
+      "bag": "live_runs/mpc_fastline_5lap_20261022/run/run_0.db3",
+      "raw_db3_sha256": "ab02b095d68b519a28c563190e1692270a94c77358d3a57131bc4fa52539d8ad",
+      "report": "live_runs/mpc_fastline_5lap_20261022/report.json",
+      "report_sha256": "1b31869d265d2becf92647443d7e389dea81ae743a12dcd89cf5c2f246281f5a",
+      "cycles": "live_runs/mpc_fastline_5lap_20261022/cycles.csv",
+      "cycles_sha256": "5259fe15699823da9d69839dff42749801f6521f036c361c80448c5fe129ec65",
+      "launch_manifest": "live_runs/mpc_fastline_5lap_20261022/run_manifest.json",
+      "manifest_sealed_before_launch": true,
+      "trajectory": "f1tenth_planning/trajectories/autodrive_practice_20260924_b/ipopt_v1_baseline_raceline.csv",
+      "trajectory_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+      "map": "f1tenth_planning/maps/autodrive_practice_20260924_b.yaml",
+      "map_sha256": "fcc4416fbab3c84aed6394e23d792f5533c914a777b743556b5f2b568807985d",
+      "outcome": {
+        "completed_laps": 0,
+        "published_commands": 240,
+        "full_horizon_exact_accepts": 212,
+        "candidate_prefix_accepts": 28,
+        "first_unpublished_mpc_rejection_from_start_s": 6.157619,
+        "first_rejection_stage": 2,
+        "first_collision_from_start_s": 6.295181,
+        "collision_after_rejection_s": 0.137562,
+        "controller_tracking_rmse": {
+          "cross_track_m": 0.180873,
+          "heading_rad": 0.206861,
+          "speed_error_mps": 2.383825
+        }
+      },
+      "timing_ms": {
+        "p50": 6.764131,
+        "p95": 10.366146,
+        "max": 12.672834,
+        "events_at_or_over_20ms": 0,
+        "callback_intervals_over_25ms": 0
+      },
+      "fixed_input_source_plant_750ms": {
+        "clean_windows": 221,
+        "endpoint_xy_rmse_m": 0.03742,
+        "endpoint_xy_p95_m": 0.08006,
+        "endpoint_xy_max_m": 0.09182,
+        "endpoints_over_0_05m": 45,
+        "whole_paths_over_0_05m": 46,
+        "whole_path_error_p95_m": 0.0810,
+        "whole_path_error_max_m": 0.0939,
+        "u_rmse_mps": 0.03385,
+        "v_rmse_mps": 0.00348,
+        "yaw_rate_rmse_radps": 0.02429,
+        "yaw_rmse_rad": 0.00655,
+        "collision_contaminated_windows_excluded": 0
+      },
+      "logged_mpc_horizon_750ms": {
+        "xy_rmse_m": 0.3985,
+        "xy_p95_m": 0.9039,
+        "xy_max_m": 1.1901,
+        "interpretation": "Closed-loop logged horizon versus later truth; the controller replans, so this is not fixed-input plant accuracy."
+      },
+      "trajectory_feasibility_audit": {
+        "report": "live_runs/mpc_fastline_5lap_20261022/trajectory_feasibility_latest.json",
+        "report_sha256": "9f4ab021826e039f3daa7e84ff21ff43a30d0180c802a3bb7f2c4f6e9d94f679",
+        "geometry_minimum_corridor_slack_after_5cm_m": 0.134211,
+        "geometry_only_pass": true,
+        "captured_full_horizon_plans_replayed": 1,
+        "candidate_prior_same_state_comparisons": 29,
+        "candidate_suffix_corridor_failures": 29,
+        "prior_suffix_valid_for_remaining_horizon": 16,
+        "prior_survives_more_stages": 15,
+        "both_3step_prefixes_valid": 28,
+        "prior_3step_objective_lower_count": 20,
+        "interpretation": "This replay identifies failure of the captured suffixes at their recorded states; it is not a global dynamic-infeasibility proof or a closed-loop policy comparison."
+      },
+      "saved_state_solver_probe": {
+        "directory": "live_runs/mpc_fastline_5lap_20261022/solver_probe",
+        "same_states": 28,
+        "baseline_100_iteration_exact_accepts": 9,
+        "200_iteration_exact_accepts": 9,
+        "heading_weight_x3_exact_accepts": 8,
+        "overspeed_weight_x4_exact_accepts": 10,
+        "interpretation": "Extra iterations and heading weight did not improve exact acceptance. The overspeed-weight result adds one accepted snapshot only and is not sufficient to promote a global weight change."
+      },
+      "qp_fixture_delta": {
+        "directory": "live_runs/mpc_qp_post_odom_epoch_fix_20261022_fastline_run3/fixtures",
+        "fixture_count": 28,
+        "capture_manifest": "live_runs/mpc_qp_post_odom_epoch_fix_20261022_fastline_run3/fixtures/capture_manifest.json",
+        "capture_manifest_sha256": "d73d8cc6b81cf4f5ee3031b971753f95e0e9ad52472d8d08e476d741b7d8d3fd",
+        "source_states_csv_sha256": "36c51056d4719cb8611a62768cad6a3a14829b1ffcfaa48d1d247a4c0c7b5185",
+        "validation": "28/28 sidecars valid; 28/28 fixture roundtrips byte-identical; 28/28 recorded solver replays exact-parity",
+        "historical_corpus_modified": false,
+        "interpretation": "New post-fix fastline failure snapshots are preserved as an isolated fixture delta. They do not contain historical live ADMM memory and are not merged into the older corpus."
+      },
+      "pr04_cold_reference_seed_probe": {
+        "source_states_csv": "live_runs/mpc_fastline_5lap_20261022/solver_probe/turn_states.csv",
+        "source_states_csv_sha256": "36c51056d4719cb8611a62768cad6a3a14829b1ffcfaa48d1d247a4c0c7b5185",
+        "replay_binary_sha256": "da882518c6d78f60b4cc486c269f9e6c96df16ddfc4bdbf4920ebdf02ef673ab",
+        "comparison": "same 28 saved states/queues; per-row solver reset; cold ADMM; 8 Jacobian workers; 100 iterations; identical objective and bounds; ordinary cold nominal versus reference-seed mode",
+        "ordinary_cold_status_counts": {
+          "accepted_optimal": 3,
+          "accepted_feasible": 6,
+          "rejected_nonlinear_rollout": 19
+        },
+        "reference_seed_status_counts": {
+          "accepted_optimal": 3,
+          "accepted_feasible": 6,
+          "rejected_nonlinear_rollout": 19
+        },
+        "status_changed_rows": 0,
+        "joint_full_horizon_accepts": 9,
+        "median_minimum_corridor_slack_m": {
+          "ordinary_cold": 0.166327924,
+          "reference_seed": 0.166327924
+        },
+        "maximum_replay_cycle_ms_offline": {
+          "ordinary_cold": 7.88963,
+          "reference_seed": 9.085858
+        },
+        "interpretation": "No effect: ordinary cold nominal construction already uses the same reference/speed seed rolled through the source plant. This does not implement PR-04(C)'s distinct feasible-continuation candidate; it prevents treating the existing reference-seed mode as that candidate. Offline timing is not a live deadline result."
+      },
+      "interpretation": "The live failure is not a measured deadline miss. Tracking begins degrading after the first full-horizon candidate fails at stage 25; short prefixes are then accepted while steering direction and tracking errors deteriorate, ending in a stage-2 rejection. The collision occurred 138 ms after that rejection during termination. No production behavior or raceline was changed."
+    },
+    {
+      "id": "saved_state_initialization_ab_20261022",
+      "comparison_class": "offline_saved_source_state_replay",
+      "controller": "Current source MPC replayed offline from bag snapshots",
+      "source_bags": [
+        "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/run",
+        "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/run"
+      ],
+      "historical_live_admm_memory_available": false,
+      "results": {
+        "fastline_terminal_chain": {
+          "snapshots": 24,
+          "sequence_warm_exact_full_horizon_accepts": 3,
+          "cold_admm_accepts": 4,
+          "independent_cold_accepts": 7,
+          "reference_seed_warm_admm_accepts": 7,
+          "terminal_stage2_failure_resolved": false
+        },
+        "default_high_curvature_segment": {
+          "snapshots": 31,
+          "sequence_warm_exact_full_horizon_accepts": 30,
+          "cold_admm_accepts": 25,
+          "independent_cold_accepts": 21,
+          "reference_seed_warm_admm_accepts": 22
+        }
+      },
+      "interpretation": "Saved-state reconstruction only. It does not reproduce the historical live z/y/rho or prove a closed-loop policy improvement."
+    }
+  ],
+  "post_fix_qp_fixture_delta": {
+    "corpus_manifest": "live_runs/mpc_qp_post_odom_epoch_fix_20261022/corpus_manifest.json",
+    "fixture_count": 55,
+    "groups": {
+      "post_odom_fix_default_high_curvature_20261022": 31,
+      "post_odom_fix_ipopt_terminal_20261022": 24
+    },
+    "old_125_fixture_corpus_modified": false,
+    "validation": "55/55 sidecars valid; 55/55 fixture roundtrips byte-identical; 55/55 recorded solver replays exact-parity",
+    "independent_qp_oracle": {
+      "oracle_status_counts": {
+        "primal infeasible": 2,
+        "run time limit reached": 28,
+        "solved": 19,
+        "solved inaccurate": 6
+      },
+      "linprog_confirmed_infeasible": 2,
+      "default_high_curvature": {
+        "reconstructed_qps": 31,
+        "oracle_status_counts": {
+          "run time limit reached": 6,
+          "solved": 19,
+          "solved inaccurate": 6
+        },
+        "native_admm_iteration_cap": 1
+      },
+      "ipopt_terminal_chain": {
+        "reconstructed_qps": 24,
+        "oracle_status_counts": {
+          "primal infeasible": 2,
+          "run time limit reached": 22
+        },
+        "native_admm_iteration_cap": 22,
+        "lp_confirmed_terminal_rows": [22, 23],
+        "source_diagnostics": [227, 228],
+        "minimum_uniform_e_y_corridor_relaxation_m": [0.26322, 0.50770],
+        "control_bounds_alone_restore_feasibility": false,
+        "other_state_bounds_alone_restore_feasibility": false
+      }
+    },
+    "interpretation": "In these reconstructed local QPs, most earlier fastline rows remain time-limited and are not proven infeasible. The last two rows are LP-confirmed infeasible; restoring feasibility requires widening only the e_y corridor bounds by about 0.263 m and 0.508 m respectively. This diagnoses local QP infeasibility at the already-diverged terminal states, not global path or vehicle infeasibility. No production bounds were changed.",
+    "limits": "These are saved-state QP reconstructions, not the exact historical live QP/ADMM-memory snapshots. They do not prove that the entire IPOPT trajectory is physically infeasible."
+  },
+  "ipopt_terminal_long_budget_refinement": {
+    "five_second_screen": "live_runs/mpc_qp_post_odom_epoch_fix_20261022/ipopt_terminal_oracle_refinement_5s.json",
+    "twenty_second_refinement": "live_runs/mpc_qp_post_odom_epoch_fix_20261022/ipopt_terminal_oracle_refinement_20s.json",
+    "scope": "Only the post-odom-fix IPOPT terminal QPs not already classified as infeasible; no MPC or plant code was executed.",
+    "five_second_status_counts_on_22_unresolved_fixtures": {
+      "solved": 13,
+      "run_time_limit_reached": 9
+    },
+    "twenty_second_followup_on_those_nine": {
+      "solved": 1,
+      "solved_inaccurate": 1,
+      "run_time_limit_reached": 7
+    },
+    "twenty_second_cases": {
+      "qp_000012.fqp": {
+        "status": "solved",
+        "iterations": 452750,
+        "primal_residual": 3.4690004392552634e-7,
+        "dual_residual": 1.618185338990778e-6
+      },
+      "qp_000018.fqp": {
+        "status": "solved inaccurate",
+        "iterations": 489401,
+        "primal_residual": 4.755336271921162e-9,
+        "dual_residual": 2.6811577302195447e-7
+      }
+    },
+    "interpretation": "The longer oracle budget converts two additional terminal QPs from time-limited to solver-returned solutions; seven remain unresolved after 20 seconds each. Together with the two LP-confirmed infeasible terminal QPs, this still does not establish global physical infeasibility or explain the upstream closed-loop divergence. The solved QPs describe isolated frozen linearizations, not replacement live controls.",
+    "production_changes": false
+  },
+  "pr03_dynamic_feasibility_by_progress": {
+    "diagnostic_only": true,
+    "source_model": "build/f1tenth_mpc/libunity_source_plant_eval.so",
+    "bin_width_m": 0.5,
+    "method": "Aggregate finite candidate/prior blended-control searches at saved MPC states by unwrapped starting progress; count full 30-stage source-valid sequences and strictly positive corridor slack witnesses.",
+    "tool_sha256": "2d8f21ab41c657d30f798f66d55d4c203f76c7a289cc1ffa5b182d6f46af0f14",
+    "test_sha256": "eadcf3cee72f4205571957ac4fe495646df03a4dce41546a28abcb6df2d6fdd9",
+    "captures": [
+      {
+        "id": "fastline_run3_terminal_chain",
+        "report": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/pr03_fastline.json",
+        "report_sha256": "fb6dc226410582e867416d333f89c4fe34ae3610e172f444db840c583dba6d33",
+        "dynamic_bins_csv": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/pr03_fastline_dynamic_feasibility_bins.csv",
+        "dynamic_bins_sha256": "e2ec923674e8659c7d3e847f5d615011b1ef9907e795f4f4ad8b5646944b560f",
+        "sampled_bins": 8,
+        "bins_with_positive_slack_witness": 6,
+        "source_valid_blends_of_total": [30, 87],
+        "unwitnessed_bins_m": [[40.5, 41.0], [41.0, 41.5]]
+      },
+      {
+        "id": "default_mintime_five_lap_capture",
+        "report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/pr03_default.json",
+        "report_sha256": "42085cdaa4d8df1c939e3d0cc99bcf4b27a1687488bee864c093fe80ccd52086",
+        "dynamic_bins_csv": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/pr03_default_dynamic_feasibility_bins.csv",
+        "dynamic_bins_sha256": "f7c03dfa93a2d268a717806d8092509860502f580f4a5ce2385dfa8952f35bd0",
+        "sampled_bins": 4,
+        "bins_with_positive_slack_witness": 3,
+        "source_valid_blends_of_total": [23, 30],
+        "unwitnessed_bins_m": [[86.0, 86.5]]
+      },
+      {
+        "id": "fastline_run1_transfer_capture",
+        "report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/pr03_fastline.json",
+        "report_sha256": "8ccee7429d110b2e73ad853c1bddf5f158698b80b8e09bde622dea980bb07625",
+        "dynamic_bins_csv": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/pr03_fastline_dynamic_feasibility_bins.csv",
+        "dynamic_bins_sha256": "35427ab4b9d0d9b9011baa86e2d87b671767f0e7ca4e6ca83b0bf2ed9332ab42",
+        "sampled_bins": 17,
+        "bins_with_positive_slack_witness": 11,
+        "source_valid_blends_of_total": [56, 141],
+        "unwitnessed_bins_m": [[33.0, 33.5], [39.0, 39.5], [39.5, 40.0], [40.0, 40.5], [40.5, 41.0], [41.0, 41.5]]
+      }
+    ],
+    "limitation": "A bin without a witness only indicates that the finite tested blend set failed at its sampled states; it does not establish global dynamical infeasibility. Progress is unwrapped across laps and is not a common lap-relative coordinate."
+  },
+  "pr04_source_plant_blend_seed_replay": {
+    "comparison_class": "offline_same_saved_state_mpc_replay",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "method": "Search candidate/prior-control blends at weights 0.25, 0.50, and 0.75; retain only complete 30-step source-plant rollouts with legal commands and strictly positive physical corridor slack; replay selected controls as MPC nominal seeds against ordinary cold solve at identical saved state/queue.",
+    "tool_hashes": {
+      "tools/audit_mpc_trajectory_feasibility.py": "37734de73168dde24346d2b191def4d96e137bd03c887995d78cf9b99a5e0e7d",
+      "tools/replay_mpc_blended_continuation.py": "6d94cbf41f628a852c6259e96280743ac1da69444fdf2d6bf4b4d671467bb5d5",
+      "tools/mpc_bag_solver_replay.cpp": "42a724953f034cd0c8efa76cf89b7efb0961dde4c9a9f71d82445a0ef2152328",
+      "replay_binary": "5e0237185afe82b999ef54d234173b399973bc7af49ba133b67181fa31ce1569"
+    },
+    "captures": [
+      {
+        "id": "ipopt_fastline_run3_terminal_turn",
+        "blend_report": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/fastline.json",
+        "blend_report_sha256": "a95a9c4c2130bd8bd18cd9f7ff0799873fb7777f9ea2a75c3032715600006d33",
+        "blend_csv_sha256": "fae1e46942e97c19d5c92af954500c5e78ef18458b4aff712ba9287a68385335",
+        "mpc_seed_replay_report": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/mpc_seed_replay/report.json",
+        "mpc_seed_replay_report_sha256": "160e07d3a8fd042f6487fe9af17568fac741cc9c91cd390116fa386224dca0de",
+        "blend_trials": 87,
+        "states_with_positive_slack_seed": 5,
+        "ordinary_cold_full_horizon_accepts": 3,
+        "seeded_full_horizon_accepts": 5,
+        "interpretation": "Two cold rejects were rescued among five selected terminal-turn states; objective worsened on the jointly accepted rows."
+      },
+      {
+        "id": "default_mintime_success_capture",
+        "blend_report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/default.json",
+        "blend_report_sha256": "832f80ad04cd35c24eb18228b3ab499075be2d157fa03277d16924e1319db08d",
+        "blend_csv_sha256": "d30697274465af9d0a5b8099d723ea52f582770dbb26bcb45409cd82cf84552e",
+        "mpc_seed_replay_report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/mpc_seed_replay/report.json",
+        "mpc_seed_replay_report_sha256": "946162474604cb3410c9f962b7a98808d356c4c5766c746617ce236842f1e72e",
+        "blend_trials": 30,
+        "states_with_positive_slack_seed": 10,
+        "ordinary_cold_full_horizon_accepts": 3,
+        "seeded_full_horizon_accepts": 10,
+        "interpretation": "Seven cold rejects were rescued in this selected set; this is a successful-reference capture and not an independent live-policy test."
+      },
+      {
+        "id": "ipopt_fastline_run1_transfer_capture",
+        "blend_report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/fastline.json",
+        "blend_report_sha256": "0bed6a7935243bfdebab9c620f148a7d8825b738324252e254ab4bc3fe3a3712",
+        "blend_csv_sha256": "7debfc90175801f09627983bb8be7bbdabc0cf2e81054f1ee8bdff157b7fca0c",
+        "mpc_seed_replay_report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay/report.json",
+        "mpc_seed_replay_report_sha256": "497f40be5a9540754741be727b37160bd5ff76690c7080c325bb8b62cf57cf9b",
+        "blend_trials": 141,
+        "states_with_positive_slack_seed": 24,
+        "ordinary_cold_full_horizon_accepts": 17,
+        "seeded_full_horizon_accepts": 17,
+        "rescue_transitions": 4,
+        "regression_transitions": 4,
+        "interpretation": "Net acceptance unchanged, with four baseline failures rescued and four baseline accepts lost; accepted-set median objective worsened and median corridor margin decreased. This is direct evidence against promoting the seed selector as a general policy."
+      }
+    ],
+    "test_results": {
+      "python_unittest": "20 tests passed: trajectory-feasibility audit and blended-continuation replay suites",
+      "python_compile": "passed",
+      "git_diff_check": "passed",
+      "live_simulator_running_at_check": false
+    },
+    "decision": "Keep this as an offline diagnostic only. It establishes that full-horizon source-plant-feasible sequences can improve solver acceptance on selected states, but held-out fastline transfer has equal net acceptance with material regressions and worse quality metrics. PR-04 recovery-policy exit gate is not met; continue with rescue-versus-regression diagnostics and PR-03 per-progress dynamic feasibility analysis."
+  },
+  "pr04_exact_objective_lower_envelope": {
+    "comparison_class": "offline_same_state_candidate_selection_oracle",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "live_simulation": false,
+    "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/quality_envelope/exact_objective_lower_envelope.json",
+    "report_sha256": "db6e1105d8aa70b32569a9574d1a96fe9b76b8346d685a17a5bcd1c9c4bae373",
+    "rowwise_csv": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/quality_envelope/exact_objective_lower_envelope.csv",
+    "rowwise_csv_sha256": "cbf52fd6a73dd7dd5dd015a13de3f47b5d3685d2314c454a62b2d1a75b4b6b96",
+    "selected_source_seed_states": 39,
+    "exact_valid_lower_envelope_states": 39,
+    "winner_counts_source_seed_cold_mpc_seeded_mpc": {
+      "fastline_run3_terminal": [1, 1, 3],
+      "default_mintime_success": [2, 1, 7],
+      "fastline_run1_transfer": [13, 7, 4]
+    },
+    "minimum_selected_slack_m": {
+      "fastline_run3_terminal": 0.173374236,
+      "default_mintime_success": 0.237695869,
+      "fastline_run1_transfer": 0.122599848
+    },
+    "limitation": "Offline lower envelope only: source seeds were preselected for validity, cold and seeded solves were separate counterfactuals, and no candidate-generation runtime or live closed-loop transfer was measured."
+  },
+  "pr04_same_cycle_objective_selector": {
+    "comparison_class": "offline_same_solve_nominal_vs_candidate_selector",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "live_simulation": false,
+    "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/quality_envelope/same_cycle_objective_selector.json",
+    "report_sha256": "436e284ca780d7fc24fabbb643a56d67f1df5ef1144bab4d563b340089bffa4c",
+    "rowwise_csv": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/quality_envelope/same_cycle_objective_selector.csv",
+    "rowwise_csv_sha256": "0c6a45aa9e1a9bfa89dd3572c23fa54ac8029575f1271abbe6e56617714a5729",
+    "selected_states": 39,
+    "full_horizon_exact_valid_by_selector": 39,
+    "mpc_outputs_above_seed_objective": {"fastline_run3_terminal": 1, "default_mintime_success": 2, "fastline_run1_transfer": 12},
+    "seed_retained_candidate_selected": {
+      "fastline_run3_terminal": [1, 4],
+      "default_mintime_success": [2, 8],
+      "fastline_run1_transfer": [19, 5]
+    },
+    "minimum_selected_slack_m": {"fastline_run3_terminal": 0.173374236, "default_mintime_success": 0.237695869, "fastline_run1_transfer": 0.123542826},
+    "limitation": "This is a saved-state replay of selected states with an available exact-valid blend seed. It does not measure seed-generation latency, sequential closed-loop behavior, or Unity live transfer."
+  },
+  "pr04_current_build_quality_selector": {
+    "comparison_class": "offline_current_binary_full_saved_state_quality_selector",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "live_simulation": false,
+    "replay_binary": "build/f1tenth_mpc/mpc_bag_solver_replay",
+    "replay_binary_sha256": "b6f8d9f845e2c8c7d79a14b9493252ba3acdcf7abf99c94a89a75015bc3b36eb",
+    "trajectory_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+    "plant_library_sha256": "bac0ca3657e7c3db7a290e40a91acc30dbf163e411d112b86b096b531294eb8d",
+    "reports": {
+      "fastline_terminal": {
+        "report": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/mpc_seed_replay_currentbuild_v2/report.json",
+        "report_sha256": "27476930a188f65dd69e0f0ff79aff90a7f8015adaa45ed1d5f39b49b221eaaf",
+        "rowwise_csv": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/mpc_seed_replay_currentbuild_v2/quality_selector.csv",
+        "rowwise_csv_sha256": "d01f032bd65e0aa238b33f392bb3dd38c171b0508de35098f5d8f2ad5ba6e4aa",
+        "saved_states": 28,
+        "source_seed_coverage": 5,
+        "ordinary_cold_exact_accepts": 9,
+        "selector_exact_valid": 11,
+        "selector_minus_cold": 2,
+        "jointly_valid_cost_increases": 1,
+        "worst_cost_increase_percent": 47.0602,
+        "minimum_selected_slack_m": 0.14872326
+      },
+      "default_mintime": {
+        "report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v2/report.json",
+        "report_sha256": "c3d234078689a49e52196a1cd5acc6b2bf7130261a25fa67373a5a8f4e023ae5",
+        "rowwise_csv": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v2/quality_selector.csv",
+        "rowwise_csv_sha256": "337fe664c4754c3ea87194f4f8493204f1aa1677153cadb150c63a21c12efc9b",
+        "saved_states": 1276,
+        "source_seed_coverage": 10,
+        "ordinary_cold_exact_accepts": 1194,
+        "selector_exact_valid": 1201,
+        "selector_minus_cold": 7,
+        "jointly_valid_cost_increases": 1,
+        "worst_cost_increase_percent": 0.1731,
+        "minimum_selected_slack_m": 0.00396490563
+      },
+      "fastline_transfer": {
+        "report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v2/report.json",
+        "report_sha256": "ea7cf0da2ed60404b9e3a52a848d05c121e06e198ed94ede59bb6ea71d18d7fa",
+        "rowwise_csv": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v2/quality_selector.csv",
+        "rowwise_csv_sha256": "5976cf6e3c9b3c39b936d454b8e0fc587b0d488c158bab0fe7fa9bcb1f707d9b",
+        "saved_states": 224,
+        "source_seed_coverage": 24,
+        "ordinary_cold_exact_accepts": 179,
+        "selector_exact_valid": 186,
+        "selector_minus_cold": 7,
+        "jointly_valid_cost_increases": 7,
+        "worst_cost_increase_ratio": 17.56797,
+        "worst_cost_increase_progress_m": 38.6095073,
+        "seeded_mpc_candidates_costlier_than_seed": 12,
+        "minimum_selected_slack_m": 0.00510335434
+      }
+    },
+    "limitations": [
+      "Only states with a tested source-valid candidate/prior blend have a source seed; all other states use the ordinary cold replay.",
+      "The seed search and repeated source-plant validation cost is excluded from replay timings.",
+      "No historical live ADMM memory is available; this is not a closed-loop or Unity-live policy comparison.",
+      "The selector can increase exact acceptance while worsening the production nonlinear objective on some jointly valid states; no promotion is justified."
+    ],
+    "decision": "PR-04 quality/no-regression gate remains open; do not launch the faster line or change production behavior."
+  },
+  "pr04_current_build_quality_selector_v3": {
+    "comparison_class": "offline_counterfactual_minimum_exact_objective_over_cold_seeded_and_source_seed",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "live_simulation": false,
+    "selector_correction": "At seeded states, compare all available exact-valid candidates (ordinary cold MPC, source-feasible seed, and source-seeded MPC); the previous v2 selector compared only the seed with its seeded MPC update and could choose a much worse action than an already-computed cold solution.",
+    "replay_binary_sha256": "b6f8d9f845e2c8c7d79a14b9493252ba3acdcf7abf99c94a89a75015bc3b36eb",
+    "trajectory_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+    "plant_library_sha256": "bac0ca3657e7c3db7a290e40a91acc30dbf163e411d112b86b096b531294eb8d",
+    "reports": {
+      "fastline_terminal": {
+        "report": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/mpc_seed_replay_currentbuild_v3/report.json",
+        "report_sha256": "11140b33d362aa9c934826e261c17c145b956a9ee34cdc3b876dc17eaea1761d",
+        "rowwise_csv": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/mpc_seed_replay_currentbuild_v3/quality_selector.csv",
+        "rowwise_csv_sha256": "b0043eb96d0f9a64b8ea28da1b34a8b9a4422755988373be25fb1518f76cadc4",
+        "saved_states": 28,
+        "source_seed_coverage": 5,
+        "cold_exact_accepts": 9,
+        "seeded_mpc_exact_accepts": 5,
+        "selector_exact_valid": 11,
+        "selected_vs_cold_cost_regressions": 0,
+        "selected_below_cold_cost": 2,
+        "minimum_selected_slack_m": 0.14872326,
+        "selection_counts": {"cold_mpc": 7, "source_seed": 1, "seeded_mpc": 3, "no_valid_action": 17}
+      },
+      "default_mintime": {
+        "report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v3/report.json",
+        "report_sha256": "66a29f0fd894d74b7fa9a4f7380f715eec0d98631112d1ebe22859871a3cee6b",
+        "rowwise_csv": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v3/quality_selector.csv",
+        "rowwise_csv_sha256": "9f43d66eb27f430fabf567bb29d446f4e1f76910a01bb8e2449ccdefc0091c7a",
+        "saved_states": 1276,
+        "source_seed_coverage": 10,
+        "cold_exact_accepts": 1194,
+        "seeded_mpc_exact_accepts": 10,
+        "selector_exact_valid": 1201,
+        "selected_vs_cold_cost_regressions": 0,
+        "selected_below_cold_cost": 2,
+        "minimum_selected_slack_m": 0.00396490563,
+        "selection_counts": {"cold_mpc": 1192, "source_seed": 2, "seeded_mpc": 7, "no_valid_action": 75}
+      },
+      "fastline_transfer": {
+        "report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v3/report.json",
+        "report_sha256": "4bef7ad0239f690b4e24e5120b29a2f14507752c19a6c3d68d174e874e6bb25f",
+        "rowwise_csv": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v3/quality_selector.csv",
+        "rowwise_csv_sha256": "e1942d1c1809664648c63b2e39e488f020afe96727fe99dd85058275a9f2a576",
+        "saved_states": 224,
+        "source_seed_coverage": 24,
+        "cold_exact_accepts": 179,
+        "seeded_mpc_exact_accepts": 17,
+        "selector_exact_valid": 186,
+        "selected_vs_cold_cost_regressions": 0,
+        "selected_below_cold_cost": 10,
+        "minimum_selected_slack_m": 0.00510335434,
+        "selection_counts": {"cold_mpc": 169, "source_seed": 13, "seeded_mpc": 4, "no_valid_action": 38},
+        "costly_seeded_candidates_count": 12
+      }
+    },
+    "worst_cost_outlier_diagnosis": {
+      "progress_m": 38.6095073,
+      "ordinary_cold": {"status": 0, "iterations": 1, "primal_residual": 0.000005722, "dual_residual": 0.000103474, "objective": 3614.21167, "corridor_slack_m": 0.175608784},
+      "source_seeded": {"status": 1, "iterations": 100, "primal_residual": 0.135032535, "dual_residual": 0.028171599, "objective": 67108.5703, "corridor_slack_m": 0.184188217, "max_plan_steering_delta_rad": 0.45026952, "max_plan_throttle_delta": 0.309419602},
+      "source_seed": {"objective": 92606.80199, "minimum_slack_m": 0.098315231, "speed_rmse_mps": 0.679484212},
+      "interpretation": "The cold solve converges cleanly from its nominal while the high-cost source seed drives the seeded solve to its iteration limit and a different, high-cost control plan. This supports seed/solver basin sensitivity at this state; it does not show plant mismatch or prove a live policy benefit."
+    },
+    "limitations": [
+      "Selection is a lower-envelope counterfactual because cold MPC, seeded MPC, and source-plant validation were all computed offline; their combined cost is not a live control-cycle timing result.",
+      "Source seed coverage remains sparse, and 38/224 fastline-transfer states have no exact-valid tested candidate.",
+      "The fastline minimum selected slack is only 5.1 mm in transfer data; robust quality/margin gate remains open.",
+      "These saved-state replays do not establish connected 750 ms continuation or a full-lap feasible speed/control schedule."
+    ],
+    "decision": "Corrected selector removes the prior 17.57x selection artifact offline, but PR-03/PR-04 are still open. Do not launch the faster raceline yet."
+  },
+  "pr04_current_build_quality_selector_v4": {
+    "comparison_class": "offline_lower_envelope_plus_same_cycle_feasible_nominal_merit_guard",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "live_simulation": false,
+    "replay_binary_sha256": "b6f8d9f845e2c8c7d79a14b9493252ba3acdcf7abf99c94a89a75015bc3b36eb",
+    "trajectory_fastline_sha256": "35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73",
+    "same_cycle_guard_rule": "Among an exact-valid source nominal and exact-valid MPC update, select the MPC update only if its exact nonlinear objective is no greater than the source nominal; otherwise retain the source nominal. Cold-MPC result is separately computed for offline comparison, not part of this same-cycle guard.",
+    "datasets": {
+      "fastline_terminal": {
+        "report": "live_runs/mpc_fastline_5lap_20261022/continuation_blend_search/mpc_seed_replay_currentbuild_v4/report.json",
+        "report_sha256": "d14ae84a345e14946280837685d0c5ebc892003583d6469fcb26af05d189926b",
+        "rowwise_csv_sha256": "4167225c2b0716db43390d64074d75de62cda357503e62cfa302abdb1e5c77e5",
+        "saved_states": 28,
+        "source_seed_coverage": 5,
+        "cold_exact_valid": 9,
+        "three_candidate_lower_envelope_valid": 11,
+        "same_cycle_guard_choices": {"retain_seed": 1, "accept_seeded_mpc": 4},
+        "minimum_guard_slack_m": 0.173374236,
+        "guard_costlier_than_cold": {"count": 1, "compared_states": 3, "worst_progress_m": 39.7604482, "relative_increase": 0.47060161}
+      },
+      "default_mintime": {
+        "report": "live_runs/mpc_odom_epoch_fix_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v4/report.json",
+        "report_sha256": "0a8e941da724c02d1ba6911115903d37f06f71cba1e5a86766d90c733ac13fab",
+        "rowwise_csv_sha256": "eb9f6d9e704ceb29eaedd63713d18ecc6b44234ab7c02b05e64c7bc77a0cccc2",
+        "saved_states": 1276,
+        "source_seed_coverage": 10,
+        "cold_exact_valid": 1194,
+        "three_candidate_lower_envelope_valid": 1201,
+        "same_cycle_guard_choices": {"retain_seed": 2, "accept_seeded_mpc": 8},
+        "minimum_guard_slack_m": 0.237695869,
+        "guard_costlier_than_cold": {"count": 1, "compared_states": 3, "worst_progress_m": 18.5168944, "relative_increase": 0.00173094}
+      },
+      "fastline_transfer": {
+        "report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v4/report.json",
+        "report_sha256": "9ad452af90d5416bda89a61347c034f8586cb6844df38c5f8e50ef986e1fcc9c",
+        "rowwise_csv_sha256": "5201fdf32e2c5c0c8ca67359bccc491b96fc089ec679be74605a48e07d027de9",
+        "saved_states": 224,
+        "source_seed_coverage": 24,
+        "cold_exact_valid": 179,
+        "three_candidate_lower_envelope_valid": 186,
+        "same_cycle_guard_choices": {"retain_seed": 19, "accept_seeded_mpc": 5},
+        "minimum_guard_slack_m": 0.123542826,
+        "guard_costlier_than_cold": {"count": 7, "compared_states": 17, "worst_progress_m": 38.6095073, "relative_increase": 17.567969}
+      }
+    },
+    "cold_plan_seeded_merit_diagnostic": {
+      "report": "live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/mpc_seed_replay_currentbuild_v3/cold_plan_diag/source_seed_merit_diagnostic.json",
+      "report_sha256": "0b6b1fd60925919e06728ad115c4304aa46429dc3c4ce9c9da5bc724c384e255e",
+      "progress_m": 38.6095073,
+      "cold_plan_exact_cost": 3614.21167,
+      "optimized_source_seed_exact_cost": 3517.18390,
+      "mpc_update_from_source_seed_exact_cost": 40154.5156,
+      "rounded_log_control_reconstruction": {
+        "reconstructed_objective_total": 40752.5161,
+        "solver_logged_objective": 40154.5156,
+        "relative_difference": 0.0149,
+        "cost_terms": {
+        "slip": 22285.0924,
+        "cross_track": 10645.5490,
+        "heading": 5795.8426,
+        "speed": 1648.5595
+        },
+        "limitation": "PLAN_CONTROLS diagnostics print six significant digits; this breakdown replays the rounded sequence. Treat term split as indicative, not exact attribution."
+      },
+      "source_seeded_candidate_corridor_slack_m": 0.170291364,
+      "interpretation": "A corridor-valid QP update from a source-feasible seed can sharply worsen the exact nonlinear objective; exact corridor validity alone does not certify objective quality. This is offline evidence for testing a nonlinear merit condition."
+    },
+    "decision": "The fastline remains gated. The offline selector is quality-safe versus the cold candidate only because it explicitly includes cold; the same-cycle seed guard is not equivalent and can be much costlier than cold. No connected full-lap schedule or live recovery policy is established."
+  },
+  "pr04_current_build_seed_reproducibility": {
+    "comparison_class": "same_saved_state_seed_across_replay_binary_builds",
+    "state_progress_m": 27.44788973670876,
+    "source_seed_sha256": "c9da96a29641d721953b1811dd38dadbe4f500e650094e1b34e7db77fbd6ab32",
+    "state_sha256": "22320c094d511029fc4a5382355bf8bcb065fe011c23c9e2f2143824501a7405",
+    "prior_reported_binary_sha256": "5e0237185afe82b999ef54d234173b399973bc7af49ba133b67181fa31ce1569",
+    "current_binary_sha256": "b6f8d9f845e2c8c7d79a14b9493252ba3acdcf7abf99c94a89a75015bc3b36eb",
+    "prior_reported_status": 8,
+    "current_binary_replays": [
+      {"status": 6, "failure_stage": 16},
+      {"status": 6, "failure_stage": 16}
+    ],
+    "source_seed_exact_source_rollout_slack_m": 0.12171225811916353,
+    "interpretation": "The prior accepted-MPC result is not reproducible with the current replay binary on the identical state and seed. The seed is source-valid; the current MPC update rejects. This is build-specific solver evidence, not Unity-live evidence."
+  },
+  "pr03_terminal_throttle_probe": {
+    "comparison_class": "offline_same_state_same_steering_source_plant_throttle_sweep",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "source_state_progress_m": 27.44788973670876,
+    "initial_speed_mps": 5.5553693773,
+    "trajectory_speed_reference_mps": 3.87393283,
+    "throttle_sweep": [
+      {"throttle": 0.01, "full_30_steps_corridor_valid": true, "minimum_slack_m": 0.147, "end_speed_mps": 0.87},
+      {"throttle": 0.05, "full_30_steps_corridor_valid": true, "minimum_slack_m": 0.142, "end_speed_mps": 1.23},
+      {"throttle": 0.10, "full_30_steps_corridor_valid": true, "minimum_slack_m": 0.078, "end_speed_mps": 2.43},
+      {"throttle": 0.15, "full_30_steps_corridor_valid": false, "minimum_slack_m": -0.327, "end_speed_mps": 3.62},
+      {"throttle": 0.20, "full_30_steps_corridor_valid": false, "minimum_slack_m": -1.344, "end_speed_mps": 4.89},
+      {"throttle": 0.25, "full_30_steps_corridor_valid": false, "minimum_slack_m": -2.195, "end_speed_mps": 6.09}
+    ],
+    "high_throttle_multistart_search": {
+      "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/branch_continuations/prior_27_034_highthrottle_30knots/continuation_search.json",
+      "report_sha256": "8cb0ac2f825eff1db2bf2c6069bf8acba8bd7c7f22a9b836a200460d90c85e3a",
+      "full_corridor_witnesses_found": 0,
+      "least_negative_slack_m": -0.1368949165
+    },
+    "feasible_seed_refinement": {
+      "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/branch_continuations/prior_27_034_feasible_seed_refine_5cm/continuation_search.json",
+      "report_sha256": "085a170da6ae97d9dfd47b393a7a9bf0c910ad547502d12b1e03dc4074120147",
+      "required_extra_slack_m": 0.05,
+      "best_witness_slack_m": 0.1171767081,
+      "objective": 32205.6979964,
+      "end_speed_mps": 2.547028187,
+      "progress_gain_m": 1.866217843
+    },
+    "interpretation": "A lower-speed exact source-plant continuation exists from this state. Higher throttle with the tested steering is corridor-infeasible. This is a local witness/finite search result, not a global fastest-line proof or Unity-live validation."
+  },
+  "pr04_branch_next_epoch_recovery": {
+    "comparison_class": "offline_counterfactual_source_plant_and_mpc_replay",
+    "diagnostic_only": true,
+    "production_changes": false,
+    "live_simulator_run": false,
+    "method": "Re-run candidate/prior 75 ms branch endpoints from the sealed run-5 bag, then compare 750 ms cold MPC replay with a source-plant-feasible nominal seed using three line-search backtracks (including alpha=0.125). Source feasibility search uses the production nonlinear objective and exact in-process source plant; finite search is not a global infeasibility proof.",
+    "branch_viability": {
+      "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/prefix_branch_viability_v3/prefix_branch_viability.json",
+      "report_sha256": "03e6e8bf1ef9a4a26c395206f74c16dfb68a794ebc8ba0876f2e92f0aa1dfcd6",
+      "exact_valid_75ms_prefixes": 28,
+      "paired_candidate_prior_states": 14,
+      "unseeded_next_epoch_full_horizon_accepts": 0,
+      "unseeded_next_epoch_rejections": 28,
+      "line_search_backtracks": 3,
+      "failure_stages_min_max": [0, 18]
+    },
+    "source_continuation_transfer": {
+      "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/branch_seed_transfer_14pairs/transfer_summary.json",
+      "report_sha256": "350eca4f9348128e98c129253ded4055bcaa83653e8bda905563c5d5c6e50fea",
+      "source_plant_witnesses_found_by_finite_search": 1,
+      "seeded_mpc_accepts_from_those_witnesses": 1,
+      "adjacent_candidate_branch_transfer": {
+        "source_rollout_slack_m": 0.1267536195,
+        "mpc_status": 8,
+        "accepted_alpha": 0.125,
+        "accepted_slack_m": 0.167176068,
+        "objective": 31616.6387
+      },
+      "paired_prior_branch": {
+        "mpc_status": 8,
+        "accepted_alpha": 0.125,
+        "accepted_slack_m": 0.0997001007,
+        "objective": 35682.6602
+      },
+      "interpretation": "One optimized witness rescues both endpoints of one nearby pair when transferred; this is not broad-state evidence. The source continuation is slow and has large cross-track/heading costs."
+    },
+    "full_stage_refinement": {
+      "report": "live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/branch_continuations/prior_27_034_fullgrid_refinement/refinement.json",
+      "report_sha256": "855cfba406c3fbe4fcd95cd2bbb3599c7d7d08ca70bb3584ba95b43a648c80e0",
+      "decision_knots": 30,
+      "source_objective_before_after": [32925.37098, 31867.86517],
+      "source_speed_rmse_before_after_mps": [1.01826, 0.91172],
+      "source_terminal_speed_before_after_mps": [2.34341, 2.69442],
+      "refined_source_slack_m": 0.113572,
+      "mpc_seeded_replay": {
+        "prior_endpoint": {"status": 8, "accepted_alpha": 0.125, "minimum_slack_m": 0.0039367, "primal": 0.2148, "dual": 0.1021},
+        "candidate_endpoint": {"status": 8, "accepted_alpha": 0.25, "minimum_slack_m": 0.104912, "primal": 0.1608, "dual": 0.0684}
+      },
+      "seed_vs_accepted_candidate_objective": {
+        "prior_endpoint": {"valid_seed_objective": 31867.7579, "accepted_objective": 39939.8828, "relative_increase_percent": 25.3301},
+        "candidate_endpoint": {"valid_seed_objective": 34305.7590, "accepted_objective": 36213.5703, "relative_increase_percent": 5.5612}
+      },
+      "interpretation": "The exact source objective improved about 3.2%, but the optimizer reported incompatible constraints and the accepted prior-branch MPC rollout retained only 3.9 mm beyond its configured corridor margin. In both endpoint replays the corridor-valid MPC update increased exact nonlinear objective relative to the shifted valid seed; current line-search acceptance does not require cost improvement. Not robust enough to promote."
+    },
+    "decision": "PR-04 exit gate remains open. No production recovery policy or faster trajectory is promoted. A live fastline run is still deferred until recovery quality and default-line no-regression are established."
+  },
+  "provenance_limit": "The Oct. 22 live-run report sidecars do not replace a sealed pre-launch manifest. The Oct. 21 pre-fix probes and mpc_fastline_5lap_20261022 have sealed pre-launch manifests; other Oct. 22 report-only captures do not. Comparisons across these captures are descriptive, not randomized paired causal estimates."
+}

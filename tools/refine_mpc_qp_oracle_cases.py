@@ -48,6 +48,12 @@ def main() -> int:
     parser.add_argument(
         "--all-unresolved", action="store_true",
         help="refine every nonconverged fixture not proven infeasible")
+    parser.add_argument(
+        "--case-id", action="append", default=[],
+        help="restrict refinement to this case ID (repeatable)")
+    parser.add_argument(
+        "--fixture", action="append", default=[],
+        help="restrict refinement to this fixture basename (repeatable)")
     args = parser.parse_args()
     corpus = args.corpus.resolve()
     validation_path = (args.validation.resolve() if args.validation else
@@ -55,6 +61,14 @@ def main() -> int:
     validation = json.loads(validation_path.read_text())
     results = validation["native_recorded_results"]
     selected = select_refinement_rows(results, args.all_unresolved)
+    if args.case_id:
+        selected_case_ids = set(args.case_id)
+        selected = [row for row in selected
+                    if row["case_id"] in selected_case_ids]
+    if args.fixture:
+        selected_fixtures = set(args.fixture)
+        selected = [row for row in selected
+                    if Path(row["fixture"]).name in selected_fixtures]
 
     output = args.output.resolve() if args.output else \
         corpus / "oracle_refinement.json"
@@ -88,6 +102,8 @@ def main() -> int:
         "selection": ("all_unresolved_not_proven_infeasible"
                       if args.all_unresolved else
                       "hardest_and_mid_tail_per_case"),
+        "case_id_filter": args.case_id,
+        "fixture_filter": args.fixture,
         "selected_count": len(records),
         "records": records,
     }

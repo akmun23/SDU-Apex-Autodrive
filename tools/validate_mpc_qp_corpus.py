@@ -40,6 +40,8 @@ def main() -> int:
     if manifest.get("source_regime") != "saved_state_reconstruction" or \
             manifest.get("live_solver_memory_restored") is not False:
         raise FixtureError("corpus provenance incorrectly claims live state")
+    delta_only = manifest.get("capture_scope") == \
+        "post_odom_epoch_fix_delta_only"
 
     records = []
     with tempfile.TemporaryDirectory(prefix="mpc_qp_roundtrip_") as temp:
@@ -79,6 +81,8 @@ def main() -> int:
                 native["oracle_status"] = oracle["status"]
                 native["oracle_feasibility_lp_status"] = \
                     oracle["feasibility_lp_status"]
+                native["infeasibility_relaxation_by_group"] = \
+                    oracle["infeasibility_relaxation_by_group"]
                 native["oracle_iterations"] = oracle["iterations"]
                 native["oracle_solve_time_s"] = oracle["solve_time_s"]
                 native["oracle_hessian_min_eigenvalue"] = \
@@ -89,11 +93,20 @@ def main() -> int:
                 records.append(native)
             print(f"validated {case['id']}: {len(fixtures)} fixtures")
 
-    if len(records) < 100:
-        raise FixtureError(f"only {len(records)} fixtures validated; expected >=100")
-    if sum(c["outcome"] == "success" for c in manifest["cases"]) < 2 or \
-            sum(c["outcome"] == "failure" for c in manifest["cases"]) < 3:
-        raise FixtureError("required success/failure case diversity missing")
+    if delta_only:
+        if len(records) != 55:
+            raise FixtureError(
+                f"post-fix delta has {len(records)} fixtures; expected 55")
+        if sum(c["outcome"] == "success" for c in manifest["cases"]) != 1 or \
+                sum(c["outcome"] == "failure" for c in manifest["cases"]) != 1:
+            raise FixtureError("post-fix delta requires one success and one failure group")
+    else:
+        if len(records) < 100:
+            raise FixtureError(
+                f"only {len(records)} fixtures validated; expected >=100")
+        if sum(c["outcome"] == "success" for c in manifest["cases"]) < 2 or \
+                sum(c["outcome"] == "failure" for c in manifest["cases"]) < 3:
+            raise FixtureError("required success/failure case diversity missing")
 
     # Repeat seed/rho comparisons on deterministically selected fixtures spread
     # across each source run. They remain identical-QP solver experiments.
@@ -126,6 +139,7 @@ def main() -> int:
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "experiment_regime": "identical_qp",
         "source_regime": "saved_state_reconstruction",
+        "capture_scope": manifest.get("capture_scope", "full_historical_corpus"),
         "live_solver_memory_restored": False,
         "fixture_count": len(records),
         "source_case_count": len(manifest["cases"]),

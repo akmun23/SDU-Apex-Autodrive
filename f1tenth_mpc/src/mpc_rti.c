@@ -402,6 +402,32 @@ static float corridor_margin_for_state(
         physical_extent;
 }
 
+int mpc_rti_compute_corridor_slack(
+    const MpcModelState_t *state,
+    float left_bound_m,
+    float right_bound_m,
+    const MpcRtiConfiguration_t *configuration,
+    int prediction_index,
+    float *lower_slack_m,
+    float *upper_slack_m)
+{
+    if (!state || !configuration || !lower_slack_m || !upper_slack_m ||
+        prediction_index < 0 || prediction_index > PREDICTION_HORIZON ||
+        !isfinite(left_bound_m) || !isfinite(right_bound_m) ||
+        !isfinite(configuration->nonlinear_corridor_tolerance_m)) return 0;
+    const float margin = corridor_margin_for_state(configuration, state,
+        prediction_index);
+    const float lower = margin - right_bound_m -
+        configuration->nonlinear_corridor_tolerance_m;
+    const float upper = left_bound_m - margin +
+        configuration->nonlinear_corridor_tolerance_m;
+    if (!isfinite(margin) || !isfinite(lower) || !isfinite(upper) ||
+        lower > upper) return 0;
+    *lower_slack_m = state->e_y - lower;
+    *upper_slack_m = upper - state->e_y;
+    return isfinite(*lower_slack_m) && isfinite(*upper_slack_m);
+}
+
 static MpcRtiCommandEnvelopeFailure_t command_envelope_failure(
     const MpcRtiState_t *state,
     const MpcRtiConfiguration_t *configuration)
@@ -1223,7 +1249,15 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
 {
     if (failure_stage) *failure_stage = -1;
     if (failure) memset(failure, 0, sizeof(*failure));
-    if (path_delta) memset(path_delta, 0, sizeof(*path_delta));
+    if (path_delta) {
+        memset(path_delta, 0, sizeof(*path_delta));
+        if (diagnostic_outputs) {
+            for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+                path_delta->lower_corridor_slack_m[k] = NAN;
+                path_delta->upper_corridor_slack_m[k] = NAN;
+            }
+        }
+    }
     if (diagnostic_output_count) *diagnostic_output_count = 0;
     if (diagnostic_outputs)
         memset(diagnostic_outputs, 0,
@@ -1363,6 +1397,12 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
             configuration->nonlinear_corridor_tolerance_m;
         const float upper_bound = candidate_reference.left_bound - margin +
             configuration->nonlinear_corridor_tolerance_m;
+        if (path_delta && diagnostic_outputs) {
+            path_delta->lower_corridor_slack_m[k + 1] =
+                states[k + 1].plant.e_y - lower_bound;
+            path_delta->upper_corridor_slack_m[k + 1] =
+                upper_bound - states[k + 1].plant.e_y;
+        }
         const int in_corridor = corridor_contains(&states[k + 1],
             &candidate_reference, configuration, margin);
         if (!in_corridor) {
@@ -1452,7 +1492,7 @@ static int valid_cycle_configuration(
         (configuration->enable_nonlinear_line_search == 0 ||
          configuration->enable_nonlinear_line_search == 1) &&
         configuration->line_search_max_backtracks >= 0 &&
-        configuration->line_search_max_backtracks <= 2 &&
+        configuration->line_search_max_backtracks <= 3 &&
         (!configuration->enable_nonlinear_line_search ||
          configuration->line_search_max_backtracks > 0) &&
         (configuration->line_search_command_epoch_valid == 0 ||
@@ -1506,6 +1546,9 @@ typedef struct
     int line_search_full_step_failure_stage;
     int line_search_last_failure_reason;
     int line_search_last_failure_stage;
+    int line_search_merit_triggered;
+    int line_search_nominal_exact_valid;
+    float line_search_nominal_objective;
     float line_search_selected_alpha;
     double line_search_us;
     int diagnostic_output_count;
@@ -1771,6 +1814,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     pass->line_search_full_step_failure_stage = -1;
     pass->line_search_last_failure_reason = -1;
     pass->line_search_last_failure_stage = -1;
+    pass->line_search_nominal_objective = NAN;
     pass->linearization_failure_stage = -1;
     pass->linearization_failure_index = -1;
     pass->admm_status = -1;
@@ -1991,6 +2035,11 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         &pass->nonlinear_failure_stage, &full_step_failure);
     pass->exact_rollout_us = monotonic_microseconds() - phase_start_us;
     int candidate_valid = rollout_status == MPC_RTI_ROLLOUT_OK;
+    float nominal_objective = NAN;
+    float nominal_minimum_corridor_slack = NAN;
+    float nominal_lateral_accel_proxy = NAN;
+    int nominal_lateral_accel_proxy_stage = -1;
+    float nominal_lateral_accel_proxy_by_stage[PREDICTION_HORIZON + 1] = {0};
     if (candidate_valid) {
         pass->candidate.valid = 1;
         memcpy(pass->candidate.states, candidate_states,
@@ -2006,7 +2055,26 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         pass->nonlinear_validation_us =
             monotonic_microseconds() - phase_start_us;
     }
-    if (candidate_valid) {
+    int merit_regression = 0;
+    if (configuration->enable_nonlinear_line_search) {
+        phase_start_us = monotonic_microseconds();
+        pass->line_search_nominal_exact_valid =
+            evaluate_nonlinear_candidate(nominal, trajectory,
+                trajectory_count, lap_length, configuration,
+                &nominal_objective, &nominal_minimum_corridor_slack,
+                &nominal_lateral_accel_proxy,
+                &nominal_lateral_accel_proxy_stage,
+                nominal_lateral_accel_proxy_by_stage);
+        pass->nonlinear_validation_us +=
+            monotonic_microseconds() - phase_start_us;
+        if (pass->line_search_nominal_exact_valid) {
+            pass->line_search_nominal_objective = nominal_objective;
+            merit_regression = candidate_valid &&
+                pass->nonlinear_objective > nominal_objective;
+            pass->line_search_merit_triggered = merit_regression;
+        }
+    }
+    if (candidate_valid && !merit_regression) {
         pass->line_search_selected_alpha = 1.0f;
         pass->status = solver_status == RICCATI_STATUS_OPTIMAL
             ? MPC_RTI_CYCLE_ACCEPTED_OPTIMAL
@@ -2017,18 +2085,23 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     }
 
     pass->candidate.valid = 0;
-    pass->nonlinear_failure = full_step_failure;
-    pass->nonlinear_failure_reason = rollout_status == MPC_RTI_ROLLOUT_OK
-        ? MPC_RTI_ROLLOUT_INVALID_MODEL : (int)rollout_status;
-    pass->line_search_full_step_failure_reason =
-        pass->nonlinear_failure_reason;
-    pass->line_search_full_step_failure_stage =
-        pass->nonlinear_failure_stage;
+    if (!candidate_valid) {
+        pass->nonlinear_failure = full_step_failure;
+        pass->nonlinear_failure_reason = rollout_status == MPC_RTI_ROLLOUT_OK
+            ? MPC_RTI_ROLLOUT_INVALID_MODEL : (int)rollout_status;
+        pass->line_search_full_step_failure_reason =
+            pass->nonlinear_failure_reason;
+        pass->line_search_full_step_failure_stage =
+            pass->nonlinear_failure_stage;
+    }
 
-    /* Only an exact corridor failure is eligible for damped recovery. A bad
-     * model, command/state envelope violation, or ADMM numerical failure does
-     * not provide a trustworthy direction to backtrack. */
-    if (rollout_status != MPC_RTI_ROLLOUT_CORRIDOR ||
+    /* A corridor failure may be repaired by damping. An exact-valid but
+     * higher-cost full step may also be damped, but only against an exact-
+     * valid nominal objective. Other rollout failures do not define a
+     * trustworthy search direction. */
+    const int corridor_backtrack = !candidate_valid &&
+        rollout_status == MPC_RTI_ROLLOUT_CORRIDOR;
+    if ((!corridor_backtrack && !merit_regression) ||
         !configuration->enable_nonlinear_line_search) {
         pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
         pass->solve_us = monotonic_microseconds() - start_us;
@@ -2043,7 +2116,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         return pass->status;
     }
 
-    static const float backtrack_alpha[2] = {0.5f, 0.25f};
+    static const float backtrack_alpha[3] = {0.5f, 0.25f, 0.125f};
     const double line_search_start_us = monotonic_microseconds();
     for (int trial_index = 0;
          trial_index < configuration->line_search_max_backtracks;
@@ -2105,6 +2178,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         pass->line_search_last_failure_stage = trial_failure_stage;
 
         int trial_accepted = trial_rollout_status == MPC_RTI_ROLLOUT_OK;
+        int trial_merit_rejected = 0;
         double trial_validation_us = 0.0;
         if (trial_accepted) {
             pass->candidate.horizon = horizon;
@@ -2134,6 +2208,11 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                 pass->line_search_last_failure_reason =
                     MPC_RTI_ROLLOUT_INVALID_MODEL;
                 pass->line_search_last_failure_stage = -1;
+            } else if (pass->line_search_nominal_exact_valid &&
+                       !(pass->nonlinear_objective < nominal_objective)) {
+                trial_accepted = 0;
+                trial_merit_rejected = 1;
+                pass->candidate.valid = 0;
             }
         }
         if (trial_accepted) {
@@ -2153,8 +2232,54 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             return pass->status;
         }
 
-        if (trial_rollout_status != MPC_RTI_ROLLOUT_CORRIDOR) break;
+        if (trial_rollout_status != MPC_RTI_ROLLOUT_CORRIDOR &&
+            !(trial_rollout_status == MPC_RTI_ROLLOUT_OK &&
+              trial_merit_rejected)) break;
     }
+
+    /* The nominal sequence is itself a safe action only after this exact
+     * objective/corridor evaluation. Retaining it is alpha=0 backtracking,
+     * not acceptance of an unchecked QP suffix. */
+    if (pass->line_search_nominal_exact_valid) {
+        pass->candidate = *nominal;
+        pass->candidate.validation_objective = nominal_objective;
+        pass->candidate.validation_minimum_corridor_slack_m =
+            nominal_minimum_corridor_slack;
+        pass->candidate.valid = 1;
+        pass->path_delta = (MpcRtiCandidatePathDelta_t){0};
+        pass->first_action = nominal->controls[0];
+        pass->first_action_valid =
+            isfinite(pass->first_action.steering_target_rad) &&
+            isfinite(pass->first_action.throttle_command) &&
+            pass->first_action.steering_target_rad >=
+                -configuration->model.max_steering_rad - 1.0e-5f &&
+            pass->first_action.steering_target_rad <=
+                configuration->model.max_steering_rad + 1.0e-5f &&
+            pass->first_action.throttle_command >=
+                MPC_THROTTLE_MIN_DRIVE - 1.0e-5f &&
+            pass->first_action.throttle_command <=
+                MPC_THROTTLE_MAX + 1.0e-5f;
+        if (pass->first_action_valid) {
+            pass->nonlinear_objective = nominal_objective;
+            pass->minimum_corridor_slack =
+                nominal_minimum_corridor_slack;
+            pass->lateral_accel_proxy = nominal_lateral_accel_proxy;
+            pass->lateral_accel_proxy_stage =
+                nominal_lateral_accel_proxy_stage;
+            memcpy(pass->lateral_accel_proxy_by_stage,
+                nominal_lateral_accel_proxy_by_stage,
+                sizeof(pass->lateral_accel_proxy_by_stage));
+            pass->diagnostic_output_count = 0;
+            pass->line_search_accepted = 1;
+            pass->line_search_selected_alpha = 0.0f;
+            pass->sqp_accepted = 1;
+            pass->status = MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH;
+            pass->solve_us = monotonic_microseconds() - start_us;
+            return pass->status;
+        }
+        pass->candidate.valid = 0;
+    }
+
     pass->candidate.valid = 0;
     memcpy(pass->candidate.controls, candidate_controls,
         (size_t)horizon * sizeof(candidate_controls[0]));
@@ -2205,6 +2330,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->line_search_full_step_failure_stage = -1;
         result->line_search_last_failure_reason = -1;
         result->line_search_last_failure_stage = -1;
+        result->line_search_nominal_objective = NAN;
         result->linearization_failure_stage = -1;
         result->linearization_failure_index = -1;
         result->state_primal_stage = -1;
@@ -2414,6 +2540,12 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         pass.line_search_last_failure_reason;
     result->line_search_last_failure_stage =
         pass.line_search_last_failure_stage;
+    result->line_search_merit_triggered =
+        pass.line_search_merit_triggered;
+    result->line_search_nominal_exact_valid =
+        pass.line_search_nominal_exact_valid;
+    result->line_search_nominal_objective =
+        pass.line_search_nominal_objective;
     result->line_search_selected_alpha = pass.line_search_selected_alpha;
     result->line_search_us = pass.line_search_us;
     result->diagnostic_output_count = pass.diagnostic_output_count;

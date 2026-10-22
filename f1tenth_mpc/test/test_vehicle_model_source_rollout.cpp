@@ -1295,6 +1295,22 @@ TEST(MpcCandidate, PriorPlanSuffixRequiresExactCurrentStateValidation)
       &diagnostic_output_count, &failure_stage), MPC_RTI_ROLLOUT_OK);
   EXPECT_EQ(diagnostic_output_count, 0);
 
+  for (int k = 0; k < PREDICTION_HORIZON - 1; ++k) {
+    controls[k].steering_target_rad = 0.0f;
+    controls[k].throttle_command = 0.1f;
+  }
+  config.capture_diagnostic_outputs = 1;
+  diagnostic_output_count = -1;
+  EXPECT_EQ(mpc_rti_validate_candidate_plan_with_diagnostics(
+      &initial, 0.0, controls, trajectory, trajectory_count, lap_length,
+      PREDICTION_HORIZON - 1, PREDICTION_DT_SECONDS, &config, &validated,
+      diagnostic_outputs, &diagnostic_output_count, &failure_stage),
+      MPC_RTI_ROLLOUT_OK);
+  ASSERT_TRUE(validated.valid);
+  EXPECT_EQ(validated.horizon, PREDICTION_HORIZON - 1);
+  EXPECT_GT(diagnostic_output_count, 0);
+  EXPECT_LE(diagnostic_output_count, MPC_RTI_DIAGNOSTIC_SAMPLE_COUNT);
+
   controls[1].steering_target_rad = SOURCE_MAX_STEERING_RAD + 0.01f;
   EXPECT_EQ(mpc_rti_validate_candidate_plan(&initial, 0.0, controls,
       trajectory, trajectory_count, lap_length, 2, PREDICTION_DT_SECONDS,
@@ -1835,6 +1851,39 @@ TEST(VehicleModelSourceRollout, KeepsTheRealTimeRTIStateCompact)
   EXPECT_NE(stage.next.source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT],
             state.source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT]);
   EXPECT_TRUE(stage.next.source_suspension_history_initialized);
+}
+
+TEST(MpcRtiCorridorSlack, MatchesTheFootprintAndStageSpecificMargins)
+{
+  MpcRtiConfiguration_t config{};
+  config.corridor_margin_m = 0.05f;
+  config.first_prediction_corridor_margin_m = 0.03f;
+  config.nonlinear_corridor_tolerance_m = 0.005f;
+  MpcModelState_t state{};
+  state.e_y = 0.10f;
+  state.e_psi = 0.25f;
+  constexpr float left_bound = 0.65f;
+  constexpr float right_bound = 0.72f;
+
+  const float extent = 0.5f * MPC_CAR_WIDTH_M *
+          std::fabs(std::cos(state.e_psi)) +
+      MPC_REAR_AXLE_TO_FRONT_BUMPER_M *
+          std::fabs(std::sin(state.e_psi));
+  float lower_stage1 = 0.0f;
+  float upper_stage1 = 0.0f;
+  ASSERT_TRUE(mpc_rti_compute_corridor_slack(&state, left_bound,
+      right_bound, &config, 1, &lower_stage1, &upper_stage1));
+  EXPECT_NEAR(lower_stage1,
+      state.e_y - (0.03f + extent - right_bound - 0.005f), 1.0e-6f);
+  EXPECT_NEAR(upper_stage1,
+      left_bound - (0.03f + extent) + 0.005f - state.e_y, 1.0e-6f);
+
+  float lower_stage2 = 0.0f;
+  float upper_stage2 = 0.0f;
+  ASSERT_TRUE(mpc_rti_compute_corridor_slack(&state, left_bound,
+      right_bound, &config, 2, &lower_stage2, &upper_stage2));
+  EXPECT_NEAR(lower_stage1 - lower_stage2, 0.02f, 1.0e-6f);
+  EXPECT_NEAR(upper_stage1 - upper_stage2, 0.02f, 1.0e-6f);
 }
 
 }  // namespace

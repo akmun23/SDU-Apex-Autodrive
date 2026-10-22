@@ -147,6 +147,59 @@ def build_osqp_matrices(problem: dict):
     return P, linear, Acon, np.asarray(lower), np.asarray(upper)
 
 
+def minimum_uniform_box_relaxation(A, lower: np.ndarray, upper: np.ndarray,
+                                  equality_count: int,
+                                  selected_variables: np.ndarray) -> dict:
+    """Find the smallest common box widening that restores QP feasibility.
+
+    Dynamics and the initial state remain exact. A single nonnegative slack is
+    added only to the selected state/input box constraints. This diagnoses
+    which constraint family blocks the linearized QP; it does not modify or
+    propose weakening production constraints.
+    """
+    nvar = A.shape[1]
+    box = A[equality_count:].tocsr()
+    if np.any(np.diff(box.indptr) != 1):
+        raise FixtureError("expected one-variable box rows after dynamics")
+    variables = box.indices
+    if np.any(np.abs(box.data - 1.0) > 1.0e-12):
+        raise FixtureError("unexpected box row coefficient in QP constraints")
+    selected = selected_variables(variables)
+
+    upper_rows = np.flatnonzero(np.isfinite(upper[equality_count:]))
+    lower_rows = np.flatnonzero(np.isfinite(lower[equality_count:]))
+    A_upper = box[upper_rows]
+    A_lower = -box[lower_rows]
+    upper_slack = sparse.csr_matrix(
+        (-selected[upper_rows].astype(np.float64),
+         (np.arange(upper_rows.size), np.zeros(upper_rows.size, dtype=int))),
+        shape=(upper_rows.size, 1))
+    lower_slack = sparse.csr_matrix(
+        (-selected[lower_rows].astype(np.float64),
+         (np.arange(lower_rows.size), np.zeros(lower_rows.size, dtype=int))),
+        shape=(lower_rows.size, 1))
+    A_ub = sparse.vstack((
+        sparse.hstack((A_upper, upper_slack)),
+        sparse.hstack((A_lower, lower_slack))), format="csr")
+    b_ub = np.concatenate((upper[equality_count:][upper_rows],
+                           -lower[equality_count:][lower_rows]))
+    A_eq = sparse.hstack((A[:equality_count],
+                          sparse.csr_matrix((equality_count, 1))), format="csr")
+    c = np.zeros(nvar + 1, dtype=np.float64)
+    c[-1] = 1.0
+    result = linprog(
+        c, A_ub=A_ub, b_ub=b_ub,
+        A_eq=A_eq, b_eq=lower[:equality_count],
+        bounds=[(None, None)] * nvar + [(0.0, None)], method="highs")
+    status = {0: "feasible", 2: "infeasible"}.get(
+        result.status, f"status-{result.status}")
+    return {
+        "status": status,
+        "minimum_uniform_relaxation": (
+            float(result.x[-1]) if result.x is not None else None),
+    }
+
+
 def solve(path: Path, max_iter: int = 25_000,
           time_limit_s: float = 0.2) -> dict:
     osqp = _load_osqp()
@@ -171,6 +224,7 @@ def solve(path: Path, max_iter: int = 25_000,
         stage_hessian_min_eigenvalue,
         float(np.min(problem["terminal_Q"])))
     feasibility_lp_status = None
+    infeasibility_relaxation_by_group = None
     if "primal infeasible" in status.lower():
         equality_count = NX * (HORIZON + 1)
         bounds = [[-np.inf, np.inf] for _ in range(P.shape[0])]
@@ -186,11 +240,32 @@ def solve(path: Path, max_iter: int = 25_000,
             b_eq=lower[:equality_count], bounds=bounds, method="highs")
         feasibility_lp_status = {
             0: "feasible", 2: "infeasible"}.get(lp.status, f"status-{lp.status}")
+        if feasibility_lp_status == "infeasible":
+            x_size = (HORIZON + 1) * NX
+            groups = {
+                "lateral_error_corridor_e_y_m":
+                    lambda variables: (variables < x_size) &
+                        ((variables % NX) == 0),
+                "other_state_bounds":
+                    lambda variables: (variables < x_size) &
+                        ((variables % NX) != 0),
+                "control_bounds": lambda variables: variables >= x_size,
+                "all_state_bounds": lambda variables: variables < x_size,
+                "all_box_bounds": lambda variables: np.ones(
+                    variables.shape, dtype=bool),
+            }
+            infeasibility_relaxation_by_group = {
+                name: minimum_uniform_box_relaxation(
+                    A, lower, upper, equality_count, select)
+                for name, select in groups.items()
+            }
     return {
         "fixture": path.name,
         "oracle": "OSQP 1.0.4, eps_abs=eps_rel=1e-8, polishing",
         "status": status,
         "feasibility_lp_status": feasibility_lp_status,
+        "infeasibility_relaxation_by_group":
+            infeasibility_relaxation_by_group,
         "iterations": result.info.iter,
         "solve_time_s": float(result.info.run_time),
         "configured_iteration_limit": max_iter,

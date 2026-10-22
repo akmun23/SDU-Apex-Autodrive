@@ -93,6 +93,14 @@
     # Jacobian workers the replay p95/max cycle was 11.94/12.98 ms; the live
     # 20 ms RTI deadline remains the hard bound.
     max_solver_iterations: 100
+    # Experimental recovery policy: prefer the retained full-plan suffix only
+    # when its entire remaining horizon revalidates from the current state.
+    # Kept off in the competition baseline pending supervised A/B evidence.
+    prefer_full_validated_prior_plan_on_rejection: false
+    # Development experiment: when both three-step recovery prefixes pass the
+    # exact source-plant/corridor check, select the lower runtime objective.
+    # Kept off until a supervised faster-line comparison demonstrates benefit.
+    quality_aware_prefix_selection_on_rejection: false
     rti_cycle_budget_ms: 20.0
     # Eight workers improved replay and passed one supervised, 3 m/s practice
     # run (publication-gate max 19.730 ms). Continue supervising until higher-

@@ -694,3 +694,2181 @@ coefficient was fitted or promoted.
 
 The current simulator/controller containers and recorder were stopped by the
 five-lap watcher. The run produced no collision and is preserved above.
+
+## 2026-10-22 — production MPC five-lap validation after odometry correction
+
+This is the first five-lap run in this continuation with the production MPC
+enabled after the throttle-epoch odometry change. It supersedes the prior
+statement that no new lap had been completed. It does **not** pass the
+requested high-accuracy criteria.
+
+### Run setup and completion
+
+- Bag: `live_runs/mpc_odom_epoch_fix_practice_20261022_run1/run`.
+- Practice map and default practice mintime trajectory were loaded from the
+  normal launch configuration; no raceline, MPC weights, or physics parameters
+  were overridden.
+- `sdu-apex-autodrive:dev` rebuilt mounted workspace source before launch;
+  logs confirm production odometry and MPC started. MPC was enabled with the
+  standard 8 Jacobian workers, 100-iteration cap, and diagnostics enabled.
+- Established practice batch-mode simulator and collision/MPC-fault watcher
+  were used. Five laps completed, collision count stayed zero, and the watcher
+  observed no MPC fault/rejection status. All containers and recorder stopped
+  after the target-lap guard.
+- Simulator lap times: **6.842, 6.245, 6.079, 6.045, 6.250 s**; mean **6.292
+  s**, best **6.045 s**. This is a successful five-lap run, not a sub-5-second
+  result.
+- Ground-truth speed reached **7.989 m/s** (p95 7.197 m/s).
+
+### MPC solve and output behavior
+
+- Statuses: 1237 `accepted_optimal`, 29 `accepted_feasible`, 10
+  `accepted_candidate_prefix`, 6 startup `waiting_for_localization`; no
+  rejected/fault cycle was recorded.
+- Exact-valid candidates: **1266/1276**. ADMM converged on 1246 solves; 30
+  reached the iteration cap. Converged iterations had p50/p95/max **9/17/100**.
+- End-to-end publication gate: p50/p95/max **6.138/7.979/14.642 ms**;
+  **0/1276** at or above the 20 ms budget. Solver-reported cycle p50/p95/max
+  was **5.900/7.675/14.087 ms**.
+- This confirms that the configured controller ran on time in this capture;
+  it does not establish worst-case timing under other host loads.
+
+### Accuracy: odometry and source-plant rollout
+
+Production odometry versus Unity truth (1283 matched samples):
+
+- forward speed RMSE **0.0329 m/s**, p95 absolute **0.0451**, max **0.1830**;
+- lateral speed RMSE **0.0060 m/s**, p95 absolute **0.0076**, max **0.0670**;
+- yaw rate comes directly from the gyro, so its zero error is not an
+  independent model-accuracy measurement;
+- integrated XY error relative to the initial pose: **27.0 cm** at the end,
+  **26.9 cm** p95, **27.3 cm** maximum. This fails the 5 cm full-run pose
+  objective.
+
+Independent fixed-input source-plant windows (each starts from its logged
+`UnityPlantState`; Bridge-reconstructed interval commands are held as the
+recorded sequence for 750 ms; no future state correction; 1252 valid windows):
+
+- forward speed RMSE **0.01742 m/s**, p95 absolute **0.02759**, max **0.11930**;
+- lateral speed RMSE **0.00081 m/s**, p95 **0.00165**, max **0.00726**;
+- yaw-rate RMSE **0.00546 rad/s**, p95 absolute **0.01134**, max **0.05363**;
+- yaw RMSE **0.00261 rad**, p95 absolute **0.00515**, max **0.01845**;
+- 750 ms XY endpoint RMSE **2.124 cm**, p95 **3.400 cm**, max **13.247 cm**;
+- maximum error along the whole 750 ms path exceeded 5 cm in **52/1252**
+  windows. By starting steering magnitude, failures were 50/607 below 0.10
+  rad, 2/309 from 0.10–0.20 rad, and 0/336 at or above 0.20 rad. The worst
+  windows start near straight steering and show about 0.10–0.12 m/s forward
+  speed underprediction by 750 ms. This points toward a remaining
+  longitudinal/throttle-transient mismatch in this run; it is not proof of a
+  specific hidden PhysX effect.
+
+The previous five-lap CSV-follower run had much lower errors, but it was a
+different command profile and speed distribution. It is not a paired
+comparison. The new MPC run shows that accuracy does not automatically
+transfer from that follower profile to the MPC's throttle/steering sequence.
+
+### Interpreting MPC's logged predicted horizon
+
+The MPC diagnostic predictions compared to later Unity truth report 25 ms
+errors of **0.0637 m XY RMSE**, **0.1594 m/s forward-speed RMSE**, **0.2433 m/s
+lateral-speed RMSE**, and **0.0932 rad/s yaw-rate RMSE**. Pairing uncertainty
+is p95 **9.59 ms**. At 750 ms, logged-plan comparison is 0.1778 m XY RMSE,
+0.3545 m/s forward-speed RMSE, and 0.4614 rad/s yaw-rate RMSE. These are not
+clean fixed-input plant scores beyond the already queued commands: the MPC
+replans every 25 ms, so subsequent real inputs differ from a frozen predicted
+horizon. Use the preceding source-plant replay for fixed-input plant accuracy;
+use these diagnostic figures as closed-loop plan-versus-later-truth evidence,
+with the time-alignment caveat.
+
+### Conclusion
+
+The MPC **can complete five practice laps** on its default raceline without a
+collision and its publication timing passed the 20 ms gate in this run. It is
+not yet accurate enough to claim a high-precision odometry/rollout pipeline:
+full-run odometry drift is 27 cm and the fixed-input rollout has 52/1252
+750 ms paths above 5 cm, mainly during near-straight throttle transients.
+The throttle-epoch correction remains supported by the command-phase evidence,
+but it does not remove this additional speed-dependent/transient error. No
+weights or plant coefficients were changed from this test. Bag and complete
+MPC diagnostics are retained for the next causal analysis.
+
+## 2026-10-22 — faster IPOPT raceline attempt
+
+The faster candidate was tested with the same practice simulator and production
+MPC configuration as the five-lap default-line run. No MPC weights, plant
+parameters, or trajectory points were changed for this trial.
+
+- Candidate: `f1tenth_planning/trajectories/autodrive_practice_20260924_b/ipopt_v1_baseline_raceline.csv`
+  (1024 points, 27.551 m). Its nominal `integral(ds / v)` estimate is about
+  **5.367 s**; this is an optimizer estimate, not a measured lap time.
+- Runtime log confirmed that both AMCL and MPC loaded this candidate. The
+  production stack used the dev image and the established practice batch-mode
+  simulator. The run was recorded at
+  `live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/run`.
+- The supervised run ended after **5.91 s** with **zero completed laps**. The
+  MPC-fault watcher tripped when the candidate and prior plan both failed exact
+  nonlinear corridor validation at stage 2. The recorded collision counter
+  reached **1** during the termination window, so this is a collision-terminated
+  failure, not a clean abort or a successful line validation.
+- Before termination, ground-truth speed peaked at **7.627 m/s**. MPC recorded
+  139 `accepted_optimal`, 38 `accepted_feasible`, 46
+  `accepted_candidate_prefix`, and one `rejected_nonlinear_rollout` status.
+  The final candidate-prefix chain lasted **22 actions**; its ADMM residual
+  p50/p95/max was **0.605/1.808/7.021**, with minimum validated-prefix
+  corridor slack **3.07 cm**. Thus the solver was publishing progressively
+  shortened prefixes while losing solution quality before the hard rejection.
+- Publication-gate time was **7.246/12.347/17.031 ms** p50/p95/max; no sample
+  exceeded the 20 ms gate. Timing was not the cause of this run ending.
+- The short, collision-terminated bag is not suitable for lap-time comparison.
+  Its fixed-input source-plant replay had a 750 ms endpoint 5 cm pass rate of
+  **198/204** and whole-path pass rate of **192/204**; the maximum whole-path
+  error was **1.461 m** at a near-straight start. These outliers include the
+  terminal collision/stop interval and do not establish the candidate plant
+  model's steady driving accuracy. No lap-time or high-accuracy claim is made.
+
+### Conclusion
+
+The faster line is **not currently usable with this MPC**: this repeat did not
+complete even one lap and recorded a collision. It did confirm that the MPC
+can execute at the 20 ms timing target while driving this candidate, but the
+22-action prefix chain, poor ADMM residuals, and subsequent stage-2 corridor
+failure are the immediate control limitation. The default-line five-lap result
+remains the only successful multi-lap result in this comparison. Preserve this
+bag as the failure case; do not promote the faster line based on its nominal
+5.367 s estimate.
+
+## 2026-10-22 — PR-03 feasibility audit and PR-04 saved-state initialization A/B
+
+This follow-up is offline only. No simulator was launched, and no production
+plant, odometry, MPC weights, recovery policy, or trajectory was changed. The
+only C++ change is to the offline `mpc_bag_solver_replay` CSV: it now exports
+the already-computed exact nonlinear validation objective. The replay target
+was rebuilt.
+
+### PR-03 — what the faster path does and does not prove
+
+The audit reads the active competition profile rather than using the old
+15 cm evaluator default. Current profile hash:
+`2bba4666f4e8910d1a0017dd919519e885056d4ba685c8d220826483ec3c9230`; the
+configured corridor and first-prediction margins are both 0.05 m, and the
+nonlinear tolerance is 0.005 m.
+
+- IPOPT path: 27.55113 m / 1024 points; peak speed 8.4875 m/s; maximum
+  absolute curvature 1.1175 1/m and lateral demand 8.400 m/s². Its minimum
+  static centerline slack after 5 cm wall margin and heading-aware footprint
+  is 0.1342 m. Geometric steering seed peaks at 0.3483 rad, below the 0.5236
+  rad limit, with no seed slew-limit exceedances. Static geometry is therefore
+  not the demonstrated failure; the speed schedule is not thereby certified.
+- Four captured full-horizon-accepted plans immediately before the terminal
+  prefix chain replay through the current source plant with minimum corridor
+  slack 0.1282–0.1591 m. Replay versus recorded plant predictions differs by
+  at most 2.35e-7 in the reported channels. This is local source-replay parity,
+  not proof of Unity future truth or whole-lap feasibility. Maximum speed
+  reference error on these plans is 0.476–1.057 m/s; maximum longitudinal
+  slip is 0.586–0.924.
+- At the last accepted prefix state, its three-step prefix has 3.07 cm minimum
+  slack. The *unpublished* full candidate suffix crosses the corridor at stage
+  4 (about -1.84 m slack); the next live candidate and retained prior-plan
+  prefix both fail exact validation at stage 2. Do not score that rejected
+  suffix as executed vehicle motion.
+- In the successful default-line bag, 77 snapshots are within 0.05 1/m of the
+  IPOPT failure curvature magnitude. Their speed range is 2.63–3.51 m/s
+  (median 3.08 m/s), versus about 4.72 m/s at |curvature|=0.8375 1/m in the
+  IPOPT terminal state. This is an unsupported speed/curvature combination
+  in that successful capture, not proof that the combination is impossible.
+- The IPOPT path seam has a 2.69 cm closing segment, 4.85 m/s² first/last
+  acceleration discontinuity, and 0.0159 rad end-to-start heading delta.
+  These defects are measured, but no evidence yet ties them causally to the
+  terminal failure.
+
+**PR-03 conclusion:** geometry is not the established cause. Evidence localizes
+the failure to the high-speed/high-curvature closed-loop state and loss of a
+feasible full horizon; global dynamic infeasibility is not proven. No global
+speed cap or path edit is justified. Detailed artifacts:
+`live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/trajectory_feasibility/`.
+
+### PR-04 — command-consistent warm start and alternate initialization
+
+Production warm-start logic was not changed. The existing code seeds the next
+nominal with the action actually published, then shifts it once. Bag checks
+found exact candidate-to-issued first actions on all 223 published fastline
+commands, and exact previous candidate stage-1 to next nominal stage-0 on all
+46 adjacent prefix transitions. The suspected command off-by-one is not
+present in these captures; the remaining warm suffix can still be a poor
+seed after the state diverges.
+
+Six offline initialization modes used identical saved inputs and current
+solver settings (100 iteration cap, 8 Jacobian workers, 5 cm margins, current
+weights and `q >= 0.01`):
+
+| Saved-state window | Sequence/warm | Sequence/cold ADMM | Nominal-cold/warm ADMM | Independent/cold | Reference-seed/warm ADMM | Dual-cold |
+|---|---:|---:|---:|---:|---:|---:|
+| Fastline terminal, 24 consecutive snapshots (diagnostics 205–228) | 3/24 accepted | 4/24 | 3/24 | 7/24 | 7/24 | 3/24 |
+| Successful default line, 31 consecutive high-curvature snapshots (diagnostics 590–620) | 30/31 | 25/31 | 27/31 | 21/31 | 22/31 | 30/31 |
+
+Acceptance means a reconstructed full-horizon candidate passed the exact
+nonlinear plant/corridor check. It is not live publication, closed-loop, or
+lap-success evidence. These are saved-state reconstructions: the bags do not
+contain historical live ADMM z/y/rho or the full certified-plan suffix.
+
+Findings:
+
+- On the IPOPT tail, reference-seed and independent cold each add four
+  accepted snapshots (diagnostics 210, 212, 213, 215); neither rescues the
+  final stage-2 failure. The newly accepted plan at diagnostic 212 has only
+  5.1 mm minimum corridor slack. Resetting only the nominal while preserving
+  the issued-control warm sequence and ADMM memory adds no accepts; resetting
+  only ADMM duals adds none.
+- The evidence points more specifically to the **warm control suffix** being
+  a poor seed in some fastline states, although its first action is aligned.
+  Reference-seed changes the first action by up to 0.515 on this chain.
+- On the held-out successful default-line segment, the existing sequence/warm
+  replay passes 30/31, versus 22/31 for reference-seed, 21/31 for independent
+  cold, 27/31 for nominal-cold and 25/31 for cold ADMM. Dual-cold is exactly
+  identical to sequence/warm in status, first actions and exact nonlinear
+  objectives. Several cold/reseed cases fail exact rollout at stages 18–29
+  despite very small ADMM residuals: QP convergence alone is not enough.
+- The live 22-prefix chain has five steering sign changes. Its per-cycle QP
+  objective ranges 396–116,808 (median 13,772), but those objectives belong
+  to different QPs and are not directly rankable. `e_y` grows from 0.0015 to
+  0.894 m, `e_psi` from 0.018 to 0.819 rad, and speed over-reference from
+  0.087 to 1.660 m/s. The replay now exports exact nonlinear objective for
+  paired, same-snapshot comparisons.
+- The bag has 224 exact bridge-request timestamp matches and 223 exact
+  published-command timestamp matches. Command-start lateness is p95 0 ms,
+  max 0.91 ms; Unity command-effect epoch IDs are absent. These observations
+  neither prove nor exclude a Unity fixed-step application-delay mismatch.
+
+**PR-04 conclusion:** do not globally reset ADMM or replace the production
+warm start. Reference seeding helps several fastline snapshots, but regresses
+the default-line held-out segment and one recovered case is nearly on the
+corridor boundary. No production recovery-policy change is supported.
+
+### Reproducibility limit and next action
+
+The Oct-22 bags contain current hidden state/queue, issued float commands,
+nominal/candidate control suffixes, outcome, residuals, objectives, and prefix
+slack. They do not contain the pre-solve live ADMM z/y/rho snapshot or
+certified-plan controls/cursor contents needed for exact same-memory A/B/C/D
+replay. Run reports also lack the historical commit/build/image, map, loaded
+YAML and supervisor manifest fields; these cannot be reconstructed
+retroactively. Before promoting a solver policy, add opt-in, nonblocking
+development capture for those missing fields, report dropped records and
+capture overhead, then run a supervised fastline attempt and default-line
+comparison without changing production behavior or the <20 ms gate.
+
+The faster candidate still has **0 completed laps**; 5.367 s is an optimizer
+estimate only. Keep the default line as the only proven multi-lap result.
+
+Reproduction identifiers:
+
+- Bag hashes: fastline
+  `192b9f36f2b2a393506553c74d17379530f85ea14b7e159df4d39cf4564904bf`;
+  default success
+  `a9f80c1fa28c9b706e39294fca73fbefde4b2a059bc54c9f709ed52b39776d17`.
+- Trajectory hashes: fastline
+  `35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73`;
+  default
+  `09b0c3e5b36b781b8709eb08a98cd8c36eb7951391f269ed761409a64938a253`.
+- Source plant hash: `21466f30fced578185fc4941d9a53d95feabe40702265c6fe5b06befbf4ade76`.
+- Solver-input hashes: fastline
+  `d569513fc7f8a3483e4d67f3728e3eb77f310cf8ad703856026d8209933fe05f`;
+  default high-curvature
+  `930d69c478e53163fda3392bf31b1a2bf4d9640699797f5f86bf77eb7df7b0bf`.
+- Offline replay binary hash:
+  `d265902ae4306bcc0c8683666b7c4fce3a431f5718779bded099e4a7f4898be4`.
+
+Verification: replay target and two missing CTest binaries built; all 9 CTests
+passed. All 25 focused Python tests passed (trajectory audit, saved-state
+export, odometry drift, one-step source analysis, and rollout case index). No
+simulator test was run in this follow-up.
+
+## 2026-10-22 — Source-exact steering epoch diagnostic (PR-02)
+
+This follow-up corrects the offline evaluator's steering-actuator diagnostic;
+it does not change the production plant, odometry, MPC or trajectory. No
+simulator was launched.
+
+### Source behavior and evaluator correction
+
+`VehicleController.CurrentSteeringAngle` returns the `currentS` snapshot,
+which `FixedUpdate()` assigns from the internal rack angle before calling
+`Steer()`. `Steer()` is not a symmetric rate limiter: its direction branch
+compares normalized autonomous steering with the sign-flipped internal rack
+angle and clamps to target after one rate step. On an unwind where that step
+has already crossed the target, the source snaps to the target in that
+physics update. The production `unity_source_plant.cpp` already ports this
+branch, including the practice prefab's 183.345993 deg/s steering-rate value.
+
+The prior `evaluate_mpc_bag.py` feedback diagnostic instead used a symmetric
+rate-limited interpolation. That approximation can manufacture a large
+residual exactly at target crossing. It now replays the source branch for
+exactly 25 × 1 ms per nominal request epoch (not a rounded ROS packet gap),
+clamps the normalized command as the source setter does, and labels the result
+as feedback-versus-feedback rather than vehicle-motion accuracy. A new C++
+regression test and four Python tests cover normal rack motion, the source
+target-crossing snap, command clamping, and invalid timing.
+
+### Practice-bag results using the corrected diagnostic
+
+| Capture | Same request epoch `C[i+0]` | Best epoch counts | Interpretation |
+|---|---:|---:|---|
+| Default-line, five-lap success | 0.00251 rad RMSE; 0.00005 rad p95; 1202/1281 transitions choose `C[i+0]` | `i−2:40`, `i−1:24`, `i:1202`, `i+1:13`, `i+2:1`, `i+3:1` | Source steering response is consistent for nearly all transitions; the residual tail is sparse. |
+| IPOPT fastline, failed trial | 0.03043 rad RMSE; 0.00640 rad p95; 185/230 transitions choose `C[i+0]` | `i−2:28`, `i−1:14`, `i:185`, `i+1:3` | Most intervals follow the same source branch, but one command-boundary event dominates RMSE. |
+
+The retained fastline bag's last 22 candidate-prefix actions begin at progress
+38.610 m with MPC state `e_y=0.001 m`, `e_psi=0.018 rad`, `u=6.654 m/s`,
+path curvature −0.175 1/m and reference speed 6.57 m/s. Over the prefix chain,
+the reference falls to 3.06 m/s by progress 41.159 m while curvature reaches
+−0.837 1/m; the MPC state is then `e_y=0.894 m`, `e_psi=0.819 rad`,
+`u=4.723 m/s`, with only 3.07 cm predicted prefix slack. The next diagnostic
+is at progress 41.193 m (−0.885 1/m, 3.00 m/s reference), with
+`e_y=0.978 m`, `e_psi=0.828 rad`, `u=4.767 m/s`; the new candidate and prior
+plan both fail at validation stage 2. Published actions are ordered
+`[steering_rad, q]`; the chain's issued q values range from 0.01 to 0.604.
+This records the failure progression but does not by itself distinguish a
+speed-profile/weight issue from source-plant or actuator-epoch mismatch, and
+does not prove that the path is globally infeasible.
+
+The fastline outlier is the interval ending at ROS stamp
+`1792623140442672939 ns` (25.839 ms after its prior sample). Reported
+physical steering changes from approximately −0.3933 rad to +0.0105 rad.
+The preceding request's normalized command is −0.859 (source target about
+−0.4498 rad); the next request is +0.020 (target +0.01047 rad), and the
+endpoint feedback matches that next target to about 0.00003 rad. The default
+capture has one analogous, smaller boundary residual (about 0.0795 rad max).
+The source recurrence predicts the fastline endpoint with 0.4603 rad residual
+when forced to use the prior request, but with the next request it is within
+measurement rounding. This indicates a request/physics-step association
+ambiguity at a command boundary; it does **not** identify which Unity
+`FixedUpdate` consumed the command.
+
+The best neighboring-epoch results are diagnostics using adjacent logged
+commands, not causal evidence for an online delay change. Bridge request to
+response latency is about 28 ms in both bags, but this measures transport and
+callback response timing, not Unity's applied-command physics-step ID. Neither
+bag records the applied sequence ID or fixed-step counter needed to settle the
+rare boundary case. Therefore no command delay, steering-rate parameter, or
+production state correction was changed.
+
+### Instrumentation feasibility and verification
+
+The current `tools/start_simulator.sh` trace environment has no matching
+consumer in the checked-in Unity subset; setting it cannot currently produce
+the requested fixed-step trace. The practice Docker image contains an IL2CPP
+player (`GameAssembly.so`, no `Assembly-CSharp.dll`), so editing managed
+scripts beside the executable would not instrument the running image. The
+public upstream AutoDRIVE Simulator source branch is available and declares
+Unity 2022.3.52f1, matching the local source subset's project version, but it
+is a separate, large source tree and does not by itself establish identity
+with the competition practice player. A trace-enabled player must be built
+from a verified matching project/player before using its step IDs as evidence.
+
+Verification performed:
+
+- `cmake --build build/f1tenth_mpc --target test_unity_source_plant -j2`
+- `ctest --test-dir build/f1tenth_mpc -R '^test_unity_source_plant$' --output-on-failure`
+  — passed.
+- `python3 -m unittest tools.test_evaluate_mpc_bag_steering -v` — 4 passed.
+- `python3 -m py_compile tools/evaluate_mpc_bag.py tools/test_evaluate_mpc_bag_steering.py`
+  — passed.
+- Re-scored both retained practice captures with
+  `--source-plant-rollout --source-reconstruct-command-queue-from-bridge`;
+  the evaluator now reports the exact `VehicleController.Steer` branch.
+- `git diff --check` — passed before this documentation update.
+
+**PR-02 status:** the source-equation mismatch in the diagnostic has been
+fixed and production dynamics were confirmed to already use the source
+steering branch. The remaining rare actuator epoch discrepancy is not
+identifiable from the current bag schema. The IPOPT fastline still has zero
+completed laps and one collision; this diagnostic does not improve its
+feasibility or justify another unchanged live attempt. Continue with a
+trace-enabled, version-matched practice player or keep the boundary residual
+explicitly unresolved; do not tune the MPC/plant to this single sample.
+
+## 2026-10-22 — PR-00/01/02 evidence continuation
+
+No simulator was launched. This pass reused the retained practice captures;
+the only code change is to the offline one-step analysis. No production
+odometry, MPC, weight, plant, or trajectory behavior changed.
+
+### Provenance reconciliation (PR-00)
+
+The three relevant raw SQLite bags are present and their bytes were hashed.
+The report sidecars record the captured HEAD (`cfefebcfe18aee16a7e55f95764db61dd0eca59f`)
+and report-generation build environment, but **none has a sealed pre-launch
+run manifest**. Their `metadata.yaml` files are ROS bag metadata, not the
+handoff's run manifest. In particular, simulator/controller image digests,
+exact loaded YAML hashes, map hash, initial pose, supervisor version, and full
+runtime limits cannot be reconstructed after the fact. Do not claim those
+properties for these historic runs.
+
+| Regime | Raw bag SHA-256 | Trajectory SHA-256 | Recorded outcome |
+|---|---|---|---|
+| CSV follower, five-lap development capture (`live_runs/csv_v251_gt_5lap_run1_20261020`) | `1c466a4ba68c8aa840c937dd2c9a051eb29ae8f9ecff0c52596394e2aac01126` | Not sealed in its run report; do not infer it from the bag name | Comparator only; no MPC claim |
+| Default mintime, production MPC (`live_runs/mpc_odom_epoch_fix_practice_20261022_run1`) | `a9f80c1fa28c9b706e39294fca73fbefde4b2a059bc54c9f709ed52b39776d17` | `09b0c3e5b36b781b8709eb08a98cd8c36eb7951391f269ed761409a64938a253` | 5 clean laps; mean 6.292 s, best 6.045 s; no collision |
+| IPOPT fastline, production MPC (`live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1`) | `192b9f36f2b2a393506553c74d17379530f85ea14b7e159df4d39cf4564904bf` | `35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73` | 0 laps; MPC fault at 5.733 s; collision at 5.871 s; nominal `∫ds/v=5.367 s` is not an achieved lap |
+
+Existing `report.json`, `cycles.csv`, source one-step outputs, source-rollout
+outputs, feasibility audits, and saved-state replay CSVs remain beside their
+bags. They are separately labeled by regime; none is a substitute for the
+missing launch manifest. A future launch must use
+`tools/seal_mpc_run_manifest.py` before starting either container.
+
+### Drift attribution (PR-01)
+
+The independent exact-epoch report was reproduced from 1,283 same-stamp truth
+and odometry rows, all at the rear-axle reference point. The final relative
+pose error is 0.2697 m, almost entirely forward (−0.2697 m; lateral +0.0018 m);
+relative yaw is numerically identical because this simulator's reported IMU
+quaternion matches its truth orientation. Forward-velocity error is bias
+−0.00834 m/s, RMSE 0.03287 m/s, p95 0.04607 m/s, max 0.18296 m/s. Trapezoid
+integration of the measured odometry-u residual accounts for −0.26785 m of
+forward displacement, matching the observed final forward error within about
+2 mm.
+
+The pose integrator is not the main source: integrating production odom twist
+reproduces its own recorded pose increments with 1.85 mm XY RMSE. Integrating
+Unity's measured twist reproduces Unity pose with 7.5 mm XY RMSE over the run;
+midpoint and interpolated 1 ms integration differ by only about 3 mm at the
+endpoint. The large 27 cm discrepancy is therefore a velocity-estimation
+error, not a frame/reference-point conversion or midpoint-integration defect.
+About 21 cm of the forward displacement error accumulates in the first two
+seconds; subsequent per-lap speed bias is near zero. The yaw/position and
+velocity error cannot be summarized as a single rollout-accuracy number.
+
+### First divergence and command/slip separation (PR-02)
+
+`tools/analyze_source_plant_one_step.py` now reports elapsed-time bins and the
+**incremental one-step error**
+`(predicted next u − next truth u) − (initial source u − initial truth u)`.
+This distinguishes error already inherited by the initial state from new
+error added by that interval. It also reports wheel/body-speed mismatch proxy,
+source-reported rear slip, queue throttle, and next-feedback/queue difference.
+The distinction is diagnostic only; it does not inject truth into production.
+
+On the default-MPC capture:
+
+- At 0.25–0.50 s, mean initial/next u error is −0.0315/−0.0340 m/s; mean
+  source rear-slip magnitude is 0.602 and the model-derived wheel/body
+  mismatch proxy averages 7.62 m/s.
+- At 0.50–0.75 s, the error is already −0.1355 m/s at the start and
+  −0.1417 m/s after one step; the added error averages −0.0062 m/s per
+  interval. At 0.75–1.00 s it is nearly flat (−0.1699 to −0.1698 m/s), then
+  recovers as slip and mismatch decline. This is a transient concentrated in
+  the initial high-spin acceleration, not a constant per-lap speed scale
+  error.
+- At the 0.50 s interval, q changes 0.552→0.086; one-step u error grows from
+  −0.075 to −0.106 m/s while source-reported rear slip is 0.887 and the
+  model-derived wheel/body mismatch proxy is 13.35 m/s. These latter two are
+  not independent Unity wheel truth.
+- Command-slot A/B on identical recorded start states does **not** support a
+  one-packet shift: slot 2 has 0.0325 m/s u RMSE over all 1,282 intervals,
+  versus 0.1318 m/s for slot 1. During |Δq|>0.2 the scores are 0.1348 vs
+  0.1554 m/s; for falling q transitions, 0.1359 vs 0.1926 m/s. Substituting
+  next-epoch throttle feedback (an offline-only future oracle) gives 0.0362
+  m/s overall and 0.1341 m/s for |Δq|>0.2—no meaningful fix to the startup
+  discrepancy. The bag confirms feedback/command association, not the exact
+  `FixedUpdate` where torque was applied.
+- As an operating-profile comparator, the CSV-follower bag's one-step u error
+  is 0.00604 m/s RMSE overall (bias +0.00041, p95 0.01089); its first two
+  seconds use q near 0.12 with much lower source-reported slip. The fastline
+  MPC bag has 0.03691 m/s one-step u RMSE before its collision/fault cutoff,
+  but only 233 intervals and no completed lap. These are different command
+  profiles, not a randomized causal comparison.
+
+**Causal ranking from retained evidence:** (1) ordinary pose integration and
+rear-axle convention are ruled out as the 27 cm cause; (2) a simple one-packet
+command-phase error is disfavored by the paired slot test and encoder-angle
+replay; (3) the remaining clear association is high-slip, rapid torque-change
+acceleration, but available wheel-speed/slip channels are model/encoder
+proxies rather than per-wheel Unity contact truth; (4) the applied command's
+per-`FixedUpdate` identity remains unknown. Do not tune torque/tire
+coefficients or production odometry from this single run yet.
+
+### Verification and next gate
+
+- `python3 -m unittest tools.test_analyze_source_plant_one_step -v` — 6 passed.
+- `python3 -m py_compile tools/analyze_source_plant_one_step.py tools/test_analyze_source_plant_one_step.py` — passed.
+- The new analyzer was run in-memory against the default-MPC, CSV-follower,
+  and fastline practice bags; no duplicate data artifacts were written.
+- Added `docs/development/MPC_HANDOFF_BASELINE_COMPARISON_20261022.json` as
+  the PR-00 machine-readable comparison index. It separates the CSV follower,
+  pre-fix IPOPT probes, post-fix default-MPC success, post-fix IPOPT failure,
+  and saved-state initialization replays. It carries raw DB3 and trajectory
+  hashes where verified and marks the missing post-fix launch manifests and
+  unavailable CSV trajectory identity explicitly. This is an index of existing
+  evidence, not a causal A/B claim.
+- Extended `tools/capture_mpc_qp_regression_corpus.py` with an explicit
+  `--post-odom-epoch-fix-only` mode. It captured 31 post-fix default-line
+  high-curvature states and 24 post-fix IPOPT terminal-chain states into the
+  separate `live_runs/mpc_qp_post_odom_epoch_fix_20261022/` delta corpus. The
+  existing 125-fixture corpus was not modified. These remain saved-state
+  reconstructions; they do not restore historical live ADMM memory.
+- Validated all 55 delta fixtures: sidecars valid, roundtrip bytes identical,
+  and recorded solver output replayed with exact parity. Added grouped
+  minimum-bound-relaxation diagnostics to `tools/mpc_qp_oracle.py`, then
+  independently classified the reconstructed QPs with OSQP and an LP
+  feasibility check:
+  - Default high-curvature segment: 19 solved, 6 solved-inaccurate, 6 oracle
+    time-limited; native ADMM reached its cap on 1/31 snapshots.
+  - IPOPT terminal chain: 22/24 oracle time-limited and 2/24 LP-confirmed
+    infeasible. Both confirmed-infeasible fixtures are the final two rows
+    (source diagnostics 227–228). Relaxing only their linearized `e_y`
+    corridor bounds by 0.2632 m and 0.5077 m respectively restores LP
+    feasibility; relaxing control bounds alone or other state bounds alone
+    does not. This is a local QP diagnosis at the already-diverged terminal
+    states, not proof that the physical path is globally infeasible. No
+    production corridor or action bound was weakened.
+- `python3 -m unittest tools.test_mpc_qp_oracle -v` — 2 passed. The independent
+  QP validation recorded exact parity for all 55 fixtures; its oracle
+  classifications and bound-relaxation diagnosis are retained in
+  `live_runs/mpc_qp_post_odom_epoch_fix_20261022/validation_summary.json`.
+- `git diff --check` — passed.
+- No simulator/controller run was active; no simulator was launched.
+
+PR-01's pose-drift source is localized to early forward-velocity estimation,
+but its causal model component is not yet identified. PR-02 establishes that
+one-packet shifting is not the fix; source-exact torque application timing is
+still unavailable. PR-00's comparison index and post-fix QP delta are present,
+but its gate remains partial because pre-launch manifests for the Oct. 22
+captures are absent. The faster IPOPT trajectory remains unproven in
+closed loop; do not rerun it unchanged. The terminal local-QP evidence points
+to a corridor-feasibility loss after the car has already diverged substantially,
+not a control-bound-only failure. The next handoff step remains an opt-in,
+bounded development capture of the live solver/plan state for PR-04. Any
+subsequent faster-line attempt must change the upstream speed/path plan based
+on source-plant feasibility, not widen the corridor or repeat this same run.
+Production selection, plant, weights and corridor remain unchanged.
+
+## 2026-10-22 — targeted higher-budget fastline QP follow-up
+
+Continued the handoff's numerical classification of the post-odom-fix IPOPT
+terminal chain. This was an offline identical-QP oracle experiment only: no
+simulator was started, and no production solver setting, weights, plant,
+corridor, or trajectory was changed.
+
+- Extended `tools/refine_mpc_qp_oracle_cases.py` with repeatable `--case-id`
+  and `--fixture` filters, so a second budget can be spent only on the exact
+  unresolved fixtures rather than rerunning already-classified rows.
+- The 5 s screen returned `solved` for 13 of the 22 fixtures not already
+  proven infeasible; the remaining 9 reached the time limit. The two terminal
+  fixtures independently confirmed infeasible by LP were excluded.
+- Re-ran only those 9 at up to 20 s / 1,000,000 iterations. One returned
+  `solved` (`qp_000012.fqp`, 452,750 iterations; primal/dual residual
+  `3.47e-7 / 1.62e-6`). One returned `solved inaccurate` at the time limit
+  (`qp_000018.fqp`; residuals `4.76e-9 / 2.68e-7`). Seven still reached the
+  time limit, with large residuals on several. Time-limited means unresolved,
+  not infeasible.
+- Across the 24 fastline terminal fixtures, 15 have an OSQP solver-returned
+  result after the 5/20 s screens, 7 remain time-limited, and 2 are LP-proven
+  infeasible under the reconstructed local box-constrained QPs. This does not
+  prove that the path or vehicle is globally infeasible: these are frozen
+  local linearizations at states reached after the live trajectory had
+  already diverged. No corridor relaxation is proposed.
+- Outputs are
+  `live_runs/mpc_qp_post_odom_epoch_fix_20261022/ipopt_terminal_oracle_refinement_5s.json`
+  and `.../ipopt_terminal_oracle_refinement_20s.json`; the comparison index
+  `docs/development/MPC_HANDOFF_BASELINE_COMPARISON_20261022.json` records the
+  counts separately from the original 0.2 s screen.
+
+This narrows the numerical question but does not create a faster usable
+raceline. The next consequential step remains bounded development capture of
+the *live* solver/plan state and rejected full suffix, then distinguishing an
+upstream nominal/reference problem from numerical QP trouble before another
+fastline simulator run. The default-line result and fastline failure evidence
+remain unchanged.
+
+### Live fastline failure-context telemetry (diagnostic-only)
+
+Added opt-in diagnostic fields to capture the controller state that the
+existing fastline bag did not preserve. This does **not** change candidate
+selection, the command envelope, plant equations, corridor acceptance,
+trajectory, or MPC weights:
+
+- `f1tenth_mpc/src/mpc_controller_node.cpp` emits diagnostics schema version 3
+  with the actually issued action (only when this cycle published one), the
+  causal two-command steering/throttle queue, source/control/candidate epoch
+  stamps, and—on a rejection, candidate/prior-plan prefix, or continuing
+  prefix chain—the certified-plan validity, cursor, remaining horizon,
+  complete controls, stage states, hidden source-plant state and stage-wise
+  corridor slack. Snapshot capture is limited to those diagnostic contexts;
+  it does not add file I/O to the solver callback.
+- `f1tenth_mpc/src/mpc_rti.c` exposes the exact nonlinear footprint clearance
+  calculation through `mpc_rti_compute_corridor_slack()`. The stage-wise
+  candidate slacks come from the same bounds and footprint used by the
+  acceptance check; diagnostic slack does not relax or replace that check.
+- `f1tenth_mpc/test/test_vehicle_model_source_rollout.cpp` checks the shared
+  slack calculation at the first-stage margin and later-stage margin. The
+  source-plant regression test also checks the Unity steering-target crossing
+  clamp exercised by the current workspace implementation.
+
+Verification on the current working tree:
+
+```bash
+cmake --build build/f1tenth_mpc --target \
+  test_vehicle_model_source_rollout mpc_controller_node -j2
+build/f1tenth_mpc/test_vehicle_model_source_rollout
+```
+
+Both targets built; all 32 source-rollout tests passed. This proves the code
+builds and the shared corridor-slack semantics match the test expectations;
+it does **not** yet prove the ROS diagnostic message decodes from a live bag,
+that telemetry load is negligible, or that the fastline is driveable. The next
+step is one supervised practice capture on the unchanged IPOPT fastline with
+diagnostics enabled, bagging the `mpc_performance` topics, and stopping at the
+first MPC fault or collision. Its purpose is to inspect the newly captured
+certified-plan/candidate context, not to claim a lap-time trial. No capture has
+yet been launched under this schema.
+
+### 2026-10-22 — fastline diagnostic decode and retained-plan experiment setup
+
+The diagnostic-only practice run on the unchanged IPOPT fastline completed
+its intended fault capture. It did **not** complete a lap and is not a racing
+success:
+
+- Bag: `live_runs/mpc_ipopt_v1_fastline_diagnostic_20261022_run1/run/`
+- Report and cycles: `report.json`, `cycles.csv` in the same run directory.
+- First unpublished MPC rejection: 3.279684 s. Collision telemetry followed
+  at 3.392061 s (112 ms later); the bridge fault arrived at 3.465790 s. The
+  collision is retained in the run outcome and is not hidden by the earlier
+  score cutoff. No lap was completed.
+- 131 MPC diagnostics: 83 full-horizon accepts, 42 exact-validated 75 ms
+  candidate prefixes, one rejected nonlinear rollout, and five localization
+  wait cycles. The controller tracking diagnostics reached cross-track RMSE
+  0.184 m and heading RMSE 0.178 rad before failure. The solver hit its
+  100-iteration limit on all 42 prefix cycles; the final failed cycle had
+  large residuals. Publication-gate latency max was 11.203 ms with no sample
+  at or above 20 ms, and no callback interval exceeded 25 ms. Timing therefore
+  does not explain this failure.
+- The exact source replay reproduced logged states for previously accepted
+  plans. The audit had initially compared center-sample corridor bounds; that
+  was incorrect because runtime uses a minimum-bound preview over ±0.10 m.
+  The audit now uses the same periodic preview and stops at the first
+  corridor violation. This was a diagnostic mismatch, not a production
+  acceptance defect.
+- Same-state source-plant counterfactuals from the new capture compare the
+  rejected candidate suffix with the retained certified suffix. Across 43
+  eligible snapshots, the candidate suffix crossed the corridor in all 43;
+  the prior suffix survived more stages in 29 and passed all of its remaining
+  actions in 26. On the 21-snapshot terminal chain, the prior suffix passed
+  its complete remaining sequence in 5, survived longer in 12, tied in 7 and
+  was worse in 2. This is one captured chain, not closed-loop evidence or a
+  guarantee that replaying the prior plan will complete a lap.
+- Added default-off parameter
+  `prefer_full_validated_prior_plan_on_rejection`. When explicitly enabled,
+  it first revalidates the *entire remaining* certified plan suffix from the
+  current state and queue; it publishes only if that exact source-plant and
+  corridor check passes within the existing publication deadline. Otherwise
+  the existing candidate-prefix/short-prior checks remain in their original
+  order. The competition default remains `false`; no plant, path, weight,
+  corridor, command envelope or accepted-plan semantics changed. Corrected
+  the prefix log message so it no longer implies a prior-plan check happened
+  when the default policy did not perform one.
+- Added a separate `full_prior_plan_suffix_revalidation` diagnostic record
+  and exporter columns so a later 75 ms prior-plan retry cannot overwrite the
+  result of the full-suffix attempt. The bag decoder test verifies both
+  records remain separately available.
+- Two prelaunch manifests (`..._run1` and `..._run2`) were superseded before
+  launch as telemetry/schema changes were made. The current sealed follow-up
+  manifest is
+  `live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run3/run_manifest.json`.
+  It uses the same practice map, IPOPT trajectory SHA
+  `35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73`,
+  initial pose, 8 Jacobian workers and 4 ROS executor threads; only the
+  run-local parameter overlay enables the experiment.
+
+Verification: MPC controller and source-rollout targets build; all 32
+source-rollout tests passed before the full-suffix case was added. The
+expanded `MpcCandidate.PriorPlanSuffixRequiresExactCurrentStateValidation`
+test passed for a 29-action suffix in the complete 32-test rerun. The
+trajectory-audit and run-report Python suites pass 19/19, runtime-topic policy
+passes, and `git diff --check` passes.
+
+The follow-up live practice experiment has **not** been launched. At the time
+of preparation, an unrelated `sdu_apex_sim_compete` container was running the
+competition image, reconnecting to port 4567 with no controller or recorder
+container. It was left untouched. The repository simulator and bridge use
+that fixed port, so the practice test must wait until that external container
+is no longer active; do not connect the test controller to the wrong track or
+stop the unrelated session without confirming ownership. Once the port is
+free, run the sealed test under the established Xvfb batch-mode path and the
+fault/collision supervisor, then evaluate whether retained-plan certification
+actually improves the fastline outcome. No faster lap or usable fastline has
+yet been demonstrated.
+
+### 2026-10-22 — handoff confirmation and odometry drift attribution
+
+Confirmed the active plan is `SDU_Apex_MPC_Odometry_Fix_Next_Steps_Handoff_2026-10-22.md`.
+Continued PR-01/PR-02 from the retained practice captures, without launching a
+simulator or changing production odometry, plant, MPC, weights, or racelines.
+
+**Default-line MPC capture**
+(`live_runs/mpc_odom_epoch_fix_practice_20261022_run1`):
+
+- Exact-stamp comparison has 1,283 truth/odom/IMU/source rows, no unmatched
+  rows, fixed initial pose alignment only, and rear-axle reference conversion.
+  Relative yaw from the IMU quaternion matches truth to floating-point
+  precision; integrating gyro instead has 0.0592 rad RMSE. Yaw and the
+  midpoint-versus-1 ms pose integrator are therefore not the source of the
+  27 cm final odometry displacement error.
+- Recorded odometry ends 0.2697 m from truth. Replacing only its `u` series
+  with same-epoch truth reduces the endpoint to 0.0276 m; replacing only rear
+  lateral velocity leaves 0.2512 m; replacing both leaves 0.0058 m. The main
+  measured contribution is forward-velocity error, not yaw or lateral
+  integration.
+- Most of the displacement accumulates during launch: at 0.60 s odometry `u`
+  is 0.138 m/s low; it reaches 0.18 m/s low near 1.0 s and remains about
+  0.14 m/s low through much of the first lap. The first lap ends about 0.23 m
+  behind in the track-forward direction; later laps add substantially less.
+- The one-step source-model replay's overall forward error is 0.0325 m/s
+  RMSE, versus 0.00745 m/s when only same-epoch truth `u/v/r` replace the
+  initial visible motion state and hidden states/commands stay unchanged. In
+  the 0.175–1.7 s launch interval the corresponding RMSEs are 0.1396 and
+  0.0062 m/s. This isolates a large carried motion-state discrepancy; it
+  does not yet identify whether the initial discrepancy is caused by
+  acceleration-state evolution, unobserved wheel/contact state, or exact
+  Unity command-effect timing.
+- Shifting the replay to the older queued throttle slot worsens overall
+  forward RMSE from 0.0325 to 0.1318 m/s; substituting next-epoch throttle
+  feedback gives 0.0362 m/s. Neither supports an extra-packet-shift fix.
+  A 25 ms trapezoidal IMU-acceleration increment is also not a valid
+  replacement: its incremental RMSE is 0.0591 m/s versus 0.0087 for the
+  source-plant increment, and recursive full-IMU propagation reaches
+  0.6275 m/s RMSE. No IMU fusion change is promoted.
+- The early launch includes sharp throttle changes and a wheel/body-speed
+  mismatch proxy above 10 m/s. The capture has no Unity physics-step ID, so
+  this is a regime association, not proof that the command was applied on a
+  particular FixedUpdate. PR-02's exact 1 ms event trace is still needed
+  before attributing this to torque/slip or changing the plant.
+
+**CSV-follower practice capture**
+(`live_runs/csv_v251_gt_5lap_run1_20261020`):
+
+- Recorded odometry ends 0.1828 m from truth; its `u/v` errors are much
+  smaller than in the MPC launch capture. Replacing both velocity components
+  leaves 0.0802 m endpoint discrepancy between integrated Unity truth twist
+  and Unity truth pose, so the complete 18 cm cannot be assigned to odometry.
+- At elapsed 28.929963 s, one truth-pose interval is 0.3451 m over 24.746 ms,
+  while truth speed is about 3.27 m/s; the truth pose then repeats for three
+  samples. Bridge request-to-response latency is 110.4 ms at the jump and
+  remains 88.3/86.0 ms in the following samples. Progress is unavailable at
+  the jump. This is strong evidence of a pose/twist epoch or burst-delivery
+  anomaly, but not proof of the Unity physics epoch because the bag lacks its
+  step ID. The samples are flagged as epoch-ambiguous, not discarded or used
+  to fit physics.
+- For the rest of this capture, exact-stamp source one-step forward RMSE is
+  0.00604 m/s, but there are no throttle-rise/fall samples. It cannot validate
+  the transient regimes that dominate the default MPC launch discrepancy.
+
+The reduced IPOPT optimizer and its README were also checked against the
+handoff: this fastline is generated by a spatial acceleration/lateral-limit
+surrogate, not the production 33-state source plant. Its 5.367 s value is an
+integral estimate, not a Unity or MPC lap time. The geometry audit alone does
+not certify dynamic feasibility. Do not repeat the unchanged fastline or
+promote it; PR-03 still requires source-plant feasibility evidence and a
+source-consistent speed schedule.
+
+Added synthetic PR-01 coverage to `tools/test_analyze_mpc_odom_drift.py` for
+reordered/missing exact epochs, reversing yaw, yaw seam crossing, high lateral
+slip/reference-point conversion, and jittered intervals with a missed packet.
+`python3 -m unittest tools.test_analyze_mpc_odom_drift -v` passes 10/10;
+`git diff --check` passes. These tests validate offline diagnostic semantics,
+not odometry accuracy.
+
+**Next in sequence:** resolve PR-02 with a development-only Unity FixedUpdate
+trace of request/command receipt, applied actuator targets, physics-step ID,
+wheel speeds/slip, and body state; compare it against clean launch windows
+before changing any production equation. The active simulator port is still
+occupied by an unrelated competition-image container with no visible
+controller/recorder; it remains untouched. The sealed practice experiment is
+not launched until the established practice simulator can be started without
+connecting to that other session.
+
+### 2026-10-22 — PR-03 local source-plant throttle feasibility
+
+Continued the exact Oct. 22 odometry/MPC handoff after the PR-01/PR-02
+diagnostics. No live simulator was launched: `sdu_apex_sim_compete` is still
+running, while neither bridge port 4567 nor 4568 has a listener. It was not
+stopped or repurposed. The PR-02 causal attribution remains **insufficient**:
+the bags do not contain a Unity `FixedUpdate` command-application ID, so ROS
+epoch reconstruction cannot establish the exact physics-step input. No plant
+coefficient or odometry change is justified by these captures.
+
+**Pinned torque branch.** The active practice scene overrides the F1TENTH
+prefab `MotorTorque` from 85.6 to 428 N m. The prefab selects `driveType=5`
+(CAWD) and `brakeType=0` (CAWB). `VehicleController.Drive()` therefore
+distributes a positive command `q` across four wheels and clears their brakes;
+`q=0` instead applies 428 N m brake torque to each wheel. At the production
+MPC minimum `q=0.01`, drive torque is 4.28 N m total, 1.07 N m/wheel, and no
+brake torque. Added this explicit source/scene mapping beside the production
+plant constant so the minimum legal MPC command is not later misread as a
+brake. The edit is comments only; dynamics and legal command bounds are
+unchanged.
+
+**New offline audit implementation.** Extended
+`tools/audit_mpc_trajectory_feasibility.py` with `--fixed-throttle-grid`.
+It replays each requested positive throttle through the same 1 ms source
+plant, preserving the captured initial hidden state, in-flight two-command
+queue, and captured steering sequence. It now also runs this grid against the
+terminal rejected full candidate suffix. `q=0` and non-finite/out-of-range
+values are rejected. This is explicitly a local counterfactual—not a searched
+policy, global infeasibility test, or Unity-native contact-solver proof.
+
+Artifacts are under
+`live_runs/mpc_ipopt_v1_fastline_diagnostic_20261022_run1/trajectory_feasibility/q_grid_terminal/`:
+
+- `ipopt_q_grid_terminal.json`
+- `ipopt_q_grid_terminal_source_witness.csv`
+- `ipopt_q_grid_terminal_bins.csv`
+- `ipopt_q_grid_terminal_candidate_prior_ab.csv`
+
+The evaluator library is `build/f1tenth_mpc/libunity_source_plant_eval.so`
+(SHA-256 `bac0ca3657e7c3db7a290e40a91acc30dbf163e411d112b86b096b531294eb8d`);
+the IPOPT trajectory remains unchanged (SHA-256
+`35bed562a8b0611c48cbf2df8520aff091a3f212adf0eacd5f59e6b9f527fb73`).
+Geometric audit: lap 27.5511 m, peak CSV speed 8.4875 m/s, idealized peak
+lateral demand 8.4000 m/s², and 0.1342 m minimum aligned footprint slack at
+the configured wall buffer. These are geometry/reference facts, not dynamic
+feasibility results.
+
+**Measured local source-plant result.** The last two captured full-horizon
+states before the terminal prefix chain are at progress 25.6686 and 25.8410 m.
+Their source-state forward speeds are 6.576 and 6.347 m/s, but rear-wheel
+surface speeds are only about 3.56 and 2.96 m/s, respectively. This is a
+large *model-state* wheel/body mismatch; the bag has no independent Unity
+per-wheel physical-speed truth, so it must not be presented as confirmed
+physical tire slip.
+
+Holding each captured steering plan and command queue fixed, constant `q=0.125`
+source-plant rollouts pass the full 30 stages (750 ms) for both states with
+minimum corridor slack 0.183 and 0.158 m. End speeds are 3.060 and 3.060 m/s
+against terminal references 2.799 and 2.848 m/s; maximum within-horizon speed
+errors are 0.580 and 0.338 m/s. Constant `q=0.20` instead violates the exact
+corridor at stages 28 and 26. This establishes a local source-model witness
+for the captured steering suffix; it does **not** certify the whole lap or
+show what Unity would do at the exact same substeps.
+
+At the terminal rejected candidate (progress 28.2605 m, initial speed
+4.580 m/s, `e_y=0.724 m`, `e_psi=0.754 rad`, reference about 2.85 m/s), every
+tested constant-q continuation
+`0.05–0.50` violates the corridor by stage 4 or 5. The first two commands
+remain the recorded in-flight queue, so changing future throttle cannot
+repair the already-late state immediately. This is a local failure of the
+captured steering/queue/state combination; other steering or earlier
+throttle sequences have not been disproved. The source replay reproduces the
+logged candidate prediction to below `2e-7` in the common states, verifying
+the audit binary against the captured MPC model, not against native Unity.
+
+**Decision:** the data do not establish that the IPOPT speed profile is
+globally infeasible. The geometry is clear, and at least two pre-terminal
+states admit a 750 ms source-plant witness at q=0.125. Conversely, the actual
+terminal state is already too late for the tested fixed-q continuations. No
+speed schedule, path, weight, MPC behavior, or odometry was changed. PR-03 is
+still **partial**: only the captured progress interval has reachable-state
+witnesses; a complete source-plant-derived schedule over the lap and a
+different-seed feasibility search remain outstanding. Do not advertise the
+5.367 s integral estimate as an achieved or validated lap time.
+
+**Verification:** `python3 -m unittest tools.test_audit_mpc_trajectory_feasibility -v`
+passes 11/11; Python byte-compilation and `git diff --check` pass. No production
+behavior or test bag was modified.
+
+**Next:** finish PR-03's per-progress feasibility/witness coverage without
+inventing a global speed cap. Then use the recorded pre-terminal state and
+source-plant witness as the fixed-state entry point for PR-04 candidate vs.
+retained-plan vs. feasible-continuation analysis. Live use of the faster line
+still waits for the established practice simulator/bridge endpoint to be
+available without interfering with the unrelated active competition image.
+
+### 2026-10-22 — PR-02 wheel-epoch check and PR-03/04 evidence extension
+
+The exact Oct. 22 handoff was confirmed as the active plan. Work remained
+offline: a `sdu_apex_sim_compete` container was still active with no listener
+on ports 4567/4568. It was not stopped or reused, and no new simulator run was
+started.
+
+**PR-02 control-time wheel comparison.** Added the reusable diagnostic
+`tools/analyze_mpc_control_time_wheels.py` and four synthetic tests in
+`tools/test_analyze_mpc_control_time_wheels.py`. It pairs MPC's rear-wheel
+hidden state at `candidate_command_stamp_ns` with encoder angle differences
+over the preceding fixed 25 ms epoch, then scans ±1 and ±2 epochs. It labels
+the comparison as an interval-average/point-state diagnostic—not independent
+wheel-speed truth—and does not feed the result into production.
+
+- Default-line five-lap bag: 1,275 matched control epochs / 2,550 wheel
+  comparisons; point-vs-interval wheel-omega RMSE 4.185 rad/s, p95 absolute
+  7.536 rad/s. Candidate-time pairing is markedly better than ±25 ms (44.6–
+  44.9 rad/s RMSE) or ±50 ms (20.86–20.90 rad/s). The corresponding wheel
+  surface-speed RMSE is 0.136 m/s.
+- Fast-line diagnostic bag: 126 epochs / 252 comparisons; RMSE 11.946 rad/s,
+  p95 absolute 24.474 rad/s, max 40.010 rad/s. Candidate-time pairing is
+  markedly better than ±25 ms (151–154 rad/s RMSE) or ±50 ms (115.1 rad/s).
+  Wheel surface-speed RMSE is 0.388 m/s.
+- The encoder sample was within 5 ms of the candidate stamp for included
+  pairs. The predicted plant state is 50 ms beyond the sensor-source stamp in
+  these captures. Comparing its predicted wheel speeds with source-stamp
+  observer state would be an epoch mismatch; the diagnostic instead compares
+  at the candidate time. The bags still lack Unity `FixedUpdate`/applied-
+  command IDs, and encoder angle is quantized. Thus the scan rejects a simple
+  adjacent-packet shift as the explanation; it does not identify the exact
+  native physics-step command effect or prove wheel-contact error.
+
+Artifacts: `live_runs/mpc_odom_epoch_fix_practice_20261022_run1/`
+`control_time_wheels.{json,csv}` and
+`live_runs/mpc_ipopt_v1_fastline_diagnostic_20261022_run1/`
+`trajectory_feasibility/control_time_wheels.{json,csv}`.
+
+**PR-03 source-plant feasibility coverage.** Replayed all 80 usable
+full-horizon accepted snapshots in the fast-line diagnostic bag, spanning
+unwrapped progress 17.601–25.841 m, with the same 1 ms four-wheel source plant
+and exact orientation-aware corridor check. All 80 captured candidate plans
+ran 30 stages (750 ms) without exceeding the configured corridor tolerance;
+minimum reported slack was −2.56 mm, within the 5 mm nonlinear tolerance.
+This is limited evidence for that captured portion and this model—not a
+whole-lap Unity feasibility claim.
+
+Holding each snapshot's steering sequence and two queued commands fixed, the
+constant-throttle source counterfactuals stayed within the 750 ms corridor in
+80/80 cases at q=0.01, 75/80 at q=0.125, 72/80 at q=0.15, 71/80 at q=0.20,
+63/80 at q=0.30, and 60/80 at q=1.0. These counts concern corridor only;
+they do not establish appropriate speed tracking or a useful fastest control
+schedule. The fixed-q probes are not an optimizer and do not show that the
+IPOPT speed profile is globally feasible/infeasible. The separate terminal
+state remains unrecoverable by the tested constant-q + captured-steering
+continuations, which only establish failure of that local family.
+
+Geometry audit remains: 27.5511 m lap, peak CSV speed 8.4875 m/s, minimum
+centerline corridor slack after the configured 5 cm margin and aligned
+footprint 0.1342 m. This rules out centerline geometry alone as the observed
+failure in this audit; it does not certify tracking or dynamic feasibility at
+every progress point.
+
+Artifact bundle:
+`live_runs/mpc_ipopt_v1_fastline_diagnostic_20261022_run1/trajectory_feasibility/`
+`all_accepted_preterminal_q_sweep.{json,_bins.csv,_source_witness.csv,` plus
+`_candidate_prior_ab.csv}`. The shorter multi-regime probe is retained as
+`nearest_regime_q_sweep.*`; neither replaces the original trajectory.
+
+**PR-04 candidate-prefix chain evidence.** Added
+`tools/analyze_mpc_prefix_chains.py` with three synthetic tests and generated
+per-action/per-chain reports for the post-odom-fix five-lap baseline and both
+fast-line captures.
+
+- Successful default-line five-lap bag: 10 candidate-prefix actions in 10
+  separate one-action chains; no long chain occurred in that session.
+- Fast-line practice bag: 46 prefix actions in 20 chains; longest chain 22
+  consecutive actions, ending at unwrapped progress 41.159 m immediately
+  before a nonlinear-rollout rejection. This older bag does **not** contain
+  certified-plan snapshots, so same-state prior-plan A/B cannot be recreated
+  from it.
+- Fast-line diagnostic bag: 42 prefix actions in 17 chains; longest chain 21
+  actions, from progress 25.998 to 28.261 m, followed by nonlinear rejection.
+  In that chain steering sign reversed four times; primal residual p50/p95
+  was 0.464/1.227, dual residual p50/p95 0.230/2.104, and logged predicted
+  minimum corridor slack declined to 0.118 m at the last prefix. The entire
+  chain's predicted slack stayed positive because each emitted action was
+  only certified for its local 75 ms; the following 750 ms solve still
+  failed.
+- On 43 same-state candidate-vs-retained-plan source replays in this
+  diagnostic bag, the candidate full suffix failed corridor in 43/43;
+  the retained certified-plan suffix passed all remaining recorded controls
+  in 22/43 and survived more stages in 29/43. The earlier 26/43 count used
+  an off-by-one plan cursor and is superseded. This is offline support
+  for testing prior-plan-first recovery when a certified plan exists, but it
+  is not a closed-loop benefit or timing result. The five-lap default bag
+  lacks snapshots, so its isolated prefixes are not comparable with this A/B.
+
+**Warm-start priority check.** Inspection confirms the publication path stores
+the actual issued candidate sequence, and
+`mpc_rti_build_nominal_impl()` shifts its already-issued first control out
+before constructing the next nominal. The existing test
+`MpcReference.IssuedCandidateSequenceSeedsNextNominalAfterShift` directly
+checks this mapping. The targeted C++ test target rebuilt and that test passed
+(1/1). No extra warm-start code change was justified. The retained certified
+plan remains a separate cursor-owned object in the node.
+
+This is an association, not causality: the comparison set contains one
+successful default session and two failed fast-line captures with different
+states/path context. It cannot establish that chain length causes loss of
+control. The second fast-line bag lacks the snapshots needed to evaluate the
+prior plan, and neither bag has recorded live ADMM memory from the historical
+solve.
+
+**New diagnostic tests:**
+`python3 -m unittest tools.test_analyze_mpc_control_time_wheels
+tools.test_analyze_mpc_prefix_chains tools.test_audit_mpc_trajectory_feasibility -v`
+passes 18/18; Python byte-compilation and `git diff --check` pass. The build
+and targeted warm-start test above pass. No production controller, odometry,
+weights, raceline or vehicle dynamics were changed.
+
+**Next handoff work:** PR-03 cannot justify a path/speed change from the
+current evidence; first collect a source-consistent speed feasibility
+witness across the missing progress range (or state the precise unsupported
+coverage). PR-04 should next implement and replay a full-source-plant-derived
+continuation seed and compare it with candidate-prefix and retained-plan
+suffixes on saved terminal states. The opt-in full-prior-suffix policy
+remains OFF until both its quality advantage and its complete 20 ms callback
+cost are measured. A supervised faster-line live run remains blocked by the
+unavailable practice simulator endpoint; the existing failed runs do not
+count as a usable lap.
+
+#### PR-03 coverage extension from the second fast-line capture
+
+The independent fast-line practice bag contains a wider set of usable full
+horizons than the diagnostic bag. Replaying all 176 complete accepted plans
+with the exact source plant gives full 750 ms corridor-valid witnesses over
+unwrapped progress **17.585–38.433 m** (lap length 27.551 m). All 176 captured
+plans pass the configured nonlinear corridor tolerance; minimum slack is
+9.0 mm. Together with the diagnostic bag's 80 witnesses over 17.601–25.841 m,
+the captured state coverage is substantially denser, but it still does not
+cover the critical reference interval **10.88–17.59 m modulo the lap**.
+
+Fixed-throttle counterfactuals with captured steering and the exact queued
+commands stayed within the corridor for:
+
+| Constant legal q | Full 750 ms corridor pass | Interpretation |
+|---:|---:|---|
+| 0.01 | 167/176 | Most robust corridor result in this sampled set; speed tracking is not certified by this count |
+| 0.125 | 141/176 | Local corridor response only |
+| 0.15 | 136/176 | Local corridor response only |
+| 0.20 | 124/176 | Local corridor response only |
+| 0.30 | 116/176 | Local corridor response only |
+| 0.50–1.00 | 113/176 | These commands coincide in portions of the source-model response; not a monotonic throttle ranking |
+
+By arc range, q=0.30 remains corridor-valid in 11/11 snapshots at 23–25 m,
+but 0/11 at 25–27 m; q=0.01 passes 11/11 at both. At 27–29 m, q=0.01
+passes 25/25 while q=0.125 passes only 4/25, q=0.15 2/25, and q≥0.20 0/25.
+These are state- and steering-conditioned corridor outcomes, not a race-speed
+schedule: q=0.01 may remain inside the corridor while badly under-target, and
+the input is still positive drive rather than the unavailable hard-brake
+mode.
+
+The two fast-line failure points fall in the uncovered progress range, after
+long local-prefix chains:
+
+- Fast-line practice run: unwrapped progress 41.193 m = 13.642 m modulo the
+  lap; reference speed 3.003 m/s, curvature −0.885 1/m; logged state
+  `e_y=0.978 m`, `e_psi=0.828 rad`, `u=4.767 m/s`. The full-horizon candidate
+  rejected at corridor stage 2 after a 22-action prefix chain.
+- Fast-line diagnostic run: unwrapped progress 28.328 m = 0.777 m modulo the
+  lap; reference speed 2.844 m/s, curvature −1.037 1/m; `e_y=0.812 m`,
+  `e_psi=0.770 rad`, `u=4.860 m/s`, `r=−0.933 rad/s`. It rejected at corridor
+  stage 2 after a 21-action prefix chain.
+
+This localizes where more evidence is needed: high-speed/high-curvature
+tracking and allowed-q deceleration in the 10.88–17.59 m interval, including
+the first run's failure corner. It does **not** show the geometric line is
+impossible, nor does the accepted-plan evidence show the actual vehicle can
+track it. The two failure states have already accumulated 0.8–1.0 m lateral
+error and ~0.77–0.83 rad heading error; changing the reference speed after
+that point alone would not explain the preceding loss. No speed schedule is
+promoted from this incomplete envelope.
+
+Expanded artifacts are at
+`live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/trajectory_feasibility/all_accepted_preterminal_source_q_sweep.*`.
+
+### 2026-10-22 — full-prior-suffix live probe and corrected failure interpretation
+
+Run `live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run4/` used the faster
+IPOPT trajectory, the run-3 opt-in full-validated-prior policy, eight
+Jacobian workers, and the practice batch-mode simulator. Its sealed manifest
+records the loaded trajectory/config/image hashes. The experiment completed
+**no lap** and had a collision, so it is not a faster-line success.
+
+The retained diagnostics narrow what this run can establish:
+
+- Before the first rejected cycle (bag time 1.7317 s, progress 24.008 m),
+  tracking remained close to the reference: `|e_y|=0.0092 m`,
+  `|e_psi|=0.0157 rad`, and measured forward speed was 7.865 m/s against a
+  7.974 m/s target. The controller had published 60 full-horizon exact-valid
+  commands and two exact-valid prior-plan actions; there were no candidate
+  prefixes.
+- The rejected callback took 34.316 ms to publication admission, over the
+  strict 20 ms bound. It did not publish a new actuator command. The prior
+  suffix was source-plant/corridor-valid, but its 2.429 ms validation finished
+  after the deadline, so it was correctly not published. The callback's
+  Jacobian stage consumed 29.332 ms wall time; the slowest worker reported
+  about 3.24 ms CPU but 22.50 ms wall, consistent with a tail scheduling or
+  worker-wait event rather than an expensive 22 ms single-thread calculation.
+- The run supervisor was started only after the simulator was already
+  running. It did not stop the simulator at the first rejected MPC diagnostic;
+  the collision counter was first observed 0.656 s later, followed by bridge
+  loss. This is a supervision-startup race in the experiment procedure, not
+  evidence that the MPC intentionally continued issuing rejected outputs.
+  The last published throttle, `q=0.3658`, remained the last actuator command
+  after the rejection. The subsequent acceleration/collision interval is
+  therefore **invalid for judging the IPOPT speed profile or source-plant
+  tracking**. No trajectory change is justified from it.
+- The captured source-plant fixed-input windows are poor over 750 ms
+  (`u` RMSE 2.136 m/s; endpoint XY RMSE 0.599 m, p95 1.336 m), despite small
+  one-step errors. These windows do not have enough matched, clean controls to
+  attribute the long-horizon error, and the terminal interval is
+  collision-contaminated. They are not evidence that the plant is accurate on
+  this faster line.
+
+The supervisor implementation already aborts on `rejected_solver`; the
+failure here was that it was armed too late. Future supervised trials must
+start `tools/watch_sim_run.sh ... mpc-lap-N ...` **before** launching Unity,
+wait for its `WATCHER_READY` line, and only then start the recorder and
+simulator. This preserves the required fault-on-rejection semantics and
+prevents a missed diagnostic from turning a solver fault into an uncontrolled
+drive interval. Do not change the controller fault policy to mask this
+orchestration defect.
+
+For the deadline event, the same 63 saved controller states were replayed
+through the current offline RTI binary with the established solver profile at
+four and eight Jacobian workers. Both replays produced identical statuses and
+first commands. Four-worker cycle p50/p95/max was 5.00/7.10/7.80 ms; eight-
+worker replay was 4.47/6.54/7.97 ms. This CPU-only replay mildly favors eight
+workers at p50/p95 and shows no useful basis for changing the production
+setting; it cannot reproduce Unity/ROS contention or establish a live worst
+case. No production parameter or raceline was changed.
+
+Artifacts added after sealing the run manifest:
+`solver_inputs.csv`, `solver_replay_4workers.csv`, and
+`solver_replay_8workers.csv`. The exported inputs explicitly identify
+themselves as saved-state reconstructions and do not contain live ADMM memory.
+
+**Next action:** resume PR-03/04 offline from clean pre-fault captured states;
+do not repeat this unchanged run. Before any new live trial, arm and verify
+the supervisor before Unity. A candidate speed/path adjustment still needs a
+clean source-plant feasibility witness and a single-factor controlled
+comparison; this run supplies neither.
+
+### 2026-10-22 — corrected same-state prefix quality A/B (supersedes earlier counts)
+
+Followed PR-04 of
+`/home/akselmo/Downloads/SDU_Apex_MPC_Odometry_Fix_Next_Steps_Handoff_2026-10-22.md`.
+This update is offline analysis of sealed practice captures; **no simulator was
+launched and no production MPC/odom, weights, or trajectory behavior changed**.
+
+The same-state audit cursor fix is now covered by
+`test_candidate_prefix_snapshot_cursor_is_post_publication`. On a published
+`accepted_candidate_prefix`, the diagnostic snapshot cursor has already
+advanced, so the replaced prior action is at `cursor`; on a rejected cycle,
+it is at `cursor + 1`. The previous 26/43 prior-full-suffix-valid count is
+therefore invalid; corrected count is 22/43. The separate 29/43
+“prior survives longer” result is unchanged.
+
+Extended `tools/audit_mpc_trajectory_feasibility.py` to replay, from each
+identical state and queued-command pair, both candidate and retained-plan
+three-action/75 ms prefixes. It reports source-plant/footprint-corridor
+validity, minimum slack, speed error, and the scalar nonlinear objective with
+the runtime YAML weights. The objective calculation was cross-checked against
+logged production nonlinear objectives for accepted full-horizon plans:
+
+- Faster-line diagnostic capture: two accepted plans, objective relative
+  differences 0.28% and 0.59%; their sampled replay state differences were
+  below `2.6e-7` in `e_y/e_psi/u/v/r/steering`.
+- Default-line five-lap capture: four accepted plans, relative differences
+  0.002%, 0.25%, 0.002%, and 2.86%. The last is retained as a known parity
+  outlier, not hidden; it does not affect the three-step comparison because
+  that bag lacks retained-plan snapshots.
+
+| Practice capture | Same-state prefix pairs | Both pass offline source/footprint screen | Lower 75 ms nonlinear cost | Median cost, candidate / prior | Median speed-error RMSE, candidate / prior |
+|---|---:|---:|---:|---:|---:|
+| Faster-line diagnostic run | 43 | 42 | Prior 28/42; candidate 14/42 | 9564.5 / 3030.8 | 2.072 / 1.961 m/s |
+| Supervised faster-line run5 | 15 | 14 | Prior 9/14; candidate 5/14 | 10314.8 / 9294.5 | 1.510 / 1.502 m/s |
+| Successful default-line five-lap run | 10 | 10 | Prior 8/10; candidate 2/10 | 24197.3 / 819.6 | 3.621 / 3.585 m/s |
+
+The prior-prefix median minimum corridor slack was 0.2944 m versus 0.2944 m
+for the candidate in the diagnostic capture, and 0.2606 m versus 0.2575 m in
+run5. In the default-line capture they were 0.3354 m versus 0.3274 m
+(candidate/prior). Thus, over the sampled states, the prior prefix often has
+lower three-step objective and similar screened clearance. The successful
+default-line bag did not record explicit retained-plan snapshots, but its
+retained sequence can be reconstructed from the accepted full-plan and
+published-control status history: all 10 reconstructed comparisons have
+complete publication flags; the reconstruction algorithm also matches all
+28 explicit snapshots in the faster-line run5 bag and all 43 in the earlier
+fastline diagnostic bag. The reconstructed default-line comparison is still
+conditional on the logged statuses and causality; it is not a live counterfactual.
+
+The same-state full-suffix checks strengthen, but do not prove, the policy
+hypothesis. The candidate's rejected full suffix fails all 10 default-line
+cases, while the retained suffix passes 9/10. For the faster-line diagnostic
+the candidate fails 43/43 and retained suffix passes 22/43; in supervised
+fastline run5 the candidate fails 15/15 and retained suffix passes 0/15.
+These are source-plant replays from the same captured states, not a simulated
+closed-loop branch: each alternative would change the next state and future
+solver outputs. The run5 full-prior policy was enabled, but no retained suffix
+passed at its 15 candidate-prefix events, so it could not rescue that run.
+The default-line and earlier fastline captures had that policy disabled.
+Therefore the existing full-suffix switch is insufficient for the faster line;
+the evidence motivates evaluating the handoff's quality-aware exact-validated
+75 ms candidate/prior choice, not blindly enabling the switch or promoting a
+new production default.
+
+The supervised faster-line run remains **zero laps**. It was observed with
+the watcher armed before Unity; 68 optimal, 4 feasible, 13 prior-plan, and 14
+candidate-prefix commands were accepted before a nonlinear rejection. The
+first collision count was observed 116 ms after rejection during shutdown, so
+the run is not labeled collision-free. Its MPC timing stayed below 20 ms
+(p50/p95/p99/max 6.592/10.351/11.456/11.479 ms); timing did not explain this
+failure. The faster line is still unproven in closed loop.
+
+Artifacts:
+
+- `live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/recovery_ab_prefix_quality*`
+- `live_runs/mpc_ipopt_v1_fastline_diagnostic_20261022_run1/trajectory_feasibility/recovery_ab_prefix_quality*`
+- `live_runs/mpc_odom_epoch_fix_practice_20261022_run1/trajectory_feasibility/default_prefix_quality*`
+
+Validation: `python3 -m unittest tools.test_audit_mpc_trajectory_feasibility
+-v` passes **14/14**; Python compilation and `git diff --check` pass. Added a
+CSV regression assertion so column ordering cannot silently shift
+`prior_snapshot_source`, chain length, progress, and command values. All three
+audits were regenerated with matching source/library/config hashes and their
+candidate/prior CSV headers and row widths agree. The quality-aware policy is
+not yet implemented or promoted; the next step is an offline held-out
+decision replay covering default, IPOPT and steering-reversal states, then a
+feature-off-by-default live trial only if it has a defined expected benefit.
+
+**Next:** complete the faster-line source-plant feasibility/continuation
+analysis on clean saved states and the uncovered corner interval; then obtain
+the missing default-line same-state comparison before any recovery-policy
+change. Any eventual policy trial must retain the 750 ms exact gate, 75 ms
+recovery validation, q/steering envelope, and strict 20 ms admission rule.
+
+### 2026-10-22 — quality-aware prefix policy on the faster IPOPT line
+
+Followed PR-04 of
+`/home/akselmo/Downloads/SDU_Apex_MPC_Odometry_Fix_Next_Steps_Handoff_2026-10-22.md`
+with one supervised live trial. The policy was enabled only in a run overlay;
+`quality_aware_prefix_selection_on_rejection` remains `false` in the
+competition configuration. The full-prior-suffix preference remained off.
+The established practice batch-mode launch and pre-armed watcher were used;
+the faster IPOPT trajectory and physics were not edited.
+
+Run: `live_runs/mpc_ipopt_v1_quality_prefix_20261022_run1/`.
+
+- The controller loaded the 1,024-point, 27.55 m IPOPT trajectory. It issued
+  109 commands and scored 115 diagnostics (including five localization-wait
+  records). There were **0 completed laps**.
+- Outcomes: 65 optimal full-horizon accepts, 10 feasible full-horizon
+  accepts, 5 accepted candidate prefixes, 29 accepted retained-plan prefixes,
+  and one unpublished nonlinear rejection. Across the 35 rejection-policy
+  decisions, it accepted a retained-plan prefix 29 times, a candidate prefix
+  5 times, then rejected when neither prefix passed exact validation.
+- The prefix selector found the chosen prefixes locally exact-valid and
+  selected between them by their runtime nonlinear cost; that does **not**
+  certify a viable remaining 750 ms continuation. Tracking deteriorated
+  during the run: diagnostic cross-track RMSE 0.185 m (max absolute 0.677 m),
+  heading RMSE 0.165 rad (max absolute 0.516 rad), and speed-error RMSE
+  2.641 m/s. The terminal rejection was a corridor failure at stage 2, at
+  progress 28.763 m.
+- The first collision message was received 110 ms after the unpublished MPC
+  rejection, during termination; the run is therefore **not** described as
+  collision-free. No evidence establishes that the collision caused the MPC
+  rejection.
+- Command-publication admission timing was p50/p95/p99/max
+  **6.893/10.472/10.931/12.001 ms**, with zero of 109 published commands at
+  or over 20 ms. This trial did not expose a timing overrun.
+- Bag, metadata, manifest, overlay, `report.json`, and `cycles.csv` are
+  retained in the run directory. The live evidence is a failed attempt to
+  drive the faster line, not proof that the line is physically infeasible or
+  that the quality-aware policy improves reliability.
+
+Decision: **do not promote** the quality-aware policy or faster line. Its
+75 ms exact-prefix comparison was insufficient to prevent cumulative loss of
+tracking, and the policy selected the retained-plan prefix on most recovery
+decisions. This is evidence for the handoff's next question—whether a local
+prefix choice restores full-horizon viability—not evidence that the retained
+plan alone caused the failure. Before another live attempt, replay the exact
+selected controls and state chain from this run alongside the held-out default
+and IPOPT captures; score the next-state/full-suffix feasibility and
+continuation quality, not only the 75 ms prefix objective. Do not repeat the
+same run unchanged.
+
+The quality-aware branch is still default-off and all its published actions
+passed its exact 75 ms source-plant/corridor gate and the existing 20 ms
+admission gate. The run's terminal cycle published no replacement command;
+the independent watcher terminated the run. Runtime logs and the bag should
+be retained together for the next causal analysis.
+
+### 2026-10-22 — full-prior-suffix policy on the faster IPOPT line
+
+The follow-up changed only the run overlay setting
+`prefer_full_validated_prior_plan_on_rejection: true`, retaining
+`quality_aware_prefix_selection_on_rejection: true`; both remain disabled in
+the competition YAML. Trajectory, map, physics and weights were unchanged.
+An initial exploratory launch was not recorded because the bag recorder was
+omitted; it is excluded as evidence and retained without deletion. The repeat
+below had the watcher and bag recorder armed before batch-mode Unity started.
+
+Run: `live_runs/mpc_ipopt_v1_quality_full_suffix_20261022_run2/`.
+
+- The faster-line run completed **0 laps**. It issued 103 commands: 68
+  optimal full-horizon, 1 feasible full-horizon, 1 candidate-prefix and 33
+  prior-plan commands, followed by one unpublished exact nonlinear corridor
+  rejection. The terminal rejection occurred at progress 28.547 m,
+  `e_y=0.750 m`, `e_psi=0.487 rad`, `u=3.318 m/s`, target speed 2.801 m/s,
+  curvature −1.065 m⁻¹; the candidate failed at stage 2. The 100-iteration
+  terminal solve had primal/dual residuals 1.114/2.253.
+- The full-prior-suffix check ran 35 times; 32 checks were exact-valid. This
+  means the **remaining** suffix of the stored plan was valid, not that a new
+  750 ms plan was available each cycle. As that plan was consumed, the checked
+  horizon decreased from 29 controls to 3. Across the final eight valid
+  checks, cross-track error rose from 0.404 m to 0.616 m while heading error
+  rose from 0.213 rad to 0.407 rad. The next candidate-prefix attempt was
+  accepted once, then the next cycle had no exact-valid option. Thus retaining
+  a valid old suffix did not prevent accumulating tracking error or eventual
+  loss of a certified command.
+- The quality selector was exercised once, earlier in the run: both local
+  75 ms prefixes passed exact validation and it selected the retained plan
+  (prior objective 1,208 vs candidate 34,143; both minimum slacks 0.346 m).
+  This does not demonstrate a quality or lap-completion benefit.
+- Controller diagnostic tracking RMSE was 0.213 m cross-track, 0.138 rad
+  heading and 2.550 m/s speed error. No lap time was recorded. The first
+  collision message arrived 140 ms after the MPC rejection during termination;
+  neither the rejection nor its cause is attributed to that later collision.
+- Command-publication admission timing was p50/p95/p99/max
+  **6.357/11.079/11.960/13.641 ms**, with 0/103 at or above 20 ms. Timing
+  was not the observed failure.
+- Fixed-input source-plant replay used 84 rolling 750 ms windows, each
+  initialized from its logged plant state and propagated with recorded
+  queue-slot-2 commands; future truth was scoring-only. No windows were
+  excluded by the pose/twist closure screen. Endpoint XY RMSE was **3.916 cm**,
+  p95 **5.965 cm**, max **6.272 cm**; 24/84 endpoints exceeded 5 cm. Maximum
+  path error over each 750 ms was >5 cm in 28/84 windows (path-max RMSE
+  4.04 cm, p95 6.08 cm, max 6.27 cm). At 750 ms, `u` RMSE was 0.0351 m/s,
+  `v` 0.0018 m/s, yaw-rate 0.0132 rad/s and yaw 0.0031 rad. These are
+  short-run, reinitialized fixed-input results, not a continuous lap-start
+  forecast or a guarantee of MPC tracking.
+- The separate logged-MPC-horizon comparison gave 75 ms XY RMSE 1.16 cm
+  (max 3.41 cm) and 750 ms RMSE 0.302 m (max 0.588 m). Since the controller
+  replans and publishes new commands every 25 ms, this comparison is **not**
+  fixed-input plant accuracy; it includes planned-versus-later-executed
+  command divergence.
+- Bag, report, cycles CSV, trajectory audit, source-rollout case index,
+  overlay and sealed manifest are retained in the run directory. The source
+  rollout was recomputed from the bag with the current
+  `libunity_source_plant_eval.so`.
+- The run-specific trajectory audit found a 27.551 m, 1,024-point line with
+  minimum aligned geometric footprint slack 0.134 m after the requested 5 cm
+  clearance; its geometry-only test passes. Peak reference speed is 8.487 m/s,
+  peak |curvature| 1.117 m⁻¹ and peak lateral-acceleration demand 8.40 m/s².
+  This does **not** establish throttle/steering dynamic feasibility: the audit
+  selected no preceding full-horizon plans for source replay, and explicitly
+  makes no global infeasibility claim.
+- Its two terminal same-state comparisons show the limitation of the prior
+  plan: at progress 28.500 m the new 30-control candidate first violates the
+  corridor at stage 5, while the retained plan is valid only through its
+  remaining 2 controls; at 28.547 m the candidate fails at stage 3 and the
+  retained plan has only 1 valid remaining control. These are source-plant
+  counterfactuals, not closed-loop outcomes. Fixed-steering q=0.01 and q=1.0
+  counterfactuals both first violate at stage 5; neither is an optimized or
+  accepted plan, so this does not show that all legal throttle schedules fail.
+
+Decision: **do not promote either recovery flag or the faster line.** This
+second supervised trial still reached no lap and ended in a corridor rejection
+despite the full-prior-suffix check. The measured short-window plant replay is
+near 5 cm on average but has a tail above the target, while controller tracking
+error was already large. The next step is offline same-state/continuation
+analysis of the captured final steering-reversal chain and the IPOPT
+feasibility audit—not another unchanged live run. Determine whether the loss
+is dominated by solver quality, reference speed/input feasibility, or
+steering/actuator state mismatch before changing weights or launching again.
+The candidate and faster-line trial remain development-only; the trusted
+reference and runtime physics were not edited.
+
+Verification after this analysis: `python3 -m unittest
+tools.test_export_mpc_run_report tools.test_audit_mpc_trajectory_feasibility
+-v` passes 24/24; `cmake --build build/f1tenth_mpc --target
+mpc_controller_node -j4` succeeds; `git diff --check` passes. No simulator,
+MPC, recorder or watcher process/container remained running after the test.
+
+## 2026-10-22 — handoff clarification and sealed faster-line follow-up
+
+The active task brief is
+`/home/akselmo/Downloads/SDU_Apex_MPC_Odometry_Fix_Next_Steps_Handoff_2026-10-22.md`.
+This follows its PR-00 evidence, PR-03 feasibility, and PR-04 continuation
+requirements; it does **not** treat a nominal trajectory-time estimate as a
+successful lap. The earlier default-line five-lap capture and two IPOPT
+attempts remain separate evidence classes.
+
+### Fresh full-speed practice attempt
+
+Run: `live_runs/mpc_fastline_5lap_20261022/`. The pre-launch manifest is sealed
+and records the current workspace revision, dirty-source hashes, current dev
+controller image, practice simulator image, practice map and requested IPOPT
+trajectory. This was the current production MPC, batchmode with graphics, no
+speed cap, no parameter overlay, eight Jacobian workers, and the strict 20 ms
+publication-admission limit. Runtime physics, controller weights and the
+trajectory file were not edited for this attempt.
+
+- Outcome: **0 laps**. There were 240 published commands, 212 full-horizon
+  exact accepts, 28 candidate-prefix accepts, then one unpublished exact
+  corridor rejection at 6.1576 s (stage 2). The first collision message was
+  138 ms later, during termination; collision is not identified as the cause
+  of the MPC rejection.
+- Publication-admission timing p50/p95/max was
+  **6.764/10.366/12.673 ms**, with no sample at/above 20 ms and no callback
+  interval over 25 ms. Timing did not explain the observed failure.
+- Diagnostic tracking RMSE was 0.181 m cross-track, 0.207 rad heading, and
+  2.384 m/s speed error. Near progress 39.48 m the state was still close to
+  the path (`e_y=0.030 m`, `e_psi=-0.003 rad`). The first subsequent full
+  horizon candidate failed at stage 25. In the ensuing prefix sequence,
+  cross-track and heading errors grew to 1.040 m and 1.119 rad. At progress
+  39.903 m, path curvature was −0.297 m⁻¹, measured yaw rate −1.169 rad/s,
+  current physical steering −0.198 rad, while the next command was +0.305 rad;
+  later physical steering/yaw rate became positive while the reference
+  curvature remained negative. Residuals were poor and every cycle in the
+  terminal 14-action chain hit the 100-iteration cap (chain maximum primal
+  residual 6.926, dual 1.671). This is direct evidence that the published
+  short-prefix sequence degraded tracking under a difficult, iteration-limited
+  solve. It is **not yet proof** whether the initiating cause is the QP
+  nominal/linearization, objective/constraints, command effect epoch, or an
+  interaction. The bag lacks a Unity FixedUpdate command-effect ID.
+- Warm-start audit for this run matched the next nominal first control to the
+  issued prefix's next control exactly within 1e-5 on all 28 prefix
+  transitions; this particular warm-start alignment is not the observed
+  mismatch.
+
+### PR-03/04 offline evidence from this capture
+
+`trajectory_feasibility_latest.json` and its CSV witnesses were generated
+with the current `libunity_source_plant_eval.so` and the exact bag. The IPOPT
+line has 1,024 points over 27.551 m, maximum reference speed 8.487 m/s and
+maximum |curvature| 1.117 m⁻¹. The geometry-only heading-aware footprint audit
+passes the requested 5 cm clearance, with minimum remaining corridor slack
+0.134 m. Geometry passing does not imply dynamic trackability.
+
+One captured, exact-full-horizon-accepted plan beginning at progress 40.330 m
+replayed through the source plant for all 30 stages with maximum discrepancy
+from the controller's logged prediction below 4.4e-7 in the compared Frenet
+states. It remained corridor-valid with 0.201 m minimum slack, but its speed
+tracking RMSE was 0.594 m/s. This verifies source replay parity for that saved
+plan—not future Unity accuracy or the candidate's global feasibility.
+
+The candidate/prior counterfactual covers 29 saved states around the run:
+both local 3-step prefixes were source-plant/footprint-valid on 28 states;
+the prior prefix had lower local objective on 20/28; its remaining suffix was
+exact-valid through all recorded remaining controls on 16 states and survived
+more stages on 15. The candidate suffix failed its full captured continuation
+screen on all 29. These are same-state offline comparisons; they do not
+establish a closed-loop benefit from switching to the prior prefix.
+
+The fixed-input source-plant score has 221 clean 750 ms windows: endpoint XY
+RMSE 3.742 cm, p95 8.006 cm, max 9.182 cm; 45 endpoints and 46 full paths
+exceed 5 cm. `u/v/yaw-rate/yaw` RMSE are 0.03385 m/s, 0.00348 m/s,
+0.02429 rad/s, and 0.00655 rad. Separately, the recorded MPC-plan versus later
+truth comparison has 750 ms XY RMSE 0.3985 m; because the controller replans,
+that is not a fixed-input plant score. Neither result establishes a complete
+lap-level prediction.
+
+A saved-state weight/iteration probe on 28 turn states adds no promotion:
+100 vs 200 iterations both yielded 9 exact-full-horizon accepts; multiplying
+heading weight by 3 yielded 8; multiplying overspeed weight by 4 yielded 10.
+The overspeed result is only one additional accepted saved state. It does not
+justify a global weight change. These probes are offline reconstructions and
+do not restore live ADMM memory.
+
+### PR-00 evidence additions and decision
+
+The machine-readable run comparison at
+`docs/development/MPC_HANDOFF_BASELINE_COMPARISON_20261022.json` now includes
+this sealed run, bag/report/cycle hashes, timing, separated fixed-input vs
+logged-MPC rollout metrics, and the latest feasibility/counterfactual report.
+The report previously named `source_rollout.json` was plain text, so it is
+retained as `source_rollout.txt` to match its actual format.
+
+Added 28 post-fix saved-state QP fixtures under
+`live_runs/mpc_qp_post_odom_epoch_fix_20261022_fastline_run3/fixtures/`,
+without overwriting the existing 125-fixture historical corpus or the prior
+55-fixture post-fix delta. All 28 sidecars validate, round-trip byte-identically,
+and reproduce the captured replay solver result exactly. These are
+saved-state QPs, not historical live ADMM-memory snapshots.
+
+#### PR-04 — controlled cold-start source-reference-seed check
+
+To avoid conflating a changed nominal with prior-row ADMM memory, replayed the
+same 28 `turn_states.csv` rows twice with per-row solver-memory reset, cold
+ADMM initialization, identical queue/state, eight Jacobian workers, 100
+iterations and identical weights: ordinary cold start (`independent`) versus
+`reference-seed`. The fixture/state input SHA-256 is
+`36c51056d4719cb8611a62768cad6a3a14829b1ffcfaa48d1d247a4c0c7b5185`; replay
+binary SHA-256 is
+`da882518c6d78f60b4cc486c269f9e6c96df16ddfc4bdbf4920ebdf02ef673ab`.
+
+- Both arms produced exactly 3 optimal full-horizon accepts, 6 feasible
+  full-horizon accepts, and 19 nonlinear-rollout rejections (9/28 exact
+  full-horizon accepts each); no row changed status.
+- On jointly accepted rows, first commands, nonlinear objective and corridor
+  slack were identical; the median minimum slack was 0.166328 m in both arms.
+  Maximum measured replay cycle was 7.890 ms vs 9.086 ms, respectively; this
+  is offline host timing, not a live 20 ms claim.
+
+This resolves an important experiment-design trap: the existing
+`reference-seed` mode is not a distinct feasible-continuation method for a
+cold solve. Ordinary cold nominal construction already generates the same
+reference/speed seed and rolls it through the source plant. Therefore this A/B
+shows no benefit and **does not satisfy PR-04(C)**, which requires a genuinely
+different full-horizon source-plant-derived feasible continuation. No
+production policy or behavior was changed. The next coding item is to build
+that distinct offline continuation candidate, then compare it against the
+captured candidate and certified-plan suffix at the same saved states; do not
+repeat this equivalent cold-seed A/B.
+
+#### PR-04(C) — source-plant-feasible blended continuation, replayed through MPC
+
+Implemented a development-only same-state experiment. For every candidate /
+retained-plan pair, formed three deterministic full-horizon control sequences
+with candidate weights 0.25, 0.50, and 0.75; a short prior suffix is extended
+by holding its last action. The current source plant replayed each sequence
+from the saved plant state and two-slot command queue. For MPC replay, selected
+the lowest logged nonlinear objective among source-valid blends with a
+strictly nonnegative physical corridor margin. This is a seed-generation
+search from available current-cycle data, not a hand-tuned production
+controller. The replay executable accepts the sequence only through the
+development-only `MPC_REPLAY_NOMINAL_SEED_CSV` environment variable. Production
+launches/code do not read it.
+
+| Capture | Source-plant blend trials | States with a selected positive-slack seed | Ordinary cold full-horizon accepts | Seeded exact full-horizon accepts | Interpretation |
+|---|---:|---:|---:|---:|---|
+| IPOPT fastline run 3 terminal turn | 87 | 5 | 3/5 | 5/5 | Two cold rejects became exact-valid. Among the 3 jointly accepted states, median nonlinear objective changed 23,188 → 34,101; median slack 0.1776 → 0.1818 m. |
+| Successful default mintime run | 30 | 10 | 3/10 | 10/10 | Seven cold rejects became exact-valid, with no acceptance regression in this selected set. On the 3 jointly accepted states, median objective 3,200.9 → 3,194.0; median slack 0.3416 → 0.3426 m. |
+| IPOPT fastline run 1, transfer capture | 141 | 24 | 17/24 | 17/24 | Four cold rejects were rescued, but four previously accepted states became rejected; net acceptance is unchanged. On 13 jointly accepted states, median objective worsened 19,207 → 32,602 and median slack fell 0.2074 → 0.1609 m. |
+
+Every seeded accepted result passed the MPC replay's own exact 30-stage
+nonlinear source-plant/corridor validator; these counts are not based on the
+blend seed simply being valid. Runs reset ADMM memory at each row, use cold
+initialization, eight Jacobian workers and the same 100-iteration solver
+configuration. They do not reconstruct live ADMM state. The state sets are
+selected states with available positive-slack candidate/prior blends, not
+random or independent samples. Offline replay maxima were below 12 ms, but
+that is not live timing under Unity/ROS load.
+
+**PR-04(C) conclusion:** the continuation seed is implementable and can rescue
+specific difficult states, including states on both the failed fastline and
+successful default reference. Its transfer capture also demonstrates equal
+net acceptance with material per-state regressions and worse objective/margin.
+Therefore **do not promote it as a general recovery policy or run it in
+production**. It is evidence that local full-horizon feasible control
+continuations exist where a cold solve can fail—not evidence that this blend
+selector is safe or faster closed-loop. Retain it as an offline comparison
+tool while the next step examines the four rescue/four regression transitions
+and whether their first-action/quality differences can be predicted from
+causal current-state diagnostics without another solve.
+
+**Decision:** do not promote the IPOPT trajectory, change production weights,
+or rerun the same fast-line experiment unchanged. The best-supported next
+engineering step is PR-04's rescue-versus-regression analysis of the
+source-derived feasible-continuation seed on these captured states, followed
+by PR-03's per-progress dynamic feasibility analysis from the last clean
+full-horizon state. The key unresolved fact is
+why the optimizer emits a direction-reversing, poor-residual candidate after
+its full horizon first fails while a short prefix still passes its local
+75 ms corridor check. Continue to distinguish solver-quality failure from
+reference-speed/input feasibility and command-effect timing before making a
+production change.
+
+#### PR-04(C) follow-up — inspect the held-out rescue/regression transitions
+
+Compared row-level solver diagnostics and initial controls for all changed
+acceptance decisions in the 24-state fastline transfer capture. Four rows
+changed rejected → exact full-horizon accepted (progress 18.0469–18.4759 m);
+four changed exact full-horizon accepted → rejected (28.2254, 28.8713,
+29.0836 and 29.4693 m). The states are in distinct portions of the captured
+run, so this comparison is descriptive rather than a randomized paired-policy
+result.
+
+| Outcome under source seed | Progress m | Input (u,v,r) at saved state | Seed first action ((\delta,q)) | Solver diagnostic |
+|---|---:|---|---|---|
+| Reject → accept | 18.0469 | (-0.197, 0.044, 1.457) | (-0.090, 0.120) | Seeded residuals became small (primal 0.0178→1.91e-6; dual 0.0141→2.67e-5). |
+| Reject → accept | 18.2333 | (-0.194, 0.078, 1.874) | (-0.026, 0.051) | Seeded solve accepted with 0.315 m minimum margin; primal rose to 0.0206 but remained accepted. |
+| Reject → accept | 18.3645 | (-0.130, 0.039, 2.174) | (-0.075, 0.264) | Both solves had low residuals; the cold arm failed nonlinear validation, while the seeded arm passed with 0.071 m margin. |
+| Reject → accept | 18.4759 | (-0.124, 0.052, 2.338) | (-0.074, 0.118) | Seeded residuals worsened to 0.0131/0.0182 but the exact nonlinear rollout passed. |
+| Accept → reject | 28.2254 | (0.159, 0.229, 3.255) | (-0.469, 0.094) | Cold arm already had poor residuals (0.292/0.352) but passed exact validation; seeded arm failed solve/validation. |
+| Accept → reject | 28.8713 | (0.442, 0.084, 1.873) | (-0.471, 0.161) | Seed worsened residuals 0.0113/0.0197→0.141/0.218. |
+| Accept → reject | 29.0836 | (0.443, -0.142, 2.327) | (-0.512, 0.139) | Seed worsened residuals 3.81e-6/7.34e-5→0.0196/0.0189. |
+| Accept → reject | 29.4693 | (0.330, -0.290, 3.019) | (-0.179, 0.195) | Seed worsened residuals 4.29e-6/7.68e-5→0.0199/0.0110. |
+
+**Finding:** yaw rate is elevated in both rescued and regressed rows (about
+1.46–3.26 rad/s); the intervals overlap substantially. A simple speed, yaw,
+or corridor-margin threshold is therefore not supported by this tiny selected
+set. In some rescued cases the seed helped numerical convergence; in others
+it changed nonlinear acceptance despite similarly small residuals. The
+regression rows show the seed is not reliably aligned with the solver's local
+basin even when its own 30-step source rollout has positive corridor margin.
+This fails PR-04's quality-aware-selection requirement. Do not add a heuristic
+filter or production branch based on these rows. Next, compare the actual
+candidate-prefix and retained-plan sequences at the same saved control epochs
+where bag instrumentation contains both; if the necessary full suffixes or
+post-publication cursor are absent, mark that arm unreconstructable and add
+bounded nonblocking development capture before a new supervised run.
+
+#### PR-03 extension — dynamic feasibility witnesses by progress bin
+
+The PR-03 report already emitted geometric corridor bins, but dynamic blend
+feasibility was summarized only over the whole bag. Added
+`summarize_dynamic_feasibility_by_progress()` to the existing audit tool and
+now emit a separate `*_dynamic_feasibility_bins.csv` plus per-bin JSON summary.
+Each bin counts sampled saved states, tested candidate/prior blends, exact
+30-stage source-valid sequences and strictly positive-slack witnesses. A bin
+with no positive witness is explicitly labeled as a finite-search result,
+never as physical infeasibility. Original audits, bags, and trajectory files
+were left untouched; reports were regenerated to separate `pr03_*` paths.
+
+| Capture | Unwrapped bins sampled | Bins with a positive-slack witness | 30-step source-valid blends / tested | Uncovered bins |
+|---|---:|---:|---:|---|
+| Fastline run 3 (terminal chain) | 8 | 6 | 30/87 | 40.5–41.5 m (9 saved states) |
+| Default mintime five-lap capture | 4 | 3 | 23/30 | 86.0–86.5 m (2 saved states) |
+| Fastline run 1 transfer capture | 17 | 11 | 56/141 | 33.0–33.5 m and 39.0–41.5 m |
+
+For the failed run-3 terminal chain, the finite candidate/prior blend set has
+no positive-margin full-horizon witness in the final 40.5–41.5 m interval,
+although witnesses exist in earlier bins, including 40.0–40.5 m. This
+localizes where these tested continuations stop working; it does not establish
+that no other legal sequence can traverse those states. Fastline run 1 shows
+the same pattern later in its run, while the successful default capture has
+tested witnesses at its sampled high-curvature states. The run progress is
+unwrapped across laps and should not be compared as a common lap-relative
+coordinate without explicit modulo mapping.
+
+Validation after the change: 22 focused Python tests pass, Python compilation,
+JSON parsing and `git diff --check` pass. No production source, MPC behavior,
+weights, or trajectory changed; no simulator was launched. The dynamic-bin
+summaries and source witnesses are diagnostic and offline.
+
+#### PR-04 follow-up — recheck next-epoch viability with the third backtrack
+
+The first branch-viability replay accidentally configured only two line-search
+backtracks, so it did not test the configured `alpha=0.125` trial. Corrected
+`tools/replay_mpc_prefix_branch_viability.py` to use three backtracks and added
+a unit test that pins this setting. Added an explicit `--state-row` selector
+to `tools/search_mpc_source_plant_continuation.py` so candidate/prior rows with
+nearly identical progress can be tested without silently selecting the wrong
+branch endpoint.
+
+Replayed all 14 candidate/prior pairs from the same run-5 bag using three
+backtracks. All 28 prefixes remained exactly corridor-valid over 75 ms, but
+all 28 subsequent 750 ms cold MPC solves still rejected at nonlinear corridor
+validation (status 6), even after exercising the `alpha=0.125` trial. Failure
+stages ranged from 0 to 18. Thus the earlier “all fail” conclusion is now
+confirmed for the tested three-backtrack policy rather than the incomplete
+two-backtrack configuration.
+
+At the first failure state (`s=27.034 m`), the prior-prefix endpoint has a
+source-plant continuation witness with 30/30 stages and +0.122 m minimum
+corridor slack. It reduces speed from 5.56 to 2.34 m/s over 750 ms, with
+1.02 m/s speed-reference RMSE; the production objective is 32,925 and is
+dominated by cross-track (25,220), heading (4,345), and yaw-rate (336) terms.
+This is a feasible but very slow, poor-tracking continuation—not a fast-line
+recovery. The previous certified-plan suffix after the three-action prefix,
+extended by holding its last remaining action, violates the corridor from
+both branch endpoints (first violation at stages 16/17; minimum slack −1.306/
+−1.264 m).
+
+The prior-endpoint source witness was then tested as an MPC nominal seed with
+three backtracks. It transferred to the nearby candidate-prefix endpoint and
+remained exact source-plant valid (+0.127 m slack). From both endpoints MPC
+accepted a full 30-stage exact rollout at `alpha=0.125` (status 8): prior
+endpoint slack +0.100 m/objective 35,683; candidate endpoint slack +0.167
+m/objective 31,617. The unseeded candidate endpoint still rejected at stage
+18. Offline cycle measurements were 11.95 and 16.86 ms respectively; they are
+not live timing evidence. The objective improved versus the source seed on the
+candidate branch but regressed on the prior branch, so this two-state result
+does not establish a quality-safe general recovery policy.
+
+Artifacts are under
+`live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/`:
+`prefix_branch_viability_v3/`, `branch_continuations/prior_27_034/`, and
+`branch_continuations/candidate_27_034_seeded_with_prior_witness/` (plus the
+explicit failed finite-start searches). These are offline counterfactuals on
+the in-process source plant; they are not Unity live validation. No production
+controller, weights, reference trajectory, or vehicle physics changed, and
+no simulator was launched. PR-04's production/release gate therefore remains
+open: broader held-out quality transfer and successful-default-line no-
+regression evidence are still required before any live recovery change.
+
+#### PR-04(C) — branch-set source-seed transfer and full-stage refinement
+
+Ran the exact production-objective source-plant continuation search on all 28
+predicted branch endpoints (14 candidate/prior pairs), with the same two
+bounded feed-forward initializations. Only one endpoint (the prior branch at
+the first pair, `s=27.448 m`) produced a full 30-step positive-slack witness;
+the other 27 had no witness in this finite 10-knot search. This is a bounded
+search result, not evidence that those states are physically infeasible.
+Seeding the corresponding MPC replay from that witness produced one exact
+full-horizon acceptance (`alpha=0.125`, +0.100 m slack); the unseeded replay
+rejected at stage 16.
+
+Transferred that same witness to its paired candidate endpoint. Its independent
+source rollout remained corridor-valid (+0.127 m slack), and the exact MPC
+replay accepted at `alpha=0.125` (+0.167 m slack). Thus the same control seed
+rescued both sides of this one matched pair; it did not transfer to the later
+branch states.
+
+Added a development-only 30-knot parameterization to the source-continuation
+search to refine the 10-knot feasible witness with a steering/throttle decision
+at every 25 ms stage. From the prior endpoint, refinement lowered the exact
+production objective 32,925 → 31,868 (3.2%), reduced speed-reference RMSE
+1.018 → 0.912 m/s, increased terminal speed 2.34 → 2.69 m/s, and retained
++0.114 m source-plant corridor slack. SLSQP nevertheless reported
+`Inequality constraints incompatible` after 8 iterations; the returned point
+was exactly re-evaluated and was feasible, but this is not a robust optimizer
+convergence result. The maximum absolute cross-track error remained about
+0.67 m.
+
+MPC replay from that refined seed accepted both paired endpoints, but the prior
+branch had only +0.0039 m remaining corridor slack and residuals 0.215/0.102;
+the candidate branch had +0.105 m slack. These are exact source-plant replay
+results, not Unity runs. The near-zero margin and residual quality fail the
+recovery quality gate, despite full-horizon acceptance. No policy is promoted.
+
+Artifacts are under
+`live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/branch_seed_transfer_14pairs/`
+and `branch_continuations/prior_27_034_fullgrid_refinement/`. The diagnostic
+tool now supports `--decision-knots 10|15|30`; production code and the loaded
+IPOPT trajectory remain unchanged. PR-04 still lacks broad accepted-quality
+transfer, safe corridor margin across the difficult-state corpus, and a
+no-regression comparison against the successful default line. Therefore the
+handoff gate for a supervised fast-line run is not met yet.
+
+#### PR-04 quality check — accepted nonlinear step can worsen exact cost
+
+Compared the accepted MPC candidates against the exact production objective
+of the same 30-stage feasible nominal seed, after applying the replay's actual
+one-action warm-start shift and hold-last-action convention. At the prior
+endpoint, exact cost rose 31,867.76 → 39,939.88 (+25.3%) while remaining
+corridor-valid with only +3.94 mm slack. At the candidate endpoint, cost rose
+34,305.76 → 36,213.57 (+5.6%) with +0.105 m slack. Both results are
+`ACCEPTED_LINE_SEARCH` solely because the exact rollout/corridor validator
+passed; `mpc_rti.c` does not require nonlinear-cost improvement relative to the
+valid nominal. This is a concrete quality gap, not evidence of a physics-model
+mismatch.
+
+Next offline test: compare an objective-aware acceptance rule against current
+acceptance while retaining the exact-valid nominal when the update worsens
+cost. Count only cases where that nominal is itself full-horizon exact-valid;
+do not turn a rejected candidate into an assumed-safe action. Check both the
+fastline failure corpus and the successful default-line states before any
+production edit. No production policy was changed in this step.
+
+#### PR-04(D) — exact-objective lower-envelope screen on existing saved states
+
+Using the existing blend-seed replays, compared three same-state candidates:
+the positive-slack source-plant seed, the cold MPC result if exact-valid, and
+the source-seeded MPC result if exact-valid. For the 39 preselected states
+with a valid source seed (5 terminal-fastline, 10 default-line, 24 fastline
+transfer), the lowest-cost exact-valid candidate covered all 39 states. The
+winner counts were source-seed / cold-MPC / source-seeded-MPC = 1/1/3, 2/1/7,
+and 13/7/4 for those three captures. Minimum chosen source-model slack was
+0.173 m, 0.238 m, and 0.123 m respectively. In the 24-state fastline transfer,
+the source-seeded MPC itself accepted 17; the lower-envelope selector chose
+the source seed on 13 states, the cold MPC on 7, and the seeded MPC on 4.
+
+This supports the *mechanism* of a cost-aware choice among already computed
+and exactly validated candidates: it could avoid a worse nonlinear MPC update
+and retain a feasible source-derived sequence on selected states. It is an
+offline oracle/lower envelope, not a causal live-policy result: the cold and
+seeded MPC solves were performed separately, these states were selected
+because a valid blend seed existed, and no online candidate-generation cost
+was measured. The evidence does not authorize production integration or a
+fastline Unity run. Machine-readable rowwise results and input hashes are in
+`live_runs/mpc_ipopt_v1_prior_full_suffix_20261022_run5_supervised/alpha_seed_search/quality_envelope/`.
+
+A stricter same-solve comparison then used only the source-validated blend seed
+and its seeded MPC result: keep the MPC candidate only if it is exact-valid and
+its nonlinear objective is no greater than the already-valid seed. This
+counterfactual selected an exact-valid full-horizon sequence for all 39
+preselected states. It retained the seed / selected the MPC candidate on
+1/4, 2/8, and 19/5 states across the terminal-fastline, default, and fastline
+transfer captures. It avoided 1/5, 2/10, and 12/24 cost-increasing solver
+outputs; the fastline transfer's minimum selected slack was +0.124 m. This is
+the clearest current evidence for an objective-aware feasible-nominal guard.
+It is still an offline replay of selected states: seed construction cost and
+closed-loop behavior have not been measured. The next implementation remains
+development-only—record/compare the nominal and candidate costs in the replay
+harness first, then consider a default-OFF live experiment if that evaluation
+passes the strict timing and default-line checks.
+
+Next: implement the quality selector only in the offline replay harness and
+evaluate it without oracle leakage on every saved state for which all actions
+are causally available; compare cost, exact slack, accepted fraction and
+runtime against current candidate-first behavior. If that passes both fastline
+and default-line cases, then consider a default-OFF production experiment.
+
+#### 2026-10-22 follow-up — current-build selector replay and speed-feasibility probe
+
+Extended the offline continuation search so it can initialize from an exact
+30-stage source-plant witness, apply explicitly requested throttle offsets,
+and require additional corridor reserve. This keeps the refinement anchored to
+a known-feasible sequence instead of restarting from geometric steering. Added
+tests for seed loading, legal bounds, full-stage conversion, and quality
+selection across seeded and unseeded rows. The focused suite now passes 41
+tests. No production MPC, plant, weights, or trajectory changed.
+
+The same saved IPOPT terminal state (`s=27.44789 m`, `u=5.555 m/s`) was used
+for the new source-plant probe. The IPOPT speed reference there is 3.874 m/s;
+within the next roughly 1.3 m it falls toward 2.75 m/s while curvature reaches
+about `|kappa|=1.11 1/m`. The state therefore enters this braking/turning zone
+about 1.68 m/s above its local reference. This is a measured state/reference
+mismatch, not by itself proof that the path is globally infeasible.
+
+With the exact steering sequence from the valid source witness held fixed,
+constant-throttle source rollouts gave:
+
+| Throttle | Full 750 ms corridor-valid | Minimum additional corridor slack | End speed |
+|---:|:---:|---:|---:|
+| 0.01 | yes | 0.147 m | 0.87 m/s |
+| 0.05 | yes | 0.142 m | 1.23 m/s |
+| 0.10 | yes | 0.078 m | 2.43 m/s |
+| 0.15 | no | −0.327 m | 3.62 m/s |
+| 0.20 | no | −1.344 m | 4.89 m/s |
+| 0.25 | no | −2.195 m | 6.09 m/s |
+
+This one fixed-steering sweep shows that a slower, legal source-plant
+continuation exists from the state, while larger throttle values on that same
+steering sequence leave the corridor. It does not identify the fastest
+possible sequence or prove the IPOPT speed profile globally infeasible.
+
+The witness-seeded, 30-knot optimization with a required extra 5 cm corridor
+reserve returned a full 30-stage source-valid sequence with 11.72 cm minimum
+slack, objective 32,205.7, progress gain 1.866 m, and end speed 2.547 m/s.
+The original seed objective was 32,925.4, progress gain 1.857 m, and end speed
+2.343 m/s. A +0.02 throttle-offset initialization also remained source-valid
+(6.06 cm slack) and ended at 2.781 m/s, but its objective was higher at
+35,725.3. The +0.05 and +0.10 offsets did not find a valid sequence. Thus the
+small objective improvement is real in the source evaluator, but remains a
+slow local continuation with substantial cross-track error; it is not a faster
+raceline solution.
+
+### Reproducibility check against the currently built replay executable
+
+The earlier PR-04 report’s accepted status-8 replay used solver executable
+SHA-256 `5e023718…`, whereas the current `build/f1tenth_mpc/mpc_bag_solver_replay`
+is `b6f8d9f8…`. Replaying the identical `s=27.44789 m` state and identical
+source-feasible seed through the current binary twice returned status 6 both
+times (exact nonlinear corridor failure at stage 15/16); the source seed
+itself still replays valid with +12.17 cm source corridor slack. The old
+accepted result is therefore not reproducible on the currently built solver
+and is not evidence for a current-build recovery. The binary, state, seed,
+trajectory, and source-plant hashes are retained in the run artifact. This
+does not identify whether the difference is solver-version behavior or the
+candidate update moving away from the valid nominal; it demonstrates that
+solver acceptance is binary/build-specific and must be rechecked.
+
+Added a reproducible replay/report path that records every saved state, not
+only states with an available source-valid seed. Current-build results:
+
+| Capture | All saved states | Source-valid seed coverage | Ordinary cold exact accepts | Selector full-horizon valid | Selected-vs-cold cost increases on jointly valid states |
+|---|---:|---:|---:|---:|---:|
+| Fastline run-3 terminal subset | 28 | 5 | 9 | 11 | 1/9; worst +47.1% |
+| Default mintime success | 1,276 | 10 | 1,194 | 1,201 | 1/1,194; worst +0.17% |
+| Fastline run-1 transfer | 224 | 24 | 179 | 186 | 7/179; worst 17.57× at progress 38.610 m |
+
+Selector composition on those full saved-state populations was, respectively:
+6 cold-valid / 4 seeded-MPC candidate / 1 retained source seed / 17 no valid
+action; 1,191 cold-valid / 8 seeded-MPC candidate / 2 retained seed / 75 no
+valid action; and 162 cold-valid / 5 seeded-MPC candidate / 19 retained seed /
+38 no valid action. All selected actions were exact-valid in the in-process
+source plant. However, the fastline transfer contains a severe objective
+regression versus the cold replay, and the default set contains a small one.
+The selector also used only 5/28, 10/1,276, and 24/224 states with tested
+source-valid seeds. Seed-generation and extra exact-plant-validation cost are
+excluded from replay timing. This is still a counterfactual offline selector,
+not a causal, timing-qualified live policy.
+
+### Decision / gate
+
+This produced concrete implementation and data: a reusable witness-seeded
+feasibility refinement, complete-population offline objective-selector
+reporting, and a throttle/corridor response measurement from the fastline
+failure state. It does **not** make the faster line ready for the simulator.
+PR-04 fails its quality/no-regression gate (including the 17.57× transfer
+outlier), and the current replay binary does not reproduce the prior claimed
+seeded acceptance. PR-03 also still lacks a source-plant-feasible, connected
+full-lap control/speed schedule. No simulator was launched; no fastline lap was
+achieved. The original IPOPT CSV and default mintime trajectory remain
+unchanged.
+
+Next: diagnose the progress-38.610 objective outlier and the current-build
+stage-15/16 rejection from the exact state/seed; then determine whether a
+source-valid low-speed continuation can be connected to the next speed-profile
+segment without losing corridor margin. Do not promote the selector or launch
+the fastline until that comparison passes on the difficult set and default
+no-regression gate.
+
+#### 2026-10-22 correction — quality selector must include the cold candidate
+
+The v2 full-population selector had a comparison omission: on states with a
+source-valid seed it compared only that seed against the seeded MPC result,
+even though an ordinary cold replay had also been computed for the same saved
+state. Consequently it could select a valid but much worse seeded result over
+an already available valid cold result. The previously reported 17.57x
+fastline-transfer “selector regression” at `s=38.6095073 m` was real for the
+v2 selector, but was an offline selector defect—not evidence that cold MPC
+itself selected that action.
+
+Corrected the *development-only replay selector* to choose the lowest exact
+nonlinear objective among all exact-valid candidates available offline:
+ordinary cold MPC, source-plant seed, and source-seeded MPC. Reran all three
+current-build saved-state populations into separate `..._v3` artifact
+directories. This does not alter production code, and the selector is an
+offline lower envelope: computing both cold and seeded solves plus source
+validation is not a measured or feasible live-cycle policy.
+
+| Capture | States | Seed coverage | Cold exact-valid | Seeded MPC exact-valid | Selector exact-valid | Selection counts (cold / seed / seeded / none) | Improvement vs cold | Min selected slack |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fastline terminal subset | 28 | 5 | 9 | 5 | 11 | 7 / 1 / 3 / 17 | 2 lower-cost, 0 higher-cost | 14.87 cm |
+| Default mintime capture | 1,276 | 10 | 1,194 | 10 | 1,201 | 1,192 / 2 / 7 / 75 | 2 lower-cost, 0 higher-cost | 0.40 cm |
+| Fastline transfer | 224 | 24 | 179 | 17 | 186 | 169 / 13 / 4 / 38 | 10 lower-cost, 0 higher-cost | 0.51 cm |
+
+The key outlier is now explained more specifically. At `s=38.6095073 m`, cold
+MPC is status 0 after one iteration, with primal/dual residuals
+`5.72e-6 / 1.03e-4`, objective 3,614.21, and 17.56 cm slack. The exact-valid
+source seed has objective 92,606.80; seeding MPC from it reaches its 100-step
+limit with residuals `0.135 / 0.0282` and objective 67,108.57. The corrected
+selector therefore chooses cold MPC. This points to a poor source-seed basin
+and solver convergence sensitivity at this state, not a source-plant/Unity
+discrepancy. Across the fastline transfer set, 12/17 exact-valid seeded MPC
+outputs are still costlier than their source seed, despite exact corridor
+validity.
+
+The fastline remains gated. The corrected lower envelope still finds no tested
+action at 38/224 transfer states, and its minimum selected transfer slack is
+only 5.1 mm. The terminal subset has only 11/28 states with a selected exact-
+valid action. The default set's 1,201/1,276 result is a counterfactual
+upper-bound over sparse source seeds, not a production acceptance rate or
+closed-loop improvement. PR-03 still lacks a connected full-lap feasible
+control/speed witness. No simulator was launched, no production behavior was
+changed, and neither line's lap time changed.
+
+Validation after this correction: focused replay/feasibility pytest set: **43
+passed**; Python byte-compile passed. Reports and rowwise CSVs are in the three
+`mpc_seed_replay_currentbuild_v3/` folders listed in
+`docs/development/MPC_HANDOFF_BASELINE_COMPARISON_20261022.json`.
+
+Next useful step is not to promote the lower envelope. Investigate the
+source-seed construction at the 12 costly fastline states and the 38 states
+without any tested valid action, using their matched cold plans as starting
+points for source-plant continuation. Then evaluate connected continuation
+across adjacent epochs and preserve objective/slack. Only a broad, causal
+recovery result with default-line no-regression can unlock a supervised
+fastline run.
+
+#### 2026-10-22 follow-up — source-nominal merit guard and cold-plan continuation
+
+Extended the offline replay report to score a distinct, potentially causal
+same-cycle rule: compare the exact-valid source nominal against the exact-valid
+MPC update and retain the nominal if the update's exact nonlinear objective is
+higher. This is separate from the three-candidate offline lower envelope,
+which also knows the result of an independent cold solve and is therefore not
+a live one-solve policy. Focused replay tests now cover both comparisons.
+
+Across current-build seeded-state replays the same-cycle rule retained the
+source seed / accepted the update on 19/5 fastline-transfer states, 2/8 default
+states, and 1/4 terminal-subset states. It guarantees no objective increase
+relative to the supplied source seed by construction. That does **not** imply
+no regression relative to an independently computed cold solution: on the
+fastline transfer, 7 of the 17 states where both cold and guarded actions were
+valid remained higher cost than cold, worst at progress 38.6095 m (67,108.57
+versus 3,614.21, +17.57×). The prior/seed quality itself matters; merely adding
+a seed-relative merit check cannot recover a better cold basin without paying
+for another solve or having a better causal nominal already available.
+
+For the progress-38.6095 outlier, exported the accepted cold plan from the
+current replay executable and used it as the initial sequence for the exact
+source-plant continuation search. The cold plan is exact corridor-valid with
+17.56 cm slack; source optimization refined it to a 30-stage witness with
+17.06 cm slack, 3.096 m progress gain, 2.782 m/s terminal speed, 0.229 m/s
+speed-error RMSE, and production nonlinear objective 3,517.18 (versus 3,614.21
+for the cold plan). The seed's 5 cm extra reserve requirement was met.
+
+Replaying MPC from that source witness produced status 0 after one ADMM
+iteration, with small residuals (`0.0156` primal, `0.00208` dual) and an exact
+corridor-valid result (17.03 cm slack)—but the exact objective rose to
+40,154.52, **11.41× the source seed**. An independent source replay of the
+candidate's diagnostic control list attributes most of the cost to slip
+(22,285), cross-track (10,646), heading (5,796) and speed (1,649), with early
+throttle pulses up to 0.655 and 0.808 m/s mean speed overshoot. The diagnostic
+prints controls at six significant digits, so replaying that rounded sequence
+gives total cost 40,752.52 rather than the solver's 40,154.52 (1.49%
+difference); the component split is indicative, not exact attribution. The
+source seed itself has full-precision objective terms dominated by cross-track
+1,873, heading 915 and slip 531. This is direct evidence that “optimal” QP
+convergence plus exact corridor validity can still produce a very poor
+nonlinear merit step. It is not, by itself, evidence of a rollout-vs-Unity
+mismatch.
+
+Saved-state artifacts for the corrected all-candidate lower envelope and the
+same-cycle guard are in the three `mpc_seed_replay_currentbuild_v4/` folders;
+the detailed cold-plan/source-seed comparison is in
+`.../mpc_seed_replay_currentbuild_v3/cold_plan_diag/source_seed_merit_diagnostic.json`.
+The machine-readable ledger includes report hashes and metric summaries.
+
+Decision: this strengthens the case for a **development-only nonlinear
+objective merit/backtracking experiment**, not a live-policy change. Before
+production use, evaluate candidate-vs-current-nominal exact objective on a
+broad held-out set with the actual causal retained-plan state, preserve exact
+corridor gates, and test acceptance/quality on default and fastline sets. The
+fastline remains unapproved: only 186/224 transfer saved states and 11/28
+terminal-subset states have any selected exact-valid 750 ms action; transfer
+minimum selected slack is 5.1 mm; source seeds cover only 24/224 states; and
+there is no connected full-lap control/speed witness. No simulator was
+launched and no production source, weights, plant, or trajectory changed.
+
+#### 2026-10-22 — exact nonlinear objective merit guard: complete saved-state replay
+
+Implemented an opt-in exact-merit check in `mpc_rti.c`. When enabled, the RTI
+candidate is compared against the current nominal only after both are scored
+with the exact 30-stage source-plant rollout, objective, and corridor test. If
+an exact-valid QP update is worse than an exact-valid nominal, bounded
+backtracking fractions (0.5, 0.25, 0.125) are tried. The solver accepts the
+first exact-valid strict objective improvement; if none improves, it keeps the
+exact-validated nominal. The option remains disabled in the ROS production
+node; the replay executable enables it only for this offline experiment.
+
+Replayed every saved cold-start state in the existing three PR-04 populations
+using each corpus's recorded trajectory and v4 baseline. Also replayed the
+matched source-seeded subsets. The rowwise outputs are in the
+`merit_backtracking_currentbuild_v5/` subdirectories next to each v4 corpus.
+
+| Saved-state corpus | States | Exact-valid before → after | Recovered states | Validity regressions | Objective worse / better / equal on jointly valid rows | Merit-triggered rows | Selected alpha (0 / .125 / .25 / .5) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Default mintime | 1,276 | 1,194 → 1,252 | 58 | 0 | 0 / 363 / 831 | 363 | 3 / 23 / 51 / 286 |
+| Fastline transfer | 224 | 179 → 202 | 23 | 0 | 0 / 50 / 129 | 50 | 26 / 11 / 39 / 19 |
+| Fastline terminal subset | 28 | 9 → 12 | 3 | 0 | 0 / 1 / 8 | 1 | 0 / 0 / 1 / 0 |
+
+The other 45 fastline-transfer and 82 default-line line-search attempts were
+corridor-repair attempts, not objective-merit triggers. The matched
+source-seeded replays remained exact-valid on 24/24 fastline-transfer, 10/10
+default, and 5/5 terminal states. Where their nominal was exact-valid, the
+selected result never exceeded its exact nominal objective. This is
+saved-state solver evidence, not closed-loop lap evidence or proof of actual
+command-effect epoch alignment.
+
+Replay timing is diagnostic only. On the 1,276 default states, maximum replay
+cycle time was 19.36 ms, with no row at/above 20 ms and no backtrack-budget
+skips. That gives insufficient timing margin/evidence to enable it live:
+offline replays omit the concurrent Unity/ROS scheduling environment and do
+not establish callback-to-publication timing. The online command-epoch-valid
+signal is also deliberately unset. No simulator was started, no trajectory or
+weights changed, and no lap-time result changed.
+
+Validation: rebuilt `mpc_controller_node`, `mpc_bag_solver_replay`, and
+`test_vehicle_model_source_rollout`; the focused CTest passed. Focused replay,
+prefix-chain, and feasibility pytest selection: **15 passed**.
+
+**Decision:** this is a measured offline improvement to exact-valid
+full-horizon solver output on all three saved-state populations, with no
+measured objective or validity regressions. It does not yet satisfy all of
+PR-04: candidate/prior prefix-chain policy, command-epoch safety, and live
+timing remain unresolved. It therefore stays default-off and does not
+authorize a fastline simulator attempt. The fastline also still has no
+connected full-lap source-plant-feasible schedule; the IPOPT reference and its
+estimated 5.367 s time remain unchanged and unachieved.
+
+Next: inspect the newly recovered fastline states by stage/progress and
+determine whether their exact-valid full plans can be connected to subsequent
+captured epochs without discontinuous first commands or loss of corridor
+slack. Keep the IPOPT terminal-prefix run separate from clean pre-fault
+windows. Only after this and the command-epoch gate pass should the feature be
+exposed behind a default-OFF live parameter and tested on the default line
+before the fastline.
+
+#### 2026-10-22 — fastline chain: retained-plan availability and source-seeded continuation
+
+Continued PR-03/04 offline on the exact captured fastline chain. No simulator
+was launched. The chain is rows 201–223 in
+`live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/cycles.csv`, from
+progress 38.6095 m through the terminal rejection at 41.1929 m.
+
+The capture does **not** contain a retained certified-plan branch to replay at
+these epochs: `prior_plan_chain_length=0` and `prior_plan_exact_valid=false`
+for all 22 published candidate-prefix cycles. The actions therefore cannot
+be compared against an actual historical certified plan. The offline
+`candidate_prior_ab.csv` uses a prior sequence reconstructed from published
+control history; that is a counterfactual comparator, not the retained
+full-horizon plan required by PR-04 B/D. On the actual chain, every published
+action was only three-stage validated; the solver reached its 100-iteration
+cap with large residuals, and the candidate full-horizon failure moved from
+stage 28 at the first row to stage 4 by chain row 22, then stage 2 for both
+candidate and unavailable prior at the final rejection.
+
+Checked source-plant continuation at the first and seventh chain states using
+the saved 22-state/internal-state snapshots, the exact fastline, the current
+`libunity_source_plant_eval.so`, legal `q >= 0.01`, 30 stages, and a required
+5 cm additional corridor reserve:
+
+| Progress | Source-plant witness | MPC replay seeded with that witness | Same-state cold replay |
+|---:|---|---|---|
+| 38.6095 m | Valid, 17.67 cm minimum slack, +3.026 m progress, terminal speed 3.057 m/s, source objective 1,131.56 | Exact full horizon valid; status 8 after one iteration, line-search alpha 0 retained the seed; objective 1,121.75, 18.17 cm slack | Exact full horizon valid; objective 3,614.21, 17.56 cm slack |
+| 39.5799 m | Valid, 22.84 cm minimum slack, +2.302 m progress, terminal speed 2.711 m/s, source objective 40,388.15 | Exact full horizon valid; status 8 after one iteration, alpha 0.25; objective 33,797.69, 23.23 cm slack | Exact full horizon valid; objective 53,507.38, 23.01 cm slack |
+
+At 40.1702 m the previously retained source-search witness also passes the
+source corridor, but its endpoint speed is only about 2.02 m/s and the
+source-seeded MPC objective is about 88,865 with poor ADMM residuals. At
+40.3089 m, the 10-knot source search found no witness (best slack −0.426 m)
+and SLSQP exited early; this is **not** proof of physical infeasibility.
+Search results and their exact inputs are under
+`live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/pr04_chain_row201_currentplant/`,
+`.../pr04_chain_row207_currentplant/`, and
+`.../merit_backtracking_currentbuild_v5/source_continuation_terminal/`.
+
+Interpretation: source-seeded full-horizon plans materially improve exact
+validity/objective at these two saved states, so the line is not shown to be
+geometrically impossible there. But the witnesses do so by shedding speed;
+their low terminal speeds and large tracking costs do not validate the
+IPOPT line's 5.367 s estimate. They are isolated 750 ms witnesses, not a
+connected schedule or a production recovery policy. Together with the absent
+retained-plan snapshot and weak solver residuals, this does **not** pass PR-04
+or authorize another fastline simulator run. The current merit/backtracking
+change remains replay-only/default-off; no production policy, plant, weights,
+or trajectory changed in this experiment.
+
+Next PR-04 data requirement: capture the actual certified full-horizon plan
+and cursor (if one exists) alongside each rejected candidate and its nominal
+suffix, plus the exact float32 issued command and decision epoch. On the
+existing bag, continue only with source-seeded counterfactuals and label the
+retained-plan arm unavailable. Do not infer a causal prior-plan benefit from
+the reconstructed history comparator.
+
+#### 2026-10-22 — preserve full per-cycle solver sequences in bag exports
+
+Inspected the fastline SQLite bag's `/mpc/diagnostics` CDR directly, then
+re-exported all 229 diagnostic messages through the ROS bag decoder. The raw
+messages contain the 30-entry `candidate_controls` and `nominal_controls`,
+decision/source/issued command stamps, plant state, ADMM diagnostics, and
+candidate/prior revalidation results. They contain **no**
+`certified_plan_snapshot`; `prior_plan_actions_remaining` is zero throughout
+the chain. Thus the absence of a prior plan is in the recorded run state, not
+merely an omission by the previous CSV exporter.
+
+Updated `tools/export_mpc_run_report.py` to emit a sibling JSONL sidecar with
+the complete decoded diagnostic payload for every MPC cycle, in receipt-time
+order. It records exact command epochs and preserves candidate/nominal/retained
+plan data when available; it never reconstructs a missing certified suffix.
+The cycle summary CSV remains compact. The report schema is now
+`sdu_apex_mpc_run_report/v4` and links the sidecar path/count. Actual fastline
+re-export: 229 JSONL diagnostic records, with the original bag, report, and
+cycle CSV retained unchanged under
+`live_runs/mpc_ipopt_v1_fastline_practice_20261022_run1/continuation_blend_search/diagnostic_export/`.
+
+Validation: `python3 -m pytest -q tools/test_export_mpc_run_report.py` —
+**11 passed**. The exporter decoded both custom plant-state and drive-command
+CDR messages directly; this did not require generated message Python packages.
+No simulator was started and no production MPC behavior changed.
+
+The row-201 source witness also gives a useful counterfactual through the
+failure corner. At the nearest progress samples (within 6.3 cm), its
+source-predicted state versus the subsequently observed candidate-prefix run
+was:
+
+| Witness progress / captured progress | Witness e_y / e_psi / u / r | Captured run e_y / e_psi / u / r |
+|---:|---|---|
+| 39.52 / 39.58 m | +0.025 m / +0.031 rad / 5.45 m/s / −1.00 rad/s | +0.078 m / +0.083 rad / 6.16 m/s / −0.77 rad/s |
+| 40.13 / 40.17 m | +0.051 m / +0.035 rad / 4.51 m/s / −1.48 rad/s | +0.177 m / +0.189 rad / 5.58 m/s / +0.69 rad/s |
+| 40.35 / 40.31 m | +0.059 m / +0.031 rad / 4.18 m/s / −1.63 rad/s | +0.218 m / +0.285 rad / 5.75 m/s / +1.00 rad/s |
+
+This is an **offline source-model counterfactual**, not a matched live or Unity
+validation: the two paths use different controls, and the witness is slower.
+It does show that, from the same initial captured full state, the exact source
+plant evaluator can find a corridor-valid trajectory that keeps heading/yaw
+with the negative-curvature section, while the live candidate-prefix sequence
+diverges. Combined with 100-iteration caps and the high residuals, this
+supports prioritizing full-horizon nominal/solver quality over changing
+source-plant coefficients. It does not justify using this one saved witness as
+a runtime policy or claim a faster lap.

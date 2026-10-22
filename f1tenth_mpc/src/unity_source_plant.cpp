@@ -337,8 +337,10 @@ constexpr double kWheelAngleBlendSpeedMps = 5.0;
 // VehicleController.Steer() applies that rate once per Unity FixedUpdate.
 constexpr double kSteeringRateDegps = 183.345993;
 // The active scene overrides the prefab's 85.6 N m default with 428 N m.
-// CAWD divides nonzero drive torque by four; CAWB applies full MotorTorque
-// independently as brake torque to each wheel when throttle is exactly zero.
+// driveType=5 is CAWD and brakeType=0 is CAWB: q>0 divides q*428 N m across
+// four driven wheels (q=0.01 is 1.07 N m/wheel and clears the brakes); exactly
+// q=0 applies 428 N m brake torque to each wheel. Do not treat minimum legal
+// MPC q as a brake or change this constant to the prefab default.
 constexpr double kMotorTorqueNm = 428.0;
 constexpr double kMaxSteeringRad = UNITY_SOURCE_MAX_STEERING_RAD;
 constexpr std::array<double, 4> kWheelX{

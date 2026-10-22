@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <set>
 #include <string>
@@ -59,6 +60,52 @@ std::vector<MpcTrajectorySample_t> load_trajectory(const char *path,
 double number_arg(char **argv, int index, double fallback)
 {
     return argv[index] ? std::stod(argv[index]) : fallback;
+}
+
+std::map<std::size_t, std::array<MpcModelControl_t, PREDICTION_HORIZON>>
+load_nominal_seed_controls(const char *path)
+{
+    std::map<std::size_t,
+        std::array<MpcModelControl_t, PREDICTION_HORIZON>> seeds;
+    if (!path || path[0] == '\0') return seeds;
+    std::ifstream input(path);
+    if (!input)
+        throw std::runtime_error(
+            "cannot open MPC_REPLAY_NOMINAL_SEED_CSV: " + std::string(path));
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(input, line)) {
+        ++line_number;
+        if (line.empty() || line.front() == '#') continue;
+        const auto values = parse_csv_numbers(line);
+        if (values.size() != 1 + 2 * PREDICTION_HORIZON)
+            throw std::runtime_error(
+                "nominal seed row must contain index plus 30 steering/throttle "
+                "pairs at line " + std::to_string(line_number));
+        if (!std::isfinite(values[0]) || values[0] < 0.0 ||
+            std::floor(values[0]) != values[0])
+            throw std::runtime_error(
+                "nominal seed row index must be a non-negative integer");
+        const std::size_t row_index =
+            static_cast<std::size_t>(values[0]);
+        std::array<MpcModelControl_t, PREDICTION_HORIZON> controls{};
+        for (int stage = 0; stage < PREDICTION_HORIZON; ++stage) {
+            const double steering = values[1 + 2 * stage];
+            const double throttle = values[2 + 2 * stage];
+            if (!std::isfinite(steering) ||
+                std::abs(steering) > kMaxSteeringRad + 1.0e-7 ||
+                !std::isfinite(throttle) || throttle < 0.01 - 1.0e-7 ||
+                throttle > 1.0 + 1.0e-7)
+                throw std::runtime_error(
+                    "nominal seed control violates the MPC drive envelope at "
+                    "line " + std::to_string(line_number));
+            controls[stage].steering_target_rad = static_cast<float>(steering);
+            controls[stage].throttle_command = static_cast<float>(throttle);
+        }
+        if (!seeds.emplace(row_index, controls).second)
+            throw std::runtime_error("duplicate nominal seed row index");
+    }
+    return seeds;
 }
 
 void configure(MpcRtiCycleConfiguration_t *config,
@@ -246,7 +293,7 @@ int main(int argc, char **argv)
             steering_slew_weight < 0.0 ||
             !std::isfinite(throttle_slew_weight) ||
             throttle_slew_weight < 0.0 ||
-            line_search_backtracks < 0 || line_search_backtracks > 2 ||
+            line_search_backtracks < 0 || line_search_backtracks > 3 ||
             !std::isfinite(speed_tracking_weight_multiplier) ||
             !(speed_tracking_weight_multiplier > 0.0) ||
             speed_tracking_weight_multiplier > 100.0)
@@ -256,6 +303,9 @@ int main(int argc, char **argv)
         const auto trajectory = load_trajectory(argv[1], &lap_length);
         std::ifstream input(argv[2]);
         if (!input) throw std::runtime_error("cannot open input CSV");
+        const auto nominal_seed_controls = load_nominal_seed_controls(
+            std::getenv("MPC_REPLAY_NOMINAL_SEED_CSV"));
+        std::set<std::size_t> consumed_nominal_seed_rows;
 
         MpcRtiCycleConfiguration_t config{};
         configure(&config, rho, rho_steer, rho_throttle, alpha, cost_scale,
@@ -356,9 +406,13 @@ int main(int argc, char **argv)
                      "admm_projection_ns,rho_update_ns,scaling_transform_ns,"
                      "output_unscale_ns,rollout_us,"
                      "nonlinear_validation_us,min_corridor_slack_m,"
+                     "nonlinear_objective,"
                      "nonlinear_failure_reason,nonlinear_failure_stage,"
                      "line_search_attempted,line_search_trials,"
                      "line_search_accepted,line_search_skipped_budget,"
+                     "line_search_merit_triggered,"
+                     "line_search_nominal_exact_valid,"
+                     "line_search_nominal_objective,"
                      "line_search_skipped_command_epoch,"
                      "line_search_full_step_failure_reason,"
                      "line_search_full_step_failure_stage,"
@@ -366,7 +420,8 @@ int main(int argc, char **argv)
                      "line_search_last_failure_stage,"
                      "line_search_selected_alpha,line_search_us,"
                      "first_steering,first_throttle,"
-                     "max_plan_steering_delta,max_plan_throttle_delta\n";
+                     "max_plan_steering_delta,max_plan_throttle_delta,"
+                     "nominal_seed_injected\n";
 
         std::string line;
         std::size_t row_index = 0;
@@ -455,6 +510,31 @@ int main(int argc, char **argv)
                         memory.solver_state.y_u[stage][input_index] = 0.0f;
                     }
                 }
+            }
+            const auto seed_it = nominal_seed_controls.find(row_index);
+            if (!nominal_seed_controls.empty() &&
+                seed_it == nominal_seed_controls.end())
+                throw std::runtime_error(
+                    "nominal seed file has no entry for replay row " +
+                    std::to_string(row_index));
+            const bool nominal_seed_injected =
+                seed_it != nominal_seed_controls.end();
+            if (nominal_seed_injected) {
+                /* Offline-only source-plant continuation experiment. The
+                 * seed file stores 30 actions already checked from this
+                 * saved state by the source-plant audit. The warm-start
+                 * contract shifts out element zero (the action in flight),
+                 * so duplicate seed[0] in slot zero and put seed[0..28] in
+                 * slots 1..29. The final nominal action is held at seed[28],
+                 * matching normal horizon-shift semantics. Production never
+                 * reads this environment variable. */
+                memory.warm_start_controls[0] = seed_it->second[0];
+                for (int stage = 1; stage < PREDICTION_HORIZON; ++stage)
+                    memory.warm_start_controls[stage] =
+                        seed_it->second[stage - 1];
+                memory.warm_start_control_count = PREDICTION_HORIZON;
+                memory.warm_start_controls_valid = 1;
+                consumed_nominal_seed_rows.insert(row_index);
             }
             const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
                 &state, row[1], trajectory.data(), trajectory.size(),
@@ -642,12 +722,16 @@ int main(int argc, char **argv)
                       << result.exact_rollout_us << ','
                       << result.nonlinear_validation_us << ','
                       << result.minimum_predicted_corridor_slack_m << ','
+                      << result.nonlinear_objective << ','
                       << result.nonlinear_failure_reason << ','
                       << result.nonlinear_failure_stage << ','
                       << result.line_search_attempted << ','
                       << result.line_search_trials << ','
                       << result.line_search_accepted << ','
                       << result.line_search_skipped_budget << ','
+                      << result.line_search_merit_triggered << ','
+                      << result.line_search_nominal_exact_valid << ','
+                      << result.line_search_nominal_objective << ','
                       << result.line_search_skipped_command_epoch << ','
                       << result.line_search_full_step_failure_reason << ','
                       << result.line_search_full_step_failure_stage << ','
@@ -658,9 +742,14 @@ int main(int argc, char **argv)
                       << result.first_control.steering_target_rad << ','
                       << result.first_control.throttle_command << ','
                       << max_plan_steering_delta << ','
-                      << max_plan_throttle_delta << '\n';
+                      << max_plan_throttle_delta << ','
+                      << (nominal_seed_injected ? 1 : 0) << '\n';
             ++row_index;
         }
+        if (consumed_nominal_seed_rows.size() !=
+            nominal_seed_controls.size())
+            throw std::runtime_error(
+                "nominal seed file contains rows outside the replay input");
         return row_index == 0 ? 1 : 0;
     } catch (const std::exception &error) {
         std::cerr << "mpc_bag_solver_replay: " << error.what() << '\n';
