@@ -10,6 +10,31 @@
 
 namespace {
 
+TEST(MpcRtiRefinementQuality, KeepsCompletedPassWhenRefinementNeverRunsAdmm)
+{
+  EXPECT_TRUE(mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
+      RICCATI_STATUS_MAX_ITERATIONS, -1, 1));
+  EXPECT_TRUE(mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
+      RICCATI_STATUS_OPTIMAL, -1, 1));
+  EXPECT_FALSE(mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
+      -1, -1, 1));
+  EXPECT_FALSE(mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
+      RICCATI_STATUS_MAX_ITERATIONS, RICCATI_STATUS_MAX_ITERATIONS, 1));
+  EXPECT_FALSE(mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
+      RICCATI_STATUS_MAX_ITERATIONS, -1, 0));
+}
+
+TEST(MpcRtiLineSearchBudget, AllowsMeasuredRecoveryTrialsButRejectsInvalidTime)
+{
+  EXPECT_FALSE(mpc_rti_line_search_budget_available(2199.0));
+  EXPECT_TRUE(mpc_rti_line_search_budget_available(2200.0));
+  EXPECT_TRUE(mpc_rti_line_search_budget_available(3000.0));
+  EXPECT_FALSE(mpc_rti_line_search_budget_available(0.0));
+  EXPECT_FALSE(mpc_rti_line_search_budget_available(-1.0));
+  EXPECT_FALSE(mpc_rti_line_search_budget_available(NAN));
+  EXPECT_FALSE(mpc_rti_line_search_budget_available(INFINITY));
+}
+
 MpcModelState_t turning_state()
 {
   MpcModelState_t state{};
@@ -25,7 +50,7 @@ MpcModelState_t turning_state()
 TEST(VehicleModelSourceRollout, CarriesLateralYawWheelAndSuspensionMotion)
 {
   MpcModelState_t state = turning_state();
-  const MpcModelControl_t control{};
+  const MpcModelControl_t control{0.35f, 0.30f};
   const MpcStageResult_t first = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(first.valid);
@@ -43,6 +68,45 @@ TEST(VehicleModelSourceRollout, CarriesLateralYawWheelAndSuspensionMotion)
                 MPC_PLANT_STATE_WHEEL_OMEGA_FL]);
   EXPECT_NE(second.next.source_plant_internal_state[MPC_PLANT_STATE_ROLL],
             first.next.source_plant_internal_state[MPC_PLANT_STATE_ROLL]);
+}
+
+TEST(MpcRtiMemory, RecoveryResetClearsAdmmButPreservesIssuedSequence)
+{
+  MpcRtiMemory_t memory{};
+  mpc_rti_memory_reset(&memory);
+
+  memory.solver_state.initialized = 1;
+  memory.solver_state.rho = 13.0f;
+  memory.solver_state.rho_u = 17.0f;
+  memory.solver_state.z_u[0][0] = 0.31f;
+  memory.solver_state.y_x[2][3] = -0.27f;
+  memory.nominal.valid = 1;
+  memory.nominal.horizon = PREDICTION_HORIZON;
+  memory.nominal.controls[0] = {0.12f, 0.37f};
+
+  MpcModelControl_t issued[PREDICTION_HORIZON]{};
+  for (int k = 0; k < PREDICTION_HORIZON; ++k)
+    issued[k] = {0.01f * static_cast<float>(k),
+        0.2f + 0.01f * static_cast<float>(k)};
+  ASSERT_TRUE(mpc_rti_memory_set_warm_start_controls(
+      &memory, issued, PREDICTION_HORIZON));
+
+  mpc_rti_memory_reset_solver_state(&memory);
+
+  EXPECT_EQ(memory.solver_state.initialized, 0);
+  EXPECT_FLOAT_EQ(memory.solver_state.rho, 0.0f);
+  EXPECT_FLOAT_EQ(memory.solver_state.rho_u, 0.0f);
+  EXPECT_FLOAT_EQ(memory.solver_state.z_u[0][0], 0.0f);
+  EXPECT_FLOAT_EQ(memory.solver_state.y_x[2][3], 0.0f);
+  ASSERT_EQ(memory.warm_start_controls_valid, 1);
+  ASSERT_EQ(memory.warm_start_control_count, PREDICTION_HORIZON);
+  EXPECT_FLOAT_EQ(memory.warm_start_controls[0].steering_target_rad,
+      issued[0].steering_target_rad);
+  EXPECT_FLOAT_EQ(memory.warm_start_controls[0].throttle_command,
+      issued[0].throttle_command);
+  ASSERT_EQ(memory.nominal.valid, 1);
+  EXPECT_FLOAT_EQ(memory.nominal.controls[0].steering_target_rad, 0.12f);
+  EXPECT_FLOAT_EQ(memory.nominal.controls[0].throttle_command, 0.37f);
 }
 
 TEST(VehicleModelSourceRollout, YawAndPoseUseOnlySourcePlantTransition)
@@ -87,8 +151,8 @@ TEST(VehicleModelSourceRollout, YawAndPoseUseOnlySourcePlantTransition)
   std::copy_n(initialized.source_plant_internal_state +
                   MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL,
               4, input.state + UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL);
-  input.steering_target_rad = initialized.delayed_steering_command_2;
-  input.throttle_normalized = initialized.delayed_throttle_command_2;
+  input.steering_target_rad = control.steering_target_rad;
+  input.throttle_normalized = control.throttle_command;
   input.suspension_history_initialized =
       initialized.source_suspension_history_initialized;
 
@@ -173,7 +237,7 @@ TEST(VehicleModelSourceRollout,
 }
 
 TEST(VehicleModelSourceRollout,
-     DirectThrottleCommandEntersTheInFlightPlantQueue)
+     DirectThrottleCommandDrivesThePlantAndAdvancesHistory)
 {
   MpcModelState_t state = turning_state();
   state.delayed_throttle_command_1 = 0.20f;
@@ -182,11 +246,18 @@ TEST(VehicleModelSourceRollout,
   const MpcStageResult_t stage = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
   ASSERT_TRUE(stage.valid);
-  /* The plant sees the newest in-flight command. The optimizer's decision is
-   * shifted into that slot for the following packet interval. */
+  /* The command drives this command-time stage immediately and is retained
+   * in slot 2 for the next causal sensor-time prediction. */
   EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_1, 0.30f);
   EXPECT_FLOAT_EQ(stage.next.delayed_throttle_command_2, 0.70f);
   EXPECT_TRUE(std::isfinite(stage.next.u));
+  const MpcStageResult_t queued = mpc_vehicle_model_propagate(
+      &state, 0.025f, 0.0f);
+  ASSERT_TRUE(queued.valid);
+  EXPECT_NE(stage.next.source_plant_internal_state[
+                MPC_PLANT_STATE_WHEEL_OMEGA_RL],
+            queued.next.source_plant_internal_state[
+                MPC_PLANT_STATE_WHEEL_OMEGA_RL]);
 }
 
 TEST(VehicleModelSourceRollout,
@@ -283,10 +354,8 @@ TEST(VehicleModelSourceRollout,
             MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL + wheel];
   reference_input.state[UNITY_SOURCE_PHYSICAL_STEERING] =
       state.actual_steering_angle;
-  reference_input.steering_target_rad =
-      state.delayed_steering_command_1;
-  reference_input.throttle_normalized =
-      state.delayed_throttle_command_1;
+  reference_input.steering_target_rad = control.steering_target_rad;
+  reference_input.throttle_normalized = control.throttle_command;
   reference_input.suspension_history_initialized = 1;
   UnitySourcePlantOutputC reference_output{};
   ASSERT_TRUE(unity_source_plant_step_c(
@@ -327,25 +396,32 @@ TEST(VehicleModelSourceRollout,
   }
 }
 
-TEST(VehicleModelSourceRollout, AppliesNewestQueuedThrottleAndShiftsHistory)
+TEST(VehicleModelSourceRollout,
+     UsesDirectHorizonControlAndQueuedPreCommandPropagation)
 {
   MpcModelState_t state = turning_state();
   state.delayed_throttle_command_1 = 0.30f;
   state.delayed_throttle_command_2 = 0.0f;
   const MpcModelControl_t control{0.0f, 0.40f};
-  const MpcStageResult_t delayed = mpc_vehicle_model_step(
+  const MpcStageResult_t horizon_step = mpc_vehicle_model_step(
       &state, &control, 0.025f, 0.0f);
-  ASSERT_TRUE(delayed.valid);
-  EXPECT_NE(delayed.branch_flags & MPC_STAGE_PLANT_BRAKE, 0U);
+  ASSERT_TRUE(horizon_step.valid);
+  EXPECT_EQ(horizon_step.branch_flags & MPC_STAGE_PLANT_BRAKE, 0U);
+  EXPECT_FLOAT_EQ(horizon_step.next.delayed_throttle_command_1, 0.0f);
+  EXPECT_FLOAT_EQ(horizon_step.next.delayed_throttle_command_2, 0.40f);
 
-  MpcModelState_t immediate_state = state;
-  immediate_state.delayed_throttle_command_2 = 0.30f;
-  const MpcStageResult_t immediate = mpc_vehicle_model_step(
-      &immediate_state, &control, 0.025f, 0.0f);
-  ASSERT_TRUE(immediate.valid);
-  EXPECT_LT(delayed.next.u, immediate.next.u);
-  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_1, 0.0f);
-  EXPECT_FLOAT_EQ(delayed.next.delayed_throttle_command_2, 0.40f);
+  const MpcStageResult_t pre_command_step = mpc_vehicle_model_propagate(
+      &state, 0.025f, 0.0f);
+  ASSERT_TRUE(pre_command_step.valid);
+  EXPECT_NE(pre_command_step.branch_flags & MPC_STAGE_PLANT_BRAKE, 0U);
+  EXPECT_LT(pre_command_step.next.u, horizon_step.next.u);
+
+  MpcModelState_t queued_state = state;
+  queued_state.delayed_throttle_command_2 = 0.30f;
+  const MpcStageResult_t queued_step = mpc_vehicle_model_propagate(
+      &queued_state, 0.025f, 0.0f);
+  ASSERT_TRUE(queued_step.valid);
+  EXPECT_GT(queued_step.next.u, pre_command_step.next.u);
 }
 
 TEST(RiccatiSolverDeadline, StopsOnlyAfterACompleteAdmmIteration)
@@ -624,7 +700,7 @@ TEST(MpcRtiSlewCost, CrossTermEqualsSquaredCommandIncrement)
       expected, 1.0e-6f);
 }
 
-TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
+TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
 {
   constexpr int horizon = PREDICTION_HORIZON;
   MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1] = {};
@@ -658,7 +734,8 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   for (int k = 0; k <= horizon; ++k) {
     nominal_states[k].plant = plant;
     references[k].u = plant.u;
-    references[k].steering_command = plant.delayed_steering_command_2;
+    references[k].steering_command =
+        plant.delayed_steering_command_2 + 0.01f * k;
     references[k].left_bound = 1.0f;
     references[k].right_bound = 1.0f;
   }
@@ -694,6 +771,22 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   MpcRtiProblem_t problem{};
   ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
       references, horizon, PREDICTION_DT_SECONDS, &config, &problem));
+  MpcRtiConfiguration_t no_steering_slew_config = config;
+  no_steering_slew_config.weight_steering_slew = 0.0f;
+  MpcRtiProblem_t no_steering_slew_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      references, horizon, PREDICTION_DT_SECONDS,
+      &no_steering_slew_config, &no_steering_slew_problem));
+  const float expected_reference_slew_linear_term =
+      2.0f * config.weight_steering_slew * 0.01f;
+  EXPECT_NEAR(problem.steps[0].q[
+          MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] -
+          no_steering_slew_problem.steps[0].q[
+              MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND],
+      expected_reference_slew_linear_term, 1.0e-5f);
+  EXPECT_NEAR(problem.steps[0].r[0] -
+          no_steering_slew_problem.steps[0].r[0],
+      -expected_reference_slew_linear_term, 1.0e-5f);
   MpcModelState_t prepared_optimizer_plant =
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant;
   ASSERT_TRUE(vehicle_model_initialize_plant_state(&prepared_optimizer_plant));
@@ -710,10 +803,10 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],
       nominal_states[0].plant
           .delayed_throttle_command_2);
-  EXPECT_NE(problem.x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND],
+  EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND],
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant
           .delayed_steering_command_2);
-  EXPECT_NE(problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],
+  EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant
           .delayed_throttle_command_2);
   EXPECT_FLOAT_EQ(problem.steps[0].u_lb[1],
@@ -758,9 +851,9 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
     for (int row = 0; row < MPC_OPT_PHYSICAL_NX; ++row) {
       const int model_row = model_index(row);
       EXPECT_FLOAT_EQ(problem.steps[k].B[row][0],
-          serial[model_stage].A[model_row][MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2]);
+          serial[model_stage].B[model_row][0]);
       EXPECT_FLOAT_EQ(problem.steps[k].B[row][1],
-          serial[model_stage].A[model_row][MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2]);
+          serial[model_stage].B[model_row][1]);
       for (int col = 0; col < MPC_OPT_PHYSICAL_NX; ++col) {
         SCOPED_TRACE(::testing::Message() << "stage=" << k
             << " model_stage=" << model_stage
@@ -773,9 +866,8 @@ TEST(MpcRtiDelayCondensing, StartsAfterQueuedPrefixAndPreservesPlantJacobian)
     }
   }
 
-  // The fixed two-command prefix has already been propagated into x0. Replay
-  // all remaining nominal decisions through the reduced affine model and
-  // compare against the corresponding full delayed-plant states.
+  // Replay every nominal decision through the reduced affine model and
+  // compare against the corresponding direct-input plant states.
   float condensed_state[RICCATI_MAX_NX] = {};
   for (int index = 0; index < RICCATI_MAX_NX; ++index) {
     condensed_state[index] = problem.x0[index];
@@ -1355,7 +1447,6 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
   config.solver.tolerance = 1.0e-9f;
   config.solver.max_iterations = 1;
   config.solver.over_relaxation = 1.0f;
-
   MpcRtiState_t initial{};
   initial.plant.e_y = 0.15f;
   initial.plant.u = 2.0f;
@@ -1425,6 +1516,7 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
   MpcRtiReference_t references[PREDICTION_HORIZON + 1] = {};
   for (int stage = 0; stage <= PREDICTION_HORIZON; ++stage) {
     references[stage].u = 8.0f;
+    references[stage].path_curvature = 0.5f;
     references[stage].left_bound = 10.0f;
     references[stage].right_bound = 10.0f;
   }
@@ -1434,7 +1526,7 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
   for (int k = 0; k < PREDICTION_HORIZON; ++k) {
     const MpcStageResult_t predicted = mpc_vehicle_model_step(
         &nominal_states[k].plant, &controls[k],
-        PREDICTION_DT_SECONDS, 0.0f);
+        PREDICTION_DT_SECONDS, references[k].path_curvature);
     ASSERT_TRUE(predicted.valid);
     nominal_states[k + 1].plant = predicted.next;
     nominal_states[k + 1].incoming_branch_flags = predicted.branch_flags;
@@ -1450,6 +1542,7 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
   ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
       PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config, &problem));
   bool slip_cost_retained_after_queued_prefix = false;
+  int slip_cost_solver_stage = -1;
   for (int solver_stage = 1; solver_stage < RICCATI_HORIZON;
        ++solver_stage) {
     const int model_stage = solver_stage + MPC_COMMAND_DELAY_STEPS;
@@ -1459,6 +1552,7 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
     if (excess[2] > 0.0 && std::abs(derivative[2]) > 1.0e-9) {
       EXPECT_GT(problem.steps[solver_stage].Q_diag[6 + 2], 0.0f);
       slip_cost_retained_after_queued_prefix = true;
+      slip_cost_solver_stage = solver_stage;
       break;
     }
   }
@@ -1479,6 +1573,97 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
   double expected_penalty = 0.0;
   for (double value : excess) expected_penalty += 50.0 * value * value;
   EXPECT_NEAR(cost_with - cost_without, expected_penalty, 1.0e-4);
+
+  config.longitudinal_slip_curvature_gain_m = 1.0f;
+  MpcRtiProblem_t curvature_scheduled_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
+      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+      &curvature_scheduled_problem));
+  ASSERT_GE(slip_cost_solver_stage, 0);
+  const float uniform_wheel_hessian =
+      problem.steps[slip_cost_solver_stage].Q_diag[6 + 2];
+  const float scheduled_wheel_hessian = curvature_scheduled_problem
+      .steps[slip_cost_solver_stage].Q_diag[6 + 2];
+  EXPECT_NEAR(scheduled_wheel_hessian / uniform_wheel_hessian, 1.5f,
+      1.0e-4f);
+  const float scheduled_cost = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  double expected_scheduled_penalty = 0.0;
+  for (double value : excess)
+    expected_scheduled_penalty += 75.0 * value * value;
+  EXPECT_NEAR(scheduled_cost - cost_without,
+      expected_scheduled_penalty, 1.0e-4);
+
+  config.weight_u = 7.5f;
+  config.weight_u_overspeed = 60.0f;
+  config.longitudinal_slip_curvature_gain_m = 0.0f;
+  config.overspeed_curvature_gain_m = 0.0f;
+  measured.plant.u = 9.0f;
+  references[0].u = 8.0f;
+  const float overspeed_cost_uniform = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  config.overspeed_curvature_gain_m = 1.0f;
+  const float overspeed_cost_curvature = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  EXPECT_NEAR(overspeed_cost_curvature - overspeed_cost_uniform,
+      60.0f * 0.5f, 1.0e-4f);
+  measured.plant.u = 7.0f;
+  const float underspeed_cost_uniform = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  config.overspeed_curvature_gain_m = 0.0f;
+  const float underspeed_cost_without_curvature = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  EXPECT_FLOAT_EQ(underspeed_cost_uniform, underspeed_cost_without_curvature);
+
+  config.overspeed_curvature_gain_m = 0.0f;
+  for (int stage = 0; stage <= PREDICTION_HORIZON; ++stage)
+    references[stage].u = 7.0f;
+  MpcRtiProblem_t uniform_speed_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
+      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+      &uniform_speed_problem));
+  config.overspeed_curvature_gain_m = 1.0f;
+  MpcRtiProblem_t curvature_speed_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
+      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+      &curvature_speed_problem));
+  EXPECT_NEAR(
+      curvature_speed_problem.steps[1].Q_diag[MPC_OPT_IDX_U] -
+          uniform_speed_problem.steps[1].Q_diag[MPC_OPT_IDX_U],
+      2.0f * config.weight_u_overspeed * 0.5f, 1.0e-4f);
+
+  /* Speed catch-up stays strong on straights but is moderated in a bend.
+   * The nominal rollout remains below this 10 m/s reference, so both the QP
+   * and exact nonlinear objective must select the underspeed schedule. */
+  config.weight_u = 40.0f;
+  config.underspeed_curvature_gain_m = 0.0f;
+  measured.plant.u = 7.0f;
+  references[0].u = 8.0f;
+  const float underspeed_cost_flat = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  config.underspeed_curvature_gain_m = 4.0f;
+  const float underspeed_cost_scheduled = mpc_rti_scalar_stage_cost(
+      &config, &references[0], &measured, &control);
+  EXPECT_NEAR(underspeed_cost_scheduled - underspeed_cost_flat,
+      (40.0f / 3.0f - 40.0f), 1.0e-4f);
+
+  for (int stage = 0; stage <= PREDICTION_HORIZON; ++stage)
+    references[stage].u = 10.0f;
+  config.underspeed_curvature_gain_m = 0.0f;
+  MpcRtiProblem_t uniform_underspeed_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
+      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+      &uniform_underspeed_problem));
+  config.underspeed_curvature_gain_m = 4.0f;
+  MpcRtiProblem_t scheduled_underspeed_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
+      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+      &scheduled_underspeed_problem));
+  ASSERT_LT(nominal_states[3].plant.u, references[3].u);
+  EXPECT_NEAR(
+      scheduled_underspeed_problem.steps[1].Q_diag[MPC_OPT_IDX_U] -
+          uniform_underspeed_problem.steps[1].Q_diag[MPC_OPT_IDX_U],
+      2.0f * (40.0f / 3.0f - 40.0f), 1.0e-3f);
 }
 
 TEST(VehicleModelSourceRollout, JacobianDifferentiatesTheSameSourceStep)

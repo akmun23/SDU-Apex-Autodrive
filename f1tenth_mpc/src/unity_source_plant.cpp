@@ -299,20 +299,27 @@ constexpr std::array<double, 3> kInverseInertiaVehicleBodyKgM2{
     43.85273404672289, 10.68349245505054, 9.971794977342487};
 constexpr double kDragPerS = 0.273;
 constexpr double kGravity = 9.81;
+constexpr double kAngularDampingPerS = 0.1;
 constexpr double kWheelbaseM = 0.324;
 constexpr double kTrackM = 0.236;
 constexpr double kWheelRadiusM = 0.059;
 constexpr double kWheelMassKg = 0.109;
 constexpr double kComForwardFromRearAxleM = 0.15532;
-// PxVehicleUpdate.cpp::setVehicleToleranceScale sets the lateral-slip
-// denominator floor to 1.0 * scale.length; the active PhysX scale length is 1m.
-constexpr double kMinLateralSpeedForTireModelMps = 1.0;
+// PxVehicleUpdate.cpp::setVehicleToleranceScale uses a 1 m length scale.
+// Keep slip offsets expressed from that named source-derived scale.
+constexpr double kPhysXToleranceScaleLengthM = 1.0;
+constexpr double kLongitudinalSlipSpeedOffsetM =
+    0.1 * kPhysXToleranceScaleLengthM;
+constexpr double kMinLateralSpeedForTireModelMps =
+    1.0 * kPhysXToleranceScaleLengthM;
 constexpr double kSuspensionDistanceM = 0.05;
 constexpr double kSuspensionTargetPosition = 0.5;
 constexpr double kSuspensionMaxCompressionM =
     kSuspensionDistanceM * (1.0 - kSuspensionTargetPosition);
 constexpr double kSuspensionMaxDroopM =
     kSuspensionDistanceM * kSuspensionTargetPosition;
+constexpr double kSuspensionSpringRateNPerM = 500.0;
+constexpr double kSuspensionDamperRateNsPerM = 100.0;
 // Unity's WheelCollider::ComputeWheelCentreOfMassOffset shifts the wheel
 // centre along the native suspension direction by
 // suspensionDistance * (1 - targetPosition). This is separate from the
@@ -336,11 +343,13 @@ constexpr double kWheelAngleBlendSpeedMps = 5.0;
 // Active practice F1TENTH.prefab serializes SteeringRate=183.346 deg/s;
 // VehicleController.Steer() applies that rate once per Unity FixedUpdate.
 constexpr double kSteeringRateDegps = 183.345993;
-// The active scene overrides the prefab's 85.6 N m default with 428 N m.
+// The practice scene "RoboRacer - Sim Racing.unity" overrides the prefab's
+// 85.6 N m default with 428 N m. source_vehicle.py locks this value against
+// the scene override by prefab GUID + VehicleController file ID.
 // driveType=5 is CAWD and brakeType=0 is CAWB: q>0 divides q*428 N m across
-// four driven wheels (q=0.01 is 1.07 N m/wheel and clears the brakes); exactly
-// q=0 applies 428 N m brake torque to each wheel. Do not treat minimum legal
-// MPC q as a brake or change this constant to the prefab default.
+// four driven wheels (q=0.001 is 0.107 N m/wheel and clears the brakes);
+// exactly q=0 applies 428 N m brake torque to each wheel. Do not treat minimum
+// legal MPC q as a brake or change this constant to the prefab default.
 constexpr double kMotorTorqueNm = 428.0;
 constexpr double kMaxSteeringRad = UNITY_SOURCE_MAX_STEERING_RAD;
 constexpr std::array<double, 4> kWheelX{
@@ -359,7 +368,7 @@ constexpr std::array<double, 4> kWheelColliderTransformYCom{
 // forward/left/up. The serialized WheelCollider.center is transformed by the
 // collider Transform separately below; it is not part of this mount point.
 constexpr std::array<double, 4> kWheelColliderTransformZCom{
-    -0.004435138776898384, -0.004435138776898384,
+    -0.00434, -0.00434,
     -0.014340000227093697, -0.014340000227093697};
 // WheelCollider.center is (0, 0.025, 0). Unity transforms this vector through
 // each collider Transform before converting it into chassis coordinates. The
@@ -405,8 +414,10 @@ constexpr std::array<double, 3> kComOffsetFromActorBody{
 // and suspension-force application point. In this plant's forward/left/up
 // frame, the point's vertical component is below COM and differs by axle.
 constexpr std::array<double, 4> kForceApplicationZ{
-    -0.0634351372718811, -0.0634351372718811,
-    -0.07333999872207642, -0.07333999872207642};
+    kWheelColliderTransformZCom[0] - kWheelRadiusM,
+    kWheelColliderTransformZCom[1] - kWheelRadiusM,
+    kWheelColliderTransformZCom[2] - kWheelRadiusM,
+    kWheelColliderTransformZCom[3] - kWheelRadiusM};
 // Exact practice-wheel mass distribution from Unity's
 // WheelCollider::UpdateVehicleSpringCMOffsetsAndMasses ->
 // PxVehicleComputeSprungMasses(totalMass=3.47, COM=0, upAxis=1). Re-solving
@@ -423,14 +434,14 @@ constexpr double kTireLoadFilterMin = 0.0;
 constexpr double kTireLoadFilterMinValue = 0.2308;
 constexpr double kTireLoadFilterMax = 3.0;
 constexpr double kTireLoadFilterMaxValue = 3.0;
-// Exact active WheelCollider initialization recovered from the matching
-// UnityPlayer_s.debug (Unity 2022.3.52f1, Build ID
-// 79f401cda3570218568e40b5331a0e68aa86f11c):
-// WheelCollider::AddWheelToExistingVehicle calls
-// PxVehicleWheelsSimData::setSubStepCount(128.0f, 5, 1). PhysX selects the
-// five-step branch when abs(longitudinal speed) < threshold. Do not replace
-// this with the unrelated 5 m/s wheel-angle integration threshold.
-constexpr double kWheelSubstepThresholdMps = 128.0;
+// Exact active practice-image WheelCollider initialization recovered from
+// UnityPlayer.so Build ID 79f401cda3570218568e40b5331a0e68aa86f11c:
+// AddWheelToExistingVehicle loads 5.0f and calls
+// PxVehicleWheelsSimData::setSubStepCount(5.0f, 5, 1). PhysX selects five
+// substeps when abs(body velocity projected onto vehicle forward) < 5.0 m/s;
+// equality selects one. The unrelated wheel-angle integration threshold is
+// also 5 m/s, but is not the evidence for this setting.
+constexpr double kWheelSubstepThresholdMps = 5.0;
 constexpr unsigned int kWheelSubstepsBelowThreshold = 5;
 constexpr unsigned int kWheelSubstepsAboveThreshold = 1;
 // Public PhysX PxVehicle sticky-tire thresholds and activation history.
@@ -739,7 +750,7 @@ Scalar curve_base_response(Scalar slip, const std::array<double, 5> &curve)
 template <typename Scalar>
 Scalar tire_load(Scalar suspension_force, double sprung_mass)
 {
-  const double rest_load = (sprung_mass + 0.109) * kGravity;
+  const double rest_load = (sprung_mass + kWheelMassKg) * kGravity;
   const Scalar normalized = suspension_force / rest_load;
   Scalar filtered;
   if (primal(normalized) <= kTireLoadFilterMin) {
@@ -786,7 +797,8 @@ bool source_slip_excess(
     const double wheel_forward = contact.forward_speed_mps;
     const double wheel_surface = state.wheel_omega_radps[i] * kWheelRadiusM;
     const double denominator =
-        std::max(std::abs(wheel_forward), std::abs(wheel_surface)) + 0.1;
+        std::max(std::abs(wheel_forward), std::abs(wheel_surface)) +
+        kLongitudinalSlipSpeedOffsetM;
     const double difference = wheel_surface - wheel_forward;
     (*slip)[i] = difference / denominator;
     const double residual = std::abs(difference) -
@@ -819,9 +831,9 @@ Scalar suspension_force(const AttitudeBasis<Scalar> &attitude, std::size_t i,
   const auto & suspension_direction = kSuspensionDirectionBody[i];
   const Scalar spring_weight = scalar_max(
       0.0, kSprungMassKg[i] * attitude.gravity_along_suspension +
-          500.0 * jounce);
+          kSuspensionSpringRateNPerM * jounce);
   const Scalar suspension_force_along_axis =
-      spring_weight + 100.0 * jounce_rate;
+      spring_weight + kSuspensionDamperRateNsPerM * jounce_rate;
   const Vec3T<Scalar> projected_suspension_force = add(
       scale(convert_vec3<Scalar>(suspension_direction),
             -suspension_force_along_axis),
@@ -1160,7 +1172,8 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
             kStickyTireSideTargetRatio * sticky_wheel_lateral};
       }
       const Scalar denominator = scalar_max(
-          scalar_max(scalar_abs(wheel_forward), scalar_abs(wheel_surface)) + 0.1,
+          scalar_max(scalar_abs(wheel_forward), scalar_abs(wheel_surface)) +
+              kLongitudinalSlipSpeedOffsetM,
           0.0);
       const Scalar raw_slip_x = primal(denominator) > 0.0
           ? (wheel_surface - wheel_forward) / denominator : Scalar(0.0);
@@ -1322,7 +1335,8 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
   // ordinary PhysX scene step then applies Rigidbody angular damping during
   // unconstrained-velocity pre-integration, before solving its constraint
   // rows (including the public PxVehicle sticky-tire rows).
-  const double angular_damping = scalar_max(1.0 - 0.1 * duration, 0.0);
+  const double angular_damping = scalar_max(
+      1.0 - kAngularDampingPerS * duration, 0.0);
   s.roll_rate_radps *= angular_damping;
   s.pitch_rate_radps *= angular_damping;
   s.yaw_rate_radps *= angular_damping;

@@ -56,15 +56,25 @@ typedef struct
     float weight_u;
     /* Used only while the nominal state is above the raceline speed. */
     float weight_u_overspeed;
+    /* Scales overspeed cost up with |reference curvature|. A value of zero
+     * preserves the uniform overspeed weight; units are metres. */
+    float overspeed_curvature_gain_m;
+    /* Scales underspeed cost down with |reference curvature|. A value of zero
+     * preserves the uniform underspeed weight; units are metres. */
+    float underspeed_curvature_gain_m;
     /* Soft cost on per-wheel surface-speed mismatch beyond Unity's forward
      * tire-curve extremum; not a hard slip feasibility limit. */
     float weight_longitudinal_slip;
+    /* Scales the source wheel-slip cost up with |reference curvature|.
+     * Zero preserves the uniform cost; units are metres. */
+    float longitudinal_slip_curvature_gain_m;
     float weight_v;
     float weight_r;
     float weight_steering_command;
     float weight_steering_target;
     float weight_throttle_command;
-    /* Per-stage squared command increments, (u[k]-u[k-1])^2. */
+    /* Steering penalizes command-increment error relative to the change in
+     * path steering feedforward; throttle penalizes raw command increments. */
     float weight_steering_slew;
     float weight_throttle_slew;
     /* Optional cold-nominal drive seed when launching below 0.5 m/s toward
@@ -237,11 +247,16 @@ typedef struct
     /* Optional absolute CLOCK_MONOTONIC deadline in microseconds. When set,
      * this deadline takes precedence over max_cycle_time_us. */
     double absolute_deadline_monotonic_us;
-    /* Exact nonlinear backtracking/merit guard. Production remains disabled
-     * until held-out quality and command-epoch safety are established. */
+    /* Exact nonlinear backtracking/merit guard. Every trial remains subject
+     * to source-plant rollout, corridor, command-epoch, and deadline checks;
+     * among tested exact-feasible backtracks, the production objective picks
+     * the winner, with corridor slack as a numerical tie-break. */
     int enable_nonlinear_line_search;
-    int line_search_max_backtracks; /* 0..3: alpha=0.5, 0.25, then 0.125 */
+    int line_search_max_backtracks; /* 0..4: alpha halves through 0.0625 */
     int line_search_command_epoch_valid;
+    /* Zero/one preserves the single RTI pass. Two enables one deadline-gated
+     * relinearization after a rejected corridor step or alpha=0 no-op. */
+    int max_sqp_iterations;
     /* Capture already-computed source-output samples for runtime diagnostics.
      * When false, exact rollouts do not retain or copy this debug data. */
     int capture_diagnostic_outputs;
@@ -265,8 +280,8 @@ typedef struct
 typedef enum
 {
     MPC_RTI_CYCLE_ACCEPTED_OPTIMAL = 0,
-    /* Solver hit its iteration cap, but this candidate passed the same full
-     * nonlinear plant and corridor validation as an optimal candidate. */
+    /* Solver hit its iteration cap, and this candidate passed the full
+     * nonlinear plant/corridor validation. */
     MPC_RTI_CYCLE_ACCEPTED_FEASIBLE,
     /* The horizon failed validation, but its next 25 ms action was exact-
      * validated and published; the next cycle must solve/revalidate again. */
@@ -281,7 +296,10 @@ typedef enum
      * budget before ADMM began. No command is publishable yet. */
     MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET,
     /* A damped QP direction passed the same complete nonlinear checks. */
-    MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH
+    MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH,
+    /* The command missed its end-to-end deadline. No late output was sent;
+     * the next cycle will revalidate the next action of the prior plan. */
+    MPC_RTI_CYCLE_DEFERRED_DEADLINE
 } MpcRtiCycleStatus_t;
 
 typedef enum
@@ -307,6 +325,9 @@ typedef struct
     int solver_iterations;
     int solver_skipped_for_deadline;
     int solver_time_budget_exhausted;
+    /* Controller discarded stale ADMM iterates after publishing an exactly
+     * revalidated recovery action, preserving its nominal/control seed. */
+    int admm_state_reset_for_recovery;
     int sqp_iterations_attempted;
     int sqp_iterations_completed;
     int sqp_iterations_accepted;
@@ -506,6 +527,16 @@ MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan_with_diagnostics(
     int *failure_stage);
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory);
+/* Clear ADMM primal/dual history while preserving nominal and issued controls. */
+void mpc_rti_memory_reset_solver_state(MpcRtiMemory_t *memory);
+int mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
+    int first_pass_admm_status,
+    int refinement_admm_status,
+    int refinement_skipped_for_deadline);
+
+/* True when the cycle has enough time remaining to attempt one nonlinear
+ * backtracking rollout without bypassing the final publication deadline. */
+int mpc_rti_line_search_budget_available(double remaining_us);
 int mpc_rti_memory_set_warm_start_controls(
     MpcRtiMemory_t *memory,
     const MpcModelControl_t *controls,

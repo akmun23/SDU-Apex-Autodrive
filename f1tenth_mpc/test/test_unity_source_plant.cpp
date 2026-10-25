@@ -65,15 +65,16 @@ double expected_yaw_acceleration_from_wheel_forces(
 
 TEST(UnitySourcePlant, UsesExactPracticePlayerWheelSubstepSchedule)
 {
-  // The exact-build native initialization is
-  // setSubStepCount(128.0f, 5, 1); PhysX uses the high-speed branch at equality.
+  // The exact-build native initialization is setSubStepCount(5.0f, 5, 1);
+  // PhysX uses the one-substep branch at equality.
   EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(0.0), 5U);
   EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(4.999), 5U);
   EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(-4.999), 5U);
-  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(5.0), 5U);
-  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(12.0), 5U);
-  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(127.999), 5U);
-  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(-127.999), 5U);
+  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(5.0), 1U);
+  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(-5.0), 1U);
+  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(5.001), 1U);
+  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(-5.001), 1U);
+  EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(12.0), 1U);
   EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(128.0), 1U);
   EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(-128.0), 1U);
 }
@@ -112,7 +113,7 @@ TEST(UnitySourcePlant, WheelPoseAngleMatchesNoDriveUpdateWrap)
 {
   constexpr double pi = 3.1415926535897932384626433832795;
   constexpr double wrap = 10.0 * pi;
-  auto state = state_at_speed(128.0);  // exactly one native substep
+  auto state = state_at_speed(8.0);  // above 5 m/s: one native substep
   state.wheel_rotation_angle_rad.fill(wrap - 0.001);
   f1tenth_mpc::UnitySourcePlantOutput output;
   ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
@@ -131,10 +132,10 @@ TEST(UnitySourcePlant, WheelPoseAngleMatchesNoDriveUpdateWrap)
 
 TEST(UnitySourcePlant, ZeroSlipAtMatchedWheelSurfaceSpeed)
 {
-  // At 128 m/s the exact native 128/5/1 schedule selects one substep. This
+  // At 8 m/s the exact native 5/5/1 schedule selects one substep. This
   // keeps the reported slip at the initially matched wheel/body speed before
   // the nonzero torque changes wheel spin.
-  const auto state = state_at_speed(128.0);
+  const auto state = state_at_speed(8.0);
   f1tenth_mpc::UnitySourcePlantOutput output;
   ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
       state, {0.0, 0.25}, &output));
@@ -707,7 +708,7 @@ TEST(UnitySourcePlant, LeftWheelSupportProducesPositiveSourceFrameRoll)
 TEST(UnitySourcePlant, PxVehicleSubstepUsesPrincipalInertiaWithoutGyroTerm)
 {
   f1tenth_mpc::UnitySourcePlantState state;
-  state.u_mps = 128.0;  // native setSubStepCount equality selects one step
+  state.u_mps = 8.0;  // above 5 m/s: native schedule selects one step
   state.roll_rate_radps = 1.0;
   state.v_mps = state.roll_rate_radps *
       -(state.body_height_m + 0.06434);
@@ -729,7 +730,7 @@ TEST(UnitySourcePlant, PxVehicleSubstepUsesPrincipalInertiaWithoutGyroTerm)
 
 TEST(UnitySourcePlant, RigidbodyAngularUpdateUsesTorqueThenSceneDamping)
 {
-  auto state = state_at_speed(128.0);  // single vehicle substep at equality
+  auto state = state_at_speed(8.0);  // above 5 m/s: one vehicle substep
   state.yaw_rate_radps = 0.75;
   state.suspension_history_initialized = true;
 
@@ -739,7 +740,7 @@ TEST(UnitySourcePlant, RigidbodyAngularUpdateUsesTorqueThenSceneDamping)
 
   // PxVehicle integrates angular velocity from the wheel-force torque first;
   // PhysX scene pre-integration then applies Rigidbody angular damping before
-  // constraints. At 128 m/s the model uses one vehicle substep, and drive intent
+  // constraints. At 8 m/s the model uses one vehicle substep, and drive intent
   // disables sticky rows, so this checks the exact ordered update.
   EXPECT_NEAR(output.yaw_acceleration_radps2,
       (output.state.yaw_rate_radps - state.yaw_rate_radps) / 0.001,
@@ -748,7 +749,7 @@ TEST(UnitySourcePlant, RigidbodyAngularUpdateUsesTorqueThenSceneDamping)
 
 TEST(UnitySourcePlant, GyroBodyRatesAdvanceTiltUsingEulerKinematics)
 {
-  auto state = state_at_speed(128.0);  // one native vehicle substep
+  auto state = state_at_speed(8.0);  // above 5 m/s: one native vehicle substep
   state.roll_rad = 0.20;
   state.pitch_rad = -0.15;
   state.roll_rate_radps = 0.30;
@@ -796,7 +797,7 @@ TEST(UnitySourcePlant, ThrottleChangesWheelSpinAndLongitudinalSlip)
 
 TEST(UnitySourcePlant, WheelSpinUsesPhysXNoDriveImplicitUpdate)
 {
-  // At 128 m/s PxVehicleNoDrive selects one vehicle substep per 1 ms update.
+  // At 8 m/s PxVehicleNoDrive selects one vehicle substep per 1 ms update.
   // Check the production wheel state against integrateNoDriveWheelSpeeds:
   // (omega + dt/I * (tireTorque + driveTorque)) /
   // (1 + dampingRate * dt/I).
@@ -808,7 +809,7 @@ TEST(UnitySourcePlant, WheelSpinUsesPhysXNoDriveImplicitUpdate)
   constexpr double motor_torque_nm = 428.0;
   constexpr double throttle = 0.2;
   constexpr double dt = 0.001;
-  const auto state = state_at_speed(128.0);
+  const auto state = state_at_speed(8.0);
   f1tenth_mpc::UnitySourcePlantOutput output;
   ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
       state, {0.0, throttle}, &output));
@@ -956,7 +957,7 @@ TEST(UnitySourcePlant, NormalizedCommandUsesPhysicalSteeringSign)
 
 TEST(UnitySourcePlant, LateralSlipUsesPhysXToleranceScaleFloor)
 {
-  auto state = state_at_speed(128.0);  // isolate one substep's input slip
+  auto state = state_at_speed(8.0);  // isolate one substep's input slip
   state.v_mps = 0.24;
   state.yaw_rate_radps = 0.55;
   state.physical_steering_rad = 0.18;
@@ -980,7 +981,7 @@ TEST(UnitySourcePlant, WheelSlipUsesFullAngularVelocityAtContactPoint)
 {
   constexpr double wheel_radius = 0.059;
   constexpr double com_height_from_actor = 0.06434;
-  constexpr double forward_speed = 128.0;  // one native substep at threshold
+  constexpr double forward_speed = 8.0;  // above 5 m/s: one native substep
   auto state = state_at_speed(forward_speed);
   const double contact_z = -(state.body_height_m + com_height_from_actor);
   state.roll_rate_radps = 0.4;
@@ -1017,7 +1018,7 @@ TEST(UnitySourcePlant, WheelSlipUsesFullAngularVelocityAtContactPoint)
 
 TEST(UnitySourcePlant, ContactJounceUsesPhysXRayPlaneIntersection)
 {
-  auto state = state_at_speed(128.0);  // one native substep; ray is initial
+  auto state = state_at_speed(8.0);  // one native substep; ray is initial
   state.body_height_m = -0.025;
   state.roll_rad = 0.035;
   state.pitch_rad = -0.045;
@@ -1029,7 +1030,7 @@ TEST(UnitySourcePlant, ContactJounceUsesPhysXRayPlaneIntersection)
   const std::array<double, 3> suspension_direction{0.0, 0.0, -1.0};
   const std::array<double, 3> collider_transform{
       0.17467999458312988, 0.11792,
-      -0.004435138776898384};
+      -0.00434};
   constexpr double center_y = -0.025 * 0.08715574274765817;
   constexpr double center_z = 0.025 * 0.9961946980917455;
   std::array<double, 3> wheel_center{};

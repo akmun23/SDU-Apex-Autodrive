@@ -124,8 +124,8 @@ int vehicle_model_longitudinal_slip_excess(
     double excess_speed_mps[4],
     double excess_derivative_wheel_omega[4]);
 
-/* One packet-rate model stage: use newest in-flight slot 2, then shift history
- * and append this stage's decision. */
+/* One MPC horizon stage at the command-application epoch: drive the source
+ * plant with this decision, then shift it into the carried command history. */
 MpcStageResult_t mpc_vehicle_model_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
@@ -142,8 +142,8 @@ int vehicle_model_reproject_tracking(
     float path_curvature,
     MpcStageResult_t *reprojected_step);
 
-/* Propagate from newest queued commands in slot 2 without advancing either
- * command-history slot. */
+/* Pre-command-time propagation uses newest accepted command in slot 2 without
+ * advancing either command-history slot. */
 MpcStageResult_t mpc_vehicle_model_propagate(
     const MpcModelState_t *state,
     float dt,

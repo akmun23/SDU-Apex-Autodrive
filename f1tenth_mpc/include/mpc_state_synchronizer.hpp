@@ -52,6 +52,28 @@ enum class MpcSyncStatus {
     kCommandTimeBeforeState,
 };
 
+enum class MpcFreshnessDecision {
+    kReady,
+    kWaitForFreshState,
+    kFault,
+};
+
+/* A brief transport backlog should not permanently latch the controller.
+ * Stale samples remain unusable; this guard only allows time for a newer
+ * sample to arrive while the already-issued actuator command remains active. */
+class MpcStateFreshnessGuard {
+public:
+    explicit MpcStateFreshnessGuard(double stale_fault_grace_s = 0.5);
+
+    MpcFreshnessDecision observe(MpcSyncStatus status, int64_t steady_now_ns);
+    double stale_duration_s(int64_t steady_now_ns) const;
+    void reset();
+
+private:
+    double stale_fault_grace_s_{};
+    int64_t stale_since_steady_ns_{};
+};
+
 struct MpcSyncConfig {
     double source_dt_min_s{0.001};
     double source_dt_max_s{0.250};

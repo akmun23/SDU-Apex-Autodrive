@@ -117,10 +117,9 @@ struct UnitySourcePlantSensitivity {
 double unity_steering_command_normalized_to_physical_rad(
     double normalized_command, double max_steering_rad);
 
-// Exact practice-player schedule: five substeps below 128 m/s and one at or
-// above 128 m/s. UnityPlayer_s.debug confirms the WheelCollider initialization
-// call setSubStepCount(128.0f, 5, 1); see the pinned source constant in
-// unity_source_plant.cpp and test the equality branch explicitly.
+// Exact pinned practice-player schedule: five substeps below 5 m/s and one at
+// or above 5 m/s. The matching UnityPlayer build disassembly confirms
+// setSubStepCount(5.0f, 5, 1); see the source constant and boundary test.
 unsigned int unity_source_wheel_substep_count(double forward_speed_mps);
 
 // Reconcile the suspension history after an observer corrects body pose or

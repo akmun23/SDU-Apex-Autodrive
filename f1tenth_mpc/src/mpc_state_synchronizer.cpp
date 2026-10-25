@@ -112,6 +112,45 @@ bool is_causal_plant_state_usable(bool received,
     return static_cast<double>(age_ns) * kNsToSeconds <= maximum_age_s;
 }
 
+MpcStateFreshnessGuard::MpcStateFreshnessGuard(double stale_fault_grace_s)
+    : stale_fault_grace_s_(std::isfinite(stale_fault_grace_s)
+            ? std::max(0.0, stale_fault_grace_s) : 0.0)
+{
+}
+
+MpcFreshnessDecision MpcStateFreshnessGuard::observe(
+    MpcSyncStatus status, int64_t steady_now_ns)
+{
+    if (status == MpcSyncStatus::kOk) {
+        reset();
+        return MpcFreshnessDecision::kReady;
+    }
+    if (status != MpcSyncStatus::kStateTooOld || steady_now_ns <= 0) {
+        reset();
+        return MpcFreshnessDecision::kFault;
+    }
+    if (stale_since_steady_ns_ <= 0 || steady_now_ns < stale_since_steady_ns_) {
+        stale_since_steady_ns_ = steady_now_ns;
+    }
+    return stale_fault_grace_s_ > 0.0 &&
+            stale_duration_s(steady_now_ns) <= stale_fault_grace_s_
+        ? MpcFreshnessDecision::kWaitForFreshState
+        : MpcFreshnessDecision::kFault;
+}
+
+double MpcStateFreshnessGuard::stale_duration_s(int64_t steady_now_ns) const
+{
+    if (stale_since_steady_ns_ <= 0 || steady_now_ns < stale_since_steady_ns_)
+        return 0.0;
+    return static_cast<double>(steady_now_ns - stale_since_steady_ns_) *
+        kNsToSeconds;
+}
+
+void MpcStateFreshnessGuard::reset()
+{
+    stale_since_steady_ns_ = 0;
+}
+
 MpcSyncStatus MpcStateSynchronizer::synchronize(
     int64_t command_time_ns, MpcSynchronizedState *state) const
 {
@@ -150,12 +189,14 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     const int64_t fused_stamp_ns = std::max(latest.stamp_ns, map_pose_.stamp_ns);
     const double age_s = static_cast<double>(command_time_ns - fused_stamp_ns) *
         kNsToSeconds;
-    if (age_s < 0.0) return MpcSyncStatus::kCommandTimeBeforeState;
-    if (age_s > config_.max_state_age_s) return MpcSyncStatus::kStateTooOld;
-
     state->source_stamp_ns = fused_stamp_ns;
     state->odom_source_stamp_ns = latest.stamp_ns;
     state->map_pose_source_stamp_ns = map_pose_.stamp_ns;
+    state->source_age_s = age_s;
+    state->pose_odom_skew_s = pose_odom_skew_s;
+    if (age_s < 0.0) return MpcSyncStatus::kCommandTimeBeforeState;
+    if (age_s > config_.max_state_age_s) return MpcSyncStatus::kStateTooOld;
+
     state->map_x = map_pose_.x + c_map * relative_x - s_map * relative_y;
     state->map_y = map_pose_.y + s_map * relative_x + c_map * relative_y;
     state->map_yaw = wrap_angle(map_pose_.yaw +
@@ -163,8 +204,6 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     state->u = latest.u;
     state->v = latest.v;
     state->yaw_rate = latest.yaw_rate;
-    state->source_age_s = age_s;
-    state->pose_odom_skew_s = pose_odom_skew_s;
     return MpcSyncStatus::kOk;
 }
 

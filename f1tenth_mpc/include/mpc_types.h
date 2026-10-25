@@ -81,7 +81,10 @@ enum
 };
 #define RICCATI_MAX_NX MPC_OPTIMIZER_NX
 #define RICCATI_MAX_NU MPC_MODEL_NU
-#define MPC_COMMAND_DELAY_STEPS 1
+/* command-time prediction advances the measured state to the next bridge
+ * request epoch before solving. The newly optimized input is active at that
+ * boundary, so the MPC horizon starts with a direct-input plant transition. */
+#define MPC_COMMAND_DELAY_STEPS 0
 
 /* Math and timing */
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
@@ -92,7 +95,8 @@ enum
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30
-/* The one command already in flight is propagated before the QP. */
+/* Prediction and optimization use the same 30 transitions from the command
+ * application epoch; there is no extra in-horizon queued-command stage. */
 #define RICCATI_HORIZON (PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS)
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
 
@@ -106,10 +110,11 @@ enum
 #define MPC_MAX_COMMAND_SPEED_MPS 16.0f                  /* Project command envelope, not simulator physics. */
 #define MPC_THROTTLE_MIN 0.0f
 #define MPC_THROTTLE_MAX 1.0f
-/* bridge_40hz serializes actuator commands to three decimal places; any
- * positive command below this threshold is transmitted as Unity's zero/brake
- * branch and therefore cannot represent a drive-mode QP decision. */
-#define MPC_THROTTLE_MIN_DRIVE 0.01f
+/* The bridge rounds normalized actuator commands to 0.001. Unity's controller
+ * treats every nonzero positive throttle as motor torque, so 0.001 is the
+ * smallest unambiguous positive drive command; exactly zero remains its
+ * separate full-brake mode. */
+#define MPC_THROTTLE_MIN_DRIVE 0.001f
 /* The 1 ms hard-brake plant sweep bottoms out at about -7.3 mm/s before
  * settling to rest; retain this measured numerical stopping transient. */
 #define MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS 0.008f

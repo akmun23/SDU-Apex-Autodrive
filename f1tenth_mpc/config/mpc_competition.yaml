@@ -18,6 +18,10 @@
     startup_ramp_laps: 0.0
 
     state_extrapolation_max_s: 0.12
+    # A stale sample is never solved against. Keep the last issued command and
+    # wait briefly for the packet backlog to recover; only a persistent stale
+    # stream latches the controller fault.
+    state_stale_fault_grace_s: 0.5
     # Publication lead is model-predicted separately from sensor-state age.
     # 500 ms covers the measured practice solve/publish lead (<400 ms) while
     # remaining inside the offline plant's validated 750 ms prediction span.
@@ -47,17 +51,28 @@
     weight_e_psi: 1500.0
     weight_u: 7.5
     weight_u_overspeed: 60.0
+    # Spend more of the existing overspeed penalty in tight bends, where the
+    # practice captures showed variable turn-in overspeed and lateral error.
+    # The speed-tracking weight while under the reference is unchanged.
+    overspeed_curvature_gain_m: 1.0
+    # Optional candidate-only schedule: reduce speed-catch-up pressure in
+    # tighter turns while retaining the full weight on straights. Zero keeps
+    # the validated production objective unchanged.
+    underspeed_curvature_gain_m: 0.0
     weight_longitudinal_slip: 25.0
     weight_v: 5.0
     weight_r: 7.8125
     weight_steering_command: 3.0
     weight_steering_target: 5.0
     weight_throttle_command: 0.1
-    # Input-increment regularization from the five-lap profile. Reducing the
-    # steering-slew penalty to 1000 caused an immediate high-heading corridor
-    # failure; the higher value avoids abrupt reversals.
+    # Penalizes steering-command changes beyond the path's curvature-derived
+    # feedforward change. This keeps steering smooth without fighting a
+    # required sign reversal through a curvature transition. The throttle
+    # slew cost remains centered on zero command increment.
     weight_steering_slew: 2000.0
-    weight_throttle_slew: 10.0
+    # Restored best repeated profile: the 75.0 run overlay averaged 5.779 s
+    # over five scored practice laps; the 100.0 reference averaged 5.785 s.
+    weight_throttle_slew: 75.0
     startup_nominal_throttle_seed: 0.25
     terminal_multiplier: 3.0
 
@@ -87,20 +102,45 @@
     # Exact nonlinear corridor validation remains a separate hard gate.
     # The exact source-plant rollout and corridor remain independent gates.
     solver_tolerance: 0.02
-    # One QP and one nonlinear validation per 40 Hz cycle; no retry pass.
-    # On 174 saved practice states (offline GT-pose isolation), 100 iterations
-    # raised exact-feasible candidates from 10/174 to 92/174. With four
-    # Jacobian workers the replay p95/max cycle was 11.94/12.98 ms; the live
-    # 20 ms RTI deadline remains the hard bound.
-    max_solver_iterations: 100
-    # Experimental recovery policy: prefer the retained full-plan suffix only
-    # when its entire remaining horizon revalidates from the current state.
-    # Kept off in the competition baseline pending supervised A/B evidence.
+    # One RTI pass by default, with a single relinearization only after a
+    # corridor-invalid QP direction or a zero-step line-search result. The
+    # second pass is gated on reserving 9 ms for the deadline and output path.
+    # On the 1,127-state v300 practice replay it reduced full-horizon nonlinear
+    # rejects from 41 to 28 and increased exact-valid optimal/feasible results;
+    # live 20 ms publication timing remains the acceptance gate.
+    # Two supervised practice runs with the same trajectory and
+    # source plant completed without collision at 150 iterations. The repeat
+    # averaged 5.785 s over scored laps (SD 0.105 s), with a 17.029 ms maximum
+    # publication gate. Keep the 20 ms deadline gate as the hard runtime bound.
+    max_solver_iterations: 150
+    # When an exact nonlinear rollout rejects the full QP step, test up to
+    # four damped source-plant steps (1/2, 1/4, 1/8, 1/16). Evaluate all
+    # feasible trials that fit the deadline and select the lowest production
+    # nonlinear objective (clearance breaks numerical ties); retain the exact
+    # corridor and command-epoch gates.
+    enable_nonlinear_line_search: true
+    line_search_max_backtracks: 4
+    max_sqp_iterations: 2
+    # Disabled: replay showed that full-horizon suffix validation rejects
+    # otherwise useful short retained prefixes too often.
     prefer_full_validated_prior_plan_on_rejection: false
-    # Development experiment: when both three-step recovery prefixes pass the
-    # exact source-plant/corridor check, select the lower runtime objective.
-    # Kept off until a supervised faster-line comparison demonstrates benefit.
-    quality_aware_prefix_selection_on_rejection: false
+    # On a rejected solve, compare candidate and retained-plan actions over
+    # the same 75 ms using exact source-plant rollout. Publish the lower-cost
+    # prefix only when it passes the corridor check. If both pass, a candidate
+    # with measurably better clearance is preferred only when the retained
+    # prefix has less than 5 cm of additional corridor slack. This reserve and
+    # 5 mm minimum gain target the observed v300 late-turn selection failure;
+    # objective selection remains unchanged elsewhere.
+    quality_aware_prefix_selection_on_rejection: true
+    quality_prefix_clearance_reserve_m: 0.05
+    quality_prefix_minimum_clearance_gain_m: 0.005
+    # An iteration-limited candidate can replace an exact-valid prior prefix
+    # only when both residuals are within 2x solver tolerance, then it must
+    # materially improve the exact 75 ms objective (or clear the 5 cm reserve).
+    # A better objective from a poor-residual iterate is not trusted: on the
+    # 2026-10-25 v300 capture it selected a saturated steering reversal before
+    # losing corridor validity on the next cycle.
+    quality_prefix_iteration_limited_relative_gain: 0.02
     rti_cycle_budget_ms: 20.0
     # Eight workers improved replay and passed one supervised, 3 m/s practice
     # run (publication-gate max 19.730 ms). Continue supervising until higher-

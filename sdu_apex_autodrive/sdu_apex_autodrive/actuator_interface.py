@@ -11,7 +11,7 @@ from sdu_apex_msgs.msg import DriveCommand
 from std_msgs.msg import Float32, String
 
 
-MIN_DRIVE_THROTTLE = 0.01
+MIN_DRIVE_THROTTLE = 0.001
 
 
 class ActuatorInterface(Node):

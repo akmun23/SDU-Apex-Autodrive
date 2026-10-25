@@ -307,7 +307,9 @@ static int vehicle_model_tracking_step_integrated(
         isfinite(*delta_s);
 }
 
-/* Nonlinear rollouts use the 1 ms source-derived four-wheel plant. The compact
+/* MPC transitions use the stage's direct command at the command epoch;
+ * control-time propagation explicitly selects the last accepted queue entry.
+ * Both paths use the same 1 ms source-derived four-wheel plant. The compact
  * RTI state tracks path/body/controller variables, while this carried state
  * preserves wheel spin, sprung-body motion, and suspension history across
  * every stage of the horizon. */
@@ -316,6 +318,7 @@ static int vehicle_model_step_scalar(
     const MpcModelControl_t *control,
     float dt,
     float path_curvature,
+    int use_queued_command,
     int advance_command_queues,
     MpcStageResult_t *stage)
 {
@@ -355,8 +358,10 @@ static int vehicle_model_step_scalar(
      * source double limit. Clip only that representation error at the plant
      * boundary; this preserves the simulator's physical steering limit. */
     source_input.steering_target_rad = clamp_source_steering_target(
-        state->delayed_steering_command_2);
-    source_input.throttle_normalized = state->delayed_throttle_command_2;
+        use_queued_command ? state->delayed_steering_command_2
+                           : steering_target);
+    source_input.throttle_normalized = use_queued_command
+        ? state->delayed_throttle_command_2 : q_throttle;
     if (source_input.throttle_normalized == 0.0f)
         stage->branch_flags |= MPC_STAGE_PLANT_BRAKE;
     UnitySourcePlantOutputC source_output;
@@ -550,9 +555,8 @@ enum { MPC_FORWARD_SENSITIVITY_COLUMNS = 20 };
 static const int kPlantSensitiveModelColumns[
     MPC_FORWARD_SENSITIVITY_COLUMNS] = {
     MPC_STATE_IDX_U, MPC_STATE_IDX_V, MPC_STATE_IDX_R,
-    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2,
     MPC_STATE_IDX_ACTUAL_STEERING_ANGLE,
-    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2,
+    MPC_MODEL_NX + 0, MPC_MODEL_NX + 1,
     MPC_STATE_IDX_WHEEL_OMEGA_FL, MPC_STATE_IDX_WHEEL_OMEGA_FR,
     MPC_STATE_IDX_WHEEL_OMEGA_RL, MPC_STATE_IDX_WHEEL_OMEGA_RR,
     MPC_STATE_IDX_BODY_HEIGHT, MPC_STATE_IDX_BODY_HEIGHT_RATE,
@@ -580,13 +584,13 @@ static int model_column_seed_source(int model_column, int *source_index,
         *second_source_index = UNITY_SOURCE_V;
         *second_source_scale = kComForwardFromRearAxleM;
         return 1;
-    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2:
+    case MPC_MODEL_NX + 0:
         *command_kind = 1;
         return 1;
     case MPC_STATE_IDX_ACTUAL_STEERING_ANGLE:
         *source_index = UNITY_SOURCE_PHYSICAL_STEERING;
         return 1;
-    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2:
+    case MPC_MODEL_NX + 1:
         *command_kind = 2;
         return 1;
     default: break;
@@ -661,20 +665,23 @@ static float source_output_derivative_to_model(
 }
 
 static int vehicle_model_forward_plant_jacobian(
-    const MpcModelState_t *state, float dt, float path_curvature,
+    const MpcModelState_t *state, const MpcModelControl_t *control,
+    float dt, float path_curvature,
     const MpcStageResult_t *nominal_stage,
     MpcStageLinearization_t *linearization,
     uint32_t *covered_columns)
 {
-    if (!state || !nominal_stage || !linearization || !covered_columns)
+    if (!state || !control || !nominal_stage || !linearization ||
+        !covered_columns)
         return 0;
     *covered_columns = 0;
     UnitySourcePlantInputC source_input;
     memset(&source_input, 0, sizeof(source_input));
     write_source_plant_state(state, source_input.state);
     source_input.steering_target_rad = clamp_source_steering_target(
-        state->delayed_steering_command_2);
-    source_input.throttle_normalized = state->delayed_throttle_command_2;
+        control->steering_target_rad);
+    source_input.throttle_normalized = clampf_local(
+        control->throttle_command, MPC_THROTTLE_MIN, MPC_THROTTLE_MAX);
     source_input.suspension_history_initialized =
         state->source_suspension_history_initialized;
     for (int first_column = 0;
@@ -702,13 +709,15 @@ static int vehicle_model_forward_plant_jacobian(
                 seeds.state[second_source_index][lane] =
                     second_source_scale;
             if (command_kind == 1) {
-                const double target =
-                    state->delayed_steering_command_2;
+                const double target = control->steering_target_rad;
                 seeds.steering_target[lane] =
                     target > -UNITY_SOURCE_MAX_STEERING_RAD &&
                     target < UNITY_SOURCE_MAX_STEERING_RAD ? 1.0 : 0.0;
             }
-            if (command_kind == 2) seeds.throttle[lane] = 1.0;
+            if (command_kind == 2 &&
+                control->throttle_command > MPC_THROTTLE_MIN &&
+                control->throttle_command < MPC_THROTTLE_MAX)
+                seeds.throttle[lane] = 1.0;
         }
         if (!unity_source_plant_step_sensitivity_c(
                 &source_input, dt, &seeds, &sensitivity)) return 0;
@@ -729,7 +738,11 @@ static int vehicle_model_forward_plant_jacobian(
                     source_output_derivative_to_model(
                         &sensitivity, row, lane);
                 if (!isfinite(derivative)) return 0;
-                linearization->A[row][model_column] = derivative;
+                if (model_column < MPC_MODEL_NX)
+                    linearization->A[row][model_column] = derivative;
+                else
+                    linearization->B[row][model_column - MPC_MODEL_NX] =
+                        derivative;
             }
 
             const float d_forward = (float)
@@ -749,22 +762,30 @@ static int vehicle_model_forward_plant_jacobian(
             const float d_epsi = d_yaw - path_curvature * d_delta_s;
             /* Derivative of the exact integrated-motion Frenet map. The path
              * coordinate columns e_y/e_psi remain on their cheap dedicated
-             * path above; this maps plant-state sensitivities only. */
+             * path above; this maps plant-state and direct-input sensitivities. */
             if (!isfinite(d_ey) || !isfinite(d_epsi)) return 0;
-            linearization->A[MPC_STATE_IDX_EY][model_column] = d_ey;
-            linearization->A[MPC_STATE_IDX_EPSI][model_column] = d_epsi;
-            *covered_columns |= UINT32_C(1) << model_column;
-
-            /* At exactly zero throttle, Unity changes from the motor-torque
-             * branch to its hard-brake branch. A local derivative through
-             * the active brake branch is zero, but the feasible positive
-             * direction crosses modes. Leave that column to the existing
-             * branch-aware one-sided difference rather than inventing a
-             * smooth derivative at the hybrid boundary. */
-            if (model_column == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2 &&
-                state->delayed_throttle_command_2 == 0.0f) {
-                *covered_columns &= ~(UINT32_C(1) << model_column);
+            if (model_column < MPC_MODEL_NX) {
+                linearization->A[MPC_STATE_IDX_EY][model_column] = d_ey;
+                linearization->A[MPC_STATE_IDX_EPSI][model_column] = d_epsi;
+            } else {
+                const int input = model_column - MPC_MODEL_NX;
+                linearization->B[MPC_STATE_IDX_EY][input] = d_ey;
+                linearization->B[MPC_STATE_IDX_EPSI][input] = d_epsi;
             }
+            const int command_derivative_is_local =
+                model_column < MPC_MODEL_NX ||
+                (model_column == MPC_MODEL_NX &&
+                    control->steering_target_rad >
+                        -UNITY_SOURCE_MAX_STEERING_RAD &&
+                    control->steering_target_rad <
+                        UNITY_SOURCE_MAX_STEERING_RAD) ||
+                (model_column == MPC_MODEL_NX + 1 &&
+                    control->throttle_command > MPC_THROTTLE_MIN &&
+                    control->throttle_command < MPC_THROTTLE_MAX);
+            if (command_derivative_is_local)
+                *covered_columns |= UINT32_C(1) << model_column;
+            else
+                *covered_columns &= ~(UINT32_C(1) << model_column);
         }
     }
     return 1;
@@ -798,7 +819,8 @@ static int vehicle_model_linearize_with_known_step(
         }
         known_storage = *known_step;
     } else if (!vehicle_model_step_scalar(
-                   state, control, dt, path_curvature, 1, &known_storage)) {
+                   state, control, dt, path_curvature, 0, 1,
+                   &known_storage)) {
         linearization->failure_reason = 2;
         return 0;
     }
@@ -817,7 +839,8 @@ static int vehicle_model_linearize_with_known_step(
 
     /* These columns have exact deterministic dependencies:
      * - e_y/e_psi enter only the cheap Frenet integration below;
-     * - each two-sample command history advances by shift and append.
+     * - command history advances by shift and append and does not drive the
+     *   plant inside the command-time-aligned MPC horizon.
      * Fill these exact dependencies directly rather than finite-differencing
      * the costly 1 ms tire/contact equations for every bookkeeping state. */
     const VehicleParameters_t parameters = vehicle_model_get_parameters();
@@ -829,11 +852,9 @@ static int vehicle_model_linearize_with_known_step(
         control->throttle_command < MPC_THROTTLE_MAX;
     linearization->A[MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1]
                      [MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2] = 1.0f;
-    /* These are exact command-queue dependencies. At a control bound the
-     * QP's feasible direction is one-sided (inward), but the queue still
-     * changes one-for-one with that feasible control change. A zero
-     * derivative at the lower throttle bound makes a stationary vehicle
-     * unable to discover positive throttle at all. */
+    /* The source plant receives the QP decision directly. These exact
+     * dependencies only advance the actuator-history fields carried beside
+     * the plant; they are not the physical input Jacobian. */
     linearization->B[MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2][0] = 1.0f;
     linearization->A[MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1]
                      [MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2] = 1.0f;
@@ -895,7 +916,7 @@ static int vehicle_model_linearize_with_known_step(
 
     uint32_t sensitivity_covered_columns = 0;
     const int sensitivities_valid = vehicle_model_forward_plant_jacobian(
-        state, dt, path_curvature, stage, linearization,
+        state, control, dt, path_curvature, stage, linearization,
         &sensitivity_covered_columns);
 
     for (int column = 0; column < MPC_MODEL_NX + MPC_MODEL_NU; ++column) {
@@ -903,17 +924,18 @@ static int vehicle_model_linearize_with_known_step(
         const int index = is_state ? column : column - MPC_MODEL_NX;
         const int analytic_column = is_state
             ? (index == MPC_STATE_IDX_EY || index == MPC_STATE_IDX_EPSI ||
-               /* Slot 1 is consumed only by the exact shift/overwrite below:
-                * the plant acts on slot 2, and next slot 1 is copied from
-                * slot 2. Therefore both slot-1 state columns are exactly
-                * zero and must not trigger a finite-difference plant run. */
+               /* Queue coordinates affect only exact shift/overwrite rows.
+                * They are bookkeeping in this direct-input horizon and must
+                * not trigger a finite-difference plant run. */
                index == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1 ||
                index == MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2 ||
                index == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1 ||
                index == MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2 ||
                (sensitivities_valid &&
                 (sensitivity_covered_columns & (UINT32_C(1) << index)) != 0))
-            : 1;
+            : (sensitivities_valid &&
+               (sensitivity_covered_columns &
+                    (UINT32_C(1) << (MPC_MODEL_NX + index))) != 0);
         if (analytic_column) continue;
         ++linearization->finite_difference_column_count;
         const float epsilon = is_state
@@ -930,7 +952,7 @@ static int vehicle_model_linearize_with_known_step(
         MpcStageResult_t plus = {0};
         MpcStageResult_t minus = {0};
         (void)vehicle_model_step_scalar(
-            &state_plus, &control_plus, dt, path_curvature, 1, &plus);
+            &state_plus, &control_plus, dt, path_curvature, 0, 1, &plus);
         const int plus_same_branch = plus.valid &&
             plus.branch_flags == stage->branch_flags;
 
@@ -948,7 +970,8 @@ static int vehicle_model_linearize_with_known_step(
                 control_minus.throttle_command -= epsilon;
             }
             (void)vehicle_model_step_scalar(
-                &state_minus, &control_minus, dt, path_curvature, 1, &minus);
+                &state_minus, &control_minus, dt, path_curvature, 0, 1,
+                &minus);
         }
         const int minus_same_branch = minus.valid &&
             minus.branch_flags == stage->branch_flags;
@@ -986,6 +1009,15 @@ static int vehicle_model_linearize_with_known_step(
                 linearization->failure_reason = 5;
                 linearization->failure_index = column;
                 return 0;
+            }
+            /* Queue append is exact even when the physical command is at a
+             * bound and its plant derivative needs a one-sided difference. */
+            if (!is_state &&
+                ((index == 0 && row ==
+                    MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2) ||
+                 (index == 1 && row ==
+                    MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2))) {
+                continue;
             }
             if (is_state) linearization->A[row][index] = derivative;
             else linearization->B[row][index] = derivative;
@@ -1032,7 +1064,8 @@ MpcStageResult_t mpc_vehicle_model_step(
     float path_curvature)
 {
     MpcStageResult_t stage = {0};
-    vehicle_model_step_scalar(state, control, dt, path_curvature, 1, &stage);
+    vehicle_model_step_scalar(state, control, dt, path_curvature, 0, 1,
+        &stage);
     return stage;
 }
 
@@ -1079,7 +1112,7 @@ MpcStageResult_t mpc_vehicle_model_propagate(
         state->delayed_steering_command_2,
         state->delayed_throttle_command_2};
     vehicle_model_step_scalar(
-        state, &queued_command, dt, path_curvature, 0, &stage);
+        state, &queued_command, dt, path_curvature, 1, 0, &stage);
     return stage;
 }
 

@@ -50,6 +50,16 @@ class ActuatorInterfaceTest(unittest.TestCase):
         self.assertEqual(self.outputs[0][0], 0.0)
         self.assertAlmostEqual(self.outputs[0][1], MIN_DRIVE_THROTTLE, places=7)
 
+    def test_minimum_drive_is_a_positive_nonbraking_command(self):
+        command = DriveCommand()
+        command.steering_angle_rad = 0.0
+        command.throttle_normalized = 0.001
+
+        self.node._on_command(command)
+
+        self.assertEqual(len(self.outputs), 1)
+        self.assertEqual(self.outputs[0][1], 0.001)
+
     def test_zero_throttle_is_rejected_without_substitute_output(self):
         command = DriveCommand()
         command.steering_angle_rad = -0.1
