@@ -60,6 +60,15 @@ int mpc_rti_line_search_budget_available(double remaining_us)
     return isfinite(remaining_us) && remaining_us >= kMinimumRemainingUs;
 }
 
+int mpc_rti_refinement_improves_action(
+    int first_valid, float first_objective,
+    int refined_valid, float refined_objective)
+{
+    if (!refined_valid || !isfinite(refined_objective)) return 0;
+    return !first_valid || !isfinite(first_objective) ||
+        refined_objective < first_objective;
+}
+
 static int finite_rti_state(const MpcRtiState_t *state)
 {
     if (!(state && isfinite(state->plant.e_y) &&
@@ -1060,6 +1069,7 @@ static int mpc_rti_build_nominal_impl(
     const MpcRtiNominal_t *previous_nominal,
     const MpcModelControl_t *warm_start_controls,
     int warm_start_control_count,
+    int shift_warm_controls,
     const MpcTrajectorySample_t *trajectory,
     size_t trajectory_count,
     double lap_length,
@@ -1209,8 +1219,9 @@ static int mpc_rti_build_nominal_impl(
      * Explicit issued-command history takes precedence over launch heuristics. */
     if (warm_start_controls) {
         for (int k = 0; k < horizon; ++k) {
-            const int shifted_index = k + 1 < warm_start_control_count
-                ? k + 1 : warm_start_control_count - 1;
+            const int requested_index = k + (shift_warm_controls ? 1 : 0);
+            const int shifted_index = requested_index < warm_start_control_count
+                ? requested_index : warm_start_control_count - 1;
             nominal->controls[k] = warm_start_controls[shifted_index];
             nominal->controls[k].steering_target_rad = clampf_rti(
                 nominal->controls[k].steering_target_rad,
@@ -1292,7 +1303,7 @@ int mpc_rti_build_nominal(
     MpcRtiReference_t references[PREDICTION_HORIZON + 1])
 {
     return mpc_rti_build_nominal_impl(current_state, current_progress,
-        previous_nominal, NULL, 0, trajectory, trajectory_count, lap_length,
+        previous_nominal, NULL, 0, 1, trajectory, trajectory_count, lap_length,
         prediction_dt, horizon, configuration, nominal, references);
 }
 
@@ -1312,7 +1323,7 @@ int mpc_rti_build_nominal_with_warm_start(
     MpcRtiReference_t references[PREDICTION_HORIZON + 1])
 {
     return mpc_rti_build_nominal_impl(current_state, current_progress,
-        previous_nominal, warm_start_controls, warm_start_control_count,
+        previous_nominal, warm_start_controls, warm_start_control_count, 1,
         trajectory, trajectory_count, lap_length, prediction_dt, horizon,
         configuration, nominal, references);
 }
@@ -2379,7 +2390,9 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             }
         }
 
-        if (trial_exact_valid) {
+        if (mpc_rti_refinement_improves_action(
+                pass->line_search_nominal_exact_valid, nominal_objective,
+                trial_exact_valid, pass->nonlinear_objective)) {
             best_trial_candidate = pass->candidate;
             best_trial_candidate.validation_objective =
                 pass->nonlinear_objective;
@@ -2403,9 +2416,10 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                 memcpy(best_trial_diagnostic_outputs,
                     pass->diagnostic_outputs,
                     sizeof(best_trial_diagnostic_outputs));
-            /* Preserve the established first-exact-feasible backtrack policy.
-             * Ranking later feasible alphas was tested on the combined U20/O30
-             * profile and did not improve the supervised practice result. */
+            /* Stop at the first decreasing exact-valid backtrack. Feasibility
+             * alone must not accept an increase that triggered merit search.
+             * If no such trial fits the budget, the independently validated
+             * alpha=0 nominal remains available below. */
             break;
         }
 
@@ -2638,12 +2652,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         trajectory, trajectory_count, lap_length, prediction_dt, horizon,
         configuration, memory, deadline_us,
         (double)MPC_RTI_POST_SOLVE_RESERVE_US, &pass);
-    /* If the full SQP step was corridor-invalid and line search could only
-     * retain alpha=0 (or no action), relinearize once around the QP's proposed
-     * control sequence. This avoids spending successive callbacks applying
-     * the same stale nominal while each new linearization is still centered on
-     * that stale trajectory. The best exact-valid backtrack from the first
-     * pass remains the winner unless refinement itself returns a valid plan. */
+    /* Refine difficult damped steps within the same publication budget.
+     * Start from the exact-valid first iterate when available, never shift
+     * its horizon as if another command had already been issued. Compare
+     * both passes using identical speed targets and retain the lower exact
+     * cost; a second valid pass is not automatically a better pass. */
     const int sqp_limit = configuration->max_sqp_iterations > 0
         ? configuration->max_sqp_iterations : 1;
     const int needs_refinement =
@@ -2651,30 +2664,42 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
          pass.line_search_full_step_failure_reason ==
             MPC_RTI_ROLLOUT_CORRIDOR) ||
         (status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH &&
-         pass.line_search_selected_alpha == 0.0f);
+         pass.line_search_selected_alpha <= 0.5f);
     const double refinement_remaining_us = deadline_us > 0.0
         ? deadline_us - monotonic_microseconds() : INFINITY;
+    /* A second nominal + Jacobian is not free: the symmetric-speed trial
+     * built 92 second QPs with no remaining ADMM budget. Reserve the measured
+     * preparation cost, 1 ms of solver work and nonlinear completion before
+     * starting refinement, rather than spending those milliseconds to skip. */
+    const double refinement_minimum_us =
+        (double)MPC_RTI_REFINEMENT_SOLVE_RESERVE_US +
+        fmax(1000.0, pass.qp_build_us) + result->nominal_build_us + 1000.0;
     if (sqp_limit > 1 && needs_refinement &&
         pass.candidate.horizon == horizon &&
-        refinement_remaining_us >=
-            (double)MPC_RTI_POST_SOLVE_RESERVE_US + 4000.0) {
+        refinement_remaining_us >= refinement_minimum_us) {
         const MpcRtiPassResult_t first_pass = pass;
         const MpcRtiCycleStatus_t first_status = status;
         const MpcRtiMemory_t memory_after_first = *memory;
-        MpcModelControl_t refinement_seed[PREDICTION_HORIZON];
-        refinement_seed[0] = first_pass.proposed_controls[0];
-        for (int k = 0; k + 1 < horizon; ++k)
-            refinement_seed[k + 1] = first_pass.proposed_controls[k];
+        const int first_action_valid = first_pass.sqp_accepted &&
+            first_pass.first_action_valid;
+        const MpcModelControl_t *refinement_seed = first_action_valid
+            ? first_pass.candidate.controls : first_pass.proposed_controls;
 
         MpcRtiNominal_t refinement_nominal;
         MpcRtiReference_t refinement_references[PREDICTION_HORIZON + 1];
         const int refinement_nominal_built =
-            mpc_rti_build_nominal_with_warm_start(
+            mpc_rti_build_nominal_impl(
                 &prepared_state, current_progress, &nominal,
-                refinement_seed, horizon, trajectory, trajectory_count,
+                refinement_seed, horizon, 0, trajectory, trajectory_count,
                 lap_length, prediction_dt, horizon, &configuration->model,
                 &refinement_nominal, refinement_references);
         if (refinement_nominal_built) {
+            for (int k = 0; k <= horizon; ++k) {
+                refinement_references[k].u = nominal.speed_reference[k];
+                refinement_nominal.speed_reference[k] =
+                    nominal.speed_reference[k];
+            }
+            align_yaw_rate_references(refinement_references, horizon);
             MpcRtiPassResult_t refined_pass;
             memset(&refined_pass, 0, sizeof(refined_pass));
             const MpcRtiCycleStatus_t refined_status = solve_rti_pass(
@@ -2690,9 +2715,13 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
                     first_pass.admm_status, refined_pass.admm_status,
                     refined_pass.solver_skipped_for_deadline);
-            if (refined_action_valid) {
+            int chose_refinement = 0;
+            if (mpc_rti_refinement_improves_action(first_action_valid,
+                    first_pass.nonlinear_objective, refined_action_valid,
+                    refined_pass.nonlinear_objective)) {
                 pass = refined_pass;
                 status = refined_status;
+                chose_refinement = 1;
             } else if (keep_first_pass) {
                 /* A refinement that never reached ADMM has no candidate to
                  * supersede the completed first pass. Keep that finite
@@ -2705,13 +2734,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                        !first_pass.first_action_valid) {
                 pass = refined_pass;
                 status = refined_status;
+                chose_refinement = 1;
             } else {
                 pass = first_pass;
                 status = first_status;
                 *memory = memory_after_first;
             }
-            const MpcRtiPassResult_t *additional_pass = keep_first_pass
-                ? &refined_pass : &first_pass;
+            const MpcRtiPassResult_t *additional_pass = chose_refinement
+                ? &first_pass : &refined_pass;
             pass.sqp_attempted += additional_pass->sqp_attempted;
             pass.sqp_completed += additional_pass->sqp_completed;
             pass.sqp_accepted += additional_pass->sqp_accepted;

@@ -542,6 +542,10 @@ int mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
     int first_pass_admm_status,
     int refinement_admm_status,
     int refinement_skipped_for_deadline);
+/* Compare exact-valid actions evaluated with the same speed targets. */
+int mpc_rti_refinement_improves_action(
+    int first_valid, float first_objective,
+    int refined_valid, float refined_objective);
 
 /* True when the cycle has enough time remaining to attempt one nonlinear
  * backtracking rollout without bypassing the final publication deadline. */

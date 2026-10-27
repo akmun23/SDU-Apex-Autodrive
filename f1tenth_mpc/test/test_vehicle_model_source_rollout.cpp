@@ -35,6 +35,17 @@ TEST(MpcRtiLineSearchBudget, AllowsMeasuredRecoveryTrialsButRejectsInvalidTime)
   EXPECT_FALSE(mpc_rti_line_search_budget_available(INFINITY));
 }
 
+TEST(MpcRtiRefinementQuality, SelectsOnlyLowerExactCostValidAction)
+{
+  EXPECT_TRUE(mpc_rti_refinement_improves_action(1, 100, 1, 90));
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, 101));
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, 100));
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 0, 90));
+  EXPECT_TRUE(mpc_rti_refinement_improves_action(0, INFINITY, 1, 150));
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, NAN));
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, INFINITY));
+}
+
 MpcModelState_t turning_state()
 {
   MpcModelState_t state{};

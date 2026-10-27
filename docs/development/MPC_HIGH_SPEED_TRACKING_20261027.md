@@ -146,3 +146,71 @@ Next correctness fix: ensure optional SQP refinement starts from the accepted
 sequence (without an artificial temporal shift), compares the same nonlinear
 objective against the first pass, and accounts both passes' computation once.
 Then test actual speed tracking, not just solver acceptance.
+
+## SQP and merit acceptance corrections
+
+Implemented: same-cycle refinement no longer shifts its seed as if time had
+advanced (the previous shift also duplicated the penultimate tail command).
+It starts from the accepted first pass when available, shares the first
+pass's speed targets, and selects refinement only if exact cost improves.
+Pass timing/counters now include each pass once regardless of which wins.
+Optional refinement also covers damped alpha <= 0.5 steps within the deadline.
+
+Run live_runs/mpc_monotone_sqp_20261027_01 tested these changes before the
+line-search correction below. Six laps, scored mean 5.7028 s, SD 0.0810 s,
+publication maximum 18.02 ms; all commands full-horizon valid. No measured
+lap-time improvement versus 5.6952 s is claimed from refinement alone.
+
+Further diagnosis: 249/1418 published cycles of the 5.6952 s run detected
+merit regression, then accepted alpha=0.5 even though exact cost still
+exceeded nominal. The backtrack loop checked feasibility, not descent.
+It now requires decreasing exact cost when nominal itself is valid; otherwise
+the independently validated alpha=0 sequence remains available. Helpers and
+source-rollout tests pass. Trial live_runs/mpc_merit_sqp_20261027_01 now tests
+the complete correction with original production weights.
+
+Result: six complete laps, no collision or recovery command. Five scored:
+5.6008, 5.5208, 5.5688, 5.6078, 5.6168 s. Mean 5.5830 s, SD 0.0351 s.
+Publication median/p95/max 5.19/17.20/18.89 ms, zero budget violations.
+All 1,386 issued commands passed full-horizon validation; zero published
+line-search actions increased exact cost above their valid nominal.
+The original weights are unchanged. The geometry + SQP/merit corrections
+improve the saved 5.7790 s mean by 0.1960 s (3.39%); 5.5 s remains open.
+
+Candidate-only next experiment: symmetric speed cost 25/25, no curvature
+overspeed multiplier, steering/throttle slew 1500/25. This tests removing
+the speed-cost branch inconsistency, not arbitrary extra throttle forcing.
+
+Symmetric trial live_runs/mpc_merit_symmetric_20261027_01 completed six laps.
+Scored 5.5278, 5.5818, 5.5008, 5.5218, 5.7008 s: mean 5.5666 s, SD
+0.0722 s. A startup cycle deferred publication at 20.53 ms; no invalid command
+was published. This is not a timing-qualified promoted profile. The startup
+Jacobian took 8.78 ms and exact rollout 5.08 ms; host compilation briefly
+overlapped early startup before being pinned off the controller CPUs.
+All later tests must avoid host compilation during live operation.
+
+The trial also wasted 92 second-QP builds with no time left for ADMM.
+Refinement now requires its measured nominal/Jacobian preparation cost,
+1 ms solver work and the existing validation reserve before it starts.
+Next coupled candidate: speed 50/50, steering slew 1000, throttle slew 25.
+The 25/25 result justifies testing stronger speed tracking with monotone
+acceptance; neither profile is promoted without measured transfer.
+
+Fixed-command replay of the 5.5830 s run: 750 ms speed RMSE 0.00783 m/s,
+lateral speed 0.00109 m/s, yaw rate 0.00819 rad/s, yaw 0.00231 rad,
+XY 0.00989 m. Maximum XY 0.0603 m; 2/1361 windows exceed 5 cm. Low average
+error does not erase these remaining tails, and is not a 1:1 guarantee.
+All ten package CTest targets pass after the SQP/merit correction.
+
+The 50/50 + steering slew 1000 trial aborted before lap one: 28 consecutive
+certified-plan actions exhausted the plan and both fresh/retained trajectories
+failed the corridor. No collision; no time claim. This is not promoted.
+Run: live_runs/mpc_speed_tracking_20261027_01. Max publication 18.31 ms.
+
+Retaining steering/throttle slew 2000/75, speed weights 15/40 and overspeed
+curvature gain 0.5 completed six laps in mpc_speed_balance_20261027_01.
+Scored 5.4808, 5.5988, 5.5418, 5.5528, 5.5608 s: mean 5.5470 s, SD
+0.0383 s. All 1376 published commands full-horizon valid, no recovery.
+Publication median/p95/max 5.01/16.77/19.05 ms, no budget violations.
+Snapshot saved in that run's mpc_overlay.yaml before testing 25/25 speed
+weights with the same 2000/75 damping and curvature gain 0.5.
