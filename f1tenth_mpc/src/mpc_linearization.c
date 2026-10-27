@@ -209,6 +209,9 @@ int mpc_model_linearize_fd_oracle(
         state, control, dt, path_curvature);
     if (!base.valid) return 0;
     linearization->nominal_branch_flags = base.branch_flags;
+    for (int wheel = 0; wheel < 4; ++wheel)
+        linearization->maximum_slip_excess_mps[wheel] = (float)
+            base.output.maximum_longitudinal_slip_excess_mps[wheel];
 
     float x0[MPC_MODEL_NX];
     float u0[MPC_MODEL_NU];
@@ -276,6 +279,22 @@ int mpc_model_linearize_fd_oracle(
                 linearization->body_motion_A[motion][index] = derivative;
             else
                 linearization->body_motion_B[motion][index] = derivative;
+        }
+        for (int wheel = 0; wheel < 4; ++wheel) {
+            const float base_excess = (float)
+                base.output.maximum_longitudinal_slip_excess_mps[wheel];
+            const float plus_excess = (float)
+                plus.output.maximum_longitudinal_slip_excess_mps[wheel];
+            const float minus_excess = (float)
+                minus.output.maximum_longitudinal_slip_excess_mps[wheel];
+            const float derivative = choose_derivative(&base, &plus, &minus,
+                &base_excess, &plus_excess, &minus_excess,
+                epsilon, 0, &column_nonsmooth);
+            if (!isfinite(derivative)) return 0;
+            if (is_state)
+                linearization->maximum_slip_excess_A[wheel][index] = derivative;
+            else
+                linearization->maximum_slip_excess_B[wheel][index] = derivative;
         }
         if (column_nonsmooth) {
             linearization->nonsmooth_column_mask |= UINT64_C(1) << column;

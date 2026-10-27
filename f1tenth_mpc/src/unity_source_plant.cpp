@@ -1437,7 +1437,7 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
   for (unsigned int i = 0; i < exact_steps; ++i) {
     const bool final_step = i + 1 == exact_steps;
     if (!step(current, input, kDt, &result,
-              final_step && !sensitivity_only, !sensitivity_only))
+              final_step && !sensitivity_only, true))
       return false;
     const auto &next = result.state;
     const Scalar u_mid = 0.5 * (current.u_mps + next.u_mps);
@@ -1462,22 +1462,18 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
     integrated_lateral_m += kDt *
         (u_mid * scalar_sin(yaw_mid) + v_rear_mid * scalar_cos(yaw_mid));
     integrated_yaw_rad += kDt * yaw_rate_euler;
-    if (!sensitivity_only) {
-      for (std::size_t wheel = 0;
-           wheel < maximum_positive_slip.size(); ++wheel) {
-        maximum_positive_slip[wheel] = scalar_max(maximum_positive_slip[wheel],
-            result.maximum_positive_longitudinal_slip[wheel]);
-        maximum_slip_excess_mps[wheel] = scalar_max(
-            maximum_slip_excess_mps[wheel],
-            result.maximum_longitudinal_slip_excess_mps[wheel]);
-      }
+    for (std::size_t wheel = 0;
+         wheel < maximum_positive_slip.size(); ++wheel) {
+      maximum_positive_slip[wheel] = scalar_max(maximum_positive_slip[wheel],
+          result.maximum_positive_longitudinal_slip[wheel]);
+      maximum_slip_excess_mps[wheel] = scalar_max(
+          maximum_slip_excess_mps[wheel],
+          result.maximum_longitudinal_slip_excess_mps[wheel]);
     }
     current = result.state;
   }
-  if (!sensitivity_only) {
-    result.maximum_positive_longitudinal_slip = maximum_positive_slip;
-    result.maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
-  }
+  result.maximum_positive_longitudinal_slip = maximum_positive_slip;
+  result.maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
   result.integrated_body_forward_displacement_m = integrated_forward_m;
   result.integrated_body_lateral_displacement_m = integrated_lateral_m;
   result.integrated_yaw_delta_rad = integrated_yaw_rad;
@@ -1619,6 +1615,13 @@ bool unity_source_plant_step_with_sensitivities(
   UnitySourcePlantOutputT<Dual20> dual_output;
   if (!step_interval(dual_state, dual_input, duration_s, &dual_output, true))
     return false;
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    const auto &excess = dual_output.maximum_longitudinal_slip_excess_mps[wheel];
+    sensitivity->maximum_longitudinal_slip_excess_mps[wheel] = primal(excess);
+    for (std::size_t lane = 0; lane < kUnityPlantSensitivityWidth; ++lane)
+      sensitivity->maximum_longitudinal_slip_excess_derivative[wheel][lane] =
+          excess.derivative[lane];
+  }
   for (std::size_t state_index = 0;
        state_index < kUnityPlantSensitivityStateSize; ++state_index) {
     const Dual20 *value = nullptr;

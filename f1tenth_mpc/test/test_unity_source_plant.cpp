@@ -300,6 +300,13 @@ TEST(UnitySourcePlant, ForwardSensitivitiesMatchSmoothBranchDifferences)
                 2.0e-5 + 2.0e-3 * std::abs(d_lateral));
     EXPECT_NEAR(sensitivity.yaw_delta[direction], d_yaw,
                 2.0e-5 + 2.0e-3 * std::abs(d_yaw));
+    for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+      const double derivative = (plus.maximum_longitudinal_slip_excess_mps[wheel] -
+          minus.maximum_longitudinal_slip_excess_mps[wheel]) / denominator;
+      EXPECT_NEAR(sensitivity.maximum_longitudinal_slip_excess_derivative[wheel][direction],
+          derivative, 2.0e-4 + 2.0e-3*std::abs(derivative))
+          << "peak slip direction=" << direction << " wheel=" << wheel;
+    }
   }
 }
 
@@ -368,6 +375,13 @@ TEST(UnitySourcePlant, ForwardSensitivitiesSupportUpperEightLanes)
          minus.integrated_body_forward_displacement_m) / denominator;
     EXPECT_NEAR(sensitivity.body_forward_displacement[direction],
         forward_difference, 2.0e-5 + 2.0e-3 * std::abs(forward_difference));
+    for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+      const double derivative = (plus.maximum_longitudinal_slip_excess_mps[wheel] -
+          minus.maximum_longitudinal_slip_excess_mps[wheel]) / denominator;
+      EXPECT_NEAR(sensitivity.maximum_longitudinal_slip_excess_derivative[wheel][direction],
+          derivative, 2.0e-4 + 2.0e-3*std::abs(derivative))
+          << "peak slip upper lane=" << direction << " wheel=" << wheel;
+    }
   }
 }
 

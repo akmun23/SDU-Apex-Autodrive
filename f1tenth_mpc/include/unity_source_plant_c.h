@@ -95,6 +95,9 @@ typedef struct {
   double body_lateral_displacement
       [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
   double yaw_delta[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+  double maximum_longitudinal_slip_excess_mps[4];
+  double maximum_longitudinal_slip_excess_derivative[4]
+      [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
 } UnitySourcePlantSensitivityC;
 
 /* Returns 1 on success; rejects non-finite/out-of-contract inputs. duration

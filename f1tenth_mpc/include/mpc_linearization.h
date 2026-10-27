@@ -16,6 +16,11 @@ typedef struct
     float d[MPC_MODEL_NX];
     float body_motion_A[3][MPC_MODEL_NX];
     float body_motion_B[3][MPC_MODEL_NU];
+    /* Same held-interval slip peaks used by nonlinear acceptance, including
+     * body/contact and direct-input dependence, not only wheel omega. */
+    float maximum_slip_excess_mps[4];
+    float maximum_slip_excess_A[4][MPC_MODEL_NX];
+    float maximum_slip_excess_B[4][MPC_MODEL_NU];
     unsigned int nominal_branch_flags;
     uint64_t nonsmooth_column_mask;
     int nonsmooth_column_count;

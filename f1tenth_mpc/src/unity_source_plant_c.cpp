@@ -162,6 +162,14 @@ extern "C" int unity_source_plant_step_sensitivity_c(
   if (!f1tenth_mpc::unity_source_plant_step_with_sensitivities(
           plant_state, plant_input, duration_s, typed_seeds,
           &typed_sensitivity)) return 0;
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    sensitivity->maximum_longitudinal_slip_excess_mps[wheel] =
+        typed_sensitivity.maximum_longitudinal_slip_excess_mps[wheel];
+    for (std::size_t lane = 0;
+         lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
+      sensitivity->maximum_longitudinal_slip_excess_derivative[wheel][lane] =
+          typed_sensitivity.maximum_longitudinal_slip_excess_derivative[wheel][lane];
+  }
   for (std::size_t state = 0; state < UNITY_SOURCE_PLANT_STATE_SIZE; ++state)
     for (std::size_t lane = 0;
          lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)

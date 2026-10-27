@@ -108,6 +108,9 @@ struct UnitySourcePlantSensitivity {
   std::array<double, kUnityPlantSensitivityWidth> body_forward_displacement{};
   std::array<double, kUnityPlantSensitivityWidth> body_lateral_displacement{};
   std::array<double, kUnityPlantSensitivityWidth> yaw_delta{};
+  std::array<double, 4> maximum_longitudinal_slip_excess_mps{};
+  std::array<std::array<double, kUnityPlantSensitivityWidth>, 4>
+      maximum_longitudinal_slip_excess_derivative{};
 };
 
 // VehicleController stores AutonomousSteering with the opposite sign in its
@@ -157,7 +160,7 @@ bool unity_source_plant_step(
     UnitySourcePlantOutput *output);
 
 // Differentiate the same source-derived interval step through its active
-// branch for up to eight independent directions. Branch selection is based on
+// branch for up to twenty independent directions. Branch selection is based on
 // primal doubles and is therefore a local derivative, not a smoothing of the
 // WheelCollider/PhysX branch transitions.
 bool unity_source_plant_step_with_sensitivities(

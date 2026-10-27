@@ -653,31 +653,42 @@ static void add_tracking_cost(
         reference->steering_command, multiplier);
 }
 
-/* Gauss-Newton local model of the source tire curve's force-loss region.
- * The residual is wheel-surface-speed mismatch beyond the source curve's
- * extremum. Its Jacobian is taken with respect to each wheel omega while the
- * other plant coordinates are held at the current RTI linearization point. */
-static void add_source_wheel_slip_cost(
-    float Q[MPC_RTI_NX], float q[MPC_RTI_NX],
-    const MpcModelState_t *plant, float weight, float multiplier)
+/* Nonlinear acceptance scores the maximum source slip excess DURING each
+ * held-input interval. An instantaneous wheel-only state penalty is a
+ * different objective. Differentiate the actual interval peak in the same
+ * AD plant pass, including body/contact state and torque/steering decisions.
+ * The diagonal Gauss-Newton Hessian keeps the compact Riccati representation;
+ * its linear term preserves the complete first derivative at the nominal.
+ * This approximates optimization curvature, never the vehicle dynamics. */
+static void add_source_transition_slip_cost(
+    RiccatiStepData_t *stage, const MpcStageLinearization_t *linearization,
+    const float nominal_state[MPC_RTI_NX],
+    const MpcModelControl_t *control, float weight, float multiplier)
 {
     if (weight <= 0.0f) return;
-    double excess[4] = {0}, derivative[4] = {0};
-    if (!vehicle_model_longitudinal_slip_excess(
-            plant, excess, derivative)) return;
-    MpcModelState_t prepared = *plant;
-    if (!vehicle_model_initialize_plant_state(&prepared)) return;
+    const double doubled_weight = 2.0 * weight * multiplier;
+    const float inputs[2] = {control->steering_target_rad,
+        control->throttle_command};
     for (int wheel = 0; wheel < 4; ++wheel) {
-        if (excess[wheel] <= 0.0 || fabs(derivative[wheel]) < 1.0e-9)
-            continue;
-        const int index = 6 + wheel;
-        const float omega = (float)prepared.source_plant_internal_state[
-            MPC_PLANT_STATE_WHEEL_OMEGA_FL + wheel];
-        const float local_weight = weight *
-            (float)(derivative[wheel] * derivative[wheel]);
-        const float local_target = omega -
-            (float)(excess[wheel] / derivative[wheel]);
-        add_tracking_term(Q, q, index, local_weight, local_target, multiplier);
+        const double excess = linearization->maximum_slip_excess_mps[wheel];
+        if (excess <= 0.0) continue;
+        for (int col = 0; col < MPC_OPT_PHYSICAL_NX; ++col) {
+            const int model_col = col < 5 ? col : col == 5 ? 7 : col + 4;
+            const double derivative =
+                linearization->maximum_slip_excess_A[wheel][model_col];
+            const double hessian = doubled_weight * derivative * derivative;
+            stage->Q_diag[col] += (float)hessian;
+            stage->q[col] += (float)(doubled_weight * derivative * excess -
+                hessian * nominal_state[col]);
+        }
+        for (int input = 0; input < MPC_RTI_NU; ++input) {
+            const double derivative =
+                linearization->maximum_slip_excess_B[wheel][input];
+            const double hessian = doubled_weight * derivative * derivative;
+            stage->R_diag[input] += (float)hessian;
+            stage->r[input] += (float)(doubled_weight * derivative * excess -
+                hessian * inputs[input]);
+        }
     }
 }
 
@@ -993,18 +1004,22 @@ int mpc_rti_build_ltv_qp(
             add_tracking_cost(stage->Q_diag, stage->q,
                 &references[model_stage], configuration, 1.0f,
                 nominal_states[model_stage].plant.u);
-            add_source_wheel_slip_cost(stage->Q_diag, stage->q,
-                &nominal_states[model_stage].plant,
-                longitudinal_slip_weight_for_reference(configuration,
-                    &references[model_stage]), 1.0f);
         }
+
+        add_source_transition_slip_cost(stage, lin,
+            nominal_optimizer_states[model_stage],
+            &nominal_controls[model_stage],
+            longitudinal_slip_weight_for_reference(configuration,
+                &references[model_stage + 1]),
+            model_stage + 1 == horizon ? configuration->terminal_multiplier : 1.0f);
 
         /* Align the stage steering decision with the path feedforward at the
          * following prediction sample. */
         {
             const int reference_index = solver_stage + 1;
             const float doubled_weight = 2.0f *
-                configuration->weight_steering_command;
+                configuration->weight_steering_command *
+                (model_stage + 1 == horizon ? configuration->terminal_multiplier : 1.0f);
             stage->R_diag[0] += doubled_weight;
             stage->r[0] -= doubled_weight *
                 references[reference_index].steering_command;
@@ -1078,11 +1093,6 @@ int mpc_rti_build_ltv_qp(
     add_tracking_cost(problem->terminal_Q, problem->terminal_q,
         &references[horizon], configuration,
         configuration->terminal_multiplier, nominal_states[horizon].plant.u);
-    add_source_wheel_slip_cost(problem->terminal_Q, problem->terminal_q,
-        &nominal_states[horizon].plant,
-        longitudinal_slip_weight_for_reference(configuration,
-            &references[horizon]),
-        configuration->terminal_multiplier);
 
     const float terminal_margin = corridor_margin_for_state(
         configuration, &nominal_states[horizon].plant, horizon);
@@ -1867,6 +1877,7 @@ static int evaluate_nonlinear_candidate(
         if (candidate->speed_reference_valid)
             references[k].u = candidate->speed_reference[k];
     }
+    align_yaw_rate_references(references, candidate->horizon);
     for (int k = 0; k <= candidate->horizon; ++k) {
         const MpcRtiReference_t *reference = &references[k];
         if (k > 0 && !corridor_contains(&candidate->states[k], reference,

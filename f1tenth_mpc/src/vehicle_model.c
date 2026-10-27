@@ -754,9 +754,22 @@ static int vehicle_model_forward_plant_jacobian(
         if (!unity_source_plant_step_sensitivity_c(
                 &source_input, dt, &seeds, &sensitivity)) return 0;
         ++linearization->source_sensitivity_call_count;
+        for (int wheel = 0; wheel < 4; ++wheel)
+            linearization->maximum_slip_excess_mps[wheel] = (float)
+                sensitivity.maximum_longitudinal_slip_excess_mps[wheel];
         for (int lane = 0; lane < lane_count; ++lane) {
             const int model_column =
                 kPlantSensitiveModelColumns[first_column + lane];
+            for (int wheel = 0; wheel < 4; ++wheel) {
+                const float derivative = (float)
+                    sensitivity.maximum_longitudinal_slip_excess_derivative[wheel][lane];
+                if (!isfinite(derivative)) return 0;
+                if (model_column < MPC_MODEL_NX)
+                    linearization->maximum_slip_excess_A[wheel][model_column] = derivative;
+                else
+                    linearization->maximum_slip_excess_B[wheel][
+                        model_column - MPC_MODEL_NX] = derivative;
+            }
             for (int row = 2; row < MPC_MODEL_NX; ++row) {
                 /* Command-history rows are exact shift/append equations,
                  * not Unity plant outputs. Preserve their analytic Jacobian. */

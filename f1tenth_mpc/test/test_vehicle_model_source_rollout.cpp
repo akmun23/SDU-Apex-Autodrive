@@ -1153,6 +1153,25 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
   }
   EXPECT_GT(problem.terminal_Q[MPC_OPT_IDX_U], 0.0f);
   EXPECT_EQ(problem.horizon, RICCATI_HORIZON);
+
+  // The last issued command is the delayed-command channel in the terminal
+  // state. Its feedforward cost has the SAME terminal multiplier as the exact
+  // nonlinear objective, even though that channel was eliminated from QP x.
+  MpcRtiConfiguration_t terminal_config = config;
+  terminal_config.terminal_multiplier = 3.0f;
+  MpcRtiProblem_t terminal_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      references, horizon, PREDICTION_DT_SECONDS, &terminal_config,
+      &terminal_problem));
+  EXPECT_FLOAT_EQ(terminal_problem.steps[0].R_diag[0],
+      problem.steps[0].R_diag[0]);
+  EXPECT_NEAR(terminal_problem.steps[RICCATI_HORIZON-1].R_diag[0] -
+      problem.steps[RICCATI_HORIZON-1].R_diag[0],
+      4.0f*config.weight_steering_command, 1.e-5f);
+  EXPECT_NEAR(terminal_problem.steps[RICCATI_HORIZON-1].r[0] -
+      problem.steps[RICCATI_HORIZON-1].r[0],
+      -4.0f*config.weight_steering_command*references[horizon].steering_command,
+      1.e-5f);
 }
 
 TEST(MpcReference, NominalHorizonKeepsTrackSpeedTarget)
@@ -1778,6 +1797,39 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
     }
   }
   EXPECT_TRUE(slip_cost_retained_after_queued_prefix);
+
+  // Compare the QP's gradient with an independent held-interval peak cost.
+  // The former wheel-only instantaneous residual had zero body-speed
+  // gradient here, despite the exact peak clearly depending on body speed.
+  MpcRtiConfiguration_t no_slip_config = config;
+  no_slip_config.weight_longitudinal_slip = 0.0f;
+  MpcRtiProblem_t no_slip_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, controls, references,
+      PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &no_slip_config,
+      &no_slip_problem));
+  auto plus_plant = nominal_states[0].plant;
+  auto minus_plant = nominal_states[0].plant;
+  constexpr double epsilon = 1.e-3;
+  plus_plant.u += epsilon;
+  minus_plant.u -= epsilon;
+  const auto plus_peak = mpc_vehicle_model_step(&plus_plant, &controls[0],
+      PREDICTION_DT_SECONDS, references[0].path_curvature);
+  const auto minus_peak = mpc_vehicle_model_step(&minus_plant, &controls[0],
+      PREDICTION_DT_SECONDS, references[0].path_curvature);
+  ASSERT_TRUE(plus_peak.valid && minus_peak.valid);
+  double finite_gradient = 0.;
+  for (int wheel = 0; wheel < 4; ++wheel) {
+    const double plus = plus_peak.output.maximum_longitudinal_slip_excess_mps[wheel];
+    const double minus = minus_peak.output.maximum_longitudinal_slip_excess_mps[wheel];
+    finite_gradient += config.weight_longitudinal_slip *
+        (plus*plus-minus*minus)/(plus_plant.u-minus_plant.u);
+  }
+  const double qp_gradient =
+      (problem.steps[0].Q_diag[MPC_OPT_IDX_U] -
+       no_slip_problem.steps[0].Q_diag[MPC_OPT_IDX_U]) * nominal_states[0].plant.u +
+      problem.steps[0].q[MPC_OPT_IDX_U] - no_slip_problem.steps[0].q[MPC_OPT_IDX_U];
+  EXPECT_GT(std::abs(finite_gradient), 1.);
+  EXPECT_NEAR(qp_gradient, finite_gradient, 0.15);
 
   MpcRtiState_t measured{};
   measured.plant = nominal_states[0].plant;

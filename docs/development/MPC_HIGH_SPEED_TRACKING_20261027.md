@@ -414,3 +414,155 @@ Updated all solver scaling layouts. Independent six-stage derivative checks
 and all ten CTest targets pass. Supervised trial:
 `live_runs/mpc_v337_progress_coupling_20261027_01`.
 This change has not yet demonstrated a live lap-time improvement.
+
+The progress-coupling trial completed six laps: five scored mean 5.4390 s,
+full-horizon accepts 1352/1352, no recovery/collision, max publication
+18.538 ms. Ey 6000 / steering slew 1000 then completed six laps at 5.4404 s,
+max 18.641 ms; not promoted. Both are slower than the prior 5.409/5.415 s
+ten-lap results. The coordinate derivative correction is independently
+verified, but no lap-time benefit is claimed from it alone.
+
+## Position-origin audit and current optimizer
+
+Verified directly from the exported **practice player** scene:
+GPS component 2117 uses Transform 536, `Rear Axle Center`, at root z=-0.16 m.
+LiDAR Head 517 -> LIDAR 561 at root z=+0.1133 -> Sensors 552 -> Roboracer 550.
+Therefore the configured rear-axle-to-LiDAR offset +0.2733 m is correct.
+Do not change it to +0.1133 m; that is the root-origin coordinate.
+
+Found a genuine IPOPT origin mismatch: spatial position propagated COM
+velocity, whereas runtime trajectory positions / GPS are rear axle. The OCP
+now transports velocity using omega cross [-0.15532,0,0] before horizontal
+projection (v_rear=v_com-r*L, w_rear=w_com+q*L). Tire forces still use COM
+velocities. The lever is checked against production kComForwardFromRearAxleM.
+Map exporter footprint bounds were also root-based [-0.24,+0.27]; corrected
+to rear-based [-0.08,+0.43], matching MPC. Earlier theoretical time/clearance
+reports are not recertified automatically by these corrections.
+
+Fixed-mesh implementation: the sole drive phase is a known-length parameter,
+not an optimization variable. The first v340 launch exposed a primal-cache
+count assumption; removed the parameter from flat decision slices while
+preserving it in report/checkpoint snapshots. All relevant tests pass.
+
+Current run: `optimized_practice_v341_rear_axle_frame_20261027`, console
+`SDU_Apex_IPOPT_PhysX_MinTime_v2/v341_rear_axle_frame_console.log`.
+Seed converts the complete saved v338 COM state to the rear-axle path and
+resamples all physical states/controls at the projected stations. This is a
+source-derived coordinate conversion, not a fitted correction. Initial
+defect 0.173157 requires Phase I; no source-feasibility claim. 8532 decision
+variables / 25122 constraints. CPU 14, Phase I 300 iterations, then 1200 per
+trust factor 16/64/256/1024. Wall margin remains 5 cm.
+
+The two v339 COM-origin processes were retired after this source audit.
+Their SIGINT was ignored; SIGTERM stopped only PIDs 374375 and 379572.
+Logs/provenance/seed files remain. No useful faster candidate from those
+graphs is claimed; they must not compete with or replace the corrected run.
+
+## Localization contribution and current live trial
+
+On the prior ten-lap run, current-map-pose error after warmup was mainly
+longitudinal: -0.0594 m bias / 0.0916 m RMS, lateral -0.0050 / 0.0267 m.
+The apparent 10.5 ms lag is a diagnostic, not a known sensor delay or an
+implemented time shift. Old full-data captures contain 40 Hz LiDAR: 10/1581
+duplicate scans; lack of scans in the recent performance profile prevented
+checking their freshness. Added raw LiDAR to that profile and sealed AMCL
+config/snapshots alongside MPC config in future trial manifests.
+
+Candidate legal-sensor fusion test: along-track AMCL correction gains 0.10
+(ordinary and fast), with cross-track/yaw handling unchanged. Run
+`mpc_v337_along_pose_gain010_20261027_01`: six laps, five scored mean
+5.3906 s, all 1342 commands exact-full-horizon valid, no recovery/collision,
+max 18.987 ms. Map-pose XY RMSE 0.093 -> 0.079 m, max 0.255 -> 0.197 m.
+This is a first measured improvement, not yet repeated ten-lap evidence.
+
+Next live candidate `mpc_v337_pose_speed_bundle_20261027_01` retains gain
+0.10 and tests under/overspeed weights 35/20, throttle slew 50. These are
+candidate values, not promoted production MPC weights. The final target
+remains mean <4.9 s; neither the current reference nor achieved live laps
+meet it yet.
+
+## Ten-lap localization / speed-objective comparison
+
+All rows use v337 geometry at original requested speeds. Warmup is excluded
+from the averages; no reference-speed multiplier was used.
+
+| Capture | Along-scan gain | Speed under/over; throttle slew | Scored laps | Mean | SD | Publication max |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| `mpc_v337_pose_speed_bundle_20261027_01` | 0.10 | 35/20; 50 | 5 | 5.3656 s | see report | 19.287 ms |
+| `mpc_v337_pose_speed_bundle_20261027_02` | 0.10 | 35/20; 50 | 10 | 5.3924 s | see report | 18.609 ms |
+| `mpc_v337_cross_track_scan_20261027_01` | 0.00 | 35/20; 50 | 5, then fault | 5.2410 s | not a completed trial | 18.306 ms |
+| `mpc_v337_along_scan_gain003_20261027_01` | 0.03 | 35/20; 50 | 10 | 5.3589 s | 0.02734 s | 18.697 ms |
+
+Zero along-track correction was **not** promoted: after six total laps it
+failed the exact corridor check at stage zero. The supervisor stopped it
+without collision. Its decreasing lap times are not evidence of consistency.
+The 0.03 trial completed eleven total laps, all commands full-horizon valid,
+no recovery or collision. Current-map-pose XY RMSE was 0.064 m, p95/max
+0.121/0.157 m. Gain 0.10 repeat was 0.080 m RMSE, max 0.204 m. Gain 0.03
+is still being repeated; no zero-error localization claim is made.
+
+For speed-bundle 01, the recorded-command 750 ms replay (no future state
+correction) gave forward/lateral/yaw-rate RMSE 0.01224 m/s / 0.00123 m/s /
+0.00980 rad/s and endpoint XY RMSE 0.01166 m. Unscreened maximum path error
+was 0.1254 m, with 33/1304 windows exceeding 5 cm somewhere. Independent
+GT pose/twist closure identifies a common pose jump in 31 of these windows;
+two clean failures remain. The raw result must not be replaced by the
+closure-screened score or described as all windows within 5 cm.
+
+## Peak-slip objective correction
+
+Found a substantive QP/nonlinear-objective mismatch: the QP penalized
+instantaneous wheel-only slip, whereas nonlinear acceptance penalized the
+maximum slip excess during the incoming held-input interval. The former
+omitted body-speed/contact-state and direct torque effects on that cost.
+
+The existing forward-AD plant now returns the same four interval peaks and
+their body/wheel/suspension/steering/throttle sensitivities. QP assembly uses
+these to preserve the peak cost's first derivative. Its positive diagonal
+Gauss-Newton Hessian is an optimization approximation, not a change to
+vehicle dynamics; no extra physical rollout or optimizer state is required.
+Removed the obsolete instantaneous wheel-only QP penalty. Retained peak
+diagnostics and the exact nonlinear acceptance check.
+
+Also corrected the terminal multiplier of the last command-feedforward
+penalty after eliminating the logged command channel from the QP, and
+recomputed yaw-rate targets after applying frozen speed targets in exact
+candidate scoring. This aligns those terms with the optimization objective.
+
+Independent finite differences verify peak derivatives for body speed, yaw,
+wheel speed, rack, height, roll, steering input and throttle. A QP-gradient
+test verifies the previously missing body-speed cost derivative. The finite
+difference denominator uses the actual float perturbation, not a rounded
+nominal epsilon. All ten CTest targets pass. Live full-speed repeat:
+`mpc_v337_peak_slip_objective_20261027_01` (gain 0.03, same 35/20/50 profile).
+No lap-time improvement from the new objective is claimed before scoring.
+
+Peak-slip trial result: eleven total / ten scored laps, mean 5.3703 s,
+population SD 0.03550 s, max publication 19.343 ms. It used 2398 full-horizon
+commands, three retained prefixes and one candidate prefix. Raw ADMM
+termination was optimal in 2277 cycles versus 2328 in the prior gain-0.03
+trial. The objective correction is independently checked, but this first
+trial is not faster and does not establish a convergence improvement.
+Next controlled trial keeps the same profile and changes only the slip
+weight 25 -> 5, because the corrected peak cost is not the old instantaneous
+residual. This changes an objective weight, never tire physics or slip limits.
+
+Development builds now discover only the five current runtime packages;
+analysis/vendor setup.py files are no longer mistaken for ROS packages.
+This does not remove any package or alter runtime topic policy.
+
+## Corrected IPOPT feasibility progress
+
+The v341 L-BFGS Phase I exhausted 300 iterations without certifying the
+corrected seed. The parallel v342 exact-Hessian solve reached a fully
+feasible iterate at iteration 20: maximum constraint violation 1.6688e-7.
+It retained a later, lower seed-displacement feasible checkpoint (iteration
+30, maximum 0.000273317), and is continuing its configured Phase-I/time
+stages. These are feasibility results, not a new faster exported raceline.
+Do not replace the running graph or treat an infeasible raw time objective
+as usable. Console: `SDU_Apex_IPOPT_PhysX_MinTime_v2/v342_rear_axle_exact_console.log`.
+
+Added independent circular COM-to-rear-axle/seam conversion tests; 26 focused
+IPOPT tests pass. Fixed resume provenance to include imported frame helper
+equations, not merely the byte-identical generated importer. Existing running
+processes retain their sealed graph; this strengthens subsequent resumes.
