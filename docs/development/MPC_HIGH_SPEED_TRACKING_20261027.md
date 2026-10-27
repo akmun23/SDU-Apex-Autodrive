@@ -214,3 +214,37 @@ Scored 5.4808, 5.5988, 5.5418, 5.5528, 5.5608 s: mean 5.5470 s, SD
 Publication median/p95/max 5.01/16.77/19.05 ms, no budget violations.
 Snapshot saved in that run's mpc_overlay.yaml before testing 25/25 speed
 weights with the same 2000/75 damping and curvature gain 0.5.
+
+Run mpc_speed_balance_20261027_02 (25/25 speed, curvature gain 0.5) completed
+six laps with no recovery. Correct scored mean 5.5214 s, SD 0.0189 s:
+5.4948, 5.5028, 5.5338, 5.5338, 5.5418 s. Publication maximum 18.59 ms.
+
+Fixed a report bug discovered here: value-change deduplication silently
+discarded one of two identical consecutive quantized lap durations. Reports
+now use rising lap-count transitions and the corresponding duration topic;
+fault cutoffs still apply, stale durations/counter resets are rejected.
+13 report tests pass, including identical-lap and cutoff regressions. When
+lap counters are absent, reports explicitly label duration-change-only data.
+
+The next controlled profile changes only speed weights to 35/20, keeping
+steering/throttle damping and physical constraints unchanged.
+
+The 35/20 trial mpc_speed_balance_20261027_03 aborted at the first hairpin,
+with corridor failure at stage 2; not promoted. The 25/25 run is the current
+best qualified profile (mean 5.5214 s, not yet <=5.5).
+
+Scored-only diagnosis of the 25/25 run (1131 issued samples after first lap):
+speed error bias -0.00175 m/s, RMSE 0.0811 m/s; actual/reference mean speed
+5.11785/5.11960 m/s. Cross-track bias +0.0369 m, RMSE 0.0601 m; heading
+RMSE 0.0415 rad. Positive lateral error is outward on the clockwise corners,
+so hitting body speed alone does not yield the nominal line's lap time.
+Next trial keeps 25/25 and 2000/75 actuator damping but doubles cross-track
+and heading weights to 8000/3000, targeting that measured path-length loss.
+
+Cross-check over 1103 samples strictly between the first and sixth lap-count
+transitions: using ds/dt=(u*cos(e_psi)-v*sin(e_psi))/(1-kappa*e_y), the
+approximate per-lap time loss is speed 0.00061 s, outward offset 0.14008 s,
+heading 0.00465 s and lateral velocity -0.00042 s; total 0.14491 s versus
+the measured ~0.154 s gap to the nominal 5.367 s line. This is an attribution
+using the path-coordinate metric, not an independent simulator measurement.
+It explains why more throttle alone was not closing this final gap.

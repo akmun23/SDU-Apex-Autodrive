@@ -14,6 +14,32 @@ from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_identical_lap_durations_are_separate_completion_events(self) -> None:
+        counts = [{"bag_time": 0, "value": 0},
+                  {"bag_time": 1, "value": 1},
+                  {"bag_time": 2, "value": 1},
+                  {"bag_time": 6.5, "value": 2}]
+        durations = [{"bag_time": 0, "value": 0},
+                     {"bag_time": 1.001, "value": 5.5},
+                     {"bag_time": 2, "value": 5.5},
+                     {"bag_time": 6.501, "value": 5.5}]
+        self.assertEqual(report._distinct_lap_times(durations, None, counts),
+                         [5.5, 5.5])
+        self.assertEqual(report._distinct_lap_times(durations, 6.5, counts),
+                         [5.5])
+
+    def test_counter_join_rejects_stale_duration_and_counter_reset(self) -> None:
+        counts = [{"bag_time": 0, "value": 2},
+                  {"bag_time": 1, "value": 0},
+                  {"bag_time": 2, "value": 1}]
+        durations = [{"bag_time": 0, "value": 5.0},
+                     {"bag_time": 1.999, "value": 5.0},
+                     {"bag_time": 2.025, "value": 6.0}]
+        self.assertEqual(report._distinct_lap_times(durations, None, counts),
+                         [6.0])
+        self.assertEqual(report._distinct_lap_times(durations[:2], None, counts),
+                         [])
+
     def test_diagnostic_sidecar_preserves_candidate_nominal_and_plan_payloads(self) -> None:
         payload = {
             "status": "accepted_candidate_prefix",

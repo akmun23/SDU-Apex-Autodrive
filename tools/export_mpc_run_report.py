@@ -9,6 +9,7 @@ at which a command was applied from arrival time.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import hashlib
 import json
@@ -208,8 +209,38 @@ def _first_unpublished_rejection_time(
 
 def _distinct_lap_times(
     rows: list[dict[str, Any]], cutoff_s: float | None = None,
+    lap_count_rows: list[dict[str, Any]] | None = None,
 ) -> list[float]:
     """Return lap-completion events, not one repeated topic sample per tick."""
+    if lap_count_rows:
+        # Consecutive laps can have exactly equal quantized durations. A value
+        # change is not a completion event: use the independent lap counter.
+        # These headerless topics are separate DDS publications. Select the
+        # first last-lap sample at/after the counter change (at most 3 ticks),
+        # never an old duration from the preceding lap or after a fault cutoff.
+        samples = sorted((float(row["bag_time"]), value)
+                         for row in rows
+                         if (value := _finite_number(row.get("value"))) is not None
+                         and value > 0.0 and "bag_time" in row
+                         and (cutoff_s is None or row["bag_time"] <= cutoff_s))
+        times = [sample[0] for sample in samples]
+        result = []
+        previous_count = None
+        for row in sorted(lap_count_rows,
+                          key=lambda item: float(item.get("bag_time", 0.0))):
+            stamp = _finite_number(row.get("bag_time"))
+            count = _finite_number(row.get("value"))
+            if stamp is None or count is None or count < 0:
+                continue
+            if cutoff_s is not None and stamp > cutoff_s:
+                break
+            if previous_count is not None and count > previous_count:
+                index = bisect.bisect_left(times, stamp)
+                if index < len(samples) and times[index] - stamp <= 0.075:
+                    result.append(samples[index][1])
+            previous_count = count
+        return result
+
     result: list[float] = []
     previous: float | None = None
     for row in sorted(rows, key=lambda item: float(item.get("bag_time", 0.0))):
@@ -887,7 +918,8 @@ def make_report(
                 if row.get("callback_to_gate_ms") is not None]),
         }
     raw_lap_time_samples = data.get(evaluator.LAST_LAP, [])
-    lap_times = _distinct_lap_times(raw_lap_time_samples, cutoff)
+    lap_times = _distinct_lap_times(
+        raw_lap_time_samples, cutoff, data.get(evaluator.LAP))
     lap_counts = [_finite_number(row.get("value"))
                   for row in data.get(evaluator.LAP, [])
                   if cutoff is None or float(row.get("bag_time", 0.0)) <= cutoff]
@@ -1115,6 +1147,9 @@ def make_report(
         "lap_count_max": max(lap_counts) if lap_counts else None,
         "lap_time_topic_samples": len(raw_lap_time_samples),
         "recorded_lap_times_s": lap_times,
+        "lap_time_event_source": ("lap_counter_transition"
+                                  if data.get(evaluator.LAP)
+                                  else "duration_value_change_only"),
         "recorded_lap_time_s": _distribution(lap_times),
     }
     report = {
