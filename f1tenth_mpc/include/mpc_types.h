@@ -75,9 +75,12 @@ enum
     MPC_OPT_IDX_SUSPENSION_JOUNCE_RL = 18,
     MPC_OPT_IDX_SUSPENSION_JOUNCE_RR = 19,
     MPC_OPT_PHYSICAL_NX = 20,
-    MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND = 20,
-    MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND = 21,
-    MPC_OPTIMIZER_NX = 22
+    /* Deterministic displacement from nominal progress. Without this scalar,
+     * speed corrections disappear from later path-frame linearizations. */
+    MPC_OPT_IDX_PROGRESS_DEVIATION = 20,
+    MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND = 21,
+    MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND = 22,
+    MPC_OPTIMIZER_NX = 23
 };
 #define RICCATI_MAX_NX MPC_OPTIMIZER_NX
 #define RICCATI_MAX_NU MPC_MODEL_NU

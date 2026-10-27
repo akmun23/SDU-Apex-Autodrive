@@ -94,8 +94,8 @@ TEST(MpcReference, LoadedFrameClosesWorldMotionAndDifferentialAcrossKnots)
   const double progress = .7;
   const float arguments[5] = {.12f, -.08f, .4f, .015f, .12f};
   double next_progress;
-  float ey, epsi, jacobian[2][5];
-  ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, progress,
+  float ey, epsi, jacobian[3][6];
+  ASSERT_TRUE(mpc_trajectory_advance_tracking_with_progress(points, count, length, progress,
       arguments[0], arguments[1], arguments[2], arguments[3], arguments[4],
       1.1, &next_progress, &ey, &epsi, jacobian));
   ASSERT_GT(next_progress, 1.0);
@@ -110,24 +110,70 @@ TEST(MpcReference, LoadedFrameClosesWorldMotionAndDifferentialAcrossKnots)
   EXPECT_NEAR(end.x - std::sin(end.heading) * ey, world_x, 1.0e-7);
   EXPECT_NEAR(end.y + std::cos(end.heading) * ey, world_y, 1.0e-7);
   EXPECT_NEAR(end.heading + epsi, yaw + arguments[4], 1.0e-7);
-  for (int column = 0; column < 5; ++column) {
+  for (int column = 0; column < 6; ++column) {
     float plus[5], minus[5];
     std::copy_n(arguments, 5, plus);
     std::copy_n(arguments, 5, minus);
     constexpr float epsilon = 2.0e-4f;
-    plus[column] += epsilon;
-    minus[column] -= epsilon;
+    if (column < 5) {
+      plus[column] += epsilon;
+      minus[column] -= epsilon;
+    }
     double sp, sm;
     float yp, ym, hp, hm;
-    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, progress,
+    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length,
+        progress + (column == 5 ? epsilon : 0),
         plus[0], plus[1], plus[2], plus[3], plus[4], next_progress,
         &sp, &yp, &hp, nullptr));
-    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, progress,
+    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length,
+        progress - (column == 5 ? epsilon : 0),
         minus[0], minus[1], minus[2], minus[3], minus[4], next_progress,
         &sm, &ym, &hm, nullptr));
     EXPECT_NEAR(jacobian[0][column], (yp - ym) / (2 * epsilon), 3.0e-4f);
     EXPECT_NEAR(jacobian[1][column], (hp - hm) / (2 * epsilon), 3.0e-4f);
+    EXPECT_NEAR(jacobian[2][column], (sp - sm) / (2 * epsilon), 3.0e-4f);
   }
+}
+
+TEST(MpcReference, ProgressSensitivityPersistsAcrossLaterStages)
+{
+  MpcTrajectorySample_t points[4] = {
+      {0, 0, 0, 0, .2, 5, 2, 2, 0},
+      {1, 1, 0, .2, .4, 5, 2, 2, 0},
+      {2, 2, .3, .6, .4, 5, 2, 2, 0},
+      {3, 3, 1, 1, .4, 5, 2, 2, 0}};
+  size_t count = 4;
+  double length;
+  ASSERT_TRUE(mpc_trajectory_prepare(points, &count, &length));
+  auto advance = [&](double impulse, double result[3], bool derivatives) {
+    double station = .75;
+    float ey = .05f, epsi = .03f;
+    double sensitivity[3] = {};
+    for (int k = 0; k < 6; ++k) {
+      double next;
+      float y, p, jac[3][6];
+      const float dx = .16f + (k == 0 ? impulse : 0);
+      EXPECT_TRUE(mpc_trajectory_advance_tracking_with_progress(
+          points, count, length, station, ey, epsi, dx, .002f, .045f,
+          station + .16, &next, &y, &p, jac));
+      double next_sensitivity[3] = {};
+      for (int row = 0; row < 3; ++row)
+        next_sensitivity[row] = jac[row][0]*sensitivity[0]
+            + jac[row][1]*sensitivity[1] + jac[row][5]*sensitivity[2]
+            + (k == 0 ? jac[row][2] : 0);
+      std::copy_n(next_sensitivity, 3, sensitivity);
+      station = next; ey = y; epsi = p;
+    }
+    if (derivatives) std::copy_n(sensitivity, 3, result);
+    else { result[0] = ey; result[1] = epsi; result[2] = station; }
+  };
+  double plus[3], minus[3], sensitivity[3];
+  constexpr double h = .0002;
+  advance(h, plus, false);
+  advance(-h, minus, false);
+  advance(0, sensitivity, true);
+  for (int row = 0; row < 3; ++row)
+    EXPECT_NEAR(sensitivity[row], (plus[row]-minus[row])/(2*h), .001);
 }
 
 TEST(MpcReference, SourceMotionSensitivityChainsThroughLoadedPath)
@@ -672,7 +718,7 @@ TEST(RiccatiSolverScaling, PreservesThePhysicalSolution)
       400.0f, 400.0f, 400.0f, 400.0f,
       0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
       0.05f, 0.05f, 0.05f, 0.05f,
-      0.5f, 1.0f};
+      1.0f, 0.5f, 1.0f};
   std::copy_n(scales, RICCATI_MAX_NX, scaled.state_scale);
   scaled.input_scale[0] = 0.5f;
   scaled.input_scale[1] = 1.0f;
@@ -952,7 +998,7 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
   MpcModelState_t prepared_optimizer_plant =
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant;
   ASSERT_TRUE(vehicle_model_initialize_plant_state(&prepared_optimizer_plant));
-  EXPECT_EQ(MPC_RTI_NX, 22);
+  EXPECT_EQ(MPC_RTI_NX, 23);
   EXPECT_EQ(RICCATI_HORIZON,
       PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS);
   EXPECT_FLOAT_EQ(problem.x0[MPC_OPT_IDX_EY],
@@ -2193,7 +2239,7 @@ TEST(VehicleModelSourceRollout, RTIJacobianCarriesAllWheelSpinStates)
 TEST(VehicleModelSourceRollout, KeepsTheRealTimeRTIStateCompact)
 {
   EXPECT_EQ(MPC_MODEL_NX, 24);
-  EXPECT_EQ(MPC_RTI_NX, 22);
+  EXPECT_EQ(MPC_RTI_NX, 23);
   EXPECT_EQ(RICCATI_HORIZON,
       PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS);
   EXPECT_EQ(MPC_PLANT_INTERNAL_STATE_COUNT, 22);

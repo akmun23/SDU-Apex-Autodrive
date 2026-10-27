@@ -385,7 +385,10 @@ void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
         400.0f, 400.0f, 400.0f, 400.0f,
         0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
         0.05f, 0.05f, 0.05f, 0.05f,
-        0.5f, 1.0f};
+        1.0f, 0.5f, 1.0f};
+    static_assert(state_scale[MPC_OPT_IDX_PROGRESS_DEVIATION] > 0.0f &&
+        state_scale[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] > 0.0f,
+        "every optimizer coordinate needs a positive scale");
     constexpr float input_scale[MPC_MODEL_NU] = {0.5f, 1.0f};
     std::copy_n(state_scale, RICCATI_MAX_NX, solver.state_scale);
     std::copy_n(input_scale, MPC_MODEL_NU, solver.input_scale);

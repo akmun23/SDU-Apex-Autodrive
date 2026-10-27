@@ -174,6 +174,7 @@ static int optimizer_index_from_model_state(int model_index)
 
 static void serialize_state(const MpcRtiState_t *state, float x[MPC_RTI_NX])
 {
+    x[MPC_OPT_IDX_PROGRESS_DEVIATION] = 0.0f;
     MpcModelState_t prepared_plant = state->plant;
     (void)vehicle_model_initialize_plant_state(&prepared_plant);
     float full[MPC_MODEL_NX] = {0};
@@ -343,7 +344,7 @@ static int rollout_nominal_controls(
             return 0;
         }
         double next_progress;
-        if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
+        if (!mpc_trajectory_advance_tracking_with_progress(trajectory, trajectory_count,
                 lap_length, progress[k], states[k].plant.e_y,
                 states[k].plant.e_psi, step.body_forward_delta_m,
                 step.body_lateral_delta_m, step.body_yaw_delta_rad,
@@ -820,7 +821,7 @@ int mpc_rti_build_ltv_qp(
         linearization_ok[k] = linearized;
         if (linearized && nominal_states[model_stage + 1].
                 incoming_tracking_jacobian_valid) {
-            const float (*geometry)[5] = nominal_states[model_stage + 1].
+            const float (*geometry)[6] = nominal_states[model_stage + 1].
                 incoming_tracking_jacobian;
             for (int row = 0; row < 2; ++row) {
                 for (int col = 0; col < MPC_MODEL_NX; ++col) {
@@ -939,6 +940,43 @@ int mpc_rti_build_ltv_qp(
             affine_offset -= (double)stage->B[row][0] * applied_steering;
             affine_offset -= (double)stage->B[row][1] * applied_throttle;
             stage->d[row] = (float)affine_offset;
+        }
+
+        /* The nonlinear rollout resamples the reference as progress changes.
+         * Carry that same dependence through later LTV stages. This scalar
+         * is fixed to zero at the nominal and propagated by dynamics; it has
+         * no tracking weight or independently selectable initial value. */
+        const int progress_index = MPC_OPT_IDX_PROGRESS_DEVIATION;
+        stage->A[progress_index][progress_index] = 1.0f;
+        if (nominal_states[model_stage + 1].incoming_tracking_jacobian_valid) {
+            const float (*geometry)[6] = nominal_states[model_stage + 1].
+                incoming_tracking_jacobian;
+            stage->A[0][progress_index] = geometry[0][5];
+            stage->A[1][progress_index] = geometry[1][5];
+            stage->A[progress_index][progress_index] = geometry[2][5];
+            double offset = 0.0;
+            for (int col = 0; col < MPC_OPT_PHYSICAL_NX; ++col) {
+                const int model_col = col < 5 ? col : col == 5 ? 7 : col + 4;
+                float derivative = col < 2 ? geometry[2][col] : 0.0f;
+                for (int motion = 0; motion < 3; ++motion)
+                    derivative += geometry[2][motion + 2] *
+                        lin->body_motion_A[motion][model_col];
+                stage->A[progress_index][col] = derivative;
+                offset -= (double)derivative *
+                    nominal_optimizer_states[model_stage][col];
+            }
+            const float inputs[2] = {
+                nominal_controls[model_stage].steering_target_rad,
+                nominal_controls[model_stage].throttle_command};
+            for (int input = 0; input < MPC_RTI_NU; ++input) {
+                float derivative = 0.0f;
+                for (int motion = 0; motion < 3; ++motion)
+                    derivative += geometry[2][motion + 2] *
+                        lin->body_motion_B[motion][input];
+                stage->B[progress_index][input] = derivative;
+                offset -= (double)derivative * inputs[input];
+            }
+            stage->d[progress_index] = (float)offset;
         }
 
         /* Exact command-slew augmentation. These two auxiliary coordinates
@@ -1483,7 +1521,7 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
             return MPC_RTI_ROLLOUT_INVALID_MODEL;
         }
         double next_progress;
-        if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
+        if (!mpc_trajectory_advance_tracking_with_progress(trajectory, trajectory_count,
                 lap_length, candidate_progress[k], states[k].plant.e_y,
                 states[k].plant.e_psi, step.body_forward_delta_m,
                 step.body_lateral_delta_m, step.body_yaw_delta_rad,

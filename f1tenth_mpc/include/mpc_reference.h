@@ -53,6 +53,15 @@ int mpc_trajectory_advance_tracking(
     double *next_progress, float *next_e_y, float *next_e_psi,
     float jacobian[2][5]);
 
+/* Full differential: rows next e_y/e_psi/progress, columns the five above
+ * followed by initial progress. Progress remains in local nominal units. */
+int mpc_trajectory_advance_tracking_with_progress(
+    const MpcTrajectorySample_t *points, size_t count, double lap_length,
+    double progress, float e_y, float e_psi,
+    float body_dx, float body_dy, float body_yaw, double progress_seed,
+    double *next_progress, float *next_e_y, float *next_e_psi,
+    float jacobian[3][6]);
+
 /* Removes a repeated closing row, validates the path, unwraps heading, and
  * computes the periodic length from the final point back to the first. */
 int mpc_trajectory_prepare(

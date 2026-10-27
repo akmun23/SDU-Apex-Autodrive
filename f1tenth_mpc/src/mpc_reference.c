@@ -177,18 +177,20 @@ static int project_reference_frame(
     return 0;
 }
 
-int mpc_trajectory_advance_tracking(
+int mpc_trajectory_advance_tracking_with_progress(
     const MpcTrajectorySample_t *points, size_t count, double length,
     double progress, float ey, float epsi,
     float dx, float dy, float dyaw, double progress_seed,
     double *next_progress, float *next_ey, float *next_epsi,
-    float jacobian[2][5])
+    float jacobian[3][6])
 {
     if (!next_progress || !next_ey || !next_epsi ||
         !isfinite(ey) || !isfinite(epsi) || !isfinite(dx) ||
         !isfinite(dy) || !isfinite(dyaw)) return 0;
     MpcTrajectorySample_t start;
-    if (!mpc_trajectory_sample(points, count, length, progress, &start)) return 0;
+    MpcPathFrame_t start_frame;
+    if (!sample_with_frame(points, count, length, progress,
+            &start, &start_frame)) return 0;
     const double c0 = cos(start.heading), s0 = sin(start.heading);
     const double yaw = start.heading + epsi;
     const double cb = cos(yaw), sb = sin(yaw);
@@ -206,16 +208,39 @@ int mpc_trajectory_advance_tracking(
         const double a = c * end.dx_ds + s * end.dy_ds -
             end.dheading_ds * result_ey;
         const double b = -s * end.dx_ds + c * end.dy_ds;
-        const double px[5] = {-s0, -sb * dx - cb * dy, cb, -sb, 0.0};
-        const double py[5] = { c0,  cb * dx - sb * dy, sb,  cb, 0.0};
-        for (int j = 0; j < 5; ++j) {
+        const double h0 = start_frame.dheading_ds;
+        const double px[6] = {-s0, -sb * dx - cb * dy, cb, -sb, 0.0,
+            start_frame.dx_ds - c0 * ey * h0 + (-sb * dx - cb * dy) * h0};
+        const double py[6] = { c0,  cb * dx - sb * dy, sb,  cb, 0.0,
+            start_frame.dy_ds - s0 * ey * h0 + ( cb * dx - sb * dy) * h0};
+        for (int j = 0; j < 6; ++j) {
             const double ds = (c * px[j] + s * py[j]) / a;
             jacobian[0][j] = (float)(-s * px[j] + c * py[j] - b * ds);
-            jacobian[1][j] = (float)((j == 1 || j == 4 ? 1.0 : 0.0) -
+            jacobian[1][j] = (float)((j == 5 ? h0 :
+                (j == 1 || j == 4 ? 1.0 : 0.0)) -
                 end.dheading_ds * ds);
+            jacobian[2][j] = (float)ds;
         }
     }
     return 1;
+}
+
+int mpc_trajectory_advance_tracking(
+    const MpcTrajectorySample_t *points, size_t count, double length,
+    double progress, float ey, float epsi,
+    float dx, float dy, float dyaw, double progress_seed,
+    double *next_progress, float *next_ey, float *next_epsi,
+    float jacobian[2][5])
+{
+    float full[3][6];
+    const int ok = mpc_trajectory_advance_tracking_with_progress(points, count,
+        length, progress, ey, epsi, dx, dy, dyaw, progress_seed,
+        next_progress, next_ey, next_epsi, jacobian ? full : NULL);
+    if (ok && jacobian)
+        for (int row = 0; row < 2; ++row)
+            for (int col = 0; col < 5; ++col)
+                jacobian[row][col] = full[row][col];
+    return ok;
 }
 
 static size_t wrapped_index(long long index, size_t count)

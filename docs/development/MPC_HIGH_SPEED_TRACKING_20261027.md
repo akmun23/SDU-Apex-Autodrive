@@ -368,3 +368,49 @@ correction in the symbolic path equations and numeric export. Running jobs
 retain their already-constructed graphs; any fix applies to new content-
 addressed solver instances, and their old-model outputs must be revalidated.
 No claim that the IPOPT model is already equivalent to the corrected MPC.
+
+## Continue toward a mean below 4.9 s
+
+Both v338 processes finished. Wide trust selected the original 5.146502 s
+seed, not a faster solution (its time-stage final iterate was 5.290012 s).
+Factor 1024 retained a 4.915787 s iterate with maximum scaled constraint
+violation 0.00028627, then failed the exporter's *coarse* swept-clearance
+certificate. This was not evidence of wall penetration: on interval 114–115,
+three subdivisions yielded +4.24 mm sampled residual clearance above the
+requested 5 cm, minus a 9.91 mm unsampled bound. Twelve subdivisions certify
++1.76 mm conservative residual clearance. The exporter now adaptively refines
+inconclusive intervals and still rejects measured or unresolved violations.
+The requested wall margin is unchanged. Tests cover refinement and rejection.
+
+Implemented `path_frame.py` for IPOPT. It uses linear XY and unwrapped
+heading exactly as production MPC. The spatial dynamics now include the
+actual chord tangent metric, chord normal drift and heading derivative.
+Node/midpoint kinematics, numeric geometry and native-witness time scheduling
+use this definition. Vehicle force equations are unchanged. Independent
+finite-difference world-motion/seam tests and Phase-I tests pass.
+
+Two new solves use separate content-addressed graphs and print level 5:
+
+- `optimized_practice_v339_exact_frame_20261027`: v337 checkpoint, L-BFGS,
+  CPU 14, 500 feasibility iterations, then 1000 per trust factor
+  16/64/256/1024. Initial corrected-equation defect 0.0203852, so the old
+  seed is correctly rejected for immediate reuse and must pass Phase I.
+- `optimized_practice_v339_fast_full_state_20261027`: complete saved
+  4.915787 s differential state plus controls, reprojected algebraic seed,
+  exact Hessian, CPU 15, 500/1200 iterations, trust 64/256/1024. It remains
+  explicitly uncertified until Phase I passes. Added full-state reseeding
+  to avoid mixing a fast path with the previous seed's wheel/body states.
+  The initial exact-Hessian launch exposed a previously hardcoded L-BFGS
+  options matcher; corrected it to preserve either selected Hessian method.
+
+MPC investigation confirmed that the prior LTV model dropped changes in
+progress between stages even though exact nonlinear validation resampled
+the path at actual progress. Implemented one deterministic progress-deviation
+coordinate, analytically propagated through the same loaded-path transform.
+It has no independent initial value or tracking weight. The plant remains
+20 physical coordinates; the QP now has those plus progress and two input
+history coordinates (23). No physical source-plant calls were added.
+Updated all solver scaling layouts. Independent six-stage derivative checks
+and all ten CTest targets pass. Supervised trial:
+`live_runs/mpc_v337_progress_coupling_20261027_01`.
+This change has not yet demonstrated a live lap-time improvement.

@@ -35,7 +35,7 @@ typedef struct
     float incoming_body_yaw_delta_rad;
     int incoming_transition_valid;
     /* Exact loaded-path frame differential for this incoming physical step. */
-    float incoming_tracking_jacobian[2][5];
+    float incoming_tracking_jacobian[3][6];
     int incoming_tracking_jacobian_valid;
 } MpcRtiState_t;
 
