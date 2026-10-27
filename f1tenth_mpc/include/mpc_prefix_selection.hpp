@@ -38,11 +38,27 @@ inline bool candidate_prefix_yaw_direction_conflicts(
         retained_yaw_rate * reference_yaw_rate > 0.0;
 }
 
+/* Include the action just issued at index zero; the next-cycle nominal shifts
+ * exactly once. Never pad an expired plan and call it a genuine suffix. */
+template <typename Control>
+inline int copy_retained_plan_warm_start(
+    const Control *plan, int count, int issued_index, int capacity,
+    Control *destination)
+{
+    if (!plan || !destination || issued_index < 0 || issued_index >= count ||
+        capacity < 1) return 0;
+    const int remaining = std::min(capacity, count - issued_index);
+    for (int k = 0; k < remaining; ++k)
+        destination[k] = plan[issued_index + k];
+    return remaining;
+}
+
 /* Compose the next nominal after publishing an exact-valid short candidate
  * prefix. The rejected full-horizon QP tail is deliberately excluded: only
  * the validated prefix may come from that candidate. If a retained certified
  * plan exists, continue it at the matching future epoch; otherwise return a
- * prefix-only seed so the nominal builder holds the last validated command.
+ * prefix-only seed so the nominal builder initializes the unsolved tail from
+ * the path. Tail initialization is not a certified or published command.
  *
  * retained_start_index is the retained plan's action aligned with the current
  * callback. Therefore the first retained action after a prefix of length P is
@@ -69,12 +85,11 @@ inline int compose_candidate_prefix_warm_start(
         retained_start_index < retained_plan_horizon;
     if (!retained_suffix_available) return validated_prefix_count;
 
-    for (int k = validated_prefix_count; k < horizon; ++k) {
-        const int source_index = std::min(
-            retained_start_index + k, retained_plan_horizon - 1);
-        destination[k] = retained_plan[source_index];
-    }
-    return horizon;
+    const int available = std::min(horizon,
+        retained_plan_horizon - retained_start_index);
+    for (int k = validated_prefix_count; k < available; ++k)
+        destination[k] = retained_plan[retained_start_index + k];
+    return std::max(validated_prefix_count, available);
 }
 
 inline bool iteration_limited_prefix_meets_residual_quality(

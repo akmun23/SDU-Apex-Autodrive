@@ -24,7 +24,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 MAP_NAME = "autodrive_practice_20260924_b.yaml"
 RACELINE_PATH = os.path.join(
     "autodrive_practice_20260924_b",
-    "autodrive_practice_20260924_b_mintime_raceline.csv")
+    "ipopt_v337_raceline.csv")
 
 
 def _bool(value: str) -> bool:

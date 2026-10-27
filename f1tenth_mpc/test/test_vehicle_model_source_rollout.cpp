@@ -1347,6 +1347,19 @@ TEST(MpcReference, IssuedCandidateSequenceSeedsNextNominalAfterShift)
       config.startup_nominal_throttle_seed)
       << "An explicit published-sequence seed must not be overwritten by "
          "the generic launch initialization.";
+  // A short certified suffix contains no information about its missing tail.
+  // Initialize that tail from the path, not a repeated expired steering input.
+  ASSERT_TRUE(mpc_rti_build_nominal_with_warm_start(&initial, 0.0, nullptr,
+      just_issued, 2, trajectory, trajectory_count, lap_length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &config,
+      &nominal, references));
+  EXPECT_FLOAT_EQ(nominal.controls[0].steering_target_rad,
+      just_issued[1].steering_target_rad);
+  EXPECT_FLOAT_EQ(nominal.controls[1].steering_target_rad, 0.0f);
+  EXPECT_FLOAT_EQ(nominal.controls[PREDICTION_HORIZON - 1].steering_target_rad,
+      0.0f);
+  EXPECT_FLOAT_EQ(nominal.controls[1].throttle_command,
+      just_issued[1].throttle_command);
   mpc_rti_memory_reset(&memory);
   EXPECT_EQ(memory.warm_start_controls_valid, 0);
   EXPECT_EQ(memory.warm_start_control_count, 0);

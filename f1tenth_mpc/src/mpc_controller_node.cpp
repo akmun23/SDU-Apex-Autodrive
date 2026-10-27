@@ -1065,11 +1065,10 @@ private:
         }
         const MpcModelControl_t &first = revalidated.controls[0];
         MpcModelControl_t next_warm_start[PREDICTION_HORIZON]{};
-        for (int k = 0; k < PREDICTION_HORIZON; ++k) {
-            const int source_index = std::min(
-                next_control_index + k, previous.horizon - 1);
-            next_warm_start[k] = previous.controls[source_index];
-        }
+        const int warm_start_count =
+            f1tenth_mpc::copy_retained_plan_warm_start(previous.controls,
+                previous.horizon, next_control_index, PREDICTION_HORIZON,
+                next_warm_start);
         next_warm_start[0] = first;
         const char *publication_fault_reason = nullptr;
         const int64_t command_stamp_ns = publish_command(
@@ -1088,7 +1087,7 @@ private:
         /* Commit the issued-sequence warm start only after publish_command()
          * confirms that this action entered the actuator command history. */
         if (!mpc_rti_memory_set_warm_start_controls(&rti_memory_,
-                next_warm_start, PREDICTION_HORIZON)) {
+                next_warm_start, warm_start_count)) {
             if (fault_reason)
                 *fault_reason = "published prior action could not seed the "
                     "next MPC nominal sequence";
@@ -1120,17 +1119,13 @@ private:
     bool seed_nominal_from_certified_plan()
     {
         const MpcRtiNominal_t &previous = certified_plan_;
-        if (!previous.valid || previous.horizon < 2) return false;
-        const int next_control_index = prior_plan_control_index_ + 1;
-        if (next_control_index >= previous.horizon) return false;
+        if (!previous.valid) return false;
         MpcModelControl_t controls[PREDICTION_HORIZON]{};
-        for (int k = 0; k < PREDICTION_HORIZON; ++k) {
-            const int source_index = std::min(
-                next_control_index + k, previous.horizon - 1);
-            controls[k] = previous.controls[source_index];
-        }
+        const int count = f1tenth_mpc::copy_retained_plan_warm_start(
+            previous.controls, previous.horizon, prior_plan_control_index_,
+            PREDICTION_HORIZON, controls);
         return mpc_rti_memory_set_warm_start_controls(
-            &rti_memory_, controls, PREDICTION_HORIZON) != 0;
+            &rti_memory_, controls, count) != 0;
     }
 
     bool has_revalidatable_prior_plan_action() const
@@ -1524,12 +1519,9 @@ private:
             next_warm_start[0] = first;
         } else {
             const MpcRtiNominal_t &previous = certified_plan_;
-            warm_start_count = PREDICTION_HORIZON;
-            for (int k = 0; k < warm_start_count; ++k) {
-                const int source_index = std::min(
-                    prior_start + k, previous.horizon - 1);
-                next_warm_start[k] = previous.controls[source_index];
-            }
+            warm_start_count = f1tenth_mpc::copy_retained_plan_warm_start(
+                previous.controls, previous.horizon, prior_start,
+                PREDICTION_HORIZON, next_warm_start);
             next_warm_start[0] = first;
         }
 

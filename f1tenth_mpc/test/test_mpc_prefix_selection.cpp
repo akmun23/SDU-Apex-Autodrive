@@ -8,6 +8,7 @@ using f1tenth_mpc::select_validated_prefix;
 using f1tenth_mpc::select_validated_recovery_prefix;
 using f1tenth_mpc::iteration_limited_prefix_meets_residual_quality;
 using f1tenth_mpc::compose_candidate_prefix_warm_start;
+using f1tenth_mpc::copy_retained_plan_warm_start;
 using f1tenth_mpc::candidate_prefix_yaw_direction_conflicts;
 
 struct TestControl {
@@ -45,6 +46,29 @@ TEST(MpcPrefixSelection, CandidatePrefixWithoutCertifiedTailIsPrefixOnly)
   EXPECT_EQ(next[0].id, 100);
   EXPECT_EQ(next[1].id, 101);
   EXPECT_EQ(next[2].id, 102);
+}
+
+TEST(MpcPrefixSelection, RetainedSuffixIncludesIssuedActionWithoutPadding)
+{
+  const TestControl plan[] = {{0}, {1}, {2}, {3}};
+  TestControl next[6]{};
+  ASSERT_EQ(copy_retained_plan_warm_start(plan, 4, 2, 6, next), 2);
+  EXPECT_EQ(next[0].id, 2);  // Already issued: next cycle shifts it once.
+  EXPECT_EQ(next[1].id, 3);
+  EXPECT_EQ(next[2].id, 0);  // Not a fabricated repeat of action 3.
+  EXPECT_EQ(copy_retained_plan_warm_start(plan, 4, 4, 6, next), 0);
+}
+
+TEST(MpcPrefixSelection, CandidateSuffixDoesNotFabricateExpiredPlanActions)
+{
+  const TestControl prefix[] = {{100}, {101}, {102}};
+  const TestControl plan[] = {{0}, {1}, {2}, {3}, {4}, {5}};
+  TestControl next[8]{};
+  ASSERT_EQ(compose_candidate_prefix_warm_start(
+      prefix, 3, plan, 6, 2, 8, next), 4);
+  EXPECT_EQ(next[2].id, 102);
+  EXPECT_EQ(next[3].id, 5);
+  EXPECT_EQ(next[4].id, 0);
 }
 
 TEST(MpcPrefixSelection, UsesObjectiveWhenClearanceReserveIsNotThreatened)

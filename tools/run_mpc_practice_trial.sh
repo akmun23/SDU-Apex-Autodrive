@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Supervised full-speed practice trial: warmup plus five scored laps.
+# Supervised full-speed practice trial: warmup plus scored laps (five default).
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_root"
@@ -14,8 +14,13 @@ if [[ $# -ge 2 ]]; then overlay="$2"; fi
 [[ "$run_id" =~ ^[[:alnum:]_-]+$ ]] || exit 2
 run_dir="live_runs/$run_id"
 [[ ! -e "$run_dir" ]] || { echo "Run already exists: $run_dir" >&2; exit 2; }
-trajectory=f1tenth_planning/trajectories/autodrive_practice_20260924_b/ipopt_v1_baseline_raceline.csv
+trajectory=f1tenth_planning/trajectories/autodrive_practice_20260924_b/ipopt_v337_raceline.csv
 if [[ $# -eq 3 ]]; then trajectory="$3"; fi
+total_laps="${SDU_APEX_TRIAL_TOTAL_LAPS:-6}"
+[[ "$total_laps" =~ ^[0-9]+$ && "$total_laps" -ge 2 ]] || {
+  echo 'SDU_APEX_TRIAL_TOTAL_LAPS must include warmup plus >=1 scored lap' >&2
+  exit 2
+}
 map=f1tenth_planning/maps/autodrive_practice_20260924_b.yaml
 controller="$run_id"_controller
 simulator="$run_id"_sim
@@ -31,7 +36,7 @@ python3 tools/seal_mpc_run_manifest.py --run-id "$run_id" \
   --simulator-container "$simulator" --controller-container "$controller" \
   --map "$map" --trajectory "$trajectory" "$@" \
   --initial-pose '{"x":0.8,"y":3.1592,"yaw":-1.5708251687330668}' \
-  --supervisor "tools/watch_sim_run.sh $controller $simulator $recorder mpc-lap-6 180" \
+  --supervisor "tools/watch_sim_run.sh $controller $simulator $recorder mpc-lap-$total_laps 180" \
   --diagnostics on --ros-executor-threads 4 --openmp-threads 8 --jacobian-workers 8
 
 cleanup() {
@@ -63,7 +68,7 @@ wait_log "$run_dir/controller.log" 'Loaded MPC trajectory'
 wait_log "$run_dir/recorder.log" Recording
 env SDU_APEX_WATCH_STALL_TIMEOUT_S=30 \
   tools/watch_sim_run.sh "$controller" "$simulator" "$recorder" \
-  mpc-lap-6 180 >"$run_dir/watcher.log" 2>&1 &
+  "mpc-lap-$total_laps" 180 >"$run_dir/watcher.log" 2>&1 &
 watcher_job=$!
 wait_log "$run_dir/watcher.log" WATCHER_READY
 # Reset suppresses sensor forwarding, so live modules receive a clean spawn

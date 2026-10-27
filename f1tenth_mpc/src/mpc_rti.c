@@ -331,14 +331,17 @@ static int rollout_nominal_controls(
     int horizon,
     float prediction_dt,
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
-    double progress[PREDICTION_HORIZON + 1])
+    double progress[PREDICTION_HORIZON + 1], int *failure_index)
 {
     states[0] = *initial_state;
     progress[0] = initial_progress;
     for (int k = 0; k < horizon; ++k) {
         MpcStageResult_t step = mpc_vehicle_model_step(
             &states[k].plant, &controls[k], prediction_dt, 0.0f);
-        if (!step.valid || !isfinite(progress[k] + step.delta_s_m)) return 0;
+        if (!step.valid || !isfinite(progress[k] + step.delta_s_m)) {
+            *failure_index = k + 1;
+            return 0;
+        }
         double next_progress;
         if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
                 lap_length, progress[k], states[k].plant.e_y,
@@ -346,7 +349,10 @@ static int rollout_nominal_controls(
                 step.body_lateral_delta_m, step.body_yaw_delta_rad,
                 progress[k] + step.delta_s_m, &next_progress,
                 &step.next.e_y, &step.next.e_psi,
-                states[k + 1].incoming_tracking_jacobian)) return 0;
+                states[k + 1].incoming_tracking_jacobian)) {
+            *failure_index = k + 1;
+            return 0;
+        }
         step.delta_s_m = (float)(next_progress - progress[k]);
         states[k + 1].incoming_tracking_jacobian_valid = 1;
         states[k + 1].plant = step.next;
@@ -1063,6 +1069,22 @@ static int fail_nominal_build(
     return 0;
 }
 
+static int seed_unsolved_tail_control(
+    const MpcTrajectorySample_t *trajectory, size_t count, double length,
+    double station, float last_throttle,
+    const MpcRtiConfiguration_t *configuration, MpcModelControl_t *control)
+{
+    MpcTrajectorySample_t sample;
+    if (!mpc_trajectory_sample(trajectory, count, length, station, &sample))
+        return 0;
+    control->steering_target_rad = clampf_rti(
+        vehicle_model_steering_for_curvature((float)sample.curvature),
+        -configuration->max_steering_rad, configuration->max_steering_rad);
+    control->throttle_command = clampf_rti(last_throttle,
+        MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
+    return 1;
+}
+
 static int mpc_rti_build_nominal_impl(
     const MpcRtiState_t *current_state,
     double current_progress,
@@ -1152,6 +1174,13 @@ static int mpc_rti_build_nominal_impl(
                 nominal->controls[k].throttle_command,
                 MPC_THROTTLE_MIN_DRIVE,
                 MPC_THROTTLE_MAX);
+            if (k + 1 >= previous_horizon &&
+                !seed_unsolved_tail_control(trajectory, trajectory_count,
+                    lap_length, progress_seed[k + 1],
+                    nominal->controls[k].throttle_command, configuration,
+                    &nominal->controls[k]))
+                return fail_nominal_build(
+                    nominal, MPC_RTI_NOMINAL_BUILD_SEED_REFERENCE);
         }
     } else {
         double phase_start_us = monotonic_microseconds();
@@ -1220,9 +1249,16 @@ static int mpc_rti_build_nominal_impl(
     if (warm_start_controls) {
         for (int k = 0; k < horizon; ++k) {
             const int requested_index = k + (shift_warm_controls ? 1 : 0);
-            const int shifted_index = requested_index < warm_start_control_count
-                ? requested_index : warm_start_control_count - 1;
-            nominal->controls[k] = warm_start_controls[shifted_index];
+            if (requested_index < warm_start_control_count) {
+                nominal->controls[k] = warm_start_controls[requested_index];
+            } else if (!seed_unsolved_tail_control(trajectory, trajectory_count,
+                    lap_length, progress_seed[k + 1],
+                    warm_start_controls[warm_start_control_count - 1].
+                        throttle_command,
+                    configuration, &nominal->controls[k])) {
+                return fail_nominal_build(
+                    nominal, MPC_RTI_NOMINAL_BUILD_SEED_REFERENCE);
+            }
             nominal->controls[k].steering_target_rad = clampf_rti(
                 nominal->controls[k].steering_target_rad,
                 -configuration->max_steering_rad,
@@ -1247,7 +1283,7 @@ static int mpc_rti_build_nominal_impl(
     if (!rollout_nominal_controls(current_state, current_progress,
             nominal->controls,
             trajectory, trajectory_count, lap_length, horizon, prediction_dt,
-            nominal->states, nominal->progress))
+            nominal->states, nominal->progress, &nominal->build_failure_index))
         return fail_nominal_build(
             nominal, MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT);
     nominal->nominal_rollout_a_us = monotonic_microseconds() - phase_start_us;

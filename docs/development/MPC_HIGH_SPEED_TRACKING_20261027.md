@@ -1,7 +1,8 @@
 # High speed MPC tracking — 2026-10-27
 
-Goal: repeated practice laps averaging at most 5.5 s after the warmup lap,
-using the requested trajectory speed and competition runtime inputs.
+Goal: match the selected raceline's theoretical time, using its requested
+speed and competition runtime inputs. Average <=5.5 s is an achieved milestone,
+not the final target (user clarified on Oct 27). Current v337 target: 5.1465 s.
 
 ## Starting evidence
 
@@ -29,7 +30,7 @@ The terminal nominal and candidate contain saturated steering reversals.
 The run, controller log, reset history, and full typed state are retained for
 first-divergence analysis. No improvement is claimed from this trial.
 
-## Active investigation
+## Initial investigation
 
 1. Compare predicted and measured yaw/steering at the first bad command.
 2. Check the QP objective and exact objective for consistency.
@@ -248,3 +249,122 @@ heading 0.00465 s and lateral velocity -0.00042 s; total 0.14491 s versus
 the measured ~0.154 s gap to the nominal 5.367 s line. This is an attribution
 using the path-coordinate metric, not an independent simulator measurement.
 It explains why more throttle alone was not closing this final gap.
+
+Doubling lateral/heading costs (mpc_path_tracking_20261027_01) did not help:
+scored mean 5.5400 s, SD 0.0541 s, max publication 18.63 ms. The post-first-
+lap cross-track RMSE rose to about 6.6 cm instead of falling. Not promoted.
+
+Promoted the measured-best 25/25 speed weights, curvature gain 0.5, original
+4000/1500 path weights and 2000/75 actuator damping to mpc_competition.yaml.
+Removed the five temporary candidate files created during this investigation;
+exact overlays remain with their run evidence, not in production config.
+Existing unrelated worktree edits and earlier profiles were not overwritten.
+
+The corrected controller now tests the v337 5.1465 s target again, with the
+new SQP/merit implementation and best qualified weights:
+live_runs/mpc_v337_merit_20261027_01. The default reference CSV is unchanged.
+
+## Goal reached on the faster v337 target
+
+First full-speed run, mpc_v337_merit_20261027_01: five scored laps
+5.4118, 5.3858, 5.4218, 5.4318, 5.3678 s. Mean 5.4038 s, SD 0.0236 s.
+Publication median/p95/max 5.88/16.88/18.55 ms; no >=20 ms cycles. One
+exact-revalidated prior-plan action; all other published actions full-horizon
+valid. Six complete laps, no collision.
+
+Unchanged repeat mpc_v337_merit_20261027_02: five scored laps
+5.3608, 5.4218, 5.3968, 5.4698, 5.3668 s. Mean 5.4032 s, SD 0.0399 s.
+Publication median/p95/max 5.74/17.06/18.64 ms; no >=20 ms cycles. All 1343
+issued actions full-horizon valid, no recovery. Six complete laps, no collision.
+All ten scored laps across the two independent trials are below 5.5 s.
+
+Saved the numerically identical v337 CSV in the planning package as
+trajectories/autodrive_practice_20260924_b/ipopt_v337_raceline.csv (LF-normalized
+copy; canonical SHA256 036fd894383aee11674f77db945911ee21b1940dd2701a78c4c50226ec8d372a).
+The original solver output used CRLF and SHA256 1bd0b8470128853c86eaacd6984f5aff38a4cc3007d4c4cba727c49bc98b63d5;
+all parsed rows match. Controller loads 474 points, 27.41 m; nominal time
+5.1465 s, not a claim that the controller has reached that time.
+
+After these two online passes, selected v337 as the default launch/trial
+raceline. The previous reference CSV files and runtime physics are untouched.
+Final check: mpc_v337_production_20261027_01, one warmup plus ten scored laps,
+using production weights without a trial overlay.
+
+Reproduction:
+`SDU_APEX_TRIAL_TOTAL_LAPS=11 tools/run_mpc_practice_trial.sh <new-run-id>`
+Reports are made with tools/export_mpc_run_report.py; count lap completions
+using lap-counter transitions and exclude the first warmup lap.
+
+Physics qualification on mpc_speed_balance_20261027_02: 750 ms fixed-command
+XY RMSE 1.03 cm, speed 0.0103 m/s, yaw-rate 0.00964 rad/s. Raw maximum path
+error is 8.82 cm; 31/1348 windows exceed 5 cm. All 31 overlap an independently
+flagged GT pose/twist closure inconsistency (>5 cm in one 25 ms interval);
+zero of the 1317 remaining windows exceed 5 cm. This diagnostic screen is
+reported alongside the unscreened result, not used to hide failures or claim
+an exact native-Unity replica. Further model claims must preserve that caveat.
+
+## Longer-run failure and retained-suffix correction
+
+mpc_v337_production_20261027_01 stopped after four laps, no collision. A chain
+of 29 prior-plan actions ended in a nominal-build failure, before ADMM ran.
+The terminal state was ~7.15 m/s, e_y=-0.200 m, e_psi=-0.250 rad. This means
+the two five-lap successes did not establish sustained ten-lap reliability.
+
+Code diagnosis: prior-plan warm starts padded the finite remaining suffix to
+30 by repeating its last command. Rejections progressively flattened the
+entire horizon to stale steering/torque. Candidate-prefix stitching had the
+same padding; the deadline-specific reseed also skipped the next command by
+starting at cursor+1 before the nominal builder shifted again.
+
+Implemented a shared suffix copier with the true remaining length and the
+already-issued action at index zero. Removed fabricated padding in direct
+prior recovery, quality-selected recovery, candidate stitching and deadline
+reseed. Missing nominal tail steering is initialized from future path
+curvature, carrying the previous positive throttle only as an initial guess;
+this is not published fallback control and must still pass QP/exact validation.
+No physics equations or optimizer dimensions changed. New tests verify exact
+indexing/counts, expired suffixes and path-based tail initialization. Nominal
+failures now report the failing stage instead of -1.
+
+Testing the correction with unchanged best weights/line, one warmup plus ten
+scored laps: live_runs/mpc_v337_suffix_fix_20261027_01.
+
+Result: eleven complete laps, no collision, all 2429 issued commands accepted
+through full-horizon validation, no recovery. Ten scored laps:
+5.4538, 5.3698, 5.4378, 5.3888, 5.4608, 5.4488, 5.4328, 5.3538,
+5.3508, 5.3958 s. Mean 5.4093 s, SD 0.0403 s; max lap 5.4608 s.
+Publication median/p95/max 5.93/17.14/18.71 ms, zero >=20 ms cycles.
+Fixed-command 750 ms replay: 2405/2405 windows stay below 5 cm at every
+sample, no GT-closure exclusions; endpoint XY RMSE 0.00981 m, max path
+0.0444 m. Speed/lateral/yaw-rate RMSE 0.00841/0.00130 m/s / 0.00891 rad/s.
+Production odom speed/lateral RMSE 0.0083/0.0011 m/s; gyro yaw-rate error zero
+against the simulator's same-axis truth. Eleven-lap uncorrected odom drift
+is not zero (relative XY endpoint 6.1 cm, maximum 9.8 cm); AMCL remains active.
+All ten package test targets and 13 report tests pass.
+
+Unchanged long repeat mpc_v337_suffix_fix_20261027_02: eleven complete laps,
+no collision/recovery, all 2425 issued actions full-horizon valid. Ten scored
+mean 5.4153 s, SD 0.0384 s, maximum lap 5.4618 s. Publication maximum
+19.22 ms; none >=20 ms. Thus twenty scored laps with this final code were
+all below 5.5 s. Repeat rollout evaluation is saved alongside this run.
+
+## Continuing toward theoretical time and IPOPT parity
+
+The 5.5 s milestone is not completion of the revised goal. Current measured
+gap to v337 is ~0.263 s/lap. A post-warmup path-coordinate estimate attributes
+~0.080 s/lap to speed tracking, 0.159 s to outward offset, 0.006 s to heading.
+Corresponding speed/cross-track/heading RMSE: 0.131 m/s, 0.0773 m, 0.0498 rad.
+
+Both existing IPOPT jobs remain active (PIDs 55467/55468, CPUs14/15). They
+have emitted native iteration messages around 3636–3656, so they are advancing,
+not merely consuming CPU. They were not stopped or modified.
+
+Audit found the same *class* of geometric inconsistency in IPOPT: independent
+linear interpolation of C(s), sin/cos heading, and curvature assumes a unit
+normal, C'(s)=T(s), and heading'=curvature. On its actual mesh, max discrepancy
+between the heading derivative and interpolated curvature is 0.11439 /m
+(RMS 0.00567 /m); normal-length error up to 0.000368. These assumptions need
+correction in the symbolic path equations and numeric export. Running jobs
+retain their already-constructed graphs; any fix applies to new content-
+addressed solver instances, and their old-model outputs must be revalidated.
+No claim that the IPOPT model is already equivalent to the corrected MPC.
