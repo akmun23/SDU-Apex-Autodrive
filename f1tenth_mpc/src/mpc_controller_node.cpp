@@ -557,6 +557,10 @@ public:
             "weight_steering_slew", 25.0f);
         rti_config_.model.weight_throttle_slew = declare_weight(
             "weight_throttle_slew", 2.0f);
+        rti_config_.model.sqp_steering_trust_region_rad = declare_weight(
+            "sqp_steering_trust_region_rad", 0.0f);
+        rti_config_.model.sqp_throttle_trust_region = declare_weight(
+            "sqp_throttle_trust_region", 0.0f);
         rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
             declare_parameter<double>("startup_nominal_throttle_seed", 0.0));
         rti_config_.model.terminal_multiplier = declare_weight(
@@ -2766,6 +2770,10 @@ private:
             << rti_config_.model.weight_steering_slew
             << ",\"throttle_slew\":"
             << rti_config_.model.weight_throttle_slew << '}';
+        json << ",\"sqp_input_trust_region\":{\"steering_rad\":"
+            << rti_config_.model.sqp_steering_trust_region_rad
+            << ",\"throttle\":"
+            << rti_config_.model.sqp_throttle_trust_region << '}';
         json << ",\"solver\":{\"iterations\":" << result.solver_iterations
             << ",\"max_iterations_configured\":"
             << rti_config_.solver.max_iterations

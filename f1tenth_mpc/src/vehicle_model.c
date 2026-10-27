@@ -297,12 +297,26 @@ static int vehicle_model_tracking_step_integrated(
         body_forward_delta_m * s + body_lateral_delta_m * c;
     const float denominator = 1.0f - path_curvature * state->e_y;
     if (fabsf(denominator) < 0.05f) return 0;
-    *delta_s = path_forward_delta / denominator;
-    *e_y_next = state->e_y + path_lateral_delta -
-        0.5f * path_curvature * (*delta_s) * (*delta_s);
+    /* Project the integrated displacement onto the local reference circle.
+     * The former Euler progress / second-order lateral correction accumulated
+     * coordinate error even for a perfect constant-curvature motion. This
+     * is a coordinate transform; the Unity plant displacement is unchanged.
+     * Rationalize (1-radius)/k to avoid cancellation near a straight. */
+    const float y = state->e_y + path_lateral_delta;
+    const float normal = 1.0f - path_curvature * y;
+    const float tangent = path_curvature * path_forward_delta;
+    const float radius = hypotf(normal, tangent);
+    if (!(radius > 0.05f)) return 0;
+    const float path_angle = atan2f(tangent, normal);
+    *delta_s = fabsf(path_curvature) > 1.0e-6f
+        ? path_angle / path_curvature : path_forward_delta / normal;
+    *e_y_next = (2.0f * y - path_curvature *
+        (path_forward_delta * path_forward_delta + y * y)) /
+        (1.0f + radius);
     const float e_psi_raw = state->e_psi + body_yaw_delta_rad -
-        path_curvature * (*delta_s);
-    *e_psi_next = atan2f(sinf(e_psi_raw), cosf(e_psi_raw));
+        path_angle;
+    *e_psi_next = fabsf(e_psi_raw) > 3.14159265358979323846f
+        ? remainderf(e_psi_raw, 6.28318530717958647692f) : e_psi_raw;
     return isfinite(*e_y_next) && isfinite(*e_psi_next) &&
         isfinite(*delta_s);
 }
@@ -684,6 +698,24 @@ static int vehicle_model_forward_plant_jacobian(
         control->throttle_command, MPC_THROTTLE_MIN, MPC_THROTTLE_MAX);
     source_input.suspension_history_initialized =
         state->source_suspension_history_initialized;
+    /* Shared geometry for every sensitivity lane and source-state batch. */
+    const float tracking_c = cosf(state->e_psi);
+    const float tracking_s = sinf(state->e_psi);
+    const float tracking_x =
+        nominal_stage->body_forward_delta_m * tracking_c -
+        nominal_stage->body_lateral_delta_m * tracking_s;
+    const float tracking_y = state->e_y +
+        nominal_stage->body_forward_delta_m * tracking_s +
+        nominal_stage->body_lateral_delta_m * tracking_c;
+    const float tracking_normal = 1.0f - path_curvature * tracking_y;
+    const float tracking_tangent = path_curvature * tracking_x;
+    const float tracking_radius_squared =
+        tracking_normal * tracking_normal +
+        tracking_tangent * tracking_tangent;
+    if (!(tracking_radius_squared > 0.0025f)) return 0;
+    const float inverse_tracking_radius = 1.0f / sqrtf(tracking_radius_squared);
+    const float inverse_tracking_radius_squared =
+        1.0f / tracking_radius_squared;
     for (int first_column = 0;
          first_column < MPC_FORWARD_SENSITIVITY_COLUMNS;
          first_column += UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH) {
@@ -750,15 +782,27 @@ static int vehicle_model_forward_plant_jacobian(
             const float d_lateral = (float)
                 sensitivity.body_lateral_displacement[lane];
             const float d_yaw = (float)sensitivity.yaw_delta[lane];
-            const float c = cosf(state->e_psi);
-            const float s = sinf(state->e_psi);
-            const float denominator = 1.0f - path_curvature * state->e_y;
-            if (fabsf(denominator) < 0.05f) return 0;
-            const float d_path_forward = d_forward * c - d_lateral * s;
-            const float d_path_lateral = d_forward * s + d_lateral * c;
-            const float d_delta_s = d_path_forward / denominator;
-            const float d_ey = d_path_lateral - path_curvature *
-                nominal_stage->delta_s_m * d_delta_s;
+            const float motion_derivatives[3] = {d_forward, d_lateral, d_yaw};
+            for (int motion = 0; motion < 3; ++motion) {
+                if (model_column < MPC_MODEL_NX)
+                    linearization->body_motion_A[motion][model_column] =
+                        motion_derivatives[motion];
+                else
+                    linearization->body_motion_B[motion][
+                        model_column - MPC_MODEL_NX] = motion_derivatives[motion];
+            }
+            const float d_path_forward =
+                d_forward * tracking_c - d_lateral * tracking_s;
+            const float d_path_lateral =
+                d_forward * tracking_s + d_lateral * tracking_c;
+            const float d_delta_s =
+                (tracking_normal * d_path_forward +
+                 tracking_tangent * d_path_lateral) *
+                inverse_tracking_radius_squared;
+            const float d_ey =
+                (tracking_normal * d_path_lateral -
+                 tracking_tangent * d_path_forward) *
+                inverse_tracking_radius;
             const float d_epsi = d_yaw - path_curvature * d_delta_s;
             /* Derivative of the exact integrated-motion Frenet map. The path
              * coordinate columns e_y/e_psi remain on their cheap dedicated
@@ -1021,6 +1065,27 @@ static int vehicle_model_linearize_with_known_step(
             }
             if (is_state) linearization->A[row][index] = derivative;
             else linearization->B[row][index] = derivative;
+        }
+        /* Preserve the same one-sided branch choice for physical integrated
+         * displacement, so the loaded-path transform can apply its own exact
+         * geometric derivative without rerunning the source plant. */
+        const int use_plus = plus_same_branch ||
+            (!minus_same_branch && plus.valid && (!minus.valid ||
+             mask_popcount((uint16_t)(plus.branch_flags ^ stage->branch_flags)) <=
+             mask_popcount((uint16_t)(minus.branch_flags ^ stage->branch_flags))));
+        const MpcStageResult_t *offset = use_plus ? &plus : &minus;
+        const float scale = (use_plus ? 1.0f : -1.0f) / epsilon;
+        const float motion_derivatives[3] = {
+            (offset->body_forward_delta_m - stage->body_forward_delta_m) * scale,
+            (offset->body_lateral_delta_m - stage->body_lateral_delta_m) * scale,
+            (offset->body_yaw_delta_rad - stage->body_yaw_delta_rad) * scale};
+        for (int motion = 0; motion < 3; ++motion) {
+            if (is_state)
+                linearization->body_motion_A[motion][index] =
+                    motion_derivatives[motion];
+            else
+                linearization->body_motion_B[motion][index] =
+                    motion_derivatives[motion];
         }
         if (nonsmooth) {
                 linearization->nonsmooth_column_mask |= UINT64_C(1) << column;

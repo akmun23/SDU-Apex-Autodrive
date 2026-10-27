@@ -47,6 +47,138 @@ MpcModelState_t turning_state()
   return state;
 }
 
+TEST(VehicleModelSourceRollout, TrackingTransformClosesExactOffsetCircle)
+{
+  for (const float curvature : {-1.2f, -0.2f, 0.2f, 1.2f}) {
+    MpcModelState_t state{};
+    state.e_y = 0.12f;
+    const float ds = 0.3f;
+    const float angle = curvature * ds;
+    const float radius = 1.0f / curvature - state.e_y;
+    MpcStageResult_t physical{};
+    physical.valid = 1;
+    physical.next = state;
+    physical.body_forward_delta_m = radius * std::sin(angle);
+    physical.body_lateral_delta_m = radius * (1.0f - std::cos(angle));
+    physical.body_yaw_delta_rad = angle;
+    MpcStageResult_t projected{};
+    ASSERT_TRUE(vehicle_model_reproject_tracking(
+        &state, &physical, curvature, &projected));
+    EXPECT_NEAR(projected.delta_s_m, ds, 2.0e-6f);
+    EXPECT_NEAR(projected.next.e_y, state.e_y, 2.0e-6f);
+    EXPECT_NEAR(projected.next.e_psi, 0.0f, 2.0e-6f);
+  }
+}
+
+TEST(MpcReference, LoadedFrameClosesWorldMotionAndDifferentialAcrossKnots)
+{
+  MpcTrajectorySample_t points[4] = {
+      {0, 0, 0, 0, .2, 5, 2, 2, 0},
+      {1, 1, 0, .2, .4, 5, 2, 2, 0},
+      {2, 2, .3, .6, .4, 5, 2, 2, 0},
+      {3, 3, 1, 1, .4, 5, 2, 2, 0}};
+  size_t count = 4;
+  double length;
+  ASSERT_TRUE(mpc_trajectory_prepare(points, &count, &length));
+  const double progress = .7;
+  const float arguments[5] = {.12f, -.08f, .4f, .015f, .12f};
+  double next_progress;
+  float ey, epsi, jacobian[2][5];
+  ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, progress,
+      arguments[0], arguments[1], arguments[2], arguments[3], arguments[4],
+      1.1, &next_progress, &ey, &epsi, jacobian));
+  ASSERT_GT(next_progress, 1.0);
+  MpcTrajectorySample_t start{}, end{};
+  ASSERT_TRUE(mpc_trajectory_sample(points, count, length, progress, &start));
+  ASSERT_TRUE(mpc_trajectory_sample(points, count, length, next_progress, &end));
+  const double yaw = start.heading + arguments[1];
+  const double world_x = start.x - std::sin(start.heading) * arguments[0] +
+      std::cos(yaw) * arguments[2] - std::sin(yaw) * arguments[3];
+  const double world_y = start.y + std::cos(start.heading) * arguments[0] +
+      std::sin(yaw) * arguments[2] + std::cos(yaw) * arguments[3];
+  EXPECT_NEAR(end.x - std::sin(end.heading) * ey, world_x, 1.0e-7);
+  EXPECT_NEAR(end.y + std::cos(end.heading) * ey, world_y, 1.0e-7);
+  EXPECT_NEAR(end.heading + epsi, yaw + arguments[4], 1.0e-7);
+  for (int column = 0; column < 5; ++column) {
+    float plus[5], minus[5];
+    std::copy_n(arguments, 5, plus);
+    std::copy_n(arguments, 5, minus);
+    constexpr float epsilon = 2.0e-4f;
+    plus[column] += epsilon;
+    minus[column] -= epsilon;
+    double sp, sm;
+    float yp, ym, hp, hm;
+    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, progress,
+        plus[0], plus[1], plus[2], plus[3], plus[4], next_progress,
+        &sp, &yp, &hp, nullptr));
+    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, progress,
+        minus[0], minus[1], minus[2], minus[3], minus[4], next_progress,
+        &sm, &ym, &hm, nullptr));
+    EXPECT_NEAR(jacobian[0][column], (yp - ym) / (2 * epsilon), 3.0e-4f);
+    EXPECT_NEAR(jacobian[1][column], (hp - hm) / (2 * epsilon), 3.0e-4f);
+  }
+}
+
+TEST(MpcReference, SourceMotionSensitivityChainsThroughLoadedPath)
+{
+  MpcTrajectorySample_t points[4] = {
+      {0, 0, 0, 0, .2, 5, 2, 2, 0},
+      {1, 1, 0, .2, .4, 5, 2, 2, 0},
+      {2, 2, .3, .6, .4, 5, 2, 2, 0},
+      {3, 3, 1, 1, .4, 5, 2, 2, 0}};
+  size_t count = 4;
+  double length;
+  ASSERT_TRUE(mpc_trajectory_prepare(points, &count, &length));
+  MpcModelState_t state = turning_state();
+  state.u = 4.0f;
+  state.e_y = .05f;
+  state.e_psi = .08f;
+  state.actual_steering_angle = .10f;
+  ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+  const MpcModelControl_t control{.11f, .2f};
+  MpcStageResult_t step{};
+  MpcStageLinearization_t lin{};
+  ASSERT_TRUE(mpc_vehicle_model_step_with_jacobian(
+      &state, &control, .025f, 0.0f, &step, &lin));
+  double station;
+  float ey, epsi, geometry[2][5];
+  ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, .96,
+      state.e_y, state.e_psi, step.body_forward_delta_m,
+      step.body_lateral_delta_m, step.body_yaw_delta_rad, 1.06,
+      &station, &ey, &epsi, geometry));
+  for (int input = 0; input < 2; ++input) {
+    MpcModelControl_t cp = control, cm = control;
+    constexpr float epsilon = 1.0e-4f;
+    if (input == 0) {
+      cp.steering_target_rad += epsilon;
+      cm.steering_target_rad -= epsilon;
+    } else {
+      cp.throttle_command += epsilon;
+      cm.throttle_command -= epsilon;
+    }
+    const auto plus = mpc_vehicle_model_step(&state, &cp, .025f, 0.0f);
+    const auto minus = mpc_vehicle_model_step(&state, &cm, .025f, 0.0f);
+    ASSERT_TRUE(plus.valid && minus.valid);
+    double sp, sm;
+    float yp, ym, hp, hm;
+    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, .96,
+        state.e_y, state.e_psi, plus.body_forward_delta_m,
+        plus.body_lateral_delta_m, plus.body_yaw_delta_rad, station,
+        &sp, &yp, &hp, nullptr));
+    ASSERT_TRUE(mpc_trajectory_advance_tracking(points, count, length, .96,
+        state.e_y, state.e_psi, minus.body_forward_delta_m,
+        minus.body_lateral_delta_m, minus.body_yaw_delta_rad, station,
+        &sm, &ym, &hm, nullptr));
+    for (int row = 0; row < 2; ++row) {
+      float analytic = 0;
+      for (int motion = 0; motion < 3; ++motion)
+        analytic += geometry[row][motion + 2] * lin.body_motion_B[motion][input];
+      EXPECT_NEAR(analytic, (row == 0 ? yp - ym : hp - hm) /
+          (2 * epsilon), 5.0e-4f);
+    }
+  }
+}
+
 TEST(VehicleModelSourceRollout, CarriesLateralYawWheelAndSuspensionMotion)
 {
   MpcModelState_t state = turning_state();
@@ -771,6 +903,25 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
   MpcRtiProblem_t problem{};
   ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
       references, horizon, PREDICTION_DT_SECONDS, &config, &problem));
+  MpcRtiConfiguration_t local_config = config;
+  local_config.sqp_steering_trust_region_rad = 0.08f;
+  local_config.sqp_throttle_trust_region = 0.10f;
+  MpcRtiProblem_t local_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      references, horizon, PREDICTION_DT_SECONDS, &local_config,
+      &local_problem));
+  for (int k = 0; k < RICCATI_HORIZON; ++k) {
+    EXPECT_NEAR(local_problem.steps[k].u_lb[0],
+        std::max(-config.max_steering_rad,
+            nominal_controls[k].steering_target_rad - 0.08f), 1.0e-7f);
+    EXPECT_NEAR(local_problem.steps[k].u_ub[0],
+        std::min(config.max_steering_rad,
+            nominal_controls[k].steering_target_rad + 0.08f), 1.0e-7f);
+    EXPECT_GE(local_problem.steps[k].u_lb[1], MPC_THROTTLE_MIN_DRIVE);
+    EXPECT_LE(local_problem.steps[k].u_ub[1], MPC_THROTTLE_MAX);
+    EXPECT_LE(local_problem.steps[k].u_ub[1] -
+        local_problem.steps[k].u_lb[1], 0.200001f);
+  }
   MpcRtiConfiguration_t no_steering_slew_config = config;
   no_steering_slew_config.weight_steering_slew = 0.0f;
   MpcRtiProblem_t no_steering_slew_problem{};

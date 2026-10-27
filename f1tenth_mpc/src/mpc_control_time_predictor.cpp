@@ -83,15 +83,21 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         const int64_t step_ticks = std::min(
             configured_ticks, target_ticks - integrated_ticks);
         const float dt = static_cast<float>(step_ticks) * 0.001f;
-        MpcTrajectorySample_t sample{};
-        if (!(dt > 0.0f) || !mpc_trajectory_sample(trajectory,
-                trajectory_count, lap_length_m, *progress_m, &sample))
-            return false;
+        if (!(dt > 0.0f)) return false;
         const MpcStageResult_t result = mpc_vehicle_model_propagate(
-            state, dt, static_cast<float>(sample.curvature));
+            state, dt, 0.0f);
         if (!result.valid) return false;
+        double next_progress;
+        float ey, epsi;
+        if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
+                lap_length_m, *progress_m, state->e_y, state->e_psi,
+                result.body_forward_delta_m, result.body_lateral_delta_m,
+                result.body_yaw_delta_rad, *progress_m + result.delta_s_m,
+                &next_progress, &ey, &epsi, nullptr)) return false;
         *state = result.next;
-        *progress_m += result.delta_s_m;
+        state->e_y = ey;
+        state->e_psi = epsi;
+        *progress_m = next_progress;
         integrated_ticks += step_ticks;
         *integrated_elapsed_ns = integrated_ticks * kUnityPhysicsTickNs;
     }

@@ -259,6 +259,24 @@ int mpc_model_linearize_fd_oracle(
             if (is_state) linearization->A[row][index] = derivative;
             else linearization->B[row][index] = derivative;
         }
+        const float base_motion[3] = {base.body_forward_delta_m,
+            base.body_lateral_delta_m, base.body_yaw_delta_rad};
+        const float plus_motion[3] = {plus.body_forward_delta_m,
+            plus.body_lateral_delta_m, plus.body_yaw_delta_rad};
+        const float minus_motion[3] = {minus.body_forward_delta_m,
+            minus.body_lateral_delta_m, minus.body_yaw_delta_rad};
+        for (int motion = 0; motion < 3; ++motion) {
+            /* Motion increments are unwrapped, not path heading states.
+             * Use the same branch selection as the physical state rows. */
+            const float derivative = choose_derivative(&base, &plus, &minus,
+                &base_motion[motion], &plus_motion[motion],
+                &minus_motion[motion], epsilon, 0, &column_nonsmooth);
+            if (!isfinite(derivative)) return 0;
+            if (is_state)
+                linearization->body_motion_A[motion][index] = derivative;
+            else
+                linearization->body_motion_B[motion][index] = derivative;
+        }
         if (column_nonsmooth) {
             linearization->nonsmooth_column_mask |= UINT64_C(1) << column;
             ++linearization->nonsmooth_column_count;

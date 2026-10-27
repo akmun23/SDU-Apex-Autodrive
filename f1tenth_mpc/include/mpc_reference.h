@@ -34,6 +34,25 @@ typedef struct
     size_t segment;
 } MpcPathProjection_t;
 
+/* Differential of the loaded reference interpolation, in its own s units. */
+typedef struct
+{
+    MpcTrajectorySample_t sample;
+    double dx_ds;
+    double dy_ds;
+    double dheading_ds;
+} MpcPathFrame_t;
+
+/* Advance the physical body displacement through the actual loaded path
+ * frame. Optional Jacobian columns are e_y, e_psi, body dx, body dy, body yaw.
+ * No tire/actuator calculation is repeated here. */
+int mpc_trajectory_advance_tracking(
+    const MpcTrajectorySample_t *points, size_t count, double lap_length,
+    double progress, float e_y, float e_psi,
+    float body_dx, float body_dy, float body_yaw, double progress_seed,
+    double *next_progress, float *next_e_y, float *next_e_psi,
+    float jacobian[2][5]);
+
 /* Removes a repeated closing row, validates the path, unwraps heading, and
  * computes the periodic length from the final point back to the first. */
 int mpc_trajectory_prepare(

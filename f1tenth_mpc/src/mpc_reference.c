@@ -6,7 +6,7 @@
 static const double kPi = 3.14159265358979323846;
 static double wrap_angle(double angle)
 {
-    return atan2(sin(angle), cos(angle));
+    return fabs(angle) <= kPi ? angle : remainder(angle, 2.0 * kPi);
 }
 
 static double unwrap_near(double angle, double reference)
@@ -68,12 +68,13 @@ static int valid_path(
         lap_length > points[point_count - 1].s - points[0].s;
 }
 
-int mpc_trajectory_sample(
+static int sample_with_frame(
     const MpcTrajectorySample_t *points,
     size_t point_count,
     double lap_length,
     double s,
-    MpcTrajectorySample_t *sample)
+    MpcTrajectorySample_t *sample,
+    MpcPathFrame_t *frame)
 {
     if (!valid_path(points, point_count, lap_length) || !sample || !isfinite(s))
         return 0;
@@ -112,7 +113,10 @@ int mpc_trajectory_sample(
     const double t = fmax(0.0, fmin(1.0, (query_s - s0) / span));
     const MpcTrajectorySample_t *a = &points[lower];
     const MpcTrajectorySample_t *b = &points[upper];
-    const double b_heading = unwrap_near(b->heading, a->heading);
+    /* prepare() already unwraps adjacent stored headings; only the closing
+     * segment needs a wrap. Avoid trig in every binary-search interpolation. */
+    const double b_heading = upper == 0
+        ? unwrap_near(b->heading, a->heading) : b->heading;
 
     *sample = (MpcTrajectorySample_t){
         .s = wrapped,
@@ -126,6 +130,91 @@ int mpc_trajectory_sample(
         .acceleration = a->acceleration +
             t * (b->acceleration - a->acceleration),
     };
+    if (frame) {
+        frame->sample = *sample;
+        frame->dx_ds = (b->x - a->x) / span;
+        frame->dy_ds = (b->y - a->y) / span;
+        frame->dheading_ds = (b_heading - a->heading) / span;
+    }
+    return 1;
+}
+
+int mpc_trajectory_sample(
+    const MpcTrajectorySample_t *points, size_t count, double length,
+    double s, MpcTrajectorySample_t *sample)
+{
+    return sample_with_frame(points, count, length, s, sample, NULL);
+}
+
+/* Invert P=C(s)+e_y*N(s) for the same interpolated heading that the MPC
+ * uses to reconstruct its world pose. A chord-only projection and a
+ * constant-curvature propagation do not define that same coordinate map. */
+static int project_reference_frame(
+    const MpcTrajectorySample_t *points, size_t count, double length,
+    double x, double y, double heading, double seed,
+    MpcPathFrame_t *frame, double *progress, double *ey, double *epsi)
+{
+    double station = seed;
+    for (int i = 0; i < 8; ++i) {
+        MpcTrajectorySample_t sample;
+        if (!sample_with_frame(points, count, length, station, &sample, frame))
+            return 0;
+        const double c = cos(sample.heading), s = sin(sample.heading);
+        const double ex = x - sample.x, ey_world = y - sample.y;
+        const double tangent_error = c * ex + s * ey_world;
+        *ey = -s * ex + c * ey_world;
+        const double tangent_scale = c * frame->dx_ds + s * frame->dy_ds -
+            frame->dheading_ds * (*ey);
+        if (!(tangent_scale > 0.05) || !isfinite(tangent_error)) return 0;
+        if (fabs(tangent_error) <= 1.0e-8) {
+            *progress = station;
+            *epsi = wrap_angle(heading - sample.heading);
+            return 1;
+        }
+        const double correction = tangent_error / tangent_scale;
+        station += fmax(-0.5, fmin(0.5, correction));
+    }
+    return 0;
+}
+
+int mpc_trajectory_advance_tracking(
+    const MpcTrajectorySample_t *points, size_t count, double length,
+    double progress, float ey, float epsi,
+    float dx, float dy, float dyaw, double progress_seed,
+    double *next_progress, float *next_ey, float *next_epsi,
+    float jacobian[2][5])
+{
+    if (!next_progress || !next_ey || !next_epsi ||
+        !isfinite(ey) || !isfinite(epsi) || !isfinite(dx) ||
+        !isfinite(dy) || !isfinite(dyaw)) return 0;
+    MpcTrajectorySample_t start;
+    if (!mpc_trajectory_sample(points, count, length, progress, &start)) return 0;
+    const double c0 = cos(start.heading), s0 = sin(start.heading);
+    const double yaw = start.heading + epsi;
+    const double cb = cos(yaw), sb = sin(yaw);
+    const double x = start.x - s0 * ey + cb * dx - sb * dy;
+    const double y = start.y + c0 * ey + sb * dx + cb * dy;
+    MpcPathFrame_t end;
+    double result_ey, result_epsi;
+    if (!project_reference_frame(points, count, length, x, y, yaw + dyaw,
+            progress_seed, &end, next_progress, &result_ey, &result_epsi))
+        return 0;
+    *next_ey = (float)result_ey;
+    *next_epsi = (float)result_epsi;
+    if (jacobian) {
+        const double c = cos(end.sample.heading), s = sin(end.sample.heading);
+        const double a = c * end.dx_ds + s * end.dy_ds -
+            end.dheading_ds * result_ey;
+        const double b = -s * end.dx_ds + c * end.dy_ds;
+        const double px[5] = {-s0, -sb * dx - cb * dy, cb, -sb, 0.0};
+        const double py[5] = { c0,  cb * dx - sb * dy, sb,  cb, 0.0};
+        for (int j = 0; j < 5; ++j) {
+            const double ds = (c * px[j] + s * py[j]) / a;
+            jacobian[0][j] = (float)(-s * px[j] + c * py[j] - b * ds);
+            jacobian[1][j] = (float)((j == 1 || j == 4 ? 1.0 : 0.0) -
+                end.dheading_ds * ds);
+        }
+    }
     return 1;
 }
 
@@ -225,7 +314,18 @@ int mpc_trajectory_project(
         }
     }
     if (!found) return 0;
+    MpcPathFrame_t frame;
+    double station, ey, epsi;
+    if (!project_reference_frame(points, point_count, lap_length,
+            x, y, heading, best.s, &frame, &station, &ey, &epsi)) return 0;
     *projection = best;
+    projection->s = frame.sample.s;
+    projection->x = frame.sample.x;
+    projection->y = frame.sample.y;
+    projection->heading = frame.sample.heading;
+    projection->lateral_error = ey;
+    projection->heading_error = epsi;
+    projection->distance = hypot(x - frame.sample.x, y - frame.sample.y);
     return 1;
 }
 

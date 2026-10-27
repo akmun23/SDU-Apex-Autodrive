@@ -14,6 +14,8 @@ typedef struct
     float A[MPC_MODEL_NX][MPC_MODEL_NX];
     float B[MPC_MODEL_NX][MPC_MODEL_NU];
     float d[MPC_MODEL_NX];
+    float body_motion_A[3][MPC_MODEL_NX];
+    float body_motion_B[3][MPC_MODEL_NU];
     unsigned int nominal_branch_flags;
     uint64_t nonsmooth_column_mask;
     int nonsmooth_column_count;

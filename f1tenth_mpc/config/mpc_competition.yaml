@@ -73,6 +73,12 @@
     # Restored best repeated profile: the 75.0 run overlay averaged 5.779 s
     # over five scored practice laps; the 100.0 reference averaged 5.785 s.
     weight_throttle_slew: 75.0
+    # Oct 27: exact loaded-path coordinates plus these local QP input radii
+    # completed five scored laps averaging 5.695 s, max publication 17.82 ms.
+    # Each radius limits one SQP correction about the nominal sequence; it
+    # does not cap the actuator's full command range or physical slew.
+    sqp_steering_trust_region_rad: 0.08
+    sqp_throttle_trust_region: 0.10
     startup_nominal_throttle_seed: 0.25
     terminal_multiplier: 3.0
 

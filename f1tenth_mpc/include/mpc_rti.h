@@ -34,6 +34,9 @@ typedef struct
     float incoming_body_lateral_delta_m;
     float incoming_body_yaw_delta_rad;
     int incoming_transition_valid;
+    /* Exact loaded-path frame differential for this incoming physical step. */
+    float incoming_tracking_jacobian[2][5];
+    int incoming_tracking_jacobian_valid;
 } MpcRtiState_t;
 
 typedef struct
@@ -77,6 +80,12 @@ typedef struct
      * path steering feedforward; throttle penalizes raw command increments. */
     float weight_steering_slew;
     float weight_throttle_slew;
+    /* Local SQP decision radius about each nominal input. Zero disables the
+     * corresponding bound. These bound a linearization step, not actuator
+     * slew across physical epochs; successive solves can traverse the full
+     * command envelope. */
+    float sqp_steering_trust_region_rad;
+    float sqp_throttle_trust_region;
     /* Optional cold-nominal drive seed when launching below 0.5 m/s toward
      * a materially faster reference. This initializes the linearization only;
      * the optimizer remains free to reduce or reject the command. */

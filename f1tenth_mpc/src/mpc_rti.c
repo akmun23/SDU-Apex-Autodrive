@@ -117,6 +117,8 @@ static int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->weight_throttle_command,
         configuration->weight_steering_slew,
         configuration->weight_throttle_slew,
+        configuration->sqp_steering_trust_region_rad,
+        configuration->sqp_throttle_trust_region,
         configuration->startup_nominal_throttle_seed,
         configuration->terminal_multiplier,
         configuration->corridor_margin_m,
@@ -315,29 +317,29 @@ static int rollout_nominal_controls(
     const MpcRtiState_t *initial_state,
     double initial_progress,
     const MpcModelControl_t controls[PREDICTION_HORIZON],
-    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length,
     int horizon,
     float prediction_dt,
-    const MpcStageResult_t cached_physical_steps[PREDICTION_HORIZON],
-    MpcStageResult_t output_physical_steps[PREDICTION_HORIZON],
     MpcRtiState_t states[PREDICTION_HORIZON + 1],
     double progress[PREDICTION_HORIZON + 1])
 {
     states[0] = *initial_state;
     progress[0] = initial_progress;
     for (int k = 0; k < horizon; ++k) {
-        MpcStageResult_t step = {0};
-        if (cached_physical_steps) {
-            if (!vehicle_model_reproject_tracking(
-                    &states[k].plant, &cached_physical_steps[k],
-                    references[k].path_curvature, &step)) return 0;
-        } else {
-            step = mpc_vehicle_model_step(
-                &states[k].plant, &controls[k], prediction_dt,
-                references[k].path_curvature);
-        }
+        MpcStageResult_t step = mpc_vehicle_model_step(
+            &states[k].plant, &controls[k], prediction_dt, 0.0f);
         if (!step.valid || !isfinite(progress[k] + step.delta_s_m)) return 0;
-        if (output_physical_steps) output_physical_steps[k] = step;
+        double next_progress;
+        if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
+                lap_length, progress[k], states[k].plant.e_y,
+                states[k].plant.e_psi, step.body_forward_delta_m,
+                step.body_lateral_delta_m, step.body_yaw_delta_rad,
+                progress[k] + step.delta_s_m, &next_progress,
+                &step.next.e_y, &step.next.e_psi,
+                states[k + 1].incoming_tracking_jacobian)) return 0;
+        step.delta_s_m = (float)(next_progress - progress[k]);
+        states[k + 1].incoming_tracking_jacobian_valid = 1;
         states[k + 1].plant = step.next;
         states[k + 1].incoming_branch_flags = step.branch_flags;
         states[k + 1].incoming_body_forward_delta_m =
@@ -348,7 +350,7 @@ static int rollout_nominal_controls(
             step.body_yaw_delta_rad;
         store_slip_metrics(&states[k + 1], &step);
         states[k + 1].incoming_transition_valid = 1;
-        progress[k + 1] = progress[k] + step.delta_s_m;
+        progress[k + 1] = next_progress;
     }
     return 1;
 }
@@ -755,6 +757,11 @@ int mpc_rti_build_ltv_qp(
         }
 #endif
         const int model_stage = k + MPC_COMMAND_DELAY_STEPS;
+        /* Physical sensitivities are path-independent. Exact loaded-frame
+         * derivatives below replace the two tracking rows. */
+        const float linearization_curvature =
+            nominal_states[model_stage + 1].incoming_tracking_jacobian_valid
+                ? 0.0f : references[model_stage].path_curvature;
         MpcStageLinearization_t *plant_linearization =
             &plant_linearizations[k];
         MpcStageResult_t known_step = {0};
@@ -773,29 +780,50 @@ int mpc_rti_build_ltv_qp(
         const int linearized = configuration->use_fd_jacobian_oracle
             ? mpc_model_linearize_fd_oracle(&nominal_states[model_stage].plant,
                 &nominal_controls[model_stage], prediction_dt,
-                references[model_stage].path_curvature, plant_linearization)
+                linearization_curvature, plant_linearization)
             : (known_step.valid
                 ? mpc_model_linearize_from_known_step(
                     &nominal_states[model_stage].plant,
                     &nominal_controls[model_stage], prediction_dt,
-                    references[model_stage].path_curvature,
+                    linearization_curvature,
                     &known_step, plant_linearization)
                 : mpc_model_linearize(&nominal_states[model_stage].plant,
                     &nominal_controls[model_stage], prediction_dt,
-                    references[model_stage].path_curvature,
+                    linearization_curvature,
                     plant_linearization));
 #else
         const int linearized = known_step.valid
             ? mpc_model_linearize_from_known_step(
                 &nominal_states[model_stage].plant,
                 &nominal_controls[model_stage], prediction_dt,
-                references[model_stage].path_curvature,
+                linearization_curvature,
                 &known_step, plant_linearization)
             : mpc_model_linearize(&nominal_states[model_stage].plant,
                 &nominal_controls[model_stage], prediction_dt,
-                references[model_stage].path_curvature, plant_linearization);
+                linearization_curvature, plant_linearization);
 #endif
         linearization_ok[k] = linearized;
+        if (linearized && nominal_states[model_stage + 1].
+                incoming_tracking_jacobian_valid) {
+            const float (*geometry)[5] = nominal_states[model_stage + 1].
+                incoming_tracking_jacobian;
+            for (int row = 0; row < 2; ++row) {
+                for (int col = 0; col < MPC_MODEL_NX; ++col) {
+                    float derivative = col < 2 ? geometry[row][col] : 0.0f;
+                    for (int motion = 0; motion < 3; ++motion)
+                        derivative += geometry[row][motion + 2] *
+                            plant_linearization->body_motion_A[motion][col];
+                    plant_linearization->A[row][col] = derivative;
+                }
+                for (int input = 0; input < MPC_MODEL_NU; ++input) {
+                    float derivative = 0.0f;
+                    for (int motion = 0; motion < 3; ++motion)
+                        derivative += geometry[row][motion + 2] *
+                            plant_linearization->body_motion_B[motion][input];
+                    plant_linearization->B[row][input] = derivative;
+                }
+            }
+        }
         jacobian_stage_wall_us[k] = monotonic_microseconds() - stage_start_us;
         const double stage_cpu_finish_us = thread_cpu_microseconds();
         if (isfinite(stage_cpu_start_us) && isfinite(stage_cpu_finish_us))
@@ -974,6 +1002,22 @@ int mpc_rti_build_ltv_qp(
         stage->u_ub[0] = configuration->max_steering_rad;
         stage->u_lb[1] = MPC_THROTTLE_MIN_DRIVE;
         stage->u_ub[1] = MPC_THROTTLE_MAX;
+        const float steering_radius =
+            configuration->sqp_steering_trust_region_rad;
+        const float throttle_radius =
+            configuration->sqp_throttle_trust_region;
+        if (steering_radius > 0.0f) {
+            const float center =
+                nominal_controls[model_stage].steering_target_rad;
+            stage->u_lb[0] = fmaxf(stage->u_lb[0], center - steering_radius);
+            stage->u_ub[0] = fminf(stage->u_ub[0], center + steering_radius);
+        }
+        if (throttle_radius > 0.0f) {
+            const float center =
+                nominal_controls[model_stage].throttle_command;
+            stage->u_lb[1] = fmaxf(stage->u_lb[1], center - throttle_radius);
+            stage->u_ub[1] = fminf(stage->u_ub[1], center + throttle_radius);
+        }
     }
 
     /* Terminal state costs were previously carried by a held-state tail stage.
@@ -1185,32 +1229,22 @@ static int mpc_rti_build_nominal_impl(
             MPC_THROTTLE_MIN_DRIVE,
             MPC_THROTTLE_MAX);
 
-    MpcRtiReference_t pass_a_references[PREDICTION_HORIZON + 1];
+    /* Physical motion no longer depends on an approximate curvature pass.
+     * One exact loaded-frame rollout gives both the nominal states and their
+     * final progress, so the old reference/second-rollout pass is redundant. */
     double phase_start_us = monotonic_microseconds();
-    for (int k = 0; k <= horizon; ++k) {
-        if (!reference_at_progress(trajectory, trajectory_count, lap_length,
-                progress_seed[k], configuration, &pass_a_references[k]))
-            return fail_nominal_build(
-                nominal, MPC_RTI_NOMINAL_BUILD_PASS_A_REFERENCE);
-    }
-    nominal->progress_reference_resampling_us +=
-        monotonic_microseconds() - phase_start_us;
-    MpcRtiState_t pass_a_states[PREDICTION_HORIZON + 1];
-    MpcStageResult_t pass_a_physical_steps[PREDICTION_HORIZON];
-    double pass_a_progress[PREDICTION_HORIZON + 1];
-    phase_start_us = monotonic_microseconds();
     if (!rollout_nominal_controls(current_state, current_progress,
-            nominal->controls, pass_a_references, horizon, prediction_dt,
-            NULL, pass_a_physical_steps, pass_a_states, pass_a_progress))
+            nominal->controls,
+            trajectory, trajectory_count, lap_length, horizon, prediction_dt,
+            nominal->states, nominal->progress))
         return fail_nominal_build(
             nominal, MPC_RTI_NOMINAL_BUILD_PASS_A_ROLLOUT);
     nominal->nominal_rollout_a_us = monotonic_microseconds() - phase_start_us;
 
-    /* Pass B resamples path data from Pass A's exact nonlinear delta_s. */
     phase_start_us = monotonic_microseconds();
     for (int k = 0; k <= horizon; ++k) {
         if (!reference_at_progress(trajectory, trajectory_count, lap_length,
-                pass_a_progress[k], configuration, &references[k]))
+                nominal->progress[k], configuration, &references[k]))
             return fail_nominal_build(
                 nominal, MPC_RTI_NOMINAL_BUILD_PASS_B_REFERENCE);
     }
@@ -1226,16 +1260,6 @@ static int mpc_rti_build_nominal_impl(
     align_yaw_rate_references(references, horizon);
     nominal->progress_reference_resampling_us +=
         monotonic_microseconds() - phase_start_us;
-    /* Normal MPC decisions are positive motor commands only. The physical
-     * plant still models q=0 as Unity hard braking for already queued inputs. */
-    phase_start_us = monotonic_microseconds();
-    if (!rollout_nominal_controls(current_state, current_progress,
-            nominal->controls, references, horizon, prediction_dt,
-            pass_a_physical_steps, NULL, nominal->states,
-            nominal->progress))
-        return fail_nominal_build(
-            nominal, MPC_RTI_NOMINAL_BUILD_FINAL_ROLLOUT);
-    nominal->nominal_rollout_b_us = monotonic_microseconds() - phase_start_us;
     for (int k = 0; k <= horizon; ++k) {
         const MpcRtiCommandEnvelopeFailure_t failure =
             command_envelope_failure(&nominal->states[k], configuration);
@@ -1404,13 +1428,25 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
         }
         if (nominal_references)
             candidate_reference.u = nominal_references[k].u;
-        const MpcStageResult_t step = mpc_vehicle_model_step(
+        MpcStageResult_t step = mpc_vehicle_model_step(
             &states[k].plant, control, prediction_dt,
-            candidate_reference.path_curvature);
+            0.0f);
         if (!step.valid) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_INVALID_MODEL;
         }
+        double next_progress;
+        if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
+                lap_length, candidate_progress[k], states[k].plant.e_y,
+                states[k].plant.e_psi, step.body_forward_delta_m,
+                step.body_lateral_delta_m, step.body_yaw_delta_rad,
+                candidate_progress[k] + step.delta_s_m, &next_progress,
+                &step.next.e_y, &step.next.e_psi,
+                states[k + 1].incoming_tracking_jacobian)) {
+            if (failure_stage) *failure_stage = k;
+            return MPC_RTI_ROLLOUT_INVALID_MODEL;
+        }
+        states[k + 1].incoming_tracking_jacobian_valid = 1;
         if (diagnostic_outputs) {
             const int sample_index = diagnostic_sample_index_for_stage(k + 1);
             if (sample_index >= 0) {
@@ -1431,7 +1467,7 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
             step.body_yaw_delta_rad;
         store_slip_metrics(&states[k + 1], &step);
         states[k + 1].incoming_transition_valid = 1;
-        candidate_progress[k + 1] = candidate_progress[k] + step.delta_s_m;
+        candidate_progress[k + 1] = next_progress;
         if (progress) progress[k + 1] = candidate_progress[k + 1];
         if (!state_inside_command_envelope(&states[k + 1], configuration)) {
             if (failure_stage) *failure_stage = k;
