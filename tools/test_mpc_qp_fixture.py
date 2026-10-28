@@ -93,9 +93,9 @@ def make_valid_payload():
 class FrozenQpFixtureTest(unittest.TestCase):
     def test_roundtrip_schema_and_summary(self):
         summary = fixture.parse_payload(make_valid_payload())
-        self.assertEqual(summary["nx"], 22)
+        self.assertEqual(summary["nx"], 23)
         self.assertEqual(summary["nu"], 2)
-        self.assertEqual(summary["qp_horizon"], 29)
+        self.assertEqual(summary["qp_horizon"], 30)
         self.assertEqual(summary["capture_passes"], 1)
         self.assertGreater(summary["float_count"], 20_000)
 
@@ -105,7 +105,8 @@ class FrozenQpFixtureTest(unittest.TestCase):
         with self.assertRaises(fixture.FixtureError):
             fixture.parse_payload(payload)
         payload = bytearray(make_valid_payload())
-        struct.pack_into("<I", payload, 16, 21)
+        # Retired 22-state captures lack the propagated progress coordinate.
+        struct.pack_into("<I", payload, 16, 22)
         with self.assertRaises(fixture.FixtureError):
             fixture.parse_payload(payload)
 
@@ -140,7 +141,7 @@ class FrozenQpFixtureTest(unittest.TestCase):
             metadata = {
                 "payload_sha256": hashlib.sha256(data).hexdigest(),
                 "canonical_qp_fixture_sha256": hashlib.sha256(data).hexdigest(),
-                "dimensions": {"nx": 22, "nu": 2, "qp_horizon": 29},
+                "dimensions": {"nx": 23, "nu": 2, "qp_horizon": 30},
                 "source_abi": {
                     "model": {"files": ["model.c"], "sha256": "a" * 64},
                     "solver_and_scaling": {

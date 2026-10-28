@@ -27,7 +27,9 @@ static double thread_cpu_microseconds(void)
     return NAN;
 }
 
-static float corridor_margin_for_state(
+typedef struct { float left; float right; } MpcCorridorMargins;
+
+static MpcCorridorMargins corridor_margin_for_state(
     const MpcRtiConfiguration_t *configuration,
     const MpcModelState_t *state,
     int prediction_index);
@@ -382,20 +384,6 @@ static void align_yaw_rate_references(
         references[horizon].u;
 }
 
-static int corridor_contains(
-    const MpcRtiState_t *state,
-    const MpcRtiReference_t *reference,
-    const MpcRtiConfiguration_t *configuration,
-    float corridor_margin_m)
-{
-    const float lower = corridor_margin_m - reference->right_bound -
-        configuration->nonlinear_corridor_tolerance_m;
-    const float upper = reference->left_bound - corridor_margin_m +
-        configuration->nonlinear_corridor_tolerance_m;
-    return isfinite(lower) && isfinite(upper) && lower <= upper &&
-        state->plant.e_y >= lower && state->plant.e_y <= upper;
-}
-
 static void record_rollout_failure(
     MpcRtiRolloutFailure_t *failure,
     int stage,
@@ -426,13 +414,13 @@ static float corridor_margin_at_prediction(
         : configuration->corridor_margin_m;
 }
 
-static float corridor_margin_for_state(
+static MpcCorridorMargins corridor_margin_for_state(
     const MpcRtiConfiguration_t *configuration,
     const MpcModelState_t *state,
     int prediction_index)
 {
     if (!configuration || !state || !isfinite(state->e_psi))
-        return NAN;
+        return (MpcCorridorMargins){NAN, NAN};
 
     /* Require the configured wall clearance plus the vehicle rectangle's
      * lateral projection about the rear axle. This keeps the full physical
@@ -440,14 +428,19 @@ static float corridor_margin_for_state(
      * wider planning footprint. This is a geometric feasibility rule, not a
      * change to Unity physics. */
     const float abs_cos = fabsf(cosf(state->e_psi));
-    const float abs_sin = fabsf(sinf(state->e_psi));
-    const float physical_extent =
-        0.5f * MPC_CAR_WIDTH_M * abs_cos +
-        fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M,
-              MPC_REAR_OVERHANG_M) * abs_sin;
-    return corridor_margin_at_prediction(configuration, prediction_index) +
-        physical_extent;
+    const float sine = sinf(state->e_psi);
+    const float common = corridor_margin_at_prediction(configuration,
+        prediction_index) + 0.5f * MPC_CAR_WIDTH_M * abs_cos;
+    // The pose is at the REAR AXLE, not the rectangle centre. Project both
+    // longitudinal anchors separately: using the front overhang on both
+    // sides invents (front-rear)*abs(sin(epsi)) of extra vehicle on one side.
+    return (MpcCorridorMargins){
+        common + fmaxf(MPC_REAR_AXLE_TO_FRONT_BUMPER_M * sine,
+                      -MPC_REAR_OVERHANG_M * sine),
+        common + fmaxf(-MPC_REAR_AXLE_TO_FRONT_BUMPER_M * sine,
+                      MPC_REAR_OVERHANG_M * sine)};
 }
+
 
 int mpc_rti_compute_corridor_slack(
     const MpcModelState_t *state,
@@ -462,13 +455,13 @@ int mpc_rti_compute_corridor_slack(
         prediction_index < 0 || prediction_index > PREDICTION_HORIZON ||
         !isfinite(left_bound_m) || !isfinite(right_bound_m) ||
         !isfinite(configuration->nonlinear_corridor_tolerance_m)) return 0;
-    const float margin = corridor_margin_for_state(configuration, state,
+    const MpcCorridorMargins margin = corridor_margin_for_state(configuration, state,
         prediction_index);
-    const float lower = margin - right_bound_m -
+    const float lower = margin.right - right_bound_m -
         configuration->nonlinear_corridor_tolerance_m;
-    const float upper = left_bound_m - margin +
+    const float upper = left_bound_m - margin.left +
         configuration->nonlinear_corridor_tolerance_m;
-    if (!isfinite(margin) || !isfinite(lower) || !isfinite(upper) ||
+    if (!isfinite(lower) || !isfinite(upper) ||
         lower > upper) return 0;
     *lower_slack_m = state->e_y - lower;
     *upper_slack_m = upper - state->e_y;
@@ -1059,10 +1052,10 @@ int mpc_rti_build_ltv_qp(
             throttle_slew_hessian;
 
         const int bound_index = model_stage;
-        const float margin = corridor_margin_for_state(configuration,
+        const MpcCorridorMargins margin = corridor_margin_for_state(configuration,
             &nominal_states[bound_index].plant, bound_index);
-        const float ey_lower = margin - references[bound_index].right_bound;
-        const float ey_upper = references[bound_index].left_bound - margin;
+        const float ey_lower = margin.right - references[bound_index].right_bound;
+        const float ey_upper = references[bound_index].left_bound - margin.left;
         if (!set_state_bounds_with_corridor(stage->x_lb, stage->x_ub,
                 ey_lower, ey_upper, configuration)) return 0;
 
@@ -1094,10 +1087,10 @@ int mpc_rti_build_ltv_qp(
         &references[horizon], configuration,
         configuration->terminal_multiplier, nominal_states[horizon].plant.u);
 
-    const float terminal_margin = corridor_margin_for_state(
+    const MpcCorridorMargins terminal_margin = corridor_margin_for_state(
         configuration, &nominal_states[horizon].plant, horizon);
-    const float terminal_lower = terminal_margin - references[horizon].right_bound;
-    const float terminal_upper = references[horizon].left_bound - terminal_margin;
+    const float terminal_lower = terminal_margin.right - references[horizon].right_bound;
+    const float terminal_upper = references[horizon].left_bound - terminal_margin.left;
     if (!set_state_bounds_with_corridor(problem->terminal_x_lb,
             problem->terminal_x_ub,
             terminal_lower, terminal_upper,
@@ -1598,11 +1591,11 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
                 nominal_references[k + 1].right_bound);
             path_delta->sample_count = k + 2;
         }
-        const float margin = corridor_margin_for_state(configuration,
+        const MpcCorridorMargins margin = corridor_margin_for_state(configuration,
             &states[k + 1].plant, k + 1);
-        const float lower_bound = margin - candidate_reference.right_bound -
+        const float lower_bound = margin.right - candidate_reference.right_bound -
             configuration->nonlinear_corridor_tolerance_m;
-        const float upper_bound = candidate_reference.left_bound - margin +
+        const float upper_bound = candidate_reference.left_bound - margin.left +
             configuration->nonlinear_corridor_tolerance_m;
         if (path_delta && diagnostic_outputs) {
             path_delta->lower_corridor_slack_m[k + 1] =
@@ -1610,13 +1603,15 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
             path_delta->upper_corridor_slack_m[k + 1] =
                 upper_bound - states[k + 1].plant.e_y;
         }
-        const int in_corridor = corridor_contains(&states[k + 1],
-            &candidate_reference, configuration, margin);
+        const int in_corridor = isfinite(lower_bound) && isfinite(upper_bound) &&
+            lower_bound <= upper_bound &&
+            states[k + 1].plant.e_y >= lower_bound &&
+            states[k + 1].plant.e_y <= upper_bound;
         if (!in_corridor) {
             if (failure_stage) *failure_stage = k;
             record_rollout_failure(failure, k, &states[k + 1],
                 &candidate_reference, candidate_progress[k + 1],
-                margin, lower_bound, upper_bound);
+                fmaxf(margin.left, margin.right), lower_bound, upper_bound);
             return MPC_RTI_ROLLOUT_CORRIDOR;
         }
     }
@@ -1880,9 +1875,14 @@ static int evaluate_nonlinear_candidate(
     align_yaw_rate_references(references, candidate->horizon);
     for (int k = 0; k <= candidate->horizon; ++k) {
         const MpcRtiReference_t *reference = &references[k];
-        if (k > 0 && !corridor_contains(&candidate->states[k], reference,
-                model, corridor_margin_for_state(model,
-                    &candidate->states[k].plant, k))) return 0;
+        if (k > 0) {
+            float lower_slack, upper_slack;
+            if (!mpc_rti_compute_corridor_slack(&candidate->states[k].plant,
+                    reference->left_bound, reference->right_bound, model, k,
+                    &lower_slack, &upper_slack) ||
+                lower_slack < 0.0f || upper_slack < 0.0f) return 0;
+            min_slack = fminf(min_slack, fminf(lower_slack, upper_slack));
+        }
         const MpcModelState_t *state = &candidate->states[k].plant;
         const double terminal_scale = k == candidate->horizon
             ? model->terminal_multiplier : 1.0;
@@ -1915,14 +1915,6 @@ static int evaluate_nonlinear_candidate(
             }
         }
 
-        if (k > 0) {
-            const float margin = corridor_margin_for_state(model, state, k);
-            const float left_slack = reference->left_bound - margin -
-                state->e_y + model->nonlinear_corridor_tolerance_m;
-            const float right_slack = reference->right_bound - margin +
-                state->e_y + model->nonlinear_corridor_tolerance_m;
-            min_slack = fminf(min_slack, fminf(left_slack, right_slack));
-        }
         lateral_accel_proxy_by_stage[k] = fabsf(state->u * state->r);
         if (lateral_accel_proxy_by_stage[k] > max_lateral_accel) {
             max_lateral_accel = lateral_accel_proxy_by_stage[k];

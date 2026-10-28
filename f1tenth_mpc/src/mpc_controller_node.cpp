@@ -14,6 +14,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <sdu_apex_msgs/msg/drive_command.hpp>
 #include <sdu_apex_msgs/msg/unity_plant_state.hpp>
@@ -516,7 +517,7 @@ public:
         // State is time-sensitive: if executor/DDS scheduling falls behind,
         // drop old samples instead of replaying them as current control input.
         control_callback_group_ = create_callback_group(
-            rclcpp::CallbackGroupType::MutuallyExclusive);
+            rclcpp::CallbackGroupType::MutuallyExclusive, false);
         const auto latest_state_qos = rclcpp::SensorDataQoS().keep_last(1);
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             pose_topic_, latest_state_qos,
@@ -535,13 +536,13 @@ public:
         /* Keep parameter defaults identical to the canonical competition
          * YAML. A missing/renamed config must not silently select a different
          * steering/yaw objective than saved-state replay and production. */
-        rti_config_.model.weight_e_y = declare_weight("weight_e_y", 125.0f);
-        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 31.25f);
-        rti_config_.model.weight_u = declare_weight("weight_u", 500.0f);
+        rti_config_.model.weight_e_y = declare_weight("weight_e_y", 4000.0f);
+        rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 1500.0f);
+        rti_config_.model.weight_u = declare_weight("weight_u", 35.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
-            "weight_u_overspeed", 300.0f);
+            "weight_u_overspeed", 20.0f);
         rti_config_.model.overspeed_curvature_gain_m = declare_weight(
-            "overspeed_curvature_gain_m", 0.0f);
+            "overspeed_curvature_gain_m", 0.5f);
         rti_config_.model.underspeed_curvature_gain_m = declare_weight(
             "underspeed_curvature_gain_m", 0.0f);
         rti_config_.model.weight_longitudinal_slip = declare_weight(
@@ -557,15 +558,15 @@ public:
         rti_config_.model.weight_throttle_command = declare_weight(
             "weight_throttle_command", 0.1f);
         rti_config_.model.weight_steering_slew = declare_weight(
-            "weight_steering_slew", 25.0f);
+            "weight_steering_slew", 2000.0f);
         rti_config_.model.weight_throttle_slew = declare_weight(
-            "weight_throttle_slew", 2.0f);
+            "weight_throttle_slew", 50.0f);
         rti_config_.model.sqp_steering_trust_region_rad = declare_weight(
-            "sqp_steering_trust_region_rad", 0.0f);
+            "sqp_steering_trust_region_rad", 0.08f);
         rti_config_.model.sqp_throttle_trust_region = declare_weight(
-            "sqp_throttle_trust_region", 0.0f);
+            "sqp_throttle_trust_region", 0.10f);
         rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
-            declare_parameter<double>("startup_nominal_throttle_seed", 0.0));
+            declare_parameter<double>("startup_nominal_throttle_seed", 0.25));
         rti_config_.model.terminal_multiplier = declare_weight(
             "terminal_multiplier", 3.0f);
         rti_config_.enable_nonlinear_line_search = declare_parameter<bool>(
@@ -587,7 +588,7 @@ public:
             actuator_steering_limit_rad_);
         rti_config_.model.corridor_margin_m = static_cast<float>(
             declare_parameter<double>("corridor_margin_m",
-                                      MPC_REQUIRED_WALL_CLEARANCE_M));
+                                      MPC_DEFAULT_WALL_CLEARANCE_M));
         rti_config_.model.first_prediction_corridor_margin_m =
             static_cast<float>(declare_parameter<double>(
                 "first_prediction_corridor_margin_m",
@@ -595,12 +596,12 @@ public:
         rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
-            declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.001));
+            declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.005));
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
-            declare_parameter<int>("jacobian_threads", 4), 0L,
+            declare_parameter<int>("jacobian_threads", 8), 0L,
             MPC_RTI_MAX_JACOBIAN_THREADS));
         const int configured_iterations = declare_parameter<int>(
-            "max_solver_iterations", MAX_ITERATIONS);
+            "max_solver_iterations", 150);
         // Keep the ROS parameter consistent with the solver's compile-time
         // storage bound. The production node caps the runtime request here.
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
@@ -672,13 +673,13 @@ public:
                 "admm_rho_max must be finite and in [1, 127]");
         }
         rti_config_.solver.tolerance = static_cast<float>(
-            declare_parameter<double>("solver_tolerance", 0.01));
+            declare_parameter<double>("solver_tolerance", 0.02));
         rti_config_.solver.adaptive_rho = declare_parameter<bool>(
             "adaptive_rho", true) ? 1 : 0;
         rti_config_.solver.cold_start_each_solve = declare_parameter<bool>(
             "solver_cold_start_each_solve", false) ? 1 : 0;
         const int adaptive_rho_update_period = static_cast<int>(
-            declare_parameter<int>("adaptive_rho_update_period", 1));
+            declare_parameter<int>("adaptive_rho_update_period", 10));
         rti_config_.solver.adaptive_rho_update_period = std::clamp(
             adaptive_rho_update_period, 1, 100);
         rti_config_.solver.shared_rho = 0;
@@ -721,20 +722,30 @@ public:
             RCLCPP_WARN(get_logger(),
                 "MPC is inactive; no command publisher is created");
         } else {
-            /* Keep sensor callbacks responsive while the nonlinear solve runs.
-             * The control group is mutually exclusive, so only one solve may
-             * touch RTI memory at a time. Input subscriptions remain in the
-             * node's separate default group and can refresh the synchronized
-             * state concurrently in the four-thread component executor. */
+            /* One persistent control owner reuses one OpenMP worker team.
+             * Letting the component executor migrate this group between its
+             * four threads created four separate eight-worker teams in live
+             * captures. Sensor callbacks remain on the component executor. */
             control_timer_ = create_wall_timer(
                 std::chrono::milliseconds(5),
                 std::bind(&MpcControllerNode::control_timer_callback, this),
                 control_callback_group_);
+            rclcpp::ExecutorOptions options;
+            options.context = get_node_base_interface()->get_context();
+            control_executor_ =
+                std::make_unique<rclcpp::executors::SingleThreadedExecutor>(options);
+            control_executor_->add_callback_group(
+                control_callback_group_, get_node_base_interface());
+            control_thread_ = std::thread([this] {control_executor_->spin();});
         }
     }
 
     ~MpcControllerNode() override
     {
+        if (control_timer_) control_timer_->cancel();
+        if (open_loop_horizon_timer_) open_loop_horizon_timer_->cancel();
+        if (control_executor_) control_executor_->cancel();
+        if (control_thread_.joinable()) control_thread_.join();
         report_health("shutdown");
     }
 
@@ -4372,6 +4383,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr
         open_loop_horizon_test_pub_;
     rclcpp::CallbackGroup::SharedPtr control_callback_group_;
+    std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> control_executor_;
+    std::thread control_thread_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr open_loop_horizon_timer_;
     std::uint64_t control_cycles_{};

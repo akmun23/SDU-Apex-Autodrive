@@ -12,8 +12,8 @@
 
 namespace sdu_apex::qp_fixture {
 
-constexpr std::uint32_t kSchemaVersion = 1;
-constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '1', '\n'};
+constexpr std::uint32_t kSchemaVersion = 2;
+constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '2', '\n'};
 
 class Writer {
  public:
@@ -133,7 +133,7 @@ inline bool write_f32_array(Writer &writer, const float *values,
 
 inline bool write_capture(const std::string &path,
                           const MpcRtiQpCapture_t &capture) {
-  static_assert(RICCATI_MAX_NX == 22, "unexpected MPC QP state ABI");
+  static_assert(RICCATI_MAX_NX == 23, "unexpected MPC QP state ABI");
   static_assert(RICCATI_MAX_NU == 2, "unexpected MPC QP control ABI");
   if (!capture.valid || capture.problem.horizon != RICCATI_HORIZON)
     return false;

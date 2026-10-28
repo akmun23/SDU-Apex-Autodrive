@@ -1,45 +1,9 @@
 /**:
   ros__parameters:
-    # Development-only one-shot test: latch one full accepted MPC horizon once
-    # odometry reports this speed, then publish all 30 planned commands without
-    # running another optimization until the 750 ms prediction is observed.
+    # Overlay on mpc_competition.yaml. Change only the measurement protocol,
+    # never the model, weights, worker count, tolerance or deadline policy.
+    # Latch a full accepted 30-command horizon at racing speed, execute those
+    # exact commands without replanning, and score its 750 ms prediction.
     open_loop_horizon_test_enabled: true
-    # The previous 6.5 m/s gate was never reached before collision, and the
-    # 3.0 m/s gate fell inside a sequence of rejected solves. Latch at 2.5 m/s,
-    # where the prior live run still had an accepted candidate, so we can
-    # execute and score a genuinely published fixed-input horizon.
-    open_loop_horizon_test_min_speed_mps: 2.5
+    open_loop_horizon_test_min_speed_mps: 6.5
     open_loop_horizon_test_topic: /mpc/open_loop_test
-    # Keep current sensor staleness bounded; the measured command-publication
-    # lead has its own 500 ms limit in the predictor configuration.
-    state_extrapolation_max_s: 0.25
-    # Do not impose the competition startup crawl on this development
-    # evaluation. The selected path is already speed-profiled from 2.72 to
-    # 8.07 m/s; the one-lap startup ramp had silently capped its 5 m/s section
-    # at 1.5 m/s and made the throttle test meaningless.
-    max_speed_mps: 16.0
-    startup_ramp_laps: 0.0
-    # Frozen candidate weights for solver/model experiments. Run22 showed the
-    # resulting rollout was worse than run21 (yaw-rate RMSE 0.778 vs 0.387
-    # rad/s) and still had bang-bang steering, so do not tune these again from
-    # track runs. Diagnose the plant/linearization and solver separately.
-    weight_e_y: 450.0
-    weight_e_psi: 250.0
-    weight_u: 1000.0
-    weight_u_overspeed: 1600.0
-    weight_longitudinal_slip: 0.05
-    weight_v: 1.0
-    weight_r: 8.0
-    weight_steering_command: 0.1
-    weight_steering_target: 0.1
-    weight_throttle_command: 0.0
-    terminal_multiplier: 3.0
-
-    # The one-shot test still uses the production single-solve formulation.
-    # It disables only the cycle deadline so the frozen-plan accuracy measure
-    # is not conflated with the 40 Hz runtime gate.
-    adaptive_rho: true
-    adaptive_rho_update_period: 5
-    max_solver_iterations: 50
-    rti_cycle_budget_ms: 0.0
-    jacobian_threads: 4

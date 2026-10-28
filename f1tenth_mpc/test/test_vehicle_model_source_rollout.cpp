@@ -859,6 +859,19 @@ TEST(RiccatiSolver, SymmetricValueRecursionMatchesUnfactoredPass)
       EXPECT_NEAR(u_factored[k][a], u_unfactored[k][a], 1.0e-5f);
     }
   }
+  // Quadratic factor reuse must still allow NEW affine dynamics. The private
+  // ADMM P*d cache must never leak into this public RHS-only reuse contract.
+  for (int k = 0; k < horizon; ++k)
+    for (int i = 0; i < nx; ++i) steps[k].d[i] *= -3.0f;
+  ASSERT_TRUE(riccati_solver_pass(steps, terminal_Q, terminal_q,
+      terminal_lb, terminal_ub, x0, 7.0f, 7.0f,
+      z_x, y_x, z_u, y_u, x_unfactored, u_unfactored));
+  ASSERT_TRUE(riccati_solver_pass_factored(steps, terminal_q, terminal_lb,
+      terminal_ub, x0, &factorization, z_x, y_x, z_u, y_u,
+      x_factored, u_factored));
+  for (int k = 0; k < horizon; ++k)
+    for (int a = 0; a < nu; ++a)
+      EXPECT_NEAR(u_factored[k][a], u_unfactored[k][a], 1.e-5f);
 }
 
 TEST(MpcRtiSlewCost, CrossTermEqualsSquaredCommandIncrement)
@@ -1172,6 +1185,7 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
       problem.steps[RICCATI_HORIZON-1].r[0],
       -4.0f*config.weight_steering_command*references[horizon].steering_command,
       1.e-5f);
+
 }
 
 TEST(MpcReference, NominalHorizonKeepsTrackSpeedTarget)
@@ -2323,18 +2337,21 @@ TEST(MpcRtiCorridorSlack, MatchesTheFootprintAndStageSpecificMargins)
   constexpr float left_bound = 0.65f;
   constexpr float right_bound = 0.72f;
 
-  const float extent = 0.5f * MPC_CAR_WIDTH_M *
+  const float left_extent = 0.5f * MPC_CAR_WIDTH_M *
           std::fabs(std::cos(state.e_psi)) +
       MPC_REAR_AXLE_TO_FRONT_BUMPER_M *
           std::fabs(std::sin(state.e_psi));
+  const float right_extent = 0.5f * MPC_CAR_WIDTH_M *
+          std::fabs(std::cos(state.e_psi)) +
+      MPC_REAR_OVERHANG_M * std::fabs(std::sin(state.e_psi));
   float lower_stage1 = 0.0f;
   float upper_stage1 = 0.0f;
   ASSERT_TRUE(mpc_rti_compute_corridor_slack(&state, left_bound,
       right_bound, &config, 1, &lower_stage1, &upper_stage1));
   EXPECT_NEAR(lower_stage1,
-      state.e_y - (0.03f + extent - right_bound - 0.005f), 1.0e-6f);
+      state.e_y - (0.03f + right_extent - right_bound - 0.005f), 1.0e-6f);
   EXPECT_NEAR(upper_stage1,
-      left_bound - (0.03f + extent) + 0.005f - state.e_y, 1.0e-6f);
+      left_bound - (0.03f + left_extent) + 0.005f - state.e_y, 1.0e-6f);
 
   float lower_stage2 = 0.0f;
   float upper_stage2 = 0.0f;
@@ -2342,6 +2359,33 @@ TEST(MpcRtiCorridorSlack, MatchesTheFootprintAndStageSpecificMargins)
       right_bound, &config, 2, &lower_stage2, &upper_stage2));
   EXPECT_NEAR(lower_stage1 - lower_stage2, 0.02f, 1.0e-6f);
   EXPECT_NEAR(upper_stage1 - upper_stage2, 0.02f, 1.0e-6f);
+}
+
+TEST(MpcRtiCorridorSlack, MatchesIndependentTransformedBodyCornersOnBothSides)
+{
+  MpcRtiConfiguration_t config{};
+  config.corridor_margin_m = 0.05f;
+  config.first_prediction_corridor_margin_m = 0.05f;
+  config.nonlinear_corridor_tolerance_m = 0.0f;
+  for (const float heading : {-2.8f, -1.2f, -0.25f, 0.0f, 0.25f, 1.2f, 2.8f}) {
+    MpcModelState_t state{};
+    state.e_y = 0.1f;
+    state.e_psi = heading;
+    double minimum_y = INFINITY, maximum_y = -INFINITY;
+    for (const double x : {-double(MPC_REAR_OVERHANG_M),
+                          double(MPC_REAR_AXLE_TO_FRONT_BUMPER_M)}) {
+      for (const double y : {-0.5 * MPC_CAR_WIDTH_M, 0.5 * MPC_CAR_WIDTH_M}) {
+        const double corner_y = x * std::sin(heading) + y * std::cos(heading);
+        minimum_y = std::min(minimum_y, corner_y);
+        maximum_y = std::max(maximum_y, corner_y);
+      }
+    }
+    float lower, upper;
+    ASSERT_TRUE(mpc_rti_compute_corridor_slack(&state, 1.0f, 1.0f,
+      &config, 1, &lower, &upper));
+    EXPECT_NEAR(lower, 1.0 + state.e_y + minimum_y - 0.05, 1.0e-6) << heading;
+    EXPECT_NEAR(upper, 1.0 - state.e_y - maximum_y - 0.05, 1.0e-6) << heading;
+  }
 }
 
 }  // namespace

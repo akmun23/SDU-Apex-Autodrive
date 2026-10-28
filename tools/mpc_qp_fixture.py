@@ -17,11 +17,11 @@ import subprocess
 import sys
 import time
 
-MAGIC = b"SDUFQP1\n"
-SCHEMA_VERSION = 1
-NX = 22
+MAGIC = b"SDUFQP2\n"
+SCHEMA_VERSION = 2
+NX = 23
 NU = 2
-HORIZON = 29
+HORIZON = 30
 HEADER_SIZE = 8 + 7 * 4
 
 

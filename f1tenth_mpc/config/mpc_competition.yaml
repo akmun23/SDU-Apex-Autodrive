@@ -43,13 +43,14 @@
     startup_path_heading_tolerance_rad: 0.75
 
     # Oct 27: loaded-frame geometry + monotone SQP + true suffix warm starts.
-    # v337 target: ten scored laps averaged 5.4093 s (SD 0.0403), no collision
-    # or recovery commands; maximum publication 18.71 ms. Full provenance:
+    # v337 target, along-scan gain 0.03 and peak-slip objective: ten scored
+    # laps averaged 5.3639 s (SD 0.0294), no collision; max publication 18.36 ms.
+    # Two retained certified prefixes were used. Full provenance:
     # docs/development/MPC_HIGH_SPEED_TRACKING_20261027.md.
     weight_e_y: 4000.0
     weight_e_psi: 1500.0
-    weight_u: 25.0
-    weight_u_overspeed: 25.0
+    weight_u: 35.0
+    weight_u_overspeed: 20.0
     # Keep extra overspeed pressure in corners without the former 8:1 base
     # asymmetry that biased speed tracking below the requested profile.
     overspeed_curvature_gain_m: 0.5
@@ -57,7 +58,9 @@
     # tighter turns while retaining the full weight on straights. Zero keeps
     # the validated production objective unchanged.
     underspeed_curvature_gain_m: 0.0
-    weight_longitudinal_slip: 25.0
+    # Cost is the actual held-interval peak; the former 25 weight belonged
+    # to a smaller instantaneous wheel-only QP residual. Physics unchanged.
+    weight_longitudinal_slip: 5.0
     weight_v: 5.0
     weight_r: 7.8125
     weight_steering_command: 3.0
@@ -70,7 +73,7 @@
     weight_steering_slew: 2000.0
     # Retain tested actuator damping; stronger gas/lower-damping bundles
     # failed the opening hairpin despite producing finite QP iterates.
-    weight_throttle_slew: 75.0
+    weight_throttle_slew: 50.0
     # Each radius limits one SQP correction about the nominal sequence; it
     # does not cap the actuator's full command range or physical slew.
     sqp_steering_trust_region_rad: 0.08

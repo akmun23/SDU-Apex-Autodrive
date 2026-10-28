@@ -478,8 +478,11 @@ static int riccati_solver_factorize_diagonal(
         }
 
         for (int a = 0; a < nu; ++a) {
-            for (int j = 0; j < nx; ++j) {
-                for (int s = 0; s < nx; ++s)
+            // Interleave independent output coordinates, NOT the reduction
+            // order. Each result still accumulates s=0..nx-1 in float, but
+            // the inner loop traverses a contiguous row and permits SIMD.
+            for (int s = 0; s < nx; ++s) {
+                for (int j = 0; j < nx; ++j)
                     M[a][j] += sd->B[s][a] * factor->P[k + 1][s][j];
             }
         }
@@ -489,12 +492,11 @@ static int riccati_solver_factorize_diagonal(
                 for (int s = 0; s < nx; ++s)
                     S[a][b] += M[a][s] * sd->B[s][b];
             }
-            for (int j = 0; j < nx; ++j) {
-                float value = 0.0f;
-                for (int s = 0; s < nx; ++s)
-                    value += M[a][s] * sd->A[s][j];
-                factor->G[k][a][j] = value + sd->N[j][a];
-            }
+            for (int s = 0; s < nx; ++s)
+                for (int j = 0; j < nx; ++j)
+                    factor->G[k][a][j] += M[a][s] * sd->A[s][j];
+            for (int j = 0; j < nx; ++j)
+                factor->G[k][a][j] += sd->N[j][a];
         }
         if (!invert_regularized_control_hessian(
                 S, factor->S_inv[k])) return 0;
@@ -509,8 +511,8 @@ static int riccati_solver_factorize_diagonal(
         }
 
         for (int i = 0; i < nx; ++i) {
-            for (int j = 0; j < nx; ++j) {
-                for (int s = 0; s < nx; ++s)
+            for (int s = 0; s < nx; ++s) {
+                for (int j = 0; j < nx; ++j)
                     P_A[i][j] += factor->P[k + 1][i][s] * sd->A[s][j];
             }
         }
@@ -621,10 +623,12 @@ int riccati_solver_pass_factored(
                     (r_aug_linear[b] + btp[b]);
             if (!isfinite(kk[k][a])) return 0;
         }
-        for (int i = 0; i < nx; ++i) {
-            p[k][i] = q_aug_linear[i];
-            for (int s = 0; s < nx; ++s)
+        for (int i = 0; i < nx; ++i) p[k][i] = q_aug_linear[i];
+        for (int s = 0; s < nx; ++s) {
+            for (int i = 0; i < nx; ++i)
                 p[k][i] += sd->A[s][i] * p_shift[s];
+        }
+        for (int i = 0; i < nx; ++i) {
             for (int a = 0; a < nu; ++a)
                 p[k][i] += factor->G[k][a][i] * kk[k][a];
             if (!isfinite(p[k][i])) return 0;

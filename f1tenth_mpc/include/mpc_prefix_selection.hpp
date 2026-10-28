@@ -106,6 +106,16 @@ inline bool iteration_limited_prefix_meets_residual_quality(
             solver_tolerance * tolerance_multiplier;
 }
 
+// Progress reward permits negative objectives. A positive-only ratio would
+// silently disable meaningful improvement checks for every such candidate.
+inline bool objective_improves_materially(
+    double candidate, double prior, double minimum_relative_gain)
+{
+    return std::isfinite(candidate) && std::isfinite(prior) &&
+        prior - candidate >= std::clamp(minimum_relative_gain, 0.0, 1.0) *
+            std::max(std::abs(prior), 1.e-9);
+}
+
 /* Select between equal-duration, exact-validated prefixes. A small safety
  * reserve may override objective ordering only when the retained plan is near
  * the corridor boundary and the candidate provides a measurable clearance
@@ -211,10 +221,8 @@ inline PrefixSelection select_validated_recovery_prefix(
             std::isfinite(prior_slack_m) &&
             candidate_slack_m >= prior_slack_m -
                 std::max(0.0, minimum_clearance_gain_m);
-        const bool materially_better =
-            std::isfinite(candidate_objective) &&
-            std::isfinite(prior_objective) && prior_objective > 0.0 &&
-            candidate_objective <= prior_objective * (1.0 - minimum_gain);
+        const bool materially_better = objective_improves_materially(
+            candidate_objective, prior_objective, minimum_gain);
         return {clearance_preserved && materially_better, false};
     }
 
@@ -226,9 +234,8 @@ inline PrefixSelection select_validated_recovery_prefix(
 
     const double minimum_gain = std::clamp(
         minimum_relative_objective_gain, 0.0, 1.0);
-    if (std::isfinite(candidate_objective) &&
-        std::isfinite(prior_objective) && prior_objective > 0.0 &&
-        candidate_objective <= prior_objective * (1.0 - minimum_gain)) {
+    if (objective_improves_materially(
+            candidate_objective, prior_objective, minimum_gain)) {
         return {true, false};
     }
     return {false, false};

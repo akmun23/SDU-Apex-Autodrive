@@ -15,6 +15,22 @@ struct TestControl {
   int id{};
 };
 
+TEST(MpcPrefixSelection, MaterialImprovementSupportsSignedObjectives)
+{
+  using f1tenth_mpc::objective_improves_materially;
+  EXPECT_TRUE(objective_improves_materially(90.0, 100.0, 0.1));
+  EXPECT_FALSE(objective_improves_materially(95.0, 100.0, 0.1));
+  EXPECT_TRUE(objective_improves_materially(-110.0, -100.0, 0.1));
+  EXPECT_FALSE(objective_improves_materially(-105.0, -100.0, 0.1));
+  EXPECT_FALSE(objective_improves_materially(-95.0, -100.0, 0.1));
+  EXPECT_TRUE(objective_improves_materially(-1.0, 0.0, 0.1));
+  EXPECT_FALSE(objective_improves_materially(0.0, 0.0, 0.1));
+  EXPECT_FALSE(objective_improves_materially(NAN, -100.0, 0.1));
+  EXPECT_TRUE(select_validated_recovery_prefix(
+      true, -115.0, 0.1, false, true, true, -100.0, 0.1,
+      0.1, 0.05, 0.005).choose_candidate);
+}
+
 TEST(MpcPrefixSelection, CandidatePrefixNeverSeedsRejectedCandidateTail)
 {
   const TestControl candidate[] = {{100}, {101}, {102}};

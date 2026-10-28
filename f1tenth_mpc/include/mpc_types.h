@@ -93,7 +93,7 @@ enum
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
 
 /* Other swept MPC defaults */
-#define MAX_ITERATIONS 200                             /* Diagnostic node ceiling; competition profile remains at 50 per pass. */
+#define MAX_ITERATIONS 200                             /* Diagnostic ceiling; competition profile uses 150 per pass. */
 #define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
@@ -127,8 +127,8 @@ enum
 #define MPC_CAR_WIDTH_M 0.273f
 #define MPC_REAR_OVERHANG_M 0.080f
 #define MPC_REAR_AXLE_TO_FRONT_BUMPER_M 0.430f
-/* Hard minimum clearance between the projected vehicle footprint and wall. */
-#define MPC_REQUIRED_WALL_CLEARANCE_M 0.150f
+/* Default physical clearance; the loaded runtime profile explicitly sets it. */
+#define MPC_DEFAULT_WALL_CLEARANCE_M 0.050f
 
 /*===========================================================================
  * Structs
