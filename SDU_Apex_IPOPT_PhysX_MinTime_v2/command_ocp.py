@@ -226,6 +226,7 @@ def export_reference(trace_path, grid, output):
     with np.load(trace_path, allow_pickle=False) as trace:
         x = np.asarray(trace['state'])
         dt = float(trace['dt_s'])
+        commands = np.asarray(trace['commands']) if 'commands' in trace else None
     xy = x[:2, :-1].T
     ds = np.linalg.norm(np.roll(xy, -1, axis=0)-xy, axis=1)
     if np.any(ds <= 0.) or not np.isfinite(x).all():
@@ -253,13 +254,27 @@ def export_reference(trace_path, grid, output):
     np.savetxt(path, np.column_stack([actual_s, point, heading, curvature, speed,
                                     acceleration, widths]), delimiter=',', fmt='%.12g',
         header='s_m,x_m,y_m,psi_rad,kappa_radpm,body_forward_speed_mps,acceleration_mps2,d_left_m,d_right_m')
-    return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+    result = dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         points=len(point), spacing_max_m=float(max(actual_ds)),
         exact_command_lap_s=(x.shape[1]-1)*dt,
         body_forward_reference_integral_s=float(np.sum(2.*actual_ds/(speed+np.roll(speed, -1)))),
         source_trace=str(trace_path), post_export_geometry_smoothing=False,
         speed_mps_range=[float(min(speed)), float(max(speed))],
         unity_validated=False, mpc_validated=False)
+    if commands is not None:
+        if commands.shape != (2, len(point)//25) or len(point) % 25:
+            raise ValueError('source command/reference epochs differ')
+        applied = np.repeat(commands, 25, axis=1)
+        heading_error = np.arctan2(np.sin(x[2, :-1]-heading), np.cos(x[2, :-1]-heading))
+        source_values = np.column_stack([heading_error,
+            x[4, :-1]-.15532*x[5, :-1], x[5, :-1], x[16, :-1], applied.T])
+        witness_path = output/'source_command_raceline_with_witness.csv'
+        np.savetxt(witness_path, np.column_stack([actual_s, point, heading, curvature,
+            speed, acceleration, widths, source_values]), delimiter=',', fmt='%.12g',
+            header='sdu_apex_source_witness/v1\ns_m,x_m,y_m,psi_rad,kappa_radpm,body_forward_speed_mps,acceleration_mps2,d_left_m,d_right_m,source_heading_error_rad,source_v_rear_mps,source_yaw_rate_radps,source_physical_steering_rad,source_steering_target_rad,source_throttle')
+        result['source_witness_csv'] = str(witness_path)
+        result['source_witness_sha256'] = hashlib.sha256(witness_path.read_bytes()).hexdigest()
+    return result
 
 
 def certify_witness(repo, path, map_path, output):

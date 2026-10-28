@@ -100,7 +100,12 @@ static int finite_reference(const MpcRtiReference_t *reference)
         isfinite(reference->steering_command) &&
         isfinite(reference->path_curvature) &&
         isfinite(reference->left_bound) && reference->left_bound > 0.0f &&
-        isfinite(reference->right_bound) && reference->right_bound > 0.0f;
+        isfinite(reference->right_bound) && reference->right_bound > 0.0f &&
+        (!reference->source_witness_valid ||
+         (isfinite(reference->source_steering_target) &&
+          isfinite(reference->source_throttle) &&
+          reference->source_throttle >= MPC_THROTTLE_MIN_DRIVE &&
+          reference->source_throttle <= MPC_THROTTLE_MAX));
 }
 
 static int valid_configuration(const MpcRtiConfiguration_t *configuration)
@@ -267,10 +272,13 @@ static int reference_at_progress(
             lap_length, progress, &sample)) return 0;
     const float speed = fminf((float)sample.speed,
         configuration->active_speed_ceiling_mps);
-    const float feedforward = clampf_rti(
-        vehicle_model_steering_for_curvature((float)sample.curvature),
-        -configuration->max_steering_rad,
-        configuration->max_steering_rad);
+    /* A source witness belongs to its own speed profile. Do not silently use
+     * its lateral state or torque after capping that profile to another speed. */
+    if (sample.source_witness_valid && speed < (float)sample.speed-1.e-4f) return 0;
+    const float feedforward = sample.source_witness_valid ?
+        (float)sample.source_physical_steering : clampf_rti(
+            vehicle_model_steering_for_curvature((float)sample.curvature),
+            -configuration->max_steering_rad, configuration->max_steering_rad);
     float left_bound = (float)sample.left_bound;
     float right_bound = (float)sample.right_bound;
     if (configuration->corridor_preview_halfwidth_m > 0.0f) {
@@ -314,14 +322,17 @@ static int reference_at_progress(
     }
     *reference = (MpcRtiReference_t){
         .e_y = 0.0f,
-        .e_psi = 0.0f,
+        .e_psi = sample.source_witness_valid ? (float)sample.source_heading_error : 0.0f,
         .u = speed,
-        .v = 0.0f,
-        .r = (float)sample.curvature * speed,
+        .v = sample.source_witness_valid ? (float)sample.source_v_rear : 0.0f,
+        .r = sample.source_witness_valid ? (float)sample.source_yaw_rate : (float)sample.curvature * speed,
         .steering_command = feedforward,
         .path_curvature = (float)sample.curvature,
         .left_bound = left_bound,
-        .right_bound = right_bound};
+        .right_bound = right_bound,
+        .source_witness_valid = sample.source_witness_valid,
+        .source_steering_target = (float)sample.source_steering_target,
+        .source_throttle = (float)sample.source_throttle};
     return finite_reference(reference);
 }
 
@@ -378,10 +389,12 @@ static void align_yaw_rate_references(
     int horizon)
 {
     for (int k = 0; k < horizon; ++k) {
-        references[k].r = references[k].path_curvature * references[k].u;
+        if (!references[k].source_witness_valid)
+            references[k].r = references[k].path_curvature * references[k].u;
     }
-    references[horizon].r = references[horizon].path_curvature *
-        references[horizon].u;
+    if (!references[horizon].source_witness_valid)
+        references[horizon].r = references[horizon].path_curvature *
+            references[horizon].u;
 }
 
 static void record_rollout_failure(
@@ -1149,12 +1162,20 @@ static int fail_nominal_build(
 
 static int seed_unsolved_tail_control(
     const MpcTrajectorySample_t *trajectory, size_t count, double length,
-    double station, float last_throttle,
+    double station, double next_station, float last_throttle,
     const MpcRtiConfiguration_t *configuration, MpcModelControl_t *control)
 {
     MpcTrajectorySample_t sample;
     if (!mpc_trajectory_sample(trajectory, count, length, station, &sample))
         return 0;
+    if (sample.source_witness_valid) {
+        control->steering_target_rad = clampf_rti((float)sample.source_steering_target,
+            -configuration->max_steering_rad, configuration->max_steering_rad);
+        control->throttle_command = clampf_rti((float)sample.source_throttle,
+            MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
+        return 1;
+    }
+    if (!mpc_trajectory_sample(trajectory, count, length, next_station, &sample)) return 0;
     control->steering_target_rad = clampf_rti(
         vehicle_model_steering_for_curvature((float)sample.curvature),
         -configuration->max_steering_rad, configuration->max_steering_rad);
@@ -1266,7 +1287,7 @@ static int mpc_rti_build_nominal_impl(
                 MPC_THROTTLE_MAX);
             if (k + 1 >= previous_horizon &&
                 !seed_unsolved_tail_control(trajectory, trajectory_count,
-                    lap_length, progress_seed[k + 1],
+                    lap_length, progress_seed[k], progress_seed[k + 1],
                     nominal->controls[k].throttle_command, configuration,
                     &nominal->controls[k]))
                 return fail_nominal_build(
@@ -1296,14 +1317,15 @@ static int mpc_rti_build_nominal_impl(
         phase_start_us = monotonic_microseconds();
         float queued_throttle = current_state->plant.delayed_throttle_command_2;
         for (int k = 0; k < horizon; ++k) {
-            const float desired_delta = references[k + 1].steering_command;
+            const float desired_delta = references[k].source_witness_valid ?
+                references[k].source_steering_target : references[k + 1].steering_command;
             nominal->controls[k].steering_target_rad = clampf_rti(
                 desired_delta,
                 -configuration->max_steering_rad,
                 configuration->max_steering_rad);
             nominal->controls[k].throttle_command = clampf_rti(
-                fmaxf(queued_throttle,
-                    MPC_THROTTLE_MIN_DRIVE),
+                references[k].source_witness_valid ? references[k].source_throttle :
+                    fmaxf(queued_throttle, MPC_THROTTLE_MIN_DRIVE),
                 MPC_THROTTLE_MIN_DRIVE,
                 MPC_THROTTLE_MAX);
             /* Carry the seed value forward as the next stage's initial guess;
@@ -1342,7 +1364,7 @@ static int mpc_rti_build_nominal_impl(
             if (requested_index < warm_start_control_count) {
                 nominal->controls[k] = warm_start_controls[requested_index];
             } else if (!seed_unsolved_tail_control(trajectory, trajectory_count,
-                    lap_length, progress_seed[k + 1],
+                    lap_length, progress_seed[k], progress_seed[k + 1],
                     warm_start_controls[warm_start_control_count - 1].
                         throttle_command,
                     configuration, &nominal->controls[k])) {

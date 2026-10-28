@@ -50,6 +50,9 @@ typedef struct
     float path_curvature;
     float left_bound;
     float right_bound;
+    int source_witness_valid;
+    float source_steering_target;
+    float source_throttle;
 } MpcRtiReference_t;
 
 typedef struct

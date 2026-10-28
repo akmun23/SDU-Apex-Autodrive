@@ -763,7 +763,13 @@ private:
 
         std::vector<Waypoint> parsed;
         std::string line;
+        bool source_witness = false;
         while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line == "# sdu_apex_source_witness/v1") {
+                source_witness = true;
+                continue;
+            }
             if (line.empty() || line.front() == '#') {
                 continue;
             }
@@ -773,38 +779,56 @@ private:
             bool valid = true;
             while (std::getline(stream, token, ',')) {
                 try {
-                    values.push_back(std::stod(token));
+                    std::size_t consumed=0;
+                    const double value=std::stod(token, &consumed);
+                    if (token.find_first_not_of(" \t", consumed) != std::string::npos) {
+                        valid=false;
+                        break;
+                    }
+                    values.push_back(value);
                 } catch (...) {
                     valid = false;
                     break;
                 }
             }
-            if (!valid || values.size() < 6) {
-                continue;
+            if (!valid || values.size() != (source_witness ? 15u : 9u)) {
+                RCLCPP_ERROR(get_logger(), "Trajectory requires 9 corridor columns or a schema-marked 15-column source witness");
+                return false;
             }
-            Waypoint point;
+            Waypoint point{};
             point.s = values[0];
             point.x = values[1];
             point.y = values[2];
             point.heading = values[3];
             point.curvature = values[4];
             point.speed = values[5];
-            point.acceleration = values.size() >= 7 ? values[6] : 0.0;
-            if (values.size() >= 9) {
-                point.left_bound = values[7];
-                point.right_bound = values[8];
+            point.acceleration = values[6];
+            point.left_bound = values[7];
+            point.right_bound = values[8];
+            if (source_witness) {
+                if (values.size() != 15) {
+                    RCLCPP_ERROR(get_logger(), "Source-witness trajectory requires exactly 15 columns");
+                    return false;
+                }
+                point.source_witness_valid = 1;
+                point.source_heading_error = values[9];
+                point.source_v_rear = values[10];
+                point.source_yaw_rate = values[11];
+                point.source_physical_steering = values[12];
+                point.source_steering_target = values[13];
+                point.source_throttle = values[14];
             }
             if (!std::isfinite(point.s) || !std::isfinite(point.x) ||
                 !std::isfinite(point.y) || !std::isfinite(point.heading) ||
                 !std::isfinite(point.curvature) || !std::isfinite(point.speed) ||
                 !std::isfinite(point.acceleration)) {
-                continue;
+                return false;
             }
             if (!std::isfinite(point.left_bound) || point.left_bound <= 0.0) {
-                point.left_bound = 1.0;
+                return false;
             }
             if (!std::isfinite(point.right_bound) || point.right_bound <= 0.0) {
-                point.right_bound = 1.0;
+                return false;
             }
             parsed.push_back(point);
         }
@@ -818,8 +842,9 @@ private:
         }
         trajectory_.resize(point_count);
         RCLCPP_INFO(get_logger(),
-            "Loaded MPC trajectory from '%s' with %zu points (%.2f m)",
-            trajectory_file_.c_str(), trajectory_.size(), track_length_m_);
+            "Loaded MPC trajectory from '%s' with %zu points (%.2f m); source witness=%s",
+            trajectory_file_.c_str(), trajectory_.size(), track_length_m_,
+            source_witness ? "enabled" : "absent");
         return true;
     }
 

@@ -6,6 +6,12 @@
 #include <stddef.h>
 
 #ifdef __cplusplus
+#define MPC_REFERENCE_ZERO {}
+#else
+#define MPC_REFERENCE_ZERO
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -20,7 +26,18 @@ typedef struct
     double left_bound;
     double right_bound;
     double acceleration;
+    /* Optional, precomputed source witness. These are reference data, never
+     * extra optimizer states or privileged runtime sensor inputs. */
+    int source_witness_valid MPC_REFERENCE_ZERO;
+    double source_heading_error MPC_REFERENCE_ZERO;
+    double source_v_rear MPC_REFERENCE_ZERO;
+    double source_yaw_rate MPC_REFERENCE_ZERO;
+    double source_physical_steering MPC_REFERENCE_ZERO;
+    double source_steering_target MPC_REFERENCE_ZERO;
+    double source_throttle MPC_REFERENCE_ZERO;
 } MpcTrajectorySample_t;
+
+#undef MPC_REFERENCE_ZERO
 
 typedef struct
 {

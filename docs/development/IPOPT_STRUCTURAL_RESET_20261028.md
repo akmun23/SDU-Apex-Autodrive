@@ -265,5 +265,57 @@ and 4.8 s screens still failed; do not claim a floor or add thousands of
 iterations. Preserve 4.875 s while investigating a better basin/formulation.
 
 No production MPC/odom equations or the frozen 51.030 s config were changed.
-The new target is separate. Runtime reference validation and eventual witness
-nominal integration remain the next gates, not completed work.
+The new target is separate. At that checkpoint, runtime reference validation
+and witness nominal integration were the next gates; results follow below.
+
+## First real practice validation and source-reference coupling
+
+Run `live_runs/mpc_source_command4p875_20261029_01/` used the separate 9-column
+4.875 s source target with the UNCHANGED frozen MPC weight/trust profile. It
+completed warmup + ten scored laps and the post-target collision watch with
+zero collisions, controller faults or bridge faults. Ten scored laps:
+**50.85199976 s**, mean **5.08519998 s**, population standard deviation
+**0.04670 s**, fastest **5.013800 s**. This is a real 0.178 s improvement over
+51.030 s, but NOT sub-50 s, sub-4.9 s driving or repeated validation.
+
+Gate median/p95/max were **9.199/17.318/20.675 ms**. One deadline-deferred
+cycle occurred; therefore do not claim a reliable maximum below 20 ms.
+Cross-track RMSE was **7.63 cm**, speed-error RMSE **0.559 m/s**. Those are
+controller tracking diagnostics, not ground-truth rollout errors. Source model
+self-consistency numbers above must never be substituted for Unity agreement.
+
+The live target still exposed a concrete representation mismatch: the existing
+MPC reference builder requested zero lateral velocity/body-path angle,
+`r=curvature*u` and bicycle steering even though a validated source witness was
+available. Implemented an explicit schema-marked 15-column reference carrying
+the planned rear-axle lateral velocity, body heading error, gyro yaw rate,
+physical rack, held steering target and torque. These are precomputed reference
+data, NOT new optimizer states or prohibited live sensors.
+
+- State references now use that witness. Cold and unsolved-tail controls use
+  its current-application-epoch steering/torque, not next-state or bicycle
+  values. Issued-command warm starts still take precedence.
+- The old yaw-reference alignment pass must NOT overwrite source yaw rate;
+  a new regression test caught that exact issue and it was fixed.
+- Physical states interpolate; commands remain zero-order-held across source
+  packet edges. Mixed schemas, zero-throttle witnesses, malformed rows and
+  capped-speed reuse fail closed. No extra solver dimensions or plant calls.
+- Retired the loader's implicit one-metre corridor fallback and partial CSV
+  acceptance. Maintained files are explicit 9-column corridors or schema-marked
+  15-column witnesses. The 9-column record path/weights/math remain unchanged.
+- Avoid bicycle `atan` work when the source rack reference is already present.
+
+Candidate: `source_command_4p875_witness_candidate.csv`, SHA-256
+`e9dffcd11a8b3004b16bd28e38955612912307e666a83bbb8e7a496994fe23d7`.
+Same 4,875 raw source XY samples and speed profile as the tested line. No
+geometry adjustment or dynamics fit. Full MPC CTest suite **12/12** passes,
+including source-state/held-input interpolation, exact nominal initialization,
+speed-cap rejection and nonlinear objective/condensed-direction parity in both
+turn directions with and without the witness. Focused Python export tests
+**7/7** pass. Runtime-topic static policy passes; organizer approval of the
+existing development 40 Hz bridge remains unresolved.
+
+Source-reference online validation is the next test. No result for it is yet
+claimed. Commit `fb76cfc46` preserving the optimizer, candidate and source
+validation has been pushed and remote SHA verified. New coupling changes are
+being verified/committed separately.

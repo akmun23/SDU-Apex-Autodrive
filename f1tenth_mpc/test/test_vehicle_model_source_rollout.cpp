@@ -180,6 +180,79 @@ TEST(MpcReference, LoadedFrameClosesWorldMotionAndDifferentialAcrossKnots)
   }
 }
 
+TEST(MpcReference, SourceWitnessInterpolatesStatesButHoldsCommands)
+{
+  MpcTrajectorySample_t points[3] = {
+      {0., 0., 0., 0., 0., 4., 10., 10., 0.},
+      {10., 10., 0., 0., 0., 4., 10., 10., 0.},
+      {20., 20., 0., 0., 0., 4., 10., 10., 0.}};
+  for (int k=0; k<3; ++k) {
+    points[k].source_witness_valid = 1;
+    points[k].source_heading_error = .05+k*.02;
+    points[k].source_v_rear = -.2+k*.1;
+    points[k].source_yaw_rate = .3;
+    points[k].source_physical_steering = .02+k*.01;
+    points[k].source_steering_target = .04+k*.1;
+    points[k].source_throttle = .11+k*.1;
+  }
+  size_t count=3;
+  double length;
+  ASSERT_TRUE(mpc_trajectory_prepare(points, &count, &length));
+  MpcTrajectorySample_t sample{};
+  ASSERT_TRUE(mpc_trajectory_sample(points, count, length, 5., &sample));
+  EXPECT_TRUE(sample.source_witness_valid);
+  EXPECT_NEAR(sample.source_heading_error, .06, 1.e-12);
+  EXPECT_NEAR(sample.source_v_rear, -.15, 1.e-12);
+  EXPECT_NEAR(sample.source_physical_steering, .025, 1.e-12);
+  EXPECT_DOUBLE_EQ(sample.source_steering_target, .04);
+  EXPECT_DOUBLE_EQ(sample.source_throttle, .11);
+  points[1].source_witness_valid=0;
+  EXPECT_FALSE(mpc_trajectory_prepare(points, &count, &length));
+  points[1].source_witness_valid=1;
+  points[1].source_throttle=0.;
+  EXPECT_FALSE(mpc_trajectory_prepare(points, &count, &length));
+}
+
+TEST(MpcReference, SourceWitnessSeedsTorqueAndUsesItsLateralReferences)
+{
+  MpcTrajectorySample_t points[3] = {
+      {0., 0., 0., 0., 0., 4., 10., 10., 0.},
+      {10., 10., 0., 0., 0., 4., 10., 10., 0.},
+      {20., 20., 0., 0., 0., 4., 10., 10., 0.}};
+  for (auto &p : points) {
+    p.source_witness_valid=1;
+    p.source_heading_error=.07; p.source_v_rear=-.2; p.source_yaw_rate=.3;
+    p.source_physical_steering=.02; p.source_steering_target=.04; p.source_throttle=.11;
+  }
+  size_t count=3; double length;
+  ASSERT_TRUE(mpc_trajectory_prepare(points, &count, &length));
+  MpcRtiConfiguration_t c{};
+  c.weight_e_y=c.weight_e_psi=c.weight_u=c.weight_u_overspeed=1.f;
+  c.weight_v=c.weight_r=c.weight_steering_command=c.weight_steering_target=1.f;
+  c.weight_throttle_command=c.terminal_multiplier=1.f;
+  c.max_speed_mps=c.active_speed_ceiling_mps=16.f;
+  c.max_steering_rad=SOURCE_MAX_STEERING_RAD;
+  c.corridor_margin_m=c.first_prediction_corridor_margin_m=.05f;
+  MpcRtiState_t initial{};
+  initial.plant.u=4.f;
+  initial.plant.delayed_throttle_command_1=initial.plant.delayed_throttle_command_2=.2f;
+  MpcRtiNominal_t nominal{};
+  MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+  ASSERT_TRUE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &c, &nominal, refs));
+  for (int k=0; k<PREDICTION_HORIZON; ++k) {
+    EXPECT_FLOAT_EQ(nominal.controls[k].steering_target_rad, .04f);
+    EXPECT_FLOAT_EQ(nominal.controls[k].throttle_command, .11f);
+    EXPECT_FLOAT_EQ(refs[k].e_psi, .07f);
+    EXPECT_FLOAT_EQ(refs[k].v, -.2f);
+    EXPECT_FLOAT_EQ(refs[k].r, .3f);
+    EXPECT_FLOAT_EQ(refs[k].steering_command, .02f);
+  }
+  c.active_speed_ceiling_mps=3.f;
+  EXPECT_FALSE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &c, &nominal, refs));
+}
+
 TEST(MpcReference, ProgressSensitivityPersistsAcrossLaterStages)
 {
   MpcTrajectorySample_t points[4] = {
@@ -1867,7 +1940,9 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
 
 TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
 {
-  for (int turn : {0, -1, 1}) {
+  for (int scenario : {0, -1, 1, 3, -2, 2}) {
+    const bool source_witness=std::abs(scenario)>1;
+    const int turn=scenario==3 ? 0 : scenario<0 ? -1 : scenario>0 ? 1 : 0;
     SCOPED_TRACE(turn);
     const float direction = turn < 0 ? -1.f : 1.f;
     std::vector<MpcTrajectorySample_t> samples = {
@@ -1889,6 +1964,17 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
       }
     }
     auto *trajectory = samples.data();
+    if (source_witness) {
+      for (auto &p : samples) {
+        p.source_witness_valid=1;
+        p.source_heading_error=.03*direction;
+        p.source_v_rear=-.1*direction;
+        p.source_yaw_rate=.2*direction;
+        p.source_physical_steering=.03*direction;
+        p.source_steering_target=.04*direction;
+        p.source_throttle=.2;
+      }
+    }
     size_t count = samples.size();
     double length = 0.;
     ASSERT_TRUE(mpc_trajectory_prepare(trajectory, &count, &length));

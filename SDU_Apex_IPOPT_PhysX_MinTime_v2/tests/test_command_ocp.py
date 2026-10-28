@@ -118,8 +118,10 @@ def test_export_keeps_exact_source_positions_and_separates_time_semantics(tmp_pa
     state = np.zeros((21, len(t)))
     state[0], state[1] = 3.+np.cos(2*np.pi*t), 3.+np.sin(2*np.pi*t)
     state[2], state[3] = 2*np.pi*t+np.pi/2, 2*np.pi*np.ones(len(t))
+    state[5], state[16] = 3., .2
     path = tmp_path/'trace.npz'
-    np.savez(path, state=state, dt_s=.001)
+    commands=np.vstack([.1+np.arange(40)*.001, np.full(40, .2)])
+    np.savez(path, state=state, dt_s=.001, commands=commands)
     grid = MapGrid(np.full((120, 120), 255, dtype=np.uint8),
         np.ones((120, 120), dtype=bool), .05, np.zeros(2), 0., np.full((120, 120), 3.))
     report = export_reference(path, grid, tmp_path)
@@ -129,3 +131,10 @@ def test_export_keeps_exact_source_positions_and_separates_time_semantics(tmp_pa
     assert report['exact_command_lap_s'] == 1.
     assert report['body_forward_reference_integral_s'] == pytest.approx(1., abs=2.e-6)
     assert not report['post_export_geometry_smoothing']
+    witness=np.loadtxt(report['source_witness_csv'], delimiter=',')
+    assert witness.shape == (1000, 15)
+    assert Path(report['source_witness_csv']).read_text().startswith('# sdu_apex_source_witness/v1\n')
+    np.testing.assert_allclose(witness[:, 10], -.15532*state[5, :-1])
+    np.testing.assert_allclose(witness[:, 12], .2)
+    np.testing.assert_allclose(witness[:, 13], np.repeat(commands[0], 25))
+    np.testing.assert_allclose(witness[:, 14], .2)

@@ -22,7 +22,17 @@ static int finite_sample(const MpcTrajectorySample_t *point)
         isfinite(point->left_bound) && isfinite(point->right_bound) &&
         isfinite(point->acceleration) &&
         point->speed >= 0.0 && point->left_bound > 0.0 &&
-        point->right_bound > 0.0;
+        point->right_bound > 0.0 &&
+        (point->source_witness_valid == 0 ||
+         (point->source_witness_valid == 1 &&
+          isfinite(point->source_heading_error) &&
+          isfinite(point->source_v_rear) && isfinite(point->source_yaw_rate) &&
+          isfinite(point->source_physical_steering) &&
+          fabs(point->source_physical_steering) <= 0.5235988 &&
+          isfinite(point->source_steering_target) &&
+          fabs(point->source_steering_target) <= 0.5235988 &&
+          isfinite(point->source_throttle) && point->source_throttle >= .001 &&
+          point->source_throttle <= 1.0));
 }
 
 int mpc_trajectory_prepare(
@@ -40,6 +50,7 @@ int mpc_trajectory_prepare(
 
     for (size_t i = 0; i < count; ++i) {
         if (!finite_sample(&points[i])) return 0;
+        if (points[i].source_witness_valid != points[0].source_witness_valid) return 0;
         if (i > 0 && !(points[i].s > points[i - 1].s)) return 0;
         if (i > 0) {
             points[i].heading = points[i - 1].heading +
@@ -129,7 +140,19 @@ static int sample_with_frame(
         .right_bound = a->right_bound + t * (b->right_bound - a->right_bound),
         .acceleration = a->acceleration +
             t * (b->acceleration - a->acceleration),
+        .source_witness_valid = a->source_witness_valid && b->source_witness_valid,
     };
+    if (sample->source_witness_valid) {
+        sample->source_heading_error = a->source_heading_error +
+            t*wrap_angle(b->source_heading_error-a->source_heading_error);
+        sample->source_v_rear = a->source_v_rear+t*(b->source_v_rear-a->source_v_rear);
+        sample->source_yaw_rate = a->source_yaw_rate+t*(b->source_yaw_rate-a->source_yaw_rate);
+        sample->source_physical_steering = a->source_physical_steering+
+            t*(b->source_physical_steering-a->source_physical_steering);
+        /* Actual commands are held, not interpolated across a packet edge. */
+        sample->source_steering_target = a->source_steering_target;
+        sample->source_throttle = a->source_throttle;
+    }
     if (frame) {
         frame->sample = *sample;
         frame->dx_ds = (b->x - a->x) / span;
