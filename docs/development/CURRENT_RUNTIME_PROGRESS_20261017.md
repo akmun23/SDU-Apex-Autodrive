@@ -1,5 +1,12 @@
 # Current runtime and rewrite status — 2026-10-17
 
+> **Current production cleanup / faster practice default — 2026-10-28:**
+> See [RUNTIME_CLEANUP_AND_RACING_20261028.md](RUNTIME_CLEANUP_AND_RACING_20261028.md)
+> before resuming work. It records the active source/scan chronology, ordered
+> Riccati optimization, retired experiments, and three completed ten-lap
+> comparisons on the new v343 tracking-reserve practice target. Older weight
+> experiments below are historical evidence, not the current runtime profile.
+
 > **Latest MPC runtime update — 2026-10-21:** the supervised practice run,
 > exact measurements, runtime input audit, bag-decoder correction, and current
 > failure-policy behavior are documented in

@@ -7,6 +7,28 @@ sensor topics only, with ground truth reserved for recording/scoring.
 
 ## Baseline and evidence
 
+**Latest production status (read first):** the practice launch/trial default
+is now `ipopt_v343_tracking_reserve_raceline.csv`, SHA256
+`21117242ebc292d666b0781e7e10fed6c4b0b4433bdbc5a1544fa4b6eda9724d`.
+Reference v337 remains unchanged for comparisons. Three supervised repeats
+completed eleven total laps each, ten scored: **52.468 / 52.347 / 52.239 s**,
+zero collisions. Latest mean **5.2239 s**, SD .07905 s; max cycle **19.395 ms**.
+One earlier repeat deferred one 20.656 ms cycle; no hard worst-case timing
+guarantee is claimed. The **49.8 s goal remains unmet** (2.439 s gap).
+
+Latest complete-run odometry u/v/r RMSE: **.0091 m/s / .0017 m/s / 0 rad/s**;
+u max .0492 m/s, v max .0245 m/s. Relative eleven-lap position drift .080 m,
+max .105 m. AMCL map-pose RMSE **.065 m**, p95 .119 m, max .151 m. AMCL PF wall
+median/p95 **2.548 / 3.160 ms**, versus 2.918 / 3.550 in the earlier cleanup
+repeat; startup maximum 40.832 ms is reported separately, not hidden.
+These different live trajectories do not isolate every estimator change.
+
+Current remaining driving issue: controller-estimated cross-track RMSE .0803 m
+and speed-error RMSE .5895 m/s; it still misses the 4.9486 s speed-profile
+integral substantially. Seventy-eight retained certified-plan actions and seven
+exact candidate prefixes were used in the last run. No new simulation data is
+needed merely to investigate these already-recorded states.
+
 - Production repeat `mpc_v337_production_peak_slip_20261027_01`: eleven total
   laps, ten scored averaging 5.3654 s (53.654 s total), no collision; maximum
   publication time 19.111 ms. Target v337 integral is 5.1465 s.
@@ -14,12 +36,11 @@ sensor topics only, with ground truth reserved for recording/scoring.
   lateral velocity 0.0011 m/s, yaw rate effectively zero against gyro/truth;
   relative endpoint drift 0.134 m over the complete eleven-lap capture.
 - v343 supplies a source-OCP-feasible 4.9414417 s target and complete saved
-  seed. It has not been driven/validated in Unity/MPC. Do not claim that target
-  as an achieved lap time.
-- Last night's lower-damping `mpc_v337_local_correction_authority_20261027_01`
-  completed eleven total laps; its full report is now being generated.
+  seed. The original geometry failed repeated driving; the promoted separate
+  tracking-reserve geometry completed the repeats above. Neither profile's
+  theoretical integral is an achieved lap time.
 
-## Work queue
+## Original work queue (implementation/results below)
 
 1. Audit active build/launch paths; remove confirmed dead code and redundant
    hot-path work, preserving unrelated pre-existing worktree edits.
@@ -91,7 +112,7 @@ sensor topics only, with ground truth reserved for recording/scoring.
   tracked overlays are recoverable through Git; untracked overlays were
   discarded as requested.
 
-## Faster target and current next trial
+## Faster target experiments (historical, not active settings)
 
 `mpc_v343_fast_target_20261028_01` used the recovered v343 4.941442 s target
 with actual MPC. Warmup 5.918800 s; scored laps 5.134800, 5.129800, 5.185800 s.
@@ -100,7 +121,7 @@ laps. At turn exit, e_y grew about 0.067 -> 0.120 m while full plans were
 still accepted, then roughly 25 retained-plan actions exhausted the useful
 suffix before the corridor fault. This is faster, not yet consistent.
 
-Active candidate `mpc_sqp_tracking_candidate.yaml` now tests a coordinated
+The subsequently retired `mpc_sqp_tracking_candidate.yaml` tested a coordinated
 tracking/authority change: ey/epsi/u weights 10000/3000/80, steering/throttle
 slew 500/20, SQP radii 0.06 rad / 0.12 throttle, ADMM cap 250. Source physics,
 positive-drive envelope, two SQP passes and 20 ms total budget remain in
@@ -242,3 +263,232 @@ not a pose error. Source dynamics are unchanged.
 Current live verification: `mpc_v337_affine_cache_20261028_01`, unchanged
 production weights and geometry. Direct progress reward remains experimental,
 not enabled in production. The 49.8 s ten-lap goal remains unmet.
+
+That cache trial stopped after eight total laps on a corridor fault, no
+collision; max cycle 19.522 ms. This does not prove repeatable tracking, and
+the cache is not yet considered a live robustness gain.
+
+## Distinct scan evidence
+
+Source `LIDAR.FixedUpdate()`/`LaserScan()` writes `CurrentRangeArray` only at
+capture; Socket republishes that held array. Offline full-array byte
+comparisons on two practice captures found 13/2254 and 18/2246 moving scans
+identical to the preceding scan at a new ROS timestamp (0.58% / 0.80%). The
+reported scan period is 25 ms; this rules out an every-other-packet 20 Hz hold
+as the main localization-bias explanation. Do NOT introduce an assumed fixed
+scan delay from the observed along-track error.
+
+Implemented exact duplicate-measurement suppression only after local lock.
+Compare full ranges and used scan geometry/frame, not a fuzzy threshold/hash.
+Keep the odom prediction baseline unchanged until the next distinct scan; do
+not reweight the cloud or refresh map-correction health at a new pose using
+the held scene. Global bootstrap keeps its repeated-evidence search. Added
+CPU tests for fresh stamps, one-ULP range changes, NaNs, different geometry /
+frames and empty scans. Four focused localization CTests and topic policy pass.
+
+Current test `mpc_v337_progress100_distinct_scans_20261028_01` retains baseline
+tracking/damping, reduces the failed 400 progress incentive to 100, and
+includes the new distinct-scan check plus matrix cache. This is a candidate
+trial, not a promoted profile or an attribution-isolated speed comparison.
+
+Result: eleven total laps, no collision, no deadline miss; ten scored 53.686 s
+(5.3686 mean, SD .04736), max cycle 19.407 ms. This establishes operation of
+the integrated candidate, NOT a meaningful speed gain over the reference.
+
+## Fast target with explicit tracking allowance
+
+The v343 target's minimum 0.20 m center-to-wall distance leaves only 1.35 cm
+for lateral tracking with a .273 m-wide aligned car and .05 m hard wall margin.
+v337's minimum is .25 m. Rather than relax the hard wall margin or keep adding
+controller penalties, created a separate tracking-reserve target from v343:
+
+- New reusable `tools/make_tracking_clearance_target.py`: convex periodic
+  least-displacement/second-difference smoothing under corridor bounds; no
+  vehicle-force fitting. Resample exact map corridors after each geometry
+  update, enforce an input-path displacement limit, and certify swept map
+  footprint clearance with the same rear-axle dimensions as production.
+- `tools/vehicle_footprint.py` is the shared production-header geometry reader
+  for this tool and plotting; no ROS/plot dependency needed for dimensions.
+- Four tests pass: no-op on sufficient clearance, correct-wall motion,
+  periodic symmetry, impossible reserve and analytic circle curvature.
+- Candidate `optimized_practice_v343_certified_restart_20261027/
+  tracking_reserve_target_not_dynamics_certified.csv`: 474 points, maximum
+  displacement 4.809 cm, minimum center-to-wall distance .25 m; swept-map
+  clearance certificate .03022 m BEYOND the retained .05 m hard wall margin.
+  Speed samples are unchanged; geometric speed-profile integral 4.948605 s.
+  This is NOT a newly certified source-OCP trajectory, not a proven lap time.
+  Its changed geometry does not inherit the original dynamic certificate.
+
+Actual supervised verification `mpc_v343_tracking_reserve_20261028_01` requests
+eleven total laps, baseline production weights (progress reward zero), current
+source plant, distinct-scan check and matrix cache. Original reference and
+IPOPT seed/run are unchanged. Stop immediately on collision or controller fault.
+
+Result: eleven total laps, ten scored in **52.468 s** (mean **5.2468 s**, SD
+.05147 s), no collision/deadline miss, max cycle **19.318 ms**. The geometry
+change gave a usable faster multi-lap target versus ~53.7 s v337 repeats, but
+not the requested 49.8 s. The source-OCP dynamic certificate still does not
+transfer; this recorded MPC/Unity run is its actual driving evidence.
+
+## Ordered matrix loops instead of the affine cache
+
+Retired the experimental private `P*d` cache. Its mathematically equivalent
+float grouping changed warm-start/SQP branches across sequence replay, making
+it harder to attribute live behavior. It is removed from the source, not left
+as a runtime switch.
+
+Reordered independent coordinate loops in the existing factored Riccati
+products `B'P`, `B'PA`, `P A` and backward `A'p`. Each individual coordinate
+still accumulates terms in the original order; inner loops now traverse
+contiguous rows and permit compiler SIMD. No states, dynamics, weights,
+factorization reuse assumptions or arithmetic reductions are removed. GCC
+vectorization diagnostics confirm 16-byte vector loops. The independent
+unfactored pass remains unchanged as the test oracle.
+
+Evidence in `affine_cache_benchmark/ordered_simd.{json,csv}`:
+
+- Six frozen QPs: **bitwise exact recorded result parity**, zero state/control
+  delta, identical statuses and iteration counts.
+- All 421 racing-state replay rows: **zero differences** in status, iteration
+  count, first steering, first throttle and nonlinear objective.
+- ADMM median **.722 -> .520 ms** (-28.0%), p95 **2.859 -> 1.916 ms** (-33.0%).
+  Whole offline cycle median 5.220 -> 4.929 ms, p95 15.377 -> 14.824 ms.
+  Maximum 27.641 -> 19.766 ms is one observed comparison, not a worst-case
+  timing guarantee. ROS/publication timing still needs the actual run.
+- All eleven MPC CTest targets pass.
+
+Current live check: `mpc_v343_tracking_reserve_ordered_simd_20261028_01`, same
+faster reserve target and baseline weights (progress reward zero), eleven
+total laps requested. This isolates the new matrix-loop implementation from
+another weight change. IPOPT v347 remains untouched in the background.
+
+## Final promotion and retirement
+
+- Ordered-loop repeat completed ten scored laps in **52.347 s**, mean 5.2347 s,
+  SD .04165 s, no collision. One cycle was deferred at 20.656 ms. The profile
+  never intentionally publishes an over-budget replacement command.
+- A stronger pace/damping bundle on the reserve target failed before warmup
+  (`mpc_v343_reserve_pace_bundle_20261028_01`). Removed the progress reward
+  implementation, parameters and failed candidate overlay entirely. The
+  existing propagated progress-deviation coordinate remains dynamically
+  necessary; it is not that retired optional reward. Production weights stay
+  at the validated reference values. Generic signed-objective comparison
+  remains an actively used deduplicated prefix-selection helper.
+- Copied the validated target into installed planning assets and changed
+  `controller.launch.py` / `run_mpc_practice_trial.sh` defaults. Explicit map /
+  trajectory overrides and the previous v337 reference remain available.
+- `mpc_v343_promoted_defaults_20261028_01` tested the actual new defaults with
+  no overlay/trajectory argument: ten scored **52.239 s**, no collision or
+  deadline deferral; max **19.395 ms**. This is the implemented default, not
+  an offline-only candidate. No runtime ground truth inputs were introduced.
+- Removed the duplicate old solver-input exporter (with obsolete startup-ramp
+  assumptions), stale hard-coded weight sweep, and unused legacy accuracy
+  profile. Canonical saved-state exporter, benchmark/frozen-QP tools and the
+  actual production profile remain. The one-shot horizon overlay now changes
+  ONLY its measurement protocol, not old weights/tolerances/worker settings;
+  it latches at >=6.5 m/s. It must overlay production configuration.
+- Fixed reporting that compared local `/ekf_pose` coordinates directly with
+  absolute Unity world coordinates and printed a spurious ~8 m error. EKF is
+  still scored via body velocities and origin-aligned relative odometry;
+  global map poses are scored separately. Added a regression test. Added
+  actual AMCL PF wall statistics to the normal report. Final focused Python
+  tests: **35 pass**; MPC **11 CTests pass**, localization **4 focused pass**;
+  allowed-topic guard passes.
+
+## Fixed-command rollout diagnostic — completed, tail gate not passed
+
+`fixed_command_rollout.txt` / `fixed_command_rollout_cases.json` in the promoted
+run score the shared production C++ source plant against the captured **actual
+issued command sequence**, without future state re-anchoring. The rebuilt
+`libunity_source_plant_eval.so` contains our own online module, NOT an external
+PhysX engine. Bridge debug stamps/actual sent inputs are used offline only to
+remove command-association ambiguity; they are not allowed runtime estimator
+inputs. Ground truth is scoring only. No yaw-residual gain or oracle future
+IMU/actuator input is enabled. Existing full-speed bags cover this diagnosis.
+
+On 2,321 complete rolling 750 ms windows, endpoint XY RMSE is **.01936 m**,
+p95 **.01948 m**, maximum **.74028 m**. Both full-path and endpoint errors
+stay below .05 m in **2,317 / 2,321** windows. These windows overlap; they are
+not independent trials. Four adjacent failures are one localized transient,
+not four independent incidents. No window was excluded by the truth pose /
+twist closure validity screen. The maximum-error gate therefore remains
+**FAILED**, despite the low pooled RMSE.
+
+| Horizon | u RMSE m/s | v RMSE m/s | r RMSE rad/s | XY RMSE m | XY max m |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 25 ms | .00906 | .00167 | .01020 | .00485 | .03245 |
+| 750 ms | .00801 | .00345 | .01566 | .01936 | .74028 |
+
+Failure start stamps: 1793172431477950617, 1793172431502967602,
+1793172431527660770, 1793172431552604866 ns. All start around 6.43–6.66 m/s,
+.079–.092 rad steering. Yaw-rate error first exceeds .1 rad/s after 7–10
+steps (175–250 ms), during the same subsequent steering reversal; position
+first exceeds .05 m at steps 20–21 (500–525 ms). Worst transient yaw-rate
+error is **2.410 rad/s**, even though the final-step error is only .393 rad/s.
+Endpoint-only motion metrics must not conceal that intermediate error.
+
+Targeted, diagnostic-only initial-state substitutions on the worst case:
+production initial u/v 6.58811/.137995 m/s gives .65538 rad integrated yaw;
+substituting only same-epoch truth u=6.5779 gives -.06390 rad; substituting
+only truth v=.1408 gives -.06056 rad. Actual yaw change is about -.117 rad.
+These are **not deployable fixes or future-state oracles**: they show strong
+initialization sensitivity of this nonlinear unwind. Recomputing initial
+jounce alone gives .38110 rad and does not resolve it. Do not promote a
+jounce reset, extra damping, timing shift or tire-parameter change from this
+diagnostic. Source-equation/contact-boundary and observer-initialization
+attribution remains open; no native-solver equivalence claim is justified.
+
+The separate `horizon comparison` section at the end of the text report
+compares a controller plan with subsequently **replanned** controls; its
+15 cm score is not this fixed-command plant accuracy measurement.
+
+## Savepoints and current verification
+
+Scoped commits: `71cb23faf` localization cleanup/projection/GPU ordering;
+`e33ed8e9` exact-parity ordered Riccati SIMD and active MPC configuration;
+`b39c90b2` held-scan suppression and reporting; `b7b6009b` faster installed
+target; `726e33cf` retired analysis/runtime paths removed. Existing unrelated
+staged work was not blanket-committed. Recovery snapshot of the pre-existing
+staged work: `6a39b5be6ef534946b926b266beaa78264c9810f` (stored in the stash
+list); do not apply it over this worktree without reviewing it first.
+
+Final focused verification now includes 47 Python tests, 11 MPC CTests and
+four localization CTests, plus the allowed-topic guard. The asymmetric
+rear-axle footprint correction is also applied to the trajectory auditor,
+so offline validation does not reintroduce the removed symmetric-overhang
+assumption.
+
+One subsequent coordinated pace/tracking experiment was supervised:
+`mpc_v343_tracking_pace_20261028_02`, e_y/e_psi/u weights 6000/2000/50,
+steering/throttle slew weights 1500/30, same plant, trust regions, profile and
+acceptance gates. It completed five total laps, four scored averaging
+5.20205 s, then stopped without collision on an exact corridor failure after
+a long retained-plan chain. One deadline was deferred. The small speed gain
+does not meet the repeatability gate, so **not promoted**; the temporary
+overlay was deleted, with its exact copy retained in the run evidence.
+Attempt `_01` was stopped during startup, before simulator launch: its YAML
+selected the wrong node name, so it is **not a weight-comparison run**.
+Added tested preflight selector validation in the manifest sealer and direct
+development launcher: mismatched/empty overlays now fail before driving
+instead of silently testing unchanged defaults. Commit `898ce502` saves this
+guard and the auditor's shared-dimension/asymmetric-footprint correction,
+without folding unrelated staged changes into the commit. Independent corner
+rotation tests cover every integer heading from -180 to +180 degrees.
+
+IPOPT remains running (stage 1/6, factor 2, iteration 3,585 at the last check;
+current objective 4.940069 s, primal residual .00018, optimality residual
+.00366). No optimizer restart/source edit was made for runtime tests. No
+simulator or controller is left running after the supervised trials.
+
+## Remaining work, not a completion claim
+
+1. Attribute the localized, initialization-sensitive unwind rollout failure
+   using the already-recorded full-speed evidence. No tire/physics change
+   was made merely to hide its tail; the .05 m maximum criterion is unmet.
+2. Improve turn-exit tracking/convergence without long retained-plan chains;
+   the stronger weight bundle did not solve this. Use the actual command /
+   state history, not another blind parameter sweep.
+3. Reach ten scored laps below 49.8 s. Best verified repeat is 52.239 s;
+   neither the target integral nor IPOPT's current iterate counts as a lap.
+4. Leave the all-day IPOPT service running; evaluate completed checkpoints
+   against source feasibility and measured driving before promoting them.
