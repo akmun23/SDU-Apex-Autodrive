@@ -45,7 +45,9 @@ PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 DEV_SIM_RESET_ENABLE_ENV = "SDU_APEX_DEV_SIM_RESET_ENABLED"
+DEV_PACKET_DIAGNOSTICS_ENABLE_ENV = "SDU_APEX_DEV_PACKET_DIAGNOSTICS_ENABLED"
 DEV_SIM_RESET_TOPIC = "/autodrive/reset_command"
+_development_packet_diagnostics_enabled = False
 
 # Requests are paced on a 25 ms host-clock grid. Receive times remain in
 # diagnostics, while source headers use request time so network jitter does
@@ -75,12 +77,6 @@ _latest_command: dict[str, str] = {
     "V1 Throttle": "0.0",
     "V1 Steering": "0.0",
     "V1 Reset": "False",
-    # These fields are understood by the patched Unity simulator. Older
-    # builds ignore unknown command fields, so the API remains backwards
-    # compatible while a rebuilt simulator is being rolled out.
-    "V1 Publish Camera": "False",
-    "V1 Publish Rear Camera": "False",
-    "V1 Publish LIDAR Intensity": "False",
 }
 _latest_steering_update_monotonic_ns: int | None = None
 _reset_level = False
@@ -118,15 +114,6 @@ _active_packet_arrival_ns: int | None = None
 _active_request_sequence: int | None = None
 _active_command: dict[str, str] = {}
 _active_steering_update_monotonic_ns: int | None = None
-_active_applied_command_sequence: int | None = None
-_active_commanded_throttle_norm: float | None = None
-_active_commanded_steering_norm: float | None = None
-_active_applied_throttle_norm: float | None = None
-_active_applied_steering_norm: float | None = None
-_active_simulation_time_s: float | None = None
-_active_simulation_frame: int | None = None
-_active_simulation_physics_step: int | None = None
-_active_telemetry_sequence: int | None = None
 _active_simulator_packet: dict[str, float | int | None] = {}
 _active_request_slot_pool: Semaphore | None = None
 
@@ -219,11 +206,6 @@ def _reset_request_pipeline() -> None:
     global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
     global _active_steering_update_monotonic_ns
-    global _active_applied_command_sequence
-    global _active_commanded_throttle_norm, _active_commanded_steering_norm
-    global _active_applied_throttle_norm, _active_applied_steering_norm
-    global _active_simulation_time_s, _active_simulation_frame
-    global _active_simulation_physics_step, _active_telemetry_sequence
     global _active_simulator_packet
     global _active_request_slot_pool, _packet_stamp
     with _pending_request_lock:
@@ -241,15 +223,6 @@ def _reset_request_pipeline() -> None:
         _active_request_sequence = None
         _active_command = {}
         _active_steering_update_monotonic_ns = None
-        _active_applied_command_sequence = None
-        _active_commanded_throttle_norm = None
-        _active_commanded_steering_norm = None
-        _active_applied_throttle_norm = None
-        _active_applied_steering_norm = None
-        _active_simulation_time_s = None
-        _active_simulation_frame = None
-        _active_simulation_physics_step = None
-        _active_telemetry_sequence = None
         _active_simulator_packet = {}
         _active_request_slot_pool = None
     _bootstrap_packet_seen.clear()
@@ -263,11 +236,6 @@ def _finish_packet() -> None:
     global _active_request_monotonic_ns, _active_packet_arrival_ns
     global _active_request_sequence, _active_command
     global _active_steering_update_monotonic_ns
-    global _active_applied_command_sequence
-    global _active_commanded_throttle_norm, _active_commanded_steering_norm
-    global _active_applied_throttle_norm, _active_applied_steering_norm
-    global _active_simulation_time_s, _active_simulation_frame
-    global _active_simulation_physics_step, _active_telemetry_sequence
     global _active_simulator_packet
     global _active_request_slot_pool, _pending_request_started_ns
     with _packet_stamp_lock:
@@ -281,15 +249,6 @@ def _finish_packet() -> None:
         _active_request_sequence = None
         _active_command = {}
         _active_steering_update_monotonic_ns = None
-        _active_applied_command_sequence = None
-        _active_commanded_throttle_norm = None
-        _active_commanded_steering_norm = None
-        _active_applied_throttle_norm = None
-        _active_applied_steering_norm = None
-        _active_simulation_time_s = None
-        _active_simulation_frame = None
-        _active_simulation_physics_step = None
-        _active_telemetry_sequence = None
         _active_simulator_packet = {}
         _active_request_slot_pool = None
         _pending_request_started_ns = (
@@ -418,6 +377,57 @@ def _on_reset_command(message: Bool) -> None:
         )
 
 
+def _development_packet_details(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract scoring telemetry only during explicitly enabled development.
+
+    The competition path must not even inspect these packet fields. Keeping
+    this boundary ahead of parsing also removes all vector/string work from
+    the normal bridge hot path.
+    """
+    if not _development_packet_diagnostics_enabled:
+        return {}
+
+    def parse_float(value: Any) -> float | None:
+        try:
+            return None if value in (None, "") else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def parse_vector(value: Any, size: int) -> list[float | None]:
+        try:
+            values = [float(item) for item in str(value).split()]
+        except (TypeError, ValueError):
+            values = []
+        return [values[index] if index < len(values) else None
+                for index in range(size)]
+
+    result = {}
+    vector_fields = (
+        ("simulator_position", "V1 Position", ("x", "y", "z")),
+        ("simulator_orientation_quaternion", "V1 Orientation Quaternion",
+         ("x", "y", "z", "w")),
+        ("simulator_orientation_euler", "V1 Orientation Euler Angles",
+         ("x", "y", "z")),
+        ("simulator_linear_velocity", "V1 Linear Velocity", ("x", "y", "z")),
+        ("simulator_angular_velocity", "V1 Angular Velocity", ("x", "y", "z")),
+        ("simulator_linear_acceleration", "V1 Linear Acceleration", ("x", "y", "z")),
+        ("simulator_encoder_angles", "V1 Encoder Angles", ("left", "right")),
+    )
+    for prefix, key, suffixes in vector_fields:
+        for suffix, value in zip(suffixes, parse_vector(data.get(key), len(suffixes))):
+            result[f"{prefix}_{suffix}"] = value
+    result.update({
+        "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
+        "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
+        "simulator_collision_count": _parse_optional_int(data.get("V1 Collisions")),
+        "simulator_development_telemetry_event_id": _parse_optional_int(
+            data.get("V1 Development Telemetry Event ID")),
+        "simulator_development_command_sequence": _parse_optional_int(
+            data.get("V1 Development Command Sequence")),
+    })
+    return result
+
+
 def _capture_competition_packet(data: Any) -> bool:
     """Pair a stock-image telemetry packet with the oldest pending request.
 
@@ -467,48 +477,7 @@ def _capture_competition_packet(data: Any) -> bool:
         return False
     arrival_ns = time.monotonic_ns()
 
-    def parse_float(value: Any) -> float | None:
-        try:
-            return None if value in (None, "") else float(value)
-        except (TypeError, ValueError):
-            return None
-
-    def parse_vector(value: Any, size: int) -> list[float | None]:
-        try:
-            values = [float(item) for item in str(value).split()]
-        except (TypeError, ValueError):
-            values = []
-        return [values[index] if index < len(values) else None
-                for index in range(size)]
-
-    simulator_packet: dict[str, float | int | None] = {}
-    vector_fields = (
-        ("simulator_position", "V1 Position", ("x", "y", "z")),
-        ("simulator_orientation_quaternion", "V1 Orientation Quaternion",
-         ("x", "y", "z", "w")),
-        ("simulator_orientation_euler", "V1 Orientation Euler Angles",
-         ("x", "y", "z")),
-        ("simulator_linear_velocity", "V1 Linear Velocity", ("x", "y", "z")),
-        ("simulator_angular_velocity", "V1 Angular Velocity", ("x", "y", "z")),
-        ("simulator_linear_acceleration", "V1 Linear Acceleration", ("x", "y", "z")),
-        ("simulator_encoder_angles", "V1 Encoder Angles", ("left", "right")),
-    )
-    for prefix, key, suffixes in vector_fields:
-        for suffix, value in zip(suffixes, parse_vector(data.get(key), len(suffixes))):
-            simulator_packet[f"{prefix}_{suffix}"] = value
-    simulator_packet.update({
-        "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
-        "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
-        "simulator_collision_count": _parse_optional_int(data.get("V1 Collisions")),
-        # Development-player-only payload echoes establish the exact Unity
-        # telemetry event that produced this response. They are diagnostic
-        # metadata only; FIFO request association and all runtime inputs remain
-        # unchanged, and stock competition players omit both fields.
-        "simulator_development_telemetry_event_id": _parse_optional_int(
-            data.get("V1 Development Telemetry Event ID")),
-        "simulator_development_command_sequence": _parse_optional_int(
-            data.get("V1 Development Command Sequence")),
-    })
+    simulator_packet = _development_packet_details(data)
 
     with _pending_request_lock:
         (request_stamp, request_ns, slot_pool, _, request_sequence,
@@ -524,17 +493,6 @@ def _capture_competition_packet(data: Any) -> bool:
         _active_command = command
         _active_steering_update_monotonic_ns = steering_update_monotonic_ns
         _active_simulator_packet = simulator_packet
-        # Enhanced Unity-only fields are not runtime inputs and may be absent
-        # from the competition image. Keep diagnostic slots empty.
-        _active_applied_command_sequence = None
-        _active_commanded_throttle_norm = None
-        _active_commanded_steering_norm = None
-        _active_applied_throttle_norm = None
-        _active_applied_steering_norm = None
-        _active_simulation_time_s = None
-        _active_simulation_frame = None
-        _active_simulation_physics_step = None
-        _active_telemetry_sequence = None
     return True
 
 
@@ -577,6 +535,8 @@ def _parse_optional_int(value: Any) -> int | None:
 
 def _record_packet_arrival() -> None:
     """Publish one diagnostic event at the start of each decoded packet."""
+    if not _development_packet_diagnostics_enabled:
+        return
     global _packet_sequence
     arrival_ns = _active_packet_arrival_ns or time.monotonic_ns()
     with _pending_request_lock:
@@ -584,15 +544,6 @@ def _record_packet_arrival() -> None:
         request_sequence = _active_request_sequence
         command = dict(_active_command)
         steering_update_ns = _active_steering_update_monotonic_ns
-        applied_command_sequence = _active_applied_command_sequence
-        commanded_throttle_norm = _active_commanded_throttle_norm
-        commanded_steering_norm = _active_commanded_steering_norm
-        applied_throttle_norm = _active_applied_throttle_norm
-        applied_steering_norm = _active_applied_steering_norm
-        simulation_time_s = _active_simulation_time_s
-        simulation_frame = _active_simulation_frame
-        simulation_physics_step = _active_simulation_physics_step
-        telemetry_sequence = _active_telemetry_sequence
         simulator_packet = dict(_active_simulator_packet)
         connection_generation = _connection_generation
         receive_stamp = _active_packet_stamp
@@ -605,7 +556,7 @@ def _record_packet_arrival() -> None:
         return
     message = String()
     message.data = json.dumps({
-        "schema_version": 4,
+        "schema_version": 5,
         "packet_sequence": sequence,
         "bridge_arrival_monotonic_ns": arrival_ns,
         "bridge_receive_ros_stamp_ns": (
@@ -623,16 +574,6 @@ def _record_packet_arrival() -> None:
         "sent_throttle_norm": _parse_command_float(command, "V1 Throttle"),
         "sent_steering_norm": _parse_command_float(command, "V1 Steering"),
         "sent_reset": command.get("V1 Reset"),
-        "applied_command_sequence": applied_command_sequence,
-        "commanded_throttle_norm": commanded_throttle_norm,
-        "commanded_steering_norm": commanded_steering_norm,
-        "applied_throttle_norm": applied_throttle_norm,
-        "applied_steering_norm": applied_steering_norm,
-        "simulation_time_s": None,
-        "simulation_frame": None,
-        "simulation_render_frame": None,
-        "simulation_physics_step": None,
-        "telemetry_sequence": None,
         **simulator_packet,
     }, separators=(",", ":"))
     try:
@@ -972,17 +913,15 @@ def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
 
 
 def main() -> None:
-    global _shutdown_requested
+    global _shutdown_requested, _development_packet_diagnostics_enabled
     _shutdown_requested = False
+    _development_packet_diagnostics_enabled = _env_enabled(
+        DEV_PACKET_DIAGNOSTICS_ENABLE_ENV, False)
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     rate_hz = _rate_hz()
     _force_ipv4_server()
     _install_packet_timestamp_patch()
-    with _command_lock:
-        _latest_command["V1 Publish Camera"] = "False"
-        _latest_command["V1 Publish Rear Camera"] = "False"
-        _latest_command["V1 Publish LIDAR Intensity"] = "False"
     _install_packet_contract()
     _disable_camera_path()
     original_emit = official_bridge.sio.emit

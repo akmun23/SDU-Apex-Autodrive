@@ -111,7 +111,8 @@ def _setup(context):
 
     bridge = Node(
         package="sdu_apex_autodrive", executable="autodrive_bridge_40hz",
-        name="autodrive_bridge", output="screen", emulate_tty=True)
+        name="autodrive_bridge", output="screen", emulate_tty=True,
+        additional_env={"SDU_APEX_DEV_PACKET_DIAGNOSTICS_ENABLED": "1"})
     odometry = Node(
         package="f1tenth_localization", executable="sensor_odometry_node",
         name="sensor_odometry", output="screen",
