@@ -14,6 +14,17 @@ from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_publication_and_history_timings_are_separate(self) -> None:
+        row = report._cycle_row(3., 0., {
+            "middleware_publish_us": 53.2, "command_history_us": .7,
+            "end_to_end_control_ms": 19.1}, {}, {})
+        self.assertEqual(row["middleware_publish_us"], 53.2)
+        self.assertEqual(row["command_history_us"], .7)
+        self.assertEqual(row["callback_to_publish_return_ms"], 19.1)
+        row = report._cycle_row(3., 0., {"middleware_publish_us": float('nan')}, {}, {})
+        self.assertIsNone(row["middleware_publish_us"])
+        self.assertIsNone(row["command_history_us"])
+
     def test_identical_lap_durations_are_separate_completion_events(self) -> None:
         counts = [{"bag_time": 0, "value": 0},
                   {"bag_time": 1, "value": 1},

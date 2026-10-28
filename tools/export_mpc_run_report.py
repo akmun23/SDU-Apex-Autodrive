@@ -613,6 +613,8 @@ def _cycle_row(
         "callback_to_gate_ms": gate,
         "callback_to_publish_return_ms": _finite_number(
             payload.get("end_to_end_control_ms")),
+        "middleware_publish_us": _finite_number(payload.get("middleware_publish_us")),
+        "command_history_us": _finite_number(payload.get("command_history_us")),
         "budget_ms": budget,
         "publication_gate_budget_violation": gate_violation,
         "prior_plan_published_while_over_budget": (
@@ -977,6 +979,12 @@ def make_report(
             row.get("status") == "accepted_prior_plan" for row in scored),
         "published_commands": sum(row.get("command_published") is True
                                    for row in scored),
+        "middleware_publish_us": _distribution([
+            row["middleware_publish_us"] for row in scored
+            if row.get("middleware_publish_us") is not None]),
+        "command_history_us": _distribution([
+            row["command_history_us"] for row in scored
+            if row.get("command_history_us") is not None]),
         "gate_ms": ({
             "count": len(gate_values),
             "p50": evaluator.percentile(gate_values, 0.50),
@@ -1237,7 +1245,8 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "nominal_vs_candidate_left_bound_error_max_m",
         "nominal_vs_candidate_right_bound_error_max_m",
         "corridor_slack_m", "source_age_s", "callback_to_gate_ms",
-        "callback_to_publish_return_ms", "budget_ms", "publication_gate_budget_violation",
+        "callback_to_publish_return_ms", "middleware_publish_us", "command_history_us",
+        "budget_ms", "publication_gate_budget_violation",
         "prior_plan_published_while_over_budget", "command_start_lateness_ms",
         "qp_build_ms", "node_solve_ms", "nominal_build_ms", "jacobian_wall_ms",
         "jacobian_worker_cpu_sum_ms", "admm_ms", "nonlinear_validation_ms",
