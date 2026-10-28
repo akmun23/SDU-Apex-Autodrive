@@ -173,8 +173,16 @@ class TrajectoryAuditTests(unittest.TestCase):
         self.assertAlmostEqual(e_y, 0.1)
         self.assertEqual(suspension_initialized, 1)
 
+    def test_source_rollout_uses_current_optimizer_command_at_each_stage(self):
+        self.assertEqual(audit.MPC_COMMAND_DELAY_STEPS, 0)
+        self.assertEqual(audit.source_rollout_command([0.23, 0.41]),
+                         (0.23, 0.41))
+        with patch.object(audit, "MPC_COMMAND_DELAY_STEPS", 1):
+            with self.assertRaisesRegex(RuntimeError, "command chronology"):
+                audit.source_rollout_command([0.23, 0.41])
+
     def test_fixed_throttle_sweep_rejects_unavailable_brake_mode(self):
-        audit.validate_fixed_throttle_grid([0.01, 0.1, 1.0])
+        audit.validate_fixed_throttle_grid([0.001, 0.01, 0.1, 1.0])
         for values in ([0.0], [-0.1], [1.01], [math.nan], [math.inf]):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 audit.validate_fixed_throttle_grid(list(values))

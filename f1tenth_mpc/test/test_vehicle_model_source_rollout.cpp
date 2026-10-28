@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -1862,6 +1863,141 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
   EXPECT_EQ(result.solver_skipped_for_deadline, 1);
   EXPECT_EQ(result.solver_time_budget_exhausted, 0);
   EXPECT_EQ(result.solver_iterations, 0);
+}
+
+TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
+{
+  for (int turn : {0, -1, 1}) {
+    SCOPED_TRACE(turn);
+    const float direction = turn < 0 ? -1.f : 1.f;
+    std::vector<MpcTrajectorySample_t> samples = {
+        {0., 0., 0., 0., 0., 5., 10., 10., 0.},
+        {30., 30., 0., 0., 0., 5., 10., 10., 0.},
+        {60., 60., 0., 0., 0., 5., 10., 10., 0.}};
+    if (turn) {
+      samples.clear();
+      double station = 0.;
+      for (int i = 0; i < 240; ++i) {
+        const double angle = i * 2. * M_PI / 240.;
+        const double x = 3.*std::cos(angle), y = turn*5.*std::sin(angle);
+        if (i) station += std::hypot(x-samples.back().x, y-samples.back().y);
+        samples.push_back({station, x, y,
+            std::atan2(turn*5.*std::cos(angle), -3.*std::sin(angle)),
+            turn*15./std::pow(9.*std::sin(angle)*std::sin(angle) +
+                25.*std::cos(angle)*std::cos(angle), 1.5),
+            5., 10., 10., 0.});
+      }
+    }
+    auto *trajectory = samples.data();
+    size_t count = samples.size();
+    double length = 0.;
+    ASSERT_TRUE(mpc_trajectory_prepare(trajectory, &count, &length));
+    MpcRtiCycleConfiguration_t config{};
+    auto &c = config.model;
+    c.weight_e_y = 4000.f;
+    c.weight_e_psi = 1500.f;
+    c.weight_u = 35.f;
+    c.weight_u_overspeed = 20.f;
+    c.overspeed_curvature_gain_m = .5f;
+    c.weight_v = 5.f;
+    c.weight_r = 7.8125f;
+    c.weight_longitudinal_slip = 5.f;
+    c.weight_steering_command = 3.f;
+    c.weight_steering_target = 5.f;
+    c.weight_throttle_command = .1f;
+    c.weight_steering_slew = 2000.f;
+    c.weight_throttle_slew = 50.f;
+    c.terminal_multiplier = 3.f;
+    c.max_speed_mps = c.active_speed_ceiling_mps = 16.f;
+    c.max_steering_rad = SOURCE_MAX_STEERING_RAD;
+    c.corridor_margin_m = c.first_prediction_corridor_margin_m = .05f;
+    MpcRtiState_t initial{};
+    initial.plant.u = 5.f;
+    initial.plant.e_y = direction * .08f;
+    initial.plant.e_psi = direction * .02f;
+    initial.plant.delayed_throttle_command_1 = .2f;
+    initial.plant.delayed_throttle_command_2 = .2f;
+    ASSERT_TRUE(vehicle_model_initialize_plant_state(&initial.plant));
+    MpcRtiNominal_t previous{}, nominal{};
+    previous.valid = 1;
+    previous.horizon = PREDICTION_HORIZON;
+    for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+      previous.progress[k] = 5. + k * .125;
+      if (k < PREDICTION_HORIZON)
+        previous.controls[k] = {direction * (.02f + .01f * std::sin(.3f*k)),
+            .2f + .01f * std::cos(.2f*k)};
+    }
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1];
+    ASSERT_TRUE(mpc_rti_build_nominal(&initial, 5., &previous,
+        trajectory, count, length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
+        &c, &nominal, references));
+    MpcRtiProblem_t problem{};
+    ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
+        references, PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &c, &problem));
+    for (int input : {0, 1}) {
+      for (int changed_stage : {0, 8, 20}) {
+        double x[RICCATI_MAX_NX], dx[RICCATI_MAX_NX]{};
+        std::copy_n(problem.x0, RICCATI_MAX_NX, x);
+        double derivative = 0.;
+        for (int k = 0; k < RICCATI_HORIZON; ++k) {
+          const auto &stage = problem.steps[k];
+          double u[2] = {nominal.controls[k].steering_target_rad,
+              nominal.controls[k].throttle_command};
+          double du[2]{};
+          if (k == changed_stage) du[input] = 1.;
+          for (int i = 0; i < RICCATI_MAX_NX; ++i) {
+            double gx = stage.Q_diag[i] * x[i] + stage.q[i];
+            for (int a = 0; a < 2; ++a) gx += stage.N[i][a] * u[a];
+            derivative += gx * dx[i];
+          }
+          for (int a = 0; a < 2; ++a) {
+            double gu = stage.R_diag[a] * u[a] + stage.r[a];
+            for (int i = 0; i < RICCATI_MAX_NX; ++i) gu += stage.N[i][a] * x[i];
+            derivative += gu * du[a];
+          }
+          double next[RICCATI_MAX_NX]{}, dnext[RICCATI_MAX_NX]{};
+          for (int i = 0; i < RICCATI_MAX_NX; ++i) {
+            next[i] = stage.d[i];
+            for (int j = 0; j < RICCATI_MAX_NX; ++j) {
+              next[i] += stage.A[i][j] * x[j];
+              dnext[i] += stage.A[i][j] * dx[j];
+            }
+            for (int a = 0; a < 2; ++a) {
+              next[i] += stage.B[i][a] * u[a];
+              dnext[i] += stage.B[i][a] * du[a];
+            }
+          }
+          std::copy_n(next, RICCATI_MAX_NX, x);
+          std::copy_n(dnext, RICCATI_MAX_NX, dx);
+        }
+        for (int i = 0; i < RICCATI_MAX_NX; ++i)
+          derivative += (problem.terminal_Q[i] * x[i] + problem.terminal_q[i]) * dx[i];
+        float costs[2];
+        constexpr float epsilon = .0001f;
+        // A 5e-4 throttle perturbation produced a 1--2% recursive secant/local
+        // gradient difference. Use 1e-4 for the local check; do not mistake the
+        // larger finite step for the derivative or attribute it to an unproven
+        // specific physics branch. Account for float objective resolution.
+        for (int sign = 0; sign < 2; ++sign) {
+          MpcModelControl_t controls[PREDICTION_HORIZON];
+          std::copy_n(nominal.controls, PREDICTION_HORIZON, controls);
+          float &value = input == 0 ? controls[changed_stage].steering_target_rad
+              : controls[changed_stage].throttle_command;
+          value += (sign == 0 ? -epsilon : epsilon);
+          MpcRtiNominal_t exact{};
+          int failed_stage;
+          ASSERT_EQ(mpc_rti_validate_candidate_plan(&initial, 5., controls,
+              trajectory, count, length, PREDICTION_HORIZON,
+              PREDICTION_DT_SECONDS, &config, &exact, &failed_stage), MPC_RTI_ROLLOUT_OK);
+          costs[sign] = exact.validation_objective;
+        }
+        const double finite_derivative = (costs[1] - costs[0]) / (2. * epsilon);
+        EXPECT_NEAR(derivative, finite_derivative,
+            .005 * std::max(1., std::abs(finite_derivative)))
+            << "input=" << input << " stage=" << changed_stage;
+      }
+    }
+  }
 }
 
 TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)

@@ -20,7 +20,7 @@ for variant in unprojected projected; do
   timeout --signal=TERM --kill-after=10s 780s python3 -u run_ipopt.py \
       --repo-root .. --mesh-spacing 0.20 --seed-backend native \
       --seed-file "$SEED" "${extras[@]}" \
-      --brake-zones 0 --phase1-hessian limited-memory \
+      --phase1-hessian limited-memory \
       --feasibility-iterations 500 --phase1-restarts 2 \
       --phase1-min-defect-improvement 0.00001 \
       --iterations 1 --native-correction-passes 0 --print-level 5 \
@@ -42,7 +42,7 @@ if [[ "${V240_RUN_EXACT_HESSIAN:-0}" == 1 ]]; then
   timeout --signal=TERM --kill-after=10s 780s python3 -u run_ipopt.py \
     --repo-root .. --mesh-spacing 0.20 --seed-backend native \
     --seed-file "$SEED" --no-seed-force-projection \
-    --brake-zones 0 --phase1-hessian exact \
+    --phase1-hessian exact \
     --feasibility-iterations 500 --phase1-restarts 2 \
     --iterations 1 --native-correction-passes 0 --print-level 5 \
     --skip-native --physx-binary ./native_physx_vehicle_step \

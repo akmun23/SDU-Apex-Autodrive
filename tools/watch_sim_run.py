@@ -13,6 +13,22 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Int32, String
 
 
+def lap_target_satisfied(initial_lap_count: int | None,
+                         current_lap_count: int | None,
+                         target_laps: int,
+                         odometry_distance_m: float,
+                         minimum_lap_distance_m: float) -> bool:
+    if (initial_lap_count is None or current_lap_count is None or
+            current_lap_count < initial_lap_count + target_laps):
+        return False
+    return odometry_distance_m >= target_laps * minimum_lap_distance_m
+
+
+def stall_watch_armed(watch_mpc_run: bool, mpc_active: bool) -> bool:
+    """Gate motion-stall aborts on MPC startup, not localization warm-up."""
+    return not watch_mpc_run or mpc_active
+
+
 class SimRunWatcher(Node):
     def __init__(self, watch_mpc_horizon_test: bool = False,
                  watch_mpc_run: bool = False,
@@ -23,10 +39,13 @@ class SimRunWatcher(Node):
         self.initial_lap_count: int | None = None
         self.collision_count: int | None = None
         self.progress_position: tuple[float, float] | None = None
+        self.last_odometry_position: tuple[float, float] | None = None
+        self.total_odometry_distance_m = 0.0
         self.last_progress_time: float | None = None
         self.mpc_horizon_event: str | None = None
         self.mpc_horizon_terminal_observed = False
         self.mpc_fault_reason: str | None = None
+        self.mpc_active = False
         self.csv_command_event: str | None = None
         self.create_subscription(
             Int32,
@@ -76,6 +95,14 @@ class SimRunWatcher(Node):
     def _odom_callback(self, message: Odometry) -> None:
         position = message.pose.pose.position
         current = (float(position.x), float(position.y))
+        if self.last_odometry_position is not None:
+            step = ((current[0] - self.last_odometry_position[0]) ** 2 +
+                    (current[1] - self.last_odometry_position[1]) ** 2) ** 0.5
+            # Ignore impossible discontinuities rather than letting one bad
+            # localization jump satisfy a multi-lap distance guard.
+            if step <= 1.0:
+                self.total_odometry_distance_m += step
+        self.last_odometry_position = current
         if self.progress_position is None:
             self.progress_position = current
             self.last_progress_time = time.monotonic()
@@ -108,16 +135,29 @@ class SimRunWatcher(Node):
             return
         status = diagnostic.get("status")
         if status in ("waiting_for_localization", "waiting_for_plant_state",
-                      "waiting_for_actuator", "waiting_for_solver_budget"):
+                      "waiting_for_actuator", "waiting_for_solver_budget",
+                      "state_stale_wait"):
             return
         if status and status not in (
                 "accepted_optimal", "accepted_feasible",
                 "accepted_line_search",
-                "accepted_candidate_prefix", "accepted_prior_plan"):
+                "accepted_candidate_prefix", "accepted_prior_plan",
+                "deferred_deadline_recovery"):
             reason = diagnostic.get("nonlinear_failure_reason", "none")
             stage = diagnostic.get("nonlinear_failure_stage", -1)
             self.mpc_fault_reason = f"{status}; nonlinear={reason}@{stage}"
             print(f"MPC_CYCLE_REJECTED: {message.data}", flush=True)
+            return
+        if status in (
+                "accepted_optimal", "accepted_feasible",
+                "accepted_line_search", "accepted_candidate_prefix",
+                "accepted_prior_plan", "deferred_deadline_recovery"):
+            # Localization/plant warm-up may legitimately hold the car still.
+            # Start the motion-stall timer when the controller first produces
+            # a usable cycle, not when the first stationary odometry arrives.
+            if not self.mpc_active:
+                self.last_progress_time = time.monotonic()
+            self.mpc_active = True
 
     def _csv_command_callback(self, message: String) -> None:
         try:
@@ -146,6 +186,10 @@ def main() -> int:
     parser.add_argument("--post-target-lap-guard-s", type=float, default=0.5,
                         help="keep collision monitoring active after the target lap")
     parser.add_argument(
+        "--minimum-lap-distance-m", type=float, default=0.0,
+        help="require this much accumulated odometry travel per counted lap; "
+             "prevents stale/erroneous lap counters from ending a run early")
+    parser.add_argument(
         "--stop-simulator-container",
         metavar="NAME",
         help="send SIGINT to this simulator Docker container when the watch ends",
@@ -166,7 +210,8 @@ def main() -> int:
              (args.target_lap < 1 or args.collision_only or args.mpc_horizon_test or
               args.csv_command_test)) or
             args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0 or
-            args.post_target_lap_guard_s < 0.0):
+            args.post_target_lap_guard_s < 0.0 or
+            args.minimum_lap_distance_m < 0.0):
         parser.error(
             "set a positive target-lap or collision-only, and a positive timeout-s")
 
@@ -183,6 +228,7 @@ def main() -> int:
           + " subscriptions created", flush=True)
     deadline = time.monotonic() + args.timeout_s
     target_lap_reached_at: float | None = None
+    lap_counter_ahead_of_distance = False
     result = 2
     try:
         while time.monotonic() < deadline:
@@ -233,26 +279,51 @@ def main() -> int:
                 result = 0
                 break
             if (not args.collision_only and
+                    stall_watch_armed(args.mpc_run, watcher.mpc_active) and
                     watcher.last_progress_time is not None and
                     time.monotonic() - watcher.last_progress_time >=
                     args.stall_timeout_s):
                 print("SCREEN_ABORT: no odometry progress", flush=True)
                 result = 4
                 break
-            if (args.target_lap > 0 and watcher.lap_count is not None and
-                    watcher.initial_lap_count is not None and
-                    watcher.lap_count >=
-                    watcher.initial_lap_count + args.target_lap):
-                if target_lap_reached_at is None:
+            lap_count_reached = (
+                args.target_lap > 0 and watcher.lap_count is not None and
+                watcher.initial_lap_count is not None and
+                watcher.lap_count >=
+                watcher.initial_lap_count + args.target_lap)
+            if lap_count_reached:
+                distance_required = (
+                    args.target_lap * args.minimum_lap_distance_m)
+                target_satisfied = lap_target_satisfied(
+                    watcher.initial_lap_count, watcher.lap_count,
+                    args.target_lap, watcher.total_odometry_distance_m,
+                    args.minimum_lap_distance_m)
+                if not target_satisfied:
+                    if not lap_counter_ahead_of_distance:
+                        print(
+                            "LAP_COUNT_AHEAD_OF_DISTANCE: "
+                            f"counter={watcher.lap_count}/"
+                            f"{watcher.initial_lap_count + args.target_lap} "
+                            f"travel={watcher.total_odometry_distance_m:.2f}m "
+                            f"required={distance_required:.2f}m; continuing",
+                            flush=True)
+                    lap_counter_ahead_of_distance = True
+                    target_lap_reached_at = None
+                elif target_lap_reached_at is None:
                     target_lap_reached_at = time.monotonic()
+                    lap_counter_ahead_of_distance = False
                     print(
                         f"target laps completed: {args.target_lap}; "
+                        f"odometry_travel={watcher.total_odometry_distance_m:.2f}m; "
                         "retaining collision watch", flush=True)
                 elif (time.monotonic() - target_lap_reached_at >=
                       args.post_target_lap_guard_s):
                     print("SCREEN_COMPLETE: lap limit", flush=True)
                     result = 0
                     break
+            elif not lap_count_reached:
+                target_lap_reached_at = None
+                lap_counter_ahead_of_distance = False
         else:
             print("SCREEN_ABORT: timeout", flush=True)
     finally:

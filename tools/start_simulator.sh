@@ -105,6 +105,15 @@ if [[ -n "${SDU_APEX_SIM_TRACE_DIR:-}" ]]; then
   echo "Development fixed-step trace: ${trace_directory}/unity_fixedstep.csv (max ${trace_max_steps} steps)"
 fi
 
+simulator_cpuset_args=()
+if [[ -n "${SDU_APEX_SIM_CPUSET_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_SIM_CPUSET_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo "SDU_APEX_SIM_CPUSET_CPUS must be a comma-separated list/range such as 12-15." >&2
+    exit 2
+  fi
+  simulator_cpuset_args=(--cpuset-cpus "${SDU_APEX_SIM_CPUSET_CPUS}")
+fi
+
 if ! docker image inspect "${image}" >/dev/null 2>&1; then
   docker pull "${image}"
 fi
@@ -116,6 +125,7 @@ fi
 echo "Starting ${track} simulator image in ${mode} mode: ${image}"
 echo "Unity log destination: ${simulator_log_file}"
 exec docker run --rm --name "${container}" "${tty_args[@]}" \
+  "${simulator_cpuset_args[@]}" \
   --log-opt max-size=10m --log-opt max-file=3 \
   --ulimit core=0 \
   --network=host --ipc=host --privileged --gpus all \

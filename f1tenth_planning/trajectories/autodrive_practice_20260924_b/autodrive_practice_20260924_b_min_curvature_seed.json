@@ -1,0 +1,64 @@
+{
+  "status": "minimum_curvature_geometry_seed_generated",
+  "map": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/maps/autodrive_practice_20260924_b.pgm",
+  "source_geometry": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv",
+  "output_csv": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_min_curvature_seed.csv",
+  "objective": "exact discrete integral squared curvature over a periodic Fourier normal-offset path",
+  "role": "IPOPT initial geometry; IPOPT remains free to change path and optimize vehicle dynamics/speed",
+  "starting_geometry": {
+    "method": "road midpoint estimated from verified per-station left/right map widths",
+    "input_geometry_shifted_to_midpoint_max_m": 0.7999886711000774,
+    "input_geometry_shifted_to_midpoint_rms_m": 0.2808119239280942,
+    "midline_offset_smoothing_sigma_m": 0.24
+  },
+  "map_footprint_check": {
+    "extra_wall_margin_m": 0.05,
+    "minimum_vehicle_perimeter_clearance_after_margin_m": 0.03708483931496423,
+    "minimum_centerline_distance_to_occupied_cells_m": 0.24829975131083673,
+    "clearance_test_spacing_m": 0.025,
+    "pass": true
+  },
+  "mesh": {
+    "nodes": 573,
+    "spacing_m": 0.059977114004102335,
+    "length_m": 34.36688632435064,
+    "source_length_m": 31.202801723160157
+  },
+  "offset_solve": {
+    "method": "CasADi/IPOPT exact discrete curvature energy",
+    "status": "Solve_Succeeded",
+    "iterations": 19,
+    "objective": 3.530500327024287,
+    "fourier_harmonics": 16,
+    "fraction_within_2_5cm_of_corridor_bound": 0.22456813819577734,
+    "largest_offset_m": 0.7835460033471083,
+    "safe_offset_min_m": -0.9750000000000054,
+    "safe_offset_max_m": 0.9999999999999876,
+    "exact_geometry_safety_scale": 1.0
+  },
+  "start_pose": {
+    "fixed_world_pose": false,
+    "periodic_csv_seam_is_only_an_index_origin": true
+  },
+  "curvature": {
+    "input_raceline_rms_abs_per_m": 0.393294941657319,
+    "road_midpoint_rms_abs_per_m": 0.38843738327223915,
+    "seed_rms_abs_per_m": 0.3207851025368102,
+    "input_raceline_peak_abs_per_m": 1.0001094690305132,
+    "road_midpoint_peak_abs_per_m": 0.9792345843111241,
+    "seed_peak_abs_per_m": 0.6630789244951311,
+    "rms_reduction_from_road_midpoint_percent": 17.41652159365268,
+    "rms_reduction_from_input_raceline_percent": 18.436504373780426
+  },
+  "speed_seed": {
+    "min_mps": 2.722744,
+    "mean_mps": 5.148000384620954,
+    "max_mps": 8.05357511601549,
+    "used_as_constraint": false
+  },
+  "corridor_widths": {
+    "left_min_m": 0.22,
+    "right_min_m": 0.38,
+    "source": "practice-map occupancy ray scan at 1 cm increments"
+  }
+}

@@ -22,6 +22,20 @@ class Tire:
         return sum(fxw), sum(fyw), 0, tuple(fxw), tuple(fyw), tuple(sx), tuple(sy)
 
 
+class SourceShapeTire(Tire):
+    @staticmethod
+    def tire_forces_casadi(model, u, v, r, steer, omegas, loads):
+        fx, fy, _, fxw, fyw, sx, sy = Tire.tire_forces_casadi(
+            model, u, v, r, steer, omegas, loads)
+        return fx, fy, 0.0, 0.0, 0.0, 0.0, fxw, fyw, sx, sy
+
+
+def flat_source_suspension_loads(model, height, height_rate, roll,
+                                 roll_rate, pitch, pitch_rate, yaw_rate):
+    return Tire.suspension_loads_numpy(
+        model, height, height_rate, roll, 0.0, pitch, 0.0)
+
+
 class BatchIncompatibleTire(Tire):
     @staticmethod
     def tire_forces_casadi(model, u, v, r, steer, omegas, loads):
@@ -49,27 +63,50 @@ def model():
     return SimpleNamespace(mass_kg=3.47,drag_per_s=.12)
 
 
+def flat_source_acceleration(model, fx, fy, u, v, yaw_rate,
+                             body_height_rate, roll, roll_rate,
+                             pitch, pitch_rate):
+    damping = -np.log1p(-model.drag_per_s * 0.001) / 0.001
+    return (fx/model.mass_kg - damping*u + yaw_rate*v,
+            fy/model.mass_kg - damping*v - yaw_rate*u)
+
+
 def test_projected_scalar_tire_force_matches_every_node_exactly():
     s=seed()
-    result, audit=project_algebraics(s,model(),Tire)
+    result, audit=project_algebraics(
+        s,model(),Tire,suspension_loads_fn=flat_source_suspension_loads,
+        body_acceleration_fn=flat_source_acceleration)
     fx,fy,*_=evaluate_scalar_tire_forces(model(),Tire,result,result['normal_load_n'])
-    np.testing.assert_allclose(result['ax_mps2'],fx/3.47-.12*result['u_mps'],atol=1e-12)
-    np.testing.assert_allclose(result['ay_mps2'],fy/3.47-.12*result['v_mps'],atol=1e-12)
+    expected = np.asarray([
+        flat_source_acceleration(model(), fx[k], fy[k], result['u_mps'][k],
+            result['v_mps'][k], result['yaw_rate_radps'][k], 0., 0., 0., 0., 0.)
+        for k in range(len(fx))])
+    np.testing.assert_allclose(result['ax_mps2'],expected[:,0],atol=1e-12)
+    np.testing.assert_allclose(result['ay_mps2'],expected[:,1],atol=1e-12)
     assert audit['scalar_vs_vectorized_tire_force_max_error_n'] < 1e-12
     assert audit['scalar_force_balance_residual_after_projection_mps2'] < 1e-12
     np.testing.assert_array_equal(result['wheel_omega_radps'],s['wheel_omega_radps'])
 
 
 def test_scalar_vector_disagreement_detected_instead_of_labeled_consistent():
-    output, audit = project_algebraics(seed(),model(),BatchIncompatibleTire)
+    output, audit = project_algebraics(
+        seed(),model(),BatchIncompatibleTire,
+        suspension_loads_fn=flat_source_suspension_loads,
+        body_acceleration_fn=flat_source_acceleration)
     assert not audit['batched_tire_force_matches_scalar_ocp']
     assert audit['scalar_vs_vectorized_tire_force_max_error_n'] == pytest.approx(1.)
     f_x,_,*_=evaluate_scalar_tire_forces(model(),BatchIncompatibleTire,output,output['normal_load_n'])
-    np.testing.assert_allclose(output['ax_mps2'],f_x/3.47-.12*output['u_mps'],atol=1e-12)
+    expected = np.asarray([
+        flat_source_acceleration(model(), f_x[k], 0., output['u_mps'][k],
+            output['v_mps'][k], output['yaw_rate_radps'][k], 0., 0., 0., 0., 0.)[0]
+        for k in range(len(f_x))])
+    np.testing.assert_allclose(output['ax_mps2'],expected,atol=1e-12)
 
 
 def test_forensic_report_residuals_are_truly_computed_from_scalar_model():
-    summary, rows=analyze_seed(seed(),model(),Tire)
+    summary, rows=analyze_seed(
+        seed(),model(),Tire,flat_source_suspension_loads,
+        flat_source_acceleration)
     assert summary['nodes']==len(rows)==8
     assert summary['projected_force_balance_max_residual_mps2'] < 1e-12
     assert summary['unprojected_lateral_force_balance_max_abs_mps2'] > .01
@@ -80,10 +117,22 @@ def test_forensic_report_residuals_are_truly_computed_from_scalar_model():
     assert summary['symbolic_load_model_max_scaled_residual'] > 0
 
 
+def test_forensic_report_decodes_active_ten_value_tire_callback():
+    summary, rows = analyze_seed(
+        seed(), model(), SourceShapeTire, flat_source_suspension_loads,
+        flat_source_acceleration)
+    assert summary['nodes'] == len(rows) == 8
+    assert summary['projected_force_balance_max_residual_mps2'] < 1e-12
+    assert np.isfinite([row['total_fy_projected_load_n'] for row in rows]).all()
+    assert 'wheel_fl_slip_lat' in rows[0]
+
+
 def test_physical_per_node_input_consistency_without_projection():
     s=seed()
     # Report must preserve the seed's original loads for unprojected balance.
-    summary, rows=analyze_seed(s,model(),Tire)
+    summary, rows=analyze_seed(s,model(),Tire,
+                               flat_source_suspension_loads,
+                               flat_source_acceleration)
     assert rows[0]['wheel_fl_native_fz_n']==pytest.approx(9.)
     assert rows[0]['wheel_fl_symbolic_fz_n']==pytest.approx(8.)
     for key in ('normal_load_n','ax_mps2','ay_mps2'):

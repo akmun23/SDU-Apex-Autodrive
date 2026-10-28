@@ -16,12 +16,14 @@ target_lap="$4"
 timeout_s="${5:-120}"
 stall_timeout_s="${SDU_APEX_WATCH_STALL_TIMEOUT_S:-20}"
 post_target_lap_guard_s="${SDU_APEX_WATCH_POST_TARGET_GUARD_S:-0.5}"
+minimum_lap_distance_m="${SDU_APEX_WATCH_MIN_DISTANCE_PER_LAP_M:-0}"
 simulator_stop_timeout_s="${SDU_APEX_WATCH_SIM_STOP_TIMEOUT_S:-2}"
 watcher_container="${SDU_APEX_WATCHER_CONTAINER:-${controller_container}}"
 if [[ ! "${timeout_s}" =~ ^[1-9][0-9]*$ ||
       ! "${stall_timeout_s}" =~ ^[1-9][0-9]*$ ||
       ! "${simulator_stop_timeout_s}" =~ ^[0-9]+$ ||
       ! "${post_target_lap_guard_s}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ||
+      ! "${minimum_lap_distance_m}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ||
       ("${target_lap}" != "collision" && "${target_lap}" != "mpc" &&
        "${target_lap}" != "mpc-horizon" &&
        "${target_lap}" != "csv-command" &&
@@ -95,8 +97,8 @@ elif [[ "${target_lap}" == "mpc-horizon" ]]; then
 elif [[ "${target_lap}" =~ ^mpc-lap-([1-9][0-9]*)$ ]]; then
   mpc_target_lap="${BASH_REMATCH[1]}"
   docker exec "${watcher_container}" /bin/bash -lc \
-    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-run --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4"' \
-    _ "${mpc_target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}"
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-run --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4" --minimum-lap-distance-m "$5"' \
+    _ "${mpc_target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}" "${minimum_lap_distance_m}"
 elif [[ "${target_lap}" == "csv-command" ]]; then
   docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --csv-command-test --timeout-s "$1" --stall-timeout-s "$2"' \
@@ -108,8 +110,8 @@ elif [[ "${target_lap}" =~ ^csv-follow-([1-9][0-9]*)$ ]]; then
     _ "${csv_target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}"
 else
   docker exec "${watcher_container}" /bin/bash -lc \
-    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4"' \
-    _ "${target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}"
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4" --minimum-lap-distance-m "$5"' \
+    _ "${target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}" "${minimum_lap_distance_m}"
 fi
 watch_status=$?
 set -e

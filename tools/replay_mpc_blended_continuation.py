@@ -27,7 +27,7 @@ REPLAY_ARGUMENTS = [
     "0.02", "independent", "cold", "8", "100", "0.25", "1", "1",
     "0.10", "0.10", "0.05", "0.05", "7", "2000", "10", "1", "0",
     "1", "4000", "1500", "7.5", "60", "25", "5", "7.8125", "3",
-    "5", "0.1", "2000", "10",
+    "5", "0.1", "2000", "100",
 ]
 REPLAY_LINE_SEARCH_ARGUMENT_INDEX = 26
 
@@ -88,7 +88,7 @@ def load_feasible_blends(
             if len(controls) != 30 or any(
                     len(control) != 2 or
                     not (-0.5235987756 <= float(control[0]) <= 0.5235987756) or
-                    not (0.01 - 1.0e-7 <= float(control[1]) <= 1.0 + 1.0e-7)
+                    not (0.001 - 1.0e-7 <= float(control[1]) <= 1.0 + 1.0e-7)
                     for control in controls):
                 raise ValueError("source-valid blend has invalid controls")
             candidate = {

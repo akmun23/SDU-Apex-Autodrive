@@ -19,6 +19,12 @@ class FakeWheel:
         return fx, fy, None, None, None, None, None
 
 
+def flat_source_suspension_loads(model, height, height_rate, roll,
+                                 roll_rate, pitch, pitch_rate, yaw_rate):
+    return FakeWheel.suspension_loads_numpy(
+        model, height, height_rate, roll, 0.0, pitch, 0.0)
+
+
 def seed(n=8):
     return dict(
         ey_m=np.zeros(n),epsi_rad=np.zeros(n),
@@ -31,31 +37,55 @@ def seed(n=8):
         roll_rate_radps=np.zeros(n),pitch_rad=np.zeros(n),pitch_rate_radps=np.zeros(n))
 
 
+def flat_source_acceleration(model, fx, fy, u, v, yaw_rate,
+                             body_height_rate, roll, roll_rate,
+                             pitch, pitch_rate):
+    damping = -np.log1p(-model.drag_per_s * 0.001) / 0.001
+    return (fx/model.mass_kg - damping*u + yaw_rate*v,
+            fy/model.mass_kg - damping*v - yaw_rate*u)
+
+
 def test_algebraic_projection_is_exact_and_preserves_measured_pose_wheel_motion():
     x=seed();original={k:v.copy() for k,v in x.items()}
     model=SimpleNamespace(mass_kg=3.47,drag_per_s=.273)
-    out,audit=project_algebraics(x,model,FakeWheel)
-    expected_ax=(2*2.2+.1*40)/3.47-.273*2.2
-    expected_ay=(3*.8-2*(-.2)+.15)/3.47-.273*(-.2)
+    out,audit=project_algebraics(
+        x,model,FakeWheel,
+        suspension_loads_fn=flat_source_suspension_loads,
+        body_acceleration_fn=flat_source_acceleration)
+    damping = -np.log1p(-.273 * .001) / .001
+    expected_ax=(2*2.2+.1*40)/3.47-damping*2.2+.8*(-.2)
+    expected_ay=(3*.8-2*(-.2)+.15)/3.47-damping*(-.2)-.8*2.2
     np.testing.assert_allclose(out['ax_mps2'],expected_ax,atol=1e-12)
     np.testing.assert_allclose(out['ay_mps2'],expected_ay,atol=1e-12)
     for k in ('ey_m','epsi_rad','u_mps','v_mps','yaw_rate_radps','wheel_omega_radps','steering_rad','throttle_norm'):
         np.testing.assert_array_equal(out[k],original[k])
     np.testing.assert_array_equal(x['ax_mps2'],original['ax_mps2'])
     assert audit['native_to_symbolic_load_max_abs_n'] > .4
-    assert audit['forced_full_brake_nodes_unseen_in_native']==0
+    assert not any('brake' in name.lower() or 'zero_throttle' in name.lower()
+                   for name in audit)
     assert audit['spatial_collocation_or_wheel_update_are_not_reconciled']
 
 
-def test_full_brake_seed_mode_cannot_claim_measured_consistency():
-    x=seed();mask=np.zeros(8,dtype=bool);mask[2:4]=True
-    out,audit=project_algebraics(x,SimpleNamespace(mass_kg=3.47,drag_per_s=.273),FakeWheel,brake_mask=mask)
-    assert audit['forced_full_brake_nodes_unseen_in_native']==2
-    assert audit['native_brake_nodes']==0
-    assert audit['brake_locked_wheel_rpm_delta_max_radps']==40.
-    assert (out['wheel_omega_radps'][:,mask]==0).all()
-    assert (out['throttle_norm'][mask]==0).all()
-    assert (x['wheel_omega_radps'][:,mask]==40).all()
+def test_drive_seed_throttle_is_projected_to_runtime_mpc_envelope():
+    x = seed()
+    x['throttle_norm'][0] = 0.0
+    x['throttle_norm'][1] = 0.005
+    out, audit = project_algebraics(
+        x, SimpleNamespace(mass_kg=3.47, drag_per_s=.273), FakeWheel,
+        suspension_loads_fn=flat_source_suspension_loads,
+        body_acceleration_fn=flat_source_acceleration,
+        minimum_drive_throttle=0.01)
+    assert out['throttle_norm'][0] == pytest.approx(0.01)
+    assert out['throttle_norm'][1] == pytest.approx(0.01)
+    assert audit['optimizer_minimum_drive_throttle'] == pytest.approx(0.01)
+    assert audit['native_drive_throttle_values_clamped'] == 2
+
+
+def test_projection_has_no_brake_mode_api():
+    import inspect
+    assert 'brake_mask' not in inspect.signature(project_algebraics).parameters
+    assert not any('brake' in name.lower() or 'zero_throttle' in name.lower()
+                   for name in project_algebraics.__code__.co_names)
 
 
 def test_native_npz_reuse_validates_content(tmp_path):
@@ -67,6 +97,55 @@ def test_native_npz_reuse_validates_content(tmp_path):
     bad=seed();bad['yaw_rate_radps'][4]=float('nan')
     with pytest.raises(ValueError,match='finite'):
         validate_native_seed(bad,8)
+
+
+def test_legacy_seed_acceleration_is_converted_to_active_ocp_derivatives(tmp_path):
+    source = seed(8)
+    source['u_mps'][:] = 2.0
+    source['v_mps'][:] = 0.25
+    source['yaw_rate_radps'][:] = 0.6
+    expected_ax = np.full(8, 0.3)
+    expected_ay = np.full(8, -0.4)
+    source['ax_mps2'][:] = expected_ax - source['yaw_rate_radps']*source['v_mps']
+    source['ay_mps2'][:] = expected_ay + source['yaw_rate_radps']*source['u_mps']
+    path = tmp_path/'legacy_acceleration_seed.npz'
+    np.savez_compressed(path, **source)
+    loaded = load_native_seed(path, 8)
+    np.testing.assert_allclose(loaded['ax_mps2'], expected_ax, atol=1e-12)
+    np.testing.assert_allclose(loaded['ay_mps2'], expected_ay, atol=1e-12)
+
+
+def test_marked_derivative_seed_is_not_converted_twice(tmp_path):
+    source = seed(8)
+    source['ax_mps2'][:] = 0.3
+    source['ay_mps2'][:] = -0.4
+    path = tmp_path/'marked_acceleration_seed.npz'
+    np.savez_compressed(path, **source,
+                        acceleration_convention=np.asarray(
+                            'body_velocity_derivative_v1'))
+    loaded = load_native_seed(path, 8)
+    np.testing.assert_allclose(loaded['ax_mps2'], 0.3, atol=1e-12)
+    np.testing.assert_allclose(loaded['ay_mps2'], -0.4, atol=1e-12)
+
+
+def test_native_seed_mesh_resample_requires_same_verified_lap_length(tmp_path):
+    source = seed(8)
+    source['u_mps'] = 2.2 + .2*np.sin(2*np.pi*np.arange(8)/8)
+    source['wheel_omega_radps'] = np.tile(source['u_mps'], (4, 1))*10
+    path = tmp_path/'seed_resample.npz'
+    np.savez_compressed(path, **source)
+    resampled = load_native_seed(path, 16, source_length_m=28.41,
+                                 target_length_m=28.41)
+    assert resampled['u_mps'].shape == (16,)
+    assert resampled['wheel_omega_radps'].shape == (4, 16)
+    np.testing.assert_allclose(resampled['u_mps'][::2], source['u_mps'], atol=1e-12)
+    assert resampled['u_mps'][1] == pytest.approx(
+        .5*(source['u_mps'][0]+source['u_mps'][1]))
+    with pytest.raises(ValueError, match='different lap lengths'):
+        load_native_seed(path, 16, source_length_m=28.41,
+                         target_length_m=28.40)
+    with pytest.raises(ValueError, match='matching track lengths'):
+        load_native_seed(path, 16)
 
 
 def test_existing_v230_solver_cache_is_upgradeable(tmp_path):

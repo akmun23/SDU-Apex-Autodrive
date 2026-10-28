@@ -1853,12 +1853,6 @@ double mpc_rti_monotonic_time_us(void)
     return monotonic_microseconds();
 }
 
-/* A recent practice capture measured exact candidate rollout at 3.797 ms,
- * nonlinear acceptance at 0.054 ms, and 0.484 ms from node-solve return to
- * the callback publication gate. Reserve 5 ms for that observed tail plus
- * bookkeeping. A 6 ms reserve previously deferred the first cold startup
- * cycle, so 5 ms is the evidence-based compromise; the external 20 ms gate
- * remains authoritative and this reserve is not a timing guarantee. */
 /* The production cycle still has an absolute 20 ms publication deadline.
  * Reserve 3 ms for exact nonlinear validation, retained-plan checks, and
  * command publication. This margin is retained until a paired replay/live
@@ -1871,7 +1865,7 @@ enum { MPC_RTI_LINE_SEARCH_TRIAL_RESERVE_US = 3500 };
 /* Refinement must reserve enough for one exact nonlinear backtrack in
  * addition to the ordinary post-solve/publication reserve. Without this,
  * a time-limited second QP can consume its budget and reach line search with
- * less than its 7 ms one-trial requirement. */
+ * less than the one-trial completion reserve. */
 enum {
     MPC_RTI_REFINEMENT_SOLVE_RESERVE_US =
         MPC_RTI_POST_SOLVE_RESERVE_US +

@@ -90,6 +90,7 @@ exec docker run --rm --name "${container}" \
     fi
     if [[ "${ROSBAG_PROFILE}" == "mpc_performance" ]]; then
       exec ros2 bag record --max-cache-size 10485760 -o "${ROSBAG_OUTPUT}" \
+      /autodrive/roboracer_1/lidar \
       /autodrive/roboracer_1/imu \
       /autodrive/roboracer_1/left_encoder \
       /autodrive/roboracer_1/right_encoder \

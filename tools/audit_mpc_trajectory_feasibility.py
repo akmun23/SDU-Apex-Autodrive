@@ -4,8 +4,9 @@
 The static part follows the production trajectory's periodic, piecewise-linear
 arc-length interpolation.  The dynamic part replays full-horizon plans already
 captured by the MPC diagnostic stream through the source-plant C ABI, including
-the two queued command slots, 25 ms command stages, 1 ms plant substeps, and
-Frenet tracking update used by production.  It writes a row-wise witness so
+the optimizer's command-epoch input semantics, 25 ms command stages, 1 ms
+plant substeps, and Frenet tracking update used by production. It writes a
+row-wise witness so
 the replay is reproducible.
 
 This is a diagnostic, not a global infeasibility proof: a failed local MPC
@@ -43,6 +44,31 @@ VEHICLE_WIDTH_M = vehicle_footprint.WIDTH_M
 REAR_AXLE_TO_FRONT_M = vehicle_footprint.BODY_X[1]
 REAR_OVERHANG_M = -vehicle_footprint.BODY_X[0]
 COM_FORWARD_FROM_REAR_M = 0.15532
+MIN_POSITIVE_THROTTLE = 0.001
+
+
+def read_mpc_command_delay_steps() -> int:
+    """Read the production optimizer's compile-time command-delay setting."""
+    header = (Path(__file__).resolve().parents[1] /
+              "f1tenth_mpc/include/mpc_types.h")
+    match = re.search(
+        r"^#define\s+MPC_COMMAND_DELAY_STEPS\s+(\d+)\b",
+        header.read_text(), re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"cannot read MPC_COMMAND_DELAY_STEPS from {header}")
+    return int(match.group(1))
+
+
+MPC_COMMAND_DELAY_STEPS = read_mpc_command_delay_steps()
+
+
+def source_rollout_command(control: list[float]) -> tuple[float, float]:
+    """Return the optimizer-stage command applied at the command epoch."""
+    if MPC_COMMAND_DELAY_STEPS != 0:
+        raise RuntimeError(
+            "source rollout audit supports only the production direct-input "
+            "horizon; update command chronology before changing the MPC delay")
+    return float(control[0]), float(control[1])
 MPC_FULL_HORIZON_STATUSES = {
     "accepted_optimal", "accepted_feasible", "accepted_line_search",
 }
@@ -544,6 +570,10 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
     if any(not isinstance(control, list) or len(control) != 2
            for control in controls):
         raise ValueError("malformed nominal control sequence")
+    if MPC_COMMAND_DELAY_STEPS != 0:
+        raise RuntimeError(
+            "source rollout audit must be updated before evaluating a "
+            "nonzero MPC_COMMAND_DELAY_STEPS")
 
     delayed_steer_1 = float(diag["state"][5])
     delayed_steer_2 = float(diag["state"][6])
@@ -562,7 +592,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
     rear_lateral_speeds: list[float] = []
     yaw_rates: list[float] = []
     actual_steering: list[float] = []
-    requested_steering: list[float] = []
+    steering_commands: list[float] = []
     steering_rate_25ms: list[float] = []
     wheel_omega: list[float] = []
     normal_loads: list[float] = []
@@ -591,7 +621,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
 
     def add_state_objective(stage: int, at_progress: float, ey: float,
                             epsi: float, speed: float, lateral_speed: float,
-                            yaw_rate: float, delayed_steering: float,
+                            yaw_rate: float, steering_command: float,
                             actual_steering: float,
                             incoming_slip_excess: list[float] | None) -> None:
         if objective_profile is None:
@@ -621,7 +651,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
             "weight_r"] * (yaw_rate - target_yaw_rate) ** 2
         objective_terms["steering_state"] += scale * objective_profile[
             "weight_steering_command"] * (
-                (delayed_steering - target_steering) ** 2 +
+                (steering_command - target_steering) ** 2 +
                 (actual_steering - target_steering) ** 2)
         if stage > 0 and incoming_slip_excess is not None:
             objective_terms["slip"] += scale * objective_profile[
@@ -635,6 +665,8 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
             float(diag["state"][6]), float(diag["state"][7]), None)
 
     for index in range(len(controls)):
+        control_steer, plan_q = source_rollout_command(controls[index])
+        control_q = plan_q if throttle_override is None else throttle_override
         reference = sample_path(points, length, progress)
         plant_input = evaluator.UnitySourcePlantInputC()
         plant_input.state[:] = state
@@ -643,8 +675,8 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
         # stores the legal float32 representation of 30 degrees, which is a
         # few ulps above the source double constant.
         plant_input.steering_target_rad = max(
-            -STEERING_LIMIT_RAD, min(STEERING_LIMIT_RAD, delayed_steer_2))
-        plant_input.throttle_normalized = delayed_q_2
+            -STEERING_LIMIT_RAD, min(STEERING_LIMIT_RAD, control_steer))
+        plant_input.throttle_normalized = control_q
         plant_input.suspension_history_initialized = suspension_initialized
         plant_output = evaluator.UnitySourcePlantOutputC()
         if not step_function(ctypes.byref(plant_input), 0.025,
@@ -672,9 +704,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
         u_interval_accels.append((u - float(state[0])) / 0.025)
         r = output_state[2]
         v_rear = output_state[1] - r * COM_FORWARD_FROM_REAR_M
-        q = delayed_q_2
-        control_steer, plan_q = map(float, controls[index])
-        control_q = plan_q if throttle_override is None else throttle_override
+        q = control_q
         if objective_profile is not None:
             steering_delta = control_steer - previous_objective_steering
             throttle_delta = control_q - previous_objective_throttle
@@ -736,7 +766,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
         rear_lateral_speeds.append(v_rear)
         yaw_rates.append(r)
         actual_steering.append(float(output_state[13]))
-        requested_steering.append(delayed_steer_2)
+        steering_commands.append(control_steer)
         if previous_actual_steering is not None:
             steering_rate_25ms.append(
                 (float(output_state[13]) - previous_actual_steering) / 0.025)
@@ -785,7 +815,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
              f"fixed_q_{throttle_override:.2f}"),
             index + 1, progress, next_e_y, next_e_psi, u, v_rear, r,
             output_state[13], control_steer, control_q,
-            delayed_steer_2, q, after_ref["speed"], speed_error,
+            control_steer, control_q, q, after_ref["speed"], speed_error,
             after_ref["curvature"], after_ref["curvature"] * u,
             u * u * after_ref["curvature"],
             after_ref["acceleration"], u_interval_accels[-1],
@@ -851,8 +881,8 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
         "stage_trace": stage_trace if collect_stage_trace else None,
         "replay_failure_stage": failed_step,
         "first_corridor_violation_stage": first_corridor_violation_stage,
-        "all_tested_throttle_commands_at_least_0p01":
-            min(controls_q) >= 0.01 - 1.0e-7,
+        "all_tested_throttle_commands_at_least_0p001":
+            min(controls_q) >= MIN_POSITIVE_THROTTLE - 1.0e-7,
         "tested_throttle_min": min(controls_q),
         "tested_throttle_max": max(controls_q),
         "commanded_q_during_replay_min": min(throttle_values)
@@ -873,8 +903,8 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
             if yaw_rates else None,
         "max_abs_actual_steering_rad": max(map(abs, actual_steering))
             if actual_steering else None,
-        "max_abs_queued_steering_target_rad": max(map(abs, requested_steering))
-            if requested_steering else None,
+        "max_abs_command_steering_rad": max(map(abs, steering_commands))
+            if steering_commands else None,
         "max_abs_actual_steering_rate_25ms_radps":
             max(map(abs, steering_rate_25ms)) if steering_rate_25ms else None,
         "max_abs_wheel_omega_radps": max(map(abs, wheel_omega))
@@ -1015,7 +1045,7 @@ def compare_candidate_and_prior_plan(
                 math.isfinite(float(action[0])) and
                 abs(float(action[0])) <= STEERING_LIMIT_RAD + 1.0e-7 and
                 math.isfinite(float(action[1])) and
-                0.01 - 1.0e-7 <= float(action[1]) <= 1.0 + 1.0e-7
+                MIN_POSITIVE_THROTTLE - 1.0e-7 <= float(action[1]) <= 1.0 + 1.0e-7
                 for action in blended_controls)
             blended_diag = dict(diag)
             blended_diag["candidate_controls"] = blended_controls
@@ -1118,7 +1148,7 @@ def compare_candidate_and_prior_plan(
                 candidate_prefix_result["first_corridor_violation_stage"] is None and
                 candidate_prefix_result.get("replay_failure_stage") is None and
                 min(float(action[1]) for action in candidate_controls[:3]) >=
-                    0.01 - 1.0e-7 and
+                    MIN_POSITIVE_THROTTLE - 1.0e-7 and
                 max(float(action[1]) for action in candidate_controls[:3]) <=
                     1.0 + 1.0e-7 and
                 max(abs(float(action[0])) for action in candidate_controls[:3]) <=
@@ -1129,7 +1159,7 @@ def compare_candidate_and_prior_plan(
                 prior_prefix_result["first_corridor_violation_stage"] is None and
                 prior_prefix_result.get("replay_failure_stage") is None and
                 min(float(action[1]) for action in prior_suffix[:3]) >=
-                    0.01 - 1.0e-7 and
+                    MIN_POSITIVE_THROTTLE - 1.0e-7 and
                 max(float(action[1]) for action in prior_suffix[:3]) <=
                     1.0 + 1.0e-7 and
                 max(abs(float(action[0])) for action in prior_suffix[:3]) <=
@@ -1231,8 +1261,9 @@ def select_nearest_regime(diagnostics: list[dict[str, Any]], count: int,
 
 def validate_fixed_throttle_grid(values: list[float]) -> None:
     """Keep offline drive-mode probes inside the production MPC command set."""
-    if any(not math.isfinite(q) or q < 0.01 or q > 1.0 for q in values):
-        raise ValueError("fixed throttle probes must lie in [0.01, 1.0]")
+    if any(not math.isfinite(q) or q < MIN_POSITIVE_THROTTLE or q > 1.0
+           for q in values):
+        raise ValueError("fixed throttle probes must lie in [0.001, 1.0]")
 
 
 def select_last_candidate_prefix_before_terminal_failure(
@@ -1370,7 +1401,7 @@ def main() -> int:
         help="additional offline source-plant counterfactuals. Each value is "
              "held across the horizon while the captured steering sequence "
              "and in-flight command queue remain unchanged; values must be "
-             "in the ordinary MPC drive range [0.01, 1.0]. This is a local "
+             "in the ordinary MPC drive range [0.001, 1.0]. This is a local "
              "response sweep, not a feasible-policy search.",
     )
     parser.add_argument(
@@ -1474,8 +1505,8 @@ def main() -> int:
     witness_header = [
         "plan_source_stamp_ns", "plan_status", "scenario", "stage", "progress_m",
         "e_y_m", "e_psi_rad", "u_mps", "v_rear_mps", "r_radps",
-        "actual_steering_rad", "queued_steering_rad", "queued_throttle",
-        "planned_steering_rad", "planned_throttle", "reference_speed_mps",
+        "actual_steering_rad", "command_steering_rad", "command_throttle",
+        "source_plant_input_throttle", "reference_speed_mps",
         "speed_error_mps", "curvature_per_m", "reference_yaw_rate_radps",
         "reference_lateral_accel_mps2", "reference_acceleration_mps2",
         "source_interval_acceleration_mps2", "source_ax_mps2", "source_ay_mps2",
@@ -1499,6 +1530,13 @@ def main() -> int:
                 corridor_preview_halfwidth_m, corridor_tolerance_m)
             if terminal_prefix_replay is not None:
                 terminal_throttle_counterfactuals = {
+                    "fixed_q_0p001": _source_rollout(
+                        terminal_prefix_candidate, points, length,
+                        step_function, writer, wall_clearance_m,
+                        first_prediction_clearance_m,
+                        corridor_preview_halfwidth_m, corridor_tolerance_m,
+                        MIN_POSITIVE_THROTTLE,
+                        scenario_label="terminal_fixed_q_0.001"),
                     "fixed_q_0p01": _source_rollout(
                         terminal_prefix_candidate, points, length, step_function,
                         writer, wall_clearance_m, first_prediction_clearance_m,
@@ -1511,7 +1549,7 @@ def main() -> int:
                         1.0, scenario_label="terminal_fixed_q_1.000"),
                 }
                 for fixed_q in sorted(set(args.fixed_throttle_grid)):
-                    if fixed_q <= 0.0100001 or fixed_q >= 0.9999999:
+                    if fixed_q <= MIN_POSITIVE_THROTTLE + 1.0e-7 or fixed_q >= 0.9999999:
                         continue
                     terminal_throttle_counterfactuals[
                         f"fixed_q_{fixed_q:.3f}"] = _source_rollout(
@@ -1538,13 +1576,20 @@ def main() -> int:
             minimum = _source_rollout(
                 diag, points, length, step_function, writer, wall_clearance_m,
                 first_prediction_clearance_m, corridor_preview_halfwidth_m,
-                corridor_tolerance_m, 0.01)
+                corridor_tolerance_m, MIN_POSITIVE_THROTTLE,
+                scenario_label="captured_fixed_q_0.001")
+            fixed_q_0p01 = _source_rollout(
+                diag, points, length, step_function, writer, wall_clearance_m,
+                first_prediction_clearance_m, corridor_preview_halfwidth_m,
+                corridor_tolerance_m, 0.01,
+                scenario_label="captured_fixed_q_0.010")
             maximum = _source_rollout(
                 diag, points, length, step_function, writer, wall_clearance_m,
                 first_prediction_clearance_m, corridor_preview_halfwidth_m,
                 corridor_tolerance_m, 1.0)
             captured["throttle_counterfactuals"] = {
-                "fixed_q_0p01": minimum,
+                "fixed_q_0p001": minimum,
+                "fixed_q_0p01": fixed_q_0p01,
                 "fixed_q_1p00": maximum,
                 "interpretation": (
                     "one-factor local source-plant response with the captured "
@@ -1552,7 +1597,7 @@ def main() -> int:
                     "not an optimized feasible schedule"),
             }
             for fixed_q in sorted(set(args.fixed_throttle_grid)):
-                if fixed_q <= 0.0100001 or fixed_q >= 0.9999999:
+                if fixed_q <= MIN_POSITIVE_THROTTLE + 1.0e-7 or fixed_q >= 0.9999999:
                     continue
                 q_result = _source_rollout(
                     diag, points, length, step_function, writer,
@@ -1772,7 +1817,7 @@ def main() -> int:
             "local_failure": (
                 "failed local solve or nonlinear rollout is not a global "
                 "dynamical infeasibility proof"),
-            "throttle_envelope": "captured MPC controls must satisfy q >= 0.01",
+            "throttle_envelope": "captured MPC controls must satisfy q >= 0.001",
         },
     }
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

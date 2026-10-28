@@ -75,6 +75,7 @@ def test_generated_real_solver_site_accepts_only_source_known_wheel_call(tmp_pat
     root,meta=prepare_working_solver(recovered,target,LEGACY)
     assert root==target
     assert dest.read_text()==transform_solver_v240(realish,'limited-memory')
+    assert meta['generated_ocp_full_contact_velocity_verified'] is True
     assert 'rate' in meta['physical_dynamics_change']
     assert 'u=x[2,k]' in meta['physical_dynamics_change']
     assert original.read_text()==realish

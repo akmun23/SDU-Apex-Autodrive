@@ -18,9 +18,11 @@ from scipy.spatial import cKDTree
 from skimage.morphology import skeletonize
 
 
-# Source-car physical footprint (body/root frame); all points are on the edge.
+# Runtime trajectory / Unity GPS origin is the rear axle, 0.16 m behind
+# the Unity root. Root bounds [-0.240, +0.270] therefore become these bounds.
+# Match MPC_REAR_OVERHANG_M and MPC_REAR_AXLE_TO_FRONT_BUMPER_M.
 # Precomputed once; do not allocate sampling grids in the control loop.
-_EDGE_ALONG = np.array([-.240, .270])
+_EDGE_ALONG = np.array([-.080, .430])
 _EDGE_SIDE = np.array([-.273/2, .273/2])
 _FOOTPRINT_LOCAL = np.asarray(
     [(a,b) for a in _EDGE_ALONG for b in np.linspace(*_EDGE_SIDE,7)] +
@@ -30,6 +32,7 @@ _FOOTPRINT_UNSAMPLED_CORRECTION = .5*max(
     (_EDGE_ALONG[1]-_EDGE_ALONG[0])/14,
     (_EDGE_SIDE[1]-_EDGE_SIDE[0])/6)
 _FOOTPRINT_RADIUS = float(np.max(np.linalg.norm(_FOOTPRINT_LOCAL,axis=1)))
+DEFAULT_WALL_MARGIN_M = 0.05
 
 @dataclass
 class MapGrid:
@@ -96,8 +99,8 @@ class MapGrid:
             order=1,mode='constant',cval=0.0)
         return vals
 
-    def footprint_clearance(self, x, y, psi, *, margin=0.15):
-        # Native PhysX body/root origin, not rear axle. Body bounds from MPC anchors.
+    def footprint_clearance(self, x, y, psi, *, margin=DEFAULT_WALL_MARGIN_M):
+        # Same rear-axle origin as Unity GPS, production MPC and exported path.
         # Include densely sampled edges: do not rely on the four corners alone.
         pts=_FOOTPRINT_LOCAL
         c, s = math.cos(psi), math.sin(psi)

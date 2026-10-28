@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Practice Raceline Sketcher</title>
+<style>
+  :root { color-scheme: dark; --bg:#11151a; --panel:#1b222a; --line:#313d49; --text:#e8edf2; --muted:#a9b6c3; --accent:#38bdf8; --pink:#fb4f9b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui,sans-serif; }
+  header { padding:14px 18px 10px; border-bottom:1px solid var(--line); }
+  h1 { font-size:19px; margin:0 0 5px; }
+  .hint { color:var(--muted); }
+  main { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:12px; padding:12px; height:calc(100vh - 78px); min-height:520px; }
+  #view { width:100%; height:100%; min-height:480px; display:block; background:#252b31; border:1px solid var(--line); border-radius:8px; touch-action:none; cursor:crosshair; }
+  aside { display:flex; flex-direction:column; gap:10px; overflow:auto; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  h2 { font-size:14px; margin:0 0 9px; }
+  label { display:block; color:var(--muted); margin:7px 0 3px; font-size:12px; }
+  input[type=file] { display:block; width:100%; color:var(--muted); font-size:12px; }
+  input[type=range] { width:100%; accent-color:var(--pink); }
+  button { color:var(--text); background:#283441; border:1px solid #435466; border-radius:6px; padding:8px 10px; cursor:pointer; }
+  button:hover { background:#344656; }
+  button.primary { background:#075985; border-color:#0ea5e9; }
+  button.active { background:#831843; border-color:var(--pink); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .row { display:flex; gap:7px; }
+  .row > button { flex:1; }
+  #status { font-size:13px; white-space:pre-line; }
+  #status.good { color:#86efac; } #status.warn { color:#fcd34d; } #status.bad { color:#fda4af; }
+  .legend { display:grid; grid-template-columns:16px 1fr; gap:5px 8px; color:var(--muted); font-size:12px; }
+  .swatch { width:14px; height:4px; margin-top:6px; }
+  .small { color:var(--muted); font-size:12px; }
+  kbd { background:#303943; border:1px solid #52606e; border-radius:4px; padding:1px 4px; color:var(--text); }
+  @media (max-width:850px) { main { grid-template-columns:1fr; height:auto; } #view { height:65vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Practice raceline sketcher</h1>
+  <div class="hint">Shape the line directly on the map. This edits a separate candidate; the source CSV is never overwritten.</div>
+</header>
+<main>
+  <canvas id="view" aria-label="Interactive track map and raceline editor"></canvas>
+  <aside>
+    <section>
+      <h2>1 · Load the three inputs</h2>
+      <label for="mapFile">Practice map (.pgm)</label><input id="mapFile" type="file" accept=".pgm,image/x-portable-graymap">
+      <label for="yamlFile">Map metadata (.yaml)</label><input id="yamlFile" type="file" accept=".yaml,.yml,text/plain">
+      <label for="pathFile">Raceline CSV</label><input id="pathFile" type="file" accept=".csv,text/csv,text/plain">
+      <p class="small">Use the practice map PGM/YAML and whichever line you want as the starting geometry (for example, v300). Files stay in your browser.</p>
+    </section>
+    <section>
+      <h2>2 · Shape the candidate</h2>
+      <div class="row"><button id="addMode">Add shaping point</button><button id="undo" disabled>Undo</button></div>
+      <label for="radius">Selected point influence radius: <span id="radiusValue">0.80 m</span></label>
+      <input id="radius" type="range" min="0.15" max="2.50" step="0.05" value="0.80">
+      <div class="row"><button id="deleteHandle" disabled>Delete point</button><button id="reset">Reset edits</button></div>
+      <p class="small">In add mode, click where you want the line to move. The editor finds the nearest point on the current path and blends a smooth local displacement. Drag pink handles to refine it. Double-click a handle to remove it. Scroll to zoom; middle/right-drag to pan; press <kbd>Esc</kbd> to leave add mode.</p>
+    </section>
+    <section>
+      <h2>3 · Check and export</h2>
+      <div id="status" class="warn">Load a map, metadata, and path to begin.</div>
+      <div class="row" style="margin-top:10px"><button id="fit">Fit map</button><button id="export" class="primary" disabled>Export candidate CSV</button></div>
+      <p class="small">The footprint check uses the 0.510 × 0.273 m body rectangle plus 5 cm, and conservatively treats unknown map cells as blocked. Export recalculates path length, heading, curvature, and map ray distances. Existing speed/acceleration columns are copied as references, not re-optimized.</p>
+    </section>
+    <section>
+      <h2>Legend</h2>
+      <div class="legend">
+        <span class="swatch" style="background:#38bdf8"></span><span>Loaded source line (visual reference only)</span>
+        <span class="swatch" style="background:#fb4f9b"></span><span>Your editable candidate</span>
+        <span class="swatch" style="background:#facc15"></span><span>Selected shaping point / footprint</span>
+        <span class="swatch" style="background:#fb7185"></span><span>Candidate samples whose buffered footprint touches non-free map cells</span>
+      </div>
+    </section>
+  </aside>
+</main>
+<script>
+(() => {
+  'use strict';
+  const BODY = { xmin:-0.240, xmax:0.270, halfWidth:0.273/2, buffer:0.05 };
+  const canvas = document.getElementById('view'), ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const handles = [];
+  let map = null, source = null, sourceHeader = null, yaml = null;
+  let selected = -1, addMode = false, drag = null, history = [], view = null;
+
+  function setStatus(message, kind='warn') { statusEl.textContent = message; statusEl.className = kind; }
+  function tokenizePGM(bytes) {
+    let i=0;
+    const token=()=> {
+      while (i<bytes.length) {
+        if (bytes[i]===35) { while (i<bytes.length && bytes[i]!==10 && bytes[i]!==13) i++; }
+        else if (bytes[i]===9 || bytes[i]===10 || bytes[i]===13 || bytes[i]===32) i++;
+        else break;
+      }
+      const start=i;
+      while (i<bytes.length && bytes[i]!==9 && bytes[i]!==10 && bytes[i]!==13 && bytes[i]!==32 && bytes[i]!==35) i++;
+      if (start===i) throw new Error('Malformed PGM header');
+      return new TextDecoder().decode(bytes.subarray(start,i));
+    };
+    const magic=token();
+    if (magic!=='P5' && magic!=='P2') throw new Error(`Expected P5/P2 PGM, got ${magic}`);
+    const width=Number(token()), height=Number(token()), maxval=Number(token());
+    if (!(width>0 && height>0 && maxval>0 && maxval<=255)) throw new Error('Unsupported PGM dimensions or max value');
+    if (magic==='P2') {
+      const vals=[]; while (i<bytes.length) { try { vals.push(Number(token())); } catch { break; } }
+      if (vals.length<width*height) throw new Error('Truncated P2 image');
+      return {width,height,pixels:Uint8Array.from(vals.slice(0,width*height),v=>Math.round(v*255/maxval))};
+    }
+    if (bytes[i]===13 && bytes[i+1]===10) i+=2; else if (bytes[i]===9 || bytes[i]===10 || bytes[i]===13 || bytes[i]===32) i++;
+    const count=width*height;
+    if (bytes.length-i<count) throw new Error('Truncated P5 image');
+    const pixels=new Uint8Array(count);
+    for (let k=0;k<count;k++) pixels[k]=Math.round(bytes[i+k]*255/maxval);
+    return {width,height,pixels};
+  }
+  function parseYaml(text) {
+    const get=(name)=> { const m=text.match(new RegExp('^\\s*'+name+'\\s*:\\s*(.+?)\\s*$','m')); return m&&m[1]; };
+    const resolution=Number(get('resolution'));
+    const originText=get('origin');
+    const origin=originText&&originText.match(/\[\s*([-+\d.eE]+)\s*,\s*([-+\d.eE]+)(?:\s*,\s*([-+\d.eE]+))?/);
+    if (!(resolution>0) || !origin) throw new Error('Could not read resolution/origin from map YAML');
+    return {resolution,originX:Number(origin[1]),originY:Number(origin[2])};
+  }
+  function parseCSV(text) {
+    const lines=text.split(/\r?\n/).filter(l=>l.trim() && !l.trimStart().startsWith('#'));
+    if (!lines.length) throw new Error('CSV contains no data rows');
+    const first=lines[0].split(',').map(v=>Number(v.trim()));
+    const hasHeader=first.some(v=>!Number.isFinite(v));
+    const rows=(hasHeader?lines.slice(1):lines).map(line=>line.split(',').map(v=>Number(v.trim())));
+    const data=rows.filter(r=>r.length>=4 && r.slice(0,4).every(Number.isFinite));
+    if(data.length<8) throw new Error('Expected at least 8 numeric trajectory rows');
+    return {rows:data,header:hasHeader?lines[0]:null};
+  }
+  const mapReady=()=>map&&yaml;
+  function worldToPixel(x,y) {
+    const col=Math.floor((x-yaml.originX)/yaml.resolution);
+    const row=map.height-1-Math.floor((y-yaml.originY)/yaml.resolution);
+    if(col<0||row<0||col>=map.width||row>=map.height) return -1;
+    return row*map.width+col;
+  }
+  function isFree(x,y) { const idx=worldToPixel(x,y); return idx>=0 && map.pixels[idx]>=240; }
+  function basePointAt(s) {
+    const total=source.totalLength;
+    s=((s%total)+total)%total;
+    let lo;
+    if(s>=source.lengths[source.lengths.length-1])lo=source.lengths.length-1;
+    else {let hi=source.lengths.length-1;lo=0;while(lo+1<hi){const m=(lo+hi)>>1;if(source.lengths[m]<=s)lo=m;else hi=m;}}
+    const a=source.rows[lo], b=source.rows[(lo+1)%source.rows.length];
+    const seg=source.segmentLengths[lo]||1e-9, t=Math.max(0,Math.min(1,(s-source.lengths[lo])/seg));
+    return {x:a[1]+t*(b[1]-a[1]),y:a[2]+t*(b[2]-a[2])};
+  }
+  function nearestPathS(x,y) {
+    const path=currentPath();
+    let best=Infinity,bestS=0;
+    for(let i=0;i<source.rows.length;i++){
+      const a=path[i],b=path[(i+1)%path.length];
+      const dx=b.x-a.x,dy=b.y-a.y,den=dx*dx+dy*dy||1;
+      const t=Math.max(0,Math.min(1,((x-a.x)*dx+(y-a.y)*dy)/den));
+      const ex=a.x+t*dx-x,ey=a.y+t*dy-y,d=ex*ex+ey*ey;
+      if(d<best){best=d;bestS=source.lengths[i]+t*source.segmentLengths[i];}
+    }
+    return bestS%source.totalLength;
+  }
+  function deformationAtS(s,exclude=-1) {
+    let dx=0,dy=0;const total=source.totalLength;
+    for(let i=0;i<handles.length;i++){
+      if(i===exclude)continue;const h=handles[i];let d=Math.abs(s-h.s);d=Math.min(d,total-d);
+      const w=Math.exp(-0.5*(d/h.radius)*(d/h.radius));dx+=h.dx*w;dy+=h.dy*w;
+    }
+    return {x:dx,y:dy};
+  }
+  function candidatePointAtS(s) {
+    const base=basePointAt(s),d=deformationAtS(s);return {x:base.x+d.x,y:base.y+d.y};
+  }
+  function currentPath() {
+    if(!source) return [];
+    const n=source.rows.length, total=source.totalLength;
+    return source.rows.map((row,index)=>{
+      let dx=0,dy=0;
+      for(const h of handles){
+        let d=Math.abs(source.lengths[index]-h.s); d=Math.min(d,total-d);
+        const z=d/h.radius, w=Math.exp(-0.5*z*z);
+        dx+=h.dx*w;dy+=h.dy*w;
+      }
+      return {x:row[1]+dx,y:row[2]+dy,src:row};
+    });
+  }
+  function geometry(path) {
+    const n=path.length, seg=new Array(n), s=new Array(n).fill(0);
+    for(let i=0;i<n;i++){const a=path[i],b=path[(i+1)%n];seg[i]=Math.hypot(b.x-a.x,b.y-a.y);if(i+1<n)s[i+1]=s[i]+seg[i];}
+    const total=s[n-1]+seg[n-1];
+    const psi=new Array(n),kappa=new Array(n);
+    for(let i=0;i<n;i++){
+      const p=path[(i+n-1)%n],q=path[i],r=path[(i+1)%n];
+      psi[i]=Math.atan2(r.y-p.y,r.x-p.x);
+      const a=Math.hypot(q.x-p.x,q.y-p.y),b=Math.hypot(r.x-q.x,r.y-q.y),c=Math.hypot(r.x-p.x,r.y-p.y);
+      const cross=(q.x-p.x)*(r.y-q.y)-(q.y-p.y)*(r.x-q.x);
+      kappa[i]=(a*b*c>1e-10)?2*cross/(a*b*c):0;
+    }
+    return {s,total,psi,kappa};
+  }
+  function rayDistance(x,y,angle,maxDist=3) {
+    const step=yaml.resolution*0.35;
+    for(let d=step;d<=maxDist;d+=step) if(!isFree(x+d*Math.cos(angle),y+d*Math.sin(angle))) return Math.max(0,d-step/2);
+    return maxDist;
+  }
+  function footprintCheck(path,g) {
+    if(!mapReady()) return {bad:0,total:0,minMargin:NaN};
+    const bx0=BODY.xmin-BODY.buffer,bx1=BODY.xmax+BODY.buffer, by=BODY.halfWidth+BODY.buffer;
+    const local=[];
+    for(let lx=bx0;lx<=bx1+1e-6;lx+=0.04) for(let ly=-by;ly<=by+1e-6;ly+=0.04) local.push([lx,ly]);
+    let bad=0,total=0,minMargin=Infinity;const badPoints=[];
+    const stride=Math.max(1,Math.floor(path.length/500));
+    for(let i=0;i<path.length;i+=stride){
+      const p=path[i],c=Math.cos(g.psi[i]),s=Math.sin(g.psi[i]);
+      let pointBad=false;
+      for(const [lx,ly] of local){if(!isFree(p.x+c*lx-s*ly,p.y+s*lx+c*ly)){bad++;pointBad=true;}total++;}
+      if(pointBad)badPoints.push(p);
+      // Radial map clearance minus the oriented rectangular footprint support.
+      for(let j=0;j<16;j++){
+        const a=2*Math.PI*j/16,ux=Math.cos(a),uy=Math.sin(a);
+        const support=Math.max(bx0*ux,bx1*ux)+by*Math.abs(uy);
+        minMargin=Math.min(minMargin,rayDistance(p.x,p.y,a)-support);
+      }
+    }
+    return {bad,total,minMargin,badPoints};
+  }
+  function getHandlePoint(h) { return candidatePointAtS(h.s); }
+  function screenSetup() {
+    const rect=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
+    if(canvas.width!==Math.round(rect.width*dpr)||canvas.height!==Math.round(rect.height*dpr)){canvas.width=Math.round(rect.width*dpr);canvas.height=Math.round(rect.height*dpr);view=null;}
+    if(!view&&mapReady()) fitMap();
+    return {w:rect.width,h:rect.height,dpr};
+  }
+  function fitMap() {
+    if(!mapReady()) return;
+    const {width:w,height:h}=canvas.getBoundingClientRect();
+    const mapW=map.width*yaml.resolution,mapH=map.height*yaml.resolution;
+    const scale=Math.min((w-36)/mapW,(h-36)/mapH);
+    view={scale,xmin:yaml.originX-(w-mapW*scale)/(2*scale),ymax:yaml.originY+mapH+(h-mapH*scale)/(2*scale)};
+    draw();
+  }
+  function toScreen(x,y) { const r=canvas.getBoundingClientRect();return {x:(x-view.xmin)*view.scale,y:(view.ymax-y)*view.scale}; }
+  function toWorld(px,py) { return {x:view.xmin+px/view.scale,y:view.ymax-py/view.scale}; }
+  function draw() {
+    const {w,h,dpr}=screenSetup(); if(!view)return;
+    ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);ctx.fillStyle='#252b31';ctx.fillRect(0,0,w,h);
+    ctx.setTransform(dpr*view.scale,0,0,-dpr*view.scale,dpr*(-view.xmin*view.scale),dpr*(view.ymax*view.scale));
+    if(mapReady()){
+      if(!map.canvas){map.canvas=document.createElement('canvas');map.canvas.width=map.width;map.canvas.height=map.height;const mctx=map.canvas.getContext('2d'),im=mctx.createImageData(map.width,map.height);
+        for(let row=0;row<map.height;row++)for(let col=0;col<map.width;col++){const src=row*map.width+col,dst=((map.height-1-row)*map.width+col)*4,v=map.pixels[src];let rgb=v>=240?[245,247,249]:v>=150?[96,101,106]:[14,17,20];im.data[dst]=rgb[0];im.data[dst+1]=rgb[1];im.data[dst+2]=rgb[2];im.data[dst+3]=255;}mctx.putImageData(im,0,0);}
+      ctx.imageSmoothingEnabled=false;ctx.drawImage(map.canvas,yaml.originX,yaml.originY,map.width*yaml.resolution,map.height*yaml.resolution);
+    }
+    if(source){
+      const path=currentPath(),g=geometry(path),check=mapReady()?footprintCheck(path,g):null;
+      ctx.lineJoin='round';ctx.lineCap='round';
+      ctx.beginPath();source.rows.forEach((r,i)=>{if(i===0)ctx.moveTo(r[1],r[2]);else ctx.lineTo(r[1],r[2]);});ctx.closePath();ctx.strokeStyle='#38bdf8';ctx.globalAlpha=.72;ctx.lineWidth=2.2/view.scale;ctx.stroke();ctx.globalAlpha=1;
+      ctx.beginPath();path.forEach((p,i)=>{if(i===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);});ctx.closePath();ctx.strokeStyle='#fb4f9b';ctx.lineWidth=2.5/view.scale;ctx.stroke();
+      if(check){
+        ctx.fillStyle='#fb7185';
+        for(const p of check.badPoints){ctx.beginPath();ctx.arc(p.x,p.y,3.5/view.scale,0,2*Math.PI);ctx.fill();}
+      }
+      if(selected>=0&&selected<handles.length){
+        const hnd=handles[selected],p=getHandlePoint(hnd),c=Math.cos(g.psi[Math.min(path.length-1,Math.round(hnd.s/source.totalLength*path.length))]),s=Math.sin(g.psi[Math.min(path.length-1,Math.round(hnd.s/source.totalLength*path.length))]);
+        const rad=hnd.radius;ctx.beginPath();ctx.arc(p.x,p.y,rad,0,2*Math.PI);ctx.strokeStyle='#facc15';ctx.globalAlpha=.45;ctx.lineWidth=1/view.scale;ctx.stroke();ctx.globalAlpha=1;
+        ctx.save();ctx.translate(p.x,p.y);ctx.rotate(Math.atan2(s,c));ctx.strokeStyle='#facc15';ctx.lineWidth=2/view.scale;ctx.strokeRect(BODY.xmin-BODY.buffer,-BODY.halfWidth-BODY.buffer,(BODY.xmax-BODY.xmin)+2*BODY.buffer,2*(BODY.halfWidth+BODY.buffer));ctx.restore();
+      }
+      for(let i=0;i<handles.length;i++){const p=getHandlePoint(handles[i]);ctx.beginPath();ctx.arc(p.x,p.y,(i===selected?7:5)/view.scale,0,2*Math.PI);ctx.fillStyle=i===selected?'#facc15':'#fb4f9b';ctx.fill();ctx.lineWidth=1.5/view.scale;ctx.strokeStyle='#11151a';ctx.stroke();}
+      updateStatus(check,g,path);
+    }
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    if(addMode){ctx.fillStyle='#facc15';ctx.font='13px system-ui';ctx.fillText('ADD POINT: click where you want the line to move · Esc to cancel',12,22);}
+  }
+  function updateStatus(check,g,path){
+    if(!mapReady()||!source){setStatus('Load a map, metadata, and path to begin.','warn');return;}
+    const maxK=Math.max(...g.kappa.map(Math.abs));
+    const foot=check.bad===0?'buffered footprint clear':`${check.bad} / ${check.total} sampled footprint points touch blocked/unknown map`;
+    const margin=Number.isFinite(check.minMargin)?`${(check.minMargin*100).toFixed(1)} cm approximate minimum body-envelope margin`:'margin unavailable';
+    const kind=check.bad===0?'good':'bad';
+    let selectedText='';
+    if(selected>=0&&selected<handles.length){const hnd=handles[selected],p=getHandlePoint(hnd);selectedText=`\nSelected point: x ${p.x.toFixed(3)}, y ${p.y.toFixed(3)} m · move ${hnd.dx.toFixed(3)}, ${hnd.dy.toFixed(3)} m · radius ${hnd.radius.toFixed(2)} m`;}
+    setStatus(`${handles.length} shaping point(s) · ${foot}\n${margin} · max |curvature| ${maxK.toFixed(2)} 1/m${selectedText}\nReference speed/acceleration are copied; this is geometry editing, not a validated/optimized raceline.`,kind);
+  }
+  function snapshot(){history.push(JSON.stringify(handles));if(history.length>80)history.shift();document.getElementById('undo').disabled=false;}
+  function restoreHandles(json){handles.splice(0,handles.length,...JSON.parse(json));selected=-1;syncControls();draw();}
+  function syncControls(){document.getElementById('deleteHandle').disabled=selected<0;const r=selected>=0?handles[selected].radius:Number(document.getElementById('radius').value);document.getElementById('radius').value=r;document.getElementById('radiusValue').textContent=`${r.toFixed(2)} m`;}
+  function nearestHandle(px,py){let best=12,bestId=-1;for(let i=0;i<handles.length;i++){const p=toScreen(...Object.values(getHandlePoint(handles[i])));const d=Math.hypot(px-p.x,py-p.y);if(d<best){best=d;bestId=i;}}return bestId;}
+  function pointerPos(e){const r=canvas.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top};}
+  canvas.addEventListener('pointerdown',e=>{
+    const p=pointerPos(e);
+    if(e.button===1||e.button===2){drag={pan:true,start:p,old:{...view}};canvas.setPointerCapture(e.pointerId);return;}
+    if(!source||!view)return;
+    const hi=nearestHandle(p.x,p.y);
+    if(hi>=0){snapshot();selected=hi;drag={handle:hi};syncControls();canvas.setPointerCapture(e.pointerId);draw();return;}
+    if(addMode){const w=toWorld(p.x,p.y),s=nearestPathS(w.x,w.y),at=candidatePointAtS(s);snapshot();handles.push({s,dx:w.x-at.x,dy:w.y-at.y,radius:Number(document.getElementById('radius').value)});selected=handles.length-1;addMode=false;document.getElementById('addMode').classList.remove('active');document.getElementById('addMode').textContent='Add shaping point';syncControls();draw();return;}
+    selected=-1;syncControls();draw();
+  });
+  canvas.addEventListener('pointermove',e=>{
+    if(!drag)return;const p=pointerPos(e);
+    if(drag.pan){const dx=(p.x-drag.start.x)/drag.old.scale,dy=(p.y-drag.start.y)/drag.old.scale;view.xmin=drag.old.xmin-dx;view.ymax=drag.old.ymax+dy;draw();return;}
+    if(drag.handle!==undefined){const hnd=handles[drag.handle],w=toWorld(p.x,p.y),b=basePointAt(hnd.s),others=deformationAtS(hnd.s,drag.handle);hnd.dx=w.x-b.x-others.x;hnd.dy=w.y-b.y-others.y;draw();}
+  });
+  canvas.addEventListener('pointerup',()=>{drag=null;});
+  canvas.addEventListener('pointercancel',()=>{drag=null;});
+  canvas.addEventListener('contextmenu',e=>e.preventDefault());
+  canvas.addEventListener('wheel',e=>{if(!view)return;e.preventDefault();const p=pointerPos(e),anchor=toWorld(p.x,p.y),factor=e.deltaY<0?1.12:1/1.12;view.scale=Math.max(8,Math.min(1200,view.scale*factor));view.xmin=anchor.x-p.x/view.scale;view.ymax=anchor.y+p.y/view.scale;draw();},{passive:false});
+  canvas.addEventListener('dblclick',e=>{if(!source||addMode)return;const p=pointerPos(e),hi=nearestHandle(p.x,p.y);if(hi>=0){snapshot();handles.splice(hi,1);selected=-1;syncControls();draw();}});
+  document.getElementById('addMode').addEventListener('click',e=>{addMode=!addMode;e.currentTarget.classList.toggle('active',addMode);e.currentTarget.textContent=addMode?'Click map to place point':'Add shaping point';draw();});
+  document.getElementById('radius').addEventListener('pointerdown',()=>{if(selected>=0)snapshot();});
+  document.getElementById('radius').addEventListener('input',e=>{const v=Number(e.target.value);document.getElementById('radiusValue').textContent=`${v.toFixed(2)} m`;if(selected>=0)handles[selected].radius=v;draw();});
+  document.getElementById('deleteHandle').addEventListener('click',()=>{if(selected<0)return;snapshot();handles.splice(selected,1);selected=-1;syncControls();draw();});
+  document.getElementById('undo').addEventListener('click',()=>{if(!history.length)return;const state=history.pop();restoreHandles(state);document.getElementById('undo').disabled=history.length===0;});
+  document.getElementById('reset').addEventListener('click',()=>{if(!handles.length)return;snapshot();handles.splice(0);selected=-1;syncControls();draw();});
+  document.getElementById('fit').addEventListener('click',fitMap);
+  window.addEventListener('keydown',e=>{if(e.key==='Escape'&&addMode){addMode=false;document.getElementById('addMode').classList.remove('active');document.getElementById('addMode').textContent='Add shaping point';draw();}if((e.key==='Delete'||e.key==='Backspace')&&selected>=0){snapshot();handles.splice(selected,1);selected=-1;syncControls();draw();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){document.getElementById('undo').click();}if(!(e.target instanceof HTMLInputElement)&&selected>=0&&['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();snapshot();const step=e.shiftKey?0.10:0.02,hnd=handles[selected];if(e.key==='ArrowUp')hnd.dy+=step;if(e.key==='ArrowDown')hnd.dy-=step;if(e.key==='ArrowLeft')hnd.dx-=step;if(e.key==='ArrowRight')hnd.dx+=step;draw();}});
+  window.addEventListener('resize',draw);
+  document.getElementById('mapFile').addEventListener('change',async e=>{try{const f=e.target.files[0];if(!f)return;map=tokenizePGM(new Uint8Array(await f.arrayBuffer()));map.name=f.name;view=null;if(mapReady())fitMap();else draw();}catch(err){setStatus(`Map load error: ${err.message}`,'bad');}});
+  document.getElementById('yamlFile').addEventListener('change',async e=>{try{const f=e.target.files[0];if(!f)return;yaml=parseYaml(await f.text());yaml.name=f.name;view=null;if(mapReady())fitMap();else draw();}catch(err){setStatus(`YAML load error: ${err.message}`,'bad');}});
+  document.getElementById('pathFile').addEventListener('change',async e=>{try{const f=e.target.files[0];if(!f)return;const parsed=parseCSV(await f.text());sourceHeader=parsed.header;const rows=parsed.rows;const seg=[],lengths=new Array(rows.length).fill(0);for(let i=0;i<rows.length;i++){const a=rows[i],b=rows[(i+1)%rows.length];seg.push(Math.hypot(b[1]-a[1],b[2]-a[2]));if(i+1<rows.length)lengths[i+1]=lengths[i]+seg[i];}source={rows,segmentLengths:seg,lengths,totalLength:lengths.at(-1)+seg.at(-1),name:f.name};handles.splice(0);history=[];selected=-1;document.getElementById('undo').disabled=true;document.getElementById('export').disabled=false;syncControls();if(mapReady())fitMap();else draw();}catch(err){setStatus(`CSV load error: ${err.message}`,'bad');}});
+  function csvNumber(v){return Number.isFinite(v)?v.toFixed(9):'0.000000000';}
+  document.getElementById('export').addEventListener('click',()=>{
+    if(!source)return;
+    const path=currentPath(),g=geometry(path),rows=[];
+    for(let i=0;i<path.length;i++){
+      const p=path[i],nx=-Math.sin(g.psi[i]),ny=Math.cos(g.psi[i]);
+      const dl=mapReady()?rayDistance(p.x,p.y,Math.atan2(ny,nx)):source.rows[i][7]||0;
+      const dr=mapReady()?rayDistance(p.x,p.y,Math.atan2(-ny,-nx)):source.rows[i][8]||0;
+      const old=source.rows[i],out=[g.s[i],p.x,p.y,g.psi[i],g.kappa[i],old[5]??0,old[6]??0,dl,dr];
+      // Do not retain stale geometry-dependent extra columns (e.g. recorded controls).
+      rows.push(out.map(csvNumber).join(','));
+    }
+    const text='# s_m,x_m,y_m,psi_rad,kappa_radpm,velocity_mps,acceleration_mps2,d_left_m,d_right_m\n'+rows.join('\n')+'\n';
+    const blob=new Blob([text],{type:'text/csv'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(source.name||'raceline.csv').replace(/\.csv$/i,'')+'_sketch_candidate.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  });
+  draw();
+})();
+</script>
+</body>
+</html>

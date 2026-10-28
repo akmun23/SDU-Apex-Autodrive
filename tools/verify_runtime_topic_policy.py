@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Static guard for the rules-compliant autonomous launch path."""
 
+import argparse
+from collections import Counter
 from pathlib import Path
 
 
@@ -43,8 +45,80 @@ TF_LISTENER_TOKENS = (
     "create_subscription<tf2_msgs::msg::TFMessage>",
 )
 
+AUTONOMY_NODES = frozenset({
+    'sensor_odometry', 'ekf_localization', 'gpu_amcl_cpp',
+    'mpc_controller_node', 'autodrive_actuator_interface',
+    'autodrive_bridge_command_input',
+})
+ALLOWED_AUTODRIVE_INPUTS = frozenset({
+    '/autodrive/roboracer_1/lidar', '/autodrive/roboracer_1/front_camera',
+    '/autodrive/roboracer_1/imu', '/autodrive/roboracer_1/left_encoder',
+    '/autodrive/roboracer_1/right_encoder', '/autodrive/roboracer_1/steering',
+    '/autodrive/roboracer_1/throttle',
+    '/autodrive/roboracer_1/steering_command',
+    '/autodrive/roboracer_1/throttle_command',
+})
+
+
+def subscription_errors(subscriptions: dict[str, list[str]]) -> list[str]:
+    """Audit actual resolved endpoints, including disallowed debug aliases."""
+    errors = []
+    for node, topics in subscriptions.items():
+        for topic in topics:
+            if (topic in RESTRICTED or topic in ('/sdu/tf', '/sdu/tf_static') or
+                    (topic.startswith('/autodrive/') and
+                     topic not in ALLOWED_AUTODRIVE_INPUTS)):
+                errors.append(f'{node}: forbidden runtime subscription {topic}')
+    return errors
+
+
+def verify_live_graph() -> int:
+    """Inspect the running competition graph; do not subscribe to sensor data."""
+    import time
+    import rclpy
+
+    rclpy.init()
+    probe = rclpy.create_node('sdu_runtime_policy_audit')
+    try:
+        deadline = time.monotonic() + 8.0
+        graph = []
+        while time.monotonic() < deadline:
+            rclpy.spin_once(probe, timeout_sec=.1)
+            graph = probe.get_node_names_and_namespaces()
+            if AUTONOMY_NODES.issubset(name for name, _ in graph):
+                # Let endpoint discovery catch up after the node announcement.
+                for _ in range(5):
+                    rclpy.spin_once(probe, timeout_sec=.1)
+                break
+        counts = Counter(name for name, _ in graph)
+        errors = [f'{name}: expected exactly one runtime node, found {counts[name]}'
+                  for name in sorted(AUTONOMY_NODES) if counts[name] != 1]
+        endpoints = {}
+        for name, namespace in graph:
+            if name not in AUTONOMY_NODES:
+                continue
+            endpoints[name] = [topic for topic, _ in
+                               probe.get_subscriber_names_and_types_by_node(
+                                   name, namespace)]
+        errors.extend(subscription_errors(endpoints))
+        for name, topics in sorted(endpoints.items()):
+            print(f'{name}: {", ".join(sorted(topics))}')
+        for error in errors:
+            print(error)
+        print('runtime subscription graph: ' + ('FAIL' if errors else 'PASS'))
+        print('Topic checks do not certify organizer approval of the bridge wrapper.')
+        return int(bool(errors))
+    finally:
+        probe.destroy_node()
+        rclpy.shutdown()
+
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--live', action='store_true',
+                        help='audit resolved subscriptions of the running competition stack')
+    if parser.parse_args().live:
+        return verify_live_graph()
     errors = []
     for relative in RUNTIME_FILES:
         path = ROOT / relative

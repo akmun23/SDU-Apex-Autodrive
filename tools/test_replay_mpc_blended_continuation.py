@@ -10,6 +10,12 @@ from tools import replay_mpc_blended_continuation as replay
 
 
 class BlendedContinuationReplayTests(unittest.TestCase):
+    def test_direct_replay_weights_match_production_profile_order(self):
+        self.assertEqual(replay.REPLAY_ARGUMENTS[-12:], [
+            "4000", "1500", "7.5", "60", "25", "5", "7.8125",
+            "3", "5", "0.1", "2000", "100",
+        ])
+
     def test_replay_arguments_make_backtracking_explicit_and_bounded(self):
         baseline = replay.replay_arguments()
         experimental = replay.replay_arguments(3)
@@ -30,7 +36,7 @@ class BlendedContinuationReplayTests(unittest.TestCase):
                     "speed_error_rmse_mps", "objective_total",
                 ])
                 writer.writeheader()
-                controls = [[0.0, 0.2]] * 30
+                controls = [[0.0, 0.001]] * 30
                 base = {
                     "full_horizon_source_valid": "True",
                     "command_bounds_valid": "True",
@@ -57,6 +63,31 @@ class BlendedContinuationReplayTests(unittest.TestCase):
         self.assertEqual(result[5.0]["objective_total"], 10.0)
         self.assertEqual(filtered[5.0]["candidate_weight"], 0.5)
         self.assertEqual(filtered[5.0]["objective_total"], 12.0)
+
+    def test_load_feasible_blends_accepts_minimum_positive_throttle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "minimum_drive.csv"
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=[
+                    "full_horizon_source_valid", "command_bounds_valid",
+                    "source_steps", "minimum_corridor_slack_m", "progress_m",
+                    "controls_json", "bag_time_s", "candidate_weight",
+                    "speed_error_rmse_mps", "objective_total",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "full_horizon_source_valid": "True",
+                    "command_bounds_valid": "True",
+                    "source_steps": "30",
+                    "minimum_corridor_slack_m": "0.02",
+                    "progress_m": "1.0",
+                    "controls_json": json.dumps([[0.0, 0.001]] * 30),
+                    "bag_time_s": "1.0",
+                    "candidate_weight": "0.25",
+                    "speed_error_rmse_mps": "0.1",
+                    "objective_total": "1.0",
+                })
+            self.assertIn(1.0, replay.load_feasible_blends(path))
 
     def test_select_states_matches_progress_and_requires_a_match(self):
         states = [[10.0, 5.0] + [0.0] * 36,

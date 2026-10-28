@@ -8,17 +8,47 @@
   "restore_commit": "ca120e0cde7ae60e70082d38f86c5931f79f148f",
   "phase1_solver_overlay": {
     "phase1_hessian": "limited-memory",
-    "phase1_method": "v2.2.7 elastic-slack dynamic defect minimization with strict zero-slack gate",
-    "physical_dynamics_changed": false,
+    "phase1_method": "v2.4.1 contact-arm correction + v2.4.0 checkpointed Phase-I continuation",
+    "numerical_guards_equal_on_physical_domain": true,
+    "phase1_detect_simple_bounds": true,
+    "physical_dynamics_changed": true,
+    "physical_dynamics_change": "v2.4.1 contact-arm correction and 3-axis contact velocities; prior wheel-state index u=x[2,k] retained; PhysX NoDrive substep branch now uses Unity setSubStepCount(128,5,1); v2.4.0 Phase-I checkpointing",
+    "wheel_substep_selection": "Unity/PhysX setSubStepCount(128m/s, 5, 1): abs(forward speed) <128m/s -> 5 substeps; >=128m/s -> 1",
+    "phase1_checkpoint_continuation": true,
     "elastic_slack_bound_phase1": 100000.0,
     "elastic_slack_bound_final": 0.0,
     "original_solver_sha256": "e647398e97775eb95779c76eb7abdfd10cc622e2e146bded4348c2e33e109057",
-    "working_solver_sha256": "c0d3228f98fa2071caa83264a6f216fcba8df3aa759c266715186df5b1fdc147",
+    "working_solver_sha256": "4694c0050bf429ea5ac5b58b49628fc9ef187481ac64de571a612b4ae425d97e",
     "source_untouched": true,
-    "working_solver_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py"
+    "working_solver_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py",
+    "working_wheel_model_parity_applied": true,
+    "original_wheel_model_sha256": "4137d1d624a03aae6487b081ad203f3e4268c2ee3c47d3b0d9381b1900750456",
+    "working_wheel_model_sha256": "e56304a0ed72aaa48d4c80ac2c2194a2966190abff854df49474df8f4dc63af1",
+    "working_wheel_model_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/SDU_Apex_Autodrive_Exact_MinTime_Optimizer_v1_3/f1tenth_planning/autodrive_mintime/unity_wheel_model.py",
+    "historical_wheel_model_untouched": true,
+    "native_callback_load_model": "tireLoad=PxVehicle.suspSpringForce",
+    "native_combined_slip_model": "normalize raw curve response before stiffness",
+    "native_lateral_slip_sign_corrected": true,
+    "native_lateral_slip_mapping": "model left-positive -> PhysX right-positive",
+    "native_lateral_force_frame_corrected": true,
+    "native_lateral_force_frame_mapping": "native right-positive Fy -> chassis left-positive Fy",
+    "native_full_contact_velocity_corrected": true,
+    "native_full_contact_velocity_model": "COM velocity plus yaw/roll/pitch cross native force application offset",
+    "native_contact_vertical_arm_m": "Rigidbody COM y plus wheel radius plus suspension target travel minus model suspension ray base y",
+    "source_contact_arm_25mm_offset_corrected": true,
+    "source_contact_arm_correction_m": 0.025,
+    "physx_substep_source_available": true,
+    "physx_substep_source_path": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver_limited_memory/tools/vehicle_dynamics_learning/physx_no_drive_source.py",
+    "physx_substep_source_sha256": "000247a696bc574781184100f9bc7179bbca058a214099ffcae42d68423fd13c",
+    "physx_substep_threshold_mps": 128.0,
+    "physx_substep_counts": [
+      5,
+      1
+    ],
+    "recovered_source_untouched": true
   },
   "model": {
-    "source_sha256": "648afbf13b11321fcb378b799b47f39abb81bf857fc5669ed9798a6ca48ba753",
+    "source_sha256": "ace984a63c3242bc21fd2ab260d25f318c090314592122562498f88f091c4aac",
     "model_metadata": {
       "source_capture": null,
       "source_config": {
@@ -26,7 +56,7 @@
         "physx_source_commit": "a2c0428acab643e60618c681b501e86f7fd558cc"
       },
       "mass_kg": 3.47,
-      "yaw_inertia_kgm2": 0.100088306,
+      "yaw_inertia_kgm2": 0.100282848,
       "wheel_radius_m": 0.059,
       "wheel_radius_scale": 1.0,
       "wheel_inertia_kgm2": 0.0001897145,
@@ -43,7 +73,7 @@
       "suspension_target_position": 0.5,
       "wheel_spin_damping_time_constant_s": 0.000758858,
       "steering_limit_rad": 0.5235987755982989,
-      "steering_rate_radps": 3.2,
+      "steering_rate_radps": 3.199991248188476,
       "motor_torque_total_nm": 428.0,
       "forward_curves": [
         [
@@ -150,22 +180,31 @@
           0.0
         ],
         "reference_body_height_m": 0.00464804098,
-        "inertia_pitch_kgm2": 0.0934206,
-        "inertia_roll_kgm2": 0.0228149127,
+        "inertia_pitch_kgm2": 0.09360235,
+        "inertia_roll_kgm2": 0.0228035953,
         "force_application_point_distance_m": 0.0
       },
       "model_boundary": "Historical CasADi differential/algebraic tire+wheel+spring model; not native PhysX scene solver, collision impulses, wheel-contact recursion or exact 1 ms map. Mandatory native replay follows.",
       "tire_slip_coordinates": "PhysX 4.1 applied-torque branch (Unity NoDrive has motor or brake torque at each optimizer node): longSlip=(R*omega-vx)/(max(abs(vx),abs(R*omega))+0.1m); lateralSlip=atan(vy/(abs(vx)+1m)). The remaining approximation is the planar contact-point/tire-axis velocity reconstruction; low-speed sticky constraints are not modeled.",
-      "source_origin": "f1tenth_mpc/src/unity_source_plant.cpp + f1tenth_localization/config/physx_odom_reset_initial.json"
+      "source_origin": "f1tenth_mpc/src/unity_source_plant.cpp + f1tenth_mpc/include/unity_source_plant_c.h + f1tenth_localization/config/physx_odom_reset_initial.json",
+      "inertia_source": "reciprocal of kInverseInertiaVehicleBodyKgM2",
+      "suspension_mount_lateral_frame": "converted Unity x-right to model y-left for roll/travel (v2.3.10)",
+      "suspension_coordinate_correction": "sign of wheel-mount lateral coordinate only; zero fitted parameters",
+      "tire_callback_parity": "v2.3.12: native tireLoad=measured suspension force; un-stiffened curve normalized before final stiffness",
+      "tire_load_filter_applied_by_ocp": false,
+      "native_callback_force_rms_evidence_n": 1.344035278849403e-07
     },
     "steering_provenance": {
-      "native_actuator_file": "f1tenth_localization/src/physx_odom_runtime.cpp",
-      "native_limit_rad": 0.5235987755982988,
-      "native_rate_radps": 3.1999913703615235,
+      "native_actuator_file": null,
+      "native_actuator_crosscheck_available": false,
+      "native_limit_rad": null,
+      "native_rate_radps": null,
       "plant_update_limit_rad": 0.5235987755982988,
       "plant_update_rate_radps": 3.199991248188476,
       "limit_source": "unity_source_plant.cpp definition",
-      "rate_source": "unity_source_plant.cpp definition"
+      "limit_native_unverified": true,
+      "rate_source": "unity_source_plant.cpp actuator update",
+      "rate_native_unverified": true
     },
     "current_wheel_moment_arms": {
       "x_m": [
@@ -182,6 +221,8 @@
       ]
     }
   },
+  "requested_warmstart_backend": "native",
+  "native_preflight_replay_does_not_certify_Unity": true,
   "stage": "setup_complete",
   "limitations": "IPOPT historical CasADi wheel+heave+roll+pitch contact approximation, not exact 1ms PhysX scene integration. Native 1ms validation is mandatory and is not Unity."
 }

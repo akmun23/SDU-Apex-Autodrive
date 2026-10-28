@@ -1,6 +1,6 @@
 # Practice Unity/PhysX WheelCollider reverse-engineering
 
-Updated: 2026-10-20
+Updated: 2026-10-22 — corrected native substep interpretation
 
 ## Scope and binary identity
 
@@ -9,6 +9,7 @@ vehicle or a generic PhysX build:
 
 - `UnityPlayer.so` Build ID: `79f401cda3570218568e40b5331a0e68aa86f11c`
 - `UnityPlayer.so` SHA-256: `9522ea13f26f71ddb439996643b382c6466c5cfafa8f0deb58517b8b82fe7b4f`
+- Pinned practice image digest: `autodriveecosystem/autodrive_roboracer_sim@sha256:b4bbda41fdb1da7a2eadba4350ed3a0cb5020e7eb783454e78399ef5852dbd76`
 - Matching debug ELF: `external/unity-practice-image-analysis/UnityPlayer_s.debug`
 - Debug ELF SHA-256: `ba315e1c4c01498960045e95770a1e45f2515e612d93653e635ac1dc2f83af31`
 - Unity version reported by the player: 2022.3.52f1
@@ -48,7 +49,7 @@ Relevant exact-build symbols include:
 
 | Function | UnityPlayer link address | What it establishes |
 | --- | ---: | --- |
-| `WheelCollider::AddWheelToExistingVehicle` | `0x15134b0` | Native wheel/suspension setup and the `setSubStepCount(128,5,1)` call |
+| `WheelCollider::AddWheelToExistingVehicle` | `0x15134b0` | Native wheel/suspension setup and the `setSubStepCount(5.0f,5,1)` call |
 | `VehicleComputeTireForce` | `0x1513d40` | The simulator's custom per-wheel tire callback |
 | `WheelCollider::ComputeWheelCentreOfMassOffset` | `0x15130c0` | Wheel centre and tire/suspension force application offsets |
 | `WheelCollider::SetSuspensionExpansionLimited` | `0x1513f70` | Maps the property to the native suspension flag |
@@ -57,14 +58,22 @@ Relevant exact-build symbols include:
 | `physx::processSuspTireWheels` | `0x1b28fd0` | Contact, suspension, slip, sticky-tire, and tire callback preparation |
 | `physx::PxVehicleUpdate::updateNoDrive` | `0x1b32e20` | `PxVehicleNoDrive` substep/update order |
 
-The exact native debug ELF corrects two earlier uncertainties:
+The exact native debug ELF resolves the wheel-substep setting unambiguously:
 
-- **Wheel substeps:** `AddWheelToExistingVehicle` passes `128.0f, 5, 1` to
-  `setSubStepCount`. Thus the race-speed branch is five internal vehicle steps
-  per Unity fixed step; the one-step branch begins at `|forward speed| >= 128`
-  in the player's units. The old 5 m/s model threshold was wrong and is
-  removed from production code. The separate public-PhysX 5 m/s value is only
-  the threshold for low-speed *wheel pose-angle blending*.
+- **Wheel substeps — corrected 2026-10-22:** the matching `UnityPlayer.so` and
+  `UnityPlayer_s.debug` have the same Build ID, and the player binary SHA-256
+  matches the copy extracted from the pinned practice image. At
+  `AddWheelToExistingVehicle+0x2a`, the code loads the float at `0x17c574`
+  (bytes `00 00 a0 40`, exactly `5.0f`), puts integer arguments `5` and `1` in
+  the argument registers, then calls
+  `PxVehicleWheelsSimData::setSubStepCount(float, unsigned, unsigned)`. PhysX
+  stores those arguments as threshold/low-count/high-count; its update path
+  computes `abs(bodyLinearVelocity · vehicleForward)` and selects the low
+  count only when this is strictly less than the threshold. The actual schedule
+  is therefore five substeps below 5 m/s and one at or above 5 m/s. The earlier
+  128 m/s interpretation in this report and the resulting production/optimizer
+  constants was wrong. The wheel-angle blend also uses 5 m/s, but is not the
+  evidence for this substep threshold.
 - **Wheel encoders:** `WheelCollider::GetRpm` calls
   `PxVehicleWheelsDynData::getWheelRotationSpeed`. It reports native wheel
   angular speed converted to RPM; it does not read throttle and does not
@@ -103,7 +112,7 @@ cannot correct a wrong mesh hit or surface normal.
 
 ### Wheel and command setup
 
-`AddWheelToExistingVehicle` enables each wheel, installs the `128/5/1`
+`AddWheelToExistingVehicle` enables each wheel, installs the `5/5/1`
 substep schedule, copies the serialized WheelCollider radius/mass/damping,
 sets wheel moment of inertia to `0.5 * mass * radius^2`, installs a 0.1 m
 width and native wheel data, sets suspension direction `(0,-1,0)`, computes
@@ -233,8 +242,9 @@ it does not invoke or link Unity/PhysX at runtime.
 
 ## Code changes in this working tree
 
-- Corrected the production wheel-substep schedule to five steps below 128 m/s
-  and one at/above it; added exact boundary tests.
+- Corrected the production wheel-substep schedule to five steps below 5 m/s
+  and one at/above it; added exact boundary tests. The player binary hash was
+  verified against the pinned practice image.
 - Removed filtered tire load from normalized lateral utilization. The Unity
   callback normalizes the raw friction-curve responses; filtered tire load
   scales the resulting force, but is not part of the normalized lateral term.
@@ -301,3 +311,88 @@ no new live accuracy claim is made here.
   is solved. The next useful validation is a current-code practice run; if it
   disagrees, inspect the runtime stream and the exact scene contact query
   before altering this now source-correct callback equation.
+
+### IPOPT plant-equation audit — 2026-10-22
+
+The production plant and IPOPT are not interchangeable implementations. The
+production C++ step advances the source-derived vehicle state at 1 ms and
+applies the Unity scene damping/constraint phase after the vehicle update. The
+minimum-time optimizer remains a spatial collocation problem, and its
+generated v251 candidate therefore needs its own equation-parity audit.
+
+That audit found a candidate state-equation error: the yaw-rate state was
+being differentiated using Euler yaw-angle rate. The repaired candidate
+separates `r_dot = Mz / Izz - damping*r` from ZYX `yaw_dot`, using the first
+only for yaw-rate propagation and the second for Frenet heading progression.
+The lateral path speed and residual diagnostics were also brought into the
+same tilted horizontal frame as the tire/contact model. Production odometry
+already propagates yaw angular acceleration and Euler pose separately, so
+these findings did not call for an odometry edit.
+
+The generator now cross-checks the Unity fixed timestep against production
+`kDt`, and verifies the angular-damping source literal before constructing the
+candidate. Focused math tests pass; there has been no post-change IPOPT or
+simulator validation. Consequently, the revised equations are source-checked,
+not yet demonstrated to improve a feasible path or lap time.
+
+Known non-parity at the optimizer level is explicit: its spatial trapezoidal
+state integration does not replay 1 ms scene steps; spatial decision nodes do
+not enforce the exact 25 ms command hold; tire reaction torque is averaged
+across intervals; a variable spatial interval can straddle the source 5 m/s
+substep switch; and the native contact/constraint solver is not reproduced by
+the symbolic OCP. In addition, zero-throttle braking and minimum normal-load
+constraints describe selected driveable-racing domain restrictions, not a
+complete simulation of every Unity contact state. None should be described
+as exact native behavior. Further accuracy work must target those mechanisms
+or quantify them—not re-fit the already source-derived tire callback.
+
+### Prefab-to-production contact geometry cross-check — 2026-10-22
+
+The source loader now resolves the active practice scene's F1TENTH prefab,
+VehicleController wheel references, WheelCollider transforms, center offsets,
+quaternions, and COM. It checks their vehicle-frame wheel centers against the
+production C++ geometry before constructing the IPOPT model. This exposed
+specific stale values rather than a tuning issue:
+
+- The inherited Python quaternion constants used `sin(5°), cos(5°)` as
+  quaternion `z,w`, encoding a 10° rotation. The serialized practice wheel
+  transforms are `z=±0.043619405, w=0.9990483`, i.e. ±5°. The old OCP front
+  mount was laterally displaced by about 2.2 mm. Ray geometry now comes
+  directly from production source arrays, and camber metadata is derived from
+  the source 5° values.
+- The front production transform-up offset was `-0.0044351388 m`; the active
+  prefab says local `y=0.06 m` and its COM is `y=0.06434 m`, giving
+  `-0.00434 m`. Rear offsets already matched. The shared plant now uses the
+  prefab value; its force-application height is derived as transform height
+  minus the serialized `0.059 m` radius. The reset snapshot and geometry test
+  use the same source-derived values.
+
+The revised loader fails closed if practice-prefab COM or wheel-center data
+disagree with the plant/reset state. It also resolves scene-level WheelCollider
+overrides. The practice scene explicitly overrides forward tire stiffness and
+extremum value for all four wheels (`0.8` and `0.9`); these currently equal the
+prefab values, so the effective curve is unchanged, but those values must not
+be silently omitted. The earlier guard treated any tire-curve override as an
+unsupported geometry change and stopped model construction. It now applies
+numeric tire-curve overrides to the effective scene model and fails closed on
+other unhandled wheel-component or transform overrides. A regression test
+checks all eight scene overrides and their effective values. The same loader
+now verifies the active autonomous mode (`DrivingMode=1`), CAWD/CAWB and front-
+wheel steering branch, the controller's steering limit/rate and Ackermann
+dimensions, plus Rigidbody mass, linear/angular damping, gravity, and dynamic
+configuration against production constants. These values agree in the current
+practice setup. The controller's serialized `WheelRadius=0.0325 m` is also
+recorded but deliberately not used: source control flow proves this field is
+only consumed by `ExtendedDifferentialDrive` for skid steer; the active CAWD
+path uses WheelCollider radii (`0.059 m`).
+
+The focused Python equation/source plus wheel-substep suites pass 14/14 (8
+equation/source checks and 6 substep-boundary checks). An expanded set including
+the steering-source/alias contract tests passes 32/32. One stale test had
+expected a missing retired localization source file to throw `FileNotFoundError`;
+it now asserts the actual fail-closed behavior when no source equation can be
+resolved. The production plant's focused C++ suite previously passed 35/35
+after the contact-height correction; no C++ source changed in this follow-up.
+No IPOPT solve or Unity simulator run was started. These parameter checks do
+not resolve the separately documented spatial-versus-fixed-step and native
+scene-contact solver gaps.

@@ -32,6 +32,8 @@ class RecoveryTests(unittest.TestCase):
                             ['--trust-factors', '4'],
                             ['--trust-factors', '4,nan'],
                             ['--trust-factors', '0,4'],
+                            ['--iterations'], ['--iterations', '0'],
+                            ['--iterations', '-1'], ['--iterations', '1.5'],
                             ['--trust-factors', '4,4'], ['--bogus']):
                 with self.subTest(options=options):
                     result = subprocess.run(

@@ -4,13 +4,14 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_root"
 [[ $# -ge 2 ]] || {
-  echo 'Usage: run_ipopt_unattended.sh OUTPUT_DIR SEED.npz [--all-day] [--trust-factors LIST]' >&2; exit 2;
+  echo 'Usage: run_ipopt_unattended.sh OUTPUT_DIR SEED.npz [--all-day] [--trust-factors LIST] [--iterations N]' >&2; exit 2;
 }
 output="$(realpath -m -- "$1")"
 seed="$(realpath -e -- "$2")"
 shift 2
 all_day=0
 requested_factors=
+requested_iterations=
 while (( $# )); do
   case "$1" in
     --all-day) all_day=1; shift ;;
@@ -19,6 +20,9 @@ while (( $# )); do
       requested_factors="$2"
       [[ -n "$requested_factors" ]] || exit 2
       shift 2 ;;
+    --iterations)
+      [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || exit 2
+      requested_iterations="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -38,6 +42,8 @@ fi
 [[ ! -e "$output/status.json" && ! -e "$output/console.log" ]] || exit 2
 mkdir -p "$output"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 SDU_IPOPT_STACK_DUMP=1
+ipopt_cpu="${SDU_IPOPT_CPU:-15}"
+[[ "$ipopt_cpu" =~ ^[0-9]+$ ]] || exit 2
 export SDU_IPOPT_STAGE_CAPTURE_DIR="$output/time_stage_iterates"
 # Native IPOPT termination returns normally through selection/export code.
 # The outer wall guard is an emergency bound, not a convergence claim.
@@ -60,6 +66,9 @@ fi
 if [[ -n "$requested_factors" ]]; then
   factors="$requested_factors"
 fi
+if [[ -n "$requested_iterations" ]]; then
+  iterations="$requested_iterations"
+fi
 write_status() {
   python3 - "$output" "$1" "$2" "$seed" "$mode" "$wall_guard" "$iterations" "$factors" <<'PY'
 import datetime,hashlib,json,os,sys
@@ -74,6 +83,10 @@ data={'state':state,'exit_code':None if state=='running' else code,
       'time_stage_wall_limit_seconds':float(os.environ['SDU_IPOPT_TIME_MAX_WALL_SECONDS']) or None,
       'iterations_per_time_stage':int(sys.argv[7]),
       'trust_region_factors':[float(x) for x in sys.argv[8].split(',')],
+      'requested_cpu':int(os.environ.get('SDU_IPOPT_CPU', '15')),
+      'variable_scaling':os.environ.get('SDU_IPOPT_VARIABLE_SCALING', '0') == '1',
+      'checkpoint_stride':int(os.environ.get('SDU_IPOPT_TIME_CHECKPOINT_STRIDE', '25')),
+      'checkpoint_interval_seconds':float(os.environ.get('SDU_IPOPT_TIME_CHECKPOINT_SECONDS', '120')),
       'seed_path':sys.argv[4],
       'seed_sha256':hashlib.sha256(Path(sys.argv[4]).read_bytes()).hexdigest(),
       'runtime_trajectory_promoted':False,'unity_validated':False,
@@ -105,7 +118,7 @@ if (( wall_guard > 0 )); then
 fi
 set +e
 "${command_prefix[@]}" \
-  taskset -c 15 nice -n 10 \
+  taskset -c "$ipopt_cpu" nice -n 10 \
   SDU_Apex_IPOPT_PhysX_MinTime_v2/.venv/bin/python -u \
   SDU_Apex_IPOPT_PhysX_MinTime_v2/run_ipopt.py \
   --repo-root "$repo_root" \

@@ -84,6 +84,15 @@ if [[ -n "${ROS_DOMAIN_ID:-}" ]]; then
   ros_domain_args+=(-e "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}")
 fi
 
+controller_cpuset_args=()
+if [[ -n "${SDU_APEX_CPUSET_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_CPUSET_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo "SDU_APEX_CPUSET_CPUS must be a comma-separated list/range such as 0-7." >&2
+    exit 2
+  fi
+  controller_cpuset_args=(--cpuset-cpus "${SDU_APEX_CPUSET_CPUS}")
+fi
+
 map_yaml_override=""
 trajectory_file_override=""
 csv_command_file_override=""
@@ -129,6 +138,7 @@ elif ! docker image inspect "${image}" >/dev/null 2>&1; then
 fi
 
 exec docker run --rm --name "${container}" \
+  "${controller_cpuset_args[@]}" \
   --network=host --ipc=host --privileged --gpus all \
   --log-opt max-size=10m --log-opt max-file=3 \
   "${ros_domain_args[@]}" \

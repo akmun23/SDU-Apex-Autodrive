@@ -4,6 +4,8 @@ from pathlib import Path
 import typing
 import unittest
 
+from tools.verify_runtime_topic_policy import subscription_errors
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / 'sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py'
@@ -23,6 +25,17 @@ def diagnostic_namespace(enabled):
 
 
 class BridgeRuntimeContractTests(unittest.TestCase):
+    def test_live_endpoint_audit_rejects_debug_and_transform_aliases(self):
+        allowed = {'sensor_odometry': ['/autodrive/roboracer_1/imu', '/parameter_events'],
+                   'mpc_controller_node': ['/odom', '/odom/unity_plant_state']}
+        self.assertEqual(subscription_errors(allowed), [])
+        for forbidden in ('/autodrive/roboracer_1/odom', '/autodrive/reset_command',
+                          '/autodrive/roboracer_1/bridge_packet_timing',
+                          '/autodrive/roboracer_1/development_actuator_timing',
+                          '/tf', '/sdu/tf'):
+            with self.subTest(topic=forbidden):
+                self.assertTrue(subscription_errors({'sensor_odometry': [forbidden]}))
+
     def test_disabled_diagnostics_never_inspect_packet(self):
         class ForbiddenPacket(dict):
             def get(self, *_args):

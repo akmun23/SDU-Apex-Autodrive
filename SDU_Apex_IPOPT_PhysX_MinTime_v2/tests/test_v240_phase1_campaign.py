@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 import pytest
-from phase1_campaign import validate_restart_checkpoint, continue_phase1
+from phase1_campaign import (validate_restart_checkpoint, continue_phase1,
+                             load_phase1_resume_report)
 from solver_overlay import (transform_solver_v240, SOLVE_ELASTIC,
                             _PHASE1_FAILURE_MARKER, _PHASE1_REPORT_MARKER)
 
@@ -31,6 +32,75 @@ def test_validate_checkpoint_with_original_physical_state_mesh():
     assert np.array_equal(stations,np.arange(5))
     assert list(lengths)==[5.]
     assert defect==0.8 and energy==10
+
+
+def _write_resume_fixture(tmp_path):
+    import hashlib
+    track=SimpleNamespace(count=5,length=5.,s=np.arange(5,dtype=float))
+    map_path=tmp_path/'track.pgm';map_path.write_bytes(b'map')
+    centerline=tmp_path/'line.csv';centerline.write_bytes(b'centerline')
+    mesh=tmp_path/'mesh.csv';mesh.write_bytes(b'mesh')
+    digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+    model={'mass_kg':3.47}
+    source_sha='source-sha-256'
+    overlay={'phase1_formulation':'elastic',
+             'optimizer_source_sha256':source_sha}
+    checkpoint=fixture_checkpoint()
+    report={
+        'phase1_strict_feasible':False,
+        'solver':{'feasible_incumbent':False},
+        'track':{'count':track.count,'length_m':track.length},
+        'unity_vehicle_model':model,
+        'phase1_solver_overlay':overlay,
+        'phase1_restart_checkpoint':checkpoint,
+    }
+    report_path=tmp_path/'ipopt_report_pass_00.json'
+    report_path.write_text(json.dumps(report))
+    provenance={
+        'map_sha256':digest(map_path),
+        'centerline_sha256':digest(centerline),
+        'optimizer_reference_track_mesh':{
+            'sha256':digest(mesh),'nodes':track.count,'length_m':track.length},
+        'phase1_solver_overlay':overlay,
+    }
+    (tmp_path/'provenance.json').write_text(json.dumps(provenance))
+    return report_path,map_path,centerline,mesh,track,model,source_sha
+
+
+def test_resume_report_requires_matching_source_map_mesh_model_and_formulation(tmp_path):
+    args=_write_resume_fixture(tmp_path)
+    checkpoint=load_phase1_resume_report(
+        args[0],map_path=args[1],centerline_path=args[2],mesh_path=args[3],
+        track=args[4],model_metadata=args[5],
+        optimizer_source_sha256=args[6],phase1_formulation='elastic')
+    assert checkpoint[3]==0.8
+    assert np.array_equal(checkpoint[1],args[4].s)
+
+
+@pytest.mark.parametrize('kwargs,match',[
+    ({'optimizer_source_sha256':'different'},'optimizer source'),
+    ({'phase1_formulation':'eliminated'},'formulation'),
+    ({'model_metadata':{'mass_kg':9.0}},'vehicle model'),
+])
+def test_resume_report_rejects_stale_source_metadata(tmp_path,kwargs,match):
+    args=_write_resume_fixture(tmp_path)
+    call={'map_path':args[1],'centerline_path':args[2],
+          'mesh_path':args[3],'track':args[4],
+          'model_metadata':args[5],'optimizer_source_sha256':args[6],
+          'phase1_formulation':'elastic'}
+    call.update(kwargs)
+    with pytest.raises(ValueError,match=match):
+        load_phase1_resume_report(args[0],**call)
+
+
+def test_resume_report_rejects_map_or_mesh_mismatch(tmp_path):
+    args=_write_resume_fixture(tmp_path)
+    args[1].write_bytes(b'changed map')
+    with pytest.raises(ValueError,match='map_sha256'):
+        load_phase1_resume_report(
+            args[0],map_path=args[1],centerline_path=args[2],mesh_path=args[3],
+            track=args[4],model_metadata=args[5],
+            optimizer_source_sha256=args[6],phase1_formulation='elastic')
 
 
 @pytest.mark.parametrize('mutation',[
@@ -64,7 +134,7 @@ class FakeOld:
 def test_phase1_restarts_reuse_best_hard_feasible_state(tmp_path):
     solver=FakeOld([0.8,0.7,0.6])
     track=SimpleNamespace(count=5,length=5.)
-    kwargs={'brake_mode_seed':np.zeros(5,dtype=bool)}
+    kwargs={}
     candidate, report, progress=continue_phase1(solver,track,None,kwargs,
         output=tmp_path,phase=0,max_restarts=2,minimum_improvement=0.00001)
     assert not candidate and not report['solver']['feasible_incumbent']
@@ -80,7 +150,7 @@ def test_phase1_restarts_reuse_best_hard_feasible_state(tmp_path):
 def test_stop_repeating_when_no_new_feasibility_progress(tmp_path):
     solver=FakeOld([0.8,0.79999999,0.799999])
     _,_,progress=continue_phase1(solver,SimpleNamespace(count=5,length=5.),None,
-        {'brake_mode_seed':np.zeros(5,dtype=bool)},output=tmp_path,
+        {},output=tmp_path,
         phase=0,max_restarts=8,minimum_improvement=1e-5)
     assert len(progress)==2
 

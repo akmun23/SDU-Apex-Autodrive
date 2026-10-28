@@ -60,5 +60,5 @@ def test_unknown_constant_expression_is_not_guessed(tmp_path):
 
 
 def test_missing_native_source_is_not_silently_defaulted(tmp_path):
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(RuntimeError, match='Cannot verify'):
         _current_steering_parameters(tmp_path, '')

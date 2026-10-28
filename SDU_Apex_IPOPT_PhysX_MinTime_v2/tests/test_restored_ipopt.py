@@ -1,4 +1,3 @@
-import math
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,9 +6,9 @@ import pytest
 
 from recover import restore
 import recover
-from run_ipopt import brake_seed
 from native_validate import _time_schedule
-from source_vehicle import _cpp_number,_quat_rotation
+from source_vehicle import (_cpp_number, _quat_rotation,
+                            _unity_scene_vehicle_parameters)
 
 
 def test_historical_git_archive_restoration(tmp_path,monkeypatch):
@@ -30,21 +29,6 @@ def test_historical_git_archive_restoration(tmp_path,monkeypatch):
     dest=tmp_path/'out'
     assert restore(repo,dest)==dest
     assert (dest/'removed/optimizer_unity_wheels.py').read_text()=='full_ipopt=True\n'
-
-
-def test_brake_seed_is_periodic_and_has_resolved_sections():
-    n=120
-    xx=np.linspace(0,2*math.pi,n,endpoint=False)
-    kappa=1+np.sin(2*xx)**2
-    track=SimpleNamespace(count=n,kappa=kappa)
-    b=brake_seed(track,3)
-    assert b.shape==(n,)
-    assert not b[0] and not b[-1]
-    assert b.sum()>0
-    changes=np.flatnonzero(b[1:]!=b[:-1])+1
-    for left,right in zip(np.r_[0,changes],np.r_[changes,n]):
-        assert right-left>=6
-    assert not brake_seed(track,0).any()
 
 
 def test_time_integral_uses_actual_spatial_speed():
@@ -68,14 +52,31 @@ def test_sim_specific_cpp_numbers_are_strict():
     assert np.allclose(_quat_rotation((0,0,0,1)),np.eye(3))
 
 
+def test_practice_scene_torque_override_matches_cawd_brake_semantics():
+    repo=Path(__file__).resolve().parents[2]
+    config=_unity_scene_vehicle_parameters(repo)
+    plant=(repo/'f1tenth_mpc/src/unity_source_plant.cpp').read_text()
+    assert config['prefab_default_motor_torque_nm']==pytest.approx(85.6)
+    assert config['scene_motor_torque_override_nm']==pytest.approx(428.0)
+    assert _cpp_number(plant,'kMotorTorqueNm')==pytest.approx(
+        config['scene_motor_torque_override_nm'])
+    assert config['drive_type']=='CAWD'
+    assert config['brake_type']=='CAWB'
+    assert config['drive_torque_per_wheel_at_full_command_nm']==pytest.approx(107.0)
+    assert config['brake_torque_per_wheel_at_zero_command_nm']==pytest.approx(428.0)
+
+
 def test_checked_in_wheel_geometry_overrides_rounded_legacy(tmp_path):
     from source_vehicle import bind_current_wheel_moment_arms
     repo=tmp_path/'repo';src=repo/'f1tenth_mpc/src';src.mkdir(parents=True)
     (src/'unity_source_plant.cpp').write_text('''
     std::array<double,4> kWheelX{.17468,.17468,-.15532,-.15532};
     std::array<double,4> kWheelY{.115741,-.115901,.11792,-.11808};
+    std::array<double,4> kWheelColliderTransformZCom{.020,.020,.020,.020};
+    constexpr double kWheelRadiusM = .059;
     ''')
     a=SimpleNamespace();b=SimpleNamespace()
     meta=bind_current_wheel_moment_arms(repo,a,b)
     assert meta['y_m'][0]==pytest.approx(.115741)
+    assert meta['force_application_z_m']==pytest.approx((-.039,)*4)
     assert a.WHEEL_Y_M==b.WHEEL_Y_M

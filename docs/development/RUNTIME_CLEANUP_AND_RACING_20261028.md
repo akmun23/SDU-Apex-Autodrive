@@ -1,8 +1,13 @@
 # Runtime cleanup and racing improvements — 2026-10-28
 
 Target: ten consecutive scored laps below 49.8 s total, excluding warmup.
-IPOPT v347 was interrupted by power loss during its second time stage. Recovery
-v348 runs on CPU 15; do not restart it for runtime development (details below).
+Latest MPC warm-start gate correction and its supervised tests are recorded in
+[MPC repairable warm-start correction](MPC_REPAIRABLE_WARM_START_20261028.md).
+The correction is implemented; the ten-lap time target remains unmet.
+IPOPT v347 was interrupted by power loss during its second time stage. Optimized
+recovery v354 runs on CPU 15; do not restart it for runtime development.
+See [IPOPT recovery and performance](IPOPT_RECOVERY_AND_PERFORMANCE_20261028.md)
+for the current service, checkpoints, correctness tests and optimization work.
 Runtime trials use the stock practice simulator, allowed
 sensor topics only, with ground truth reserved for recording/scoring.
 
@@ -20,7 +25,7 @@ sensor topics only, with ground truth reserved for recording/scoring.
   vectors were not saved, so the printed objective/residual cannot reconstruct
   that iterate. The previous complete factor-2 NPZ is intact, SHA256
   `bb9fc985db4ec3eacf0a2cb94fbcef4f011a7274a0839d0e39b3583b89c1418c`.
-- Recovery directory: `optimized_practice_v348_power_recovery_20261028`.
+- Initial recovery directory: `optimized_practice_v348_power_recovery_20261028`.
   Transferred every archived differential state and both control arrays at
   fraction 1.0 with the existing provenance-checking seed converter; zero
   speed samples clipped. Algebraic quantities are recomputed by the current
@@ -28,7 +33,7 @@ sensor topics only, with ground truth reserved for recording/scoring.
   This is a primal reseed, **not** restoration of IPOPT duals, barrier state,
   or the interrupted iteration counter. The time-stage trust box is centered
   on the newly certified initializer, as in the existing restart formulation.
-- Started `sdu-apex-ipopt-recovery-20261028.service`: factors
+- Initially started `sdu-apex-ipopt-recovery-20261028.service`: factors
   **4,16,64,256,1024**, 6000 iterations each, exact Hessian, original 0.06 m
   mesh / 0.05 m margin / positive throttle bounds, no CPU/wall caps. No new
   simulation, no runtime trajectory promotion, no physics/model changes.
@@ -46,9 +51,10 @@ sensor topics only, with ground truth reserved for recording/scoring.
   python3 tools/watch_ipopt.py optimized_practice_v348_power_recovery_20261028 --unit sdu-apex-ipopt-recovery-20261028.service
   ```
 
-Only stage-end checkpoints currently persist time-stage primal vectors.
-Mid-stage progress remains vulnerable to forced power loss; the sleep
-inhibitor does not provide checkpointing or protection against power failure.
+The initial v348 attempt exposed a throttle re-seeding bug and was superseded.
+The linked IPOPT document describes its fix, the successful exact recheck, and
+the v354 continuation with durable mid-stage checkpoints. This section records
+the initial recovery investigation, not the latest active service.
 
 **Follow-up work in progress:** same-epoch ADMM refinement fix and competition
 bridge isolation are detailed in the 2026-10-28 follow-up section below. The

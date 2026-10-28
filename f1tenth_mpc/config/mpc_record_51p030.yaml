@@ -1,0 +1,7 @@
+/**:
+  ros__parameters:
+    # Frozen overlay for the verified 51.030 s ten-scored-lap practice run.
+    # Use with the full mpc_competition.yaml and documented smooth v343 line.
+    # Physical actuator bounds and all production weights remain unchanged.
+    sqp_steering_trust_region_rad: 0.04
+    sqp_throttle_trust_region: 0.05

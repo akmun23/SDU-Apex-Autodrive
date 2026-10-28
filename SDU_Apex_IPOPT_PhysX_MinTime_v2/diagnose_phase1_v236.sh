@@ -22,7 +22,6 @@ timeout --signal=TERM --kill-after=10s 240s python3 -u run_ipopt.py \
   --mesh-spacing 0.20 \
   --seed-backend native \
   --seed-file ./optimized_practice_v2_3_0/warmstart_physx/native_warmstart.npz \
-  --brake-zones 0 \
   --phase1-hessian limited-memory \
   --feasibility-iterations 50 \
   --iterations 1 \

@@ -58,7 +58,7 @@ def test_stage_control_seed_accepts_production_float32_command_bounds(
         tmp_path: Path):
     path = tmp_path / "production_float_bounds.csv"
     steering = float(np.float32(0.5235987756))
-    throttle = float(np.float32(0.01))
+    throttle = float(np.float32(0.001))
     rows = ["stage,command_steering_rad,command_throttle"]
     rows.extend(f"{i + 1},{steering},{throttle}" for i in range(30))
     path.write_text("\n".join(rows) + "\n")
@@ -138,7 +138,7 @@ def test_select_saved_state_rejects_invalid_index_or_progress():
 
 
 def test_parse_starts_keeps_only_legal_throttle():
-    assert _parse_starts("0.7:0.01,1.0:0.05") == [(0.7, 0.01), (1.0, 0.05)]
+    assert _parse_starts("0.7:0.001,1.0:0.05") == [(0.7, 0.001), (1.0, 0.05)]
     with pytest.raises(ValueError):
         _parse_starts("1.0:0")
 

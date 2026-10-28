@@ -27,6 +27,8 @@ def main():
     root = args.run_dir.resolve()
     log = root / 'console.log'
     offset, pending, stage, row, last_result = 0, '', None, None, None
+    durable_checkpoint = None
+    progress_message = None
     try:
         while True:
             if log.exists():
@@ -39,18 +41,29 @@ def main():
                 lines = pending.split('\n')
                 pending = lines.pop()
                 for line in lines:
+                    if line.startswith(('Symbolic mesh pass ', 'Phase-I ',
+                                        'IPOPT time-continuation solver setup',
+                                        'IPOPT exporting audited candidate:')):
+                        progress_message = line[:180]
                     match = re.search(r'IPOPT time stage trust_factor=([\d.eE+-]+)', line)
                     if match:
                         stage, row = float(match[1]), None
+                        durable_checkpoint = None
                     fields = line.split()
                     if len(fields) >= 4 and re.fullmatch(r'\d+r?', fields[0]):
                         try:
                             row = (fields[0], *(float(x) for x in fields[1:4]))
+                            progress_message = 'Numerical time minimization'
                         except ValueError:
                             pass
                     if line.startswith('IPOPT time-stage result: '):
                         try:
                             last_result = json.loads(line.split(': ', 1)[1])
+                        except ValueError:
+                            pass
+                    if line.startswith('IPOPT durable time checkpoint: '):
+                        try:
+                            durable_checkpoint = json.loads(line.split(': ', 1)[1])
                         except ValueError:
                             pass
             try:
@@ -80,8 +93,18 @@ def main():
                            f'Lap:    {row[1]:.6f} s  (current iterate)',
                            f'Constraint residual: {row[2]:.3g}  (limit 0.001)',
                            f'Optimality residual: {row[3]:.3g}  (lower is better)']
+            elif stage is not None:
+                output.append('Phase: solver initialization / derivative compilation; no iterations yet')
+            if progress_message:
+                output.append(f'Progress: {progress_message}')
             if last_result:
                 output.append(f'Last stage: {last_result.get("return_status", "unknown")}')
+            if durable_checkpoint:
+                best = durable_checkpoint.get('best_sampled_feasible_lap_time_s')
+                if best is not None:
+                    output.append(f'Best saved feasible sample: {best:.6f} s')
+                output.append('Durable save: iteration '
+                              + str(durable_checkpoint.get('iteration', '?')))
             if checkpoints:
                 latest = checkpoints[-1]
                 stamp = dt.datetime.fromtimestamp(latest.stat().st_mtime).astimezone()

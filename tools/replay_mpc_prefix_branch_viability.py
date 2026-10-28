@@ -36,7 +36,7 @@ REPLAY_ARGUMENTS = [
     "0.02", "independent", "cold", "8", "100", "0.25", "1", "1",
     "0.10", "0.10", "0.05", "0.05", "7", "2000", "10", "1", "3",
     "1", "4000", "1500", "7.5", "60", "25", "5", "7.8125", "3",
-    "5", "0.1", "2000", "10",
+    "5", "0.1", "2000", "100",
 ]
 
 
@@ -90,6 +90,17 @@ def saved_state_row(diag: dict[str, Any]) -> list[float]:
 
 def get_prefix_controls(diag: dict[str, Any]) -> tuple[list[list[float]],
                                                         list[list[float]]]:
+    quality = diag.get("quality_aware_prefix_selection", {})
+    if quality.get("attempted"):
+        candidate_logged = quality.get("candidate_prefix_controls")
+        prior_logged = quality.get("prior_prefix_controls")
+        if (isinstance(candidate_logged, list) and len(candidate_logged) >= 3 and
+                isinstance(prior_logged, list) and len(prior_logged) >= 3):
+            return (
+                [[float(u[0]), float(u[1])] for u in candidate_logged[:3]],
+                [[float(u[0]), float(u[1])] for u in prior_logged[:3]],
+            )
+
     candidate = diag.get("candidate_controls")
     snapshot = diag.get("certified_plan_snapshot")
     if not isinstance(snapshot, dict):
@@ -100,16 +111,27 @@ def get_prefix_controls(diag: dict[str, Any]) -> tuple[list[list[float]],
         raise ValueError("certified prior plan snapshot is unavailable")
     prior = snapshot.get("controls")
     cursor = int(snapshot.get("cursor", -1))
-    # Published candidate-prefix replaces the current prior action at cursor.
-    prior_start = cursor
+    # The diagnostic snapshot is emitted after the publication decision. A
+    # candidate-prefix publication advances the cursor and replaces the old
+    # plan action now at `cursor`; a same-state counterfactual compares against
+    # that action. A rejected cycle publishes nothing, so its next retained
+    # action is `cursor + 1`.
+    prior_start = (cursor if diag.get("status") == "accepted_candidate_prefix"
+                   else cursor + 1)
     if not isinstance(prior, list) or not 0 <= prior_start < len(prior):
         raise ValueError("certified prior-plan cursor is invalid")
     candidate_prefix = [[float(u[0]), float(u[1])] for u in candidate[:3]]
     prior_prefix = [[float(u[0]), float(u[1])]
-                    for u in prior[prior_start:prior_start + 3]]
-    if len(prior_prefix) != 3:
-        raise ValueError("prior plan has fewer than three remaining actions")
+                    for u in (prior[min(prior_start + i, len(prior) - 1)]
+                              for i in range(3))]
     return candidate_prefix, prior_prefix
+
+
+def has_candidate_prior_prefix_comparison(diag: dict[str, Any]) -> bool:
+    if diag.get("status") == "accepted_candidate_prefix":
+        return True
+    quality = diag.get("quality_aware_prefix_selection", {})
+    return bool(quality.get("attempted"))
 
 
 def run_replay(binary: Path, trajectory: Path, states_path: Path,
@@ -164,7 +186,7 @@ def main() -> int:
     valid_branch_refs: list[dict[str, Any]] = []
     state_rows: list[list[float]] = []
     for diag in diagnostics:
-        if diag.get("status") != "accepted_candidate_prefix":
+        if not has_candidate_prior_prefix_comparison(diag):
             continue
         try:
             candidate, prior = get_prefix_controls(diag)
@@ -204,6 +226,7 @@ def main() -> int:
                 "bag_time_s": diag.get("bag_time"),
                 "source_stamp_ns": diag.get("source_stamp_ns"),
                 "progress_m": float(diag["progress_m"]),
+                "comparison_status": diag.get("status"),
                 "source": source,
                 "issued_prefix": controls,
                 "prefix_exact_valid": True,

@@ -29,11 +29,11 @@ except ModuleNotFoundError:
 
 STAGES = 30
 DECISION_KNOTS = 10
-# Match the production C float command envelope exactly. Decimal CSV dumps of
-# these legal values appear microscopically outside the corresponding Python
-# double constants; the source plant clamps the steering representation at its
-# boundary, just as production does.
-THROTTLE_MIN = float(ctypes.c_float(0.01).value)
+# Keep the decimal actuator boundary exact in Python. The production C float
+# representation of 0.001 is slightly larger than the decimal value, so using
+# that rounded float as the comparison threshold incorrectly rejected a CSV
+# command written as exactly 0.001.
+THROTTLE_MIN = 0.001
 STEERING_COMMAND_LIMIT_RAD = float(ctypes.c_float(0.5235987756).value)
 STATE_COLUMNS = (
     "e_y", "e_psi", "u", "v", "r", "delayed_steer_1_rad",
@@ -337,7 +337,7 @@ def optimize_saved_state(diag: dict[str, Any], points: list[dict[str, float]],
             "all 30 source-plant stages replayed from the saved 33-state plant and two-slot command queue",
             f"minimum source-plant footprint corridor slack >= {minimum_corridor_slack_m:.6f} m after configured wall clearance",
             "steering within production bounds",
-            "MPC throttle within [0.01,1.0]",
+            "MPC throttle within [0.001,1.0]",
         ],
         "decision_parameterization": {
             "stages": STAGES, "knot_count_per_control": knots,
@@ -364,7 +364,7 @@ def _parse_starts(value: str) -> list[tuple[float, float]]:
         if not math.isfinite(gain) or not 0.0 <= gain <= 2.0:
             raise ValueError("steering seed gains must be in [0,2]")
         if not math.isfinite(throttle) or not THROTTLE_MIN <= throttle <= 1.0:
-            raise ValueError("seed throttle must be in [0.01,1]")
+            raise ValueError("seed throttle must be in [0.001,1]")
         starts.append((gain, throttle))
     if not starts:
         raise ValueError("at least one optimizer start is required")
@@ -385,7 +385,7 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int, default=60)
     parser.add_argument("--decision-knots", type=int, choices=(10, 15, 30),
                         default=DECISION_KNOTS)
-    parser.add_argument("--starts", default="0.7:0.01,1.0:0.05")
+    parser.add_argument("--starts", default="0.7:0.001,1.0:0.05")
     parser.add_argument("--seed-control-csv", type=Path,
                         help="30-stage exact source-witness CSV used as an additional initialization")
     parser.add_argument("--seed-throttle-offsets", default="0,0.05,0.10,0.20",

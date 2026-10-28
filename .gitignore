@@ -5,11 +5,34 @@ log/
 log-current/
 build-current/
 install-current/
-live_runs/
+/live_runs/*
+!/live_runs/COLCON_IGNORE
 **/build/
 **/install/
 **/log/
-SDU_Apex_IPOPT_PhysX_MinTime_v2/
+SDU_Apex_IPOPT_PhysX_MinTime_v2/*
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/COLCON_IGNORE
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/min_curvature_seed.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/solver_overlay_v251.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/make_exploratory_ipopt_seed.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/path_frame.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/source_equation_kernels.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/ipopt_time_progress.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/benchmark_source_equation_kernels.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/solver_overlay_condensed_v242.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/solver_overlay_eliminated_v243.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/vehicle_mechanics_overlay_v250.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/wheel_model_overlay_v241.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/wheel_model_overlay_v250.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/wheel_model_overlay_v251.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/
+SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/*
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_v251_phase1_reduction.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_exploratory_ipopt_seed.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_path_frame.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_native_clearance.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_source_equation_kernels.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_ipopt_time_progress.py
 
 # Python and local tooling
 __pycache__/
@@ -26,8 +49,17 @@ artifacts/
 *.db3
 *.csv.tmp
 
-external/
+/external/*
+!/external/COLCON_IGNORE
 install_handoff/
 build_handoff/
 log_handoff/
-build_task/
+/build_task/*
+!/build_task/COLCON_IGNORE
+
+# Optimizer results/checkpoints are local data, including live unattended jobs.
+/optimized_*/
+# Source is above; restored/generated copies are reproducible caches.
+SDU_Apex_IPOPT_PhysX_MinTime_v2/_restored_git_history/
+SDU_Apex_IPOPT_PhysX_MinTime_v2/_working_solver*/
+SDU_Apex_IPOPT_PhysX_MinTime_v2/min_curvature_tradeoff_*/
