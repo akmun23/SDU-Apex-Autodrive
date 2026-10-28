@@ -2681,6 +2681,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->lateral_accel_proxy_mps2 = NAN;
         result->lateral_accel_proxy_stage = -1;
         result->nonlinear_objective = NAN;
+        result->refinement_first_prefix_objective = NAN;
+        result->refinement_second_prefix_objective = NAN;
         result->total_cycle_us = 0.0;
     }
     if (!result || !memory || !finite_rti_state(current_state) ||
@@ -2837,6 +2839,48 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
                     first_pass.admm_status, refined_pass.admm_status,
                     refined_pass.solver_skipped_for_deadline);
+            int refined_prefix_better = 0;
+            if (!first_action_valid && !refined_action_valid &&
+                !keep_first_pass &&
+                (deadline_us <= 0.0 || deadline_us - monotonic_microseconds()
+                    >= MPC_RTI_POST_SOLVE_RESERVE_US + 1000.0)) {
+                /* Neither full horizon is certified. Do not blindly replace
+                 * the first proposal by R2: compare equal 75 ms exact prefixes
+                 * on the same state, inputs in flight, references and costs.
+                 * The node still revalidates any prefix before publication.
+                 * A short prefix cannot certify either rejected full tail. */
+                const double prefix_start_us = monotonic_microseconds();
+                MpcRtiNominal_t prefix;
+                int failure_stage;
+                const int prefix_horizon = MPC_RECOVERY_PREFIX_HORIZON;
+                const int first_prefix_valid = first_pass.first_action_valid &&
+                    mpc_rti_validate_candidate_plan(&prepared_state,
+                        current_progress, first_pass.proposed_controls,
+                        trajectory, trajectory_count, lap_length,
+                        prefix_horizon, prediction_dt, configuration,
+                        &prefix, &failure_stage) == MPC_RTI_ROLLOUT_OK;
+                if (first_prefix_valid)
+                    result->refinement_first_prefix_objective =
+                        prefix.validation_objective;
+                const int second_prefix_valid = refined_pass.first_action_valid &&
+                    mpc_rti_validate_candidate_plan(&prepared_state,
+                        current_progress, refined_pass.proposed_controls,
+                        trajectory, trajectory_count, lap_length,
+                        prefix_horizon, prediction_dt, configuration,
+                        &prefix, &failure_stage) == MPC_RTI_ROLLOUT_OK;
+                if (second_prefix_valid)
+                    result->refinement_second_prefix_objective =
+                        prefix.validation_objective;
+                refined_prefix_better = mpc_rti_refinement_improves_action(
+                    first_prefix_valid,
+                    result->refinement_first_prefix_objective,
+                    second_prefix_valid,
+                    result->refinement_second_prefix_objective);
+                result->refinement_prefix_selected_pass =
+                    refined_prefix_better ? 2 : 1;
+                result->refinement_prefix_validation_us =
+                    monotonic_microseconds() - prefix_start_us;
+            }
             int chose_refinement = 0;
             if (mpc_rti_refinement_improves_action(first_action_valid,
                     first_pass.nonlinear_objective, refined_action_valid,
@@ -2852,8 +2896,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 pass = first_pass;
                 status = first_status;
                 *memory = memory_after_first;
-            } else if (!first_pass.sqp_accepted ||
-                       !first_pass.first_action_valid) {
+            } else if (refined_prefix_better) {
                 pass = refined_pass;
                 status = refined_status;
                 chose_refinement = 1;

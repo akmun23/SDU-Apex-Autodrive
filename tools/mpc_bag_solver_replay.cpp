@@ -437,7 +437,10 @@ int main(int argc, char **argv)
         riccati_debug_set_trace_enabled(trace_row >= 0);
         std::cout << "stamp_ns,status,admm_status,time_budget_exhausted,iterations,"
                      "sqp_iterations_attempted,sqp_iterations_completed,"
-                     "sqp_iterations_accepted,primal,dual,"
+                     "sqp_iterations_accepted,refinement_prefix_selected_pass,"
+                     "refinement_first_prefix_objective,"
+                     "refinement_second_prefix_objective,"
+                     "refinement_prefix_validation_us,primal,dual,"
                      "rho_changes,factorizations,"
                      "input_u_mps,input_v_mps,input_r_radps,"
                      "input_abs_steering_rad,input_delayed_throttle,"
@@ -769,6 +772,10 @@ int main(int argc, char **argv)
                       << result.sqp_iterations_attempted << ','
                       << result.sqp_iterations_completed << ','
                       << result.sqp_iterations_accepted << ','
+                      << result.refinement_prefix_selected_pass << ','
+                      << result.refinement_first_prefix_objective << ','
+                      << result.refinement_second_prefix_objective << ','
+                      << result.refinement_prefix_validation_us << ','
                       << result.primal_residual << ',' << result.dual_residual << ','
                       << result.rho_change_count << ','
                       << result.factorization_count << ','

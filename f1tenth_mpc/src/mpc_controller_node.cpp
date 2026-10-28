@@ -55,7 +55,7 @@ constexpr std::uint32_t kUnityPlantStateSchemaVersion = 11;
 constexpr int64_t kBridgeControlPeriodNs = 25'000'000;
 /* A fresh command takes effect after the two queued bridge packets. Validate
  * those two intervals plus the first interval affected by this command. */
-constexpr int kCommandEffectValidationHorizon = 3;
+constexpr int kCommandEffectValidationHorizon = MPC_RECOVERY_PREFIX_HORIZON;
 /* Only a truly stationary, plan-less spawn may wait for the next solve tick
  * when cold Jacobian construction consumes the reserved ADMM budget. */
 constexpr float kStationaryStartupRetrySpeedMps = 0.05f;
@@ -960,7 +960,6 @@ private:
         double progress,
         int64_t callback_steady_ns,
         int64_t control_stamp_ns,
-        int64_t candidate_command_stamp_ns,
         MpcRtiCycleResult_t *result,
         const char **fault_reason,
         bool validate_full_remaining_suffix = false)
@@ -1225,7 +1224,6 @@ private:
         double progress,
         int64_t callback_steady_ns,
         int64_t control_stamp_ns,
-        int64_t candidate_command_stamp_ns,
         MpcRtiCycleResult_t *result,
         bool *attempted,
         const char **fault_reason)
@@ -1614,7 +1612,6 @@ private:
         double progress,
         int64_t callback_steady_ns,
         int64_t control_stamp_ns,
-        int64_t candidate_command_stamp_ns,
         MpcRtiCycleResult_t *result,
         const char **fault_reason)
     {
@@ -1924,12 +1921,8 @@ private:
         if (open_loop_horizon_test_next_stage_ <
             open_loop_horizon_test_plan_.horizon) {
             const int stage = open_loop_horizon_test_next_stage_++;
-            const int64_t expected_command_stamp_ns =
-                open_loop_horizon_start_stamp_ns_ +
-                static_cast<int64_t>(stage) * kBridgeControlPeriodNs;
             const char *publication_fault_reason = nullptr;
             if (publish_open_loop_horizon_command(stage, callback_steady_ns,
-                    expected_command_stamp_ns,
                     &publication_fault_reason) == 0) {
                 report_control_fault(
                     publication_fault_reason ? publication_fault_reason :
@@ -2088,7 +2081,7 @@ private:
 
     int64_t publish_open_loop_horizon_command(
         int stage, int64_t callback_steady_ns,
-        int64_t expected_command_stamp_ns, const char **fault_reason)
+        const char **fault_reason)
     {
         const MpcModelControl_t & control =
             open_loop_horizon_test_plan_.controls[stage];
@@ -2799,6 +2792,15 @@ private:
             << result.sqp_iterations_completed
             << ",\"sqp_iterations_accepted\":"
             << result.sqp_iterations_accepted
+            << ",\"refinement_prefix_selected_pass\":"
+            << result.refinement_prefix_selected_pass
+            << ",\"refinement_prefix_validation_us\":"
+            << result.refinement_prefix_validation_us;
+        json << ",\"refinement_first_prefix_objective\":";
+        json_number(result.refinement_first_prefix_objective);
+        json << ",\"refinement_second_prefix_objective\":";
+        json_number(result.refinement_second_prefix_objective);
+        json
             << ",\"admm_status\":" << result.admm_status
             << ",\"admm_state_reset_for_recovery\":"
             << (result.admm_state_reset_for_recovery ? "true" : "false")
@@ -3756,7 +3758,7 @@ private:
             const char * recovery_reason = nullptr;
             if (try_publish_prior_plan(state, last_projected_s_,
                     callback_steady_ns, control_stamp_ns,
-                    candidate_command_stamp_ns, &result,
+                    &result,
                     &recovery_reason)) {
                 record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
                     result, 0.0);
@@ -3851,7 +3853,7 @@ private:
                 const char *full_prior_failure_reason = nullptr;
                 if (try_publish_prior_plan(state, last_projected_s_,
                         callback_steady_ns, control_stamp_ns,
-                        candidate_command_stamp_ns, &result,
+                        &result,
                         &full_prior_failure_reason, true)) {
                     record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
                         result, solve_us);
@@ -3888,7 +3890,7 @@ private:
             const char *quality_failure_reason = nullptr;
             if (try_publish_quality_aware_prefix(state, last_projected_s_,
                     callback_steady_ns, control_stamp_ns,
-                    candidate_command_stamp_ns, &result,
+                    &result,
                     &quality_attempted, &quality_failure_reason)) {
                 record_cycle_health(result.status, result, solve_us);
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -3935,7 +3937,7 @@ private:
             const char *candidate_prefix_failure_reason = nullptr;
             if (try_publish_candidate_prefix(state, last_projected_s_,
                     callback_steady_ns, control_stamp_ns,
-                    candidate_command_stamp_ns, &result,
+                    &result,
                     &candidate_prefix_failure_reason)) {
                 record_cycle_health(
                     MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX,
@@ -3972,7 +3974,6 @@ private:
             const char * reuse_failure_reason = nullptr;
             if (try_publish_prior_plan(state, last_projected_s_,
                     callback_steady_ns, control_stamp_ns,
-                    candidate_command_stamp_ns,
                     &result, &reuse_failure_reason)) {
                 record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
                     result, solve_us);
@@ -4111,7 +4112,7 @@ private:
                 state.plant.u, PREDICTION_HORIZON);
             const char *publication_fault_reason = nullptr;
             const int64_t command_stamp_ns = publish_open_loop_horizon_command(
-                0, callback_steady_ns, candidate_command_stamp_ns,
+                0, callback_steady_ns,
                 &publication_fault_reason);
             if (command_stamp_ns == 0) {
                 if (last_publication_gate_elapsed_ms_ >=

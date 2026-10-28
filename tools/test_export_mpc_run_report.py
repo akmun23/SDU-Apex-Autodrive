@@ -14,6 +14,25 @@ from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_rejected_refinement_prefix_comparison(self) -> None:
+        row = report._cycle_row(3., 0., {"solver": {
+            "refinement_prefix_selected_pass": 1,
+            "refinement_first_prefix_objective": 12.5,
+            "refinement_second_prefix_objective": None,
+            "refinement_prefix_validation_us": 231.}}, {}, {})
+        self.assertEqual(row["refinement_prefix_selected_pass"], 1)
+        self.assertEqual(row["refinement_first_prefix_objective"], 12.5)
+        self.assertIsNone(row["refinement_second_prefix_objective"])
+        self.assertEqual(row["refinement_prefix_validation_us"], 231.)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cycles.csv"
+            report.write_cycle_csv(path, [row])
+            import csv
+            with path.open() as stream:
+                exported = next(csv.DictReader(stream))
+            self.assertEqual(exported["refinement_prefix_selected_pass"], "1")
+            self.assertEqual(exported["refinement_first_prefix_objective"], "12.5")
+
     def test_publication_and_history_timings_are_separate(self) -> None:
         row = report._cycle_row(3., 0., {
             "middleware_publish_us": 53.2, "command_history_us": .7,

@@ -98,6 +98,10 @@ enum
 #define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
 #define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30
+/* Equal-duration, 75 ms exact validation for rejected-plan proposals and
+ * retained actions. Independent of in-horizon delay: command-time prediction
+ * has already handled the external actuator queue before this horizon. */
+#define MPC_RECOVERY_PREFIX_HORIZON 3
 /* Prediction and optimization use the same 30 transitions from the command
  * application epoch; there is no extra in-horizon queued-command stage. */
 #define RICCATI_HORIZON (PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS)

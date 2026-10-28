@@ -490,6 +490,18 @@ def _cycle_row(
             "converged" if solver.get("admm_status") == 0 else
             "not_run_or_unknown")),
         "iterations": solver.get("iterations"),
+        "sqp_iterations_attempted": solver.get("sqp_iterations_attempted"),
+        "sqp_iterations_completed": solver.get("sqp_iterations_completed"),
+        "sqp_iterations_accepted": solver.get("sqp_iterations_accepted"),
+        "line_search_selected_alpha": _finite_number(solver.get("line_search_selected_alpha")),
+        "line_search_merit_triggered": solver.get("line_search_merit_triggered"),
+        "refinement_prefix_selected_pass": solver.get("refinement_prefix_selected_pass"),
+        "refinement_first_prefix_objective": _finite_number(
+            solver.get("refinement_first_prefix_objective")),
+        "refinement_second_prefix_objective": _finite_number(
+            solver.get("refinement_second_prefix_objective")),
+        "refinement_prefix_validation_us": _finite_number(
+            solver.get("refinement_prefix_validation_us")),
         "primal_residual": _finite_number(solver.get("primal_residual")),
         "dual_residual": _finite_number(solver.get("dual_residual")),
         "state_primal_residual": _finite_number(
@@ -1206,6 +1218,10 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "steering_command_delta_rad", "throttle_command_delta",
         "candidate_prefix_chain_length", "prior_plan_chain_length", "solver_status",
         "solver_stop_reason", "iterations", "primal_residual", "dual_residual",
+        "sqp_iterations_attempted", "sqp_iterations_completed", "sqp_iterations_accepted",
+        "line_search_selected_alpha", "line_search_merit_triggered",
+        "refinement_prefix_selected_pass", "refinement_first_prefix_objective",
+        "refinement_second_prefix_objective", "refinement_prefix_validation_us",
         "state_primal_residual", "state_primal_stage", "state_primal_coordinate",
         "state_dual_residual", "state_dual_stage", "state_dual_coordinate",
         "input_primal_residual", "input_primal_stage", "input_primal_coordinate",

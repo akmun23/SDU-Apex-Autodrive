@@ -37,6 +37,8 @@ TEST(MpcRtiLineSearchBudget, AllowsMeasuredRecoveryTrialsButRejectsInvalidTime)
 
 TEST(MpcRtiRefinementQuality, SelectsOnlyLowerExactCostValidAction)
 {
+  static_assert(MPC_RECOVERY_PREFIX_HORIZON == 3,
+      "core proposal comparison and controller must validate the same 75 ms");
   EXPECT_TRUE(mpc_rti_refinement_improves_action(1, 100, 1, 90));
   EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, 101));
   EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, 100));
@@ -44,6 +46,12 @@ TEST(MpcRtiRefinementQuality, SelectsOnlyLowerExactCostValidAction)
   EXPECT_TRUE(mpc_rti_refinement_improves_action(0, INFINITY, 1, 150));
   EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, NAN));
   EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, INFINITY));
+  // Rejected horizons are compared on equal-duration exact prefixes, not
+  // on their meaningless infinite full-tail objectives. Preserve R1 on ties
+  // and when neither prefix validates; R2 must earn replacement.
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(0, NAN, 0, NAN));
+  EXPECT_FALSE(mpc_rti_refinement_improves_action(1, -10, 1, -9));
+  EXPECT_TRUE(mpc_rti_refinement_improves_action(1, -10, 1, -11));
 }
 
 TEST(RiccatiWarmStartEpoch, RefinementDoesNotAdvanceTheCommandSequence)

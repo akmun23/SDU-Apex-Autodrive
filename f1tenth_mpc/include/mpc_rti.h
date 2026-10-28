@@ -349,6 +349,13 @@ typedef struct
     int sqp_iterations_attempted;
     int sqp_iterations_completed;
     int sqp_iterations_accepted;
+    /* Only compared when neither SQP pass has a valid complete horizon.
+     * This selects a proposal for the controller's independent prefix gate;
+     * it never certifies the rejected tail. 0=not compared, 1=first, 2=second. */
+    int refinement_prefix_selected_pass;
+    float refinement_first_prefix_objective;
+    float refinement_second_prefix_objective;
+    double refinement_prefix_validation_us;
     int admm_status;
     float primal_residual;
     float dual_residual;
