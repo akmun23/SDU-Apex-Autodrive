@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Make a separate tracking-reserve target; never certify vehicle dynamics.
 
-Preserve the input speed samples, minimally move geometry away from tight
+Preserve the input speed samples unless explicitly scaled, minimally move geometry away from tight
 walls, recompute geometric headings/curvature/corridors, and certify swept
 map footprint clearance. The result needs closed-loop simulator validation;
 the input OCP's dynamic feasibility certificate does NOT transfer to it.
@@ -119,6 +119,23 @@ def corridor_widths(grid, xy, heading):
     return np.column_stack(widths)
 
 
+def target_speed_profile(speed, segments, scale=1.):
+    """Scale target speed and its geometric acceleration consistently.
+
+    This is a requested profile, never a source-plant feasibility certificate.
+    For fixed geometry acceleration scales quadratically with speed scale.
+    """
+    speed, segments = np.asarray(speed, dtype=float), np.asarray(segments, dtype=float)
+    if (speed.ndim != 1 or speed.shape != segments.shape or len(speed) < 3 or
+            not np.isfinite(speed).all() or not np.isfinite(segments).all() or
+            np.any(speed <= 0) or np.any(segments <= 0) or
+            not math.isfinite(scale) or scale <= 0):
+        raise ValueError("finite positive speeds, segments and scale required")
+    u = speed * scale
+    acceleration = u * (np.roll(u, -1) - np.roll(u, 1)) / (segments + np.roll(segments, 1))
+    return u, acceleration
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
@@ -131,13 +148,17 @@ def main():
     parser.add_argument("--geometry-smoothing-length", type=float, default=0.,
         help="optional periodic XY regularization length in metres; zero preserves input")
     parser.add_argument("--max-geometry-displacement", type=float, default=.02)
+    parser.add_argument("--speed-scale", type=float, default=1.,
+        help="scale requested speed only; dynamic feasibility never transfers")
     args = parser.parse_args()
     if (not all(math.isfinite(v) for v in (args.tracking_reserve,
             args.wall_margin, args.smoothing_length, args.max_offset,
-            args.geometry_smoothing_length, args.max_geometry_displacement)) or
+            args.geometry_smoothing_length, args.max_geometry_displacement,
+            args.speed_scale)) or
             args.tracking_reserve < 0 or args.wall_margin < 0 or
             args.smoothing_length <= 0 or args.max_offset <= 0 or
-            args.geometry_smoothing_length < 0 or args.max_geometry_displacement <= 0):
+            args.geometry_smoothing_length < 0 or args.max_geometry_displacement <= 0 or
+            args.speed_scale <= 0):
         parser.error("finite nonnegative margins and positive smoothing/trust bounds required")
     if args.output.exists() or args.output.with_suffix('.json').exists():
         parser.error("refusing to overwrite an existing target/report")
@@ -192,8 +213,8 @@ def main():
     output[:, 0] = np.r_[0., np.cumsum(segments[:-1])]
     output[:, 1:3], output[:, 3], output[:, 4], output[:, 7:9] = xy, heading, curvature, widths
     # Kinematic target acceleration, not a newly certified source-force state.
-    u = values[:, 5]
-    output[:, 6] = u * (np.roll(u, -1) - np.roll(u, 1)) / (segments + np.roll(segments, 1))
+    u, acceleration = target_speed_profile(values[:, 5], segments, args.speed_scale)
+    output[:, 5], output[:, 6] = u, acceleration
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(args.output, output, delimiter=',', fmt='%.9f',
         header='s_m,x_m,y_m,psi_rad,kappa_radpm,body_forward_speed_mps,acceleration_mps2,d_left_m,d_right_m')
@@ -205,7 +226,8 @@ def main():
         maximum_displacement_m=float(np.max(np.linalg.norm(xy-original, axis=1))),
         geometry_smoothing_length_m=args.geometry_smoothing_length,
         geometry_smoothing_displacement_m=geometry_displacement,
-        speed_samples_unchanged=True, source_OCP_feasibility_transfers=False,
+        speed_scale=args.speed_scale,
+        speed_samples_unchanged=args.speed_scale == 1., source_OCP_feasibility_transfers=False,
         simulator_validated=False,
         speed_profile_integral_s=float(np.sum(2 * segments / (u + np.roll(u, -1)))))
     args.output.with_suffix('.json').write_text(json.dumps(report, indent=2)+'\n')

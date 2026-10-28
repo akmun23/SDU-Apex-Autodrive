@@ -1,9 +1,24 @@
 import unittest
 import numpy as np
-from tools.make_tracking_clearance_target import smooth_offsets, path_geometry, smooth_geometry
+from tools.make_tracking_clearance_target import (
+    smooth_offsets, path_geometry, smooth_geometry, target_speed_profile)
 
 
 class TrackingClearanceTargetTests(unittest.TestCase):
+    def test_speed_scaling_preserves_geometry_and_scales_acceleration_squared(self):
+        speed = np.array([3., 4., 6., 5.])
+        segments = np.array([.05, .07, .03, .08])
+        u, a = target_speed_profile(speed, segments)
+        np.testing.assert_array_equal(u, speed)
+        scaled_u, scaled_a = target_speed_profile(speed, segments, 1.03)
+        np.testing.assert_allclose(scaled_u, 1.03 * u)
+        np.testing.assert_allclose(scaled_a, 1.03**2 * a)
+        for invalid in [0., -.1, float('nan'), float('inf')]:
+            with self.assertRaises(ValueError):
+                target_speed_profile(speed, segments, invalid)
+        with self.assertRaises(ValueError):
+            target_speed_profile(speed, [-1., .1, .1, .1])
+
     def test_sufficient_corridor_does_not_move_path(self):
         offsets = smooth_offsets(np.ones(40), np.ones(40), .25, .06, .6, .1)
         np.testing.assert_array_equal(offsets, np.zeros(40))
