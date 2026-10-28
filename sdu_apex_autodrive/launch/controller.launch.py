@@ -24,7 +24,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 MAP_NAME = "autodrive_practice_20260924_b.yaml"
 RACELINE_PATH = os.path.join(
     "autodrive_practice_20260924_b",
-    "ipopt_v337_raceline.csv")
+    "ipopt_v343_tracking_reserve_raceline.csv")
 
 
 def _bool(value: str) -> bool:
@@ -175,7 +175,7 @@ def _setup(context):
     if csv_command_file and not enable_mpc:
         # The development path follower uses Unity's q=0 full-brake mode.
         # MPC remains bounded to positive drive throttle and competition uses
-        # the default actuator minimum of 0.01.
+        # the default actuator minimum of 0.001.
         actuator_parameters.append({"minimum_throttle_normalized": 0.0})
     if overlays["actuator_parameter_overlay"]:
         actuator_parameters.append(overlays["actuator_parameter_overlay"])
@@ -186,15 +186,18 @@ def _setup(context):
 
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        bridge, odometry, ekf, map_server, map_lifecycle, amcl, actuator,
+        bridge, odometry, ekf, map_server, map_lifecycle,
     ]
     if enable_mpc:
+        # Register before adding AMCL to the launch graph; otherwise AMCL can
+        # start before this handler is active and the delayed MPC never starts.
         actions.append(RegisterEventHandler(OnProcessStart(
             target_action=amcl,
             on_start=[TimerAction(period=start_delay, actions=[
                 LogInfo(msg=f"Starting MPC after {start_delay:.2f}s AMCL warm-up"),
                 controller,
             ])])))
+    actions.extend([amcl, actuator])
     if csv_command_file:
         actions.append(Node(
             package="sdu_apex_autodrive", executable="csv_command_replay",
