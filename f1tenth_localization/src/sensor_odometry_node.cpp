@@ -507,8 +507,7 @@ private:
     state.roll_rate_radps = last_plant_.state[10];
     state.pitch_rad = last_plant_.state[11];
     state.pitch_rate_radps = last_plant_.state[12];
-    state.physical_steering_rad = feedback_valid ?
-      steering_feedback : last_plant_.state[13];
+    state.physical_steering_rad = last_plant_.state[13];
     std::copy_n(last_plant_.state.begin() + 14, 4,
       state.suspension_jounce_m.begin());
     std::copy_n(last_plant_.state.begin() +

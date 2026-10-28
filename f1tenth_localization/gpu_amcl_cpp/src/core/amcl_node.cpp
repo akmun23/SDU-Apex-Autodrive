@@ -1,8 +1,8 @@
 #include "gpu_amcl_cpp/core/amcl_node.hpp"
 #include "gpu_amcl_cpp/helpers/math_utils.hpp"
 #include "gpu_amcl_cpp/helpers/localization_math.hpp"
-#include "gpu_amcl_cpp/helpers/scan_likelihood_along_track.hpp"
 #include "gpu_amcl_cpp/helpers/scan_validity.hpp"
+#include "gpu_amcl_cpp/helpers/odom_history.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -128,7 +128,6 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("update_min_a", 0.001);
 
     // Scan freshness
-    declare_parameter<double>("max_scan_age", 0.012);
 
     // Motion model
     declare_parameter<double>("alpha1", 0.1);
@@ -250,7 +249,6 @@ void AmclNode::declare_all_parameters() {
     declare_parameter<double>("local_scan_correction_fast_speed_threshold_mps", 3.0);
     declare_parameter<double>("local_scan_correction_fast_along_track_gain", 0.25);
     declare_parameter<double>("local_scan_correction_yaw_gain", 0.0);
-    declare_parameter<double>("scan_likelihood_along_track_gain", 0.0);
     declare_parameter<bool>("local_tracking_reinitialize_cloud", true);
     declare_parameter<double>("local_tracking_cloud_covariance_xy", 0.01);
     declare_parameter<double>("local_tracking_cloud_covariance_yaw", 0.01);
@@ -287,7 +285,6 @@ void AmclNode::load_parameters() {
     odom_topic_   = get_parameter("odom_topic").as_string();
     update_min_d_ = get_parameter("update_min_d").as_double();
     update_min_a_ = get_parameter("update_min_a").as_double();
-    max_scan_age_ = get_parameter("max_scan_age").as_double();
     cloud_publish_rate_ = get_parameter("cloud_publish_rate").as_double();
     force_max_particles_initial_sec_ = std::max(
         0.0, get_parameter("force_max_particles_initial_sec").as_double());
@@ -388,8 +385,6 @@ void AmclNode::load_parameters() {
         get_parameter("local_scan_correction_fast_along_track_gain").as_double(), 0.0, 1.0);
     local_scan_correction_yaw_gain_ = std::clamp(
       get_parameter("local_scan_correction_yaw_gain").as_double(), 0.0, 1.0);
-    scan_likelihood_along_track_gain_ = std::clamp(
-        get_parameter("scan_likelihood_along_track_gain").as_double(), 0.0, 1.0);
     local_tracking_reinitialize_cloud_ = get_parameter(
         "local_tracking_reinitialize_cloud").as_bool();
     local_tracking_cloud_covariance_xy_ = std::max(
@@ -410,12 +405,12 @@ void AmclNode::load_parameters() {
 
     RCLCPP_INFO(get_logger(),
         "[AMCL] Parameters: update_min_d=%.5f, update_min_a=%.5f, "
-        "max_scan_age=%.4f, odom_history=%.3fs, cloud_publish_rate=%.1f Hz, "
+        "odom_history=%.3fs, cloud_publish_rate=%.1f Hz, "
         "debug_pre_resample=%s, slip_threshold=%.2f rad/s, initial_raceline_heading=%s, "
         "local_correction_gate=%.2fm/%.2frad xy_gain=%.3f cross_track_only=%s "
         "along_track_gain=%.3f fast_speed=%.2fmps fast_along_gain=%.3f yaw_gain=%.3f "
-        "scan_likelihood_along_gain=%.3f association=%.2fm recenter_cloud=%s",
-        update_min_d_, update_min_a_, max_scan_age_, odom_history_duration_s_,
+        "association=%.2fm recenter_cloud=%s",
+        update_min_d_, update_min_a_, odom_history_duration_s_,
         cloud_publish_rate_, debug_pre_resample_particles_ ? "true" : "false",
         slip_angular_threshold_,
         initial_heading_from_raceline_ ? "true" : "false",
@@ -426,7 +421,6 @@ void AmclNode::load_parameters() {
         local_scan_correction_fast_speed_threshold_mps_,
         local_scan_correction_fast_along_track_gain_,
         local_scan_correction_yaw_gain_,
-        scan_likelihood_along_track_gain_,
         local_cluster_association_max_distance_m_,
         local_tracking_reinitialize_cloud_ ? "true" : "false");
     RCLCPP_INFO(get_logger(),
@@ -552,12 +546,12 @@ bool AmclNode::interpolate_odom_pose(const rclcpp::Time& stamp,
                                      rclcpp::Time* bracket_before_stamp,
                                      rclcpp::Time* bracket_after_stamp,
                                      Eigen::Matrix3d* covariance) const {
-    if (odom_history_.empty()) {
+    const auto bracket = odom_history::bracket(odom_history_, stamp);
+    if (bracket.first == nullptr) {
         return false;
     }
-
-    const auto& first = odom_history_.front();
-    const auto& last = odom_history_.back();
+    const auto& a = *bracket.first;
+    const auto& b = *bracket.second;
     const auto sample_covariance = [](const OdomSample& sample) {
         Eigen::Matrix3d result = Eigen::Matrix3d::Zero();
         result(0, 0) = sample.covariance_xx;
@@ -577,99 +571,19 @@ bool AmclNode::interpolate_odom_pose(const rclcpp::Time& stamp,
         }
         return result;
     };
-    if (stamp < first.stamp || stamp > last.stamp) {
-        // Under host jitter, scans can fall just outside the retained odometry
-        // window. Use the nearest endpoint and preserve the scan; report the
-        // timestamp mismatch in the existing alignment diagnostics.
-        const auto& nearest = stamp < first.stamp ? first : last;
-        x = nearest.x;
-        y = nearest.y;
-        theta = nearest.theta;
-        if (matched_stamp != nullptr) *matched_stamp = nearest.stamp;
-        if (bracket_before_stamp != nullptr) *bracket_before_stamp = nearest.stamp;
-        if (bracket_after_stamp != nullptr) *bracket_after_stamp = nearest.stamp;
-        if (covariance != nullptr) *covariance = sample_covariance(nearest);
-        return true;
+    if (matched_stamp != nullptr) *matched_stamp = stamp;
+    if (bracket_before_stamp != nullptr) *bracket_before_stamp = a.stamp;
+    if (bracket_after_stamp != nullptr) *bracket_after_stamp = b.stamp;
+    const double dt = (b.stamp - a.stamp).seconds();
+    const double t = dt > 0.0 ? (stamp - a.stamp).seconds() / dt : 0.0;
+    x = a.x + t * (b.x - a.x);
+    y = a.y + t * (b.y - a.y);
+    theta = math_utils::normalize_angle(
+        a.theta + t * math_utils::angle_diff(b.theta, a.theta));
+    if (covariance != nullptr) {
+        *covariance = (1.0 - t) * sample_covariance(a) + t * sample_covariance(b);
     }
-
-    if (matched_stamp != nullptr) {
-        *matched_stamp = stamp;
-    }
-    if (bracket_before_stamp != nullptr) {
-        *bracket_before_stamp = first.stamp;
-    }
-    if (bracket_after_stamp != nullptr) {
-        *bracket_after_stamp = last.stamp;
-    }
-
-    if (stamp == first.stamp) {
-        x = first.x;
-        y = first.y;
-        theta = first.theta;
-        if (bracket_before_stamp != nullptr) {
-            *bracket_before_stamp = first.stamp;
-        }
-        if (bracket_after_stamp != nullptr) {
-            *bracket_after_stamp = first.stamp;
-        }
-        if (covariance != nullptr) {
-            *covariance = sample_covariance(first);
-        }
-        return true;
-    }
-    if (stamp == last.stamp) {
-        x = last.x;
-        y = last.y;
-        theta = last.theta;
-        if (bracket_before_stamp != nullptr) {
-            *bracket_before_stamp = last.stamp;
-        }
-        if (bracket_after_stamp != nullptr) {
-            *bracket_after_stamp = last.stamp;
-        }
-        if (covariance != nullptr) {
-            *covariance = sample_covariance(last);
-        }
-        return true;
-    }
-
-    for (size_t i = 1; i < odom_history_.size(); ++i) {
-        const auto& a = odom_history_[i - 1];
-        const auto& b = odom_history_[i];
-
-        if (stamp <= b.stamp) {
-            if (bracket_before_stamp != nullptr) {
-                *bracket_before_stamp = a.stamp;
-            }
-            if (bracket_after_stamp != nullptr) {
-                *bracket_after_stamp = b.stamp;
-            }
-            const double dt = (b.stamp - a.stamp).seconds();
-            if (dt <= 1e-9) {
-                x = b.x;
-                y = b.y;
-                theta = b.theta;
-                if (covariance != nullptr) {
-                    *covariance = sample_covariance(b);
-                }
-                return true;
-            }
-
-            const double t = (stamp - a.stamp).seconds() / dt;
-            x = a.x + t * (b.x - a.x);
-            y = a.y + t * (b.y - a.y);
-
-            const double dtheta = math_utils::angle_diff(b.theta, a.theta);
-            theta = math_utils::normalize_angle(a.theta + t * dtheta);
-            if (covariance != nullptr) {
-                *covariance = (1.0 - t) * sample_covariance(a) +
-                              t * sample_covariance(b);
-            }
-            return true;
-        }
-    }
-
-    return false;
+    return true;
 }
 
 void AmclNode::retry_pending_scans() {
@@ -698,10 +612,7 @@ void AmclNode::publish_scan_alignment_diagnostic(
     double matched_odom_error_ms,
     bool accepted,
     std::size_t sampled_valid_beams,
-    std::size_t sampled_beams,
-    double likelihood_offset_m,
-    double likelihood_score_gain,
-    double likelihood_applied_m) {
+    std::size_t sampled_beams) {
     if (scan_alignment_pub_->get_subscription_count() == 0) {
         return;
     }
@@ -712,8 +623,7 @@ void AmclNode::publish_scan_alignment_diagnostic(
     }
     // [scan source stamp, matched odom stamp, source-time error ms, accepted,
     //  queued scans, dropped scans, bracket-before stamp, bracket-after stamp,
-    //  processing drops, sampled valid/total beams, likelihood offset/score
-    //  gain/applied translation]. Existing fields 1-11 retain their layout.
+    //  processing drops, sampled valid/total beams].
     std_msgs::msg::Float64MultiArray msg;
     msg.data = {
         scan_stamp.seconds(),
@@ -730,9 +640,6 @@ void AmclNode::publish_scan_alignment_diagnostic(
         static_cast<double>(scan_processing_drop_count_.load()),
         static_cast<double>(sampled_valid_beams),
         static_cast<double>(sampled_beams),
-        likelihood_offset_m,
-        likelihood_score_gain,
-        likelihood_applied_m,
     };
     scan_alignment_pub_->publish(msg);
 }
@@ -1352,11 +1259,6 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     auto t_callback_start = std::chrono::high_resolution_clock::now();
     static std::atomic<uint64_t> scan_callback_count{0};
     const uint64_t callback_count = ++scan_callback_count;
-    double scan_likelihood_offset_m =
-        std::numeric_limits<double>::quiet_NaN();
-    double scan_likelihood_score_gain =
-        std::numeric_limits<double>::quiet_NaN();
-    double scan_likelihood_applied_m = 0.0;
 
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 5000,
@@ -1395,6 +1297,14 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     double odom_x_at_scan = 0.0;
     double odom_y_at_scan = 0.0;
     double odom_theta_at_scan = 0.0;
+    if (last_processed_scan_stamp_.nanoseconds() != 0 &&
+        scan_time <= last_processed_scan_stamp_) {
+        // A deferred scan must never apply a negative odometry increment or
+        // reuse an already consumed measurement after a newer scan completed.
+        ++scan_processing_drop_count_;
+        processing_scan_ = false;
+        return;
+    }
     rclcpp::Time matched_odom_stamp(0, 0, clock_type);
     rclcpp::Time bracket_before_stamp(0, 0, clock_type);
     rclcpp::Time bracket_after_stamp(0, 0, clock_type);
@@ -1444,9 +1354,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         publish_scan_alignment_diagnostic(
             scan_time, matched_odom_stamp, bracket_before_stamp,
             bracket_after_stamp, 0.0, false,
-            scan_range_counts.valid, scan_range_counts.sampled,
-            scan_likelihood_offset_m, scan_likelihood_score_gain,
-            scan_likelihood_applied_m);
+            scan_range_counts.valid, scan_range_counts.sampled);
         processing_scan_ = false;
         return;
     }
@@ -1925,63 +1833,6 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                     }
                 }
 
-                // This independent 1-D map-likelihood score was fit around the
-                // fused current map pose using only legal pose/scan inputs and
-                // a chronological held-out split. Search around this same
-                // fused estimate (not odom_prediction), so runtime and offline
-                // fitting share the correction reference. Keep it disabled in
-                // production until its matched live A/B passes. Apply only to
-                // an accepted local scan (never during global bootstrap,
-                // recovery, or a rejected cluster). The configured gain is a
-                // conservative live candidate and must be scored against the
-                // simulator truth bag before promotion.
-                if (scan_likelihood_along_track_gain_ > 0.0 &&
-                    !global_sensor_bootstrap &&
-                    !local_tracking_recovery_confirmed) {
-                    const auto& sensor_cfg = pf_.sensor_model().config();
-                    const scan_likelihood::LikelihoodFieldConfig score_cfg{
-                        sensor_cfg.max_beams,
-                        sensor_cfg.z_hit,
-                        sensor_cfg.z_rand,
-                        sensor_cfg.sigma_hit,
-                        sensor_cfg.laser_min_range,
-                        sensor_cfg.laser_max_range,
-                        sensor_cfg.laser_offset_x,
-                        sensor_cfg.laser_offset_y,
-                        sensor_cfg.normalize_likelihood_by_beams,
-                        sensor_cfg.likelihood_scale,
-                    };
-                    const auto score = scan_likelihood::estimate_along_track_offset(
-                        msg->ranges,
-                        msg->angle_min,
-                        msg->angle_increment,
-                        est.x,
-                        est.y,
-                        est.theta,
-                        map_.width(),
-                        map_.height(),
-                        map_.resolution(),
-                        map_.origin_x(),
-                        map_.origin_y(),
-                        map_.distance_field(),
-                        score_cfg);
-                    if (score.valid && std::isfinite(score.offset_m) &&
-                        std::isfinite(score.score_gain)) {
-                        scan_likelihood_offset_m = score.offset_m;
-                        scan_likelihood_score_gain = score.score_gain;
-                        scan_likelihood_applied_m =
-                            scan_likelihood_along_track_gain_ * score.offset_m;
-                        est.x += scan_likelihood_applied_m * std::cos(est.theta);
-                        est.y += scan_likelihood_applied_m * std::sin(est.theta);
-                        RCLCPP_INFO_THROTTLE(
-                            get_logger(), *get_clock(), 1000,
-                            "AMCL along scan likelihood: offset=%.3fm "
-                            "applied=%.3fm score_gain=%.4f gain=%.2f",
-                            score.offset_m, scan_likelihood_applied_m,
-                            score.score_gain, scan_likelihood_along_track_gain_);
-                    }
-                }
-
                 if (!local_tracking_recovery_confirmed &&
                     correction_distance_limit > 0.0) {
                     const double applied_x = est.x - odom_prediction.x;
@@ -2266,7 +2117,25 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     // been reached; the first moving scan can then separate alternatives.
     const bool hold_global_cloud =
         global_sensor_bootstrap && !global_travel_enough;
-    if (!hold_global_cloud) {
+    const bool pose_candidate_allowed =
+        publish_cluster &&
+        (!global_sensor_bootstrap ||
+         global_lock_confirmed ||
+         global_provisional_pose_allowed);
+    // Gate once, before deciding whether this cloud has any future consumer.
+    // should_publish_pose_estimate updates jump-confirmation history.
+    const bool pose_gate_passed =
+        pose_candidate_allowed &&
+        (!local_tracking_update || should_publish_pose_estimate(
+            est, local_tracking_recovery_confirmed));
+    const bool replace_local_cloud = pose_gate_passed &&
+        !global_sensor_bootstrap && local_tracking_update &&
+        local_tracking_reinitialize_cloud_ && !local_scan_correction_rejected;
+    // An accepted local scan below replaces every particle and weight with
+    // a fresh cloud at the fused pose. KLD counting, resampling, roughening
+    // and recovery injection immediately before that overwrite are dead work.
+    // Rejected scans/global hypotheses still retain their normal PF update.
+    if (!hold_global_cloud && !replace_local_cloud) {
         pf_.resample_if_needed();
     }
 
@@ -2305,18 +2174,9 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     bool pose_published = false;
     double callback_to_pose_publish_ms =
         std::numeric_limits<double>::quiet_NaN();
-    const bool pose_candidate_allowed =
-        publish_cluster &&
-        (!global_sensor_bootstrap ||
-         global_lock_confirmed ||
-         global_provisional_pose_allowed);
     // Local estimates have already been gated against the odometry-predicted
     // pose above. Comparing them with the previous scan-time pose would gate
     // normal vehicle motion rather than a localization innovation.
-    const bool pose_gate_passed =
-        pose_candidate_allowed &&
-        (!local_tracking_update || should_publish_pose_estimate(
-            est, local_tracking_recovery_confirmed));
     if (!pose_gate_passed && local_tracking_recovery_confirmed) {
         // The confirmed recovery still has to pass the large-jump guard. Keep
         // it visible as an outage while the guard accumulates its evidence.
@@ -2378,8 +2238,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             local_pose_reference_ = est;
             local_odom_reference_ready_ = true;
         }
-        if (!global_sensor_bootstrap && local_tracking_update &&
-            local_tracking_reinitialize_cloud_ && !local_scan_correction_rejected) {
+        if (replace_local_cloud) {
             // The particle cloud is a scan-matching aid, not a second dead-
             // reckoning state. Recenter it on the fused pose so a small
             // systematic scan bias cannot be integrated again on the next
@@ -2513,10 +2372,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         0.0,
         pose_published && last_scan_correction_accepted_,
         scan_range_counts.valid,
-        scan_range_counts.sampled,
-        scan_likelihood_offset_m,
-        scan_likelihood_score_gain,
-        scan_likelihood_applied_m);
+        scan_range_counts.sampled);
 
     processing_scan_ = false; // Allow next scan
     } catch (const std::exception& e) {

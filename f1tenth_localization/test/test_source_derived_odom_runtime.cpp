@@ -100,21 +100,35 @@ TEST(SourceDerivedOdomRuntime, UsesMeasuredSteeringAndCorrectedBodyState)
   EXPECT_TRUE(std::isfinite(output.wheel_encoder_angle_prediction_rad[2]));
 }
 
-TEST(SourceDerivedOdomRuntime, AdvancesPreSteerFeedbackToRackStateAtPacketBoundary)
+TEST(SourceDerivedOdomRuntime, AppliesEndpointSteeringFeedbackAfterPacketPhysics)
 {
-  SourceDerivedOdomRuntime runtime(0.15532);
-  runtime.advance(0.5, 0.0, false, 0.0);
-  runtime.advance(0.5, 0.0, false, 0.0);
+  SourceDerivedOdomRuntime without_feedback(0.15532);
+  SourceDerivedOdomRuntime with_feedback(0.15532);
+  for (SourceDerivedOdomRuntime * runtime : {&without_feedback, &with_feedback}) {
+    runtime->advance(0.5, 0.0, false, 0.0);
+    runtime->advance(0.5, 0.0, false, 0.0);
+  }
 
-  // The source getter reports the angle before Steer() updates it. The
-  // feedback correction reconstructs that missing fixed-step rack motion,
-  // then the 25 future plant ticks advance steering normally.
-  const auto output = runtime.advance(0.5, 0.0, true, 0.1);
+  const auto open_loop = without_feedback.advance(0.5, 0.0, false, 0.0);
+  const auto output = with_feedback.advance(0.5, 0.0, true, 0.1);
+  // Endpoint feedback must not alter the already-completed interval's body
+  // propagation. It only reconstructs the rack state for the next interval.
+  EXPECT_DOUBLE_EQ(output.state[0], open_loop.state[0]);
+  EXPECT_DOUBLE_EQ(output.state[1], open_loop.state[1]);
+  EXPECT_DOUBLE_EQ(output.state[2], open_loop.state[2]);
+
   constexpr double kSteeringRateRadps =
     183.345993 * 3.14159265358979323846 / 180.0;
   constexpr double kStep = kSteeringRateRadps * 0.001;
   EXPECT_NEAR(output.state[UNITY_SOURCE_PHYSICAL_STEERING],
-    0.1 + 26.0 * kStep, 1.0e-7);
+    0.1 + kStep, 1.0e-7);
+
+  const auto next_open_loop = without_feedback.advance(0.5, 0.0, false, 0.0);
+  const auto next_corrected = with_feedback.advance(0.5, 0.0, false, 0.0);
+  EXPECT_LT(std::abs(next_corrected.state[UNITY_SOURCE_PHYSICAL_STEERING] -
+    next_open_loop.state[UNITY_SOURCE_PHYSICAL_STEERING]),
+    std::abs(output.state[UNITY_SOURCE_PHYSICAL_STEERING] -
+    open_loop.state[UNITY_SOURCE_PHYSICAL_STEERING]));
 }
 
 TEST(SourceDerivedOdomRuntime, AppliesOnlyThePreviousGyroInnovationToYawForecast)

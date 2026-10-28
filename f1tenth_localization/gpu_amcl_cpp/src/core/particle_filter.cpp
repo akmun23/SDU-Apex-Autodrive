@@ -38,19 +38,11 @@ double timed_memcpy_async(
     return std::chrono::duration<double, std::milli>(stop - start).count();
 }
 
-template <typename Fn>
-double timed_stream_stage(cudaStream_t stream, Fn&& fn) {
-    const auto start = std::chrono::high_resolution_clock::now();
-    fn();
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    const auto stop = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration<double, std::milli>(stop - start).count();
-}
-
 }  // namespace
 
 void ParticleFilter::reset_stage_timing() {
     last_stage_diag_ = StageTimingDiagnostics{};
+    predict_timing_pending_ = false;
 }
 
 void ParticleFilter::set_force_max_particles(bool enabled) {
@@ -157,10 +149,6 @@ void ParticleFilter::init(const Config& pf_cfg,
     CUDA_CHECK(cudaMallocHost(&h_particles_pinned_, cfg_.max_particles * 3 * sizeof(float)));
     CUDA_CHECK(cudaMallocHost(&h_weights_pinned_,   cfg_.max_particles * sizeof(float)));
 
-    // Pre-allocate buffers for get_estimate() (avoid per-call allocation)
-    est_angles_.resize(cfg_.max_particles);
-    est_weights_.resize(cfg_.max_particles);
-
     if (cfg_.global_initialization) {
         reinitialize_global(map);
     } else {
@@ -182,9 +170,11 @@ void ParticleFilter::reinitialize(double x, double y, double theta,
     force_max_particles_ = false;
     force_max_particles_release_pending_ = false;
 
-    // Create CPU arrays for particles and weights
-    std::vector<float> particles(n_ * 3);       // x, y, θ for each particle
-    std::vector<float> weights(n_, 1.0f / n_);  // Uniform weights
+    // Reuse already allocated pinned staging. This path runs after every
+    // accepted local scan; allocating two pageable vectors per scan then
+    // copying through CUDA's staging pool is unnecessary.
+    float* particles = h_particles_pinned_;
+    std::fill_n(h_weights_pinned_, n_, 1.0f / n_);
 
     // Create Gaussian distributions for noise
     std::normal_distribution<float> dx(0, static_cast<float>(std::sqrt(cov_xx)));
@@ -200,8 +190,13 @@ void ParticleFilter::reinitialize(double x, double y, double theta,
     }
 
     // Upload to GPU
-    CUDA_CHECK(cudaMemcpy(d_active_particles_, particles.data(), n_ * 3 * sizeof(float), cudaMemcpyHostToDevice));
-    d_weights_.upload(weights.data(), n_);
+    CUDA_CHECK(cudaMemcpyAsync(d_active_particles_, particles,
+        n_ * 3 * sizeof(float), cudaMemcpyHostToDevice, stream_.get()));
+    CUDA_CHECK(cudaMemcpyAsync(d_weights_.ptr(), h_weights_pinned_,
+        n_ * sizeof(float), cudaMemcpyHostToDevice, stream_.get()));
+    // Retain a single owned-stream boundary: both staging arrays may be
+    // reused by the next read/reinitialization immediately after return.
+    CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 }
 
 float ParticleFilter::nearest_global_heading(float wx, float wy) const {
@@ -484,11 +479,10 @@ void ParticleFilter::roughen_local_particles() {
 
 // ─── Predict ────────────────────────────────────────────────────────
 void ParticleFilter::predict(float dx, float dy, float dtheta) {
-    last_stage_diag_.predict_ms = timed_stream_stage(stream_.get(), [&]() {
-        motion_.apply(d_active_particles_, n_,
-                      dx, dy, dtheta,
-                      stream_.get());
-    });
+    predict_begin_.record(stream_.get());
+    motion_.apply(d_active_particles_, n_, dx, dy, dtheta, stream_.get());
+    predict_end_.record(stream_.get());
+    predict_timing_pending_ = true;
 }
 
 // ─── Update ─────────────────────────────────────────────────────────
@@ -532,9 +526,10 @@ bool ParticleFilter::update_weights(const float* ranges, int num_ranges,
 
     // Copy the bounded scan staging buffer, then asynchronously upload it.
     const size_t scan_bytes = static_cast<size_t>(sampled_num_ranges) * sizeof(float);
-    last_transfer_diag_.scan_upload_ms = timed_memcpy_async(
-        d_ranges_.ptr(), h_ranges_pinned_, scan_bytes,
-        cudaMemcpyHostToDevice, stream_.get());
+    upload_begin_.record(stream_.get());
+    CUDA_CHECK(cudaMemcpyAsync(d_ranges_.ptr(), h_ranges_pinned_, scan_bytes,
+        cudaMemcpyHostToDevice, stream_.get()));
+    upload_end_.record(stream_.get());
     last_transfer_diag_.scan_upload_bytes = scan_bytes;
     last_transfer_diag_.particle_download_ms = std::numeric_limits<double>::quiet_NaN();
     last_transfer_diag_.weight_download_ms = std::numeric_limits<double>::quiet_NaN();
@@ -548,17 +543,14 @@ bool ParticleFilter::update_weights(const float* ranges, int num_ranges,
                             d_ranges_.ptr(), sampled_num_ranges,
                             angle_min, sampled_angle_inc,
                             d_log_w_.ptr(), stream_.get());
-    last_stage_diag_.sensor_model_ms = timed_stream_stage(stream_.get(), []() {});
+    sensor_end_.record(stream_.get());
 
     // §1: GPU-side weight normalization — all on GPU, no host transfers.
     // Steps: CUB::Max(log_w) → exp-shift-mul → CUB::Sum → normalize.
-    last_stage_diag_.normalize_ms = timed_stream_stage(stream_.get(), [&]() {
-        launch_gpu_normalize_weights(
-            d_log_w_.ptr(), d_weights_.ptr(), d_scratch_w_.ptr(),
-            d_max_val_, d_sum_val_,
-            d_cub_temp_, cub_temp_bytes_,
-            n_, stream_.get());
-    });
+    launch_gpu_normalize_weights(
+        d_log_w_.ptr(), d_weights_.ptr(), d_scratch_w_.ptr(),
+        d_max_val_, d_sum_val_, d_cub_temp_, cub_temp_bytes_, n_, stream_.get());
+    normalize_end_.record(stream_.get());
 
     // After normalize, d_scratch_w_ holds the normalised weights — swap.
     std::swap(d_weights_, d_scratch_w_); // Pointer swap, no copy, no sync needed. d_weights_ now has normalised weights for resampling.
@@ -569,6 +561,18 @@ bool ParticleFilter::update_weights(const float* ranges, int num_ranges,
     last_stage_diag_.scan_confidence_ms =
         std::chrono::duration<double, std::milli>(
             confidence_stop - confidence_start).count();
+    // update_scan_confidence already waits for its CPU result. If disabled,
+    // retain one completion boundary so the pinned scan can be reused by a
+    // subsequent verification/update without racing its asynchronous upload.
+    if (!cfg_.enable_local_roughening || sampled_num_ranges <= 0)
+        normalize_end_.wait();
+    if (predict_timing_pending_) {
+        last_stage_diag_.predict_ms = predict_end_.elapsed_ms_since(predict_begin_);
+        predict_timing_pending_ = false;
+    }
+    last_transfer_diag_.scan_upload_ms = upload_end_.elapsed_ms_since(upload_begin_);
+    last_stage_diag_.sensor_model_ms = sensor_end_.elapsed_ms_since(upload_end_);
+    last_stage_diag_.normalize_ms = normalize_end_.elapsed_ms_since(sensor_end_);
 
     const auto update_stop = std::chrono::high_resolution_clock::now();
     last_stage_diag_.update_weights_total_ms =

@@ -123,28 +123,6 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
   delayed_throttle_commands_norm_[0] = delayed_throttle_commands_norm_[1];
   delayed_throttle_commands_norm_[1] = std::clamp(throttle_command_norm, -1.0, 1.0);
 
-  if (steering_feedback_valid) {
-    const double measured_physical_steering_rad = std::clamp(
-      steering_feedback_rad, -UNITY_SOURCE_MAX_STEERING_RAD,
-      UNITY_SOURCE_MAX_STEERING_RAD);
-    // VehicleController.CurrentSteeringAngle returns currentS. FixedUpdate
-    // assigns currentS from SteeringAngle before Steer() advances SteeringAngle
-    // for that same physics tick, so the published feedback is one Unity fixed
-    // step behind the rack state used by the wheel solver. Reconstruct that
-    // post-Steer state from the newest command sample in the plant queue. The
-    // headerless ROS command and feedback topics carry no Unity fixed-step
-    // sequence, so the exact target
-    // association is not independently observable from a bag. Do not advance
-    // body dynamics here because the sensor packet already anchors those at
-    // this boundary.
-    float internal_steering_deg = -static_cast<float>(
-      measured_physical_steering_rad * (180.0 / kPi));
-    internal_steering_deg = detail::unity_steering_step(
-      internal_steering_deg, static_cast<float>(applied_steering));
-    plant_state_.physical_steering_rad = std::clamp(
-      -static_cast<double>(internal_steering_deg) * (kPi / 180.0),
-      -UNITY_SOURCE_MAX_STEERING_RAD, UNITY_SOURCE_MAX_STEERING_RAD);
-  }
   const double steering_feedback_delta = steering_feedback_valid &&
     have_steering_feedback_ ?
     steering_feedback_rad - last_steering_feedback_rad_ : 0.0;
@@ -178,6 +156,28 @@ PredictedPlantState SourceDerivedOdomRuntime::advance(
     plant_state_ = physics_output.state;
     integrate_rear_axle_pose(previous_state, plant_state_, rear_axle_from_com_m_,
       kFixedStepS, &yaw_rad_, &rear_axle_x_m_, &rear_axle_y_m_);
+  }
+
+  if (steering_feedback_valid) {
+    const double measured_physical_steering_rad = std::clamp(
+      steering_feedback_rad, -UNITY_SOURCE_MAX_STEERING_RAD,
+      UNITY_SOURCE_MAX_STEERING_RAD);
+    // CurrentSteeringAngle exposes currentS, which FixedUpdate assigns before
+    // Steer() updates the rack used by that tick's wheel solve. This feedback
+    // closes the packet interval, so first integrate that interval from its
+    // causal start-of-interval rack state, then reconstruct the post-Steer
+    // rack state for the next interval. Applying it before the loop would
+    // backdate an endpoint measurement over all 25 completed physics steps.
+    // ROS provides no Unity fixed-step sequence number; the packet's queued
+    // command is therefore the only source-grounded target for this final
+    // single 1 ms Steer() advance.
+    float internal_steering_deg = -static_cast<float>(
+      measured_physical_steering_rad * (180.0 / kPi));
+    internal_steering_deg = detail::unity_steering_step(
+      internal_steering_deg, static_cast<float>(applied_steering));
+    plant_state_.physical_steering_rad = std::clamp(
+      -static_cast<double>(internal_steering_deg) * (kPi / 180.0),
+      -UNITY_SOURCE_MAX_STEERING_RAD, UNITY_SOURCE_MAX_STEERING_RAD);
   }
 
   copy_plant_state(plant_state_, &result.state);

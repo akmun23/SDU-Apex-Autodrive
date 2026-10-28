@@ -54,10 +54,7 @@ private:
                                            double matched_odom_error_ms,
                                            bool accepted,
                                            std::size_t sampled_valid_beams,
-                                           std::size_t sampled_beams,
-                                           double likelihood_offset_m,
-                                           double likelihood_score_gain,
-                                           double likelihood_applied_m);
+                                           std::size_t sampled_beams);
     void retry_pending_scans();
 
     // ── Helpers ────────────────────────────────────────────────────
@@ -121,7 +118,6 @@ private:
     double prev_theta_ = 0;
     double update_min_d_ = 0.001;
     double update_min_a_ = 0.001;
-    double max_scan_age_ = 0.05;
     int max_beams_ = 270;
     double laser_min_range_m_ = 0.06;
     double laser_max_range_m_ = 10.0;
@@ -238,7 +234,6 @@ private:
     double local_scan_correction_yaw_gain_ = 0.0;
     // Experimental scan-likelihood translation; production remains disabled
     // until the matched live AMCL/Pure Pursuit holdout passes.
-    double scan_likelihood_along_track_gain_ = 0.0;
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
     double local_tracking_cloud_covariance_yaw_ = 0.01;

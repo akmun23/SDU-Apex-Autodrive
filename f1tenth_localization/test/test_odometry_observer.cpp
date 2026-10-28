@@ -37,6 +37,50 @@ TEST(OdometryObserver, AppliesSameEpochAccelerationInnovationForOnePhysicsTick)
   EXPECT_NEAR(estimate.body_u_mps, 2.002, 1.0e-12);
 }
 
+TEST(OdometryObserver, ProjectsTiltedBodyVelocityBackToWorldMotion)
+{
+  OdometryObserver observer;
+  auto observation = plant_observation(0.0);
+  observation.roll_rad = 0.10;
+  observation.pitch_rad = -0.05;
+  observation.yaw_rad = 0.35;
+  const double sr = std::sin(observation.roll_rad), cr = std::cos(observation.roll_rad);
+  const double sp = std::sin(observation.pitch_rad), cp = std::cos(observation.pitch_rad);
+  const double sy = std::sin(observation.yaw_rad), cy = std::cos(observation.yaw_rad);
+  // Independent rigid-transform oracle: R = Rz(yaw) Ry(pitch) Rx(roll).
+  const double rotation[3][3] = {
+    {cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr},
+    {sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr},
+    {-sp, cp * sr, cp * cr}};
+  const double world[3] = {6.0, -0.2, 0.03};
+  double body[3]{};
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) body[i] += rotation[j][i] * world[j];
+  }
+  observation.physx_forward_velocity_mps = body[0];
+  observation.physx_lateral_velocity_com_mps = body[1];
+  observation.physx_state[UNITY_SOURCE_BODY_HEIGHT_RATE] = world[2];
+  observer.update(observation);
+  observation.stamp_s = 0.025;
+  const auto result = observer.update(observation);
+  EXPECT_NEAR(result.x_m, 0.025 * world[0], 1.0e-12);
+  EXPECT_NEAR(result.y_m, 0.025 * world[1], 1.0e-12);
+  EXPECT_DOUBLE_EQ(result.body_u_mps, body[0]);
+  EXPECT_DOUBLE_EQ(result.body_v_com_mps, body[1]);
+}
+
+TEST(OdometryObserver, RejectsSingularProjectionBeforeChangingItsEpoch)
+{
+  OdometryObserver observer;
+  auto observation = plant_observation(0.0);
+  observer.update(observation);
+  observation.stamp_s = 0.025;
+  observation.pitch_rad = std::acos(-1.0) / 2.0;
+  EXPECT_DOUBLE_EQ(observer.update(observation).stamp_s, 0.0);
+  observation.pitch_rad = 0.0;
+  EXPECT_DOUBLE_EQ(observer.update(observation).stamp_s, 0.025);
+}
+
 TEST(OdometryObserver, PreservesSuspensionJouncePlantChannels)
 {
   OdometryObserver observer;
@@ -62,6 +106,25 @@ TEST(OdometryObserver, PreservesSuspensionJouncePlantChannels)
     EXPECT_DOUBLE_EQ(estimate.unity_state[state], observation.physx_state[state])
         << "corrected plant state index " << state;
   }
+}
+
+TEST(OdometryObserver, KeepsReconstructedRackStateSeparateFromRawFeedback)
+{
+  OdometryObserver observer;
+  auto observation = plant_observation(0.0);
+  observation.physx_state[13] = 0.123;
+  observation.steering_feedback_rad = 0.120;
+  observation.actuator_feedback_valid = true;
+
+  auto estimate = observer.update(observation);
+  EXPECT_DOUBLE_EQ(estimate.unity_state[13], observation.physx_state[13]);
+
+  observation = plant_observation(0.025);
+  observation.physx_state[13] = 0.234;
+  observation.steering_feedback_rad = 0.231;
+  observation.actuator_feedback_valid = true;
+  estimate = observer.update(observation);
+  EXPECT_DOUBLE_EQ(estimate.unity_state[13], observation.physx_state[13]);
 }
 
 TEST(OdometryObserver, DoesNotStretchOneMillisecondAccelerationSpikeAcrossPacket)

@@ -18,24 +18,6 @@ public:
     void init(int max_particles);
 
     /**
-     * @brief Resample particles in-place.
-     *
-     * Uses low-variance systematic resampling.
-     * After resampling, weights are set to 1/n.
-     *
-     * @param d_particles  Device Nx3 float array.
-     * @param d_weights    Device N float array (normalised).
-     * @param n            Current particle count.
-     * @param target_n     Target count after resampling (for KLD).
-     *                     If <= 0, keeps n unchanged.
-     * @param stream       CUDA stream.
-     * @return             Number of particles after resampling.
-     */
-    int resample(float* d_particles, float* d_weights,
-                 int n, int target_n = -1,
-                 cudaStream_t stream = nullptr);
-
-    /**
      * @brief Resample particles to an external output buffer (§5 double-buffer).
      *
      * Writes resampled particles to d_out_particles (caller-owned).
@@ -65,7 +47,6 @@ public:
 
 private:
     DeviceBuffer<float> d_cumsum_;
-    DeviceBuffer<float> d_new_particles_;
     DeviceBuffer<float> d_scratch_;  ///< for reduction results (1 float)
     int                 capacity_ = 0;
 

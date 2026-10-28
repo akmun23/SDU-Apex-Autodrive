@@ -302,6 +302,11 @@ private:
     SensorModel     sensor_;
     Resampler       resampler_;
     CudaStream      stream_;
+    // Reused stream markers avoid synchronizing between dependent kernels
+    // merely to measure them. Resolve after the confidence host read.
+    CudaTimingEvent predict_begin_, predict_end_, upload_begin_, upload_end_;
+    CudaTimingEvent sensor_end_, normalize_end_;
+    bool predict_timing_pending_ = false;
     const MapProcessor* map_ = nullptr;
 
     // GPU double-buffering strategy
@@ -365,10 +370,6 @@ private:
     bool force_max_particles_release_pending_ = false;
 
     std::mt19937 rng_{42};                   // For reinitialize() Gaussian sampling
-
-    // Pre-allocated buffers for get_estimate() (avoid per-call allocation)
-    std::vector<double> est_angles_;         // Particle angles for circular mean
-    std::vector<double> est_weights_;        // Particle weights as double
 
     KldDiagnostics last_kld_diag_;
     TransferDiagnostics last_transfer_diag_;

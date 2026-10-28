@@ -308,7 +308,25 @@ private:
     size_t count_ = 0;
 };
 
-// ─── CUDA stream RAII ───────────────────────────────────────────────
+// ─── CUDA timing and stream RAII ─────────────────────────────────────
+class CudaTimingEvent {
+public:
+    CudaTimingEvent() { CUDA_CHECK(cudaEventCreate(&event_)); }
+    ~CudaTimingEvent() { if (event_) cudaEventDestroy(event_); }
+    CudaTimingEvent(const CudaTimingEvent&) = delete;
+    CudaTimingEvent& operator=(const CudaTimingEvent&) = delete;
+    void record(cudaStream_t stream) { CUDA_CHECK(cudaEventRecord(event_, stream)); }
+    void wait() const { CUDA_CHECK(cudaEventSynchronize(event_)); }
+    // Both events must have completed at an existing host-read boundary.
+    double elapsed_ms_since(const CudaTimingEvent& start) const {
+        float elapsed = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&elapsed, start.event_, event_));
+        return elapsed;
+    }
+private:
+    cudaEvent_t event_ = nullptr;
+};
+
 class CudaStream {
 public:
     /**

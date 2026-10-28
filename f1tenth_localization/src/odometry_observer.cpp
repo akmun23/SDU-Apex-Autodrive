@@ -32,8 +32,7 @@ double lateral_acceleration_innovation_gain(
   {
     return config.lateral_acceleration_residual_gain;
   }
-  const double physical_steering = observation.actuator_feedback_valid ?
-    observation.steering_feedback_rad : observation.physx_state[13];
+  const double physical_steering = observation.steering_feedback_rad;
   const double positive_wheel_spin_ratio =
     (rear_wheel_speed_mps - body_u_mps) / std::max(std::abs(body_u_mps), 0.5);
   if (std::abs(physical_steering) < kHighSteeringInnovationFadeStartRad ||
@@ -128,16 +127,16 @@ void OdometryObserver::reset() noexcept
   initialized_ = false;
   previous_stamp_s_ = 0.0;
   previous_yaw_rad_ = 0.0;
-  previous_yaw_rate_radps_ = 0.0;
   previous_encoder_left_angle_rad_ = 0.0;
   previous_encoder_right_angle_rad_ = 0.0;
   previous_physx_wheel_encoder_angle_prediction_rad_.fill(0.0);
   physx_pose_origin_x_m_ = 0.0;
   physx_pose_origin_y_m_ = 0.0;
-  physx_pose_origin_initialized_ = false;
   body_u_mps_ = 0.0;
   body_v_com_mps_ = 0.0;
   body_v_mps_ = 0.0;
+  horizontal_u_mps_ = 0.0;
+  horizontal_v_mps_ = 0.0;
   x_m_ = 0.0;
   y_m_ = 0.0;
   last_ = {};
@@ -155,20 +154,41 @@ OdometryEstimate OdometryObserver::update(
     return current_estimate();
   }
 
+  const double sr = std::sin(observation.roll_rad);
+  const double cr = std::cos(observation.roll_rad);
+  const double sp = std::sin(observation.pitch_rad);
+  const double cp = std::cos(observation.pitch_rad);
+  if (std::abs(cp * cr) < 1.0e-8) return current_estimate();
+  const auto horizontal_velocity = [&](double u, double v_com) {
+      // Source plant heave is WORLD vertical speed, while u/v are body-frame
+      // COM components. Recover body w, transport velocity to the rear axle,
+      // then project with R_y(pitch) R_x(roll). The final yaw rotation remains
+      // measured IMU yaw in integrate_pose; no gravity or r*u is added twice.
+      const double w_com =
+        (observation.physx_state[UNITY_SOURCE_BODY_HEIGHT_RATE] + sp * u -
+        cp * sr * v_com) / (cp * cr);
+      const double v_rear = v_com -
+        observation.yaw_rate_radps * config_.imu_reference_forward_m;
+      const double w_rear = w_com +
+        observation.pitch_rate_radps * config_.imu_reference_forward_m;
+      return std::pair<double, double>{
+        cp * u + sp * (sr * v_rear + cr * w_rear),
+        cr * v_rear - sr * w_rear};
+    };
+
   if (!initialized_) {
     initialized_ = true;
     previous_stamp_s_ = observation.stamp_s;
     previous_yaw_rad_ = observation.yaw_rad;
-    previous_yaw_rate_radps_ = observation.yaw_rate_radps;
-    body_u_mps_ = observation.physx_state_valid ?
-      observation.physx_forward_velocity_mps : 0.0;
-    body_v_com_mps_ = observation.physx_state_valid ?
-      observation.physx_lateral_velocity_com_mps : 0.0;
+    body_u_mps_ = observation.physx_forward_velocity_mps;
+    body_v_com_mps_ = observation.physx_lateral_velocity_com_mps;
     body_v_mps_ = body_v_com_mps_ -
       observation.yaw_rate_radps * config_.imu_reference_forward_m;
+    const auto horizontal = horizontal_velocity(body_u_mps_, body_v_com_mps_);
+    horizontal_u_mps_ = horizontal.first;
+    horizontal_v_mps_ = horizontal.second;
     physx_pose_origin_x_m_ = observation.physx_rear_axle_x_m;
     physx_pose_origin_y_m_ = observation.physx_rear_axle_y_m;
-    physx_pose_origin_initialized_ = true;
     x_m_ = 0.0;
     y_m_ = 0.0;
     const double lateral_accel_gain = lateral_acceleration_innovation_gain(
@@ -207,8 +227,9 @@ OdometryEstimate OdometryObserver::update(
     last_.unity_state[10] = observation.roll_rate_radps;
     last_.unity_state[11] = observation.pitch_rad;
     last_.unity_state[12] = observation.pitch_rate_radps;
-    if (observation.actuator_feedback_valid)
-      last_.unity_state[13] = observation.steering_feedback_rad;
+    // The runtime has already converted the one-fixed-step-old feedback into
+    // the current post-Steer rack state. Keep that causal plant state instead
+    // of publishing the raw feedback value as if it were current rack angle.
     last_.roll_rad = observation.roll_rad;
     last_.roll_rate_radps = observation.roll_rate_radps;
     last_.pitch_rad = observation.pitch_rad;
@@ -269,17 +290,10 @@ OdometryEstimate OdometryObserver::update(
   const double prior_u = body_u_mps_;
   const double prior_v_com = body_v_com_mps_;
   const double prior_yaw = previous_yaw_rad_;
-  const double prior_yaw_rate = previous_yaw_rate_radps_;
-  const double predicted_u = observation.physx_state_valid ?
-    observation.physx_forward_velocity_mps :
-    prior_u + (observation.ax_mps2 + prior_yaw_rate * prior_v_com) * dt_s;
-  const double predicted_v_com = observation.physx_state_valid ?
-    observation.physx_lateral_velocity_com_mps :
-    prior_v_com + (observation.ay_mps2 - prior_yaw_rate * prior_u) * dt_s;
-  const double predicted_ax = observation.physx_state_valid ?
-    observation.physx_longitudinal_acceleration_mps2 : observation.ax_mps2;
-  const double predicted_ay = observation.physx_state_valid ?
-    observation.physx_lateral_acceleration_mps2 : observation.ay_mps2;
+  const double predicted_u = observation.physx_forward_velocity_mps;
+  const double predicted_v_com = observation.physx_lateral_velocity_com_mps;
+  const double predicted_ax = observation.physx_longitudinal_acceleration_mps2;
+  const double predicted_ay = observation.physx_lateral_acceleration_mps2;
 
   // UnityPlantState and the Unity IMU source define these accelerations as
   // the latest 1 ms FixedUpdate sample. The native plant has already advanced
@@ -288,8 +302,7 @@ OdometryEstimate OdometryObserver::update(
   // interval. Both accelerations are inertial acceleration in body axes;
   // only the measured/model yaw-rate difference adds a velocity-frame
   // transport correction. Adding nominal r*v or r*u here double-counts it.
-  const double model_yaw_rate = observation.physx_state_valid ?
-    observation.physx_yaw_rate_radps : observation.yaw_rate_radps;
+  const double model_yaw_rate = observation.physx_yaw_rate_radps;
   const double yaw_rate_residual =
     observation.yaw_rate_radps - model_yaw_rate;
   const double lateral_accel_gain = lateral_acceleration_innovation_gain(
@@ -318,16 +331,18 @@ OdometryEstimate OdometryObserver::update(
    * capture, its aligned position RMSE was 0.194 m versus 0.118 m for the
    * existing estimator. Integrate the sensor-corrected body velocity instead;
    * retain the independent millisecond PhysX pose below for online diagnostics. */
-  if (!physx_pose_origin_initialized_) return current_estimate();
-  integrate_pose(dt_s, prior_yaw, next_yaw, prior_u, next_u,
-    body_v_mps_, next_v, x_m_, y_m_);
+  const auto horizontal = horizontal_velocity(next_u, next_v_com);
+  integrate_pose(dt_s, prior_yaw, next_yaw,
+    horizontal_u_mps_, horizontal.first, horizontal_v_mps_, horizontal.second,
+    x_m_, y_m_);
+  horizontal_u_mps_ = horizontal.first;
+  horizontal_v_mps_ = horizontal.second;
 
   body_u_mps_ = next_u;
   body_v_com_mps_ = next_v_com;
   body_v_mps_ = next_v;
   previous_stamp_s_ = observation.stamp_s;
   previous_yaw_rad_ = next_yaw;
-  previous_yaw_rate_radps_ = observation.yaw_rate_radps;
   OdometryEstimate output;
   output.stamp_s = observation.stamp_s;
   output.dt_s = dt_s;
@@ -359,8 +374,6 @@ OdometryEstimate OdometryObserver::update(
     left_omega_correction, right_omega_correction};
   output.encoder_wheel_omega_average_radps = {
     left_omega_average, right_omega_average};
-  output.wheel_omega_radps[kWheelOmegaRearLeft] = left_omega;
-  output.wheel_omega_radps[kWheelOmegaRearRight] = right_omega;
   output.longitudinal_slip = observation.physx_longitudinal_slip;
   output.lateral_slip = observation.physx_lateral_slip;
   output.normal_load_n = observation.physx_normal_load_n;
@@ -374,8 +387,8 @@ OdometryEstimate OdometryObserver::update(
   output.unity_state[10] = observation.roll_rate_radps;
   output.unity_state[11] = observation.pitch_rad;
   output.unity_state[12] = observation.pitch_rate_radps;
-  if (observation.actuator_feedback_valid)
-    output.unity_state[13] = observation.steering_feedback_rad;
+  // Preserve the runtime's endpoint-reconstructed rack state in unity_state.
+  // steering_feedback_rad remains separately available as the raw sensor.
   output.roll_rad = observation.roll_rad;
   output.roll_rate_radps = observation.roll_rate_radps;
   output.pitch_rad = observation.pitch_rad;

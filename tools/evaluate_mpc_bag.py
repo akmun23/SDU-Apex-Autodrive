@@ -32,6 +32,11 @@ from rosidl_runtime_py.utilities import get_message
 
 
 GT = "/autodrive/roboracer_1/odom"
+
+# MPC lateral velocity is represented at the rear axle, while Unity's odometry
+# twist is reported at the rigid-body COM. Keep this geometry aligned with
+# vehicle_model.c and unity_source_odom_runtime.hpp.
+MPC_REAR_AXLE_FROM_COM_M = 0.15532
 ODOM = "/odom"
 EKF = "/ekf_odom"
 EKF_POSE = "/ekf_pose"
@@ -1848,7 +1853,7 @@ def report_localization_diagnostics(
     health_rows = [row for row in data.get(AMCL_HEALTH, [])
                    if len(row.get("values", [])) >= 10]
     scan_rows = [row for row in data.get(AMCL_SCAN_ALIGNMENT, [])
-                 if len(row.get("values", [])) >= 14]
+                 if len(row.get("values", [])) >= 11]
     if health_rows or scan_rows:
         applied_xy = [row["values"][8] for row in health_rows]
         applied_yaw = [abs(row["values"][9]) for row in health_rows]
@@ -2615,8 +2620,12 @@ def report_encoder_slip(
                       f"bias={statistics.mean(residuals):+.3f} "
                       f"RMSE={math.sqrt(statistics.mean(x*x for x in residuals)):.3f}")
     summarize("all", rows)
-    summarize("zero-throttle/brake command", [x for x in rows if x["throttle"] < 0.01])
-    summarize("positive throttle", [x for x in rows if x["throttle"] >= 0.01])
+    # Unity selects its distinct full-brake branch only at exactly zero.
+    # Positive values below 0.01 are valid motor-torque commands (the live
+    # bridge transmits them in 0.001 increments) and must not be labeled brake.
+    summarize("zero-throttle/full-brake command", [
+        x for x in rows if x["throttle"] == 0.0])
+    summarize("positive throttle", [x for x in rows if x["throttle"] > 0.0])
     summarize("wheel/body speed mismatch >0.5 m/s", [
         x for x in rows if max(abs(x["left_surface_minus_body"]),
                                abs(x["right_surface_minus_body"])) > 0.5])
@@ -2930,43 +2939,63 @@ def report_horizon_errors(
     trajectory: tuple[list[dict[str, float]], float] | None,
 ) -> None:
     print(
-        "horizon comparison note: closed-loop logs replan controls every 25 ms; "
-        "beyond already-queued commands these errors are not fixed-input plant accuracy."
+        "horizon comparison note: prediction starts at candidate command-start time "
+        "when recorded (otherwise control ROS time); closed-loop logs replan controls "
+        "every 25 ms, so later horizons are not fixed-input plant accuracy."
     )
     truth_times = [row["stamp"] for row in truth]
+
+    def truth_at(stamp: float) -> tuple[dict[str, float], float] | None:
+        """Interpolate truth onto the controller epoch; never extrapolate."""
+        index = bisect.bisect_left(truth_times, stamp)
+        if index < len(truth_times) and truth_times[index] == stamp:
+            return truth[index], 0.0
+        if index == 0 or index == len(truth_times):
+            return None
+        before, after = truth[index - 1], truth[index]
+        span = truth_times[index] - truth_times[index - 1]
+        if span <= 0.0 or span > 0.050:
+            return None
+        ratio = (stamp - truth_times[index - 1]) / span
+        sample = {"stamp": stamp}
+        for field in ("x", "y", "u", "v", "r"):
+            sample[field] = before[field] + ratio * (after[field] - before[field])
+        sample["yaw"] = before["yaw"] + ratio * normalized_angle(
+            after["yaw"] - before["yaw"]
+        )
+        return sample, min(stamp - truth_times[index - 1], truth_times[index] - stamp)
+
     errors: dict[int, list[dict[str, float]]] = {}
     for row in diagnostics:
         diag = row.get("json", {})
+        candidate_ns = diag.get("candidate_command_stamp_ns")
         control_ns = diag.get("control_ros_stamp_ns")
-        if not isinstance(control_ns, int):
+        start_ns = candidate_ns if isinstance(candidate_ns, int) and candidate_ns > 0 else control_ns
+        if not isinstance(start_ns, int):
             continue
-        start_time = control_ns * 1e-9
+        start_time = start_ns * 1e-9
         control_prediction = diag.get("control_time_prediction", {})
         map_start = control_prediction.get("predicted_map_pose")
-        start_index = bisect.bisect_left(truth_times, start_time)
-        candidates = [i for i in (start_index - 1, start_index) if 0 <= i < len(truth)]
-        if not candidates:
+        start_truth_result = truth_at(start_time)
+        if start_truth_result is None:
             continue
-        start_truth = min(candidates, key=lambda i: abs(truth_times[i] - start_time))
-        actual_start = truth[start_truth]
+        actual_start, start_alignment_dt = start_truth_result
         for prediction in diag.get("predictions", []):
             n = prediction.get("n")
             state = prediction.get("state")
             if not isinstance(n, int) or not isinstance(state, list) or len(state) < 5:
                 continue
             target_time = start_time + n * 0.025
-            idx = bisect.bisect_left(truth_times, target_time)
-            candidates = [i for i in (idx - 1, idx) if 0 <= i < len(truth)]
-            if not candidates:
+            actual_result = truth_at(target_time)
+            if actual_result is None:
                 continue
-            target_index = min(candidates, key=lambda i: abs(truth_times[i] - target_time))
-            if abs(truth_times[target_index] - target_time) > 0.018:
-                continue
-            actual = truth[target_index]
+            actual, target_alignment_dt = actual_result
             item = {
-                "dt": abs(truth_times[target_index] - target_time),
+                "dt": max(start_alignment_dt, target_alignment_dt),
                 "u": state[2] - actual["u"],
-                "v": state[3] - actual["v"],
+                "v_rear": state[3] - (
+                    actual["v"] - actual["r"] * MPC_REAR_AXLE_FROM_COM_M
+                ),
                 "r": state[4] - actual["r"],
                 "start_speed": math.hypot(actual_start["u"], actual_start["v"]),
             }
@@ -2992,7 +3021,7 @@ def report_horizon_errors(
             f"horizon {n} ({n*25}ms): n={len(rows)} "
             f"time_align_p95={percentile([x['dt'] for x in rows], 0.95)*1000:.2f}ms"
         )
-        for field in ("u", "v", "r", "xy", "yaw"):
+        for field in ("u", "v_rear", "r", "xy", "yaw"):
             values = [row[field] for row in rows if field in row]
             if not values:
                 continue
@@ -3037,6 +3066,7 @@ def report_source_plant_rollout(
     extra_throttle_delay_packets: int = 0,
     oracle_steering_feedback: bool = False,
     oracle_throttle_feedback: bool = False,
+    causal_steering_boundary_correction: bool = False,
     reconstruct_command_queue_from_stamps: bool = False,
     reconstruct_command_queue_from_bridge: bool = False,
     bridge_command_epoch_offset: int = 1,
@@ -3057,6 +3087,10 @@ def report_source_plant_rollout(
     Starts from a recorded UnityPlantState, then advances with the recorded
     slot-2 actuator command sequence. It never reads future measured states
     during a rollout; simulator truth is used only to score each endpoint.
+    The optional causal steering-boundary correction reconstructs the current
+    post-Steer rack state from current feedback and the preceding applied
+    command. It does not feed future steering feedback into an open-loop
+    horizon.
     The optional oracle-motion diagnostic replaces selected initial u/v/r
     with same-epoch Unity truth. Hidden plant states and all future inputs
     remain unchanged; this is diagnostic only and must never be used in
@@ -3432,6 +3466,19 @@ def report_source_plant_rollout(
         state[18:22] = row["low_forward_speed_time_s"]
         state[22:26] = row["low_side_speed_time_s"]
         return state
+
+    def reconstruct_feedback_aligned_rack(
+        row: dict[str, Any], command_norm: float | None = None,
+    ) -> float:
+        if not row.get("actuator_feedback_valid", False):
+            return float(row["physical_steering"])
+        # slot 1 closed the interval represented by this feedback sample;
+        # slot 2 is the queued target for the interval being predicted.
+        return _unity_vehicle_steering_angle_after(
+            float(row["steering_feedback"]),
+            float(row["delayed_steering_1"] if command_norm is None
+                  else command_norm), UNITY_FIXED_STEP_S)
+
     def make_input(state: list[float], angles: list[float],
                    queue: dict[str, Any], history_initialized: bool,
                    command_slot: int = 1,
@@ -3767,6 +3814,14 @@ def report_source_plant_rollout(
         for phase in ("start_feedback", "end_feedback")
     }
     one_step_motion_details: list[dict[str, float]] = []
+    steering_chronology_errors = {
+        mode: {
+            group: {field: [] for field in ("u", "v", "r")}
+            for group in ("all", "high_steer", "steering_transition",
+                          "high_steer_transition")
+        }
+        for mode in ("causal_start_rack", "backdated_endpoint_reset")
+    }
     response_dt_one_step_errors = {
         field: [] for field in ("u", "v", "r", "steering")
     }
@@ -3902,6 +3957,50 @@ def report_source_plant_rollout(
                         timing_output.state[2] - next_truth["r"])
         current_steering = start_plant["physical_steering"]
         next_steering = next_plant["physical_steering"]
+        if start_plant.get("actuator_feedback_valid", False):
+            current_steering = reconstruct_feedback_aligned_rack(start_plant)
+        if next_plant.get("actuator_feedback_valid", False):
+            next_steering = reconstruct_feedback_aligned_rack(next_plant)
+
+        # Direct A/B for the diagnosed chronology bug. The production-order
+        # candidate starts from the rack state known at this epoch. The old
+        # ordering substitutes the *next* epoch's CurrentSteeringAngle and
+        # advances it before simulating this completed interval. Future
+        # feedback is used only to reproduce that old implementation for
+        # diagnosis, never as a deployable input.
+        if (start_plant.get("actuator_feedback_valid", False) and
+                next_plant.get("actuator_feedback_valid", False)):
+            chronology_start_states = {
+                "causal_start_rack": source_state(start_plant),
+                "backdated_endpoint_reset": source_state(start_plant),
+            }
+            chronology_start_states["causal_start_rack"][13] = current_steering
+            chronology_start_states["backdated_endpoint_reset"][13] = (
+                reconstruct_feedback_aligned_rack(
+                    next_plant, start_plant["delayed_steering_2"]))
+            transition = abs(next_steering - current_steering) >= 0.05
+            selected_groups = ["all"]
+            high_steer = abs(current_steering) >= 0.35
+            if high_steer:
+                selected_groups.append("high_steer")
+            if transition:
+                selected_groups.append("steering_transition")
+            if high_steer and transition:
+                selected_groups.append("high_steer_transition")
+            for mode, state in chronology_start_states.items():
+                chronology_input = make_input(
+                    state, list(start_plant["wheel_angle"]), start_plant,
+                    start_plant["suspension_history_initialized"],
+                    command_slot=2)
+                chronology_output = UnitySourcePlantOutputC()
+                if not step(ctypes.byref(chronology_input), 0.025,
+                            ctypes.byref(chronology_output)):
+                    continue
+                for group in selected_groups:
+                    for field, state_index in (("u", 0), ("v", 1), ("r", 2)):
+                        truth_value = next_truth[field]
+                        steering_chronology_errors[mode][group][field].append(
+                            chronology_output.state[state_index] - truth_value)
         steering_delta_magnitude = abs(next_steering) - abs(current_steering)
         regimes = []
         if abs(current_steering) >= 0.10:
@@ -3913,6 +4012,8 @@ def report_source_plant_rollout(
                     regimes.append("high-steer-turn-in")
         initial_state = apply_initial_motion_oracle(
             source_state(start_plant), start_truth, oracle_components)
+        if causal_steering_boundary_correction:
+            initial_state[13] = current_steering
         initial_state, initial_history_initialized = reconcile_start_state(
             initial_state, start_plant["suspension_history_initialized"])
         for slot in (1, 2):
@@ -3979,6 +4080,8 @@ def report_source_plant_rollout(
                 candidate_output.state[13] - next_steering)
             if slot == 2:
                 next_state = source_state(next_plant)
+                if causal_steering_boundary_correction:
+                    next_state[13] = next_steering
                 for state_index, name in enumerate(plant_state_names):
                     one_step_plant_state_errors[name].append(
                         candidate_output.state[state_index] -
@@ -4157,6 +4260,8 @@ def report_source_plant_rollout(
         # future truth or changing hidden wheel/suspension states.
         state = apply_initial_motion_oracle(
             source_state(start_plant), start_truth, oracle_components)
+        if causal_steering_boundary_correction:
+            state[13] = reconstruct_feedback_aligned_rack(start_plant)
         state, history_initialized = reconcile_start_state(
             state, start_plant["suspension_history_initialized"])
         start_state = list(state)
@@ -4582,6 +4687,28 @@ def report_source_plant_rollout(
           f"aligned={residual_valid_windows}, enabled={residual_enabled_windows}")
     print(f"  aligned_epochs={len(times)} start_windows={len(times)-max(horizons)} "
           f"skipped_windows={skipped} model_dt=25ms")
+    print("  steering feedback chronology A/B (future feedback used only to "
+          "recreate the prior backdated-reset behavior):")
+    for group in ("all", "high_steer", "steering_transition",
+                  "high_steer_transition"):
+        mode_counts = [len(steering_chronology_errors[mode][group]["r"])
+                       for mode in steering_chronology_errors]
+        if max(mode_counts, default=0) == 0:
+            continue
+        print(f"    {group}:")
+        for mode in ("causal_start_rack", "backdated_endpoint_reset"):
+            fields = steering_chronology_errors[mode][group]
+            print(f"      {mode}: n={len(fields['r'])}")
+            for field, unit in (("u", "m/s"), ("v", "m/s"),
+                                ("r", "rad/s")):
+                values = fields[field]
+                if not values:
+                    continue
+                print(f"        {field}: RMSE="
+                      f"{math.sqrt(statistics.mean(v*v for v in values)):.5f}"
+                      f"{unit} p95_abs="
+                      f"{percentile([abs(v) for v in values], 0.95):.5f}"
+                      f" max_abs={max(abs(v) for v in values):.5f}")
     print("  one-step command-queue phase A/B (same plant state; next Unity "
           "epoch used only for scoring; recorded queue-slot diagnostics):")
     for slot in (1, 2):
@@ -5107,6 +5234,12 @@ def report_source_plant_rollout(
             "  steering target used next recorded actuator feedback; this is "
             "an offline oracle diagnostic, not a deployable rollout input."
         )
+    if causal_steering_boundary_correction:
+        print(
+            "  causal steering boundary correction: current feedback is "
+            "advanced one source Steer() step using the preceding applied "
+            "command; no future feedback enters the open-loop horizon."
+        )
     if reconstruct_command_queue:
         source_label = ("Bridge's recorded sent command per request" if
                         reconstruct_command_queue_from_bridge else
@@ -5363,6 +5496,13 @@ def main() -> int:
              "future information, never deployable",
     )
     parser.add_argument(
+        "--source-causal-steering-boundary-correction", action="store_true",
+        help="diagnostic A/B: reconstruct each rollout's current rack state "
+             "from current steering feedback plus one source Steer() step "
+             "using the preceding applied command; no future feedback enters "
+             "the open-loop horizon",
+    )
+    parser.add_argument(
         "--source-reconstruct-command-queue-from-stamps", action="store_true",
         help="diagnostic: reconstruct the two-packet command queue from the "
              "recorded Float32 command topic arrival times and sensor request "
@@ -5494,6 +5634,7 @@ def main() -> int:
                 args.source_extra_throttle_delay_packets,
                 args.source_oracle_steering_feedback,
                 args.source_oracle_throttle_feedback,
+                args.source_causal_steering_boundary_correction,
                 args.source_reconstruct_command_queue_from_stamps,
                 args.source_reconstruct_command_queue_from_bridge,
                 args.source_bridge_command_epoch_offset,
