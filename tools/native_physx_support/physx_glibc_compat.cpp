@@ -6,10 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 
-// PhysX 4.1's checked-in Linux archives were built against a newer glibc and
-// reference the C23 parsing entry points. The Odom runtime loads decimal
-// vehicle-state JSON only, so Ubuntu 22.04 can provide the legacy parser
-// implementations at this ABI boundary without changing the PhysX equations.
+// Offline native-validation archives require C23 parsing symbols on older
+// glibc. This shim belongs to that validator; production odometry neither
+// links these archives nor loads vehicle-state JSON through PhysX.
 extern "C" unsigned long __isoc23_strtoul(
   const char * text, char ** end, int base)
 {
