@@ -3,11 +3,37 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_root"
-[[ $# == 2 || ( $# == 3 && "$3" == --all-day ) ]] || {
-  echo 'Usage: run_ipopt_unattended.sh OUTPUT_DIR SEED.npz [--all-day]' >&2; exit 2;
+[[ $# -ge 2 ]] || {
+  echo 'Usage: run_ipopt_unattended.sh OUTPUT_DIR SEED.npz [--all-day] [--trust-factors LIST]' >&2; exit 2;
 }
 output="$(realpath -m -- "$1")"
 seed="$(realpath -e -- "$2")"
+shift 2
+all_day=0
+requested_factors=
+while (( $# )); do
+  case "$1" in
+    --all-day) all_day=1; shift ;;
+    --trust-factors)
+      [[ $# -ge 2 ]] || exit 2
+      requested_factors="$2"
+      [[ -n "$requested_factors" ]] || exit 2
+      shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+if [[ -n "$requested_factors" ]]; then
+  python3 - "$requested_factors" <<'PY'
+import math,sys
+try:
+    factors=[float(x) for x in sys.argv[1].split(',')]
+    assert len(factors) >= 2
+    assert all(math.isfinite(x) and x > 0 for x in factors)
+    assert all(a < b for a,b in zip(factors,factors[1:]))
+except (ValueError,AssertionError):
+    sys.exit('Provide at least two finite, positive, strictly increasing trust factors')
+PY
+fi
 [[ "$output" == "$repo_root"/optimized_practice_* && -f "$seed" ]] || exit 2
 [[ ! -e "$output/status.json" && ! -e "$output/console.log" ]] || exit 2
 mkdir -p "$output"
@@ -22,7 +48,7 @@ wall_guard=11700
 export SDU_IPOPT_PHASE1_MAX_CPU_SECONDS=600
 export SDU_IPOPT_TIME_MAX_CPU_SECONDS=2400
 export SDU_IPOPT_TIME_MAX_WALL_SECONDS=2700
-if [[ "${3:-}" == --all-day ]]; then
+if (( all_day )); then
   mode=all_day
   iterations=6000
   factors=2,4,16,64,256,1024
@@ -30,6 +56,9 @@ if [[ "${3:-}" == --all-day ]]; then
   export SDU_IPOPT_PHASE1_MAX_CPU_SECONDS=0
   export SDU_IPOPT_TIME_MAX_CPU_SECONDS=0
   export SDU_IPOPT_TIME_MAX_WALL_SECONDS=0
+fi
+if [[ -n "$requested_factors" ]]; then
+  factors="$requested_factors"
 fi
 write_status() {
   python3 - "$output" "$1" "$2" "$seed" "$mode" "$wall_guard" "$iterations" "$factors" <<'PY'

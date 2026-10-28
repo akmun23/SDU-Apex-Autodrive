@@ -10,6 +10,14 @@ import sys
 import time
 
 
+def observed_state(recorded_state, service_state):
+    """A stale 'running' JSON must not hide a stopped service after power loss."""
+    if recorded_state == 'running' and service_state in {
+            'inactive', 'failed', 'unknown', 'not-found'}:
+        return f'interrupted / service {service_state} (saved status was running)'
+    return f'{recorded_state} / service {service_state}'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run_dir', type=Path)
@@ -55,7 +63,8 @@ def main():
                     result = subprocess.run(
                         ['systemctl', '--user', 'is-active', args.unit],
                         capture_output=True, text=True, timeout=2)
-                    state += f' / service {result.stdout.strip() or "unknown"}'
+                    state = observed_state(
+                        state, result.stdout.strip() or 'unknown')
                 except (OSError, subprocess.TimeoutExpired):
                     state += ' / service unavailable'
             factors = status.get('trust_region_factors', [])

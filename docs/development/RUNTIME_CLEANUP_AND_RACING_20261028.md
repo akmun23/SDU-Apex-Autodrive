@@ -1,11 +1,59 @@
 # Runtime cleanup and racing improvements — 2026-10-28
 
 Target: ten consecutive scored laps below 49.8 s total, excluding warmup.
-IPOPT all-day service v347 remains running on CPU 15; do not restart it for
-runtime development. Runtime trials use the stock practice simulator, allowed
+IPOPT v347 was interrupted by power loss during its second time stage. Recovery
+v348 runs on CPU 15; do not restart it for runtime development (details below).
+Runtime trials use the stock practice simulator, allowed
 sensor topics only, with ground truth reserved for recording/scoring.
 
 ## Baseline and evidence
+
+### Power-loss recovery, 2026-10-28
+
+- The old run **did advance** after its first time stage (trust factor 2).
+  At iteration 6000 it saved a 4.9400679968 s iterate with maximum constraint
+  violation 0.0003611644, below the 0.001 feasibility gate. IPOPT returned
+  `Maximum_Iterations_Exceeded`; this is not a stationarity/convergence claim.
+  The continuation code accepted that feasible restart and entered factor 4.
+- Factor 4 reached iteration 1048: console objective 4.9388517 s, reported
+  primal residual 0.000793. Power loss interrupted this stage. Its primal
+  vectors were not saved, so the printed objective/residual cannot reconstruct
+  that iterate. The previous complete factor-2 NPZ is intact, SHA256
+  `bb9fc985db4ec3eacf0a2cb94fbcef4f011a7274a0839d0e39b3583b89c1418c`.
+- Recovery directory: `optimized_practice_v348_power_recovery_20261028`.
+  Transferred every archived differential state and both control arrays at
+  fraction 1.0 with the existing provenance-checking seed converter; zero
+  speed samples clipped. Algebraic quantities are recomputed by the current
+  source equations, and the ordinary strict Phase-I gate must pass again.
+  This is a primal reseed, **not** restoration of IPOPT duals, barrier state,
+  or the interrupted iteration counter. The time-stage trust box is centered
+  on the newly certified initializer, as in the existing restart formulation.
+- Started `sdu-apex-ipopt-recovery-20261028.service`: factors
+  **4,16,64,256,1024**, 6000 iterations each, exact Hessian, original 0.06 m
+  mesh / 0.05 m margin / positive throttle bounds, no CPU/wall caps. No new
+  simulation, no runtime trajectory promotion, no physics/model changes.
+  Sleep inhibitor is tied to the service; a forced shutdown still stops it.
+  Old directory and its console/checkpoints remain untouched.
+- Launcher now accepts explicit remaining trust factors with fail-fast
+  validation. Dashboard now labels a stale `running` status as interrupted
+  when the named service is inactive, rather than displaying it as running.
+  Three recovery-contract unit tests and three existing raw-seed tests pass;
+  shell syntax check passes. Pytest plugin auto-loading was disabled because
+  the host ROS launch-testing plugin lacks `lark` in the optimizer venv.
+- Observe recovery:
+
+  ```bash
+  python3 tools/watch_ipopt.py optimized_practice_v348_power_recovery_20261028 --unit sdu-apex-ipopt-recovery-20261028.service
+  ```
+
+Only stage-end checkpoints currently persist time-stage primal vectors.
+Mid-stage progress remains vulnerable to forced power loss; the sleep
+inhibitor does not provide checkpointing or protection against power failure.
+
+**Follow-up work in progress:** same-epoch ADMM refinement fix and competition
+bridge isolation are detailed in the 2026-10-28 follow-up section below. The
+52.239 s result predates that solver correction; no ten-lap improvement is
+claimed for the follow-up until repeated online verification passes.
 
 **Latest production status (read first):** the practice launch/trial default
 is now `ipopt_v343_tracking_reserve_raceline.csv`, SHA256
@@ -492,3 +540,92 @@ simulator or controller is left running after the supervised trials.
    neither the target integral nor IPOPT's current iterate counts as a lap.
 4. Leave the all-day IPOPT service running; evaluate completed checkpoints
    against source feasibility and measured driving before promoting them.
+
+## Follow-up: convergence, precision and competition boundary
+
+The objective remains ten scored laps below 49.8 s (also meets the user's
+latest <50 s requirement), excluding warmup. A new IPOPT path is not the only
+route to improvement: the current target's integral is 4.9486 s, whereas
+closed-loop repeats average around 5.22 s. Tracking/convergence and estimator
+uncertainty still cost time on this already-loaded target.
+
+### Measured solver defect and correction
+
+On the latest 2,346-cycle repeat, only 637 cycles selected a full nonlinear
+step; 1,382 selected alpha .5/.25/.125/.0625 and 326 had alpha zero. Fourteen
+consecutive retained-plan actions occurred twice, with |e_y| growing to
+.137–.151 m at high-speed turn exit. Simply changing weights or waiting for
+IPOPT does not fix those controller-side limitations.
+
+Found a concrete chronology bug: `riccati_admm_solve_core` shifted projected
+variables, duals and per-stage penalties on **every call**, including the
+second SQP solve at the same command epoch. RTI correctly kept its nominal
+sequence unshifted, so the solver warm start was one stage ahead of it.
+Added explicit `reuse_same_epoch` configuration for refinement only; the next
+control cycle retains the normal single shift. A one-iteration analytic
+zero-cost QP regression test with distinct stage markers proves stage indices
+are preserved for refinement and shifted for the next epoch. No vehicle
+physics, horizon, state dimensions, weights or safety margins were changed.
+
+Frozen-QP format is now **v3** in C++ and Python, including this explicit
+chronology bit; unsupported older versions are rejected, not silently decoded
+with the wrong layout. Compiled roundtrip and Python parsing tests cover it.
+Removed stale 22-state documentation and the old comment claiming two unused
+future control slots despite the direct-input 30-stage production horizon.
+
+Saved-state comparison: 600 consecutive full-speed states, baseline production
+weights, v343 tracking-reserve target, eight workers. Baseline vs corrected:
+ADMM convergence 516 -> 520/600; total iteration p50 56 -> 52, p95 300 -> 287;
+cycle p95 17.373 -> 16.517 ms. Exact full-horizon acceptance 592 -> 590/600,
+so this is **not** proof of a racing/robustness gain. These replays reconstruct
+solver memory, not the unrecorded original live ADMM state.
+
+Tighter fixed steering/throttle trust-region trials did not establish a win;
+an adaptive refinement-radius prototype also worsened convergence/timing.
+That prototype was removed entirely. Reports remain in
+`live_runs/mpc_v343_promoted_defaults_20261028_01/trust_region_replay/` as
+negative evidence; do not reintroduce it as an untested improvement.
+
+Live verification `mpc_v343_same_epoch_sqp_20261028_01` completed ten total
+laps, then stopped without collision on a corridor failure at stage 2; ten
+**scored** laps were not completed. Full command/state history was recorded.
+This corrects a solver defect but has not yet passed the racing goal.
+
+### Competition inspection: allowed topics are not blanket certification
+
+Checked the current official [2026 technical guide](https://autodrive-ecosystem.github.io/competitions/roboracer-sim-racing-guide-2026/#23-data-streams)
+and [rules](https://autodrive-ecosystem.github.io/competitions/roboracer-sim-racing-rules-2026/#24-inspection-rules).
+Permitted runtime inputs are LiDAR, camera, IMU, encoders and actuator
+feedback; controls are steering/throttle ROS topics. Simulator pose/odometry,
+race telemetry, reset and TF are restricted during racing. Team estimators /
+MPC continue to use permitted sensors and their own derived messages only.
+
+The guide also forbids modifying `autodrive_roboracer`. Our wrapper leaves
+installed files intact but changes that bridge's behavior in memory. This
+is a **submission-compliance uncertainty**, not resolved by a topic grep.
+The user confirms no organizer approval is known. Keep it for development;
+organizer clarification is required before claiming submission compliance.
+Suggested question: may a separate team package wrap the unmodified installed
+bridge to pace unchanged WebSocket packets at 40 Hz, synchronize ROS headers
+and isolate legal actuator callbacks, without using restricted telemetry in
+the autonomy algorithm? No message has been sent to organizers.
+
+Implemented conservative isolation regardless of that outstanding question:
+
+- Competition launch explicitly disables development packet diagnostics and
+  reset. Default diagnostics flag is off even outside that launch.
+- Restricted packet details are not inspected or parsed on that path; no
+  per-packet timing JSON publisher/work is run. Development launch explicitly
+  enables the existing complete recording path for offline diagnosis.
+- Removed nonstandard camera/intensity-control fields from outbound packets;
+  retained only the official actuator/reset fields. Competition reset is
+  always false and has no subscriber.
+- Deleted nine always-null legacy metadata globals, repeated resets/reads
+  and their empty JSON fields. Diagnostic schema v5 retains actual request,
+  receipt and issued-command evidence for development bags.
+- Four new dependency-free boundary tests prove disabled diagnostics never
+  access packet values or ROS/clock/publisher state, verify the official
+  command-field set and enforce the competition launch overrides.
+
+Remaining attribution of the four localized 750 ms rollout tails is unchanged;
+none of these solver/bridge edits changes the physical plant equations.
