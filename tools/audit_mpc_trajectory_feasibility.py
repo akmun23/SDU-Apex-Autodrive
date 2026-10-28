@@ -29,17 +29,19 @@ from typing import Any
 
 try:
     from tools import evaluate_mpc_bag as evaluator
+    from tools import vehicle_footprint
 except ModuleNotFoundError:
     import evaluate_mpc_bag as evaluator
+    import vehicle_footprint
 
 
 SCHEMA = "sdu_apex_mpc_trajectory_feasibility_audit/v1"
 WHEELBASE_M = 0.324
 STEERING_LIMIT_RAD = math.pi / 6.0
 STEERING_RATE_RADPS = math.radians(183.345993)
-VEHICLE_WIDTH_M = 0.273
-REAR_AXLE_TO_FRONT_M = 0.430
-REAR_OVERHANG_M = 0.080
+VEHICLE_WIDTH_M = vehicle_footprint.WIDTH_M
+REAR_AXLE_TO_FRONT_M = vehicle_footprint.BODY_X[1]
+REAR_OVERHANG_M = -vehicle_footprint.BODY_X[0]
 COM_FORWARD_FROM_REAR_M = 0.15532
 MPC_FULL_HORIZON_STATUSES = {
     "accepted_optimal", "accepted_feasible", "accepted_line_search",
@@ -358,9 +360,11 @@ def sample_corridor_bounds(points: list[dict[str, float]], length: float,
     return min(left_values), min(right_values)
 
 
-def footprint_extent(e_psi: float) -> float:
-    return (0.5 * VEHICLE_WIDTH_M * abs(math.cos(e_psi)) +
-            max(REAR_AXLE_TO_FRONT_M, REAR_OVERHANG_M) * abs(math.sin(e_psi)))
+def footprint_extents(e_psi: float) -> tuple[float, float]:
+    width = 0.5 * VEHICLE_WIDTH_M * abs(math.cos(e_psi))
+    sine = math.sin(e_psi)
+    return (width + max(REAR_AXLE_TO_FRONT_M * sine, -REAR_OVERHANG_M * sine),
+            width + max(-REAR_AXLE_TO_FRONT_M * sine, REAR_OVERHANG_M * sine))
 
 
 def geometry_audit(points: list[dict[str, float]], length: float,
@@ -375,7 +379,7 @@ def geometry_audit(points: list[dict[str, float]], length: float,
         item["steering_seed"] = math.atan(WHEELBASE_M * item["curvature"])
         item["yaw_rate_demand"] = item["speed"] * item["curvature"]
         item["lateral_accel_demand"] = item["speed"] ** 2 * item["curvature"]
-        item["aligned_footprint_extent"] = footprint_extent(0.0)
+        item["aligned_footprint_extent"] = footprint_extents(0.0)[0]
         item["left_slack"] = (item["left"] - wall_clearance_m -
                                item["aligned_footprint_extent"])
         item["right_slack"] = (item["right"] - wall_clearance_m -
@@ -479,15 +483,16 @@ def geometry_audit(points: list[dict[str, float]], length: float,
             abs(value) > STEERING_RATE_RADPS for value in steering_rates),
         "source_steering_rate_limit_radps": STEERING_RATE_RADPS,
         "minimum_aligned_footprint_clearance_m": min(
-            min(row["left"], row["right"]) - footprint_extent(0.0)
+            min(row["left"], row["right"]) - footprint_extents(0.0)[0]
             for row in samples),
         "wall_clearance_requirement_m": wall_clearance_m,
         "minimum_centerline_corridor_slack_after_footprint_m": min(all_slacks),
         "geometric_centerline_feasible_at_requested_clearance":
             min(all_slacks) >= -tolerance_m,
         "heading_aware_envelope_formula": (
-            "0.5*vehicle_width*abs(cos(e_psi)) + "
-            "max(front_extent,rear_overhang)*abs(sin(e_psi))"),
+            "left/right support of four rear-axle-origin rectangle corners; "
+            f"front={REAR_AXLE_TO_FRONT_M:.3f} m, rear={REAR_OVERHANG_M:.3f} m, "
+            f"width={VEHICLE_WIDTH_M:.3f} m"),
         "bin_width_m": bin_width_m,
     }
     return summary, bins
@@ -708,13 +713,13 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
         wheel_angles = [0.0] * 4
 
         after_ref = sample_path(points, length, progress)
-        extent = footprint_extent(next_e_psi)
+        left_extent, right_extent = footprint_extents(next_e_psi)
         margin = (first_prediction_clearance_m if index == 0
                   else wall_clearance_m)
         preview_left, preview_right = sample_corridor_bounds(
             points, length, progress, corridor_preview_halfwidth_m)
-        left_slack = preview_left - margin - extent - next_e_y
-        right_slack = preview_right - margin - extent + next_e_y
+        left_slack = preview_left - margin - left_extent - next_e_y
+        right_slack = preview_right - margin - right_extent + next_e_y
         slack = min(left_slack, right_slack)
         speed_error = u - after_ref["speed"]
         speed_accel_errors.append(u_interval_accels[-1] -

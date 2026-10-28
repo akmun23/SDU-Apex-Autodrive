@@ -31,6 +31,7 @@ if [[ -n "${SDU_APEX_MPC_PARAMETER_OVERLAY:-}" ]]; then
     exit 1
   fi
   overlay_host_path="$(realpath -- "${SDU_APEX_MPC_PARAMETER_OVERLAY}")"
+  python3 -c 'from pathlib import Path; import sys; from tools.seal_mpc_run_manifest import validate_mpc_overlay; validate_mpc_overlay(Path(sys.argv[1]))' "$overlay_host_path"
   case "${overlay_host_path}" in
     "${repo_root}"/*)
       mpc_parameter_overlay="/workspace/src/${overlay_host_path#"${repo_root}"/}"

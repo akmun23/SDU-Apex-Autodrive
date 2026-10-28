@@ -14,6 +14,8 @@ import stat
 import subprocess
 import time
 
+import yaml
+
 GENERATED_UNTRACKED_ROOTS = frozenset({"build_task", "install_task", "log_task"})
 
 
@@ -156,6 +158,26 @@ def file_record(root: Path, raw_path: str) -> dict:
             "size_bytes": path.stat().st_size}
 
 
+def validate_mpc_overlay(path: Path) -> None:
+    """Reject ROS selectors that would silently leave the MPC unchanged.
+
+    The maintained launch names its unnamespaced component
+    /mpc_controller_node. A typo in a YAML selector is otherwise accepted by
+    ROS while applying none of the intended experiment parameters.
+    """
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    selectors = {"/**", "mpc_controller_node", "/mpc_controller_node"}
+    if not isinstance(document, dict) or not document:
+        raise ValueError(f"MPC overlay must contain ROS parameters: {path}")
+    for selector, entry in document.items():
+        if selector not in selectors:
+            raise ValueError(f"MPC overlay selector {selector!r} does not target "
+                             f"/mpc_controller_node: {path}")
+        parameters = entry.get("ros__parameters") if isinstance(entry, dict) else None
+        if not isinstance(parameters, dict) or not parameters:
+            raise ValueError(f"MPC overlay has no parameters for {selector}: {path}")
+
+
 def map_record(root: Path, raw_path: str) -> dict:
     yaml_record = file_record(root, raw_path)
     yaml_path = Path(yaml_record["path"])
@@ -199,7 +221,10 @@ def build_manifest(args: argparse.Namespace, root: Path) -> dict:
         name, separator, value = item.partition("=")
         if not separator or not name or not value:
             raise ValueError("--config values must be NAME=PATH")
-        config_records.append({"name": name, **file_record(root, value)})
+        record = {"name": name, **file_record(root, value)}
+        if name == "overlay":
+            validate_mpc_overlay(Path(record["path"]))
+        config_records.append(record)
     if not config_records:
         raise ValueError("provide at least one loaded YAML/config with --config")
     build_dir = Path(args.build_dir)

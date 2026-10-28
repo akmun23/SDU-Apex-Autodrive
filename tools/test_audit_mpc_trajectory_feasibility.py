@@ -36,9 +36,20 @@ class TrajectoryAuditTests(unittest.TestCase):
         self.assertAlmostEqual(at_start["curvature"], at_end["curvature"])
 
     def test_heading_aware_footprint_grows_with_yaw_error(self):
-        self.assertGreater(audit.footprint_extent(0.2),
-                           audit.footprint_extent(0.0))
-        self.assertAlmostEqual(audit.footprint_extent(0.0), 0.1365)
+        left, right = audit.footprint_extents(0.2)
+        self.assertGreater(left, right)
+        self.assertEqual(audit.footprint_extents(-0.2), (right, left))
+        self.assertEqual(audit.footprint_extents(0.0), (0.1365, 0.1365))
+
+    def test_footprint_support_matches_all_four_rotated_corners(self):
+        for step in range(-180, 181):
+            angle = math.radians(step)
+            lateral = [x * math.sin(angle) + y * math.cos(angle)
+                       for x in (-audit.REAR_OVERHANG_M, audit.REAR_AXLE_TO_FRONT_M)
+                       for y in (-audit.VEHICLE_WIDTH_M / 2, audit.VEHICLE_WIDTH_M / 2)]
+            left, right = audit.footprint_extents(angle)
+            self.assertAlmostEqual(left, max(lateral), places=12)
+            self.assertAlmostEqual(right, -min(lateral), places=12)
 
     def test_geometry_reports_arc_bins_and_physical_clearance(self):
         summary, bins = audit.geometry_audit(

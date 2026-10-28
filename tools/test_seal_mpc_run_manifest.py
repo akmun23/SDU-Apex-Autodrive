@@ -11,11 +11,25 @@ from tools.seal_mpc_run_manifest import (
     image_provenance,
     map_record,
     parse_pose,
+    validate_mpc_overlay,
     workspace_manifest,
 )
 
 
 class RunManifestTest(unittest.TestCase):
+    def test_mpc_overlay_requires_actual_runtime_node_selector(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "overlay.yaml"
+            for selector in ("/**", "mpc_controller_node", "/mpc_controller_node"):
+                with self.subTest(selector=selector):
+                    path.write_text(f"{selector}:\n  ros__parameters:\n    weight_u: 50.0\n")
+                    validate_mpc_overlay(path)
+            for text in ("mpc_controller:\n  ros__parameters:\n    weight_u: 50.0\n",
+                         "mpc_controller_node:\n  ros__parameters: {}\n", "[]\n"):
+                with self.subTest(text=text), self.assertRaises(ValueError):
+                    path.write_text(text)
+                    validate_mpc_overlay(path)
+
     def test_parses_finite_numeric_initial_pose(self):
         self.assertEqual(parse_pose('{"x": 1, "y": -2.5, "yaw": 0.3}'),
                          {"x": 1.0, "y": -2.5, "yaw": 0.3})
