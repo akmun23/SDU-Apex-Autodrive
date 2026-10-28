@@ -652,9 +652,16 @@ system shutdown was present at launch. The PC remains user-controlled.
 Inspect progress:
 
 ```bash
+python3 tools/watch_ipopt.py optimized_practice_v347_all_day_20261028 --unit sdu-apex-ipopt-all-day-20261028.service
 tail -f optimized_practice_v347_all_day_20261028/console.log
 systemctl --user status sdu-apex-ipopt-all-day-20261028.service
 ```
+
+The read-only dashboard refreshes every two seconds, following the log
+incrementally and showing the current trust stage, iteration/objective,
+primal/dual residuals, actual service status and latest checkpoint on disk.
+Ctrl+C exits only the viewer. `--once` prints one snapshot; this was checked
+against the active run (stage 1/6, iteration 223, one saved checkpoint).
 
 Last night's recovered CSV and complete checkpoint remain available under
 v343 even if any subsequent stage fails or is interrupted. A faster objective
