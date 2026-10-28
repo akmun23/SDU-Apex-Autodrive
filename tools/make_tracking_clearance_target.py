@@ -108,15 +108,7 @@ def smooth_geometry(xy, smoothing_length, max_displacement):
 
 
 def corridor_widths(grid, xy, heading):
-    distances = np.arange(0., 3.01, max(.0125, .5 * grid.resolution))
-    normal = np.column_stack((-np.sin(heading), np.cos(heading)))
-    widths = []
-    for sign in (1, -1):
-        points = xy[:, None, :] + sign * distances[None, :, None] * normal[:, None, :]
-        occupied = grid.distance(points) < .55 * grid.resolution
-        first = np.argmax(occupied, axis=1)
-        widths.append(np.where(occupied.any(axis=1), distances[first], distances[-1]))
-    return np.column_stack(widths)
+    return grid.side_clearances(xy, heading)
 
 
 def target_speed_profile(speed, segments, scale=1.):

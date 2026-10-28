@@ -118,8 +118,8 @@ def make_componentwise_time_trust_region(source: str) -> str:
     arbitrarily large step. The box is centered on the *certified Phase-I
     trajectory*, not the original seed: Phase I may need to move a resampled
     seed substantially before time descent is allowed. Its radius is chosen
-    so an equal-magnitude displacement of every component has the former
-    aggregate L2 budget.
+    from a per-node normalized budget, so refining the spatial mesh does not
+    inadvertently freeze geometry. Old aggregate geometry is audit-only.
     """
     old = (
         "        opti.set_value(trust_region_bound, feasibility_reference * "
@@ -153,8 +153,8 @@ def make_componentwise_time_trust_region(source: str) -> str:
         "ca.DM(np.maximum(time_reference_phase_lengths, 1.0)),\n"
         "            ca.vec((normal_load - ca.DM(time_reference_load)) / 10.0),\n"
         "            ca.vec((accel_xy - ca.DM(time_reference_accel_xy)) / 10.0))\n"
-        "        time_trust_region_component_limit = ca.sqrt(\n"
-        "            trust_region_bound / int(time_trust_region_deviation.numel()))\n"
+        "        time_trust_region_component_limit = trust_component_radius(\n"
+        "            trust_region_bound, int(time_trust_region_deviation.numel()), n)\n"
         "        opti.subject_to(opti.bounded(-time_trust_region_component_limit, "
         "time_trust_region_deviation, time_trust_region_component_limit))\n"
         "        constraint_labels.extend(['captured_motion_trust_region'] * "
@@ -170,8 +170,8 @@ def make_componentwise_time_trust_region(source: str) -> str:
     old_report = "'feasibility_trust_region': feasibility_trust_region, 'ipopt_iteration_budgets':"
     new_report = (
         "'feasibility_trust_region': feasibility_trust_region, "
-        "'time_trust_region_geometry': 'normalized_component_box_with_"
-        "aggregate_l2_equivalent_radius', 'ipopt_iteration_budgets':")
+        "'time_trust_region_geometry': os.environ.get('SDU_IPOPT_TRUST_GEOMETRY', 'node-mean'), "
+        "'ipopt_iteration_budgets':")
     if source.count(old_report) != 1:
         raise RuntimeError(
             "Cannot annotate the minimum-time trust-region formulation")
@@ -284,14 +284,30 @@ def compact_source_force_evaluation(source: str) -> str:
                                for target in node.targets))
     solver.body.insert(scale_index+1, ast.parse(
         'scale_solver_coordinates(opti, x, state_scales, qdelta)').body[0])
+    # The same time solver is installed once and reused across trust stages.
+    # Only choose its barrier strategy; never relax physics or acceptance.
+    class BarrierOptions(ast.NodeTransformer):
+        count = 0
+
+        def visit_Assign(self, node):
+            if any(isinstance(target, ast.Name) and target.id == 'time_ipopt_options'
+                   for target in node.targets):
+                self.count += 1
+                return [node, ast.parse(
+                    'time_ipopt_options.update(time_barrier_options())').body[0]]
+            return self.generic_visit(node)
+
+    barrier = BarrierOptions()
+    barrier.visit(solver)
+    if barrier.count != 1:
+        raise RuntimeError('Expected one time-stage barrier options assignment')
     # Exporting thousands of scalar Opti.value calls repeatedly reconstructs
     # the large primal assignment/evaluation graph. Batch and cache the exact
     # same expressions; retain every output channel and independent audit.
     value_index = next(i for i, node in enumerate(solver.body)
                        if isinstance(node, ast.FunctionDef) and node.name == 'value')
     solver.body.insert(value_index+1, ast.parse(
-        "print('IPOPT exporting audited candidate: batched node evaluation', flush=True)\n"
-        "node_values = NodeValueCache(value)").body[0])
+        "print('IPOPT exporting audited candidate: batched node evaluation', flush=True)").body[0])
     solver.body.insert(value_index+2, ast.parse(
         'node_values = NodeValueCache(value)').body[0])
     replacements = {}
@@ -330,6 +346,15 @@ def compact_source_force_evaluation(source: str) -> str:
     batching.visit(solver)
     if batching.count != 20:
         raise RuntimeError(f'Expected 20 batched export sites, found {batching.count}')
+    # Preserve the exact collocation clock for independent command checks.
+    # Re-deriving it from a rounded mesh CSV can select the other side of a
+    # piecewise-linear coordinate knot and is not the same objective oracle.
+    candidate_index = next(i for i, node in enumerate(solver.body)
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+            and target.id == 'candidate' for target in node.targets))
+    solver.body[candidate_index+1:candidate_index+1] = ast.parse(
+        "candidate['node_time_density_s_per_m'] = node_values(time_density).reshape(-1)\n"
+        "candidate['spatial_steps_m'] = node_values(step_nodes).reshape(-1)").body
     # Keep __future__ imports first.
     index = next(i for i, node in enumerate(tree.body)
                  if not (isinstance(node, ast.ImportFrom)
@@ -338,7 +363,9 @@ def compact_source_force_evaluation(source: str) -> str:
         module='source_equation_kernels',
         names=[ast.alias(name='make_force_kernel'),
                ast.alias(name='NodeValueCache'),
-               ast.alias(name='scale_solver_coordinates')], level=0))
+               ast.alias(name='scale_solver_coordinates'),
+               ast.alias(name='trust_component_radius'),
+               ast.alias(name='time_barrier_options')], level=0))
     return ast.unparse(ast.fix_missing_locations(tree))+'\n'
 
 
@@ -348,7 +375,8 @@ def add_time_stage_progress(source: str) -> str:
     if source.count(import_anchor) != 1:
         raise RuntimeError('Cannot add time-stage progress import')
     source = source.replace(import_anchor, import_anchor +
-        'from ipopt_time_progress import TimeStageProgress, choose_sampled_incumbent, primal_assignments, prefer_terminal_restart\n', 1)
+        'from ipopt_time_progress import TimeStageProgress, choose_sampled_incumbent, primal_assignments, prefer_terminal_restart\n'
+        'from ipopt_nlp_audit import maybe_audit_checkpoint\n', 1)
     time_setup_anchor = "        print('IPOPT time-continuation solver setup (one-time)', flush=True)\n"
     callback_setup = '''        active_time_progress = [None]
         def time_progress_callback(iteration):
@@ -364,7 +392,11 @@ def add_time_stage_progress(source: str) -> str:
     solve_anchor = '''            try:
                 continuation_solution = opti.solve_limited()
 '''
-    setup = '''            checkpoint_initial = opti.initial()
+    setup = '''            maybe_audit_checkpoint(opti, constraint_labels,
+                lap_time=lap_time, factor=trust_factor,
+                time_density=ca.vertcat(*time_density),
+                spatial_steps=ca.vertcat(*step_nodes))
+            checkpoint_initial = opti.initial()
             checkpoint_parameters = np.asarray(opti.value(opti.p, checkpoint_initial))
             checkpoint_lower = np.asarray(opti.value(opti.lbg, checkpoint_initial))
             checkpoint_upper = np.asarray(opti.value(opti.ubg, checkpoint_initial))
@@ -383,6 +415,8 @@ def add_time_stage_progress(source: str) -> str:
                     'throttle_norm': np.asarray(sampled_q).reshape(-1),
                     'phase_lengths_m': np.asarray(sampled_lengths).reshape(-1),
                     'decision_x': flat,
+                    'trust_geometry': np.asarray(os.environ.get(
+                        'SDU_IPOPT_TRUST_GEOMETRY', 'node-mean')),
                     'constraint_duals': stage_values(None, {}, opti.lam_g).reshape(-1),
                     'predicted_lap_time_s': float(sampled_time),
                     'max_constraint_violation': diagnostic.get('max_constraint_violation', np.nan),
@@ -397,6 +431,13 @@ def add_time_stage_progress(source: str) -> str:
     if source.count(solve_anchor) != 1:
         raise RuntimeError('Cannot locate time-stage solve for progress capture')
     source = source.replace(solve_anchor, setup+solve_anchor, 1)
+    reuse_anchor = '    phase1_elastic_reports = []\n'
+    if source.count(reuse_anchor) != 1:
+        raise RuntimeError('Cannot guard no-solve audit Phase-I seed reuse')
+    source = source.replace(reuse_anchor,
+        "    if os.environ.get('SDU_IPOPT_AUDIT_CHECKPOINT') and not initial_is_feasible:\n"
+        "        raise ValueError('NLP audit requires an already source-feasible original seed; no solve allowed')\n"
+        + reuse_anchor, 1)
     stats_anchor = '            continuation_stats = opti.stats()\n'
     stats_with_failure_context = '''            try:
                 continuation_stats = opti.stats()

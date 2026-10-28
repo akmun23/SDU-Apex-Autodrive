@@ -111,6 +111,18 @@ class MapGrid:
         return float(np.min(self.distance(world)) -
                      _FOOTPRINT_UNSAMPLED_CORRECTION - margin)
 
+    def side_clearances(self, xy, heading, *, maximum_distance=3.0):
+        """Raw map distances along path normals, not car-adjusted bounds."""
+        distances = np.arange(0., maximum_distance+.01, max(.0125, .5*self.resolution))
+        normal = np.column_stack((-np.sin(heading), np.cos(heading)))
+        widths = []
+        for sign in (1, -1):
+            probes = xy[:, None, :] + sign*distances[None, :, None]*normal[:, None, :]
+            occupied = self.distance(probes) < .55*self.resolution
+            first = np.argmax(occupied, axis=1)
+            widths.append(np.where(occupied.any(axis=1), distances[first], distances[-1]))
+        return np.column_stack(widths)
+
 
 def _skeleton_cycle(free):
     mask = skeletonize(free)

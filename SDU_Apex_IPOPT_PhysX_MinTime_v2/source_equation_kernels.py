@@ -92,3 +92,32 @@ def scale_solver_coordinates(opti, states, state_scales, steering_rate):
     if mode == '1':
         opti.set_linear_scale(states, state_scales)
         opti.set_linear_scale(steering_rate, 3.2)
+
+
+def trust_component_radius(bound, coordinates, nodes):
+    """Mesh-independent per-node normalized displacement budget.
+
+    The old sum over every node shrank physical freedom as 1/sqrt(mesh size).
+    Divide by coordinates *per node* instead. Physics constraints and the
+    feasibility gate are unchanged. The old definition is available only to
+    reproduce/audit saved solves; select it explicitly, never silently.
+    """
+    if coordinates < 1 or nodes < 1:
+        raise ValueError('positive trust coordinate and node counts required')
+    geometry = os.environ.get('SDU_IPOPT_TRUST_GEOMETRY', 'node-mean')
+    if geometry not in ('node-mean', 'aggregate-checkpoint'):
+        raise ValueError('unknown SDU_IPOPT_TRUST_GEOMETRY')
+    denominator = coordinates/nodes if geometry == 'node-mean' else coordinates
+    return ca.sqrt(bound/denominator)
+
+
+def time_barrier_options():
+    """Avoid spending a feasible time solve centering at an oversized barrier.
+
+    Adaptive mu changes the numerical path, not constraints or tolerances.
+    The monotone path is retained for explicit controlled comparisons.
+    """
+    strategy = os.environ.get('SDU_IPOPT_BARRIER_STRATEGY', 'adaptive')
+    if strategy not in ('adaptive', 'monotone'):
+        raise ValueError('unknown SDU_IPOPT_BARRIER_STRATEGY')
+    return {'mu_strategy': strategy}

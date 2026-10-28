@@ -538,18 +538,10 @@ def _literal_plant_actuator(source: str) -> tuple[float | None, float | None]:
 def _current_steering_parameters(repo: Path, source: str) -> tuple[float, float, dict]:
     """Resolve source actuator constants without assuming particular C++ names.
 
-    The Unity-source plant's explicit steering update and the native runtime's
-    declarations are independent evidence. Reject disagreements, and clearly
-    label source parity as unverified if one side is missing a definition.
+    Read the production plant and its owned headers. Reject unresolved aliases
+    and conflicting implemented updates; never resurrect a retired runtime to
+    supply missing constants. current_model cross-checks Unity's active prefab.
     """
-    # The localization runtime used to define an independent copy of these
-    # actuator constants.  That implementation has since been retired; the
-    # optimizer must not depend on resurrecting it.  Keep the cross-check when
-    # the file exists in older worktrees, but make the active source plant the
-    # authoritative input in the current workspace.
-    native_path = Path(repo) / 'f1tenth_localization/src/physx_odom_runtime.cpp'
-    native_exists = native_path.is_file()
-    native = native_path.read_text(encoding='utf-8') if native_exists else ''
     plant_path = Path(repo) / 'f1tenth_mpc/src/unity_source_plant.cpp'
 
     def includes(raw: str, path: Path, root: Path) -> str:
@@ -566,62 +558,32 @@ def _current_steering_parameters(repo: Path, source: str) -> tuple[float, float,
         return text
 
     plant_text = includes(source, plant_path, Path(repo) / 'f1tenth_mpc/include')
-    native_text = (includes(native, native_path,
-                            Path(repo) / 'f1tenth_localization/include')
-                   if native_exists else '')
     plant_limit_update, plant_rate_update = _literal_plant_actuator(source)
 
-    def optional_cpp(raw: str, name: str) -> float | None:
-        try:
-            return _cpp_number(raw, name)
-        except UnresolvedCppSymbol:
-            return None
-
-    native_limit_deg = optional_cpp(native_text, 'kSteeringLimitDeg')
-    native_rate_deg = optional_cpp(native_text, 'kSteeringRateDegPerS')
-    native_limit = math.radians(native_limit_deg) if native_limit_deg is not None else None
-    native_rate = math.radians(native_rate_deg) if native_rate_deg is not None else None
-
     evidence = {
-        'limit': ('kMaxSteeringRad', 'UNITY_SOURCE_MAX_STEERING_RAD',
-                  native_limit, plant_limit_update, 1e-5),
-        'rate': ('kSteeringRateRadps', 'UNITY_SOURCE_STEERING_RATE_RADPS',
-                 native_rate, plant_rate_update, 1e-4),
+        'limit': ('kMaxSteeringRad', plant_limit_update, 1e-5),
+        'rate': ('kSteeringRateRadps', plant_rate_update, 1e-4),
     }
     values: dict[str, float] = {}
-    provenance = {'native_actuator_file': (str(native_path.relative_to(repo))
-                                            if native_exists else None),
-                  'native_actuator_crosscheck_available': native_exists,
-                  'native_limit_rad': native_limit,
-                  'native_rate_radps': native_rate,
-                  'plant_update_limit_rad': plant_limit_update,
+    provenance = {'plant_update_limit_rad': plant_limit_update,
                   'plant_update_rate_radps': plant_rate_update}
-    for label, (name, known_alias, native_value, update_value, atol) in evidence.items():
+    for label, (name, update_value, atol) in evidence.items():
         try:
             plant_value = _cpp_number(plant_text, name)
-            declared = True
         except UnresolvedCppSymbol as exc:
             rhs = re.findall(r'\b' + re.escape(name) + r'\s*=\s*([^;]+);', source)
-            # Exactly the known symbolic alias may come from a build-system -D
-            # definition. Unknown symbols must still be rejected.
-            if len(rhs) == 1 and rhs[0].strip() == known_alias:
-                declared = False
-                plant_value = None
-                provenance[label + '_alias_unverified'] = known_alias
-            elif not rhs:
-                declared = False
+            if not rhs and update_value is not None:
                 plant_value = None
             else:
                 raise RuntimeError(f'Cannot resolve {name}: {exc}') from exc
         sources = [(kind, v) for kind, v in (
             ('unity_source_plant.cpp definition', plant_value),
-            ('unity_source_plant.cpp actuator update', update_value),
-            ('physx_odom_runtime.cpp actuator declaration', native_value))
+            ('unity_source_plant.cpp actuator update', update_value))
             if v is not None]
         if not sources:
             raise RuntimeError(
                 f'Cannot verify {name}: no numerical definition in source plant, '
-                'native runtime, or recognized steering-update equations')
+                'or recognized steering-update equations')
         # Reject mismatch rather than silently selecting an arbitrary value.
         # The active plant's declared constants take precedence where known;
         # otherwise the plant's implemented update is the best numeric source.
@@ -635,21 +597,6 @@ def _current_steering_parameters(repo: Path, source: str) -> tuple[float, float,
             raise RuntimeError(f'{name} must be positive and finite')
         values[label] = chosen_value
         provenance[label + '_source'] = chosen_source
-        if native_value is None:
-            provenance[label + '_native_unverified'] = True
-            import warnings
-            warnings.warn(
-                f'{name}: native runtime does not expose a resolvable '
-                f"{'kSteeringLimitDeg' if label == 'limit' else 'kSteeringRateDegPerS'}; "
-                'verified against the C++ plant/update source here; '
-                'current_model separately cross-checks the active practice prefab.',
-                RuntimeWarning, stacklevel=2)
-        if label + '_alias_unverified' in provenance:
-            import warnings
-            warnings.warn(
-                f'{name} uses unresolved C++ alias {known_alias}; using '
-                f'{chosen_source}, but cannot verify plant alias parity or compiler -D values.',
-                RuntimeWarning, stacklevel=2)
     return values['limit'], values['rate'], provenance
 
 

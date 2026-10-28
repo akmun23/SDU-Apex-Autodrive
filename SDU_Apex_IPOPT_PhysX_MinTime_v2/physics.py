@@ -124,18 +124,22 @@ class SourcePlant:
         self.state=State(float(x),float(y),float(yaw),float(speed),0.,0.,0.,[0.]*4,[0.]*4,[0.]*4)
         return self.state
 
-    def step(self,steer,throttle):
+    def step(self,steer,throttle,*,duration_s=.025):
         inp=self.input;out=self.output
         inp.steering_target_rad=max(-STEER_MAX,min(STEER_MAX,float(steer)))
         inp.throttle_normalized=max(0.,min(1.,float(throttle)))
-        if not self.lib.unity_source_plant_step_c(C.byref(inp),C.c_double(.025),C.byref(out)):
+        if not self.lib.unity_source_plant_step_c(C.byref(inp),C.c_double(duration_s),C.byref(out)):
             raise RuntimeError('production source plant rejected vehicle transition')
         old=self.state
-        u=.5*(old.u+out.state[0]);v=.5*(old.v+out.state[1]);r=.5*(old.r+out.state[2])
-        yaw_mid=old.yaw+.0125*r
-        xx=old.x+.025*(u*math.cos(yaw_mid)-v*math.sin(yaw_mid))
-        yy=old.y+.025*(u*math.sin(yaw_mid)+v*math.cos(yaw_mid))
-        self.state=State(xx,yy,old.yaw+.025*r,out.state[0],out.state[1],out.state[2],
+        # The production plant already integrates rear-axle pose at every
+        # source substep. Re-integrating endpoint COM velocities here both
+        # discards that accuracy and uses the wrong lateral velocity origin.
+        dx=out.integrated_body_forward_displacement_m
+        dy=out.integrated_body_lateral_displacement_m
+        c,s=math.cos(old.yaw),math.sin(old.yaw)
+        xx=old.x+c*dx-s*dy
+        yy=old.y+s*dx+c*dy
+        self.state=State(xx,yy,old.yaw+out.integrated_yaw_delta_rad,out.state[0],out.state[1],out.state[2],
                          out.state[13],list(out.longitudinal_slip),list(out.lateral_slip),
                          list(out.normal_load_n))
         inp.state[:]=out.state[:]

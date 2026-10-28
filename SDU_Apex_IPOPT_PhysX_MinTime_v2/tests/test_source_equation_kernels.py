@@ -12,7 +12,31 @@ sys.path.insert(0, str(PACKAGE))
 from recover import load_modules
 from source_vehicle import current_model, bind_current_wheel_moment_arms
 from source_equation_kernels import (
-    make_force_kernel, NodeValueCache, scale_solver_coordinates)
+    make_force_kernel, NodeValueCache, scale_solver_coordinates, trust_component_radius,
+    time_barrier_options)
+
+
+def test_barrier_strategy_is_explicit_and_does_not_relax_tolerances(monkeypatch):
+    monkeypatch.delenv('SDU_IPOPT_BARRIER_STRATEGY', raising=False)
+    assert time_barrier_options() == {'mu_strategy': 'adaptive'}
+    monkeypatch.setenv('SDU_IPOPT_BARRIER_STRATEGY', 'monotone')
+    assert time_barrier_options() == {'mu_strategy': 'monotone'}
+    monkeypatch.setenv('SDU_IPOPT_BARRIER_STRATEGY', 'typo')
+    with pytest.raises(ValueError, match='unknown'):
+        time_barrier_options()
+
+
+def test_trust_radius_preserves_geometry_when_mesh_is_refined(monkeypatch):
+    monkeypatch.delenv('SDU_IPOPT_TRUST_GEOMETRY', raising=False)
+    coarse = float(trust_component_radius(4., 18*100, 100))
+    fine = float(trust_component_radius(4., 18*474, 474))
+    assert coarse == pytest.approx(fine)
+    assert coarse*.25 == pytest.approx(.11785113019775792)
+    monkeypatch.setenv('SDU_IPOPT_TRUST_GEOMETRY', 'aggregate-checkpoint')
+    assert float(trust_component_radius(4., 18*474, 474)) == pytest.approx(.02165232674872103)
+    monkeypatch.setenv('SDU_IPOPT_TRUST_GEOMETRY', 'typo')
+    with pytest.raises(ValueError, match='unknown'):
+        trust_component_radius(4., 1800, 100)
 
 
 @pytest.fixture(scope='module')

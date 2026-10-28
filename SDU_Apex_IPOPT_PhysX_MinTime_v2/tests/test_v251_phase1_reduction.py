@@ -64,10 +64,10 @@ def test_source_equality_time_continuation_uses_componentwise_trust_bounds():
     assert 'time_trust_region_deviation = ca.vertcat(' in transformed
     assert 'x - ca.DM(time_reference_x)' in transformed
     assert 'x - ca.DM(seed_x_values)' not in transformed
-    assert 'time_trust_region_component_limit = ca.sqrt(' in transformed
+    assert 'time_trust_region_component_limit = trust_component_radius(' in transformed
     assert "constraint_labels.extend(['captured_motion_trust_region'] * " in transformed
     assert 'opti.subject_to(feasibility_objective <= trust_region_bound)' not in transformed
-    assert "'time_trust_region_geometry': 'normalized_component_box_" in transformed
+    assert "'time_trust_region_geometry': os.environ.get('SDU_IPOPT_TRUST_GEOMETRY', 'node-mean')" in transformed
 
 
 def test_ipopt_cpu_time_caps_are_optional_and_keep_iteration_limits():
@@ -537,4 +537,3 @@ def test_feasible_checkpoint_saved_before_time_solver_setup(tmp_path, monkeypatc
     # Derived loads/accelerations are not independent trust-box coordinates.
     assert 'time_reference_load' not in source
     assert 'time_reference_accel_xy' not in source
-

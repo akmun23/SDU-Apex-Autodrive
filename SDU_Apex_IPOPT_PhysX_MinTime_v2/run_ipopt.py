@@ -721,6 +721,8 @@ def run():
     ap.add_argument('--map',type=Path,default=None,help='PGM with matching ROS .yaml; default Porto practice map')
     ap.add_argument('--centerline',type=Path,default=None,help='CSV reference only; optimizer changes geometry')
     ap.add_argument('--output',type=Path,default=Path('optimized_practice_ipopt'))
+    ap.add_argument('--audit-time-checkpoint', type=Path,
+                    help='Rebuild a matching feasible seed NLP and audit saved primal/duals; no time solve')
     ap.add_argument('--physx-binary',type=Path,default=None)
     ap.add_argument('--mesh-spacing',type=float,default=.06,help='spatial OCP knot spacing (m); source feasibility is checked at knots and interval midpoints, so max sample gap is half this value')
     ap.add_argument('--max-speed',type=float,default=16.,help='current MPC command envelope, not real-car limit')
@@ -941,6 +943,14 @@ def run():
           f'throttle [{min_drive_throttle:.3f}, 1.000]; '
           f'steering ±{model.steering_limit_rad:.4f} rad',flush=True)
     args.output.mkdir(parents=True,exist_ok=True)
+    # A normal CLI solve must retain useful feasible intermediate iterates,
+    # not only a possibly infeasible max-iteration terminal point. Callers can
+    # still choose another durable root explicitly (unattended launcher).
+    if not args.diagnose_initial_only and args.audit_time_checkpoint is None:
+        os.environ.setdefault('SDU_IPOPT_STAGE_CAPTURE_DIR',
+                              str((args.output/'time_stage_iterates').resolve()))
+        os.environ.setdefault('SDU_IPOPT_TIME_CHECKPOINT_STRIDE',
+                              '5' if args.iterations <= 100 else '25')
     reference_track_mesh_path = args.output/'optimizer_reference_track_mesh.csv'
     track_mod.export_track_csv(track, reference_track_mesh_path)
     run_info={
@@ -963,6 +973,9 @@ def run():
         'wall_clearance_source': ('command_line_override' if wall_margin_overridden
                                   else 'f1tenth_mpc/config/mpc_competition.yaml'),
         'time_optimization': {
+            'variable_scaling': os.environ.get('SDU_IPOPT_VARIABLE_SCALING', '0') == '1',
+            'barrier_strategy': os.environ.get('SDU_IPOPT_BARRIER_STRATEGY', 'adaptive'),
+            'trust_geometry': os.environ.get('SDU_IPOPT_TRUST_GEOMETRY', 'node-mean'),
             'hessian_approximation': args.time_hessian_approximation,
             'trust_region_factors': (None if args.time_trust_region_factors is None
                                      else list(args.time_trust_region_factors)),
@@ -1387,11 +1400,40 @@ def run():
                 args.time_max_cpu_seconds)
         else:
             os.environ.pop('SDU_IPOPT_TIME_MAX_CPU_SECONDS', None)
-        candidate,report,phase1_progress=run_phase1_or_diagnose(
-            old,track,model,kwargs,output=args.output,phase=phase,
-            max_restarts=args.phase1_restarts,
-            minimum_improvement=args.phase1_min_defect_improvement,
-            diagnose_initial_only=args.diagnose_initial_only)
+        if args.audit_time_checkpoint is not None:
+            if not args.skip_native or args.optimizer_seed_file is None:
+                ap.error('NLP audit requires --skip-native and the original --optimizer-seed-file')
+            with np.load(args.audit_time_checkpoint, allow_pickle=False) as audit_archive:
+                audit_factor = float(audit_archive['trust_factor'])
+                audit_geometry = (str(audit_archive['trust_geometry'].item())
+                    if 'trust_geometry' in audit_archive else 'aggregate-checkpoint')
+            kwargs['time_trust_region_factors'] = (audit_factor, audit_factor*2.)
+            # Existing captures used the aggregate (mesh-dependent) box.
+            # Reconstruct that graph exactly instead of auditing new bounds.
+            audit_prior_trust_geometry = os.environ.get('SDU_IPOPT_TRUST_GEOMETRY')
+            os.environ['SDU_IPOPT_TRUST_GEOMETRY'] = audit_geometry
+            os.environ['SDU_IPOPT_AUDIT_CHECKPOINT'] = str(args.audit_time_checkpoint.resolve())
+            os.environ['SDU_IPOPT_AUDIT_OUTPUT'] = str((args.output/'nlp_audit.json').resolve())
+        from ipopt_nlp_audit import NlpAuditComplete
+        try:
+            candidate,report,phase1_progress=run_phase1_or_diagnose(
+                old,track,model,kwargs,output=args.output,phase=phase,
+                max_restarts=args.phase1_restarts,
+                minimum_improvement=args.phase1_min_defect_improvement,
+                diagnose_initial_only=args.diagnose_initial_only)
+        except NlpAuditComplete:
+            (args.output/'report.json').write_text(json.dumps({
+                'status': 'checkpoint_audit_only', 'ipopt_time_solve_invoked': False,
+                'unity_validated': False, 'trajectory_promoted': False}, indent=2)+'\n')
+            return 0
+        finally:
+            if args.audit_time_checkpoint is not None:
+                os.environ.pop('SDU_IPOPT_AUDIT_CHECKPOINT', None)
+                os.environ.pop('SDU_IPOPT_AUDIT_OUTPUT', None)
+                if audit_prior_trust_geometry is None:
+                    os.environ.pop('SDU_IPOPT_TRUST_GEOMETRY', None)
+                else:
+                    os.environ['SDU_IPOPT_TRUST_GEOMETRY'] = audit_prior_trust_geometry
         report['initial_guess_source'] = initial_guess_source
         report['reference_speed_seed'] = run_info['reference_speed_seed']
         report['requested_seed_backend'] = args.seed_backend
@@ -1468,6 +1510,10 @@ def run():
             'source_feasibility_required':True,
         }
         midpoint_witness_path=candidate_dir/'unity_wheel_feasibility_witness_midpoints.csv'
+        from command_realizability import validate_exported_candidate
+        command_report = validate_exported_candidate(
+            candidate, track, args.repo_root, candidate_dir/'command_realizability.json')
+        report['source_command_realizability'] = command_report
         write_midpoint_witness(candidate,midpoint_witness_path)
         report['feasibility_witness_midpoints']={
             'path':str(midpoint_witness_path),

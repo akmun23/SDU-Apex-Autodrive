@@ -34,7 +34,12 @@ def test_historical_git_archive_restoration(tmp_path,monkeypatch):
 def test_time_integral_uses_actual_spatial_speed():
     n=100
     s=np.linspace(0,20,n,endpoint=False)
-    track=SimpleNamespace(s=s,length=20.,kappa=np.zeros(n))
+    angle=np.arange(n)*2*np.pi/n
+    radius=20./(2*n*np.sin(np.pi/n))
+    x,y=radius*np.cos(angle),radius*np.sin(angle)
+    heading=np.arctan2(np.roll(y,-1)-y,np.roll(x,-1)-x)
+    track=SimpleNamespace(s=s,length=20.,count=n,kappa=np.zeros(n),
+                          x=x,y=y,psi=heading)
     candidate=dict(s_ref_m=s,speed_mps=np.full(n,5.),
                    lateral_speed_mps=np.zeros(n),epsi_rad=np.zeros(n),
                    ey_m=np.zeros(n))
