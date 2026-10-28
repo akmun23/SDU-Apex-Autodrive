@@ -18,6 +18,8 @@ import sys
 
 import numpy as np
 from scipy.optimize import minimize
+from scipy.sparse import diags, lil_matrix
+from scipy.sparse.linalg import spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -66,6 +68,45 @@ def path_geometry(xy):
     return segments, heading, curvature
 
 
+def smooth_geometry(xy, smoothing_length, max_displacement):
+    """Periodic, arc-weighted geometry regularization, not vehicle fitting.
+
+    Minimize integral |p-p0|^2 + length^4 |d2p/ds2|^2 on the original
+    nonuniform arc grid. The sparse SPD system is solved for both coordinates
+    together. Never clip individual points: that would recreate curvature
+    spikes. A downstream swept-footprint check remains mandatory.
+    """
+    xy = np.asarray(xy, dtype=float)
+    if (xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 3 or
+            not np.isfinite(xy).all() or not math.isfinite(smoothing_length) or
+            smoothing_length < 0 or not math.isfinite(max_displacement) or
+            max_displacement <= 0):
+        raise ValueError("invalid geometry smoothing inputs")
+    segments, _, _ = path_geometry(xy)
+    if smoothing_length == 0:
+        return xy.copy()
+    previous = np.roll(segments, 1)
+    weights = .5 * (previous + segments)
+    second = lil_matrix((len(xy), len(xy)))
+    for i in range(len(xy)):
+        factor = 1. / weights[i]
+        second[i, (i - 1) % len(xy)] = factor / previous[i]
+        second[i, i] = -factor * (1. / previous[i] + 1. / segments[i])
+        second[i, (i + 1) % len(xy)] = factor / segments[i]
+    second = second.tocsc()
+    weight = diags(weights).tocsc()
+    system = weight + smoothing_length**4 * (second.T @ weight @ second)
+    # Center before solving so large map origins do not amplify cancellation.
+    origin = np.average(xy, axis=0, weights=weights)
+    result = spsolve(system, weight @ (xy - origin)) + origin
+    if not np.isfinite(result).all():
+        raise ValueError("geometry smoothing produced nonfinite coordinates")
+    displacement = np.linalg.norm(result - xy, axis=1)
+    if float(np.max(displacement)) > max_displacement:
+        raise ValueError("geometry smoothing exceeds displacement bound")
+    return result
+
+
 def corridor_widths(grid, xy, heading):
     distances = np.arange(0., 3.01, max(.0125, .5 * grid.resolution))
     normal = np.column_stack((-np.sin(heading), np.cos(heading)))
@@ -87,11 +128,16 @@ def main():
     parser.add_argument("--wall-margin", type=float, default=.05)
     parser.add_argument("--smoothing-length", type=float, default=.6)
     parser.add_argument("--max-offset", type=float, default=.10)
+    parser.add_argument("--geometry-smoothing-length", type=float, default=0.,
+        help="optional periodic XY regularization length in metres; zero preserves input")
+    parser.add_argument("--max-geometry-displacement", type=float, default=.02)
     args = parser.parse_args()
     if (not all(math.isfinite(v) for v in (args.tracking_reserve,
-            args.wall_margin, args.smoothing_length, args.max_offset)) or
+            args.wall_margin, args.smoothing_length, args.max_offset,
+            args.geometry_smoothing_length, args.max_geometry_displacement)) or
             args.tracking_reserve < 0 or args.wall_margin < 0 or
-            args.smoothing_length <= 0 or args.max_offset <= 0):
+            args.smoothing_length <= 0 or args.max_offset <= 0 or
+            args.geometry_smoothing_length < 0 or args.max_geometry_displacement <= 0):
         parser.error("finite nonnegative margins and positive smoothing/trust bounds required")
     if args.output.exists() or args.output.with_suffix('.json').exists():
         parser.error("refusing to overwrite an existing target/report")
@@ -110,7 +156,11 @@ def main():
     # margin. Footprint dimensions come from the production controller header.
     required = .5 * WIDTH_M + args.wall_margin + args.tracking_reserve
     original = values[:, 1:3].copy()
-    xy = original.copy()
+    xy = smooth_geometry(original, args.geometry_smoothing_length,
+                         args.max_geometry_displacement)
+    geometry_displacement = float(np.max(np.linalg.norm(xy - original, axis=1)))
+    if geometry_displacement > args.max_offset + 1.e-8:
+        raise ValueError("geometry smoothing exceeds input-path trust bound")
     for passes in range(1, 9):
         segments, heading, curvature = path_geometry(xy)
         widths = corridor_widths(grid, xy, heading)
@@ -153,6 +203,8 @@ def main():
         minimum_center_to_wall_m=float(np.min(widths)), required_center_to_wall_m=required,
         swept_footprint_clearance_beyond_margin_m=minimum_clearance,
         maximum_displacement_m=float(np.max(np.linalg.norm(xy-original, axis=1))),
+        geometry_smoothing_length_m=args.geometry_smoothing_length,
+        geometry_smoothing_displacement_m=geometry_displacement,
         speed_samples_unchanged=True, source_OCP_feasibility_transfers=False,
         simulator_validated=False,
         speed_profile_integral_s=float(np.sum(2 * segments / (u + np.roll(u, -1)))))

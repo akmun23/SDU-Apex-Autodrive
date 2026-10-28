@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from tools.make_tracking_clearance_target import smooth_offsets, path_geometry
+from tools.make_tracking_clearance_target import smooth_offsets, path_geometry, smooth_geometry
 
 
 class TrackingClearanceTargetTests(unittest.TestCase):
@@ -29,6 +29,43 @@ class TrackingClearanceTargetTests(unittest.TestCase):
         np.testing.assert_allclose(curvature, .5, atol=1.e-12)
         self.assertTrue(np.all(segments > 0))
         np.testing.assert_allclose(np.diff(heading), 2*np.pi/100, atol=1.e-12)
+
+    def test_geometry_regularization_matches_periodic_circle_eigenvalue(self):
+        angle = np.linspace(0., 2*np.pi, 80, endpoint=False)
+        xy = 2*np.column_stack((np.cos(angle), np.sin(angle)))
+        h = np.linalg.norm(xy[1] - xy[0])
+        eigenvalue = (2 - 2*np.cos(2*np.pi/len(xy))) / h**2
+        scale = 1 / (1 + .1**4 * eigenvalue**2)
+        actual = smooth_geometry(xy, .1, .02)
+        np.testing.assert_allclose(actual, scale*xy, atol=2.e-12)
+        np.testing.assert_array_equal(smooth_geometry(xy, 0., .02), xy)
+
+    def test_geometry_smoothing_is_rigid_transform_and_seam_invariant(self):
+        angle = np.linspace(0., 2*np.pi, 71, endpoint=False)**1.05
+        angle *= (2*np.pi - .06)/angle[-1]
+        xy = np.column_stack((2*np.cos(angle), np.sin(angle)))
+        actual = smooth_geometry(xy, .08, .05)
+        rotation = np.array([[.6, -.8], [.8, .6]])
+        shifted = xy @ rotation.T + [100., -40.]
+        np.testing.assert_allclose(smooth_geometry(shifted, .08, .05),
+            actual @ rotation.T + [100., -40.], atol=2.e-12)
+        np.testing.assert_allclose(smooth_geometry(np.roll(xy, 17, axis=0), .08, .05),
+            np.roll(actual, 17, axis=0), atol=2.e-12)
+
+    def test_geometry_smoothing_reduces_small_alternating_curvature_noise(self):
+        angle = np.linspace(0., 2*np.pi, 160, endpoint=False)
+        radius = 2 + .001*(-1.)**np.arange(len(angle))
+        xy = radius[:, None]*np.column_stack((np.cos(angle), np.sin(angle)))
+        actual = smooth_geometry(xy, .1, .02)
+        before = path_geometry(xy)[2]
+        after = path_geometry(actual)[2]
+        self.assertLess(np.std(after), .1*np.std(before))
+        self.assertLess(np.max(np.linalg.norm(actual-xy, axis=1)), .002)
+        with self.assertRaisesRegex(ValueError, 'displacement'):
+            smooth_geometry(xy, .1, .0001)
+        for bad in [-.1, float('nan'), float('inf')]:
+            with self.assertRaises(ValueError):
+                smooth_geometry(xy, bad, .02)
 
 
 if __name__ == '__main__':
