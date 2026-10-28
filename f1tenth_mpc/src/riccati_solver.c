@@ -912,7 +912,7 @@ static RiccatiStatus_t riccati_admm_solve_core(
     float (*y_x)[RICCATI_MAX_NX] = admm_state->y_x;
     float (*y_u)[RICCATI_MAX_NU] = admm_state->y_u;
 
-    if (admm_state->initialized) {
+    if (admm_state->initialized && !(config && config->reuse_same_epoch)) {
         riccati_admm_shift_warm_start(admm_state, x0);
     }
 
@@ -1517,7 +1517,8 @@ static RiccatiStatus_t riccati_admm_solve_impl(
                 }
 
     const int use_scaling = config ? config->use_scaling : 0;
-    if (use_scaling != 0 && use_scaling != 1) {
+    if ((use_scaling != 0 && use_scaling != 1) ||
+        (config && config->reuse_same_epoch != 0 && config->reuse_same_epoch != 1)) {
         solution->status = RICCATI_STATUS_ERROR;
         return RICCATI_STATUS_ERROR;
     }

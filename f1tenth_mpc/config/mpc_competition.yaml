@@ -42,11 +42,11 @@
     startup_path_max_distance_m: 0.80
     startup_path_heading_tolerance_rad: 0.75
 
-    # Oct 27: loaded-frame geometry + monotone SQP + true suffix warm starts.
-    # v337 target, along-scan gain 0.03 and peak-slip objective: ten scored
-    # laps averaged 5.3639 s (SD 0.0294), no collision; max publication 18.36 ms.
-    # Two retained certified prefixes were used. Full provenance:
-    # docs/development/MPC_HIGH_SPEED_TRACKING_20261027.md.
+    # Loaded-frame geometry, exact nonlinear line search and peak-slip cost.
+    # Oct 28 v343 tracking-reserve target: ten scored laps in 52.239 s,
+    # no collision, maximum publication 19.395 ms. No along-scan likelihood
+    # correction or optional progress reward remains in production.
+    # Evidence: docs/development/RUNTIME_CLEANUP_AND_RACING_20261028.md.
     weight_e_y: 4000.0
     weight_e_psi: 1500.0
     weight_u: 35.0
@@ -138,8 +138,7 @@
     # losing corridor validity on the next cycle.
     quality_prefix_iteration_limited_relative_gain: 0.02
     rti_cycle_budget_ms: 20.0
-    # Eight workers improved replay and passed one supervised, 3 m/s practice
-    # run (publication-gate max 19.730 ms). Continue supervising until higher-
-    # speed runs confirm CPU contention and deadline-tail margin.
+    # Eight persistent workers were exercised by full-speed ten-lap repeats.
+    # One earlier repeat deferred a 20.656 ms cycle; no WCET guarantee claimed.
     # Zero disables OpenMP parallelism.
     jacobian_threads: 8

@@ -12,8 +12,8 @@
 
 namespace sdu_apex::qp_fixture {
 
-constexpr std::uint32_t kSchemaVersion = 2;
-constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '2', '\n'};
+constexpr std::uint32_t kSchemaVersion = 3;
+constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '3', '\n'};
 
 class Writer {
  public:
@@ -180,6 +180,7 @@ inline bool write_capture(const std::string &path,
       !writer.i32(config.max_iterations) ||
       !writer.i32(config.adaptive_rho) ||
       !writer.i32(config.cold_start_each_solve) ||
+      !writer.i32(config.reuse_same_epoch) ||
       !writer.i32(config.adaptive_rho_update_period) ||
       !writer.i32(config.shared_rho) || !writer.f32(config.over_relaxation) ||
       !writer.f64(config.max_solve_time_us) ||
@@ -332,6 +333,7 @@ inline bool read_capture(const std::string &path,
       !reader.i32(&config.max_iterations) ||
       !reader.i32(&config.adaptive_rho) ||
       !reader.i32(&config.cold_start_each_solve) ||
+      !reader.i32(&config.reuse_same_epoch) ||
       !reader.i32(&config.adaptive_rho_update_period) ||
       !reader.i32(&config.shared_rho) ||
       !reader.f32(&config.over_relaxation) ||
@@ -476,6 +478,7 @@ inline bool read_capture(const std::string &path,
       config.max_iterations < 1 || config.max_iterations > 200 ||
       config.adaptive_rho < 0 || config.adaptive_rho > 1 ||
       config.cold_start_each_solve < 0 || config.cold_start_each_solve > 1 ||
+      config.reuse_same_epoch < 0 || config.reuse_same_epoch > 1 ||
       config.shared_rho < 0 || config.shared_rho > 1 ||
       config.adaptive_rho_update_period < 1 ||
       config.over_relaxation < 1.0f || config.over_relaxation > 2.0f ||

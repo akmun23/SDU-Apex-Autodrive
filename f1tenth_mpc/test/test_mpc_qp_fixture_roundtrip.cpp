@@ -25,6 +25,7 @@ TEST(MpcQpFixture, RoundTripsActualProductionDimensions)
   config.rho_max = 32.0f;
   config.tolerance = 0.02f;
   config.max_iterations = 150;
+  config.reuse_same_epoch = 1;
   config.adaptive_rho_update_period = 10;
   config.over_relaxation = 1.6f;
   std::fill_n(config.state_scale, RICCATI_MAX_NX, 1.0f);
@@ -33,6 +34,7 @@ TEST(MpcQpFixture, RoundTripsActualProductionDimensions)
   MpcRtiQpCapture_t decoded{};
   ASSERT_TRUE(sdu_apex::qp_fixture::read_capture(path, &decoded));
   EXPECT_EQ(decoded.problem.horizon, RICCATI_HORIZON);
+  EXPECT_EQ(decoded.solver_config.reuse_same_epoch, 1);
   EXPECT_FLOAT_EQ(decoded.problem.terminal_q[MPC_OPT_IDX_PROGRESS_DEVIATION],
       -125.0f);
   EXPECT_FLOAT_EQ(decoded.problem.x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND],

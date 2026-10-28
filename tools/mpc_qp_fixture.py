@@ -17,8 +17,8 @@ import subprocess
 import sys
 import time
 
-MAGIC = b"SDUFQP2\n"
-SCHEMA_VERSION = 2
+MAGIC = b"SDUFQP3\n"
+SCHEMA_VERSION = 3
 NX = 23
 NU = 2
 HORIZON = 30
@@ -121,6 +121,7 @@ def parse_payload(data: bytes) -> dict:
     max_iterations = cursor.signed()
     adaptive_rho = cursor.signed()
     cold_start = cursor.signed()
+    reuse_same_epoch = cursor.signed()
     adaptive_update_period = cursor.signed()
     shared_rho = cursor.signed()
     over_relaxation = cursor.f32_array(1)[0]
@@ -178,6 +179,7 @@ def parse_payload(data: bytes) -> dict:
     if (rho <= 0 or rho_u <= 0 or rho_max < 1 or rho_max > 127 or
             solver_tolerance <= 0 or max_iterations < 1 or max_iterations > 200 or
             adaptive_rho not in (0, 1) or cold_start not in (0, 1) or
+            reuse_same_epoch not in (0, 1) or
             shared_rho not in (0, 1) or adaptive_update_period < 1 or
             not 1 <= over_relaxation <= 2 or use_scaling not in (0, 1) or
             any(value < 0 or value > 127 or 0 < value < 1
@@ -198,6 +200,7 @@ def parse_payload(data: bytes) -> dict:
         "nu": nu,
         "qp_horizon": horizon,
         "capture_passes": passes,
+        "reuse_same_epoch": reuse_same_epoch,
         "raw_status": raw_status,
         "raw_solution_status": solution_status,
         "raw_iterations": iterations,

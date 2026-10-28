@@ -43,7 +43,7 @@ def make_valid_payload():
     floats(nx)  # default per-state penalties
     floats(nu)  # default per-input penalties
     floats(2, 1.0)  # rho_max, solver tolerance
-    ints(5, 1)  # max iter, adaptive, cold, update period, shared rho
+    ints(6, 1)  # max iter, adaptive, cold, same epoch, update period, shared rho
     floats(1, 1.5)  # over-relaxation
     data.extend(struct.pack("<d", 0.0))
     ints(1)  # scaling enabled
@@ -97,6 +97,7 @@ class FrozenQpFixtureTest(unittest.TestCase):
         self.assertEqual(summary["nu"], 2)
         self.assertEqual(summary["qp_horizon"], 30)
         self.assertEqual(summary["capture_passes"], 1)
+        self.assertEqual(summary["reuse_same_epoch"], 1)
         self.assertGreater(summary["float_count"], 20_000)
 
     def test_rejects_bad_magic_and_dimensions(self):

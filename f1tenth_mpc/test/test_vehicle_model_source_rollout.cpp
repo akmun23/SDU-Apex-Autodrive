@@ -46,6 +46,42 @@ TEST(MpcRtiRefinementQuality, SelectsOnlyLowerExactCostValidAction)
   EXPECT_FALSE(mpc_rti_refinement_improves_action(1, 100, 1, INFINITY));
 }
 
+TEST(RiccatiWarmStartEpoch, RefinementDoesNotAdvanceTheCommandSequence)
+{
+  RiccatiStepData_t steps[RICCATI_HORIZON]{};
+  float terminal_Q[RICCATI_MAX_NX]{}, terminal_q[RICCATI_MAX_NX]{};
+  float lower[RICCATI_MAX_NX], upper[RICCATI_MAX_NX], x0[RICCATI_MAX_NX]{};
+  std::fill_n(lower, RICCATI_MAX_NX, -BIG_BOUND);
+  std::fill_n(upper, RICCATI_MAX_NX, BIG_BOUND);
+  for (auto &step : steps) {
+    std::fill_n(step.x_lb, RICCATI_MAX_NX, -BIG_BOUND);
+    std::fill_n(step.x_ub, RICCATI_MAX_NX, BIG_BOUND);
+    std::fill_n(step.u_lb, RICCATI_MAX_NU, -1.f);
+    std::fill_n(step.u_ub, RICCATI_MAX_NU, 1.f);
+    for (int i = 0; i < RICCATI_MAX_NX; ++i) step.A[i][i] = 1.f;
+  }
+  RiccatiAdmmConfig_t config{};
+  config.rho = config.rho_u = 1.f;
+  config.tolerance = .01f;
+  config.max_iterations = 1;
+  config.over_relaxation = 1.f;
+  for (int same_epoch : {0, 1}) {
+    RiccatiAdmmState_t memory{};
+    memory.initialized = 1;
+    memory.rho = memory.rho_u = 1.f;
+    for (int k = 0; k < RICCATI_HORIZON; ++k)
+      memory.z_u[k][0] = .01f * (k + 1);
+    config.reuse_same_epoch = same_epoch;
+    RiccatiSolution_t result{};
+    ASSERT_NE(riccati_admm_solve(steps, terminal_Q, terminal_q, lower, upper,
+                                x0, &config, &memory, &result), RICCATI_STATUS_ERROR);
+    for (int k = 0; k < RICCATI_HORIZON; ++k) {
+      const int source = same_epoch ? k : std::min(k + 1, RICCATI_HORIZON - 1);
+      EXPECT_FLOAT_EQ(result.u[k][0], .01f * (source + 1));
+    }
+  }
+}
+
 MpcModelState_t turning_state()
 {
   MpcModelState_t state{};

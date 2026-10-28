@@ -223,6 +223,10 @@ typedef struct
     /* Discard the previous ADMM primal, dual, and penalty iterate before
      * each QP solve. Zero preserves warm-start behavior. */
     int cold_start_each_solve;
+    /* A second SQP QP describes the same command epoch: retain stage indices
+     * instead of shifting the persistent split/dual iterate by 25 ms again.
+     * Zero means the ordinary next-control-epoch warm start (one shift). */
+    int reuse_same_epoch;
     /* Re-factor only every Nth ADMM iteration when adapting rho; zero keeps
      * the historical per-iteration update cadence. */
     int adaptive_rho_update_period;

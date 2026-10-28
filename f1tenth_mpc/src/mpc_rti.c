@@ -2219,10 +2219,9 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     memcpy(candidate_controls, nominal->controls,
         sizeof(candidate_controls));
     for (int k = 0; k < RICCATI_HORIZON; ++k) {
-        /* The condensed QP starts at the first command that can affect the
-         * plant. Project its direct q[k] decision into that stage's actuator
-         * box; the last two beyond-horizon commands stay nominal and cannot
-         * affect this rollout or its first action. */
+        /* Every condensed stage is a direct command at its own plant epoch.
+         * Project q[k] into that stage's actuator box; queued commands have
+         * already been propagated before this horizon begins. */
         const RiccatiStepData_t *command_stage = &problem.steps[k];
         candidate_controls[k].steering_target_rad = clampf_rti(
             solution.u[k][0], command_stage->u_lb[0],
@@ -2761,6 +2760,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             first_pass.first_action_valid;
         const MpcModelControl_t *refinement_seed = first_action_valid
             ? first_pass.candidate.controls : first_pass.proposed_controls;
+        MpcRtiCycleConfiguration_t refinement_configuration = *configuration;
+        /* No command has elapsed between SQP passes. The ADMM split/dual
+         * iterate must stay at the same stages, just like the nominal seed.
+         * The first solve of the next control cycle still shifts once. */
+        refinement_configuration.solver.reuse_same_epoch = 1;
 
         MpcRtiNominal_t refinement_nominal;
         MpcRtiReference_t refinement_references[PREDICTION_HORIZON + 1];
@@ -2782,7 +2786,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             const MpcRtiCycleStatus_t refined_status = solve_rti_pass(
                 &prepared_state, current_progress, &refinement_nominal,
                 refinement_references, trajectory, trajectory_count,
-                lap_length, prediction_dt, horizon, configuration, memory,
+                lap_length, prediction_dt, horizon, &refinement_configuration, memory,
                 deadline_us,
                 (double)MPC_RTI_REFINEMENT_SOLVE_RESERVE_US,
                 &refined_pass);

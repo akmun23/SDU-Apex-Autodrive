@@ -203,13 +203,13 @@ void riccati_admm_shift_warm_start(
  * 5. Convergence check against the configured absolute maximum residual
  *
  * This solver is specialized for N=RICCATI_HORIZON=30,
- * nx=RICCATI_MAX_NX=22, and nu=RICCATI_MAX_NU=2. These compile-time
+ * nx=RICCATI_MAX_NX=23, and nu=RICCATI_MAX_NU=2. These compile-time
  * dimensions are the only supported problem shape.
  *
  * @param step_data   Per-step dynamics and cost data (array of 30 elements)
- * @param terminal_Q  Terminal state cost (diagonal weights, length 20)
- * @param terminal_q  Terminal state linear cost (length 20)
- * @param x0          Initial state (length 20)
+ * @param terminal_Q  Terminal state cost (diagonal weights, length 23)
+ * @param terminal_q  Terminal state linear cost (length 23)
+ * @param x0          Initial state (length 23)
  * @param config      ADMM configuration (if NULL, compile-time defaults are used).
  * @param admm_state  ADMM warm-start state (modified in-place)
  * @param solution    Output: optimal trajectories and status
