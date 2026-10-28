@@ -1296,6 +1296,85 @@ TEST(MpcReference, NominalHorizonKeepsTrackSpeedTarget)
          "not a pre-clipped target, determines whether it is reachable.";
 }
 
+TEST(MpcReference, InfeasibleWarmStartCanReachQpButCannotBePublished)
+{
+  // A finite nominal is a linearization point, not an accepted trajectory.
+  // Start from the final measured state of the Oct 28 slip-cost trial. A
+  // sustained tight-turn seed eventually predicts reverse forward velocity;
+  // the actual vehicle is still moving forwards when optimization begins.
+  MpcTrajectorySample_t trajectory[3] = {
+      {0., 0., 0., 0., 0., 12., 100., 100., 0.},
+      {100., 100., 0., 0., 0., 12., 100., 100., 0.},
+      {200., 200., 0., 0., 0., 12., 100., 100., 0.}};
+  size_t count = 3;
+  double length = 0.;
+  ASSERT_TRUE(mpc_trajectory_prepare(trajectory, &count, &length));
+  MpcRtiConfiguration_t config{};
+  config.weight_e_y = config.weight_e_psi = config.weight_u = 1.f;
+  config.weight_u_overspeed = config.weight_v = config.weight_r = 1.f;
+  config.weight_steering_command = config.weight_steering_target = 1.f;
+  config.weight_throttle_command = config.terminal_multiplier = 1.f;
+  config.max_speed_mps = 16.f;
+  config.active_speed_ceiling_mps = 16.f;
+  config.max_steering_rad = SOURCE_MAX_STEERING_RAD;
+  config.corridor_margin_m = config.first_prediction_corridor_margin_m = .05f;
+  MpcRtiState_t initial{};
+  initial.plant.u = 5.24309015f;
+  initial.plant.v = .509816468f;
+  initial.plant.r = -2.16397238f;
+  initial.plant.actual_steering_angle = -.253153682f;
+  initial.plant.delayed_steering_command_1 = -.338617772f;
+  initial.plant.delayed_steering_command_2 = -.338617772f;
+  initial.plant.delayed_throttle_command_1 = .267959505f;
+  initial.plant.delayed_throttle_command_2 = .268189043f;
+  initial.plant.source_plant_initialized = 1;
+  initial.plant.source_suspension_history_initialized = 1;
+  const double hidden[] = {113.274164, 114.357796, 112.407531, 113.8122,
+      .00409496345, -.000176888811, -.079873332, .0974897421,
+      .0165529907, .11159703, .00709799916, -.0114578217,
+      .0116765382, -.00722836564, 0., 0., 0., 0., 0., 0., 0., 0.};
+  std::copy_n(hidden, 22, initial.plant.source_plant_internal_state);
+  MpcModelControl_t controls[PREDICTION_HORIZON]{};
+  for (auto &control : controls) {
+    control.throttle_command = .268189043f;
+    control.steering_target_rad = -.5f;
+  }
+  MpcRtiNominal_t nominal{};
+  MpcRtiReference_t references[PREDICTION_HORIZON + 1]{};
+  ASSERT_TRUE(mpc_rti_build_nominal_with_warm_start(&initial, 0., nullptr,
+      controls, PREDICTION_HORIZON, trajectory, count, length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &config, &nominal, references))
+      << "stage=" << nominal.build_failure_stage << " index="
+      << nominal.build_failure_index;
+  float minimum_u = initial.plant.u;
+  for (const auto &state : nominal.states)
+    minimum_u = std::min(minimum_u, state.plant.u);
+  ASSERT_LT(minimum_u, -MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS);
+  MpcRtiProblem_t problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
+      references, PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config, &problem));
+  for (int k = 0; k < problem.horizon; ++k) {
+    EXPECT_GE(problem.steps[k].x_lb[MPC_OPT_IDX_U],
+              -MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS);
+    EXPECT_LE(problem.steps[k].x_ub[MPC_OPT_IDX_U], config.max_speed_mps);
+  }
+  MpcRtiState_t states[PREDICTION_HORIZON + 1]{};
+  EXPECT_EQ(mpc_rti_rollout_candidate(&initial, 0., controls, trajectory,
+      count, length, nullptr, nullptr, nullptr, PREDICTION_HORIZON,
+      PREDICTION_DT_SECONDS, &config, states, nullptr, nullptr),
+      MPC_RTI_ROLLOUT_STATE_LIMIT);
+
+  // Measured violations remain fatal; they must not become repairable seeds.
+  for (float invalid_speed : {-1.f, 17.f}) {
+    initial.plant.u = invalid_speed;
+    EXPECT_FALSE(mpc_rti_build_nominal(&initial, 0., nullptr, trajectory,
+        count, length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &config,
+        &nominal, references));
+    EXPECT_EQ(nominal.build_failure_index, 0);
+    EXPECT_EQ(nominal.build_failure_stage, MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE);
+  }
+}
+
 TEST(MpcReference, ColdStartThrottleSeedMatchesExactQueueShift)
 {
   MpcTrajectorySample_t trajectory[3] = {

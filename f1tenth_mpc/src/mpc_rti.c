@@ -1175,6 +1175,18 @@ static int mpc_rti_build_nominal_impl(
     }
     nominal->horizon = horizon;
     nominal->states[0] = *current_state;
+    /* x0 is measured and cannot be repaired by optimization. A finite future
+     * warm-start rollout, however, is only a linearization point: imposing
+     * candidate bounds here can abort before the QP can repair its controls.
+     * The QP and exact nonlinear acceptance still enforce future bounds. */
+    const MpcRtiCommandEnvelopeFailure_t initial_failure =
+        command_envelope_failure(current_state, configuration);
+    if (initial_failure != MPC_RTI_COMMAND_ENVELOPE_OK) {
+        nominal->build_failure_constraint = initial_failure;
+        nominal->build_failure_index = 0;
+        return fail_nominal_build(
+            nominal, MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE);
+    }
 
     double progress_seed[PREDICTION_HORIZON + 1] = {0};
     if (warm) {
@@ -1348,16 +1360,6 @@ static int mpc_rti_build_nominal_impl(
     align_yaw_rate_references(references, horizon);
     nominal->progress_reference_resampling_us +=
         monotonic_microseconds() - phase_start_us;
-    for (int k = 0; k <= horizon; ++k) {
-        const MpcRtiCommandEnvelopeFailure_t failure =
-            command_envelope_failure(&nominal->states[k], configuration);
-        if (failure != MPC_RTI_COMMAND_ENVELOPE_OK) {
-            nominal->build_failure_constraint = failure;
-            nominal->build_failure_index = k;
-            return fail_nominal_build(
-                nominal, MPC_RTI_NOMINAL_BUILD_COMMAND_ENVELOPE);
-        }
-    }
     for (int k = 0; k <= horizon; ++k)
         nominal->speed_reference[k] = references[k].u;
     nominal->speed_reference_valid = 1;
