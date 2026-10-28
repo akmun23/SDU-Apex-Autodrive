@@ -1796,8 +1796,14 @@ def report_localization_diagnostics(
     pose_topics = (
         (AMCL_POSE, "AMCL scan pose"),
         (CURRENT_MAP_POSE, "AMCL control map pose"),
-        (EKF_POSE, "EKF pose"),
     )
+    if data.get(EKF_POSE):
+        # This is the local odom frame, not the world/map frame. Comparing
+        # its raw XY/yaw to Unity printed a spurious ~8 m localization error.
+        # report_state_errors already scores EKF odom with SE(2) origin
+        # alignment and separately compares its body velocities.
+        print("EKF pose: local odom frame; absolute world error not scored "
+              "(see aligned EKF odom relative_pose below)")
     for topic, label in pose_topics:
         errors_xy = []
         errors_yaw = []
@@ -1867,6 +1873,13 @@ def report_localization_diagnostics(
             f"{max(applied_xy) if applied_xy else math.nan:.3f}m, "
             f"yaw max={max(applied_yaw) if applied_yaw else math.nan:.3f}rad"
         )
+    timing_values = [row["value"] for row in data.get(AMCL_TIMING, [])
+                     if math.isfinite(row["value"])]
+    if timing_values:
+        print(f"AMCL PF wall ms: n={len(timing_values)} "
+              f"median={statistics.median(timing_values):.3f} "
+              f"p95={percentile(timing_values, 0.95):.3f} "
+              f"max={max(timing_values):.3f} (startup included)")
 
 
 def report_csv_path_follow(

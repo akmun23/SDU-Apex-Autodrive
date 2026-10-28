@@ -99,6 +99,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_odom_history test/test_odom_history.cpp)
   target_include_directories(test_odom_history PRIVATE gpu_amcl_cpp/include)
+  ament_add_gtest(test_scan_validity test/test_scan_validity.cpp)
+  target_include_directories(test_scan_validity PRIVATE gpu_amcl_cpp/include)
   ament_add_gtest(test_sensor_packet_assembler
     test/test_sensor_packet_assembler.cpp
     src/sensor_packet_assembler.cpp)

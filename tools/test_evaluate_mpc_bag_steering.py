@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import math
+import io
+from contextlib import redirect_stdout
 import unittest
 
 from tools import evaluate_mpc_bag as evaluator
 
 
 class UnitySteeringSourceDiagnosticTest(unittest.TestCase):
+    def test_local_ekf_pose_is_not_scored_as_absolute_world_pose(self) -> None:
+        truth = [{"stamp": 1.0, "bag_time": 1.0, "x": 100., "y": 200., "yaw": 1.0}]
+        local = [{"stamp": 1.0, "bag_time": 1.0, "x": 0., "y": 0., "yaw": 0.0}]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            evaluator.report_localization_diagnostics(
+                truth, {evaluator.EKF_POSE: local})
+        self.assertIn("local odom frame", output.getvalue())
+        self.assertNotIn("EKF pose vs Unity truth", output.getvalue())
+
     def test_normal_motion_uses_serialized_steering_rate(self) -> None:
         angle = evaluator._unity_vehicle_steering_angle_after(
             0.0, 0.5, 0.025)

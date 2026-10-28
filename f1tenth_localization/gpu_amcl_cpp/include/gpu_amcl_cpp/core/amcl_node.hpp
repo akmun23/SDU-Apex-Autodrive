@@ -151,6 +151,7 @@ private:
     double force_max_particles_initial_sec_ = 0.0;
     rclcpp::Time localization_start_time_;
     rclcpp::Time last_processed_scan_stamp_;
+    sensor_msgs::msg::LaserScan::ConstSharedPtr last_distinct_scan_;
     rclcpp::Time last_map_correction_stamp_;
     rclcpp::Time last_current_map_pose_stamp_;
     bool map_odom_valid_ = false;

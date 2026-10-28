@@ -1134,6 +1134,7 @@ void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         accumulated_odom_travel_m_ = 0.0;
         last_scan_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         last_processed_scan_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        last_distinct_scan_.reset();
         reset_pose_jump_gate();
         {
             std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
@@ -1358,6 +1359,23 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         processing_scan_ = false;
         return;
     }
+
+    if (global_localization_locked_ && last_distinct_scan_ &&
+        scan_validity::same_observation(*msg, *last_distinct_scan_)) {
+        // Unity republishes CurrentRangeArray until its next LaserScan().
+        // Racing captures contain occasional identical arrays at fresh ROS
+        // stamps while moving. Do not move/reweight the PF using that stale
+        // scene at a NEW pose, or refresh correction health from it. Keep the
+        // odometry baseline so the next distinct scan consumes all motion.
+        // Global bootstrap deliberately retains its repeated-evidence search.
+        ++scan_processing_drop_count_;
+        publish_scan_alignment_diagnostic(scan_time, matched_odom_stamp,
+            bracket_before_stamp, bracket_after_stamp, 0.0, false,
+            scan_range_counts.valid, scan_range_counts.sampled);
+        processing_scan_ = false;
+        return;
+    }
+    last_distinct_scan_ = msg;
 
     // ── Baseline initialization ──
     // For the first scan after startup/reinit, just seed the odom baseline
