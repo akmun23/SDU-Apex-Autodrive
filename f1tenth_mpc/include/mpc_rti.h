@@ -187,6 +187,7 @@ typedef struct
     float terminal_x_lb[RICCATI_MAX_NX];
     float terminal_x_ub[RICCATI_MAX_NX];
     float x0[RICCATI_MAX_NX];
+    RiccatiStatePolygon_t state_polygons[RICCATI_HORIZON + 1];
     int horizon;
     int nonsmooth_jacobian_columns;
     int jacobian_stages_completed;
@@ -246,6 +247,14 @@ int mpc_rti_compute_corridor_slack(
     int prediction_index,
     float *lower_slack_m,
     float *upper_slack_m);
+
+/* First-order constraints for ALL four body corners, in (e_y,e_psi).
+ * Unlike freezing a support extent, this also handles the heading-zero
+ * corner switch without selecting an arbitrary derivative of max(). */
+int mpc_rti_build_corridor_polygon(
+    const MpcModelState_t *state, float left_bound_m, float right_bound_m,
+    const MpcRtiConfiguration_t *configuration, int prediction_index,
+    RiccatiStatePolygon_t *polygon);
 
 typedef struct
 {

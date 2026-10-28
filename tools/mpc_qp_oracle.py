@@ -58,9 +58,14 @@ def decode_problem(payload: bytes) -> dict:
     terminal_lb = np.asarray(cursor.f32_array(NX))
     terminal_ub = np.asarray(cursor.f32_array(NX))
     x0 = np.asarray(cursor.f32_array(NX))
+    polygons = []
+    for _ in range(HORIZON + 1):
+        count = cursor.signed()
+        planes = [cursor.f32_array(3) for _ in range(8)]
+        polygons.append(planes[:count])
     return {"steps": steps, "terminal_Q": terminal_Q,
             "terminal_q": terminal_q, "terminal_lb": terminal_lb,
-            "terminal_ub": terminal_ub, "x0": x0}
+            "terminal_ub": terminal_ub, "x0": x0, "state_polygons": polygons}
 
 
 def build_osqp_matrices(problem: dict):
@@ -142,6 +147,12 @@ def build_osqp_matrices(problem: dict):
     for k, step in enumerate(problem["steps"]):
         for a in range(nu):
             add_constraint([(uidx(k, a), 1.0)], step[10][a], step[11][a])
+    for k, polygon in enumerate(problem.get("state_polygons", [])):
+        if k == 0:
+            continue  # measured initial state is immutable, just as in Riccati
+        for normal0, normal1, bound in polygon:
+            add_constraint([(xidx(k, 0), normal0), (xidx(k, 1), normal1)],
+                           -np.inf, bound)
     Acon = sparse.coo_matrix((vals, (rows, cols)),
                              shape=(len(lower), nvar)).tocsc()
     return P, linear, Acon, np.asarray(lower), np.asarray(upper)
@@ -159,12 +170,14 @@ def minimum_uniform_box_relaxation(A, lower: np.ndarray, upper: np.ndarray,
     """
     nvar = A.shape[1]
     box = A[equality_count:].tocsr()
-    if np.any(np.diff(box.indptr) != 1):
-        raise FixtureError("expected one-variable box rows after dynamics")
-    variables = box.indices
-    if np.any(np.abs(box.data - 1.0) > 1.0e-12):
-        raise FixtureError("unexpected box row coefficient in QP constraints")
-    selected = selected_variables(variables)
+    # Widen selected box rows only. Coupled footprint rows remain exact.
+    is_box = np.diff(box.indptr) == 1
+    variables = np.zeros(box.shape[0], dtype=int)
+    for row in np.flatnonzero(is_box):
+        offset = box.indptr[row]
+        is_box[row] = abs(box.data[offset] - 1.) <= 1.e-12
+        variables[row] = box.indices[offset]
+    selected = is_box & selected_variables(variables)
 
     upper_rows = np.flatnonzero(np.isfinite(upper[equality_count:]))
     lower_rows = np.flatnonzero(np.isfinite(lower[equality_count:]))
@@ -227,17 +240,15 @@ def solve(path: Path, max_iter: int = 25_000,
     infeasibility_relaxation_by_group = None
     if "primal infeasible" in status.lower():
         equality_count = NX * (HORIZON + 1)
-        bounds = [[-np.inf, np.inf] for _ in range(P.shape[0])]
-        for row_index in range(equality_count, A.shape[0]):
-            row = A.getrow(row_index)
-            if row.nnz != 1 or abs(row.data[0] - 1.0) > 1e-12:
-                raise FixtureError("unexpected non-box row in QP constraints")
-            variable = row.indices[0]
-            bounds[variable][0] = max(bounds[variable][0], lower[row_index])
-            bounds[variable][1] = min(bounds[variable][1], upper[row_index])
+        inequality = A[equality_count:]
+        lo, hi = lower[equality_count:], upper[equality_count:]
+        lower_rows, upper_rows = np.isfinite(lo), np.isfinite(hi)
         lp = linprog(
-            np.zeros(P.shape[0]), A_eq=A[:equality_count],
-            b_eq=lower[:equality_count], bounds=bounds, method="highs")
+            np.zeros(P.shape[0]),
+            A_ub=sparse.vstack((inequality[upper_rows], -inequality[lower_rows])).tocsr(),
+            b_ub=np.r_[hi[upper_rows], -lo[lower_rows]],
+            A_eq=A[:equality_count], b_eq=lower[:equality_count],
+            bounds=[(-np.inf, np.inf)]*P.shape[0], method="highs")
         feasibility_lp_status = {
             0: "feasible", 2: "infeasible"}.get(lp.status, f"status-{lp.status}")
         if feasibility_lp_status == "infeasible":

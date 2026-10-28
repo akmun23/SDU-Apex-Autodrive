@@ -12,8 +12,8 @@
 
 namespace sdu_apex::qp_fixture {
 
-constexpr std::uint32_t kSchemaVersion = 3;
-constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '3', '\n'};
+constexpr std::uint32_t kSchemaVersion = 4;
+constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '4', '\n'};
 
 class Writer {
  public:
@@ -173,6 +173,12 @@ inline bool write_capture(const std::string &path,
       !write_f32_array(writer, problem.x0, RICCATI_MAX_NX)) return false;
 
   const auto &config = capture.solver_config;
+  for (const auto &polygon : config.state_polygons) {
+    if (!writer.i32(polygon.count)) return false;
+    for (int face = 0; face < RICCATI_STATE_POLYGON_MAX_PLANES; ++face)
+      if (!write_f32_array(writer, polygon.normal[face], 2) ||
+          !writer.f32(polygon.upper[face])) return false;
+  }
   if (!writer.f32(config.rho) || !writer.f32(config.rho_u) ||
       !write_f32_array(writer, config.rho_x_by_state, RICCATI_MAX_NX) ||
       !write_f32_array(writer, config.rho_u_by_input, RICCATI_MAX_NU) ||
@@ -326,6 +332,21 @@ inline bool read_capture(const std::string &path,
       !read_f32_array(reader, problem.x0, RICCATI_MAX_NX)) return false;
 
   auto &config = capture->solver_config;
+  for (int k = 0; k <= RICCATI_HORIZON; ++k) {
+    auto &polygon = config.state_polygons[k];
+    if (!reader.i32(&polygon.count) || polygon.count < 0 ||
+        polygon.count > RICCATI_STATE_POLYGON_MAX_PLANES) return false;
+    for (int face = 0; face < RICCATI_STATE_POLYGON_MAX_PLANES; ++face) {
+      if (!read_f32_array(reader, polygon.normal[face], 2) ||
+          !reader.f32(&polygon.upper[face])) return false;
+      if (!std::isfinite(polygon.normal[face][0]) ||
+          !std::isfinite(polygon.normal[face][1]) ||
+          !std::isfinite(polygon.upper[face])) return false;
+      if (face < polygon.count &&
+          !(std::hypot(polygon.normal[face][0], polygon.normal[face][1]) > 0.f)) return false;
+    }
+    problem.state_polygons[k] = polygon;
+  }
   if (!reader.f32(&config.rho) || !reader.f32(&config.rho_u) ||
       !read_f32_array(reader, config.rho_x_by_state, RICCATI_MAX_NX) ||
       !read_f32_array(reader, config.rho_u_by_input, RICCATI_MAX_NU) ||

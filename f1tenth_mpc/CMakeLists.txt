@@ -150,6 +150,9 @@ if(BUILD_TESTING)
     test/test_mpc_qp_fixture_roundtrip.cpp)
   target_link_libraries(test_mpc_qp_fixture_roundtrip mpc_core)
   target_include_directories(test_mpc_qp_fixture_roundtrip PRIVATE include)
+  ament_add_gtest(test_mpc_corridor_polygon test/test_mpc_corridor_polygon.cpp)
+  target_link_libraries(test_mpc_corridor_polygon mpc_core)
+  target_include_directories(test_mpc_corridor_polygon PRIVATE include)
   add_test(NAME test_mpc_qp_fixture_schema
     COMMAND ${Python3_EXECUTABLE} -m unittest tools.test_mpc_qp_fixture -v)
   set_tests_properties(test_mpc_qp_fixture_schema PROPERTIES

@@ -468,6 +468,35 @@ int mpc_rti_compute_corridor_slack(
     return isfinite(*lower_slack_m) && isfinite(*upper_slack_m);
 }
 
+int mpc_rti_build_corridor_polygon(
+    const MpcModelState_t *state, float left_bound_m, float right_bound_m,
+    const MpcRtiConfiguration_t *configuration, int prediction_index,
+    RiccatiStatePolygon_t *polygon)
+{
+    if (!state || !configuration || !polygon || !isfinite(state->e_psi) ||
+        !isfinite(left_bound_m) || !isfinite(right_bound_m) ||
+        prediction_index < 0 || prediction_index > PREDICTION_HORIZON) return 0;
+    const float margin = corridor_margin_at_prediction(configuration, prediction_index);
+    const float sine = sinf(state->e_psi), cosine = cosf(state->e_psi);
+    const float x[2] = {-MPC_REAR_OVERHANG_M, MPC_REAR_AXLE_TO_FRONT_BUMPER_M};
+    const float y[2] = {-.5f*MPC_CAR_WIDTH_M, .5f*MPC_CAR_WIDTH_M};
+    polygon->count = 0;
+    for (int along = 0; along < 2; ++along) {
+        for (int side = 0; side < 2; ++side) {
+            const float lateral = x[along]*sine + y[side]*cosine;
+            const float derivative = x[along]*cosine - y[side]*sine;
+            const int left = polygon->count++, right = polygon->count++;
+            polygon->normal[left][0] = 1.f;
+            polygon->normal[left][1] = derivative;
+            polygon->upper[left] = left_bound_m - margin - lateral + derivative*state->e_psi;
+            polygon->normal[right][0] = -1.f;
+            polygon->normal[right][1] = -derivative;
+            polygon->upper[right] = right_bound_m - margin + lateral - derivative*state->e_psi;
+        }
+    }
+    return 1;
+}
+
 static MpcRtiCommandEnvelopeFailure_t command_envelope_failure(
     const MpcRtiState_t *state,
     const MpcRtiConfiguration_t *configuration)
@@ -541,7 +570,9 @@ static void set_unconstrained_bounds(RiccatiStepData_t *stage)
     }
 }
 
-static int set_state_bounds_with_corridor(
+/* Broad rear-axle boxes only. The full footprint belongs to the coupled
+ * corner half-planes, never a heading-frozen e_y extent. */
+static int set_state_bounds_for_corridor_polygon(
     float lower[MPC_RTI_NX],
     float upper[MPC_RTI_NX],
     float ey_lower,
@@ -557,6 +588,8 @@ static int set_state_bounds_with_corridor(
     }
     lower[MPC_STATE_IDX_EY] = ey_lower;
     upper[MPC_STATE_IDX_EY] = ey_upper;
+    lower[MPC_STATE_IDX_EPSI] = -3.14159265358979323846f;
+    upper[MPC_STATE_IDX_EPSI] = 3.14159265358979323846f;
     lower[MPC_STATE_IDX_U] = -MPC_PHYSX_BRAKE_REVERSE_TRANSIENT_MPS;
     upper[MPC_STATE_IDX_U] =
         vehicle_model_get_parameters().maximum_command_speed_mps;
@@ -1052,12 +1085,14 @@ int mpc_rti_build_ltv_qp(
             throttle_slew_hessian;
 
         const int bound_index = model_stage;
-        const MpcCorridorMargins margin = corridor_margin_for_state(configuration,
-            &nominal_states[bound_index].plant, bound_index);
-        const float ey_lower = margin.right - references[bound_index].right_bound;
-        const float ey_upper = references[bound_index].left_bound - margin.left;
-        if (!set_state_bounds_with_corridor(stage->x_lb, stage->x_ub,
+        const float margin = corridor_margin_at_prediction(configuration, bound_index);
+        const float ey_lower = margin - references[bound_index].right_bound;
+        const float ey_upper = references[bound_index].left_bound - margin;
+        if (!set_state_bounds_for_corridor_polygon(stage->x_lb, stage->x_ub,
                 ey_lower, ey_upper, configuration)) return 0;
+        if (!mpc_rti_build_corridor_polygon(&nominal_states[bound_index].plant,
+                references[bound_index].left_bound, references[bound_index].right_bound,
+                configuration, bound_index, &problem->state_polygons[solver_stage])) return 0;
 
         stage->u_lb[0] = -configuration->max_steering_rad;
         stage->u_ub[0] = configuration->max_steering_rad;
@@ -1087,14 +1122,16 @@ int mpc_rti_build_ltv_qp(
         &references[horizon], configuration,
         configuration->terminal_multiplier, nominal_states[horizon].plant.u);
 
-    const MpcCorridorMargins terminal_margin = corridor_margin_for_state(
-        configuration, &nominal_states[horizon].plant, horizon);
-    const float terminal_lower = terminal_margin.right - references[horizon].right_bound;
-    const float terminal_upper = references[horizon].left_bound - terminal_margin.left;
-    if (!set_state_bounds_with_corridor(problem->terminal_x_lb,
+    const float terminal_margin = corridor_margin_at_prediction(configuration, horizon);
+    const float terminal_lower = terminal_margin - references[horizon].right_bound;
+    const float terminal_upper = references[horizon].left_bound - terminal_margin;
+    if (!set_state_bounds_for_corridor_polygon(problem->terminal_x_lb,
             problem->terminal_x_ub,
             terminal_lower, terminal_upper,
             configuration)) return 0;
+    if (!mpc_rti_build_corridor_polygon(&nominal_states[horizon].plant,
+            references[horizon].left_bound, references[horizon].right_bound,
+            configuration, horizon, &problem->state_polygons[RICCATI_HORIZON])) return 0;
 
     return 1;
 }
@@ -2125,6 +2162,8 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         sizeof(pass->jacobian_worker_os_tid));
 
     RiccatiAdmmConfig_t solver_config = configuration->solver;
+    memcpy(solver_config.state_polygons, problem.state_polygons,
+        sizeof(problem.state_polygons));
     if (cycle_deadline_us > 0.0) {
         const double solver_budget_us = cycle_deadline_us -
             monotonic_microseconds() - post_solve_reserve_us;

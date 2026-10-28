@@ -28,6 +28,20 @@ class MinimumUniformBoxRelaxationTest(unittest.TestCase):
         self.assertEqual(result["status"], "infeasible")
         self.assertIsNone(result["minimum_uniform_relaxation"])
 
+    def test_coupled_footprint_rows_are_never_relaxed_as_boxes(self):
+        # x=1,y=0, box x<=0 can be widened, but x+y<=.5 remains hard.
+        matrix = sparse.csr_matrix([[1., 0.], [0., 1.], [1., 0.], [1., 1.]])
+        lower = np.array([1., 0., -np.inf, -np.inf])
+        upper = np.array([1., 0., 0., .5])
+        result = minimum_uniform_box_relaxation(matrix, lower, upper, 2,
+            lambda variables: variables == 0)
+        self.assertEqual(result["status"], "infeasible")
+        upper[-1] = 2.
+        result = minimum_uniform_box_relaxation(matrix, lower, upper, 2,
+            lambda variables: variables == 0)
+        self.assertEqual(result["status"], "feasible")
+        self.assertAlmostEqual(result["minimum_uniform_relaxation"], 1.)
+
 
 if __name__ == "__main__":
     unittest.main()

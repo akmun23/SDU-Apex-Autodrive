@@ -94,7 +94,8 @@ load_nominal_seed_controls(const char *path)
             const double throttle = values[2 + 2 * stage];
             if (!std::isfinite(steering) ||
                 std::abs(steering) > kMaxSteeringRad + 1.0e-7 ||
-                !std::isfinite(throttle) || throttle < 0.01 - 1.0e-7 ||
+                !std::isfinite(throttle) ||
+                throttle < MPC_THROTTLE_MIN_DRIVE - 1.0e-7 ||
                 throttle > 1.0 + 1.0e-7)
                 throw std::runtime_error(
                     "nominal seed control violates the MPC drive envelope at "
@@ -183,7 +184,7 @@ void configure(MpcRtiCycleConfiguration_t *config,
         400.0f, 400.0f, 400.0f, 400.0f,
         0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
         0.05f, 0.05f, 0.05f, 0.05f,
-        0.5f, 1.0f}};
+        1.0f, 0.5f, 1.0f}};
     static_assert(state_scale.size() == RICCATI_MAX_NX,
         "replay scaling must cover every optimizer state");
     std::copy(state_scale.begin(), state_scale.end(), solver.state_scale);
@@ -199,7 +200,8 @@ void configure(MpcRtiCycleConfiguration_t *config,
 
 int main(int argc, char **argv)
 {
-    if (argc < 8 || (argc > 31 && argc != 43)) {
+    if (argc < 8 || (argc > 31 && argc != 43 && argc != 44 &&
+                     argc != 45 && argc != 46 && argc != 47 && argc != 49)) {
         std::cerr << "usage: mpc_bag_solver_replay TRAJECTORY INPUT_CSV "
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
@@ -216,7 +218,10 @@ int main(int argc, char **argv)
                      "[SPEED_TRACKING_WEIGHT_MULTIPLIER "
                      "[DIRECT_WEIGHTS: EY EPSI U U_OVERSPEED SLIP V R "
                      "STEER_COMMAND STEER_TARGET THROTTLE_COMMAND "
-                     "STEER_SLEW THROTTLE_SLEW]]]]]]]]]]]]]]]]] "
+                     "STEER_SLEW THROTTLE_SLEW [MAX_SQP_ITERATIONS: 1..2 "
+                     "[OVERSPEED_CURVATURE_GAIN_M: 0..10 "
+                     "[UNDERSPEED_CURVATURE_GAIN_M: 0..10 "
+                     "[SLIP_CURVATURE_GAIN_M: 0..10]]]]]]]]]]]]]]]]]]]] "
                      "(MAX_ITERATIONS: 1..200)\n";
         return 2;
     }
@@ -293,7 +298,7 @@ int main(int argc, char **argv)
             steering_slew_weight < 0.0 ||
             !std::isfinite(throttle_slew_weight) ||
             throttle_slew_weight < 0.0 ||
-            line_search_backtracks < 0 || line_search_backtracks > 3 ||
+            line_search_backtracks < 0 || line_search_backtracks > 4 ||
             !std::isfinite(speed_tracking_weight_multiplier) ||
             !(speed_tracking_weight_multiplier > 0.0) ||
             speed_tracking_weight_multiplier > 100.0)
@@ -317,11 +322,16 @@ int main(int argc, char **argv)
                   corridor_margin, first_corridor_margin, rho_u,
                   steering_slew_weight, throttle_slew_weight, adaptive_rho,
                   speed_tracking_weight_multiplier);
+        config.max_sqp_iterations = argc >= 44
+            ? static_cast<int>(number_arg(argv, 43, 1.0)) : 1;
+        if (config.max_sqp_iterations < 1 ||
+            config.max_sqp_iterations > 2)
+            throw std::runtime_error("MAX_SQP_ITERATIONS must be in [1, 2]");
         /* Production tuning sweeps use the exact twelve production-stage
          * weights, rather than trying to synthesize them from this replay
          * executable's historical global cost multipliers. Keep the older
          * multiplier interface intact for existing benchmark artifacts. */
-        if (argc == 43) {
+        if (argc >= 43) {
             float * const direct_weights[] = {
                 &config.model.weight_e_y,
                 &config.model.weight_e_psi,
@@ -343,6 +353,44 @@ int main(int argc, char **argv)
                         "direct replay weights must be finite and in [0, 1e8]");
                 *direct_weights[index] = static_cast<float>(value);
             }
+        }
+        if (argc >= 45) {
+            const double curvature_gain = number_arg(argv, 44, 0.0);
+            if (!std::isfinite(curvature_gain) || curvature_gain < 0.0 ||
+                curvature_gain > 10.0)
+                throw std::runtime_error(
+                    "overspeed curvature gain must be finite and in [0, 10]");
+            config.model.overspeed_curvature_gain_m =
+                static_cast<float>(curvature_gain);
+        }
+        if (argc >= 46) {
+            const double curvature_gain = number_arg(argv, 45, 0.0);
+            if (!std::isfinite(curvature_gain) || curvature_gain < 0.0 ||
+                curvature_gain > 10.0)
+                throw std::runtime_error(
+                    "underspeed curvature gain must be finite and in [0, 10]");
+            config.model.underspeed_curvature_gain_m =
+                static_cast<float>(curvature_gain);
+        }
+        if (argc >= 47) {
+            const double curvature_gain = number_arg(argv, 46, 0.0);
+            if (!std::isfinite(curvature_gain) || curvature_gain < 0.0 ||
+                curvature_gain > 10.0)
+                throw std::runtime_error(
+                    "slip curvature gain must be finite and in [0, 10]");
+            config.model.longitudinal_slip_curvature_gain_m =
+                static_cast<float>(curvature_gain);
+        }
+        if (argc == 49) {
+            const double steering_radius = number_arg(argv, 47, 0.0);
+            const double throttle_radius = number_arg(argv, 48, 0.0);
+            if (!std::isfinite(steering_radius) || steering_radius < 0.0 ||
+                !std::isfinite(throttle_radius) || throttle_radius < 0.0)
+                throw std::runtime_error("invalid SQP input trust radius");
+            config.model.sqp_steering_trust_region_rad =
+                static_cast<float>(steering_radius);
+            config.model.sqp_throttle_trust_region =
+                static_cast<float>(throttle_radius);
         }
         config.enable_nonlinear_line_search = line_search_backtracks > 0;
         config.line_search_max_backtracks = line_search_backtracks;
@@ -421,6 +469,7 @@ int main(int argc, char **argv)
                      "line_search_selected_alpha,line_search_us,"
                      "first_steering,first_throttle,"
                      "max_plan_steering_delta,max_plan_throttle_delta,"
+                     "frenet_geometry_closure_max_m,frenet_geometry_closure_max_rad,"
                      "nominal_seed_injected\n";
 
         std::string line;
@@ -555,6 +604,8 @@ int main(int argc, char **argv)
             }
             float max_plan_steering_delta = 0.0f;
             float max_plan_throttle_delta = 0.0f;
+            double geometry_closure_m = NAN;
+            double geometry_closure_rad = NAN;
             if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
                  status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
                  status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) &&
@@ -571,6 +622,39 @@ int main(int argc, char **argv)
                         std::abs(control.throttle_command - previous_throttle));
                     previous_steering = control.steering_target_rad;
                     previous_throttle = control.throttle_command;
+                }
+                MpcTrajectorySample_t anchor{};
+                if (!mpc_trajectory_sample(trajectory.data(), trajectory.size(),
+                        lap_length, memory.nominal.progress[0], &anchor))
+                    throw std::runtime_error("cannot anchor geometry closure");
+                const auto &initial = memory.nominal.states[0].plant;
+                double world_x = anchor.x - std::sin(anchor.heading) * initial.e_y;
+                double world_y = anchor.y + std::cos(anchor.heading) * initial.e_y;
+                double world_yaw = anchor.heading + initial.e_psi;
+                geometry_closure_m = geometry_closure_rad = 0.0;
+                for (int k = 1; k <= memory.nominal.horizon; ++k) {
+                    const auto &next = memory.nominal.states[k];
+                    const double c = std::cos(world_yaw), s = std::sin(world_yaw);
+                    world_x += c * next.incoming_body_forward_delta_m -
+                        s * next.incoming_body_lateral_delta_m;
+                    world_y += s * next.incoming_body_forward_delta_m +
+                        c * next.incoming_body_lateral_delta_m;
+                    world_yaw += next.incoming_body_yaw_delta_rad;
+                    MpcTrajectorySample_t reference{};
+                    if (!mpc_trajectory_sample(trajectory.data(), trajectory.size(),
+                            lap_length, memory.nominal.progress[k], &reference))
+                        throw std::runtime_error("cannot sample geometry closure");
+                    const double path_x = reference.x -
+                        std::sin(reference.heading) * next.plant.e_y;
+                    const double path_y = reference.y +
+                        std::cos(reference.heading) * next.plant.e_y;
+                    const double yaw_error = world_yaw -
+                        reference.heading - next.plant.e_psi;
+                    geometry_closure_m = std::max(geometry_closure_m,
+                        std::hypot(world_x - path_x, world_y - path_y));
+                    geometry_closure_rad = std::max(geometry_closure_rad,
+                        std::abs(std::atan2(std::sin(yaw_error),
+                            std::cos(yaw_error))));
                 }
             }
             if (static_cast<long>(row_index) == trace_row) {
@@ -743,6 +827,8 @@ int main(int argc, char **argv)
                       << result.first_control.throttle_command << ','
                       << max_plan_steering_delta << ','
                       << max_plan_throttle_delta << ','
+                      << geometry_closure_m << ','
+                      << geometry_closure_rad << ','
                       << (nominal_seed_injected ? 1 : 0) << '\n';
             ++row_index;
         }

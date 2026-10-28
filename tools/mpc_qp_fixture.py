@@ -17,8 +17,8 @@ import subprocess
 import sys
 import time
 
-MAGIC = b"SDUFQP3\n"
-SCHEMA_VERSION = 3
+MAGIC = b"SDUFQP4\n"
+SCHEMA_VERSION = 4
 NX = 23
 NU = 2
 HORIZON = 30
@@ -106,6 +106,16 @@ def parse_payload(data: bytes) -> dict:
     terminal_lb = cursor.f32_array(NX)
     terminal_ub = cursor.f32_array(NX)
     cursor.f32_array(NX)  # x0
+    polygon_count = 0
+    for _ in range(HORIZON + 1):
+        count = cursor.signed()
+        if not 0 <= count <= 8:
+            raise FixtureError("invalid state-polygon plane count")
+        polygon_count += count
+        for face in range(8):
+            normal0, normal1, bound = cursor.f32_array(3)
+            if face < count and normal0 == normal1 == 0.:
+                raise FixtureError("zero state-polygon normal")
     for lower, upper in zip(lower_state_bounds + [terminal_lb],
                             upper_state_bounds + [terminal_ub]):
         if any(lo > hi for lo, hi in zip(lower, upper)):
@@ -201,6 +211,7 @@ def parse_payload(data: bytes) -> dict:
         "qp_horizon": horizon,
         "capture_passes": passes,
         "reuse_same_epoch": reuse_same_epoch,
+        "state_polygon_plane_count": polygon_count,
         "raw_status": raw_status,
         "raw_solution_status": solution_status,
         "raw_iterations": iterations,
@@ -359,10 +370,12 @@ def seal(payload: Path, trajectory: Path | None, input_csv: Path | None,
             "solver_and_scaling": {
                 "files": [
                     "f1tenth_mpc/include/riccati_solver.h",
+                    "f1tenth_mpc/include/riccati_state_polygon.h",
                     "f1tenth_mpc/src/riccati_solver.c",
                 ],
                 "sha256": source_set_sha256(root, (
                     "f1tenth_mpc/include/riccati_solver.h",
+                    "f1tenth_mpc/include/riccati_state_polygon.h",
                     "f1tenth_mpc/src/riccati_solver.c")),
             },
         },

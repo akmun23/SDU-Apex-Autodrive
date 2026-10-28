@@ -206,6 +206,17 @@ typedef struct
  *          not scaled by unrelated state magnitudes because MPC channels have
  *          different physical units.
  */
+enum { RICCATI_STATE_POLYGON_MAX_PLANES = 8 };
+
+/* Affine half-planes in optimizer coordinates 0 and 1 (e_y, e_psi).
+ * They constrain an ADMM split, not additional optimizer/dynamic states. */
+typedef struct
+{
+    int count;
+    float normal[RICCATI_STATE_POLYGON_MAX_PLANES][2];
+    float upper[RICCATI_STATE_POLYGON_MAX_PLANES];
+} RiccatiStatePolygon_t;
+
 typedef struct
 {
     float rho;
@@ -239,6 +250,7 @@ typedef struct
     int use_scaling;
     float state_scale[RICCATI_MAX_NX];
     float input_scale[RICCATI_MAX_NU];
+    RiccatiStatePolygon_t state_polygons[RICCATI_HORIZON + 1];
 } RiccatiAdmmConfig_t;
 
 /**

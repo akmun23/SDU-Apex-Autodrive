@@ -39,6 +39,10 @@ def make_valid_payload():
     floats(nx, 1.0)
     floats(nx)
 
+    for _ in range(horizon + 1):
+        ints(1)  # no coupled footprint planes in this generic fixture
+        floats(8 * 3)
+
     floats(2, 1.0)  # rho, rho_u
     floats(nx)  # default per-state penalties
     floats(nu)  # default per-input penalties
@@ -132,6 +136,22 @@ class FrozenQpFixtureTest(unittest.TestCase):
         struct.pack_into("<f", payload, stage_x_lb_offset, 2.0)
         with self.assertRaises(fixture.FixtureError):
             fixture.parse_payload(payload)
+
+    def test_polygon_metadata_is_checked_and_old_schema_rejected(self):
+        nx, nu = fixture.NX, fixture.NU
+        start = fixture.HEADER_SIZE + 4*(fixture.HORIZON*(nx*nx+2*nx*nu+5*nx+4*nu)+5*nx)
+        data = bytearray(make_valid_payload())
+        struct.pack_into('<i', data, start, 9)
+        with self.assertRaisesRegex(fixture.FixtureError, 'plane count'):
+            fixture.parse_payload(data)
+        struct.pack_into('<i', data, start, 1)
+        with self.assertRaisesRegex(fixture.FixtureError, 'normal'):
+            fixture.parse_payload(data)
+        struct.pack_into('<3f', data, start+4, 1., .43, .2)
+        self.assertEqual(fixture.parse_payload(data)['state_polygon_plane_count'], 1)
+        data[:8] = b'SDUFQP3\n'
+        with self.assertRaises(fixture.FixtureError):
+            fixture.parse_payload(data)
 
     def test_sidecar_hash_must_match(self):
         with tempfile.TemporaryDirectory() as directory:
