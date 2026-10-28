@@ -566,3 +566,107 @@ Added independent circular COM-to-rear-axle/seam conversion tests; 26 focused
 IPOPT tests pass. Fixed resume provenance to include imported frame helper
 equations, not merely the byte-identical generated importer. Existing running
 processes retain their sealed graph; this strengthens subsequent resumes.
+
+## Overnight result recovery and restart — 2026-10-28
+
+The v343 run completed and exported its retained Phase-I feasible point:
+predicted lap 4.941441705748207 s, maximum scaled constraint violation
+6.182244142493784e-5 against the 0.001 acceptance limit. This is not a
+stationary minimum-time solution or a Unity/MPC-validated lap.
+
+| Time trust factor | Final objective | Maximum violation | Result |
+| --- | ---: | ---: | --- |
+| 64 | 4.923914 s | 0.014697 | 1200 iterations; infeasible |
+| 256 | 4.922632 s | 0.007334 | 1200 iterations; infeasible |
+| 1024 | 5.704074 s | 0.431163 | 1200 iterations; infeasible |
+
+Recovered files, all under `optimized_practice_v343_certified_restart_20261027/`:
+
+- `optimizer_target_raceline_pass_00_not_mpc_validated.csv`: 474 finite
+  nine-column rows; SHA256
+  `9fcda13ff57e0ed9fac968519fe9bfaf19f226be3130fdd9e4d075f1a12bd534`.
+- `ipopt_candidate_pass_00/optimizer_seed.npz`: complete exported state,
+  controls and algebraic quantities; all numeric entries finite; SHA256
+  `8d814076e65c407a49cd46c0877eb29dbace0a4ef092c878e386eec70e49776a`.
+- `ipopt_report_pass_00.json`, `report.json`, source witness state/midpoint
+  CSVs, and all three raw time-stage checkpoints remain available. The export
+  report records the map footprint check and geometry/curvature consistency
+  check as passed. Native witness replay was skipped.
+
+The initial v344 handoff did not start overnight. The subsequent v345 launch
+had valid CPU/wall caps, but unnecessarily reprojected a raw-derived seed;
+the initializer then recomputed throttle and raised its initial residual to
+0.09423. It was stopped before any minimum-time stage. Preserve that log for
+provenance; it is not the active run.
+
+The bounded v346 verification run used v343's
+complete exported checkpoint directly, without forced reprojection or
+changes to its saved states and controls. Map, reference mesh and model
+provenance checks remain enforced, followed by an independent source
+constraint evaluation before checkpoint reuse. Its actual startup log
+confirmed maximum residual 6.182244142708196e-5 and `reuse=True`; Phase I was
+correctly skipped and a complete feasible checkpoint was saved before time
+optimization. That run was stopped when the user replaced the four-hour
+shutdown plan with an unrestricted all-day run.
+
+`tools/run_ipopt_unattended.sh` passes the CPU limits as explicit CLI options
+because the main CLI clears environment-only CPU limits when its arguments
+remain zero. Budgets: Phase I 600 CPU seconds; each time stage 2400 CPU / 2700
+wall seconds; outer process guard 11700 wall seconds; service guard 11790
+seconds. Factors remain 64, 256, 1024, maximum 1200 iterations each. Native
+IPOPT limits return through normal checkpoint/result export; the outer guard
+preserves earlier completed checkpoints but cannot guarantee a final export
+from an interrupted stage.
+
+The wrapper now records the seed path/hash in `status.json` and writes an
+interrupted status on TERM/INT. Run output and logs persist independently of
+Codex. No new trajectory is automatically promoted to the production MPC.
+Inspect `console.log`, `status.json`, `time_stage_iterates/`, and final
+`report.json` in the active output directory after completion. A wrapper `finished`
+status alone does not establish a new feasible or Unity-validated raceline.
+
+### Active all-day run
+
+User service: `sdu-apex-ipopt-all-day-20261028.service`.
+Output: `optimized_practice_v347_all_day_20261028/`.
+Launcher: `tools/run_ipopt_unattended.sh OUTPUT_DIR SEED.npz --all-day`.
+Input: v343's complete exported `ipopt_candidate_pass_00/optimizer_seed.npz`,
+with the checksum recorded above. An exact launcher copy is saved as
+`launcher.sh` inside the output directory.
+
+All CPU, stage-wall, outer-wall and service runtime limits are disabled.
+Time stages each allow 6000 iterations, with factors 2, 4, 16, 64, 256, 1024.
+Factors were checked using the actual CLI parser: the first factor must be
+strictly greater than one. A narrow initial trust region starts near the
+retained feasible 4.9414 s solution before widening, rather than jumping
+immediately to factor 64. The physics, constraints and acceptance tolerance
+are unchanged. Stage completion saves its raw iterate independently; the
+selected feasible result is exported after continuation finishes. There is
+no automatic endless relaunch loop or automatic production promotion.
+
+User lingering is enabled so the service survives logout. A companion
+`sdu-apex-ipopt-awake-20261028.service` blocks idle/sleep while the optimizer
+service lives and releases that block when the optimizer stops. No scheduled
+system shutdown was present at launch. The PC remains user-controlled.
+
+Inspect progress:
+
+```bash
+tail -f optimized_practice_v347_all_day_20261028/console.log
+systemctl --user status sdu-apex-ipopt-all-day-20261028.service
+```
+
+Last night's recovered CSV and complete checkpoint remain available under
+v343 even if any subsequent stage fails or is interrupted. A faster objective
+with violation above 0.001 remains rejected; more iterations are not evidence
+that a result has converged or that Unity can drive it.
+
+Startup verification completed: the actual all-day process independently
+accepted the unchanged seed at residual 6.182244142708196e-5, skipped Phase I,
+saved its feasible initializer and entered the exact-Hessian time solve at
+factor 2. At iteration 17 its objective was 4.9400668 s and primal violation
+7.20e-4; dual residual was 1.46e-2, so it was not yet converged. Approximately
+12 GiB RSS, one active CPU core and no swap usage were observed. The service
+has `RuntimeMaxUSec=infinity`; its companion sleep inhibitor was visible and
+active. Only this one IPOPT process was running. Subsequent progress belongs
+to its durable console and stage reports rather than this startup snapshot.
