@@ -1,5 +1,6 @@
 #include "mpc_rti.h"
 #include "mpc_qp_fixture_format.hpp"
+#include "mpc_trajectory_io.hpp"
 
 #include <algorithm>
 #include <array>
@@ -40,21 +41,7 @@ std::vector<MpcTrajectorySample_t> load_trajectory(const char *path,
 {
     std::ifstream input(path);
     if (!input) throw std::runtime_error("cannot open trajectory CSV");
-    std::vector<MpcTrajectorySample_t> points;
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.empty() || line.front() == '#') continue;
-        const auto row = parse_csv_numbers(line);
-        if (row.size() < 9) continue;
-        points.push_back(MpcTrajectorySample_t{
-            row[0], row[1], row[2], row[3], row[4], row[5], row[7], row[8],
-            row[6]});
-    }
-    std::size_t count = points.size();
-    if (!mpc_trajectory_prepare(points.data(), &count, lap_length))
-        throw std::runtime_error("trajectory validation failed");
-    points.resize(count);
-    return points;
+    return f1tenth_mpc::read_mpc_trajectory(input, lap_length);
 }
 
 double number_arg(char **argv, int index, double fallback)

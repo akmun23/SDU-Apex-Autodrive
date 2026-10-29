@@ -6,11 +6,24 @@ import math
 import io
 from contextlib import redirect_stdout
 import unittest
+import tempfile
+from pathlib import Path
 
 from tools import evaluate_mpc_bag as evaluator
 
 
 class UnitySteeringSourceDiagnosticTest(unittest.TestCase):
+    def test_source_schema_comment_is_not_mistaken_for_csv_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'witness.csv'
+            path.write_text('# sdu_apex_source_witness/v1\n'
+                '# s_m,x_m,y_m,psi_rad,extra\n'
+                '0,0,0,0,0.2\n1,1,0,0,0.3\n2,1,1,1.5,0.4\n')
+            points, length=evaluator.load_trajectory(path)
+            self.assertEqual(len(points), 3)
+            self.assertEqual(points[1]['x'], 1.)
+            self.assertEqual(length, 3.)
+
     def test_local_ekf_pose_is_not_scored_as_absolute_world_pose(self) -> None:
         truth = [{"stamp": 1.0, "bag_time": 1.0, "x": 100., "y": 200., "yaw": 1.0}]
         local = [{"stamp": 1.0, "bag_time": 1.0, "x": 0., "y": 0., "yaw": 0.0}]

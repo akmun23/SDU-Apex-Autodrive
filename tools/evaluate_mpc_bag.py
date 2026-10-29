@@ -2914,7 +2914,17 @@ def load_trajectory(path: Path | None) -> tuple[list[dict[str, float]], float] |
     if path is None:
         return None
     with path.open(newline="", encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
+        def csv_lines():
+            for line in stream:
+                text=line.lstrip()
+                if text.startswith('#'):
+                    text=text[1:].lstrip()
+                    if not text.startswith('s_m,'):
+                        continue
+                    yield text
+                elif text.strip():
+                    yield text
+        rows = list(csv.DictReader(csv_lines()))
     if not rows:
         raise ValueError(f"empty trajectory: {path}")
     first = rows[0]

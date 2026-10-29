@@ -120,6 +120,8 @@ rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcController
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  ament_add_gtest(test_mpc_trajectory_io test/test_mpc_trajectory_io.cpp)
+  target_link_libraries(test_mpc_trajectory_io mpc_core)
   ament_add_gtest(test_unity_source_plant
     test/test_unity_source_plant.cpp
     src/unity_source_plant.cpp
