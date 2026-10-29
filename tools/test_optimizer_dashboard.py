@@ -72,6 +72,68 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(reader.points[-1]['residual'], .4)
         self.assertEqual(reader.ipopt['primal_infeasibility'], 1e-8)
 
+    def test_time_prediction_uses_its_own_residuals_and_is_never_a_certified_trial(self):
+        self.start_log()
+        self.write(self.campaign_path, dict(active=None, attempts=[], active_predictor=dict(
+            output=str(self.folder), incumbent_sha256='fixture')))
+        with self.log.open('a') as stream:
+            for event in (dict(event='minimum_time_prediction', output=str(self.folder)),
+                          dict(stage='minimum-time predictor setup', source_lap_s=2.25,
+                               max_iterations=200),
+                          dict(stage='minimum-time predictor', iteration=5,
+                               predicted_lap_s=2.22, max_constraint_violation=.002)):
+                stream.write(json.dumps(event)+'\n')
+        result = self.dashboard.snapshot()
+        self.assertTrue(result['active']['time_predictor'])
+        self.assertEqual(result['active']['trial_lap_s'], 2.22)
+        self.assertEqual(result['iteration'], 5)
+        self.assertEqual(result['residuals'][-1]['residual'], .002)
+        self.assertEqual(result['passed_attempts'], 0)
+
+    def test_idle_between_trials_accepts_null_active(self):
+        self.write(self.campaign_path, dict(active=None, attempts=[]))
+        result = self.dashboard.snapshot()
+        self.assertIsNone(result['active']['trial_lap_s'])
+
+    def test_feasibility_and_ipopt_raw_use_separate_graphs(self):
+        html = Path(__file__).with_name('optimizer_dashboard.html').read_text()
+        actual = html.split('function residualChart(){', 1)[1].split('function ipoptChart(){', 1)[0]
+        raw = html.split('function ipoptChart(){', 1)[1].split('function lapChart(){', 1)[0]
+        self.assertIn('id="residualChart"', html)
+        self.assertIn('id="ipoptChart"', html)
+        self.assertIn('threshold=-4', actual)
+        self.assertNotIn('ipopt_history', actual)
+        self.assertIn('ipopt_history', raw)
+        self.assertNotIn('threshold=-4', raw)
+        self.assertIn('Separate logarithmic scale', html)
+
+    def test_intentional_stagnation_is_reported_without_claiming_optimizer_crash(self):
+        self.start_log()
+        with self.log.open('a') as stream:
+            stream.write('RuntimeError: command feasibility stagnated; durable best iterate saved\n')
+        result = self.dashboard.snapshot()
+        event = next(event for event in result['events']
+                     if event.get('event')=='feasibility_stagnation')
+        self.assertEqual(event['event'], 'feasibility_stagnation')
+        self.assertEqual(result['status'], 'not_running')
+        self.assertTrue(any('RuntimeError: command feasibility stagnated' in line
+                            for line in result['log_lines']))
+
+    def test_raw_ipopt_history_updates_without_actual_residual_callback(self):
+        self.start_log()
+        with self.log.open('a') as stream:
+            stream.write('  1  1.234567e-04 1.0e-02 2.0e-04 -3 0.5 - 1 1h 1\n')
+            stream.write('  2  1.234567e-04 3.0e-03 2.0e-04 -3 0.5 - 1 1h 1\n')
+        result = self.dashboard.snapshot()
+        self.assertEqual(result['iteration'], 2)
+        self.assertEqual(len(result['ipopt_history']), 2)
+        self.assertEqual(result['ipopt_history'][-1]['primal_infeasibility'], .003)
+        self.assertEqual(result['residuals'], [])
+        with self.log.open('a') as stream:
+            stream.write(json.dumps(dict(event='solve',output='different-solve'))+'\n')
+        self.dashboard.log.poll()
+        self.assertEqual(list(self.dashboard.log.ipopt_points), [])
+
     def test_partial_lines_and_new_solve_do_not_retain_old_iteration(self):
         reader = LogObserver(self.log)
         self.log.write_text('{"iteration":5,"max_constraint_violation":0.4}')
@@ -162,6 +224,45 @@ class DashboardTest(unittest.TestCase):
         with patch.object(Path, 'read_bytes', return_value=b'/usr/bin/other-process\x00'), \
              patch.object(Path, 'read_text', return_value='State:\tS\nVmRSS:\t120 kB\nThreads:\t1\n'):
             self.assertFalse(process_info(123)['alive'])
+
+    def test_unity_queue_is_read_only_and_exposes_trial_metrics(self):
+        self.write('mpc_validation/state.json', dict(
+            pending=['def567'], worker=dict(status='running'),
+            attempts=[dict(id='abc123', model_lap_s=7.35, status='completed',
+                           run_id='apex_mpc_abc1234567890abc_a01', attempt=1,
+                           metrics=dict(average_scored_s=7.6,
+                                        scored_lap_times_s=[7.6]*10))]))
+        result=self.dashboard.snapshot()['mpc_trials']
+        self.assertEqual(result['pending'],1)
+        self.assertEqual(result['attempts'][0]['metrics']['average_scored_s'],7.6)
+        self.assertEqual(result['attempts'][0]['status'],'completed')
+
+    def test_only_latest_unity_attempt_is_sent_to_gui(self):
+        self.write('mpc_validation/state.json', dict(
+            pending=[], worker=dict(status='idle'),
+            attempts=[
+                dict(id='original', model_lap_s=11.275, status='completed',
+                     attempt=1, started_epoch_s=100.,
+                     metrics=dict(completed_scored_laps=10)),
+                dict(id='latest', model_lap_s=8.25, status='mpc_rejected',
+                     attempt=1, started_epoch_s=300.,
+                     reason='rejected_nonlinear_rollout; nonlinear=corridor@2',
+                     metrics=dict(completed_scored_laps=1)),
+                dict(id='middle', model_lap_s=9.15, status='mpc_rejected',
+                     attempt=1, started_epoch_s=200.,
+                     metrics=dict(completed_scored_laps=1))]))
+        result=self.dashboard.snapshot()['mpc_trials']
+        self.assertEqual(len(result['attempts']),1)
+        self.assertEqual(result['attempts'][0]['id'],'latest')
+        self.assertEqual(result['attempts'][0]['metrics']['completed_scored_laps'],1)
+
+    def test_unity_lap_count_has_independent_height_and_no_clipping(self):
+        html = Path(__file__).with_name('optimizer_dashboard.html').read_text()
+        self.assertEqual(html.count('function renderMpc(data){'),1)
+        self.assertNotIn('class="mpc-progress-label"',html)
+        self.assertIn("mpcAppend(summary,top,quick,bar)",html)
+        self.assertIn('mpc-summary-meta',html)
+        self.assertIn("slice(0,1)",html)
 
     def test_http_endpoints_are_local_read_only_and_no_generic_file_server(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(self.dashboard))

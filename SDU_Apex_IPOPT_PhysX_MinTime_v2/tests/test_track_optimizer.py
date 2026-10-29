@@ -103,6 +103,32 @@ def test_atomic_export_never_replaces_best_with_slower_or_uncertified(tmp_path):
     assert (tmp_path/'best.json').read_bytes() == first
 
 
+def test_verified_unity_reference_orients_optimizer_to_driven_laps():
+    ref = optimizer.REPO/'live_runs/iros_mpc_initial_20261029_02/raceline.csv'
+    if not ref.is_file():
+        pytest.skip('recorded successful IROS reference not mounted')
+    direction=optimizer.verified_unity_direction(ref)
+    assert direction['winding'] == 1
+    assert direction['signed_area_m2'] > 0
+    assert direction['geometry_orientation'] != 'clockwise'
+
+
+def test_opposite_winding_witness_rejected_by_simulator_direction_gate(tmp_path):
+    witness(tmp_path/'opposite.npz')
+    with pytest.raises(ValueError, match='opposite to verified Unity'):
+        optimizer.require_travel_orientation(tmp_path/'opposite.npz', 1, verified=True)
+
+
+def test_positive_winding_witness_accepted_by_simulator_direction_gate(tmp_path):
+    witness(tmp_path/'matching.npz')
+    with np.load(tmp_path/'matching.npz', allow_pickle=False) as data:
+        state, controls = data['state'].copy(), data['controls'].copy()
+    state[1] *= -1
+    state[2] *= -1
+    save_command_checkpoint(tmp_path/'matching.npz', state, controls, 'test-only', 0., 0)
+    optimizer.require_travel_orientation(tmp_path/'matching.npz', 1, verified=True)
+
+
 def test_counterclockwise_is_rejected_even_with_a_source_certificate(tmp_path):
     source = tmp_path/'source'
     source.mkdir()
@@ -214,6 +240,30 @@ def test_no_feasible_bootstrap_is_not_reported_as_raceline_success(pipeline, mon
     monkeypatch.setattr(optimizer, 'solve_witness', failed)
     state = optimizer.run_track(**settings, workers=1, refinements=1)
     assert state['status'] == 'no_validated_raceline'
+    assert not (settings['output']/'best.json').exists()
+
+
+def test_saved_command_seed_is_recertified_without_regenerating_geometry(pipeline, monkeypatch):
+    settings, calls = pipeline
+    seed = settings['output'].parent/'source_seed.npz'
+    witness(seed)
+    monkeypatch.setattr(optimizer, 'geometry_starts', lambda *a: pytest.fail('must reuse certified seed'))
+    state = optimizer.run_track(**settings, workers=1, command_seed=seed)
+    assert state['status'] == 'plateau' and state['best_lap_s'] == 1.
+    assert len(calls) == 0
+    assert (settings['output']/'input/source_seed.npz').read_bytes() == seed.read_bytes()
+    assert state['starts']['source_seed']['witness'].endswith('certified/witness.npz')
+
+
+def test_saved_command_seed_never_bypasses_current_certification(pipeline, monkeypatch):
+    settings, _ = pipeline
+    seed = settings['output'].parent/'source_seed.npz'
+    witness(seed)
+    def fail(*args):
+        return dict(status='no_validated_witness')
+    monkeypatch.setattr(optimizer, 'certify_witness', fail)
+    with pytest.raises(ValueError, match='fails current map/source certification'):
+        optimizer.run_track(**settings, workers=1, command_seed=seed)
     assert not (settings['output']/'best.json').exists()
 
 

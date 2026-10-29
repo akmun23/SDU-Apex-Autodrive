@@ -159,6 +159,8 @@ def main() -> int:
                         help="watch follower abort while enforcing target laps")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--stall-timeout-s", type=float, default=20.0)
+    parser.add_argument("--mpc-startup-timeout-s", type=float, default=75.,
+                        help="maximum time to first accepted MPC cycle, including localization")
     parser.add_argument("--post-target-lap-guard-s", type=float, default=0.5,
                         help="keep collision monitoring active after the target lap")
     parser.add_argument(
@@ -184,6 +186,7 @@ def main() -> int:
              (args.target_lap < 1 or args.collision_only or
               args.csv_command_test)) or
             args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0 or
+            args.mpc_startup_timeout_s <= 0.0 or
             args.post_target_lap_guard_s < 0.0 or
             args.minimum_lap_distance_m < 0.0):
         parser.error(
@@ -198,7 +201,8 @@ def main() -> int:
           + (", CSV follower abort, and target-lap completion"
              if args.csv_path_follow else "")
           + " subscriptions created", flush=True)
-    deadline = time.monotonic() + args.timeout_s
+    started = time.monotonic()
+    deadline = started + args.timeout_s
     target_lap_reached_at: float | None = None
     lap_counter_ahead_of_distance = False
     result = 2
@@ -212,6 +216,12 @@ def main() -> int:
             if watcher.mpc_fault_reason is not None:
                 print(f"SCREEN_ABORT: MPC fault ({watcher.mpc_fault_reason})",
                       flush=True)
+                result = 5
+                break
+            if args.mpc_run and not watcher.mpc_active and (
+                    time.monotonic() - started >= args.mpc_startup_timeout_s):
+                print("SCREEN_ABORT: MPC startup timeout; no accepted controller "
+                      "cycle or localized pose", flush=True)
                 result = 5
                 break
             if watcher.csv_command_event == "abort":

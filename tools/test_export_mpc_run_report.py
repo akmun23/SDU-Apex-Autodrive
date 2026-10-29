@@ -14,6 +14,24 @@ from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_lap_tracking_uses_counter_boundaries_not_wall_time_guess(self) -> None:
+        laps = [dict(bag_time=10., value=0), dict(bag_time=20., value=1),
+                dict(bag_time=30., value=2)]
+        def cycle(t, error):
+            return dict(bag_receipt_epoch_s=t, score_eligible=True, e_y_m=error,
+                        e_psi_rad=error/2, speed_error_mps=error/4,
+                        callback_to_gate_ms=7., status="accepted_optimal")
+        result = report._per_lap_tracking(laps, [cycle(11., .1),cycle(12., -.1),
+                                                   cycle(21., .02),cycle(22., .02),
+                                                   cycle(31., .2)])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["official_lap_index"], 1)
+        self.assertEqual(result[1]["official_lap_index"], 2)
+        self.assertAlmostEqual(result[0]["cross_track_rmse_m"], .1)
+        self.assertAlmostEqual(result[1]["cross_track_rmse_m"], .02)
+        self.assertEqual(result[1]["diagnostic_cycles"], 2)
+
+
     def test_rejected_refinement_prefix_comparison(self) -> None:
         row = report._cycle_row(3., 0., {"solver": {
             "refinement_prefix_selected_pass": 1,

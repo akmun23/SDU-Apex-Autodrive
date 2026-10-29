@@ -106,6 +106,44 @@ def bundle_map(image, config, assets):
     return bundled_image, bundled_yaml
 
 
+def verified_unity_direction(reference):
+    """Get travel orientation from a previously COMPLETED official Unity lap.
+
+    The ROS map's mathematical winding is not the competition driving-direction
+    convention. A bare occupancy grid has no authoritative travel direction.
+    """
+    reference = Path(reference).resolve(strict=True)
+    table = np.loadtxt(reference, delimiter=',', comments='#')
+    if table.ndim != 2 or table.shape[1] < 4 or len(table) < 25:
+        raise ValueError('Unity driving reference must contain a complete race loop')
+    xy = table[:, 1:3]
+    yaw = np.unwrap(table[:, 3])
+    if not np.isfinite(xy).all() or not np.isfinite(yaw).all():
+        raise ValueError('non-finite driving reference')
+    winding = round((yaw[-1]-yaw[0])/(2*math.pi))
+    signed_area_twice = float(np.sum(xy[:, 0]*np.roll(xy[:, 1],-1) -
+                                    xy[:, 1]*np.roll(xy[:, 0],-1)))
+    if abs(winding) != 1 or winding*signed_area_twice <= 0.:
+        raise ValueError('ambiguous Unity-verified direction or degenerate reference')
+    geometry_orientation = 'counterclockwise' if winding > 0 else 'clockwise'
+    return dict(reference=str(reference), sha256=file_hash(reference),
+                winding=winding, geometry_orientation=geometry_orientation,
+                signed_area_m2=signed_area_twice/2)
+
+
+def require_travel_orientation(witness, winding, *, verified=False):
+    with np.load(witness, allow_pickle=False) as data:
+        x = np.asarray(data['state'])
+    if x.ndim != 2 or x.shape[0] != 21 or not np.isfinite(x).all():
+        raise ValueError('invalid direction witness')
+    area_twice = float(np.sum(x[0, :-1]*x[1, 1:]-x[1, :-1]*x[0, 1:]))
+    actual = round((x[2,-1]-x[2,0])/(2*math.pi))
+    if actual != winding or area_twice*winding <= 0.:
+        if verified:
+            raise ValueError('witness travels opposite to verified Unity racing direction')
+        raise ValueError('only clockwise racelines may be exported')
+
+
 def source_parameters(repo):
     """Read initializer constants from the same plant, not a second config."""
     source = (repo/'f1tenth_mpc/src/unity_source_plant.cpp').read_text()
@@ -181,14 +219,17 @@ def geometric_seed(reference, destination, repo, speed_scale=1.):
     return count
 
 
-def publish_best(output, witness, lap_s, state, *, source_digest):
+def publish_best(output, witness, lap_s, state, *, source_digest,
+                 verified_direction=None):
     """Publish only independently certified immutable bundles; atomic pointer."""
     report_path = witness.with_name('report.json')
     checked = json.loads(report_path.read_text())
     if (checked.get('status') != 'source_witness_passed' or
             checked.get('source_plant_sha256') != source_digest):
         raise ValueError('cannot publish an uncertified or stale-source witness')
-    require_clockwise(witness)
+    require_travel_orientation(witness,
+        verified_direction['winding'] if verified_direction else -1,
+        verified=verified_direction is not None)
     if state.get('best_lap_s') is not None and lap_s >= state['best_lap_s']-1.e-9:
         return
     directory = output/'exports'/file_hash(witness)[:16]
@@ -215,7 +256,10 @@ def publish_best(output, witness, lap_s, state, *, source_digest):
     if 'raceline' not in published:
         raise ValueError('certified witness has no exported raceline')
     summary = dict(lap_s=lap_s, files=published, witness_sha256=file_hash(witness),
-                   source_plant_sha256=source_digest, direction='clockwise', source_only=True,
+                   source_plant_sha256=source_digest,
+                   direction='unity_verified' if verified_direction else 'clockwise',
+                   direction_reference_sha256=(verified_direction['sha256'] if verified_direction else None),
+                   source_only=True,
                    unity_validated=False, mpc_validated=False, runtime_promoted=False)
     save_json_checkpoint(directory/'manifest.json', summary)
     save_json_checkpoint(output/'best.json', summary)
@@ -223,15 +267,8 @@ def publish_best(output, witness, lap_s, state, *, source_digest):
 
 
 def require_clockwise(witness):
-    """Race direction is a hard export invariant, not a speed trade-off."""
-    with np.load(witness, allow_pickle=False) as data:
-        x = np.asarray(data['state'])
-    if x.ndim != 2 or x.shape[0] != 21 or not np.isfinite(x).all():
-        raise ValueError('invalid direction witness')
-    area_twice = np.sum(x[0, :-1]*x[1, 1:]-x[1, :-1]*x[0, 1:])
-    winding = round((x[2, -1]-x[2, 0])/(2*math.pi))
-    if winding != -1 or area_twice >= 0.:
-        raise ValueError('only clockwise racelines may be exported')
+    """Historical map-only default; prefer verified Unity reference on IROS."""
+    return require_travel_orientation(witness, -1)
 
 
 def geometry_starts(map_yaml, output, directions, cancel):
@@ -280,18 +317,28 @@ def geometry_starts(map_yaml, output, directions, cancel):
 
 def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
               phases=4, refinements=6, stagnation_iterations=250, prepare_only=False,
-              bootstrap_only=False, cancel=None):
+              bootstrap_only=False, cancel=None, driving_reference=None, hybrid_time=False,
+              command_seed=None):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     lock = (output/'.lock').open('a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     status_path = output/'optimizer.json'
+    verified = verified_unity_direction(driving_reference) if driving_reference else None
+    geometry_direction = verified['geometry_orientation'] if verified else 'clockwise'
     _, digest = production_command_map(REPO, REPO/'build_task/command_ocp')
     contract = dict(image_sha256=file_hash(image), metadata_sha256=file_hash(metadata),
         source_sha256=digest, optimizer_sha256=implementation_digest(),
         workers=workers, iterations=iterations, stagnation_iterations=stagnation_iterations, phases=phases,
-        refinements=refinements, direction='clockwise', schema=1)
+        refinements=refinements,
+        direction='unity_verified' if verified else 'clockwise',
+        direction_reference_sha256=verified['sha256'] if verified else None,
+        expected_winding=verified['winding'] if verified else -1, schema=2 if verified else 1)
+    contract['hybrid_time_search'] = hybrid_time
+    if command_seed is not None:
+        command_seed = Path(command_seed).resolve()
+        contract['command_seed_sha256'] = file_hash(command_seed)
     state = json.loads(status_path.read_text()) if status_path.exists() else dict(
         schema='sdu-map-optimizer/v1', contract=contract, best_lap_s=None,
         best_manifest=None, starts={}, status='running', source_only=True,
@@ -308,7 +355,8 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                 context['attempts'] = []
     if state.get('best_manifest'):
         previous_best = json.loads(Path(state['best_manifest']).read_text())
-        require_clockwise(Path(previous_best['files']['witness']))
+        require_travel_orientation(Path(previous_best['files']['witness']),
+            verified['winding'] if verified else -1, verified=verified is not None)
     def save(**values):
         state.update(values, pid=os.getpid(), updated_epoch_s=time.time())
         save_json_checkpoint(status_path, state)
@@ -316,18 +364,25 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
         save(stage=stage, **values)
         print(json.dumps(dict(stage=stage, best_lap_s=state['best_lap_s'], **values)), flush=True)
     def promote(path, lap):
-        publish_best(output, path, lap, state, source_digest=digest)
+        publish_best(output, path, lap, state, source_digest=digest,
+                     verified_direction=verified)
         save()
     try:
         save(status='running')
         # Bundle metric metadata as well as pixels; another track's origin or
         # resolution must never be silently paired with a saved shooting state.
         bundled_image, bundled_yaml = bundle_map(image, config, output/'input')
-        event('centerline_and_geometry')
-        starts = geometry_starts(bundled_yaml, output/'geometry', ('clockwise',), cancel)
+        event('source_seed_validation' if command_seed else 'centerline_and_geometry')
+        starts = ([('source_seed', command_seed)] if command_seed else
+                  geometry_starts(bundled_yaml, output/'geometry', (geometry_direction,), cancel))
+        if verified:
+            # User-facing basin names describe simulator driving authority, not
+            # the map XY coordinate system's mathematical winding.
+            starts = [(name.replace(geometry_direction, 'unity_race_direction'),path)
+                      for name,path in starts]
         if not starts:
             raise ValueError('no safe closed-circuit geometry extracted from supplied map')
-        save(geometry_starts=[dict(name=name, csv=str(path)) for name, path in starts])
+        save(geometry_starts=[] if command_seed else [dict(name=name, csv=str(path)) for name, path in starts])
         if prepare_only:
             event('prepared', status='prepared')
             return state
@@ -336,6 +391,19 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
             current = state['starts'].setdefault(name, dict(attempts=[], witness=None))
             base = output/'starts'/name
             base.mkdir(parents=True, exist_ok=True)
+            if command_seed is not None and current['witness'] is None:
+                immutable = output/'input/source_seed.npz'
+                if not immutable.exists():
+                    shutil.copyfile(command_seed, immutable)
+                if file_hash(immutable) != contract['command_seed_sha256']:
+                    raise ValueError('workspace contains a different command seed')
+                checked_dir = unused_directory(base/'certified')
+                checked = certify_witness(REPO, immutable, bundled_image, checked_dir)
+                if checked['status'] != 'source_witness_passed':
+                    raise ValueError('provided command seed fails current map/source certification')
+                current['witness'] = str(checked_dir/'witness.npz')
+                promote(Path(current['witness']), checked['trial_lap_s'])
+                save()
             if current['witness'] is None:
                 for scale in (1., 1.5, .75):
                     key = f'speed_{scale:g}'
@@ -404,6 +472,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                 map_path=bundled_image, output=campaign, target_seconds=None,
                 phases=phases, workers=workers, iterations=iterations, refinements=refinements,
                 stagnation_iterations=stagnation_iterations, coarse_fraction=.1,
+                hybrid_time=hybrid_time,
                 resume=(campaign/'campaign.json').exists(), cancel_requested=cancel,
                 on_improvement=promote)
             current['campaign_status'] = result['status']
@@ -467,6 +536,10 @@ def main():
     parser.add_argument('map', type=Path, help='PGM/image or ROS map YAML')
     parser.add_argument('yaml', nargs='?', type=Path, help='explicit metric YAML for the supplied image')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--driving-reference', type=Path, help=
+        'previously completed official Unity raceline; defines required travel direction')
+    parser.add_argument('--command-seed', type=Path,
+                        help='Continue from a saved witness; independently recertified on the supplied map')
     parser.add_argument('--workers', type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument('--iterations', type=int, default=1500, help='per solve; improving primals are restarted')
     parser.add_argument('--stagnation-iterations', type=int, default=250,
@@ -475,6 +548,8 @@ def main():
     parser.add_argument('--refinements', type=int, default=6)
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--bootstrap-only', action='store_true')
+    parser.add_argument('--hybrid-time-search', action='store_true',
+                        help='Add local minimum-time proposals followed by exact command repair')
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--watch', action='store_true')
     parser.add_argument('--describe', action='store_true', help='print resolved output/service metadata; no solve')
@@ -483,7 +558,21 @@ def main():
             or args.phases < 1 or args.refinements < 0 or args.stagnation_iterations < 5):
         parser.error('invalid solver search settings')
     image, metadata, config = resolve_map(args.map, args.yaml)
-    output = (args.output or default_output(image, config)).resolve()
+    driving_reference = args.driving_reference
+    if driving_reference is None and image.stem == 'autodrive_iros_2026_compete':
+        # Existing two-lap Unity/MPC result is authoritative for IROS direction.
+        driving_reference = REPO/'live_runs/iros_mpc_initial_20261029_02/raceline.csv'
+    if driving_reference is not None:
+        verified = verified_unity_direction(driving_reference)
+        # Never resume the geometrically opposite archived campaign.
+        output = (args.output or (default_output(image, config).with_name(
+            default_output(image, config).name+'_unity_'+verified['sha256'][:10]))).resolve()
+    else:
+        output = (args.output or default_output(image, config)).resolve()
+    if args.command_seed is not None and args.output is None:
+        output = output.with_name(output.name+'_seed_'+file_hash(args.command_seed)[:10])
+    if args.hybrid_time_search and args.output is None:
+        output = output.with_name(output.name+'_hybrid')
     if args.describe:
         print(json.dumps(dict(output=str(output), image=str(image), metadata=str(metadata),
             unit='sdu-track-optimizer-'+hashlib.sha256(str(output).encode()).hexdigest()[:12])))
@@ -507,6 +596,9 @@ def main():
             workers=args.workers, iterations=args.iterations, phases=args.phases,
             refinements=args.refinements, stagnation_iterations=args.stagnation_iterations,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
+            driving_reference=driving_reference,
+            hybrid_time=args.hybrid_time_search,
+            command_seed=args.command_seed,
             cancel=lambda: stop[0])
         return 0 if state['status'] in ('plateau', 'prepared', 'search_domain_reached') else 3
     except KeyboardInterrupt:

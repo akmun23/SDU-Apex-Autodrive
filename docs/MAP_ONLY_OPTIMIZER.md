@@ -43,7 +43,7 @@ Use `--output DIR` to select a durable workspace.
 tools/watch_raceline_gui.sh
 
 # Or select one explicitly (needed when several tracks have been optimized).
-tools/watch_raceline_gui.sh live_runs/optimizer_autodrive_iros_2026_compete_dc3c93097d
+tools/watch_raceline_gui.sh live_runs/optimizer_autodrive_iros_2026_compete_dc3c93097d_unity_acb4ff6081
 ```
 
 This opens **http://127.0.0.1:8765/** in your browser. It refreshes every two
@@ -181,12 +181,53 @@ validation remains a separate gate. A plateau is the best found within this
 multistart search, vehicle/domain constraints and 25 ms command grid—not a
 global minimum-time certificate.
 
-Racing is always **clockwise**, as specified by the user. The entrypoint no
-longer offers bidirectional or counterclockwise search. Only clockwise starts
-are generated, and export checks both negative yaw winding and negative signed
-path area before publishing an incumbent. Maps must describe an extractable closed circuit;
-ambiguous/open maps fail explicitly rather than silently selecting another
-track or inventing a feasible path.
+## Continuing a good line and searching near a plateau
+
+Continue from an existing command witness without rebuilding its geometry:
+
+```bash
+tools/run_raceline_campaign.sh track.yaml --command-seed /path/to/witness.npz --output live_runs/new_search
+```
+
+The seed is copied into the workspace and independently recertified on the
+supplied map with the current source model and required driving direction.
+An invalid seed cannot bypass bootstrap or enter `best.json`.
+
+The fixed-duration objective is now rescaled by a positive constant, keeping
+its exact minimizers and relative penalties while improving numerical scale.
+The scheduler tries progressively smaller duration reductions before spending
+all remaining phases on an unsuccessful large reduction. For a one-packet
+reduction, the source-selected single-gap initializer precedes global state
+resampling. These changes do not modify any physical parameter or certificate.
+
+`--hybrid-time-search` additionally enables a local minimum-time predictor
+after a failed shortening attempt. It interpolates literal 24/25 ms source
+transition maps to propose joint time, geometry and control changes, then
+rounds UP to complete command packets. This is an **uncertified initializer**;
+it supplies no new free-duration derivative to the runtime C ABI. The exact
+25 ms NLP and independent full-lap 1 ms certification remain mandatory.
+
+The predictor is optional because current tests demonstrate an improvement
+from cost scaling, but do not yet demonstrate a faster certified line from
+the relaxed time objective itself. It stores shorter incomplete primals,
+compares their exact defects with ordinary seeds, and can resume after an
+interruption. Its raw checkpoint schema is rejected by witness certification.
+The dashboard labels this stage as a time predictor requiring exact repair.
+
+The implementation/settings contract has changed: let an existing loaded
+process retain its saved workspace; use `--command-seed` and a new `--output`
+to evaluate the updated search without losing its certified progress.
+
+The measurements and remaining checks are recorded in
+[the hybrid search development log](development/HYBRID_RACELINE_SEARCH_20261029.md).
+
+The IROS racing direction is now derived from a previously completed
+Unity/MPC lap, rather than the signed-area naming convention of map XY
+coordinates. The older hardcoded direction produced a source-certified but
+Unity-incompatible trajectory. New optimizer workspaces require matching
+verified yaw winding and signed path area, and the old 7.350 s witness is
+archived, not promoted to the runtime. The map still supplies geometry and
+wall bounds; the completed Unity lap supplies **direction only**.
 
 Map pixels, metric metadata, production source, optimizer implementation and
 search settings are hashed. Restart refuses mismatched workspaces; use a new

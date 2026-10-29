@@ -9,14 +9,33 @@ run_id="${1:-iros_mpc_$(date +%Y%m%d_%H%M%S)}"
 run_dir="live_runs/$run_id"
 [[ ! -e "$run_dir" ]] || { echo "Run already exists: $run_dir" >&2; exit 2; }
 map=f1tenth_planning/maps/autodrive_iros_2026_compete.yaml
-trajectory=f1tenth_planning/trajectories/autodrive_iros_2026_compete/initial_raceline.csv
+trajectory=${SDU_APEX_IROS_TRAJECTORY_FILE:-f1tenth_planning/trajectories/autodrive_iros_2026_compete/initial_raceline.csv}
+trajectory="$(realpath -- "$trajectory")"
+[[ "$trajectory" == "$repo_root/"* ]] || {
+  echo "Trajectory must resolve inside the repository" >&2; exit 2;
+}
+trajectory_container="/workspace/src/${trajectory#"$repo_root/"}"
+total_laps="${SDU_APEX_IROS_TOTAL_LAPS:-2}"
+timeout_s="${SDU_APEX_IROS_WALL_TIMEOUT_S:-240}"
+[[ "$total_laps" =~ ^[0-9]+$ && "$total_laps" -ge 2 &&
+   "$timeout_s" =~ ^[0-9]+$ && "$timeout_s" -ge 60 ]] || {
+   echo "Total laps must be >=2 and timeout >=60 seconds" >&2; exit 2;
+}
 [[ -f "$map" && -f "$trajectory" ]] || { echo 'Build the IROS map/raceline first.' >&2; exit 2; }
 image="${SDU_APEX_MAPPING_IMAGE:-sdu-apex-autodrive:iros-mapping}"
 controller="${run_id}_controller"
 simulator="${run_id}_sim"
 recorder="rec_${run_id}"
 mkdir -p "$run_dir"
-SDU_APEX_IMAGE="$image" tools/build_competition.sh >"$run_dir/build.log" 2>&1
+if [[ "${SDU_APEX_IROS_SKIP_BUILD:-0}" == 1 ]]; then
+  docker image inspect "$image" >/dev/null 2>&1 || {
+    echo "The requested prebuilt IROS controller image is missing" >&2; exit 1;
+  }
+  printf "Using existing controller image %s\n" "$image" >"$run_dir/build.log"
+else
+  SDU_APEX_IMAGE="$image" tools/build_competition.sh >"$run_dir/build.log" 2>&1
+fi
+docker image inspect --format '{{.Id}}' "$image" >"$run_dir/controller_image_id.txt"
 cp -- "$map" "$run_dir/map.yaml"
 cp -- "$trajectory" "$run_dir/raceline.csv"
 cp -- f1tenth_localization/config/amcl_iros.yaml "$run_dir/amcl_overlay.yaml"
@@ -30,13 +49,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 docker run --rm --name "$controller" --network=host --ipc=host --privileged --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
-  -v "$repo_root:/workspace/src:rw" --entrypoint /bin/bash "$image" -lc '
+  -v "$repo_root:/workspace/src:rw" -e "SDU_APEX_TRAJECTORY_FILE=$trajectory_container" --entrypoint /bin/bash "$image" -lc '
     source /opt/ros/humble/setup.bash &&
     source /home/autodrive_devkit/install/setup.bash &&
     source /workspace/install/setup.bash &&
     exec ros2 launch sdu_apex_autodrive controller.launch.py \
       map_yaml:=/workspace/src/f1tenth_planning/maps/autodrive_iros_2026_compete.yaml \
-      trajectory_file:=/workspace/src/f1tenth_planning/trajectories/autodrive_iros_2026_compete/initial_raceline.csv \
+      trajectory_file:="$SDU_APEX_TRAJECTORY_FILE" \
       amcl_parameter_overlay:=/workspace/src/f1tenth_localization/config/amcl_iros.yaml \
       mpc_publish_diagnostics:=true with_rviz:=false
   ' >"$run_dir/controller.log" 2>&1 &
@@ -57,14 +76,14 @@ wait_ready() {
 wait_ready "$run_dir/controller.log" 'Loaded MPC trajectory'
 wait_ready "$run_dir/recorder.log" 'Recording'
 SDU_APEX_WATCH_STALL_TIMEOUT_S=30 SDU_APEX_WATCH_MIN_DISTANCE_PER_LAP_M=25 \
-  tools/watch_sim_run.sh "$controller" "$simulator" "$recorder" mpc-lap-2 240 \
+  tools/watch_sim_run.sh "$controller" "$simulator" "$recorder" "mpc-lap-$total_laps" "$timeout_s" \
   >"$run_dir/watcher.log" 2>&1 &
 watcher_job=$!
 wait_ready "$run_dir/watcher.log" 'WATCHER_READY'
 SDU_APEX_SIM_TRACK=iros SDU_APEX_SIM_MODE=batchmode SDU_APEX_SIM_LOG_FILE=/dev/null \
   SDU_APEX_SIM_CONTAINER="$simulator" tools/start_simulator.sh >"$run_dir/simulator.log" 2>&1 &
 simulator_job=$!
-echo "IROS production trial running: $run_dir"
+echo "IROS production trial: $run_dir, target $total_laps laps, trajectory $trajectory"
 set +e
 wait "$watcher_job"
 result=$?

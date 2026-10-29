@@ -87,6 +87,7 @@ class LogObserver:
         self.lines = deque(maxlen=90)
         self.events = deque(maxlen=30)
         self.points = deque(maxlen=1600)
+        self.ipopt_points = deque(maxlen=2000)
         self.solve = {}
         self.output = None
         self.completed = False
@@ -101,24 +102,34 @@ class LogObserver:
         if not line:
             return
         self.lines.append(line[:2000])
+        # This specific callback exception is an INTENTIONAL IPOPT
+        # early-exit after checkpointing. Preserve the original stack trace
+        # in the raw logfile, but describe the outcome correctly to the user.
+        if line.startswith('RuntimeError: command feasibility stagnated; durable best iterate saved'):
+            self.events.append(dict(event='feasibility_stagnation',
+                                    iteration=self.live_iteration))
         try:
             item = json.loads(line, parse_constant=lambda _: None)
         except (ValueError, TypeError):
             item = None
         if isinstance(item, dict):
-            if item.get('event') == 'solve':
+            if item.get('event') in ('solve', 'minimum_time_prediction'):
                 self.output = item.get('output')
                 self.points.clear()
+                self.ipopt_points.clear()
                 self.solve = {}
                 self.completed = False
                 self.live_iteration = None
                 self.ipopt = {}
-            if item.get('stage') == 'production-command witness':
+            if item.get('stage') in ('production-command witness', 'minimum-time predictor setup'):
                 self.solve = item
                 self.points.clear()
+                self.ipopt_points.clear()
                 self.live_iteration = None
                 self.ipopt = {}
                 self.completed = False
+            if item.get('stage') == 'minimum-time predictor':
+                self.solve['predicted_lap_s'] = item.get('predicted_lap_s')
             if 'iteration' in item and 'max_constraint_violation' in item:
                 self.live_iteration = int(item['iteration'])
                 self.add_point(item['iteration'], item['max_constraint_violation'])
@@ -137,6 +148,7 @@ class LogObserver:
             self.ipopt = dict(iteration=int(iteration), objective=finite(objective),
                               primal_infeasibility=finite(primal),
                               dual_infeasibility=finite(dual), restoration=bool(restoration))
+            self.ipopt_points.append(dict(self.ipopt))
 
     def add_point(self, iteration, residual, objective=None, dual=None, restoration=False):
         point = dict(iteration=int(iteration), residual=finite(residual),
@@ -158,6 +170,7 @@ class LogObserver:
             self.lines.clear()
             self.events.clear()
             self.points.clear()
+            self.ipopt_points.clear()
             self.solve = {}
             self.output = None
             self.live_iteration = None
@@ -190,7 +203,7 @@ def process_info(pid):
         command = Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode()
         status = dict(line.split(':', 1) for line in Path(f'/proc/{pid}/status').read_text().splitlines()
                       if ':' in line)
-        verified = 'track_optimizer.py' in command
+        verified = ('track_optimizer.py' in command or 'continue_direct_challenger.py' in command)
         return dict(alive=verified and not status.get('State', '').strip().startswith('Z'),
                     verified=verified, pid=pid,
                     rss_mb=float(status.get('VmRSS', '0 kB').split()[0])/1024,
@@ -244,15 +257,17 @@ class Dashboard:
             active_name = state.get('active_start')
             campaign = (self.optional(f'starts/{active_name}/campaign/campaign.json')
                         if active_name else {})
-            active = campaign.get('active', {}) if state.get('stage') == 'adaptive_minimum_time_search' else (
-                state.get('starts', {}).get(active_name, {}).get('active', {}))
+            predicting = campaign.get('active_predictor')
+            active = ((predicting or campaign.get('active') or {})
+                      if state.get('stage') == 'adaptive_minimum_time_search' else (
+                          state.get('starts', {}).get(active_name, {}).get('active') or {}))
             context = dict(active)
             checkpoint = None
             report = None
             if active.get('output'):
                 try:
                     folder = self.workspace.path(active['output'])
-                    saved = folder/'best_iterate.npz'
+                    saved = folder/('best_predictor.npz' if predicting else 'best_iterate.npz')
                     if saved.is_file():
                         checkpoint = dict(self.workspace.read(saved, checkpoint_data),
                                           saved_epoch_s=saved.stat().st_mtime,
@@ -270,8 +285,9 @@ class Dashboard:
                 matches = self.log.solve.get('trial_lap_s') == state.get('trial_lap_s')
             solver = dict(self.log.solve) if matches else {}
             points = list(self.log.points) if matches else []
+            ipopt_points = list(self.log.ipopt_points) if matches else []
             trial = TRIAL.fullmatch(active.get('key', ''))
-            trial_s = finite(solver.get('trial_lap_s'))
+            trial_s = finite(solver.get('predicted_lap_s') if predicting else solver.get('trial_lap_s'))
             if trial_s is None:
                 trial_s = int(trial[1])*.025 if trial else (
                     finite(state.get('trial_lap_s')) if state.get('stage') == 'periodic_bootstrap' else None)
@@ -293,11 +309,57 @@ class Dashboard:
                           'quiet' if age is None or age > 90 else 'active')
             attempts = campaign.get('attempts', [])
             context.update(trial_lap_s=trial_s, phase=int(trial[2]) if trial else None,
-                           strategy=trial[3] if trial else None)
+                           strategy='minimum-time predictor' if predicting else trial[3] if trial else None,
+                           time_predictor=bool(predicting))
             best_summary = {key: best.get(key) for key in (
                 'lap_s', 'direction', 'source_only', 'unity_validated', 'mpc_validated', 'runtime_promoted')}
             best_summary['available_downloads'] = [key for key in (
                 'raceline', 'raceline_with_witness', 'validation') if best.get('files', {}).get(key)]
+            mpc_state = self.optional('mpc_validation/state.json', {})
+            mpc_attempts = []
+            for trial in sorted(
+                mpc_state.get('attempts', []),
+                key=lambda attempt: (finite(attempt.get('started_epoch_s')) or
+                                     finite(attempt.get('finished_epoch_s')) or
+                                     finite(attempt.get('queued_epoch_s')) or 0.,
+                                     int(attempt.get('attempt') or 0)),
+                reverse=True,
+            )[:1]:
+                compact = {key: trial.get(key) for key in (
+                    'id', 'model_lap_s', 'run_id', 'status', 'reason', 'attempt',
+                    'started_epoch_s', 'finished_epoch_s', 'analysis_error',
+                    'trajectory_sha256', 'mpc_validated', 'unity_trial_completed')}
+                metrics = trial.get('metrics') or {}
+                compact['metrics'] = {key: metrics.get(key) for key in (
+                    'warmup_lap_s', 'scored_lap_times_s', 'completed_scored_laps',
+                    'per_official_lap_tracking',
+                    'total_scored_s', 'average_scored_s', 'best_scored_s',
+                    'worst_scored_s', 'stddev_scored_s', 'tracking',
+                    'absolute_error_distributions', 'status_counts', 'cycle_reason_counts',
+                    'nonlinear_failure_reason_counts', 'controller_cycles',
+                    'score_cutoff_reason', 'gate_timing_ms', 'jacobian_profile',
+                    'solver_profile', 'solver_termination_counts',
+                    'solver_stop_reason_counts')}
+                if compact['status'] == 'running':
+                    run_id = compact.get('run_id') or ''
+                    # Only read logs from explicitly named auto-trial directories.
+                    if re.fullmatch(r'apex_mpc_[a-f0-9]{16}_a[0-9]{2,}', run_id):
+                        watcher = REPO/'live_runs'/run_id/'watcher.log'
+                        if watcher.is_file() and not watcher.is_symlink():
+                            try:
+                                lines = watcher.read_text(errors='replace').splitlines()
+                                counts = [int(m.group(1)) for line in lines[-300:]
+                                          if (m := re.fullmatch(r'lap_count=(\d+)', line))]
+                                compact['official_laps_seen'] = max(counts, default=0)
+                                aborts = [line for line in lines[-100:] if 'SCREEN_ABORT:' in line]
+                                if aborts:
+                                    compact['live_failure'] = aborts[-1][:400]
+                            except OSError:
+                                pass
+                mpc_attempts.append(compact)
+            mpc_trials = dict(enabled=bool(mpc_state), pending=len(mpc_state.get('pending', [])),
+                              worker=mpc_state.get('worker', {'status': 'not_configured'}),
+                              attempts=mpc_attempts)
             result = dict(workspace=str(self.workspace.root), name=self.workspace.root.name,
                           now_epoch_s=now, status=status, recorded_status=state.get('status'),
                           stage=state.get('stage', 'waiting'), active_start=active_name,
@@ -307,12 +369,12 @@ class Dashboard:
                           validation=validation, history=history, active=context,
                           solver=solver, iteration=self.log.live_iteration if matches else None,
                           ipopt=dict(self.log.ipopt) if matches else {},
-                          checkpoint=checkpoint, residuals=points, solve_report=report,
+                          checkpoint=checkpoint, residuals=points, ipopt_history=ipopt_points, solve_report=report,
                           completed_attempts=len(attempts),
                           passed_attempts=sum(bool(v.get('certified')) for v in attempts),
                           geometry_starts=state.get('geometry_starts', []),
                           attempts=attempts[-12:][::-1], events=list(self.log.events)[::-1],
-                          log_lines=list(self.log.lines), warnings=list(self.warnings),
+                          log_lines=list(self.log.lines), warnings=list(self.warnings), mpc_trials=mpc_trials,
                           error=state.get('error'))
             self.snapshot_cache = result
             self.last_poll = time.monotonic()
@@ -329,7 +391,10 @@ class Dashboard:
             layers = []
             starts = state.get('geometry_starts', [])
             if starts:
-                path = self.workspace.path(starts[0]['csv']).with_name('centerline.csv')
+                try:
+                    path = self.workspace.path(starts[0]['csv']).with_name('centerline.csv')
+                except ValueError:
+                    path = self.workspace.path('geometry/unity_reverse_seed/centerline.csv')
                 if path.is_file():
                     layers.append(dict(name='Extracted centerline', kind='centerline',
                                        points=self.workspace.read(path, reference_points)))

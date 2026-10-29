@@ -7,11 +7,97 @@
 <style>
 :root{color-scheme:dark;--bg:#10141c;--panel:#181f2b;--panel2:#1d2634;--stroke:#2c3748;--muted:#a4b2c7;--text:#edf3fc;--green:#54e3b5;--blue:#73afff;--amber:#f5bd67;--red:#ff8194}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,sans-serif}button,a{font:inherit}a{color:var(--blue)}main{max-width:1510px;margin:auto;padding:30px 34px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:22px}h1{font-size:27px;letter-spacing:-.9px;margin:0}h2{font-size:16px;margin:0 0 4px}p{margin:0}.eyebrow{text-transform:uppercase;letter-spacing:2px;font-size:10px;color:var(--green);font-weight:750;margin-bottom:4px}.muted,.description{color:var(--muted)}.description{font-size:12px}.status{display:inline-flex;gap:8px;align-items:center;padding:7px 13px;border:1px solid var(--stroke);border-radius:30px;background:var(--panel);font-size:12px}.dot{background:var(--green);width:7px;height:7px;border-radius:50%;box-shadow:0 0 12px #54e3b544}.status[data-kind="quiet"] .dot{background:var(--amber)}.status[data-kind="error"] .dot{background:var(--red)}.header-right{text-align:right}.connection{font-size:11px;color:var(--muted);margin-top:6px}.notice{background:#202b2c;border:1px solid #35504b;border-radius:10px;padding:11px 16px;color:#b7d9d1;font-size:12px;margin-bottom:18px}.error{background:#402331;border-color:#774050;color:#ffd1d8}.hidden{display:none!important}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}.card,.panel{border:1px solid var(--stroke);border-radius:13px;background:var(--panel)}.card{padding:18px 20px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px}.value{font-size:34px;line-height:1.3;font-weight:650;letter-spacing:-1.1px;font-variant-numeric:tabular-nums;margin:6px 0 3px}.value small{font-size:15px;color:var(--muted);font-weight:400;letter-spacing:0}.green{color:var(--green)}.blue{color:var(--blue)}.amber{color:var(--amber)}.sub{color:var(--muted);font-size:12px;min-height:18px}.layout{display:grid;grid-template-columns:minmax(290px,.85fr) minmax(450px,1.65fr);gap:18px}.panel{padding:20px}.track-panel{grid-row:span 2;display:flex;flex-direction:column;min-height:710px}.panel-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.tag{font-size:10px;padding:3px 8px;border:1px solid var(--stroke);border-radius:5px;color:var(--muted);white-space:nowrap}.canvas-box{position:relative;min-height:190px;height:210px;margin-top:12px}.canvas-box canvas{width:100%;height:100%;display:block}.track-canvas{flex:1;min-height:470px;position:relative;margin-top:14px}.track-canvas canvas{width:100%;height:100%;display:block;position:absolute;inset:0}.legend{display:flex;gap:18px;font-size:11px;color:var(--muted);flex-wrap:wrap;margin-top:12px;align-items:center}.legend span{display:inline-flex;align-items:center;gap:6px}.line{width:19px;height:2px;background:var(--green)}.line.gray{background:#aeb9c9}.line.blue{background:var(--blue)}.line.amber{background:var(--amber)}.graph-label{font-size:11px;color:var(--muted);margin-top:5px}.progress-track{height:5px;background:#2d3747;border-radius:3px;margin:15px 0 7px;overflow:hidden}.progress-fill{height:100%;width:0;background:var(--blue);transition:width .5s}.stage-panel{margin-top:18px}.stages{display:flex;align-items:stretch;margin-top:16px;gap:6px}.stage{flex:1;padding:9px 12px;background:#141b26;border-radius:7px;color:#7e8ca3;font-size:12px;border:1px solid transparent}.stage.active{color:var(--green);background:#20352f;border-color:#34554b}.stage.done{color:#beccdc}.stage b{display:block;font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:3px}.details{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:17px}.detail{min-width:0}.detail strong{display:block;margin-top:4px;font-size:13px;font-weight:500;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.detail .label{font-size:10px}.bottom{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.attempts{margin-top:12px;width:100%;border-collapse:collapse;font-size:12px}.attempts th{text-align:left;font-weight:500;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}.attempts td,.attempts th{padding:9px 5px;border-bottom:1px solid #283243}.attempts td:last-child,.attempts th:last-child{text-align:right}.attempts tr:last-child td{border:0}.attempts td:first-child{overflow-wrap:anywhere;max-width:260px}.feed{list-style:none;padding:0;margin:10px 0 0;max-height:260px;overflow:auto}.feed li{padding:9px 0;border-bottom:1px solid #283243;font-size:12px}.feed li:last-child{border:0}.feed small{color:var(--muted);display:block;margin-top:2px}.downloads{display:flex;gap:8px;flex-wrap:wrap;margin-top:17px}.button{display:inline-flex;align-items:center;gap:6px;text-decoration:none;border:1px solid var(--stroke);border-radius:6px;padding:6px 10px;background:var(--panel2);font-size:11px;color:var(--text);cursor:pointer}.button:hover{border-color:var(--blue)}.button[disabled]{opacity:.45;cursor:default}.controls{display:flex;gap:7px;align-items:center}.controls button{font-size:11px}details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px}pre{background:#0c1119;border:1px solid var(--stroke);border-radius:9px;padding:15px;max-height:340px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#b7c6db;font:11px/1.65 ui-monospace,monospace}footer{display:flex;justify-content:space-between;gap:16px;margin-top:20px;font-size:10px;color:#8f9db2}#workspace{overflow-wrap:anywhere}.metrics-row{display:flex;gap:24px;font-size:11px;color:var(--muted);margin-top:12px}.metrics-row strong{color:var(--text);font-weight:500}.empty{padding:24px 8px;text-align:center;color:var(--muted);font-size:12px}.nowrap{white-space:nowrap}@media(max-width:1000px){main{padding:22px 18px}.cards{grid-template-columns:1fr 1fr}.layout{grid-template-columns:1fr}.track-panel{grid-row:auto;min-height:450px}.track-canvas{min-height:360px}.bottom{grid-template-columns:1fr}.details{grid-template-columns:1fr 1fr}}@media(max-width:550px){header{align-items:flex-start}h1{font-size:21px}.value{font-size:27px}.card{padding:14px}.cards{gap:9px}.panel{padding:15px}.stages{flex-wrap:wrap}.stage{flex-basis:45%}.header-right{min-width:115px}.metrics-row{flex-wrap:wrap;gap:10px}}
+
+/* MPC trials: user-first status, lap performance, optional engineering details */
+.mpc-section{margin-top:18px}
+.mpc-section .panel-head{align-items:center}
+.mpc-trial-list{display:grid;gap:14px;margin-top:18px}
+.mpc-trial{border:1px solid var(--stroke);border-radius:12px;background:#151d28;overflow:hidden;margin:0}
+.mpc-trial[open]{border-color:#46566a;box-shadow:0 7px 30px #060c1835}
+.mpc-trial>summary{list-style:none;cursor:pointer;padding:18px 20px;display:block;color:var(--text);font-size:14px}
+.mpc-trial>summary::-webkit-details-marker{display:none}
+.mpc-trial>summary:focus-visible{outline:2px solid var(--blue);outline-offset:-3px}
+.mpc-trial>summary:hover{background:#202b395c}
+.mpc-summary-top{display:flex;align-items:center;gap:12px;justify-content:space-between;flex-wrap:wrap}
+.mpc-summary-name{font-size:16px;font-weight:680;letter-spacing:-.25px}
+.mpc-summary-sub{font-size:12px;color:var(--muted);margin-top:4px}
+.mpc-summary-meta{display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:11px}
+.mpc-summary-meta strong{color:var(--text);font-variant-numeric:tabular-nums;font-weight:620}
+.mpc-expand-hint{font-size:12px;color:var(--blue);white-space:nowrap}
+.mpc-expand-hint:after{content:"⌄";margin-left:7px;display:inline-block;font-size:18px;vertical-align:-1px;transition:transform .15s}
+.mpc-trial[open] .mpc-expand-hint:after{transform:rotate(180deg)}
+.mpc-status-pill{font-size:11px;font-weight:680;border-radius:30px;padding:5px 10px;border:1px solid var(--stroke);background:#222d39;color:var(--muted);line-height:1.2}
+.mpc-status-pill.good{color:#8be9c9;background:#193e33;border-color:#2b6b56}
+.mpc-status-pill.bad{color:#ffb3c0;background:#452834;border-color:#80505c}
+.mpc-status-pill.warn{color:#ffdc9f;background:#473722;border-color:#786343}
+.mpc-status-pill.live{color:#a9d1ff;background:#1d3856;border-color:#42688e}
+.mpc-progress{height:7px;background:#354155;border-radius:9px;overflow:hidden;margin-top:14px}
+.mpc-progress>span{height:100%;display:block;background:var(--blue);border-radius:9px;transition:width .35s}
+.mpc-trial.is-good .mpc-progress>span{background:var(--green)}
+.mpc-trial.is-bad .mpc-progress>span{background:var(--amber)}
+.mpc-body{border-top:1px solid var(--stroke);padding:20px}
+.mpc-section-title{font-size:13px;color:var(--text);font-weight:670;margin:17px 0 10px}
+.mpc-section-title:first-child{margin-top:0}
+.mpc-explainer{border:1px solid #3d4b61;border-left:3px solid var(--blue);border-radius:9px;background:#1c2839;padding:13px 16px;display:grid;gap:6px}
+.mpc-explainer.is-bad{border-color:#6e414c;border-left-color:var(--red);background:#30212c}
+.mpc-explainer.is-good{border-color:#326454;border-left-color:var(--green);background:#1b302e}
+.mpc-explainer strong{font-size:14px;font-weight:690}
+.mpc-explainer p{color:var(--muted);font-size:12.5px;line-height:1.55}
+.mpc-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:18px 0}
+.mpc-fact{padding:14px 16px;background:#202b39;border:1px solid #334154;border-radius:10px;min-width:0}
+.mpc-fact-label{font-size:11px;color:var(--muted);margin-bottom:5px}
+.mpc-fact-value{font-size:24px;font-weight:720;font-variant-numeric:tabular-nums;line-height:1.2;letter-spacing:-.5px}
+.mpc-fact-unit{font-size:13px;color:var(--muted);font-weight:500;letter-spacing:0}
+.mpc-fact-foot{font-size:11px;color:var(--muted);margin-top:5px;min-height:14px}
+.mpc-grid-2{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px;margin-top:14px}
+.mpc-subpanel{border:1px solid var(--stroke);border-radius:10px;padding:15px;background:#192431;min-width:0}
+.mpc-subpanel h3{font-size:14px;margin:0 0 4px;letter-spacing:-.15px}
+.mpc-subpanel .mpc-helper{font-size:11.5px;color:var(--muted);margin-bottom:13px}
+.mpc-lap-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12px}
+.mpc-lap-table th{font-size:10.5px;text-transform:uppercase;letter-spacing:.45px;color:var(--muted);font-weight:600;text-align:left}
+.mpc-lap-table th,.mpc-lap-table td{padding:7px 6px;border-bottom:1px solid #334154}
+.mpc-lap-table tr:last-child td{border-bottom:0}
+.mpc-lap-table th:last-child,.mpc-lap-table td:last-child{text-align:right}
+.mpc-lap-table .fastest{color:var(--green);font-weight:680}
+.mpc-lap-table .slowest{color:var(--amber)}
+.mpc-lap-table .muted-value{color:var(--muted)}
+.mpc-lap-time-cell{display:flex;align-items:center;gap:10px}
+.mpc-lap-time-cell .mpc-tick{width:36%;height:5px;background:#344052;border-radius:4px;overflow:hidden;flex-shrink:0}
+.mpc-lap-time-cell .mpc-tick i{display:block;height:100%;background:var(--blue);border-radius:4px}
+.mpc-lap-time-cell .mpc-tick.fastest i{background:var(--green)}
+.mpc-tracking-score{display:flex;align-items:baseline;gap:7px;margin:18px 0 8px}
+.mpc-tracking-score strong{font-size:34px;line-height:1;font-weight:730;color:var(--text);font-variant-numeric:tabular-nums}
+.mpc-tracking-score span{font-size:13px;color:var(--muted)}
+.mpc-tracking-details{display:grid;gap:10px;margin-top:18px}
+.mpc-tracking-line{display:flex;gap:16px;align-items:baseline;justify-content:space-between;font-size:12px;border-bottom:1px solid #2b394a;padding-bottom:8px}
+.mpc-tracking-line:last-child{border:0;padding-bottom:0}
+.mpc-tracking-line strong{font-variant-numeric:tabular-nums;font-weight:680;white-space:nowrap}
+.mpc-advanced{border:1px solid var(--stroke);border-radius:9px;padding:0;margin-top:16px;background:#17212d}
+.mpc-advanced>summary{color:var(--text);font-size:12px;font-weight:630;padding:12px 15px;list-style:none;cursor:pointer}
+.mpc-advanced>summary::-webkit-details-marker{display:none}
+.mpc-advanced>summary:before{content:"＋";color:var(--blue);margin-right:9px}
+.mpc-advanced[open]>summary:before{content:"－"}
+.mpc-advanced-inner{padding:4px 15px 16px;border-top:1px solid var(--stroke)}
+.mpc-diag-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:13px}
+.mpc-diag-card{background:#202b39;border:1px solid #344052;border-radius:8px;padding:12px}
+.mpc-diag-card small{display:block;color:var(--muted);font-size:11px}
+.mpc-diag-card strong{display:block;font-size:16px;margin-top:5px}
+.mpc-code-title{font-size:12px;font-weight:650;margin:17px 0 6px}
+.mpc-code{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;padding:10px 12px;border:1px solid #354155;border-radius:7px;background:#0d1520;color:#c8d6e9;user-select:text}
+.mpc-footer-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:15px}
+.mpc-footer-note{font-size:11px;color:var(--muted)}
+.mpc-footnote{font-size:11.5px;color:var(--muted);margin-top:12px;line-height:1.5}
+@media(max-width:1050px){.mpc-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.mpc-grid-2{grid-template-columns:1fr}}
+@media(max-width:650px){.mpc-trial>summary{padding:14px}.mpc-body{padding:14px}.mpc-summary-name{font-size:14px}.mpc-fact-value{font-size:21px}.mpc-fact{padding:12px}.mpc-diag-grid{grid-template-columns:1fr 1fr}.mpc-lap-time-cell .mpc-tick{display:none}}
+
+
 </style>
 </head>
 <body>
 <main>
-<header><div><div class="eyebrow">SDU APEX / trajectory lab</div><h1>Raceline optimizer</h1><p class="description" id="trackName">Connecting to the live workspace…</p></div><div class="header-right"><div id="status" class="status" role="status"><span class="dot"></span><span id="statusText">Connecting</span></div><div id="connection" class="connection">Read-only · refresh every 2 seconds</div></div></header>
+<header><div><div class="eyebrow">SDU APEX / trajectory lab</div><h1>Raceline optimizer</h1><p class="description" id="trackName">Connecting to the live workspace…</p></div><div class="header-right"><div id="status" class="status" role="status"><span class="dot"></span><span id="statusText">Connecting</span></div><div id="connection" class="connection">Read-only · refresh every 2 seconds</div>
+<button class="button" id="pauseDisplay" type="button" style="margin-top:8px">Pause live display</button>
+</div></header>
 <div id="errorBanner" class="notice error hidden" role="alert"></div>
 <div class="notice">Source-model results only. A saved line has passed independent model checks; Unity driving and MPC validation are separate. This viewer cannot change or stop the optimizer.</div>
 <section class="cards" aria-label="Live optimizer metrics">
@@ -21,18 +107,55 @@
 <div class="card"><div class="label">Best saved residual</div><div class="value amber" id="bestResidual">—</div><div class="sub" id="residualSub">Checkpoint not yet written</div></div>
 </section>
 <section class="layout">
-<div class="panel track-panel"><div class="panel-head"><div><h2>Track & best line</h2><p class="description">Map coordinates · clockwise</p></div><span class="tag">SAVED RESULT</span></div><div class="track-canvas"><canvas id="track" aria-label="Occupancy map with best validated raceline and extracted centerline"></canvas></div><div class="legend"><span><i class="line"></i>Best validated</span><span><i class="line gray"></i>Centerline</span></div><div class="downloads" id="downloads"></div><p id="mapNote" class="description" style="margin-top:12px">Loading map…</p></div>
-<div class="panel"><div class="panel-head"><div><h2>Is this solve converging?</h2><p class="description">Actual constraint residual · checked every 5 iterations · lower is better</p></div><span class="tag" id="solveTag">WAITING</span></div><div class="canvas-box"><canvas id="residualChart" aria-label="Current solve constraint residual versus iteration"></canvas></div><div class="legend"><span><i class="line blue"></i>Checked residual</span><span><i class="line"></i>Best observed</span><span><i class="line amber"></i>Solver candidate gate (10⁻⁴)</span></div><div class="metrics-row"><span>Last checked <strong id="currentResidual">—</strong></span><span>Initial <strong id="initialResidual">—</strong></span><span>Improvement <strong id="residualGain">—</strong></span></div><p class="graph-label">Log scale. Residual combines scaled constraints; it is not a position error. Crossing the line alone does not certify a lap.</p></div>
+<div class="panel track-panel"><div class="panel-head"><div><h2>Track & best line</h2><p class="description">Map coordinates · Unity-verified direction</p></div><span class="tag">SAVED RESULT</span></div><div class="track-canvas"><canvas id="track" aria-label="Occupancy map with best validated raceline and extracted centerline"></canvas></div><div class="legend"><span><i class="line"></i>Best validated</span><span><i class="line gray"></i>Centerline</span></div><div class="downloads" id="downloads"></div><p id="mapNote" class="description" style="margin-top:12px">Loading map…</p></div>
+<div class="panel"><div class="panel-head"><div><h2>Verified constraint residual</h2><p class="description">Independent constraint check every 5 solver iterations · lower is better</p></div><span class="tag" id="solveTag">WAITING</span></div>
+<div class="canvas-box"><canvas id="residualChart" aria-label="Independently checked constraint residual history"></canvas></div>
+<div class="legend"><span><i class="line blue"></i>Actual checked residual</span><span><i class="line"></i>Best observed actual residual</span><span><i class="line amber"></i>Candidate threshold (10⁻⁴)</span></div>
+<div class="metrics-row"><span>Last checked <strong id="currentResidual">—</strong></span><span>Initial <strong id="initialResidual">—</strong></span><span>Best reduction <strong id="residualGain">—</strong></span></div>
+<p class="graph-label">Evaluated directly against model constraint bounds. This is the feasibility metric used to save the best primal; a low residual alone does not certify wall clearance, periodicity or Unity driving.</p>
+<div style="border-top:1px solid var(--stroke);margin:20px 0 16px"></div>
+<div class="panel-head"><div><h2>IPOPT raw progress</h2><p class="description">Internal primal infeasibility (inf_pr) · every printed iteration</p></div><span class="tag" id="ipoptMode">DIAGNOSTIC</span></div>
+<div class="canvas-box" style="height:160px"><canvas id="ipoptChart" aria-label="IPOPT internal primal infeasibility on an independent vertical scale"></canvas></div>
+<div class="metrics-row"><span>Last raw inf_pr <strong id="rawResidual">—</strong></span><span>Latest iteration <strong id="rawIteration">—</strong></span></div>
+<p class="graph-label">Separate logarithmic scale. IPOPT may use a different constraint representation or scaling. Its values cannot be compared numerically with the upper graph or its 10⁻⁴ candidate threshold. Use this graph only to assess iteration-by-iteration solver activity.</p></div>
 <div class="panel"><div class="panel-head"><div><h2>Validated lap-time gains</h2><p class="description">Every point is a saved, independently checked improvement</p></div><span class="tag" id="gainsTag">0 EXPORTS</span></div><div class="canvas-box" style="height:180px"><canvas id="lapChart" aria-label="History of saved validated lap times"></canvas></div><p class="graph-label" id="historyNote">Waiting for the first validated lap. Completion time cannot be predicted reliably.</p></div>
 </section>
 <section class="panel stage-panel"><div class="panel-head"><div><h2 id="stageTitle">Waiting for optimizer</h2><p id="stageText" class="description">The workspace will appear here when a run starts.</p></div><span class="tag" id="activity">NO DATA</span></div><div class="stages" id="stages"><div class="stage" data-step="0"><b>01 / geometry</b>Extract & seed</div><div class="stage" data-step="1"><b>02 / bootstrap</b>Find feasible lap</div><div class="stage" data-step="2"><b>03 / search</b>Shorten & refine</div><div class="stage" data-step="3"><b>04 / save</b>Check every gain</div></div><div class="progress-track"><div class="progress-fill" id="iterationBar"></div></div><p class="description" id="budgetNote">Iteration budget for this solve, not total optimization completion.</p><div class="details"><div class="detail"><div class="label">Geometry basin</div><strong id="basin">—</strong></div><div class="detail"><div class="label">Phase / refinement</div><strong id="phase">—</strong></div><div class="detail"><div class="label">Workers / memory</div><strong id="resources">—</strong></div><div class="detail"><div class="label">Checkpoint age</div><strong id="checkpointAge">—</strong></div><div class="detail"><div class="label">Iteration / patience limits</div><strong id="limits">—</strong></div><div class="detail"><div class="label">Saved local dynamics defect</div><strong id="dynamicDefect">—</strong></div><div class="detail"><div class="label">Saved extra wall slack</div><strong id="clearance">—</strong></div><div class="detail"><div class="label">Active checkpoint folder</div><strong id="activePath">—</strong></div></div></section>
 <section class="bottom"><div class="panel"><div class="panel-head"><div><h2>Recent attempts</h2><p class="description">Completed trials in this geometry basin</p></div><span class="tag" id="attemptTag">0 COMPLETED</span></div><div id="attempts"></div></div><div class="panel"><h2>What is happening</h2><p class="description">Stage changes, new trials and accepted improvements</p><ul id="feed" class="feed"></ul></div></section>
-<details id="rawDetails"><summary>Raw IPOPT output · latest 90 lines</summary><div class="controls" style="margin-top:10px"><button class="button" id="pauseLog" type="button">Pause log display</button><span class="description">Only freezes this text; optimizer keeps running.</span></div><pre id="log">Waiting for optimizer output…</pre></details>
+<section class="panel mpc-section" aria-label="Unity MPC driving test results">
+<div class="panel-head"><div><h2>Most recent Unity driving test</h2><p class="description">One test at a time · older results are saved but hidden</p></div><span class="tag" id="mpcQueueStatus">NOT CONFIGURED</span></div>
+<p class="graph-label" id="mpcQueueNote">The simulation supervisor runs separately from the optimizer and retains its logs and ROS bags.</p>
+<div id="mpcTrials"></div>
+<p class="mpc-footnote">These are actual Unity driving results, not a guarantee that the source model exactly reproduces Unity physics. Only completed timed laps are scored. Technical details and logs are available inside each trial.</p>
+</section>
+<details id="rawDetails"><summary>Technical IPOPT log · latest 90 lines</summary>
+<p class="mpc-footnote">The text “command feasibility stagnated; durable best iterate saved” is a controlled stop for an individual solve. CasADi prints a traceback, but the saved candidate is retained and the overall optimization continues. Other unexpected errors remain visible here.</p><div class="controls" style="margin-top:10px"><button class="button" id="pauseLog" type="button">Pause log display</button><span class="description">Only freezes this text; optimizer keeps running.</span></div><pre id="log">Waiting for optimizer output…</pre></details>
 <footer><span id="workspace">Workspace: —</span><span class="nowrap">Local observer · no solver controls</span></footer>
 </main>
 <script>
 'use strict';
-const $=id=>document.getElementById(id), set=(id,value)=>{$(id).textContent=value};
+const $=id=>document.getElementById(id);
+let pointerSelecting=false, displayPaused=false;
+document.addEventListener('pointerdown',()=>{pointerSelecting=true;},true);
+document.addEventListener('pointerup',()=>{pointerSelecting=false;},true);
+document.addEventListener('pointercancel',()=>{pointerSelecting=false;},true);
+window.addEventListener('blur',()=>{pointerSelecting=false;});
+function selectionTouches(node){
+ if(pointerSelecting)return true;
+ const selection=window.getSelection();
+ return !!selection && !selection.isCollapsed &&
+   ((selection.anchorNode&&node.contains(selection.anchorNode)) ||
+    (selection.focusNode&&node.contains(selection.focusNode)));
+}
+const set=(id,value)=>{const node=$(id),valueString=String(value);
+ if(node.textContent!==valueString&&!selectionTouches(node))node.textContent=valueString;};
+function reconcileCollection(id,key,build){
+ const node=$(id);
+ if(node.dataset.renderKey===key||selectionTouches(node))return false;
+ build(node);
+ node.dataset.renderKey=key;
+ return true;
+}
 const num=(v,d=3)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
 const sci=v=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toExponential(2);
 const age=s=>s==null?'—':s<60?`${Math.round(s)} s`:s<3600?`${Math.floor(s/60)} min ${Math.round(s%60)} s`:`${Math.floor(s/3600)} h ${Math.floor(s%3600/60)} min`;
@@ -47,7 +170,7 @@ function emptyCanvas(id,message){const {ctx,w,h}=canvasContext(id);text(ctx,mess
 
 function residualChart(){
  const pts=(snapshot?.residuals||[]).filter(p=>p.residual!=null&&p.residual>=0);
- if(!pts.length){emptyCanvas('residualChart','Waiting for iterations in this solve…');return;}
+ if(!pts.length){emptyCanvas('residualChart','Waiting for independent constraint checks…');return;}
  const {ctx,w,h}=canvasContext('residualChart'), pad={l:48,r:14,t:12,b:27};
  const floor=1e-12, logs=pts.map(p=>Math.log10(Math.max(floor,p.residual))), threshold=-4;
  let ymin=Math.floor(Math.min(threshold,...logs)),ymax=Math.ceil(Math.max(threshold,...logs));if(ymax-ymin<2){ymax++;ymin--;}
@@ -55,8 +178,23 @@ function residualChart(){
  const xx=x=>pad.l+(x-xmin)/(xmax-xmin)*(w-pad.l-pad.r),yy=y=>h-pad.b-(y-ymin)/(ymax-ymin)*(h-pad.t-pad.b);
  for(let y=ymin;y<=ymax;y+=Math.max(1,Math.ceil((ymax-ymin)/5))){line(ctx,[[pad.l,yy(y)],[w-pad.r,yy(y)]],chartColors.grid,1);text(ctx,`1e${y}`,pad.l-8,yy(y)+3,'right');}
  line(ctx,[[pad.l,yy(threshold)],[w-pad.r,yy(threshold)]],chartColors.amber,1,[5,5]);
- let best=Infinity;line(ctx,pts.map(p=>[xx(p.iteration),yy(Math.log10(Math.max(floor,p.residual)))]),chartColors.blue,1.8);
+ let best=Infinity;
+ line(ctx,pts.map(p=>[xx(p.iteration),yy(Math.log10(Math.max(floor,p.residual)))]),chartColors.blue,1.8);
  line(ctx,pts.map(p=>{best=Math.min(best,p.residual);return [xx(p.iteration),yy(Math.log10(Math.max(floor,best)))];}),chartColors.green,2);
+ [xmin,Math.round((xmin+xmax)/2),xmax].forEach(x=>text(ctx,String(x),xx(x),h-7,'center'));
+}
+function ipoptChart(){
+ const pts=(snapshot?.ipopt_history||[]).filter(p=>p.primal_infeasibility!=null&&p.primal_infeasibility>=0);
+ if(!pts.length){emptyCanvas('ipoptChart','Waiting for IPOPT iteration output…');return;}
+ const {ctx,w,h}=canvasContext('ipoptChart'),pad={l:48,r:14,t:12,b:27},floor=1e-12;
+ const logs=pts.map(p=>Math.log10(Math.max(floor,p.primal_infeasibility)));
+ let ymin=Math.floor(Math.min(...logs)),ymax=Math.ceil(Math.max(...logs));
+ if(ymax-ymin<2){ymax++;ymin--;}
+ const xmin=Math.min(...pts.map(p=>p.iteration)),xmax=Math.max(xmin+1,...pts.map(p=>p.iteration));
+ const xx=x=>pad.l+(x-xmin)/(xmax-xmin)*(w-pad.l-pad.r),yy=y=>h-pad.b-(y-ymin)/(ymax-ymin)*(h-pad.t-pad.b);
+ for(let y=ymin;y<=ymax;y+=Math.max(1,Math.ceil((ymax-ymin)/4))){line(ctx,[[pad.l,yy(y)],[w-pad.r,yy(y)]],chartColors.grid,1);text(ctx,`1e${y}`,pad.l-8,yy(y)+3,'right');}
+ line(ctx,pts.map(p=>[xx(p.iteration),yy(Math.log10(Math.max(floor,p.primal_infeasibility)))]),'#8794ab',1.8);
+ const recent=pts[pts.length-1];ctx.fillStyle=chartColors.blue;ctx.beginPath();ctx.arc(xx(recent.iteration),yy(Math.log10(Math.max(floor,recent.primal_infeasibility))),3,0,2*Math.PI);ctx.fill();
  [xmin,Math.round((xmin+xmax)/2),xmax].forEach(x=>text(ctx,String(x),xx(x),h-7,'center'));
 }
 function lapChart(){
@@ -88,29 +226,250 @@ function eventText(event){
  if(event.event==='solve')return {title:`Testing ${num(event.target_lap_s)} s lap`,detail:`${event.key} · refinement ${event.refinement}`};
  if(event.event==='faster_source_witness')return {title:`New source-validated best: ${num(event.lap_s)} s`,detail:'Independent model replay passed; saved automatically'};
  if(event.event==='budgets_increased')return {title:'Exploration budget increased',detail:`${event.iterations} iterations · ${event.stagnation_iterations} patience`};
+ if(event.event==='feasibility_stagnation')
+  return {title:'Solve stopped after progress stalled',detail:'Best intermediate states were saved. The optimizer will try another candidate; the campaign has not crashed.'};
  return {title:human(event.event||event.stage),detail:event.error||event.reason||event.key||'Optimizer stage update'};
 }
+function mpcEl(tag,cls='',value){const node=document.createElement(tag);if(cls)node.className=cls;if(value!==undefined)node.textContent=String(value);return node;}
+function mpcAppend(parent,...nodes){parent.append(...nodes);return parent;}
+function mpcNum(value,d=3){return Number.isFinite(value)?value.toFixed(d):'—';}
+function mpcInt(value){return Number.isFinite(value)?Math.round(value).toLocaleString():'—';}
+function mpcState(a){
+ const s=a.status;
+ if(s==='completed')return ['Completed · 10/10 laps','good'];
+ if(s==='running')return ['Driving in Unity','live'];
+ if(s==='mpc_rejected'||s==='localization_start_heading_mismatch'||s==='mpc_startup_timeout')return ['Stopped · controller safety','bad'];
+ if(s==='collision')return ['Stopped · collision','bad'];
+ if(s==='blocked_start_orientation')return ['Not started · direction mismatch','warn'];
+ if(s==='watch_timeout')return ['Stopped · timeout','warn'];
+ if(s==='incomplete_evidence')return ['Recording incomplete','warn'];
+ return ['Trial did not complete','bad'];
+}
+function mpcExplain(a){
+ const m=a.metrics||{},sources=Object.keys(m.cycle_reason_counts||{}).join(' ')+' '+(a.reason||'')+' '+(a.live_failure||'');
+ if(a.status==='completed')return ['All 10 timed laps completed','Unity finished all laps without a reported controller safety stop.','The recording and detailed tracking statistics are available below.'];
+ if(a.status==='running')return ['The car is driving','The simulator is being monitored for collisions, controller safety stops and stalled progress.','Live lap count updates as Unity completes each lap.'];
+ if(sources.includes('pose_odom_skew_exceeded'))return ['Position and odometry were out of sync','MPC rejected a state update because localization and odometry timestamps were too far apart. The controller stopped safely. This does not, by itself, mean the raceline is wrong.','Check synchronization of AMCL, odometry and the ROS bridge. Retry to determine whether the fault is intermittent.'];
+ if(a.status==='blocked_start_orientation'||a.status==='localization_start_heading_mismatch'||sources.includes('scan heading error'))return ['Starting direction did not match the simulator','The vehicle could not establish a consistent position and heading for this reference.','The optimizer must follow the direction demonstrated in Unity; do not weaken localization safety checks.'];
+ if(sources.includes('rejected_nonlinear_rollout')||sources.includes('nonlinear=corridor'))
+  return ['MPC predicted an unsafe trajectory','During its next prediction, MPC detected that the proposed motion could leave the permitted track corridor and rejected the update. This is a predicted safety violation, not necessarily a collision in Unity.','Check the predicted corridor constraint and the reference clearance at the reported horizon step. The line may be too aggressive for reliable MPC tracking.'];
+ if(a.status==='collision')return ['The simulator detected a collision','The run stopped after the simulated vehicle collided.','Inspect the trajectory clearance and controller behavior before retrying.'];
+ if(a.status==='mpc_startup_timeout')return ['MPC could not start driving','No accepted MPC cycle was received within the startup limit.','Check localization, controller startup and ROS topic availability.'];
+ if(a.status==='mpc_rejected')return ['MPC stopped the run for safety','The controller rejected a state or control update. Previously completed laps remain usable for analysis.','Open Technical details for the exact fault and relevant controller logs.'];
+ if(a.status==='watch_timeout')return ['The trial reached its time limit','The car did not finish the requested number of laps in time.','Check whether the vehicle stalled or the controller stopped publishing commands.'];
+ if(a.status==='incomplete_evidence')return ['The recording was incomplete','Unity reported completion, but the lap records did not verify all 10 timed laps.','Check the bag recorder and official lap counter.'];
+ return ['This trial did not complete',a.reason||a.analysis_error||'A failure was recorded.','Open Technical details for more information.'];
+}
+function mpcScoredError(m){
+ const rows=(m.per_official_lap_tracking||[]).filter(p=>p.official_lap_index>=2&&Number.isFinite(p.cross_track_rmse_m)&&Number.isFinite(p.diagnostic_cycles)&&p.diagnostic_cycles>0);
+ const n=rows.reduce((s,p)=>s+p.diagnostic_cycles,0);
+ return n?100*Math.sqrt(rows.reduce((s,p)=>s+p.diagnostic_cycles*p.cross_track_rmse_m*p.cross_track_rmse_m,0)/n):null;
+}
+function mpcFact(label,value,unit,foot){
+ const node=mpcEl('div','mpc-fact'),big=mpcEl('div','mpc-fact-value',value);
+ if(unit)big.append(mpcEl('span','mpc-fact-unit',' '+unit));
+ mpcAppend(node,mpcEl('div','mpc-fact-label',label),big,mpcEl('div','mpc-fact-foot',foot||' '));
+ return node;
+}
+function mpcKV(parent,label,value){
+ const row=mpcEl('div','mpc-tracking-line');
+ mpcAppend(row,mpcEl('span','',label),mpcEl('strong','',value));
+ parent.append(row);
+}
+function mpcCounts(parent,title,items){
+ const all=Object.entries(items||{}).filter(([k,v])=>Number.isFinite(v)).sort((a,b)=>b[1]-a[1]);
+ if(!all.length)return;
+ parent.append(mpcEl('div','mpc-code-title',title));
+ const table=mpcEl('table','mpc-lap-table'),body=mpcEl('tbody');
+ for(const [name,count] of all){
+  const tr=mpcEl('tr');
+  mpcAppend(tr,mpcEl('td','',name.replace(/_/g,' ')),mpcEl('td','',mpcInt(count)));
+  body.append(tr);
+ }
+ table.append(body);parent.append(table);
+}
+function mpcCopy(content,label){
+ const btn=mpcEl('button','button',label);
+ btn.type='button';
+ btn.addEventListener('click',()=>{
+  if(navigator.clipboard?.writeText)navigator.clipboard.writeText(content)
+    .then(()=>{btn.textContent='Copied';}).catch(()=>{btn.textContent=content;});
+  else btn.textContent=content;
+ });
+ return btn;
+}
+function mpcCard(a,data,index,persist){
+ const m=a.metrics||{},state=mpcState(a),reason=mpcExplain(a),key=String(a.id)+':'+String(a.attempt);
+ const completed=Math.max(0,Math.min(10,m.completed_scored_laps??Math.max(0,(a.official_laps_seen||0)-1)));
+ const scored=m.scored_lap_times_s||[];
+ const card=mpcEl('details','mpc-trial is-'+state[1]);card.dataset.attemptKey=key;
+ card.open=persist.has('trial:'+key)?persist.get('trial:'+key):index===0;
+ const summary=mpcEl('summary'),top=mpcEl('div','mpc-summary-top');
+ const left=mpcEl('div');
+ mpcAppend(left,mpcEl('div','mpc-summary-name','Reference '+mpcNum(a.model_lap_s)+' s · Trial '+a.attempt),
+            mpcEl('div','mpc-summary-sub','Unity simulator · MPC autonomous driving'));
+ const right=mpcEl('div','mpc-summary-top');
+ mpcAppend(right,mpcEl('span','mpc-status-pill '+state[1],state[0]),mpcEl('span','mpc-expand-hint','Details'));
+ mpcAppend(top,left,right);
+ const quick=mpcEl('div','mpc-summary-meta');
+ mpcAppend(quick,mpcEl('span','','Timed laps: '+completed+' / 10'),
+   mpcEl('span','','Average: '+mpcNum(m.average_scored_s)+' s'),
+   mpcEl('span','','Fastest: '+mpcNum(m.best_scored_s)+' s'));
+ const bar=mpcEl('div','mpc-progress'),fill=mpcEl('span');
+ fill.style.width=String(completed*10)+'%';bar.append(fill);
+ bar.setAttribute('role','progressbar');bar.setAttribute('aria-label','Completed timed laps');
+ bar.setAttribute('aria-valuemin','0');bar.setAttribute('aria-valuemax','10');bar.setAttribute('aria-valuenow',String(completed));
+ mpcAppend(summary,top,quick,bar);card.append(summary);
+ const body=mpcEl('div','mpc-body');
+ const message=mpcEl('div','mpc-explainer is-'+state[1]);
+ mpcAppend(message,mpcEl('strong','',reason[0]),mpcEl('p','',reason[1]),mpcEl('p','',reason[2]));
+ body.append(message);
+ if(a.status==='running')body.append(mpcEl('p','mpc-footnote',
+  'Official laps: '+(a.official_laps_seen??0)+' / 11. The first lap is warm-up.'));
+ if(scored.length||completed){
+  const facts=mpcEl('div','mpc-facts');
+  mpcAppend(facts,
+    mpcFact('Timed laps',completed+' / 10','','Warm-up excluded'),
+    mpcFact('Average lap',mpcNum(m.average_scored_s),'s','Completed scored laps'),
+    mpcFact('Fastest lap',mpcNum(m.best_scored_s),'s','Best recorded lap'),
+    mpcFact('Total timed driving',mpcNum(m.total_scored_s),'s','Completed scored laps'));
+  body.append(facts);
+  const grid=mpcEl('div','mpc-grid-2'),lap=mpcEl('section','mpc-subpanel'),track=mpcEl('section','mpc-subpanel');
+  mpcAppend(lap,mpcEl('h3','','Lap-by-lap performance'),
+    mpcEl('p','mpc-helper','Unity lap times · warm-up '+mpcNum(m.warmup_lap_s)+' s (excluded).'));
+  const table=mpcEl('table','mpc-lap-table');
+  table.setAttribute('aria-label','Individual lap times and lateral tracking errors');
+  const header=mpcEl('thead'),headRow=mpcEl('tr');
+  for(const value of ['Lap','Time','Lateral error'])headRow.append(mpcEl('th','',value));
+  header.append(headRow);table.append(header);
+  const tbody=mpcEl('tbody');
+  const min=Math.min(...scored),max=Math.max(...scored);
+  for(let i=0;i<scored.length;i++){
+   const value=scored[i],tr=mpcEl('tr');
+   tr.append(mpcEl('td','',i+1));
+   const time=mpcEl('td'),contents=mpcEl('div','mpc-lap-time-cell');
+   const fast=Math.abs(value-min)<1e-7,slow=Math.abs(value-max)<1e-7;
+   const measure=mpcEl('span',fast?'fastest':slow?'slowest':'',mpcNum(value)+' s');
+   const bar=mpcEl('span','mpc-tick'+(fast?' fastest':''));
+   const tick=mpcEl('i');tick.style.width=(35+65*(value-(min-.08))/Math.max(.16,max-min+.16)).toFixed(0)+'%';
+   bar.append(tick);mpcAppend(contents,measure,bar);time.append(contents);tr.append(time);
+   const diagnostic=(m.per_official_lap_tracking||[]).find(x=>x.official_lap_index===i+2);
+   tr.append(mpcEl('td','muted-value',Number.isFinite(diagnostic?.cross_track_rmse_m)?
+     mpcNum(diagnostic.cross_track_rmse_m*100,2)+' cm':'—'));
+   tbody.append(tr);
+  }
+  table.append(tbody);lap.append(table);
+  mpcAppend(track,mpcEl('h3','','Path following'),
+    mpcEl('p','mpc-helper','Lateral error is the distance between the car and the reference path.'));
+  const tr=m.tracking||{},scoredErr=mpcScoredError(m);
+  const value=scoredErr??(Number.isFinite(tr.cross_track_rmse_m)?tr.cross_track_rmse_m*100:null);
+  const large=mpcEl('div','mpc-tracking-score');
+  mpcAppend(large,mpcEl('strong','',mpcNum(value,2)),
+    mpcEl('span','','cm lateral RMSE'));
+  track.append(large);
+  track.append(mpcEl('p','mpc-helper',scoredErr!=null?
+    'From completed timed laps only. Warm-up excluded.':
+    'From the full recorded run; may include the warm-up.'));
+  const lines=mpcEl('div','mpc-tracking-details');
+  mpcKV(lines,'Heading error (whole recording)',mpcNum(tr.heading_rmse_rad,4)+' rad');
+  mpcKV(lines,'Speed error (whole recording)',mpcNum(tr.speed_error_rmse_mps)+' m/s');
+  mpcKV(lines,'Source-model lap prediction',mpcNum(a.model_lap_s)+' s');
+  if(Number.isFinite(m.average_scored_s)&&Number.isFinite(a.model_lap_s)){
+   const diff=m.average_scored_s-a.model_lap_s;
+   mpcKV(lines,'Difference from prediction',(diff>=0?'+':'')+mpcNum(diff)+' s');
+  }
+  if(Number.isFinite(tr.cross_track_rmse_m))
+   mpcKV(lines,'Lateral RMSE including warm-up',mpcNum(tr.cross_track_rmse_m*100,2)+' cm');
+  track.append(lines);
+  mpcAppend(grid,lap,track);body.append(grid);
+ }
+ const advanced=mpcEl('details','mpc-advanced');advanced.dataset.persistKey='advanced:'+key;
+ advanced.open=persist.get('advanced:'+key)??false;
+ advanced.append(mpcEl('summary','','Technical details · timings, solver and fault logs'));
+ const content=mpcEl('div','mpc-advanced-inner'),timing=mpcEl('div','mpc-diag-grid');
+ const gate=m.gate_timing_ms||{},jac=m.jacobian_profile?.wall_us||{};
+ mpcAppend(timing,
+  mpcFact('Controller cycle · median',mpcNum(gate.p50),'ms','Publication gate'),
+  mpcFact('Controller cycle · p95',mpcNum(gate.p95),'ms','95th percentile'),
+  mpcFact('Slowest controller cycle',mpcNum(gate.max),'ms','Worst observed'),
+  mpcFact('Missed timing budget',mpcInt(gate.at_or_over_budget),'cycles',''),
+  mpcFact('Jacobian · p95',mpcNum(Number.isFinite(jac.p95)?jac.p95/1000:null),'ms',''),
+  mpcFact('Controller cycles',mpcInt(m.controller_cycles),'',''));
+ content.append(timing);
+ mpcCounts(content,'Controller outcomes',m.status_counts);
+ mpcCounts(content,'Solver termination reasons',m.solver_termination_counts);
+ mpcCounts(content,'Localization and state-rejection causes',m.cycle_reason_counts);
+ mpcCounts(content,'Nonlinear optimizer failure reasons',m.nonlinear_failure_reason_counts);
+ if(a.reason)mpcAppend(content,mpcEl('div','mpc-code-title','Exact stop message'),
+   mpcEl('pre','mpc-code',a.reason));
+ if(a.analysis_error)mpcAppend(content,mpcEl('div','mpc-code-title','Recording error'),
+   mpcEl('pre','mpc-code',a.analysis_error));
+ if(a.run_id){
+  const location='live_runs/'+a.run_id+'/';
+  mpcAppend(content,mpcEl('div','mpc-code-title','Saved evidence'),
+    mpcEl('p','mpc-helper','ROS bag and controller, simulator, watcher and recorder logs.'),
+    mpcEl('pre','mpc-code',location),mpcCopy(location,'Copy result folder'));
+ }
+ advanced.append(content);body.append(advanced);
+ if(!['running','completed'].includes(a.status)){
+  const actions=mpcEl('div','mpc-footer-actions');
+  const command='python3 tools/optimizer_mpc_validation.py --workspace "'+data.workspace+'" --retry '+a.id;
+  mpcAppend(actions,mpcCopy(command,'Copy command to retry'),
+    mpcEl('span','mpc-footer-note','The command requests a new attempt; existing results are preserved.'));
+  body.append(actions);
+ }
+ card.append(body);return card;
+}
+function renderMpc(data){
+ const mpc=data.mpc_trials||{},target=$('mpcTrials'),worker=mpc.worker||{},queue=mpc.pending||0;
+ set('mpcQueueStatus',!mpc.enabled?'NOT CONFIGURED':worker.status==='running'?
+  'SIMULATION RUNNING · '+queue+' WAITING':worker.status==='blocked'?
+  'SUPERVISOR NEEDS ATTENTION':queue?queue+' SAVED FOR LATER':'LAST RECORDED TEST');
+ set('mpcQueueNote',worker.status==='blocked'?
+   'Supervisor needs attention: '+(worker.reason||'A startup check failed'):
+   'Previously recorded Unity results. Automatic simulator testing is currently stopped; IPOPT keeps running.');
+ const attempts=(mpc.attempts||[]).slice(0,1),renderKey=JSON.stringify(attempts);
+ if(target.dataset.renderKey===renderKey||selectionTouches(target))return;
+ const persist=new Map();
+ target.querySelectorAll('details[data-attempt-key]').forEach(node=>persist.set('trial:'+node.dataset.attemptKey,node.open));
+ target.querySelectorAll('details[data-persist-key]').forEach(node=>persist.set(node.dataset.persistKey,node.open));
+ target.replaceChildren();target.dataset.renderKey=renderKey;
+ if(!attempts.length){
+  target.append(mpcEl('p','empty',mpc.enabled?
+    'No driving results yet. The next source-validated raceline will appear here.':
+    'Automatic Unity testing has not been configured.'));
+  return;
+ }
+ const list=mpcEl('div','mpc-trial-list');
+ for(const [index,a] of attempts.entries())list.append(mpcCard(a,data,index,persist));
+ target.append(list);
+}
+
 function render(data){
  snapshot=data;const best=data.best,trial=data.active?.trial_lap_s,current=data.residuals.at(-1)?.residual,initial=data.solver?.initial_residual,cp=data.checkpoint,c=data.contract;
  set('trackName',data.name.replace(/^optimizer_/,'').replace(/_[a-f\d]{10}$/,''));
  const live=data.process.alive,isFinished=['plateau','search_domain_reached','prepared'].includes(data.status);
  set('statusText',data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
  $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.activity==='quiet'||!live?'quiet':'active';
- set('connection',`Connected · ${new Date(data.now_epoch_s*1000).toLocaleTimeString()} · refresh 2 s`);
- set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · clockwise`);
+ set('connection',`Connected · ${new Date().toLocaleTimeString()} · 2 s polling · last log change ${age(data.log_age_s)} ago`);
+ set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · verified direction`);
  set('trialLap',trial==null?'—':`${num(trial)} s`);const gain=best.lap_s!=null&&trial!=null?best.lap_s-trial:null;
- set('trialSub',gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
+ set('trialSub',data.active?.time_predictor?'Time predictor · requires exact command repair':gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
  set('iteration',data.iteration??'—');set('iterationSub',`of ${data.solver?.max_iterations??c.iterations??'—'} per solve · not total progress`);
  set('bestResidual',sci(cp?.residual));set('residualSub',cp?`Saved at iteration ${cp.iteration}`:'No checkpoint in current solve yet');
  set('currentResidual',sci(current));set('initialResidual',sci(initial));
+ const raw=data.ipopt||{};set('rawResidual',sci(raw.primal_infeasibility));set('rawIteration',raw.iteration??'—');
+ set('ipoptMode',raw.restoration?'RESTORATION':'DIAGNOSTIC');
  const lowest=data.residuals.length?Math.min(...data.residuals.filter(p=>p.residual!=null).map(p=>p.residual)):null;
  set('residualGain',initial>0&&lowest!=null?`${num((1-lowest/initial)*100,1)}%`:'—');
- set('solveTag',data.solve_report?'CHECKS COMPLETE':data.iteration!=null?'SOLVING':'SETTING UP');
+ set('solveTag',data.solve_report?'CHECKS COMPLETE':data.iteration!=null?'SOLVING · '+data.iteration:'SETTING UP');
  set('gainsTag',`${data.history.length} EXPORTS`);const history=data.history;
  set('historyNote',history.length>1?`${num(history[0].lap_s)} s → ${num(history.at(-1).lap_s)} s · ${num(history[0].lap_s-history.at(-1).lap_s)} s saved since first export. No reliable ETA to the final plateau.`:'The campaign saves each accepted improvement. There is no fixed target-time stopping goal.');
  const stageNames={centerline_and_geometry:'Extracting map geometry',periodic_bootstrap:'Repairing the first periodic lap',adaptive_minimum_time_search:'Searching for a faster feasible lap',finished:isFinished?'Search stopped at its configured boundary':'Search finished',interrupted:'Optimizer interrupted',failed:'Optimizer failed',prepared:'Geometry prepared'};
  set('stageTitle',stageNames[data.stage]||human(data.stage));
- set('stageText',data.stage==='adaptive_minimum_time_search'?`Tries shorter laps, different cyclic starts and clearance refinements. Each improvement must pass the full source-model checks.`:'The dashboard observes existing files only. Saved checkpoints survive closing this page.');
+ set('stageText',data.stage==='adaptive_minimum_time_search'?
+ `Searching for ${num(trial)} s from the ${num(best.lap_s)} s certified lap. ${data.passed_attempts} certified attempts, ${data.completed_attempts-data.passed_attempts} rejected. Phase changes and extra wall cuts are separate retries, not evidence of improvement. No candidate replaces the incumbent without independent source checks.`:
+ 'The dashboard observes existing files only. Saved checkpoints survive closing this page.');
  set('activity',live?(data.activity==='quiet'?`NO LOG CHANGE FOR ${age(data.log_age_s)}`:`LOG UPDATED ${age(data.log_age_s)} AGO`):'PROCESS NOT RUNNING');
  const step=data.stage==='centerline_and_geometry'?0:data.stage==='periodic_bootstrap'?1:data.stage==='finished'?3:2;
  document.querySelectorAll('.stage').forEach((node,i)=>{node.classList.toggle('active',i===step);node.classList.toggle('done',i<step);});
@@ -119,19 +478,39 @@ function render(data){
  set('basin',data.active_start||'—');set('phase',`${data.active?.phase??'—'} / ${data.active?.refinement??'—'} · ${human(data.active?.strategy||'initialization')}`);
  set('resources',`${c.workers??'—'} workers · ${num(data.process.rss_mb,0)} MB`);set('checkpointAge',cp?age(Math.max(0,data.now_epoch_s-cp.saved_epoch_s)):'Not saved yet');
  set('limits',`${c.iterations??'—'} / ${c.stagnation_iterations??'—'}`);set('dynamicDefect',sci(data.validation.max_local_dynamic_defect));
- const slack=data.validation.rollout?.minimum_1ms_footprint_slack_m;set('clearance',slack==null?'—':`${num(slack*100,1)} cm beyond margin`);set('activePath',data.active?.output||'—');
+ const slack=data.validation.rollout?.minimum_1ms_footprint_slack_m;set('clearance',slack==null?'—':`${slack<0?'':'+'}${num(slack*1000,3)} mm beyond modeled margin`);set('activePath',data.active?.output||'—');
  set('attemptTag',`${data.completed_attempts} COMPLETED`);
- $('attempts').replaceChildren();if(data.attempts.length){const table=document.createElement('table');table.className='attempts';const header=table.createTHead().insertRow();for(const value of ['Trial','Result','Residual']){const th=document.createElement('th');th.textContent=value;header.append(th);}const body=table.createTBody();for(const item of data.attempts.slice(0,7)){const row=body.insertRow();const match=item.key?.match(/(?:from\d+_)?(\d+)_phase(\d+)_(.+)/);[match?`${num(Number(match[1])*.025)} s · phase ${match[2]}`:item.key,item.certified?'Source passed':'Not validated',sci(item.residual)].forEach((value,i)=>{const cell=row.insertCell();cell.textContent=value;if(i===1)cell.className=item.certified?'green':'muted';});}$('attempts').append(table);}else{const p=document.createElement('p');p.className='empty';p.textContent='No completed attempts in this basin yet.';$('attempts').append(p);}
- $('feed').replaceChildren();for(const event of data.events.slice(0,12)){const value=eventText(event),li=document.createElement('li'),small=document.createElement('small');li.append(document.createTextNode(value.title));small.textContent=value.detail;li.append(small);$('feed').append(li);}
- if(!paused){set('log',data.log_lines.join('\n'));if($('rawDetails').open)$('log').scrollTop=$('log').scrollHeight;}
+ reconcileCollection('attempts',JSON.stringify(data.attempts.slice(0,7)),target=>{
+ target.replaceChildren();
+ if(data.attempts.length){const table=document.createElement('table');table.className='attempts';const header=table.createTHead().insertRow();for(const value of ['Trial','Result','Residual']){const th=document.createElement('th');th.textContent=value;header.append(th);}const body=table.createTBody();for(const item of data.attempts.slice(0,7)){const row=body.insertRow();const match=item.key?.match(/(?:from\d+_)?(\d+)_phase(\d+)_(.+)/);[match?`${num(Number(match[1])*.025)} s · phase ${match[2]}`:item.key,item.certified?'Source passed':'Not validated',sci(item.residual)].forEach((value,i)=>{const cell=row.insertCell();cell.textContent=value;if(i===1)cell.className=item.certified?'green':'muted';});}target.append(table);}else{const p=document.createElement('p');p.className='empty';p.textContent='No completed attempts in this basin yet.';target.append(p);}
+ });
+ reconcileCollection('feed',JSON.stringify(data.events.slice(0,12)),target=>{
+ const oldScroll=target.scrollTop;
+ target.replaceChildren();
+ for(const event of data.events.slice(0,12)){const value=eventText(event),li=document.createElement('li'),small=document.createElement('small');li.append(document.createTextNode(value.title));small.textContent=value.detail;li.append(small);target.append(li);}
+ target.scrollTop=oldScroll;
+ });
+ if(!paused&&!selectionTouches($('log'))){
+   const node=$('log'),atBottom=node.scrollHeight-node.scrollTop-node.clientHeight<30;
+   set('log',data.log_lines.join('\n'));
+   if($('rawDetails').open&&atBottom)node.scrollTop=node.scrollHeight;
+ }
  set('workspace',`Workspace: ${data.workspace}`);
- $('downloads').replaceChildren();for(const [key,name,label]of [['raceline','raceline.csv','Download raceline'],['raceline_with_witness','commands.csv','Commands CSV'],['validation','validation.json','Validation report']]){if(best.available_downloads.includes(key)){const a=document.createElement('a');a.className='button';a.href=`/download/${name}`;a.textContent=label;$('downloads').append(a);}}
+ reconcileCollection('downloads',JSON.stringify(best.available_downloads),target=>{
+ target.replaceChildren();for(const [key,name,label]of [['raceline','raceline.csv','Download raceline'],['raceline_with_witness','commands.csv','Commands CSV'],['validation','validation.json','Validation report']]){if(best.available_downloads.includes(key)){const a=document.createElement('a');a.className='button';a.href=`/download/${name}`;a.textContent=label;target.append(a);}}
+ });
  const warning=data.error||data.warnings.join(' · ');$('errorBanner').classList.toggle('hidden',!warning);set('errorBanner',warning||'');
- residualChart();lapChart();refreshTrack(`${history.at(-1)?.id||'none'}:${data.geometry_starts.length}`);
+ residualChart();ipoptChart();lapChart();renderMpc(data);refreshTrack(`${history.at(-1)?.id||'none'}:${data.geometry_starts.length}`);
 }
-async function poll(){if(fetching)return;fetching=true;try{const response=await fetch('/api/snapshot',{cache:'no-store'});if(!response.ok)throw Error(`HTTP ${response.status}`);render(await response.json());}catch(error){set('connection','Disconnected · retrying automatically');set('errorBanner',`Dashboard connection lost (${error.message}). The optimizer is independent of this viewer.`);$('errorBanner').classList.remove('hidden');$('status').dataset.kind='error';set('statusText','Viewer disconnected');}finally{fetching=false;}}
+async function poll(){if(fetching)return;fetching=true;try{const response=await fetch('/api/snapshot',{cache:'no-store'});if(!response.ok)throw Error(`HTTP ${response.status}`);const next=await response.json();if(!displayPaused)render(next);}catch(error){set('connection','Disconnected · retrying automatically');set('errorBanner',`Dashboard connection lost (${error.message}). The optimizer is independent of this viewer.`);$('errorBanner').classList.remove('hidden');$('status').dataset.kind='error';set('statusText','Viewer disconnected');}finally{fetching=false;}}
 $('pauseLog').addEventListener('click',()=>{paused=!paused;set('pauseLog',paused?'Resume log display':'Pause log display');});
-let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(snapshot){residualChart();lapChart();drawTrack();}},120);});
+$('pauseDisplay').addEventListener('click',()=>{
+ displayPaused=!displayPaused;
+ $('pauseDisplay').textContent=displayPaused?'Resume live display':'Pause live display';
+ if(!displayPaused)poll();
+});
+
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(snapshot){residualChart();ipoptChart();lapChart();drawTrack();}},120);});
 poll();setInterval(poll,2000);
 </script>
 </body>

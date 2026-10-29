@@ -256,6 +256,53 @@ def _distinct_lap_times(
     return result
 
 
+def _per_lap_tracking(
+    lap_rows: list[dict[str, Any]], cycles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per-official-lap MPC diagnostics delimited by ROS bag lap-count epochs.
+
+    Uses the same bag receipt clock for lap counter and MPC diagnostics, not
+    inferred Unity applied-command epochs. The lap duration is taken separately
+    from the official last_lap_time publication, not these receipt deltas.
+    """
+    transitions: list[tuple[int, float]] = []
+    last_count = None
+    for row in sorted(lap_rows, key=lambda r: r.get("bag_time", 0.0)):
+        count = _finite_number(row.get("value"))
+        epoch = _finite_number(row.get("bag_time"))
+        if count is None or epoch is None or count < 0:
+            continue
+        count = int(count)
+        if last_count is None or count > last_count:
+            transitions.append((count, epoch))
+            last_count = count
+    result: list[dict[str, Any]] = []
+    if not transitions:
+        return result
+    # A lap starts at the first observed baseline count; each +1 is one
+    # observed completion. Missing counter transitions are never invented.
+    for (previous, started), (current, ended) in zip(transitions, transitions[1:]):
+        if current != previous + 1 or ended <= started:
+            continue
+        sample = [row for row in cycles if row.get("score_eligible") and
+                  started <= (row.get("bag_receipt_epoch_s") or -1) < ended]
+        cross = [float(row["e_y_m"]) for row in sample if row.get("e_y_m") is not None]
+        heading = [float(row["e_psi_rad"]) for row in sample if row.get("e_psi_rad") is not None]
+        speed = [float(row["speed_error_mps"]) for row in sample if row.get("speed_error_mps") is not None]
+        gate = [float(row["callback_to_gate_ms"]) for row in sample if row.get("callback_to_gate_ms") is not None]
+        result.append(dict(official_lap_index=current - transitions[0][0],
+                           lap_counter_value=current,
+                           bag_receipt_start_s=started, bag_receipt_end_s=ended,
+                           diagnostic_cycles=len(sample),
+                           cross_track_rmse_m=_rmse(cross),
+                           cross_track_max_abs_m=max(map(abs, cross), default=None),
+                           heading_rmse_rad=_rmse(heading),
+                           speed_error_rmse_mps=_rmse(speed),
+                           callback_to_gate_ms=_distribution(gate),
+                           status_counts=dict(Counter(row.get("status") for row in sample))))
+    return result
+
+
 def _bridge_by_request_stamp(
     rows: list[dict[str, Any]],
 ) -> dict[int, dict[str, Any]]:
@@ -1177,6 +1224,7 @@ def make_report(
         "experiment_regime": experiment_regime,
         "metadata": build_metadata(root, bag, trajectory, supplied_metadata),
         "summary": summary,
+        "per_official_lap_tracking": _per_lap_tracking(data.get(evaluator.LAP, []), cycles),
         "progress_bin_width_m": progress_bin_m,
         "per_progress_bin": _progress_bins(scored, progress_bin_m),
         "cycle_detail_format": "companion CSV; one row per MPC diagnostic cycle",
