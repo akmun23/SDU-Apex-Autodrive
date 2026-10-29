@@ -167,6 +167,18 @@ def test_map_only_full_workflow_needs_no_bags_reference_or_time_target(pipeline)
         optimizer.run_track(**settings, workers=2)
 
 
+def test_larger_budgets_do_not_repeat_a_verified_bootstrap(pipeline):
+    settings, calls = pipeline
+    optimizer.run_track(**settings, workers=1)
+    state = optimizer.run_track(**settings, workers=1, iterations=2500, stagnation_iterations=500)
+    assert len(calls) == 1
+    assert state['contract']['iterations'] == 2500
+    assert state['contract']['stagnation_iterations'] == 500
+    assert len(state['budget_updates']) == 1
+    with pytest.raises(ValueError, match='settings changed'):
+        optimizer.run_track(**settings, workers=1, iterations=1000, stagnation_iterations=100)
+
+
 def test_interrupted_bootstrap_resumes_its_durable_best(pipeline, monkeypatch):
     settings, calls = pipeline
     def interrupt(**kw):

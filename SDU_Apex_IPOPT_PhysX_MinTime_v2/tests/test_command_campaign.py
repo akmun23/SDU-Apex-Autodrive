@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from command_campaign import phase_seed, run_campaign, trial_counts
+from command_campaign import phase_seed, run_campaign, trial_counts, budget_increase_only
 from command_ocp import load_command_seed, save_command_checkpoint
 
 
@@ -206,3 +206,59 @@ def test_resuming_rejects_changed_metric_metadata_even_with_identical_pixels(set
     metadata.write_text('resolution: .025\n')
     with pytest.raises(ValueError, match='map/settings changed'):
         run_campaign(**setup, resume=True)
+
+
+def test_larger_budgets_reopen_stagnated_primals_after_plateau(setup):
+    def limited(**kw):
+        report = solver_report(kw, passed=False, residual=.001)
+        report.update(termination_reason='feasibility_stagnation',
+                      ipopt_status='User_Requested_Stop')
+        (kw['output']/'report.json').write_text(json.dumps(report))
+        fixture_witness(kw['output']/'best_iterate.npz', kw['count'])
+        return report
+    state = run_campaign(**setup, solve=limited, certify=checked)
+    assert state['status'] == 'plateau'
+    previous_count = len(state['attempts'])
+    calls = []
+    def improved(**kw):
+        calls.append(kw)
+        return solver_report(kw, passed=True)
+    increased = dict(setup, iterations=200, stagnation_iterations=100)
+    state = run_campaign(**increased, solve=improved, certify=checked, resume=True)
+    assert state['status'] == 'target_reached'
+    assert len(state['budget_limited_history']) == previous_count
+    assert calls[0]['command_seed'].name == 'best_iterate.npz'
+    assert calls[0]['iterations'] == 200 and calls[0]['stagnation_iterations'] == 100
+    assert len(state['budget_updates']) == 1
+
+
+def test_budget_increase_cannot_hide_physics_changes_or_lower_patience():
+    previous = dict(source_sha256='same', iterations=300)
+    assert budget_increase_only(previous, dict(previous, iterations=1500, stagnation_iterations=250))
+    assert not budget_increase_only(previous, dict(previous, iterations=150))
+    assert not budget_increase_only(previous, dict(previous, stagnation_iterations=20))
+    assert not budget_increase_only(previous, dict(previous, source_sha256='changed', iterations=1500))
+
+
+def test_active_primal_is_not_lost_when_larger_budgets_reopen_earlier_phases(setup):
+    settings = dict(setup, include_packet_starts=False)
+    calls = []
+    def interrupted(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            report = solver_report(kw, passed=False, residual=.01)
+            report.update(termination_reason='feasibility_stagnation')
+            (kw['output']/'report.json').write_text(json.dumps(report))
+            return report
+        kw['output'].mkdir()
+        fixture_witness(kw['output']/'best_iterate.npz', kw['count'])
+        raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        run_campaign(**settings, solve=interrupted, certify=checked)
+    resumed = []
+    def finish(**kw):
+        resumed.append(kw)
+        return solver_report(kw, passed=True)
+    run_campaign(**dict(settings, iterations=200, stagnation_iterations=100),
+                 solve=finish, certify=checked, resume=True)
+    assert resumed[0]['command_seed'] == calls[1]['output']/'best_iterate.npz'

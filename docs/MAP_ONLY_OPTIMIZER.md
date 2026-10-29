@@ -49,13 +49,28 @@ certification. This is an observation for this run, not a universal timeout
 or a promise for other maps. More difficult initializations can take longer.
 
 There is no campaign-wide timer or fixed total iteration count. Each solve
-has a default 300-iteration chunk; a local stagnation check triggers after
-50 iterations without a 2% improvement in the tracked feasibility residual.
+has a default 1,500-iteration chunk; a local stagnation check triggers after
+250 iterations without a 2% improvement in the tracked feasibility residual.
 An iteration-limited solve may continue from its primal when its residual has
 fallen below half of its starting residual. Otherwise the campaign tries
 other durations, phases and geometry starts. Defaults are three geometry
 starts, four cyclic phases, up to six clearance refinements, and duration
 reductions ranging from approximately 10% down to one 25 ms packet.
+
+The former defaults were 300/50. The 50-iteration gate stopped an 18.8 s
+candidate at a 2.63e-4 residual despite passing recursive-position and wall
+checks; it was not accepted, because dynamics feasibility still failed.
+No completed solve at that point had exhausted 300 iterations. The larger
+iteration ceiling provides headroom, while the longer stagnation window
+addresses the observed stopping reason directly.
+
+For still more exploration, use the same map/output with, for example,
+`--iterations 2500 --stagnation-iterations 500`. Raising only these budgets
+is supported on resume: completed bootstrap data and the incumbent remain,
+earlier budget-limited failures are reopened from their saved primals, and
+the active interrupted phase is preserved. Old attempt reports remain in
+the history. Lower budgets or other model/map/settings changes still fail
+the contract check; raising budgets never relaxes validation thresholds.
 
 Every newly certified faster incumbent starts another shortening search.
 The campaign finishes when its configured tries cannot produce another
@@ -149,7 +164,7 @@ Implemented:
 
 Verification results:
 
-- All 34 campaign, map-only and source-command tests pass, covering warm
+- All 38 campaign, map-only and source-command tests pass, covering warm
   restart, power-loss-style interruption, coarse-to-fine trial selection,
   metadata/source guards and rejection of unvalidated exports. Test doubles
   exercise orchestration, not vehicle-accuracy certification.
@@ -171,6 +186,17 @@ Verification results:
   The already-clockwise incumbent and active solver primal were retained;
   counterclockwise development geometry remains only in the historical run
   folder and is no longer selected for optimization.
+- Subsequent automatic improvements reached 35.275, 31.750, 28.575, 25.725,
+  23.175 and 20.875 s, all independently source-validated, not online racing
+  records. The defaults were then raised to 1,500/250 using the observed
+  18.8 s stagnation case. Regression tests cover reopening old failed primals
+  after a budget increase, preserving an interrupted later phase, and rejecting
+  disguised source changes or smaller budgets.
+- Live resume with the larger settings preserved the active clockwise phase,
+  reopened earlier budget-limited reports, then certified 18.800 s (four
+  iterations, local defect 2.62e-10) and started a 16.925 s trial. This verifies
+  operation of the new resume path; it does not prove the larger ceiling caused
+  that improvement, because the accepted solve itself needed only four steps.
 - The production-model initializer and derivatives were exercised numerically;
   the artificial circular geometry fixture is labeled as a module test, not
   as captured vehicle data.

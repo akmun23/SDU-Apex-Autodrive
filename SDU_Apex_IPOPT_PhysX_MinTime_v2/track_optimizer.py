@@ -25,7 +25,7 @@ import numpy as np
 import yaml
 from scipy.interpolate import CubicSpline
 
-from command_campaign import run_campaign, unused_directory
+from command_campaign import run_campaign, unused_directory, budget_increase_only
 from command_ocp import (certify_witness, production_command_map, save_command_checkpoint,
                          save_json_checkpoint, solve_witness)
 from physics import SourcePlant
@@ -278,8 +278,8 @@ def geometry_starts(map_yaml, output, directions, cancel):
     return starts
 
 
-def run_track(*, image, metadata, config, output, workers=8, iterations=300,
-              phases=4, refinements=6, prepare_only=False,
+def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
+              phases=4, refinements=6, stagnation_iterations=250, prepare_only=False,
               bootstrap_only=False, cancel=None):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
@@ -290,14 +290,22 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=300,
     _, digest = production_command_map(REPO, REPO/'build_task/command_ocp')
     contract = dict(image_sha256=file_hash(image), metadata_sha256=file_hash(metadata),
         source_sha256=digest, optimizer_sha256=implementation_digest(),
-        workers=workers, iterations=iterations, phases=phases,
+        workers=workers, iterations=iterations, stagnation_iterations=stagnation_iterations, phases=phases,
         refinements=refinements, direction='clockwise', schema=1)
     state = json.loads(status_path.read_text()) if status_path.exists() else dict(
         schema='sdu-map-optimizer/v1', contract=contract, best_lap_s=None,
         best_manifest=None, starts={}, status='running', source_only=True,
         global_minimum_proven=False, runtime_promoted=False)
     if state['contract'] != contract:
-        raise ValueError('map/source/settings changed; choose a new output directory')
+        if not budget_increase_only(state['contract'], contract):
+            raise ValueError('map/source/settings changed; choose a new output directory')
+        state.setdefault('budget_updates', []).append(dict(
+            previous=state['contract'], requested=contract, epoch_s=time.time()))
+        state['contract'] = contract
+        for context in state['starts'].values():
+            if context['witness'] is None:
+                context.setdefault('budget_limited_attempts', []).extend(context['attempts'])
+                context['attempts'] = []
     if state.get('best_manifest'):
         previous_best = json.loads(Path(state['best_manifest']).read_text())
         require_clockwise(Path(previous_best['files']['witness']))
@@ -363,7 +371,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=300,
                             map_path=bundled_image, output=destination, count=count,
                             iterations=iterations, cpu_seconds=1.e20, command_seed=seed,
                             workers=workers, clearance_cuts=sorted(cuts),
-                            stagnation_iterations=50, cancel_requested=cancel)
+                            stagnation_iterations=stagnation_iterations, cancel_requested=cancel)
                         seed = destination/'witness.npz'
                         residual = report['max_constraint_violation']
                         if report['status'] == 'source_witness_passed':
@@ -395,7 +403,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=300,
             result = run_campaign(repo=REPO, seed=Path(current['witness']),
                 map_path=bundled_image, output=campaign, target_seconds=None,
                 phases=phases, workers=workers, iterations=iterations, refinements=refinements,
-                stagnation_iterations=50, coarse_fraction=.1,
+                stagnation_iterations=stagnation_iterations, coarse_fraction=.1,
                 resume=(campaign/'campaign.json').exists(), cancel_requested=cancel,
                 on_improvement=promote)
             current['campaign_status'] = result['status']
@@ -423,6 +431,8 @@ def show_status(output):
     state = json.loads(path.read_text())
     best = state.get('best_lap_s')
     print(f"Stage: {state['stage']} | Status: {state['status']}")
+    print(f"Budgets: {state['contract']['iterations']} iterations/solve | "
+          f"{state['contract'].get('stagnation_iterations', 50)} iterations of stagnation patience")
     print('Best source-validated lap: '+(f'{best:.3f} s' if best is not None else 'none yet'))
     print(f"Starting basin: {state.get('active_start', '—')} | Last state save: "
           f"{time.time()-state['updated_epoch_s']:.0f} s ago")
@@ -458,7 +468,9 @@ def main():
     parser.add_argument('yaml', nargs='?', type=Path, help='explicit metric YAML for the supplied image')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--workers', type=int, default=min(8, os.cpu_count() or 1))
-    parser.add_argument('--iterations', type=int, default=300, help='per solve; improving primals are restarted')
+    parser.add_argument('--iterations', type=int, default=1500, help='per solve; improving primals are restarted')
+    parser.add_argument('--stagnation-iterations', type=int, default=250,
+                        help='patience without significant feasibility improvement (minimum 5)')
     parser.add_argument('--phases', type=int, default=4)
     parser.add_argument('--refinements', type=int, default=6)
     parser.add_argument('--prepare-only', action='store_true')
@@ -468,7 +480,7 @@ def main():
     parser.add_argument('--describe', action='store_true', help='print resolved output/service metadata; no solve')
     args = parser.parse_args()
     if (not 1 <= args.workers <= (os.cpu_count() or 1) or args.iterations < 1
-            or args.phases < 1 or args.refinements < 0):
+            or args.phases < 1 or args.refinements < 0 or args.stagnation_iterations < 5):
         parser.error('invalid solver search settings')
     image, metadata, config = resolve_map(args.map, args.yaml)
     output = (args.output or default_output(image, config)).resolve()
@@ -493,7 +505,7 @@ def main():
     try:
         state = run_track(image=image, metadata=metadata, config=config, output=output,
             workers=args.workers, iterations=args.iterations, phases=args.phases,
-            refinements=args.refinements,
+            refinements=args.refinements, stagnation_iterations=args.stagnation_iterations,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
             cancel=lambda: stop[0])
         return 0 if state['status'] in ('plateau', 'prepared', 'search_domain_reached') else 3

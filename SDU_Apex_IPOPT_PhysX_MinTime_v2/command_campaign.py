@@ -74,8 +74,37 @@ def trial_counts(count, fraction, minimum):
         step = max(1, step//2)
 
 
+def budget_increase_only(previous, requested):
+    """Changing patience/iteration ceilings cannot transfer a physics certificate."""
+    keys = ('iterations', 'stagnation_iterations')
+    a = {k: v for k, v in previous.items() if k not in keys}
+    b = {k: v for k, v in requested.items() if k not in keys}
+    return a == b and all(requested.get(k, 50) >= previous.get(k, 50) for k in keys)
+
+
+def reopen_budget_limited_attempts(state):
+    """Give stopped primals a real retry after increasing exploration budgets."""
+    retained = []
+    for attempt in state['attempts']:
+        path = Path(attempt['report'])
+        report = json.loads(path.read_text()) if path.exists() else {}
+        limited = (report.get('termination_reason') == 'feasibility_stagnation' or
+                   report.get('ipopt_status') == 'Maximum_Iterations_Exceeded')
+        if not attempt['certified'] and limited:
+            seed = path.with_name('best_iterate.npz')
+            if not seed.exists():
+                seed = path.with_name('witness.npz')
+            if seed.exists():
+                state.setdefault('budget_limited_history', []).append(attempt)
+                state.setdefault('retry_starts', {})[attempt['key']] = dict(
+                    seed=str(seed), cuts=report.get('source_clearance_cuts', []))
+                continue
+        retained.append(attempt)
+    state['attempts'] = retained
+
+
 def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
-                 phases=8, workers=8, iterations=300, stagnation_iterations=50,
+                 phases=8, workers=8, iterations=1500, stagnation_iterations=250,
                  refinements=6, resume=False, include_packet_starts=True,
                  solve=solve_witness, certify=certify_witness, digest=None,
                  cancel_requested=None, coarse_fraction=0., on_improvement=None):
@@ -114,7 +143,18 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         if resume:
             state = json.loads(state_path.read_text())
             if state['contract'] != contract:
-                raise ValueError('campaign source/map/settings changed; create a new campaign')
+                if not budget_increase_only(state['contract'], contract):
+                    raise ValueError('campaign source/map/settings changed; create a new campaign')
+                state.setdefault('budget_updates', []).append(dict(
+                    previous=state['contract'], requested=contract, epoch_s=time.time()))
+                state['contract'] = contract
+                reopen_budget_limited_attempts(state)
+                if state.get('retry_starts') and state['status'] == 'plateau':
+                    state['status'] = 'running'
+                save()
+                event('budgets_increased', iterations=iterations,
+                      stagnation_iterations=stagnation_iterations,
+                      reopened=len(state.get('retry_starts', {})))
             if state['status'] in ('target_reached', 'plateau', 'search_domain_reached'):
                 event('already_finished', status=state['status'], best_lap_s=state['best_lap_s'])
                 return state
@@ -158,6 +198,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                       for strategy in (('resample', 'drop-packet')
                           if include_packet_starts and count == old_count-1
                           else ('resample',))]
+            active_key = (state.get('active') or {}).get('key')
+            if active_key:
+                # Increasing budgets can reopen an EARLIER phase. Finish the
+                # interrupted phase first, rather than overwrite its context.
+                starts.sort(key=lambda item:
+                    f'from{old_count:03d}_{item[0]:03d}_phase{item[1]:03d}_{item[2]}' != active_key)
             for count, rotation, strategy in starts:
                 key = f'from{old_count:03d}_{count:03d}_phase{rotation:03d}_{strategy}'
                 if any(a['key'] == key for a in state['attempts']): continue
@@ -176,6 +222,11 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                     else:
                         report, start = None, Path(active['seed'])
                     refinement = active['refinement']
+                elif key in state.get('retry_starts', {}):
+                    retry = state['retry_starts'][key]
+                    start = Path(retry['seed'])
+                    cuts = {tuple(c) for c in retry['cuts']}
+                    report, refinement = None, 0
                 else:
                     start = incumbent
                     if rotation:
@@ -235,6 +286,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                     report=str(start.with_name('report.json')),
                     residual=report.get('max_constraint_violation'), certified=improved))
                 state['active'] = None
+                state.get('retry_starts', {}).pop(key, None)
                 save()
                 if improved: break
             if not improved:
@@ -283,8 +335,8 @@ def main():
                         help='Try coarse duration reductions before single-packet refinement')
     parser.add_argument('--phases', type=int, default=8)
     parser.add_argument('--workers', type=int, default=os.cpu_count() or 1)
-    parser.add_argument('--iterations', type=int, default=300)
-    parser.add_argument('--stagnation-iterations', type=int, default=50)
+    parser.add_argument('--iterations', type=int, default=1500)
+    parser.add_argument('--stagnation-iterations', type=int, default=250)
     parser.add_argument('--refinements', type=int, default=6)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-if-exists', action='store_true',
