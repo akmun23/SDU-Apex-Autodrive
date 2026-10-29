@@ -106,6 +106,22 @@
 <div class="card"><div class="label">Current iteration</div><div class="value" id="iteration">—</div><div class="sub" id="iterationSub">Waiting for solver output</div></div>
 <div class="card"><div class="label">Best saved residual</div><div class="value amber" id="bestResidual">—</div><div class="sub" id="residualSub">Checkpoint not yet written</div></div>
 </section>
+<section class="panel" aria-label="Multi-incumbent optimization progress" style="margin-bottom:18px">
+ <div class="panel-head"><div><h2>Search diversification · equal-time alternatives</h2>
+ <p class="description">Only independently certified candidates become alternate seeds. Every seed gets its own 25 ms and hybrid-time searches.</p></div>
+ <span class="tag" id="eliteStatus">WAITING</span></div>
+ <div class="mpc-facts" style="margin-top:13px">
+  <div class="mpc-fact"><div class="mpc-fact-label">Certified alternative witnesses</div><div class="mpc-fact-value" id="eliteCount">0</div><div class="mpc-fact-foot">Same or better source lap time</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Explored starting basins</div><div class="mpc-fact-value" id="basinsExplored">0</div><div class="mpc-fact-foot">Independently searched alternatives</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Failed faster-time starts</div><div class="mpc-fact-value" id="failedTimeStarts">0</div><div class="mpc-fact-foot">Trials since current duration</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Largest archived clearance reserve</div><div class="mpc-fact-value" id="eliteMargin">—</div><div class="mpc-fact-foot">Extra beyond the hard 5 cm margin</div></div>
+ </div>
+ <div class="details" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+  <div class="detail"><div class="label">Search currently running</div><strong id="eliteMode">Initial feasibility search</strong></div>
+  <div class="detail"><div class="label">Current alternative</div><strong id="eliteBranch">Main candidate</strong></div>
+ </div>
+ <p class="description" id="eliteExplanation" style="margin-top:15px">The dashboard distinguishes optimizer activity from certified speed improvements. There is no defensible percent complete for an unbounded search.</p>
+</section>
 <section class="panel mpc-section" aria-label="Unity MPC driving test results" style="margin-bottom:18px">
 <div class="panel-head"><div><h2>Most recent Unity driving test</h2><p class="description">One heavy job at a time · optimization pauses during driving tests</p></div><span class="tag" id="mpcQueueStatus">NOT CONFIGURED</span></div>
 <p class="graph-label" id="mpcQueueNote">The simulation supervisor runs separately from the optimizer and retains its logs and ROS bags.</p>
@@ -491,6 +507,26 @@ function render(data){
  set('statusText',data.mpc_trials?.optimizer_pause?.unit?'Paused for '+data.mpc_trials.optimizer_pause.reason:data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
  $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.activity==='quiet'||!live?'quiet':'active';
  set('connection',`Connected · ${new Date().toLocaleTimeString()} · 2 s polling · last log change ${age(data.log_age_s)} ago`);
+ const ep=data.elite_progress||{},branch=ep.active_branch||{},alternatives=ep.recent_alternatives||[];
+ set('eliteCount',ep.archived_alternatives??0);
+ set('basinsExplored',ep.explored_basins??0);
+ set('failedTimeStarts',Math.max(0,(ep.parent_attempts??0)+(ep.current_attempts??0)-(ep.current_attempts===ep.parent_attempts?(ep.parent_attempts??0):0)));
+ set('eliteMargin',ep.best_clearance_mm==null?'—':num(ep.best_clearance_mm*1000,3)+' mm');
+ const polishing=ep.polishing||{},polishingActive=ep.polishing_active||{};
+ const mode=polishing.output?'Same-duration '+(polishingActive.strategy||'clearance/geometry')+' IPOPT · '+(ep.polishing_attempts||0)+' completed':
+    branch.output?'Alternate basin · '+(data.active?.time_predictor?'hybrid-time IPOPT':'25 ms IPOPT'):
+    data.active?.time_predictor?'Main basin · hybrid-time IPOPT':
+    data.active?.strategy==='drop-packet'?'Main basin · 25 ms packet removal':
+    'Main basin · fixed-duration IPOPT';
+ set('eliteMode',mode);
+ set('eliteBranch',polishing.output?'Seed '+(polishing.seed||'').split('/').at(-2):branch.sha256?branch.sha256.slice(0,14):'Main source-certified witness');
+ set('eliteStatus',polishing.output?'BUILDING ALTERNATIVES':branch.output?'SEARCHING ALTERNATIVE':ep.archived_alternatives?'ALTERNATIVES CERTIFIED':ep.enabled?'DIVERSIFICATION ENABLED':'NOT ENABLED');
+ set('eliteExplanation',polishing.output?
+  'Searching alternative geometries or improving clearance at the unchanged lap duration. Independently certified variants are archived; unsuccessful IPOPT solves are not counted as improvements.':
+  branch.output?
+   'Searching a different independently certified witness at the same starting lap duration; both command-packet reduction and hybrid-time proposals are active. A new incumbent requires a strictly faster independently validated source lap.':
+   ep.enabled?'Unsuccessful shorter-time solves are not progress. The next plateau triggers same-time clearance and geometry searches. Only certified alternatives are retained; no solver activity alone counts as a faster result.':
+   'Standard single-incumbent search. Equal-time diversification is not configured for this workspace.');
  set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · verified direction`);
  set('trialLap',trial==null?'—':`${num(trial)} s`);const gain=best.lap_s!=null&&trial!=null?best.lap_s-trial:null;
  set('trialSub',data.active?.time_predictor?'Time predictor · requires exact command repair':gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
