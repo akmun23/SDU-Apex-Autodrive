@@ -188,7 +188,7 @@ void configure(MpcRtiCycleConfiguration_t *config,
 int main(int argc, char **argv)
 {
     if (argc < 8 || (argc > 31 && argc != 43 && argc != 44 &&
-                     argc != 45 && argc != 46 && argc != 47 && argc != 49)) {
+                     argc != 45 && argc != 46 && argc != 47 && argc != 49 && argc != 50 && argc != 51)) {
         std::cerr << "usage: mpc_bag_solver_replay TRAJECTORY INPUT_CSV "
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
@@ -209,7 +209,8 @@ int main(int argc, char **argv)
                      "[OVERSPEED_CURVATURE_GAIN_M: 0..10 "
                      "[UNDERSPEED_CURVATURE_GAIN_M: 0..10 "
                      "[SLIP_CURVATURE_GAIN_M: 0..10]]]]]]]]]]]]]]]]]]]] "
-                     "(MAX_ITERATIONS: 1..200)\n";
+                     "(MAX_ITERATIONS: 1..200; optional final arguments after "
+                     "both trust radii: FEEDBACK_ROLLOUT [REFERENCE_CLEARANCE_RESERVE_M])\n";
         return 2;
     }
 
@@ -368,7 +369,7 @@ int main(int argc, char **argv)
             config.model.longitudinal_slip_curvature_gain_m =
                 static_cast<float>(curvature_gain);
         }
-        if (argc == 49) {
+        if (argc >= 49) {
             const double steering_radius = number_arg(argv, 47, 0.0);
             const double throttle_radius = number_arg(argv, 48, 0.0);
             if (!std::isfinite(steering_radius) || steering_radius < 0.0 ||
@@ -378,6 +379,18 @@ int main(int argc, char **argv)
                 static_cast<float>(steering_radius);
             config.model.sqp_throttle_trust_region =
                 static_cast<float>(throttle_radius);
+        }
+        if (argc >= 50) {
+            const double feedback_mode = number_arg(argv, 49, 0);
+            if (feedback_mode != 0. && feedback_mode != 1.)
+                throw std::runtime_error("feedback rollout must be 0 or 1");
+            config.feedback_rollout = feedback_mode == 1.;
+        }
+        if (argc >= 51) {
+            const double reserve = number_arg(argv, 50, 0.);
+            if (!std::isfinite(reserve) || reserve < 0.)
+                throw std::runtime_error("reference clearance reserve must be finite and nonnegative");
+            config.model.reference_clearance_reserve_m = static_cast<float>(reserve);
         }
         config.enable_nonlinear_line_search = line_search_backtracks > 0;
         config.line_search_max_backtracks = line_search_backtracks;

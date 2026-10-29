@@ -79,8 +79,10 @@ typedef struct
     float weight_steering_command;
     float weight_steering_target;
     float weight_throttle_command;
-    /* Steering penalizes command-increment error relative to the change in
-     * path steering feedforward; throttle penalizes raw command increments. */
+    /* Steering penalizes command-increment error relative to path feedforward
+     * (the native target for source witnesses, not their physical rack angle).
+     * A source witness anchors the first command to its target; later stages
+     * penalize changes of command-tracking error. Throttle uses raw increments. */
     float weight_steering_slew;
     float weight_throttle_slew;
     /* Local SQP decision radius about each nominal input. Zero disables the
@@ -106,6 +108,10 @@ typedef struct
     int use_fd_jacobian_oracle;
     /* Independent horizon-stage Jacobians; zero selects the serial fallback. */
     int jacobian_threads;
+    /* Soft geometric reference reserve beyond the HARD wall-clearance margin.
+     * Moves the lateral target away from a tight wall when space permits;
+     * does not tighten/relax constraints or change the loaded path/speeds. */
+    float reference_clearance_reserve_m;
 } MpcRtiConfiguration_t;
 
 typedef enum
@@ -273,6 +279,9 @@ typedef struct
      * among tested exact-feasible backtracks, the production objective picks
      * the winner, with corridor slack as a numerical tie-break. */
     int enable_nonlinear_line_search;
+    /* Reuse the QP's Riccati feedback during nonlinear forward trials. Every
+     * resulting command and state still passes the ordinary exact checks. */
+    int feedback_rollout;
     int line_search_max_backtracks; /* 0..4: alpha halves through 0.0625 */
     int line_search_command_epoch_valid;
     /* Zero/one preserves the single RTI pass. Two enables one deadline-gated

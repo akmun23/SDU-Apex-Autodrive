@@ -555,6 +555,8 @@ public:
             "terminal_multiplier", 3.0f);
         rti_config_.enable_nonlinear_line_search = declare_parameter<bool>(
             "enable_nonlinear_line_search", false) ? 1 : 0;
+        rti_config_.feedback_rollout = declare_parameter<bool>(
+            "feedback_rollout", false) ? 1 : 0;
         rti_config_.line_search_max_backtracks = static_cast<int>(
             std::clamp<long>(
                 declare_parameter<int>("line_search_max_backtracks", 0),
@@ -579,6 +581,8 @@ public:
                 rti_config_.model.corridor_margin_m));
         rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
             declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
+        rti_config_.model.reference_clearance_reserve_m = static_cast<float>(
+            declare_parameter<double>("reference_clearance_reserve_m", 0.0));
         rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
             declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.005));
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(

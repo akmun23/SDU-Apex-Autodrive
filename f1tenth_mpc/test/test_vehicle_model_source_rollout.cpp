@@ -249,8 +249,34 @@ TEST(MpcReference, SourceWitnessSeedsTorqueAndUsesItsLateralReferences)
     EXPECT_FLOAT_EQ(refs[k].steering_command, .02f);
   }
   c.active_speed_ceiling_mps=3.f;
-  EXPECT_FALSE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
+  ASSERT_TRUE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
       PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &c, &nominal, refs));
+  for (int k=1; k<PREDICTION_HORIZON; ++k) {
+    EXPECT_EQ(refs[k].source_witness_valid, 0);
+    EXPECT_FLOAT_EQ(refs[k].u, 3.f);
+    EXPECT_FLOAT_EQ(refs[k].v, 0.f);
+    EXPECT_FLOAT_EQ(refs[k].e_psi, 0.f);
+    EXPECT_FLOAT_EQ(nominal.controls[k].throttle_command, .2f);
+  }
+  c.active_speed_ceiling_mps=16.f;
+  ASSERT_TRUE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &c, &nominal, refs));
+  EXPECT_EQ(refs[1].source_witness_valid, 1);
+  EXPECT_FLOAT_EQ(refs[1].v, -.2f);
+  EXPECT_FLOAT_EQ(nominal.controls[1].throttle_command, .11f);
+  c.reference_clearance_reserve_m=.05f;
+  for (auto &point : points) point.left_bound=.25;
+  ASSERT_TRUE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &c, &nominal, refs));
+  EXPECT_LT(refs[1].e_y, 0.f);
+  EXPECT_FLOAT_EQ(c.corridor_margin_m,.05f);
+  MpcModelState_t target{};
+  target.e_y=refs[1].e_y; target.e_psi=refs[1].e_psi;
+  float lower_slack, upper_slack;
+  ASSERT_TRUE(mpc_rti_compute_corridor_slack(&target, refs[1].left_bound,
+      refs[1].right_bound, &c, 2, &lower_slack, &upper_slack));
+  EXPECT_GE(lower_slack,.04999f);
+  EXPECT_GE(upper_slack,.04999f);
 }
 
 TEST(MpcReference, ProgressSensitivityPersistsAcrossLaterStages)
@@ -896,6 +922,54 @@ TEST(RiccatiSolverScaling, PreservesThePhysicalSolution)
   EXPECT_LE(capped_debug.rho_u, 32.0f);
 }
 
+TEST(RiccatiFeedback, ExportsPhysicalGainWithoutChangingTheQpSolution)
+{
+  RiccatiStepData_t steps[RICCATI_HORIZON]{};
+  float terminal_Q[RICCATI_MAX_NX]{}, terminal_q[RICCATI_MAX_NX]{};
+  float lo[RICCATI_MAX_NX], hi[RICCATI_MAX_NX], x0[RICCATI_MAX_NX]{};
+  for (int i=0; i<RICCATI_MAX_NX; ++i) {lo[i]=-BIG_BOUND;hi[i]=BIG_BOUND;}
+  lo[0]=-1.f; hi[0]=1.f; terminal_Q[0]=3.f;
+  for (auto &stage : steps) {
+    for (int i=0; i<RICCATI_MAX_NX; ++i) {
+      stage.A[i][i]=1.f; stage.x_lb[i]=lo[i]; stage.x_ub[i]=hi[i];
+    }
+    stage.B[0][0]=.1f; stage.Q_diag[0]=3.f;
+    for (int a=0; a<2; ++a) {stage.R_diag[a]=4.f;stage.u_lb[a]=-1.f;stage.u_ub[a]=1.f;}
+  }
+  RiccatiAdmmConfig_t config{};
+  config.rho=config.rho_u=7.f; config.rho_max=32.f;
+  config.max_iterations=1;config.tolerance=1.e-6f;
+  config.use_scaling=1;
+  std::fill_n(config.state_scale,RICCATI_MAX_NX,1.f);
+  config.state_scale[0]=2.f;
+  config.input_scale[0]=.5f;config.input_scale[1]=1.f;
+  RiccatiAdmmState_t old_memory{}, feedback_memory{};
+  RiccatiSolution_t old_solution{}, feedback_solution{};
+  float gain[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
+  const auto a=riccati_admm_solve(steps,terminal_Q,terminal_q,lo,hi,x0,&config,&old_memory,&old_solution);
+  const auto b=riccati_admm_solve_with_feedback(steps,terminal_Q,terminal_q,lo,hi,x0,&config,
+      &feedback_memory,&feedback_solution,nullptr,gain);
+  EXPECT_EQ(a,b);
+  EXPECT_EQ(std::memcmp(&old_solution,&feedback_solution,sizeof(old_solution)),0);
+  const float b_scaled=.1f*.5f/2.f;
+  const float terminal_augmented=3.f*2.f*2.f+7.f;
+  const float expected_scaled=-b_scaled*terminal_augmented/(4.f*.5f*.5f+7.f+b_scaled*b_scaled*terminal_augmented);
+  EXPECT_NEAR(gain[RICCATI_HORIZON-1][0][0], .5f/2.f*expected_scaled,1.e-7f);
+  // Invalid core configuration fails after the scaling wrapper has started.
+  // Optional outputs must not be read/unscaled if the core produced none.
+  config.over_relaxation = 3.f;
+  float primal[RICCATI_HORIZON][RICCATI_MAX_NU];
+  for (int k=0; k<RICCATI_HORIZON; ++k)
+    for (int a=0; a<RICCATI_MAX_NU; ++a) {
+      primal[k][a]=7.f;
+      std::fill_n(gain[k][a],RICCATI_MAX_NX,7.f);
+    }
+  EXPECT_EQ(riccati_admm_solve_with_feedback(steps,terminal_Q,terminal_q,lo,hi,x0,
+      &config,&feedback_memory,&feedback_solution,primal,gain),RICCATI_STATUS_ERROR);
+  EXPECT_FLOAT_EQ(gain[0][0][0],7.f);
+  EXPECT_FLOAT_EQ(primal[0][0],7.f);
+}
+
 TEST(RiccatiSolver, SymmetricValueRecursionMatchesUnfactoredPass)
 {
   constexpr int nx = RICCATI_MAX_NX;
@@ -1126,6 +1200,30 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
   EXPECT_NEAR(problem.steps[0].r[0] -
           no_steering_slew_problem.steps[0].r[0],
       -expected_reference_slew_linear_term, 1.0e-5f);
+  // The source's target can change while the rack is still rate-limited.
+  // Compare the exact same plant/QP with and without its slew cost, and verify
+  // that it follows TARGET changes, never the physical-rack reference changes.
+  MpcRtiReference_t source_references[PREDICTION_HORIZON + 1];
+  std::copy_n(references, PREDICTION_HORIZON + 1, source_references);
+  for (int k = 0; k <= horizon; ++k) {
+    source_references[k].source_witness_valid = 1;
+    source_references[k].source_steering_target = k == 0 ? 0.30f : -0.20f;
+    source_references[k].source_throttle = 0.2f;
+  }
+  MpcRtiProblem_t source_problem{}, source_no_slew{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      source_references, horizon, PREDICTION_DT_SECONDS, &config, &source_problem));
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      source_references, horizon, PREDICTION_DT_SECONDS, &no_steering_slew_config, &source_no_slew));
+  for (int k : {0, 1, 2}) {
+    const float previous = k == 0 ? nominal_states[0].plant.delayed_steering_command_2 :
+        source_references[k - 1].source_steering_target;
+    const float expected = 2.f*config.weight_steering_slew *
+        (source_references[k].source_steering_target - previous);
+    EXPECT_NEAR(source_problem.steps[k].r[0] - source_no_slew.steps[k].r[0], -expected, 1.e-5f);
+    EXPECT_NEAR(source_problem.steps[k].q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] -
+        source_no_slew.steps[k].q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND], expected, 1.e-5f);
+  }
   MpcModelState_t prepared_optimizer_plant =
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant;
   ASSERT_TRUE(vehicle_model_initialize_plant_state(&prepared_optimizer_plant));
@@ -1926,6 +2024,25 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
   EXPECT_EQ(result.line_search_accepted, 0);
   EXPECT_TRUE(memory.nominal.valid);
   EXPECT_TRUE(std::isfinite(result.first_control.throttle_command));
+
+  config.feedback_rollout = 1;
+  mpc_rti_memory_reset(&memory);
+  const auto feedback_status = mpc_rti_solve_cycle(&initial, 0., trajectory,
+      trajectory_count, lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
+      &config, &memory, &result);
+  ASSERT_TRUE(feedback_status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+      feedback_status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+      feedback_status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH);
+  MpcRtiNominal_t explicit_replay{};
+  int explicit_failure;
+  ASSERT_EQ(mpc_rti_validate_candidate_plan(&initial, 0., memory.nominal.controls,
+      trajectory, trajectory_count, lap_length, PREDICTION_HORIZON,
+      PREDICTION_DT_SECONDS, &config, &explicit_replay, &explicit_failure), MPC_RTI_ROLLOUT_OK);
+  for (int k=0; k<=PREDICTION_HORIZON; ++k) {
+    EXPECT_NEAR(explicit_replay.states[k].plant.e_y, memory.nominal.states[k].plant.e_y,1.e-6f);
+    EXPECT_NEAR(explicit_replay.states[k].plant.r, memory.nominal.states[k].plant.r,1.e-6f);
+    EXPECT_NEAR(explicit_replay.progress[k], memory.nominal.progress[k],1.e-6);
+  }
 
   mpc_rti_memory_reset(&memory);
   config.absolute_deadline_monotonic_us = mpc_rti_monotonic_time_us() - 1.0;

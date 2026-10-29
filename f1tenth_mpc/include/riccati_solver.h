@@ -243,6 +243,19 @@ RiccatiStatus_t riccati_admm_solve_with_primal_controls(
     RiccatiSolution_t *solution,
     float primal_u_out[RICCATI_HORIZON][RICCATI_MAX_NU]);
 
+/* Same solve, additionally return the already-factorized local feedback gain
+ * in PHYSICAL coordinates: du = K dx. No new factorization or solver states.
+ * This is the augmented Riccati policy, not a constrained-optimum sensitivity;
+ * a nonlinear trial using it must still enforce all bounds and be validated. */
+RiccatiStatus_t riccati_admm_solve_with_feedback(
+    const RiccatiStepData_t *step_data, const float *terminal_Q,
+    const float *terminal_q, const float *terminal_x_lb,
+    const float *terminal_x_ub, const float *x0,
+    const RiccatiAdmmConfig_t *config, RiccatiAdmmState_t *admm_state,
+    RiccatiSolution_t *solution,
+    float primal_u_out[RICCATI_HORIZON][RICCATI_MAX_NU],
+    float feedback_out[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX]);
+
 void riccati_debug_get_last(RiccatiDebugInfo_t *out);
 int riccati_debug_get_trace_count(void);
 int riccati_debug_get_trace_sample(int index, RiccatiDebugIterSample_t *out);
