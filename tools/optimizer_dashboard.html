@@ -318,6 +318,7 @@ function mpcCard(a,data,index,persist){
  mpcAppend(top,left,right);
  const quick=mpcEl('div','mpc-summary-meta');
  mpcAppend(quick,mpcEl('span','','Timed laps: '+completed+' / 10'),
+   mpcEl('span','',Number.isFinite(m.warmup_lap_s)?'Warm-up: '+mpcNum(m.warmup_lap_s)+' s':'Warm-up not completed'),
    mpcEl('span','','Average: '+mpcNum(m.average_scored_s)+' s'),
    mpcEl('span','','Fastest: '+mpcNum(m.best_scored_s)+' s'));
  const bar=mpcEl('div','mpc-progress'),fill=mpcEl('span');
@@ -329,6 +330,18 @@ function mpcCard(a,data,index,persist){
  const message=mpcEl('div','mpc-explainer is-'+state[1]);
  mpcAppend(message,mpcEl('strong','',reason[0]),mpcEl('p','',reason[1]),mpcEl('p','',reason[2]));
  body.append(message);
+ const fixed=m.fixed_command_rollout;
+ if(fixed?.status==='scored'){
+  const physics=mpcEl('div','mpc-facts');
+  mpcAppend(physics,
+   mpcFact('750 ms physics replay · RMSE',mpcNum(fixed.endpoint_xy_rmse_m*100,2),'cm',fixed.windows+' overlapping windows'),
+   mpcFact('750 ms endpoint · maximum',mpcNum(fixed.endpoint_xy_max_m*100,2),'cm','Actual issued commands'),
+   mpcFact('Whole prediction · maximum',mpcNum(fixed.full_path_xy_max_m*100,2),'cm','Largest error at any horizon step'),
+   mpcFact('Paths exceeding 5 cm',mpcInt(fixed.paths_over_5cm),'','Not a planned-command Unity test'));
+  body.append(physics);body.append(mpcEl('p','mpc-footnote',fixed.interpretation));
+ }else if(fixed?.status==='unavailable')body.append(mpcEl('p','mpc-footnote','Physics replay unavailable: '+fixed.error));
+ if(Number.isFinite(m.first_collision_from_start_s))body.append(mpcEl('p','mpc-footnote',
+  'The recording also contains a collision at '+mpcNum(m.first_collision_from_start_s)+' s after recording start. Metrics stop at the first fault, not at the end of shutdown.'));
  if(a.status==='running')body.append(mpcEl('p','mpc-footnote',
   'Official laps: '+(a.official_laps_seen??0)+' / 11. The first lap is warm-up.'));
  if(scored.length||completed){
@@ -409,6 +422,8 @@ function mpcCard(a,data,index,persist){
    mpcEl('pre','mpc-code',a.reason));
  if(a.analysis_error)mpcAppend(content,mpcEl('div','mpc-code-title','Recording error'),
    mpcEl('pre','mpc-code',a.analysis_error));
+ if(a.decoder_compatibility_note)mpcAppend(content,mpcEl('div','mpc-code-title','Decoder provenance'),
+   mpcEl('p','mpc-helper',a.decoder_compatibility_note));
  if(a.run_id){
   const location='live_runs/'+a.run_id+'/';
   mpcAppend(content,mpcEl('div','mpc-code-title','Saved evidence'),
@@ -437,9 +452,9 @@ function mpcCard(a,data,index,persist){
 }
 function renderMpc(data){
  const mpc=data.mpc_trials||{},target=$('mpcTrials'),worker=mpc.worker||{},queue=mpc.pending||0;
- const paused=!!mpc.optimizer_pause?.unit;
- set('plainStatus',paused?'Unity test in progress · optimizer paused':data.process.alive?'One optimizer is searching for a faster path':'Optimizer is not running');
- set('plainExplanation',paused?'The same optimization iterate is preserved and resumes after the test. The simulator, controller and bag decoder have the machine to themselves.':
+ const paused=!!mpc.optimizer_pause?.unit,pauseReason=mpc.optimizer_pause?.reason||'Unity driving test';
+ set('plainStatus',paused?pauseReason+' · optimizer paused':data.process.alive?'One optimizer is searching for a faster path':'Optimizer is not running');
+ set('plainExplanation',paused?'The same optimization iterate is preserved. It resumes when this task finishes, so optimization does not compete with driving or analysis.':
   mpc.supervisor_alive?'New model-feasible lines are automatically tested in Unity, one at a time. Model feasibility alone does not prove the controller can drive a line.':
   'Automatic driving tests are stopped. Optimization can continue, but new candidates will not be tested until the supervisor is started.');
  set('drivingSummary',`${mpc.successful_trials??0} / ${mpc.total_trials??0} driving tests completed all 10 timed laps. First lap is warm-up and is not scored.`);
@@ -473,7 +488,7 @@ function render(data){
  snapshot=data;const best=data.best,trial=data.active?.trial_lap_s,current=data.residuals.at(-1)?.residual,initial=data.solver?.initial_residual,cp=data.checkpoint,c=data.contract;
  set('trackName',data.name.replace(/^optimizer_/,'').replace(/_[a-f\d]{10}$/,''));
  const live=data.process.alive,isFinished=['plateau','search_domain_reached','prepared'].includes(data.status);
- set('statusText',data.mpc_trials?.optimizer_pause?.unit?'Optimizer paused for Unity test':data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
+ set('statusText',data.mpc_trials?.optimizer_pause?.unit?'Paused for '+data.mpc_trials.optimizer_pause.reason:data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
  $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.activity==='quiet'||!live?'quiet':'active';
  set('connection',`Connected · ${new Date().toLocaleTimeString()} · 2 s polling · last log change ${age(data.log_age_s)} ago`);
  set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · verified direction`);

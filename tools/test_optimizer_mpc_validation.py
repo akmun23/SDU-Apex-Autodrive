@@ -131,6 +131,11 @@ def test_analysis_uses_recorded_ros_image_and_repository_paths(tmp_path, monkeyp
     assert '/workspace/src/live_runs/apex_mpc_fixture_a01/run' in command
     assert '/workspace/src/live_runs/apex_mpc_fixture_a01/raceline.csv' in command
     assert any('source /opt/ros/humble/setup.bash' in part for part in command)
+    assert '--source-plant-library' in command
+    assert any('cmake --build /workspace/build/f1tenth_mpc' in part for part in command)
+    override = analysis_command(run, run/'raceline.csv', decoder_image='checked-decoder:latest')
+    assert 'checked-decoder:latest' in override
+    assert image not in override
     (run/'controller_image_id.txt').write_text('invalid')
     with pytest.raises(ValueError, match='image ID'):
         analysis_command(run, run/'raceline.csv')
@@ -189,3 +194,14 @@ def test_never_steal_an_existing_pause(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match='another owner'):
         with yield_optimizer(tmp_path):
             pytest.fail('must not launch a competing trial')
+
+
+def test_restart_must_not_thaw_another_live_analysis_owner(tmp_path, monkeypatch):
+    import tools.optimizer_mpc_validation as validation
+    lease = tmp_path/'mpc_validation/optimizer_pause.json'
+    validation.atomic_json(lease, dict(unit='sdu-track-optimizer-abc.service',
+                                      owner_pid=123, owner_start_ticks='456'))
+    monkeypatch.setattr(validation, 'process_start_ticks', lambda _: '456')
+    monkeypatch.setattr(validation, 'optimizer_unit', lambda _: pytest.fail('must not take over live lease'))
+    recover_optimizer(tmp_path)
+    assert lease.exists()

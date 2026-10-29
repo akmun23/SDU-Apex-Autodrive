@@ -70,13 +70,33 @@ JSONL (if bag analysis succeeds).
 Analysis runs inside the controller's ROS image, rather than depending on
 host Python having rclpy and the generated vehicle messages. New trials save
 `controller_image_id.txt` and the decoder uses that immutable image ID; older
-recordings without it use the configured controller image. Failed runs are
+recordings without it use the configured controller image. If a recorded image
+has been garbage-collected, a configured decoder image may be used with an
+explicit `analysis_environment.json` compatibility note. This does not recreate
+the old controller binary. Failed runs are
 decoded as well, with zero completed laps distinguished from missing data.
+
+An optional workspace `mpc_validation/mpc_parameter_overlay.yaml` is copied
+to an immutable per-attempt input and SHA-identified before launch. The run
+also retains the base/overlay actually passed to ROS. Practice-only parameters
+are not implicitly applied to the IROS map.
 
 The report includes official per-lap durations and per-lap RMS reference
 cross-track/heading/speed error, as well as full-run average, total, median,
 minimum/maximum, standard deviation, MPC convergence statuses, fault reasons,
 timings (median/p95/max), per-progress-bin diagnostics and raw cycles.
+
+Automatic analysis freshly builds the source-only plant evaluator inside the
+ROS image and records its library SHA. It scores 750 ms predictions from each
+logged initial observer state and actual future issued commands, without later
+state corrections. The dashboard shows endpoint RMSE/max, maximum error anywhere
+in the horizon and paths over 5 cm. This is **not** validation of an unexecuted
+MPC plan against replanning Unity. Overlapping windows are not independent.
+Missing analysis is unavailable, not zero error. Metrics stop at the first
+fault; collisions during shutdown are displayed separately.
+
+Controller changes, failed alternatives, accuracy and remaining gates:
+[IROS runtime progress](development/IROS_MPC_RUNTIME_20261029.md).
 
 A run is successful only if the watcher completes without abort, the process
 returns successfully and the ROS bag contains ten scored completed lap-time

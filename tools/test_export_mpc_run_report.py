@@ -14,6 +14,21 @@ from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_fixed_commands_are_not_scored_as_unexecuted_plans(self):
+        rows = [dict(xy_m=.02, path_max_xy_m=.03, end_u_error_mps=.01,
+                     end_v_error_mps=.002, end_r_error_radps=.02),
+                dict(xy_m=.04, path_max_xy_m=.06, progress_m=float('nan'), end_u_error_mps=-.01,
+                     end_v_error_mps=-.002, end_r_error_radps=-.02)]
+        result = report.summarize_fixed_command_rollout(rows)
+        self.assertEqual(result['windows'], 2)
+        self.assertAlmostEqual(result['endpoint_xy_rmse_m'], (.001)**.5)
+        self.assertEqual(result['full_path_xy_max_m'], .06)
+        self.assertEqual(result['paths_over_5cm'], 1)
+        self.assertIsNone(result['worst_window']['progress_m'])
+        json.dumps(result, allow_nan=False)
+        self.assertIn('Not an unexecuted MPC-plan test', result['interpretation'])
+        self.assertEqual(report.summarize_fixed_command_rollout([])['status'], 'unavailable')
+
     def test_lap_tracking_uses_counter_boundaries_not_wall_time_guess(self) -> None:
         laps = [dict(bag_time=10., value=0), dict(bag_time=20., value=1),
                 dict(bag_time=30., value=2)]

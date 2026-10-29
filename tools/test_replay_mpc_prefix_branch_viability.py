@@ -109,7 +109,7 @@ def test_next_epoch_state_preserves_hidden_state_and_advances_stamp():
     assert len(PLANT_STATE_COLUMNS) == 22
     assert predicted["stamp_ns"] == 1_075_000_000
     assert predicted["state"] == list(map(float, range(10)))
-    assert row[3:13] == list(map(float, range(10)))
+    assert row[3:13] == [0., 1., 2., 3., 4., 7., 5., 6., 8., 9.]
     assert row[-22:] == list(map(float, range(22)))
 
 

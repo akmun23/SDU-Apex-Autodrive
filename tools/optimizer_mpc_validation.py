@@ -231,6 +231,9 @@ def summary_from_report(report: dict) -> dict:
                   solver_termination_counts=data.get("solver_termination_counts"),
                   solver_stop_reason_counts=data.get("solver_stop_reason_counts"),
                   report_schema=report.get("schema"))
+    for key in ('fixed_command_rollout', 'first_collision_from_start_s',
+                'first_unpublished_mpc_rejection_from_start_s'):
+        result[key] = data.get(key)
     if scored:
         result.update(total_scored_s=sum(scored), average_scored_s=statistics.mean(scored),
                       median_scored_s=statistics.median(scored),
@@ -239,7 +242,7 @@ def summary_from_report(report: dict) -> dict:
     return result
 
 
-def analysis_command(run_dir: Path, reference: Path) -> list[str]:
+def analysis_command(run_dir: Path, reference: Path, *, decoder_image=None) -> list[str]:
     """Decode bags with the same ROS messages/runtime used to collect them."""
     def mounted(path):
         return '/workspace/src/'+str(path.resolve().relative_to(REPO.resolve()))
@@ -248,6 +251,10 @@ def analysis_command(run_dir: Path, reference: Path) -> list[str]:
         'SDU_APEX_MAPPING_IMAGE', 'sdu-apex-autodrive:iros-mapping')
     if image_file.exists() and not re.fullmatch(r'sha256:[a-f0-9]{64}', image):
         raise ValueError('Invalid recorded controller image ID')
+    if decoder_image is not None:
+        if not re.fullmatch(r'[A-Za-z0-9_./:@-]+', decoder_image):
+            raise ValueError('Invalid decoder image')
+        image = decoder_image
     if not re.fullmatch(r'[A-Za-z0-9_-]+', run_dir.name):
         raise ValueError('Invalid analysis run name')
     return ['docker', 'run', '--rm', '--name', 'report_'+run_dir.name,
@@ -255,11 +262,13 @@ def analysis_command(run_dir: Path, reference: Path) -> list[str]:
         '-lc', 'set -e; source /opt/ros/humble/setup.bash; '
         'source /home/autodrive_devkit/install/setup.bash; '
         'source /workspace/install/setup.bash; cd /workspace/src; '
+        'cmake --build /workspace/build/f1tenth_mpc --target unity_source_plant_eval --parallel 2; '
         'exec python3 tools/export_mpc_run_report.py "$@"', 'mpc-report',
         mounted(run_dir/'run'), '--root', '/workspace/src', '--trajectory', mounted(reference),
         '--experiment-regime', 'live_closed_loop',
         '--output-json', mounted(run_dir/'mpc_run_report.json'),
-        '--output-csv', mounted(run_dir/'mpc_cycle_detail.csv')]
+        '--output-csv', mounted(run_dir/'mpc_cycle_detail.csv'),
+        '--source-plant-library', '/workspace/build/f1tenth_mpc/libunity_source_plant_eval.so']
 
 
 def run_analysis(run_dir: Path, reference: Path, attempt: dict) -> None:
@@ -270,7 +279,18 @@ def run_analysis(run_dir: Path, reference: Path, attempt: dict) -> None:
     report_path = run_dir / "mpc_run_report.json"
     try:
         command = analysis_command(run_dir, reference)
-    except (OSError, ValueError) as exc:
+        image = command[command.index('-lc')-1]
+        available = subprocess.run(['docker', 'image', 'inspect', image],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15).returncode == 0
+        if not available:
+            decoder = os.environ.get('SDU_APEX_MAPPING_IMAGE', 'sdu-apex-autodrive:iros-mapping')
+            command = analysis_command(run_dir, reference, decoder_image=decoder)
+            attempt['decoder_compatibility_note'] = (
+                'Recorded controller image no longer exists; decoded using '+decoder+
+                '. Message/schema decoding is checked by the reader; physics replay compiles current source.')
+            atomic_json(run_dir/'analysis_environment.json', dict(
+                recorded_image=image, decoder_image=decoder, note=attempt['decoder_compatibility_note']))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         attempt['analysis_error'] = str(exc)
         return
     with (run_dir / "analysis.log").open("w") as log:
@@ -338,11 +358,25 @@ def optimizer_unit(workspace: Path) -> str | None:
     return cgroup
 
 
+def process_start_ticks(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
 def recover_optimizer(workspace: Path) -> None:
     """Release a freeze left by a crashed supervisor, not an arbitrary unit."""
     lease = workspace / 'mpc_validation/optimizer_pause.json'
     saved = load_json(lease)
     if not saved:
+        return
+    owner_start = process_start_ticks(saved.get('owner_pid'))
+    if owner_start is not None and owner_start == saved.get('owner_start_ticks'):
+        # A deliberate offline analysis can own the pause while this supervisor
+        # is restarted. A live owner is not a crashed-supervisor lease.
         return
     unit = optimizer_unit(workspace)
     if unit and unit == saved.get('unit'):
@@ -351,7 +385,7 @@ def recover_optimizer(workspace: Path) -> None:
 
 
 @contextmanager
-def yield_optimizer(workspace: Path):
+def yield_optimizer(workspace: Path, *, reason='Unity driving test'):
     """One heavy workload: freeze IPOPT during build, Unity, and bag decoding.
 
     Freezing the dedicated cgroup includes any solver workers and preserves the
@@ -367,7 +401,8 @@ def yield_optimizer(workspace: Path):
         if current.stdout.strip() != 'running':
             raise RuntimeError('Optimizer is already paused by another owner; deferring trial')
         atomic_json(lease, dict(unit=unit, owner_pid=os.getpid(),
-                               reason='Unity driving test', started_epoch_s=time.time()))
+                               owner_start_ticks=process_start_ticks(os.getpid()),
+                               reason=reason, started_epoch_s=time.time()))
     try:
         if unit:
             subprocess.run(['systemctl', '--user', 'freeze', unit], check=True, timeout=15)
@@ -413,6 +448,15 @@ def execute(workspace: Path, state: dict, item: dict, state_path: Path, *, dry_r
     env.update(SDU_APEX_IROS_TRAJECTORY_FILE=str(reference),
                SDU_APEX_IROS_TOTAL_LAPS=str(TARGET_LAPS),
                SDU_APEX_IROS_WALL_TIMEOUT_S=env.get("SDU_APEX_AUTO_TRIAL_TIMEOUT_S", "900"))
+    profile = workspace / 'mpc_validation/mpc_parameter_overlay.yaml'
+    if profile.is_file():
+        profile = safe_file(str(profile), workspace)
+        snapshot = input_dir / f'attempt_{iteration:02d}_mpc.yaml'
+        shutil.copyfile(profile, snapshot)
+        attempt['mpc_profile_sha256'] = sha256(snapshot)
+        attempt['mpc_profile_snapshot'] = str(snapshot)
+        env['SDU_APEX_IROS_MPC_PARAMETER_FILE'] = str(snapshot)
+        atomic_json(state_path, state)
     # The existing launcher builds the production controller image so that a
     # stale prebuilt image is never silently treated as a fresh trial.
     command = ["bash", str(REPO / "tools/run_iros_trial.sh"), run_id]

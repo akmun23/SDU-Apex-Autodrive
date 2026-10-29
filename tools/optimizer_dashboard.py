@@ -382,7 +382,8 @@ class Dashboard:
                 compact = {key: trial.get(key) for key in (
                     'id', 'model_lap_s', 'run_id', 'status', 'reason', 'attempt',
                     'started_epoch_s', 'finished_epoch_s', 'analysis_error',
-                    'trajectory_sha256', 'mpc_validated', 'unity_trial_completed')}
+                    'trajectory_sha256', 'mpc_validated', 'unity_trial_completed',
+                    'mpc_profile_sha256', 'decoder_compatibility_note')}
                 metrics = trial.get('metrics') or {}
                 compact['metrics'] = {key: metrics.get(key) for key in (
                     'warmup_lap_s', 'scored_lap_times_s', 'completed_scored_laps',
@@ -393,7 +394,8 @@ class Dashboard:
                     'nonlinear_failure_reason_counts', 'controller_cycles',
                     'score_cutoff_reason', 'gate_timing_ms', 'jacobian_profile',
                     'solver_profile', 'solver_termination_counts',
-                    'solver_stop_reason_counts')}
+                    'solver_stop_reason_counts', 'fixed_command_rollout',
+                    'first_collision_from_start_s', 'first_unpublished_mpc_rejection_from_start_s')}
                 if compact['status'] == 'running':
                     run_id = compact.get('run_id') or ''
                     # Only read logs from explicitly named auto-trial directories.

@@ -55,11 +55,17 @@ def to_solver_row(diag: dict[str, Any]) -> list[float]:
     stamp_ns = diag.get("source_stamp_ns")
     progress = diag.get("progress_m")
     speed_ceiling = diag.get("active_speed_ceiling_mps")
-    values = [stamp_ns, progress, speed_ceiling, *state[:10], flags[1],
+    # Diagnostic order is ey,epsi,u,v,r,queued steer 1,queued steer 2,rack,q1,q2.
+    # The C replay's numeric schema puts the rack BEFORE the two queued targets.
+    # Copying state verbatim silently exchanged physical rack and command history.
+    ordered = [*state[:5], state[7], state[5], state[6], *state[8:10]]
+    values = [stamp_ns, progress, speed_ceiling, *ordered, flags[1],
               0.0, 0.0, *hidden]
     row = [float(value) for value in values]
     if len(row) != 38:
         raise ValueError(f"internal export row has {len(row)} values, expected 38")
+    if not all(math.isfinite(value) for value in row):
+        raise ValueError('saved MPC state contains non-finite values')
     return row
 
 

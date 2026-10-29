@@ -23,13 +23,10 @@ from typing import Any
 from tools import audit_mpc_trajectory_feasibility as audit
 from tools import evaluate_mpc_bag as evaluator
 from tools import search_mpc_source_plant_continuation as search
+from tools.export_mpc_solver_inputs_from_bag import HEADER as SOLVER_HEADER, to_solver_row
 
 
-STATE_HEADER = (
-    "stamp_ns", "progress_m", "speed_ceiling_mps", *search.STATE_COLUMNS,
-    "suspension_history_initialized", "yaw_residual_radps",
-    "yaw_residual_valid", *search.PLANT_STATE_COLUMNS,
-)
+STATE_HEADER = tuple(SOLVER_HEADER.split(','))
 
 REPLAY_ARGUMENTS = [
     "7", "0", "0", "1.6", "0.001", "0", "0", "0", "32", "10",
@@ -76,13 +73,8 @@ def branch_diagnostic(diag: dict[str, Any], stage: dict[str, Any]) -> dict[str, 
 
 
 def saved_state_row(diag: dict[str, Any]) -> list[float]:
-    row = [
-        float(diag["stamp_ns"]), float(diag["progress_m"]),
-        float(diag["speed_ceiling_mps"]), *diag["state"],
-        float(diag["suspension_history_initialized"]),
-        float(diag["yaw_residual_radps"]), float(diag["yaw_residual_valid"]),
-        *diag["plant_internal_state"],
-    ]
+    row = to_solver_row(dict(diag, source_stamp_ns=diag['stamp_ns'],
+                            active_speed_ceiling_mps=diag['speed_ceiling_mps']))
     if len(row) != len(STATE_HEADER) or not all(math.isfinite(v) for v in row):
         raise ValueError("invalid saved MPC state row")
     return row

@@ -284,6 +284,8 @@ class DashboardTest(unittest.TestCase):
         self.assertNotIn('class="mpc-progress-label"',html)
         self.assertIn("mpcAppend(summary,top,quick,bar)",html)
         self.assertIn('mpc-summary-meta',html)
+        self.assertIn("'Warm-up: '+mpcNum(m.warmup_lap_s)",html)
+        self.assertIn('Warm-up not completed',html)
         self.assertIn("slice(0,1)",html)
 
     def test_http_endpoints_are_local_read_only_and_no_generic_file_server(self):

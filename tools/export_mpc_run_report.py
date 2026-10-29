@@ -1390,6 +1390,29 @@ def write_diagnostic_sequence_sidecar(
         "_decode_error" not in row["json"] for row in ordered)
 
 
+def summarize_fixed_command_rollout(windows):
+    """Retrospective dynamics check, never unexecuted-plan tracking accuracy."""
+    valid = [row for row in windows if isinstance(row.get('xy_m'), (int, float))
+             and math.isfinite(row['xy_m'])]
+    if not valid:
+        return dict(status='unavailable', windows=0, error='No aligned pre-fault 750 ms windows')
+    worst = max(valid, key=lambda row: row['path_max_xy_m'])
+    return dict(status='scored', windows=len(valid), horizon_ms=750,
+        endpoint_xy_rmse_m=_rmse([row['xy_m'] for row in valid]),
+        endpoint_xy_max_m=max(row['xy_m'] for row in valid),
+        full_path_xy_max_m=max(row['path_max_xy_m'] for row in valid),
+        paths_over_5cm=sum(row['path_max_xy_m'] > .05 for row in valid),
+        forward_speed_rmse_mps=_rmse([row['end_u_error_mps'] for row in valid]),
+        lateral_speed_rmse_mps=_rmse([row['end_v_error_mps'] for row in valid]),
+        yaw_rate_rmse_radps=_rmse([row['end_r_error_radps'] for row in valid]),
+        worst_window={key: (worst.get(key) if isinstance(worst.get(key), (int, float))
+                           and math.isfinite(worst[key]) else None) for key in (
+            'start_stamp_ns', 'start_bag_time_s', 'start_speed_mps',
+            'start_steering_rad', 'progress_m', 'path_max_xy_m', 'path_max_step')},
+        interpretation='Logged start plus actual issued commands; no future state corrections. '
+                       'Overlapping windows are not independent trials. Not an unexecuted MPC-plan test.')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bag", type=Path)
@@ -1406,6 +1429,8 @@ def main() -> int:
         help="explicitly set live_closed_loop only when MPC commands controlled the run")
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-csv", type=Path, required=True)
+    parser.add_argument('--source-plant-library', type=Path,
+                        help='also score fixed-issued-command 750 ms replay against truth')
     parser.add_argument(
         "--output-diagnostics-jsonl", type=Path,
         help="full per-cycle diagnostic payload sidecar (default: sibling of output CSV)")
@@ -1418,6 +1443,21 @@ def main() -> int:
         args.trajectory.resolve() if args.trajectory else None,
         args.run_metadata.resolve() if args.run_metadata else None,
         args.progress_bin_m, args.experiment_regime)
+    if args.source_plant_library:
+        try:
+            cutoff = report['summary'].get('scored_through_first_fault_epoch_s')
+            before_fault = lambda topic: [row for row in data.get(topic, [])
+                                         if cutoff is None or row.get('bag_time', math.inf) <= cutoff]
+            result = evaluator.report_source_plant_rollout(
+                before_fault(evaluator.GT), before_fault(evaluator.PLANT),
+                before_fault(evaluator.ODOM_DIAGNOSTICS), args.source_plant_library,
+                before_fault(evaluator.IMU), before_fault(evaluator.LEFT_ENCODER),
+                before_fault(evaluator.RIGHT_ENCODER))
+            windows = (result or {}).get('valid_750ms_windows', [])
+            report['summary']['fixed_command_rollout'] = summarize_fixed_command_rollout(windows)
+            report['summary']['fixed_command_rollout']['library_sha256'] = sha256_file(args.source_plant_library)
+        except (OSError, ValueError, RuntimeError) as error:
+            report['summary']['fixed_command_rollout'] = dict(status='unavailable', error=str(error))
     report["cycle_detail_csv"] = str(args.output_csv.resolve())
     diag_topic = (evaluator.CANDIDATE_DIAGNOSTICS
                   if data.get(evaluator.CANDIDATE_DIAGNOSTICS)

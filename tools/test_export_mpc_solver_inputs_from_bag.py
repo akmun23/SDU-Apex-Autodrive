@@ -23,7 +23,7 @@ class SolverInputExportTests(unittest.TestCase):
         row = to_solver_row(self.sample())
         self.assertEqual(len(row), 38)
         self.assertEqual(row[:3], [123456789.0, 12.5, 16.0])
-        self.assertEqual(row[3:13], list(map(float, self.sample()["state"])))
+        self.assertEqual(row[3:13], [0.1, -0.2, 3.0, 0.4, 0.5, 0.03, 0.01, 0.02, 0.4, 0.5])
         self.assertEqual(row[13:16], [0.0, 0.0, 0.0])
         self.assertEqual(row[16:], list(map(float, range(22))))
 

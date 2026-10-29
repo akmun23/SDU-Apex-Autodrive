@@ -2,6 +2,10 @@
 
 ## Purpose and current status
 
+For current Unity/MPC driving, automatic report metrics and controller changes,
+see [IROS runtime progress](IROS_MPC_RUNTIME_20261029.md). Model certification
+must not be confused with completed competition-track laps.
+
 Keep the command campaign's rapid large reductions. Add local minimum-time
 search when fixed-duration attempts stall, and repair resampled actuator and
 wheel histories using the production source equations. This does not replace

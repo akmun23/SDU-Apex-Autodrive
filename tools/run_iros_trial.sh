@@ -15,6 +15,15 @@ trajectory="$(realpath -- "$trajectory")"
   echo "Trajectory must resolve inside the repository" >&2; exit 2;
 }
 trajectory_container="/workspace/src/${trajectory#"$repo_root/"}"
+mpc_profile="${SDU_APEX_IROS_MPC_PARAMETER_FILE:-}"
+mpc_profile_container=""
+if [[ -n "$mpc_profile" ]]; then
+  mpc_profile="$(realpath -e -- "$mpc_profile")"
+  [[ "$mpc_profile" == "$repo_root/"* && -f "$mpc_profile" ]] || {
+    echo 'MPC profile must resolve to a repository file' >&2; exit 2;
+  }
+  mpc_profile_container="/workspace/src/${mpc_profile#"$repo_root/"}"
+fi
 total_laps="${SDU_APEX_IROS_TOTAL_LAPS:-2}"
 timeout_s="${SDU_APEX_IROS_WALL_TIMEOUT_S:-240}"
 [[ "$total_laps" =~ ^[0-9]+$ && "$total_laps" -ge 2 &&
@@ -39,6 +48,8 @@ docker image inspect --format '{{.Id}}' "$image" >"$run_dir/controller_image_id.
 cp -- "$map" "$run_dir/map.yaml"
 cp -- "$trajectory" "$run_dir/raceline.csv"
 cp -- f1tenth_localization/config/amcl_iros.yaml "$run_dir/amcl_overlay.yaml"
+cp -- f1tenth_mpc/config/mpc_competition.yaml "$run_dir/mpc_base.yaml"
+if [[ -n "$mpc_profile" ]]; then cp -- "$mpc_profile" "$run_dir/mpc_overlay.yaml"; fi
 cleanup() {
   docker stop --timeout 0 "$simulator" >/dev/null 2>&1 || true
   docker kill --signal SIGINT "$recorder" "$controller" >/dev/null 2>&1 || true
@@ -49,13 +60,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 docker run --rm --name "$controller" --network=host --ipc=host --privileged --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
-  -v "$repo_root:/workspace/src:rw" -e "SDU_APEX_TRAJECTORY_FILE=$trajectory_container" --entrypoint /bin/bash "$image" -lc '
+  -v "$repo_root:/workspace/src:rw" -e "SDU_APEX_TRAJECTORY_FILE=$trajectory_container" \
+  -e "SDU_APEX_MPC_PARAMETER_FILE=$mpc_profile_container" --entrypoint /bin/bash "$image" -lc '
     source /opt/ros/humble/setup.bash &&
     source /home/autodrive_devkit/install/setup.bash &&
     source /workspace/install/setup.bash &&
     exec ros2 launch sdu_apex_autodrive controller.launch.py \
       map_yaml:=/workspace/src/f1tenth_planning/maps/autodrive_iros_2026_compete.yaml \
       trajectory_file:="$SDU_APEX_TRAJECTORY_FILE" \
+      mpc_parameter_overlay:="$SDU_APEX_MPC_PARAMETER_FILE" \
       amcl_parameter_overlay:=/workspace/src/f1tenth_localization/config/amcl_iros.yaml \
       mpc_publish_diagnostics:=true with_rviz:=false
   ' >"$run_dir/controller.log" 2>&1 &
