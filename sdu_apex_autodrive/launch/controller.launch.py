@@ -18,7 +18,6 @@ from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
-from launch_ros.parameter_descriptions import ParameterValue
 
 
 MAP_NAME = "autodrive_practice_20260924_b.yaml"
@@ -45,6 +44,20 @@ def _mpc_parameter_files(mpc_share: str, map_path: str, overlay: str) -> list[st
     if overlay:
         parameters.append(overlay)
     return parameters
+
+
+def _optional_controller_speed(value: str) -> dict[str, float]:
+    # Launch CLI speed is an explicit override. If omitted, keep YAML's value.
+    requested = value.strip()
+    if not requested:
+        return {}
+    try:
+        speed = float(requested)
+    except ValueError as exc:
+        raise RuntimeError("controller_max_speed must be numeric") from exc
+    if not math.isfinite(speed) or not 0.0 < speed <= 16.0:
+        raise RuntimeError("controller_max_speed must be finite and in (0,16]")
+    return {"max_speed_mps": speed}
 
 
 def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
@@ -163,6 +176,10 @@ def _setup(context):
         ], remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")])
 
     mpc_parameters = _mpc_parameter_files(mpc, map_path, overlays['mpc_parameter_overlay'])
+    # An explicit CLI override has higher precedence than YAML, but the
+    # implicit default must NOT silently replace max_speed_mps from an overlay.
+    mpc_speed_override = _optional_controller_speed(
+        LaunchConfiguration("controller_max_speed").perform(context))
     diagnostics = _bool(
         LaunchConfiguration("mpc_publish_diagnostics").perform(context))
     mpc_node = ComposableNode(
@@ -170,8 +187,7 @@ def _setup(context):
         name="mpc_controller_node",
         parameters=mpc_parameters + [{
             "trajectory_file": trajectory,
-            "max_speed_mps": ParameterValue(
-                LaunchConfiguration("controller_max_speed"), value_type=float),
+            **mpc_speed_override,
             "publish_diagnostics": diagnostics,
             "diagnostics_topic": "/mpc/diagnostics",
         }], remappings=[
@@ -245,7 +261,7 @@ def generate_launch_description():
         DeclareLaunchArgument("csv_path_repeats", default_value="3"),
         DeclareLaunchArgument("csv_lookahead_speed_gain_s", default_value="0.12"),
         DeclareLaunchArgument("csv_native_control_delay_s", default_value="0.05"),
-        DeclareLaunchArgument("controller_max_speed", default_value="16.0"),
+        DeclareLaunchArgument("controller_max_speed", default_value=""),
         DeclareLaunchArgument("mpc_publish_diagnostics", default_value="false"),
         DeclareLaunchArgument("mpc_start_delay_sec", default_value="2.0"),
         DeclareLaunchArgument("mpc_parameter_overlay", default_value=""),

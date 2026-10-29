@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    # Diagnose whether the source fastline is only failing under high dynamic demand.
+    max_speed_mps: 5.0
+    startup_speed_mps: 3.0
+    startup_ramp_laps: 1.0
+    weight_e_y: 300.0
+    weight_e_psi: 75.0
+    weight_u: 0.35
+    weight_u_overspeed: 4.0
+    weight_longitudinal_slip: 0.05
+    weight_v: 0.05
+    weight_r: 2.0
+    weight_steering_command: 0.03
+    weight_steering_target: 0.05
+    weight_throttle_command: 0.001
+    weight_steering_slew: 1.0
+    weight_throttle_slew: 0.1
+    feedback_rollout: true
+    reference_clearance_reserve_m: 0.07
