@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from tools.optimizer_mpc_validation import (
     certified_exports, initialize, discover, classification, summary_from_report,
     request_retry, consume_retries, safe_file, start_orientation_conflict,
     analysis_command,
+    yield_optimizer, recover_optimizer,
 )
 
 
@@ -142,3 +144,48 @@ def test_known_iros_clockwise_reference_is_opposite_initial_spawn_line():
     if candidate.is_file() and baseline.is_file():
         reason = start_orientation_conflict(candidate, baseline)
         assert reason and "opposite direction" in reason
+
+
+def test_optimizer_is_released_even_if_trial_fails(tmp_path, monkeypatch):
+    import tools.optimizer_mpc_validation as validation
+    calls = []
+    monkeypatch.setattr(validation, 'optimizer_unit', lambda _: 'sdu-track-optimizer-abc.service')
+    def run(command, **_):
+        calls.append(command)
+        return SimpleNamespace(stdout='running\n')
+    monkeypatch.setattr(validation.subprocess, 'run', run)
+    with pytest.raises(RuntimeError, match='trial failed'):
+        with yield_optimizer(tmp_path):
+            assert (tmp_path/'mpc_validation/optimizer_pause.json').is_file()
+            raise RuntimeError('trial failed')
+    assert [command[2] for command in calls] == ['show', 'freeze', 'thaw']
+    assert not (tmp_path/'mpc_validation/optimizer_pause.json').exists()
+
+
+def test_restart_recovers_a_crashed_supervisors_optimizer_lease(tmp_path, monkeypatch):
+    import tools.optimizer_mpc_validation as validation
+    unit = 'sdu-track-optimizer-abc.service'
+    calls = []
+    monkeypatch.setattr(validation, 'optimizer_unit', lambda _: unit)
+    monkeypatch.setattr(validation.subprocess, 'run', lambda command, **_: calls.append(command))
+    validation.atomic_json(tmp_path/'mpc_validation/optimizer_pause.json', dict(unit=unit))
+    recover_optimizer(tmp_path)
+    assert calls == [['systemctl', '--user', 'thaw', unit]]
+    assert not (tmp_path/'mpc_validation/optimizer_pause.json').exists()
+
+
+def test_no_optimizer_means_no_freeze_or_thaw(tmp_path, monkeypatch):
+    import tools.optimizer_mpc_validation as validation
+    monkeypatch.setattr(validation, 'optimizer_unit', lambda _: None)
+    monkeypatch.setattr(validation.subprocess, 'run', lambda *_, **__: pytest.fail('unexpected process control'))
+    with yield_optimizer(tmp_path):
+        pass
+
+
+def test_never_steal_an_existing_pause(tmp_path, monkeypatch):
+    import tools.optimizer_mpc_validation as validation
+    monkeypatch.setattr(validation, 'optimizer_unit', lambda _: 'sdu-track-optimizer-abc.service')
+    monkeypatch.setattr(validation.subprocess, 'run', lambda *_, **__: SimpleNamespace(stdout='frozen\n'))
+    with pytest.raises(RuntimeError, match='another owner'):
+        with yield_optimizer(tmp_path):
+            pytest.fail('must not launch a competing trial')

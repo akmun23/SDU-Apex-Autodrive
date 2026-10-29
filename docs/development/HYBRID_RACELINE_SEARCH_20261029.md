@@ -116,8 +116,10 @@ Source plant fingerprint:
 Updated campaign: `live_runs/optimizer_iros_conditioned_20261029/`.
 It starts from the independently certified 7.400 s witness, uses the rescaled
 fixed-duration cost and duration-first scheduler, and explicitly enables the
-optional local time predictor as a separate challenger to the older process.
-The older loaded campaign continues in its own workspace.
+optional local time predictor. The older loaded campaign was gracefully
+stopped on user request; its checkpoints and exports are preserved. Only this
+campaign remains active. The launcher now rejects a second active optimizer
+service, even when its requested output directory differs.
 
 ```bash
 tools/run_raceline_campaign.sh f1tenth_planning/maps/autodrive_iros_2026_compete.yaml \
@@ -126,7 +128,7 @@ tools/run_raceline_campaign.sh f1tenth_planning/maps/autodrive_iros_2026_compete
   --workers 4 --iterations 900 --stagnation-iterations 180 --phases 4
 ```
 
-Dashboard: http://127.0.0.1:8767/ . Optimizer user service:
+Single dashboard: http://127.0.0.1:8765/ . Optimizer user service:
 `sdu-track-optimizer-2a79aeaea99f.service`.
 The independent Unity queue service is
 `sdu-apex-mpc-validation-iros-conditioned.service`, watching this workspace.
@@ -148,3 +150,53 @@ recorded immutable image ID for future runs. The existing bag was rescored
 successfully without another simulation; JSON, cycle CSV and diagnostics JSONL
 are present and its failure/metrics appear in the dashboard. Failed trials are
 retained for manual retry, not automatically launched repeatedly.
+
+## Consolidation, GUI and actual retry (2026-10-29)
+
+- Stopped `sdu-apex-reverse-campaign.service` gracefully (old PID 3259451).
+  Repointed `sdu-apex-active-dashboard.service` to the conditioned campaign;
+  stopped its duplicate dashboard on port 8767. No results were deleted.
+- Unity build, driving and decoding now freeze only the verified optimizer's
+  dedicated systemd cgroup and thaw it afterward. The exact iterate survives.
+  Workspace/PID/cgroup identity checks prevent pausing unrelated work. A
+  durable pause lease supports recovery after supervisor failure; termination
+  stops the owned trial process group and releases the optimizer.
+- The dashboard reports whether its test supervisor actually exists, queued
+  retries, source-only best versus completed Unity results, and warmup-excluded
+  scoring. Driving results are above the detailed optimizer plots. A same-origin
+  JSON-only button queues a retry of an existing failed certified candidate;
+  it cannot submit shell commands or arbitrary files. Duplicate requests are
+  coalesced. Failed candidates are not retried without a user request.
+- Fixed a real configuration leak: the development launch applied
+  `mpc_practice_fastline.yaml` to EVERY map. That imposed practice-only
+  weights/SQP radii on IROS. Practice retains its verified overlay; other maps
+  use the complete base profile plus any explicit override. The launch log
+  now records the actual parameter-file precedence.
+- Exercised the real GUI retry endpoint with the 7.400 s certificate. Trial
+  `live_runs/apex_mpc_f8c5b636134d8b64_a02/` built current production code,
+  explicitly loaded only the base MPC profile, and ran with IPOPT frozen.
+  It still failed before warmup completion: `nonlinear=corridor@1`.
+  Terminal projected progress was 65.574 m (previous run 62.295 m), but this
+  is not a successful lap or a controlled proof of improved driving.
+- Terminal forward speed was 5.383 m/s and reference cross-track error
+  -0.210 m. The proposed second predicted state crossed the lower corridor
+  bound (-0.17454 m versus -0.17084 m). ADMM stopped on its time budget
+  after 244 total iterations across two SQP passes: primal residual 0.08889,
+  dual 0.009766. The retained full plan was exhausted (cursor 29); no
+  candidate/retained prefix passed the exact check. No physical collision
+  was reported. This is evidence of controller tracking/convergence failure,
+  NOT proof that source dynamics match native Unity, nor proof that the
+  candidate is physically impossible.
+- The second trial had median/p95/max publication times
+  11.672 / 18.015 / 23.928 ms, three at/over 20 ms. Removing CPU competition
+  did NOT establish the timing target: the base profile also changes the
+  problem and refinement workload. Do not claim an all-under-20-ms result.
+- Both trial bags decoded successfully. Zero of two trials completed ten
+  scored laps. Next controller work is saved-state convergence/tracking
+  analysis at these failures, not repeatedly launching an unchanged line or
+  relaxing wall checks. Optimizer resumed automatically after decoding.
+- Fixed missing GUI centerline for command-seeded campaigns: these have no
+  `geometry_starts`. The viewer now derives the same map-only skeleton via
+  the existing extraction helper, once per immutable map, in a background
+  thread; no solver or output reference is changed. Extraction failures are
+  visible, and the page retries while the layer is being prepared.

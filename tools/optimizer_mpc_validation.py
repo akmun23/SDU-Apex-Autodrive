@@ -13,6 +13,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -77,7 +78,7 @@ def certified_exports(workspace: Path) -> list[dict]:
             if item.get("direction") == "unity_verified":
                 # Verify this candidate was built against the known
                 # independently completed IROS Unity racing orientation.
-                reference = REPO / "live_runs/iros_mpc_initial_20261029_02/raceline.csv"
+                reference = REPO / "f1tenth_planning/trajectories/autodrive_iros_2026_compete/initial_raceline.csv"
                 if (not reference.is_file() or
                         item.get("direction_reference_sha256") != sha256(reference)):
                     continue
@@ -276,7 +277,11 @@ def run_analysis(run_dir: Path, reference: Path, attempt: dict) -> None:
         try:
             finished = subprocess.run(command, cwd=REPO, stdout=log,
                                       stderr=subprocess.STDOUT, timeout=240)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt, SystemExit) as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                subprocess.run(['docker', 'stop', '--time', '0', 'report_'+run_dir.name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                raise
             if isinstance(exc, subprocess.TimeoutExpired):
                 try:
                     subprocess.run(['docker', 'stop', '--time', '0', 'report_'+run_dir.name],
@@ -303,6 +308,74 @@ def simulation_busy() -> bool:
     names = result.stdout.splitlines()
     return any(("_sim" in name or name.endswith("_controller") or name.startswith("rec_"))
                for name in names)
+
+
+def optimizer_unit(workspace: Path) -> str | None:
+    """Resolve only this workspace's live optimizer; never freeze a login scope."""
+    pid = load_json(workspace / 'optimizer.json').get('pid')
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    proc = Path('/proc') / str(pid)
+    try:
+        args = proc.joinpath('cmdline').read_bytes().decode().split('\0')
+        if not any(Path(arg).name == 'track_optimizer.py' for arg in args):
+            raise RuntimeError('Optimizer PID no longer identifies track_optimizer.py')
+        output = args[args.index('--output') + 1]
+        base = proc.joinpath('cwd').resolve(strict=True)
+        if (base / output).resolve() != workspace.resolve():
+            raise RuntimeError('Optimizer PID belongs to another workspace')
+        cgroup = proc.joinpath('cgroup').read_text().strip().split('/')[-1]
+    except FileNotFoundError:
+        return None
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError('Cannot verify optimizer process identity') from exc
+    if not re.fullmatch(r'sdu-track-optimizer-[a-f0-9]+\.service', cgroup):
+        raise RuntimeError('Optimizer must run in its own systemd service before automatic trials')
+    result = subprocess.run(['systemctl', '--user', 'show', cgroup, '-p', 'MainPID', '--value'],
+                            capture_output=True, text=True, timeout=10, check=True)
+    if result.stdout.strip() != str(pid):
+        raise RuntimeError('Optimizer systemd identity changed')
+    return cgroup
+
+
+def recover_optimizer(workspace: Path) -> None:
+    """Release a freeze left by a crashed supervisor, not an arbitrary unit."""
+    lease = workspace / 'mpc_validation/optimizer_pause.json'
+    saved = load_json(lease)
+    if not saved:
+        return
+    unit = optimizer_unit(workspace)
+    if unit and unit == saved.get('unit'):
+        subprocess.run(['systemctl', '--user', 'thaw', unit], check=True, timeout=15)
+    lease.unlink(missing_ok=True)
+
+
+@contextmanager
+def yield_optimizer(workspace: Path):
+    """One heavy workload: freeze IPOPT during build, Unity, and bag decoding.
+
+    Freezing the dedicated cgroup includes any solver workers and preserves the
+    exact running iterate. The durable lease lets a restarted supervisor thaw
+    it after a crash. A normal service stop raises KeyboardInterrupt and thaws
+    in finally; stopping a frozen optimizer service also thaws it in systemd.
+    """
+    unit = optimizer_unit(workspace)
+    lease = workspace / 'mpc_validation/optimizer_pause.json'
+    if unit:
+        current = subprocess.run(['systemctl', '--user', 'show', unit, '-p', 'FreezerState', '--value'],
+                                 capture_output=True, text=True, check=True, timeout=10)
+        if current.stdout.strip() != 'running':
+            raise RuntimeError('Optimizer is already paused by another owner; deferring trial')
+        atomic_json(lease, dict(unit=unit, owner_pid=os.getpid(),
+                               reason='Unity driving test', started_epoch_s=time.time()))
+    try:
+        if unit:
+            subprocess.run(['systemctl', '--user', 'freeze', unit], check=True, timeout=15)
+        yield
+    finally:
+        if unit:
+            subprocess.run(['systemctl', '--user', 'thaw', unit], check=True, timeout=15)
+            lease.unlink(missing_ok=True)
 
 
 def execute(workspace: Path, state: dict, item: dict, state_path: Path, *, dry_run=False) -> dict:
@@ -350,6 +423,18 @@ def execute(workspace: Path, state: dict, item: dict, state_path: Path, *, dry_r
                                        stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 status = process.wait(timeout=1800)
+            except (KeyboardInterrupt, SystemExit):
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+                attempt.update(status='interrupted', reason='Validation supervisor stopped',
+                               finished_epoch_s=time.time())
+                state['worker'] = dict(status='idle')
+                atomic_json(state_path, state)
+                raise
             except subprocess.TimeoutExpired:
                 # Signal the entire trial process group so shell EXIT traps can
                 # stop *its own* simulator/recorder/controller containers.
@@ -418,6 +503,7 @@ def loop(workspace: Path, *, once=False, dry_run=False) -> None:
     lock_file = data_dir / ".lock"
     with lock_file.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        recover_optimizer(workspace)
         state_path = data_dir / "state.json"
         state = initialize(workspace, state_path)
         # Reacquiring the exclusive worker lock proves no old worker remains.
@@ -434,6 +520,7 @@ def loop(workspace: Path, *, once=False, dry_run=False) -> None:
         atomic_json(state_path, state)
         print("Validation supervisor workspace:", workspace, flush=True)
         while True:
+            state['supervisor'] = dict(pid=os.getpid(), heartbeat_epoch_s=time.time())
             exports = certified_exports(workspace)
             discover(workspace, state)
             consume_retries(workspace, state, exports)
@@ -470,9 +557,13 @@ def loop(workspace: Path, *, once=False, dry_run=False) -> None:
                                         atomic_json(state_path, state)
                                     print("Preflight blocked:", conflict, flush=True)
                                 else:
-                                    outcome = execute(workspace, state, candidate, state_path, dry_run=dry_run)
+                                    if dry_run:
+                                        outcome = execute(workspace, state, candidate, state_path, dry_run=True)
+                                    else:
+                                        with yield_optimizer(workspace):
+                                            outcome = execute(workspace, state, candidate, state_path)
                                     print("Trial outcome:", outcome["status"], outcome.get("reason"), flush=True)
-                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                     print("Supervisor preflight or trial error:", exc, flush=True)
                     state["worker"] = dict(status="blocked", reason=str(exc))
                     atomic_json(state_path, state)
@@ -482,6 +573,9 @@ def loop(workspace: Path, *, once=False, dry_run=False) -> None:
 
 
 def main() -> None:
+    def stopped(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stopped)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
     group = parser.add_mutually_exclusive_group()
@@ -493,7 +587,10 @@ def main() -> None:
     if args.retry:
         print("Retry requested:", request_retry(args.workspace.resolve(), args.retry))
     else:
-        loop(args.workspace, once=not args.watch, dry_run=args.dry_run)
+        try:
+            loop(args.workspace, once=not args.watch, dry_run=args.dry_run)
+        except KeyboardInterrupt:
+            print('Validation supervisor stopped; optimizer released', flush=True)
 
 
 if __name__ == "__main__":

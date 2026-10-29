@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only, localhost dashboard for map-only raceline optimizer workspaces.
+"""Localhost dashboard for map-only raceline optimizer workspaces.
 
-No optimizer imports, physics builds, subprocess solver calls, or workspace writes.
+No optimizer imports, physics builds or subprocess solver calls. The single
+write action queues a verified, previously failed Unity trial for the supervisor.
 The observer is deliberately outside the optimizer's implementation-hash contract.
 """
 from __future__ import annotations
@@ -219,6 +220,20 @@ def checkpoint_data(path):
                     residual=finite(data['max_constraint_violation']))
 
 
+def validation_supervisor(workspace, state):
+    pid = state.get('supervisor', {}).get('pid')
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        proc = Path('/proc')/str(pid)
+        args = proc.joinpath('cmdline').read_bytes().decode().split('\0')
+        return (any(Path(arg).name == 'optimizer_mpc_validation.py' for arg in args)
+                and (proc.joinpath('cwd').resolve(strict=True) /
+                     args[args.index('--workspace')+1]).resolve() == workspace)
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def reference_points(path):
     values = np.loadtxt(path, delimiter=',', comments='#', ndmin=2)
     values = values[np.isfinite(values[:, 1:3]).all(axis=1)]
@@ -226,6 +241,21 @@ def reference_points(path):
         return []
     stride = max(1, math.ceil(len(values)/1600))
     return values[::stride, 1:3].tolist()
+
+
+def map_centerline(image):
+    """Same map-only extraction as geometry bootstrap; no optimization or writes."""
+    if __package__:
+        from . import build_mapped_raceline as builder
+    else:
+        import build_mapped_raceline as builder
+    import map_track
+    # Initialize the reusable geometry helper exactly as builder.build does,
+    # without invoking its curvature optimization, plotting or file output.
+    builder.map_track_module, builder.map_to_track = map_track, map_track.map_to_track
+    grid = map_track.MapGrid.load(image)
+    track, _ = builder._extract_map_track(grid, image, min(.12, grid.resolution*2.4))
+    return track.xy[::max(1, math.ceil(len(track.xy)/1600))].tolist()
 
 
 class Dashboard:
@@ -236,6 +266,29 @@ class Dashboard:
         self.last_poll = 0.
         self.snapshot_cache = None
         self.warnings = []
+        self.centerline_key = None
+        self.centerline_points = []
+        self.centerline_status = 'pending'
+        self.centerline_message = ''
+
+    def derived_centerline(self):
+        paths = [self.workspace.path('input/map.'+ext) for ext in ('pgm', 'yaml')]
+        key = tuple((path.stat().st_mtime_ns, path.stat().st_size) for path in paths)
+        if key != self.centerline_key:
+            self.centerline_key = key
+            self.centerline_points = []
+            self.centerline_status = 'extracting'
+            self.centerline_message = 'Extracting the centerline from this map…'
+            def extract():
+                try:
+                    points, status, message = map_centerline(paths[0]), 'ready', ''
+                except Exception as error:
+                    points, status, message = [], 'unavailable', str(error)
+                with self.lock:
+                    if self.centerline_key == key:
+                        self.centerline_points, self.centerline_status, self.centerline_message = points, status, message
+            threading.Thread(target=extract, name='dashboard-map-centerline', daemon=True).start()
+        return self.centerline_points
 
     def optional(self, path, default=None):
         try:
@@ -316,6 +369,7 @@ class Dashboard:
             best_summary['available_downloads'] = [key for key in (
                 'raceline', 'raceline_with_witness', 'validation') if best.get('files', {}).get(key)]
             mpc_state = self.optional('mpc_validation/state.json', {})
+            supervisor_alive = validation_supervisor(self.workspace.root, mpc_state)
             mpc_attempts = []
             for trial in sorted(
                 mpc_state.get('attempts', []),
@@ -345,6 +399,11 @@ class Dashboard:
                     # Only read logs from explicitly named auto-trial directories.
                     if re.fullmatch(r'apex_mpc_[a-f0-9]{16}_a[0-9]{2,}', run_id):
                         watcher = REPO/'live_runs'/run_id/'watcher.log'
+                        run_dir = watcher.parent
+                        compact['live_phase'] = ('analyzing' if (run_dir/'analysis.log').exists()
+                                                 else 'driving' if watcher.exists()
+                                                 else 'launching' if (run_dir/'controller.log').exists()
+                                                 else 'building')
                         if watcher.is_file() and not watcher.is_symlink():
                             try:
                                 lines = watcher.read_text(errors='replace').splitlines()
@@ -358,6 +417,11 @@ class Dashboard:
                                 pass
                 mpc_attempts.append(compact)
             mpc_trials = dict(enabled=bool(mpc_state), pending=len(mpc_state.get('pending', [])),
+                              supervisor_alive=supervisor_alive,
+                              retry_requests=len(list((self.workspace.root/'mpc_validation/retry_requests').glob('*.json'))),
+                              optimizer_pause=self.optional('mpc_validation/optimizer_pause.json', {}),
+                              total_trials=len(mpc_state.get('attempts', [])),
+                              successful_trials=sum(bool(a.get('mpc_validated')) for a in mpc_state.get('attempts', [])),
                               worker=mpc_state.get('worker', {'status': 'not_configured'}),
                               attempts=mpc_attempts)
             result = dict(workspace=str(self.workspace.root), name=self.workspace.root.name,
@@ -380,6 +444,32 @@ class Dashboard:
             self.last_poll = time.monotonic()
             return result
 
+    def retry(self, ident):
+        """Queue only an existing failed certificate; never execute shell input."""
+        if __package__:
+            from .optimizer_mpc_validation import certified_exports, request_retry
+        else:
+            from optimizer_mpc_validation import certified_exports, request_retry
+        with self.lock:
+            state = self.optional('mpc_validation/state.json', {})
+            if not validation_supervisor(self.workspace.root, state):
+                raise RuntimeError('Automatic test supervisor is not running')
+            if not isinstance(ident, str) or not re.fullmatch(r'[a-f0-9]{16}', ident):
+                raise ValueError('Choose a recorded candidate to retry')
+            attempt = next((a for a in reversed(state.get('attempts', [])) if a.get('id') == ident), None)
+            if not attempt or attempt.get('status') in ('running', 'completed'):
+                raise ValueError('Only a failed recorded test can be retried')
+            if ident in state.get('pending', []):
+                return dict(status='already_queued')
+            if not any(item['id'] == ident for item in certified_exports(self.workspace.root)):
+                raise ValueError('Source certificate no longer verifies')
+            for path in (self.workspace.root/'mpc_validation/retry_requests').glob('*.json'):
+                if self.optional(path).get('witness_prefix') == ident:
+                    return dict(status='already_queued')
+            request_retry(self.workspace.root, ident)
+            self.last_poll = 0.
+            return dict(status='queued')
+
     def map_payload(self):
         config = self.workspace.read('input/map.yaml', read_map_config)
         return self.workspace.read('input/map.pgm', map_png), config
@@ -398,6 +488,12 @@ class Dashboard:
                 if path.is_file():
                     layers.append(dict(name='Extracted centerline', kind='centerline',
                                        points=self.workspace.read(path, reference_points)))
+            centerline_status, centerline_message = 'ready', ''
+            if not layers:
+                points = self.derived_centerline()
+                centerline_status, centerline_message = self.centerline_status, self.centerline_message
+                if points:
+                    layers.append(dict(name='Extracted map centerline', kind='centerline', points=points))
             reference = best.get('files', {}).get('raceline')
             if reference:
                 layers.append(dict(name='Best source-validated line', kind='best',
@@ -406,6 +502,7 @@ class Dashboard:
             with Image.open(self.workspace.path('input/map.pgm')) as image:
                 return dict(layers=layers, width=image.width, height=image.height,
                             resolution=float(config['resolution']), origin=config['origin'],
+                            centerline_status=centerline_status, centerline_message=centerline_message,
                             best_id=best.get('witness_sha256'))
 
     def download(self, name):
@@ -433,8 +530,38 @@ def handler_for(dashboard):
         def log_message(self, *_):
             pass
 
+        def do_POST(self):
+            # Same-origin JSON only: no cross-site form/DNS-rebinding control.
+            host = self.headers.get('Host')
+            allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+            if host not in allowed or self.headers.get('Origin') != 'http://'+host:
+                self.send_error(403, 'Same-origin requests only')
+                return
+            if self.path != '/api/retry':
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if self.headers.get('Content-Type') != 'application/json' or not 0 < length <= 256:
+                    raise ValueError('Expected a small JSON request')
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('Expected a JSON object')
+                result, status = dashboard.retry(payload.get('id')), 202
+            except (ValueError, TypeError) as error:
+                result, status = dict(error=str(error)), 400
+            except (OSError, RuntimeError) as error:
+                result, status = dict(error=str(error)), 503
+            body = json_bytes(result)
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
-            # Localhost-only, no CORS, no write/control routes or generic file serving.
+            # Localhost-only, no CORS or generic file serving.
             allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
             if self.headers.get('Host') not in allowed:
                 self.send_error(403, 'Localhost only')

@@ -36,6 +36,17 @@ def _bool(value: str) -> bool:
     raise RuntimeError(f"expected boolean, got {value!r}")
 
 
+def _mpc_parameter_files(mpc_share: str, map_path: str, overlay: str) -> list[str]:
+    # Practice tuning is not a generic vehicle default. In particular its
+    # tighter SQP correction radii must not leak into a newly mapped circuit.
+    parameters = [os.path.join(mpc_share, 'config', 'mpc_competition.yaml')]
+    if os.path.basename(map_path) == MAP_NAME:
+        parameters.append(os.path.join(mpc_share, 'config', 'mpc_practice_fastline.yaml'))
+    if overlay:
+        parameters.append(overlay)
+    return parameters
+
+
 def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
     try:
         result = subprocess.run(
@@ -151,14 +162,7 @@ def _setup(context):
             },
         ], remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")])
 
-    # The fastline file is an overlay; retain the complete base configuration,
-    # including command publication and the solver/plant settings it omits.
-    mpc_parameters = [
-        os.path.join(mpc, "config", "mpc_competition.yaml"),
-        os.path.join(mpc, "config", "mpc_practice_fastline.yaml"),
-    ]
-    if overlays["mpc_parameter_overlay"]:
-        mpc_parameters.append(overlays["mpc_parameter_overlay"])
+    mpc_parameters = _mpc_parameter_files(mpc, map_path, overlays['mpc_parameter_overlay'])
     diagnostics = _bool(
         LaunchConfiguration("mpc_publish_diagnostics").perform(context))
     mpc_node = ComposableNode(
@@ -196,6 +200,7 @@ def _setup(context):
 
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
+        LogInfo(msg='MPC parameter files (last overrides first): '+', '.join(mpc_parameters)),
         bridge, odometry, ekf, map_server, map_lifecycle,
     ]
     if enable_mpc:

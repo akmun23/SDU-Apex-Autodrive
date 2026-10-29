@@ -99,12 +99,18 @@
 <button class="button" id="pauseDisplay" type="button" style="margin-top:8px">Pause live display</button>
 </div></header>
 <div id="errorBanner" class="notice error hidden" role="alert"></div>
-<div class="notice">Source-model results only. A saved line has passed independent model checks; Unity driving and MPC validation are separate. This viewer cannot change or stop the optimizer.</div>
+<div class="notice" role="status"><strong id="plainStatus">Connecting to the campaign…</strong><p id="plainExplanation">The optimizer searches for faster paths. Unity then checks whether the real controller can drive them.</p><p id="drivingSummary"></p></div>
 <section class="cards" aria-label="Live optimizer metrics">
-<div class="card"><div class="label">Best validated lap</div><div class="value green" id="bestLap">—</div><div class="sub" id="bestSub">Waiting for a certified export</div></div>
+<div class="card"><div class="label">Best model-feasible lap</div><div class="value green" id="bestLap">—</div><div class="sub" id="bestSub">Not a proven Unity lap time</div></div>
 <div class="card"><div class="label">Current trial</div><div class="value blue" id="trialLap">—</div><div class="sub" id="trialSub">Not yet validated</div></div>
 <div class="card"><div class="label">Current iteration</div><div class="value" id="iteration">—</div><div class="sub" id="iterationSub">Waiting for solver output</div></div>
 <div class="card"><div class="label">Best saved residual</div><div class="value amber" id="bestResidual">—</div><div class="sub" id="residualSub">Checkpoint not yet written</div></div>
+</section>
+<section class="panel mpc-section" aria-label="Unity MPC driving test results" style="margin-bottom:18px">
+<div class="panel-head"><div><h2>Most recent Unity driving test</h2><p class="description">One heavy job at a time · optimization pauses during driving tests</p></div><span class="tag" id="mpcQueueStatus">NOT CONFIGURED</span></div>
+<p class="graph-label" id="mpcQueueNote">The simulation supervisor runs separately from the optimizer and retains its logs and ROS bags.</p>
+<div id="mpcTrials"></div>
+<p class="mpc-footnote">These are actual Unity driving results, not a guarantee that the source model exactly reproduces Unity physics. Only completed timed laps are scored. Technical details and logs are available inside each trial.</p>
 </section>
 <section class="layout">
 <div class="panel track-panel"><div class="panel-head"><div><h2>Track & best line</h2><p class="description">Map coordinates · Unity-verified direction</p></div><span class="tag">SAVED RESULT</span></div><div class="track-canvas"><canvas id="track" aria-label="Occupancy map with best validated raceline and extracted centerline"></canvas></div><div class="legend"><span><i class="line"></i>Best validated</span><span><i class="line gray"></i>Centerline</span></div><div class="downloads" id="downloads"></div><p id="mapNote" class="description" style="margin-top:12px">Loading map…</p></div>
@@ -122,15 +128,9 @@
 </section>
 <section class="panel stage-panel"><div class="panel-head"><div><h2 id="stageTitle">Waiting for optimizer</h2><p id="stageText" class="description">The workspace will appear here when a run starts.</p></div><span class="tag" id="activity">NO DATA</span></div><div class="stages" id="stages"><div class="stage" data-step="0"><b>01 / geometry</b>Extract & seed</div><div class="stage" data-step="1"><b>02 / bootstrap</b>Find feasible lap</div><div class="stage" data-step="2"><b>03 / search</b>Shorten & refine</div><div class="stage" data-step="3"><b>04 / save</b>Check every gain</div></div><div class="progress-track"><div class="progress-fill" id="iterationBar"></div></div><p class="description" id="budgetNote">Iteration budget for this solve, not total optimization completion.</p><div class="details"><div class="detail"><div class="label">Geometry basin</div><strong id="basin">—</strong></div><div class="detail"><div class="label">Phase / refinement</div><strong id="phase">—</strong></div><div class="detail"><div class="label">Workers / memory</div><strong id="resources">—</strong></div><div class="detail"><div class="label">Checkpoint age</div><strong id="checkpointAge">—</strong></div><div class="detail"><div class="label">Iteration / patience limits</div><strong id="limits">—</strong></div><div class="detail"><div class="label">Saved local dynamics defect</div><strong id="dynamicDefect">—</strong></div><div class="detail"><div class="label">Saved extra wall slack</div><strong id="clearance">—</strong></div><div class="detail"><div class="label">Active checkpoint folder</div><strong id="activePath">—</strong></div></div></section>
 <section class="bottom"><div class="panel"><div class="panel-head"><div><h2>Recent attempts</h2><p class="description">Completed trials in this geometry basin</p></div><span class="tag" id="attemptTag">0 COMPLETED</span></div><div id="attempts"></div></div><div class="panel"><h2>What is happening</h2><p class="description">Stage changes, new trials and accepted improvements</p><ul id="feed" class="feed"></ul></div></section>
-<section class="panel mpc-section" aria-label="Unity MPC driving test results">
-<div class="panel-head"><div><h2>Most recent Unity driving test</h2><p class="description">One test at a time · older results are saved but hidden</p></div><span class="tag" id="mpcQueueStatus">NOT CONFIGURED</span></div>
-<p class="graph-label" id="mpcQueueNote">The simulation supervisor runs separately from the optimizer and retains its logs and ROS bags.</p>
-<div id="mpcTrials"></div>
-<p class="mpc-footnote">These are actual Unity driving results, not a guarantee that the source model exactly reproduces Unity physics. Only completed timed laps are scored. Technical details and logs are available inside each trial.</p>
-</section>
 <details id="rawDetails"><summary>Technical IPOPT log · latest 90 lines</summary>
 <p class="mpc-footnote">The text “command feasibility stagnated; durable best iterate saved” is a controlled stop for an individual solve. CasADi prints a traceback, but the saved candidate is retained and the overall optimization continues. Other unexpected errors remain visible here.</p><div class="controls" style="margin-top:10px"><button class="button" id="pauseLog" type="button">Pause log display</button><span class="description">Only freezes this text; optimizer keeps running.</span></div><pre id="log">Waiting for optimizer output…</pre></details>
-<footer><span id="workspace">Workspace: —</span><span class="nowrap">Local observer · no solver controls</span></footer>
+<footer><span id="workspace">Workspace: —</span><span class="nowrap">Local dashboard · failed tests can be retried below</span></footer>
 </main>
 <script>
 'use strict';
@@ -219,7 +219,7 @@ function drawTrack(){
 }
 async function refreshTrack(key){
  if(trackFetching||key===mapKey)return;trackFetching=true;
- try{const response=await fetch('/api/track',{cache:'no-store'});if(!response.ok)throw Error('Track not ready');const data=await response.json();if(!mapImage){const img=new Image();img.src='/map.png';await img.decode();mapImage=img;}trackData=data;mapKey=key;drawTrack();set('mapNote',`${data.width} × ${data.height} cells · ${num(data.resolution*100,1)} cm / cell · true aspect ratio`);}
+ try{const response=await fetch('/api/track',{cache:'no-store'});if(!response.ok)throw Error('Track not ready');const data=await response.json();if(!mapImage){const img=new Image();img.src='/map.png';await img.decode();mapImage=img;}trackData=data;mapKey=data.centerline_status==='extracting'?null:key;drawTrack();set('mapNote',`${data.width} × ${data.height} cells · ${num(data.resolution*100,1)} cm / cell · true aspect ratio${data.centerline_message?' · '+data.centerline_message:''}`);}
  catch(error){set('mapNote',`Track view: ${error.message}. Retrying automatically.`);}finally{trackFetching=false;}
 }
 function eventText(event){
@@ -248,7 +248,12 @@ function mpcState(a){
 function mpcExplain(a){
  const m=a.metrics||{},sources=Object.keys(m.cycle_reason_counts||{}).join(' ')+' '+(a.reason||'')+' '+(a.live_failure||'');
  if(a.status==='completed')return ['All 10 timed laps completed','Unity finished all laps without a reported controller safety stop.','The recording and detailed tracking statistics are available below.'];
- if(a.status==='running')return ['The car is driving','The simulator is being monitored for collisions, controller safety stops and stalled progress.','Live lap count updates as Unity completes each lap.'];
+ if(a.status==='running'){
+  if(a.live_phase==='building')return ['Building the production controller','Optimization is paused while the current code is compiled. The car has not started yet.','The simulator will start automatically when the build and startup checks finish.'];
+  if(a.live_phase==='launching')return ['Starting the controller and recorder','Waiting for ROS nodes, localization and recording to be ready.','Unity starts only after those checks pass.'];
+  if(a.live_phase==='analyzing')return ['Analyzing the recording','The driving test has stopped. Its ROS bag is being decoded and scored.','Optimization resumes after the analysis finishes.'];
+  return ['The Unity driving test is active','The simulator is being monitored for collisions, controller stops and stalled progress.','Live lap count updates as Unity completes each lap.'];
+ }
  if(sources.includes('pose_odom_skew_exceeded'))return ['Position and odometry were out of sync','MPC rejected a state update because localization and odometry timestamps were too far apart. The controller stopped safely. This does not, by itself, mean the raceline is wrong.','Check synchronization of AMCL, odometry and the ROS bridge. Retry to determine whether the fault is intermittent.'];
  if(a.status==='blocked_start_orientation'||a.status==='localization_start_heading_mismatch'||sources.includes('scan heading error'))return ['Starting direction did not match the simulator','The vehicle could not establish a consistent position and heading for this reference.','The optimizer must follow the direction demonstrated in Unity; do not weaken localization safety checks.'];
  if(sources.includes('rejected_nonlinear_rollout')||sources.includes('nonlinear=corridor'))
@@ -414,21 +419,40 @@ function mpcCard(a,data,index,persist){
  if(!['running','completed'].includes(a.status)){
   const actions=mpcEl('div','mpc-footer-actions');
   const command='python3 tools/optimizer_mpc_validation.py --workspace "'+data.workspace+'" --retry '+a.id;
-  mpcAppend(actions,mpcCopy(command,'Copy command to retry'),
-    mpcEl('span','mpc-footer-note','The command requests a new attempt; existing results are preserved.'));
+  const retry=mpcEl('button','button','Retry this driving test');retry.type='button';
+  retry.disabled=!data.mpc_trials?.supervisor_alive||data.mpc_trials?.pending>0||data.mpc_trials?.retry_requests>0;
+  const feedback=mpcEl('span','mpc-footer-note','Existing recordings are preserved. Optimization pauses automatically.');
+  retry.addEventListener('click',async()=>{
+   if(!window.confirm('Run this candidate in Unity again? Optimization will pause until the driving test and analysis finish.'))return;
+   retry.disabled=true;
+   try{const response=await fetch('/api/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:a.id})});
+    const reply=await response.json();if(!response.ok)throw Error(reply.error||'Retry failed');
+    feedback.textContent='Test queued. The supervisor will start it automatically.';
+   }catch(error){feedback.textContent=error.message;retry.disabled=false;}
+  });
+  mpcAppend(actions,retry,mpcCopy(command,'Copy terminal command'),feedback);
   body.append(actions);
  }
  card.append(body);return card;
 }
 function renderMpc(data){
  const mpc=data.mpc_trials||{},target=$('mpcTrials'),worker=mpc.worker||{},queue=mpc.pending||0;
+ const paused=!!mpc.optimizer_pause?.unit;
+ set('plainStatus',paused?'Unity test in progress · optimizer paused':data.process.alive?'One optimizer is searching for a faster path':'Optimizer is not running');
+ set('plainExplanation',paused?'The same optimization iterate is preserved and resumes after the test. The simulator, controller and bag decoder have the machine to themselves.':
+  mpc.supervisor_alive?'New model-feasible lines are automatically tested in Unity, one at a time. Model feasibility alone does not prove the controller can drive a line.':
+  'Automatic driving tests are stopped. Optimization can continue, but new candidates will not be tested until the supervisor is started.');
+ set('drivingSummary',`${mpc.successful_trials??0} / ${mpc.total_trials??0} driving tests completed all 10 timed laps. First lap is warm-up and is not scored.`);
  set('mpcQueueStatus',!mpc.enabled?'NOT CONFIGURED':worker.status==='running'?
   'SIMULATION RUNNING · '+queue+' WAITING':worker.status==='blocked'?
   'SUPERVISOR NEEDS ATTENTION':queue?queue+' SAVED FOR LATER':'LAST RECORDED TEST');
  set('mpcQueueNote',worker.status==='blocked'?
    'Supervisor needs attention: '+(worker.reason||'A startup check failed'):
-   'Previously recorded Unity results. Automatic simulator testing is currently stopped; IPOPT keeps running.');
- const attempts=(mpc.attempts||[]).slice(0,1),renderKey=JSON.stringify(attempts);
+   !mpc.supervisor_alive?'Automatic simulator testing is stopped. Saved results remain available.':
+   worker.status==='running'?'Unity and the production MPC are being tested. Optimization is paused until the recording has been analyzed.':
+   queue||mpc.retry_requests?'A test is queued and will start when the simulator is free.':
+   'Automatic testing is active. Waiting for the next model-feasible improvement; a failed line is not retried endlessly.');
+ const attempts=(mpc.attempts||[]).slice(0,1),renderKey=JSON.stringify([attempts,mpc.supervisor_alive,queue,mpc.retry_requests]);
  if(target.dataset.renderKey===renderKey||selectionTouches(target))return;
  const persist=new Map();
  target.querySelectorAll('details[data-attempt-key]').forEach(node=>persist.set('trial:'+node.dataset.attemptKey,node.open));
@@ -449,7 +473,7 @@ function render(data){
  snapshot=data;const best=data.best,trial=data.active?.trial_lap_s,current=data.residuals.at(-1)?.residual,initial=data.solver?.initial_residual,cp=data.checkpoint,c=data.contract;
  set('trackName',data.name.replace(/^optimizer_/,'').replace(/_[a-f\d]{10}$/,''));
  const live=data.process.alive,isFinished=['plateau','search_domain_reached','prepared'].includes(data.status);
- set('statusText',data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
+ set('statusText',data.mpc_trials?.optimizer_pause?.unit?'Optimizer paused for Unity test':data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
  $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.activity==='quiet'||!live?'quiet':'active';
  set('connection',`Connected · ${new Date().toLocaleTimeString()} · 2 s polling · last log change ${age(data.log_age_s)} ago`);
  set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · verified direction`);
@@ -470,7 +494,7 @@ function render(data){
  set('stageText',data.stage==='adaptive_minimum_time_search'?
  `Searching for ${num(trial)} s from the ${num(best.lap_s)} s certified lap. ${data.passed_attempts} certified attempts, ${data.completed_attempts-data.passed_attempts} rejected. Phase changes and extra wall cuts are separate retries, not evidence of improvement. No candidate replaces the incumbent without independent source checks.`:
  'The dashboard observes existing files only. Saved checkpoints survive closing this page.');
- set('activity',live?(data.activity==='quiet'?`NO LOG CHANGE FOR ${age(data.log_age_s)}`:`LOG UPDATED ${age(data.log_age_s)} AGO`):'PROCESS NOT RUNNING');
+ set('activity',data.mpc_trials?.optimizer_pause?.unit?'PAUSED FOR UNITY TEST':live?(data.activity==='quiet'?`NO LOG CHANGE FOR ${age(data.log_age_s)}`:`LOG UPDATED ${age(data.log_age_s)} AGO`):'PROCESS NOT RUNNING');
  const step=data.stage==='centerline_and_geometry'?0:data.stage==='periodic_bootstrap'?1:data.stage==='finished'?3:2;
  document.querySelectorAll('.stage').forEach((node,i)=>{node.classList.toggle('active',i===step);node.classList.toggle('done',i<step);});
  const limit=data.solver?.max_iterations??c.iterations;const fraction=limit&&data.iteration!=null?Math.min(100,data.iteration/limit*100):0;$('iterationBar').style.width=`${fraction}%`;

@@ -207,6 +207,26 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(data['layers'][0]['points'], [[3., -4.], [3.5, -3.5]])
         self.assertTrue(self.dashboard.map_payload()[0].startswith(b'\x89PNG'))
 
+    def test_command_seed_campaign_extracts_and_caches_missing_centerline(self):
+        # Command-seed workflows intentionally have no geometry_starts; this
+        # must not silently remove the centerline layer from the viewer.
+        from time import monotonic, sleep
+        (self.root/'input').mkdir()
+        Image.new('L', (20, 30), 255).save(self.root/'input/map.pgm')
+        self.write('input/map.yaml', dict(origin=[0, 0, 0], resolution=.05))
+        points = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]
+        with patch('tools.optimizer_dashboard.map_centerline', return_value=points) as extract:
+            self.dashboard.track()
+            end = monotonic()+2.
+            while self.dashboard.centerline_status == 'extracting' and monotonic() < end:
+                sleep(.005)
+            data = self.dashboard.track()
+            self.assertEqual(data['centerline_status'], 'ready')
+            self.assertEqual(data['layers'][0]['kind'], 'centerline')
+            self.assertEqual(data['layers'][0]['points'], points)
+            self.dashboard.track()
+            extract.assert_called_once()
+
     def test_file_reads_reject_traversal_and_symlinks_outside_workspace(self):
         workspace = Workspace(self.root)
         with self.assertRaises(ValueError):
@@ -225,7 +245,7 @@ class DashboardTest(unittest.TestCase):
              patch.object(Path, 'read_text', return_value='State:\tS\nVmRSS:\t120 kB\nThreads:\t1\n'):
             self.assertFalse(process_info(123)['alive'])
 
-    def test_unity_queue_is_read_only_and_exposes_trial_metrics(self):
+    def test_unity_queue_exposes_trial_metrics_and_honest_worker_status(self):
         self.write('mpc_validation/state.json', dict(
             pending=['def567'], worker=dict(status='running'),
             attempts=[dict(id='abc123', model_lap_s=7.35, status='completed',
@@ -236,6 +256,8 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(result['pending'],1)
         self.assertEqual(result['attempts'][0]['metrics']['average_scored_s'],7.6)
         self.assertEqual(result['attempts'][0]['status'],'completed')
+        self.assertFalse(result['supervisor_alive'])
+        self.assertEqual(result['total_trials'], 1)
 
     def test_only_latest_unity_attempt_is_sent_to_gui(self):
         self.write('mpc_validation/state.json', dict(
@@ -276,13 +298,43 @@ class DashboardTest(unittest.TestCase):
             self.assertEqual(response.headers['Cache-Control'], 'no-store')
         with urlopen(url+'/') as response:
             self.assertIn(b'Raceline optimizer', response.read())
-        cases = [('/etc/passwd', None, 404), ('/stop', b'', 501),
+        cases = [('/etc/passwd', None, 404), ('/stop', b'', 403),
                  ('/api/snapshot', None, 403)]
         for path, data, code in cases:
             headers = {'Origin': 'https://attacker.invalid'} if code == 403 else {}
             with self.assertRaises(HTTPError) as caught:
                 urlopen(Request(url+path, data=data, headers=headers))
             self.assertEqual(caught.exception.code, code)
+
+    def test_retry_endpoint_requires_same_origin_and_json(self):
+        server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(self.dashboard))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f'http://127.0.0.1:{server.server_port}'
+        for origin in (None, 'https://attacker.invalid'):
+            headers = {'Content-Type': 'application/json'}
+            if origin:
+                headers['Origin'] = origin
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(Request(url+'/api/retry', data=b'{}', headers=headers))
+            self.assertEqual(caught.exception.code, 403)
+        with patch.object(self.dashboard, 'retry', return_value=dict(status='queued')) as retry:
+            request = Request(url+'/api/retry', data=b'{"id":"aaaaaaaaaaaaaaaa"}',
+                              headers={'Origin': url, 'Content-Type': 'application/json'})
+            with urlopen(request) as response:
+                self.assertEqual(response.status, 202)
+                self.assertEqual(json.load(response), dict(status='queued'))
+            retry.assert_called_once_with('aaaaaaaaaaaaaaaa')
+
+    def test_retry_refuses_stopped_supervisor_and_invalid_candidates(self):
+        with self.assertRaisesRegex(RuntimeError, 'supervisor'):
+            self.dashboard.retry('a'*16)
+        with patch('tools.optimizer_dashboard.validation_supervisor', return_value=True):
+            with self.assertRaises(ValueError):
+                self.dashboard.retry('../unsafe')
+            with self.assertRaises(ValueError):
+                self.dashboard.retry('a'*16)
 
 
 if __name__ == '__main__':

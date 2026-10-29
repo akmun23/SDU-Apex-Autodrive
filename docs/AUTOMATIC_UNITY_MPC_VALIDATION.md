@@ -12,40 +12,48 @@ identified trajectory and the IROS map. The watcher stops the run on collision,
 MPC rejection, motion stall, timeout, or completion of **11 official laps**:
 one warmup plus 10 scored laps. A failed trial is not automatically retried.
 
-This is an independent process. The optimizer keeps running and never changes
-its best manifest or runtime controller reference because of a Unity trial.
+This is an independent process. It pauses the verified optimizer's dedicated
+systemd cgroup during controller building, Unity driving and bag analysis,
+then resumes the exact same iterate. Only one heavy workload runs at once.
+It never changes the optimizer's best manifest or runtime controller reference
+because of a Unity trial. A durable pause lease is released on normal shutdown
+and recovered on supervisor restart after a crash.
 
 ## Services and commands
 
 Check whether service is running:
 
-    systemctl --user status sdu-apex-mpc-validation.service
-    journalctl --user -u sdu-apex-mpc-validation.service -f
+    systemctl --user status sdu-apex-mpc-validation-iros-conditioned.service
+    tail -F live_runs/optimizer_iros_conditioned_20261029/mpc_validation/supervisor.log
 
 Stop the validation supervisor only:
 
-    systemctl --user stop sdu-apex-mpc-validation.service
+    systemctl --user stop sdu-apex-mpc-validation-iros-conditioned.service
 
 Single queue attempt when the service is stopped:
 
     python3 tools/optimizer_mpc_validation.py \
-      --workspace live_runs/optimizer_autodrive_iros_2026_compete_dc3c93097d --once
+      --workspace live_runs/optimizer_iros_conditioned_20261029 --once
 
 Run a foreground supervisor when the service is stopped:
 
     source tools/docker_env.sh
     python3 tools/optimizer_mpc_validation.py \
-      --workspace live_runs/optimizer_autodrive_iros_2026_compete_dc3c93097d --watch
+      --workspace live_runs/optimizer_iros_conditioned_20261029 --watch
 
 Request a new attempt for a failed witness:
 
     python3 tools/optimizer_mpc_validation.py \
-      --workspace live_runs/optimizer_autodrive_iros_2026_compete_dc3c93097d \
-      --retry 8c2ef06394b9af69
+      --workspace live_runs/optimizer_iros_conditioned_20261029 \
+      --retry f8c5b636134d8b64
 
 The viewer at http://127.0.0.1:8765/ has a Unity + MPC trajectory trials
-panel, including live official-lap progress and a Copy retry command button.
-The viewer itself has no execution/control endpoints.
+panel, including live official-lap progress, clear model-versus-Unity results,
+actual supervisor status and a **Retry this driving test** button. This single
+write endpoint accepts same-origin JSON only and queues a previously failed,
+independently source-certified candidate. It cannot execute arbitrary commands.
+The supervisor owns launching and serializes all trials. Repeated clicks do
+not create duplicate queued attempts. A terminal command can also be copied.
 
 ## Results
 
@@ -81,8 +89,8 @@ completion is not proof that the source model matches private Unity PhysX.
 
 This integration is specifically for the IROS competition track in Unity-confirmed racing direction.
 Each trial builds a fresh production controller image, so stale binaries are
-not silently reused. Simulation and builds compete for compute with IPOPT;
-this can slow optimization. The default watcher wall timeout is 900 seconds,
+not silently reused. Simulation, builds and analysis run with IPOPT paused;
+the GUI remains responsive. The default watcher wall timeout is 900 seconds,
 and a separate outer watchdog guards the launch process. Existing active
 Unity/controller/recorder containers defer the next auto trial rather than
 being stopped. It does not automatically promote any result into the
@@ -114,8 +122,8 @@ It uses a new output workspace and a separate source-contract hash to prevent
 resume from the incompatible campaign. The saved opposite-direction
 witness cannot be reversed while retaining dynamics certification.
 
-Active read-only dashboard: http://127.0.0.1:8765/
-Archived failure/report dashboard: http://127.0.0.1:8766/
+Single active dashboard: http://127.0.0.1:8765/
+Older workspace results remain on disk; no second dashboard is required.
 
 The dashboard retains expanded failure panels, preserves selected text
 across two-second polls, updates unchanged regions without rebuilding
