@@ -33,8 +33,27 @@ The controller is not yet fully reliable at higher speed:
 | `iros_mpc_recovery_7mps_20261029_01` | 7.0 m/s | After warmup, nonlinear corridor rejection at stage 7, progress ~124.25 m |
 | `iros_mpc_recovery_5p5mps_20261029_01` | 5.5 m/s | After warmup, nonlinear corridor rejection at stage 2, progress ~117.38 m; measured plant speed ~5.94 m/s (above nominal ceiling due dynamics) |
 | `iros_mpc_recovery_5mps_20261029_03` | 5.0 m/s | Independent repeat: warmup + **one** scored lap only, then nonlinear corridor rejection at stage 1, progress ~167.39 m; lateral error ~-0.40 m and rack near 0.52 rad |
+| `iros_mpc_recovery_4mps_20261029_01` | 4.0 m/s | Warmup + **six** scored laps, then nonlinear corridor rejection at stage 2, progress ~381.40 m, lateral error ~-0.044 m; gate 14.76 ms |
 
 Both higher-speed test failures were **exact MPC safety-gate rejections**, not proof of actual vehicle collision. Do **not** weaken collision constraints to force completion or interpret one 5 m/s pass as proof of a general stability bound. In the 6 m/s failure, controller lateral error was only about 3 cm; the predicted corridor becomes infeasible ahead of the car. At 7 m/s, errors accumulated and repeated retained-plan actions preceded failure. This supports corner-specific feasibility and recovery investigation, not simply another uniform weight increase.
+
+## Hotspot analysis and stricter-clearance source-model experiment
+
+The 7.400 s source CSV has a circuit length of approximately **42.966 m**. Mapping each failed MPC diagnostic's unwrapped progress into one lap gives:
+
+| Speed ceiling | Failed progress modulo track length | MPC lateral error | MPC gate | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| 4.0 m/s | 37.67 m | -0.044 m | 14.76 ms | Near track-boundary steering demand, despite small error |
+| 5.0 m/s repeat | 38.50 m | -0.481 m | 13.26 ms | Late recovery, physical rack ~0.517 rad near steering limit |
+| 5.5 m/s | 31.45 m | +0.081 m | 14.60 ms | Overspeed during corner transition |
+| 6.0 m/s | 19.86 m | -0.023 m | 13.14 ms | Near-feasible corridor state, insufficient short-horizon room |
+| 7.0 m/s | 38.32 m | -0.242 m | 10.64 ms | Late corrective steering; long prior-plan fallbacks |
+
+**Three of five tests fail in the 37.7–38.5 m sector.** Near s=38 m, the source line reaches **~1.55 m^-1 curvature** and source corridor half-width ~**0.20 m on the narrow side**, which leaves little room after accounting for vehicle footprint and the fixed 5 cm safety margin. Widths from CSV are path-relative corridor geometry and are **not** substitutes for the source model's entire vehicle-perimeter check.
+
+Experiment in `live_runs/iros_mpc_recovery_20261029/source_margin_12cm_7p400/`: solve the existing production-source-command OCP at fixed **7.400 s**, same source vehicle and commands, but strengthen the offline **full-footprint** clearance to **12 cm** (MPC's hard 5 cm safety gate unchanged). The original 7.4 s seed initially violated the stronger clearance by **~69.85 mm**. Within the capped CPU budget IPOPT terminated after 33 iterations with `Maximum_CpuTime_Exceeded`, best residual **0.0698446** and independently replayed source-tick slack **-0.0698482 m**. **No new source-feasible witness was obtained**, and none was promoted. This negative result does not demonstrate the larger margin is physically impossible: 7.4 s duration, geometry-basin restrictions, initial seed and numerical behavior all affect feasibility. Need duration continuation or a different geometry basin.
+
+The best-supported next approach is now **robust reference design before more controller-weight sweeps**: generate a physics-feasible trajectory with enough *additional* footprint clearance at the 20 m and 38 m corners, include enough anticipatory speed reduction and steering response, then require full independent source and Unity ten-lap validation. Hard walls, 20 ms gate and competition sensor policy must stay enforced.
 
 ## Reproduction
 
@@ -55,7 +74,7 @@ Use the original capture `live_runs/iros_mpc_recovery_5mps_20261029_02` for resu
 ## Next engineering priority
 
 1. Independent 5.0 m/s repeat **failed**; do not call the successful first trial consistently reproducible. Examine the new failure at progress 167.39 m and run several independently supervised trials before promoting any setting as reliable.
-2. Inspect why 6.0 m/s becomes infeasible at progress 105–106 m when lateral error is only ~3 cm, including the QP linearized footprint constraint, actual 75 ms prefix corridor, command latency, actuator saturation and feasible steering authority.
+2. Inspect why even 4.0 m/s occasionally becomes infeasible and the recurrent turn at s≈38 m; the failure is not resolved by a global speed cap. Inspect why 6.0 m/s becomes infeasible at progress 105–106 m when lateral error is only ~3 cm, including the QP linearized footprint constraint, actual 75 ms prefix corridor, command latency, actuator saturation and feasible steering authority.
 3. Develop a **corner-conditioned, anticipation-aware speed envelope** rather than a uniform global cap. It must be physically realizable with the same steering/throttle and delay model, leave room beyond the 5 cm hard clearance for tracking errors, and be independently checked.
 4. Raise speed using the same ten-lap supervised criterion, keeping the 5 m/s result recoverable. Only report new IROS lap-time improvement on full Unity/MPC completion.
 5. The faster 7.125 s **source-only** optimizer witness is not a driven competition result. No change to the ongoing independent offline optimizer is needed just to preserve this baseline.
