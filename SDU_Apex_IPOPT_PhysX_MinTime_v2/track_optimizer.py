@@ -69,6 +69,20 @@ def default_output(image, config):
     return REPO/'live_runs'/f'optimizer_{Path(image).stem}_{key}'
 
 
+def approved_search_code_update(previous, requested):
+    '''An explicit algorithm-only update may resume with unchanged physics.
+
+    No map, source, seed, direction or numerical configuration other than
+    increasing solver budgets can change. The migration is durably audited.
+    '''
+    before = {k:v for k,v in previous.items()
+              if k != 'optimizer_sha256'}
+    after = {k:v for k,v in requested.items()
+             if k != 'optimizer_sha256'}
+    return (previous.get('optimizer_sha256') != requested.get('optimizer_sha256')
+            and budget_increase_only(before, after))
+
+
 def implementation_digest():
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
@@ -319,7 +333,8 @@ def geometry_starts(map_yaml, output, directions, cancel):
 def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
               phases=4, refinements=6, stagnation_iterations=250, prepare_only=False,
               bootstrap_only=False, cancel=None, driving_reference=None, hybrid_time=False,
-              command_seed=None, elite_refinements=2, elite_first=True):
+              command_seed=None, elite_refinements=2, elite_first=True,
+              allow_search_code_update=False):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -346,10 +361,24 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
         best_manifest=None, starts={}, status='running', source_only=True,
         global_minimum_proven=False, runtime_promoted=False)
     if state['contract'] != contract:
-        if not budget_increase_only(state['contract'], contract):
-            raise ValueError('map/source/settings changed; choose a new output directory')
+        previous = state['contract']
+        code_migration = approved_search_code_update(previous, contract)
+        if not (budget_increase_only(previous, contract) or
+                (allow_search_code_update and code_migration)):
+            raise ValueError('map/source/settings changed; choose a new output directory '
+                             'or explicitly approve an algorithm-only update')
+        if code_migration:
+            state.setdefault('search_code_migrations', []).append(dict(
+                previous_optimizer_sha256=previous['optimizer_sha256'],
+                requested_optimizer_sha256=contract['optimizer_sha256'],
+                previous_budget=dict(iterations=previous['iterations'],
+                                     stagnation_iterations=previous['stagnation_iterations']),
+                new_budget=dict(iterations=iterations,
+                                stagnation_iterations=stagnation_iterations),
+                reason='explicit algorithm-only budget-cap removal',
+                epoch_s=time.time()))
         state.setdefault('budget_updates', []).append(dict(
-            previous=state['contract'], requested=contract, epoch_s=time.time()))
+            previous=previous, requested=contract, epoch_s=time.time()))
         state['contract'] = contract
         for context in state['starts'].values():
             if context['witness'] is None:
@@ -551,6 +580,9 @@ def main():
     parser.add_argument('--refinements', type=int, default=6)
     parser.add_argument('--elite-refinements', type=int, default=2,
                         help='equal-time clearance/archive attempts after all faster starts fail')
+    parser.add_argument('--allow-search-code-update', action='store_true',
+                        help='explicitly audit and resume an optimizer-only code update '
+                             'with identical map, source, seed and nondecreasing budgets')
     parser.add_argument('--no-elite-first', dest='elite_first', action='store_false',
                         help='defer equal-time diversification until the first plateau')
     parser.set_defaults(elite_first=True)
@@ -605,6 +637,7 @@ def main():
             workers=args.workers, iterations=args.iterations, phases=args.phases,
             refinements=args.refinements, stagnation_iterations=args.stagnation_iterations,
             elite_refinements=args.elite_refinements, elite_first=args.elite_first,
+            allow_search_code_update=args.allow_search_code_update,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
             driving_reference=driving_reference,
             hybrid_time=args.hybrid_time_search,

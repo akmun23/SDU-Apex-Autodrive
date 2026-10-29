@@ -86,3 +86,27 @@ The existing certified lap history and all historical/Unity records remain.
 - A child full campaign can consume substantial time before the next elite
   receives its turn. A future priority scheduler could interleave bounded
   duration attempts across elites.
+
+## Budget increase and expected iteration resets
+
+- Equal-duration source-witness polishing now receives the **full configured
+  IPOPT iteration and stagnation budgets**; previously it was silently capped
+  at 450 and 100, even when the top-level campaign permitted more.
+- The active IROS run is resumed at **1200 max IPOPT iterations / 300
+  stagnation iterations** rather than the previous 900/180 top-level and
+  450/100 equal-time split.
+- IPOPT iteration numbers start at **0 for each new solve**: different
+  margin targets, different geometry starts, new child campaigns and time
+  predictors are independent NLPs. A reset is not by itself evidence that
+  the daemon restarted or repeated the same candidate.
+- Previously completed rejected attempts are checkpointed and not silently
+  retried; an interrupted current attempt resumes from its durable saved
+  primal in a distinct solve directory.
+- Resuming after an optimizer-only code upgrade requires the *explicit*
+  `--allow-search-code-update` command-line argument. The metadata/map,
+  vehicle source, seed, driving direction and all other settings must match
+  the prior contract, and budgets may only increase. The migration is logged
+  in `optimizer.json`; the original witnesses are left intact.
+- As always, a source-witness candidate only improves the best lap after
+  independent 1 ms full-vehicle footprint checks pass. No shortfall can
+  be hidden by relaxing the verifier or reporting an IPOPT convergence alone.

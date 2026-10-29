@@ -205,6 +205,42 @@ def test_larger_budgets_do_not_repeat_a_verified_bootstrap(pipeline):
         optimizer.run_track(**settings, workers=1, iterations=1000, stagnation_iterations=100)
 
 
+def test_explicit_search_code_migration_preserves_map_source_and_seed(pipeline, monkeypatch):
+    settings,calls=pipeline
+    optimizer.run_track(**settings,workers=1,iterations=900,stagnation_iterations=180)
+    previous=json.loads((settings['output']/'optimizer.json').read_text())
+    old_digest=previous['contract']['optimizer_sha256']
+    monkeypatch.setattr(optimizer,'implementation_digest',lambda: 'search-upgrade-test-only')
+    with pytest.raises(ValueError,match='explicitly approve'):
+        optimizer.run_track(**settings,workers=1,iterations=1200,stagnation_iterations=300)
+    assert json.loads((settings['output']/'optimizer.json').read_text())['contract']==previous['contract']
+    result=optimizer.run_track(**settings,workers=1,
+        iterations=1200,stagnation_iterations=300,
+        allow_search_code_update=True)
+    assert result['contract']['iterations']==1200
+    assert result['contract']['stagnation_iterations']==300
+    assert result['search_code_migrations'][0]['previous_optimizer_sha256']==old_digest
+    assert len(calls)==1  # A code upgrade cannot discard previous certified result.
+    with pytest.raises(ValueError,match='settings changed'):
+        optimizer.run_track(**settings,workers=2,
+            iterations=1200,stagnation_iterations=300,
+            allow_search_code_update=True)
+
+
+def test_search_code_migration_does_not_allow_source_or_budget_regression():
+    old=dict(optimizer_sha256='a',source_sha256='source',
+             image_sha256='map',command_seed_sha256='seed',
+             iterations=900,stagnation_iterations=180)
+    new=dict(old,optimizer_sha256='b',iterations=1200,stagnation_iterations=300)
+    assert optimizer.approved_search_code_update(old,new)
+    assert not optimizer.approved_search_code_update(old,dict(new,source_sha256='changed'))
+    assert not optimizer.approved_search_code_update(old,dict(new,image_sha256='changed'))
+    assert not optimizer.approved_search_code_update(old,dict(new,command_seed_sha256='changed'))
+    assert not optimizer.approved_search_code_update(old,dict(new,iterations=700))
+    assert not optimizer.approved_search_code_update(old,dict(old,iterations=1200,
+        stagnation_iterations=300))
+
+
 def test_interrupted_bootstrap_resumes_its_durable_best(pipeline, monkeypatch):
     settings, calls = pipeline
     def interrupt(**kw):

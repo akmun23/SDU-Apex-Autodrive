@@ -221,7 +221,10 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             archive = (elite_polish or polish_equal_time)(
                 repo=repo, seed=incumbent, map_path=map_path,
                 output=elite_dir, workers=workers,
-                iterations=min(iterations, 450),
+                # Give equal-time feasibility restoration the same budget as
+                # primary 25 ms solves (e.g. 1200/300). Independent attempts
+                # remain sequential and independently certified.
+                iterations=iterations,
                 margin_steps=(.0001, .0005, .002)[:elite_refinements],
                 # Explore other local geometry basins at exactly the
                 # incumbent duration, in addition to improving clearance.
@@ -230,7 +233,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 geometry_seeds=((.04, 1), (-.04, 1),
                                 (.09, 2), (-.09, 2), (.14, 3)),
                 max_elites=5, diversity_threshold_m=.015,
-                stagnation_iterations=min(stagnation_iterations, 100),
+                stagnation_iterations=stagnation_iterations,
                 cancel_requested=cancel_requested,
                 solve=solve, certify=certify)
             state.setdefault('elite_archives', {})[baseline_hash] = str(

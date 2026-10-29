@@ -412,3 +412,21 @@ def test_elite_first_runs_before_any_shorter_duration_trial(setup):
     assert result['best_lap_s']==pytest.approx(.975)
     assert result['elite_first_done'] is True
     assert order[:2]==['equal_duration_archive','shorter_duration']
+
+
+
+def test_elite_uses_full_iteration_and_stagnation_budget(setup):
+    elite_calls=[]
+    def elite(**kw):
+        elite_calls.append(kw)
+        return dict(accepted=[])
+    def failed(**kw):
+        return solver_report(kw,passed=False,residual=.2)
+    settings=dict(setup,iterations=1200,stagnation_iterations=300,
+                  elite_first=True,elite_refinements=2,
+                  elite_polish=elite)
+    result=run_campaign(**settings,solve=failed,certify=checked)
+    assert result['status']=='plateau'
+    assert elite_calls
+    assert elite_calls[0]['iterations']==1200
+    assert elite_calls[0]['stagnation_iterations']==300
