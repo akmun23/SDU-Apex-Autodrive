@@ -430,3 +430,19 @@ def test_elite_uses_full_iteration_and_stagnation_budget(setup):
     assert elite_calls
     assert elite_calls[0]['iterations']==1200
     assert elite_calls[0]['stagnation_iterations']==300
+
+
+
+def test_hybrid_time_optimizer_uses_full_1200_300_budget(setup):
+    predicted=[]
+    def predict(**kw):
+        predicted.append(kw)
+        return predictor_report(kw,proposal=False)
+    settings=dict(setup,iterations=1200,stagnation_iterations=300)
+    state=run_campaign(**settings,
+        solve=lambda **kw: solver_report(kw,passed=False,residual=.1),
+        certify=checked,hybrid_time=True,predict=predict)
+    assert state['status']=='plateau'
+    assert len(predicted)==1
+    assert predicted[0]['iterations']==1200
+    assert predicted[0]['stagnation_iterations']==300

@@ -110,3 +110,15 @@ The existing certified lap history and all historical/Unity records remain.
 - As always, a source-witness candidate only improves the best lap after
   independent 1 ms full-vehicle footprint checks pass. No shortfall can
   be hidden by relaxing the verifier or reporting an IPOPT convergence alone.
+
+
+## Hybrid-time budget parity and visible solver resets
+
+The local hybrid-time predictor previously had a separate
+**200 iteration / 80 iteration stagnation** cap. It now uses the full
+configured per-solve budgets, matching the fixed-duration and equal-time
+IPOPT solves (**1200/300** for the active IROS run). Both optimizers
+still require independent 1 ms physical clearance verification before
+promoting any faster source lap. Iteration zero is normal after
+switching candidate solves; the GUI now labels the current alternate
+index (e.g. 4/8) and the per-solve maximum/patience explicitly.

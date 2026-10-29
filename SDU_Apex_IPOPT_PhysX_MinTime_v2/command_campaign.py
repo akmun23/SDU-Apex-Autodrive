@@ -188,8 +188,11 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         event('minimum_time_prediction', source_lap_s=old_count*.025,
               output=str(destination), source_certified=False)
         report = predict(repo=repo, command_seed=incumbent, map_path=map_path,
-            output=destination, workers=workers, iterations=min(iterations, 200),
-            stagnation_iterations=min(stagnation_iterations, 80),
+            # The hybrid-time objective is a complementary search basin,
+            # not an expendable 200/80 trial. Give it the same per-solve budget
+            # as fixed 25 ms and equal-time IPOPT.
+            output=destination, workers=workers, iterations=iterations,
+            stagnation_iterations=stagnation_iterations,
             cancel_requested=cancel_requested, resume_checkpoint=resume_checkpoint)
         stored[ident] = report
         state.pop('active_predictor', None)

@@ -393,6 +393,8 @@ class Dashboard:
                 enabled=bool(state.get('contract', {}).get('elite_refinements')),
                 polishing=polishing,
                 polishing_attempts=len(polish_archive.get('attempts',[])),
+                polishing_total=(len(polish_archive.get('contract',{}).get('extra_margin_m',[]))
+                                 +len(polish_archive.get('contract',{}).get('geometry_seeds',[]))),
                 polishing_active=polish_active,
                 parent_attempts=len(campaign.get('attempts', [])),
                 current_attempts=len(attempts),

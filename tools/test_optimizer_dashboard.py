@@ -120,6 +120,29 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('Multi-incumbent optimization progress',
             Path(__file__).with_name('optimizer_dashboard.html').read_text())
 
+    def test_polishing_budget_and_attempt_context(self):
+        self.start_log()
+        p=self.root/'starts/clockwise/campaign'
+        p.mkdir(parents=True,exist_ok=True)
+        folder=p/'elite_refinement/seed1'
+        self.write(folder/'elite.json',dict(
+            contract=dict(extra_margin_m=[.0001,.0005,.002],
+                          geometry_seeds=[[.04,1],[-.04,1]]),
+            active_attempt=dict(index=3,strategy='geometry',
+                                output=str(folder/'polish_03')),
+            attempts=[dict(index=i,status='no_validated_witness')
+                      for i in range(3)],accepted=[]))
+        self.write(self.campaign_path,dict(
+            active_elite_polish=dict(seed='seed',output=str(folder),
+                                     source_lap_s=7.125)))
+        snap=self.dashboard.snapshot()
+        ep=snap['elite_progress']
+        self.assertEqual(ep['polishing_total'],5)
+        self.assertEqual(ep['polishing_attempts'],3)
+        self.assertEqual(ep['polishing_active']['index'],3)
+        html=Path(__file__).with_name('optimizer_dashboard.html').read_text()
+        self.assertIn('resets for each new candidate',html)
+
     def test_feasibility_and_ipopt_raw_use_separate_graphs(self):
         html = Path(__file__).with_name('optimizer_dashboard.html').read_text()
         actual = html.split('function residualChart(){', 1)[1].split('function ipoptChart(){', 1)[0]
