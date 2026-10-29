@@ -1,0 +1,210 @@
+"""Map-only orchestration tests; mocks below do NOT certify vehicle accuracy."""
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+import yaml
+
+import track_optimizer as optimizer
+from command_ocp import save_command_checkpoint
+
+
+def input_map(tmp_path):
+    image, metadata = tmp_path/'new_track.pgm', tmp_path/'new_track.yaml'
+    image.write_bytes(b'P5\n2 2\n255\n'+bytes([0, 255, 255, 0]))
+    config = dict(image=image.name, resolution=.025, origin=[10., -8., .2],
+                  negate=0, occupied_thresh=.65, free_thresh=.25)
+    metadata.write_text(yaml.safe_dump(config))
+    return image, metadata, config
+
+
+def witness(path, count=40):
+    x = np.zeros((21, count+1))
+    x[2] = np.linspace(0., 2*np.pi, count+1)
+    x[3] = 1.
+    u = np.vstack([np.full(count, .1), np.full(count, .05)])
+    save_command_checkpoint(path, x, u, 'fixture', 0., 0)
+
+
+def certification(repo, path, map_path, destination):
+    destination.mkdir()
+    with np.load(path) as data:
+        count = data['controls'].shape[1]
+    witness(destination/'witness.npz', count)
+    (destination/'raceline.csv').write_text('# fixture only\n0,0,0\n')
+    report = dict(status='source_witness_passed', source_plant_sha256='fixture',
+                  trial_lap_s=count*.025,
+                  reference_export=dict(path=str(destination/'raceline.csv')))
+    (destination/'report.json').write_text(json.dumps(report))
+    return report
+
+
+def test_map_pair_and_yaml_only_preserve_metric_origin(tmp_path):
+    image, metadata, config = input_map(tmp_path)
+    assert optimizer.resolve_map(image, metadata) == (image, metadata, config)
+    assert optimizer.resolve_map(metadata) == (image, metadata, config)
+    other = tmp_path/'wrong.pgm'
+    other.write_bytes(b'different track')
+    with pytest.raises(ValueError, match='does not match'):
+        optimizer.resolve_map(other, metadata)
+    config['resolution'] = float('nan')
+    metadata.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match='resolution'):
+        optimizer.resolve_map(image, metadata)
+
+
+def test_output_identity_depends_on_image_and_metric_metadata(tmp_path):
+    image, _, config = input_map(tmp_path)
+    original = optimizer.default_output(image, config)
+    assert optimizer.default_output(image, config) == original
+    assert optimizer.default_output(image, dict(config, resolution=.05)) != original
+    image.write_bytes(b'another circuit')
+    assert optimizer.default_output(image, config) != original
+
+
+def test_orphaned_input_bundle_cannot_be_reused_for_another_map(tmp_path):
+    image, metadata, config = input_map(tmp_path)
+    assets = tmp_path/'input'
+    optimizer.bundle_map(image, config, assets)
+    optimizer.bundle_map(image, config, assets)  # same input is idempotent
+    with pytest.raises(ValueError, match='different map metadata'):
+        optimizer.bundle_map(image, dict(config, resolution=.05), assets)
+    # This is precisely the crash-before-optimizer.json / reused-output case.
+    image.write_bytes(b'P5\n2 2\n255\n'+bytes([0, 0, 255, 0]))
+    with pytest.raises(ValueError, match='different map image'):
+        optimizer.bundle_map(image, config, assets)
+
+
+def test_implementation_guard_includes_source_adapter_and_time_helpers(monkeypatch):
+    original = Path.read_bytes
+    for suffix in ('physics.py', 'path_frame.py', 'command_realizability.py'):
+        before = optimizer.implementation_digest()
+        with monkeypatch.context() as context:
+            context.setattr(Path, 'read_bytes', lambda path: original(path)+(
+                b'\n# modified numerical behavior\n' if path.name == suffix else b''))
+            assert optimizer.implementation_digest() != before
+
+
+def test_atomic_export_never_replaces_best_with_slower_or_uncertified(tmp_path):
+    source = tmp_path/'certified'
+    source.mkdir()
+    witness(source/'seed.npz')
+    result = tmp_path/'checked'
+    certification(tmp_path, source/'seed.npz', tmp_path/'map', result)
+    state = dict(best_lap_s=None)
+    optimizer.publish_best(tmp_path, result/'witness.npz', 1., state, source_digest='fixture')
+    first = (tmp_path/'best.json').read_bytes()
+    optimizer.publish_best(tmp_path, result/'witness.npz', 2., state, source_digest='fixture')
+    assert (tmp_path/'best.json').read_bytes() == first
+    with pytest.raises(ValueError, match='stale-source'):
+        optimizer.publish_best(tmp_path, result/'witness.npz', .9, state, source_digest='changed')
+    assert (tmp_path/'best.json').read_bytes() == first
+
+
+@pytest.fixture
+def pipeline(tmp_path, monkeypatch):
+    image, metadata, config = input_map(tmp_path)
+    reference = tmp_path/'generated_centerline.csv'
+    reference.write_text('fixture; no physics use')
+    monkeypatch.setattr(optimizer, 'REPO', tmp_path)
+    monkeypatch.setattr(optimizer, 'production_command_map', lambda *a: (None, 'fixture'))
+    monkeypatch.setattr(optimizer, 'geometry_starts', lambda *a: [('map_basin', reference)])
+    monkeypatch.setattr(optimizer, 'geometric_seed', lambda ref, path, repo, scale: witness(path))
+    monkeypatch.setattr(optimizer, 'certify_witness', certification)
+    calls = []
+    def solve(**kw):
+        calls.append(kw)
+        kw['output'].mkdir()
+        witness(kw['output']/'witness.npz', kw['count'])
+        return dict(status='source_witness_passed', max_constraint_violation=0.,
+                    rollout=dict(violating_source_ticks=[]))
+    monkeypatch.setattr(optimizer, 'solve_witness', solve)
+    def campaign(**kw):
+        assert kw['target_seconds'] is None
+        assert kw['coarse_fraction'] == .1
+        assert kw['seed'].is_file()
+        return dict(status='plateau')
+    monkeypatch.setattr(optimizer, 'run_campaign', campaign)
+    return dict(image=image, metadata=metadata, config=config, output=tmp_path/'out'), calls
+
+
+def test_map_only_full_workflow_needs_no_bags_reference_or_time_target(pipeline):
+    settings, calls = pipeline
+    state = optimizer.run_track(**settings, workers=1)
+    assert state['status'] == 'plateau' and state['best_lap_s'] == 1.
+    assert len(calls) == 1
+    assert calls[0]['cpu_seconds'] == 1.e20
+    bundled = json.loads((settings['output']/'input/map.yaml').read_text())
+    assert bundled['origin'] == [10., -8., .2]
+    assert (settings['output']/'best.json').is_file()
+    assert not state['global_minimum_proven'] and not state['runtime_promoted']
+    # Restart reuses completed bootstrap, without running it again.
+    optimizer.run_track(**settings, workers=1)
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='settings changed'):
+        optimizer.run_track(**settings, workers=2)
+
+
+def test_interrupted_bootstrap_resumes_its_durable_best(pipeline, monkeypatch):
+    settings, calls = pipeline
+    def interrupt(**kw):
+        kw['output'].mkdir()
+        witness(kw['output']/'best_iterate.npz', kw['count'])
+        raise KeyboardInterrupt
+    real_solve = optimizer.solve_witness
+    monkeypatch.setattr(optimizer, 'solve_witness', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        optimizer.run_track(**settings, workers=1)
+    state = json.loads((settings['output']/'optimizer.json').read_text())
+    assert state['status'] == 'interrupted'
+    assert not (settings['output']/'best.json').exists()
+    monkeypatch.setattr(optimizer, 'solve_witness', real_solve)
+    optimizer.run_track(**settings, workers=1)
+    assert calls[0]['command_seed'].name == 'best_iterate.npz'
+
+
+def test_search_domain_stop_is_not_reported_as_numerical_plateau(pipeline, monkeypatch):
+    settings, _ = pipeline
+    monkeypatch.setattr(optimizer, 'run_campaign', lambda **kw: dict(status='search_domain_reached'))
+    state = optimizer.run_track(**settings, workers=1)
+    assert state['status'] == 'search_domain_reached'
+
+
+def test_no_feasible_bootstrap_is_not_reported_as_raceline_success(pipeline, monkeypatch):
+    settings, calls = pipeline
+    original = optimizer.solve_witness
+    def failed(**kw):
+        result = original(**kw)
+        result.update(status='no_validated_witness', max_constraint_violation=1.)
+        return result
+    monkeypatch.setattr(optimizer, 'solve_witness', failed)
+    state = optimizer.run_track(**settings, workers=1, refinements=1)
+    assert state['status'] == 'no_validated_raceline'
+    assert not (settings['output']/'best.json').exists()
+
+
+def test_geometric_initializer_uses_real_source_state_and_is_not_certified(tmp_path):
+    # Artificial circular MAP GEOMETRY for a numerical module check. This is
+    # neither simulator telemetry nor evidence of a real car's prediction error.
+    theta = np.linspace(0., 2*np.pi, 160, endpoint=False)
+    radius = 3.
+    table = np.column_stack([theta*radius, radius*np.cos(theta), radius*np.sin(theta),
+        theta+np.pi/2, np.full(len(theta), 1/radius), np.full(len(theta), 1.2),
+        np.zeros(len(theta)), np.ones((len(theta), 2))])
+    reference, seed = tmp_path/'circle.csv', tmp_path/'initializer.npz'
+    np.savetxt(reference, table, delimiter=',')
+    count = optimizer.geometric_seed(reference, seed, optimizer.REPO)
+    with np.load(seed) as data:
+        assert data['state'].shape == (21, count+1)
+        assert data['controls'].shape == (2, count)
+        assert np.isfinite(data['state']).all()
+        assert np.min(data['controls'][1]) > 0.
+        assert data['state'][2, -1]-data['state'][2, 0] == pytest.approx(2*np.pi)
+        assert str(data['source_sha256']) == 'uncertified-map-geometric-initializer'
+        assert int(data['iteration']) == -1
+        assert np.isinf(data['max_constraint_violation'])
+        function, _ = optimizer.production_command_map(optimizer.REPO,
+                                                       optimizer.REPO/'build_task/command_ocp')
+        predicted = np.asarray(function(np.r_[data['state'][:, 0], data['controls'][:, 0]]))
+        assert predicted.shape == (21, 1) and np.isfinite(predicted).all()

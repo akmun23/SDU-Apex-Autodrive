@@ -59,22 +59,42 @@ def source_count(path):
         return data['controls'].shape[1]
 
 
+def trial_counts(count, fraction, minimum):
+    """Coarse-to-fine duration trials; always include the one-packet step."""
+    if not 0. <= fraction < 1. or minimum < 2:
+        raise ValueError('invalid duration search domain')
+    step = max(1, int(count*fraction))
+    result = []
+    while True:
+        candidate = max(minimum, count-step)
+        if candidate < count and candidate not in result:
+            result.append(candidate)
+        if step == 1:
+            return result
+        step = max(1, step//2)
+
+
 def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                  phases=8, workers=8, iterations=300, stagnation_iterations=50,
                  refinements=6, resume=False, include_packet_starts=True,
                  solve=solve_witness, certify=certify_witness, digest=None,
-                 cancel_requested=None):
+                 cancel_requested=None, coarse_fraction=0., on_improvement=None):
     repo, seed, map_path, output = [Path(p).resolve() for p in (repo, seed, map_path, output)]
-    if (not math.isfinite(target_seconds) or target_seconds < .75 or phases < 1
+    if ((target_seconds is not None and
+            (not math.isfinite(target_seconds) or target_seconds < .75)) or phases < 1
+            or not math.isfinite(coarse_fraction) or not 0. <= coarse_fraction < 1.
             or refinements < 0 or iterations < 1 or stagnation_iterations < 5):
         raise ValueError('invalid campaign target or search settings')
     if digest is None:
         _, digest = production_command_map(repo, repo/'build_task/command_ocp')
     contract = dict(seed_sha256=file_hash(seed), map_sha256=file_hash(map_path),
-        source_sha256=digest, target_intervals=math.floor(target_seconds/.025+1.e-9),
+        source_sha256=digest, target_intervals=(None if target_seconds is None else
+            math.floor(target_seconds/.025+1.e-9)),
         phases=phases, workers=workers, iterations=iterations,
         stagnation_iterations=stagnation_iterations, refinements=refinements,
-        include_packet_starts=include_packet_starts)
+        include_packet_starts=include_packet_starts, coarse_fraction=coarse_fraction,
+        map_metadata_sha256=(file_hash(map_path.with_suffix('.yaml'))
+                             if map_path.with_suffix('.yaml').exists() else None))
     state_path = output/'campaign.json'
     if output.exists() and not resume:
         raise FileExistsError('campaign exists; use --resume, never overwrite it')
@@ -95,7 +115,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             state = json.loads(state_path.read_text())
             if state['contract'] != contract:
                 raise ValueError('campaign source/map/settings changed; create a new campaign')
-            if state['status'] in ('target_reached', 'plateau'):
+            if state['status'] in ('target_reached', 'plateau', 'search_domain_reached'):
                 event('already_finished', status=state['status'], best_lap_s=state['best_lap_s'])
                 return state
             state['status'] = 'running' if state['status'] != 'initializing' else 'initializing'
@@ -115,95 +135,107 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             state.update(status='running', best_witness=str(baseline_dir/'witness.npz'),
                          best_lap_s=baseline['trial_lap_s'])
         save()
+        if on_improvement is not None:
+            on_improvement(Path(state['best_witness']), state['best_lap_s'])
         while True:
             if cancel_requested is not None and cancel_requested():
                 raise KeyboardInterrupt
             incumbent = Path(state['best_witness'])
-            count = source_count(incumbent)-1
-            if count < contract['target_intervals']:
-                state.update(status='target_reached', active=None)
+            old_count = source_count(incumbent)
+            # 30 intervals is a numerical search-domain guard, not a physical
+            # vehicle-time floor. No requested lap target stops an open search.
+            minimum = contract['target_intervals'] or 30
+            counts = trial_counts(old_count, coarse_fraction, minimum)
+            if not counts:
+                state.update(status=('target_reached' if target_seconds is not None
+                                     else 'search_domain_reached'), active=None)
                 save()
                 break
             rotations = sorted(set(int(source_count(incumbent)*i/phases) for i in range(phases)))
-            strategies = ('resample', 'drop-packet') if include_packet_starts else ('resample',)
             improved = False
-            for rotation in rotations:
-                for strategy in strategies:
-                    key = f'{count:03d}_phase{rotation:03d}_{strategy}'
-                    if any(a['key'] == key for a in state['attempts']): continue
-                    directory = output/key
-                    directory.mkdir(exist_ok=True)
-                    active = state.get('active')
-                    if active is not None and active['key'] == key:
-                        cuts = {tuple(c) for c in active['cuts']}
-                        previous = Path(active['output'])
-                        if (previous/'report.json').exists():
-                            report = json.loads((previous/'report.json').read_text())
-                            start = previous/'witness.npz'
-                        elif (previous/'best_iterate.npz').exists():
-                            report = None
-                            start = previous/'best_iterate.npz'
-                        else:
-                            report, start = None, Path(active['seed'])
-                        refinement = active['refinement']
+            starts = [(count, rotation, strategy) for count in counts
+                      for rotation in rotations
+                      for strategy in (('resample', 'drop-packet')
+                          if include_packet_starts and count == old_count-1
+                          else ('resample',))]
+            for count, rotation, strategy in starts:
+                key = f'from{old_count:03d}_{count:03d}_phase{rotation:03d}_{strategy}'
+                if any(a['key'] == key for a in state['attempts']): continue
+                directory = output/key
+                directory.mkdir(exist_ok=True)
+                active = state.get('active')
+                if active is not None and active['key'] == key:
+                    cuts = {tuple(c) for c in active['cuts']}
+                    previous = Path(active['output'])
+                    if (previous/'report.json').exists():
+                        report = json.loads((previous/'report.json').read_text())
+                        start = previous/'witness.npz'
+                    elif (previous/'best_iterate.npz').exists():
+                        report = None
+                        start = previous/'best_iterate.npz'
                     else:
-                        start = incumbent
-                        if rotation:
-                            start = phase_seed(incumbent, rotation, directory/'phase_seed.npz')
-                        cuts, report, refinement = set(), None, 0
-                    while True:
-                        if report is None:
-                            index = 0
-                            while (directory/f'solve_{index:03d}').exists(): index += 1
-                            destination = directory/f'solve_{index:03d}'
-                            state['active'] = dict(key=key, output=str(destination), seed=str(start),
-                                cuts=sorted(cuts), refinement=refinement)
+                        report, start = None, Path(active['seed'])
+                    refinement = active['refinement']
+                else:
+                    start = incumbent
+                    if rotation:
+                        start = phase_seed(incumbent, rotation, directory/'phase_seed.npz')
+                    cuts, report, refinement = set(), None, 0
+                while True:
+                    if report is None:
+                        index = 0
+                        while (directory/f'solve_{index:03d}').exists(): index += 1
+                        destination = directory/f'solve_{index:03d}'
+                        state['active'] = dict(key=key, output=str(destination), seed=str(start),
+                            cuts=sorted(cuts), refinement=refinement)
+                        save()
+                        event('solve', key=key, refinement=refinement,
+                              target_lap_s=count*.025, output=str(destination))
+                        report = solve(repo=repo, checkpoint=None, mesh=None, audit=None,
+                            map_path=map_path, output=destination, count=count,
+                            iterations=iterations, cpu_seconds=1.e20, command_seed=start,
+                            workers=workers, clearance_cuts=sorted(cuts),
+                            shorten_packet=strategy == 'drop-packet' and source_count(start) == count+1,
+                            stagnation_iterations=stagnation_iterations,
+                            cancel_requested=cancel_requested)
+                        start = destination/'witness.npz'
+                    if report['status'] == 'source_witness_passed':
+                        destination = unused_directory(directory/'certified')
+                        checked = certify(repo, start, map_path, destination)
+                        if checked['status'] == 'source_witness_passed':
+                            state.update(best_witness=str(destination/'witness.npz'),
+                                best_lap_s=checked['trial_lap_s'])
+                            improved = True
                             save()
-                            event('solve', key=key, refinement=refinement,
-                                  target_lap_s=count*.025, output=str(destination))
-                            report = solve(repo=repo, checkpoint=None, mesh=None, audit=None,
-                                map_path=map_path, output=destination, count=count,
-                                iterations=iterations, cpu_seconds=1.e20, command_seed=start,
-                                workers=workers, clearance_cuts=sorted(cuts),
-                                shorten_packet=strategy == 'drop-packet' and source_count(start) == count+1,
-                                stagnation_iterations=stagnation_iterations,
-                                cancel_requested=cancel_requested)
-                            start = destination/'witness.npz'
-                        if report['status'] == 'source_witness_passed':
-                            destination = unused_directory(directory/'certified')
-                            checked = certify(repo, start, map_path, destination)
-                            if checked['status'] == 'source_witness_passed':
-                                state.update(best_witness=str(destination/'witness.npz'),
-                                    best_lap_s=checked['trial_lap_s'])
-                                improved = True
-                                event('faster_source_witness', lap_s=state['best_lap_s'],
-                                      witness=state['best_witness'], unity_validated=False)
-                            break
-                        discovered = {(int(c['interval']), int(c['tick'])) for c in
-                                      report['rollout']['violating_source_ticks']}
-                        if (report['max_constraint_violation'] <= 1.e-3 and
-                                report['rollout']['full_lap_xy_max_m'] <= .05 and
-                                refinement < refinements and discovered-cuts):
-                            cuts.update(discovered)
-                            refinement += 1
-                            report = None
-                            continue
-                        # A close dynamic residual can need repair even when
-                        # no wall cut is missing. Do not confuse "no new wall
-                        # cuts" with full feasibility or numerical stagnation.
-                        if (report.get('ipopt_status') in ('Maximum_Iterations_Exceeded', 'User_Requested_Stop')
-                                and report['max_constraint_violation'] < report.get('initial_residual', 0.)*.5
-                                and report['max_constraint_violation'] > 1.e-5):
-                            report = None
-                            event('continue_improving_primal', key=key)
-                            continue
+                            if on_improvement is not None:
+                                on_improvement(Path(state['best_witness']), state['best_lap_s'])
+                            event('faster_source_witness', lap_s=state['best_lap_s'],
+                                  witness=state['best_witness'], unity_validated=False)
                         break
-                    state['attempts'].append(dict(key=key, status=report['status'],
-                        report=str(start.with_name('report.json')),
-                        residual=report.get('max_constraint_violation'), certified=improved))
-                    state['active'] = None
-                    save()
-                    if improved: break
+                    discovered = {(int(c['interval']), int(c['tick'])) for c in
+                                  report['rollout']['violating_source_ticks']}
+                    if (report['max_constraint_violation'] <= 1.e-3 and
+                            report['rollout']['full_lap_xy_max_m'] <= .05 and
+                            refinement < refinements and discovered-cuts):
+                        cuts.update(discovered)
+                        refinement += 1
+                        report = None
+                        continue
+                    # A close dynamic residual can need repair even when
+                    # no wall cut is missing. Do not confuse "no new wall
+                    # cuts" with full feasibility or numerical stagnation.
+                    if (report.get('ipopt_status') in ('Maximum_Iterations_Exceeded', 'User_Requested_Stop')
+                            and report['max_constraint_violation'] < report.get('initial_residual', 0.)*.5
+                            and report['max_constraint_violation'] > 1.e-5):
+                        report = None
+                        event('continue_improving_primal', key=key)
+                        continue
+                    break
+                state['attempts'].append(dict(key=key, status=report['status'],
+                    report=str(start.with_name('report.json')),
+                    residual=report.get('max_constraint_violation'), certified=improved))
+                state['active'] = None
+                save()
                 if improved: break
             if not improved:
                 state.update(status='plateau', active=None)
@@ -245,7 +277,10 @@ def main():
     parser.add_argument('--seed', type=Path)
     parser.add_argument('--map', type=Path)
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--target-seconds', type=float, default=4.7)
+    parser.add_argument('--target-seconds', type=float, default=None,
+                        help='Optional stop target; default searches until configured starts plateau')
+    parser.add_argument('--coarse-fraction', type=float, default=.1,
+                        help='Try coarse duration reductions before single-packet refinement')
     parser.add_argument('--phases', type=int, default=8)
     parser.add_argument('--workers', type=int, default=os.cpu_count() or 1)
     parser.add_argument('--iterations', type=int, default=300)
@@ -273,6 +308,7 @@ def main():
             stagnation_iterations=args.stagnation_iterations, refinements=args.refinements,
             resume=args.resume or (args.resume_if_exists and (args.output/'campaign.json').exists()),
             include_packet_starts=not args.no_packet_starts,
+            coarse_fraction=args.coarse_fraction,
             cancel_requested=lambda: stop_requested[0])
     except KeyboardInterrupt:
         print('Interrupted; best witness and active primal retained. Use --resume.', flush=True)

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from command_campaign import phase_seed, run_campaign
+from command_campaign import phase_seed, run_campaign, trial_counts
 from command_ocp import load_command_seed, save_command_checkpoint
 
 
@@ -173,3 +173,36 @@ def test_incomplete_bootstrap_certification_is_recoverable(setup):
         solve=lambda **kw: solver_report(kw, passed=True))
     assert state['status'] == 'target_reached'
     assert (setup['output']/'baseline_001/report.json').exists()
+
+
+def test_coarse_to_fine_duration_trials_always_reach_packet_resolution():
+    assert trial_counts(100, .1, 30) == [90, 95, 98, 99]
+    assert trial_counts(40, .1, 39) == [39]
+    assert trial_counts(30, .1, 30) == []
+    with pytest.raises(ValueError):
+        trial_counts(40, float('inf'), 30)
+
+
+def test_open_search_has_no_track_specific_target_and_publishes_each_gain(setup):
+    settings = dict(setup, target_seconds=None, coarse_fraction=.1, phases=1)
+    calls, published = [], []
+    def solve(**kwargs):
+        calls.append(kwargs)
+        return solver_report(kwargs, passed=kwargs['count'] == 36, residual=.1)
+    state = run_campaign(**settings, solve=solve, certify=checked,
+        on_improvement=lambda path, lap: published.append(lap))
+    assert calls[0]['count'] == 36
+    assert state['status'] == 'plateau'
+    assert state['contract']['target_intervals'] is None
+    assert state['best_lap_s'] == pytest.approx(.9)
+    assert published == pytest.approx([1., .9])
+    assert calls[-1]['count'] == 35
+
+
+def test_resuming_rejects_changed_metric_metadata_even_with_identical_pixels(setup):
+    metadata = setup['map_path'].with_suffix('.yaml')
+    metadata.write_text('resolution: .05\n')
+    run_campaign(**setup, solve=lambda **kw: solver_report(kw, passed=True), certify=checked)
+    metadata.write_text('resolution: .025\n')
+    with pytest.raises(ValueError, match='map/settings changed'):
+        run_campaign(**setup, resume=True)
