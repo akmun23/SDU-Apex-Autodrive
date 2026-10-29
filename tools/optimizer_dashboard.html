@@ -513,7 +513,8 @@ function render(data){
  set('failedTimeStarts',Math.max(0,(ep.parent_attempts??0)+(ep.current_attempts??0)-(ep.current_attempts===ep.parent_attempts?(ep.parent_attempts??0):0)));
  set('eliteMargin',ep.best_clearance_mm==null?'—':num(ep.best_clearance_mm*1000,3)+' mm');
  const polishing=ep.polishing||{},polishingActive=ep.polishing_active||{};
- const mode=polishing.output?'Same-duration '+(polishingActive.strategy||'clearance/geometry')+' IPOPT · '+(ep.polishing_attempts||0)+' completed':
+ const mode=polishing.output?'Same-duration '+(polishingActive.strategy||'clearance/geometry')+
+   ' IPOPT · attempt '+((polishingActive.index??0)+1)+'/'+(ep.polishing_total||'—'):
     branch.output?'Alternate basin · '+(data.active?.time_predictor?'hybrid-time IPOPT':'25 ms IPOPT'):
     data.active?.time_predictor?'Main basin · hybrid-time IPOPT':
     data.active?.strategy==='drop-packet'?'Main basin · 25 ms packet removal':
@@ -530,7 +531,7 @@ function render(data){
  set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · verified direction`);
  set('trialLap',trial==null?'—':`${num(trial)} s`);const gain=best.lap_s!=null&&trial!=null?best.lap_s-trial:null;
  set('trialSub',data.active?.time_predictor?'Time predictor · requires exact command repair':gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
- set('iteration',data.iteration??'—');set('iterationSub',`of ${data.solver?.max_iterations??c.iterations??'—'} per solve · not total progress`);
+ set('iteration',data.iteration??'—');set('iterationSub',`of ${data.solver?.max_iterations??c.iterations??'—'} per solve · ${c.stagnation_iterations??'—'} stagnation patience · resets for each new candidate`);
  set('bestResidual',sci(cp?.residual));set('residualSub',cp?`Saved at iteration ${cp.iteration}`:'No checkpoint in current solve yet');
  set('currentResidual',sci(current));set('initialResidual',sci(initial));
  const raw=data.ipopt||{};set('rawResidual',sci(raw.primal_infeasibility));set('rawIteration',raw.iteration??'—');
