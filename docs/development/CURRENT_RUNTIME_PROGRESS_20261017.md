@@ -1,5 +1,14 @@
 # Current runtime and rewrite status — 2026-10-17
 
+> **Latest runtime result — 2026-10-29:** corrected LiDAR acquisition-time
+> association and independent motion-regime AMCL gains completed ten scored
+> laps in **49.588 / 49.467 / 49.614 s**, warmup excluded, without collision or
+> controller fault. Forward pose RMS 3.19/3.04/2.92 cm, near-zero bias; two
+> isolated deferred cycles peaked at 20.71/21.43 ms. AMCL settings promoted and
+> verified WITHOUT an experimental AMCL overlay in the third trial. See
+> [RACING_TRACKING_VARIANCE_20261029.md](RACING_TRACKING_VARIANCE_20261029.md).
+> Older entries below are historical, not instructions to restore stale settings.
+
 > **Current production cleanup / faster practice default — 2026-10-28:**
 > See [RUNTIME_CLEANUP_AND_RACING_20261028.md](RUNTIME_CLEANUP_AND_RACING_20261028.md)
 > before resuming work. It records the active source/scan chronology, ordered

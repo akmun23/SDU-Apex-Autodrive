@@ -9,6 +9,7 @@ to a vehicle force or claiming controller-state estimates are ground truth.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import hashlib
 import json
@@ -16,6 +17,76 @@ import math
 from pathlib import Path
 
 import numpy as np
+
+
+def truth_path_rows(truth, map_poses, lap_counter, reference):
+    """Project actual GPS rear-axle poses, not controller-predicted positions.
+
+    Lap counters are headerless: associate by bag receipt, recording that
+    limitation. Map-pose errors use EXACT integer header stamps, never a
+    time-shift chosen to reduce the error. No future truth enters runtime.
+    """
+    counter = sorted(lap_counter, key=lambda r: r['bag_time'])
+    counter_times = [r['bag_time'] for r in counter]
+    poses = {r['stamp_ns']: r for r in map_poses}
+    xy = reference[:, 1:3]
+    delta = np.roll(xy, -1, axis=0)-xy
+    square = np.sum(delta*delta, axis=1)
+    if np.any(square <= 0): raise ValueError('degenerate reference segment')
+    length = float(reference[-1, 0]+np.sqrt(square[-1]))
+    steps = np.diff(np.r_[reference[:, 0], length])
+    rows = []
+    for gt in truth:
+        position = np.array([gt['x'], gt['y']])
+        fraction = np.clip(np.sum((position-xy)*delta, axis=1)/square, 0., 1.)
+        projected = xy+fraction[:, None]*delta
+        distances = np.sum((position-projected)**2, axis=1)
+        index = int(np.argmin(distances))
+        heading0 = reference[index, 3]
+        heading_delta = math.atan2(math.sin(reference[(index+1)%len(xy),3]-heading0),
+                                   math.cos(reference[(index+1)%len(xy),3]-heading0))
+        heading = heading0+fraction[index]*heading_delta
+        offset = position-projected[index]
+        counter_index = bisect.bisect_right(counter_times, gt['bag_time'])-1
+        lap = int(counter[counter_index]['value']) if counter_index >= 0 else -1
+        row = dict(stamp_ns=int(gt['stamp_ns']), bag_time=gt['bag_time'], lap=lap,
+            s_m=float((reference[index,0]+fraction[index]*steps[index])%length),
+            e_y_m=float(-math.sin(heading)*offset[0]+math.cos(heading)*offset[1]),
+            e_psi_rad=math.atan2(math.sin(gt['yaw']-heading),math.cos(gt['yaw']-heading)),
+            x_m=gt['x'],y_m=gt['y'],u_mps=gt['u'],r_radps=gt['r'])
+        estimate = poses.get(gt['stamp_ns'])
+        if estimate is not None:
+            dx,dy=estimate['x']-gt['x'],estimate['y']-gt['y']
+            c,s=math.cos(gt['yaw']),math.sin(gt['yaw'])
+            row.update(map_forward_error_m=c*dx+s*dy,map_lateral_error_m=-s*dx+c*dy)
+        rows.append(row)
+    return rows,length
+
+
+def summarize_truth_path(rows, length, laps):
+    def metrics(selected):
+        if not selected:
+            raise ValueError('no truth samples in the requested complete laps')
+        a=np.array([r['e_y_m'] for r in selected])
+        result=dict(samples=len(selected),cross_track_rmse_m=float(np.sqrt(np.mean(a*a))),
+            cross_track_p95_m=float(np.percentile(abs(a),95)),cross_track_max_m=float(max(abs(a))))
+        for name in ('map_forward_error_m','map_lateral_error_m'):
+            values=np.array([r[name] for r in selected if name in r])
+            if len(values): result[name]=dict(bias=float(np.mean(values)),rmse=float(np.sqrt(np.mean(values*values))))
+        return result
+    scored=[r for r in rows if 1<=r['lap']<=laps]
+    per_lap=[]
+    for lap in range(1,laps+1):
+        selected=[r for r in scored if r['lap']==lap]
+        if len(selected)<2: continue
+        result=dict(lap=lap,**metrics(selected))
+        result['source_stamp_sample_span_s']=(selected[-1]['stamp_ns']-selected[0]['stamp_ns'])*1.e-9
+        result['sectors']=[dict(start_m=i,**metrics(part)) for i in range(math.ceil(length))
+            if (part:=[r for r in selected if i<=r['s_m']<i+1])]
+        per_lap.append(result)
+    return dict(state_source='Unity GPS/body truth; exact-stamp map-pose join',
+        lap_association='headerless counter by bag receipt; sample span is NOT exact Unity lap time',
+        whole_run=metrics(scored),per_lap=per_lap)
 
 
 def time_densities(u, v, epsi, ey, curvature, reference_u):
@@ -111,6 +182,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--laps', type=int, default=10)
     parser.add_argument('--bin-width', type=float, default=1.)
+    parser.add_argument('--truth-path', action='store_true',
+                        help='Also measure actual truth/path tracking and exact-epoch localization per lap')
     args = parser.parse_args()
     if args.laps < 1 or args.bin_width <= 0. or not math.isfinite(args.bin_width):
         parser.error('positive lap count and bin width required')
@@ -184,6 +257,10 @@ def main():
                     'Controller states contain observer/localization and timing error.',
                     'Midpoint quadrature, receipt epoch phase and Unity clock differences are explicit.',
                     'A source-feasible reference is not a Unity tracking certificate.'])
+    if args.truth_path:
+        rows,truth_length=truth_path_rows(bag[evaluator.GT],bag.get(evaluator.CURRENT_MAP_POSE,[]),
+                                          bag[evaluator.LAP],reference)
+        result['truth_path']=summarize_truth_path(rows,truth_length,args.laps)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')
     print(json.dumps({k:result[k] for k in ('achieved_mean_lap_s',

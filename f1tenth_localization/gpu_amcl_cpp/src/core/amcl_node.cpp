@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <sensor_msgs/msg/point_field.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -121,6 +122,7 @@ void AmclNode::declare_all_parameters() {
 
     // Topics
     declare_parameter<std::string>("scan_topic", "/autodrive/roboracer_1/lidar");
+    declare_parameter<double>("scan_acquisition_delay_s", 0.0);
     declare_parameter<std::string>("odom_topic", "/odom");
 
     // Update thresholds
@@ -300,6 +302,15 @@ void AmclNode::load_parameters() {
     slip_noise_multiplier_  = get_parameter("slip_noise_multiplier").as_double();
     odom_history_duration_s_ = std::max(
         0.0, get_parameter("odom_history_duration_s").as_double());
+    // Stock telemetry contains held LiDAR ranges, stamped by the bridge on
+    // packet receipt rather than acquisition. This is a sensor-age calibration,
+    // NOT a vehicle-physics parameter or a forward pose offset.
+    const double scan_delay = get_parameter("scan_acquisition_delay_s").as_double();
+    if (!std::isfinite(scan_delay) || scan_delay < 0.0 ||
+        scan_delay > odom_history_duration_s_) {
+        throw std::invalid_argument("scan_acquisition_delay_s must fit odom history");
+    }
+    scan_acquisition_delay_ns_ = std::llround(scan_delay * 1.e9);
     odom_reset_distance_m_ = std::max(
         0.0, get_parameter("odom_reset_distance_m").as_double());
     odom_reset_yaw_rad_ = std::max(
@@ -623,7 +634,9 @@ void AmclNode::publish_scan_alignment_diagnostic(
     }
     // [scan source stamp, matched odom stamp, source-time error ms, accepted,
     //  queued scans, dropped scans, bracket-before stamp, bracket-after stamp,
-    //  processing drops, sampled valid/total beams].
+    //  processing drops, sampled valid/total beams, original packet stamp,
+    //  configured acquisition delay seconds]. Corrected acquisition epoch is
+    //  in slot 0, keeping odometry bracket diagnostics meaningful.
     std_msgs::msg::Float64MultiArray msg;
     msg.data = {
         scan_stamp.seconds(),
@@ -640,6 +653,9 @@ void AmclNode::publish_scan_alignment_diagnostic(
         static_cast<double>(scan_processing_drop_count_.load()),
         static_cast<double>(sampled_valid_beams),
         static_cast<double>(sampled_beams),
+        rclcpp::Time(scan_stamp.nanoseconds() + scan_acquisition_delay_ns_,
+                     scan_stamp.get_clock_type()).seconds(),
+        static_cast<double>(scan_acquisition_delay_ns_) * 1.e-9,
     };
     scan_alignment_pub_->publish(msg);
 }
@@ -1290,7 +1306,15 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     // Keep measured scan age for diagnostics only. Timing age never discards
     // a structurally valid scan.
     const auto clock_type = get_clock()->get_clock_type();
-    const rclcpp::Time scan_time(msg->header.stamp, clock_type);
+    const rclcpp::Time packet_time(msg->header.stamp, clock_type);
+    std::int64_t acquisition_ns = 0;
+    if (!scan_validity::acquisition_stamp_ns(
+            packet_time.nanoseconds(), scan_acquisition_delay_ns_, acquisition_ns)) {
+        ++pending_scan_drop_count_;
+        processing_scan_ = false;
+        return;
+    }
+    const rclcpp::Time scan_time(acquisition_ns, clock_type);
     auto age = (now() - scan_time).seconds();
 
     std::lock_guard<std::mutex> lock(pf_mutex_);
@@ -1447,7 +1471,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         // window.  Republish the last accepted estimate without running a new
         // particle update or inventing motion.
         if (global_pose_published_ && have_last_published_pose_) {
-            publish_pose(last_published_pose_, msg->header.stamp);
+            publish_pose(last_published_pose_, scan_time);
         }
         processing_scan_ = false;
         return;
@@ -1809,23 +1833,17 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                         correction_x * normal_x + correction_y * normal_y;
                     const double along_error =
                         correction_x * tangent_x + correction_y * tangent_y;
-                    double along_gain = local_scan_correction_cross_track_only_ ?
-                        0.0 : local_scan_correction_along_track_gain_;
-                    // The local cluster is already associated with the causal
-                    // odometry prediction and has passed the scan quality
-                    // gate. At high speed, a tangent innovation is the
-                    // measured odometry phase drift; at the slow upper
-                    // hairpin, the same component can be a corridor alias.
-                    // Use source-time motion, not a raceline index, to select
-                    // the observability regime.
+                    // Select by source-time motion, not raceline location.
+                    // The independently configured fast gain may be smaller:
+                    // a valid cluster is not proof of tangent observability.
                     const double scan_speed_mps = dt > 0.001 && dt < 1.0 ?
                         dist_moved / dt : 0.0;
-                    if (!local_scan_correction_cross_track_only_ &&
-                        local_scan_correction_fast_speed_threshold_mps_ > 0.0 &&
-                        scan_speed_mps >= local_scan_correction_fast_speed_threshold_mps_) {
-                        along_gain = std::max(
-                            along_gain, local_scan_correction_fast_along_track_gain_);
-                    }
+                    const double along_gain =
+                        scan_validity::along_track_correction_gain(
+                            local_scan_correction_cross_track_only_, scan_speed_mps,
+                            local_scan_correction_fast_speed_threshold_mps_,
+                            local_scan_correction_along_track_gain_,
+                            local_scan_correction_fast_along_track_gain_);
                     correction_x = normal_x * normal_error +
                         tangent_x * along_gain * along_error;
                     correction_y = normal_y * normal_error +
@@ -2267,7 +2285,7 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
                 local_tracking_cloud_covariance_xy_,
                 local_tracking_cloud_covariance_yaw_);
         }
-        publish_pose(est, msg->header.stamp);
+        publish_pose(est, scan_time);
         pose_published = true;
         const auto t_pose_published = std::chrono::high_resolution_clock::now();
         callback_to_pose_publish_ms =

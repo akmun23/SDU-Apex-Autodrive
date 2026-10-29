@@ -1,7 +1,8 @@
 import math
 import unittest
 import numpy as np
-from tools.analyze_racing_time_loss import account, clipped_samples, time_densities
+from tools.analyze_racing_time_loss import (account, clipped_samples, time_densities,
+                                          truth_path_rows, summarize_truth_path)
 
 
 class RacingTimeLossTests(unittest.TestCase):
@@ -42,6 +43,25 @@ class RacingTimeLossTests(unittest.TestCase):
                        (5., 0., math.pi, 0., 0., 5.),
                        (5., 0., 0., 2., 1., 5.)]:
             with self.assertRaises(ValueError): time_densities(*values)
+
+    def test_truth_projection_uses_exact_epoch_not_nearby_pose(self):
+        ref = np.array([[0., 0., 0., 0.], [2., 2., 0., math.pi/2],
+                        [4., 2., 2., math.pi], [6., 0., 2., -math.pi/2]])
+        gt = dict(stamp_ns=100, bag_time=1., x=1., y=.1, yaw=0., u=4., r=0.)
+        poses = [dict(stamp_ns=99, x=100., y=100.),
+                 dict(stamp_ns=100, x=.95, y=.12)]
+        rows, length = truth_path_rows([gt], poses, [dict(bag_time=0., value=1)], ref)
+        self.assertEqual(length, 8.)
+        self.assertAlmostEqual(rows[0]['s_m'], 1.)
+        self.assertAlmostEqual(rows[0]['map_forward_error_m'], -.05)
+        self.assertAlmostEqual(rows[0]['map_lateral_error_m'], .02)
+        report = summarize_truth_path(rows, length, 1)
+        self.assertEqual(report['whole_run']['samples'], 1)
+        rows, _ = truth_path_rows([gt], poses[:1], [], ref)
+        self.assertNotIn('map_forward_error_m', rows[0])
+        self.assertEqual(rows[0]['lap'], -1)
+        with self.assertRaisesRegex(ValueError, 'no truth samples'):
+            summarize_truth_path(rows, length, 1)
 
 
 if __name__ == '__main__': unittest.main()

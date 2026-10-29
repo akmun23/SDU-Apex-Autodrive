@@ -74,6 +74,8 @@ def _setup(context):
         raise RuntimeError("the selected map/raceline pair is incomplete")
 
     overlays = {
+        "amcl_parameter_overlay": LaunchConfiguration(
+            "amcl_parameter_overlay").perform(context).strip(),
         "mpc_parameter_overlay": LaunchConfiguration(
             "mpc_parameter_overlay").perform(context).strip(),
         "odom_parameter_overlay": LaunchConfiguration(
@@ -138,6 +140,8 @@ def _setup(context):
         name="gpu_amcl_cpp", output="screen",
         parameters=[
             os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
+            *([overlays["amcl_parameter_overlay"]]
+              if overlays["amcl_parameter_overlay"] else []),
             {
                 "global_heading_trajectory_file": trajectory,
                 "odom_topic": "/ekf_odom",
@@ -237,5 +241,6 @@ def generate_launch_description():
         DeclareLaunchArgument("mpc_parameter_overlay", default_value=""),
         DeclareLaunchArgument("actuator_parameter_overlay", default_value=""),
         DeclareLaunchArgument("odom_parameter_overlay", default_value=""),
+        DeclareLaunchArgument("amcl_parameter_overlay", default_value=""),
         OpaqueFunction(function=_setup),
     ])

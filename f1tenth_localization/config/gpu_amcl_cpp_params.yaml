@@ -4,6 +4,13 @@ gpu_amcl_cpp:
     odom_frame_id: odom
     global_frame_id: map
     scan_topic: /autodrive/roboracer_1/lidar
+    # Stock practice player holds periodic range snapshots but the 40 Hz bridge
+    # stamps packet receipt. Two independent scan/map timing checks support
+    # 17.5 ms effective age; two new full-speed ten-lap trials removed the
+    # ~5.5 cm backward bias and ran 49.588/49.467 s. This is sensor-age
+    # calibration, NOT an extra forward pose offset or a PhysX parameter.
+    # Revalidate when player/sensor cadence/bridge timing changes.
+    scan_acquisition_delay_s: 0.0175
     # AMCL consumes the timestamped trust-filter output. The raw /odom topic
     # remains available for diagnostics and offline odometry scoring.
     odom_topic: /ekf_odom
@@ -160,15 +167,14 @@ gpu_amcl_cpp:
     # pose-jump gates. Cross-track correction remains fully scan-supported.
     local_scan_correction_xy_gain: 1.0
     local_scan_correction_cross_track_only: false
-    # 2026-10-27 ten-lap trial: gain 0.03 reduced current-map-pose XY RMSE
-    # to 0.064 m (gain 0.10 repeat: 0.080 m). Zero gain failed after six laps.
-    # Retain a nonzero tangent correction to bound odometry phase drift;
-    # accepted innovations remain bounded by the existing association gates.
-    local_scan_correction_along_track_gain: 0.03
-    # Use the same conservative tangent correction at high speed, with existing
-    # cluster-quality, association, and raceline checks retained.
+    # 2026-10-29 whole-run diagnosis: slow-motion scan tangent innovations help
+    # remove accumulated phase drift; fast-motion innovations are less reliable.
+    # With corrected acquisition epochs these independent gains reduced forward
+    # pose RMS from 7.09 cm to 3.04–3.19 cm in new ten-lap runs. Keep every
+    # existing cluster-quality, association, raceline and pose-jump check.
+    local_scan_correction_along_track_gain: 0.15
     local_scan_correction_fast_speed_threshold_mps: 3.0
-    local_scan_correction_fast_along_track_gain: 0.03
+    local_scan_correction_fast_along_track_gain: 0.01
     # Heading was already source-time stable in the crash run. Keep its map
     # correction conservative until a heading-observability campaign justifies
     # a larger value.

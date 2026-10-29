@@ -165,17 +165,22 @@ def validate_mpc_overlay(path: Path) -> None:
     /mpc_controller_node. A typo in a YAML selector is otherwise accepted by
     ROS while applying none of the intended experiment parameters.
     """
+    validate_node_overlay(path, "mpc_controller_node")
+
+
+def validate_node_overlay(path: Path, node_name: str) -> None:
+    """Fail before launching if ROS would silently ignore an overlay."""
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    selectors = {"/**", "mpc_controller_node", "/mpc_controller_node"}
+    selectors = {"/**", node_name, f"/{node_name}"}
     if not isinstance(document, dict) or not document:
-        raise ValueError(f"MPC overlay must contain ROS parameters: {path}")
+        raise ValueError(f"{node_name} overlay must contain ROS parameters: {path}")
     for selector, entry in document.items():
         if selector not in selectors:
-            raise ValueError(f"MPC overlay selector {selector!r} does not target "
-                             f"/mpc_controller_node: {path}")
+            raise ValueError(f"overlay selector {selector!r} does not target "
+                             f"/{node_name}: {path}")
         parameters = entry.get("ros__parameters") if isinstance(entry, dict) else None
         if not isinstance(parameters, dict) or not parameters:
-            raise ValueError(f"MPC overlay has no parameters for {selector}: {path}")
+            raise ValueError(f"overlay has no parameters for {selector}: {path}")
 
 
 def map_record(root: Path, raw_path: str) -> dict:
@@ -224,6 +229,8 @@ def build_manifest(args: argparse.Namespace, root: Path) -> dict:
         record = {"name": name, **file_record(root, value)}
         if name == "overlay":
             validate_mpc_overlay(Path(record["path"]))
+        elif name == "amcl_overlay":
+            validate_node_overlay(Path(record["path"]), "gpu_amcl_cpp")
         config_records.append(record)
     if not config_records:
         raise ValueError("provide at least one loaded YAML/config with --config")

@@ -38,4 +38,32 @@ TEST(ScanValidity, CountsOnlyActualUsableRangeEvidence)
   EXPECT_EQ(counts.sampled, 4u);
   EXPECT_EQ(counts.valid, 2u);
 }
+
+TEST(ScanValidity, FastTangentCorrectionCanBeLessThanSlowCorrection)
+{
+  using gpu_amcl_cpp::scan_validity::along_track_correction_gain;
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(false, 2.9, 3., .15, .01), .15);
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(false, 3., 3., .15, .01), .01);
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(false, 7., 3., .15, .01), .01);
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(false, 7., 0., .15, .01), .15);
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(true, 1., 3., .15, .01), 0.);
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(true, 7., 3., .15, .01), 0.);
+  EXPECT_DOUBLE_EQ(along_track_correction_gain(false, 7., 3., .03, .03), .03);
+}
+
+TEST(ScanValidity, AcquisitionEpochPreservesNanosecondsAndRetryInput)
+{
+  using gpu_amcl_cpp::scan_validity::acquisition_stamp_ns;
+  std::int64_t corrected = 0;
+  constexpr std::int64_t packet = 1793256688296807675LL;
+  ASSERT_TRUE(acquisition_stamp_ns(packet, 17500000, corrected));
+  EXPECT_EQ(corrected, packet - 17500000);
+  // Deferred callback retries use the original header and remain idempotent.
+  ASSERT_TRUE(acquisition_stamp_ns(packet, 17500000, corrected));
+  EXPECT_EQ(corrected, packet - 17500000);
+  ASSERT_TRUE(acquisition_stamp_ns(packet, 0, corrected));
+  EXPECT_EQ(corrected, packet);
+  EXPECT_FALSE(acquisition_stamp_ns(100, 101, corrected));
+  EXPECT_FALSE(acquisition_stamp_ns(packet, -1, corrected));
+}
 }  // namespace

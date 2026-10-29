@@ -12,11 +12,20 @@ from tools.seal_mpc_run_manifest import (
     map_record,
     parse_pose,
     validate_mpc_overlay,
+    validate_node_overlay,
     workspace_manifest,
 )
 
 
 class RunManifestTest(unittest.TestCase):
+    def test_amcl_overlay_targets_actual_runtime_node(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "amcl.yaml"
+            path.write_text('gpu_amcl_cpp:\n  ros__parameters:\n    scan_acquisition_delay_s: 0.0175\n')
+            validate_node_overlay(path, 'gpu_amcl_cpp')
+            with self.assertRaisesRegex(ValueError, 'does not target'):
+                validate_node_overlay(path, 'mpc_controller_node')
+
     def test_mpc_overlay_requires_actual_runtime_node_selector(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "overlay.yaml"

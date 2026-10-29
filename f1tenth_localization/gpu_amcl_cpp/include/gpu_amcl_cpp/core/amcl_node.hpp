@@ -17,6 +17,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <Eigen/Core>
@@ -254,6 +255,7 @@ private:
 
     std::deque<OdomSample> odom_history_;
     double odom_history_duration_s_ = 0.2;
+    std::int64_t scan_acquisition_delay_ns_ = 0;
     double odom_reset_distance_m_ = 2.0;
     double odom_reset_yaw_rad_ = 1.5;
     // During startup/first lap AMCL may apply a larger scan-supported

@@ -1,6 +1,12 @@
 # Racing checkpoint and autonomous construction — 2026-10-29
 
-## Current measured result
+> Superseded runtime result: acquisition-time / AMCL corrections completed
+> **49.588 / 49.467 / 49.614 s** for ten scored laps, same 4.800 s path and MPC profile.
+> See [RACING_TRACKING_VARIANCE_20261029.md](RACING_TRACKING_VARIANCE_20261029.md).
+> The campaign below exhausted its 16 starts at `plateau`, retaining 4.800 s;
+> it is NOT currently running. The rest of this file preserves the checkpoint.
+
+## Earlier measured checkpoint
 
 Warmup excluded in every row; real practice Unity simulator, production MPC,
 permitted-sensor odometry and AMCL. No truth fed into autonomy.
@@ -77,7 +83,7 @@ Verification: MPC CTest **13/13**, tool tests **147/147**, focused command
 OCP/campaign/realizability tests **25/25**. No claim that all historical optional
 optimizer tests pass; their previously documented failures remain separate.
 
-## Automated construction: what is running
+## Automated construction: completed plateau
 
 Service: `sdu-apex-raceline-campaign.service`.
 Campaign: `live_runs/raceline_campaign_20261029/`.

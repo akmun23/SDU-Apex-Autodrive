@@ -3,12 +3,14 @@
 ## Current objective
 
 Latest checkpoint (2026-10-29): **4.800 s** source-feasible witness, real MPC
-ten-scored-lap results **50.293 s / 50.287 s**, no collisions. The autonomous
-campaign is searching for a shorter source-feasible lap. Full current status,
-reproduction and unattended operation:
+ten-scored-lap results **49.588 / 49.467 / 49.614 s**, no collisions, after fixing
+scan-time localization association. Current results:
+[`RACING_TRACKING_VARIANCE_20261029.md`](RACING_TRACKING_VARIANCE_20261029.md).
+The autonomous campaign finished its 16 configured starts at `plateau`,
+retaining 4.800 s. Construction/reproduction:
 [`RACING_50P287_AND_AUTOMATION_20261029.md`](RACING_50P287_AND_AUTOMATION_20261029.md).
 The sections below are the chronological investigation, not current service
-status. Sub-50 s driving is still unachieved.
+status. Sub-50 s driving is now achieved; a repeatable sub-4.9 s mean is not.
 
 Keep the 51.030 s ten-scored-lap MPC setup frozen while finding a substantially
 better, source-feasible and command-realizable raceline. More iterations alone

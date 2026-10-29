@@ -32,6 +32,12 @@ set -- "$@" --config amcl=f1tenth_localization/config/gpu_amcl_cpp_params.yaml
 cp -- f1tenth_mpc/config/mpc_competition.yaml "$run_dir/mpc_parameters.yaml"
 cp -- f1tenth_localization/config/gpu_amcl_cpp_params.yaml "$run_dir/amcl_parameters.yaml"
 [[ -z "$overlay" ]] || cp -- "$overlay" "$run_dir/mpc_overlay.yaml"
+amcl_overlay="${SDU_APEX_AMCL_PARAMETER_OVERLAY:-}"
+if [[ -n "$amcl_overlay" ]]; then
+  [[ -f "$amcl_overlay" ]] || { echo 'Missing AMCL overlay' >&2; exit 2; }
+  cp -- "$amcl_overlay" "$run_dir/amcl_overlay.yaml"
+  set -- "$@" --config "amcl_overlay=$amcl_overlay"
+fi
 python3 tools/seal_mpc_run_manifest.py --run-id "$run_id" \
   --output "$run_dir/run_manifest.json" --acknowledge-not-started \
   --track practice --unity-mode batchmode \
