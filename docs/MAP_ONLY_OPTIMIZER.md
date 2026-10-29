@@ -36,6 +36,52 @@ the output directory and a `tail -F` command for the complete IPOPT log.
 `--bootstrap-only` stops after the first independently certified periodic lap.
 Use `--output DIR` to select a durable workspace.
 
+### Live graphical dashboard
+
+```bash
+# Auto-select the workspace when exactly one map-only optimizer workspace exists.
+tools/watch_raceline_gui.sh
+
+# Or select one explicitly (needed when several tracks have been optimized).
+tools/watch_raceline_gui.sh live_runs/optimizer_autodrive_iros_2026_compete_dc3c93097d
+```
+
+This opens **http://127.0.0.1:8765/** in your browser. It refreshes every two
+seconds and runs as a separate, low-priority local observer service. Closing
+the browser or its terminal does not stop IPOPT. Relaunching the same viewer
+reuses the existing service. Use `--no-open` to print the address without
+opening a browser, `--port 8766` for another workspace, or `--serve` to keep
+the viewer in the current terminal. The launcher prints the exact command
+to stop **only the viewer service**.
+
+The dashboard shows:
+
+- Best independently source-validated lap versus the current unvalidated trial.
+- Live IPOPT iteration and per-solve budget, not a made-up overall completion percentage.
+- Actual constraint residuals, sampled by the existing solver callback every
+  five iterations, with best-observed and saved-checkpoint values distinguished.
+- Historical validated lap-time improvements, the occupancy map, extracted
+  centerline, and latest saved raceline in the map's metric frame.
+- Geometry basin, cyclic phase, clearance refinement, checkpoint age,
+  worker count, process memory, recent attempts and raw solver output.
+- Downloads of the current validated reference, command-enriched CSV and report.
+
+The displayed `1e-4` line is only the solver's candidate feasibility gate.
+Independent certification also requires local/periodic defects at most
+`1e-5`, whole-lap recursive XY error at most 5 cm and nonnegative 1 ms
+footprint slack. Residuals are scaled constraint violations, **not metres**.
+Raw IPOPT `inf_pr` may use internal scaling and is deliberately not mixed
+into the actual-residual plot. Neither set of model checks certifies Unity
+driving or MPC performance.
+
+The viewer does not import optimizer modules, compile physics, change settings,
+write into the workspace, or start/stop a solver. It binds only to localhost,
+has no control/write endpoints and serves no arbitrary filesystem paths.
+An inactive process or stale log is labeled explicitly; no reliable overall
+ETA or global-minimum claim is shown. The dashboard is outside the optimizer's
+implementation-hash contract, so installing it does not invalidate a running
+campaign or require restarting one.
+
 There is deliberately **no 6 s, 7 s, practice-time or other target** in this
 entrypoint. Nor is there a ten-minute campaign timeout. Per-solve iteration
 chunks and stagnation checks decide when to continue an improving primal or
@@ -151,6 +197,14 @@ the workspace; do not move it during a campaign.
 
 Implemented:
 
+- Added the read-only browser dashboard (`tools/optimizer_dashboard.py` and
+  `.html`, launched by `tools/watch_raceline_gui.sh`). Eleven observer tests
+  cover real NPZ metadata decoding, scaled-vs-actual residual separation,
+  new-solve/reset handling, map frame preservation, workspace read-only
+  behavior, PID identity checks and local HTTP/path confinement. Desktop
+  rendering was checked with headless Chrome while the original optimizer
+  process continued unchanged. Its latest state is always read live rather
+  than hardcoded in the viewer.
 - Replaced the practice-only launcher with PGM/YAML input resolution.
 - Added map-only centerline, geometry-start and command-guess bootstrap.
 - Reused/extended the periodic source-command campaign for coarse-to-fine,

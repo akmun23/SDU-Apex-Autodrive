@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APEX · Raceline optimizer</title>
+<style>
+:root{color-scheme:dark;--bg:#10141c;--panel:#181f2b;--panel2:#1d2634;--stroke:#2c3748;--muted:#a4b2c7;--text:#edf3fc;--green:#54e3b5;--blue:#73afff;--amber:#f5bd67;--red:#ff8194}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,sans-serif}button,a{font:inherit}a{color:var(--blue)}main{max-width:1510px;margin:auto;padding:30px 34px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:22px}h1{font-size:27px;letter-spacing:-.9px;margin:0}h2{font-size:16px;margin:0 0 4px}p{margin:0}.eyebrow{text-transform:uppercase;letter-spacing:2px;font-size:10px;color:var(--green);font-weight:750;margin-bottom:4px}.muted,.description{color:var(--muted)}.description{font-size:12px}.status{display:inline-flex;gap:8px;align-items:center;padding:7px 13px;border:1px solid var(--stroke);border-radius:30px;background:var(--panel);font-size:12px}.dot{background:var(--green);width:7px;height:7px;border-radius:50%;box-shadow:0 0 12px #54e3b544}.status[data-kind="quiet"] .dot{background:var(--amber)}.status[data-kind="error"] .dot{background:var(--red)}.header-right{text-align:right}.connection{font-size:11px;color:var(--muted);margin-top:6px}.notice{background:#202b2c;border:1px solid #35504b;border-radius:10px;padding:11px 16px;color:#b7d9d1;font-size:12px;margin-bottom:18px}.error{background:#402331;border-color:#774050;color:#ffd1d8}.hidden{display:none!important}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}.card,.panel{border:1px solid var(--stroke);border-radius:13px;background:var(--panel)}.card{padding:18px 20px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px}.value{font-size:34px;line-height:1.3;font-weight:650;letter-spacing:-1.1px;font-variant-numeric:tabular-nums;margin:6px 0 3px}.value small{font-size:15px;color:var(--muted);font-weight:400;letter-spacing:0}.green{color:var(--green)}.blue{color:var(--blue)}.amber{color:var(--amber)}.sub{color:var(--muted);font-size:12px;min-height:18px}.layout{display:grid;grid-template-columns:minmax(290px,.85fr) minmax(450px,1.65fr);gap:18px}.panel{padding:20px}.track-panel{grid-row:span 2;display:flex;flex-direction:column;min-height:710px}.panel-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.tag{font-size:10px;padding:3px 8px;border:1px solid var(--stroke);border-radius:5px;color:var(--muted);white-space:nowrap}.canvas-box{position:relative;min-height:190px;height:210px;margin-top:12px}.canvas-box canvas{width:100%;height:100%;display:block}.track-canvas{flex:1;min-height:470px;position:relative;margin-top:14px}.track-canvas canvas{width:100%;height:100%;display:block;position:absolute;inset:0}.legend{display:flex;gap:18px;font-size:11px;color:var(--muted);flex-wrap:wrap;margin-top:12px;align-items:center}.legend span{display:inline-flex;align-items:center;gap:6px}.line{width:19px;height:2px;background:var(--green)}.line.gray{background:#aeb9c9}.line.blue{background:var(--blue)}.line.amber{background:var(--amber)}.graph-label{font-size:11px;color:var(--muted);margin-top:5px}.progress-track{height:5px;background:#2d3747;border-radius:3px;margin:15px 0 7px;overflow:hidden}.progress-fill{height:100%;width:0;background:var(--blue);transition:width .5s}.stage-panel{margin-top:18px}.stages{display:flex;align-items:stretch;margin-top:16px;gap:6px}.stage{flex:1;padding:9px 12px;background:#141b26;border-radius:7px;color:#7e8ca3;font-size:12px;border:1px solid transparent}.stage.active{color:var(--green);background:#20352f;border-color:#34554b}.stage.done{color:#beccdc}.stage b{display:block;font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:3px}.details{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:17px}.detail{min-width:0}.detail strong{display:block;margin-top:4px;font-size:13px;font-weight:500;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.detail .label{font-size:10px}.bottom{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.attempts{margin-top:12px;width:100%;border-collapse:collapse;font-size:12px}.attempts th{text-align:left;font-weight:500;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}.attempts td,.attempts th{padding:9px 5px;border-bottom:1px solid #283243}.attempts td:last-child,.attempts th:last-child{text-align:right}.attempts tr:last-child td{border:0}.attempts td:first-child{overflow-wrap:anywhere;max-width:260px}.feed{list-style:none;padding:0;margin:10px 0 0;max-height:260px;overflow:auto}.feed li{padding:9px 0;border-bottom:1px solid #283243;font-size:12px}.feed li:last-child{border:0}.feed small{color:var(--muted);display:block;margin-top:2px}.downloads{display:flex;gap:8px;flex-wrap:wrap;margin-top:17px}.button{display:inline-flex;align-items:center;gap:6px;text-decoration:none;border:1px solid var(--stroke);border-radius:6px;padding:6px 10px;background:var(--panel2);font-size:11px;color:var(--text);cursor:pointer}.button:hover{border-color:var(--blue)}.button[disabled]{opacity:.45;cursor:default}.controls{display:flex;gap:7px;align-items:center}.controls button{font-size:11px}details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:12px}pre{background:#0c1119;border:1px solid var(--stroke);border-radius:9px;padding:15px;max-height:340px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#b7c6db;font:11px/1.65 ui-monospace,monospace}footer{display:flex;justify-content:space-between;gap:16px;margin-top:20px;font-size:10px;color:#8f9db2}#workspace{overflow-wrap:anywhere}.metrics-row{display:flex;gap:24px;font-size:11px;color:var(--muted);margin-top:12px}.metrics-row strong{color:var(--text);font-weight:500}.empty{padding:24px 8px;text-align:center;color:var(--muted);font-size:12px}.nowrap{white-space:nowrap}@media(max-width:1000px){main{padding:22px 18px}.cards{grid-template-columns:1fr 1fr}.layout{grid-template-columns:1fr}.track-panel{grid-row:auto;min-height:450px}.track-canvas{min-height:360px}.bottom{grid-template-columns:1fr}.details{grid-template-columns:1fr 1fr}}@media(max-width:550px){header{align-items:flex-start}h1{font-size:21px}.value{font-size:27px}.card{padding:14px}.cards{gap:9px}.panel{padding:15px}.stages{flex-wrap:wrap}.stage{flex-basis:45%}.header-right{min-width:115px}.metrics-row{flex-wrap:wrap;gap:10px}}
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="eyebrow">SDU APEX / trajectory lab</div><h1>Raceline optimizer</h1><p class="description" id="trackName">Connecting to the live workspace…</p></div><div class="header-right"><div id="status" class="status" role="status"><span class="dot"></span><span id="statusText">Connecting</span></div><div id="connection" class="connection">Read-only · refresh every 2 seconds</div></div></header>
+<div id="errorBanner" class="notice error hidden" role="alert"></div>
+<div class="notice">Source-model results only. A saved line has passed independent model checks; Unity driving and MPC validation are separate. This viewer cannot change or stop the optimizer.</div>
+<section class="cards" aria-label="Live optimizer metrics">
+<div class="card"><div class="label">Best validated lap</div><div class="value green" id="bestLap">—</div><div class="sub" id="bestSub">Waiting for a certified export</div></div>
+<div class="card"><div class="label">Current trial</div><div class="value blue" id="trialLap">—</div><div class="sub" id="trialSub">Not yet validated</div></div>
+<div class="card"><div class="label">Current iteration</div><div class="value" id="iteration">—</div><div class="sub" id="iterationSub">Waiting for solver output</div></div>
+<div class="card"><div class="label">Best saved residual</div><div class="value amber" id="bestResidual">—</div><div class="sub" id="residualSub">Checkpoint not yet written</div></div>
+</section>
+<section class="layout">
+<div class="panel track-panel"><div class="panel-head"><div><h2>Track & best line</h2><p class="description">Map coordinates · clockwise</p></div><span class="tag">SAVED RESULT</span></div><div class="track-canvas"><canvas id="track" aria-label="Occupancy map with best validated raceline and extracted centerline"></canvas></div><div class="legend"><span><i class="line"></i>Best validated</span><span><i class="line gray"></i>Centerline</span></div><div class="downloads" id="downloads"></div><p id="mapNote" class="description" style="margin-top:12px">Loading map…</p></div>
+<div class="panel"><div class="panel-head"><div><h2>Is this solve converging?</h2><p class="description">Actual constraint residual · checked every 5 iterations · lower is better</p></div><span class="tag" id="solveTag">WAITING</span></div><div class="canvas-box"><canvas id="residualChart" aria-label="Current solve constraint residual versus iteration"></canvas></div><div class="legend"><span><i class="line blue"></i>Checked residual</span><span><i class="line"></i>Best observed</span><span><i class="line amber"></i>Solver candidate gate (10⁻⁴)</span></div><div class="metrics-row"><span>Last checked <strong id="currentResidual">—</strong></span><span>Initial <strong id="initialResidual">—</strong></span><span>Improvement <strong id="residualGain">—</strong></span></div><p class="graph-label">Log scale. Residual combines scaled constraints; it is not a position error. Crossing the line alone does not certify a lap.</p></div>
+<div class="panel"><div class="panel-head"><div><h2>Validated lap-time gains</h2><p class="description">Every point is a saved, independently checked improvement</p></div><span class="tag" id="gainsTag">0 EXPORTS</span></div><div class="canvas-box" style="height:180px"><canvas id="lapChart" aria-label="History of saved validated lap times"></canvas></div><p class="graph-label" id="historyNote">Waiting for the first validated lap. Completion time cannot be predicted reliably.</p></div>
+</section>
+<section class="panel stage-panel"><div class="panel-head"><div><h2 id="stageTitle">Waiting for optimizer</h2><p id="stageText" class="description">The workspace will appear here when a run starts.</p></div><span class="tag" id="activity">NO DATA</span></div><div class="stages" id="stages"><div class="stage" data-step="0"><b>01 / geometry</b>Extract & seed</div><div class="stage" data-step="1"><b>02 / bootstrap</b>Find feasible lap</div><div class="stage" data-step="2"><b>03 / search</b>Shorten & refine</div><div class="stage" data-step="3"><b>04 / save</b>Check every gain</div></div><div class="progress-track"><div class="progress-fill" id="iterationBar"></div></div><p class="description" id="budgetNote">Iteration budget for this solve, not total optimization completion.</p><div class="details"><div class="detail"><div class="label">Geometry basin</div><strong id="basin">—</strong></div><div class="detail"><div class="label">Phase / refinement</div><strong id="phase">—</strong></div><div class="detail"><div class="label">Workers / memory</div><strong id="resources">—</strong></div><div class="detail"><div class="label">Checkpoint age</div><strong id="checkpointAge">—</strong></div><div class="detail"><div class="label">Iteration / patience limits</div><strong id="limits">—</strong></div><div class="detail"><div class="label">Saved local dynamics defect</div><strong id="dynamicDefect">—</strong></div><div class="detail"><div class="label">Saved extra wall slack</div><strong id="clearance">—</strong></div><div class="detail"><div class="label">Active checkpoint folder</div><strong id="activePath">—</strong></div></div></section>
+<section class="bottom"><div class="panel"><div class="panel-head"><div><h2>Recent attempts</h2><p class="description">Completed trials in this geometry basin</p></div><span class="tag" id="attemptTag">0 COMPLETED</span></div><div id="attempts"></div></div><div class="panel"><h2>What is happening</h2><p class="description">Stage changes, new trials and accepted improvements</p><ul id="feed" class="feed"></ul></div></section>
+<details id="rawDetails"><summary>Raw IPOPT output · latest 90 lines</summary><div class="controls" style="margin-top:10px"><button class="button" id="pauseLog" type="button">Pause log display</button><span class="description">Only freezes this text; optimizer keeps running.</span></div><pre id="log">Waiting for optimizer output…</pre></details>
+<footer><span id="workspace">Workspace: —</span><span class="nowrap">Local observer · no solver controls</span></footer>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), set=(id,value)=>{$(id).textContent=value};
+const num=(v,d=3)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
+const sci=v=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toExponential(2);
+const age=s=>s==null?'—':s<60?`${Math.round(s)} s`:s<3600?`${Math.floor(s/60)} min ${Math.round(s%60)} s`:`${Math.floor(s/3600)} h ${Math.floor(s%3600/60)} min`;
+const human=s=>String(s||'').replaceAll('_',' ');
+let snapshot=null, trackData=null, mapImage=null, mapKey=null, paused=false, fetching=false, trackFetching=false;
+const chartColors={grid:'#2b3545',text:'#a4b2c7',blue:'#73afff',green:'#54e3b5',amber:'#f5bd67'};
+
+function canvasContext(id){const canvas=$(id), rect=canvas.getBoundingClientRect(), ratio=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);return {ctx,w:rect.width,h:rect.height};}
+function text(ctx,value,x,y,align='left',color=chartColors.text){ctx.fillStyle=color;ctx.font='10px system-ui';ctx.textAlign=align;ctx.fillText(value,x,y);}
+function line(ctx,points,color,width=2,dash=[]){if(!points.length)return;ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineJoin='round';ctx.lineCap='round';ctx.setLineDash(dash);points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.stroke();ctx.setLineDash([]);}
+function emptyCanvas(id,message){const {ctx,w,h}=canvasContext(id);text(ctx,message,w/2,h/2,'center');}
+
+function residualChart(){
+ const pts=(snapshot?.residuals||[]).filter(p=>p.residual!=null&&p.residual>=0);
+ if(!pts.length){emptyCanvas('residualChart','Waiting for iterations in this solve…');return;}
+ const {ctx,w,h}=canvasContext('residualChart'), pad={l:48,r:14,t:12,b:27};
+ const floor=1e-12, logs=pts.map(p=>Math.log10(Math.max(floor,p.residual))), threshold=-4;
+ let ymin=Math.floor(Math.min(threshold,...logs)),ymax=Math.ceil(Math.max(threshold,...logs));if(ymax-ymin<2){ymax++;ymin--;}
+ const xmin=Math.min(...pts.map(p=>p.iteration)),xmax=Math.max(xmin+1,...pts.map(p=>p.iteration));
+ const xx=x=>pad.l+(x-xmin)/(xmax-xmin)*(w-pad.l-pad.r),yy=y=>h-pad.b-(y-ymin)/(ymax-ymin)*(h-pad.t-pad.b);
+ for(let y=ymin;y<=ymax;y+=Math.max(1,Math.ceil((ymax-ymin)/5))){line(ctx,[[pad.l,yy(y)],[w-pad.r,yy(y)]],chartColors.grid,1);text(ctx,`1e${y}`,pad.l-8,yy(y)+3,'right');}
+ line(ctx,[[pad.l,yy(threshold)],[w-pad.r,yy(threshold)]],chartColors.amber,1,[5,5]);
+ let best=Infinity;line(ctx,pts.map(p=>[xx(p.iteration),yy(Math.log10(Math.max(floor,p.residual)))]),chartColors.blue,1.8);
+ line(ctx,pts.map(p=>{best=Math.min(best,p.residual);return [xx(p.iteration),yy(Math.log10(Math.max(floor,best)))];}),chartColors.green,2);
+ [xmin,Math.round((xmin+xmax)/2),xmax].forEach(x=>text(ctx,String(x),xx(x),h-7,'center'));
+}
+function lapChart(){
+ const pts=snapshot?.history||[];if(!pts.length){emptyCanvas('lapChart','No validated exports yet');return;}
+ const {ctx,w,h}=canvasContext('lapChart'), pad={l:48,r:15,t:12,b:28};
+ let min=Math.min(...pts.map(p=>p.lap_s)),max=Math.max(...pts.map(p=>p.lap_s));const range=Math.max(.1,max-min);min-=range*.08;max+=range*.12;
+ const xx=i=>pad.l+i/Math.max(1,pts.length-1)*(w-pad.l-pad.r),yy=v=>h-pad.b-(v-min)/(max-min)*(h-pad.t-pad.b);
+ for(let i=0;i<4;i++){const v=min+(max-min)*i/3;line(ctx,[[pad.l,yy(v)],[w-pad.r,yy(v)]],chartColors.grid,1);text(ctx,`${v.toFixed(1)} s`,pad.l-7,yy(v)+3,'right');}
+ line(ctx,pts.map((p,i)=>[xx(i),yy(p.lap_s)]),chartColors.green,2.5);
+ pts.forEach((p,i)=>{ctx.fillStyle=chartColors.green;ctx.beginPath();ctx.arc(xx(i),yy(p.lap_s),3,0,2*Math.PI);ctx.fill();});
+ const count=Math.min(6,pts.length);for(let i=0;i<count;i++){const j=Math.round(i*Math.max(1,pts.length-1)/Math.max(1,count-1));if(j<pts.length)text(ctx,`#${j+1}`,xx(j),h-7,'center');}
+}
+function drawTrack(){
+ if(!trackData||!mapImage){emptyCanvas('track','Loading track map…');return;}
+ const {ctx,w,h}=canvasContext('track'),d=trackData,pad=14,scale=Math.min((w-2*pad)/d.width,(h-2*pad)/d.height),ox=(w-d.width*scale)/2,oy=(h-d.height*scale)/2;
+ ctx.imageSmoothingEnabled=false;ctx.drawImage(mapImage,ox,oy,d.width*scale,d.height*scale);
+ const [mx,my,yaw]=d.origin,c=Math.cos(yaw),s=Math.sin(yaw);
+ function project(p){const dx=p[0]-mx,dy=p[1]-my;return [ox+((c*dx+s*dy)/d.resolution-.5)*scale,oy+(d.height-(-s*dx+c*dy)/d.resolution-.5)*scale];}
+ d.layers.forEach(layer=>{const pts=layer.points.map(project);if(pts.length)pts.push(pts[0]);line(ctx,pts,layer.kind==='best'?'#007a61':'#7d8da4',layer.kind==='best'?2.2:1.3,layer.kind==='best'?[]:[4,4]);});
+ // One direction arrow follows the actual ordered best line, not map orientation.
+ const best=d.layers.find(l=>l.kind==='best');if(best?.points.length>15){const i=Math.floor(best.points.length*.16),a=project(best.points[i]),b=project(best.points[Math.min(i+8,best.points.length-1)]),angle=Math.atan2(b[1]-a[1],b[0]-a[0]);ctx.fillStyle='#007a61';ctx.beginPath();ctx.moveTo(b[0],b[1]);ctx.lineTo(b[0]-10*Math.cos(angle-.45),b[1]-10*Math.sin(angle-.45));ctx.lineTo(b[0]-10*Math.cos(angle+.45),b[1]-10*Math.sin(angle+.45));ctx.closePath();ctx.fill();}
+}
+async function refreshTrack(key){
+ if(trackFetching||key===mapKey)return;trackFetching=true;
+ try{const response=await fetch('/api/track',{cache:'no-store'});if(!response.ok)throw Error('Track not ready');const data=await response.json();if(!mapImage){const img=new Image();img.src='/map.png';await img.decode();mapImage=img;}trackData=data;mapKey=key;drawTrack();set('mapNote',`${data.width} × ${data.height} cells · ${num(data.resolution*100,1)} cm / cell · true aspect ratio`);}
+ catch(error){set('mapNote',`Track view: ${error.message}. Retrying automatically.`);}finally{trackFetching=false;}
+}
+function eventText(event){
+ if(event.event==='solve')return {title:`Testing ${num(event.target_lap_s)} s lap`,detail:`${event.key} · refinement ${event.refinement}`};
+ if(event.event==='faster_source_witness')return {title:`New source-validated best: ${num(event.lap_s)} s`,detail:'Independent model replay passed; saved automatically'};
+ if(event.event==='budgets_increased')return {title:'Exploration budget increased',detail:`${event.iterations} iterations · ${event.stagnation_iterations} patience`};
+ return {title:human(event.event||event.stage),detail:event.error||event.reason||event.key||'Optimizer stage update'};
+}
+function render(data){
+ snapshot=data;const best=data.best,trial=data.active?.trial_lap_s,current=data.residuals.at(-1)?.residual,initial=data.solver?.initial_residual,cp=data.checkpoint,c=data.contract;
+ set('trackName',data.name.replace(/^optimizer_/,'').replace(/_[a-f\d]{10}$/,''));
+ const live=data.process.alive,isFinished=['plateau','search_domain_reached','prepared'].includes(data.status);
+ set('statusText',data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
+ $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.activity==='quiet'||!live?'quiet':'active';
+ set('connection',`Connected · ${new Date(data.now_epoch_s*1000).toLocaleTimeString()} · refresh 2 s`);
+ set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · clockwise`);
+ set('trialLap',trial==null?'—':`${num(trial)} s`);const gain=best.lap_s!=null&&trial!=null?best.lap_s-trial:null;
+ set('trialSub',gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
+ set('iteration',data.iteration??'—');set('iterationSub',`of ${data.solver?.max_iterations??c.iterations??'—'} per solve · not total progress`);
+ set('bestResidual',sci(cp?.residual));set('residualSub',cp?`Saved at iteration ${cp.iteration}`:'No checkpoint in current solve yet');
+ set('currentResidual',sci(current));set('initialResidual',sci(initial));
+ const lowest=data.residuals.length?Math.min(...data.residuals.filter(p=>p.residual!=null).map(p=>p.residual)):null;
+ set('residualGain',initial>0&&lowest!=null?`${num((1-lowest/initial)*100,1)}%`:'—');
+ set('solveTag',data.solve_report?'CHECKS COMPLETE':data.iteration!=null?'SOLVING':'SETTING UP');
+ set('gainsTag',`${data.history.length} EXPORTS`);const history=data.history;
+ set('historyNote',history.length>1?`${num(history[0].lap_s)} s → ${num(history.at(-1).lap_s)} s · ${num(history[0].lap_s-history.at(-1).lap_s)} s saved since first export. No reliable ETA to the final plateau.`:'The campaign saves each accepted improvement. There is no fixed target-time stopping goal.');
+ const stageNames={centerline_and_geometry:'Extracting map geometry',periodic_bootstrap:'Repairing the first periodic lap',adaptive_minimum_time_search:'Searching for a faster feasible lap',finished:isFinished?'Search stopped at its configured boundary':'Search finished',interrupted:'Optimizer interrupted',failed:'Optimizer failed',prepared:'Geometry prepared'};
+ set('stageTitle',stageNames[data.stage]||human(data.stage));
+ set('stageText',data.stage==='adaptive_minimum_time_search'?`Tries shorter laps, different cyclic starts and clearance refinements. Each improvement must pass the full source-model checks.`:'The dashboard observes existing files only. Saved checkpoints survive closing this page.');
+ set('activity',live?(data.activity==='quiet'?`NO LOG CHANGE FOR ${age(data.log_age_s)}`:`LOG UPDATED ${age(data.log_age_s)} AGO`):'PROCESS NOT RUNNING');
+ const step=data.stage==='centerline_and_geometry'?0:data.stage==='periodic_bootstrap'?1:data.stage==='finished'?3:2;
+ document.querySelectorAll('.stage').forEach((node,i)=>{node.classList.toggle('active',i===step);node.classList.toggle('done',i<step);});
+ const limit=data.solver?.max_iterations??c.iterations;const fraction=limit&&data.iteration!=null?Math.min(100,data.iteration/limit*100):0;$('iterationBar').style.width=`${fraction}%`;
+ set('budgetNote',`${data.iteration??0} / ${limit??'—'} iterations in this solve only. Overall search has no honest percentage-complete or finish-time estimate.`);
+ set('basin',data.active_start||'—');set('phase',`${data.active?.phase??'—'} / ${data.active?.refinement??'—'} · ${human(data.active?.strategy||'initialization')}`);
+ set('resources',`${c.workers??'—'} workers · ${num(data.process.rss_mb,0)} MB`);set('checkpointAge',cp?age(Math.max(0,data.now_epoch_s-cp.saved_epoch_s)):'Not saved yet');
+ set('limits',`${c.iterations??'—'} / ${c.stagnation_iterations??'—'}`);set('dynamicDefect',sci(data.validation.max_local_dynamic_defect));
+ const slack=data.validation.rollout?.minimum_1ms_footprint_slack_m;set('clearance',slack==null?'—':`${num(slack*100,1)} cm beyond margin`);set('activePath',data.active?.output||'—');
+ set('attemptTag',`${data.completed_attempts} COMPLETED`);
+ $('attempts').replaceChildren();if(data.attempts.length){const table=document.createElement('table');table.className='attempts';const header=table.createTHead().insertRow();for(const value of ['Trial','Result','Residual']){const th=document.createElement('th');th.textContent=value;header.append(th);}const body=table.createTBody();for(const item of data.attempts.slice(0,7)){const row=body.insertRow();const match=item.key?.match(/(?:from\d+_)?(\d+)_phase(\d+)_(.+)/);[match?`${num(Number(match[1])*.025)} s · phase ${match[2]}`:item.key,item.certified?'Source passed':'Not validated',sci(item.residual)].forEach((value,i)=>{const cell=row.insertCell();cell.textContent=value;if(i===1)cell.className=item.certified?'green':'muted';});}$('attempts').append(table);}else{const p=document.createElement('p');p.className='empty';p.textContent='No completed attempts in this basin yet.';$('attempts').append(p);}
+ $('feed').replaceChildren();for(const event of data.events.slice(0,12)){const value=eventText(event),li=document.createElement('li'),small=document.createElement('small');li.append(document.createTextNode(value.title));small.textContent=value.detail;li.append(small);$('feed').append(li);}
+ if(!paused){set('log',data.log_lines.join('\n'));if($('rawDetails').open)$('log').scrollTop=$('log').scrollHeight;}
+ set('workspace',`Workspace: ${data.workspace}`);
+ $('downloads').replaceChildren();for(const [key,name,label]of [['raceline','raceline.csv','Download raceline'],['raceline_with_witness','commands.csv','Commands CSV'],['validation','validation.json','Validation report']]){if(best.available_downloads.includes(key)){const a=document.createElement('a');a.className='button';a.href=`/download/${name}`;a.textContent=label;$('downloads').append(a);}}
+ const warning=data.error||data.warnings.join(' · ');$('errorBanner').classList.toggle('hidden',!warning);set('errorBanner',warning||'');
+ residualChart();lapChart();refreshTrack(`${history.at(-1)?.id||'none'}:${data.geometry_starts.length}`);
+}
+async function poll(){if(fetching)return;fetching=true;try{const response=await fetch('/api/snapshot',{cache:'no-store'});if(!response.ok)throw Error(`HTTP ${response.status}`);render(await response.json());}catch(error){set('connection','Disconnected · retrying automatically');set('errorBanner',`Dashboard connection lost (${error.message}). The optimizer is independent of this viewer.`);$('errorBanner').classList.remove('hidden');$('status').dataset.kind='error';set('statusText','Viewer disconnected');}finally{fetching=false;}}
+$('pauseLog').addEventListener('click',()=>{paused=!paused;set('pauseLog',paused?'Resume log display':'Pause log display');});
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(snapshot){residualChart();lapChart();drawTrack();}},120);});
+poll();setInterval(poll,2000);
+</script>
+</body>
+</html>
