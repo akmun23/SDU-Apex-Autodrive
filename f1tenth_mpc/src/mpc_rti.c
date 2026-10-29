@@ -1100,6 +1100,12 @@ int mpc_rti_build_ltv_qp(
 
         stage->R_diag[0] +=
             2.0f * configuration->weight_steering_target;
+        /* A source witness supplies a commanded target independently of its
+         * physical rack angle. Use that input prior, not zero-effort steering,
+         * when it is available; geometry-only references retain zero effort. */
+        if (references[model_stage].source_witness_valid)
+            stage->r[0] -= 2.0f * configuration->weight_steering_target *
+                references[model_stage].source_steering_target;
         stage->R_diag[1] +=
             2.0f * configuration->weight_throttle_command;
         const float steering_slew_hessian =
@@ -2072,8 +2078,10 @@ static int evaluate_nonlinear_candidate(
         if (k == candidate->horizon) continue;
 
         const MpcModelControl_t *control = &candidate->controls[k];
+        const double target_error = control->steering_target_rad -
+            (reference->source_witness_valid ? reference->source_steering_target : 0.);
         cost += model->weight_steering_target *
-                control->steering_target_rad * control->steering_target_rad +
+                target_error * target_error +
             model->weight_throttle_command *
                 control->throttle_command * control->throttle_command;
         const double steering_delta =

@@ -174,6 +174,19 @@ TEST(MpcPrefixSelection, IterationLimitedCandidateMayWinByClearance)
   EXPECT_TRUE(choice.clearance_override);
 }
 
+TEST(MpcPrefixSelection, PoorResidualCannotSuppressExactValidatedClearanceGain)
+{
+  /* Reproduced from the IROS 7.125 s trial: both 75 ms prefixes pass the exact
+   * source-plant corridor check, but the prior has only 4.42 cm slack while
+   * the candidate has 7.99 cm. The candidate's cost is higher and ADMM did not
+   * meet residual quality; choosing the prior starts a long stale-plan chain. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 123.178444, 0.0798761, false, false,
+      true, 120.830353, 0.0442098, 0.02, 0.05, 0.005);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.clearance_override);
+}
+
 TEST(MpcPrefixSelection, ConvergedCandidateUsesNormalObjectiveOrdering)
 {
   const auto choice = select_validated_recovery_prefix(
@@ -245,7 +258,7 @@ TEST(MpcPrefixSelection, PoorResidualCannotReplacePriorOnSmallClearanceGain)
    */
   const auto choice = select_validated_recovery_prefix(
       true, 7121.38916, 0.0262431242, false, false,
-      true, 7732.78662, 0.0163606443, 0.02, 0.05, 0.005);
+      true, 7732.78662, 0.0163606443, 0.02, 0.05, 0.02);
   EXPECT_FALSE(choice.choose_candidate);
   EXPECT_FALSE(choice.clearance_override);
 }
@@ -290,6 +303,44 @@ TEST(MpcPrefixSelection, StaleRefreshAllowsNonWorseExactObjective)
   EXPECT_TRUE(choice.stale_prior_refresh);
 }
 
+TEST(MpcPrefixSelection, StaleChainMayRefreshForLargeValidatedClearanceGain)
+{
+  /* IROS 7.125 s trial a06: after six prior-plan actions, both exact 75 ms
+   * prefixes passed. Candidate cost was 108.75 vs 86.96, but its clearance
+   * was 24.01 cm vs 19.79 cm. Permit this bounded cost trade only after
+   * the stale chain and only while both retain the 5 cm reserve. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 108.75, 0.2401, false, false,
+      true, 86.96, 0.1979, 0.02, 0.05, 0.02,
+      6, 3, 0.02, 0.30, 0.005);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_FALSE(choice.clearance_override);
+  EXPECT_TRUE(choice.stale_prior_refresh);
+}
+
+TEST(MpcPrefixSelection, ClearanceRefreshRejectsLargeObjectiveRegression)
+{
+  const auto choice = select_validated_recovery_prefix(
+      true, 180.0, 0.2401, false, false,
+      true, 86.96, 0.1979, 0.02, 0.05, 0.02,
+      6, 3, 0.02, 0.30, 0.005);
+  EXPECT_FALSE(choice.choose_candidate);
+  EXPECT_FALSE(choice.stale_prior_refresh);
+}
+
+TEST(MpcPrefixSelection, StaleChainRefreshesForFiveMillimeterGain)
+{
+  /* a08 accumulated 9 prior actions before an exact-valid candidate improved
+   * 75 ms slack by 7.5 mm at a 29.8% exact-cost increase. A stale-chain-only
+   * 5 mm threshold catches it; the normal near-wall override remains 2 cm. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 16.3531685, 0.203892231, false, false,
+      true, 12.6028471, 0.196427286, 0.02, 0.05, 0.02,
+      9, 3, 0.02, 0.30, 0.005);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.stale_prior_refresh);
+}
+
 TEST(MpcPrefixSelection, StalePriorRefreshRequiresChainAndClearance)
 {
   const auto chain_too_short = select_validated_recovery_prefix(
@@ -320,7 +371,7 @@ TEST(MpcPrefixSelection, PoorResidualStillRejectsSmallCostWinOrClearanceLoss)
    * rejected even though its short prefix had slightly more slack. */
   EXPECT_FALSE(select_validated_recovery_prefix(
       true, 7121.4, 0.0262, false, false,
-      true, 7732.8, 0.0164, 0.02, 0.05, 0.005).choose_candidate);
+      true, 7732.8, 0.0164, 0.02, 0.05, 0.02).choose_candidate);
 
   /* A >10% cost improvement is not enough if it materially erodes the
    * already-certified prefix's corridor clearance. */

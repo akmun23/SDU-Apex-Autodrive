@@ -153,7 +153,10 @@ inline PrefixSelection select_validated_prefix(
  * replace a valid prior prefix; it may do so for a material objective gain,
  * or under the separately gated stale-prior refresh below when a chain of
  * retained actions has aged, the exact candidate prefix preserves margin,
- * and its exact objective is no worse than the retained prefix. */
+ * and its exact objective is no worse than the retained prefix. After a
+ * longer stale chain, a materially clearer candidate may also refresh despite
+ * a bounded cost increase; this avoids replaying a less-safe plan solely due
+ * to an iteration-limited full-horizon QP. */
 inline PrefixSelection select_validated_recovery_prefix(
     bool candidate_valid,
     double candidate_objective,
@@ -168,7 +171,9 @@ inline PrefixSelection select_validated_recovery_prefix(
     double minimum_clearance_gain_m,
     int consecutive_prior_plan_actions = 0,
     int stale_prior_refresh_after_actions = 0,
-    double stale_prior_max_clearance_loss_m = 0.0)
+    double stale_prior_max_clearance_loss_m = 0.0,
+    double stale_prior_clearance_gain_objective_loss_fraction = 0.0,
+    double stale_prior_minimum_clearance_gain_m = 0.0)
 {
     if (!candidate_valid) return {false, false};
     if (!prior_valid) {
@@ -190,6 +195,20 @@ inline PrefixSelection select_validated_recovery_prefix(
             clearance_reserve_m, minimum_clearance_gain_m);
     }
 
+    /* Exact nonlinear validation establishes that both prefixes are safe
+     * through the command-effect horizon. If the retained prefix is already
+     * below the configured clearance reserve, prefer a materially safer
+     * candidate even when its QP residual is poor and its short-horizon cost
+     * is higher. Otherwise a stale, lower-cost prior can be replayed until it
+     * loses corridor validity. */
+    const bool clearance_override = std::isfinite(prior_slack_m) &&
+        std::isfinite(candidate_slack_m) &&
+        std::isfinite(clearance_reserve_m) &&
+        std::isfinite(minimum_clearance_gain_m) &&
+        prior_slack_m < clearance_reserve_m &&
+        candidate_slack_m > prior_slack_m + minimum_clearance_gain_m;
+    if (clearance_override) return {true, true};
+
     /* Do not refresh from an iteration-limited candidate solely because its
      * 75 ms rollout stays inside the corridor. A captured practice failure
      * showed such candidates can have a much worse exact objective and
@@ -197,18 +216,27 @@ inline PrefixSelection select_validated_recovery_prefix(
      * the configured retained-plan chain, refresh only if both prefixes keep
      * their reserve, clearance loss is bounded, and the candidate objective
      * is no worse over the same exact-validated horizon. */
-    const bool stale_prior_refresh = stale_prior_refresh_after_actions > 0 &&
+    const bool stale_chain_ready = stale_prior_refresh_after_actions > 0 &&
         consecutive_prior_plan_actions >= stale_prior_refresh_after_actions &&
-        std::isfinite(candidate_objective) &&
-        std::isfinite(prior_objective) &&
-        candidate_objective <= prior_objective &&
         std::isfinite(candidate_slack_m) && std::isfinite(prior_slack_m) &&
         std::isfinite(stale_prior_max_clearance_loss_m) &&
         stale_prior_max_clearance_loss_m >= 0.0 &&
         candidate_slack_m >= clearance_reserve_m &&
-        prior_slack_m >= clearance_reserve_m &&
-        candidate_slack_m >= prior_slack_m -
-            stale_prior_max_clearance_loss_m;
+        prior_slack_m >= clearance_reserve_m;
+    const bool stale_prior_refresh = stale_chain_ready &&
+        std::isfinite(candidate_objective) && std::isfinite(prior_objective) &&
+        ((candidate_objective <= prior_objective &&
+          candidate_slack_m >= prior_slack_m -
+              stale_prior_max_clearance_loss_m) ||
+         (std::isfinite(stale_prior_minimum_clearance_gain_m) &&
+          std::isfinite(stale_prior_clearance_gain_objective_loss_fraction) &&
+          stale_prior_clearance_gain_objective_loss_fraction >= 0.0 &&
+          stale_prior_minimum_clearance_gain_m >= 0.0 &&
+          candidate_slack_m >= prior_slack_m +
+              stale_prior_minimum_clearance_gain_m &&
+          candidate_objective <= prior_objective +
+              stale_prior_clearance_gain_objective_loss_fraction *
+                  std::max(std::abs(prior_objective), 1.e-9)));
     if (stale_prior_refresh) return {true, false, true};
 
     if (!candidate_residual_quality_acceptable) {
@@ -225,12 +253,6 @@ inline PrefixSelection select_validated_recovery_prefix(
             candidate_objective, prior_objective, minimum_gain);
         return {clearance_preserved && materially_better, false};
     }
-
-    const bool clearance_override = std::isfinite(prior_slack_m) &&
-        std::isfinite(candidate_slack_m) &&
-        prior_slack_m < clearance_reserve_m &&
-        candidate_slack_m > prior_slack_m + minimum_clearance_gain_m;
-    if (clearance_override) return {true, true};
 
     const double minimum_gain = std::clamp(
         minimum_relative_objective_gain, 0.0, 1.0);

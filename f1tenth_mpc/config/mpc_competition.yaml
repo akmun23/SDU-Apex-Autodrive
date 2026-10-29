@@ -64,10 +64,12 @@
     weight_v: 5.0
     weight_r: 7.8125
     weight_steering_command: 3.0
+    # Tracks the native commanded target for a source witness, independently
+    # of physical rack angle. Geometry-only paths use zero-effort steering.
     weight_steering_target: 5.0
     weight_throttle_command: 0.1
-    # Penalizes steering-command changes beyond the path's curvature-derived
-    # feedforward change. This keeps steering smooth without fighting a
+    # Penalizes steering-command changes beyond the native target change
+    # (or curvature-derived feedforward for geometry-only paths), allowing a
     # required sign reversal through a curvature transition. The throttle
     # slew cost remains centered on zero command increment.
     weight_steering_slew: 2000.0
@@ -121,22 +123,29 @@
     # otherwise useful short retained prefixes too often.
     prefer_full_validated_prior_plan_on_rejection: false
     # On a rejected solve, compare candidate and retained-plan actions over
-    # the same 75 ms using exact source-plant rollout. Publish the lower-cost
-    # prefix only when it passes the corridor check. If both pass, a candidate
-    # with measurably better clearance is preferred only when the retained
-    # prefix has less than 5 cm of additional corridor slack. This reserve and
-    # 5 mm minimum gain target the observed v300 late-turn selection failure;
-    # objective selection remains unchanged elsewhere.
+    # the same 75 ms using exact source-plant rollout. If both pass, prefer the
+    # candidate when it adds >=2 cm slack and the prior has <5 cm slack, even
+    # if ADMM residuals are poor: exact validation certifies this prefix and
+    # stale-plan replay otherwise erodes clearance. Else use cost/residual
+    # ordering. Hard nonlinear wall clearance is unchanged.
     quality_aware_prefix_selection_on_rejection: true
     quality_prefix_clearance_reserve_m: 0.05
-    quality_prefix_minimum_clearance_gain_m: 0.005
-    # An iteration-limited candidate can replace an exact-valid prior prefix
-    # only when both residuals are within 2x solver tolerance, then it must
-    # materially improve the exact 75 ms objective (or clear the 5 cm reserve).
-    # A better objective from a poor-residual iterate is not trusted: on the
+    quality_prefix_minimum_clearance_gain_m: 0.02
+    # An iteration-limited candidate normally needs residuals within 2x solver
+    # tolerance and a material exact-objective gain. A poor-residual iterate
+    # cannot replace a prior for a small cost/clearance change: on the
     # 2026-10-25 v300 capture it selected a saturated steering reversal before
     # losing corridor validity on the next cycle.
     quality_prefix_iteration_limited_relative_gain: 0.02
+    # After 3 consecutive retained-plan actions, allow an exactly validated
+    # 75 ms candidate prefix to refresh when it improves corridor slack by at
+    # least 5 mm. Both prefixes must retain >=5 cm slack; its exact objective
+    # may worsen by at most 30%. This specifically prevents stale-plan chains
+    # from persisting only because an iteration-limited QP has higher cost.
+    quality_prefix_stale_prior_refresh_after_actions: 3
+    quality_prefix_stale_prior_max_clearance_loss_m: 0.02
+    quality_prefix_stale_prior_clearance_gain_objective_loss_fraction: 0.30
+    quality_prefix_stale_prior_minimum_clearance_gain_m: 0.005
     rti_cycle_budget_ms: 20.0
     # Eight persistent workers were exercised by full-speed ten-lap repeats.
     # One earlier repeat deferred a 20.656 ms cycle; no WCET guarantee claimed.

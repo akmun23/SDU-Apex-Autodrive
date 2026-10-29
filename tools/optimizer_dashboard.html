@@ -272,8 +272,10 @@ function mpcExplain(a){
  }
  if(sources.includes('pose_odom_skew_exceeded'))return ['Position and odometry were out of sync','MPC rejected a state update because localization and odometry timestamps were too far apart. The controller stopped safely. This does not, by itself, mean the raceline is wrong.','Check synchronization of AMCL, odometry and the ROS bridge. Retry to determine whether the fault is intermittent.'];
  if(a.status==='blocked_start_orientation'||a.status==='localization_start_heading_mismatch'||sources.includes('scan heading error'))return ['Starting direction did not match the simulator','The vehicle could not establish a consistent position and heading for this reference.','The optimizer must follow the direction demonstrated in Unity; do not weaken localization safety checks.'];
- if(sources.includes('rejected_nonlinear_rollout')||sources.includes('nonlinear=corridor'))
-  return ['MPC predicted an unsafe trajectory','During its next prediction, MPC detected that the proposed motion could leave the permitted track corridor and rejected the update. This is a predicted safety violation, not necessarily a collision in Unity.','Check the predicted corridor constraint and the reference clearance at the reported horizon step. The line may be too aggressive for reliable MPC tracking.'];
+ if(sources.includes('rejected_nonlinear_rollout')||sources.includes('nonlinear=corridor')){
+  const stage=sources.match(/nonlinear=corridor@(\d+)/);
+  return ['MPC could not validate its next plan','The proposed motion failed the nonlinear prediction checks'+(stage?' at prediction step '+(Number(stage[1])+1):'')+'. A predicted corridor violation is not necessarily a collision in Unity.','Solver convergence, tracking drift, state timing or reference feasibility can cause this. The rejection alone does not identify the cause or prove the raceline is wrong.'];
+ }
  if(a.status==='collision')return ['The simulator detected a collision','The run stopped after the simulated vehicle collided.','Inspect the trajectory clearance and controller behavior before retrying.'];
  if(a.status==='mpc_startup_timeout')return ['MPC could not start driving','No accepted MPC cycle was received within the startup limit.','Check localization, controller startup and ROS topic availability.'];
  if(a.status==='mpc_rejected')return ['MPC stopped the run for safety','The controller rejected a state or control update. Previously completed laps remain usable for analysis.','Open Technical details for the exact fault and relevant controller logs.'];

@@ -1224,6 +1224,17 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
     EXPECT_NEAR(source_problem.steps[k].q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] -
         source_no_slew.steps[k].q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND], expected, 1.e-5f);
   }
+  auto no_target_config = config;
+  no_target_config.weight_steering_target = 0.f;
+  MpcRtiProblem_t no_target_problem{};
+  ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
+      source_references, horizon, PREDICTION_DT_SECONDS, &no_target_config, &no_target_problem));
+  for (int k : {0, 1}) {
+    EXPECT_NEAR(source_problem.steps[k].r[0]-no_target_problem.steps[k].r[0],
+        -2.f*config.weight_steering_target*source_references[k].source_steering_target,1.e-5f);
+    EXPECT_NEAR(source_problem.steps[k].R_diag[0]-no_target_problem.steps[k].R_diag[0],
+        2.f*config.weight_steering_target,1.e-5f);
+  }
   MpcModelState_t prepared_optimizer_plant =
       nominal_states[MPC_COMMAND_DELAY_STEPS].plant;
   ASSERT_TRUE(vehicle_model_initialize_plant_state(&prepared_optimizer_plant));

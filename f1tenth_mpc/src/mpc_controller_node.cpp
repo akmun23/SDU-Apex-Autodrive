@@ -424,7 +424,7 @@ public:
                 "quality_prefix_clearance_reserve_m", 0.05), 0.0, 1.0);
         quality_prefix_minimum_clearance_gain_m_ = clamp(
             declare_parameter<double>(
-                "quality_prefix_minimum_clearance_gain_m", 0.005),
+                "quality_prefix_minimum_clearance_gain_m", 0.02),
             0.0, 1.0);
         quality_prefix_iteration_limited_relative_gain_ = clamp(
             declare_parameter<double>(
@@ -437,6 +437,14 @@ public:
         quality_prefix_stale_prior_max_clearance_loss_m_ = clamp(
             declare_parameter<double>(
                 "quality_prefix_stale_prior_max_clearance_loss_m", 0.02),
+            0.0, 1.0);
+        quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_ =
+            clamp(declare_parameter<double>(
+                "quality_prefix_stale_prior_clearance_gain_objective_loss_fraction",
+                0.0), 0.0, 2.0);
+        quality_prefix_stale_prior_minimum_clearance_gain_m_ = clamp(
+            declare_parameter<double>(
+                "quality_prefix_stale_prior_minimum_clearance_gain_m", 0.005),
             0.0, 1.0);
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
         command_frame_ = declare_parameter<std::string>("command_frame", "base_link");
@@ -1369,7 +1377,9 @@ private:
             quality_prefix_minimum_clearance_gain_m_,
             consecutive_prior_plan_actions_,
             quality_prefix_stale_prior_refresh_after_actions_,
-            quality_prefix_stale_prior_max_clearance_loss_m_);
+            quality_prefix_stale_prior_max_clearance_loss_m_,
+            quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_,
+            quality_prefix_stale_prior_minimum_clearance_gain_m_);
         bool candidate_yaw_direction_conflict = false;
         if (prefix_selection.choose_candidate &&
             candidate_prefix_exact_valid_ && prior_plan_exact_valid_ &&
@@ -2211,6 +2221,10 @@ private:
             << quality_prefix_stale_prior_refresh_after_actions_
             << ",\"stale_prior_max_clearance_loss_m\":"
             << quality_prefix_stale_prior_max_clearance_loss_m_
+            << ",\"stale_prior_clearance_gain_objective_loss_fraction\":"
+            << quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_
+            << ",\"stale_prior_minimum_clearance_gain_m\":"
+            << quality_prefix_stale_prior_minimum_clearance_gain_m_
             << ",\"iteration_limited_relative_gain\":"
             << quality_prefix_iteration_limited_relative_gain_
             << ",\"prior_source\":\""
@@ -3865,10 +3879,12 @@ private:
     bool quality_prefix_yaw_direction_guard_{};
     bool quality_prefix_prior_is_recovery_{};
     double quality_prefix_clearance_reserve_m_{0.05};
-    double quality_prefix_minimum_clearance_gain_m_{0.005};
+    double quality_prefix_minimum_clearance_gain_m_{0.02};
     double quality_prefix_iteration_limited_relative_gain_{0.02};
     int quality_prefix_stale_prior_refresh_after_actions_{};
     double quality_prefix_stale_prior_max_clearance_loss_m_{0.02};
+    double quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_{};
+    double quality_prefix_stale_prior_minimum_clearance_gain_m_{0.005};
     std::string quality_prefix_choice_{"none"};
     bool quality_candidate_prefix_valid_{};
     bool quality_prior_prefix_valid_{};

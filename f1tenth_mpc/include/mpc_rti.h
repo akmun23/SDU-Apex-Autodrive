@@ -77,6 +77,8 @@ typedef struct
     float weight_v;
     float weight_r;
     float weight_steering_command;
+    /* Native commanded-target tracking when a source witness is available;
+     * zero-effort regularization for geometry-only references. */
     float weight_steering_target;
     float weight_throttle_command;
     /* Steering penalizes command-increment error relative to path feedforward
