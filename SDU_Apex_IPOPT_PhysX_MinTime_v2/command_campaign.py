@@ -20,7 +20,8 @@ import time
 import numpy as np
 
 from command_ocp import (certify_witness, load_command_seed, production_command_map,
-                         save_command_checkpoint, save_json_checkpoint, solve_witness)
+                         save_command_checkpoint, save_json_checkpoint, solve_witness,
+                         solve_time_predictor)
 
 
 def unused_directory(path):
@@ -74,6 +75,18 @@ def trial_counts(count, fraction, minimum):
         step = max(1, step//2)
 
 
+def search_starts(counts, rotations, old_count, include_packet_starts):
+    """Back off duration before rephasing the same unsuccessful large jump.
+
+    Near the incumbent, removing one packet preserves every other exact source
+    transition. Try that initializer before globally resampling hidden states.
+    All configured phases/durations are still visited if none succeeds.
+    """
+    return [(count, rotation, strategy) for rotation in rotations for count in counts
+            for strategy in (('drop-packet', 'resample')
+                if include_packet_starts and count == old_count-1 else ('resample',))]
+
+
 def budget_increase_only(previous, requested):
     """Changing patience/iteration ceilings cannot transfer a physics certificate."""
     keys = ('iterations', 'stagnation_iterations')
@@ -107,7 +120,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                  phases=8, workers=8, iterations=1500, stagnation_iterations=250,
                  refinements=6, resume=False, include_packet_starts=True,
                  solve=solve_witness, certify=certify_witness, digest=None,
-                 cancel_requested=None, coarse_fraction=0., on_improvement=None):
+                 cancel_requested=None, coarse_fraction=0., on_improvement=None,
+                 hybrid_time=False, predict=solve_time_predictor):
     repo, seed, map_path, output = [Path(p).resolve() for p in (repo, seed, map_path, output)]
     if ((target_seconds is not None and
             (not math.isfinite(target_seconds) or target_seconds < .75)) or phases < 1
@@ -124,6 +138,10 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         include_packet_starts=include_packet_starts, coarse_fraction=coarse_fraction,
         map_metadata_sha256=(file_hash(map_path.with_suffix('.yaml'))
                              if map_path.with_suffix('.yaml').exists() else None))
+    contract['start_order'] = 'duration-before-phase/drop-first-v1'
+    contract['command_objective_scaling'] = 'unit-regularizer-v1'
+    if hybrid_time:
+        contract['time_predictor'] = 'source-24-25ms-chord/v1'
     state_path = output/'campaign.json'
     if output.exists() and not resume:
         raise FileExistsError('campaign exists; use --resume, never overwrite it')
@@ -138,6 +156,44 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
 
     def event(name, **values):
         print(json.dumps(dict(event=name, **values)), flush=True)
+
+    def time_prediction(incumbent, old_count):
+        """One time-objective proposal per incumbent, always followed by exact repair."""
+        ident = file_hash(incumbent)
+        stored = state.setdefault('time_predictions', {})
+        if ident in stored:
+            return stored[ident]
+        active = state.get('active_predictor')
+        parent = output/f'time_from{old_count:03d}'
+        destination = unused_directory(parent/'solve')
+        resume_checkpoint = None
+        if active and active['incumbent_sha256'] == ident:
+            previous = Path(active['output'])
+            if (previous/'report.json').exists():
+                stored[ident] = json.loads((previous/'report.json').read_text())
+                state.pop('active_predictor', None)
+                save()
+                return stored[ident]
+            for name in ('best_time_candidate.npz', 'best_predictor.npz'):
+                if (previous/name).exists():
+                    resume_checkpoint = previous/name
+                    break
+        state['active_predictor'] = dict(incumbent_sha256=ident,
+            output=str(destination), seed=str(incumbent))
+        save()
+        event('minimum_time_prediction', source_lap_s=old_count*.025,
+              output=str(destination), source_certified=False)
+        report = predict(repo=repo, command_seed=incumbent, map_path=map_path,
+            output=destination, workers=workers, iterations=min(iterations, 200),
+            stagnation_iterations=min(stagnation_iterations, 80),
+            cancel_requested=cancel_requested, resume_checkpoint=resume_checkpoint)
+        stored[ident] = report
+        state.pop('active_predictor', None)
+        save()
+        event('time_prediction_finished', status=report['status'],
+              predicted_lap_s=report.get('predicted_lap_s'),
+              trial_lap_s=report.get('trial_lap_s'), source_certified=False)
+        return report
 
     try:
         if resume:
@@ -193,18 +249,21 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 break
             rotations = sorted(set(int(source_count(incumbent)*i/phases) for i in range(phases)))
             improved = False
-            starts = [(count, rotation, strategy) for count in counts
-                      for rotation in rotations
-                      for strategy in (('resample', 'drop-packet')
-                          if include_packet_starts and count == old_count-1
-                          else ('resample',))]
+            starts = search_starts(counts, rotations, old_count, include_packet_starts)
+            prediction = state.get('time_predictions', {}).get(file_hash(incumbent))
+            if hybrid_time and state.get('active_predictor'):
+                prediction = time_prediction(incumbent, old_count)
+            if prediction and prediction.get('status') == 'uncertified_time_proposal':
+                suggested = max(minimum, prediction['proposed_intervals'])
+                if suggested < old_count:
+                    starts.insert(0, (suggested, 0, 'time-predictor'))
             active_key = (state.get('active') or {}).get('key')
             if active_key:
                 # Increasing budgets can reopen an EARLIER phase. Finish the
                 # interrupted phase first, rather than overwrite its context.
                 starts.sort(key=lambda item:
                     f'from{old_count:03d}_{item[0]:03d}_phase{item[1]:03d}_{item[2]}' != active_key)
-            for count, rotation, strategy in starts:
+            for start_index, (count, rotation, strategy) in enumerate(starts):
                 key = f'from{old_count:03d}_{count:03d}_phase{rotation:03d}_{strategy}'
                 if any(a['key'] == key for a in state['attempts']): continue
                 directory = output/key
@@ -228,7 +287,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                     cuts = {tuple(c) for c in retry['cuts']}
                     report, refinement = None, 0
                 else:
-                    start = incumbent
+                    start = (Path(prediction['proposed_seed'])
+                             if strategy == 'time-predictor' else incumbent)
                     if rotation:
                         start = phase_seed(incumbent, rotation, directory/'phase_seed.npz')
                     cuts, report, refinement = set(), None, 0
@@ -247,6 +307,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                             iterations=iterations, cpu_seconds=1.e20, command_seed=start,
                             workers=workers, clearance_cuts=sorted(cuts),
                             shorten_packet=strategy == 'drop-packet' and source_count(start) == count+1,
+                            recondition_seed=hybrid_time and source_count(start) != count,
                             stagnation_iterations=stagnation_iterations,
                             cancel_requested=cancel_requested)
                         start = destination/'witness.npz'
@@ -289,6 +350,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 state.get('retry_starts', {}).pop(key, None)
                 save()
                 if improved: break
+                if hybrid_time and prediction is None:
+                    prediction = time_prediction(incumbent, old_count)
+                    if prediction.get('status') == 'uncertified_time_proposal':
+                        suggested = max(minimum, prediction['proposed_intervals'])
+                        if suggested < old_count:
+                            starts.insert(start_index+1, (suggested, 0, 'time-predictor'))
             if not improved:
                 state.update(status='plateau', active=None)
                 save()
@@ -342,6 +409,8 @@ def main():
     parser.add_argument('--resume-if-exists', action='store_true',
                         help='For unattended service restarts: resume a matching saved campaign')
     parser.add_argument('--no-packet-starts', action='store_true')
+    parser.add_argument('--hybrid-time-search', action='store_true',
+                        help='After a failed shortening, propose geometry/controls with a time objective')
     args = parser.parse_args()
     if args.status:
         show_status(args.status)
@@ -361,6 +430,7 @@ def main():
             resume=args.resume or (args.resume_if_exists and (args.output/'campaign.json').exists()),
             include_packet_starts=not args.no_packet_starts,
             coarse_fraction=args.coarse_fraction,
+            hybrid_time=args.hybrid_time_search,
             cancel_requested=lambda: stop_requested[0])
     except KeyboardInterrupt:
         print('Interrupted; best witness and active primal retained. Use --resume.', flush=True)

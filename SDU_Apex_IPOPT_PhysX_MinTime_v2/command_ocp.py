@@ -33,12 +33,16 @@ STATE_SCALES = np.array([1., 1., 1., 2., 1., 2., *([150.]*4),
 
 def save_command_checkpoint(path, state, controls, digest, residual, iteration):
     """Power-loss-safe primal checkpoint; feasibility must still be checked."""
+    save_npz_checkpoint(path, schema='production-command-ocp/v1',
+        state=state, controls=controls, dt_s=.025,
+        lap_time_s=controls.shape[1]*.025, source_sha256=digest,
+        max_constraint_violation=residual, iteration=iteration)
+
+
+def save_npz_checkpoint(path, **values):
     temporary = path.with_suffix('.tmp.npz')
     with temporary.open('wb') as stream:
-        np.savez_compressed(stream, schema='production-command-ocp/v1',
-            state=state, controls=controls, dt_s=.025,
-            lap_time_s=controls.shape[1]*.025, source_sha256=digest,
-            max_constraint_violation=residual, iteration=iteration)
+        np.savez_compressed(stream, **values)
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
@@ -225,6 +229,47 @@ def shorten_seed_by_packet(path, count, function, workers):
             winding, lap)
 
 
+def seed_dynamic_defect(function, state, controls, workers):
+    predicted = np.asarray(mapped_transition(function, controls.shape[1], workers)(
+        np.vstack([state[:, :-1], controls])))
+    dynamic = float(np.max(np.abs((predicted-state[:, 1:])/STATE_SCALES[:, None])))
+    periodic = state[:, -1]-state[:, 0]
+    periodic[2] -= round(periodic[2]/(2*math.pi))*2*math.pi
+    return max(dynamic, float(np.max(np.abs(periodic/STATE_SCALES))))
+
+
+def recondition_command_seed(function, state, controls, workers, *, max_laps=12):
+    """Initialize fast internal histories with source propagation, not time warping.
+
+    Prescribe ONLY the guessed pose and u/v/r at each node. Propagate wheels,
+    rack, heave, attitude and jounce through the new held commands to settle
+    their periodic history. This is an initializer with prescribed body motion,
+    NOT a recursive motion prediction or feasibility certificate. The NLP still
+    optimizes all 21 coordinates and the final replay has no state resets.
+    """
+    before = seed_dynamic_defect(function, state, controls, workers)
+    best, score, carry = state.copy(), before, state[6:, 0].copy()
+    laps = 0
+    for laps in range(1, max_laps+1):
+        trial = state.copy()
+        start = carry.copy()
+        try:
+            for k in range(controls.shape[1]):
+                trial[6:, k] = carry
+                propagated = np.asarray(function(np.r_[trial[:, k], controls[:, k]])).reshape(-1)
+                carry = propagated[6:]
+            trial[6:, -1] = carry
+            measured = seed_dynamic_defect(function, trial, controls, workers)
+        except RuntimeError:
+            break  # retain the better finite initializer; no certificate exists
+        if math.isfinite(measured) and measured < score:
+            best, score = trial, measured
+        if np.max(np.abs((carry-start)/STATE_SCALES[6:])) <= 1.e-7:
+            break
+    return best, dict(source_settling_laps=laps, scaled_defect_before=before,
+        scaled_defect_after=score, prescribed_body_initializer=True, source_certified=False)
+
+
 def check_full_witness(function, state, controls, grid, margin, *, repo=None, trace_path=None):
     predicted = state[:, 0].copy()
     errors, clearance, state_errors = [], [], []
@@ -379,23 +424,15 @@ def certify_witness(repo, path, map_path, output):
     return report
 
 
-def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
-                  count=197, iterations=80, cpu_seconds=120., margin=.05,
-                  command_seed=None, workers=8, clearance_cuts=(),
-                  shorten_packet=False, stagnation_iterations=0, cancel_requested=None):
-    if output.exists(): raise FileExistsError('refusing to overwrite command OCP')
-    output.mkdir(parents=True)
-    function, digest = production_command_map(repo, repo/'build_task/command_ocp')
-    if shorten_packet:
-        if command_seed is None:
-            raise ValueError('packet shortening requires a command witness')
-        initial_x, initial_u, winding, source_lap = shorten_seed_by_packet(
-            command_seed, count, function, workers)
-    else:
-        initial_x, initial_u, winding, source_lap = (
-            load_command_seed(command_seed, count) if command_seed is not None else
-            load_seed(checkpoint, mesh, audit, count, repo))
-    grid = MapGrid.load(map_path)
+def command_problem(repo, function, digest, initial_x, initial_u, winding, grid,
+                    margin, workers, clearance_cuts=(), *, time_predictor=False):
+    """Shared physical bounds, winding, geometry and wall constraints.
+
+    The optional 24/25 ms chord is a time-search INITIALIZER, never a runtime
+    dynamics replacement or a source certificate. Literal-tick map derivatives
+    remain valid; no false duration derivative is taken through the C ABI.
+    """
+    count = initial_u.shape[1]
     wall_distance = clearance_interpolant(grid)
     opti = ca.Opti()
     x, u = opti.variable(21, count+1), opti.variable(2, count)
@@ -406,6 +443,14 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
     opti.set_initial(u, initial_u)
     packed = ca.vertcat(x[:, :count], u)
     mapped = mapped_transition(function, count, workers)(packed)
+    prefix24 = production_fixed_prefix(repo, repo/'build_task/command_ocp', digest,
+                                       packed, 24, workers=workers)
+    fraction = None
+    if time_predictor:
+        fraction = opti.variable()
+        opti.subject_to(opti.bounded(0., fraction, 1.))
+        opti.set_initial(fraction, 1.)  # incumbent is an exact feasible endpoint
+        mapped = prefix24+fraction*(mapped-prefix24)
     opti.subject_to(ca.vec((x[:, 1:]-mapped)/scales[:, 1:]) == 0.)
     periodic_delta = x[:, -1]-x[:, 0]
     periodic_delta[2] -= 2*math.pi*winding
@@ -429,7 +474,7 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
     pose_parts = [x[:3, :], *[
         production_fixed_prefix(repo, repo/'build_task/command_ocp', digest, packed,
                                 tick, workers=workers)[:3, :]
-        for tick in (6, 12, 18, 24)]]
+        for tick in (6, 12, 18)], prefix24[:3, :]]
     for interval, tick in clearance_cuts:
         if not isinstance(interval, int) or not 0 <= interval < count:
             raise ValueError('invalid clearance-cut interval')
@@ -445,9 +490,51 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         local = ca.vertcat(map_c*wx+map_s*wy, -map_s*wx+map_c*wy)
         distance = wall_distance.map(pose_count, 'serial')(local)
         opti.subject_to(distance >= margin+_FOOTPRINT_UNSAMPLED_CORRECTION)
-    opti.minimize(.001*ca.sumsqr((x-initial_x)/scales)/count
-                 +.001*ca.sumsqr(u-initial_u)/count
-                 +.0001*ca.sumsqr(u[:, 1:]-u[:, :-1])/count)
+    if time_predictor:
+        # This is a LOCAL predictor. Keep its derivatives useful across tire
+        # and steering branches rather than taking unrestricted free-time
+        # Newton steps from a good witness. Bounds are numerical trust boxes,
+        # not vehicle limits; the exact-grid repair retains its original bounds.
+        scaled_step = (x-initial_x)/scales
+        control_step = (u-initial_u)/ca.repmat(ca.DM([.35, .1]), 1, count)
+        opti.subject_to(opti.bounded(-.25, ca.vec(scaled_step), .25))
+        opti.subject_to(opti.bounded(-.25, ca.vec(control_step), .25))
+        opti.minimize(count*(.024+.001*fraction)
+                      +.01*(ca.sumsqr(scaled_step)+ca.sumsqr(control_step))/count)
+    else:
+        # Multiply the previous objective by count/.001. This positive
+        # constant preserves its minimizers and ALL relative penalties, while
+        # avoiding 1e-6-scale objective gradients against unit-scale constraints.
+        opti.minimize(ca.sumsqr((x-initial_x)/scales)
+                     +ca.sumsqr(u-initial_u)
+                     +.1*ca.sumsqr(u[:, 1:]-u[:, :-1]))
+    return opti, x, u, fraction
+
+
+def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
+                  count=197, iterations=80, cpu_seconds=120., margin=.05,
+                  command_seed=None, workers=8, clearance_cuts=(),
+                  shorten_packet=False, stagnation_iterations=0, cancel_requested=None,
+                  recondition_seed=False):
+    if output.exists(): raise FileExistsError('refusing to overwrite command OCP')
+    output.mkdir(parents=True)
+    function, digest = production_command_map(repo, repo/'build_task/command_ocp')
+    if shorten_packet:
+        if command_seed is None:
+            raise ValueError('packet shortening requires a command witness')
+        initial_x, initial_u, winding, source_lap = shorten_seed_by_packet(
+            command_seed, count, function, workers)
+    else:
+        initial_x, initial_u, winding, source_lap = (
+            load_command_seed(command_seed, count) if command_seed is not None else
+            load_seed(checkpoint, mesh, audit, count, repo))
+    conditioning = None
+    if recondition_seed:
+        initial_x, conditioning = recondition_command_seed(function, initial_x, initial_u, workers)
+        print(json.dumps(dict(stage='source history initialization', **conditioning)), flush=True)
+    grid = MapGrid.load(map_path)
+    opti, x, u, _ = command_problem(repo, function, digest, initial_x, initial_u,
+                                   winding, grid, margin, workers, clearance_cuts)
     opti.solver('ipopt', {'expand': False, 'print_time': False}, {
         'max_iter': iterations, 'max_cpu_time': cpu_seconds,
         'hessian_approximation': 'limited-memory', 'mu_strategy': 'adaptive',
@@ -464,6 +551,7 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         trial_lap_s=count*.025, source_lap_s=source_lap, states=21,
         decisions=opti.nx, constraints=opti.ng, initial_residual=violation(initial),
         max_iterations=iterations, cpu_seconds=cpu_seconds, workers=workers,
+        objective_scaling_factor=count/.001,
         source_clearance_cuts=len(clearance_cuts),
         source_sha256=digest)), flush=True)
     best = [None]
@@ -515,8 +603,10 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         max_constraint_violation=residual, ipopt_status=stats.get('return_status'),
         ipopt_iterations=stats.get('iter_count'), error=error, rollout=rollout,
         jacobian_workers=workers, initializer=str(command_seed or checkpoint),
+        objective_scaling_factor=count/.001,
         stagnation_iterations=stagnation_iterations,
         initializer_strategy='drop-one-packet' if shorten_packet else 'resample-or-exact-restart',
+        seed_reconditioning=conditioning,
         source_clearance_cuts=[list(item) for item in clearance_cuts],
         initializer_sha256=hashlib.sha256(Path(command_seed or checkpoint).read_bytes()).hexdigest(),
         map_sha256=hashlib.sha256(map_path.read_bytes()).hexdigest(),
@@ -536,6 +626,170 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
     return report
 
 
+def time_prediction_seed(states, controls, fraction):
+    """Round a relaxed time UP to full packets and make an uncertified guess."""
+    count = controls.shape[1]
+    if (states.shape != (21, count+1) or controls.shape[0] != 2 or
+            not np.isfinite(states).all() or not np.isfinite(controls).all() or
+            not math.isfinite(fraction) or not 0. <= fraction <= 1.):
+        raise ValueError('invalid time predictor primal')
+    predicted_lap = count*(.024+.001*fraction)
+    target = int(math.ceil(predicted_lap/.025-1.e-9))
+    if not 30 <= target < count:
+        return None
+    query = np.linspace(0., 1., target+1)
+    grid = np.linspace(0., 1., count+1)
+    state = np.array([np.interp(query, grid, row) for row in states])
+    held = controls[:, np.arange(target, dtype=np.int64)*count//target].copy()
+    return state, held, predicted_lap
+
+
+def solve_time_predictor(*, repo, command_seed, map_path, output, workers=8,
+                         iterations=200, stagnation_iterations=80, margin=.05,
+                         cancel_requested=None, resume_checkpoint=None):
+    """Minimum-time predictor followed by an obligatory exact-grid repair.
+
+    Interpolates the fixed 24/25 ms source transition MAPS, not fitted vehicle
+    forces. This relaxation has no physical certificate. It makes time, pose,
+    hidden states and controls joint decisions from the feasible incumbent.
+    Only solve_witness + certify_witness may approve the resampled proposal.
+    """
+    repo, output, command_seed = map(Path, (repo, output, command_seed))
+    if output.exists():
+        raise FileExistsError('refusing to overwrite minimum-time predictor')
+    output.mkdir(parents=True)
+    function, digest = production_command_map(repo, repo/'build_task/command_ocp')
+    with np.load(command_seed, allow_pickle=False) as data:
+        count = data['controls'].shape[1]
+    initial_x, initial_u, winding, lap = load_command_seed(command_seed, count)
+    opti, x, u, fraction = command_problem(repo, function, digest, initial_x, initial_u,
+        winding, MapGrid.load(map_path), margin, workers, time_predictor=True)
+    seed_hash = hashlib.sha256(command_seed.read_bytes()).hexdigest()
+    map_hash = hashlib.sha256(Path(map_path).read_bytes()).hexdigest()
+    metadata = Path(map_path).with_suffix('.yaml')
+    metadata_hash = hashlib.sha256(metadata.read_bytes()).hexdigest() if metadata.exists() else ''
+    if resume_checkpoint is not None:
+        with np.load(resume_checkpoint, allow_pickle=False) as saved:
+            if (str(saved['schema'].item()) != 'source-time-predictor/v1' or
+                    str(saved['source_sha256'].item()) != digest or
+                    str(saved['seed_sha256'].item()) != seed_hash or
+                    str(saved['map_sha256'].item()) != map_hash or
+                    str(saved['map_metadata_sha256'].item()) != metadata_hash or
+                    saved['state'].shape != initial_x.shape):
+                raise ValueError('time predictor checkpoint contract differs')
+            opti.set_initial(x, saved['state'])
+            opti.set_initial(u, saved['controls'])
+            opti.set_initial(fraction, float(saved['fraction']))
+    opti.solver('ipopt', {'expand': False, 'print_time': False}, {
+        'max_iter': iterations, 'hessian_approximation': 'limited-memory',
+        'mu_strategy': 'adaptive', 'bound_relax_factor': 0.,
+        'tol': 1.e-6, 'acceptable_tol': 1.e-5, 'print_level': 5})
+    evaluator = ca.Function('time_predictor_constraints', [opti.x], [opti.g])
+    lower = np.asarray(opti.value(opti.lbg, opti.initial())).reshape(-1)
+    upper = np.asarray(opti.value(opti.ubg, opti.initial())).reshape(-1)
+    def violation(flat):
+        values = np.asarray(evaluator(flat)).reshape(-1)
+        return float(np.max(np.maximum(np.maximum(lower-values, values-upper), 0.)))
+    best, proposals, progress, proposal_progress = [None], {}, [lap, 0], [float('inf')]
+    def checkpoint(name, candidate, iteration):
+        save_npz_checkpoint(output/name, schema='source-time-predictor/v1',
+            state=candidate['state'], controls=candidate['controls'], fraction=candidate['fraction'],
+            lap_time_s=candidate['lap_s'], source_sha256=digest, seed_sha256=seed_hash,
+            map_sha256=map_hash, map_metadata_sha256=metadata_hash,
+            max_constraint_violation=candidate['residual'], iteration=iteration, source_certified=False)
+    def observe(iteration, initial=False, terminal=False):
+        if cancel_requested is not None and cancel_requested():
+            raise RuntimeError('time predictor interrupted')
+        if not initial and not terminal and iteration % 5:
+            return
+        getter = (lambda value: opti.value(value, opti.initial())) if initial else opti.debug.value
+        flat = np.asarray(getter(opti.x)).reshape(-1)
+        residual = violation(flat)
+        theta = float(getter(fraction))
+        duration = count*(.024+.001*theta)
+        rank = (residual > 1.e-4, duration if residual <= 1.e-4 else residual)
+        current = dict(state=np.asarray(getter(x)), controls=np.asarray(getter(u)),
+                       fraction=theta, residual=residual, lap_s=duration, rank=rank)
+        if np.isfinite(residual) and (best[0] is None or rank < best[0]['rank']):
+            best[0] = current
+            checkpoint('best_predictor.npz', current, iteration)
+        target = int(math.ceil(duration/.025-1.e-9))
+        # A useful initial guess need not pass the relaxed NLP's feasibility
+        # gate. Preserve shorter iterates for exact-map comparison/repair;
+        # never call them source-feasible merely because they improve time.
+        if (0. <= theta <= 1. and 30 <= target < count and np.isfinite(residual)
+                and (target not in proposals or residual < proposals[target]['residual'])):
+            proposals[target] = current
+            checkpoint(f'time_candidate_{target:04d}.npz', current, iteration)
+            if residual <= min(c['residual'] for c in proposals.values()):
+                checkpoint('best_time_candidate.npz', current, iteration)
+        if residual <= 1.e-4 and duration < progress[0]-1.e-5:
+            progress[:] = [duration, iteration]
+        print(json.dumps(dict(stage='minimum-time predictor', iteration=iteration,
+            source_lap_s=lap, predicted_lap_s=duration, fraction=theta,
+            max_constraint_violation=residual, source_certified=False)), flush=True)
+        if 30 <= target < count and residual < proposal_progress[0]*.98:
+            # Once a whole-packet gain is proposed, allow its feasibility to
+            # improve before demanding another fully feasible time iterate.
+            proposal_progress[0] = residual
+            progress[1] = iteration
+        if not initial and not terminal and stagnation_iterations and iteration-progress[1] >= stagnation_iterations:
+            raise RuntimeError('no feasible time improvement; predictor primal retained')
+    print(json.dumps(dict(stage='minimum-time predictor setup', intervals=count,
+        source_lap_s=lap, initial_residual=violation(
+            np.asarray(opti.value(opti.x, opti.initial())).reshape(-1)),
+        max_iterations=iterations, workers=workers, source_certified=False)), flush=True)
+    observe(0, initial=True)
+    opti.callback(observe)
+    started, error = time.monotonic(), None
+    try:
+        opti.solve_limited()
+    except RuntimeError as exception:
+        error = str(exception).splitlines()[-1]
+    if cancel_requested is not None and cancel_requested():
+        raise KeyboardInterrupt('time predictor interrupted; checkpoint retained')
+    # Include the terminal iterate even when it is between callback samples.
+    observe(int(opti.stats().get('iter_count', 0)), terminal=True)
+    candidate = best[0]
+    report = dict(status='no_time_proposal', mode='source-24-25ms-chord/v1',
+        source_certified=False, unity_validated=False, runtime_promoted=False,
+        source_plant_sha256=digest, initializer=str(command_seed),
+        predicted_lap_s=candidate['lap_s'] if candidate else lap,
+        source_lap_s=lap, max_constraint_violation=candidate['residual'] if candidate else None,
+        ipopt_iterations=opti.stats().get('iter_count'), ipopt_status=opti.stats().get('return_status'),
+        elapsed_s=time.monotonic()-started, error=error,
+        limitation='Interpolated transition predictor only; exact 25ms repair and certification required.')
+    comparisons = []
+    selected = None
+    for target in sorted(proposals):
+        point = proposals[target]
+        state, held, predicted_lap = time_prediction_seed(point['state'], point['controls'], point['fraction'])
+        state, conditioning = recondition_command_seed(function, state, held, workers)
+        defect = conditioning['scaled_defect_after']
+        baseline_x, baseline_u, _, _ = load_command_seed(command_seed, target)
+        _, baseline_conditioning = recondition_command_seed(function, baseline_x, baseline_u, workers)
+        baseline_defect = baseline_conditioning['scaled_defect_after']
+        comparisons.append(dict(intervals=target, exact_initial_dynamic_defect=defect,
+            resampled_initial_dynamic_defect=baseline_defect, predictor_residual=point['residual'],
+            proposed_conditioning=conditioning, baseline_conditioning=baseline_conditioning))
+        if defect < baseline_defect and (selected is None or defect < selected[3]):
+            selected = (state, held, predicted_lap, defect, baseline_defect, point['residual'])
+    report['initializer_comparisons'] = comparisons
+    if selected is not None:
+        state, held, predicted_lap, defect, baseline_defect, predictor_residual = selected
+        seed = output/'proposed_seed.npz'
+        save_command_checkpoint(seed, state, held, digest, defect, int(report['ipopt_iterations']))
+        report.update(status='uncertified_time_proposal', proposed_seed=str(seed),
+            proposed_intervals=held.shape[1], trial_lap_s=held.shape[1]*.025,
+            predicted_lap_s=predicted_lap, exact_initial_dynamic_defect=defect,
+            resampled_initial_dynamic_defect=baseline_defect, predictor_residual=predictor_residual,
+            best_feasible_predictor_residual=report['max_constraint_violation'],
+            max_constraint_violation=predictor_residual)
+    save_json_checkpoint(output/'report.json', report)
+    print(json.dumps(report), flush=True)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo-root', type=Path, default=Path(__file__).resolve().parents[1])
@@ -547,6 +801,11 @@ def main():
                         help='Remove one source-selected packet instead of resampling all hidden history')
     parser.add_argument('--validate-only', action='store_true',
                         help='Recheck --command-seed and export only if source gates pass; no IPOPT')
+    parser.add_argument('--time-predictor', action='store_true',
+                        help='Minimum-time source-map relaxation; creates an uncertified exact-grid seed')
+    parser.add_argument('--resume-predictor', type=Path)
+    parser.add_argument('--recondition-seed', action='store_true',
+                        help='Initialize internal histories by source propagation before the exact NLP')
     parser.add_argument('--workers', type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument('--refine-clearance-passes', type=int, default=0,
                         help='Add exact source-tick wall cuts after a failed margin check; bounded extra solves')
@@ -563,6 +822,13 @@ def main():
     if args.refine_clearance_passes < 0 or args.refine_clearance_passes > 10:
         parser.error('clearance refinement must be in [0,10]')
     if args.output.exists(): parser.error('output already exists')
+    if args.time_predictor:
+        if args.command_seed is None or args.validate_only or args.shorten_packet:
+            parser.error('--time-predictor requires --command-seed and its own output')
+        solve_time_predictor(repo=args.repo_root.resolve(), command_seed=args.command_seed,
+            map_path=args.map, output=args.output, workers=args.workers,
+            iterations=args.iterations, resume_checkpoint=args.resume_predictor)
+        return
     if args.validate_only:
         if args.command_seed is None: parser.error('--validate-only requires --command-seed')
         certify_witness(args.repo_root.resolve(), args.command_seed, args.map, args.output)
@@ -579,6 +845,7 @@ def main():
             map_path=args.map, output=destination,
             count=args.intervals, iterations=args.iterations, cpu_seconds=args.cpu_seconds,
             command_seed=seed, workers=args.workers, clearance_cuts=sorted(cuts),
+            recondition_seed=args.recondition_seed and index == 0,
             shorten_packet=args.shorten_packet and index == 0)
         if args.refine_clearance_passes:
             (args.output/'summary.json').write_text(json.dumps(dict(

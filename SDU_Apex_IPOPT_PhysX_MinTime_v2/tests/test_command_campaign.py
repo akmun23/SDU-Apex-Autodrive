@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from command_campaign import phase_seed, run_campaign, trial_counts, budget_increase_only
+from command_campaign import phase_seed, run_campaign, trial_counts, budget_increase_only, search_starts
 from command_ocp import load_command_seed, save_command_checkpoint
 
 
@@ -262,3 +262,71 @@ def test_active_primal_is_not_lost_when_larger_budgets_reopen_earlier_phases(set
     run_campaign(**dict(settings, iterations=200, stagnation_iterations=100),
                  solve=finish, certify=checked, resume=True)
     assert resumed[0]['command_seed'] == calls[1]['output']/'best_iterate.npz'
+
+
+def predictor_report(kwargs, *, proposal=True):
+    out = kwargs['output']
+    out.mkdir(parents=True)
+    seed = out/'proposed_seed.npz'
+    fixture_witness(seed, 39)
+    report = dict(status='uncertified_time_proposal' if proposal else 'no_time_proposal',
+        source_certified=False, predicted_lap_s=.970, trial_lap_s=.975,
+        proposed_intervals=39, proposed_seed=str(seed))
+    (out/'report.json').write_text(json.dumps(report))
+    return report
+
+
+def test_hybrid_proposal_must_be_repaired_and_independently_certified(setup):
+    calls, predictions = [], []
+    def solve(**kw):
+        calls.append(kw)
+        return solver_report(kw, passed=kw['command_seed'].name == 'proposed_seed.npz', residual=.1)
+    def predict(**kw):
+        predictions.append(kw)
+        return predictor_report(kw)
+    state = run_campaign(**setup, solve=solve, certify=checked, hybrid_time=True, predict=predict)
+    assert state['status'] == 'target_reached'
+    assert len(predictions) == 1 and len(calls) == 2
+    assert calls[1]['command_seed'] == predictions[0]['output']/'proposed_seed.npz'
+    assert 'time-predictor' in state['attempts'][-1]['key']
+    assert Path(state['best_witness']).parent.name == 'certified'
+
+
+def test_search_tries_smaller_duration_reductions_before_repeating_hard_phases():
+    counts = trial_counts(326, .1, 30)
+    starts = search_starts(counts, [0, 81, 163, 244], 326, True)
+    assert [c for c, phase, _ in starts if phase == 0] == [294, 310, 318, 322, 324, 325, 325]
+    assert starts[5:7] == [(325, 0, 'drop-packet'), (325, 0, 'resample')]
+    assert starts[7] == (294, 81, 'resample')
+    assert len(set(starts)) == len(starts) == 28
+
+
+def test_hybrid_no_proposal_continues_other_phases_without_repeating_predictor(setup):
+    predictions = []
+    def predict(**kw):
+        predictions.append(kw)
+        return predictor_report(kw, proposal=False)
+    state = run_campaign(**setup, solve=lambda **kw: solver_report(kw, passed=False, residual=.1),
+        certify=checked, hybrid_time=True, predict=predict)
+    assert state['status'] == 'plateau' and state['best_lap_s'] == 1.
+    assert len(predictions) == 1 and len(state['attempts']) == 4
+
+
+def test_interrupted_time_predictor_resumes_checkpoint_before_exact_repair(setup):
+    predictions = []
+    def interrupt(**kw):
+        predictions.append(kw)
+        kw['output'].mkdir(parents=True)
+        (kw['output']/'best_predictor.npz').write_bytes(b'checkpoint contract handled by predictor')
+        raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        run_campaign(**setup, solve=lambda **kw: solver_report(kw, passed=False, residual=.1),
+                     certify=checked, hybrid_time=True, predict=interrupt)
+    def resume(**kw):
+        assert kw['resume_checkpoint'] == predictions[0]['output']/'best_predictor.npz'
+        assert kw['output'] != predictions[0]['output']
+        return predictor_report(kw)
+    state = run_campaign(**setup, solve=lambda **kw: solver_report(kw, passed=True),
+                         certify=checked, hybrid_time=True, predict=resume, resume=True)
+    assert state['status'] == 'target_reached'
+    assert state['attempts'][-1]['key'].endswith('time-predictor')

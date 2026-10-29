@@ -7,6 +7,9 @@ import pytest
 from command_ocp import (production_command_map, production_fixed_prefix,
                          mapped_transition, load_command_seed, export_reference)
 from command_ocp import shorten_seed_by_packet
+from command_ocp import time_prediction_seed, certify_witness, save_npz_checkpoint
+from command_ocp import recondition_command_seed
+from command_ocp import command_problem, STATE_SCALES
 from physics import SourcePlant
 
 
@@ -188,3 +191,74 @@ def test_export_keeps_exact_source_positions_and_separates_time_semantics(tmp_pa
     np.testing.assert_allclose(witness[:, 12], .2)
     np.testing.assert_allclose(witness[:, 13], np.repeat(commands[0], 25))
     np.testing.assert_allclose(witness[:, 14], .2)
+
+
+def test_time_proposal_rounds_up_and_preserves_phase_and_packet_ownership():
+    states = np.arange(21*101, dtype=float).reshape(21, 101)
+    held = np.vstack([np.linspace(-.4, .4, 100), np.linspace(.01, .4, 100)])
+    guessed, commands, time = time_prediction_seed(states, held, .5)
+    assert time == pytest.approx(2.45)
+    assert commands.shape == (2, 98)
+    assert commands.shape[1]*.025 >= time
+    np.testing.assert_array_equal(guessed[:, [0, -1]], states[:, [0, -1]])
+    np.testing.assert_array_equal(commands, held[:, np.arange(98)*100//98])
+    assert time_prediction_seed(states, held, 1.) is None
+    with pytest.raises(ValueError):
+        time_prediction_seed(states, held, float('nan'))
+
+
+def test_raw_time_relaxation_is_never_a_source_witness(tmp_path):
+    path = tmp_path/'predictor.npz'
+    save_npz_checkpoint(path, schema='source-time-predictor/v1', state=np.zeros((21, 41)),
+                        controls=np.zeros((2, 40)), fraction=.5, source_certified=False)
+    with pytest.raises(ValueError, match='not a production command initializer'):
+        load_command_seed(path, 40)
+    # Rejected before the compiler/model/map is accessed, even if a caller
+    # mistakenly sends the predictor straight to the certification function.
+    with pytest.raises(ValueError, match='unknown command schema'):
+        certify_witness(tmp_path, path, tmp_path/'unused.pgm', tmp_path/'certified')
+
+
+def test_source_history_initialization_preserves_body_guess_and_propagates_hidden_states(maps):
+    function, _, plant, _ = maps
+    plant.reset(0., 0., 0., 3.)
+    plant.step(0., .1)
+    count = 40
+    states = np.repeat(np.r_[0., 0., 0., plant.input.state[:18]][:, None], count+1, axis=1)
+    phase = np.linspace(0., 2*np.pi, count+1)
+    states[:3] = np.vstack([np.cos(phase), np.sin(phase), phase])
+    states[6:10] = 1000.  # deliberately inconsistent numerical initialization
+    states[16] = .5
+    controls = np.vstack([np.zeros(count), np.full(count, .1)])
+    original_controls = controls.copy()
+    fixed, report = recondition_command_seed(function, states, controls, 1)
+    np.testing.assert_array_equal(fixed[:6], states[:6])
+    np.testing.assert_array_equal(controls, original_controls)
+    assert report['scaled_defect_after'] < report['scaled_defect_before']
+    propagated = np.asarray(mapped_transition(function, count, 1)(
+        np.vstack([fixed[:, :-1], controls])))
+    np.testing.assert_allclose(propagated[6:], fixed[6:, 1:], atol=1.e-12, rtol=0.)
+    # The prescribed body/yaw path above is NOT a motion-prediction fixture.
+    assert report['prescribed_body_initializer'] and not report['source_certified']
+
+
+def test_cost_rescaling_preserves_every_relative_penalty(maps):
+    from map_track import MapGrid
+    root = Path(__file__).resolve().parents[2]
+    function, _, _, digest = maps
+    # Literal prefix library used by command_problem lives in its content cache.
+    production_command_map(root, root/'build_task/command_ocp')
+    count = 4
+    initial_x = np.zeros((21, count+1))
+    initial_u = np.vstack([np.linspace(-.2, .2, count), np.linspace(.1, .2, count)])
+    image = np.full((80, 80), 255, dtype=np.uint8)
+    grid = MapGrid(image, image > 0, .05, np.zeros(2), 0., np.full((80, 80), 3.))
+    opti, x, u, _ = command_problem(root, function, digest, initial_x, initial_u, 1, grid, .05, 1)
+    trial_x = initial_x+STATE_SCALES[:, None]*.03
+    trial_u = initial_u+.01
+    opti.set_initial(x, trial_x)
+    opti.set_initial(u, trial_u)
+    old_cost = (.001*np.sum(((trial_x-initial_x)/STATE_SCALES[:, None])**2)/count
+                +.001*np.sum((trial_u-initial_u)**2)/count
+                +.0001*np.sum(np.diff(trial_u, axis=1)**2)/count)
+    assert float(opti.value(opti.f, opti.initial())) == pytest.approx(old_cost*count/.001)
