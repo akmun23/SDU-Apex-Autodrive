@@ -31,6 +31,35 @@ STATE_SCALES = np.array([1., 1., 1., 2., 1., 2., *([150.]*4),
                           .02, 1., .12, 2., .1, 2., .35, *([.04]*4)])
 
 
+def save_command_checkpoint(path, state, controls, digest, residual, iteration):
+    """Power-loss-safe primal checkpoint; feasibility must still be checked."""
+    temporary = path.with_suffix('.tmp.npz')
+    with temporary.open('wb') as stream:
+        np.savez_compressed(stream, schema='production-command-ocp/v1',
+            state=state, controls=controls, dt_s=.025,
+            lap_time_s=controls.shape[1]*.025, source_sha256=digest,
+            max_constraint_violation=residual, iteration=iteration)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+
+
+def save_json_checkpoint(path, value):
+    temporary = path.with_suffix('.tmp.json')
+    with temporary.open('w') as stream:
+        json.dump(value, stream, indent=2, allow_nan=False)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+
+
 def production_command_map(repo: Path, build: Path):
     repo, build = Path(repo).resolve(), Path(build).resolve()
     files = [repo/'f1tenth_mpc/src/unity_source_plant.cpp',
@@ -133,6 +162,15 @@ def load_command_seed(path, count):
                 not np.isfinite(x).all() or not np.isfinite(u).all()
                 or float(archive['dt_s']) != .025):
             raise ValueError('malformed command initializer')
+    winding = round((x[2, -1]-x[2, 0])/(2*math.pi))
+    if abs(winding) != 1: raise ValueError('initializer is not one track circuit')
+    if count == u.shape[1]:
+        # A clearance-cut restart MUST preserve the optimized shooting states
+        # and held commands bit for bit. Replacing shooting states with the
+        # recursive trace discards the saved primal. Floating query*count then
+        # floor also selected the PREVIOUS packet at exact integer boundaries
+        # (15 commands in the 195-packet witness). Never resample a warm start.
+        return x.copy(), u.copy(), winding, count*.025
     old_grid = np.linspace(0., 1., x.shape[1])
     query = np.linspace(0., 1., count+1)
     dense_path = path.with_name('source_trace.npz')
@@ -151,9 +189,9 @@ def load_command_seed(path, count):
         states = np.array([np.interp(query, old_grid, row) for row in x])
     # Held commands stay held in the initializer. The new trial must solve all
     # its dynamics again; changing duration never transfers certification.
-    control_index = np.minimum(u.shape[1]-1, (query[:-1]*u.shape[1]).astype(int))
-    winding = round((x[2, -1]-x[2, 0])/(2*math.pi))
-    if abs(winding) != 1: raise ValueError('initializer is not one track circuit')
+    # Integer division gives exact left-closed packet ownership, including
+    # shared boundaries when the old and new sample counts have common factors.
+    control_index = np.arange(count, dtype=np.int64)*u.shape[1]//count
     controls = u[:, control_index].copy()
     if count != u.shape[1] and dense_path.exists():
         # End rack is a physically meaningful initial target; continuous rack
@@ -161,6 +199,30 @@ def load_command_seed(path, count):
         # This is only initialization, never a post-solve control correction.
         controls[0] = states[16, 1:]
     return states, controls, winding, u.shape[1]*.025
+
+
+def shorten_seed_by_packet(path, count, function, workers):
+    """Alternative one-packet continuation; no resampling of hidden history.
+
+    Delete one interior shooting node and its preceding held input. All other
+    25 ms transitions remain the saved primal; only the bridge across the gap
+    needs repair. Select the gap by measured source-map defect, not by a
+    guessed speed/steering regime. This is INITIALIZATION, not feasibility.
+    """
+    with np.load(path, allow_pickle=False) as archive:
+        old_count = archive['controls'].shape[1]
+    if count != old_count-1:
+        raise ValueError('packet shortening requires exactly one fewer interval')
+    state, control, winding, lap = load_command_seed(path, old_count)
+    predicted = np.asarray(mapped_transition(function, count, workers)(
+        np.vstack([state[:, :count], control[:, 1:]])))
+    defects = np.max(np.abs((predicted-state[:, 2:])/STATE_SCALES[:, None]), axis=0)
+    packet = int(np.argmin(defects))
+    print(json.dumps(dict(seed_strategy='drop-one-packet', removed_packet=packet,
+        gap_scaled_dynamic_defect=float(defects[packet]),
+        source_lap_s=lap, trial_lap_s=count*.025)), flush=True)
+    return (np.delete(state, packet+1, axis=1), np.delete(control, packet, axis=1),
+            winding, lap)
 
 
 def check_full_witness(function, state, controls, grid, margin, *, repo=None, trace_path=None):
@@ -311,7 +373,7 @@ def certify_witness(repo, path, map_path, output):
         state=states, controls=controls, dt_s=.025, lap_time_s=controls.shape[1]*.025,
         max_constraint_violation=max(defect, periodic_max), source_sha256=digest)
     if passed: report['reference_export'] = export_reference(output/'source_trace.npz', grid, output)
-    (output/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+    save_json_checkpoint(output/'report.json', report)
     print(json.dumps({key:report[key] for key in ('status', 'trial_lap_s',
         'max_local_dynamic_defect', 'max_periodicity_defect')}), flush=True)
     return report
@@ -319,13 +381,20 @@ def certify_witness(repo, path, map_path, output):
 
 def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
                   count=197, iterations=80, cpu_seconds=120., margin=.05,
-                  command_seed=None, workers=8, clearance_cuts=()):
+                  command_seed=None, workers=8, clearance_cuts=(),
+                  shorten_packet=False, stagnation_iterations=0, cancel_requested=None):
     if output.exists(): raise FileExistsError('refusing to overwrite command OCP')
     output.mkdir(parents=True)
     function, digest = production_command_map(repo, repo/'build_task/command_ocp')
-    initial_x, initial_u, winding, source_lap = (
-        load_command_seed(command_seed, count) if command_seed is not None else
-        load_seed(checkpoint, mesh, audit, count, repo))
+    if shorten_packet:
+        if command_seed is None:
+            raise ValueError('packet shortening requires a command witness')
+        initial_x, initial_u, winding, source_lap = shorten_seed_by_packet(
+            command_seed, count, function, workers)
+    else:
+        initial_x, initial_u, winding, source_lap = (
+            load_command_seed(command_seed, count) if command_seed is not None else
+            load_seed(checkpoint, mesh, audit, count, repo))
     grid = MapGrid.load(map_path)
     wall_distance = clearance_interpolant(grid)
     opti = ca.Opti()
@@ -398,19 +467,35 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         source_clearance_cuts=len(clearance_cuts),
         source_sha256=digest)), flush=True)
     best = [None]
+    significant = [float('inf'), 0]
+    stagnated = [False]
     def callback(iteration):
+        if cancel_requested is not None and cancel_requested():
+            raise RuntimeError('command campaign interruption requested')
         if iteration % 5: return
         flat = np.asarray(opti.debug.value(opti.x)).reshape(-1)
         residual = violation(flat)
         print(json.dumps(dict(iteration=int(iteration), trial_lap_s=count*.025,
                                max_constraint_violation=residual)), flush=True)
-        if residual <= 1.e-4:
+        if np.isfinite(residual) and (best[0] is None or residual < best[0][2]):
             best[0] = (np.asarray(opti.debug.value(x)), np.asarray(opti.debug.value(u)), residual)
+            save_command_checkpoint(output/'best_iterate.npz', *best[0][:2],
+                                    digest, residual, int(iteration))
+        if residual < significant[0]*.98:
+            significant[:] = [residual, int(iteration)]
+        if stagnation_iterations and iteration-significant[1] >= stagnation_iterations:
+            stagnated[0] = True
+            raise RuntimeError('command feasibility stagnated; durable best iterate saved')
     opti.callback(callback)
     started = time.monotonic()
     error = None
     try: opti.solve_limited()
     except RuntimeError as exception: error = str(exception).splitlines()[-1]
+    # CasADi converts exceptions thrown inside a Python callback (including
+    # KeyboardInterrupt) into solver errors. Check the signal flag OUTSIDE its
+    # C++ stack so a service stop cannot be swallowed as another failed solve.
+    if cancel_requested is not None and cancel_requested():
+        raise KeyboardInterrupt('campaign interrupted; durable primal retained')
     stats = opti.stats()
     flat = np.asarray(opti.debug.value(opti.x)).reshape(-1)
     residual = violation(flat)
@@ -421,14 +506,17 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
                                 trace_path=output/'source_trace.npz')
     passed = (residual <= 1.e-4 and rollout['full_lap_xy_max_m'] <= .05
               and rollout['minimum_1ms_footprint_slack_m'] >= 0.)
-    np.savez_compressed(output/'witness.npz', schema=np.asarray('production-command-ocp/v1'),
-        state=states, controls=controls, dt_s=.025, lap_time_s=count*.025,
-        max_constraint_violation=residual, source_sha256=digest)
+    save_command_checkpoint(output/'witness.npz', states, controls, digest, residual,
+                            int(stats.get('iter_count', -1)))
     report = dict(schema=1, status='source_witness_passed' if passed else 'no_validated_witness',
         source_plant_sha256=digest, trial_lap_s=count*.025, elapsed_s=time.monotonic()-started,
+        initial_residual=violation(initial), last_significant_iteration=significant[1],
+        termination_reason='feasibility_stagnation' if stagnated[0] else stats.get('return_status'),
         max_constraint_violation=residual, ipopt_status=stats.get('return_status'),
         ipopt_iterations=stats.get('iter_count'), error=error, rollout=rollout,
         jacobian_workers=workers, initializer=str(command_seed or checkpoint),
+        stagnation_iterations=stagnation_iterations,
+        initializer_strategy='drop-one-packet' if shorten_packet else 'resample-or-exact-restart',
         source_clearance_cuts=[list(item) for item in clearance_cuts],
         initializer_sha256=hashlib.sha256(Path(command_seed or checkpoint).read_bytes()).hexdigest(),
         map_sha256=hashlib.sha256(map_path.read_bytes()).hexdigest(),
@@ -439,7 +527,7 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
             'Perimeter checked at every 1 ms source tick; continuous inter-tick contact and Unity remain unvalidated.'])
     if passed:
         report['reference_export'] = export_reference(output/'source_trace.npz', grid, output)
-    (output/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+    save_json_checkpoint(output/'report.json', report)
     print(json.dumps(dict(status=report['status'], trial_lap_s=count*.025,
         iterations=report['ipopt_iterations'], elapsed_s=report['elapsed_s'],
         residual=residual, recursive_xy_max_m=rollout['full_lap_xy_max_m'],
@@ -455,6 +543,8 @@ def main():
         parser.add_argument('--'+name, type=Path, required=name in ('map', 'output'))
     parser.add_argument('--command-seed', type=Path,
                         help='Resample an earlier command witness as an uncertified initializer')
+    parser.add_argument('--shorten-packet', action='store_true',
+                        help='Remove one source-selected packet instead of resampling all hidden history')
     parser.add_argument('--validate-only', action='store_true',
                         help='Recheck --command-seed and export only if source gates pass; no IPOPT')
     parser.add_argument('--workers', type=int, default=min(8, os.cpu_count() or 1))
@@ -488,7 +578,8 @@ def main():
             audit=args.audit if seed is None else None,
             map_path=args.map, output=destination,
             count=args.intervals, iterations=args.iterations, cpu_seconds=args.cpu_seconds,
-            command_seed=seed, workers=args.workers, clearance_cuts=sorted(cuts))
+            command_seed=seed, workers=args.workers, clearance_cuts=sorted(cuts),
+            shorten_packet=args.shorten_packet and index == 0)
         if args.refine_clearance_passes:
             (args.output/'summary.json').write_text(json.dumps(dict(
                 latest_pass=index, latest_report=str(destination/'report.json'),

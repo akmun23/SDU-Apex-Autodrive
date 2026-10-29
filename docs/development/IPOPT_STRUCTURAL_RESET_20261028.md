@@ -2,6 +2,14 @@
 
 ## Current objective
 
+Latest checkpoint (2026-10-29): **4.800 s** source-feasible witness, real MPC
+ten-scored-lap results **50.293 s / 50.287 s**, no collisions. The autonomous
+campaign is searching for a shorter source-feasible lap. Full current status,
+reproduction and unattended operation:
+[`RACING_50P287_AND_AUTOMATION_20261029.md`](RACING_50P287_AND_AUTOMATION_20261029.md).
+The sections below are the chronological investigation, not current service
+status. Sub-50 s driving is still unachieved.
+
 Keep the 51.030 s ten-scored-lap MPC setup frozen while finding a substantially
 better, source-feasible and command-realizable raceline. More iterations alone
 are not the proposed solution. A max-iteration exit proves neither optimality
@@ -319,3 +327,75 @@ Source-reference online validation is the next test. No result for it is yet
 claimed. Commit `fb76cfc46` preserving the optimizer, candidate and source
 validation has been pushed and remote SHA verified. New coupling changes are
 being verified/committed separately.
+
+## 2026-10-29: actual source-reference driving result
+
+The next test DID pass: `live_runs/mpc_source_witness4p875_20261029_01/`
+completed warmup plus ten scored laps, no collision or driving controller fault.
+Ten-lap total **50.616999149 s**, mean **5.061699915 s**, population standard
+deviation **0.037128 s**. Gate median/p95/max **9.283/17.300/19.545 ms**,
+zero deadline-deferred cycles. Cross-track diagnostic RMSE **0.06891 m**,
+speed-error RMSE **0.54436 m/s**. This is 0.235 s faster than the same geometry
+without its source-state/control reference and 0.413 s faster than 51.030 s.
+Source-reference implementation was committed/pushed as `a5d67ad2c`.
+
+A joint tracking/speed-weight increase with less input damping did NOT pass:
+`live_runs/mpc_source_tracking4p875_20261029_01/` stopped after warmup and one
+scored lap on a corridor rejection. That candidate's weights are not promoted;
+its exact overlay remains archived with its run. Do not repeat that experiment
+unchanged or confuse it with the best profile (`mpc_record_51p030.yaml`).
+
+Against Unity, the best run's 750 ms recorded-command replay gives XY RMSE
+**1.306 cm**, p95 **2.285 cm** using the odometry command queue. Reconstructing
+the actual sent queue OFFLINE gives **1.135 cm**, p95 **1.931 cm**, forward-speed
+RMSE **0.00719 m/s**, yaw-rate RMSE **0.00945 rad/s**. All 2,216 windows with
+internally consistent truth have full-path error below 5 cm in that diagnostic;
+32 truth pose/twist-closure failures remain explicitly classified, with raw
+maximum XY error about 11.2 cm. Do not silently omit those tails, claim perfect
+Unity parity or use restricted bridge diagnostics in runtime odometry. The
+queue association remains an online investigation, not a new tire fit.
+
+The evaluator's CSV reader was also fixed: a source-witness schema comment
+must not be mistaken for the trajectory header. A regression test covers it.
+
+## 2026-10-29: restart bug fixed; 4.800 s candidate
+
+After the machine shutdown, the long v354 service is no longer running. It
+stopped in stage 3/6 (trust 64), iteration 4,719/6,000. Current iterate 4.916307 s
+has residual 0.00618 and is NOT feasible at the 0.001 limit. Its best saved
+feasible sample is **4.921756 s**, slower than the separate 4.875 s command
+witness. There is no newly finished faster legacy line to transfer.
+
+Found and fixed an actual initialization error in `load_command_seed`:
+floating-point `floor(query * old_count)` assigned previous commands at exact
+packet boundaries. A 195-packet restart changed 15 commands (maximum target/q
+difference 0.02236), raising the saved dynamic defect from **1.558e-7 to 0.09082**.
+The 192-packet restart changed 21 commands and raised **1.967e-5 to 0.37221**.
+Those were not tire-model limitations or evidence of a lap-time floor.
+
+Same-size restarts now copy the complete primal and controls exactly. Changed
+mesh sizes assign held packet ownership by exact integer division; the dense
+1 ms initializer is used only when actually resampling. Three regression cases
+cover 192/195-packet restart parity and shared packet boundaries; focused command
+OCP tests **10/10** pass. No production physics, observer or MPC weights changed.
+
+With that fix, the existing near-feasible 4.800 s point plus four measured wall
+cuts converged in **17 iterations / 21.14 s** (IPOPT itself 19.64 s): maximum
+scaled violation **3.28804e-7**, full-lap recursive XY disagreement **0.0132 mm**,
+minimum conservative source-tick slack beyond 5 cm **0.0358 mm**. Those are
+source self-consistency and mapped-clearance checks, NOT Unity accuracy.
+Source fingerprint `8f4e47544d5e5205f31ec83a4e067f8c980c9cb1f588b127a46cfd559ae77747`.
+
+The original output directory was moved to desktop Trash during preparation.
+Rather than undoing external cleanup, recovered the exact saved witness into
+`live_runs/source_command4p800_certified_20261029/` with an independent full
+source certification/re-export (no solve, no geometry change). Local dynamic
+defect **3.28804e-7**, periodic defect zero; all source-tick margin checks pass.
+The 15-column candidate SHA is
+`03433092578e36f2dc143b3272c6bce507bef10675c1a2b96989c7757653e03b`.
+
+First supervised test:
+`live_runs/mpc_source_witness4p800_20261029_02/`, unchanged best weight/trust
+profile, warmup plus ten scored laps, immediate collision/fault stop. `_01`
+never launched: input path no longer existed; do not count it as a failed drive.
+Do not promote or claim a faster achieved lap until `_02` has completed.

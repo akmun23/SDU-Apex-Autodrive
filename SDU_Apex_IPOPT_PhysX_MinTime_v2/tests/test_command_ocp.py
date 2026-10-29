@@ -6,6 +6,7 @@ import pytest
 
 from command_ocp import (production_command_map, production_fixed_prefix,
                          mapped_transition, load_command_seed, export_reference)
+from command_ocp import shorten_seed_by_packet
 from physics import SourcePlant
 
 
@@ -110,6 +111,55 @@ def test_dense_seed_keeps_fast_internal_history_missing_from_25ms_nodes(tmp_path
     np.savez(tmp_path/'source_trace.npz', state=dense, commands=controls*2, dt_s=.001)
     with pytest.raises(ValueError, match='does not match'):
         load_command_seed(path, 60)
+
+
+@pytest.mark.parametrize('count', [192, 195])
+def test_clearance_restart_preserves_primal_and_every_held_packet(tmp_path, count):
+    states = np.arange(21*(count+1), dtype=float).reshape(21, count+1)*1.e-5
+    states[2, -1] = states[2, 0]+2*np.pi
+    controls = np.vstack([np.linspace(-.4, .4, count), np.linspace(.02, .3, count)])
+    path = tmp_path/'witness.npz'
+    np.savez(path, schema='production-command-ocp/v1', state=states, controls=controls, dt_s=.025)
+    # Even a genuine dense replay need not equal all shooting nodes. A restart
+    # preserves the primal instead of replacing it by that recursive history.
+    dense = np.repeat(states[:, :1], count*25+1, axis=1)
+    np.savez(tmp_path/'source_trace.npz', state=dense, commands=controls, dt_s=.001)
+    actual, held, winding, lap = load_command_seed(path, count)
+    np.testing.assert_array_equal(actual, states)
+    np.testing.assert_array_equal(held, controls)
+    assert winding == 1 and lap == count*.025
+
+
+def test_resampling_assigns_shared_packet_edges_using_exact_integers(tmp_path):
+    count, new_count = 195, 390
+    states = np.zeros((21, count+1))
+    states[2] = np.linspace(0., 2*np.pi, count+1)
+    controls = np.vstack([np.linspace(-.4, .4, count), np.linspace(.02, .3, count)])
+    path = tmp_path/'witness.npz'
+    np.savez(path, schema='production-command-ocp/v1', state=states, controls=controls, dt_s=.025)
+    _, held, _, _ = load_command_seed(path, new_count)
+    np.testing.assert_array_equal(held, np.repeat(controls, 2, axis=1))
+
+
+def test_packet_shortening_preserves_all_other_states_and_held_controls(tmp_path, maps):
+    function, _, plant, _ = maps
+    count = 40
+    plant.reset(0., 0., 0., 5.)
+    plant.step(.1, .1)
+    states = np.repeat(np.r_[0., 0., 0., plant.input.state[:18]][:, None], count+1, axis=1)
+    states[0] = np.arange(count+1)*.1
+    states[2, -1] = 2*np.pi
+    controls = np.vstack([np.linspace(.1, .3, count), np.linspace(.05, .2, count)])
+    path = tmp_path/'witness.npz'
+    np.savez(path, schema='production-command-ocp/v1', state=states, controls=controls, dt_s=.025)
+    actual, held, winding, lap = shorten_seed_by_packet(path, count-1, function, 1)
+    missing = next(k for k in range(count) if not np.any(held[0] == controls[0, k]))
+    np.testing.assert_array_equal(actual, np.delete(states, missing+1, axis=1))
+    np.testing.assert_array_equal(held, np.delete(controls, missing, axis=1))
+    np.testing.assert_array_equal(actual[:, -1], states[:, -1])
+    assert winding == 1 and lap == 1.
+    with pytest.raises(ValueError, match='exactly one fewer'):
+        shorten_seed_by_packet(path, count-2, function, 1)
 
 
 def test_export_keeps_exact_source_positions_and_separates_time_semantics(tmp_path):

@@ -2,8 +2,23 @@
 
 Current evidence and remaining work:
 [structural investigation](../docs/development/IPOPT_STRUCTURAL_RESET_20261028.md).
-Production racing remains the separate
-[51.030 s baseline](../docs/development/RACING_51P030_FREEZE_20261028.md).
+Latest practice result and autonomous construction:
+[50.287 s checkpoint](../docs/development/RACING_50P287_AND_AUTOMATION_20261029.md).
+The [51.030 s baseline](../docs/development/RACING_51P030_FREEZE_20261028.md)
+remains separate and reproducible.
+
+## Unattended search
+
+`tools/run_raceline_campaign.sh` starts/resumes a background user service.
+`command_campaign.py` repeatedly solves the production-command OCP with IPOPT,
+adds measured source-tick clearance cuts, independently certifies every new
+incumbent, then tries a shorter duration. It uses phase/mode initializations
+instead of endlessly repeating a stalled solve. Best primals and the campaign
+manifest are atomic/fsynced; resume is fingerprint-checked and writer-locked.
+The old valid line is never replaced by a faster infeasible iterate. It reports
+`plateau` honestly if all configured starts fail; there is no guarantee that
+every cycle improves or that this proves a physical floor. New outputs remain
+source-only candidates until supervised practice validation.
 
 ## Two distinct problems
 

@@ -1,0 +1,11 @@
+/**:
+  ros__parameters:
+    # Candidate, not the production default. 4.800 s run accounting assigns
+    # 206 ms/lap to outside-path travel versus 27 ms to forward-speed loss.
+    # Increase geometric tracking authority without the rejected 4x speed
+    # weight / 4x steering-damping reduction. Keep throttle/slip costs intact.
+    sqp_steering_trust_region_rad: 0.04
+    sqp_throttle_trust_region: 0.05
+    weight_e_y: 6000.0
+    weight_e_psi: 2000.0
+    weight_steering_slew: 1500.0
