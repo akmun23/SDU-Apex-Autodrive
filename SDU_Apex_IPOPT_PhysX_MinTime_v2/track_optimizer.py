@@ -73,6 +73,7 @@ def implementation_digest():
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for path in (Path(__file__), root/'command_ocp.py', root/'command_campaign.py',
+                 root/'elite_refinement.py',
                  root/'map_track.py', root/'min_curvature_seed.py', root/'physics.py',
                  root/'path_frame.py', root/'command_realizability.py',
                  root.parent/'tools/build_mapped_raceline.py'):
@@ -318,7 +319,7 @@ def geometry_starts(map_yaml, output, directions, cancel):
 def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
               phases=4, refinements=6, stagnation_iterations=250, prepare_only=False,
               bootstrap_only=False, cancel=None, driving_reference=None, hybrid_time=False,
-              command_seed=None):
+              command_seed=None, elite_refinements=2, elite_first=True):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -331,7 +332,8 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
     contract = dict(image_sha256=file_hash(image), metadata_sha256=file_hash(metadata),
         source_sha256=digest, optimizer_sha256=implementation_digest(),
         workers=workers, iterations=iterations, stagnation_iterations=stagnation_iterations, phases=phases,
-        refinements=refinements,
+        refinements=refinements, elite_refinements=elite_refinements,
+        elite_first=bool(elite_first),
         direction='unity_verified' if verified else 'clockwise',
         direction_reference_sha256=verified['sha256'] if verified else None,
         expected_winding=verified['winding'] if verified else -1, schema=2 if verified else 1)
@@ -472,7 +474,8 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                 map_path=bundled_image, output=campaign, target_seconds=None,
                 phases=phases, workers=workers, iterations=iterations, refinements=refinements,
                 stagnation_iterations=stagnation_iterations, coarse_fraction=.1,
-                hybrid_time=hybrid_time,
+                hybrid_time=hybrid_time, elite_refinements=elite_refinements,
+                elite_first=elite_first,
                 resume=(campaign/'campaign.json').exists(), cancel_requested=cancel,
                 on_improvement=promote)
             current['campaign_status'] = result['status']
@@ -546,6 +549,11 @@ def main():
                         help='patience without significant feasibility improvement (minimum 5)')
     parser.add_argument('--phases', type=int, default=4)
     parser.add_argument('--refinements', type=int, default=6)
+    parser.add_argument('--elite-refinements', type=int, default=2,
+                        help='equal-time clearance/archive attempts after all faster starts fail')
+    parser.add_argument('--no-elite-first', dest='elite_first', action='store_false',
+                        help='defer equal-time diversification until the first plateau')
+    parser.set_defaults(elite_first=True)
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--bootstrap-only', action='store_true')
     parser.add_argument('--hybrid-time-search', action='store_true',
@@ -555,7 +563,8 @@ def main():
     parser.add_argument('--describe', action='store_true', help='print resolved output/service metadata; no solve')
     args = parser.parse_args()
     if (not 1 <= args.workers <= (os.cpu_count() or 1) or args.iterations < 1
-            or args.phases < 1 or args.refinements < 0 or args.stagnation_iterations < 5):
+            or args.phases < 1 or args.refinements < 0 or args.stagnation_iterations < 5
+            or not 0 <= args.elite_refinements <= 3):
         parser.error('invalid solver search settings')
     image, metadata, config = resolve_map(args.map, args.yaml)
     driving_reference = args.driving_reference
@@ -595,6 +604,7 @@ def main():
         state = run_track(image=image, metadata=metadata, config=config, output=output,
             workers=args.workers, iterations=args.iterations, phases=args.phases,
             refinements=args.refinements, stagnation_iterations=args.stagnation_iterations,
+            elite_refinements=args.elite_refinements, elite_first=args.elite_first,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
             driving_reference=driving_reference,
             hybrid_time=args.hybrid_time_search,

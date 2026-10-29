@@ -310,8 +310,29 @@ class Dashboard:
             active_name = state.get('active_start')
             campaign = (self.optional(f'starts/{active_name}/campaign/campaign.json')
                         if active_name else {})
-            predicting = campaign.get('active_predictor')
-            active = ((predicting or campaign.get('active') or {})
+            # Multi-incumbent campaigns run one child branch synchronously.
+            # Prefer that branch's actual solver checkpoints, not a stale
+            # parent solve or the old incumbent's metrics.
+            elite_job = campaign.get('active_elite') or {}
+            child_campaign = {}
+            if elite_job.get('output'):
+                try:
+                    child_folder = self.workspace.path(elite_job['output'])
+                    child_campaign = self.optional(child_folder/'campaign.json')
+                except (ValueError, OSError) as error:
+                    self.warnings.append(f'Elite branch inaccessible: {error}')
+            active_campaign = child_campaign if child_campaign else campaign
+            polishing = campaign.get('active_elite_polish') or {}
+            polish_archive = {}
+            if polishing.get('output'):
+                try:
+                    polish_archive=self.optional(
+                        self.workspace.path(polishing['output'])/'elite.json')
+                except (OSError, ValueError) as error:
+                    self.warnings.append(f'Elite polishing state inaccessible: {error}')
+            predicting = active_campaign.get('active_predictor')
+            polish_active=polish_archive.get('active_attempt') or {}
+            active = ((predicting or polish_active or active_campaign.get('active') or {})
                       if state.get('stage') == 'adaptive_minimum_time_search' else (
                           state.get('starts', {}).get(active_name, {}).get('active') or {}))
             context = dict(active)
@@ -360,7 +381,29 @@ class Dashboard:
             age = max(0., now-self.log.log_mtime) if self.log.log_mtime is not None else None
             log_status = ('not_running' if not proc['alive'] else
                           'quiet' if age is None or age > 90 else 'active')
-            attempts = campaign.get('attempts', [])
+            attempts = active_campaign.get('attempts', [])
+            elites = []
+            for archive_path in (campaign.get('elite_archives') or {}).values():
+                try:
+                    archive = self.optional(archive_path)
+                    elites.extend(archive.get('accepted', []))
+                except (OSError, ValueError) as error:
+                    self.warnings.append(f'Elite archive unavailable: {error}')
+            elite_progress = dict(
+                enabled=bool(state.get('contract', {}).get('elite_refinements')),
+                polishing=polishing,
+                polishing_attempts=len(polish_archive.get('attempts',[])),
+                polishing_active=polish_active,
+                parent_attempts=len(campaign.get('attempts', [])),
+                current_attempts=len(attempts),
+                archived_alternatives=len(elites)+len(polish_archive.get('accepted',[])),
+                active_branch=elite_job,
+                child_status=child_campaign.get('status') if child_campaign else None,
+                explored_basins=len(campaign.get('elite_explored', [])),
+                archive_count=len(campaign.get('elite_archives', {})),
+                best_clearance_mm=(max((float(e.get('clearance_slack_m',0))
+                                       for e in elites+polish_archive.get('accepted',[])), default=None)),
+                recent_alternatives=elites[-6:])
             context.update(trial_lap_s=trial_s, phase=int(trial[2]) if trial else None,
                            strategy='minimum-time predictor' if predicting else trial[3] if trial else None,
                            time_predictor=bool(predicting))
@@ -437,6 +480,7 @@ class Dashboard:
                           ipopt=dict(self.log.ipopt) if matches else {},
                           checkpoint=checkpoint, residuals=points, ipopt_history=ipopt_points, solve_report=report,
                           completed_attempts=len(attempts),
+                          elite_progress=elite_progress,
                           passed_attempts=sum(bool(v.get('certified')) for v in attempts),
                           geometry_starts=state.get('geometry_starts', []),
                           attempts=attempts[-12:][::-1], events=list(self.log.events)[::-1],

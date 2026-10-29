@@ -121,12 +121,14 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                  refinements=6, resume=False, include_packet_starts=True,
                  solve=solve_witness, certify=certify_witness, digest=None,
                  cancel_requested=None, coarse_fraction=0., on_improvement=None,
-                 hybrid_time=False, predict=solve_time_predictor):
+                 hybrid_time=False, predict=solve_time_predictor,
+                 elite_refinements=0, elite_polish=None, elite_first=False):
     repo, seed, map_path, output = [Path(p).resolve() for p in (repo, seed, map_path, output)]
     if ((target_seconds is not None and
             (not math.isfinite(target_seconds) or target_seconds < .75)) or phases < 1
             or not math.isfinite(coarse_fraction) or not 0. <= coarse_fraction < 1.
-            or refinements < 0 or iterations < 1 or stagnation_iterations < 5):
+            or refinements < 0 or iterations < 1 or stagnation_iterations < 5
+            or elite_refinements < 0 or elite_refinements > 3):
         raise ValueError('invalid campaign target or search settings')
     if digest is None:
         _, digest = production_command_map(repo, repo/'build_task/command_ocp')
@@ -138,6 +140,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         include_packet_starts=include_packet_starts, coarse_fraction=coarse_fraction,
         map_metadata_sha256=(file_hash(map_path.with_suffix('.yaml'))
                              if map_path.with_suffix('.yaml').exists() else None))
+    contract['elite_refinements'] = elite_refinements
+    contract['elite_first'] = bool(elite_first)
     contract['start_order'] = 'duration-before-phase/drop-first-v1'
     contract['command_objective_scaling'] = 'unit-regularizer-v1'
     if hybrid_time:
@@ -195,6 +199,86 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
               trial_lap_s=report.get('trial_lap_s'), source_certified=False)
         return report
 
+    def explore_elites(incumbent):
+        """Run alternative same-time seed search from a certified incumbent."""
+        improved=False
+        if not elite_refinements:
+            return False
+        # Escape a single-basin plateau without weakening the primary
+        # min-time objective. Equal-time candidates are only used as
+        # independently certified alternative search seeds; they do
+        # NOT silently replace the fastest published witness.
+        from elite_refinement import polish_equal_time
+        baseline_hash = file_hash(incumbent)
+        explored = state.setdefault('elite_explored', [])
+        if baseline_hash not in explored:
+            elite_dir = output/'elite_refinement'/baseline_hash[:16]
+            state['active_elite_polish'] = dict(seed=str(incumbent),
+                output=str(elite_dir), source_lap_s=source_count(incumbent)*.025)
+            save()
+            event('elite_polish_started', source_lap_s=source_count(incumbent)*.025,
+                output=str(elite_dir))
+            archive = (elite_polish or polish_equal_time)(
+                repo=repo, seed=incumbent, map_path=map_path,
+                output=elite_dir, workers=workers,
+                iterations=min(iterations, 450),
+                margin_steps=(.0001, .0005, .002)[:elite_refinements],
+                # Explore other local geometry basins at exactly the
+                # incumbent duration, in addition to improving clearance.
+                # Both child minimizers run with EXACT 25 ms source maps
+                # and with their own hybrid-time proposals.
+                geometry_seeds=((.04, 1), (-.04, 1),
+                                (.09, 2), (-.09, 2), (.14, 3)),
+                max_elites=5, diversity_threshold_m=.015,
+                stagnation_iterations=min(stagnation_iterations, 100),
+                cancel_requested=cancel_requested,
+                solve=solve, certify=certify)
+            state.setdefault('elite_archives', {})[baseline_hash] = str(
+                elite_dir/'elite.json')
+            state.pop('active_elite_polish',None)
+            save()
+            for candidate in archive['accepted']:
+                if cancel_requested is not None and cancel_requested():
+                    raise KeyboardInterrupt
+                child_dir = output/'elite_campaigns'/candidate['sha256'][:16]
+                state['active_elite'] = dict(
+                    seed=candidate['witness'], sha256=candidate['sha256'],
+                    lap_s=candidate['lap_s'], clearance_slack_m=candidate['clearance_slack_m'],
+                    output=str(child_dir))
+                save()
+                event('elite_branch_started', seed=candidate['witness'],
+                      lap_s=candidate['lap_s'], output=str(child_dir),
+                      clearance_slack_m=candidate['clearance_slack_m'])
+                child = run_campaign(
+                    repo=repo, seed=Path(candidate['witness']),
+                    map_path=map_path, output=child_dir,
+                    target_seconds=target_seconds,
+                    phases=phases, workers=workers,
+                    iterations=iterations,
+                    stagnation_iterations=stagnation_iterations,
+                    refinements=refinements,
+                    resume=(child_dir/'campaign.json').exists(),
+                    include_packet_starts=include_packet_starts,
+                    solve=solve, certify=certify, digest=digest,
+                    cancel_requested=cancel_requested,
+                    coarse_fraction=coarse_fraction,
+                    on_improvement=on_improvement,
+                    hybrid_time=hybrid_time, predict=predict,
+                    elite_refinements=0, elite_first=False)
+                if child['best_lap_s'] < state['best_lap_s']-1.e-9:
+                    state['best_lap_s'] = child['best_lap_s']
+                    state['best_witness'] = child['best_witness']
+                    improved = True
+                    save()
+                    event('elite_faster_source_witness',
+                          lap_s=state['best_lap_s'],
+                          seed=candidate['witness'],
+                          witness=state['best_witness'])
+            state.pop('active_elite',None)
+            explored.append(baseline_hash)
+            save()
+        return improved
+
     try:
         if resume:
             state = json.loads(state_path.read_text())
@@ -233,6 +317,11 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         save()
         if on_improvement is not None:
             on_improvement(Path(state['best_witness']), state['best_lap_s'])
+        if elite_first and elite_refinements and not state.get('elite_first_done'):
+            event('elite_first_search', best_lap_s=state['best_lap_s'])
+            explore_elites(Path(state['best_witness']))
+            state['elite_first_done']=True
+            save()
         while True:
             if cancel_requested is not None and cancel_requested():
                 raise KeyboardInterrupt
@@ -356,6 +445,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                         suggested = max(minimum, prediction['proposed_intervals'])
                         if suggested < old_count:
                             starts.insert(start_index+1, (suggested, 0, 'time-predictor'))
+            if not improved:
+                improved=explore_elites(incumbent)
             if not improved:
                 state.update(status='plateau', active=None)
                 save()

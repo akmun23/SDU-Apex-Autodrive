@@ -330,3 +330,85 @@ def test_interrupted_time_predictor_resumes_checkpoint_before_exact_repair(setup
                          certify=checked, hybrid_time=True, predict=resume, resume=True)
     assert state['status'] == 'target_reached'
     assert state['attempts'][-1]['key'].endswith('time-predictor')
+
+
+def test_plateau_tries_both_packet_and_time_objectives_from_distinct_elites(
+        setup, tmp_path):
+    """A same-time elite archive is a branching search, not a new fastest lap."""
+    seeds, solved, time_predictions, callbacks = [], [], [], []
+    for index in (1, 2):
+        folder=tmp_path/f'certified_elite_{index}'
+        folder.mkdir()
+        fixture_witness(folder/'witness.npz',40)
+        with np.load(folder/'witness.npz') as data:
+            states=np.asarray(data['state']).copy()
+            controls=np.asarray(data['controls']).copy()
+        states[0,:]=index*.02
+        save_command_checkpoint(folder/'witness.npz',states,controls,'fixture',0.,0)
+        (folder/'report.json').write_text(json.dumps(dict(
+            status='source_witness_passed',trial_lap_s=1.,
+            rollout=dict(minimum_1ms_footprint_slack_m=.0001*index))))
+        seeds.append(folder/'witness.npz')
+
+    def elite(**kwargs):
+        assert kwargs['margin_steps'] and kwargs['geometry_seeds']
+        assert kwargs['max_elites']>=2
+        return dict(accepted=[
+            dict(witness=str(path),sha256=f'elite{i}',lap_s=1.,
+                 clearance_slack_m=.0001*i)
+            for i,path in enumerate(seeds,1)])
+
+    def solve(**kw):
+        solved.append(kw)
+        # The initial campaign must plateau. Each elite must first fail its
+        # first shorter fixed-grid proposal, triggering its time predictor.
+        with np.load(kw['command_seed'], allow_pickle=False) as data:
+            marker=float(data['state'][0,0])
+        refined = abs(marker)>.005
+        branch_dir=str(kw['output'])
+        in_child='elite_campaigns' in branch_dir
+        preceding=[x for x in solved[:-1] if str(x['output']).split('/elite_campaigns/')[0] ==
+                   branch_dir.split('/elite_campaigns/')[0]
+                   and in_child and '/elite_campaigns/' in str(x['output'])
+                   and str(x['output']).split('/elite_campaigns/')[1].split('/')[0] ==
+                   branch_dir.split('/elite_campaigns/')[1].split('/')[0]]
+        allowed=in_child and refined and len(preceding)>0
+        return solver_report(kw,passed=allowed,residual=.08)
+
+    def predict(**kw):
+        time_predictions.append(str(kw['command_seed']))
+        kw['output'].mkdir(parents=True,exist_ok=True)
+        result=dict(status='no_time_proposal',trial_lap_s=None,
+                    predicted_lap_s=1.,proposed_intervals=None)
+        (kw['output']/'report.json').write_text(json.dumps(result))
+        return result
+
+    settings=dict(setup,target_seconds=.975,phases=1,hybrid_time=True,
+                  elite_refinements=2,elite_polish=elite,predict=predict,
+                  on_improvement=lambda path,lap:callbacks.append((path,lap)))
+    state=run_campaign(**settings,solve=solve,certify=checked)
+    assert state['status']=='target_reached'
+    assert state['best_lap_s']==pytest.approx(.975)
+    assert len(state['elite_archives'])==1
+    # Both elites get their own source-grid and time-objective attempts.
+    assert any('/elite_campaigns/elite1/' in x for x in time_predictions)
+    assert any('/elite_campaigns/elite2/' in x for x in time_predictions)
+    child_folders=[x for x in (settings['output']/'elite_campaigns').iterdir() if x.is_dir()]
+    assert len(child_folders)==2
+    assert all((folder/'campaign.json').is_file() for folder in child_folders)
+
+
+def test_elite_first_runs_before_any_shorter_duration_trial(setup):
+    order=[]
+    def elite(**kwargs):
+        order.append('equal_duration_archive')
+        assert kwargs['geometry_seeds']
+        return {'accepted':[]}
+    def solve(**kw):
+        order.append('shorter_duration')
+        return solver_report(kw,passed=True)
+    result=run_campaign(**setup,solve=solve,certify=checked,
+                        elite_first=True,elite_refinements=2,elite_polish=elite)
+    assert result['best_lap_s']==pytest.approx(.975)
+    assert result['elite_first_done'] is True
+    assert order[:2]==['equal_duration_archive','shorter_duration']

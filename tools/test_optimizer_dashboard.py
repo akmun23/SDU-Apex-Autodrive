@@ -95,6 +95,31 @@ class DashboardTest(unittest.TestCase):
         result = self.dashboard.snapshot()
         self.assertIsNone(result['active']['trial_lap_s'])
 
+    def test_multi_incumbent_branch_reads_child_and_archive_not_stale_parent(self):
+        self.start_log()
+        folder=self.root/'starts/clockwise/campaign'
+        alternate=folder/'elite_campaigns/abcedf1234567890'
+        alternate.mkdir(parents=True)
+        self.write(folder/'elite_refinement/eeff/elite.json',dict(
+            accepted=[dict(clearance_slack_m=.0008,lap_s=2.5,witness='example.npz')]))
+        self.write(alternate/'campaign.json',dict(
+            active=dict(key='from100_90_phase000_resample',
+                        output=str(alternate/'from100_90_phase000_resample/solve_000'),
+                        refinement=0),
+            attempts=[dict(key='alternate',certified=False)]))
+        self.write(self.campaign_path,dict(active=None,attempts=[dict(key='old',certified=True)],
+            elite_archives=dict(original=str(folder/'elite_refinement/eeff/elite.json')),
+            elite_explored=['oldseed'],
+            active_elite=dict(sha256='abcedf1234567890',output=str(alternate),lap_s=2.5)))
+        result=self.dashboard.snapshot()
+        self.assertEqual(result['completed_attempts'],1)
+        self.assertEqual(result['attempts'][0]['key'],'alternate')
+        self.assertEqual(result['elite_progress']['archived_alternatives'],1)
+        self.assertEqual(result['elite_progress']['explored_basins'],1)
+        self.assertEqual(result['elite_progress']['active_branch']['sha256'],'abcedf1234567890')
+        self.assertIn('Multi-incumbent optimization progress',
+            Path(__file__).with_name('optimizer_dashboard.html').read_text())
+
     def test_feasibility_and_ipopt_raw_use_separate_graphs(self):
         html = Path(__file__).with_name('optimizer_dashboard.html').read_text()
         actual = html.split('function residualChart(){', 1)[1].split('function ipoptChart(){', 1)[0]
@@ -286,6 +311,8 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('mpc-summary-meta',html)
         self.assertIn("'Warm-up: '+mpcNum(m.warmup_lap_s)",html)
         self.assertIn('Warm-up not completed',html)
+        self.assertIn('The rejection alone does not identify the cause',html)
+        self.assertNotIn('The line may be too aggressive',html)
         self.assertIn("slice(0,1)",html)
 
     def test_http_endpoints_are_local_read_only_and_no_generic_file_server(self):
