@@ -21,7 +21,8 @@ def input_map(tmp_path):
 
 def witness(path, count=40):
     x = np.zeros((21, count+1))
-    x[2] = np.linspace(0., 2*np.pi, count+1)
+    angle = np.linspace(0., -2*np.pi, count+1)
+    x[0], x[1], x[2] = np.cos(angle), np.sin(angle), angle
     x[3] = 1.
     u = np.vstack([np.full(count, .1), np.full(count, .05)])
     save_command_checkpoint(path, x, u, 'fixture', 0., 0)
@@ -102,6 +103,23 @@ def test_atomic_export_never_replaces_best_with_slower_or_uncertified(tmp_path):
     assert (tmp_path/'best.json').read_bytes() == first
 
 
+def test_counterclockwise_is_rejected_even_with_a_source_certificate(tmp_path):
+    source = tmp_path/'source'
+    source.mkdir()
+    witness(source/'seed.npz')
+    destination = tmp_path/'certified'
+    certification(tmp_path, source/'seed.npz', tmp_path/'map', destination)
+    path = destination/'witness.npz'
+    with np.load(path) as data:
+        x, u = data['state'].copy(), data['controls'].copy()
+    x[1] *= -1.
+    x[2] *= -1.
+    save_command_checkpoint(path, x, u, 'fixture', 0., 0)
+    with pytest.raises(ValueError, match='only clockwise'):
+        optimizer.publish_best(tmp_path, path, 1., dict(best_lap_s=None), source_digest='fixture')
+    assert not (tmp_path/'best.json').exists()
+
+
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
     image, metadata, config = input_map(tmp_path)
@@ -109,7 +127,10 @@ def pipeline(tmp_path, monkeypatch):
     reference.write_text('fixture; no physics use')
     monkeypatch.setattr(optimizer, 'REPO', tmp_path)
     monkeypatch.setattr(optimizer, 'production_command_map', lambda *a: (None, 'fixture'))
-    monkeypatch.setattr(optimizer, 'geometry_starts', lambda *a: [('map_basin', reference)])
+    def starts(map_yaml, output, directions, cancel):
+        assert directions == ('clockwise',)
+        return [('map_basin', reference)]
+    monkeypatch.setattr(optimizer, 'geometry_starts', starts)
     monkeypatch.setattr(optimizer, 'geometric_seed', lambda ref, path, repo, scale: witness(path))
     monkeypatch.setattr(optimizer, 'certify_witness', certification)
     calls = []

@@ -41,6 +41,30 @@ entrypoint. Nor is there a ten-minute campaign timeout. Per-solve iteration
 chunks and stagnation checks decide when to continue an improving primal or
 try another initialization. They do not imply a physical lap-time floor.
 
+## Runtime and stopping budgets
+
+The first IROS clockwise bootstrap used five IPOPT iterations, 36.36 seconds
+in IPOPT, and 57.37 seconds from saved initializer through independent
+certification. This is an observation for this run, not a universal timeout
+or a promise for other maps. More difficult initializations can take longer.
+
+There is no campaign-wide timer or fixed total iteration count. Each solve
+has a default 300-iteration chunk; a local stagnation check triggers after
+50 iterations without a 2% improvement in the tracked feasibility residual.
+An iteration-limited solve may continue from its primal when its residual has
+fallen below half of its starting residual. Otherwise the campaign tries
+other durations, phases and geometry starts. Defaults are three geometry
+starts, four cyclic phases, up to six clearance refinements, and duration
+reductions ranging from approximately 10% down to one 25 ms packet.
+
+Every newly certified faster incumbent starts another shortening search.
+The campaign finishes when its configured tries cannot produce another
+validated improvement. This can take hours or longer; current measurements
+do not support a reliable completion estimate. It is a finite-search plateau,
+not proof that an unlimited solve or another geometry basin could not improve.
+The separate 30-packet numerical lower domain is reported as
+`search_domain_reached`, never mislabeled as a plateau or a 6 s goal.
+
 ## Automatic stages
 
 1. Validate the supplied map pair and snapshot pixels plus metric metadata.
@@ -96,10 +120,10 @@ validation remains a separate gate. A plateau is the best found within this
 multistart search, vehicle/domain constraints and 25 ms command grid—not a
 global minimum-time certificate.
 
-PGM/YAML do not encode the race's permitted direction. By default both winding
-directions are searched. If the event specifies one, append
-`--direction counterclockwise` or `--direction clockwise`; do not use a faster
-wrong-direction result. Maps must describe an extractable closed circuit;
+Racing is always **clockwise**, as specified by the user. The entrypoint no
+longer offers bidirectional or counterclockwise search. Only clockwise starts
+are generated, and export checks both negative yaw winding and negative signed
+path area before publishing an incumbent. Maps must describe an extractable closed circuit;
 ambiguous/open maps fail explicitly rather than silently selecting another
 track or inventing a feasible path.
 
@@ -125,7 +149,7 @@ Implemented:
 
 Verification results:
 
-- All 33 campaign, map-only and source-command tests pass, covering warm
+- All 34 campaign, map-only and source-command tests pass, covering warm
   restart, power-loss-style interruption, coarse-to-fine trial selection,
   metadata/source guards and rejection of unvalidated exports. Test doubles
   exercise orchestration, not vehicle-accuracy certification.
@@ -141,6 +165,12 @@ Verification results:
 - The automatic campaign proceeded to a 35.275 s trial, saving intermediate
   iterates. During this solve memory was about 2.5 GB with no process swap,
   rather than the standalone bootstrap's 27 GB resident plus heavy swapping.
+- After the user's direction clarification, the map-only entrypoint was
+  restricted to clockwise geometry and exports, with a regression test that
+  rejects a counterclockwise witness even if it carries a source certificate.
+  The already-clockwise incumbent and active solver primal were retained;
+  counterclockwise development geometry remains only in the historical run
+  folder and is no longer selected for optimization.
 - The production-model initializer and derivatives were exercised numerically;
   the artificial circular geometry fixture is labeled as a module test, not
   as captured vehicle data.

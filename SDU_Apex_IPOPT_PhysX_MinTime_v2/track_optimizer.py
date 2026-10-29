@@ -188,6 +188,7 @@ def publish_best(output, witness, lap_s, state, *, source_digest):
     if (checked.get('status') != 'source_witness_passed' or
             checked.get('source_plant_sha256') != source_digest):
         raise ValueError('cannot publish an uncertified or stale-source witness')
+    require_clockwise(witness)
     if state.get('best_lap_s') is not None and lap_s >= state['best_lap_s']-1.e-9:
         return
     directory = output/'exports'/file_hash(witness)[:16]
@@ -214,11 +215,23 @@ def publish_best(output, witness, lap_s, state, *, source_digest):
     if 'raceline' not in published:
         raise ValueError('certified witness has no exported raceline')
     summary = dict(lap_s=lap_s, files=published, witness_sha256=file_hash(witness),
-                   source_plant_sha256=source_digest, source_only=True,
+                   source_plant_sha256=source_digest, direction='clockwise', source_only=True,
                    unity_validated=False, mpc_validated=False, runtime_promoted=False)
     save_json_checkpoint(directory/'manifest.json', summary)
     save_json_checkpoint(output/'best.json', summary)
     state.update(best_lap_s=lap_s, best_manifest=str(directory/'manifest.json'))
+
+
+def require_clockwise(witness):
+    """Race direction is a hard export invariant, not a speed trade-off."""
+    with np.load(witness, allow_pickle=False) as data:
+        x = np.asarray(data['state'])
+    if x.ndim != 2 or x.shape[0] != 21 or not np.isfinite(x).all():
+        raise ValueError('invalid direction witness')
+    area_twice = np.sum(x[0, :-1]*x[1, 1:]-x[1, :-1]*x[0, 1:])
+    winding = round((x[2, -1]-x[2, 0])/(2*math.pi))
+    if winding != -1 or area_twice >= 0.:
+        raise ValueError('only clockwise racelines may be exported')
 
 
 def geometry_starts(map_yaml, output, directions, cancel):
@@ -266,7 +279,7 @@ def geometry_starts(map_yaml, output, directions, cancel):
 
 
 def run_track(*, image, metadata, config, output, workers=8, iterations=300,
-              phases=4, refinements=6, direction='both', prepare_only=False,
+              phases=4, refinements=6, prepare_only=False,
               bootstrap_only=False, cancel=None):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
@@ -278,13 +291,16 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=300,
     contract = dict(image_sha256=file_hash(image), metadata_sha256=file_hash(metadata),
         source_sha256=digest, optimizer_sha256=implementation_digest(),
         workers=workers, iterations=iterations, phases=phases,
-        refinements=refinements, direction=direction, schema=1)
+        refinements=refinements, direction='clockwise', schema=1)
     state = json.loads(status_path.read_text()) if status_path.exists() else dict(
         schema='sdu-map-optimizer/v1', contract=contract, best_lap_s=None,
         best_manifest=None, starts={}, status='running', source_only=True,
         global_minimum_proven=False, runtime_promoted=False)
     if state['contract'] != contract:
         raise ValueError('map/source/settings changed; choose a new output directory')
+    if state.get('best_manifest'):
+        previous_best = json.loads(Path(state['best_manifest']).read_text())
+        require_clockwise(Path(previous_best['files']['witness']))
     def save(**values):
         state.update(values, pid=os.getpid(), updated_epoch_s=time.time())
         save_json_checkpoint(status_path, state)
@@ -300,8 +316,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=300,
         # resolution must never be silently paired with a saved shooting state.
         bundled_image, bundled_yaml = bundle_map(image, config, output/'input')
         event('centerline_and_geometry')
-        directions = ('clockwise', 'counterclockwise') if direction == 'both' else (direction,)
-        starts = geometry_starts(bundled_yaml, output/'geometry', directions, cancel)
+        starts = geometry_starts(bundled_yaml, output/'geometry', ('clockwise',), cancel)
         if not starts:
             raise ValueError('no safe closed-circuit geometry extracted from supplied map')
         save(geometry_starts=[dict(name=name, csv=str(path)) for name, path in starts])
@@ -446,7 +461,6 @@ def main():
     parser.add_argument('--iterations', type=int, default=300, help='per solve; improving primals are restarted')
     parser.add_argument('--phases', type=int, default=4)
     parser.add_argument('--refinements', type=int, default=6)
-    parser.add_argument('--direction', choices=('both', 'clockwise', 'counterclockwise'), default='both')
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--bootstrap-only', action='store_true')
     parser.add_argument('--status', action='store_true')
@@ -479,7 +493,7 @@ def main():
     try:
         state = run_track(image=image, metadata=metadata, config=config, output=output,
             workers=args.workers, iterations=args.iterations, phases=args.phases,
-            refinements=args.refinements, direction=args.direction,
+            refinements=args.refinements,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
             cancel=lambda: stop[0])
         return 0 if state['status'] in ('plateau', 'prepared', 'search_domain_reached') else 3
