@@ -53,8 +53,6 @@ typedef struct
     int source_witness_valid;
     float source_steering_target;
     float source_throttle;
-    int source_input_history_valid;
-    float source_previous_steering_target;
 } MpcRtiReference_t;
 
 typedef struct

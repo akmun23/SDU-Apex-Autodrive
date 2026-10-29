@@ -35,8 +35,6 @@ typedef struct
     double source_physical_steering MPC_REFERENCE_ZERO;
     double source_steering_target MPC_REFERENCE_ZERO;
     double source_throttle MPC_REFERENCE_ZERO;
-    int source_input_history_valid MPC_REFERENCE_ZERO;
-    double source_previous_steering_target MPC_REFERENCE_ZERO;
 } MpcTrajectorySample_t;
 
 #undef MPC_REFERENCE_ZERO

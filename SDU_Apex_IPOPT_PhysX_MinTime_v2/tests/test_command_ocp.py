@@ -182,10 +182,9 @@ def test_export_keeps_exact_source_positions_and_separates_time_semantics(tmp_pa
     assert report['body_forward_reference_integral_s'] == pytest.approx(1., abs=2.e-6)
     assert not report['post_export_geometry_smoothing']
     witness=np.loadtxt(report['source_witness_csv'], delimiter=',')
-    assert witness.shape == (1000, 16)
-    assert Path(report['source_witness_csv']).read_text().startswith('# sdu_apex_source_witness/v2\n')
+    assert witness.shape == (1000, 15)
+    assert Path(report['source_witness_csv']).read_text().startswith('# sdu_apex_source_witness/v1\n')
     np.testing.assert_allclose(witness[:, 10], -.15532*state[5, :-1])
     np.testing.assert_allclose(witness[:, 12], .2)
     np.testing.assert_allclose(witness[:, 13], np.repeat(commands[0], 25))
     np.testing.assert_allclose(witness[:, 14], .2)
-    np.testing.assert_allclose(witness[:, 15], np.repeat(np.roll(commands[0], 1), 25))

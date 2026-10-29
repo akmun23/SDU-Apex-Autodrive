@@ -1,9 +1,0 @@
-/**:
-  ros__parameters:
-    # Overlay on mpc_competition.yaml. Change only the measurement protocol,
-    # never the model, weights, worker count, tolerance or deadline policy.
-    # Latch a full accepted 30-command horizon at racing speed, execute those
-    # exact commands without replanning, and score its 750 ms prediction.
-    open_loop_horizon_test_enabled: true
-    open_loop_horizon_test_min_speed_mps: 6.5
-    open_loop_horizon_test_topic: /mpc/open_loop_test

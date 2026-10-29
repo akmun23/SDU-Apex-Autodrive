@@ -327,14 +327,13 @@ def export_reference(trace_path, grid, output):
         if commands.shape != (2, len(point)//25) or len(point) % 25:
             raise ValueError('source command/reference epochs differ')
         applied = np.repeat(commands, 25, axis=1)
-        previous_steering = np.repeat(np.roll(commands[0], 1), 25)
         heading_error = np.arctan2(np.sin(x[2, :-1]-heading), np.cos(x[2, :-1]-heading))
         source_values = np.column_stack([heading_error,
-            x[4, :-1]-.15532*x[5, :-1], x[5, :-1], x[16, :-1], applied.T, previous_steering])
+            x[4, :-1]-.15532*x[5, :-1], x[5, :-1], x[16, :-1], applied.T])
         witness_path = output/'source_command_raceline_with_witness.csv'
         np.savetxt(witness_path, np.column_stack([actual_s, point, heading, curvature,
             speed, acceleration, widths, source_values]), delimiter=',', fmt='%.12g',
-            header='sdu_apex_source_witness/v2\ns_m,x_m,y_m,psi_rad,kappa_radpm,body_forward_speed_mps,acceleration_mps2,d_left_m,d_right_m,source_heading_error_rad,source_v_rear_mps,source_yaw_rate_radps,source_physical_steering_rad,source_steering_target_rad,source_throttle,source_previous_steering_target_rad')
+            header='sdu_apex_source_witness/v1\ns_m,x_m,y_m,psi_rad,kappa_radpm,body_forward_speed_mps,acceleration_mps2,d_left_m,d_right_m,source_heading_error_rad,source_v_rear_mps,source_yaw_rate_radps,source_physical_steering_rad,source_steering_target_rad,source_throttle')
         result['source_witness_csv'] = str(witness_path)
         result['source_witness_sha256'] = hashlib.sha256(witness_path.read_bytes()).hexdigest()
     return result

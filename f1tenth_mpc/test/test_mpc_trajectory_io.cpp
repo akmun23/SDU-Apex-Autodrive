@@ -57,25 +57,3 @@ TEST(MpcTrajectoryIo, InvalidRowsCannotBeSilentlyDroppedOrTruncated)
                      std::runtime_error) << text;
     }
 }
-
-TEST(MpcTrajectoryIo, V2InputHistoryIsHeldAndMixedSchemasAreRejected)
-{
-    std::istringstream input("# sdu_apex_source_witness/v2\n"+
-        triangle(",.03,.04,-2.1,-.2,-.25,.15,-.22"));
-    double length = 0.;
-    auto points = f1tenth_mpc::read_mpc_trajectory(input, &length);
-    MpcTrajectorySample_t sample{};
-    ASSERT_TRUE(mpc_trajectory_sample(points.data(), points.size(), length, .5, &sample));
-    EXPECT_TRUE(sample.source_input_history_valid);
-    EXPECT_DOUBLE_EQ(sample.source_previous_steering_target, -.22);
-    points[1].source_input_history_valid=0;
-    auto count=points.size();
-    EXPECT_FALSE(mpc_trajectory_prepare(points.data(), &count, &length));
-    for (const auto &text : {
-        std::string("# sdu_apex_source_witness/v2\n")+triangle(",0,0,0,0,0,.2"),
-        std::string("# sdu_apex_source_witness/v2\n")+triangle(",0,0,0,0,0,.2,nan"),
-        std::string("# sdu_apex_source_witness/v2\n")+triangle(",0,0,0,0,0,.2,1")}) {
-        std::istringstream bad(text);
-        EXPECT_THROW(f1tenth_mpc::read_mpc_trajectory(bad,&length),std::runtime_error);
-    }
-}

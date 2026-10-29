@@ -21,7 +21,6 @@ inline std::vector<MpcTrajectorySample_t> read_mpc_trajectory(
     std::vector<MpcTrajectorySample_t> points;
     std::string line;
     bool witness = false;
-    bool input_history = false;
     std::size_t number = 0;
     while (std::getline(input, line)) {
         ++number;
@@ -30,12 +29,10 @@ inline std::vector<MpcTrajectorySample_t> read_mpc_trajectory(
         line.erase(0, start);
         const auto end = line.find_last_not_of(" \t\r");
         line.erase(end+1);
-        if (line == "# sdu_apex_source_witness/v1" ||
-            line == "# sdu_apex_source_witness/v2") {
+        if (line == "# sdu_apex_source_witness/v1") {
             if (!points.empty())
                 throw std::runtime_error("source schema after trajectory data");
             witness = true;
-            input_history = line == "# sdu_apex_source_witness/v2";
             continue;
         }
         if (line.front() == '#') continue;
@@ -54,9 +51,9 @@ inline std::vector<MpcTrajectorySample_t> read_mpc_trajectory(
                 valid = false;
             }
         }
-        if (!valid || row.size() != (input_history ? 16u : witness ? 15u : 9u))
+        if (!valid || row.size() != (witness ? 15u : 9u))
             throw std::runtime_error("invalid trajectory row " +
-                std::to_string(number) + ": require corridor or schema-marked source columns");
+                std::to_string(number) + ": require 9 columns or schema-marked 15 columns");
         MpcTrajectorySample_t point{};
         point.s=row[0]; point.x=row[1]; point.y=row[2];
         point.heading=row[3]; point.curvature=row[4]; point.speed=row[5];
@@ -66,8 +63,6 @@ inline std::vector<MpcTrajectorySample_t> read_mpc_trajectory(
             point.source_heading_error=row[9]; point.source_v_rear=row[10];
             point.source_yaw_rate=row[11]; point.source_physical_steering=row[12];
             point.source_steering_target=row[13]; point.source_throttle=row[14];
-            point.source_input_history_valid=input_history;
-            if (input_history) point.source_previous_steering_target=row[15];
         }
         points.push_back(point);
     }
